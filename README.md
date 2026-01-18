@@ -1,6 +1,6 @@
 <h1 align="center">Cortex</h1>
 
-The Agent-Native Development CLI. Our agent is continuously fine-tuned through community-driven incentives, enabling contributors to collaborate and compete to produce the best possible AI agent.
+The **Agent-Native Development CLI**. Our agent is continuously **fine-tuned** through community-driven incentives, enabling contributors to collaborate and compete to produce the best possible AI agent.
 
 ---
 
