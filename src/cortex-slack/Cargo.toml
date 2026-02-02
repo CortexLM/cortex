@@ -1,0 +1,46 @@
+[package]
+name = "cortex-slack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Slack integration for Cortex CLI - bot, events, and slash commands"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Internal crates
+cortex-keyring-store = { path = "../cortex-keyring-store" }
+
+# Async runtime
+tokio = { workspace = true, features = ["full", "sync"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# Web framework (for OAuth routes)
+axum = { workspace = true }
+
+# HTTP client
+reqwest = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Utilities
+secrecy = { workspace = true }
+urlencoding = { workspace = true }
+
+# WebSocket for Socket Mode
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }

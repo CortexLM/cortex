@@ -1,0 +1,75 @@
+[package]
+name = "cortex-app-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HTTP API server for Cortex - provides REST and WebSocket APIs"
+
+[lib]
+name = "cortex_app_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cortex-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Internal
+cortex-engine = { path = "../cortex-engine" }
+cortex-protocol = { path = "../cortex-protocol" }
+cortex-common = { path = "../cortex-common" }
+
+# Web framework
+axum = { workspace = true }
+tower-http = { workspace = true }
+
+# Async
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+async-channel = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+
+# HTTP client
+reqwest = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# CLI
+clap = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+base64 = { workspace = true }
+dirs = "5"
+fs2 = "0.4"  # File locking for concurrent access
+
+# Authentication
+jsonwebtoken = "9"
+
+# File watching
+notify = "6"
+notify-debouncer-mini = "0.4"
+
+# mDNS/Bonjour service discovery
+mdns-sd = "0.11"
+if-addrs = "0.13"
+gethostname = "0.5"
+
+[dev-dependencies]
+tokio-test = { workspace = true }

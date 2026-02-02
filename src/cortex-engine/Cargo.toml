@@ -1,0 +1,134 @@
+[package]
+name = "cortex-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core business logic for Cortex CLI - agent, tools, providers, sandbox"
+
+[lib]
+name = "cortex_engine"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# Internal
+cortex-protocol = { workspace = true }
+cortex-common = { workspace = true }
+cortex-login = { workspace = true }
+cortex-mcp-types = { path = "../cortex-mcp-types" }
+
+# New feature crates (Phase 1)
+cortex-lsp = { path = "../cortex-lsp" }
+cortex-snapshot = { path = "../cortex-snapshot" }
+cortex-agents-ext = { path = "../cortex-agents", package = "cortex-agents" }
+cortex-hooks-ext = { path = "../cortex-hooks", package = "cortex-hooks" }
+cortex-share = { path = "../cortex-share" }
+cortex-plugins-ext = { path = "../cortex-plugins", package = "cortex-plugins" }
+cortex-batch = { path = "../cortex-batch" }
+
+# New feature crates (Phase 2)
+cortex-ghost = { path = "../cortex-ghost" }
+cortex-review-ext = { path = "../cortex-review", package = "cortex-review" }
+cortex-resume = { path = "../cortex-resume" }
+cortex-compact-ext = { path = "../cortex-compact", package = "cortex-compact" }
+cortex-ratelimits = { path = "../cortex-ratelimits" }
+cortex-migrations = { path = "../cortex-migrations" }
+cortex-experimental = { path = "../cortex-experimental" }
+
+# Async
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
+tokio-util = "0.7"
+async-trait = { workspace = true }
+async-channel = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# HTTP
+reqwest = { workspace = true, features = ["multipart"] }
+eventsource-stream = { workspace = true }
+url = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Parsing
+regex = { workspace = true }
+shlex = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+dunce = { workspace = true }
+which = { workspace = true }
+similar = { workspace = true }
+once_cell = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+rand = "0.8"
+urlencoding = "2.1"
+serde_yaml = "0.9"
+num_cpus = "1.16"
+glob = "0.3"
+walkdir = "2.5"
+
+# Security - credential encryption
+# Note: keyring with linux-native is platform-specific, moved to target dependencies
+secrecy = { version = "0.10", features = ["serde"] }
+aes-gcm = "0.10"
+argon2 = "0.5"
+zeroize = { version = "1.8", features = ["derive"] }
+
+# mDNS / Service Discovery
+mdns-sd = { workspace = true }
+hostname = { workspace = true }
+flume = "0.11"
+
+# Platform specific
+# Linux glibc builds - uses linux-native keyring backend (libsecret/D-Bus)
+[target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
+landlock = { workspace = true }
+seccompiler = { workspace = true }
+libc = { workspace = true }
+keyring = { workspace = true, features = ["linux-native"] }
+
+# Linux musl builds (static) - uses linux-keyutils backend (no D-Bus dependency)
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+landlock = { workspace = true }
+seccompiler = { workspace = true }
+libc = { workspace = true }
+keyring = { workspace = true, features = ["linux-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
+# macOS uses default keyring backend (Security.framework)
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+cortex-windows-sandbox = { path = "../cortex-windows-sandbox" }
+# Windows uses default keyring backend (Windows Credential Manager)
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
+wiremock = { workspace = true }
+insta = { workspace = true }

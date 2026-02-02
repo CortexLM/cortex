@@ -1,0 +1,31 @@
+[package]
+name = "cortex-lsp"
+version = "0.1.0"
+edition = "2021"
+description = "LSP (Language Server Protocol) support for Cortex CLI"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Internal
+
+tokio = { workspace = true, features = ["full", "process"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+lsp-types = "0.95"
+futures = { workspace = true }
+lazy_static = { workspace = true }
+
+# For LSP server downloading
+reqwest = { workspace = true }
+dirs = { workspace = true }
+zip = { workspace = true }
+flate2 = "1"
+tar = "0.4"
+xz2 = "0.1"
+
+[dev-dependencies]
+tempfile = { workspace = true }

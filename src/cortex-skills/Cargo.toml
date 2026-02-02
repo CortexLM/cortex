@@ -1,0 +1,39 @@
+[package]
+name = "cortex-skills"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Skills system for Cortex CLI with context isolation and hot reloading"
+
+[lib]
+name = "cortex_skills"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# Async
+tokio = { workspace = true, features = ["fs", "io-util", "sync", "time"] }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Utilities
+dirs = { workspace = true }
+tracing = { workspace = true }
+glob = { workspace = true }
+notify = { workspace = true }
+chrono = { workspace = true }
+
+# Concurrency
+dashmap = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }

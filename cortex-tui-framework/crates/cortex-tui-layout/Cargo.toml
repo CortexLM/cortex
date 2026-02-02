@@ -1,0 +1,13 @@
+[package]
+name = "cortex-tui-layout"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Flexbox layout engine for Cortex TUI"
+
+[lints]
+workspace = true
+
+[dependencies]
+taffy = { workspace = true }
+slotmap = { workspace = true }

@@ -1,0 +1,26 @@
+[package]
+name = "cortex-otel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OpenTelemetry integration for Cortex CLI"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+otel = ["opentelemetry", "opentelemetry-otlp", "opentelemetry_sdk", "opentelemetry-semantic-conventions"]
+
+[dependencies]
+tracing = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+
+# Optional OpenTelemetry dependencies
+opentelemetry = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-semantic-conventions = { workspace = true, optional = true }
+
+[dev-dependencies]

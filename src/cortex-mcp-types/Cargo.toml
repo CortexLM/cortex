@@ -1,0 +1,18 @@
+[package]
+name = "cortex-mcp-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP type definitions for Cortex CLI"
+
+[lib]
+name = "cortex_mcp_types"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }

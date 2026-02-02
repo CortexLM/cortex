@@ -1,0 +1,17 @@
+[package]
+name = "cortex-utils-pty"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+description = "PTY utilities for Cortex CLI"
+
+[lib]
+name = "cortex_utils_pty"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+portable-pty = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "cortex-ratelimits"
+version = "0.1.0"
+edition = "2021"
+description = "Rate limits display for Cortex CLI"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }

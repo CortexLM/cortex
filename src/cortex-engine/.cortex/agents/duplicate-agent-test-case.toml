@@ -1,0 +1,9 @@
+[agent]
+name = "duplicate-agent-test-case"
+description = """
+Duplicate agent test case
+"""
+
+# Add custom configuration here
+# [config]
+# key = "value"

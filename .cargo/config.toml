@@ -1,0 +1,42 @@
+# Cargo configuration for static linking with musl targets
+# This enables building portable, statically-linked Linux binaries
+
+# =============================================================================
+# x86_64 musl target (static linking)
+# =============================================================================
+[target.x86_64-unknown-linux-musl]
+# Use the musl-cross toolchain linker for cross-compilation
+# If building on a musl-based system, this can be simplified to just "musl-gcc"
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-self-contained=yes"
+]
+
+# =============================================================================
+# aarch64 musl target (static linking)
+# =============================================================================
+[target.aarch64-unknown-linux-musl]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-self-contained=yes"
+]
+
+# =============================================================================
+# Build configuration
+# =============================================================================
+[build]
+# Use nightly for multithreaded compilation (set via RUSTFLAGS in CI)
+# rustflags = ["-Zthreads=32"]
+
+# =============================================================================
+# Net configuration (for faster crate downloads)
+# =============================================================================
+[net]
+retry = 3
+git-fetch-with-cli = true
+
+# =============================================================================
+# Registry configuration (sparse protocol for faster index updates)
+# =============================================================================
+[registries.crates-io]
+protocol = "sparse"

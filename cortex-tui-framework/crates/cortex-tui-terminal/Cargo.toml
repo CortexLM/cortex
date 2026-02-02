@@ -1,0 +1,15 @@
+[package]
+name = "cortex-tui-terminal"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Terminal backend for Cortex TUI"
+
+[lints]
+workspace = true
+
+[dependencies]
+cortex-tui-core = { path = "../cortex-tui-core" }
+cortex-tui-buffer = { path = "../cortex-tui-buffer" }
+cortex-tui-input = { path = "../cortex-tui-input" }
+crossterm = { workspace = true }

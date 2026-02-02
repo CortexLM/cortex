@@ -1,0 +1,41 @@
+[package]
+name = "cortex-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Common utilities and types shared across Cortex CLI crates"
+
+[lib]
+name = "cortex_common"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+cortex-protocol = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+once_cell = { workspace = true }
+clap = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+dirs = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+[features]
+default = []
+cli = ["clap"]
+async = ["tokio"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serial_test = { workspace = true }
+dunce = { workspace = true }

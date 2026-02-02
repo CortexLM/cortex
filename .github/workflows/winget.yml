@@ -1,0 +1,167 @@
+name: Winget Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.1.0)'
+        required: true
+
+env:
+  PACKAGE_ID: CortexLM.Cortex
+
+jobs:
+  # Lightweight job - 4 vCPU Blacksmith Windows runner
+  winget:
+    name: Publish to Winget
+    runs-on: blacksmith-4vcpu-windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "${{ github.event.inputs.tag }}" -replace '^v', ''
+          } else {
+            $version = "${{ github.event.release.tag_name }}" -replace '^v', ''
+          }
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "Version: $version"
+
+      - name: Get release URLs and hashes
+        id: release
+        shell: pwsh
+        run: |
+          $tag = "v${{ steps.version.outputs.version }}"
+          $baseUrl = "https://github.com/${{ github.repository }}/releases/download/$tag"
+          
+          # Download and hash x64
+          $x64Url = "$baseUrl/cortex-windows-x64.zip"
+          Invoke-WebRequest -Uri $x64Url -OutFile "cortex-x64.zip" -ErrorAction Stop
+          $x64Hash = (Get-FileHash -Path "cortex-x64.zip" -Algorithm SHA256).Hash
+          
+          # Download and hash arm64
+          $arm64Url = "$baseUrl/cortex-windows-arm64.zip"
+          try {
+            Invoke-WebRequest -Uri $arm64Url -OutFile "cortex-arm64.zip" -ErrorAction Stop
+            $arm64Hash = (Get-FileHash -Path "cortex-arm64.zip" -Algorithm SHA256).Hash
+          } catch {
+            $arm64Hash = ""
+            $arm64Url = ""
+          }
+          
+          echo "x64_url=$x64Url" >> $env:GITHUB_OUTPUT
+          echo "x64_hash=$x64Hash" >> $env:GITHUB_OUTPUT
+          echo "arm64_url=$arm64Url" >> $env:GITHUB_OUTPUT
+          echo "arm64_hash=$arm64Hash" >> $env:GITHUB_OUTPUT
+
+      - name: Create winget manifest directory
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $manifestDir = "manifests/c/CortexLM/Cortex/$version"
+          New-Item -ItemType Directory -Force -Path $manifestDir
+          echo "MANIFEST_DIR=$manifestDir" >> $env:GITHUB_ENV
+
+      - name: Generate version manifest
+        shell: pwsh
+        run: |
+          $content = @"
+          PackageIdentifier: ${{ env.PACKAGE_ID }}
+          PackageVersion: ${{ steps.version.outputs.version }}
+          DefaultLocale: en-US
+          ManifestType: version
+          ManifestVersion: 1.6.0
+          "@
+          $content | Out-File -FilePath "${{ env.MANIFEST_DIR }}/${{ env.PACKAGE_ID }}.yaml" -Encoding utf8
+
+      - name: Generate installer manifest
+        shell: pwsh
+        run: |
+          $installers = @"
+          PackageIdentifier: ${{ env.PACKAGE_ID }}
+          PackageVersion: ${{ steps.version.outputs.version }}
+          Platform:
+            - Windows.Desktop
+          MinimumOSVersion: 10.0.17763.0
+          InstallerType: zip
+          NestedInstallerType: portable
+          NestedInstallerFiles:
+            - RelativeFilePath: Cortex.exe
+              PortableCommandAlias: cortex
+          Installers:
+            - Architecture: x64
+              InstallerUrl: ${{ steps.release.outputs.x64_url }}
+              InstallerSha256: ${{ steps.release.outputs.x64_hash }}
+          "@
+          
+          if ("${{ steps.release.outputs.arm64_hash }}" -ne "") {
+            $installers += @"
+
+            - Architecture: arm64
+              InstallerUrl: ${{ steps.release.outputs.arm64_url }}
+              InstallerSha256: ${{ steps.release.outputs.arm64_hash }}
+          "@
+          }
+          
+          $installers += @"
+
+          ManifestType: installer
+          ManifestVersion: 1.6.0
+          "@
+          
+          $installers | Out-File -FilePath "${{ env.MANIFEST_DIR }}/${{ env.PACKAGE_ID }}.installer.yaml" -Encoding utf8
+
+      - name: Generate locale manifest
+        shell: pwsh
+        run: |
+          $content = @"
+          PackageIdentifier: ${{ env.PACKAGE_ID }}
+          PackageVersion: ${{ steps.version.outputs.version }}
+          PackageLocale: en-US
+          Publisher: CortexLM
+          PublisherUrl: https://github.com/CortexLM
+          PublisherSupportUrl: https://github.com/CortexLM/cortex-cli/issues
+          PackageName: Cortex CLI
+          PackageUrl: https://github.com/CortexLM/cortex-cli
+          License: Apache-2.0
+          LicenseUrl: https://github.com/CortexLM/cortex-cli/blob/master/LICENSE
+          ShortDescription: Cortex CLI - A modern AI coding agent
+          Description: Cortex is a powerful command-line AI coding assistant that helps developers write, debug, and maintain code more efficiently.
+          Tags:
+            - ai
+            - cli
+            - coding
+            - developer-tools
+            - rust
+          ManifestType: defaultLocale
+          ManifestVersion: 1.6.0
+          "@
+          $content | Out-File -FilePath "${{ env.MANIFEST_DIR }}/${{ env.PACKAGE_ID }}.locale.en-US.yaml" -Encoding utf8
+
+      - name: Install wingetcreate
+        shell: pwsh
+        run: |
+          iwr https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+
+      - name: Validate manifests
+        shell: pwsh
+        run: |
+          .\wingetcreate.exe validate ${{ env.MANIFEST_DIR }}
+
+      - name: Submit to winget-pkgs
+        shell: pwsh
+        run: |
+          .\wingetcreate.exe submit ${{ env.MANIFEST_DIR }} --token ${{ secrets.WINGET_PAT }}
+        env:
+          WINGET_PAT: ${{ secrets.WINGET_PAT }}
+
+      - name: Upload manifests as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: winget-manifests
+          path: manifests/

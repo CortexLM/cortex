@@ -1,0 +1,16 @@
+[package]
+name = "cortex-utils-string"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "String utilities for Cortex CLI"
+
+[lib]
+name = "cortex_utils_string"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+unicode-width = { workspace = true }

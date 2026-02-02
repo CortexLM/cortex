@@ -1,0 +1,90 @@
+[package]
+name = "cortex-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cortex CLI - Modern AI coding agent"
+
+[[bin]]
+name = "Cortex"
+path = "src/main.rs"
+
+[lib]
+name = "cortex_cli"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[features]
+default = ["cortex-tui"]
+# Use the new Cortex TUI (120 FPS, Cortex theme)
+cortex-tui = ["dep:cortex-tui"]
+
+[dependencies]
+cortex-engine = { workspace = true }
+cortex-protocol = { workspace = true }
+cortex-tui = { workspace = true, optional = true }
+
+cortex-common = { workspace = true, features = ["cli"] }
+cortex-commands = { workspace = true }
+cortex-login = { workspace = true }
+cortex-process-hardening = { workspace = true }
+cortex-app-server = { workspace = true }
+cortex-update = { workspace = true }
+
+cortex-share = { path = "../cortex-share" }
+cortex-snapshot = { workspace = true }
+cortex-compact = { path = "../cortex-compact" }
+cortex-agents = { workspace = true }
+
+clap = { workspace = true }
+clap_complete = { workspace = true }
+
+# For colored help output
+color-print = "0.3"
+tokio = { workspace = true, features = ["full"] }
+futures = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-appender = { workspace = true }
+dirs = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+serde_yaml = "0.9"
+serde = { workspace = true }
+ctor = "0.5"
+base64 = { workspace = true }
+
+# For error types in utilities
+thiserror = { workspace = true }
+
+# For upgrade command (HTTP requests) and scrape command (cookie support)
+reqwest = { workspace = true, features = ["json", "cookies"] }
+
+# For scrape command (HTML parsing)
+scraper = "0.25"
+
+# For agent reference extraction from messages
+regex = { workspace = true }
+
+# For Ctrl+C handling and terminal cleanup
+ctrlc = { version = "3.4", features = ["termination"] }
+
+# For file descriptor limit checking
+libc = { workspace = true }
+
+# For SIGTERM signal handling on Unix (graceful container shutdown)
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+
+[build-dependencies]
+chrono = "0.4"
+
+[dev-dependencies]
+serial_test = { workspace = true }
+tempfile = { workspace = true }

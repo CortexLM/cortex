@@ -1,0 +1,26 @@
+[package]
+name = "cortex-prompt-harness"
+description = "Centralized system prompt harness for dynamic prompt construction and agent state tracking"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+
+# Utilities
+indexmap = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+pretty_assertions = { workspace = true }
+
+[lints]
+workspace = true

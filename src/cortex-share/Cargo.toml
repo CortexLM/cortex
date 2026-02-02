@@ -1,0 +1,18 @@
+[package]
+name = "cortex-share"
+version = "0.1.0"
+edition = "2021"
+description = "Session sharing functionality for Cortex CLI"
+
+[lints]
+workspace = true
+
+[dependencies]
+cortex-common = { path = "../cortex-common" }
+tokio = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+thiserror = "1"
+reqwest = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }

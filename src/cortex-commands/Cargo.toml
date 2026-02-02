@@ -1,0 +1,34 @@
+[package]
+name = "cortex-commands"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Custom command system for Cortex CLI"
+
+[lib]
+name = "cortex_commands"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Serialization
+serde = { workspace = true }
+serde_yaml = "0.9"
+
+# Async
+tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Utilities
+chrono = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+regex-lite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }

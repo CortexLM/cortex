@@ -1,0 +1,51 @@
+[package]
+name = "cortex-login"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Login and authentication for Cortex CLI"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true, features = ["json", "blocking"] }
+axum = { workspace = true, features = ["http1", "tokio", "query"] }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+hostname = "0.4"
+urlencoding = { workspace = true }
+rand = { workspace = true }
+
+# Security - credential encryption
+secrecy = { version = "0.10", features = ["serde"] }
+aes-gcm = "0.10"
+zeroize = { version = "1.8", features = ["derive"] }
+
+# Keyring with platform-specific backends
+[target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
+keyring = { workspace = true, features = ["linux-native"] }
+
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+keyring = { workspace = true, features = ["linux-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

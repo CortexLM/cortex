@@ -1,0 +1,79 @@
+[package]
+name = "cortex-tui"
+description = "Cortex CLI terminal user interface built on Cortex engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Cortex TUI core (the TUI engine)
+cortex-core = { path = "../cortex-core" }
+
+# Centralized TUI components
+cortex-tui-components = { path = "../cortex-tui-components" }
+
+# TUI capture and debugging (dev/debug feature)
+cortex-tui-capture = { path = "../cortex-tui-capture" }
+
+# Cortex business logic
+cortex-engine = { workspace = true }
+cortex-protocol = { workspace = true }
+cortex-common = { workspace = true }
+cortex-login = { workspace = true }
+cortex-agents = { workspace = true }
+
+# TUI framework
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true, features = ["full", "sync", "time", "macros"] }
+tokio-stream = { workspace = true }
+async-channel = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+toml = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Utilities
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+dirs = { workspace = true }
+hostname = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
+
+# Clipboard
+arboard = { workspace = true }
+
+# File search and fuzzy matching
+walkdir = { workspace = true }
+
+# External editor
+which = { workspace = true }
+
+# Audio notifications
+rodio = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

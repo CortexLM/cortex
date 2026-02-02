@@ -1,0 +1,14 @@
+[package]
+name = "cortex-tui-input"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Input handling for Cortex TUI"
+
+[lints]
+workspace = true
+
+[dependencies]
+crossterm = { workspace = true }
+bitflags = { workspace = true }
+smallvec = { workspace = true }

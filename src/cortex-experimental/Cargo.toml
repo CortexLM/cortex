@@ -1,0 +1,13 @@
+[package]
+name = "cortex-experimental"
+version = "0.1.0"
+edition = "2021"
+description = "Experimental features management for Cortex CLI"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["fs"] }
+toml = "0.8"

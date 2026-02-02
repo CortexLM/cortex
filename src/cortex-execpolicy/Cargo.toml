@@ -1,0 +1,19 @@
+[package]
+name = "cortex-execpolicy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Execution policy engine for Cortex CLI (Starlark-based)"
+
+[lib]
+name = "cortex_execpolicy"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+shlex = { workspace = true }
+thiserror = { workspace = true }

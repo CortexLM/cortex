@@ -1,0 +1,17 @@
+[package]
+name = "cortex-utils-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Image utilities for Cortex CLI"
+
+[lib]
+name = "cortex_utils_image"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+base64 = { workspace = true }

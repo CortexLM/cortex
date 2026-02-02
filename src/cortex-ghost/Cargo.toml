@@ -1,0 +1,16 @@
+[package]
+name = "cortex-ghost"
+version = "0.1.0"
+edition = "2021"
+description = "Ghost commits for automatic undo in Cortex CLI"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["process"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tempfile = "3"

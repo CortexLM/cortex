@@ -1,0 +1,13 @@
+[package]
+name = "cortex-review"
+version = "0.1.0"
+edition = "2021"
+description = "Code review functionality for Cortex CLI"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["process"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"

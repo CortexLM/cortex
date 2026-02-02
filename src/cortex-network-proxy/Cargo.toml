@@ -1,0 +1,26 @@
+[package]
+name = "cortex-network-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Network proxy with domain filtering and SSRF protection for Cortex CLI"
+
+[lib]
+name = "cortex_network_proxy"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

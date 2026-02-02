@@ -1,0 +1,19 @@
+[package]
+name = "cortex-utils-file-safety"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "File safety utilities for Cortex - validates file paths and types before reading"
+
+[lib]
+name = "cortex_utils_file_safety"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

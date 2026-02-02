@@ -1,0 +1,13 @@
+# audit.toml - cargo-audit configuration for security audit
+# https://github.com/rustsec/rustsec/blob/main/cargo-audit/audit.toml.example
+#
+# This file consolidates all RUSTSEC advisory exceptions in one place.
+# These are known vulnerabilities in transitive dependencies that cannot be
+# easily upgraded, typically due to deep dependency chains (e.g., wasmtime).
+
+[advisories]
+# No longer needed - wasmtime updated to v41, ratatui to v0.30
+ignore = []
+
+# Warn on informational advisories (unmaintained, unsound, etc.)
+informational_warnings = ["unmaintained", "unsound", "notice"]

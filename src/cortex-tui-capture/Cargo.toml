@@ -1,0 +1,53 @@
+[package]
+name = "cortex-tui-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "TUI capture and snapshot testing framework for Cortex CLI debugging"
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "generate_tui_screenshots"
+path = "src/bin/generate_tui_screenshots.rs"
+
+[dependencies]
+# TUI dependencies
+ratatui = { workspace = true }
+
+# Cortex TUI buffer for rendering
+cortex-tui-buffer = { workspace = true }
+cortex-tui-core = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true, features = ["full", "sync", "time", "macros", "fs"] }
+
+# Serialization for metadata
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Timestamps
+chrono = { workspace = true }
+
+# Unique IDs
+uuid = { workspace = true }
+
+# Tracing for logging
+tracing = { workspace = true }
+
+# Home directory detection
+dirs = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

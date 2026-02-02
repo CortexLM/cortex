@@ -1,0 +1,42 @@
+[package]
+name = "cortex-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "High-performance TUI engine with game-loop architecture for Cortex"
+
+[lib]
+doctest = false
+
+[dependencies]
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tokio = { workspace = true, features = ["full", "sync", "time", "macros", "rt-multi-thread", "signal"] }
+unicode-width = { workspace = true }
+pulldown-cmark = { workspace = true }
+tui-textarea = { git = "https://github.com/phsym/tui-textarea.git", branch = "main", features = ["crossterm"] }
+anyhow = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Markdown rendering dependencies
+cortex-tui-syntax = { workspace = true }
+cortex-tui-text = { workspace = true }
+once_cell = { workspace = true }
+ahash = { workspace = true }
+
+# Tree-sitter grammars (optional features)
+tree-sitter-bash = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+
+[lints]
+workspace = true

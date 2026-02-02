@@ -1,0 +1,21 @@
+[package]
+name = "cortex-tui-syntax"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Syntax highlighting for Cortex TUI"
+
+[lints]
+workspace = true
+
+[dependencies]
+cortex-tui-text = { path = "../cortex-tui-text" }
+tree-sitter = { workspace = true }
+streaming-iterator = "0.1"
+ahash = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+once_cell = "1.20"
+
+[dev-dependencies]
+pretty_assertions = "1.4"

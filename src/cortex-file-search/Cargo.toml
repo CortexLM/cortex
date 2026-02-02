@@ -1,0 +1,25 @@
+[package]
+name = "cortex-file-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fuzzy file search for Cortex CLI"
+
+[lib]
+name = "cortex_file_search"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+ignore = { workspace = true }
+nucleo-matcher = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }

@@ -1,0 +1,25 @@
+[package]
+name = "cortex-mcp-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP client implementation for Cortex CLI"
+
+[lib]
+name = "cortex_mcp_client"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+cortex-common = { path = "../cortex-common" }
+cortex-mcp-types = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+url = { workspace = true }

@@ -1,0 +1,30 @@
+[package]
+name = "cortex-tui-components"
+description = "Reusable TUI component library for Cortex - standardized widgets, dropdowns, modals, and forms"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Cortex TUI core (theme, colors, base widgets)
+cortex-core = { path = "../cortex-core" }
+
+# TUI framework
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+
+# Utilities
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+
+[[example]]
+name = "dump_previews"
+path = "examples/dump_previews.rs"
+
+[lints]
+workspace = true

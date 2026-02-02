@@ -1,0 +1,36 @@
+[package]
+name = "cortex-shell-snapshot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shell environment snapshotting for Cortex CLI"
+
+[lib]
+name = "cortex_shell_snapshot"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }

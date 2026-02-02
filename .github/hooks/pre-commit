@@ -1,0 +1,42 @@
+#!/bin/sh
+# Pre-commit hook for Cortex CLI (OPTIMIZED)
+# Only formats and checks CHANGED Rust files
+
+set -e
+
+echo "=== Pre-commit Hook (Optimized) ==="
+
+# Get list of staged Rust files
+STAGED_RS_FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.rs$' || true)
+
+if [ -z "$STAGED_RS_FILES" ]; then
+    echo "No Rust files staged, skipping checks."
+    exit 0
+fi
+
+echo "Checking $(echo "$STAGED_RS_FILES" | wc -l | tr -d ' ') Rust file(s)..."
+
+# Format only staged files with rustfmt directly (faster than cargo fmt)
+echo "Running rustfmt on staged files..."
+echo "$STAGED_RS_FILES" | xargs rustfmt --edition 2024 2>/dev/null || true
+
+# Re-add formatted files
+echo "$STAGED_RS_FILES" | xargs git add
+
+# Quick clippy on changed crates only (find unique crate directories)
+CHANGED_CRATES=$(echo "$STAGED_RS_FILES" | sed 's|/src/.*||' | sort -u | grep -v '^\.' || true)
+
+if [ -n "$CHANGED_CRATES" ]; then
+    echo "Running clippy --fix on changed crates..."
+    for crate in $CHANGED_CRATES; do
+        if [ -f "$crate/Cargo.toml" ]; then
+            crate_name=$(basename "$crate")
+            cargo clippy -p "$crate_name" --fix --allow-dirty --allow-staged 2>/dev/null || true
+        fi
+    done
+    
+    # Re-add any clippy fixes
+    echo "$STAGED_RS_FILES" | xargs git add 2>/dev/null || true
+fi
+
+echo "=== Pre-commit passed! ==="

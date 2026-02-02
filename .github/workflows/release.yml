@@ -1,0 +1,368 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'cli-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.1.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  BINARY_NAME: Cortex
+  # Nightly multithreaded frontend for faster compilation (32 threads for 32 vCPU runners)
+  RUSTFLAGS: "-Zthreads=32"
+  # Sparse registry for faster index updates
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  # Incremental compilation off for release builds
+  CARGO_INCREMENTAL: 0
+
+permissions:
+  contents: write
+
+# Ensure only one release at a time - prevents overloading when multiple tags pushed
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ==========================================================================
+  # Prepare - Determine version and what to build (lightweight - 4 vCPU)
+  # ==========================================================================
+  prepare:
+    name: Prepare Release
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      cache_key: ${{ steps.cache.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate cache key
+        id: cache
+        run: |
+          echo "key=rust-release-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}" >> $GITHUB_OUTPUT
+      
+      - name: Determine version and build targets
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+            TAG="v${VERSION}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+            if [[ "$TAG" == cli-v* ]]; then
+              VERSION="${TAG#cli-v}"
+            else
+              VERSION="${TAG#v}"
+            fi
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Verify CLI version consistency
+        run: |
+          CLI_RELEASE_VERSION="${{ steps.version.outputs.version }}" ./scripts/check-cli-version.sh
+
+  # ==========================================================================
+  # Build CLI Binaries (32 vCPU for compilation)
+  # ==========================================================================
+  build-cli:
+    name: CLI ${{ matrix.artifact }}
+    runs-on: ${{ matrix.runner }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: blacksmith-32vcpu-windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact: cortex-cli-windows-x64
+            ext: .exe
+            static: false
+          # Temporarily disabled: Windows ARM64 build has LLVM/clang issues
+          # - runner: blacksmith-32vcpu-windows-2025
+          #   target: aarch64-pc-windows-msvc
+          #   artifact: cortex-cli-windows-arm64
+          #   ext: .exe
+          #   static: false
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            artifact: cortex-cli-macos-x64
+            ext: ""
+            static: false
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            artifact: cortex-cli-macos-arm64
+            ext: ""
+            static: false
+          - runner: blacksmith-32vcpu-ubuntu-2404
+            target: x86_64-unknown-linux-gnu
+            artifact: cortex-cli-linux-x64
+            ext: ""
+            static: false
+          - runner: blacksmith-32vcpu-ubuntu-2404-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: cortex-cli-linux-arm64
+            ext: ""
+            static: false
+          # =================================================================
+          # Static musl builds - portable across Linux distributions
+          # These binaries have no GLIBC dependency and work on older systems
+          # =================================================================
+          - runner: blacksmith-32vcpu-ubuntu-2404
+            target: x86_64-unknown-linux-musl
+            artifact: cortex-cli-linux-x64-static
+            ext: ""
+            static: true
+          - runner: blacksmith-32vcpu-ubuntu-2404-arm
+            target: aarch64-unknown-linux-musl
+            artifact: cortex-cli-linux-arm64-static
+            ext: ""
+            static: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Rust cache (Blacksmith optimized)
+        if: contains(matrix.runner, 'blacksmith')
+        uses: useblacksmith/rust-cache@v3
+        with:
+          prefix-key: "rust-release-cli-${{ matrix.target }}"
+          shared-key: ${{ needs.prepare.outputs.cache_key }}
+
+      - name: Setup Rust cache (non-Blacksmith)
+        if: "!contains(matrix.runner, 'blacksmith')"
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "rust-release-cli-${{ matrix.target }}"
+          shared-key: ${{ needs.prepare.outputs.cache_key }}
+
+      # =========================================================================
+      # Static musl build setup (for portable Linux binaries)
+      # =========================================================================
+      - name: Install musl toolchain (x86_64 static)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools musl-dev
+          # Verify musl-gcc is available
+          which musl-gcc
+          musl-gcc --version
+
+      - name: Install musl toolchain (aarch64 static)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          # For cross-compiling to aarch64-musl, we need the cross toolchain
+          sudo apt-get install -y musl-tools musl-dev gcc-aarch64-linux-gnu
+          # Install aarch64-linux-musl-gcc cross compiler
+          wget -q https://musl.cc/aarch64-linux-musl-cross.tgz
+          tar xzf aarch64-linux-musl-cross.tgz
+          sudo mv aarch64-linux-musl-cross /opt/
+          echo "/opt/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+
+      # Windows ARM64 requires clang from Visual Studio for building the ring crate
+      # See: https://github.com/briansmith/ring/blob/main/BUILDING.md
+      - name: Setup MSVC environment for Windows ARM64
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64_arm64
+
+      - name: Setup LLVM for Windows ARM64
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          # Try all known Visual Studio LLVM paths for cross-compiling to ARM64
+          $llvmPaths = @(
+            "C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin",
+            "C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional\VC\Tools\Llvm\x64\bin",
+            "C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin",
+            "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\Llvm\x64\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin"
+          )
+          
+          $found = $false
+          foreach ($path in $llvmPaths) {
+            if (Test-Path $path) {
+              echo "Found LLVM at: $path"
+              echo "$path" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              $found = $true
+              break
+            }
+          }
+          
+          if (-not $found) {
+            echo "Visual Studio LLVM not found in standard paths. Searching..."
+            $clangExe = Get-ChildItem -Path "C:\Program Files*" -Recurse -Filter "clang.exe" -ErrorAction SilentlyContinue | 
+                        Where-Object { $_.FullName -match "LLVM|Llvm" } | 
+                        Select-Object -First 1
+            if ($clangExe) {
+              $clangDir = Split-Path $clangExe.FullName -Parent
+              echo "Found clang at: $clangDir"
+              echo "$clangDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              $found = $true
+            }
+          }
+          
+          if (-not $found) {
+            echo "::error::LLVM/Clang not found. Installing via choco..."
+            choco install llvm -y --no-progress
+            echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      # =========================================================================
+      # Build commands
+      # =========================================================================
+      - name: Build release binary (dynamic)
+        if: matrix.static == false
+        run: cargo +nightly build --release --target ${{ matrix.target }} -p cortex-cli
+        env:
+          RUSTFLAGS: "-Zthreads=32"
+          CARGO_PROFILE_RELEASE_LTO: thin
+
+      - name: Build release binary (static musl x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          cargo +nightly build --release --target ${{ matrix.target }} -p cortex-cli
+        env:
+          RUSTFLAGS: "-Zthreads=32 -C target-feature=+crt-static"
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          AR_x86_64_unknown_linux_musl: ar
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+
+      - name: Build release binary (static musl aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          cargo +nightly build --release --target ${{ matrix.target }} -p cortex-cli
+        env:
+          RUSTFLAGS: "-Zthreads=32 -C target-feature=+crt-static"
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
+          AR_aarch64_unknown_linux_musl: aarch64-linux-musl-ar
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
+
+      # =========================================================================
+      # Verify static binary (for musl builds)
+      # =========================================================================
+      - name: Verify static binary
+        if: matrix.static == true
+        run: |
+          echo "=== Verifying static binary ==="
+          BINARY="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+          file "$BINARY"
+          echo ""
+          echo "=== Checking dynamic dependencies ==="
+          # For a truly static binary, ldd should report "not a dynamic executable"
+          # or show no dynamic dependencies
+          if ldd "$BINARY" 2>&1 | grep -q "not a dynamic executable\|statically linked"; then
+            echo "✅ Binary is statically linked"
+          else
+            echo "⚠️ Binary has some dynamic dependencies (expected for musl with linux-keyutils):"
+            ldd "$BINARY" 2>&1 || true
+          fi
+          echo ""
+          echo "=== Binary size ==="
+          ls -lh "$BINARY"
+
+      - name: Prepare artifact (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.ext }} dist/
+          cd dist
+          tar -czvf ../${{ matrix.artifact }}.tar.gz *
+
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.ext }}" dist/
+          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.artifact }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.zip
+          if-no-files-found: ignore
+
+  # ==========================================================================
+  # Create GitHub Release (lightweight - 4 vCPU)
+  # ==========================================================================
+  release:
+    name: Create Release
+    needs: [prepare, build-cli]
+    if: always() && needs.prepare.result == 'success' && needs.build-cli.result == 'success'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create tag (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ needs.prepare.outputs.tag }} || true
+          git push origin ${{ needs.prepare.outputs.tag }} || true
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten and generate checksums
+        run: |
+          cd artifacts
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.dmg" -o -name "*.msi" -o -name "*.AppImage" \) -exec mv {} . \;
+          rm -rf cortex-*/ || true
+          sha256sum * > checksums-sha256.txt 2>/dev/null || true
+          echo "=== Release artifacts ==="
+          ls -la
+          echo "=== Checksums ==="
+          cat checksums-sha256.txt
+
+      - name: Determine release name
+        id: release_name
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
+          if [[ "$TAG" == cli-v* ]]; then
+            echo "name=Cortex CLI v${VERSION}" >> $GITHUB_OUTPUT
+          else
+            echo "name=Cortex v${VERSION}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ steps.release_name.outputs.name }}
+          draft: false
+          prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
+          generate_release_notes: true
+          files: |
+            artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+

@@ -1,0 +1,29 @@
+[package]
+name = "cortex-mcp-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP server implementation for Cortex CLI"
+
+[lib]
+name = "cortex_mcp_server"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+cortex-mcp-types = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+[features]
+default = []
+http = ["axum"]
+
+[dependencies.axum]
+workspace = true
+optional = true

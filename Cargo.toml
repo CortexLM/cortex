@@ -1,0 +1,408 @@
+[workspace]
+resolver = "2"
+members = [
+    # ==========================================================================
+    # CLI Application
+    # ==========================================================================
+    "src/cortex-cli",
+    "src/cortex-engine",
+    "src/cortex-protocol",
+    "src/cortex-exec",
+    
+    # CLI - Security
+    "src/cortex-execpolicy",
+    "src/cortex-sandbox",
+    "src/cortex-process-hardening",
+    "src/cortex-linux-sandbox",
+    "src/cortex-windows-sandbox",
+    
+    # CLI - MCP
+    "src/cortex-mcp-server",
+    "src/cortex-mcp-types",
+    "src/cortex-mcp-client",
+    
+    # CLI - Tools
+    "src/cortex-apply-patch",
+    "src/cortex-file-search",
+    "src/cortex-common",
+    
+    # CLI - Storage
+    "src/cortex-storage",
+    
+    # CLI - Authentication
+    "src/cortex-login",
+    "src/cortex-keyring-store",
+    
+    # CLI - Feedback & Telemetry
+    "src/cortex-feedback",
+    "src/cortex-otel",
+    
+    # CLI - Server
+    "src/cortex-app-server",
+    
+    # CLI - Utilities
+    "src/cortex-utils/git",
+    "src/cortex-utils/pty",
+    "src/cortex-utils/image",
+    "src/cortex-utils/string",
+    "src/cortex-utils/cache",
+    "src/cortex-utils/file-safety",
+    
+    # CLI - Features (Phase 1)
+    "src/cortex-lsp",
+    "src/cortex-snapshot",
+    "src/cortex-agents",
+    "src/cortex-hooks",
+    "src/cortex-share",
+    "src/cortex-plugins",
+    "src/cortex-batch",
+    
+    # CLI - Features (Phase 2)
+    "src/cortex-ghost",
+    "src/cortex-review",
+    "src/cortex-resume",
+    "src/cortex-compact",
+    "src/cortex-ratelimits",
+    "src/cortex-migrations",
+    "src/cortex-experimental",
+    "src/cortex-commands",
+    "src/cortex-skills",
+    "src/cortex-prompt-harness",
+    
+    # CLI - Features (Phase 3)
+    "src/cortex-collab",
+    "src/cortex-network-proxy",
+    "src/cortex-shell-snapshot",
+    
+    # CLI - Integrations
+    "src/cortex-slack",
+    
+    # CLI - LM Studio Integration
+    "src/cortex-lmstudio",
+    
+    # CLI - TUI
+    "src/cortex-core",
+    "src/cortex-tui",
+    "src/cortex-tui-capture",
+    "src/cortex-tui-components",
+    
+    # CLI - Auto-Update
+    "src/cortex-update",
+    
+    # CLI - Cortex TUI Framework
+    "cortex-tui-framework",
+    "cortex-tui-framework/crates/cortex-tui-core",
+    "cortex-tui-framework/crates/cortex-tui-buffer",
+    "cortex-tui-framework/crates/cortex-tui-terminal",
+    "cortex-tui-framework/crates/cortex-tui-layout",
+    "cortex-tui-framework/crates/cortex-tui-widgets",
+    "cortex-tui-framework/crates/cortex-tui-input",
+    "cortex-tui-framework/crates/cortex-tui-text",
+    "cortex-tui-framework/crates/cortex-tui-syntax",
+]
+
+[workspace.package]
+# CLI version - kept in sync with VERSION_CLI file
+# Run `scripts/check-cli-version.sh` to verify consistency
+version = "0.0.6"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Cortex Team <team@cortex.foundation>"]
+license = "MIT"
+repository = "https://github.com/CortexLM/cortex"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.49", features = ["full"] }
+
+# Web framework (used by app-server)
+axum = { version = "0.8.8", features = ["macros", "ws"] }
+axum-extra = { version = "0.12", features = ["typed-header"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "compression-gzip", "request-id"] }
+
+# Serialization
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+simd-json = "0.14"
+toml = "0.8"
+
+# HTTP client
+reqwest = { version = "0.13", features = ["json", "stream", "rustls", "cookies", "form", "multipart", "query"], default-features = false }
+
+# Error handling
+thiserror = "2.0.18"
+anyhow = "1.0"
+
+# Tracing & Observability
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.31"
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", features = ["tonic"] }
+
+# Utilities
+uuid = { version = "1.20", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+futures = "0.3"
+bytes = "1.10"
+base64 = "0.22"
+rand = "0.9"
+sha2 = "0.10"
+regex = "1.12"
+lazy_static = "1.5"
+async-trait = "0.1"
+
+# Performance optimized types
+smallvec = { version = "1.13", features = ["union", "const_generics", "serde"] }
+compact_str = { version = "0.8", features = ["serde"] }
+
+# Concurrent data structures
+dashmap = "6.0"
+once_cell = "1.19"
+
+# ==========================================================================
+# CLI Dependencies
+# ==========================================================================
+
+# CLI internal crates
+cortex-cli = { path = "src/cortex-cli" }
+cortex-engine = { path = "src/cortex-engine" }
+cortex-protocol = { path = "src/cortex-protocol" }
+cortex-exec = { path = "src/cortex-exec" }
+cortex-execpolicy = { path = "src/cortex-execpolicy" }
+cortex-sandbox = { path = "src/cortex-sandbox" }
+cortex-mcp-server = { path = "src/cortex-mcp-server" }
+cortex-mcp-types = { path = "src/cortex-mcp-types" }
+cortex-mcp-client = { path = "src/cortex-mcp-client" }
+cortex-apply-patch = { path = "src/cortex-apply-patch" }
+cortex-file-search = { path = "src/cortex-file-search" }
+cortex-common = { path = "src/cortex-common" }
+cortex-utils-git = { path = "src/cortex-utils/git" }
+cortex-utils-pty = { path = "src/cortex-utils/pty" }
+cortex-utils-image = { path = "src/cortex-utils/image" }
+cortex-utils-string = { path = "src/cortex-utils/string" }
+cortex-utils-cache = { path = "src/cortex-utils/cache" }
+cortex-utils-file-safety = { path = "src/cortex-utils/file-safety" }
+cortex-login = { path = "src/cortex-login" }
+cortex-keyring-store = { path = "src/cortex-keyring-store" }
+cortex-feedback = { path = "src/cortex-feedback" }
+cortex-otel = { path = "src/cortex-otel" }
+cortex-process-hardening = { path = "src/cortex-process-hardening" }
+cortex-app-server = { path = "src/cortex-app-server" }
+cortex-commands = { path = "src/cortex-commands" }
+cortex-storage = { path = "src/cortex-storage" }
+cortex-core = { path = "src/cortex-core" }
+cortex-tui = { path = "src/cortex-tui" }
+cortex-tui-capture = { path = "src/cortex-tui-capture" }
+cortex-tui-components = { path = "src/cortex-tui-components" }
+cortex-update = { path = "src/cortex-update" }
+cortex-lsp = { path = "src/cortex-lsp" }
+cortex-snapshot = { path = "src/cortex-snapshot" }
+cortex-agents = { path = "src/cortex-agents" }
+cortex-hooks = { path = "src/cortex-hooks" }
+cortex-share = { path = "src/cortex-share" }
+cortex-plugins = { path = "src/cortex-plugins" }
+cortex-batch = { path = "src/cortex-batch" }
+cortex-ghost = { path = "src/cortex-ghost" }
+cortex-review = { path = "src/cortex-review" }
+cortex-resume = { path = "src/cortex-resume" }
+cortex-compact = { path = "src/cortex-compact" }
+cortex-ratelimits = { path = "src/cortex-ratelimits" }
+cortex-migrations = { path = "src/cortex-migrations" }
+cortex-experimental = { path = "src/cortex-experimental" }
+cortex-linux-sandbox = { path = "src/cortex-linux-sandbox" }
+cortex-windows-sandbox = { path = "src/cortex-windows-sandbox" }
+cortex-lmstudio = { path = "src/cortex-lmstudio" }
+cortex-skills = { path = "src/cortex-skills" }
+cortex-prompt-harness = { path = "src/cortex-prompt-harness" }
+
+# Phase 3 crates
+cortex-collab = { path = "src/cortex-collab" }
+cortex-network-proxy = { path = "src/cortex-network-proxy" }
+cortex-shell-snapshot = { path = "src/cortex-shell-snapshot" }
+
+# Integrations
+cortex-slack = { path = "src/cortex-slack" }
+
+# Cortex TUI Framework crates
+cortex-tui-framework = { path = "cortex-tui-framework" }
+cortex-tui-core = { path = "cortex-tui-framework/crates/cortex-tui-core" }
+cortex-tui-buffer = { path = "cortex-tui-framework/crates/cortex-tui-buffer" }
+cortex-tui-terminal = { path = "cortex-tui-framework/crates/cortex-tui-terminal" }
+cortex-tui-layout = { path = "cortex-tui-framework/crates/cortex-tui-layout" }
+cortex-tui-widgets = { path = "cortex-tui-framework/crates/cortex-tui-widgets" }
+cortex-tui-input = { path = "cortex-tui-framework/crates/cortex-tui-input" }
+cortex-tui-text = { path = "cortex-tui-framework/crates/cortex-tui-text" }
+cortex-tui-syntax = { path = "cortex-tui-framework/crates/cortex-tui-syntax" }
+
+# CLI - Async & concurrency
+tokio-stream = "0.1"
+tokio-util = "0.7"
+async-channel = "2"
+async-stream = "0.3"
+
+# CLI - Serialization
+serde_with = { version = "3", features = ["macros", "base64"] }
+toml_edit = "0.23"
+
+# CLI - Arguments
+clap = { version = "4", features = ["derive", "wrap_help", "env"] }
+clap_complete = "4"
+clap_mangen = "0.2"
+
+# CLI - TUI
+ratatui = { version = "0.30", features = ["scrolling-regions", "unstable-backend-writer", "unstable-rendered-line-info", "unstable-widget-ref"] }
+crossterm = { version = "0.29", features = ["bracketed-paste", "event-stream"] }
+textwrap = "0.16"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+
+# CLI - HTTP & Networking
+eventsource-stream = "0.2"
+url = "2"
+
+# CLI - Error handling
+color-eyre = "0.6"
+
+# CLI - Logging
+tracing-appender = "0.2"
+log = "0.4"
+
+# CLI - Parsing
+pulldown-cmark = "0.13"
+tree-sitter = "0.26"
+tree-sitter-bash = "0.25"
+tree-sitter-highlight = "0.26"
+regex-lite = "0.1"
+
+# CLI - Sandbox & Security (Linux)
+landlock = "0.4"
+seccompiler = "0.5"
+libc = "0.2"
+
+# CLI - Policy engine (Starlark)
+starlark = "0.13"
+
+# CLI - MCP
+rmcp = { version = "0.13", default-features = false }
+schemars = "0.8"
+
+# CLI - Utilities
+time = { version = "0.3", features = ["formatting", "parsing", "local-offset", "macros"] }
+dirs = "6"
+dunce = "1"
+which = "6"
+shlex = "1"
+similar = "2"
+diffy = "0.4"
+walkdir = "2"
+ignore = "0.4"
+pathdiff = "0.2"
+path-absolutize = "3"
+indexmap = "2"
+itertools = "0.14"
+
+# CLI - Clipboard
+arboard = { version = "3", features = ["wayland-data-control"] }
+
+# CLI - Fuzzy matching
+nucleo-matcher = "0.3"
+
+# CLI - Image processing
+image = { version = "0.25", default-features = false }
+
+# CLI - Encoding
+encoding_rs = "0.8"
+chardetng = "0.1"
+
+# CLI - Hashing
+sha1 = "0.10"
+
+# CLI - mDNS / Service Discovery
+mdns-sd = "0.11"
+hostname = "0.4"
+
+# CLI - PTY
+portable-pty = "0.9"
+
+# CLI - HTTP Server (for network proxy)
+hyper = { version = "1.6", features = ["server", "http1"] }
+hyper-util = "0.1"
+http-body-util = "0.1"
+
+# CLI - Keyring
+keyring = { version = "3", default-features = false }
+
+# CLI - Testing
+insta = "1"
+pretty_assertions = "1"
+assert_matches = "1"
+tempfile = "3"
+serial_test = "3"
+test-log = "0.2"
+assert_cmd = "2"
+predicates = "3"
+tokio-test = "0.4"
+wiremock = "0.6"
+
+# CLI - OpenTelemetry
+opentelemetry-semantic-conventions = "0.31"
+opentelemetry-appender-tracing = "0.31"
+
+# CLI - TypeScript bindings
+ts-rs = { version = "11", features = ["uuid-impl", "serde-json-impl", "no-serde-warnings"] }
+
+# CLI - Additional utilities
+ahash = "0.8"
+taffy = "0.6"
+bitflags = "2.6"
+slotmap = "1.0"
+parking_lot = "0.12"
+flume = "0.11"
+secrecy = { version = "0.10", features = ["serde"] }
+zeroize = { version = "1.8", features = ["derive"] }
+glob = "0.3"
+num_cpus = "1.16"
+notify = "6.1"
+serde_yaml = "0.9"
+hmac = "0.12"
+zip = { version = "2.2", features = ["deflate"] }
+sysinfo = "0.32"
+hex = "0.4"
+urlencoding = "2.1"
+pin-project-lite = "0.2"
+rodio = { version = "0.19", default-features = false, features = ["wav"] }
+
+[workspace.lints.rust]
+unsafe_code = "allow"
+
+[workspace.lints.clippy]
+expect_used = "allow"
+unwrap_used = "allow"
+print_stdout = "allow"
+print_stderr = "allow"
+# Allow sort_by with comparisons - many valid uses in codebase for reverse sorting
+unnecessary_sort_by = "allow"
+# Allow iter() without IntoIterator implementation
+iter_without_into_iter = "allow"
+# Allow modules with the same name as parent (test modules pattern)
+module_inception = "allow"
+# Allow manual Default impl instead of derive (sometimes needed for doc comments)
+derivable_impls = "allow"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+opt-level = 3
+
+[profile.release.build-override]
+opt-level = 3
+
+[profile.dev]
+opt-level = 0
+debug = true

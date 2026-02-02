@@ -1,0 +1,27 @@
+[package]
+name = "cortex-lmstudio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LM Studio client for Cortex CLI - local model management and inference"
+
+[lib]
+name = "cortex_lmstudio"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+which = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tokio-test = { workspace = true }
+tempfile = { workspace = true }

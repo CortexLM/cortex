@@ -1,0 +1,16 @@
+[package]
+name = "cortex-tui-text"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Text rendering and Unicode handling for Cortex TUI"
+
+[lints]
+workspace = true
+
+[dependencies]
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
+smallvec = { workspace = true }
+
+[dev-dependencies]

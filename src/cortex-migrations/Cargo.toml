@@ -1,0 +1,12 @@
+[package]
+name = "cortex-migrations"
+version = "0.1.0"
+edition = "2021"
+description = "Model migration warnings and deprecation notices for Cortex CLI"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }

@@ -1,0 +1,28 @@
+[package]
+name = "cortex-tui-framework"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A high-performance terminal UI framework for Rust"
+repository = "https://github.com/example/cortex-tui-framework"
+authors = ["Cortex TUI Contributors"]
+
+[lints]
+workspace = true
+
+[dependencies]
+cortex-tui-core = { path = "crates/cortex-tui-core" }
+cortex-tui-buffer = { path = "crates/cortex-tui-buffer" }
+cortex-tui-terminal = { path = "crates/cortex-tui-terminal" }
+cortex-tui-layout = { path = "crates/cortex-tui-layout" }
+cortex-tui-widgets = { path = "crates/cortex-tui-widgets" }
+cortex-tui-input = { path = "crates/cortex-tui-input" }
+cortex-tui-text = { path = "crates/cortex-tui-text" }
+cortex-tui-syntax = { path = "crates/cortex-tui-syntax" }
+
+# Part of parent orion workspace - no local [workspace] section
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

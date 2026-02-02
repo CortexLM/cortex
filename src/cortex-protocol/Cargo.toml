@@ -1,0 +1,30 @@
+[package]
+name = "cortex-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Protocol types for Cortex CLI - SQ/EQ communication between client and agent"
+
+[lib]
+name = "cortex_protocol"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v4"] }
+chrono = { workspace = true }
+strum_macros = "0.27"
+base64 = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+anyhow = { workspace = true }
+
+[features]
+default = []

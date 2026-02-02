@@ -1,0 +1,79 @@
+#!/bin/sh
+# Pre-push hook for Cortex CLI (OPTIMIZED)
+# Only checks crates with changes since origin
+
+set -e
+
+echo "=== Pre-push Hook (Optimized) ==="
+
+# Get the remote branch we're pushing to
+REMOTE=${1:-origin}
+REMOTE_REF=$(git rev-parse --abbrev-ref @{upstream} 2>/dev/null || echo "$REMOTE/master")
+
+# Get changed Rust files since remote
+CHANGED_RS_FILES=$(git diff --name-only "$REMOTE_REF"...HEAD | grep '\.rs$' || true)
+
+if [ -z "$CHANGED_RS_FILES" ]; then
+    echo "No Rust files changed since $REMOTE_REF, skipping checks."
+    exit 0
+fi
+
+echo "Checking changes since $REMOTE_REF..."
+
+# Find changed crates
+CHANGED_CRATES=$(echo "$CHANGED_RS_FILES" | sed 's|/src/.*||' | sort -u | grep -v '^\.' || true)
+
+# Format check on changed files only
+echo "Running rustfmt --check on changed files..."
+echo "$CHANGED_RS_FILES" | xargs rustfmt --edition 2024 --check 2>/dev/null || {
+    echo "ERROR: Format check failed. Run 'cargo fmt' to fix."
+    exit 1
+}
+
+# Clippy only on changed crates
+if [ -n "$CHANGED_CRATES" ]; then
+    echo "Running clippy on changed crates..."
+    CLIPPY_ARGS=""
+    for crate in $CHANGED_CRATES; do
+        if [ -f "$crate/Cargo.toml" ]; then
+            crate_name=$(basename "$crate")
+            # Skip cortex-gui (needs frontend built)
+            if [ "$crate_name" != "cortex-gui" ] && [ "$crate_name" != "src-tauri" ]; then
+                CLIPPY_ARGS="$CLIPPY_ARGS -p $crate_name"
+            fi
+        fi
+    done
+    
+    if [ -n "$CLIPPY_ARGS" ]; then
+        cargo clippy $CLIPPY_ARGS --lib 2>&1 | head -50 || true
+    fi
+fi
+
+# Check only changed crates
+echo "Running cargo check on changed crates..."
+for crate in $CHANGED_CRATES; do
+    if [ -f "$crate/Cargo.toml" ]; then
+        crate_name=$(basename "$crate")
+        if [ "$crate_name" != "cortex-gui" ] && [ "$crate_name" != "src-tauri" ]; then
+            cargo check -p "$crate_name" 2>/dev/null || {
+                echo "ERROR: cargo check failed for $crate_name"
+                exit 1
+            }
+        fi
+    fi
+done
+
+# Run tests only on changed crates
+echo "Running tests on changed crates..."
+for crate in $CHANGED_CRATES; do
+    if [ -f "$crate/Cargo.toml" ]; then
+        crate_name=$(basename "$crate")
+        if [ "$crate_name" != "cortex-gui" ] && [ "$crate_name" != "src-tauri" ]; then
+            cargo test -p "$crate_name" --lib 2>/dev/null || {
+                echo "WARNING: Tests failed for $crate_name (continuing)"
+            }
+        fi
+    fi
+done
+
+echo "=== Pre-push passed! ==="

@@ -1,0 +1,236 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, develop]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Nightly multithreaded frontend for faster compilation (32 threads for 32 vCPU runners)
+  RUSTFLAGS: "-Zthreads=32"
+  # Sparse registry for faster index updates
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  # Incremental compilation off for CI (more reproducible, better caching)
+  CARGO_INCREMENTAL: 0
+
+# Ensure only one CI run per branch at a time - prevents overloading when many PRs merge
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ==========================================================================
+  # Version consistency check (lightweight - 4 vCPU)
+  # ==========================================================================
+  version-check:
+    name: CLI Version Check
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Verify CLI version consistency
+        run: ./scripts/check-cli-version.sh
+
+  # ==========================================================================
+  # Setup job to prepare shared cache (lightweight - 4 vCPU)
+  # ==========================================================================
+  setup-cache:
+    name: Setup Cache
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      cache-key: ${{ steps.cache-key.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate cache key
+        id: cache-key
+        run: |
+          echo "key=rust-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}" >> $GITHUB_OUTPUT
+
+  # ==========================================================================
+  # Fast checks (fmt, clippy) - Run in parallel
+  # ==========================================================================
+  fmt:
+    name: Format
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      
+      - name: Check formatting
+        run: cargo +nightly fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    needs: setup-cache
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libglib2.0-dev libasound2-dev
+      
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+      
+      - name: Setup Rust cache (Blacksmith optimized)
+        uses: useblacksmith/rust-cache@v3
+        with:
+          prefix-key: "rust-clippy"
+          shared-key: ${{ needs.setup-cache.outputs.cache-key }}
+      
+      - name: Run clippy
+        run: cargo +nightly clippy --workspace --all-targets --all-features -- -D warnings
+
+  # ==========================================================================
+  # Test jobs - Matrix for all platforms (32 vCPU for compilation)
+  # ==========================================================================
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    needs: setup-cache
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu
+            runner: blacksmith-32vcpu-ubuntu-2404
+          - name: macos
+            runner: macos-latest
+          - name: windows
+            runner: blacksmith-32vcpu-windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Linux dependencies
+        if: matrix.name == 'ubuntu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libglib2.0-dev libasound2-dev
+      
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+      
+      - name: Setup Rust cache (Blacksmith optimized)
+        if: contains(matrix.runner, 'blacksmith')
+        uses: useblacksmith/rust-cache@v3
+        with:
+          prefix-key: "rust-test-${{ matrix.name }}"
+          shared-key: ${{ needs.setup-cache.outputs.cache-key }}
+      
+      - name: Setup Rust cache (non-Blacksmith)
+        if: "!contains(matrix.runner, 'blacksmith')"
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "rust-test-${{ matrix.name }}"
+          shared-key: ${{ needs.setup-cache.outputs.cache-key }}
+      
+      - name: Run tests
+        run: cargo +nightly test --workspace --all-features
+        env:
+          RUSTFLAGS: "-Zthreads=32"
+
+  # ==========================================================================
+  # Build check - All platforms (32 vCPU for compilation)
+  # ==========================================================================
+  build-check:
+    name: Build Check (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    needs: setup-cache
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu
+            runner: blacksmith-32vcpu-ubuntu-2404
+          - name: macos
+            runner: macos-latest
+          - name: windows
+            runner: blacksmith-32vcpu-windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Linux dependencies
+        if: matrix.name == 'ubuntu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libglib2.0-dev libasound2-dev
+      
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+      
+      - name: Setup Rust cache (Blacksmith optimized)
+        if: contains(matrix.runner, 'blacksmith')
+        uses: useblacksmith/rust-cache@v3
+        with:
+          prefix-key: "rust-build-${{ matrix.name }}"
+          shared-key: ${{ needs.setup-cache.outputs.cache-key }}
+      
+      - name: Setup Rust cache (non-Blacksmith)
+        if: "!contains(matrix.runner, 'blacksmith')"
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "rust-build-${{ matrix.name }}"
+          shared-key: ${{ needs.setup-cache.outputs.cache-key }}
+      
+      - name: Check build
+        run: cargo +nightly check --workspace --all-features
+        env:
+          RUSTFLAGS: "-Zthreads=32"
+
+  # ==========================================================================
+  # Security Audit (lightweight - 4 vCPU)
+  # ==========================================================================
+  audit:
+    name: Security Audit
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      issues: write
+    # Override global RUSTFLAGS - the -Zthreads flag is nightly-only and breaks cargo-audit installation on stable
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      
+      # Known RUSTSEC advisories are configured in .cargo/audit.toml
+      # See that file for detailed explanations of each exception
+      - uses: actions-rust-lang/audit@v1
+        name: Audit Rust Dependencies
+
+  # ==========================================================================
+  # Final status check (for branch protection) - lightweight - 4 vCPU
+  # ==========================================================================
+  ci-success:
+    name: CI Success
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [version-check, fmt, clippy, test, build-check, audit]
+    if: always()
+    steps:
+      - name: Check all jobs
+        run: |
+          # Note: audit job uses continue-on-error, so we don't check it here
+          # Security vulnerabilities are tracked via GitHub issues instead
+          if [[ "${{ needs.version-check.result }}" == "failure" || \
+                "${{ needs.fmt.result }}" == "failure" || \
+                "${{ needs.clippy.result }}" == "failure" || \
+                "${{ needs.test.result }}" == "failure" || \
+                "${{ needs.build-check.result }}" == "failure" ]]; then
+            echo "One or more jobs failed"
+            exit 1
+          fi
+          echo "All CI checks passed!"

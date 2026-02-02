@@ -1,0 +1,22 @@
+[package]
+name = "cortex-tui-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Core types and traits for Cortex TUI"
+
+[lints.clippy]
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+float_cmp = "allow"
+missing_errors_doc = "allow"
+uninlined_format_args = "allow"
+# Include workspace-level lint allows
+unnecessary_sort_by = "allow"
+iter_without_into_iter = "allow"
+
+[dependencies]
+bitflags = { workspace = true }
+thiserror = { workspace = true }
+smallvec = { workspace = true }

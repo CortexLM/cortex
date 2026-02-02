@@ -1,0 +1,34 @@
+[package]
+name = "cortex-keyring-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Keyring-based credential storage for Cortex CLI"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Use linux-native backend (libsecret/D-Bus) - for glibc builds
+linux-native = ["keyring/linux-native"]
+
+[dependencies]
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+# Keyring with conditional features based on target environment
+# For musl builds, we use linux-keyutils which doesn't require D-Bus
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+keyring = { workspace = true, features = ["linux-native"] }
+
+[target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
+keyring = { workspace = true, features = ["linux-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[dev-dependencies]

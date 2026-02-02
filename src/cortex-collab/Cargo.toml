@@ -1,0 +1,29 @@
+[package]
+name = "cortex-collab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Multi-agent collaboration system for Cortex CLI"
+
+[lib]
+name = "cortex_collab"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

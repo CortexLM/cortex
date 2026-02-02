@@ -1,0 +1,13 @@
+[package]
+name = "cortex-tui-buffer"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Double-buffered terminal rendering for Cortex TUI"
+
+[lints]
+workspace = true
+
+[dependencies]
+cortex-tui-core = { path = "../cortex-tui-core" }
+smallvec = { workspace = true }

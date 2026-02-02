@@ -1,0 +1,15 @@
+[package]
+name = "cortex-utils-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Git utilities for Cortex CLI"
+
+[lib]
+name = "cortex_utils_git"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]

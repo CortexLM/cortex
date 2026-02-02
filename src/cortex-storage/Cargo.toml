@@ -1,0 +1,36 @@
+[package]
+name = "cortex-storage"
+version = "0.1.0"
+edition = "2021"
+description = "Centralized storage for Cortex - OS-aware paths and session persistence"
+license = "MIT"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Path detection
+dirs = "5"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async
+tokio = { version = "1", features = ["fs", "sync", "io-util"] }
+
+# Logging
+tracing = "0.1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID generation
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Error handling
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
