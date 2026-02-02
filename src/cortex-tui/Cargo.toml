@@ -33,6 +33,7 @@ tokio = { workspace = true, features = ["full", "sync", "time", "macros"] }
 tokio-stream = { workspace = true }
 async-channel = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

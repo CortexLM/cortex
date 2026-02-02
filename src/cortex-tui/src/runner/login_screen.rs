@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
+use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -169,18 +170,15 @@ impl LoginScreen {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<LoginResult> {
-        // Flush any pending input events to prevent stale keypresses
-        while event::poll(Duration::from_millis(0))? {
-            let _ = event::read()?;
-        }
+        // Create an async event stream - this is crucial for non-blocking event handling
+        // that allows the tokio runtime to process async messages concurrently
+        let mut event_stream = EventStream::new();
 
         // Small delay to let terminal settle
-        std::thread::sleep(Duration::from_millis(50));
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Flush again after delay
-        while event::poll(Duration::from_millis(0))? {
-            let _ = event::read()?;
-        }
+        // Timer for UI updates (60fps refresh rate)
+        let mut render_interval = tokio::time::interval(Duration::from_millis(16));
 
         loop {
             self.frame_count = self.frame_count.wrapping_add(1);
@@ -195,21 +193,7 @@ impl LoginScreen {
             // Render
             terminal.draw(|f| self.render(f))?;
 
-            // Check async messages
-            self.process_async_messages();
-
-            // Handle events - only process KeyPress, not KeyRelease or KeyRepeat
-            if event::poll(Duration::from_millis(80))?
-                && let Event::Key(key) = event::read()?
-            {
-                // Filter to only handle key press events (not release)
-                if key.kind == crossterm::event::KeyEventKind::Press
-                    && let Some(result) = self.handle_key(key)
-                {
-                    return Ok(result);
-                }
-            }
-
+            // Check state before waiting for events
             match self.state {
                 LoginState::Success => {
                     return Ok(LoginResult::LoggedIn);
@@ -222,6 +206,42 @@ impl LoginScreen {
                     return Ok(LoginResult::Failed(msg));
                 }
                 _ => {}
+            }
+
+            // Use tokio::select! to concurrently wait for:
+            // 1. Terminal events (keyboard input)
+            // 2. Async messages from background tasks (token polling)
+            // 3. Render timer tick
+            // This prevents blocking the async runtime and ensures responsive UI
+            tokio::select! {
+                // Handle keyboard/terminal events
+                maybe_event = event_stream.next() => {
+                    if let Some(Ok(Event::Key(key))) = maybe_event
+                        && key.kind == crossterm::event::KeyEventKind::Press
+                        && let Some(result) = self.handle_key(key)
+                    {
+                        return Ok(result);
+                    }
+                }
+                
+                // Handle async messages from token polling
+                msg = async {
+                    if let Some(ref mut rx) = self.async_rx {
+                        rx.recv().await
+                    } else {
+                        // No receiver, wait forever (will be cancelled by other branches)
+                        std::future::pending::<Option<AsyncMessage>>().await
+                    }
+                } => {
+                    if let Some(msg) = msg {
+                        self.handle_async_message(msg);
+                    }
+                }
+                
+                // Periodic render tick to keep UI responsive
+                _ = render_interval.tick() => {
+                    // Just continue to re-render
+                }
             }
         }
     }
@@ -499,17 +519,27 @@ impl LoginScreen {
     fn handle_waiting_key(&mut self, key: KeyEvent) -> Option<LoginResult> {
         match key.code {
             KeyCode::Esc => {
+                // Cancel the current auth flow and go back to method selection
                 self.state = LoginState::SelectMethod;
                 self.error_message = None;
+                self.user_code = None;
+                self.verification_uri = None;
+                // Drop the receiver to signal the async task it can stop
+                // (the task will get a send error and terminate)
                 self.async_rx = None;
             }
             KeyCode::Char('c') | KeyCode::Char('C') => {
+                // Only handle 'c' for copy if NOT Ctrl+C (Ctrl+C is handled in handle_key)
                 // Copy URL to clipboard using the safe clipboard function
                 // This properly handles Linux (with wait()) and Windows clipboard behavior
                 let url = self.get_direct_url();
                 if super::terminal::safe_clipboard_copy(&url) {
                     self.copied_notification = Some(Instant::now());
                 }
+            }
+            KeyCode::Char('q') | KeyCode::Char('Q') => {
+                // Also allow 'q' to exit from waiting screen for better UX
+                return Some(LoginResult::Exit);
             }
             _ => {}
         }
@@ -534,73 +564,67 @@ impl LoginScreen {
         tx
     }
 
-    fn process_async_messages(&mut self) {
-        let messages: Vec<AsyncMessage> = if let Some(ref mut rx) = self.async_rx {
-            let mut msgs = Vec::new();
-            while let Ok(msg) = rx.try_recv() {
-                msgs.push(msg);
+    fn handle_async_message(&mut self, msg: AsyncMessage) {
+        match msg {
+            AsyncMessage::DeviceCodeReceived {
+                user_code,
+                device_code,
+                verification_uri: _,
+            } => {
+                tracing::info!("Device code received: {}", user_code);
+                let auth_url = format!("{}/device", AUTH_BASE_URL);
+                self.user_code = Some(user_code.clone());
+                self.verification_uri = Some(auth_url.clone());
+
+                // Open browser
+                let link_url = format!("{}?code={}", auth_url, user_code);
+                tracing::debug!("Opening browser to: {}", link_url);
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("open")
+                        .arg(&link_url)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&link_url)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "start", "", &link_url])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+
+                // Start token polling - create new channel for this phase
+                tracing::debug!("Starting token polling for device code");
+                let cortex_home = self.cortex_home.clone();
+                let tx = self.create_async_channel();
+                tokio::spawn(async move {
+                    poll_for_token_async(cortex_home, device_code, tx).await;
+                });
             }
-            msgs
-        } else {
-            Vec::new()
-        };
-
-        for msg in messages {
-            match msg {
-                AsyncMessage::DeviceCodeReceived {
-                    user_code,
-                    device_code,
-                    verification_uri: _,
-                } => {
-                    let auth_url = format!("{}/device", AUTH_BASE_URL);
-                    self.user_code = Some(user_code.clone());
-                    self.verification_uri = Some(auth_url.clone());
-
-                    // Open browser
-                    let link_url = format!("{}?code={}", auth_url, user_code);
-                    #[cfg(target_os = "macos")]
-                    {
-                        let _ = std::process::Command::new("open")
-                            .arg(&link_url)
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .spawn();
-                    }
-                    #[cfg(target_os = "linux")]
-                    {
-                        let _ = std::process::Command::new("xdg-open")
-                            .arg(&link_url)
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .spawn();
-                    }
-                    #[cfg(target_os = "windows")]
-                    {
-                        let _ = std::process::Command::new("cmd")
-                            .args(["/C", "start", "", &link_url])
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .spawn();
-                    }
-
-                    // Start token polling
-                    let cortex_home = self.cortex_home.clone();
-                    let tx = self.create_async_channel();
-                    tokio::spawn(async move {
-                        poll_for_token_async(cortex_home, device_code, tx).await;
-                    });
-                }
-                AsyncMessage::DeviceCodeError(e) => {
-                    self.state = LoginState::SelectMethod;
-                    self.error_message = Some(e);
-                }
-                AsyncMessage::TokenReceived => {
-                    self.state = LoginState::Success;
-                }
-                AsyncMessage::TokenError(e) => {
-                    self.state = LoginState::SelectMethod;
-                    self.error_message = Some(e);
-                }
+            AsyncMessage::DeviceCodeError(e) => {
+                tracing::error!("Device code error: {}", e);
+                self.state = LoginState::SelectMethod;
+                self.error_message = Some(e);
+            }
+            AsyncMessage::TokenReceived => {
+                tracing::info!("Authentication token received - login successful");
+                self.state = LoginState::Success;
+            }
+            AsyncMessage::TokenError(e) => {
+                tracing::error!("Token error: {}", e);
+                self.state = LoginState::SelectMethod;
+                self.error_message = Some(e);
             }
         }
     }
@@ -688,19 +712,31 @@ async fn poll_for_token_async(
     device_code: String,
     tx: mpsc::Sender<AsyncMessage>,
 ) {
+    tracing::debug!("Token polling started");
+    
     let client = match cortex_engine::create_default_client() {
         Ok(c) => c,
         Err(e) => {
+            tracing::error!("Failed to create HTTP client: {}", e);
             let _ = tx.send(AsyncMessage::TokenError(e.to_string())).await;
             return;
         }
     };
 
     let interval = Duration::from_secs(5);
-    let max_attempts = 180;
+    let max_attempts = 180; // 15 minutes total
 
-    for _ in 0..max_attempts {
+    for attempt in 0..max_attempts {
         tokio::time::sleep(interval).await;
+
+        // Check if the receiver was dropped (user cancelled)
+        // This is a cheap check that allows us to exit early
+        if tx.is_closed() {
+            tracing::debug!("Token polling cancelled (receiver dropped)");
+            return;
+        }
+
+        tracing::trace!("Polling for token (attempt {}/{})", attempt + 1, max_attempts);
 
         let response = match client
             .post(format!("{}/auth/device/token", API_BASE_URL))
@@ -709,13 +745,18 @@ async fn poll_for_token_async(
             .await
         {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(e) => {
+                tracing::debug!("Token poll request failed: {}", e);
+                continue;
+            }
         };
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
         if status.is_success() {
+            tracing::debug!("Token response received (success)");
+            
             #[derive(serde::Deserialize)]
             struct TokenResponse {
                 access_token: String,
@@ -733,7 +774,12 @@ async fn poll_for_token_async(
                 match save_auth_with_fallback(&cortex_home, &auth_data) {
                     Ok(mode) => {
                         tracing::info!("Auth credentials saved using {:?} storage", mode);
-                        let _ = tx.send(AsyncMessage::TokenReceived).await;
+                        // Send the success message - this is the critical moment
+                        if let Err(e) = tx.send(AsyncMessage::TokenReceived).await {
+                            tracing::error!("Failed to send TokenReceived message: {}", e);
+                        } else {
+                            tracing::debug!("TokenReceived message sent successfully");
+                        }
                         return;
                     }
                     Err(e) => {
@@ -747,6 +793,8 @@ async fn poll_for_token_async(
                         return;
                     }
                 }
+            } else {
+                tracing::warn!("Failed to parse token response");
             }
             continue;
         }
@@ -755,24 +803,36 @@ async fn poll_for_token_async(
             && let Some(err) = error.get("error").and_then(|e| e.as_str())
         {
             match err {
-                "authorization_pending" | "slow_down" => continue,
+                "authorization_pending" => {
+                    tracing::trace!("Authorization pending...");
+                    continue;
+                }
+                "slow_down" => {
+                    tracing::debug!("Server requested slow down");
+                    continue;
+                }
                 "expired_token" => {
+                    tracing::warn!("Device code expired");
                     let _ = tx
                         .send(AsyncMessage::TokenError("Device code expired".to_string()))
                         .await;
                     return;
                 }
                 "access_denied" => {
+                    tracing::warn!("Access denied by user");
                     let _ = tx
                         .send(AsyncMessage::TokenError("Access denied".to_string()))
                         .await;
                     return;
                 }
-                _ => {}
+                _ => {
+                    tracing::debug!("Unknown error response: {}", err);
+                }
             }
         }
     }
 
+    tracing::warn!("Token polling timed out after {} attempts", max_attempts);
     let _ = tx
         .send(AsyncMessage::TokenError(
             "Authentication timed out".to_string(),

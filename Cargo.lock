@@ -1644,6 +1644,7 @@ dependencies = [
  "cortex-tui-components",
  "crossterm",
  "dirs 6.0.0",
+ "futures",
  "hostname",
  "libc",
  "ratatui",
