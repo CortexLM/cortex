@@ -466,18 +466,29 @@ impl ExecCli {
                     }
                 }
                 EventMsg::ExecApprovalRequest(approval) => {
-                    // Check autonomy level
-                    if let Some(level) = autonomy
-                        && level == AutonomyLevel::ReadOnly
-                    {
-                        // Fail fast in read-only mode
-                        error_occurred = true;
-                        error_message = Some(
-                            "Permission denied: Command execution not allowed in read-only mode. \
-                                Use --auto low|medium|high to enable."
-                                .to_string(),
-                        );
-                        break;
+                    // Check autonomy level using allows_risk for proper validation
+                    if let Some(level) = autonomy {
+                        let command_str = approval.command.join(" ");
+                        let risk_level = approval
+                            .sandbox_assessment
+                            .as_ref()
+                            .map(|a| match a.risk_level {
+                                cortex_protocol::SandboxRiskLevel::Low => "low",
+                                cortex_protocol::SandboxRiskLevel::Medium => "medium",
+                                cortex_protocol::SandboxRiskLevel::High => "high",
+                            })
+                            .unwrap_or("low");
+
+                        if !level.allows_risk(risk_level, &command_str) {
+                            // Command not allowed at this autonomy level
+                            error_occurred = true;
+                            error_message = Some(format!(
+                                "Permission denied: Command '{}' (risk: {}) not allowed in {} mode. \
+                                Use --auto with higher autonomy level to enable.",
+                                command_str, risk_level, level
+                            ));
+                            break;
+                        }
                     }
 
                     // Auto-approve based on autonomy level (already set via approval_policy)
