@@ -33,15 +33,15 @@ pub async fn run_config(args: ConfigArgs) -> Result<()> {
         global_config_toml // Default to .toml path for display
     };
 
-    let local_config = std::env::current_dir().ok().and_then(|d| {
+    let local_config = std::env::current_dir().ok().map(|d| {
         let local_toml = d.join(".cortex/config.toml");
         let local_json = d.join(".cortex/config.json");
         if local_toml.exists() {
-            Some(local_toml)
+            local_toml
         } else if local_json.exists() {
-            Some(local_json)
+            local_json
         } else {
-            Some(local_toml) // Default to .toml path for display
+            local_toml // Default to .toml path for display
         }
     });
 

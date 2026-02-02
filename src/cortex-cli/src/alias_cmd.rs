@@ -249,6 +249,8 @@ async fn run_show(args: AliasShowArgs) -> Result<()> {
                     "error": format!("Alias '{}' does not exist", args.name)
                 });
                 println!("{}", serde_json::to_string_pretty(&error)?);
+                // Exit with error code but don't duplicate error message via bail!()
+                std::process::exit(1);
             }
             bail!("Alias '{}' does not exist.", args.name);
         }

@@ -409,6 +409,8 @@ async fn run_show(args: PluginShowArgs) -> Result<()> {
                 "error": format!("Plugin '{}' is not installed", args.name)
             });
             println!("{}", serde_json::to_string_pretty(&error)?);
+            // Exit with error code but don't duplicate error message via bail!()
+            std::process::exit(1);
         }
         bail!("Plugin '{}' is not installed.", args.name);
     }
