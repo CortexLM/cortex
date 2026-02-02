@@ -247,6 +247,7 @@ pub fn git_root(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     fn setup_test_dir() -> TempDir {
@@ -344,8 +345,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_caching() {
-        // Clear cache first since tests run in parallel and share static cache
+        // Clear cache first - must use #[serial] since tests share static cache
         clear_cache();
         assert_eq!(cache_size(), 0);
 
