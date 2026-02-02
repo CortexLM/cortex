@@ -1,6 +1,6 @@
 //! File command handler.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::debug_cmd::commands::FileArgs;
 use crate::debug_cmd::types::{FileDebugOutput, FileMetadata};
@@ -19,16 +19,15 @@ pub async fn run_file(args: FileArgs) -> Result<()> {
 
     let exists = path.exists();
 
+    if !exists {
+        bail!("File does not exist: {}", path.display());
+    }
+
     // Detect special file types using stat() BEFORE attempting any reads
     // This prevents blocking on FIFOs, sockets, and other special files
-    let special_file_type = if exists {
-        detect_special_file_type(&path)
-    } else {
-        None
-    };
+    let special_file_type = detect_special_file_type(&path);
 
-    let (metadata, error) = if exists {
-        match std::fs::metadata(&path) {
+    let (metadata, error) = match std::fs::metadata(&path) {
             Ok(meta) => {
                 let modified = meta
                     .modified()
@@ -96,14 +95,11 @@ pub async fn run_file(args: FileArgs) -> Result<()> {
                     None,
                 )
             }
-            Err(e) => (None, Some(e.to_string())),
-        }
-    } else {
-        (None, Some("File does not exist".to_string()))
+        Err(e) => (None, Some(e.to_string())),
     };
 
     // Detect MIME type from extension - skip for special files
-    let mime_type = if exists && path.is_file() && special_file_type.is_none() {
+    let mime_type = if path.is_file() && special_file_type.is_none() {
         path.extension()
             .and_then(|ext| ext.to_str())
             .map(guess_mime_type)
@@ -112,7 +108,7 @@ pub async fn run_file(args: FileArgs) -> Result<()> {
     };
 
     // Detect encoding and binary status - SKIP for special files to avoid blocking
-    let (encoding, is_binary) = if exists && path.is_file() && special_file_type.is_none() {
+    let (encoding, is_binary) = if path.is_file() && special_file_type.is_none() {
         detect_encoding_and_binary(&path)
     } else {
         (None, None)
@@ -120,7 +116,7 @@ pub async fn run_file(args: FileArgs) -> Result<()> {
 
     // Check if the file appears to be actively modified by comparing
     // metadata from two reads with a small delay
-    let active_modification_warning = if exists && path.is_file() {
+    let active_modification_warning = if path.is_file() {
         // Get initial size
         let initial_size = std::fs::metadata(&path).ok().map(|m| m.len());
         // Brief delay to detect active writes

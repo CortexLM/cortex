@@ -1,6 +1,6 @@
 //! Handler for the `agent list` command.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::agent_cmd::cli::ListArgs;
 use crate::agent_cmd::loader::load_all_agents;
@@ -9,6 +9,13 @@ use crate::agent_cmd::utils::matches_pattern;
 
 /// List agents command.
 pub async fn run_list(args: ListArgs) -> Result<()> {
+    // Validate mutually exclusive flags
+    if args.primary && args.subagents {
+        bail!(
+            "Cannot specify both --primary and --subagents. Choose one filter or use neither for all agents."
+        );
+    }
+
     // Handle --remote flag
     if args.remote {
         println!("Remote agent registry:");

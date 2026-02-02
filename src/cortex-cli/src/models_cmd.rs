@@ -422,6 +422,16 @@ async fn run_list(
     sort_by: &str,
     show_full: bool,
 ) -> Result<()> {
+    // Validate sort value (Issue #3722)
+    const VALID_SORT_VALUES: &[&str] = &["name", "provider", "context", "created", "id"];
+    if !VALID_SORT_VALUES.contains(&sort_by) {
+        anyhow::bail!(
+            "Invalid sort value '{}'. Valid values are: {}",
+            sort_by,
+            VALID_SORT_VALUES.join(", ")
+        );
+    }
+
     let mut models = get_available_models();
 
     // Parse sort order (Issue #1993)

@@ -407,33 +407,32 @@ async fn run_compact(args: CompactRunArgs) -> Result<()> {
     }
 
     if args.dry_run {
-        println!("Dry run mode - no changes will be made.");
-        println!();
+        let log_files_count = dir_stats(&logs_dir).0;
+        let session_files_count = dir_stats(&sessions_dir).0;
+        let history_files_count = dir_stats(&history_dir).0;
+        let orphaned_history_count = count_orphaned_history(&sessions_dir, &history_dir);
 
-        let status = CompactionStatus {
-            data_dir: data_dir.clone(),
-            logs_dir: logs_dir.clone(),
-            sessions_dir: sessions_dir.clone(),
-            history_dir: history_dir.clone(),
-            log_files_count: dir_stats(&logs_dir).0,
-            log_files_size: dir_stats(&logs_dir).1,
-            log_files_size_human: format_size(dir_stats(&logs_dir).1),
-            session_files_count: dir_stats(&sessions_dir).0,
-            history_files_count: dir_stats(&history_dir).0,
-            orphaned_history_count: count_orphaned_history(&sessions_dir, &history_dir),
-            total_data_size: 0,
-            total_data_size_human: String::new(),
-            lock_held: false,
-        };
-
-        println!("Would process:");
-        println!("  Log files: {}", status.log_files_count);
-        println!("  Session files: {}", status.session_files_count);
-        println!("  History files: {}", status.history_files_count);
-        println!(
-            "  Orphaned files to clean: {}",
-            status.orphaned_history_count
-        );
+        if args.json {
+            let output = serde_json::json!({
+                "dry_run": true,
+                "would_process": {
+                    "log_files": log_files_count,
+                    "session_files": session_files_count,
+                    "history_files": history_files_count,
+                    "orphaned_files_to_clean": orphaned_history_count
+                },
+                "message": "Dry run completed - no changes made"
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            println!("Dry run mode - no changes will be made.");
+            println!();
+            println!("Would process:");
+            println!("  Log files: {}", log_files_count);
+            println!("  Session files: {}", session_files_count);
+            println!("  History files: {}", history_files_count);
+            println!("  Orphaned files to clean: {}", orphaned_history_count);
+        }
         return Ok(());
     }
 

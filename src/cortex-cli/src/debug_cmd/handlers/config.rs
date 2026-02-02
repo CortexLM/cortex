@@ -22,10 +22,28 @@ pub async fn run_config(args: ConfigArgs) -> Result<()> {
         )
     })?;
 
-    let global_config = config.cortex_home.join("config.toml");
-    let local_config = std::env::current_dir()
-        .ok()
-        .map(|d| d.join(".cortex/config.toml"));
+    // Support both config.toml and config.json
+    let global_config_toml = config.cortex_home.join("config.toml");
+    let global_config_json = config.cortex_home.join("config.json");
+    let global_config = if global_config_toml.exists() {
+        global_config_toml
+    } else if global_config_json.exists() {
+        global_config_json
+    } else {
+        global_config_toml // Default to .toml path for display
+    };
+
+    let local_config = std::env::current_dir().ok().and_then(|d| {
+        let local_toml = d.join(".cortex/config.toml");
+        let local_json = d.join(".cortex/config.json");
+        if local_toml.exists() {
+            Some(local_toml)
+        } else if local_json.exists() {
+            Some(local_json)
+        } else {
+            Some(local_toml) // Default to .toml path for display
+        }
+    });
 
     let resolved = ResolvedConfig {
         model: config.model.clone(),
@@ -140,14 +158,26 @@ pub async fn run_config(args: ConfigArgs) -> Result<()> {
 
     // Handle --diff flag: compare local and global configs
     if args.diff {
-        println!();
-        println!("Config Diff (Global vs Local)");
-        println!("{}", "=".repeat(50));
+        // Support both config.toml and config.json for diff
+        let global_toml = config.cortex_home.join("config.toml");
+        let global_json = config.cortex_home.join("config.json");
+        let global_path = if global_toml.exists() {
+            global_toml
+        } else {
+            global_json
+        };
 
-        let global_path = config.cortex_home.join("config.toml");
-        let local_path = std::env::current_dir()
-            .ok()
-            .map(|d| d.join(".cortex/config.toml"));
+        let local_path = std::env::current_dir().ok().and_then(|d| {
+            let local_toml = d.join(".cortex/config.toml");
+            let local_json = d.join(".cortex/config.json");
+            if local_toml.exists() {
+                Some(local_toml)
+            } else if local_json.exists() {
+                Some(local_json)
+            } else {
+                None
+            }
+        });
 
         let global_content = if global_path.exists() {
             std::fs::read_to_string(&global_path).ok()
@@ -163,40 +193,79 @@ pub async fn run_config(args: ConfigArgs) -> Result<()> {
             }
         });
 
-        match (global_content.as_ref(), local_content.as_ref()) {
-            (None, None) => {
-                println!("  No config files found.");
-            }
-            (Some(_global), None) => {
-                println!("  Only global config exists.");
-                if args.json {
-                    let diff_output = serde_json::json!({
+        // For --diff --json, output pure JSON without mixing text and JSON
+        if args.json {
+            let diff_output = match (global_content.as_ref(), local_content.as_ref()) {
+                (None, None) => {
+                    serde_json::json!({
+                        "global_only": false,
+                        "local_only": false,
+                        "identical": false,
+                        "message": "No config files found",
+                        "differences": []
+                    })
+                }
+                (Some(_), None) => {
+                    serde_json::json!({
                         "global_only": true,
                         "local_only": false,
-                        "differences": [],
-                    });
-                    println!("{}", serde_json::to_string_pretty(&diff_output)?);
+                        "identical": false,
+                        "message": "Only global config exists",
+                        "differences": []
+                    })
                 }
-            }
-            (None, Some(_local)) => {
-                println!("  Only local config exists.");
-                if args.json {
-                    let diff_output = serde_json::json!({
+                (None, Some(_)) => {
+                    serde_json::json!({
                         "global_only": false,
                         "local_only": true,
-                        "differences": [],
-                    });
-                    println!("{}", serde_json::to_string_pretty(&diff_output)?);
+                        "identical": false,
+                        "message": "Only local config exists",
+                        "differences": []
+                    })
                 }
-            }
-            (Some(global), Some(local)) => {
-                if global == local {
-                    println!("  Configs are identical.");
-                } else {
-                    let diff = compute_config_diff(global, local);
-                    if args.json {
-                        println!("{}", serde_json::to_string_pretty(&diff)?);
+                (Some(global), Some(local)) => {
+                    if global == local {
+                        serde_json::json!({
+                            "global_only": false,
+                            "local_only": false,
+                            "identical": true,
+                            "message": "Configs are identical",
+                            "differences": []
+                        })
                     } else {
+                        let diff = compute_config_diff(global, local);
+                        serde_json::json!({
+                            "global_only": false,
+                            "local_only": false,
+                            "identical": false,
+                            "only_in_global": diff.only_in_global,
+                            "only_in_local": diff.only_in_local,
+                            "unified_diff": diff.unified_diff
+                        })
+                    }
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&diff_output)?);
+        } else {
+            println!();
+            println!("Config Diff (Global vs Local)");
+            println!("{}", "=".repeat(50));
+
+            match (global_content.as_ref(), local_content.as_ref()) {
+                (None, None) => {
+                    println!("  No config files found.");
+                }
+                (Some(_), None) => {
+                    println!("  Only global config exists.");
+                }
+                (None, Some(_)) => {
+                    println!("  Only local config exists.");
+                }
+                (Some(global), Some(local)) => {
+                    if global == local {
+                        println!("  Configs are identical.");
+                    } else {
+                        let diff = compute_config_diff(global, local);
                         println!();
                         if !diff.only_in_global.is_empty() {
                             println!("Lines only in global config:");

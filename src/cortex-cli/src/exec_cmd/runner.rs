@@ -24,6 +24,13 @@ use super::output::{ExecInputFormat, ExecOutputFormat};
 impl ExecCli {
     /// Run the exec command.
     pub async fn run(self) -> Result<()> {
+        // Validate mutually exclusive tool flags
+        if !self.enabled_tools.is_empty() && !self.disabled_tools.is_empty() {
+            bail!(
+                "Cannot specify both --enabled-tools and --disabled-tools. Choose one to filter tools."
+            );
+        }
+
         // Ensure UTF-8 locale for proper text handling
         let _ = ensure_utf8_locale();
 

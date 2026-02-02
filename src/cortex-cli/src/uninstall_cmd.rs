@@ -181,7 +181,16 @@ impl UninstallCli {
             return Ok(());
         }
 
-        // Backup if requested
+        // Confirm before proceeding (Issue #3682: confirm BEFORE creating backup)
+        if !self.force && !self.yes {
+            println!("\nAre you sure you want to uninstall Cortex CLI? [y/N]");
+            if !prompt_yes_no()? {
+                println!("Uninstall cancelled.");
+                return Ok(());
+            }
+        }
+
+        // Backup if requested (only after user confirms)
         if self.backup {
             print_info("Creating backup...");
             if let Err(e) = create_backup(&items_to_remove) {
@@ -193,15 +202,6 @@ impl UninstallCli {
                         return Ok(());
                     }
                 }
-            }
-        }
-
-        // Confirm before proceeding
-        if !self.force && !self.yes {
-            println!("\nAre you sure you want to uninstall Cortex CLI? [y/N]");
-            if !prompt_yes_no()? {
-                println!("Uninstall cancelled.");
-                return Ok(());
             }
         }
 

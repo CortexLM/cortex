@@ -120,8 +120,19 @@ pub(crate) async fn run_list(args: ListArgs) -> Result<()> {
 
 /// Run the get command.
 pub(crate) async fn run_get(args: GetArgs) -> Result<()> {
-    let server = get_mcp_server(&args.name)?
-        .ok_or_else(|| anyhow::anyhow!("No MCP server named '{}' found", args.name))?;
+    let server = match get_mcp_server(&args.name)? {
+        Some(s) => s,
+        None => {
+            let error_message = format!("No MCP server named '{}' found", args.name);
+            if args.json {
+                let error = serde_json::json!({
+                    "error": error_message
+                });
+                println!("{}", serde_json::to_string_pretty(&error)?);
+            }
+            bail!("{}", error_message);
+        }
+    };
 
     if args.json {
         let json = serde_json::to_string_pretty(&server)?;
@@ -247,6 +258,21 @@ pub(crate) async fn run_add(args: AddArgs) -> Result<()> {
             name,
             name
         );
+    }
+
+    // Check for conflicting transport types
+    let has_url = transport_args
+        .streamable_http
+        .as_ref()
+        .map(|h| !h.url.is_empty())
+        .unwrap_or(false);
+    let has_sse = transport_args
+        .sse_transport
+        .as_ref()
+        .and_then(|s| s.sse_url.as_ref())
+        .is_some();
+    if has_url && has_sse {
+        bail!("Cannot specify both --url and --sse. Choose one transport type.");
     }
 
     // Validate that bearer token is not used with stdio transport

@@ -3,7 +3,7 @@
 //! Uses the Cortex Software Distribution API at software.cortex.foundation
 //! to check for updates and download new versions.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use cortex_engine::create_default_client;
 use std::io::{Write, stdout};
@@ -73,11 +73,10 @@ impl UpgradeCli {
                 "beta" => ReleaseChannel::Beta,
                 "nightly" => ReleaseChannel::Nightly,
                 _ => {
-                    eprintln!(
+                    bail!(
                         "Invalid channel: {}. Use: stable, beta, or nightly",
                         self.channel
                     );
-                    return Ok(());
                 }
             }
         };
@@ -337,14 +336,40 @@ fn print_line(line: &str) -> Result<bool> {
     }
 }
 
+/// Convert GitHub URLs to raw content URLs (Issue #3651)
+fn convert_to_raw_url(url: &str) -> String {
+    // Handle github.com/user/repo/blob/branch/file -> raw.githubusercontent.com/user/repo/branch/file
+    if url.contains("github.com") && url.contains("/blob/") {
+        return url
+            .replace("github.com", "raw.githubusercontent.com")
+            .replace("/blob/", "/");
+    }
+
+    // Handle github.com/user/repo/releases for changelog
+    if url.contains("github.com") && url.contains("/releases") {
+        // Try to construct a raw CHANGELOG.md URL
+        if let Some(repo_part) = url.split("/releases").next() {
+            return format!("{}/raw/main/CHANGELOG.md", repo_part)
+                .replace("github.com", "raw.githubusercontent.com")
+                .replace("/raw/", "/");
+        }
+    }
+
+    // Return original URL if no conversion needed
+    url.to_string()
+}
+
 /// Fetch and display changelog content from a URL
 async fn fetch_and_display_changelog(url: &str) -> Result<()> {
+    // Convert GitHub URLs to raw content URLs (Issue #3651)
+    let raw_url = convert_to_raw_url(url);
+
     // Create HTTP client
     let client = create_default_client().context("Failed to create HTTP client")?;
 
     // Fetch the changelog content
     let response = client
-        .get(url)
+        .get(&raw_url)
         .send()
         .await
         .context("Failed to send HTTP request")?;
@@ -375,10 +400,12 @@ async fn fetch_and_display_changelog(url: &str) -> Result<()> {
         return Ok(());
     }
 
-    // If it's a GitHub URL, we might need to fetch the raw content
-    let display_content = if url.contains("github.com") && !url.contains("/raw/") {
-        // Try to extract useful content from HTML (basic approach)
-        // For GitHub releases, the content might be in HTML format
+    // Check if content still looks like HTML (fallback stripping)
+    let display_content = if content.trim_start().starts_with("<!DOCTYPE")
+        || content.trim_start().starts_with("<html")
+        || content.contains("<head>")
+    {
+        // Content is HTML, strip tags
         strip_html_tags(&content)
     } else {
         content

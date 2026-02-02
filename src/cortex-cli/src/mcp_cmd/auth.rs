@@ -203,6 +203,13 @@ async fn run_auth(
 pub(crate) async fn run_logout(args: LogoutArgs) -> Result<()> {
     use cortex_engine::mcp;
 
+    // Validate mutually exclusive flags
+    if args.name.is_some() && args.all {
+        bail!(
+            "Cannot specify both --name and --all. Use --name for a specific server or --all for all servers."
+        );
+    }
+
     if args.all {
         // Logout from all servers
         let servers = get_mcp_servers()?;

@@ -144,6 +144,13 @@ impl PluginCli {
 }
 
 async fn run_list(args: PluginListArgs) -> Result<()> {
+    // Validate mutually exclusive flags
+    if args.enabled && args.disabled {
+        bail!(
+            "Cannot specify both --enabled and --disabled. Choose one filter or use neither for all plugins."
+        );
+    }
+
     let plugins_dir = get_plugins_dir();
 
     if !plugins_dir.exists() {
@@ -243,6 +250,11 @@ async fn run_list(args: PluginListArgs) -> Result<()> {
 }
 
 async fn run_install(args: PluginInstallArgs) -> Result<()> {
+    // Validate plugin name is not empty (Issue #3700)
+    if args.name.trim().is_empty() {
+        bail!("Plugin name cannot be empty. Please provide a valid plugin name.");
+    }
+
     let plugins_dir = get_plugins_dir();
 
     // Create plugins directory if it doesn't exist
@@ -392,6 +404,12 @@ async fn run_show(args: PluginShowArgs) -> Result<()> {
     let manifest_path = plugin_path.join("plugin.toml");
 
     if !manifest_path.exists() {
+        if args.json {
+            let error = serde_json::json!({
+                "error": format!("Plugin '{}' is not installed", args.name)
+            });
+            println!("{}", serde_json::to_string_pretty(&error)?);
+        }
         bail!("Plugin '{}' is not installed.", args.name);
     }
 

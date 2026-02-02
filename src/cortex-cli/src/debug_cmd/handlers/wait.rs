@@ -102,7 +102,15 @@ pub async fn run_wait(args: WaitArgs) -> Result<()> {
 
         (condition, success, error)
     } else {
-        bail!("No condition specified. Use --lsp-ready, --server-ready, or --port");
+        let error_message = "No condition specified. Use --lsp-ready, --server-ready, or --port";
+        if args.json {
+            let error = serde_json::json!({
+                "error": error_message,
+                "success": false
+            });
+            println!("{}", serde_json::to_string_pretty(&error)?);
+        }
+        bail!("{}", error_message);
     };
 
     let waited_ms = start.elapsed().as_millis() as u64;

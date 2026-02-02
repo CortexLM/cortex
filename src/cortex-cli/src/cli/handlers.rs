@@ -27,7 +27,7 @@ pub async fn dispatch_command(cli: Cli) -> Result<()> {
         Some(Commands::Login(login_cli)) => handle_login(login_cli).await,
         Some(Commands::Logout(logout_cli)) => handle_logout(logout_cli).await,
         Some(Commands::Whoami) => {
-            run_whoami().await;
+            run_whoami().await?;
             Ok(())
         }
         Some(Commands::Mcp(mcp_cli)) => mcp_cli.run().await,
@@ -182,6 +182,23 @@ async fn run_init(init_cli: InitCommand) -> Result<()> {
 
 /// Handle login command.
 async fn handle_login(login_cli: LoginCommand) -> Result<()> {
+    // Validate mutually exclusive authentication methods
+    let auth_methods_count = [
+        login_cli.token.is_some(),
+        login_cli.use_sso,
+        login_cli.use_device_code,
+        login_cli.with_api_key,
+    ]
+    .iter()
+    .filter(|&&x| x)
+    .count();
+
+    if auth_methods_count > 1 {
+        bail!(
+            "Cannot specify multiple authentication methods. Choose one: --token, --sso, --device-auth, or --with-api-key."
+        );
+    }
+
     match login_cli.action {
         Some(LoginSubcommand::Status) => run_login_status(login_cli.config_overrides).await,
         None => {
@@ -512,7 +529,7 @@ fn install_completions(shell: Shell) -> Result<()> {
 // ============================================================================
 
 /// Show current logged-in user.
-pub async fn run_whoami() {
+pub async fn run_whoami() -> Result<()> {
     use cortex_login::{AuthMode, load_auth_with_fallback, safe_format_key};
 
     let cortex_home = dirs::home_dir()
@@ -527,7 +544,7 @@ pub async fn run_whoami() {
             "Authenticated via CORTEX_AUTH_TOKEN: {}",
             safe_format_key(&token)
         );
-        return;
+        return Ok(());
     }
 
     if let Ok(token) = std::env::var("CORTEX_API_KEY")
@@ -537,7 +554,7 @@ pub async fn run_whoami() {
             "Authenticated via CORTEX_API_KEY: {}",
             safe_format_key(&token)
         );
-        return;
+        return Ok(());
     }
 
     // Load stored credentials
@@ -565,9 +582,11 @@ pub async fn run_whoami() {
             println!("Not logged in. Run 'cortex login' to authenticate.");
         }
         Err(e) => {
-            eprintln!("Error checking login status: {}", e);
+            return Err(anyhow::anyhow!("Error checking login status: {}", e));
         }
     }
+
+    Ok(())
 }
 
 /// Resume a previous session.
@@ -585,6 +604,16 @@ pub async fn run_resume(resume_cli: ResumeCommand) -> Result<()> {
     let config = cortex_engine::Config::default();
 
     let id_str = match (resume_cli.session_id, resume_cli.last, resume_cli.pick) {
+        // Support "last" as SESSION_ID as documented in help text (Issue #3646)
+        (Some(id), _, _) if id.to_lowercase() == "last" => {
+            let sessions = cortex_engine::list_sessions(&config.cortex_home)?;
+            if sessions.is_empty() {
+                print_info("No sessions found to resume.");
+                return Ok(());
+            }
+            print_info("Resuming most recent session...");
+            sessions[0].id.clone()
+        }
         (Some(id), _, _) => id,
         (None, true, _) => {
             let sessions = cortex_engine::list_sessions(&config.cortex_home)?;
@@ -810,10 +839,10 @@ pub async fn show_config(config_cli: ConfigCommand) -> Result<()> {
                 if let Some(value) = config.get(&args.key) {
                     println!("{}", value);
                 } else {
-                    println!("Key '{}' not found.", args.key);
+                    bail!("Key '{}' not found in configuration", args.key);
                 }
             } else {
-                println!("No configuration file found.");
+                bail!("No configuration file found");
             }
         }
         Some(ConfigSubcommand::Set(args)) => {
@@ -841,10 +870,10 @@ pub async fn show_config(config_cli: ConfigCommand) -> Result<()> {
                     std::fs::write(&config_path, content)?;
                     print_success(&format!("Removed key: {}", args.key));
                 } else {
-                    print_warning(&format!("Key '{}' not found.", args.key));
+                    bail!("Key '{}' not found in configuration", args.key);
                 }
             } else {
-                print_warning("No configuration file found.");
+                bail!("No configuration file found");
             }
         }
         None => {

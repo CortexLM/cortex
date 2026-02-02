@@ -96,6 +96,24 @@ struct LockFile {
     locked_sessions: Vec<LockEntry>,
 }
 
+/// Validate session ID format (must be valid UUID or 8-char prefix)
+fn validate_session_id(session_id: &str) -> Result<()> {
+    // Check if it's a valid UUID
+    if uuid::Uuid::parse_str(session_id).is_ok() {
+        return Ok(());
+    }
+
+    // Check if it's a valid 8-character hex prefix
+    if session_id.len() == 8 && session_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+
+    bail!(
+        "Invalid session ID: '{}'. Expected a full UUID (e.g., '550e8400-e29b-41d4-a716-446655440000') or an 8-character prefix.",
+        session_id
+    )
+}
+
 /// Get the lock file path.
 fn get_lock_file_path() -> PathBuf {
     dirs::home_dir()
@@ -185,6 +203,11 @@ impl LockCli {
 }
 
 async fn run_add(args: LockAddArgs) -> Result<()> {
+    // Validate all session IDs first (Issue #3696)
+    for session_id in &args.session_ids {
+        validate_session_id(session_id)?;
+    }
+
     let mut lock_file = load_lock_file()?;
     let timestamp = chrono::Utc::now().to_rfc3339();
 

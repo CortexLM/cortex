@@ -71,6 +71,11 @@ pub async fn run_create(args: DagCreateArgs) -> Result<()> {
 
 /// Execute a DAG.
 pub async fn run_execute(args: DagRunArgs) -> Result<()> {
+    // Validate --jobs argument (Issue #3716)
+    if args.max_concurrent == 0 {
+        bail!("--jobs must be at least 1. Use --jobs 1 for sequential execution.");
+    }
+
     let spec = load_spec(&args.file)?;
     let specs = convert_specs(&spec);
 
@@ -86,14 +91,33 @@ pub async fn run_execute(args: DagRunArgs) -> Result<()> {
 
     if matches!(args.strategy, ExecutionStrategy::DryRun) {
         // Dry run - just validate
-        dag.topological_sort()
+        let order = dag
+            .topological_sort()
             .map_err(|e| anyhow::anyhow!("DAG validation failed: {}", e))?;
-        print_success(&format!(
-            "✓ DAG is valid ({} tasks in execution order)",
-            dag.len()
-        ));
-        println!();
-        print_execution_order(&dag)?;
+
+        match args.format {
+            DagOutputFormat::Json => {
+                let task_names: Vec<String> = order
+                    .iter()
+                    .filter_map(|id| dag.get_task(*id).map(|t| t.name.clone()))
+                    .collect();
+                let output = serde_json::json!({
+                    "dry_run": true,
+                    "valid": true,
+                    "task_count": dag.len(),
+                    "execution_order": task_names
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+            _ => {
+                print_success(&format!(
+                    "✓ DAG is valid ({} tasks in execution order)",
+                    dag.len()
+                ));
+                println!();
+                print_execution_order(&dag)?;
+            }
+        }
         return Ok(());
     }
 
@@ -251,7 +275,14 @@ pub async fn run_list(args: DagListArgs) -> Result<()> {
     let ids = store.list().await?;
 
     if ids.is_empty() {
-        print_info("No DAGs found");
+        match args.format {
+            DagOutputFormat::Json => {
+                println!("[]");
+            }
+            _ => {
+                print_info("No DAGs found");
+            }
+        }
         return Ok(());
     }
 

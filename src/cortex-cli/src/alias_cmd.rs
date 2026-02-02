@@ -241,10 +241,18 @@ async fn run_remove(args: AliasRemoveArgs) -> Result<()> {
 async fn run_show(args: AliasShowArgs) -> Result<()> {
     let config = load_aliases()?;
 
-    let alias = config
-        .aliases
-        .get(&args.name)
-        .ok_or_else(|| anyhow::anyhow!("Alias '{}' does not exist.", args.name))?;
+    let alias = match config.aliases.get(&args.name) {
+        Some(a) => a,
+        None => {
+            if args.json {
+                let error = serde_json::json!({
+                    "error": format!("Alias '{}' does not exist", args.name)
+                });
+                println!("{}", serde_json::to_string_pretty(&error)?);
+            }
+            bail!("Alias '{}' does not exist.", args.name);
+        }
+    };
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(alias)?);

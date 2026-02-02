@@ -275,7 +275,44 @@ impl RunCli {
             tracing::warn!("Failed to scan custom commands: {}", e);
         }
 
-        let (mut session, handle) = Session::new(config.clone())?;
+        // Create session, handling auth errors specially for JSON output
+        let (mut session, handle) = match Session::new(config.clone()) {
+            Ok(result) => result,
+            Err(e) => {
+                let error_message = e.to_string();
+                let is_auth_error = error_message.contains("Authentication required")
+                    || error_message.contains("authentication")
+                    || error_message.contains("auth")
+                    || error_message.contains("API key")
+                    || error_message.contains("login");
+
+                if is_json {
+                    let error_type = if is_auth_error {
+                        "authentication_error"
+                    } else {
+                        "session_error"
+                    };
+
+                    let mut error_json = serde_json::json!({
+                        "error": {
+                            "type": error_type,
+                            "message": error_message,
+                        }
+                    });
+
+                    // Add hint for auth errors
+                    if is_auth_error {
+                        error_json["error"]["hint"] = serde_json::Value::String(
+                            "Run 'cortex login' to authenticate".to_string(),
+                        );
+                    }
+
+                    println!("{}", serde_json::to_string_pretty(&error_json)?);
+                }
+
+                return Err(e.into());
+            }
+        };
 
         // Handle session resumption if needed
         let session_id = match session_mode {

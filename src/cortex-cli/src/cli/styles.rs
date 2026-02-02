@@ -49,8 +49,8 @@ pub const AFTER_HELP: &str = color_print::cstr!(
     <dim>Agents</>      ~/.cortex/agents/ (personal), .cortex/agents/ (project)
 
 <cyan,bold>🔗 LEARN MORE</>
-    <blue,underline>https://docs.cortex.foundation</>         Documentation
-    <blue,underline>https://github.com/CortexLM/cortex-cli</>  Source & Issues"#
+    <blue,underline>https://docs.cortex.foundation</>       Documentation
+    <blue,underline>https://github.com/CortexLM/cortex</>   Source & Issues"#
 );
 
 /// Before-help section with ASCII art banner.

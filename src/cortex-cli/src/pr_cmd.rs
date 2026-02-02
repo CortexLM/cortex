@@ -130,7 +130,7 @@ async fn run_pr_checkout(args: PrCli) -> Result<()> {
 
     let repository = format!("{}/{}", owner, repo);
 
-    println!("🔀 Pull Request #{}", pr_number);
+    println!("[PR] Pull Request #{}", pr_number);
     println!("{}", "=".repeat(40));
     println!("Repository: {}", repository);
     println!();
@@ -328,7 +328,7 @@ async fn run_pr_checkout(args: PrCli) -> Result<()> {
     validate_refspec(&refspec)?;
 
     println!("Fetching PR #{}...", pr_number);
-    print!("  ⏳ Downloading PR data from origin...");
+    print!("  [WAIT] Downloading PR data from origin...");
     std::io::Write::flush(&mut std::io::stdout()).ok();
 
     // SECURITY: Arguments are passed as separate array elements, not interpolated into a string
@@ -345,7 +345,7 @@ async fn run_pr_checkout(args: PrCli) -> Result<()> {
     }
 
     // Checkout the branch
-    print!("  ⏳ Checking out branch '{}'...", branch_name);
+    print!("  [WAIT] Checking out branch '{}'...", branch_name);
     std::io::Write::flush(&mut std::io::stdout()).ok();
 
     let checkout_args = if args.force {

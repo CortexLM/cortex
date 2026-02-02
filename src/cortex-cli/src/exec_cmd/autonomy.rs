@@ -74,9 +74,13 @@ impl AutonomyLevel {
     }
 
     /// Check if a command risk level is allowed.
-    pub fn allows_risk(&self, risk: &str) -> bool {
+    ///
+    /// # Arguments
+    /// * `risk` - The risk level of the command ("low", "medium", "high")
+    /// * `command` - The actual command string to check if it's read-only
+    pub fn allows_risk(&self, risk: &str, command: &str) -> bool {
         match self {
-            AutonomyLevel::ReadOnly => risk == "low" && is_read_only_command(risk),
+            AutonomyLevel::ReadOnly => risk == "low" && is_read_only_command(command),
             AutonomyLevel::Low => risk == "low",
             AutonomyLevel::Medium => risk == "low" || risk == "medium",
             AutonomyLevel::High => true,
@@ -148,5 +152,30 @@ mod tests {
         assert!(is_read_only_command("git log --oneline"));
         assert!(!is_read_only_command("rm -rf /"));
         assert!(!is_read_only_command("git push"));
+    }
+
+    #[test]
+    fn test_allows_risk() {
+        // Test ReadOnly level
+        assert!(AutonomyLevel::ReadOnly.allows_risk("low", "cat file.txt"));
+        assert!(AutonomyLevel::ReadOnly.allows_risk("low", "ls -la"));
+        assert!(!AutonomyLevel::ReadOnly.allows_risk("low", "rm file.txt"));
+        assert!(!AutonomyLevel::ReadOnly.allows_risk("medium", "cat file.txt"));
+        assert!(!AutonomyLevel::ReadOnly.allows_risk("high", "cat file.txt"));
+
+        // Test Low level
+        assert!(AutonomyLevel::Low.allows_risk("low", "any command"));
+        assert!(!AutonomyLevel::Low.allows_risk("medium", "any command"));
+        assert!(!AutonomyLevel::Low.allows_risk("high", "any command"));
+
+        // Test Medium level
+        assert!(AutonomyLevel::Medium.allows_risk("low", "any command"));
+        assert!(AutonomyLevel::Medium.allows_risk("medium", "any command"));
+        assert!(!AutonomyLevel::Medium.allows_risk("high", "any command"));
+
+        // Test High level
+        assert!(AutonomyLevel::High.allows_risk("low", "any command"));
+        assert!(AutonomyLevel::High.allows_risk("medium", "any command"));
+        assert!(AutonomyLevel::High.allows_risk("high", "any command"));
     }
 }

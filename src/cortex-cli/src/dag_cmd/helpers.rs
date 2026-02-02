@@ -28,6 +28,17 @@ pub fn load_spec(path: &PathBuf) -> Result<DagSpecInput> {
         serde_yaml::from_str(&content).context("Failed to parse YAML")?
     };
 
+    // Check for duplicate task IDs (Issue #3815)
+    let mut seen_names = std::collections::HashSet::new();
+    for task in &spec.tasks {
+        if !seen_names.insert(&task.name) {
+            anyhow::bail!(
+                "Duplicate task ID '{}' found in DAG specification. Task IDs must be unique.",
+                task.name
+            );
+        }
+    }
+
     Ok(spec)
 }
 
