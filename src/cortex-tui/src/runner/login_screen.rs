@@ -223,7 +223,7 @@ impl LoginScreen {
                         return Ok(result);
                     }
                 }
-                
+
                 // Handle async messages from token polling
                 msg = async {
                     if let Some(ref mut rx) = self.async_rx {
@@ -237,7 +237,7 @@ impl LoginScreen {
                         self.handle_async_message(msg);
                     }
                 }
-                
+
                 // Periodic render tick to keep UI responsive
                 _ = render_interval.tick() => {
                     // Just continue to re-render
@@ -713,7 +713,7 @@ async fn poll_for_token_async(
     tx: mpsc::Sender<AsyncMessage>,
 ) {
     tracing::debug!("Token polling started");
-    
+
     let client = match cortex_engine::create_default_client() {
         Ok(c) => c,
         Err(e) => {
@@ -736,7 +736,11 @@ async fn poll_for_token_async(
             return;
         }
 
-        tracing::trace!("Polling for token (attempt {}/{})", attempt + 1, max_attempts);
+        tracing::trace!(
+            "Polling for token (attempt {}/{})",
+            attempt + 1,
+            max_attempts
+        );
 
         let response = match client
             .post(format!("{}/auth/device/token", API_BASE_URL))
@@ -756,7 +760,7 @@ async fn poll_for_token_async(
 
         if status.is_success() {
             tracing::debug!("Token response received (success)");
-            
+
             #[derive(serde::Deserialize)]
             struct TokenResponse {
                 access_token: String,

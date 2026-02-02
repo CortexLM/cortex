@@ -1,0 +1,24 @@
+# Forge Orchestration Configuration
+
+[global]
+# Maximum parallel agent executions
+max_parallel = 4
+# Timeout for each agent in seconds
+timeout_seconds = 300
+# Stop on first failure
+fail_fast = false
+# Output format: "json", "text", "markdown"
+output_format = "json"
+
+[agents.security]
+enabled = true
+priority = 10
+
+[agents.quality]
+enabled = true
+priority = 10
+
+[agents.aggregator]
+enabled = true
+depends_on = ["security", "quality"]
+priority = 5

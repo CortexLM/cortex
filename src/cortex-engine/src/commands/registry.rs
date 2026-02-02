@@ -16,6 +16,7 @@ use super::development::{
     BgProcessCommand, BugCommand, DiagnosticsCommand, GhostCommand, IdeCommand, MultiEditCommand,
     ReviewCommand, ShareCommand,
 };
+use super::forge::ForgeCommand;
 use super::information::{
     AgentsCommand, ConfigCommand, CostCommand, ModelCommand, PluginsCommand, RateLimitsCommand,
     SkillsCommand,
@@ -86,6 +87,8 @@ impl CommandRegistry {
             Arc::new(HooksCommand),
             // Custom commands
             Arc::new(CustomCommandsCommand),
+            // Forge orchestration
+            Arc::new(ForgeCommand),
         ];
 
         drop(commands);

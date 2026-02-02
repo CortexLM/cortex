@@ -19,6 +19,7 @@
 mod configuration;
 mod custom;
 mod development;
+mod forge;
 mod information;
 mod navigation;
 mod registry;
@@ -45,6 +46,7 @@ pub use development::{
     BgProcessCommand, BugCommand, DiagnosticsCommand, GhostCommand, IdeCommand, MultiEditCommand,
     ReviewCommand, ShareCommand,
 };
+pub use forge::ForgeCommand;
 pub use information::{
     AgentsCommand, ConfigCommand, CostCommand, ModelCommand, PluginsCommand, RateLimitsCommand,
     SkillsCommand,

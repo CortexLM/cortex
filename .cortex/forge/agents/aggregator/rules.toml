@@ -1,0 +1,26 @@
+# Aggregator Agent Rules Configuration
+
+[agent]
+id = "aggregator"
+name = "Result Aggregator"
+description = "Collects and summarizes all validation results"
+enabled = true
+# Always runs last
+priority = -1
+
+[thresholds]
+# Maximum allowed errors before blocking
+max_errors = 0
+# Maximum allowed warnings
+max_warnings = 10
+# Require all agents to pass
+require_all_pass = true
+
+[actions]
+# What to do when validation passes
+on_pass = "proceed"
+# What to do when validation fails
+on_fail = "block"
+# Generate summary report
+generate_report = true
+report_format = "markdown"

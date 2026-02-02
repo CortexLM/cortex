@@ -117,6 +117,7 @@ pub mod background;
 pub mod collab;
 pub mod control;
 pub mod custom;
+pub mod forge;
 pub mod mention;
 pub mod permission;
 pub mod prompt;

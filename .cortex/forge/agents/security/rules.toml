@@ -1,0 +1,37 @@
+# Security Agent Rules Configuration
+
+[agent]
+id = "security"
+name = "Security Validator"
+description = "Checks for security vulnerabilities and best practices"
+enabled = true
+
+[rules.secrets_exposed]
+enabled = true
+severity = "error"
+description = "Detect hardcoded secrets and API keys"
+patterns = [
+    "(?i)(api[_-]?key|apikey)\\s*[=:]\\s*['\"][^'\"]{8,}['\"]",
+    "(?i)(secret|password|passwd|pwd)\\s*[=:]\\s*['\"][^'\"]+['\"]",
+    "(?i)(token|bearer)\\s*[=:]\\s*['\"][^'\"]{16,}['\"]",
+]
+exclude_patterns = ["*.test.rs", "*_test.go", "*.spec.ts"]
+
+[rules.dependencies_audit]
+enabled = true
+severity = "warning"
+description = "Check for known vulnerable dependencies"
+check_cargo_lock = true
+check_package_lock = true
+
+[rules.unsafe_code]
+enabled = true
+severity = "warning"
+description = "Detect unsafe blocks without safety comments"
+require_safety_comment = true
+allowed_files = ["src/ffi/*.rs", "src/sys/*.rs"]
+
+[rules.input_validation]
+enabled = true
+severity = "info"
+description = "Check for proper input validation patterns"

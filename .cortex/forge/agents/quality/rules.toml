@@ -1,0 +1,38 @@
+# Quality Agent Rules Configuration
+
+[agent]
+id = "quality"
+name = "Code Quality Validator"
+description = "Enforces code quality standards and best practices"
+enabled = true
+
+[rules.todo_comments]
+enabled = true
+severity = "warning"
+description = "Find TODO/FIXME/HACK comments"
+patterns = ["TODO", "FIXME", "XXX", "HACK"]
+max_allowed = 0
+
+[rules.unimplemented_code]
+enabled = true
+severity = "error"
+description = "Detect unimplemented!() and todo!() macros"
+
+[rules.error_handling]
+enabled = true
+severity = "warning"
+description = "Check for unwrap() without context"
+allow_in_tests = true
+
+[rules.dead_code]
+enabled = false  # Often handled by compiler
+severity = "info"
+description = "Detect potentially unused code"
+
+[rules.documentation]
+enabled = true
+severity = "info"
+description = "Check for missing documentation on public items"
+require_module_docs = true
+require_function_docs = true
+min_doc_length = 10
