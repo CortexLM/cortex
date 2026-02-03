@@ -636,8 +636,11 @@ impl Default for CortexPromptBuilder {
 ///
 /// # Usage
 ///
-/// This prompt is loaded via `include_str!` from `cortex_prompt.txt` in the
-/// main cortex-engine, but the canonical version is defined here.
+/// This is the canonical source for the Cortex system prompt. It is used
+/// directly by cortex-engine via `cortex_prompt_harness::prompts::CORTEX_MAIN_PROMPT`.
+///
+/// For dynamic prompt building with custom sections and tools, use
+/// [`CortexPromptBuilder`] instead.
 pub const CORTEX_MAIN_PROMPT: &str = r#"# CORTEX
 
 You are **Cortex**, an autonomous software engineering intelligence.
@@ -1182,10 +1185,7 @@ mod tests {
     #[test]
     fn test_builder_with_tools() {
         let prompt = CortexPromptBuilder::new()
-            .with_tools(&[
-                ("Tool1", "Description 1"),
-                ("Tool2", "Description 2"),
-            ])
+            .with_tools(&[("Tool1", "Description 1"), ("Tool2", "Description 2")])
             .build();
 
         assert!(prompt.contains("`Tool1`"));
@@ -1220,9 +1220,7 @@ mod tests {
     fn test_builder_custom_toolkit_replaces_add_tool() {
         let prompt = CortexPromptBuilder::new()
             .add_tool("FirstTool", "Should be replaced")
-            .with_custom_toolkit(&[
-                ("FinalTool", "Final description"),
-            ])
+            .with_custom_toolkit(&[("FinalTool", "Final description")])
             .build();
 
         assert!(!prompt.contains("FirstTool"));
@@ -1234,7 +1232,10 @@ mod tests {
     #[test]
     fn test_builder_add_custom_section() {
         let prompt = CortexPromptBuilder::new()
-            .add_custom_section("SPECIAL RULES", "## SPECIAL RULES\n\nFollow these special rules...")
+            .add_custom_section(
+                "SPECIAL RULES",
+                "## SPECIAL RULES\n\nFollow these special rules...",
+            )
             .build();
 
         assert!(prompt.contains("## SPECIAL RULES"));
@@ -1243,8 +1244,7 @@ mod tests {
 
     #[test]
     fn test_builder_is_section_enabled() {
-        let builder = CortexPromptBuilder::new()
-            .without_section("ANTI-PATTERNS");
+        let builder = CortexPromptBuilder::new().without_section("ANTI-PATTERNS");
 
         assert!(builder.is_section_enabled("PRIME DIRECTIVES"));
         assert!(builder.is_section_enabled("TOOLKIT"));

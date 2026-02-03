@@ -555,8 +555,12 @@ mod tests {
         let rendered = section.render();
 
         // Alpha should come before Zebra (alphabetically)
-        let alpha_pos = rendered.find("### Alpha").expect("Alpha category should exist");
-        let zebra_pos = rendered.find("### Zebra").expect("Zebra category should exist");
+        let alpha_pos = rendered
+            .find("### Alpha")
+            .expect("Alpha category should exist");
+        let zebra_pos = rendered
+            .find("### Zebra")
+            .expect("Zebra category should exist");
         assert!(
             alpha_pos < zebra_pos,
             "Alpha should appear before Zebra in sorted output"

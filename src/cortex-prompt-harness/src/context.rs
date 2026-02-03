@@ -482,8 +482,7 @@ mod tests {
 
     #[test]
     fn test_tool_definition_with_category() {
-        let tool = ToolDefinition::new("Read", "Read file contents")
-            .with_category("Perception");
+        let tool = ToolDefinition::new("Read", "Read file contents").with_category("Perception");
 
         assert_eq!(tool.name, "Read");
         assert_eq!(tool.category, Some("Perception".to_string()));
@@ -515,9 +514,7 @@ mod tests {
 
     #[test]
     fn test_prompt_context_combined_tools() {
-        let initial_tools = vec![
-            ToolDefinition::new("Read", "Read files"),
-        ];
+        let initial_tools = vec![ToolDefinition::new("Read", "Read files")];
         let context = PromptContext::new()
             .with_tools(initial_tools)
             .add_tool(ToolDefinition::new("Write", "Write files"));

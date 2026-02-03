@@ -1139,6 +1139,7 @@ dependencies = [
  "cortex-mcp-types",
  "cortex-migrations",
  "cortex-plugins",
+ "cortex-prompt-harness",
  "cortex-protocol",
  "cortex-ratelimits",
  "cortex-resume",
