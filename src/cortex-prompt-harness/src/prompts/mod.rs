@@ -36,6 +36,7 @@
 //! ```
 
 pub mod agents;
+pub mod base_agent;
 pub mod core;
 pub mod generation;
 pub mod review;
@@ -46,6 +47,10 @@ pub mod tools;
 pub use agents::{
     EXPLORE_AGENT_PROMPT, GENERAL_AGENT_PROMPT, RESEARCH_AGENT_PROMPT, SUMMARY_AGENT_PROMPT,
     TITLE_AGENT_PROMPT,
+};
+pub use base_agent::{
+    AVAILABLE_SKILLS, CORTEX_BASE_PROMPT, CORTEX_BASE_PROMPT_WITH_SKILLS_PRELOADED,
+    format_skill_loading_prompt, get_recommended_skills,
 };
 pub use core::{
     CORTEX_MAIN_PROMPT, CortexPromptBuilder, SECTION_ANTI_PATTERNS, SECTION_CODE_DISCIPLINE,
