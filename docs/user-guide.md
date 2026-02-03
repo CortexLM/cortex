@@ -16,6 +16,11 @@ Cortex provides:
 
 ### Linux and macOS
 
+> **Security Note:** Before running any installation script, you can review it first:
+> ```bash
+> curl -fsSL https://software.cortex.foundation/install.sh | less
+> ```
+
 ```bash
 curl -fsSL https://software.cortex.foundation/install.sh | sh
 ```

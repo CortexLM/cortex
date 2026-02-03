@@ -372,8 +372,8 @@ cortex exec -o json "list TODO comments" | jq '.tool_calls | length'
 # Start a session
 SESSION=$(cortex exec -o json "analyze codebase" | jq -r '.session_id')
 
-# Continue the session
-cortex exec -s $SESSION "now focus on the auth module"
+# Continue the session (quote variable to handle edge cases)
+cortex exec -s "$SESSION" "now focus on the auth module"
 ```
 
 ### Context Inclusion
