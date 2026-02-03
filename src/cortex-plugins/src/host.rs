@@ -2,10 +2,16 @@
 //!
 //! This module provides the host-side implementation of functions that WASM plugins
 //! can call. These functions are exposed to plugins through the wasmtime Linker.
+//!
+//! # Synchronous Context
+//!
+//! WASM host functions run in a synchronous context (called from wasmtime's sync API).
+//! We avoid using `tokio::runtime::Handle::block_on()` to prevent potential deadlocks
+//! when the tokio runtime is already blocked on the WASM call. Instead, we use
+//! `std::sync::Mutex` for state that needs synchronous access from host functions.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Engine, Linker};
 
 use crate::Result;
@@ -77,14 +83,23 @@ impl ToastLevel {
 }
 
 /// State shared between the host and WASM plugins.
+///
+/// Uses `std::sync::Mutex` instead of `tokio::sync::RwLock` to allow synchronous
+/// access from WASM host functions without risking deadlocks. WASM host functions
+/// are called synchronously by wasmtime, and using `block_on()` to access async
+/// locks could deadlock if the tokio runtime is already blocked on the WASM call.
 #[derive(Debug, Clone)]
 pub struct PluginHostState {
     pub plugin_id: String,
     pub context: PluginContext,
-    pub widgets: Arc<RwLock<HashMap<UiRegion, Vec<String>>>>,
-    pub keybindings: Arc<RwLock<HashMap<String, String>>>,
-    pub events: Arc<RwLock<Vec<PluginEvent>>>,
-    pub toasts: Arc<RwLock<Vec<ToastNotification>>>,
+    /// Registered widgets by UI region. Uses sync Mutex for safe access from WASM host functions.
+    pub widgets: Arc<Mutex<HashMap<UiRegion, Vec<String>>>>,
+    /// Registered keybindings (key -> action). Uses sync Mutex for safe access from WASM host functions.
+    pub keybindings: Arc<Mutex<HashMap<String, String>>>,
+    /// Emitted events queue. Uses sync Mutex for safe access from WASM host functions.
+    pub events: Arc<Mutex<Vec<PluginEvent>>>,
+    /// Toast notifications queue. Uses sync Mutex for safe access from WASM host functions.
+    pub toasts: Arc<Mutex<Vec<ToastNotification>>>,
 }
 
 impl PluginHostState {
@@ -92,10 +107,10 @@ impl PluginHostState {
         Self {
             plugin_id: plugin_id.into(),
             context,
-            widgets: Arc::new(RwLock::new(HashMap::new())),
-            keybindings: Arc::new(RwLock::new(HashMap::new())),
-            events: Arc::new(RwLock::new(Vec::new())),
-            toasts: Arc::new(RwLock::new(Vec::new())),
+            widgets: Arc::new(Mutex::new(HashMap::new())),
+            keybindings: Arc::new(Mutex::new(HashMap::new())),
+            events: Arc::new(Mutex::new(Vec::new())),
+            toasts: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -333,11 +348,17 @@ fn register_widget_impl<T: HasHostState>(
         }
     };
 
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.block_on(async {
-            let mut w = widgets.write().await;
+    // Use sync Mutex instead of async RwLock to avoid deadlock risk.
+    // WASM host functions run synchronously, and using block_on() on an async lock
+    // could deadlock if the tokio runtime is already blocked on this WASM call.
+    match widgets.lock() {
+        Ok(mut w) => {
             w.entry(ui_region).or_default().push(widget_type.clone());
-        });
+        }
+        Err(e) => {
+            tracing::error!(plugin = %plugin_id, error = %e, "Failed to acquire widget lock (poisoned)");
+            return HostError::InternalError.into();
+        }
     }
     tracing::debug!(plugin = %plugin_id, widget_type = %widget_type, region = ?ui_region, "Widget registered");
     HostError::Success.into()
@@ -369,11 +390,17 @@ fn register_keybinding_impl<T: HasHostState>(
         return HostError::InvalidArgument.into();
     }
 
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.block_on(async {
-            let mut kb = keybindings.write().await;
+    // Use sync Mutex instead of async RwLock to avoid deadlock risk.
+    // WASM host functions run synchronously, and using block_on() on an async lock
+    // could deadlock if the tokio runtime is already blocked on this WASM call.
+    match keybindings.lock() {
+        Ok(mut kb) => {
             kb.insert(key.clone(), action.clone());
-        });
+        }
+        Err(e) => {
+            tracing::error!(plugin = %plugin_id, error = %e, "Failed to acquire keybinding lock (poisoned)");
+            return HostError::InternalError.into();
+        }
     }
     tracing::debug!(plugin = %plugin_id, key = %key, action = %action, "Keybinding registered");
     HostError::Success.into()
@@ -406,11 +433,17 @@ fn show_toast_impl<T: HasHostState>(
         plugin_id: plugin_id.clone(),
     };
 
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.block_on(async {
-            let mut t = toasts.write().await;
+    // Use sync Mutex instead of async RwLock to avoid deadlock risk.
+    // WASM host functions run synchronously, and using block_on() on an async lock
+    // could deadlock if the tokio runtime is already blocked on this WASM call.
+    match toasts.lock() {
+        Ok(mut t) => {
             t.push(toast);
-        });
+        }
+        Err(e) => {
+            tracing::error!(plugin = %plugin_id, error = %e, "Failed to acquire toast lock (poisoned)");
+            return HostError::InternalError.into();
+        }
     }
     tracing::debug!(plugin = %plugin_id, message = %message, "Toast queued");
     HostError::Success.into()
@@ -442,10 +475,13 @@ fn emit_event_impl<T: HasHostState>(
         return HostError::InvalidArgument.into();
     }
 
-    if !data.is_empty()
-        && serde_json::from_str::<serde_json::Value>(&data).is_err() {
-            return HostError::InvalidArgument.into();
-        }
+    // Validate that data is valid JSON if non-empty.
+    // Empty data is allowed and represents "no data" (null/empty event payload).
+    // This avoids confusing behavior where `serde_json::from_str("")` would fail,
+    // which we explicitly want to allow as a valid "no data" case.
+    if !data.is_empty() && serde_json::from_str::<serde_json::Value>(&data).is_err() {
+        return HostError::InvalidArgument.into();
+    }
 
     let event = PluginEvent {
         name: name.clone(),
@@ -454,11 +490,17 @@ fn emit_event_impl<T: HasHostState>(
         timestamp: chrono::Utc::now(),
     };
 
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.block_on(async {
-            let mut e = events.write().await;
+    // Use sync Mutex instead of async RwLock to avoid deadlock risk.
+    // WASM host functions run synchronously, and using block_on() on an async lock
+    // could deadlock if the tokio runtime is already blocked on this WASM call.
+    match events.lock() {
+        Ok(mut e) => {
             e.push(event);
-        });
+        }
+        Err(e) => {
+            tracing::error!(plugin = %plugin_id, error = %e, "Failed to acquire event lock (poisoned)");
+            return HostError::InternalError.into();
+        }
     }
     tracing::debug!(plugin = %plugin_id, event_name = %name, "Event emitted");
     HostError::Success.into()
@@ -508,19 +550,19 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
-    async fn test_plugin_host_state_widgets() {
+    #[test]
+    fn test_plugin_host_state_widgets() {
         let context = PluginContext::new("/tmp");
         let state = PluginHostState::new("test-plugin", context);
         {
-            let mut widgets = state.widgets.write().await;
+            let mut widgets = state.widgets.lock().expect("lock should not be poisoned");
             widgets
                 .entry(UiRegion::StatusBar)
                 .or_default()
                 .push("test_widget".to_string());
         }
         {
-            let widgets = state.widgets.read().await;
+            let widgets = state.widgets.lock().expect("lock should not be poisoned");
             assert!(widgets.get(&UiRegion::StatusBar).is_some());
             assert_eq!(widgets.get(&UiRegion::StatusBar).unwrap()[0], "test_widget");
         }

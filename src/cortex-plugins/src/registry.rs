@@ -2,6 +2,14 @@
 //!
 //! This module provides both local plugin registry management and remote
 //! registry discovery, including plugin index fetching and update checking.
+//!
+//! # Security
+//!
+//! This module implements several security measures:
+//! - SSRF protection: URLs are validated before downloading to block private IPs
+//!   and dangerous protocols
+//! - Directory traversal protection: Plugin IDs are validated to prevent path
+//!   traversal attacks via "../" sequences
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -339,11 +347,32 @@ impl PluginRegistry {
     ///
     /// Downloads the plugin, verifies checksum and optional signature,
     /// then saves to the target directory.
+    ///
+    /// # Security
+    ///
+    /// This function implements several security checks:
+    /// - SSRF protection: Validates the download URL to block private IPs and dangerous ports
+    /// - Directory traversal protection: Validates plugin ID to prevent "../" path traversal
+    /// - Checksum verification: Ensures downloaded content matches expected hash
+    /// - Signature verification: Optionally verifies plugin signature if trusted keys are configured
     pub async fn download_plugin(
         &self,
         entry: &PluginIndexEntry,
         target_dir: &Path,
     ) -> Result<PathBuf> {
+        // Security: Validate plugin ID to prevent directory traversal attacks
+        // Plugin IDs must not contain path separators or ".." sequences
+        if entry.id.contains("..") || entry.id.contains('/') || entry.id.contains('\\') {
+            return Err(PluginError::validation_error(
+                "plugin_id",
+                "Plugin ID contains invalid characters (path separators or '..')",
+            ));
+        }
+
+        // Security: Validate URL to prevent SSRF attacks
+        // Block requests to private IPs, localhost, and dangerous ports
+        Self::validate_download_url(&entry.download_url)?;
+
         tracing::info!(
             "Downloading plugin {} v{} from {}",
             entry.id,
@@ -418,7 +447,7 @@ impl PluginRegistry {
             tracing::warn!("Plugin {} is not signed", entry.id);
         }
 
-        // Create plugin directory
+        // Create plugin directory (safe now that plugin ID is validated)
         let plugin_dir = target_dir.join(&entry.id);
         tokio::fs::create_dir_all(&plugin_dir).await?;
 
@@ -434,6 +463,196 @@ impl PluginRegistry {
         );
 
         Ok(plugin_path)
+    }
+
+    /// Validate a URL for SSRF (Server-Side Request Forgery) protection.
+    ///
+    /// Blocks requests to:
+    /// - Private IP ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
+    /// - Localhost (127.x.x.x, ::1)
+    /// - Link-local addresses (169.254.x.x, fe80::/10)
+    /// - Non-HTTPS protocols (except for local development)
+    /// - Cloud metadata endpoints (169.254.169.254)
+    fn validate_download_url(url: &str) -> Result<()> {
+        let parsed = url::Url::parse(url).map_err(|e| {
+            PluginError::validation_error("download_url", format!("Invalid URL: {}", e))
+        })?;
+
+        // Only allow HTTPS for security (block file://, ftp://, etc.)
+        match parsed.scheme() {
+            "https" => {} // OK
+            "http" => {
+                // Allow HTTP only for local development with explicit localhost domains
+                // But block it for IP addresses to prevent SSRF
+                if let Some(host) = parsed.host_str() {
+                    if !host.ends_with(".localhost") && host != "localhost" {
+                        return Err(PluginError::validation_error(
+                            "download_url",
+                            "HTTP URLs are only allowed for localhost; use HTTPS for remote URLs",
+                        ));
+                    }
+                }
+            }
+            other => {
+                return Err(PluginError::validation_error(
+                    "download_url",
+                    format!("Unsupported URL scheme '{}'; only HTTPS is allowed", other),
+                ));
+            }
+        }
+
+        // Check for dangerous hosts
+        if let Some(host) = parsed.host() {
+            match host {
+                url::Host::Ipv4(ip) => {
+                    if Self::is_private_ipv4(ip) {
+                        return Err(PluginError::validation_error(
+                            "download_url",
+                            format!(
+                                "Download URL points to private/internal IP address: {}",
+                                ip
+                            ),
+                        ));
+                    }
+                }
+                url::Host::Ipv6(ip) => {
+                    if Self::is_private_ipv6(ip) {
+                        return Err(PluginError::validation_error(
+                            "download_url",
+                            format!(
+                                "Download URL points to private/internal IPv6 address: {}",
+                                ip
+                            ),
+                        ));
+                    }
+                }
+                url::Host::Domain(domain) => {
+                    // Block common internal/metadata domains
+                    let lower_domain = domain.to_lowercase();
+                    if lower_domain == "localhost"
+                        || lower_domain.ends_with(".local")
+                        || lower_domain.ends_with(".internal")
+                        || lower_domain == "metadata.google.internal"
+                        || lower_domain.contains("169.254.169.254")
+                    {
+                        return Err(PluginError::validation_error(
+                            "download_url",
+                            format!(
+                                "Download URL points to internal/metadata domain: {}",
+                                domain
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Block dangerous ports commonly used for internal services
+        if let Some(port) = parsed.port() {
+            const DANGEROUS_PORTS: &[u16] = &[
+                22,   // SSH
+                23,   // Telnet
+                25,   // SMTP
+                135,  // RPC
+                137,  // NetBIOS
+                138,  // NetBIOS
+                139,  // NetBIOS
+                445,  // SMB
+                1433, // MSSQL
+                1521, // Oracle
+                3306, // MySQL
+                3389, // RDP
+                5432, // PostgreSQL
+                5900, // VNC
+                6379, // Redis
+                8080, // Common proxy
+                8443, // Alt HTTPS
+                9200, // Elasticsearch
+                27017, // MongoDB
+            ];
+
+            if DANGEROUS_PORTS.contains(&port) {
+                return Err(PluginError::validation_error(
+                    "download_url",
+                    format!(
+                        "Download URL uses a potentially dangerous port: {}",
+                        port
+                    ),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if an IPv4 address is private/internal.
+    fn is_private_ipv4(ip: std::net::Ipv4Addr) -> bool {
+        // Loopback (127.0.0.0/8)
+        if ip.is_loopback() {
+            return true;
+        }
+        // Private ranges (RFC 1918)
+        if ip.is_private() {
+            return true;
+        }
+        // Link-local (169.254.0.0/16) - includes AWS/GCP/Azure metadata endpoint
+        if ip.is_link_local() {
+            return true;
+        }
+        // Broadcast
+        if ip.is_broadcast() {
+            return true;
+        }
+        // Documentation ranges
+        if ip.is_documentation() {
+            return true;
+        }
+        // Unspecified (0.0.0.0)
+        if ip.is_unspecified() {
+            return true;
+        }
+        // Shared address space (100.64.0.0/10) - RFC 6598 (carrier-grade NAT)
+        let octets = ip.octets();
+        if octets[0] == 100 && (octets[1] >= 64 && octets[1] <= 127) {
+            return true;
+        }
+        // Localhost alternate (0.0.0.0)
+        if octets[0] == 0 {
+            return true;
+        }
+
+        false
+    }
+
+    /// Check if an IPv6 address is private/internal.
+    fn is_private_ipv6(ip: std::net::Ipv6Addr) -> bool {
+        // Loopback (::1)
+        if ip.is_loopback() {
+            return true;
+        }
+        // Unspecified (::)
+        if ip.is_unspecified() {
+            return true;
+        }
+        // Check if it's an IPv4-mapped address and validate the IPv4 part
+        if let Some(ipv4) = ip.to_ipv4_mapped() {
+            return Self::is_private_ipv4(ipv4);
+        }
+        // Link-local (fe80::/10)
+        let segments = ip.segments();
+        if segments[0] & 0xffc0 == 0xfe80 {
+            return true;
+        }
+        // Unique local address (fc00::/7)
+        if segments[0] & 0xfe00 == 0xfc00 {
+            return true;
+        }
+        // Site-local (deprecated, fec0::/10)
+        if segments[0] & 0xffc0 == 0xfec0 {
+            return true;
+        }
+
+        false
     }
 
     /// Get a plugin index entry by ID from the cached index.
@@ -890,5 +1109,151 @@ mod tests {
 
         let cached = registry.cached_index.read().await;
         assert!(cached.is_empty());
+    }
+
+    // =========================================================================
+    // Security Tests: SSRF Protection
+    // =========================================================================
+
+    #[test]
+    fn test_ssrf_blocks_private_ipv4_addresses() {
+        // Localhost
+        assert!(PluginRegistry::validate_download_url("https://127.0.0.1/plugin.wasm").is_err());
+        assert!(PluginRegistry::validate_download_url("https://127.0.0.255/plugin.wasm").is_err());
+
+        // Private class A (10.0.0.0/8)
+        assert!(PluginRegistry::validate_download_url("https://10.0.0.1/plugin.wasm").is_err());
+        assert!(PluginRegistry::validate_download_url("https://10.255.255.255/plugin.wasm").is_err());
+
+        // Private class B (172.16.0.0/12)
+        assert!(PluginRegistry::validate_download_url("https://172.16.0.1/plugin.wasm").is_err());
+        assert!(PluginRegistry::validate_download_url("https://172.31.255.255/plugin.wasm").is_err());
+
+        // Private class C (192.168.0.0/16)
+        assert!(PluginRegistry::validate_download_url("https://192.168.0.1/plugin.wasm").is_err());
+        assert!(PluginRegistry::validate_download_url("https://192.168.255.255/plugin.wasm").is_err());
+
+        // Link-local / AWS metadata endpoint
+        assert!(PluginRegistry::validate_download_url("https://169.254.169.254/plugin.wasm").is_err());
+        assert!(PluginRegistry::validate_download_url("https://169.254.0.1/plugin.wasm").is_err());
+
+        // Carrier-grade NAT (100.64.0.0/10)
+        assert!(PluginRegistry::validate_download_url("https://100.64.0.1/plugin.wasm").is_err());
+        assert!(PluginRegistry::validate_download_url("https://100.127.255.255/plugin.wasm").is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_private_ipv6_addresses() {
+        // Loopback
+        assert!(PluginRegistry::validate_download_url("https://[::1]/plugin.wasm").is_err());
+
+        // Link-local
+        assert!(PluginRegistry::validate_download_url("https://[fe80::1]/plugin.wasm").is_err());
+
+        // Unique local
+        assert!(PluginRegistry::validate_download_url("https://[fc00::1]/plugin.wasm").is_err());
+        assert!(PluginRegistry::validate_download_url("https://[fd00::1]/plugin.wasm").is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_localhost_domains() {
+        assert!(PluginRegistry::validate_download_url("https://localhost/plugin.wasm").is_err());
+        assert!(PluginRegistry::validate_download_url("https://test.local/plugin.wasm").is_err());
+        assert!(PluginRegistry::validate_download_url("https://internal.internal/plugin.wasm").is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_dangerous_ports() {
+        // SSH
+        assert!(PluginRegistry::validate_download_url("https://example.com:22/plugin.wasm").is_err());
+        // MySQL
+        assert!(PluginRegistry::validate_download_url("https://example.com:3306/plugin.wasm").is_err());
+        // Redis
+        assert!(PluginRegistry::validate_download_url("https://example.com:6379/plugin.wasm").is_err());
+        // MongoDB
+        assert!(PluginRegistry::validate_download_url("https://example.com:27017/plugin.wasm").is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_non_https() {
+        // File protocol
+        assert!(PluginRegistry::validate_download_url("file:///etc/passwd").is_err());
+        // FTP
+        assert!(PluginRegistry::validate_download_url("ftp://example.com/plugin.wasm").is_err());
+        // HTTP to non-localhost
+        assert!(PluginRegistry::validate_download_url("http://example.com/plugin.wasm").is_err());
+    }
+
+    #[test]
+    fn test_ssrf_allows_valid_https_urls() {
+        assert!(PluginRegistry::validate_download_url("https://example.com/plugin.wasm").is_ok());
+        assert!(PluginRegistry::validate_download_url("https://plugins.cortex.dev/v1/download/test-plugin.wasm").is_ok());
+        assert!(PluginRegistry::validate_download_url("https://github.com/user/repo/releases/download/v1.0.0/plugin.wasm").is_ok());
+    }
+
+    #[test]
+    fn test_ssrf_allows_standard_ports() {
+        assert!(PluginRegistry::validate_download_url("https://example.com:443/plugin.wasm").is_ok());
+        assert!(PluginRegistry::validate_download_url("https://example.com:8000/plugin.wasm").is_ok());
+    }
+
+    // =========================================================================
+    // Security Tests: Directory Traversal Protection
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_directory_traversal_blocks_dotdot() {
+        let registry = PluginRegistry::new();
+        let entry = PluginIndexEntry {
+            id: "../../../etc/passwd".to_string(),
+            name: "Malicious Plugin".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Tries to escape".to_string(),
+            download_url: "https://example.com/plugin.wasm".to_string(),
+            checksum: "abc123".to_string(),
+            signature: None,
+            updated_at: chrono::Utc::now(),
+        };
+
+        let result = registry.download_plugin(&entry, Path::new("/tmp")).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("path") || err_msg.contains("invalid"));
+    }
+
+    #[tokio::test]
+    async fn test_directory_traversal_blocks_forward_slash() {
+        let registry = PluginRegistry::new();
+        let entry = PluginIndexEntry {
+            id: "plugin/subdir/file".to_string(),
+            name: "Malicious Plugin".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Tries to create subdirs".to_string(),
+            download_url: "https://example.com/plugin.wasm".to_string(),
+            checksum: "abc123".to_string(),
+            signature: None,
+            updated_at: chrono::Utc::now(),
+        };
+
+        let result = registry.download_plugin(&entry, Path::new("/tmp")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_directory_traversal_blocks_backslash() {
+        let registry = PluginRegistry::new();
+        let entry = PluginIndexEntry {
+            id: "plugin\\..\\..\\etc".to_string(),
+            name: "Malicious Plugin".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Windows-style traversal".to_string(),
+            download_url: "https://example.com/plugin.wasm".to_string(),
+            checksum: "abc123".to_string(),
+            signature: None,
+            updated_at: chrono::Utc::now(),
+        };
+
+        let result = registry.download_plugin(&entry, Path::new("/tmp")).await;
+        assert!(result.is_err());
     }
 }

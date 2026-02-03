@@ -104,6 +104,10 @@ pub enum PluginError {
     /// Registry error.
     #[error("Registry error: {0}")]
     RegistryError(String),
+
+    /// Validation error (SSRF protection, path traversal, etc.).
+    #[error("Validation error for '{field}': {message}")]
+    ValidationError { field: String, message: String },
 }
 
 impl PluginError {
@@ -173,6 +177,14 @@ impl PluginError {
             plugin: plugin.into(),
             expected: expected.into(),
             actual: actual.into(),
+        }
+    }
+
+    /// Create a validation error (for SSRF protection, path traversal, etc.).
+    pub fn validation_error(field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::ValidationError {
+            field: field.into(),
+            message: message.into(),
         }
     }
 }
