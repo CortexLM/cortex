@@ -349,7 +349,6 @@ mod tests {
     fn test_caching() {
         // Clear cache first - must use #[serial] since tests share static cache
         clear_cache();
-        assert_eq!(cache_size(), 0);
 
         let temp_dir = setup_test_dir();
         std::fs::write(temp_dir.path().join("test.toml"), "test = true").unwrap();
@@ -358,12 +357,17 @@ mod tests {
         let result = find_up(temp_dir.path(), "test.toml");
         assert!(result.is_some(), "find_up should find test.toml");
 
-        // Second call - should use cache (just verify it doesn't panic)
-        let _ = find_up(temp_dir.path(), "test.toml");
+        // Second call - should use cache (just verify it doesn't panic and returns same result)
+        let result2 = find_up(temp_dir.path(), "test.toml");
+        assert_eq!(result, result2, "Cached result should match original");
 
-        // Clear and verify
+        // Clear and verify the clear function works (cache should be empty after clear)
         clear_cache();
-        assert_eq!(cache_size(), 0);
+        let size_after_clear = cache_size();
+        assert_eq!(
+            size_after_clear, 0,
+            "Cache should be empty after clear_cache()"
+        );
     }
 
     #[test]
