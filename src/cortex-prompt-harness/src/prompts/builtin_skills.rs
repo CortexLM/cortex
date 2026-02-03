@@ -1574,11 +1574,23 @@ mod tests {
         ];
 
         for skill in skills {
-            assert!(skill.starts_with("---\n"), "Skill should start with YAML frontmatter");
-            assert!(skill.contains("\n---\n"), "Skill should have frontmatter end marker");
+            assert!(
+                skill.starts_with("---\n"),
+                "Skill should start with YAML frontmatter"
+            );
+            assert!(
+                skill.contains("\n---\n"),
+                "Skill should have frontmatter end marker"
+            );
             assert!(skill.contains("name:"), "Skill should have name field");
-            assert!(skill.contains("description:"), "Skill should have description field");
-            assert!(skill.contains("version:"), "Skill should have version field");
+            assert!(
+                skill.contains("description:"),
+                "Skill should have description field"
+            );
+            assert!(
+                skill.contains("version:"),
+                "Skill should have version field"
+            );
             assert!(skill.contains("tags:"), "Skill should have tags field");
         }
     }

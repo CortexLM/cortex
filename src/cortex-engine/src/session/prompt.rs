@@ -25,6 +25,7 @@ pub(crate) const BASE_PROMPT_WITH_SKILLS: &str =
 ///
 /// When `true`, the system uses a minimal base prompt with skills loaded on-demand.
 /// When `false`, the full monolithic prompt is used.
+#[allow(dead_code)]
 pub const USE_SKILL_BASED_PROMPT: bool = true;
 
 /// Build the system prompt for the agent.
@@ -225,6 +226,7 @@ fn get_system_info() -> String {
 /// let skills = auto_detect_skills_from_message("Fix this bug and create a PR");
 /// let prompt = build_system_prompt_with_skills(&config, &skills);
 /// ```
+#[allow(dead_code)]
 pub fn build_system_prompt_with_skills(config: &Config, skills: &[&str]) -> String {
     // If skills mode is disabled and no skills specified, use monolithic prompt
     if !USE_SKILL_BASED_PROMPT && skills.is_empty() {
@@ -348,6 +350,7 @@ pub fn build_system_prompt_with_skills(config: &Config, skills: &[&str]) -> Stri
 /// assert!(prompt.contains("Git Operations Skill"));
 /// assert!(prompt.contains("Debugging Skill"));
 /// ```
+#[allow(dead_code)]
 pub fn inject_skills(base_prompt: &str, skills: &[&str]) -> String {
     if skills.is_empty() {
         return base_prompt.to_string();
@@ -383,6 +386,7 @@ pub fn inject_skills(base_prompt: &str, skills: &[&str]) -> String {
 ///
 /// Skills include YAML frontmatter for metadata, but we don't need it
 /// in the injected prompt.
+#[allow(dead_code)]
 fn strip_yaml_frontmatter(content: &str) -> &str {
     if !content.starts_with("---\n") {
         return content;
@@ -425,6 +429,7 @@ fn strip_yaml_frontmatter(content: &str) -> &str {
 /// assert!(skills.contains(&"file-operations"));
 /// assert!(skills.contains(&"code-quality"));
 /// ```
+#[allow(dead_code)]
 pub fn auto_detect_skills_from_message(message: &str) -> Vec<&'static str> {
     cortex_prompt_harness::prompts::get_recommended_skills(message)
 }
@@ -434,6 +439,7 @@ pub fn auto_detect_skills_from_message(message: &str) -> Vec<&'static str> {
 /// # Returns
 ///
 /// A slice of all available skill names.
+#[allow(dead_code)]
 pub fn available_skills() -> &'static [&'static str] {
     cortex_prompt_harness::prompts::AVAILABLE_SKILLS
 }
@@ -447,6 +453,7 @@ pub fn available_skills() -> &'static [&'static str] {
 /// # Returns
 ///
 /// `true` if the skill exists, `false` otherwise.
+#[allow(dead_code)]
 pub fn is_valid_skill(skill: &str) -> bool {
     cortex_prompt_harness::prompts::is_builtin_skill(skill)
 }

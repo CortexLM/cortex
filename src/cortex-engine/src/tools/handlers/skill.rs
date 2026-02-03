@@ -230,9 +230,8 @@ impl SkillLoader {
             return Ok(None);
         }
 
-        let content = get_builtin_skill(name).ok_or_else(|| {
-            CortexError::NotFound(format!("Built-in skill not found: {}", name))
-        })?;
+        let content = get_builtin_skill(name)
+            .ok_or_else(|| CortexError::NotFound(format!("Built-in skill not found: {}", name)))?;
 
         let (definition, markdown) = parse_skill_md(content)?;
 
