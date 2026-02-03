@@ -147,7 +147,7 @@ uuid = { version = "1.20", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 futures = "0.3"
-bytes = "1.10"
+bytes = "1.11.1"
 base64 = "0.22"
 rand = "0.9"
 sha2 = "0.10"
