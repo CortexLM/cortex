@@ -362,12 +362,10 @@ impl CortexStyle {
         Style::default().fg(SKY_BLUE)
     }
 
-    /// System message style: muted italic text
+    /// System message style: error red italic text for backend error messages
     #[inline]
     pub fn system_message() -> Style {
-        Style::default()
-            .fg(TEXT_MUTED)
-            .add_modifier(Modifier::ITALIC)
+        Style::default().fg(ERROR).add_modifier(Modifier::ITALIC)
     }
 
     /// Code style: electric blue text on surface background
