@@ -70,7 +70,10 @@ impl ProviderInfo {
 
 /// Returns the list of known providers with their default information.
 pub fn known_providers() -> Vec<ProviderInfo> {
-    vec![ProviderInfo::new("cortex", "Cortex").with_description("Cortex AI Gateway")]
+    vec![
+        ProviderInfo::new("cortex", "Cortex").with_description("Cortex AI Gateway"),
+        ProviderInfo::new("chutes", "Chutes (TEE)").with_description("TEE-secured models only"),
+    ]
 }
 
 // ============================================================================
@@ -395,15 +398,16 @@ mod tests {
         let modal = ProvidersModal::with_known_providers(Some("cortex".to_string()));
 
         assert_eq!(modal.title(), "Providers");
-        assert_eq!(modal.providers.len(), 1);
+        assert_eq!(modal.providers.len(), 2);
     }
 
     #[test]
     fn test_known_providers() {
         let providers = known_providers();
 
-        assert_eq!(providers.len(), 1);
+        assert_eq!(providers.len(), 2);
         assert!(providers.iter().any(|p| p.id == "cortex"));
+        assert!(providers.iter().any(|p| p.id == "chutes"));
     }
 
     #[test]

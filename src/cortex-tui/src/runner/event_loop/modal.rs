@@ -37,13 +37,21 @@ impl EventLoop {
                     KeyCode::Enter => {
                         if let Some(model) = self.app_state.model_picker.selected_model() {
                             let model_id = model.id.clone();
-                            self.app_state.model = model_id.clone();
 
+                            // Validate through manager instead of direct assignment
                             if let Some(pm) = &self.provider_manager
                                 && let Ok(mut manager) = pm.try_write()
+                                && let Err(e) = manager.set_model(&model_id)
                             {
-                                let _ = manager.set_model(&model_id);
+                                self.app_state
+                                    .toasts
+                                    .error(format!("Cannot use model: {}", e));
+                                self.app_state.close_modal();
+                                return Ok(true);
                             }
+
+                            // Only update if validation passed
+                            self.app_state.model = model_id.clone();
 
                             if let Ok(mut config) = crate::providers::config::CortexConfig::load() {
                                 let _ = config.save_last_model(&self.app_state.provider, &model_id);
@@ -216,11 +224,19 @@ impl EventLoop {
     pub(super) async fn process_modal_action(&mut self, action: ModalAction) {
         match action {
             ModalAction::SelectModel(model_id) => {
-                self.app_state.model = model_id.clone();
+                // Don't set model directly - let set_model handle validation
                 if let Some(pm) = &self.provider_manager
                     && let Ok(mut manager) = pm.try_write()
                 {
-                    let _ = manager.set_model(&model_id);
+                    // Check result of set_model instead of ignoring it
+                    if let Err(e) = manager.set_model(&model_id) {
+                        self.app_state
+                            .toasts
+                            .error(format!("Cannot use model: {}", e));
+                        return;
+                    }
+                    // Only update app state if validation passed
+                    self.app_state.model = model_id.clone();
                 }
                 if let Ok(mut config) = crate::providers::config::CortexConfig::load() {
                     let _ = config.save_last_model(&self.app_state.provider, &model_id);
@@ -498,7 +514,14 @@ impl EventLoop {
                 if let Some(pm) = &self.provider_manager
                     && let Ok(mut manager) = pm.try_write()
                 {
-                    let _ = manager.set_provider(&item_id);
+                    if let Err(e) = manager.set_provider(&item_id) {
+                        self.app_state
+                            .toasts
+                            .error(format!("Cannot switch provider: {}", e));
+                        return false;
+                    }
+                    // Update model to reflect any changes made during provider switch
+                    self.app_state.model = manager.current_model().to_string();
                     self.app_state.provider = item_id.clone();
                 }
                 return false;
@@ -507,7 +530,13 @@ impl EventLoop {
                 if let Some(pm) = &self.provider_manager
                     && let Ok(mut manager) = pm.try_write()
                 {
-                    let _ = manager.set_model(&item_id);
+                    // Check validation result
+                    if let Err(e) = manager.set_model(&item_id) {
+                        self.app_state
+                            .toasts
+                            .error(format!("Cannot use model: {}", e));
+                        return false;
+                    }
                     self.app_state.model = item_id.clone();
                 }
                 self.update_session_model(&item_id);

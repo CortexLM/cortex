@@ -27,14 +27,23 @@ pub const CONFIG_FILE: &str = "config.json";
 /// Sessions directory name
 pub const SESSIONS_DIR: &str = "sessions";
 
-/// Single provider - Cortex Backend (for compatibility with old code)
-pub const PROVIDERS: &[ProviderInfo] = &[ProviderInfo {
-    id: "cortex",
-    name: "Cortex",
-    env_var: "CORTEX_AUTH_TOKEN",
-    base_url: "https://api.cortex.foundation",
-    requires_key: true,
-}];
+/// Supported providers
+pub const PROVIDERS: &[ProviderInfo] = &[
+    ProviderInfo {
+        id: "cortex",
+        name: "Cortex",
+        env_var: "CORTEX_AUTH_TOKEN",
+        base_url: "https://api.cortex.foundation",
+        requires_key: true,
+    },
+    ProviderInfo {
+        id: "chutes",
+        name: "Chutes (TEE)",
+        env_var: "CHUTES_API_KEY",
+        base_url: "https://llm.chutes.ai",
+        requires_key: true,
+    },
+];
 
 // ============================================================
 // TYPES

@@ -11,6 +11,7 @@ use cortex_engine::client::{
 
 use super::config::CortexConfig;
 use super::models::{ModelInfo, get_models_for_provider, get_popular_models};
+use cortex_common::model_presets::{DEFAULT_CHUTES_MODEL, validate_chutes_model};
 
 // ============================================================
 // PROVIDER MANAGER
@@ -39,7 +40,22 @@ impl ProviderManager {
     pub fn new(config: CortexConfig) -> Self {
         let (current_provider, current_model) =
             if let Some((provider, model)) = config.get_last_model() {
-                (provider.to_string(), model.to_string())
+                // SECURITY: Validate model when loading for Chutes provider
+                if provider.eq_ignore_ascii_case("chutes") {
+                    if validate_chutes_model(model).is_err() {
+                        // Fall back to first allowed Chutes model if invalid
+                        tracing::warn!(
+                            "Invalid TEE model '{}' loaded from config for Chutes provider, \
+                             resetting to default",
+                            model
+                        );
+                        (provider.to_string(), DEFAULT_CHUTES_MODEL.to_string())
+                    } else {
+                        (provider.to_string(), model.to_string())
+                    }
+                } else {
+                    (provider.to_string(), model.to_string())
+                }
             } else {
                 (
                     config.default_provider.clone(),
@@ -208,9 +224,22 @@ impl ProviderManager {
             || cortex_login::has_valid_auth()
     }
 
-    /// Sets the current provider (for compatibility - always sets to "cortex").
-    pub fn set_provider(&mut self, _provider: &str) -> Result<()> {
-        self.current_provider = "cortex".to_string();
+    /// Sets the current provider.
+    pub fn set_provider(&mut self, provider: &str) -> Result<()> {
+        self.current_provider = provider.to_string();
+
+        // SECURITY: Validate current model when switching to Chutes provider
+        if provider.eq_ignore_ascii_case("chutes")
+            && validate_chutes_model(&self.current_model).is_err()
+        {
+            tracing::warn!(
+                "Current model '{}' is not a valid TEE model for Chutes provider, \
+                 switching to default",
+                self.current_model
+            );
+            self.current_model = DEFAULT_CHUTES_MODEL.to_string();
+        }
+
         self.client = None;
         Ok(())
     }
@@ -218,6 +247,13 @@ impl ProviderManager {
     /// Sets the current model.
     pub fn set_model(&mut self, model: &str) -> Result<()> {
         let resolved = self.config.resolve_alias(model);
+
+        // Validate model for Chutes provider (TEE-only security requirement)
+        // Use case-insensitive comparison for provider check
+        if self.current_provider.eq_ignore_ascii_case("chutes") {
+            validate_chutes_model(&resolved).map_err(|e| anyhow::anyhow!(e))?;
+        }
+
         self.current_model = resolved;
         self.client = None;
         Ok(())
@@ -361,6 +397,12 @@ impl ProviderManager {
         if self.client.is_some() {
             return Ok(());
         }
+
+        // SECURITY: Defense-in-depth - validate TEE model before API calls
+        if self.current_provider.eq_ignore_ascii_case("chutes") {
+            validate_chutes_model(&self.current_model).map_err(|e| anyhow::anyhow!("{}", e))?;
+        }
+
         let token = self.get_token()?;
         self.client = Some(create_client("cortex", &self.current_model, &token, None)?);
         Ok(())
