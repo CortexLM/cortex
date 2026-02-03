@@ -119,12 +119,12 @@ impl EventLoop {
             // Apply selection highlight
             self.apply_selection_highlight(frame.buffer_mut());
 
-            // Render toast notifications
-            if !self.app_state.toasts.is_empty() {
-                let toast_widget = crate::widgets::ToastWidget::new(&self.app_state.toasts)
-                    .terminal_size(area.width, area.height);
-                toast_widget.render(area, frame.buffer_mut());
-            }
+            // Toast notifications disabled
+            // if !self.app_state.toasts.is_empty() {
+            //     let toast_widget = crate::widgets::ToastWidget::new(&self.app_state.toasts)
+            //         .terminal_size(area.width, area.height);
+            //     toast_widget.render(area, frame.buffer_mut());
+            // }
         })?;
 
         // Capture frame for TUI debugging

@@ -275,32 +275,37 @@ impl ToastManager {
 
     /// Adds a toast to the manager and returns its ID.
     pub fn push(&mut self, mut toast: Toast) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        toast.id = id;
-        // Insert at the beginning (newest first)
-        self.toasts.insert(0, toast);
-        id
+        // Toast notifications disabled
+        let _ = toast;
+        0
     }
 
     /// Adds a success toast and returns its ID.
     pub fn success(&mut self, message: impl Into<String>) -> u64 {
-        self.push(Toast::success(message))
+        // Toast notifications disabled
+        let _ = message;
+        0
     }
 
     /// Adds an info toast and returns its ID.
     pub fn info(&mut self, message: impl Into<String>) -> u64 {
-        self.push(Toast::info(message))
+        // Toast notifications disabled
+        let _ = message;
+        0
     }
 
     /// Adds a warning toast and returns its ID.
     pub fn warning(&mut self, message: impl Into<String>) -> u64 {
-        self.push(Toast::warning(message))
+        // Toast notifications disabled
+        let _ = message;
+        0
     }
 
     /// Adds an error toast and returns its ID.
     pub fn error(&mut self, message: impl Into<String>) -> u64 {
-        self.push(Toast::error(message))
+        // Toast notifications disabled
+        let _ = message;
+        0
     }
 
     /// Removes a specific toast by ID.
