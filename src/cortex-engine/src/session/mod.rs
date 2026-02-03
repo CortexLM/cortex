@@ -22,7 +22,10 @@ use crate::rollout::RolloutRecorder;
 use crate::tools::ToolRouter;
 
 pub use lifecycle::list_sessions;
-pub use prompt::build_system_prompt;
+pub use prompt::{
+    auto_detect_skills_from_message, available_skills, build_system_prompt,
+    build_system_prompt_with_skills, inject_skills, is_valid_skill, USE_SKILL_BASED_PROMPT,
+};
 pub use types::{SessionHandle, SessionInfo, TokenCounter};
 
 /// A running session that handles conversation with the model.
