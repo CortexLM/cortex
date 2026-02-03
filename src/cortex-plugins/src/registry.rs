@@ -1,10 +1,94 @@
 //! Plugin registry for managing loaded plugins.
+//!
+//! This module provides both local plugin registry management and remote
+//! registry discovery, including plugin index fetching and update checking.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::plugin::{Plugin, PluginHandle, PluginInfo, PluginState, PluginStats, PluginStatus};
+use crate::signing::PluginSigner;
 use crate::{PluginError, Result};
+
+/// Remote registry configuration.
+///
+/// Represents a remote plugin registry that can be queried for
+/// available plugins and updates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteRegistry {
+    /// Base URL of the registry (e.g., "https://plugins.cortex.dev")
+    pub url: String,
+    /// Human-readable name of the registry
+    pub name: String,
+    /// Whether this registry is enabled for queries
+    pub enabled: bool,
+}
+
+impl RemoteRegistry {
+    /// Create a new remote registry configuration.
+    pub fn new(url: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            name: name.into(),
+            enabled: true,
+        }
+    }
+
+    /// Create a disabled remote registry configuration.
+    pub fn new_disabled(url: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            name: name.into(),
+            enabled: false,
+        }
+    }
+}
+
+/// Plugin index entry from a remote registry.
+///
+/// Contains metadata about an available plugin including
+/// download URL, checksum, and optional signature.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginIndexEntry {
+    /// Unique plugin identifier
+    pub id: String,
+    /// Human-readable plugin name
+    pub name: String,
+    /// Plugin version (semver)
+    pub version: String,
+    /// Plugin description
+    pub description: String,
+    /// URL to download the plugin package
+    pub download_url: String,
+    /// SHA256 checksum of the plugin package (hex-encoded)
+    pub checksum: String,
+    /// Optional ed25519 signature (hex-encoded)
+    pub signature: Option<String>,
+    /// When this entry was last updated
+    pub updated_at: DateTime<Utc>,
+}
+
+impl PluginIndexEntry {
+    /// Check if this entry has a signature.
+    pub fn is_signed(&self) -> bool {
+        self.signature.is_some()
+    }
+}
+
+/// Remote plugin index response.
+///
+/// The format expected from remote registry API endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginIndex {
+    /// List of available plugins
+    pub plugins: Vec<PluginIndexEntry>,
+    /// When the index was generated
+    pub generated_at: DateTime<Utc>,
+}
 
 /// Registry for loaded plugins.
 pub struct PluginRegistry {
@@ -13,15 +97,358 @@ pub struct PluginRegistry {
 
     /// Plugin statistics
     stats: RwLock<HashMap<String, PluginStats>>,
+
+    /// Configured remote registries
+    remote_registries: RwLock<Vec<RemoteRegistry>>,
+
+    /// Cached plugin index from remote registries
+    cached_index: RwLock<HashMap<String, Vec<PluginIndexEntry>>>,
+
+    /// HTTP client for remote operations
+    http_client: reqwest::Client,
+
+    /// Plugin signer for signature verification
+    signer: RwLock<PluginSigner>,
 }
 
 impl PluginRegistry {
     /// Create a new plugin registry.
     pub fn new() -> Self {
+        let http_client = reqwest::Client::builder()
+            .user_agent(format!("cortex-plugins/{}", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
             plugins: RwLock::new(HashMap::new()),
             stats: RwLock::new(HashMap::new()),
+            remote_registries: RwLock::new(Vec::new()),
+            cached_index: RwLock::new(HashMap::new()),
+            http_client,
+            signer: RwLock::new(PluginSigner::new()),
         }
+    }
+
+    /// Add a remote registry.
+    pub async fn add_remote_registry(&self, registry: RemoteRegistry) {
+        let mut registries = self.remote_registries.write().await;
+        
+        // Check if already exists (by URL)
+        if !registries.iter().any(|r| r.url == registry.url) {
+            tracing::info!("Adding remote registry: {} ({})", registry.name, registry.url);
+            registries.push(registry);
+        }
+    }
+
+    /// Remove a remote registry by URL.
+    pub async fn remove_remote_registry(&self, url: &str) {
+        let mut registries = self.remote_registries.write().await;
+        registries.retain(|r| r.url != url);
+    }
+
+    /// List configured remote registries.
+    pub async fn list_remote_registries(&self) -> Vec<RemoteRegistry> {
+        self.remote_registries.read().await.clone()
+    }
+
+    /// Add a trusted signing key.
+    pub async fn add_trusted_key(&self, key_bytes: &[u8]) -> Result<()> {
+        let mut signer = self.signer.write().await;
+        signer.add_trusted_key(key_bytes)
+    }
+
+    /// Add a trusted signing key from hex string.
+    pub async fn add_trusted_key_hex(&self, hex_key: &str) -> Result<()> {
+        let mut signer = self.signer.write().await;
+        signer.add_trusted_key_hex(hex_key)
+    }
+
+    /// Fetch plugin index from a remote registry.
+    ///
+    /// The index is cached for subsequent queries.
+    pub async fn fetch_remote_index(
+        &self,
+        registry: &RemoteRegistry,
+    ) -> Result<Vec<PluginIndexEntry>> {
+        if !registry.enabled {
+            tracing::debug!("Registry {} is disabled, skipping", registry.name);
+            return Ok(Vec::new());
+        }
+
+        let index_url = format!("{}/api/v1/plugins/index", registry.url.trim_end_matches('/'));
+        tracing::debug!("Fetching plugin index from: {}", index_url);
+
+        let response = self
+            .http_client
+            .get(&index_url)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::warn!("Failed to fetch index from {}: {}", registry.name, e);
+                PluginError::NetworkError(format!(
+                    "Failed to fetch index from {}: {}",
+                    registry.name, e
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            tracing::warn!(
+                "Registry {} returned error status: {}",
+                registry.name,
+                status
+            );
+            return Err(PluginError::RegistryError(format!(
+                "Registry {} returned status {}",
+                registry.name, status
+            )));
+        }
+
+        let index: PluginIndex = response.json().await.map_err(|e| {
+            tracing::warn!("Failed to parse index from {}: {}", registry.name, e);
+            PluginError::RegistryError(format!(
+                "Failed to parse index from {}: {}",
+                registry.name, e
+            ))
+        })?;
+
+        // Cache the index
+        {
+            let mut cached = self.cached_index.write().await;
+            cached.insert(registry.url.clone(), index.plugins.clone());
+        }
+
+        tracing::info!(
+            "Fetched {} plugins from registry {}",
+            index.plugins.len(),
+            registry.name
+        );
+
+        Ok(index.plugins)
+    }
+
+    /// Fetch indices from all enabled remote registries.
+    pub async fn fetch_all_remote_indices(&self) -> Vec<PluginIndexEntry> {
+        let registries = self.remote_registries.read().await.clone();
+        let mut all_entries = Vec::new();
+
+        for registry in registries {
+            match self.fetch_remote_index(&registry).await {
+                Ok(entries) => all_entries.extend(entries),
+                Err(e) => {
+                    tracing::warn!("Failed to fetch from {}: {}", registry.name, e);
+                    // Continue with other registries
+                }
+            }
+        }
+
+        all_entries
+    }
+
+    /// Search for plugins by query string.
+    ///
+    /// Searches plugin ID, name, and description across all cached indices.
+    pub async fn search(&self, query: &str) -> Result<Vec<PluginIndexEntry>> {
+        let query_lower = query.to_lowercase();
+        let cached = self.cached_index.read().await;
+
+        let mut results: Vec<PluginIndexEntry> = cached
+            .values()
+            .flatten()
+            .filter(|entry| {
+                entry.id.to_lowercase().contains(&query_lower)
+                    || entry.name.to_lowercase().contains(&query_lower)
+                    || entry.description.to_lowercase().contains(&query_lower)
+            })
+            .cloned()
+            .collect();
+
+        // Sort by relevance (exact ID match first, then name match, then description)
+        results.sort_by(|a, b| {
+            let a_id_match = a.id.to_lowercase() == query_lower;
+            let b_id_match = b.id.to_lowercase() == query_lower;
+            
+            if a_id_match && !b_id_match {
+                return std::cmp::Ordering::Less;
+            }
+            if b_id_match && !a_id_match {
+                return std::cmp::Ordering::Greater;
+            }
+
+            let a_name_match = a.name.to_lowercase().contains(&query_lower);
+            let b_name_match = b.name.to_lowercase().contains(&query_lower);
+
+            if a_name_match && !b_name_match {
+                return std::cmp::Ordering::Less;
+            }
+            if b_name_match && !a_name_match {
+                return std::cmp::Ordering::Greater;
+            }
+
+            a.name.cmp(&b.name)
+        });
+
+        Ok(results)
+    }
+
+    /// Check for updates to installed plugins.
+    ///
+    /// Returns a list of tuples: (plugin_id, current_version, available_version).
+    pub async fn check_updates(&self) -> Result<Vec<(String, String, String)>> {
+        let plugins = self.plugins.read().await;
+        let cached = self.cached_index.read().await;
+
+        let mut updates = Vec::new();
+
+        for (id, handle) in plugins.iter() {
+            let info = handle.info().await;
+            let current_version = &info.version;
+
+            // Look for this plugin in cached indices
+            for entries in cached.values() {
+                if let Some(entry) = entries.iter().find(|e| e.id == *id) {
+                    // Compare versions using semver
+                    if let (Ok(current), Ok(available)) = (
+                        semver::Version::parse(current_version),
+                        semver::Version::parse(&entry.version),
+                    ) {
+                        if available > current {
+                            updates.push((
+                                id.clone(),
+                                current_version.clone(),
+                                entry.version.clone(),
+                            ));
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        if !updates.is_empty() {
+            tracing::info!("Found {} plugin updates available", updates.len());
+        }
+
+        Ok(updates)
+    }
+
+    /// Download a plugin from the remote registry.
+    ///
+    /// Downloads the plugin, verifies checksum and optional signature,
+    /// then saves to the target directory.
+    pub async fn download_plugin(
+        &self,
+        entry: &PluginIndexEntry,
+        target_dir: &Path,
+    ) -> Result<PathBuf> {
+        tracing::info!(
+            "Downloading plugin {} v{} from {}",
+            entry.id,
+            entry.version,
+            entry.download_url
+        );
+
+        // Download the plugin package
+        let response = self
+            .http_client
+            .get(&entry.download_url)
+            .send()
+            .await
+            .map_err(|e| {
+                PluginError::NetworkError(format!("Failed to download plugin {}: {}", entry.id, e))
+            })?;
+
+        if !response.status().is_success() {
+            return Err(PluginError::NetworkError(format!(
+                "Failed to download plugin {}: HTTP {}",
+                entry.id,
+                response.status()
+            )));
+        }
+
+        let bytes = response.bytes().await.map_err(|e| {
+            PluginError::NetworkError(format!("Failed to read plugin data for {}: {}", entry.id, e))
+        })?;
+
+        // Verify checksum
+        let actual_checksum = PluginSigner::compute_checksum(&bytes);
+        if !actual_checksum.eq_ignore_ascii_case(&entry.checksum) {
+            return Err(PluginError::checksum_mismatch(
+                &entry.id,
+                &entry.checksum,
+                &actual_checksum,
+            ));
+        }
+        tracing::debug!("Checksum verified for plugin {}", entry.id);
+
+        // Verify signature if present
+        if let Some(ref signature) = entry.signature {
+            let signer = self.signer.read().await;
+            if signer.has_trusted_keys() {
+                match signer.verify_plugin_hex(&bytes, signature) {
+                    Ok(true) => {
+                        tracing::debug!("Signature verified for plugin {}", entry.id);
+                    }
+                    Ok(false) => {
+                        return Err(PluginError::SignatureError(format!(
+                            "Plugin {} signature verification failed - not signed by trusted key",
+                            entry.id
+                        )));
+                    }
+                    Err(e) => {
+                        return Err(PluginError::SignatureError(format!(
+                            "Plugin {} signature verification error: {}",
+                            entry.id, e
+                        )));
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "Plugin {} is signed but no trusted keys configured - skipping signature verification",
+                    entry.id
+                );
+            }
+        } else {
+            tracing::warn!("Plugin {} is not signed", entry.id);
+        }
+
+        // Create plugin directory
+        let plugin_dir = target_dir.join(&entry.id);
+        tokio::fs::create_dir_all(&plugin_dir).await?;
+
+        // Save the plugin file (assuming it's a WASM file)
+        let plugin_path = plugin_dir.join("plugin.wasm");
+        tokio::fs::write(&plugin_path, &bytes).await?;
+
+        tracing::info!(
+            "Downloaded plugin {} v{} to {}",
+            entry.id,
+            entry.version,
+            plugin_path.display()
+        );
+
+        Ok(plugin_path)
+    }
+
+    /// Get a plugin index entry by ID from the cached index.
+    pub async fn get_index_entry(&self, plugin_id: &str) -> Option<PluginIndexEntry> {
+        let cached = self.cached_index.read().await;
+        
+        for entries in cached.values() {
+            if let Some(entry) = entries.iter().find(|e| e.id == plugin_id) {
+                return Some(entry.clone());
+            }
+        }
+        
+        None
+    }
+
+    /// Clear the cached plugin index.
+    pub async fn clear_index_cache(&self) {
+        let mut cached = self.cached_index.write().await;
+        cached.clear();
+        tracing::debug!("Cleared plugin index cache");
     }
 
     /// Register a plugin.
@@ -359,5 +786,102 @@ mod tests {
         let results = registry.init_all().await;
         assert_eq!(results.len(), 1);
         assert!(results[0].1.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_add_remote_registry() {
+        let registry = PluginRegistry::new();
+        
+        let remote = RemoteRegistry::new("https://example.com", "Example Registry");
+        registry.add_remote_registry(remote).await;
+        
+        let registries = registry.list_remote_registries().await;
+        assert_eq!(registries.len(), 1);
+        assert_eq!(registries[0].name, "Example Registry");
+        assert!(registries[0].enabled);
+    }
+
+    #[tokio::test]
+    async fn test_add_duplicate_remote_registry() {
+        let registry = PluginRegistry::new();
+        
+        let remote1 = RemoteRegistry::new("https://example.com", "Example Registry");
+        let remote2 = RemoteRegistry::new("https://example.com", "Duplicate");
+        
+        registry.add_remote_registry(remote1).await;
+        registry.add_remote_registry(remote2).await;
+        
+        let registries = registry.list_remote_registries().await;
+        assert_eq!(registries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_remove_remote_registry() {
+        let registry = PluginRegistry::new();
+        
+        registry.add_remote_registry(RemoteRegistry::new("https://example.com", "Test")).await;
+        registry.remove_remote_registry("https://example.com").await;
+        
+        let registries = registry.list_remote_registries().await;
+        assert!(registries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_empty_cache() {
+        let registry = PluginRegistry::new();
+        
+        let results = registry.search("test").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_plugin_index_entry_is_signed() {
+        let entry = PluginIndexEntry {
+            id: "test-plugin".to_string(),
+            name: "Test Plugin".to_string(),
+            version: "1.0.0".to_string(),
+            description: "A test plugin".to_string(),
+            download_url: "https://example.com/plugin.wasm".to_string(),
+            checksum: "abc123".to_string(),
+            signature: Some("signature".to_string()),
+            updated_at: chrono::Utc::now(),
+        };
+        
+        assert!(entry.is_signed());
+        
+        let unsigned_entry = PluginIndexEntry {
+            signature: None,
+            ..entry
+        };
+        
+        assert!(!unsigned_entry.is_signed());
+    }
+
+    #[tokio::test]
+    async fn test_remote_registry_disabled() {
+        let registry = PluginRegistry::new();
+        
+        let remote = RemoteRegistry::new_disabled("https://example.com", "Disabled");
+        registry.add_remote_registry(remote.clone()).await;
+        
+        // Fetching from disabled registry should return empty
+        let result = registry.fetch_remote_index(&remote).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_clear_index_cache() {
+        let registry = PluginRegistry::new();
+        
+        // Manually insert something into the cache
+        {
+            let mut cached = registry.cached_index.write().await;
+            cached.insert("test".to_string(), vec![]);
+        }
+        
+        registry.clear_index_cache().await;
+        
+        let cached = registry.cached_index.read().await;
+        assert!(cached.is_empty());
     }
 }

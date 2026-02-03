@@ -60,6 +60,7 @@ pub mod plugin;
 pub mod registry;
 pub mod runtime;
 pub mod sdk;
+pub mod signing;
 
 // Re-exports for convenience
 pub use api::{PluginApi, PluginContext, PluginHostFunctions};
@@ -273,7 +274,8 @@ pub use manifest::{
     PluginManifest, PluginPermission,
 };
 pub use plugin::{Plugin, PluginInfo, PluginState, PluginStatus};
-pub use registry::PluginRegistry;
+pub use registry::{PluginIndex, PluginIndexEntry, PluginRegistry, RemoteRegistry};
+pub use signing::PluginSigner;
 pub use runtime::{PluginStoreState, WasmPlugin, WasmRuntime};
 
 // Host function re-exports

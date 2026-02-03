@@ -84,6 +84,26 @@ pub enum PluginError {
     /// Plugin is disabled.
     #[error("Plugin is disabled: {0}")]
     Disabled(String),
+
+    /// Signature verification error.
+    #[error("Signature error: {0}")]
+    SignatureError(String),
+
+    /// Network/HTTP error.
+    #[error("Network error: {0}")]
+    NetworkError(String),
+
+    /// Checksum verification error.
+    #[error("Checksum mismatch for plugin '{plugin}': expected {expected}, got {actual}")]
+    ChecksumMismatch {
+        plugin: String,
+        expected: String,
+        actual: String,
+    },
+
+    /// Registry error.
+    #[error("Registry error: {0}")]
+    RegistryError(String),
 }
 
 impl PluginError {
@@ -142,6 +162,19 @@ impl PluginError {
             message: message.into(),
         }
     }
+
+    /// Create a checksum mismatch error.
+    pub fn checksum_mismatch(
+        plugin: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self::ChecksumMismatch {
+            plugin: plugin.into(),
+            expected: expected.into(),
+            actual: actual.into(),
+        }
+    }
 }
 
 impl From<toml::de::Error> for PluginError {
@@ -159,6 +192,12 @@ impl From<serde_json::Error> for PluginError {
 impl From<wasmtime::Error> for PluginError {
     fn from(err: wasmtime::Error) -> Self {
         Self::WasmError(err.to_string())
+    }
+}
+
+impl From<reqwest::Error> for PluginError {
+    fn from(err: reqwest::Error) -> Self {
+        Self::NetworkError(err.to_string())
     }
 }
 
