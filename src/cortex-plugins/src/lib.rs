@@ -49,10 +49,10 @@
 pub mod api;
 pub mod commands;
 pub mod config;
-pub mod host;
 pub mod error;
 pub mod events;
 pub mod hooks;
+pub mod host;
 pub mod loader;
 pub mod manager;
 pub mod manifest;
@@ -275,14 +275,13 @@ pub use manifest::{
 };
 pub use plugin::{Plugin, PluginInfo, PluginState, PluginStatus};
 pub use registry::{PluginIndex, PluginIndexEntry, PluginRegistry, RemoteRegistry};
-pub use signing::PluginSigner;
 pub use runtime::{PluginStoreState, WasmPlugin, WasmRuntime};
+pub use signing::PluginSigner;
 
 // Host function re-exports
 pub use host::{
-    create_linker, register_host_functions, HasHostState, HostError,
-    LogLevel as HostLogLevel, PluginEvent, PluginHostState,
-    ToastLevel as HostToastLevel, ToastNotification,
+    HasHostState, HostError, LogLevel as HostLogLevel, PluginEvent, PluginHostState,
+    ToastLevel as HostToastLevel, ToastNotification, create_linker, register_host_functions,
 };
 
 /// Plugin system version

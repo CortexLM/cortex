@@ -133,10 +133,14 @@ impl PluginRegistry {
     /// Add a remote registry.
     pub async fn add_remote_registry(&self, registry: RemoteRegistry) {
         let mut registries = self.remote_registries.write().await;
-        
+
         // Check if already exists (by URL)
         if !registries.iter().any(|r| r.url == registry.url) {
-            tracing::info!("Adding remote registry: {} ({})", registry.name, registry.url);
+            tracing::info!(
+                "Adding remote registry: {} ({})",
+                registry.name,
+                registry.url
+            );
             registries.push(registry);
         }
     }
@@ -176,21 +180,19 @@ impl PluginRegistry {
             return Ok(Vec::new());
         }
 
-        let index_url = format!("{}/api/v1/plugins/index", registry.url.trim_end_matches('/'));
+        let index_url = format!(
+            "{}/api/v1/plugins/index",
+            registry.url.trim_end_matches('/')
+        );
         tracing::debug!("Fetching plugin index from: {}", index_url);
 
-        let response = self
-            .http_client
-            .get(&index_url)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::warn!("Failed to fetch index from {}: {}", registry.name, e);
-                PluginError::NetworkError(format!(
-                    "Failed to fetch index from {}: {}",
-                    registry.name, e
-                ))
-            })?;
+        let response = self.http_client.get(&index_url).send().await.map_err(|e| {
+            tracing::warn!("Failed to fetch index from {}: {}", registry.name, e);
+            PluginError::NetworkError(format!(
+                "Failed to fetch index from {}: {}",
+                registry.name, e
+            ))
+        })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -268,7 +270,7 @@ impl PluginRegistry {
         results.sort_by(|a, b| {
             let a_id_match = a.id.to_lowercase() == query_lower;
             let b_id_match = b.id.to_lowercase() == query_lower;
-            
+
             if a_id_match && !b_id_match {
                 return std::cmp::Ordering::Less;
             }
@@ -368,7 +370,10 @@ impl PluginRegistry {
         }
 
         let bytes = response.bytes().await.map_err(|e| {
-            PluginError::NetworkError(format!("Failed to read plugin data for {}: {}", entry.id, e))
+            PluginError::NetworkError(format!(
+                "Failed to read plugin data for {}: {}",
+                entry.id, e
+            ))
         })?;
 
         // Verify checksum
@@ -434,13 +439,13 @@ impl PluginRegistry {
     /// Get a plugin index entry by ID from the cached index.
     pub async fn get_index_entry(&self, plugin_id: &str) -> Option<PluginIndexEntry> {
         let cached = self.cached_index.read().await;
-        
+
         for entries in cached.values() {
             if let Some(entry) = entries.iter().find(|e| e.id == plugin_id) {
                 return Some(entry.clone());
             }
         }
-        
+
         None
     }
 
@@ -791,10 +796,10 @@ mod tests {
     #[tokio::test]
     async fn test_add_remote_registry() {
         let registry = PluginRegistry::new();
-        
+
         let remote = RemoteRegistry::new("https://example.com", "Example Registry");
         registry.add_remote_registry(remote).await;
-        
+
         let registries = registry.list_remote_registries().await;
         assert_eq!(registries.len(), 1);
         assert_eq!(registries[0].name, "Example Registry");
@@ -804,13 +809,13 @@ mod tests {
     #[tokio::test]
     async fn test_add_duplicate_remote_registry() {
         let registry = PluginRegistry::new();
-        
+
         let remote1 = RemoteRegistry::new("https://example.com", "Example Registry");
         let remote2 = RemoteRegistry::new("https://example.com", "Duplicate");
-        
+
         registry.add_remote_registry(remote1).await;
         registry.add_remote_registry(remote2).await;
-        
+
         let registries = registry.list_remote_registries().await;
         assert_eq!(registries.len(), 1);
     }
@@ -818,10 +823,12 @@ mod tests {
     #[tokio::test]
     async fn test_remove_remote_registry() {
         let registry = PluginRegistry::new();
-        
-        registry.add_remote_registry(RemoteRegistry::new("https://example.com", "Test")).await;
+
+        registry
+            .add_remote_registry(RemoteRegistry::new("https://example.com", "Test"))
+            .await;
         registry.remove_remote_registry("https://example.com").await;
-        
+
         let registries = registry.list_remote_registries().await;
         assert!(registries.is_empty());
     }
@@ -829,7 +836,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_empty_cache() {
         let registry = PluginRegistry::new();
-        
+
         let results = registry.search("test").await.unwrap();
         assert!(results.is_empty());
     }
@@ -846,24 +853,24 @@ mod tests {
             signature: Some("signature".to_string()),
             updated_at: chrono::Utc::now(),
         };
-        
+
         assert!(entry.is_signed());
-        
+
         let unsigned_entry = PluginIndexEntry {
             signature: None,
             ..entry
         };
-        
+
         assert!(!unsigned_entry.is_signed());
     }
 
     #[tokio::test]
     async fn test_remote_registry_disabled() {
         let registry = PluginRegistry::new();
-        
+
         let remote = RemoteRegistry::new_disabled("https://example.com", "Disabled");
         registry.add_remote_registry(remote.clone()).await;
-        
+
         // Fetching from disabled registry should return empty
         let result = registry.fetch_remote_index(&remote).await.unwrap();
         assert!(result.is_empty());
@@ -872,15 +879,15 @@ mod tests {
     #[tokio::test]
     async fn test_clear_index_cache() {
         let registry = PluginRegistry::new();
-        
+
         // Manually insert something into the cache
         {
             let mut cached = registry.cached_index.write().await;
             cached.insert("test".to_string(), vec![]);
         }
-        
+
         registry.clear_index_cache().await;
-        
+
         let cached = registry.cached_index.read().await;
         assert!(cached.is_empty());
     }

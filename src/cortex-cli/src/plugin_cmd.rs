@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event, EventKind};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -868,7 +868,10 @@ fn scaffold_advanced_plugin(
         fs::write(plugin_dir.join("package.json"), package_json)?;
 
         // gitignore for TypeScript
-        fs::write(plugin_dir.join(".gitignore"), "node_modules/\ndist/\n*.wasm\n")?;
+        fs::write(
+            plugin_dir.join(".gitignore"),
+            "node_modules/\ndist/\n*.wasm\n",
+        )?;
     } else {
         // Rust project with advanced template
         let rust_code = generate_advanced_rust_code(plugin_id, plugin_name, "example");
@@ -1241,14 +1244,20 @@ async fn run_show(args: PluginShowArgs) -> Result<()> {
 // =============================================================================
 
 async fn run_new(args: PluginNewArgs) -> Result<()> {
-    let output_dir = args.output.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let output_dir = args
+        .output
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     // Validate plugin name
     if args.name.is_empty() {
         bail!("Plugin name cannot be empty");
     }
 
-    if !args.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !args
+        .name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         bail!("Plugin name can only contain alphanumeric characters, hyphens, and underscores");
     }
 
@@ -1270,7 +1279,9 @@ async fn run_new(args: PluginNewArgs) -> Result<()> {
             .ok()
             .and_then(|output| {
                 if output.status.success() {
-                    String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
+                    String::from_utf8(output.stdout)
+                        .ok()
+                        .map(|s| s.trim().to_string())
                 } else {
                     None
                 }
@@ -1350,7 +1361,9 @@ async fn run_new(args: PluginNewArgs) -> Result<()> {
 // =============================================================================
 
 async fn run_dev(args: PluginDevArgs) -> Result<()> {
-    let plugin_dir = args.path.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let plugin_dir = args
+        .path
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     // Verify this is a plugin directory
     let manifest_path = plugin_dir.join("plugin.toml");
@@ -1362,10 +1375,10 @@ async fn run_dev(args: PluginDevArgs) -> Result<()> {
     }
 
     // Read plugin info
-    let manifest_content = std::fs::read_to_string(&manifest_path)
-        .context("Failed to read plugin.toml")?;
-    let manifest: toml::Value = toml::from_str(&manifest_content)
-        .context("Failed to parse plugin.toml")?;
+    let manifest_content =
+        std::fs::read_to_string(&manifest_path).context("Failed to read plugin.toml")?;
+    let manifest: toml::Value =
+        toml::from_str(&manifest_content).context("Failed to parse plugin.toml")?;
 
     let plugin_name = manifest
         .get("plugin")
@@ -1408,7 +1421,11 @@ async fn run_dev(args: PluginDevArgs) -> Result<()> {
 
     // Watch src directory if it exists, otherwise watch the plugin directory
     let src_dir = plugin_dir.join("src");
-    let watch_path = if src_dir.exists() { &src_dir } else { &plugin_dir };
+    let watch_path = if src_dir.exists() {
+        &src_dir
+    } else {
+        &plugin_dir
+    };
 
     watcher
         .watch(watch_path, RecursiveMode::Recursive)
@@ -1443,7 +1460,11 @@ async fn run_dev(args: PluginDevArgs) -> Result<()> {
                         .filter_map(|n| n.to_str())
                         .collect();
 
-                    println!("\n[{}] File changed: {:?}", chrono::Local::now().format("%H:%M:%S"), changed_files);
+                    println!(
+                        "\n[{}] File changed: {:?}",
+                        chrono::Local::now().format("%H:%M:%S"),
+                        changed_files
+                    );
                     println!("Rebuilding...");
 
                     match run_plugin_build(&plugin_dir, false, None) {
@@ -1517,7 +1538,10 @@ fn run_plugin_build(plugin_dir: &Path, debug: bool, output: Option<PathBuf>) -> 
             cmd.arg("--release");
         }
 
-        println!("  Running: cargo build --target wasm32-wasi {}", if debug { "" } else { "--release" });
+        println!(
+            "  Running: cargo build --target wasm32-wasi {}",
+            if debug { "" } else { "--release" }
+        );
 
         let output_result = cmd
             .stdout(Stdio::inherit())
@@ -1526,7 +1550,10 @@ fn run_plugin_build(plugin_dir: &Path, debug: bool, output: Option<PathBuf>) -> 
             .context("Failed to execute cargo build")?;
 
         if !output_result.success() {
-            bail!("Cargo build failed with exit code: {:?}", output_result.code());
+            bail!(
+                "Cargo build failed with exit code: {:?}",
+                output_result.code()
+            );
         }
 
         // Locate the built WASM file
@@ -1539,25 +1566,37 @@ fn run_plugin_build(plugin_dir: &Path, debug: bool, output: Option<PathBuf>) -> 
 
         if !wasm_source.exists() {
             // Try to find any .wasm file
-            let target_dir = plugin_dir.join("target").join("wasm32-wasi").join(profile_dir);
+            let target_dir = plugin_dir
+                .join("target")
+                .join("wasm32-wasi")
+                .join(profile_dir);
             if let Ok(entries) = std::fs::read_dir(&target_dir) {
                 for entry in entries.flatten() {
-                    if entry.path().extension().map(|e| e == "wasm").unwrap_or(false) {
+                    if entry
+                        .path()
+                        .extension()
+                        .map(|e| e == "wasm")
+                        .unwrap_or(false)
+                    {
                         let found_wasm = entry.path();
-                        let output_path = output.clone().unwrap_or_else(|| plugin_dir.join("plugin.wasm"));
+                        let output_path = output
+                            .clone()
+                            .unwrap_or_else(|| plugin_dir.join("plugin.wasm"));
                         std::fs::copy(&found_wasm, &output_path)
                             .context("Failed to copy WASM file")?;
                         return Ok(output_path);
                     }
                 }
             }
-            bail!("WASM file not found at expected path: {}", wasm_source.display());
+            bail!(
+                "WASM file not found at expected path: {}",
+                wasm_source.display()
+            );
         }
 
         // Copy to output location
         let output_path = output.unwrap_or_else(|| plugin_dir.join("plugin.wasm"));
-        std::fs::copy(&wasm_source, &output_path)
-            .context("Failed to copy WASM file to output")?;
+        std::fs::copy(&wasm_source, &output_path).context("Failed to copy WASM file to output")?;
 
         Ok(output_path)
     } else {
@@ -1589,7 +1628,9 @@ fn run_plugin_build(plugin_dir: &Path, debug: bool, output: Option<PathBuf>) -> 
 }
 
 async fn run_build(args: PluginBuildArgs) -> Result<()> {
-    let plugin_dir = args.path.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let plugin_dir = args
+        .path
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     println!("Building plugin in: {}", plugin_dir.display());
 
@@ -1644,7 +1685,9 @@ struct ValidationResult {
 }
 
 async fn run_validate(args: PluginValidateArgs) -> Result<()> {
-    let plugin_dir = args.path.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let plugin_dir = args
+        .path
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let manifest_path = plugin_dir.join("plugin.toml");
 
     let mut result = ValidationResult {
@@ -1718,7 +1761,11 @@ async fn run_validate(args: PluginValidateArgs) -> Result<()> {
     }
 
     // Validate version
-    if plugin_section.get("version").and_then(|v| v.as_str()).is_none() {
+    if plugin_section
+        .get("version")
+        .and_then(|v| v.as_str())
+        .is_none()
+    {
         result.issues.push(ValidationIssue {
             severity: ValidationSeverity::Warning,
             message: "Missing version field (defaults to 0.0.0)".to_string(),
@@ -1727,7 +1774,11 @@ async fn run_validate(args: PluginValidateArgs) -> Result<()> {
     }
 
     // Validate description
-    if plugin_section.get("description").and_then(|v| v.as_str()).is_none() {
+    if plugin_section
+        .get("description")
+        .and_then(|v| v.as_str())
+        .is_none()
+    {
         if args.verbose {
             result.issues.push(ValidationIssue {
                 severity: ValidationSeverity::Info,
@@ -1750,9 +1801,12 @@ async fn run_validate(args: PluginValidateArgs) -> Result<()> {
     let has_built_wasm = if target_wasm.exists() {
         std::fs::read_dir(&target_wasm)
             .map(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .any(|e| e.path().extension().map(|ext| ext == "wasm").unwrap_or(false))
+                entries.filter_map(|e| e.ok()).any(|e| {
+                    e.path()
+                        .extension()
+                        .map(|ext| ext == "wasm")
+                        .unwrap_or(false)
+                })
             })
             .unwrap_or(false)
     } else {
@@ -1768,20 +1822,33 @@ async fn run_validate(args: PluginValidateArgs) -> Result<()> {
     } else if args.verbose {
         result.issues.push(ValidationIssue {
             severity: ValidationSeverity::Info,
-            message: format!("WASM file found: {}", if has_wasm { "plugin.wasm" } else { "target/wasm32-wasi/release/*.wasm" }),
+            message: format!(
+                "WASM file found: {}",
+                if has_wasm {
+                    "plugin.wasm"
+                } else {
+                    "target/wasm32-wasi/release/*.wasm"
+                }
+            ),
             field: None,
         });
     }
 
     // Validate permissions if present
-    if let Some(permissions) = manifest.get("permissions").or_else(|| plugin_section.get("permissions")) {
+    if let Some(permissions) = manifest
+        .get("permissions")
+        .or_else(|| plugin_section.get("permissions"))
+    {
         if let Some(perms_array) = permissions.as_array() {
             validate_permissions(perms_array, &mut result, args.verbose);
         }
     }
 
     // Validate capabilities if present
-    if let Some(capabilities) = manifest.get("capabilities").or_else(|| plugin_section.get("capabilities")) {
+    if let Some(capabilities) = manifest
+        .get("capabilities")
+        .or_else(|| plugin_section.get("capabilities"))
+    {
         if let Some(caps_array) = capabilities.as_array() {
             validate_capabilities(caps_array, &mut result, args.verbose);
         }
@@ -1803,7 +1870,8 @@ async fn run_validate(args: PluginValidateArgs) -> Result<()> {
     if !cargo_toml.exists() && !package_json.exists() {
         result.issues.push(ValidationIssue {
             severity: ValidationSeverity::Warning,
-            message: "No Cargo.toml or package.json found. Build configuration missing.".to_string(),
+            message: "No Cargo.toml or package.json found. Build configuration missing."
+                .to_string(),
             field: None,
         });
     }
@@ -1869,7 +1937,11 @@ fn validate_permissions(permissions: &[toml::Value], result: &mut ValidationResu
     }
 }
 
-fn validate_capabilities(capabilities: &[toml::Value], result: &mut ValidationResult, verbose: bool) {
+fn validate_capabilities(
+    capabilities: &[toml::Value],
+    result: &mut ValidationResult,
+    verbose: bool,
+) {
     const KNOWN_CAPABILITIES: &[&str] = &[
         "commands",
         "hooks",
@@ -1977,7 +2049,9 @@ fn output_validation_result(result: ValidationResult, as_json: bool) -> Result<(
 // =============================================================================
 
 async fn run_publish(args: PluginPublishArgs) -> Result<()> {
-    let plugin_dir = args.path.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let plugin_dir = args
+        .path
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     println!("Preparing plugin for publication...");
     println!("  Directory: {}", plugin_dir.display());
@@ -1991,7 +2065,10 @@ async fn run_publish(args: PluginPublishArgs) -> Result<()> {
     };
 
     if let Err(e) = run_validate(validate_args).await {
-        bail!("Plugin validation failed: {}. Fix issues before publishing.", e);
+        bail!(
+            "Plugin validation failed: {}. Fix issues before publishing.",
+            e
+        );
     }
 
     // Read plugin info
@@ -2030,7 +2107,12 @@ async fn run_publish(args: PluginPublishArgs) -> Result<()> {
         if target_wasm.exists() {
             if let Ok(entries) = std::fs::read_dir(&target_wasm) {
                 for entry in entries.flatten() {
-                    if entry.path().extension().map(|e| e == "wasm").unwrap_or(false) {
+                    if entry
+                        .path()
+                        .extension()
+                        .map(|e| e == "wasm")
+                        .unwrap_or(false)
+                    {
                         std::fs::copy(entry.path(), &wasm_path)?;
                         break;
                     }
@@ -2047,10 +2129,12 @@ async fn run_publish(args: PluginPublishArgs) -> Result<()> {
     println!("\nStep 3: Creating distribution package...");
 
     let tarball_name = format!("{}-{}.tar.gz", plugin_id, plugin_version);
-    let tarball_path = args.output.unwrap_or_else(|| plugin_dir.join(&tarball_name));
+    let tarball_path = args
+        .output
+        .unwrap_or_else(|| plugin_dir.join(&tarball_name));
 
-    let tarball_file = std::fs::File::create(&tarball_path)
-        .context("Failed to create tarball file")?;
+    let tarball_file =
+        std::fs::File::create(&tarball_path).context("Failed to create tarball file")?;
 
     let encoder = flate2::write::GzEncoder::new(tarball_file, flate2::Compression::default());
     let mut archive = tar::Builder::new(encoder);

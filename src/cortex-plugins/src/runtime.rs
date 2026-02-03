@@ -384,10 +384,20 @@ impl HasHostState for PluginStoreState {
 }
 
 impl ResourceLimiter for PluginStoreState {
-    fn memory_growing(&mut self, current: usize, desired: usize, maximum: Option<usize>) -> anyhow::Result<bool> {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
         self.limits.memory_growing(current, desired, maximum)
     }
-    fn table_growing(&mut self, current: usize, desired: usize, maximum: Option<usize>) -> anyhow::Result<bool> {
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
         self.limits.table_growing(current, desired, maximum)
     }
     fn instances(&self) -> usize {

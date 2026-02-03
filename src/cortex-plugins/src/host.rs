@@ -8,9 +8,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use wasmtime::{Caller, Engine, Linker};
 
+use crate::Result;
 use crate::api::PluginContext;
 use crate::hooks::UiRegion;
-use crate::Result;
 
 /// Error codes returned by host functions.
 #[repr(i32)]
@@ -147,21 +147,21 @@ fn read_string_from_memory<T>(
         Some(e) => e,
         None => return (caller, Err(HostError::MemoryOutOfBounds)),
     };
-    
+
     let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
         Some(m) => m,
         None => return (caller, Err(HostError::InternalError)),
     };
-    
+
     let data = memory.data(&caller);
     if end > data.len() {
         return (caller, Err(HostError::MemoryOutOfBounds));
     }
-    
+
     let result = std::str::from_utf8(&data[ptr_usize..end])
         .map(|s| s.to_string())
         .map_err(|_| HostError::InvalidUtf8);
-    
+
     (caller, result)
 }
 
@@ -178,13 +178,20 @@ where
                 log_impl(caller, level, msg_ptr, msg_len)
             },
         )
-        .map_err(|e| crate::PluginError::execution_error("host", format!("Failed to register log: {}", e)))?;
+        .map_err(|e| {
+            crate::PluginError::execution_error("host", format!("Failed to register log: {}", e))
+        })?;
 
     linker
         .func_wrap("cortex", "get_context", |caller: Caller<'_, T>| {
             get_context_impl(caller)
         })
-        .map_err(|e| crate::PluginError::execution_error("host", format!("Failed to register get_context: {}", e)))?;
+        .map_err(|e| {
+            crate::PluginError::execution_error(
+                "host",
+                format!("Failed to register get_context: {}", e),
+            )
+        })?;
 
     linker
         .func_wrap(
@@ -194,17 +201,31 @@ where
                 register_widget_impl(caller, region, type_ptr, type_len)
             },
         )
-        .map_err(|e| crate::PluginError::execution_error("host", format!("Failed to register register_widget: {}", e)))?;
+        .map_err(|e| {
+            crate::PluginError::execution_error(
+                "host",
+                format!("Failed to register register_widget: {}", e),
+            )
+        })?;
 
     linker
         .func_wrap(
             "cortex",
             "register_keybinding",
-            |caller: Caller<'_, T>, key_ptr: i32, key_len: i32, action_ptr: i32, action_len: i32| {
+            |caller: Caller<'_, T>,
+             key_ptr: i32,
+             key_len: i32,
+             action_ptr: i32,
+             action_len: i32| {
                 register_keybinding_impl(caller, key_ptr, key_len, action_ptr, action_len)
             },
         )
-        .map_err(|e| crate::PluginError::execution_error("host", format!("Failed to register register_keybinding: {}", e)))?;
+        .map_err(|e| {
+            crate::PluginError::execution_error(
+                "host",
+                format!("Failed to register register_keybinding: {}", e),
+            )
+        })?;
 
     linker
         .func_wrap(
@@ -214,7 +235,12 @@ where
                 show_toast_impl(caller, level, msg_ptr, msg_len, duration_ms)
             },
         )
-        .map_err(|e| crate::PluginError::execution_error("host", format!("Failed to register show_toast: {}", e)))?;
+        .map_err(|e| {
+            crate::PluginError::execution_error(
+                "host",
+                format!("Failed to register show_toast: {}", e),
+            )
+        })?;
 
     linker
         .func_wrap(
@@ -224,7 +250,12 @@ where
                 emit_event_impl(caller, name_ptr, name_len, data_ptr, data_len)
             },
         )
-        .map_err(|e| crate::PluginError::execution_error("host", format!("Failed to register emit_event: {}", e)))?;
+        .map_err(|e| {
+            crate::PluginError::execution_error(
+                "host",
+                format!("Failed to register emit_event: {}", e),
+            )
+        })?;
 
     Ok(())
 }
@@ -270,16 +301,21 @@ fn get_context_impl<T: HasHostState>(caller: Caller<'_, T>) -> i64 {
     }
 }
 
-fn register_widget_impl<T: HasHostState>(caller: Caller<'_, T>, region: i32, type_ptr: i32, type_len: i32) -> i32 {
+fn register_widget_impl<T: HasHostState>(
+    caller: Caller<'_, T>,
+    region: i32,
+    type_ptr: i32,
+    type_len: i32,
+) -> i32 {
     let plugin_id = caller.data().host_state().plugin_id.clone();
     let widgets = caller.data().host_state().widgets.clone();
-    
+
     let (_, result) = read_string_from_memory(caller, type_ptr, type_len);
     let widget_type = match result {
         Ok(s) => s,
         Err(e) => return e.into(),
     };
-    
+
     let ui_region = match region {
         0 => UiRegion::Header,
         1 => UiRegion::Footer,
@@ -296,7 +332,7 @@ fn register_widget_impl<T: HasHostState>(caller: Caller<'_, T>, region: i32, typ
             return HostError::InvalidArgument.into();
         }
     };
-    
+
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.block_on(async {
             let mut w = widgets.write().await;
@@ -307,26 +343,32 @@ fn register_widget_impl<T: HasHostState>(caller: Caller<'_, T>, region: i32, typ
     HostError::Success.into()
 }
 
-fn register_keybinding_impl<T: HasHostState>(caller: Caller<'_, T>, key_ptr: i32, key_len: i32, action_ptr: i32, action_len: i32) -> i32 {
+fn register_keybinding_impl<T: HasHostState>(
+    caller: Caller<'_, T>,
+    key_ptr: i32,
+    key_len: i32,
+    action_ptr: i32,
+    action_len: i32,
+) -> i32 {
     let plugin_id = caller.data().host_state().plugin_id.clone();
     let keybindings = caller.data().host_state().keybindings.clone();
-    
+
     let (caller, key_result) = read_string_from_memory(caller, key_ptr, key_len);
     let key = match key_result {
         Ok(s) => s,
         Err(e) => return e.into(),
     };
-    
+
     let (_, action_result) = read_string_from_memory(caller, action_ptr, action_len);
     let action = match action_result {
         Ok(s) => s,
         Err(e) => return e.into(),
     };
-    
+
     if key.is_empty() || action.is_empty() {
         return HostError::InvalidArgument.into();
     }
-    
+
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.block_on(async {
             let mut kb = keybindings.write().await;
@@ -337,27 +379,33 @@ fn register_keybinding_impl<T: HasHostState>(caller: Caller<'_, T>, key_ptr: i32
     HostError::Success.into()
 }
 
-fn show_toast_impl<T: HasHostState>(caller: Caller<'_, T>, level: i32, msg_ptr: i32, msg_len: i32, duration_ms: i32) -> i32 {
+fn show_toast_impl<T: HasHostState>(
+    caller: Caller<'_, T>,
+    level: i32,
+    msg_ptr: i32,
+    msg_len: i32,
+    duration_ms: i32,
+) -> i32 {
     let plugin_id = caller.data().host_state().plugin_id.clone();
     let toasts = caller.data().host_state().toasts.clone();
-    
+
     let (_, result) = read_string_from_memory(caller, msg_ptr, msg_len);
     let message = match result {
         Ok(s) => s,
         Err(e) => return e.into(),
     };
-    
+
     if duration_ms < 0 {
         return HostError::InvalidArgument.into();
     }
-    
+
     let toast = ToastNotification {
         level: ToastLevel::from_i32(level),
         message: message.clone(),
         duration_ms: duration_ms as u32,
         plugin_id: plugin_id.clone(),
     };
-    
+
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.block_on(async {
             let mut t = toasts.write().await;
@@ -368,39 +416,44 @@ fn show_toast_impl<T: HasHostState>(caller: Caller<'_, T>, level: i32, msg_ptr: 
     HostError::Success.into()
 }
 
-fn emit_event_impl<T: HasHostState>(caller: Caller<'_, T>, name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32 {
+fn emit_event_impl<T: HasHostState>(
+    caller: Caller<'_, T>,
+    name_ptr: i32,
+    name_len: i32,
+    data_ptr: i32,
+    data_len: i32,
+) -> i32 {
     let plugin_id = caller.data().host_state().plugin_id.clone();
     let events = caller.data().host_state().events.clone();
-    
+
     let (caller, name_result) = read_string_from_memory(caller, name_ptr, name_len);
     let name = match name_result {
         Ok(s) => s,
         Err(e) => return e.into(),
     };
-    
+
     let (_, data_result) = read_string_from_memory(caller, data_ptr, data_len);
     let data = match data_result {
         Ok(s) => s,
         Err(e) => return e.into(),
     };
-    
+
     if name.is_empty() {
         return HostError::InvalidArgument.into();
     }
-    
-    if !data.is_empty() {
-        if serde_json::from_str::<serde_json::Value>(&data).is_err() {
+
+    if !data.is_empty()
+        && serde_json::from_str::<serde_json::Value>(&data).is_err() {
             return HostError::InvalidArgument.into();
         }
-    }
-    
+
     let event = PluginEvent {
         name: name.clone(),
         data,
         plugin_id: plugin_id.clone(),
         timestamp: chrono::Utc::now(),
     };
-    
+
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.block_on(async {
             let mut e = events.write().await;
@@ -454,14 +507,17 @@ mod tests {
         let result = create_linker::<PluginHostState>(&engine);
         assert!(result.is_ok());
     }
-    
+
     #[tokio::test]
     async fn test_plugin_host_state_widgets() {
         let context = PluginContext::new("/tmp");
         let state = PluginHostState::new("test-plugin", context);
         {
             let mut widgets = state.widgets.write().await;
-            widgets.entry(UiRegion::StatusBar).or_default().push("test_widget".to_string());
+            widgets
+                .entry(UiRegion::StatusBar)
+                .or_default()
+                .push("test_widget".to_string());
         }
         {
             let widgets = state.widgets.read().await;

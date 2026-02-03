@@ -3,7 +3,7 @@
 //! Provides ed25519-based signature verification for plugin authenticity
 //! and SHA256 checksum computation for integrity verification.
 
-use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::{PluginError, Result};
@@ -65,9 +65,8 @@ impl PluginSigner {
     /// # Errors
     /// Returns an error if the hex string is invalid or the key is invalid.
     pub fn add_trusted_key_hex(&mut self, hex_key: &str) -> Result<()> {
-        let key_bytes = hex::decode(hex_key).map_err(|e| {
-            PluginError::SignatureError(format!("Invalid hex-encoded key: {}", e))
-        })?;
+        let key_bytes = hex::decode(hex_key)
+            .map_err(|e| PluginError::SignatureError(format!("Invalid hex-encoded key: {}", e)))?;
 
         self.add_trusted_key(&key_bytes)
     }
@@ -202,10 +201,12 @@ mod tests {
         let result = signer.add_trusted_key(&[0u8; 16]);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid public key length"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid public key length")
+        );
     }
 
     #[test]
@@ -214,10 +215,12 @@ mod tests {
         let result = signer.add_trusted_key_hex("invalid_hex");
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid hex-encoded key"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid hex-encoded key")
+        );
     }
 
     #[test]
@@ -236,10 +239,12 @@ mod tests {
         let result = signer.verify_plugin(&[1, 2, 3], &[0u8; 32]);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid signature length"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid signature length")
+        );
     }
 
     #[test]
@@ -267,7 +272,10 @@ mod tests {
         let data = b"test data";
         let checksum = PluginSigner::compute_checksum(data);
 
-        assert!(PluginSigner::verify_checksum(data, &checksum.to_uppercase()));
+        assert!(PluginSigner::verify_checksum(
+            data,
+            &checksum.to_uppercase()
+        ));
     }
 
     #[test]
@@ -298,9 +306,11 @@ mod tests {
         let result = signer.verify_plugin_hex(&[1, 2, 3], "not_valid_hex");
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid hex-encoded signature"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid hex-encoded signature")
+        );
     }
 }

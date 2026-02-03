@@ -493,7 +493,9 @@ impl PluginIntegrationBuilder {
     ///
     /// If no registry was provided, creates a new empty registry.
     pub fn build(self) -> PluginIntegration {
-        let registry = self.registry.unwrap_or_else(|| Arc::new(HookRegistry::new()));
+        let registry = self
+            .registry
+            .unwrap_or_else(|| Arc::new(HookRegistry::new()));
         PluginIntegration::new(registry)
     }
 }
