@@ -21,7 +21,7 @@ use crate::rollout::{RolloutRecorder, SESSIONS_SUBDIR, get_rollout_path, read_ro
 use crate::tools::ToolRouter;
 
 use super::Session;
-use super::prompt::{build_system_prompt, build_system_prompt_with_skills, USE_SKILL_BASED_PROMPT};
+use super::prompt::{USE_SKILL_BASED_PROMPT, build_system_prompt, build_system_prompt_with_skills};
 use super::types::{SessionHandle, SessionInfo, TokenCounter};
 
 impl Session {

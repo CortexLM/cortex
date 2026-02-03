@@ -18,8 +18,8 @@ use crate::summarization::SummarizationStrategy;
 
 use super::Session;
 use super::prompt::{
-    auto_detect_skills_from_message, build_system_prompt, build_system_prompt_with_skills,
-    inject_skills, USE_SKILL_BASED_PROMPT,
+    USE_SKILL_BASED_PROMPT, auto_detect_skills_from_message, build_system_prompt,
+    build_system_prompt_with_skills, inject_skills,
 };
 
 impl Session {
