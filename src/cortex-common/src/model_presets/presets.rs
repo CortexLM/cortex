@@ -2,6 +2,10 @@
 
 use super::types::ModelPreset;
 
+/// Default model for Chutes provider.
+/// This is the fallback model when no specific model is provided.
+pub const DEFAULT_CHUTES_MODEL: &str = "moonshotai/Kimi-K2.5-TEE";
+
 /// Available model presets.
 pub const MODEL_PRESETS: &[ModelPreset] = &[
     ModelPreset {
@@ -806,6 +810,17 @@ pub const MODEL_PRESETS: &[ModelPreset] = &[
         supports_tools: true,
         supports_reasoning: false,
     },
+    // Chutes TEE models (Trusted Execution Environment)
+    // Security requirement: Only models with '-TEE' suffix are allowed
+    ModelPreset {
+        id: "moonshotai/Kimi-K2.5-TEE",
+        name: "Kimi K2.5 (TEE)",
+        provider: "chutes",
+        context_window: 262_144,
+        supports_vision: false,
+        supports_tools: true,
+        supports_reasoning: true,
+    },
 ];
 
 /// Get a model preset by ID.
@@ -819,4 +834,250 @@ pub fn get_models_for_provider(provider: &str) -> Vec<&'static ModelPreset> {
         .iter()
         .filter(|m| m.provider == provider)
         .collect()
+}
+
+/// Validates that a model is allowed for the Chutes provider.
+/// Chutes only allows TEE (Trusted Execution Environment) models for security.
+/// Any model ending with '-TEE' suffix (case-insensitive) is accepted.
+/// Returns Ok(()) if valid, Err with message if invalid.
+///
+/// # Security
+/// This function performs strict validation to prevent bypass attacks:
+/// - Rejects null bytes and control characters (prevents C-string truncation attacks)
+/// - Only allows safe ASCII characters: alphanumeric, hyphen, underscore, dot, forward slash
+/// - Case-insensitive suffix check for -TEE
+pub fn validate_chutes_model(model: &str) -> Result<(), String> {
+    let model = model.trim();
+
+    // Check for empty model
+    if model.is_empty() {
+        return Err("Model name cannot be empty for Chutes provider".to_string());
+    }
+
+    // SECURITY: Reject null bytes and control characters (CWE-626, CWE-158)
+    // This prevents null byte injection attacks where "malicious\0-TEE" would
+    // pass validation but be truncated to "malicious" by C libraries/APIs
+    if model.bytes().any(|b| b == 0 || b < 0x20) {
+        return Err(
+            "Model name contains invalid characters (null bytes or control characters)".to_string(),
+        );
+    }
+
+    // SECURITY: Only allow safe ASCII characters for model names
+    // Allowed: a-z, A-Z, 0-9, hyphen (-), underscore (_), dot (.), forward slash (/)
+    // This prevents Unicode homoglyph attacks and other encoding-based bypasses
+    if !model
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+    {
+        return Err(
+            "Model name contains invalid characters. Only alphanumeric characters, \
+             hyphens, underscores, dots, and forward slashes are allowed."
+                .to_string(),
+        );
+    }
+
+    // Check suffix (case-insensitive) - any model ending with -TEE is allowed
+    if !model.to_uppercase().ends_with("-TEE") {
+        return Err(format!(
+            "Chutes provider only allows TEE models (models ending with '-TEE'). \
+             Model '{}' is not a TEE model. Default model: {}",
+            model, DEFAULT_CHUTES_MODEL
+        ));
+    }
+
+    Ok(())
+}
+
+/// Checks if a provider restricts custom models.
+/// All providers allow custom models, but Chutes requires -TEE suffix.
+pub fn provider_allows_custom_models(provider: &str) -> bool {
+    // All providers allow custom models
+    // Chutes allows any model with -TEE suffix (validated via validate_chutes_model)
+    let _ = provider; // Used for potential future provider-specific restrictions
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_chutes_model_valid() {
+        // Default TEE model
+        assert!(validate_chutes_model("moonshotai/Kimi-K2.5-TEE").is_ok());
+        // Case insensitive
+        assert!(validate_chutes_model("moonshotai/kimi-k2.5-tee").is_ok());
+        assert!(validate_chutes_model("MOONSHOTAI/KIMI-K2.5-TEE").is_ok());
+        // Whitespace handling
+        assert!(validate_chutes_model("  moonshotai/Kimi-K2.5-TEE  ").is_ok());
+        // Any model with -TEE suffix is valid
+        assert!(validate_chutes_model("custom-model-TEE").is_ok());
+        assert!(validate_chutes_model("some-provider/my-model-TEE").is_ok());
+        assert!(validate_chutes_model("another-model-tee").is_ok());
+        assert!(validate_chutes_model("UPPERCASE-MODEL-TEE").is_ok());
+        // Allowed special characters
+        assert!(validate_chutes_model("provider_name/model.v1-TEE").is_ok());
+        assert!(validate_chutes_model("my_custom_model-TEE").is_ok());
+    }
+
+    #[test]
+    fn test_validate_chutes_model_invalid() {
+        // Not a TEE model (no -TEE suffix)
+        assert!(validate_chutes_model("gpt-4").is_err());
+        assert!(validate_chutes_model("claude-3").is_err());
+        assert!(validate_chutes_model("some-model").is_err());
+
+        // TEE in wrong position (not at the end)
+        assert!(validate_chutes_model("model-TEE-v2").is_err());
+        assert!(validate_chutes_model("TEE-model").is_err());
+        assert!(validate_chutes_model("my-TEE-model-v1").is_err());
+
+        // Empty string
+        let result = validate_chutes_model("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot be empty"));
+
+        // Whitespace only
+        let result = validate_chutes_model("   ");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot be empty"));
+    }
+
+    // ===========================================
+    // SECURITY TESTS: Bypass attempt prevention
+    // ===========================================
+
+    #[test]
+    fn test_validate_chutes_model_null_byte_injection() {
+        // SECURITY: Null byte injection attack (CWE-626, CWE-158)
+        // Attacker tries to bypass TEE check by appending -TEE after a null byte
+        // C libraries would see only "gpt-4" but our validation would see "gpt-4\0-TEE"
+        let malicious_with_null = "gpt-4\0-TEE";
+        let result = validate_chutes_model(malicious_with_null);
+        assert!(result.is_err(), "Null byte injection should be rejected");
+        assert!(
+            result.unwrap_err().contains("invalid characters"),
+            "Error should mention invalid characters"
+        );
+
+        // More null byte attack variants
+        assert!(validate_chutes_model("claude-3\0-TEE").is_err());
+        assert!(validate_chutes_model("\0model-TEE").is_err());
+        assert!(validate_chutes_model("model\0-TEE\0").is_err());
+    }
+
+    #[test]
+    fn test_validate_chutes_model_control_characters() {
+        // SECURITY: Control character injection
+        // Characters below 0x20 (space) could cause parsing issues
+        assert!(validate_chutes_model("model\t-TEE").is_err()); // Tab
+        assert!(validate_chutes_model("model\n-TEE").is_err()); // Newline
+        assert!(validate_chutes_model("model\r-TEE").is_err()); // Carriage return
+        assert!(validate_chutes_model("model\x1b-TEE").is_err()); // Escape
+        assert!(validate_chutes_model("model\x07-TEE").is_err()); // Bell
+    }
+
+    #[test]
+    fn test_validate_chutes_model_unicode_attacks() {
+        // SECURITY: Unicode homoglyph attacks
+        // Attacker tries to use visually similar Unicode characters
+
+        // Cyrillic 'Е' (U+0415) looks like Latin 'E' but is different
+        assert!(validate_chutes_model("model-TЕЕ").is_err()); // Cyrillic E
+
+        // Fullwidth characters
+        assert!(validate_chutes_model("model-ＴＥＥ").is_err()); // Fullwidth TEE
+
+        // Other Unicode tricks
+        assert!(validate_chutes_model("model-TEE\u{200B}").is_err()); // Zero-width space at end
+        assert!(validate_chutes_model("model\u{FEFF}-TEE").is_err()); // BOM in middle
+
+        // Combining characters
+        assert!(validate_chutes_model("model-TE\u{0301}E").is_err()); // E with combining acute
+    }
+
+    #[test]
+    fn test_validate_chutes_model_special_characters() {
+        // SECURITY: Reject potentially dangerous special characters
+        // These could cause issues in shell commands, URLs, or other contexts
+
+        assert!(validate_chutes_model("model;-TEE").is_err()); // Semicolon (command separator)
+        assert!(validate_chutes_model("model&-TEE").is_err()); // Ampersand
+        assert!(validate_chutes_model("model|-TEE").is_err()); // Pipe
+        assert!(validate_chutes_model("model`-TEE").is_err()); // Backtick
+        assert!(validate_chutes_model("model$-TEE").is_err()); // Dollar sign
+        assert!(validate_chutes_model("model'-TEE").is_err()); // Single quote
+        assert!(validate_chutes_model("model\"-TEE").is_err()); // Double quote
+        assert!(validate_chutes_model("model<-TEE").is_err()); // Less than
+        assert!(validate_chutes_model("model>-TEE").is_err()); // Greater than
+        assert!(validate_chutes_model("model(-TEE").is_err()); // Parenthesis
+        assert!(validate_chutes_model("model)-TEE").is_err());
+        assert!(validate_chutes_model("model{-TEE").is_err()); // Braces
+        assert!(validate_chutes_model("model}-TEE").is_err());
+        assert!(validate_chutes_model("model[-TEE").is_err()); // Brackets
+        assert!(validate_chutes_model("model]-TEE").is_err());
+        assert!(validate_chutes_model("model\\-TEE").is_err()); // Backslash
+        assert!(validate_chutes_model("model!-TEE").is_err()); // Exclamation
+        assert!(validate_chutes_model("model@-TEE").is_err()); // At sign
+        assert!(validate_chutes_model("model#-TEE").is_err()); // Hash
+        assert!(validate_chutes_model("model%-TEE").is_err()); // Percent
+        assert!(validate_chutes_model("model^-TEE").is_err()); // Caret
+        assert!(validate_chutes_model("model*-TEE").is_err()); // Asterisk
+        assert!(validate_chutes_model("model=-TEE").is_err()); // Equals
+        assert!(validate_chutes_model("model+-TEE").is_err()); // Plus
+        assert!(validate_chutes_model("model~-TEE").is_err()); // Tilde
+        assert!(validate_chutes_model("model?-TEE").is_err()); // Question mark
+        assert!(validate_chutes_model("model:-TEE").is_err()); // Colon
+        assert!(validate_chutes_model("model,-TEE").is_err()); // Comma
+        assert!(validate_chutes_model("model -TEE").is_err()); // Space in middle
+    }
+
+    #[test]
+    fn test_validate_chutes_model_allowed_characters() {
+        // Verify that only allowed characters pass
+        // Allowed: a-z, A-Z, 0-9, hyphen (-), underscore (_), dot (.), forward slash (/)
+
+        // All allowed characters
+        assert!(validate_chutes_model("abc123-TEE").is_ok());
+        assert!(validate_chutes_model("ABC123-TEE").is_ok());
+        assert!(validate_chutes_model("model_name-TEE").is_ok());
+        assert!(validate_chutes_model("model.v1-TEE").is_ok());
+        assert!(validate_chutes_model("provider/model-TEE").is_ok());
+        assert!(validate_chutes_model("my-model-TEE").is_ok());
+        assert!(validate_chutes_model("Provider123/Model_v1.0-TEE").is_ok());
+    }
+
+    #[test]
+    fn test_validate_chutes_model_error_message() {
+        let result = validate_chutes_model("invalid-model");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Error message should mention the default model
+        assert!(err.contains(DEFAULT_CHUTES_MODEL));
+        assert!(err.contains("-TEE"));
+    }
+
+    #[test]
+    fn test_provider_allows_custom_models() {
+        // All providers allow custom models
+        assert!(provider_allows_custom_models("chutes"));
+        assert!(provider_allows_custom_models("Chutes"));
+        assert!(provider_allows_custom_models("CHUTES"));
+        assert!(provider_allows_custom_models("cortex"));
+        assert!(provider_allows_custom_models("openai"));
+        assert!(provider_allows_custom_models("anthropic"));
+    }
+
+    #[test]
+    fn test_default_chutes_model() {
+        // Verify the default model is a valid TEE model
+        assert!(DEFAULT_CHUTES_MODEL.to_uppercase().ends_with("-TEE"));
+        assert_eq!(DEFAULT_CHUTES_MODEL, "moonshotai/Kimi-K2.5-TEE");
+        // Verify the default model passes our own validation
+        assert!(
+            validate_chutes_model(DEFAULT_CHUTES_MODEL).is_ok(),
+            "Default Chutes model must pass validation"
+        );
+    }
 }

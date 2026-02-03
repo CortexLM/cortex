@@ -18,7 +18,10 @@ pub use types::{ModelAlias, ModelPreset, ModelResolution};
 pub use constants::{DEFAULT_MODEL, DEFAULT_MODELS, DEFAULT_PROVIDER};
 
 // Re-export preset data and helpers
-pub use presets::{MODEL_PRESETS, get_model_preset, get_models_for_provider};
+pub use presets::{
+    DEFAULT_CHUTES_MODEL, MODEL_PRESETS, get_model_preset, get_models_for_provider,
+    provider_allows_custom_models, validate_chutes_model,
+};
 
 // Re-export alias data and helpers
 pub use aliases::{MODEL_ALIASES, list_model_aliases, resolve_model_alias};

@@ -548,22 +548,57 @@ impl EventLoop {
     pub(super) fn handle_set_value(&mut self, key: &str, value: &str) {
         match key {
             "model" => {
-                self.app_state.model = value.to_string();
-                if let Some(pm) = &self.provider_manager
+                // Check validation result first, storing any error
+                let validation_result: Result<(), String> = if let Some(pm) = &self.provider_manager
                     && let Ok(mut manager) = pm.try_write()
                 {
-                    let _ = manager.set_model(value);
+                    manager.set_model(value).map_err(|e| e.to_string())
+                } else {
+                    Ok(())
+                };
+
+                // Handle validation result after releasing the borrow
+                if let Err(e) = validation_result {
+                    self.add_system_message(&format!("Cannot set model: {}", e));
+                    return;
                 }
+
+                // Only update state if validation passed
+                self.app_state.model = value.to_string();
                 self.update_session_model(value);
                 self.add_system_message(&format!("Model set to: {}", value));
             }
             "provider" => {
-                self.app_state.provider = value.to_string();
-                if let Some(pm) = &self.provider_manager
+                // Check validation result first, storing any error and new model
+                let validation_result: Result<Option<String>, String> = if let Some(pm) =
+                    &self.provider_manager
                     && let Ok(mut manager) = pm.try_write()
                 {
-                    let _ = manager.set_provider(value);
+                    match manager.set_provider(value) {
+                        Ok(()) => {
+                            // Get updated model after provider switch
+                            Ok(Some(manager.current_model().to_string()))
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                } else {
+                    Ok(None)
+                };
+
+                // Handle validation result after releasing the borrow
+                match validation_result {
+                    Err(e) => {
+                        self.add_system_message(&format!("Cannot set provider: {}", e));
+                        return;
+                    }
+                    Ok(Some(new_model)) => {
+                        // Update model to reflect any changes made during provider switch
+                        self.app_state.model = new_model;
+                    }
+                    Ok(None) => {}
                 }
+
+                self.app_state.provider = value.to_string();
                 self.add_system_message(&format!("Provider set to: {}", value));
             }
             "session_name" => {
