@@ -16,6 +16,7 @@ use tokio::sync::RwLock;
 use wasmtime::*;
 
 use crate::api::{PluginContext, PluginHostFunctions};
+use crate::host::{self, HasHostState, PluginHostState};
 use crate::manifest::PluginManifest;
 use crate::plugin::{Plugin, PluginInfo, PluginState};
 use crate::{PluginError, Result};
@@ -46,6 +47,7 @@ const MAX_MEMORIES: u32 = 1;
 /// WASM runtime for executing plugins.
 pub struct WasmRuntime {
     engine: Engine,
+    linker: Linker<PluginStoreState>,
 }
 
 impl WasmRuntime {
@@ -56,9 +58,18 @@ impl WasmRuntime {
     /// The runtime is configured with:
     /// - Fuel consumption for CPU limiting
     /// - Epoch-based interruption for timeout handling
+    ///
+    /// # Note on async_support
+    ///
+    /// Async support is disabled because all host functions use synchronous
+    /// `std::sync::Mutex` instead of async locks. This prevents potential
+    /// deadlocks when host functions are called from wasmtime's sync context.
+    /// See `host.rs` for the detailed rationale.
     pub fn new() -> Result<Self> {
         let mut config = Config::new();
-        config.async_support(true);
+        // SECURITY: Disable async support - host functions are synchronous to prevent
+        // deadlock risks when using Mutex in WASM callbacks. See host.rs documentation.
+        config.async_support(false);
 
         // SECURITY: Enable fuel consumption for CPU limiting
         // This prevents infinite loops and excessive CPU usage
@@ -70,7 +81,15 @@ impl WasmRuntime {
 
         let engine = Engine::new(&config)?;
 
-        Ok(Self { engine })
+        // Create linker with host functions registered
+        let linker = host::create_linker::<PluginStoreState>(&engine)?;
+
+        Ok(Self { engine, linker })
+    }
+
+    /// Get the linker reference.
+    pub fn linker(&self) -> &Linker<PluginStoreState> {
+        &self.linker
     }
 
     /// Compile a WASM module from bytes.
@@ -167,13 +186,28 @@ impl WasmPlugin {
     /// - Memory limit: Maximum 16MB per instance
     /// - Table/instance limits for additional sandboxing
     pub async fn call_function(&self, name: &str) -> Result<i32> {
+        let context = PluginContext::new(self.wasm_path.parent().unwrap_or(Path::new(".")));
+        self.call_function_with_context(name, context).await
+    }
+
+    /// Call a WASM function with execution context.
+    ///
+    /// This method uses the linker with host functions, allowing the WASM
+    /// plugin to call back into the host for logging, widgets, etc.
+    pub async fn call_function_with_context(
+        &self,
+        name: &str,
+        context: PluginContext,
+    ) -> Result<i32> {
         let module = self
             .module
             .as_ref()
             .ok_or_else(|| PluginError::execution_error(&self.info.id, "Plugin not loaded"))?;
 
-        // SECURITY: Create store with resource limiter
-        let mut store = Store::new(self.runtime.engine(), PluginStoreLimits::default());
+        // Create host state for this invocation
+        let host_state = PluginHostState::new(&self.info.id, context);
+        let store_state = PluginStoreState::new(host_state);
+        let mut store = Store::new(self.runtime.engine(), store_state);
 
         // SECURITY: Set fuel limit to prevent infinite loops and excessive CPU usage
         store.set_fuel(DEFAULT_FUEL_LIMIT).map_err(|e| {
@@ -181,9 +215,13 @@ impl WasmPlugin {
         })?;
 
         // SECURITY: Configure the store's resource limiter
-        store.limiter(|limits| limits);
+        store.limiter(|state| state);
 
-        let instance = Instance::new(&mut store, module, &[])
+        // Use the linker to instantiate the module with host functions
+        let instance = self
+            .runtime
+            .linker()
+            .instantiate(&mut store, module)
             .map_err(|e| PluginError::execution_error(&self.info.id, e.to_string()))?;
 
         let func = instance
@@ -197,6 +235,50 @@ impl WasmPlugin {
 
         func.call(&mut store, ())
             .map_err(|e| PluginError::execution_error(&self.info.id, e.to_string()))
+    }
+
+    /// Call a WASM function and retrieve the host state after execution.
+    pub async fn call_and_get_state(
+        &self,
+        name: &str,
+        context: PluginContext,
+    ) -> Result<(i32, PluginHostState)> {
+        let module = self
+            .module
+            .as_ref()
+            .ok_or_else(|| PluginError::execution_error(&self.info.id, "Plugin not loaded"))?;
+
+        let host_state = PluginHostState::new(&self.info.id, context);
+        let store_state = PluginStoreState::new(host_state);
+        let mut store = Store::new(self.runtime.engine(), store_state);
+
+        store.set_fuel(DEFAULT_FUEL_LIMIT).map_err(|e| {
+            PluginError::execution_error(&self.info.id, format!("Failed to set fuel: {}", e))
+        })?;
+
+        store.limiter(|state| state);
+
+        let instance = self
+            .runtime
+            .linker()
+            .instantiate(&mut store, module)
+            .map_err(|e| PluginError::execution_error(&self.info.id, e.to_string()))?;
+
+        let func = instance
+            .get_typed_func::<(), i32>(&mut store, name)
+            .map_err(|e| {
+                PluginError::execution_error(
+                    &self.info.id,
+                    format!("Function '{}' not found or wrong signature: {}", name, e),
+                )
+            })?;
+
+        let result = func
+            .call(&mut store, ())
+            .map_err(|e| PluginError::execution_error(&self.info.id, e.to_string()))?;
+
+        let host_state = store.into_data().host_state;
+        Ok((result, host_state))
     }
 }
 
@@ -279,6 +361,62 @@ impl ResourceLimiter for PluginStoreLimits {
     /// Returns the maximum number of memories.
     fn memories(&self) -> usize {
         MAX_MEMORIES as usize
+    }
+}
+
+/// Combined store state that includes both host state and resource limits.
+#[derive(Debug, Clone)]
+pub struct PluginStoreState {
+    /// Host state for plugin communication
+    pub host_state: PluginHostState,
+    /// Resource limits
+    limits: PluginStoreLimits,
+}
+
+impl PluginStoreState {
+    /// Create a new store state with the given host state.
+    pub fn new(host_state: PluginHostState) -> Self {
+        Self {
+            host_state,
+            limits: PluginStoreLimits::default(),
+        }
+    }
+}
+
+impl HasHostState for PluginStoreState {
+    fn host_state(&self) -> &PluginHostState {
+        &self.host_state
+    }
+    fn host_state_mut(&mut self) -> &mut PluginHostState {
+        &mut self.host_state
+    }
+}
+
+impl ResourceLimiter for PluginStoreState {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
+        self.limits.memory_growing(current, desired, maximum)
+    }
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
+        self.limits.table_growing(current, desired, maximum)
+    }
+    fn instances(&self) -> usize {
+        self.limits.instances()
+    }
+    fn tables(&self) -> usize {
+        self.limits.tables()
+    }
+    fn memories(&self) -> usize {
+        self.limits.memories()
     }
 }
 

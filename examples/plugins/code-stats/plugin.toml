@@ -1,0 +1,87 @@
+# Code Stats Plugin - An advanced Cortex plugin example
+#
+# This plugin demonstrates advanced plugin capabilities:
+# - Multiple commands with different functionalities
+# - Multiple hooks for tracking file operations
+# - UI widget for status bar display
+# - Persistent storage across sessions
+
+# Top-level capabilities (before [plugin] section)
+capabilities = ["commands", "hooks", "config", "events"]
+
+# Permissions for file operations
+permissions = [
+    { read_file = { paths = ["**/*"] } },
+]
+
+[plugin]
+id = "code-stats"
+name = "Code Statistics Plugin"
+version = "1.0.0"
+description = "Tracks and displays code statistics including lines added, removed, and files modified"
+authors = ["Cortex Team <team@cortex.dev>"]
+homepage = "https://github.com/cortex/examples/plugins/code-stats"
+license = "MIT"
+min_cortex_version = "0.5.0"
+keywords = ["statistics", "metrics", "productivity", "advanced", "demo"]
+
+# Command definitions
+[[commands]]
+name = "stats"
+aliases = ["statistics", "metrics"]
+description = "Display current session code statistics"
+usage = "/stats"
+category = "analytics"
+
+[[commands]]
+name = "stats-reset"
+aliases = ["reset-stats"]
+description = "Reset all statistics counters to zero"
+usage = "/stats-reset"
+category = "analytics"
+
+[[commands]]
+name = "stats-export"
+aliases = ["export-stats"]
+description = "Export statistics to JSON format"
+usage = "/stats-export [filename]"
+category = "analytics"
+
+[[commands.args]]
+name = "filename"
+description = "Output filename for exported stats (defaults to 'stats.json')"
+required = false
+default = "stats.json"
+arg_type = "string"
+
+# Hook definitions
+[[hooks]]
+hook_type = "file_operation_after"
+priority = 50
+function = "hook_file_operation_after"
+
+[[hooks]]
+hook_type = "session_end"
+priority = 100
+function = "hook_session_end"
+
+[[hooks]]
+hook_type = "widget_register"
+priority = 50
+function = "hook_widget_register"
+
+# Configuration schema
+[config]
+auto_save = { description = "Automatically save stats on session end", type = "boolean", default = true, required = false }
+display_format = { description = "Format for displaying stats (compact, detailed)", type = "string", default = "compact", required = false }
+track_by_language = { description = "Track statistics per programming language", type = "boolean", default = true, required = false }
+
+[config.display_format.validation]
+enum_values = ["compact", "detailed"]
+
+# WASM module settings
+[wasm]
+memory_pages = 256
+timeout_ms = 10000
+wasi_enabled = true
+wasi_caps = ["stdout", "stderr", "clocks"]

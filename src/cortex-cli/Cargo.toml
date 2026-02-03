@@ -72,6 +72,13 @@ scraper = "0.25"
 # For agent reference extraction from messages
 regex = { workspace = true }
 
+# For plugin dev --watch file watching
+notify = { workspace = true }
+
+# For plugin publish tar archive creation
+tar = "0.4"
+flate2 = "1.0"
+
 # For Ctrl+C handling and terminal cleanup
 ctrlc = { version = "3.4", features = ["termination"] }
 
