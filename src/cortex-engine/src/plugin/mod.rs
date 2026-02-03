@@ -71,6 +71,7 @@
 
 pub mod config;
 pub mod hooks;
+pub mod integration;
 pub mod loader;
 pub mod manager;
 pub mod types;
@@ -80,6 +81,9 @@ pub use config::{PluginConfigBuilder, PluginConfigEntry, PluginSettings, Plugins
 pub use hooks::{
     CombinedHookResult, CompactionHookContext, ErrorHookContext, HookDispatcher, HookRegistration,
     MessageHookContext, PermissionHookContext, SessionHookContext, ToolHookContext,
+};
+pub use integration::{
+    PluginIntegration, PluginIntegrationBuilder, SessionHookResult, ToolHookResult,
 };
 pub use loader::{
     DiscoveredPlugin, LoadedPluginInfo, PluginFormat, PluginLoadError, PluginLoadResult,
