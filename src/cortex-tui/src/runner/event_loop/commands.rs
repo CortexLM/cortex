@@ -391,6 +391,24 @@ impl EventLoop {
                 self.handle_history();
             }
             "models:fetch-and-pick" => {
+                // First, fetch models from the backend to populate the cache
+                if let Some(pm) = &self.provider_manager {
+                    // Need to acquire write lock to call fetch_models()
+                    match pm.try_write() {
+                        Ok(mut manager) => {
+                            if let Err(e) = manager.fetch_models().await {
+                                tracing::warn!("Failed to fetch models: {}", e);
+                                self.app_state
+                                    .toasts
+                                    .warning("Could not fetch models, showing cached list");
+                            }
+                        }
+                        Err(_) => {
+                            tracing::warn!("Could not acquire write lock for provider manager");
+                        }
+                    }
+                }
+                // Now open the modal with freshly fetched (or cached) models
                 self.handle_open_modal(ModalType::ModelPicker).await;
             }
             _ => {
