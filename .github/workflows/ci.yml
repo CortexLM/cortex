@@ -133,8 +133,8 @@ jobs:
         if: "!contains(matrix.runner, 'blacksmith')"
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: "rust-test-${{ matrix.name }}"
-          shared-key: ${{ needs.setup-cache.outputs.cache-key }}
+          prefix-key: "v1-rust-test"
+          shared-key: "${{ matrix.name }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}"
       
       - name: Run tests
         run: cargo +nightly test --workspace --all-features
@@ -181,8 +181,8 @@ jobs:
         if: "!contains(matrix.runner, 'blacksmith')"
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: "rust-build-${{ matrix.name }}"
-          shared-key: ${{ needs.setup-cache.outputs.cache-key }}
+          prefix-key: "v1-rust-build"
+          shared-key: "${{ matrix.name }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}"
       
       - name: Check build
         run: cargo +nightly check --workspace --all-features
