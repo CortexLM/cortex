@@ -467,6 +467,26 @@ impl EventLoop {
             return;
         }
 
+        // Check if this is an insufficient balance error (402 Payment Required)
+        if error_lower.contains("402")
+            || error_lower.contains("insufficient_balance")
+            || error_lower.contains("insufficient token balance")
+            || error_lower.contains("payment required")
+        {
+            self.add_system_message(
+                "Error: Insufficient token balance to continue the conversation.\n\n\
+                 Please recharge your account at: https://app.cortex.foundation\n\n\
+                 Once recharged, you can continue your conversation.",
+            );
+            self.app_state
+                .toasts
+                .error("Insufficient balance. Please recharge at app.cortex.foundation");
+            self.stream_controller.reset();
+            self.streaming_rx = None;
+            self.streaming_task = None;
+            return;
+        }
+
         // Check if this is a rate limit / usage limit error
         if error_lower.contains("rate limit")
             || error_lower.contains("usage limit")
