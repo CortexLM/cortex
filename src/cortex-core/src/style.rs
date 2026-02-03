@@ -362,9 +362,17 @@ impl CortexStyle {
         Style::default().fg(SKY_BLUE)
     }
 
-    /// System message style: error red italic text for backend error messages
+    /// System message style: muted italic text for informational system messages
     #[inline]
     pub fn system_message() -> Style {
+        Style::default()
+            .fg(TEXT_MUTED)
+            .add_modifier(Modifier::ITALIC)
+    }
+
+    /// Error message style: red italic text for backend error messages
+    #[inline]
+    pub fn error_message() -> Style {
         Style::default().fg(ERROR).add_modifier(Modifier::ITALIC)
     }
 
@@ -528,6 +536,7 @@ mod tests {
         let _ = CortexStyle::user_message();
         let _ = CortexStyle::assistant_message();
         let _ = CortexStyle::system_message();
+        let _ = CortexStyle::error_message();
         let _ = CortexStyle::code();
         let _ = CortexStyle::border();
         let _ = CortexStyle::border_focused();
