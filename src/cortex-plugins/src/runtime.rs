@@ -58,9 +58,18 @@ impl WasmRuntime {
     /// The runtime is configured with:
     /// - Fuel consumption for CPU limiting
     /// - Epoch-based interruption for timeout handling
+    ///
+    /// # Note on async_support
+    ///
+    /// Async support is disabled because all host functions use synchronous
+    /// `std::sync::Mutex` instead of async locks. This prevents potential
+    /// deadlocks when host functions are called from wasmtime's sync context.
+    /// See `host.rs` for the detailed rationale.
     pub fn new() -> Result<Self> {
         let mut config = Config::new();
-        config.async_support(true);
+        // SECURITY: Disable async support - host functions are synchronous to prevent
+        // deadlock risks when using Mutex in WASM callbacks. See host.rs documentation.
+        config.async_support(false);
 
         // SECURITY: Enable fuel consumption for CPU limiting
         // This prevents infinite loops and excessive CPU usage
