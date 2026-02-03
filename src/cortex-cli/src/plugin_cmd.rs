@@ -1778,14 +1778,13 @@ async fn run_validate(args: PluginValidateArgs) -> Result<()> {
         .get("description")
         .and_then(|v| v.as_str())
         .is_none()
+        && args.verbose
     {
-        if args.verbose {
-            result.issues.push(ValidationIssue {
-                severity: ValidationSeverity::Info,
-                message: "Consider adding a description".to_string(),
-                field: Some("description".to_string()),
-            });
-        }
+        result.issues.push(ValidationIssue {
+            severity: ValidationSeverity::Info,
+            message: "Consider adding a description".to_string(),
+            field: Some("description".to_string()),
+        });
     }
 
     // Check for WASM file
@@ -1835,23 +1834,21 @@ async fn run_validate(args: PluginValidateArgs) -> Result<()> {
     }
 
     // Validate permissions if present
-    if let Some(permissions) = manifest
+    if let Some(perms_array) = manifest
         .get("permissions")
         .or_else(|| plugin_section.get("permissions"))
+        .and_then(|p| p.as_array())
     {
-        if let Some(perms_array) = permissions.as_array() {
-            validate_permissions(perms_array, &mut result, args.verbose);
-        }
+        validate_permissions(perms_array, &mut result, args.verbose);
     }
 
     // Validate capabilities if present
-    if let Some(capabilities) = manifest
+    if let Some(caps_array) = manifest
         .get("capabilities")
         .or_else(|| plugin_section.get("capabilities"))
+        .and_then(|c| c.as_array())
     {
-        if let Some(caps_array) = capabilities.as_array() {
-            validate_capabilities(caps_array, &mut result, args.verbose);
-        }
+        validate_capabilities(caps_array, &mut result, args.verbose);
     }
 
     // Check for source files
@@ -1906,21 +1903,25 @@ fn validate_permissions(permissions: &[toml::Value], result: &mut ValidationResu
                 }
 
                 // Check for overly broad permissions
-                if let Some(value) = table.get(key) {
-                    if let Some(paths) = value.get("paths").and_then(|p| p.as_array()) {
-                        for path in paths {
-                            if let Some(p) = path.as_str() {
-                                if p == "**/*" || p == "**" || p == "*" {
-                                    result.issues.push(ValidationIssue {
-                                        severity: ValidationSeverity::Warning,
-                                        message: format!(
-                                            "Overly broad permission pattern '{}' for {}. Consider restricting to specific paths.",
-                                            p, key
-                                        ),
-                                        field: Some("permissions".to_string()),
-                                    });
-                                }
-                            }
+                if let Some(paths) = table
+                    .get(key)
+                    .and_then(|v| v.get("paths"))
+                    .and_then(|p| p.as_array())
+                {
+                    for path in paths {
+                        let is_overly_broad = path
+                            .as_str()
+                            .map(|p| p == "**/*" || p == "**" || p == "*")
+                            .unwrap_or(false);
+                        if is_overly_broad {
+                            result.issues.push(ValidationIssue {
+                                severity: ValidationSeverity::Warning,
+                                message: format!(
+                                    "Overly broad permission pattern '{}' for {}. Consider restricting to specific paths.",
+                                    path.as_str().unwrap_or(""), key
+                                ),
+                                field: Some("permissions".to_string()),
+                            });
                         }
                     }
                 }
@@ -1955,15 +1956,12 @@ fn validate_capabilities(
         "network",
     ];
 
-    let mut unknown_caps = Vec::new();
-
-    for cap in capabilities {
-        if let Some(cap_str) = cap.as_str() {
-            if !KNOWN_CAPABILITIES.contains(&cap_str) {
-                unknown_caps.push(cap_str.to_string());
-            }
-        }
-    }
+    let unknown_caps: Vec<String> = capabilities
+        .iter()
+        .filter_map(|cap| cap.as_str())
+        .filter(|cap_str| !KNOWN_CAPABILITIES.contains(cap_str))
+        .map(String::from)
+        .collect();
 
     if !unknown_caps.is_empty() {
         result.issues.push(ValidationIssue {
@@ -2096,26 +2094,27 @@ async fn run_publish(args: PluginPublishArgs) -> Result<()> {
         run_plugin_build(&plugin_dir, false, None)?;
     }
 
-    // Verify WASM exists after build
+    // Verify WASM exists after build, try to copy from target dir if needed
     if !wasm_path.exists() {
-        // Try to copy from target
         let target_wasm = plugin_dir
             .join("target")
             .join("wasm32-wasi")
             .join("release");
 
-        if target_wasm.exists() {
-            if let Ok(entries) = std::fs::read_dir(&target_wasm) {
-                for entry in entries.flatten() {
-                    if entry
-                        .path()
-                        .extension()
-                        .map(|e| e == "wasm")
-                        .unwrap_or(false)
-                    {
-                        std::fs::copy(entry.path(), &wasm_path)?;
-                        break;
-                    }
+        if let Some(entries) = target_wasm
+            .exists()
+            .then(|| std::fs::read_dir(&target_wasm).ok())
+            .flatten()
+        {
+            for entry in entries.flatten() {
+                let is_wasm = entry
+                    .path()
+                    .extension()
+                    .map(|e| e == "wasm")
+                    .unwrap_or(false);
+                if is_wasm {
+                    std::fs::copy(entry.path(), &wasm_path)?;
+                    break;
                 }
             }
         }

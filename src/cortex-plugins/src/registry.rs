@@ -508,10 +508,7 @@ impl PluginRegistry {
                     if Self::is_private_ipv4(ip) {
                         return Err(PluginError::validation_error(
                             "download_url",
-                            format!(
-                                "Download URL points to private/internal IP address: {}",
-                                ip
-                            ),
+                            format!("Download URL points to private/internal IP address: {}", ip),
                         ));
                     }
                 }
@@ -550,34 +547,31 @@ impl PluginRegistry {
         // Block dangerous ports commonly used for internal services
         if let Some(port) = parsed.port() {
             const DANGEROUS_PORTS: &[u16] = &[
-                22,   // SSH
-                23,   // Telnet
-                25,   // SMTP
-                135,  // RPC
-                137,  // NetBIOS
-                138,  // NetBIOS
-                139,  // NetBIOS
-                445,  // SMB
-                1433, // MSSQL
-                1521, // Oracle
-                3306, // MySQL
-                3389, // RDP
-                5432, // PostgreSQL
-                5900, // VNC
-                6379, // Redis
-                8080, // Common proxy
-                8443, // Alt HTTPS
-                9200, // Elasticsearch
+                22,    // SSH
+                23,    // Telnet
+                25,    // SMTP
+                135,   // RPC
+                137,   // NetBIOS
+                138,   // NetBIOS
+                139,   // NetBIOS
+                445,   // SMB
+                1433,  // MSSQL
+                1521,  // Oracle
+                3306,  // MySQL
+                3389,  // RDP
+                5432,  // PostgreSQL
+                5900,  // VNC
+                6379,  // Redis
+                8080,  // Common proxy
+                8443,  // Alt HTTPS
+                9200,  // Elasticsearch
                 27017, // MongoDB
             ];
 
             if DANGEROUS_PORTS.contains(&port) {
                 return Err(PluginError::validation_error(
                     "download_url",
-                    format!(
-                        "Download URL uses a potentially dangerous port: {}",
-                        port
-                    ),
+                    format!("Download URL uses a potentially dangerous port: {}", port),
                 ));
             }
         }
@@ -1123,23 +1117,33 @@ mod tests {
 
         // Private class A (10.0.0.0/8)
         assert!(PluginRegistry::validate_download_url("https://10.0.0.1/plugin.wasm").is_err());
-        assert!(PluginRegistry::validate_download_url("https://10.255.255.255/plugin.wasm").is_err());
+        assert!(
+            PluginRegistry::validate_download_url("https://10.255.255.255/plugin.wasm").is_err()
+        );
 
         // Private class B (172.16.0.0/12)
         assert!(PluginRegistry::validate_download_url("https://172.16.0.1/plugin.wasm").is_err());
-        assert!(PluginRegistry::validate_download_url("https://172.31.255.255/plugin.wasm").is_err());
+        assert!(
+            PluginRegistry::validate_download_url("https://172.31.255.255/plugin.wasm").is_err()
+        );
 
         // Private class C (192.168.0.0/16)
         assert!(PluginRegistry::validate_download_url("https://192.168.0.1/plugin.wasm").is_err());
-        assert!(PluginRegistry::validate_download_url("https://192.168.255.255/plugin.wasm").is_err());
+        assert!(
+            PluginRegistry::validate_download_url("https://192.168.255.255/plugin.wasm").is_err()
+        );
 
         // Link-local / AWS metadata endpoint
-        assert!(PluginRegistry::validate_download_url("https://169.254.169.254/plugin.wasm").is_err());
+        assert!(
+            PluginRegistry::validate_download_url("https://169.254.169.254/plugin.wasm").is_err()
+        );
         assert!(PluginRegistry::validate_download_url("https://169.254.0.1/plugin.wasm").is_err());
 
         // Carrier-grade NAT (100.64.0.0/10)
         assert!(PluginRegistry::validate_download_url("https://100.64.0.1/plugin.wasm").is_err());
-        assert!(PluginRegistry::validate_download_url("https://100.127.255.255/plugin.wasm").is_err());
+        assert!(
+            PluginRegistry::validate_download_url("https://100.127.255.255/plugin.wasm").is_err()
+        );
     }
 
     #[test]
@@ -1159,19 +1163,29 @@ mod tests {
     fn test_ssrf_blocks_localhost_domains() {
         assert!(PluginRegistry::validate_download_url("https://localhost/plugin.wasm").is_err());
         assert!(PluginRegistry::validate_download_url("https://test.local/plugin.wasm").is_err());
-        assert!(PluginRegistry::validate_download_url("https://internal.internal/plugin.wasm").is_err());
+        assert!(
+            PluginRegistry::validate_download_url("https://internal.internal/plugin.wasm").is_err()
+        );
     }
 
     #[test]
     fn test_ssrf_blocks_dangerous_ports() {
         // SSH
-        assert!(PluginRegistry::validate_download_url("https://example.com:22/plugin.wasm").is_err());
+        assert!(
+            PluginRegistry::validate_download_url("https://example.com:22/plugin.wasm").is_err()
+        );
         // MySQL
-        assert!(PluginRegistry::validate_download_url("https://example.com:3306/plugin.wasm").is_err());
+        assert!(
+            PluginRegistry::validate_download_url("https://example.com:3306/plugin.wasm").is_err()
+        );
         // Redis
-        assert!(PluginRegistry::validate_download_url("https://example.com:6379/plugin.wasm").is_err());
+        assert!(
+            PluginRegistry::validate_download_url("https://example.com:6379/plugin.wasm").is_err()
+        );
         // MongoDB
-        assert!(PluginRegistry::validate_download_url("https://example.com:27017/plugin.wasm").is_err());
+        assert!(
+            PluginRegistry::validate_download_url("https://example.com:27017/plugin.wasm").is_err()
+        );
     }
 
     #[test]
@@ -1187,14 +1201,28 @@ mod tests {
     #[test]
     fn test_ssrf_allows_valid_https_urls() {
         assert!(PluginRegistry::validate_download_url("https://example.com/plugin.wasm").is_ok());
-        assert!(PluginRegistry::validate_download_url("https://plugins.cortex.dev/v1/download/test-plugin.wasm").is_ok());
-        assert!(PluginRegistry::validate_download_url("https://github.com/user/repo/releases/download/v1.0.0/plugin.wasm").is_ok());
+        assert!(
+            PluginRegistry::validate_download_url(
+                "https://plugins.cortex.dev/v1/download/test-plugin.wasm"
+            )
+            .is_ok()
+        );
+        assert!(
+            PluginRegistry::validate_download_url(
+                "https://github.com/user/repo/releases/download/v1.0.0/plugin.wasm"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn test_ssrf_allows_standard_ports() {
-        assert!(PluginRegistry::validate_download_url("https://example.com:443/plugin.wasm").is_ok());
-        assert!(PluginRegistry::validate_download_url("https://example.com:8000/plugin.wasm").is_ok());
+        assert!(
+            PluginRegistry::validate_download_url("https://example.com:443/plugin.wasm").is_ok()
+        );
+        assert!(
+            PluginRegistry::validate_download_url("https://example.com:8000/plugin.wasm").is_ok()
+        );
     }
 
     // =========================================================================
