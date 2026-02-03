@@ -17,7 +17,10 @@ use crate::rollout::recorder::SessionMeta;
 use crate::summarization::SummarizationStrategy;
 
 use super::Session;
-use super::prompt::build_system_prompt;
+use super::prompt::{
+    USE_SKILL_BASED_PROMPT, auto_detect_skills_from_message, build_system_prompt,
+    build_system_prompt_with_skills, inject_skills,
+};
 
 impl Session {
     /// Handle an incoming submission.
@@ -122,7 +125,12 @@ impl Session {
                 // Update system prompt in existing message history
                 if let Some(msg) = self.messages.first_mut() {
                     if matches!(msg.role, crate::client::MessageRole::System) {
-                        *msg = Message::system(build_system_prompt(&self.config));
+                        let new_prompt = if USE_SKILL_BASED_PROMPT {
+                            build_system_prompt_with_skills(&self.config, &[])
+                        } else {
+                            build_system_prompt(&self.config)
+                        };
+                        *msg = Message::system(new_prompt);
                     }
                 }
             }
@@ -192,6 +200,29 @@ impl Session {
         }
 
         tracing::debug!("User message: {}", user_text);
+
+        // Auto-detect and inject skills based on the user's message (only on first message)
+        // This reduces context window usage by only loading relevant skills.
+        if USE_SKILL_BASED_PROMPT && self.turn_id == 1 {
+            let detected_skills = auto_detect_skills_from_message(&user_text);
+            if !detected_skills.is_empty() {
+                tracing::info!("Auto-detected skills for task: {:?}", detected_skills);
+
+                // Update the system prompt with detected skills
+                if let Some(msg) = self.messages.first_mut() {
+                    if matches!(msg.role, MessageRole::System) {
+                        if let Some(current_content) = msg.content.as_text() {
+                            let updated_prompt = inject_skills(current_content, &detected_skills);
+                            *msg = Message::system(updated_prompt);
+                            tracing::debug!(
+                                "Injected skills into system prompt: {:?}",
+                                detected_skills
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         // Track messages for potential redo functionality
         let _msg_start_idx = self.messages.len();

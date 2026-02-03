@@ -21,7 +21,7 @@ use crate::rollout::{RolloutRecorder, SESSIONS_SUBDIR, get_rollout_path, read_ro
 use crate::tools::ToolRouter;
 
 use super::Session;
-use super::prompt::build_system_prompt;
+use super::prompt::{USE_SKILL_BASED_PROMPT, build_system_prompt, build_system_prompt_with_skills};
 use super::types::{SessionHandle, SessionInfo, TokenCounter};
 
 impl Session {
@@ -64,8 +64,16 @@ impl Session {
         recorder.record_meta(&meta)?;
 
         // Initialize with system prompt
+        // Use skill-based minimal prompt by default to reduce context window usage.
+        // Skills will be loaded on-demand based on task requirements.
         let mut messages = Vec::new();
-        messages.push(Message::system(build_system_prompt(&config)));
+        let initial_prompt = if USE_SKILL_BASED_PROMPT {
+            // Start with the minimal base prompt - skills will be injected on first user message
+            build_system_prompt_with_skills(&config, &[])
+        } else {
+            build_system_prompt(&config)
+        };
+        messages.push(Message::system(initial_prompt));
 
         // Initialize snapshot manager
         let snapshot_dir = config
@@ -145,8 +153,15 @@ impl Session {
         let mut tool_router = ToolRouter::new();
 
         // Rebuild messages from events
+        // For resumed sessions, we still use the base prompt since skills might have been
+        // loaded during the previous session and we want consistency.
         let mut messages = Vec::new();
-        messages.push(Message::system(build_system_prompt(&config)));
+        let initial_prompt = if USE_SKILL_BASED_PROMPT {
+            build_system_prompt_with_skills(&config, &[])
+        } else {
+            build_system_prompt(&config)
+        };
+        messages.push(Message::system(initial_prompt));
 
         let events = get_events(&entries);
         for event_msg in events {
@@ -257,7 +272,12 @@ impl Session {
         let entries = read_rollout(&rollout_path)?;
 
         let mut messages = Vec::new();
-        messages.push(Message::system(build_system_prompt(&config)));
+        let initial_prompt = if USE_SKILL_BASED_PROMPT {
+            build_system_prompt_with_skills(&config, &[])
+        } else {
+            build_system_prompt(&config)
+        };
+        messages.push(Message::system(initial_prompt));
 
         let events = get_events(&entries);
 
