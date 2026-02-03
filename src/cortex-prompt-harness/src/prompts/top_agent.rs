@@ -1134,6 +1134,9 @@ pub const TOP_AGENT_SECTION_NAMES: &[&str] = &[
     "WEB_SEARCH",
     "MULTIPLE_TOOL_CALLS",
     "PROCESS_MANAGEMENT",
+    "CODE_EXECUTION",
+    "FILE_OPERATIONS",
+    "WEB_SEARCH_CAPABILITY",
 ];
 
 // =============================================================================
@@ -1166,6 +1169,9 @@ impl TopAgentSection {
 /// This builder allows dynamic construction of prompts by enabling/disabling
 /// sections, adding capability contexts, and customizing variables.
 ///
+/// All capability contexts (code execution, file operations, web search) are
+/// included as sections that can be enabled/disabled like any other section.
+///
 /// # Example
 ///
 /// ```rust
@@ -1184,12 +1190,6 @@ pub struct TopAgentPromptBuilder {
     sections: Vec<TopAgentSection>,
     /// Variables for template substitution.
     variables: HashMap<String, String>,
-    /// Enable code execution context.
-    code_execution: bool,
-    /// Enable file operations context.
-    file_operations: bool,
-    /// Enable web search context.
-    web_search: bool,
     /// Custom instructions to append.
     custom_instructions: Option<String>,
     /// Persona override.
@@ -1198,8 +1198,22 @@ pub struct TopAgentPromptBuilder {
 
 impl TopAgentPromptBuilder {
     /// Create a new builder with all sections enabled by default.
+    ///
+    /// All capability contexts (CODE_EXECUTION, FILE_OPERATIONS, WEB_SEARCH_CAPABILITY)
+    /// are disabled by default. Use `with_code_execution()`, `with_file_operations()`,
+    /// and `with_web_search()` to enable them.
     #[must_use]
     pub fn new() -> Self {
+        let mut code_exec_section = TopAgentSection::new("CODE_EXECUTION", CODE_EXECUTION_CONTEXT);
+        code_exec_section.enabled = false;
+
+        let mut file_ops_section = TopAgentSection::new("FILE_OPERATIONS", FILE_OPERATIONS_CONTEXT);
+        file_ops_section.enabled = false;
+
+        let mut web_search_section =
+            TopAgentSection::new("WEB_SEARCH_CAPABILITY", WEB_SEARCH_CONTEXT);
+        web_search_section.enabled = false;
+
         Self {
             sections: vec![
                 TopAgentSection::new("IDENTITY", SECTION_IDENTITY),
@@ -1224,11 +1238,11 @@ impl TopAgentPromptBuilder {
                 TopAgentSection::new("WEB_SEARCH", SECTION_WEB_SEARCH),
                 TopAgentSection::new("MULTIPLE_TOOL_CALLS", SECTION_MULTIPLE_TOOL_CALLS),
                 TopAgentSection::new("PROCESS_MANAGEMENT", SECTION_PROCESS_MANAGEMENT),
+                code_exec_section,
+                file_ops_section,
+                web_search_section,
             ],
             variables: HashMap::new(),
-            code_execution: false,
-            file_operations: false,
-            web_search: false,
             custom_instructions: None,
             persona: None,
         }
@@ -1271,25 +1285,22 @@ impl TopAgentPromptBuilder {
         self
     }
 
-    /// Enable code execution capability context.
+    /// Enable code execution capability context section.
     #[must_use]
-    pub fn with_code_execution(mut self) -> Self {
-        self.code_execution = true;
-        self
+    pub fn with_code_execution(self) -> Self {
+        self.with_section("CODE_EXECUTION")
     }
 
-    /// Enable file operations capability context.
+    /// Enable file operations capability context section.
     #[must_use]
-    pub fn with_file_operations(mut self) -> Self {
-        self.file_operations = true;
-        self
+    pub fn with_file_operations(self) -> Self {
+        self.with_section("FILE_OPERATIONS")
     }
 
-    /// Enable web search capability context.
+    /// Enable web search capability context section.
     #[must_use]
-    pub fn with_web_search(mut self) -> Self {
-        self.web_search = true;
-        self
+    pub fn with_web_search(self) -> Self {
+        self.with_section("WEB_SEARCH_CAPABILITY")
     }
 
     /// Add custom instructions to the end of the prompt.
@@ -1336,6 +1347,10 @@ impl TopAgentPromptBuilder {
     }
 
     /// Build the final prompt string.
+    ///
+    /// All enabled sections are included directly in the system prompt.
+    /// There are no conditional checks - each section is either included or not
+    /// based on whether it is enabled.
     #[must_use]
     pub fn build(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
@@ -1345,23 +1360,12 @@ impl TopAgentPromptBuilder {
             parts.push(persona.clone());
         }
 
-        // Add enabled sections
+        // Add all enabled sections directly to the system prompt
         for section in &self.sections {
             if section.enabled {
                 let content = self.render_template(&section.content);
                 parts.push(content);
             }
-        }
-
-        // Add capability contexts
-        if self.code_execution {
-            parts.push(CODE_EXECUTION_CONTEXT.to_string());
-        }
-        if self.file_operations {
-            parts.push(FILE_OPERATIONS_CONTEXT.to_string());
-        }
-        if self.web_search {
-            parts.push(WEB_SEARCH_CONTEXT.to_string());
         }
 
         // Add custom instructions
