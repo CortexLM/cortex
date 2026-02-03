@@ -84,7 +84,7 @@ pub mod tracker;
 
 // Re-exports
 pub use builder::SystemPromptBuilder;
-pub use context::{AgentConfig, PromptContext, TaskConfig};
+pub use context::{AgentConfig, PromptContext, TaskConfig, ToolDefinition};
 pub use notifications::{AgentNotification, NotificationKind, NotificationType, UpdateNotifier};
 pub use sections::{PromptSection, SectionPriority};
 pub use state::{AgentState, PromptState};

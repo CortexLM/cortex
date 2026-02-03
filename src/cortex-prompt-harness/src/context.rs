@@ -7,10 +7,42 @@
 //! - Active agent configuration
 //! - Current tasks and their states
 //! - Model and provider information
+//! - Available tools for dynamic injection
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+
+/// Definition of a tool for dynamic injection into system prompts.
+///
+/// Tools can be grouped by category (e.g., "Perception", "Action", "Cognition")
+/// and rendered as a markdown table in the prompt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolDefinition {
+    /// Tool name (e.g., "Read", "Write", "Shell").
+    pub name: String,
+    /// Tool function description.
+    pub description: String,
+    /// Optional category for grouping (e.g., "Perception", "Action", "Cognition").
+    pub category: Option<String>,
+}
+
+impl ToolDefinition {
+    /// Create a new tool definition with name and description.
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            category: None,
+        }
+    }
+
+    /// Set the tool's category for grouping.
+    pub fn with_category(mut self, category: impl Into<String>) -> Self {
+        self.category = Some(category.into());
+        self
+    }
+}
 
 /// Configuration for an agent within the prompt context.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -232,6 +264,8 @@ pub struct PromptContext {
     pub subagents: Vec<AgentConfig>,
     /// Current tasks.
     pub tasks: Vec<TaskConfig>,
+    /// Available tools for dynamic injection.
+    pub tools: Vec<ToolDefinition>,
     /// Custom instructions from user.
     pub custom_instructions: Option<String>,
     /// User name.
@@ -302,6 +336,18 @@ impl PromptContext {
     /// Add a task.
     pub fn add_task(mut self, task: TaskConfig) -> Self {
         self.tasks.push(task);
+        self
+    }
+
+    /// Add a single tool definition.
+    pub fn add_tool(mut self, tool: ToolDefinition) -> Self {
+        self.tools.push(tool);
+        self
+    }
+
+    /// Add multiple tool definitions at once.
+    pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+        self.tools.extend(tools);
         self
     }
 
@@ -423,5 +469,59 @@ mod tests {
         assert!(context.has_tasks());
         assert_eq!(context.active_task_count(), 2);
         assert_eq!(context.task_ids().len(), 2);
+    }
+
+    #[test]
+    fn test_tool_definition_new() {
+        let tool = ToolDefinition::new("Read", "Read file contents from the filesystem");
+
+        assert_eq!(tool.name, "Read");
+        assert_eq!(tool.description, "Read file contents from the filesystem");
+        assert!(tool.category.is_none());
+    }
+
+    #[test]
+    fn test_tool_definition_with_category() {
+        let tool = ToolDefinition::new("Read", "Read file contents")
+            .with_category("Perception");
+
+        assert_eq!(tool.name, "Read");
+        assert_eq!(tool.category, Some("Perception".to_string()));
+    }
+
+    #[test]
+    fn test_prompt_context_add_tool() {
+        let tool = ToolDefinition::new("Read", "Read files");
+        let context = PromptContext::new().add_tool(tool);
+
+        assert_eq!(context.tools.len(), 1);
+        assert_eq!(context.tools[0].name, "Read");
+    }
+
+    #[test]
+    fn test_prompt_context_with_tools() {
+        let tools = vec![
+            ToolDefinition::new("Read", "Read files").with_category("Perception"),
+            ToolDefinition::new("Write", "Write files").with_category("Action"),
+            ToolDefinition::new("Shell", "Execute shell commands").with_category("Action"),
+        ];
+        let context = PromptContext::new().with_tools(tools);
+
+        assert_eq!(context.tools.len(), 3);
+        assert_eq!(context.tools[0].name, "Read");
+        assert_eq!(context.tools[1].name, "Write");
+        assert_eq!(context.tools[2].name, "Shell");
+    }
+
+    #[test]
+    fn test_prompt_context_combined_tools() {
+        let initial_tools = vec![
+            ToolDefinition::new("Read", "Read files"),
+        ];
+        let context = PromptContext::new()
+            .with_tools(initial_tools)
+            .add_tool(ToolDefinition::new("Write", "Write files"));
+
+        assert_eq!(context.tools.len(), 2);
     }
 }
