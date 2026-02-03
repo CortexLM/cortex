@@ -49,6 +49,7 @@
 pub mod api;
 pub mod commands;
 pub mod config;
+pub mod host;
 pub mod error;
 pub mod events;
 pub mod hooks;
@@ -273,7 +274,14 @@ pub use manifest::{
 };
 pub use plugin::{Plugin, PluginInfo, PluginState, PluginStatus};
 pub use registry::PluginRegistry;
-pub use runtime::{WasmPlugin, WasmRuntime};
+pub use runtime::{PluginStoreState, WasmPlugin, WasmRuntime};
+
+// Host function re-exports
+pub use host::{
+    create_linker, register_host_functions, HasHostState, HostError,
+    LogLevel as HostLogLevel, PluginEvent, PluginHostState,
+    ToastLevel as HostToastLevel, ToastNotification,
+};
 
 /// Plugin system version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
