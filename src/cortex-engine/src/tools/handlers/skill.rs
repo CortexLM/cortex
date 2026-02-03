@@ -164,6 +164,8 @@ pub enum SkillSource {
     Project,
     /// Current directory SKILL.md
     Local,
+    /// Built-in skill embedded in the agent
+    Builtin,
 }
 
 impl std::fmt::Display for SkillSource {
@@ -172,6 +174,7 @@ impl std::fmt::Display for SkillSource {
             Self::Personal => write!(f, "personal"),
             Self::Project => write!(f, "project"),
             Self::Local => write!(f, "local"),
+            Self::Builtin => write!(f, "builtin"),
         }
     }
 }
@@ -191,11 +194,12 @@ impl SkillLoader {
     /// Create a new skill loader.
     ///
     /// Skill search paths (in priority order):
-    /// 1. `./SKILL.md` (local file)
-    /// 2. `.agents/` (project, https://agent.md/ compatible)
-    /// 3. `.agent/` (project, https://agent.md/ compatible)
-    /// 4. `.cortex/skills/` (project, traditional format)
-    /// 5. `~/.cortex/skills/` (personal)
+    /// 1. Built-in skills (embedded in the agent)
+    /// 2. `./SKILL.md` (local file)
+    /// 3. `.agents/` (project, https://agent.md/ compatible)
+    /// 4. `.agent/` (project, https://agent.md/ compatible)
+    /// 5. `.cortex/skills/` (project, traditional format)
+    /// 6. `~/.cortex/skills/` (personal)
     pub fn new(cwd: PathBuf) -> Self {
         let personal_dir = dirs::home_dir()
             .map(|h| h.join(".cortex").join("skills"))
@@ -215,9 +219,39 @@ impl SkillLoader {
         }
     }
 
+    /// Load a built-in skill by name.
+    ///
+    /// Returns `Ok(Some(skill))` if the skill is a built-in and was loaded successfully,
+    /// `Ok(None)` if the skill is not a built-in, or `Err` if parsing failed.
+    fn load_builtin(&self, name: &str) -> Result<Option<LoadedSkill>> {
+        use cortex_prompt_harness::prompts::builtin_skills::{get_builtin_skill, is_builtin_skill};
+
+        if !is_builtin_skill(name) {
+            return Ok(None);
+        }
+
+        let content = get_builtin_skill(name).ok_or_else(|| {
+            CortexError::NotFound(format!("Built-in skill not found: {}", name))
+        })?;
+
+        let (definition, markdown) = parse_skill_md(content)?;
+
+        Ok(Some(LoadedSkill {
+            definition,
+            content: markdown,
+            path: PathBuf::from("<builtin>"),
+            source: SkillSource::Builtin,
+        }))
+    }
+
     /// Load a skill by name.
     pub async fn load(&self, name: &str) -> Result<LoadedSkill> {
-        // Search order: local SKILL.md, project skills, personal skills
+        // Search order: built-in, local SKILL.md, project skills, personal skills
+
+        // 0. Check built-in skills first
+        if let Some(skill) = self.load_builtin(name)? {
+            return Ok(skill);
+        }
 
         // 1. Check for SKILL.md in current directory
         let local_skill = self.cwd.join("SKILL.md");
@@ -256,7 +290,7 @@ impl SkillLoader {
             .collect();
 
         Err(CortexError::NotFound(format!(
-            "Skill not found: {}. Searched in:\n  - {}/SKILL.md (local)\n  - {} (project)\n  - {} (personal)",
+            "Skill not found: {}. Searched in:\n  - built-in skills\n  - {}/SKILL.md (local)\n  - {} (project)\n  - {} (personal)",
             name,
             self.cwd.display(),
             project_paths.join(", "),
@@ -325,15 +359,28 @@ impl SkillLoader {
 
     /// List all available skills.
     pub async fn list(&self) -> Result<Vec<LoadedSkill>> {
+        use cortex_prompt_harness::prompts::builtin_skills::BUILTIN_SKILL_NAMES;
+
         let mut skills = Vec::new();
         let mut seen_names = std::collections::HashSet::new();
+
+        // Load built-in skills first
+        for name in BUILTIN_SKILL_NAMES {
+            if let Ok(Some(skill)) = self.load_builtin(name) {
+                seen_names.insert(skill.definition.name.clone());
+                skills.push(skill);
+            }
+        }
 
         // Check local SKILL.md
         let local_skill = self.cwd.join("SKILL.md");
         if local_skill.exists() {
             if let Ok(skill) = self.load_skill_file(&local_skill, SkillSource::Local).await {
-                seen_names.insert(skill.definition.name.clone());
-                skills.push(skill);
+                // Skip if a built-in has the same name
+                if !seen_names.contains(&skill.definition.name) {
+                    seen_names.insert(skill.definition.name.clone());
+                    skills.push(skill);
+                }
             }
         }
 
@@ -542,7 +589,8 @@ impl SkillHandler {
 
         if skills.is_empty() {
             return Ok(ToolResult::success(
-                "No skills found. Create skills in:\n  \
+                "No skills found. Built-in skills should always be available.\n\
+                 You can also create custom skills in:\n  \
                  - ./SKILL.md (local)\n  \
                  - .agents/<skill-name>/SKILL.md (project, agent.md format)\n  \
                  - .agent/<skill-name>/SKILL.md (project, agent.md format)\n  \
@@ -834,5 +882,148 @@ Analyze {{target}} with verbose={{verbose}}.
 
         assert!(unrestricted.allows_tool("Execute"));
         assert!(unrestricted.allows_tool("Write"));
+    }
+
+    #[test]
+    fn test_skill_source_display() {
+        assert_eq!(format!("{}", SkillSource::Personal), "personal");
+        assert_eq!(format!("{}", SkillSource::Project), "project");
+        assert_eq!(format!("{}", SkillSource::Local), "local");
+        assert_eq!(format!("{}", SkillSource::Builtin), "builtin");
+    }
+
+    #[test]
+    fn test_load_builtin_git_skill() {
+        let loader = SkillLoader::new(PathBuf::from("/tmp"));
+        let skill = loader.load_builtin("git").unwrap();
+
+        assert!(skill.is_some());
+        let skill = skill.unwrap();
+        assert_eq!(skill.definition.name, "git");
+        assert_eq!(skill.source, SkillSource::Builtin);
+        assert_eq!(skill.path, PathBuf::from("<builtin>"));
+        assert!(skill.content.contains("Git Operations Skill"));
+    }
+
+    #[test]
+    fn test_load_builtin_code_quality_skill() {
+        let loader = SkillLoader::new(PathBuf::from("/tmp"));
+        let skill = loader.load_builtin("code-quality").unwrap();
+
+        assert!(skill.is_some());
+        let skill = skill.unwrap();
+        assert_eq!(skill.definition.name, "code-quality");
+        assert_eq!(skill.source, SkillSource::Builtin);
+        assert!(skill.content.contains("Code Quality Skill"));
+    }
+
+    #[test]
+    fn test_load_builtin_debugging_skill() {
+        let loader = SkillLoader::new(PathBuf::from("/tmp"));
+        let skill = loader.load_builtin("debugging").unwrap();
+
+        assert!(skill.is_some());
+        let skill = skill.unwrap();
+        assert_eq!(skill.definition.name, "debugging");
+        assert_eq!(skill.source, SkillSource::Builtin);
+        assert!(skill.content.contains("Debugging Skill"));
+    }
+
+    #[test]
+    fn test_load_builtin_security_skill() {
+        let loader = SkillLoader::new(PathBuf::from("/tmp"));
+        let skill = loader.load_builtin("security").unwrap();
+
+        assert!(skill.is_some());
+        let skill = skill.unwrap();
+        assert_eq!(skill.definition.name, "security");
+        assert_eq!(skill.source, SkillSource::Builtin);
+        assert!(skill.content.contains("Security Skill"));
+    }
+
+    #[test]
+    fn test_load_builtin_planning_skill() {
+        let loader = SkillLoader::new(PathBuf::from("/tmp"));
+        let skill = loader.load_builtin("planning").unwrap();
+
+        assert!(skill.is_some());
+        let skill = skill.unwrap();
+        assert_eq!(skill.definition.name, "planning");
+        assert_eq!(skill.source, SkillSource::Builtin);
+        assert!(skill.content.contains("Planning Skill"));
+    }
+
+    #[test]
+    fn test_load_builtin_file_operations_skill() {
+        let loader = SkillLoader::new(PathBuf::from("/tmp"));
+        let skill = loader.load_builtin("file-operations").unwrap();
+
+        assert!(skill.is_some());
+        let skill = skill.unwrap();
+        assert_eq!(skill.definition.name, "file-operations");
+        assert_eq!(skill.source, SkillSource::Builtin);
+        assert!(skill.content.contains("File Operations Skill"));
+    }
+
+    #[test]
+    fn test_load_builtin_nonexistent_returns_none() {
+        let loader = SkillLoader::new(PathBuf::from("/tmp"));
+        let skill = loader.load_builtin("nonexistent-skill").unwrap();
+        assert!(skill.is_none());
+    }
+
+    #[test]
+    fn test_load_builtin_case_insensitive() {
+        let loader = SkillLoader::new(PathBuf::from("/tmp"));
+
+        // Test various case combinations
+        let skill_lower = loader.load_builtin("git").unwrap();
+        let skill_upper = loader.load_builtin("GIT").unwrap();
+        let skill_mixed = loader.load_builtin("Git").unwrap();
+
+        assert!(skill_lower.is_some());
+        assert!(skill_upper.is_some());
+        assert!(skill_mixed.is_some());
+
+        // All should return the same skill
+        assert_eq!(
+            skill_lower.unwrap().definition.name,
+            skill_upper.unwrap().definition.name
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skill_loader_load_builtin_first() {
+        // The loader should check built-in skills before filesystem
+        let loader = SkillLoader::new(PathBuf::from("/nonexistent/path"));
+
+        // Should still be able to load built-in skills
+        let result = loader.load("git").await;
+        assert!(result.is_ok());
+
+        let skill = result.unwrap();
+        assert_eq!(skill.definition.name, "git");
+        assert_eq!(skill.source, SkillSource::Builtin);
+    }
+
+    #[tokio::test]
+    async fn test_skill_loader_list_includes_builtins() {
+        let loader = SkillLoader::new(PathBuf::from("/nonexistent/path"));
+
+        let skills = loader.list().await.unwrap();
+
+        // Should include all built-in skills
+        let builtin_names: Vec<&str> = skills
+            .iter()
+            .filter(|s| s.source == SkillSource::Builtin)
+            .map(|s| s.definition.name.as_str())
+            .collect();
+
+        assert!(builtin_names.contains(&"git"));
+        assert!(builtin_names.contains(&"code-quality"));
+        assert!(builtin_names.contains(&"file-operations"));
+        assert!(builtin_names.contains(&"debugging"));
+        assert!(builtin_names.contains(&"security"));
+        assert!(builtin_names.contains(&"planning"));
     }
 }
