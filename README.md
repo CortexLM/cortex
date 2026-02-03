@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/CortexLM/cortex/releases"><img src="https://img.shields.io/github/v/release/CortexLM/cortex?style=flat-square&color=blue" alt="Release"></a>
-  <a href="https://discord.gg/cortexfoundation"><img src="https://img.shields.io/discord/1234567890?style=flat-square&logo=discord&logoColor=white&color=5865F2" alt="Discord"></a>
+  <a href="https://discord.gg/cortexfoundation"><img src="https://img.shields.io/badge/Discord-Join%20Us-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://twitter.com/CortexLM"><img src="https://img.shields.io/twitter/follow/CortexLM?style=flat-square&logo=twitter&color=1DA1F2" alt="Twitter"></a>
 </p>
 
