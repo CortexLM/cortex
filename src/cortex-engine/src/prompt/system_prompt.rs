@@ -16,7 +16,7 @@ pub enum SystemPromptError {
 
 pub type Result<T> = std::result::Result<T, SystemPromptError>;
 
-const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../../../cortex_prompt.txt");
+const DEFAULT_SYSTEM_PROMPT: &str = cortex_prompt_harness::prompts::CORTEX_MAIN_PROMPT;
 
 pub fn load_system_prompt(path: Option<&Path>) -> Result<String> {
     match path {
