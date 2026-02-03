@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use crate::config::Config;
 
-/// System prompt for the Cortex Agent - loaded from cortex_prompt.txt
-pub(crate) const SYSTEM_PROMPT: &str = include_str!("../../../../cortex_prompt.txt");
+/// System prompt for the Cortex Agent - loaded from cortex-prompt-harness
+pub(crate) const SYSTEM_PROMPT: &str = cortex_prompt_harness::prompts::CORTEX_MAIN_PROMPT;
 
 /// Build the system prompt for the agent.
 pub fn build_system_prompt(config: &Config) -> String {

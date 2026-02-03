@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::context::{AgentConfig, PromptContext, TaskConfig, TaskStatus};
+use crate::context::{AgentConfig, PromptContext, TaskConfig, TaskStatus, ToolDefinition};
 use crate::notifications::AgentNotification;
 
 /// Priority level for prompt sections.
@@ -333,6 +333,72 @@ pub fn build_tools_section(allowed: &[String], denied: &[String]) -> PromptSecti
     PromptSection::new("Tool Access", content).with_priority(SectionPriority::Normal)
 }
 
+/// Build a dynamic tools section from tool definitions.
+///
+/// Groups tools by category if categories are provided, rendering each group
+/// as a markdown table with format:
+///
+/// ```text
+/// | Tool | Function |
+/// |------|----------|
+/// | `Read` | Read file contents |
+/// ```
+///
+/// If tools have no categories, all tools are rendered in a single table.
+pub fn build_dynamic_tools_section(tools: &[ToolDefinition]) -> PromptSection {
+    if tools.is_empty() {
+        return PromptSection::new("Toolkit", "No tools available.")
+            .with_priority(SectionPriority::Normal)
+            .enabled(false);
+    }
+
+    // Group tools by category
+    let mut categorized: std::collections::HashMap<Option<String>, Vec<&ToolDefinition>> =
+        std::collections::HashMap::new();
+
+    for tool in tools {
+        categorized
+            .entry(tool.category.clone())
+            .or_default()
+            .push(tool);
+    }
+
+    let mut content = String::new();
+
+    // Sort categories: named categories first (alphabetically), then uncategorized
+    let mut categories: Vec<_> = categorized.keys().cloned().collect();
+    categories.sort_by(|a, b| match (a, b) {
+        (Some(a_name), Some(b_name)) => a_name.cmp(b_name),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+
+    for category in categories {
+        let tools_in_category = categorized
+            .get(&category)
+            .expect("category should exist in map");
+
+        // Add category header if present
+        if let Some(ref cat_name) = category {
+            content.push_str(&format!("### {}\n", cat_name));
+        }
+
+        // Build markdown table
+        content.push_str("| Tool | Function |\n");
+        content.push_str("|------|----------|\n");
+
+        for tool in tools_in_category {
+            content.push_str(&format!("| `{}` | {} |\n", tool.name, tool.description));
+        }
+
+        content.push('\n');
+    }
+
+    PromptSection::new("Toolkit", content.trim_end().to_string())
+        .with_priority(SectionPriority::Normal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +482,91 @@ mod tests {
 
         assert!(rendered.contains("research"));
         assert!(rendered.contains("enabled"));
+    }
+
+    #[test]
+    fn test_dynamic_tools_section_empty() {
+        let tools: Vec<ToolDefinition> = vec![];
+        let section = build_dynamic_tools_section(&tools);
+
+        assert!(!section.enabled);
+    }
+
+    #[test]
+    fn test_dynamic_tools_section_no_categories() {
+        let tools = vec![
+            ToolDefinition::new("Read", "Read file contents"),
+            ToolDefinition::new("Write", "Write file contents"),
+        ];
+
+        let section = build_dynamic_tools_section(&tools);
+        let rendered = section.render();
+
+        assert!(rendered.contains("## Toolkit"));
+        assert!(rendered.contains("| Tool | Function |"));
+        assert!(rendered.contains("| `Read` | Read file contents |"));
+        assert!(rendered.contains("| `Write` | Write file contents |"));
+    }
+
+    #[test]
+    fn test_dynamic_tools_section_with_categories() {
+        let tools = vec![
+            ToolDefinition::new("Read", "Read file contents").with_category("Perception"),
+            ToolDefinition::new("Search", "Search for patterns").with_category("Perception"),
+            ToolDefinition::new("Write", "Write file contents").with_category("Action"),
+            ToolDefinition::new("Shell", "Execute commands").with_category("Action"),
+        ];
+
+        let section = build_dynamic_tools_section(&tools);
+        let rendered = section.render();
+
+        assert!(rendered.contains("### Perception"));
+        assert!(rendered.contains("### Action"));
+        assert!(rendered.contains("| `Read` | Read file contents |"));
+        assert!(rendered.contains("| `Shell` | Execute commands |"));
+    }
+
+    #[test]
+    fn test_dynamic_tools_section_mixed_categories() {
+        let tools = vec![
+            ToolDefinition::new("Read", "Read file contents").with_category("Perception"),
+            ToolDefinition::new("Custom", "Custom tool without category"),
+        ];
+
+        let section = build_dynamic_tools_section(&tools);
+        let rendered = section.render();
+
+        // Should have Perception category header for categorized tool
+        assert!(rendered.contains("### Perception"));
+        // Both tools should be present
+        assert!(rendered.contains("| `Read` |"));
+        assert!(rendered.contains("| `Custom` |"));
+    }
+
+    #[test]
+    fn test_dynamic_tools_section_categories_sorted() {
+        let tools = vec![
+            ToolDefinition::new("Tool1", "Desc 1").with_category("Zebra"),
+            ToolDefinition::new("Tool2", "Desc 2").with_category("Alpha"),
+            ToolDefinition::new("Tool3", "Desc 3"), // No category
+        ];
+
+        let section = build_dynamic_tools_section(&tools);
+        let rendered = section.render();
+
+        // Alpha should come before Zebra (alphabetically)
+        let alpha_pos = rendered
+            .find("### Alpha")
+            .expect("Alpha category should exist");
+        let zebra_pos = rendered
+            .find("### Zebra")
+            .expect("Zebra category should exist");
+        assert!(
+            alpha_pos < zebra_pos,
+            "Alpha should appear before Zebra in sorted output"
+        );
+
+        // Uncategorized tools should appear after categorized ones
+        // (no header for them, just a table)
     }
 }

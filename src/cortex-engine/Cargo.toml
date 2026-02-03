@@ -28,6 +28,7 @@ cortex-hooks-ext = { path = "../cortex-hooks", package = "cortex-hooks" }
 cortex-share = { path = "../cortex-share" }
 cortex-plugins-ext = { path = "../cortex-plugins", package = "cortex-plugins" }
 cortex-batch = { path = "../cortex-batch" }
+cortex-prompt-harness = { path = "../cortex-prompt-harness" }
 
 # New feature crates (Phase 2)
 cortex-ghost = { path = "../cortex-ghost" }

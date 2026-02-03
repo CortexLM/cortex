@@ -7,7 +7,8 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 
-use crate::sections::{PromptSection, SectionPriority};
+use crate::context::ToolDefinition;
+use crate::sections::{self, PromptSection, SectionPriority};
 
 /// Builder for constructing system prompts.
 ///
@@ -133,6 +134,17 @@ impl SystemPromptBuilder {
     /// Remove a section by name.
     pub fn remove_section(mut self, name: &str) -> Self {
         self.sections.shift_remove(name);
+        self
+    }
+
+    /// Add a tools section with the given tool definitions.
+    ///
+    /// Tools are rendered as a markdown table, grouped by category if provided.
+    /// The section is automatically named "Toolkit" and can be removed using
+    /// `remove_section("Toolkit")` if needed.
+    pub fn with_tools(mut self, tools: &[ToolDefinition]) -> Self {
+        let section = sections::build_dynamic_tools_section(tools);
+        self.sections.insert(section.name.clone(), section);
         self
     }
 
@@ -324,5 +336,75 @@ mod tests {
         assert!(prompt.contains("Base"));
         assert!(prompt.contains("Rule 1"));
         assert!(prompt.contains("Context info"));
+    }
+
+    #[test]
+    fn test_with_tools() {
+        let tools = vec![
+            ToolDefinition::new("Read", "Read file contents").with_category("Perception"),
+            ToolDefinition::new("Write", "Write file contents").with_category("Action"),
+        ];
+
+        let prompt = SystemPromptBuilder::with_base("Base prompt")
+            .with_tools(&tools)
+            .build();
+
+        assert!(prompt.contains("Base prompt"));
+        assert!(prompt.contains("## Toolkit"));
+        assert!(prompt.contains("| `Read` | Read file contents |"));
+        assert!(prompt.contains("| `Write` | Write file contents |"));
+        assert!(prompt.contains("### Perception"));
+        assert!(prompt.contains("### Action"));
+    }
+
+    #[test]
+    fn test_with_tools_empty() {
+        let tools: Vec<ToolDefinition> = vec![];
+
+        let prompt = SystemPromptBuilder::with_base("Base prompt")
+            .with_tools(&tools)
+            .build();
+
+        // Empty tools should not add visible section content
+        assert!(prompt.contains("Base prompt"));
+        // Disabled section should not be rendered
+        assert!(!prompt.contains("No tools available"));
+    }
+
+    #[test]
+    fn test_with_tools_removes_previous() {
+        let tools1 = vec![ToolDefinition::new("Read", "Read files")];
+        let tools2 = vec![ToolDefinition::new("Write", "Write files")];
+
+        let prompt = SystemPromptBuilder::new()
+            .with_tools(&tools1)
+            .with_tools(&tools2)
+            .build();
+
+        // Second with_tools should replace the first
+        assert!(!prompt.contains("| `Read` |"));
+        assert!(prompt.contains("| `Write` |"));
+    }
+
+    #[test]
+    fn test_has_toolkit_section() {
+        let tools = vec![ToolDefinition::new("Read", "Read files")];
+
+        let builder = SystemPromptBuilder::new().with_tools(&tools);
+
+        assert!(builder.has_section("Toolkit"));
+    }
+
+    #[test]
+    fn test_remove_toolkit_section() {
+        let tools = vec![ToolDefinition::new("Read", "Read files")];
+
+        let prompt = SystemPromptBuilder::new()
+            .with_tools(&tools)
+            .remove_section("Toolkit")
+            .build();
+
+        assert!(!prompt.contains("Toolkit"));
+        assert!(!prompt.contains("| `Read` |"));
     }
 }
