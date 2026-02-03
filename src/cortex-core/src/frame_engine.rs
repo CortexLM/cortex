@@ -665,6 +665,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "Requires terminal (crossterm EventStream) which is unavailable in CI"]
     async fn test_engine_stops_on_flag() {
         let (tx, mut rx) = create_event_channel();
         let running = Arc::new(AtomicBool::new(true));

@@ -390,6 +390,9 @@ impl EventLoop {
             "history" => {
                 self.handle_history();
             }
+            "models:fetch-and-pick" => {
+                self.handle_open_modal(ModalType::ModelPicker).await;
+            }
             _ => {
                 self.app_state
                     .toasts
