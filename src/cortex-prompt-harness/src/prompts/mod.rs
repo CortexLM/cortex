@@ -14,6 +14,7 @@
 //!
 //! - [`core`]: Core agent prompts (Cortex main prompt, TUI prompt)
 //! - [`agents`]: Built-in agent prompts (explore, general, research, etc.)
+//! - [`builtin_skills`]: On-demand skills for context-aware loading
 //! - [`tasks`]: Task-related prompts (summarization, compaction, titles)
 //! - [`review`]: Code review prompts
 //! - [`tools`]: Tool-specific prompts (subagent executor, mentions)
@@ -37,6 +38,7 @@
 
 pub mod agents;
 pub mod base_agent;
+pub mod builtin_skills;
 pub mod core;
 pub mod generation;
 pub mod review;
@@ -57,5 +59,10 @@ pub use core::{
     SECTION_COGNITIVE_ARCHITECTURE, SECTION_FAILURE_PROTOCOL, SECTION_HEADER, SECTION_NAMES,
     SECTION_OUTPUT_FORMAT, SECTION_PRIME_DIRECTIVES, SECTION_QUALITY_CHECKPOINTS,
     SECTION_RESPONSE_PATTERNS, SECTION_TOOLKIT, TUI_SYSTEM_PROMPT_TEMPLATE,
+};
+pub use builtin_skills::{
+    BUILTIN_SKILL_NAMES, SKILL_CODE_QUALITY, SKILL_DEBUGGING, SKILL_FILE_OPERATIONS, SKILL_GIT,
+    SKILL_PLANNING, SKILL_SECURITY, builtin_skill_count, get_builtin_skill, is_builtin_skill,
+    list_builtin_skills,
 };
 pub use tasks::{COMPACTION_PROMPT, SUMMARIZATION_PROMPT};
