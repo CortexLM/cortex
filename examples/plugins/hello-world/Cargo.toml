@@ -1,0 +1,19 @@
+[package]
+name = "hello-world-plugin"
+version = "1.0.0"
+edition = "2021"
+description = "A simple example plugin demonstrating basic Cortex plugin capabilities"
+authors = ["Cortex Team <team@cortex.dev>"]
+license = "MIT"
+
+# Build for WASM target: cargo build --target wasm32-wasi --release
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wee_alloc = "0.4"
+
+[profile.release]
+opt-level = "s"
+lto = true

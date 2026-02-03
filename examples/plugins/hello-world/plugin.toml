@@ -1,0 +1,55 @@
+# Hello World Plugin - A basic Cortex plugin example
+#
+# This plugin demonstrates fundamental plugin capabilities:
+# - Custom slash commands
+# - Hook handlers
+# - Configuration schema
+
+# Top-level capabilities (before [plugin] section)
+capabilities = ["commands", "hooks", "config"]
+
+[plugin]
+id = "hello-world"
+name = "Hello World Plugin"
+version = "1.0.0"
+description = "A simple example plugin demonstrating basic Cortex plugin capabilities"
+authors = ["Cortex Team <team@cortex.dev>"]
+homepage = "https://github.com/cortex/examples/plugins/hello-world"
+license = "MIT"
+min_cortex_version = "0.5.0"
+keywords = ["example", "hello", "demo"]
+
+# Command definitions
+[[commands]]
+name = "hello"
+aliases = ["hi", "greet"]
+description = "Greets the user with a customizable message"
+usage = "/hello [name]"
+category = "demo"
+
+[[commands.args]]
+name = "name"
+description = "The name to greet (defaults to 'World')"
+required = false
+default = "World"
+arg_type = "string"
+
+# Hook definitions
+[[hooks]]
+hook_type = "tool_execute_before"
+priority = 100
+function = "hook_tool_execute_before"
+
+# Configuration schema
+[config]
+greeting_prefix = { description = "Prefix for greeting messages", type = "string", default = "Hello", required = false }
+
+[config.greeting_prefix.validation]
+min = 1
+max = 50
+
+# WASM module settings
+[wasm]
+memory_pages = 128
+timeout_ms = 5000
+wasi_enabled = true
