@@ -143,6 +143,18 @@ impl StreamContent {
         }
     }
 
+    /// Complete a tool call and validate its arguments.
+    /// Returns Ok(()) if the tool call was found and arguments are valid JSON.
+    /// Returns Err if tool call not found or arguments are invalid JSON.
+    pub fn complete_tool_call_validated(&mut self, id: &str) -> Result<(), String> {
+        if let Some(tc) = self.tool_calls.iter_mut().find(|tc| tc.id == id) {
+            tc.complete = true;
+            tc.validate_arguments()
+        } else {
+            Err(format!("Tool call with id '{}' not found", id))
+        }
+    }
+
     /// Check if has content.
     pub fn has_content(&self) -> bool {
         !self.text.is_empty() || !self.tool_calls.is_empty()
@@ -170,6 +182,23 @@ impl StreamToolCall {
         } else {
             None
         }
+    }
+
+    /// Validate that arguments contain valid JSON.
+    /// Returns Ok(()) if valid, Err with details if invalid.
+    pub fn validate_arguments(&self) -> Result<(), String> {
+        if self.arguments.trim().is_empty() {
+            return Ok(()); // Empty is valid (no arguments)
+        }
+        serde_json::from_str::<serde_json::Value>(&self.arguments)
+            .map(|_| ())
+            .map_err(|e| format!("Invalid JSON in tool call arguments: {}", e))
+    }
+
+    /// Check if arguments are complete and valid JSON.
+    /// Returns true only if complete and valid.
+    pub fn is_valid_complete(&self) -> bool {
+        self.complete && self.validate_arguments().is_ok()
     }
 }
 
