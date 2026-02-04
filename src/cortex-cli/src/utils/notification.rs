@@ -63,7 +63,14 @@ pub fn send_task_notification(session_id: &str, success: bool) -> Result<()> {
         "Cortex Task Failed"
     };
 
-    let short_id = &session_id[..8.min(session_id.len())];
+    // Use safe UTF-8 slicing - find the last valid char boundary at or before position 8
+    let short_id = session_id
+        .char_indices()
+        .take_while(|(idx, _)| *idx < 8)
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .last()
+        .and_then(|end| session_id.get(..end))
+        .unwrap_or(session_id);
     let body = format!("Session: {}", short_id);
 
     let urgency = if success {
