@@ -187,7 +187,7 @@ impl ExecRunner {
             self.client = Some(client);
         }
 
-        Ok(self.client.as_ref().unwrap().as_ref())
+        Ok(self.client.as_ref().expect("Client should be initialized in init_client").as_ref())
     }
 
     /// Get filtered tool definitions based on options.
