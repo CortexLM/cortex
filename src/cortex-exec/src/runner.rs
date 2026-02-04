@@ -187,7 +187,11 @@ impl ExecRunner {
             self.client = Some(client);
         }
 
-        Ok(self.client.as_ref().unwrap().as_ref())
+        Ok(self
+            .client
+            .as_ref()
+            .expect("ModelClient should be initialized before use")
+            .as_ref())
     }
 
     /// Get filtered tool definitions based on options.
