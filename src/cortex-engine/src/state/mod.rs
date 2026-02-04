@@ -69,7 +69,7 @@ impl Default for StateConfig {
     fn default() -> Self {
         Self {
             max_sessions: 100,
-            session_timeout: Duration::from_secs(3600),
+            session_timeout: Duration::from_secs(604800), // 1 week
             turn_timeout: Duration::from_secs(300),
             persist: false,
             persist_dir: None,

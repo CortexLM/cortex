@@ -331,7 +331,7 @@ fn default_max_sessions() -> usize {
 }
 
 fn default_session_timeout() -> u64 {
-    3600 // 1 hour
+    604800 // 1 week
 }
 
 fn default_max_messages() -> usize {
