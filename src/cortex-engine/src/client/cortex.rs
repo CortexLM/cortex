@@ -667,11 +667,23 @@ impl ModelClient for CortexClient {
                                 }
                             }
                             Err(e) => {
-                                tracing::debug!(
-                                    "Failed to parse Cortex event: {} - {}",
-                                    e,
-                                    event.data
+                                let data_preview = if event.data.len() > 100 {
+                                    &event.data[..100]
+                                } else {
+                                    &event.data
+                                };
+                                tracing::warn!(
+                                    error = %e,
+                                    data_preview = %data_preview,
+                                    "Failed to parse SSE event"
                                 );
+                                let error_msg = format!(
+                                    "SSE parsing error: {} (data: {})",
+                                    e, data_preview
+                                );
+                                if tx.send(Ok(ResponseEvent::Error(error_msg))).await.is_err() {
+                                    break;
+                                }
                             }
                         }
                     }
