@@ -39,10 +39,10 @@ pub fn expand_tilde(path: &str) -> String {
         if let Some(home) = dirs::home_dir() {
             return home.to_string_lossy().to_string();
         }
-    } else if path.starts_with("~/") {
+    } else if let Some(suffix) = path.strip_prefix("~/") {
         // Handle "~/" prefix - expand to home directory + rest of path
         if let Some(home) = dirs::home_dir() {
-            return home.join(&path[2..]).to_string_lossy().to_string();
+            return home.join(suffix).to_string_lossy().to_string();
         }
     }
     path.to_string()
