@@ -99,7 +99,7 @@ impl DropdownState {
 
     /// Select the next item.
     pub fn select_next(&mut self) {
-        if self.items.is_empty() {
+        if self.items.is_empty() || self.max_visible == 0 {
             return;
         }
         self.selected = (self.selected + 1) % self.items.len();
@@ -108,7 +108,7 @@ impl DropdownState {
 
     /// Select the previous item.
     pub fn select_prev(&mut self) {
-        if self.items.is_empty() {
+        if self.items.is_empty() || self.max_visible == 0 {
             return;
         }
         self.selected = if self.selected == 0 {

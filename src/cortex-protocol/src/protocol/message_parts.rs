@@ -182,6 +182,44 @@ pub enum ToolState {
     },
 }
 
+impl ToolState {
+    /// Check if transitioning to the given state is valid.
+    ///
+    /// Valid transitions:
+    /// - Pending -> Running, Completed, Error
+    /// - Running -> Completed, Error
+    /// - Completed -> (terminal, no transitions)
+    /// - Error -> (terminal, no transitions)
+    ///
+    /// State machine:
+    /// ```text
+    /// Pending -> Running -> Completed
+    ///     |         |
+    ///     |         +-> Error
+    ///     +-> Completed
+    ///     +-> Error
+    /// ```
+    pub fn can_transition_to(&self, target: &ToolState) -> bool {
+        match (self, target) {
+            // From Pending, can go to any non-Pending state
+            (ToolState::Pending { .. }, ToolState::Running { .. }) => true,
+            (ToolState::Pending { .. }, ToolState::Completed { .. }) => true,
+            (ToolState::Pending { .. }, ToolState::Error { .. }) => true,
+
+            // From Running, can go to Completed or Error
+            (ToolState::Running { .. }, ToolState::Completed { .. }) => true,
+            (ToolState::Running { .. }, ToolState::Error { .. }) => true,
+
+            // Terminal states cannot transition
+            (ToolState::Completed { .. }, _) => false,
+            (ToolState::Error { .. }, _) => false,
+
+            // Any other transition is invalid
+            _ => false,
+        }
+    }
+}
+
 /// Subtask execution status.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -552,6 +590,8 @@ impl MessageWithParts {
     }
 
     /// Update a tool state by call ID.
+    ///
+    /// Logs a warning if the state transition is invalid (e.g., from a terminal state).
     pub fn update_tool_state(&mut self, call_id: &str, new_state: ToolState) -> bool {
         for part in &mut self.parts {
             if let MessagePart::Tool {
@@ -561,6 +601,14 @@ impl MessageWithParts {
             } = &mut part.part
             {
                 if cid == call_id {
+                    if !state.can_transition_to(&new_state) {
+                        tracing::warn!(
+                            "Invalid ToolState transition from {:?} to {:?} for call_id {}",
+                            state,
+                            new_state,
+                            call_id
+                        );
+                    }
                     *state = new_state;
                     return true;
                 }

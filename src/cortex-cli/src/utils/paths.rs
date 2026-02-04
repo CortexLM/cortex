@@ -34,10 +34,16 @@ pub fn get_cortex_home() -> PathBuf {
 /// // Returns: /home/user/documents/file.txt
 /// ```
 pub fn expand_tilde(path: &str) -> String {
-    if path.starts_with("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(&path[2..]).to_string_lossy().to_string();
+    if path == "~" {
+        // Handle bare "~" - return home directory
+        if let Some(home) = dirs::home_dir() {
+            return home.to_string_lossy().to_string();
+        }
+    } else if let Some(suffix) = path.strip_prefix("~/") {
+        // Handle "~/" prefix - expand to home directory + rest of path
+        if let Some(home) = dirs::home_dir() {
+            return home.join(suffix).to_string_lossy().to_string();
+        }
     }
     path.to_string()
 }
@@ -58,8 +64,12 @@ pub fn expand_tilde(path: &str) -> String {
 pub fn validate_path_safety(path: &Path, base_dir: Option<&Path>) -> Result<(), String> {
     let path_str = path.to_string_lossy();
 
-    // Check for path traversal attempts
-    if path_str.contains("..") {
+    // Check for path traversal attempts by examining path components
+    // This correctly handles filenames containing ".." like "file..txt"
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err("Path contains traversal sequence '..'".to_string());
     }
 
@@ -257,8 +267,15 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_with_tilde_only() {
-        // Test tilde alone - should remain unchanged (not "~/")
-        assert_eq!(expand_tilde("~"), "~");
+        // Test bare "~" - should expand to home directory
+        let result = expand_tilde("~");
+        if let Some(home) = dirs::home_dir() {
+            let expected = home.to_string_lossy().to_string();
+            assert_eq!(result, expected);
+        } else {
+            // If no home dir, original is returned
+            assert_eq!(result, "~");
+        }
     }
 
     #[test]
@@ -320,20 +337,30 @@ mod tests {
 
     #[test]
     fn test_validate_path_safety_detects_various_traversal_patterns() {
-        // Different traversal patterns
-        let patterns = ["foo/../bar", "...", "foo/bar/../baz", "./foo/../../../etc"];
+        // Patterns that ARE path traversal (contain ".." as a component)
+        let traversal_patterns = ["foo/../bar", "foo/bar/../baz", "./foo/../../../etc", ".."];
 
-        for pattern in patterns {
+        for pattern in traversal_patterns {
             let path = Path::new(pattern);
             let result = validate_path_safety(path, None);
-            // Only patterns containing ".." should fail
-            if pattern.contains("..") {
-                assert!(
-                    result.is_err(),
-                    "Expected traversal detection for: {}",
-                    pattern
-                );
-            }
+            assert!(
+                result.is_err(),
+                "Expected traversal detection for: {}",
+                pattern
+            );
+        }
+
+        // Patterns that are NOT path traversal (contain ".." in filenames only)
+        let safe_patterns = ["file..txt", "..hidden", "test...file", "foo/bar..baz/file"];
+
+        for pattern in safe_patterns {
+            let path = Path::new(pattern);
+            let result = validate_path_safety(path, None);
+            assert!(
+                result.is_ok(),
+                "False positive: '{}' should not be detected as traversal",
+                pattern
+            );
         }
     }
 

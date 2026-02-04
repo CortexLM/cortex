@@ -20,8 +20,7 @@ use cortex_mcp_types::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock};
-use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 // ============================================================================
 // Transport Trait
@@ -197,61 +196,6 @@ impl StdioTransport {
 
         info!(command = %self.command, "MCP subprocess connected");
         Ok(())
-    }
-
-    /// Reconnect with exponential backoff.
-    ///
-    /// Properly cleans up existing connections before each attempt to prevent
-    /// file descriptor leaks (#2198).
-    #[allow(dead_code)]
-    async fn reconnect(&self) -> Result<()> {
-        if !self.reconnect_config.enabled {
-            return Err(anyhow!("Reconnection disabled"));
-        }
-
-        let mut attempt = 0;
-        let mut delay = self.reconnect_config.initial_delay;
-
-        while attempt < self.reconnect_config.max_attempts {
-            attempt += 1;
-            info!(
-                attempt,
-                max = self.reconnect_config.max_attempts,
-                "Attempting reconnection"
-            );
-
-            // Clean up any existing connection before attempting reconnect
-            // This prevents file descriptor leaks on repeated failures (#2198)
-            {
-                let mut process_guard = self.process.lock().await;
-                if let Some(mut child) = process_guard.take() {
-                    // Kill the process and wait for it to clean up
-                    let _ = child.kill().await;
-                    // Wait a short time for resources to be released
-                    drop(child);
-                }
-                self.connected.store(false, Ordering::SeqCst);
-            }
-
-            // Clear any stale pending responses
-            self.pending_responses.write().await.clear();
-
-            match self.connect().await {
-                Ok(()) => {
-                    info!("Reconnection successful");
-                    return Ok(());
-                }
-                Err(e) => {
-                    error!(error = %e, attempt, "Reconnection failed");
-                    if attempt < self.reconnect_config.max_attempts {
-                        sleep(delay).await;
-                        delay = (delay * 2).min(self.reconnect_config.max_delay);
-                    }
-                }
-            }
-        }
-
-        Err(anyhow!("Failed to reconnect after {} attempts", attempt))
     }
 
     /// Send a request and wait for response.
@@ -515,51 +459,6 @@ impl HttpTransport {
     /// Generate next request ID.
     fn next_request_id(&self) -> RequestId {
         RequestId::Number(self.request_id.fetch_add(1, Ordering::SeqCst) as i64)
-    }
-
-    /// Test connection.
-    #[allow(dead_code)]
-    async fn test_connection(&self) -> Result<()> {
-        let request = JsonRpcRequest::new(self.next_request_id(), methods::PING);
-        self.send_request(request).await?;
-        Ok(())
-    }
-
-    /// Reconnect with exponential backoff.
-    #[allow(dead_code)]
-    async fn reconnect(&self) -> Result<()> {
-        if !self.reconnect_config.enabled {
-            return Err(anyhow!("Reconnection disabled"));
-        }
-
-        let mut attempt = 0;
-        let mut delay = self.reconnect_config.initial_delay;
-
-        while attempt < self.reconnect_config.max_attempts {
-            attempt += 1;
-            info!(
-                attempt,
-                max = self.reconnect_config.max_attempts,
-                "Attempting HTTP reconnection"
-            );
-
-            match self.test_connection().await {
-                Ok(()) => {
-                    info!("HTTP reconnection successful");
-                    self.connected.store(true, Ordering::SeqCst);
-                    return Ok(());
-                }
-                Err(e) => {
-                    error!(error = %e, attempt, "HTTP reconnection failed");
-                    if attempt < self.reconnect_config.max_attempts {
-                        sleep(delay).await;
-                        delay = (delay * 2).min(self.reconnect_config.max_delay);
-                    }
-                }
-            }
-        }
-
-        Err(anyhow!("Failed to reconnect after {} attempts", attempt))
     }
 }
 

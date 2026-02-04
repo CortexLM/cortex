@@ -15,6 +15,37 @@ use anyhow::{Context, Result};
 use cortex_common::AppDirs;
 use serde::{Deserialize, Serialize};
 
+// ============================================================
+// SECURITY HELPERS
+// ============================================================
+
+/// Sanitize a server name to prevent path traversal attacks.
+///
+/// Only allows alphanumeric characters, hyphens, and underscores.
+/// Any other characters (including path separators) are replaced with underscores.
+fn sanitize_server_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Validate a server name for safe filesystem use.
+///
+/// Returns true if the name contains only safe characters.
+#[allow(dead_code)]
+pub fn validate_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// MCP transport type
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -158,8 +189,11 @@ impl McpStorage {
     }
 
     /// Get the path to a server's config file
+    ///
+    /// The server name is sanitized to prevent path traversal attacks.
     fn server_path(&self, name: &str) -> PathBuf {
-        self.mcps_dir.join(format!("{}.json", name))
+        let sanitized_name = sanitize_server_name(name);
+        self.mcps_dir.join(format!("{}.json", sanitized_name))
     }
 
     /// Save an MCP server configuration
@@ -371,5 +405,51 @@ mod tests {
         let (storage, _tmp) = test_storage();
         let result = storage.load_server("nonexistent").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_sanitize_server_name() {
+        // Normal names stay the same
+        assert_eq!(sanitize_server_name("my-server"), "my-server");
+        assert_eq!(sanitize_server_name("server_123"), "server_123");
+
+        // Path traversal attempts get sanitized - verify no path separators remain
+        // and that result ends with "etc" (exact underscore count may vary by platform)
+        let sanitized = sanitize_server_name("../../../etc");
+        assert!(!sanitized.contains('/'));
+        assert!(!sanitized.contains('\\'));
+        assert!(!sanitized.contains(".."));
+        assert!(sanitized.ends_with("etc"));
+
+        assert_eq!(sanitize_server_name("test/subdir"), "test_subdir");
+        assert_eq!(sanitize_server_name("test\\windows"), "test_windows");
+    }
+
+    #[test]
+    fn test_validate_server_name() {
+        // Valid names
+        assert!(validate_server_name("my-server"));
+        assert!(validate_server_name("server_123"));
+        assert!(validate_server_name("ABC"));
+
+        // Invalid names
+        assert!(!validate_server_name("../../../etc"));
+        assert!(!validate_server_name("test/subdir"));
+        assert!(!validate_server_name(""));
+        assert!(!validate_server_name("name with spaces"));
+    }
+
+    #[test]
+    fn test_server_path_traversal() {
+        let (storage, tmp) = test_storage();
+        let base_dir = tmp.path().to_path_buf();
+
+        // Attempt path traversal
+        let malicious_name = "../../../etc/passwd";
+        let result_path = storage.server_path(malicious_name);
+
+        // The result should still be under mcps_dir
+        assert!(result_path.starts_with(base_dir.join("mcps")));
+        assert!(!result_path.to_string_lossy().contains(".."));
     }
 }

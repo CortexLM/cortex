@@ -148,8 +148,13 @@ impl HelpBrowserState {
     }
 
     /// Returns the currently selected section.
-    pub fn current_section(&self) -> &HelpSection {
-        &self.sections[self.selected_section]
+    ///
+    /// Returns `None` if the sections vector is empty.
+    pub fn current_section(&self) -> Option<&HelpSection> {
+        if self.sections.is_empty() {
+            return None;
+        }
+        self.sections.get(self.selected_section)
     }
 
     /// Handles character input for search.

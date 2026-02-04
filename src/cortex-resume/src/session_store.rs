@@ -13,15 +13,34 @@ use tokio::fs;
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use tracing::{debug, info};
 
+/// Maximum number of lock entries before triggering cleanup.
+const MAX_LOCK_ENTRIES: usize = 10_000;
+
 /// Global file lock manager for session store operations.
 /// Prevents concurrent modifications to the same file within the process.
 static FILE_LOCKS: once_cell::sync::Lazy<std::sync::Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
 
+/// Remove lock entries that are no longer in use.
+///
+/// An entry is considered stale when only the HashMap holds a reference
+/// to it (strong_count == 1), meaning no caller is currently using the lock.
+fn cleanup_stale_file_locks(locks: &mut HashMap<PathBuf, Arc<AsyncMutex<()>>>) {
+    locks.retain(|_, arc| Arc::strong_count(arc) > 1);
+}
+
 /// Acquire an async lock for a specific file path.
+///
+/// Automatically cleans up stale lock entries when the map grows too large.
 fn get_file_lock(path: &Path) -> Arc<AsyncMutex<()>> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut locks = FILE_LOCKS.lock().unwrap();
+
+    // Clean up stale entries if the map is getting large
+    if locks.len() >= MAX_LOCK_ENTRIES {
+        cleanup_stale_file_locks(&mut locks);
+    }
+
     locks
         .entry(canonical)
         .or_insert_with(|| Arc::new(AsyncMutex::new(())))

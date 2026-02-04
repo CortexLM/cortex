@@ -109,7 +109,13 @@ impl<'a> InteractiveWidget<'a> {
         let hints_height = 1;
         let border_height = 2;
 
-        (items_count as u16) + header_height + search_height + hints_height + border_height
+        // Use saturating conversion to prevent overflow when items_count exceeds u16::MAX
+        let items_height = u16::try_from(items_count).unwrap_or(u16::MAX);
+        items_height
+            .saturating_add(header_height)
+            .saturating_add(search_height)
+            .saturating_add(hints_height)
+            .saturating_add(border_height)
     }
 }
 

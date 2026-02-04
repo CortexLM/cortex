@@ -204,7 +204,7 @@ impl Default for WriteFileHandler {
 #[async_trait]
 impl ToolHandler for WriteFileHandler {
     fn name(&self) -> &str {
-        "Write"
+        "Create"
     }
 
     async fn execute(&self, arguments: Value, context: &ToolContext) -> Result<ToolResult> {
@@ -445,7 +445,7 @@ impl Default for SearchFilesHandler {
 #[async_trait]
 impl ToolHandler for SearchFilesHandler {
     fn name(&self) -> &str {
-        "search_files"
+        "SearchFiles"
     }
 
     async fn execute(&self, arguments: Value, context: &ToolContext) -> Result<ToolResult> {

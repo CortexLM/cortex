@@ -124,20 +124,67 @@ impl SessionStorage {
     }
 
     /// Save a session to disk.
+    ///
+    /// This function ensures data durability by calling sync_all() (fsync)
+    /// after writing to prevent data loss on crash or forceful termination.
     pub async fn save_session(&self, session: &StoredSession) -> Result<()> {
         let path = self.paths.session_path(&session.id);
         let content = serde_json::to_string_pretty(session)?;
-        fs::write(&path, content).await?;
+
+        // Write content to file
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .await?;
+
+        use tokio::io::AsyncWriteExt;
+        let mut file = file;
+        file.write_all(content.as_bytes()).await?;
+        file.flush().await?;
+
+        // Ensure data is durably written to disk (fsync) to prevent data loss on crash
+        file.sync_all().await?;
+
+        // Sync parent directory on Unix for crash safety (ensures directory entry is persisted)
+        #[cfg(unix)]
+        {
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = fs::File::open(parent).await {
+                    let _ = dir.sync_all().await;
+                }
+            }
+        }
+
         debug!(session_id = %session.id, "Session saved");
         Ok(())
     }
 
     /// Save a session synchronously.
+    ///
+    /// This function ensures data durability by calling sync_all() (fsync)
+    /// after writing to prevent data loss on crash or forceful termination.
     pub fn save_session_sync(&self, session: &StoredSession) -> Result<()> {
         let path = self.paths.session_path(&session.id);
         let file = std::fs::File::create(&path)?;
-        let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, session)?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut writer, session)?;
+        writer.flush()?;
+
+        // Ensure data is durably written to disk (fsync) to prevent data loss on crash
+        writer.get_ref().sync_all()?;
+
+        // Sync parent directory on Unix for crash safety (ensures directory entry is persisted)
+        #[cfg(unix)]
+        {
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
+        }
+
         debug!(session_id = %session.id, "Session saved");
         Ok(())
     }

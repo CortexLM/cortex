@@ -225,8 +225,9 @@ impl CardView for CommandsCard {
 
     fn desired_height(&self, max_height: u16, _width: u16) -> u16 {
         // Base height for list items + search bar + some padding
-        let command_count = self.commands.len() as u16;
-        let content_height = command_count + 2; // +2 for search bar and padding
+        // Use saturating conversion to prevent overflow when count > u16::MAX
+        let command_count = u16::try_from(self.commands.len()).unwrap_or(u16::MAX);
+        let content_height = command_count.saturating_add(2); // +2 for search bar and padding
 
         // Clamp between min 5 and max 14, respecting max_height
         content_height.clamp(5, 14).min(max_height)

@@ -572,7 +572,7 @@ impl SelectionList {
             && let Some(reason) = &item.disabled_reason
         {
             let reason_str = format!(" {}", reason);
-            let reason_x = x + width - reason_str.len() as u16 - 1;
+            let reason_x = x.saturating_add(width.saturating_sub(reason_str.len() as u16 + 1));
             if reason_x > col + 2 {
                 buf.set_string(
                     reason_x,
@@ -651,7 +651,11 @@ impl SelectionList {
 
         buf.set_string(x + 2, area.y, &display_text, text_style);
 
-        let cursor_x = x + 2 + self.search_query.len() as u16;
+        // Use character count for cursor position, and account for truncation
+        let query_char_count = self.search_query.chars().count();
+        let display_char_count = display_text.chars().count();
+        let cursor_offset = display_char_count.min(query_char_count) as u16;
+        let cursor_x = x + 2 + cursor_offset;
         if cursor_x < area.right().saturating_sub(1) {
             buf[(cursor_x, area.y)].set_bg(self.colors.accent);
             buf[(cursor_x, area.y)].set_fg(self.colors.void);

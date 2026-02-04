@@ -357,31 +357,47 @@ fn validate_export_messages(messages: &[ExportMessage]) -> Result<()> {
     for (idx, message) in messages.iter().enumerate() {
         // Check for base64-encoded image data in content
         // Common pattern: "data:image/png;base64,..." or "data:image/jpeg;base64,..."
-        if let Some(data_uri_start) = message.content.find("data:image/")
-            && let Some(base64_marker) = message.content[data_uri_start..].find(";base64,")
-        {
-            let base64_start = data_uri_start + base64_marker + 8; // 8 = len(";base64,")
-            let remaining = &message.content[base64_start..];
+        if let Some(data_uri_start) = message.content.find("data:image/") {
+            // Use safe slicing with .get() to avoid panics on multi-byte UTF-8 boundaries
+            let content_after_start = match message.content.get(data_uri_start..) {
+                Some(s) => s,
+                None => continue, // Invalid byte offset, skip this message
+            };
 
-            // Find end of base64 data (could end with quote, whitespace, or end of string)
-            let base64_end = remaining
-                .find(['"', '\'', ' ', '\n', ')'])
-                .unwrap_or(remaining.len());
-            let base64_data = &remaining[..base64_end];
+            if let Some(base64_marker) = content_after_start.find(";base64,") {
+                let base64_start = data_uri_start + base64_marker + 8; // 8 = len(";base64,")
 
-            // Validate the base64 data
-            if !base64_data.is_empty() {
-                let engine = base64::engine::general_purpose::STANDARD;
-                if let Err(e) = engine.decode(base64_data) {
-                    bail!(
-                        "Invalid base64 encoding in message {} (role: '{}'): {}\n\
-                            The image data starting at position {} has invalid base64 encoding.\n\
-                            Please ensure all embedded images use valid base64 encoding.",
-                        idx + 1,
-                        message.role,
-                        e,
-                        data_uri_start
-                    );
+                // Safe slicing for the remaining content after base64 marker
+                let remaining = match message.content.get(base64_start..) {
+                    Some(s) => s,
+                    None => continue, // Invalid byte offset, skip this message
+                };
+
+                // Find end of base64 data (could end with quote, whitespace, or end of string)
+                let base64_end = remaining
+                    .find(['"', '\'', ' ', '\n', ')'])
+                    .unwrap_or(remaining.len());
+
+                // Safe slicing for the base64 data
+                let base64_data = match remaining.get(..base64_end) {
+                    Some(s) => s,
+                    None => continue, // Invalid byte offset, skip this message
+                };
+
+                // Validate the base64 data
+                if !base64_data.is_empty() {
+                    let engine = base64::engine::general_purpose::STANDARD;
+                    if let Err(e) = engine.decode(base64_data) {
+                        bail!(
+                            "Invalid base64 encoding in message {} (role: '{}'): {}\n\
+                                The image data starting at position {} has invalid base64 encoding.\n\
+                                Please ensure all embedded images use valid base64 encoding.",
+                            idx + 1,
+                            message.role,
+                            e,
+                            data_uri_start
+                        );
+                    }
                 }
             }
         }
@@ -395,13 +411,24 @@ fn validate_export_messages(messages: &[ExportMessage]) -> Result<()> {
                     // Try to find and validate any base64 in the arguments
                     for (pos, _) in args_str.match_indices(";base64,") {
                         let base64_start = pos + 8;
-                        let remaining = &args_str[base64_start..];
+
+                        // Safe slicing for the remaining content after base64 marker
+                        let remaining = match args_str.get(base64_start..) {
+                            Some(s) => s,
+                            None => continue, // Invalid byte offset, skip this occurrence
+                        };
+
                         let base64_end = remaining
                             .find(|c: char| {
                                 c == '"' || c == '\'' || c == ' ' || c == '\n' || c == ')'
                             })
                             .unwrap_or(remaining.len());
-                        let base64_data = &remaining[..base64_end];
+
+                        // Safe slicing for the base64 data
+                        let base64_data = match remaining.get(..base64_end) {
+                            Some(s) => s,
+                            None => continue, // Invalid byte offset, skip this occurrence
+                        };
 
                         if !base64_data.is_empty() {
                             let engine = base64::engine::general_purpose::STANDARD;

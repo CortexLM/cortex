@@ -85,12 +85,12 @@ impl<'a> MentionPopup<'a> {
         let item_count = self.state.visible_results().len() as u16;
         let height = (item_count + 2).min(MAX_HEIGHT + 2); // +2 for borders
 
-        // Calculate width based on content
+        // Calculate width based on content (use chars().count() for Unicode support)
         let content_width = self
             .state
             .results()
             .iter()
-            .map(|p| p.to_string_lossy().len())
+            .map(|p| p.to_string_lossy().chars().count())
             .max()
             .unwrap_or(20) as u16;
 
@@ -195,8 +195,11 @@ impl Widget for MentionPopup<'_> {
 
         let (width, height) = self.calculate_dimensions(area);
 
-        // Position the popup
-        let popup_area = if self.above {
+        // Position the popup - check if it fits above, otherwise render below
+        let fits_above = area.y >= height;
+        let render_above = self.above && fits_above;
+
+        let popup_area = if render_above {
             Rect::new(area.x, area.y.saturating_sub(height), width, height)
         } else {
             Rect::new(

@@ -30,6 +30,7 @@ pub mod artifacts;
 pub mod context;
 pub mod handlers;
 pub mod registry;
+pub mod response_store;
 pub mod router;
 pub mod spec;
 pub mod unified_executor;
@@ -45,6 +46,11 @@ pub use artifacts::{
 pub use context::ToolContext;
 pub use handlers::*;
 pub use registry::{PluginTool, ToolRegistry};
+pub use response_store::{
+    CLEANUP_INTERVAL, DEFAULT_TTL, MAX_STORE_SIZE, StoreInfo, StoreStats, StoredResponse,
+    ToolResponseStore, ToolResponseStoreConfig, create_shared_store,
+    create_shared_store_with_config,
+};
 pub use router::ToolRouter;
 pub use spec::{ToolCall, ToolDefinition, ToolHandler, ToolResult};
 pub use unified_executor::{ExecutorConfig, UnifiedToolExecutor};

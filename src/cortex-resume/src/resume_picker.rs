@@ -153,12 +153,15 @@ fn format_relative_time(time: &chrono::DateTime<chrono::Utc>) -> String {
     }
 }
 
-/// Truncate string to fit width.
+/// Truncate string to fit width, handling multi-byte UTF-8 safely.
 fn truncate_string(s: &str, width: usize) -> String {
-    if s.len() <= width {
+    // Count actual character width, not byte length
+    let char_count = s.chars().count();
+    if char_count <= width {
         s.to_string()
     } else if width > 3 {
-        format!("{}...", &s[..width - 3])
+        let truncated: String = s.chars().take(width - 3).collect();
+        format!("{}...", truncated)
     } else {
         s.chars().take(width).collect()
     }
@@ -175,5 +178,41 @@ mod tests {
 
         let hour_ago = now - chrono::Duration::hours(2);
         assert_eq!(format_relative_time(&hour_ago), "2h ago");
+    }
+
+    #[test]
+    fn test_truncate_string_ascii() {
+        // Short string, no truncation needed
+        assert_eq!(truncate_string("hello", 10), "hello");
+
+        // Exact fit
+        assert_eq!(truncate_string("hello", 5), "hello");
+
+        // Needs truncation
+        assert_eq!(truncate_string("hello world", 8), "hello...");
+
+        // Very short width
+        assert_eq!(truncate_string("hello", 3), "hel");
+        assert_eq!(truncate_string("hello", 2), "he");
+    }
+
+    #[test]
+    fn test_truncate_string_utf8() {
+        // UTF-8 multi-byte characters (Japanese)
+        let japanese = "こんにちは世界"; // 7 chars
+        assert_eq!(truncate_string(japanese, 10), japanese); // No truncation
+        assert_eq!(truncate_string(japanese, 7), japanese); // Exact fit
+        assert_eq!(truncate_string(japanese, 6), "こんに..."); // Truncated (3 chars + ...)
+
+        // UTF-8 with emoji
+        let emoji = "Hello 🌍🌎🌏"; // 9 chars: H,e,l,l,o, ,🌍,🌎,🌏
+        assert_eq!(truncate_string(emoji, 20), emoji); // No truncation
+        assert_eq!(truncate_string(emoji, 9), emoji); // Exact fit (9 chars)
+        assert_eq!(truncate_string(emoji, 8), "Hello..."); // Truncated (5 chars + ...)
+
+        // Mixed UTF-8 and ASCII
+        let mixed = "路径/path/文件"; // 11 chars
+        assert_eq!(truncate_string(mixed, 20), mixed); // No truncation
+        assert_eq!(truncate_string(mixed, 8), "路径/pa..."); // Truncated
     }
 }

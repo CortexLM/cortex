@@ -22,6 +22,37 @@ const META_FILE: &str = "meta.json";
 const HISTORY_FILE: &str = "history.jsonl";
 
 // ============================================================
+// SECURITY HELPERS
+// ============================================================
+
+/// Sanitize a session ID to prevent path traversal attacks.
+///
+/// Only allows alphanumeric characters, hyphens, and underscores.
+/// Any other characters (including path separators) are replaced with underscores.
+fn sanitize_session_id(session_id: &str) -> String {
+    session_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Validate a session ID for safe filesystem use.
+///
+/// Returns true if the session_id contains only safe characters.
+pub fn validate_session_id(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+// ============================================================
 // SESSION STORAGE
 // ============================================================
 
@@ -49,8 +80,21 @@ impl SessionStorage {
     }
 
     /// Gets the directory for a specific session.
+    ///
+    /// # Security
+    ///
+    /// The session_id is validated to prevent path traversal attacks.
+    /// Only alphanumeric characters, hyphens, and underscores are allowed.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic but will return an invalid path if
+    /// the session_id contains disallowed characters. Use `validate_session_id`
+    /// before calling this function for untrusted input.
     pub fn session_dir(&self, session_id: &str) -> PathBuf {
-        self.base_dir.join(session_id)
+        // Sanitize session_id to prevent path traversal
+        let sanitized_id = sanitize_session_id(session_id);
+        self.base_dir.join(&sanitized_id)
     }
 
     /// Gets the metadata file path for a session.
@@ -87,6 +131,9 @@ impl SessionStorage {
     // ========================================================================
 
     /// Saves session metadata.
+    ///
+    /// Uses atomic write (temp file + rename) with fsync for durability.
+    /// This prevents data loss on crash or forceful termination.
     pub fn save_meta(&self, meta: &SessionMeta) -> Result<()> {
         self.ensure_session_dir(&meta.id)?;
 
@@ -94,12 +141,34 @@ impl SessionStorage {
         let content =
             serde_json::to_string_pretty(meta).context("Failed to serialize session metadata")?;
 
-        // Atomic write: write to temp file then rename
+        // Atomic write: write to temp file, fsync, then rename
         let temp_path = path.with_extension("json.tmp");
-        fs::write(&temp_path, &content)
+
+        // Write and sync temp file
+        let file = File::create(&temp_path)
+            .with_context(|| format!("Failed to create temp metadata file: {:?}", temp_path))?;
+        let mut writer = BufWriter::new(file);
+        writer
+            .write_all(content.as_bytes())
             .with_context(|| format!("Failed to write temp metadata file: {:?}", temp_path))?;
+        writer.flush()?;
+
+        // Ensure data is durably written to disk (fsync) before rename
+        writer.get_ref().sync_all().with_context(|| {
+            format!("Failed to sync temp metadata file to disk: {:?}", temp_path)
+        })?;
+
+        // Rename temp file to final path
         fs::rename(&temp_path, &path)
             .with_context(|| format!("Failed to rename metadata file: {:?}", path))?;
+
+        // Sync parent directory on Unix for crash safety (ensures directory entry is persisted)
+        #[cfg(unix)]
+        if let Some(parent) = path.parent()
+            && let Ok(dir) = File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
 
         Ok(())
     }
@@ -211,6 +280,14 @@ impl SessionStorage {
 
         fs::rename(&temp_path, &path)
             .with_context(|| format!("Failed to rename history file: {:?}", path))?;
+
+        // Sync parent directory on Unix for crash safety (ensures directory entry is persisted)
+        #[cfg(unix)]
+        if let Some(parent) = path.parent()
+            && let Ok(dir) = File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
 
         Ok(())
     }
@@ -428,5 +505,52 @@ mod tests {
 
         let loaded = storage.load_meta(&session_id).unwrap();
         assert!(loaded.archived);
+    }
+
+    #[test]
+    fn test_validate_session_id() {
+        // Valid IDs
+        assert!(validate_session_id("abc-123"));
+        assert!(validate_session_id("test_session"));
+        assert!(validate_session_id("ABC123"));
+
+        // Invalid IDs - path traversal attempts
+        assert!(!validate_session_id("../../../etc"));
+        assert!(!validate_session_id(".."));
+        assert!(!validate_session_id("test/../passwd"));
+        assert!(!validate_session_id("test/subdir"));
+        assert!(!validate_session_id(""));
+    }
+
+    #[test]
+    fn test_sanitize_session_id() {
+        // Normal ID stays the same
+        assert_eq!(sanitize_session_id("abc-123"), "abc-123");
+        assert_eq!(sanitize_session_id("test_session"), "test_session");
+
+        // Path traversal gets sanitized - verify no path separators remain
+        // and that result ends with "etc" (exact underscore count may vary by platform)
+        let sanitized = sanitize_session_id("../../../etc");
+        assert!(!sanitized.contains('/'));
+        assert!(!sanitized.contains('\\'));
+        assert!(!sanitized.contains(".."));
+        assert!(sanitized.ends_with("etc"));
+
+        assert_eq!(sanitize_session_id("test/subdir"), "test_subdir");
+        assert_eq!(sanitize_session_id("test\x00evil"), "test_evil");
+    }
+
+    #[test]
+    fn test_session_dir_path_traversal() {
+        let (storage, temp) = create_test_storage();
+        let base_dir = temp.path().to_path_buf();
+
+        // Attempt path traversal - should be sanitized
+        let malicious_id = "../../../etc/passwd";
+        let result_path = storage.session_dir(malicious_id);
+
+        // The result should still be under base_dir, not escaping it
+        assert!(result_path.starts_with(&base_dir));
+        assert!(!result_path.to_string_lossy().contains(".."));
     }
 }

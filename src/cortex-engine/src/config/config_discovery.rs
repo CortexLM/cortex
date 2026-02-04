@@ -4,20 +4,36 @@
 //! with caching support for performance in monorepo environments.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 
 use tracing::{debug, trace};
 
+/// Maximum number of entries in each cache to prevent unbounded memory growth.
+const MAX_CACHE_SIZE: usize = 1000;
+
 /// Cache for discovered config paths.
 /// Key is the start directory, value is the found config path (or None).
 static CONFIG_CACHE: LazyLock<RwLock<HashMap<PathBuf, Option<PathBuf>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+    LazyLock::new(|| RwLock::new(HashMap::with_capacity(MAX_CACHE_SIZE)));
 
 /// Cache for project roots.
 /// Key is the start directory, value is the project root path.
 static PROJECT_ROOT_CACHE: LazyLock<RwLock<HashMap<PathBuf, Option<PathBuf>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+    LazyLock::new(|| RwLock::new(HashMap::with_capacity(MAX_CACHE_SIZE)));
+
+/// Insert a key-value pair into the cache with eviction when full.
+/// When the cache reaches MAX_CACHE_SIZE, removes an arbitrary entry before inserting.
+fn insert_with_eviction<K: Eq + Hash + Clone, V>(cache: &mut HashMap<K, V>, key: K, value: V) {
+    if cache.len() >= MAX_CACHE_SIZE {
+        // Remove first entry (simple eviction strategy)
+        if let Some(k) = cache.keys().next().cloned() {
+            cache.remove(&k);
+        }
+    }
+    cache.insert(key, value);
+}
 
 /// Markers that indicate a project root directory.
 const PROJECT_ROOT_MARKERS: &[&str] = &[
@@ -57,9 +73,9 @@ pub fn find_up(start_dir: &Path, filename: &str) -> Option<PathBuf> {
 
     let result = find_up_uncached(start_dir, filename);
 
-    // Store in cache
+    // Store in cache with eviction when full
     if let Ok(mut cache) = CONFIG_CACHE.write() {
-        cache.insert(cache_key, result.clone());
+        insert_with_eviction(&mut cache, cache_key, result.clone());
     }
 
     result
@@ -169,9 +185,9 @@ pub fn find_project_root(start_dir: &Path) -> Option<PathBuf> {
 
     let result = find_project_root_uncached(start_dir);
 
-    // Store in cache
+    // Store in cache with eviction when full
     if let Ok(mut cache) = PROJECT_ROOT_CACHE.write() {
-        cache.insert(start_dir.to_path_buf(), result.clone());
+        insert_with_eviction(&mut cache, start_dir.to_path_buf(), result.clone());
     }
 
     result

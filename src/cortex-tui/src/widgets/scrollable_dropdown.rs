@@ -254,9 +254,12 @@ impl<'a> ScrollableDropdown<'a> {
 
     /// Returns visible items slice.
     fn visible_items(&self) -> &[DropdownItem] {
-        let start = self.scroll_offset;
+        if self.max_visible == 0 || self.items.is_empty() {
+            return &[];
+        }
+        let start = self.scroll_offset.min(self.items.len());
         let end = (start + self.max_visible).min(self.items.len());
-        &self.items[start..end]
+        self.items.get(start..end).unwrap_or(&[])
     }
 
     /// Renders a single item.
@@ -459,7 +462,7 @@ pub fn calculate_scroll_offset(
     max_visible: usize,
     total_items: usize,
 ) -> usize {
-    if total_items <= max_visible {
+    if max_visible == 0 || total_items <= max_visible {
         return 0;
     }
 
@@ -468,7 +471,7 @@ pub fn calculate_scroll_offset(
         selected
     } else if selected >= current_offset + max_visible {
         // Selected item is below visible area - scroll down
-        selected.saturating_sub(max_visible - 1)
+        selected.saturating_sub(max_visible.saturating_sub(1))
     } else {
         // Selected item is visible - no change needed
         current_offset
@@ -482,7 +485,7 @@ pub fn select_prev(
     max_visible: usize,
     total_items: usize,
 ) -> (usize, usize) {
-    if total_items == 0 {
+    if total_items == 0 || max_visible == 0 {
         return (0, 0);
     }
 
@@ -511,7 +514,7 @@ pub fn select_next(
     max_visible: usize,
     total_items: usize,
 ) -> (usize, usize) {
-    if total_items == 0 {
+    if total_items == 0 || max_visible == 0 {
         return (0, 0);
     }
 
@@ -521,8 +524,8 @@ pub fn select_next(
         // Wrapped to start
         0
     } else if new_selected >= scroll_offset + max_visible {
-        // Need to scroll down
-        new_selected.saturating_sub(max_visible - 1)
+        // Need to scroll down - use saturating_sub to prevent underflow
+        new_selected.saturating_sub(max_visible.saturating_sub(1))
     } else {
         scroll_offset
     };

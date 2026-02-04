@@ -1502,6 +1502,7 @@ dependencies = [
  "serde_json",
  "strum_macros",
  "tempfile",
+ "tracing",
  "uuid",
 ]
 

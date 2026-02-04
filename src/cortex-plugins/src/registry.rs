@@ -674,18 +674,21 @@ impl PluginRegistry {
         let info = plugin.info().clone();
         let id = info.id.clone();
 
-        {
-            let plugins = self.plugins.read().await;
-            if plugins.contains_key(&id) {
-                return Err(PluginError::AlreadyExists(id));
-            }
-        }
-
+        // Use entry API to atomically check-and-insert within a single write lock
+        // to prevent TOCTOU race conditions where multiple concurrent registrations
+        // could both pass the contains_key check before either inserts
         let handle = PluginHandle::new(plugin);
-
         {
             let mut plugins = self.plugins.write().await;
-            plugins.insert(id.clone(), handle);
+            use std::collections::hash_map::Entry;
+            match plugins.entry(id.clone()) {
+                Entry::Occupied(_) => {
+                    return Err(PluginError::AlreadyExists(id));
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(handle);
+                }
+            }
         }
 
         {

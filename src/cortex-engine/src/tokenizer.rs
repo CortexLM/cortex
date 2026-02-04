@@ -3,8 +3,24 @@
 //! Provides token counting and text tokenization for various models.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 
 use serde::{Deserialize, Serialize};
+
+/// Maximum number of entries in the token cache to prevent unbounded memory growth.
+const MAX_CACHE_SIZE: usize = 1000;
+
+/// Insert a key-value pair into the cache with eviction when full.
+/// When the cache reaches MAX_CACHE_SIZE, removes an arbitrary entry before inserting.
+fn insert_with_eviction<K: Eq + Hash + Clone, V>(cache: &mut HashMap<K, V>, key: K, value: V) {
+    if cache.len() >= MAX_CACHE_SIZE {
+        // Remove first entry (simple eviction strategy)
+        if let Some(k) = cache.keys().next().cloned() {
+            cache.remove(&k);
+        }
+    }
+    cache.insert(key, value);
+}
 
 /// Tokenizer type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,7 +74,7 @@ impl TokenizerType {
 pub struct TokenCounter {
     /// Tokenizer type.
     tokenizer: TokenizerType,
-    /// Cache.
+    /// Cache with bounded size to prevent unbounded memory growth.
     cache: HashMap<u64, u32>,
 }
 
@@ -67,7 +83,7 @@ impl TokenCounter {
     pub fn new(tokenizer: TokenizerType) -> Self {
         Self {
             tokenizer,
-            cache: HashMap::new(),
+            cache: HashMap::with_capacity(MAX_CACHE_SIZE),
         }
     }
 
@@ -85,7 +101,7 @@ impl TokenCounter {
         }
 
         let count = self.count_uncached(text);
-        self.cache.insert(hash, count);
+        insert_with_eviction(&mut self.cache, hash, count);
         count
     }
 

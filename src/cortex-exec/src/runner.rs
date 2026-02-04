@@ -27,10 +27,23 @@ use cortex_protocol::ConversationId;
 use crate::output::{OutputFormat, OutputWriter};
 
 /// Default timeout for the entire execution (10 minutes).
+///
+/// This is the maximum duration for a multi-turn exec session.
+/// See `cortex_common::http_client` module documentation for the complete
+/// timeout hierarchy across Cortex services.
 const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
 /// Default timeout for a single LLM request (2 minutes).
+///
+/// Allows sufficient time for model inference while preventing indefinite hangs.
+/// See `cortex_common::http_client` module documentation for the complete
+/// timeout hierarchy across Cortex services.
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
+
+/// Per-chunk timeout during streaming responses.
+/// Prevents indefinite hangs when connections stall mid-stream.
+/// See cortex_common::http_client for timeout hierarchy documentation.
+const STREAMING_CHUNK_TIMEOUT_SECS: u64 = 30;
 
 /// Maximum retries for transient errors.
 const MAX_RETRIES: usize = 3;
@@ -187,7 +200,10 @@ impl ExecRunner {
             self.client = Some(client);
         }
 
-        Ok(self.client.as_ref().unwrap().as_ref())
+        self.client
+            .as_ref()
+            .map(|c| c.as_ref())
+            .ok_or_else(|| CortexError::Internal("LLM client not initialized".to_string()))
     }
 
     /// Get filtered tool definitions based on options.
@@ -555,7 +571,28 @@ impl ExecRunner {
         let mut partial_tool_calls: std::collections::HashMap<String, (String, String)> =
             std::collections::HashMap::new();
 
-        while let Some(event) = stream.next().await {
+        loop {
+            // Apply per-chunk timeout to prevent indefinite hangs when connections stall
+            let event = match tokio::time::timeout(
+                Duration::from_secs(STREAMING_CHUNK_TIMEOUT_SECS),
+                stream.next(),
+            )
+            .await
+            {
+                Ok(Some(event)) => event,
+                Ok(None) => break, // Stream ended normally
+                Err(_) => {
+                    tracing::warn!(
+                        "Stream chunk timeout after {}s",
+                        STREAMING_CHUNK_TIMEOUT_SECS
+                    );
+                    return Err(CortexError::Provider(format!(
+                        "Streaming timeout: no response chunk received within {}s",
+                        STREAMING_CHUNK_TIMEOUT_SECS
+                    )));
+                }
+            };
+
             match event? {
                 ResponseEvent::Delta(delta) => {
                     if self.options.streaming {

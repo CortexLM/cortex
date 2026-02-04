@@ -222,13 +222,16 @@ impl McpServer {
     }
 
     async fn handle_initialize(&self, params: Option<Value>) -> Result<Value, JsonRpcError> {
-        // Check state
-        let current_state = *self.state.read().await;
-        if current_state != ServerState::Uninitialized {
-            return Err(JsonRpcError::invalid_request("Server already initialized"));
+        // Atomic check-and-transition: hold write lock during entire state check and modification
+        // to prevent TOCTOU race conditions where multiple concurrent initialize requests
+        // could both pass the uninitialized check before either sets the state
+        {
+            let mut state_guard = self.state.write().await;
+            if *state_guard != ServerState::Uninitialized {
+                return Err(JsonRpcError::invalid_request("Server already initialized"));
+            }
+            *state_guard = ServerState::Initializing;
         }
-
-        *self.state.write().await = ServerState::Initializing;
 
         // Parse params
         let init_params: InitializeParams = params

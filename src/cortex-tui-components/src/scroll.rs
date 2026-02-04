@@ -119,12 +119,16 @@ impl ScrollState {
     ///
     /// Adjusts offset if necessary to make the item visible.
     pub fn ensure_visible(&mut self, index: usize) {
+        // Guard against zero visible items to prevent underflow
+        if self.visible == 0 {
+            return;
+        }
         if index < self.offset {
             // Item is above visible area - scroll up
             self.offset = index;
         } else if index >= self.offset + self.visible {
             // Item is below visible area - scroll down
-            self.offset = index.saturating_sub(self.visible - 1);
+            self.offset = index.saturating_sub(self.visible.saturating_sub(1));
         }
         self.clamp_offset();
     }

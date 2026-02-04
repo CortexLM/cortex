@@ -15,6 +15,10 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+/// Maximum number of events to buffer before dropping old ones.
+/// Prevents unbounded memory growth if drain_events() is not called regularly.
+const MAX_BUFFER_SIZE: usize = 10_000;
+
 /// Token usage for streaming.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StreamTokenUsage {
@@ -26,12 +30,25 @@ pub struct StreamTokenUsage {
     pub total_tokens: u32,
 }
 
+/// Safely convert an i64 token count to u32 with saturation.
+/// Negative values clamp to 0, values > u32::MAX clamp to u32::MAX.
+#[inline]
+fn saturating_i64_to_u32(value: i64) -> u32 {
+    if value <= 0 {
+        0
+    } else if value > u32::MAX as i64 {
+        u32::MAX
+    } else {
+        value as u32
+    }
+}
+
 impl From<crate::client::TokenUsage> for StreamTokenUsage {
     fn from(usage: crate::client::TokenUsage) -> Self {
         Self {
-            prompt_tokens: usage.input_tokens as u32,
-            completion_tokens: usage.output_tokens as u32,
-            total_tokens: usage.total_tokens as u32,
+            prompt_tokens: saturating_i64_to_u32(usage.input_tokens),
+            completion_tokens: saturating_i64_to_u32(usage.output_tokens),
+            total_tokens: saturating_i64_to_u32(usage.total_tokens),
         }
     }
 }
@@ -213,7 +230,7 @@ impl StreamProcessor {
         Self {
             state: StreamState::Idle,
             content: StreamContent::new(),
-            buffer: VecDeque::new(),
+            buffer: VecDeque::with_capacity(1024), // Pre-allocate reasonable capacity
             start_time: None,
             first_token_time: None,
             last_event_time: None,
@@ -284,6 +301,10 @@ impl StreamProcessor {
             }
         }
 
+        // Enforce buffer size limit to prevent unbounded memory growth
+        if self.buffer.len() >= MAX_BUFFER_SIZE {
+            self.buffer.pop_front();
+        }
         self.buffer.push_back(event);
     }
 

@@ -67,9 +67,17 @@ impl GitInfo {
         let status = git_command(&root, &["status", "--porcelain"]).unwrap_or_default();
         let is_dirty = !status.is_empty();
 
-        // Count changes
-        let changes = status.lines().filter(|l| !l.starts_with("??")).count() as u32;
-        let untracked = status.lines().filter(|l| l.starts_with("??")).count() as u32;
+        // Count changes (saturating to u32::MAX to prevent truncation)
+        let changes = status
+            .lines()
+            .filter(|l| !l.starts_with("??"))
+            .count()
+            .min(u32::MAX as usize) as u32;
+        let untracked = status
+            .lines()
+            .filter(|l| l.starts_with("??"))
+            .count()
+            .min(u32::MAX as usize) as u32;
 
         // Get tags
         let tags = git_command(&root, &["tag", "--points-at", "HEAD"])
@@ -385,7 +393,7 @@ impl GitStash {
                 let message = parts.get(2).unwrap_or(&"").to_string();
 
                 stashes.push(GitStash {
-                    index: i as u32,
+                    index: i.min(u32::MAX as usize) as u32,
                     message,
                     branch,
                 });

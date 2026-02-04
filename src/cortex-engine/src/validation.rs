@@ -269,6 +269,33 @@ pub struct CommandValidator {
     pub allow_shell_operators: bool,
 }
 
+/// Normalize a command string for consistent validation.
+///
+/// This function handles bypass attempts such as:
+/// - Extra whitespace: "rm  -rf" → "rm -rf"
+/// - Quoted parts: "'rm' -rf" → "rm -rf"
+/// - Path variants: "/bin/rm -rf" → "rm -rf"
+fn normalize_command(cmd: &str) -> String {
+    cmd.split_whitespace()
+        .enumerate()
+        .map(|(idx, part)| {
+            // Remove surrounding quotes (single and double)
+            let unquoted = part.trim_matches(|c| c == '\'' || c == '"');
+
+            // For the first part (command), extract basename to handle path variants
+            if idx == 0 {
+                Path::new(unquoted)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(unquoted)
+            } else {
+                unquoted
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl CommandValidator {
     /// Create a new validator.
     pub fn new() -> Self {
@@ -332,9 +359,12 @@ impl CommandValidator {
             ));
         }
 
-        // Check allowed list
+        // Normalize the command for consistent validation
+        let normalized = normalize_command(command);
+
+        // Check allowed list using normalized command
         if let Some(ref allowed) = self.allowed {
-            let cmd = command.split_whitespace().next().unwrap_or("");
+            let cmd = normalized.split_whitespace().next().unwrap_or("");
             if !allowed.contains(cmd) {
                 result.add_error(ValidationError::new(
                     "command",
@@ -343,9 +373,10 @@ impl CommandValidator {
             }
         }
 
-        // Check blocked commands
+        // Check blocked commands against normalized form
         for blocked in &self.blocked {
-            if command.contains(blocked) {
+            let normalized_blocked = normalize_command(blocked);
+            if normalized.contains(&normalized_blocked) {
                 result.add_error(ValidationError::new(
                     "command",
                     "Command contains blocked pattern",
@@ -354,9 +385,9 @@ impl CommandValidator {
             }
         }
 
-        // Check blocked patterns
+        // Check blocked patterns against both original and normalized
         for pattern in &self.blocked_patterns {
-            if command.contains(pattern) {
+            if command.contains(pattern) || normalized.contains(pattern) {
                 result.add_error(ValidationError::new(
                     "command",
                     "Command contains dangerous pattern",
@@ -698,6 +729,97 @@ mod tests {
 
         let result = validator.validate("ls -la");
         assert!(result.valid);
+    }
+
+    #[test]
+    fn test_command_validation_whitespace_bypass() {
+        let validator = CommandValidator::new();
+
+        // Extra whitespace should not bypass validation
+        let result = validator.validate("rm  -rf  /");
+        assert!(
+            !result.valid,
+            "Extra whitespace should not bypass blocked command"
+        );
+
+        let result = validator.validate("rm   -rf   /");
+        assert!(
+            !result.valid,
+            "Multiple spaces should not bypass blocked command"
+        );
+    }
+
+    #[test]
+    fn test_command_validation_quote_bypass() {
+        let validator = CommandValidator::new();
+
+        // Quoted commands should not bypass validation
+        let result = validator.validate("'rm' -rf /");
+        assert!(
+            !result.valid,
+            "Single quotes should not bypass blocked command"
+        );
+
+        let result = validator.validate("\"rm\" -rf /");
+        assert!(
+            !result.valid,
+            "Double quotes should not bypass blocked command"
+        );
+
+        let result = validator.validate("'rm' '-rf' '/'");
+        assert!(
+            !result.valid,
+            "Fully quoted command should not bypass blocked command"
+        );
+    }
+
+    #[test]
+    fn test_command_validation_path_bypass() {
+        let validator = CommandValidator::new();
+
+        // Path variants should not bypass validation
+        let result = validator.validate("/bin/rm -rf /");
+        assert!(
+            !result.valid,
+            "Absolute path should not bypass blocked command"
+        );
+
+        let result = validator.validate("/usr/bin/rm -rf /");
+        assert!(!result.valid, "Full path should not bypass blocked command");
+
+        let result = validator.validate("./rm -rf /");
+        assert!(
+            !result.valid,
+            "Relative path should not bypass blocked command"
+        );
+    }
+
+    #[test]
+    fn test_command_validation_combined_bypass() {
+        let validator = CommandValidator::new();
+
+        // Combined bypass attempts
+        let result = validator.validate("'/bin/rm'  -rf  /");
+        assert!(
+            !result.valid,
+            "Combined path and whitespace should not bypass"
+        );
+
+        let result = validator.validate("\"/usr/bin/rm\"   '-rf'   '/'");
+        assert!(
+            !result.valid,
+            "Combined quotes, path, and whitespace should not bypass"
+        );
+    }
+
+    #[test]
+    fn test_normalize_command() {
+        // Test the normalize function directly
+        assert_eq!(normalize_command("rm -rf /"), "rm -rf /");
+        assert_eq!(normalize_command("rm  -rf  /"), "rm -rf /");
+        assert_eq!(normalize_command("'rm' -rf /"), "rm -rf /");
+        assert_eq!(normalize_command("/bin/rm -rf /"), "rm -rf /");
+        assert_eq!(normalize_command("'/usr/bin/rm' '-rf' '/'"), "rm -rf /");
     }
 
     #[test]

@@ -207,7 +207,9 @@ impl CardView for SessionsCard {
 
     fn desired_height(&self, max_height: u16, _width: u16) -> u16 {
         // Base height: sessions + header + search bar + padding
-        let content_height = self.sessions.len() as u16 + 3;
+        // Use saturating conversion to prevent overflow when count > u16::MAX
+        let session_count = u16::try_from(self.sessions.len()).unwrap_or(u16::MAX);
+        let content_height = session_count.saturating_add(3);
         let min_height = 5;
         let max_desired = 15;
         content_height
