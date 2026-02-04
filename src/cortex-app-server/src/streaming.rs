@@ -510,10 +510,10 @@ async fn session_events_stream(
             serde_json::to_string(&StreamEvent::Ping {
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or_default()
                     .as_secs(),
             })
-            .unwrap(),
+            .unwrap_or_default(),
         )))
         .await;
 
