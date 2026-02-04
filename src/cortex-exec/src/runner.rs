@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use tokio_stream::StreamExt;
 
+use cortex_common::{DEFAULT_EXEC_TIMEOUT_SECS, DEFAULT_REQUEST_TIMEOUT_SECS};
 use cortex_engine::{
     Config, ConversationManager, CortexError,
     client::{
@@ -25,12 +26,6 @@ use cortex_engine::{
 use cortex_protocol::ConversationId;
 
 use crate::output::{OutputFormat, OutputWriter};
-
-/// Default timeout for the entire execution (10 minutes).
-const DEFAULT_TIMEOUT_SECS: u64 = 600;
-
-/// Default timeout for a single LLM request (2 minutes).
-const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 /// Maximum retries for transient errors.
 const MAX_RETRIES: usize = 3;
@@ -75,7 +70,7 @@ impl Default for ExecOptions {
             output_format: OutputFormat::Text,
             full_auto: false,
             max_turns: Some(10),
-            timeout_secs: Some(DEFAULT_TIMEOUT_SECS),
+            timeout_secs: Some(DEFAULT_EXEC_TIMEOUT_SECS),
             request_timeout_secs: Some(DEFAULT_REQUEST_TIMEOUT_SECS),
             sandbox: true,
             system_prompt: None,
@@ -267,7 +262,7 @@ impl ExecRunner {
     /// Run the execution with full timeout enforcement.
     pub async fn run(&mut self) -> Result<ExecResult, CortexError> {
         let timeout =
-            Duration::from_secs(self.options.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
+            Duration::from_secs(self.options.timeout_secs.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS));
 
         // Wrap the entire execution in a timeout
         match tokio::time::timeout(timeout, self.run_inner()).await {
@@ -766,7 +761,7 @@ mod tests {
         assert!(opts.prompt.is_empty());
         assert!(opts.sandbox);
         assert_eq!(opts.max_turns, Some(10));
-        assert_eq!(opts.timeout_secs, Some(DEFAULT_TIMEOUT_SECS));
+        assert_eq!(opts.timeout_secs, Some(DEFAULT_EXEC_TIMEOUT_SECS));
         assert!(!opts.full_auto);
         assert!(opts.streaming);
     }

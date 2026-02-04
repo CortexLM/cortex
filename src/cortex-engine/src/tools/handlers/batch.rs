@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use cortex_common::DEFAULT_BATCH_TIMEOUT_SECS;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -19,9 +20,6 @@ use crate::tools::spec::{ToolDefinition, ToolHandler, ToolResult};
 
 /// Maximum number of tools that can be executed in a batch.
 pub const MAX_BATCH_SIZE: usize = 10;
-
-/// Default timeout for batch execution in seconds.
-pub const DEFAULT_BATCH_TIMEOUT_SECS: u64 = 300;
 
 /// Tools that cannot be called within a batch (prevent recursion).
 /// Note: Task is now allowed to enable parallel task execution.

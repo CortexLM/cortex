@@ -18,6 +18,7 @@ pub mod signal_safety;
 pub mod subprocess_env;
 pub mod subprocess_output;
 pub mod text_sanitize;
+pub mod timeout;
 pub mod truncate;
 
 #[cfg(feature = "cli")]
@@ -72,6 +73,11 @@ pub use subprocess_output::{
 };
 pub use text_sanitize::{
     has_control_chars, normalize_code_fences, sanitize_control_chars, sanitize_for_terminal,
+};
+pub use timeout::{
+    DEFAULT_BATCH_TIMEOUT_SECS, DEFAULT_EXEC_TIMEOUT_SECS, DEFAULT_HEALTH_CHECK_TIMEOUT_SECS,
+    DEFAULT_READ_TIMEOUT_SECS, DEFAULT_REQUEST_TIMEOUT_SECS, DEFAULT_SHUTDOWN_TIMEOUT_SECS,
+    DEFAULT_STREAMING_TIMEOUT_SECS,
 };
 pub use truncate::{
     truncate_command, truncate_first_line, truncate_for_display, truncate_id, truncate_id_default,
