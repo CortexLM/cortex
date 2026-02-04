@@ -152,7 +152,9 @@ impl<'a> HelpBrowser<'a> {
 
     /// Renders the content pane.
     fn render_content(&self, area: Rect, buf: &mut Buffer) {
-        let section = self.state.current_section();
+        let Some(section) = self.state.current_section() else {
+            return;
+        };
         let mut y = area.y;
         let scroll = self.state.content_scroll;
         let mut line_idx = 0;
