@@ -1204,6 +1204,7 @@ dependencies = [
 name = "cortex-exec"
 version = "0.0.6"
 dependencies = [
+ "cortex-common",
  "cortex-engine",
  "cortex-protocol",
  "serde_json",

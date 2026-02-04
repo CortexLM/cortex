@@ -2,6 +2,14 @@
 
 use std::time::{Duration, Instant};
 
+/// Connection timeout for subagent streaming requests.
+/// Higher than main streaming to allow for subagent initialization.
+const SUBAGENT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Per-event timeout during subagent responses.
+/// Higher than main streaming to account for longer tool executions.
+const SUBAGENT_EVENT_TIMEOUT: Duration = Duration::from_secs(60);
+
 use crate::app::SubagentTaskDisplay;
 use crate::events::{SubagentEvent, ToolEvent};
 use crate::session::StoredToolCall;
@@ -210,7 +218,8 @@ impl EventLoop {
                 };
 
                 let stream_result =
-                    tokio::time::timeout(Duration::from_secs(120), client.complete(request)).await;
+                    tokio::time::timeout(SUBAGENT_CONNECTION_TIMEOUT, client.complete(request))
+                        .await;
 
                 let mut stream = match stream_result {
                     Ok(Ok(s)) => s,
@@ -252,7 +261,7 @@ impl EventLoop {
                 let mut iteration_tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
 
                 loop {
-                    let event = tokio::time::timeout(Duration::from_secs(60), stream.next()).await;
+                    let event = tokio::time::timeout(SUBAGENT_EVENT_TIMEOUT, stream.next()).await;
 
                     match event {
                         Ok(Some(Ok(ResponseEvent::Delta(delta)))) => {

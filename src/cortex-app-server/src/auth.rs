@@ -45,7 +45,7 @@ impl Claims {
     pub fn new(user_id: impl Into<String>, expiry_seconds: u64) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         Self {
@@ -75,7 +75,7 @@ impl Claims {
     pub fn is_expired(&self) -> bool {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
         self.exp < now
     }
@@ -187,7 +187,7 @@ impl AuthService {
     pub async fn cleanup_revoked_tokens(&self) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         let mut revoked = self.revoked_tokens.write().await;

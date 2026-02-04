@@ -20,6 +20,14 @@ use cortex_engine::streaming::StreamEvent;
 
 use super::core::{EventLoop, PendingToolCall, simplify_error_message};
 
+/// Initial connection timeout for streaming requests.
+/// See cortex_common::http_client for timeout hierarchy documentation.
+const STREAMING_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Per-chunk timeout during streaming responses.
+/// See cortex_common::http_client for timeout hierarchy documentation.
+const STREAMING_CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl EventLoop {
     /// Handles message submission using the new provider system.
     ///
@@ -175,11 +183,8 @@ impl EventLoop {
             };
 
             // Start the completion request with timeout
-            let stream_result = tokio::time::timeout(
-                Duration::from_secs(60), // 60 second timeout for initial connection
-                client.complete(request),
-            )
-            .await;
+            let stream_result =
+                tokio::time::timeout(STREAMING_CONNECTION_TIMEOUT, client.complete(request)).await;
 
             let mut stream = match stream_result {
                 Ok(Ok(s)) => s,
@@ -214,11 +219,7 @@ impl EventLoop {
                 }
 
                 // Wait for next event with timeout
-                let event = tokio::time::timeout(
-                    Duration::from_secs(30), // 30 second timeout between chunks
-                    stream.next(),
-                )
-                .await;
+                let event = tokio::time::timeout(STREAMING_CHUNK_TIMEOUT, stream.next()).await;
 
                 match event {
                     Ok(Some(Ok(ResponseEvent::Delta(delta)))) => {
@@ -738,7 +739,7 @@ impl EventLoop {
             };
 
             let stream_result =
-                tokio::time::timeout(Duration::from_secs(60), client.complete(request)).await;
+                tokio::time::timeout(STREAMING_CONNECTION_TIMEOUT, client.complete(request)).await;
 
             let mut stream = match stream_result {
                 Ok(Ok(s)) => s,
@@ -770,7 +771,7 @@ impl EventLoop {
                     break;
                 }
 
-                let event = tokio::time::timeout(Duration::from_secs(30), stream.next()).await;
+                let event = tokio::time::timeout(STREAMING_CHUNK_TIMEOUT, stream.next()).await;
 
                 match event {
                     Ok(Some(Ok(ResponseEvent::Delta(delta)))) => {

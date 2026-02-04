@@ -8,7 +8,21 @@
 
 use regex::Regex;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use thiserror::Error;
+
+/// Static regex for environment variable substitution: {env:VAR} or {env:VAR:default}
+/// Group 1: variable name
+/// Group 2: optional default value (after second colon)
+static ENV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\{env:([^:}]+)(?::([^}]*))?\}").expect("env regex pattern is valid and tested")
+});
+
+/// Static regex for file content substitution: {file:path}
+/// Group 1: file path
+static FILE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\{file:([^}]+)\}").expect("file regex pattern is valid and tested")
+});
 
 /// Errors that can occur during configuration substitution.
 #[derive(Debug, Error)]
@@ -42,11 +56,13 @@ pub enum SubstitutionError {
 ///
 /// Handles replacement of `{env:...}` and `{file:...}` placeholders
 /// in configuration strings.
+///
+/// This struct uses statically initialized regex patterns via `LazyLock`,
+/// making regex compilation a one-time cost shared across all instances.
 pub struct ConfigSubstitution {
-    /// Regex for environment variable substitution: {env:VAR} or {env:VAR:default}
-    env_regex: Regex,
-    /// Regex for file content substitution: {file:path}
-    file_regex: Regex,
+    // This struct is kept for API compatibility.
+    // Regex patterns are now static module-level constants.
+    _private: (),
 }
 
 impl Default for ConfigSubstitution {
@@ -56,22 +72,13 @@ impl Default for ConfigSubstitution {
 }
 
 impl ConfigSubstitution {
-    /// Creates a new `ConfigSubstitution` instance with compiled regex patterns.
+    /// Creates a new `ConfigSubstitution` instance.
+    ///
+    /// The regex patterns are statically initialized on first use,
+    /// so creating multiple instances has no additional cost.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            // Matches {env:VAR_NAME} or {env:VAR_NAME:default_value}
-            // Group 1: variable name
-            // Group 2: optional default value (after second colon)
-            env_regex: Regex::new(r"\{env:([^:}]+)(?::([^}]*))?\}").unwrap_or_else(|e| {
-                panic!("Failed to compile env regex: {e}");
-            }),
-            // Matches {file:path}
-            // Group 1: file path
-            file_regex: Regex::new(r"\{file:([^}]+)\}").unwrap_or_else(|e| {
-                panic!("Failed to compile file regex: {e}");
-            }),
-        }
+        Self { _private: () }
     }
 
     /// Substitutes all variables in a string.
@@ -109,8 +116,7 @@ impl ConfigSubstitution {
         let mut error: Option<SubstitutionError> = None;
 
         // Collect all matches first to avoid borrowing issues
-        let matches: Vec<_> = self
-            .env_regex
+        let matches: Vec<_> = ENV_REGEX
             .captures_iter(input)
             .map(|cap| {
                 let full_match = cap.get(0).map(|m| m.as_str().to_string());
@@ -155,8 +161,7 @@ impl ConfigSubstitution {
         let mut error: Option<SubstitutionError> = None;
 
         // Collect all matches first
-        let matches: Vec<_> = self
-            .file_regex
+        let matches: Vec<_> = FILE_REGEX
             .captures_iter(input)
             .map(|cap| {
                 let full_match = cap.get(0).map(|m| m.as_str().to_string());

@@ -466,6 +466,7 @@ impl UnifiedToolExecutor {
                 Ok(BatchToolArgs {
                     calls,
                     timeout_secs: arguments.get("timeout_secs").and_then(|v| v.as_u64()),
+                    tool_timeout_secs: arguments.get("tool_timeout_secs").and_then(|v| v.as_u64()),
                 })
             } else {
                 Err(CortexError::InvalidInput(

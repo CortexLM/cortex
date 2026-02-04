@@ -250,9 +250,6 @@ pub struct SearchReplace {
     pub search: String,
     /// The text to replace with.
     pub replace: String,
-    /// Replace all occurrences (true) or just the first (false).
-    #[allow(dead_code)]
-    pub replace_all: bool,
 }
 
 impl SearchReplace {
@@ -266,15 +263,7 @@ impl SearchReplace {
             path: path.into(),
             search: search.into(),
             replace: replace.into(),
-            replace_all: false,
         }
-    }
-
-    /// Set whether to replace all occurrences.
-    #[allow(dead_code)]
-    pub fn with_replace_all(mut self, replace_all: bool) -> Self {
-        self.replace_all = replace_all;
-        self
     }
 }
 
