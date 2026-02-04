@@ -106,7 +106,10 @@ impl Compactor {
         }];
         new_items.extend(items.into_iter().skip(preserved_start));
 
-        let tokens_after = current_tokens - tokens_in_compacted + summary_tokens;
+        // Use saturating arithmetic to prevent underflow if tokens_in_compacted > current_tokens
+        let tokens_after = current_tokens
+            .saturating_sub(tokens_in_compacted)
+            .saturating_add(summary_tokens);
 
         let result =
             CompactionResult::success(summary, current_tokens, tokens_after, items_removed);
