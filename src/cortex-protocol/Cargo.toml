@@ -20,6 +20,7 @@ uuid = { workspace = true, features = ["serde", "v4"] }
 chrono = { workspace = true }
 strum_macros = "0.27"
 base64 = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
