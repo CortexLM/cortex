@@ -104,7 +104,7 @@ members = [
 [workspace.package]
 # CLI version - kept in sync with VERSION_CLI file
 # Run `scripts/check-cli-version.sh` to verify consistency
-version = "0.0.6"
+version = "0.0.7"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Cortex Team <team@cortex.foundation>"]
