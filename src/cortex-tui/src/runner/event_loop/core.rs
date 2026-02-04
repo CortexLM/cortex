@@ -446,6 +446,9 @@ impl EventLoop {
                 task.abort();
             }
 
+            // Reset ESC timer after cancellation to prevent accidental quit
+            self.app_state.reset_esc();
+
             self.stream_controller.reset();
         }
     }
