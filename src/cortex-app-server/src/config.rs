@@ -86,7 +86,7 @@ pub struct ServerConfig {
 
 fn default_shutdown_timeout() -> u64 {
     30 // 30 seconds for graceful shutdown
-       // See cortex_common::http_client for timeout hierarchy documentation
+    // See cortex_common::http_client for timeout hierarchy documentation
 }
 
 fn default_listen_addr() -> String {
