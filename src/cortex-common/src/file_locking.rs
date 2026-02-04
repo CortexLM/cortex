@@ -557,6 +557,9 @@ pub async fn atomic_write_async(
         .map_err(|e| FileLockError::AtomicWriteFailed(format!("spawn_blocking failed: {}", e)))?
 }
 
+/// Maximum number of lock entries before triggering cleanup.
+const MAX_LOCK_ENTRIES: usize = 10_000;
+
 /// A file lock manager for coordinating access across multiple operations.
 ///
 /// This is useful when you need to perform multiple operations on a file
@@ -577,13 +580,45 @@ impl FileLockManager {
     ///
     /// This is in addition to the filesystem-level advisory lock and helps
     /// coordinate access within the same process.
+    ///
+    /// Automatically cleans up stale lock entries when the map grows too large.
     pub fn get_lock(&self, path: impl AsRef<Path>) -> Arc<std::sync::Mutex<()>> {
         let path = path.as_ref().to_path_buf();
         let mut locks = self.locks.lock().unwrap();
+
+        // Clean up stale entries if the map is getting large
+        if locks.len() >= MAX_LOCK_ENTRIES {
+            Self::cleanup_stale_entries(&mut locks);
+        }
+
         locks
             .entry(path)
             .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
             .clone()
+    }
+
+    /// Remove lock entries that are no longer in use.
+    ///
+    /// An entry is considered stale when only the HashMap holds a reference
+    /// to it (strong_count == 1), meaning no caller is currently using the lock.
+    fn cleanup_stale_entries(
+        locks: &mut std::collections::HashMap<PathBuf, Arc<std::sync::Mutex<()>>>,
+    ) {
+        locks.retain(|_, arc| Arc::strong_count(arc) > 1);
+    }
+
+    /// Manually trigger cleanup of stale lock entries.
+    ///
+    /// This removes entries where no external reference exists (only the
+    /// manager holds the Arc). Useful for periodic maintenance.
+    pub fn cleanup(&self) {
+        let mut locks = self.locks.lock().unwrap();
+        Self::cleanup_stale_entries(&mut locks);
+    }
+
+    /// Returns the current number of lock entries in the manager.
+    pub fn lock_count(&self) -> usize {
+        self.locks.lock().unwrap().len()
     }
 
     /// Execute an operation with both process-local and file-system locks.
