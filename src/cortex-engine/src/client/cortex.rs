@@ -5,12 +5,15 @@
 //! - Responses API (streaming SSE)
 //! - Credit system with price verification
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
@@ -21,6 +24,11 @@ use crate::api_client::create_streaming_client;
 use crate::error::{CortexError, Result};
 
 const DEFAULT_CORTEX_URL: &str = "https://api.cortex.foundation";
+
+/// Timeout in seconds for receiving individual SSE chunks during streaming.
+/// If no data is received within this duration, the connection is terminated
+/// to prevent indefinite hangs when connections stall mid-stream.
+const CHUNK_TIMEOUT_SECS: u64 = 60;
 
 /// Pricing information for a model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -567,8 +575,26 @@ impl ModelClient for CortexClient {
             let mut stream = std::pin::pin!(stream);
             let mut accumulated_text = String::new();
             let mut usage = TokenUsage::default();
+            let chunk_timeout = Duration::from_secs(CHUNK_TIMEOUT_SECS);
 
-            while let Some(event_result) = stream.next().await {
+            loop {
+                // Apply per-chunk timeout to prevent indefinite hangs when connections stall
+                let event_result = match timeout(chunk_timeout, stream.next()).await {
+                    Ok(Some(result)) => result,
+                    Ok(None) => break, // Stream ended normally
+                    Err(_) => {
+                        // Timeout elapsed - no data received within CHUNK_TIMEOUT_SECS
+                        let _ = tx
+                            .send(Err(CortexError::BackendError {
+                                message: format!(
+                                    "SSE chunk timeout - no data received for {} seconds",
+                                    CHUNK_TIMEOUT_SECS
+                                ),
+                            }))
+                            .await;
+                        break;
+                    }
+                };
                 match event_result {
                     Ok(event) => {
                         if event.data.is_empty() || event.data == "[DONE]" {
