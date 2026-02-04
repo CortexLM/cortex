@@ -412,7 +412,7 @@ mod tests {
         // Normal names stay the same
         assert_eq!(sanitize_server_name("my-server"), "my-server");
         assert_eq!(sanitize_server_name("server_123"), "server_123");
-        
+
         // Path traversal attempts get sanitized
         assert_eq!(sanitize_server_name("../../../etc"), "________etc");
         assert_eq!(sanitize_server_name("test/subdir"), "test_subdir");
@@ -425,7 +425,7 @@ mod tests {
         assert!(validate_server_name("my-server"));
         assert!(validate_server_name("server_123"));
         assert!(validate_server_name("ABC"));
-        
+
         // Invalid names
         assert!(!validate_server_name("../../../etc"));
         assert!(!validate_server_name("test/subdir"));
@@ -437,11 +437,11 @@ mod tests {
     fn test_server_path_traversal() {
         let (storage, tmp) = test_storage();
         let base_dir = tmp.path().to_path_buf();
-        
+
         // Attempt path traversal
         let malicious_name = "../../../etc/passwd";
         let result_path = storage.server_path(malicious_name);
-        
+
         // The result should still be under mcps_dir
         assert!(result_path.starts_with(base_dir.join("mcps")));
         assert!(!result_path.to_string_lossy().contains(".."));
