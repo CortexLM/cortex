@@ -87,6 +87,8 @@ pub(super) struct RenderState<'a> {
     pub(super) in_paragraph: bool,
     /// Whether we need a blank line before the next block.
     pub(super) needs_newline: bool,
+    /// Current line width for paragraph wrapping (visual columns).
+    pub(super) current_line_width: usize,
 
     // Heading state
     /// Current heading level (if in a heading).
@@ -121,6 +123,7 @@ impl<'a> RenderState<'a> {
             current_cell: String::new(),
             in_paragraph: false,
             needs_newline: false,
+            current_line_width: 0,
             current_heading_level: None,
             current_link_url: None,
             current_list_item: Vec::new(),

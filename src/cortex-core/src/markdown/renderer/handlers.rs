@@ -3,7 +3,7 @@
 use pulldown_cmark::{CodeBlockKind, HeadingLevel};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::markdown::inline::{render_blockquote_prefix, render_hr};
 use crate::markdown::list::ListContext;
@@ -20,6 +20,7 @@ impl<'a> RenderState<'a> {
     pub(super) fn start_paragraph(&mut self) {
         self.add_blank_line_if_needed();
         self.in_paragraph = true;
+        self.current_line_width = 0;
     }
 
     pub(super) fn start_heading(&mut self, level: HeadingLevel) {
@@ -116,6 +117,7 @@ impl<'a> RenderState<'a> {
         self.flush_line();
         self.in_paragraph = false;
         self.needs_newline = true;
+        self.current_line_width = 0;
     }
 
     pub(super) fn end_heading(&mut self) {
@@ -338,9 +340,99 @@ impl<'a> RenderState<'a> {
             return;
         }
 
-        // Regular text
+        // Paragraph text - apply word wrapping
+        if self.in_paragraph {
+            self.wrap_paragraph_text(text);
+            return;
+        }
+
+        // Regular text (headings, etc.) - no wrapping needed
         let style = self.current_style();
         self.push_span(Span::styled(text.to_string(), style));
+    }
+
+    /// Wraps paragraph text to fit within the renderer's width.
+    ///
+    /// Handles word boundaries, preserves inline styles across line breaks,
+    /// and properly measures unicode character widths (CJK characters, emoji).
+    fn wrap_paragraph_text(&mut self, text: &str) {
+        let style = self.current_style();
+        let max_width = self.renderer.width as usize;
+
+        // Account for blockquote prefix width
+        let prefix_width = if self.blockquote_depth > 0 {
+            // Each blockquote level adds "│ " (2 chars)
+            self.blockquote_depth * 2
+        } else {
+            0
+        };
+
+        let available_width = max_width.saturating_sub(prefix_width);
+        if available_width == 0 {
+            // No room for text
+            return;
+        }
+
+        // Process text word by word
+        for word in text.split_inclusive(|c: char| c.is_whitespace()) {
+            let word_width = UnicodeWidthStr::width(word);
+
+            // Check if word fits on current line
+            if self.current_line_width + word_width <= available_width {
+                // Word fits - add it
+                self.push_span(Span::styled(word.to_string(), style));
+                self.current_line_width += word_width;
+            } else if self.current_line_width == 0 {
+                // First word on line but too long - break it
+                self.wrap_long_word(word, style, available_width);
+            } else {
+                // Word doesn't fit - start new line
+                self.flush_line();
+                self.current_line_width = 0;
+
+                // Trim leading whitespace from word when starting new line
+                let trimmed = word.trim_start();
+                let trimmed_width = UnicodeWidthStr::width(trimmed);
+
+                if trimmed_width <= available_width {
+                    self.push_span(Span::styled(trimmed.to_string(), style));
+                    self.current_line_width = trimmed_width;
+                } else {
+                    // Even trimmed word is too long - break it
+                    self.wrap_long_word(trimmed, style, available_width);
+                }
+            }
+        }
+    }
+
+    /// Wraps a word that is too long to fit on a single line.
+    ///
+    /// Breaks the word at visual width boundaries, handling multi-width
+    /// unicode characters properly.
+    fn wrap_long_word(&mut self, word: &str, style: Style, max_width: usize) {
+        let mut current_chunk = String::new();
+        let mut current_width = 0;
+
+        for ch in word.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+
+            if current_width + ch_width > max_width && !current_chunk.is_empty() {
+                // Flush current chunk as a line
+                self.push_span(Span::styled(current_chunk.clone(), style));
+                self.flush_line();
+                current_chunk.clear();
+                current_width = 0;
+            }
+
+            current_chunk.push(ch);
+            current_width += ch_width;
+        }
+
+        // Handle remaining characters
+        if !current_chunk.is_empty() {
+            self.push_span(Span::styled(current_chunk, style));
+            self.current_line_width = current_width;
+        }
     }
 
     pub(super) fn handle_code(&mut self, code: &str) {
@@ -423,6 +515,7 @@ impl<'a> RenderState<'a> {
         let mut spans = self.get_blockquote_prefix();
         spans.extend(self.current_spans.drain(..));
         self.lines.push(Line::from(spans));
+        self.current_line_width = 0;
     }
 
     /// Push a span to the current line.
