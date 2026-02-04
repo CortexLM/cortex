@@ -234,8 +234,6 @@ pub enum ToastPosition {
 pub struct ToastManager {
     /// Active toasts (newest first)
     toasts: Vec<Toast>,
-    /// Counter for generating unique toast IDs
-    next_id: u64,
     /// Maximum number of toasts to display at once
     max_visible: usize,
     /// Screen position for toast display
@@ -251,7 +249,6 @@ impl ToastManager {
     pub fn new() -> Self {
         Self {
             toasts: Vec::new(),
-            next_id: 1,
             max_visible: 5,
             position: ToastPosition::TopRight,
         }
