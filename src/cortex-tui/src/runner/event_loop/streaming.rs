@@ -285,7 +285,7 @@ impl EventLoop {
                             Err(_) => {
                                 // Timeout
                                 let _ = tx
-                                    .send(StreamEvent::Error("Response timeout".to_string()))
+                                    .send(StreamEvent::Error("The provider appears to be overloaded or your internet connection/proxy is experiencing issues communicating with it.".to_string()))
                                     .await;
                                 break;
                             }
@@ -842,7 +842,7 @@ impl EventLoop {
                             }
                             Err(_) => {
                                 let _ = tx
-                                    .send(StreamEvent::Error("Response timeout".to_string()))
+                                    .send(StreamEvent::Error("The provider appears to be overloaded or your internet connection/proxy is experiencing issues communicating with it.".to_string()))
                                     .await;
                                 break;
                             }
