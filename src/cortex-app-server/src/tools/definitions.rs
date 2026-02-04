@@ -337,7 +337,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "Plan".to_string(),
-            description: "Present an implementation plan for user approval before coding. Use this to outline approach, list tasks, and get confirmation.".to_string(),
+            description: "Present a comprehensive implementation plan with multi-agent expert analysis for user approval. Include security, architecture, performance, and other expert perspectives.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -347,7 +347,16 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "description": {
                         "type": "string",
-                        "description": "Detailed description of what will be implemented and how"
+                        "description": "Detailed description of what will be implemented and the overall approach"
+                    },
+                    "architecture": {
+                        "type": "string",
+                        "description": "High-level architecture description"
+                    },
+                    "tech_stack": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Technologies, frameworks, and tools to be used"
                     },
                     "tasks": {
                         "type": "array",
@@ -357,6 +366,20 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                                 "id": { "type": "string" },
                                 "title": { "type": "string" },
                                 "description": { "type": "string" },
+                                "subtasks": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                },
+                                "dependencies": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "IDs of tasks this depends on"
+                                },
+                                "complexity": {
+                                    "type": "string",
+                                    "enum": ["low", "medium", "high", "critical"]
+                                },
+                                "estimated_time": { "type": "string" },
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed"]
@@ -364,14 +387,94 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                             },
                             "required": ["id", "title"]
                         },
-                        "description": "List of tasks to complete"
+                        "description": "List of tasks with subtasks and dependencies"
+                    },
+                    "use_cases": {
+                        "type": "array",
+                        "items": {
+                            "oneOf": [
+                                { "type": "string" },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string" },
+                                        "description": { "type": "string" },
+                                        "actors": { "type": "array", "items": { "type": "string" } },
+                                        "flow": { "type": "array", "items": { "type": "string" } }
+                                    }
+                                }
+                            ]
+                        },
+                        "description": "User stories and use cases"
+                    },
+                    "agent_analyses": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "agent": {
+                                    "type": "string",
+                                    "description": "Name of the expert agent (e.g., 'Security Analyst', 'Performance Engineer')"
+                                },
+                                "role": {
+                                    "type": "string",
+                                    "description": "Role description"
+                                },
+                                "findings": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Key findings from analysis"
+                                },
+                                "recommendations": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Recommendations and best practices"
+                                },
+                                "risk_level": {
+                                    "type": "string",
+                                    "enum": ["low", "medium", "high", "critical"]
+                                },
+                                "priority_items": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                }
+                            },
+                            "required": ["agent", "role", "findings", "recommendations"]
+                        },
+                        "description": "Expert analyses from different perspectives (security, performance, UX, etc.)"
+                    },
+                    "risks": {
+                        "type": "array",
+                        "items": {
+                            "oneOf": [
+                                { "type": "string" },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "risk": { "type": "string" },
+                                        "level": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+                                        "mitigation": { "type": "string" }
+                                    }
+                                }
+                            ]
+                        },
+                        "description": "Identified risks and mitigation strategies"
+                    },
+                    "success_criteria": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Criteria to determine if implementation is successful"
+                    },
+                    "timeline": {
+                        "type": "string",
+                        "description": "Estimated timeline for completion"
                     },
                     "estimated_changes": {
                         "type": "string",
-                        "description": "Brief estimate of scope (e.g., 'Small: ~50 lines', 'Medium: ~200 lines')"
+                        "description": "Brief estimate of scope (e.g., 'Small: ~50 lines', 'Large: ~1000 lines')"
                     }
                 },
-                "required": ["title", "description", "tasks"]
+                "required": ["title", "description", "tasks", "agent_analyses"]
             }),
             category: "workflow".to_string(),
         },
