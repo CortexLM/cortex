@@ -314,7 +314,7 @@ impl EventLoop {
                                 .send(ToolEvent::Failed {
                                     id: id.clone(),
                                     name: "Task".to_string(),
-                                    error: "Response timeout".to_string(),
+                                    error: "The provider appears to be overloaded or your internet connection/proxy is experiencing issues communicating with it.".to_string(),
                                     duration: started_at.elapsed(),
                                 })
                                 .await
