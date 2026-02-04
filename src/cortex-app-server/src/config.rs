@@ -49,12 +49,18 @@ pub struct ServerConfig {
     pub max_body_size: usize,
 
     /// Request timeout in seconds (applies to full request lifecycle).
+    ///
+    /// See `cortex_common::http_client` module documentation for the complete
+    /// timeout hierarchy across Cortex services.
     #[serde(default = "default_request_timeout")]
     pub request_timeout: u64,
 
     /// Read timeout for individual chunks in seconds.
     /// Applies to chunked transfer encoding to prevent indefinite hangs
     /// when clients disconnect without sending the terminal chunk.
+    ///
+    /// See `cortex_common::http_client` module documentation for the complete
+    /// timeout hierarchy across Cortex services.
     #[serde(default = "default_read_timeout")]
     pub read_timeout: u64,
 
@@ -71,12 +77,16 @@ pub struct ServerConfig {
     pub cors_origins: Vec<String>,
 
     /// Graceful shutdown timeout in seconds.
+    ///
+    /// See `cortex_common::http_client` module documentation for the complete
+    /// timeout hierarchy across Cortex services.
     #[serde(default = "default_shutdown_timeout")]
     pub shutdown_timeout: u64,
 }
 
 fn default_shutdown_timeout() -> u64 {
     30 // 30 seconds for graceful shutdown
+       // See cortex_common::http_client for timeout hierarchy documentation
 }
 
 fn default_listen_addr() -> String {

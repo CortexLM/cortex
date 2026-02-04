@@ -17,6 +17,7 @@ pub struct GlobHandler;
 #[derive(Debug, Deserialize)]
 struct GlobArgs {
     patterns: Vec<String>,
+    #[serde(alias = "folder")]
     directory: Option<String>,
     #[serde(default)]
     exclude_patterns: Vec<String>,

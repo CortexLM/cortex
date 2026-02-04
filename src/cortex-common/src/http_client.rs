@@ -9,6 +9,54 @@
 //!
 //! DNS caching is configured with reasonable TTL to allow failover and load
 //! balancer updates (#2177).
+//!
+//! # Timeout Configuration Guide
+//!
+//! This section documents the timeout hierarchy across the Cortex codebase. Use this
+//! as a reference when configuring timeouts for new features or debugging timeout issues.
+//!
+//! ## Timeout Hierarchy
+//!
+//! | Use Case                    | Timeout | Constant/Location                          | Rationale                               |
+//! |-----------------------------|---------|--------------------------------------------|-----------------------------------------|
+//! | Health checks               | 5s      | `HEALTH_CHECK_TIMEOUT` (this module)       | Quick validation of service status      |
+//! | Standard HTTP requests      | 30s     | `DEFAULT_TIMEOUT` (this module)            | Normal API calls with reasonable margin |
+//! | Per-chunk read (streaming)  | 30s     | `read_timeout` (cortex-app-server/config)  | Individual chunk timeout during stream  |
+//! | Pool idle timeout           | 60s     | `POOL_IDLE_TIMEOUT` (this module)          | DNS re-resolution for failover          |
+//! | LLM Request (non-streaming) | 120s    | `DEFAULT_REQUEST_TIMEOUT_SECS` (cortex-exec/runner) | Model inference takes time |
+//! | LLM Streaming total         | 300s    | `STREAMING_TIMEOUT` (this module)          | Long-running streaming responses        |
+//! | Server request lifecycle    | 300s    | `request_timeout` (cortex-app-server/config) | Full HTTP request/response cycle      |
+//! | Entire exec session         | 600s    | `DEFAULT_TIMEOUT_SECS` (cortex-exec/runner) | Multi-turn conversation limit          |
+//! | Graceful shutdown           | 30s     | `shutdown_timeout` (cortex-app-server/config) | Time for cleanup on shutdown        |
+//!
+//! ## Module-Specific Timeouts
+//!
+//! ### cortex-common (this module)
+//! - `DEFAULT_TIMEOUT` (30s): Use for standard API calls.
+//! - `STREAMING_TIMEOUT` (300s): Use for LLM streaming endpoints.
+//! - `HEALTH_CHECK_TIMEOUT` (5s): Use for health/readiness checks.
+//! - `POOL_IDLE_TIMEOUT` (60s): Connection pool cleanup for DNS freshness.
+//!
+//! ### cortex-exec (runner.rs)
+//! - `DEFAULT_TIMEOUT_SECS` (600s): Maximum duration for entire exec session.
+//! - `DEFAULT_REQUEST_TIMEOUT_SECS` (120s): Single LLM request timeout.
+//!
+//! ### cortex-app-server (config.rs)
+//! - `request_timeout` (300s): Full request lifecycle timeout.
+//! - `read_timeout` (30s): Per-chunk timeout for streaming reads.
+//! - `shutdown_timeout` (30s): Graceful shutdown duration.
+//!
+//! ### cortex-engine (api_client.rs)
+//! - Re-exports constants from this module for consistency.
+//!
+//! ## Recommendations
+//!
+//! When adding new timeout configurations:
+//! 1. Use constants from this module when possible for consistency.
+//! 2. Document any new timeout constants with their rationale.
+//! 3. Consider the timeout hierarchy - inner timeouts should be shorter than outer ones.
+//! 4. For LLM operations, use longer timeouts (120s-300s) to accommodate model inference.
+//! 5. For health checks and quick validations, use short timeouts (5s-10s).
 
 use reqwest::Client;
 use std::time::Duration;

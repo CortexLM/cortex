@@ -47,8 +47,6 @@ pub struct StoredToolCall {
 
 /// Session storage manager.
 pub struct SessionStorage {
-    #[allow(dead_code)]
-    base_dir: PathBuf,
     sessions_dir: PathBuf,
     history_dir: PathBuf,
 }
@@ -66,7 +64,6 @@ impl SessionStorage {
         info!("Session storage initialized at {:?}", base_dir);
 
         Ok(Self {
-            base_dir,
             sessions_dir,
             history_dir,
         })
