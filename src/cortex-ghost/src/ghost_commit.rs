@@ -267,17 +267,33 @@ impl GhostCommitManager {
     }
 
     /// Stage files for commit.
+    ///
+    /// Stages only the specified files, not all changes in the repository.
+    /// Files are processed in batches to avoid command line length limits.
     async fn stage_files(&self, files: &[PathBuf]) -> Result<()> {
         if files.is_empty() {
             return Ok(());
         }
 
-        // Use git add with --intent-to-add for new files, then add all
-        let output = git_command_with_timeout(&["add", "-A"], &self.repo_path).await?;
+        // Process files in batches to avoid command line length limits
+        // Most systems have a limit around 128KB-2MB for command arguments
+        const BATCH_SIZE: usize = 100;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("Git add warning: {}", stderr);
+        for batch in files.chunks(BATCH_SIZE) {
+            // Build the argument list: git add -- file1 file2 ...
+            let mut args: Vec<&str> = vec!["add", "--"];
+            let file_strs: Vec<String> = batch
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            args.extend(file_strs.iter().map(|s| s.as_str()));
+
+            let output = git_command_with_timeout(&args, &self.repo_path).await?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!("Git add warning: {}", stderr);
+            }
         }
 
         Ok(())
