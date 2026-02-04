@@ -32,6 +32,11 @@ const DEFAULT_TIMEOUT_SECS: u64 = 600;
 /// Default timeout for a single LLM request (2 minutes).
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
 
+/// Per-chunk timeout during streaming responses.
+/// Prevents indefinite hangs when connections stall mid-stream.
+/// See cortex_common::http_client for timeout hierarchy documentation.
+const STREAMING_CHUNK_TIMEOUT_SECS: u64 = 30;
+
 /// Maximum retries for transient errors.
 const MAX_RETRIES: usize = 3;
 
@@ -555,7 +560,28 @@ impl ExecRunner {
         let mut partial_tool_calls: std::collections::HashMap<String, (String, String)> =
             std::collections::HashMap::new();
 
-        while let Some(event) = stream.next().await {
+        loop {
+            // Apply per-chunk timeout to prevent indefinite hangs when connections stall
+            let event = match tokio::time::timeout(
+                Duration::from_secs(STREAMING_CHUNK_TIMEOUT_SECS),
+                stream.next(),
+            )
+            .await
+            {
+                Ok(Some(event)) => event,
+                Ok(None) => break, // Stream ended normally
+                Err(_) => {
+                    tracing::warn!(
+                        "Stream chunk timeout after {}s",
+                        STREAMING_CHUNK_TIMEOUT_SECS
+                    );
+                    return Err(CortexError::Provider(format!(
+                        "Streaming timeout: no response chunk received within {}s",
+                        STREAMING_CHUNK_TIMEOUT_SECS
+                    )));
+                }
+            };
+
             match event? {
                 ResponseEvent::Delta(delta) => {
                     if self.options.streaming {
