@@ -203,91 +203,93 @@ impl EventLoop {
             let mut reasoning = String::new();
             let mut tokens: Option<cortex_engine::streaming::StreamTokenUsage> = None;
 
-            // Process stream events
+            // Process stream events using tokio::select! for faster cancellation response
             loop {
-                // Check for cancellation
-                if cancelled.load(Ordering::SeqCst) {
-                    let _ = tx
-                        .send(StreamEvent::Error("Cancelled by user".to_string()))
-                        .await;
-                    break;
-                }
+                tokio::select! {
+                    // Check for cancellation with polling
+                    _ = async {
+                        while !cancelled.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                    } => {
+                        let _ = tx
+                            .send(StreamEvent::Error("Cancelled by user".to_string()))
+                            .await;
+                        break;
+                    }
 
-                // Wait for next event with timeout
-                let event = tokio::time::timeout(
-                    Duration::from_secs(30), // 30 second timeout between chunks
-                    stream.next(),
-                )
-                .await;
-
-                match event {
-                    Ok(Some(Ok(ResponseEvent::Delta(delta)))) => {
-                        content.push_str(&delta);
-                        if tx.send(StreamEvent::Delta(delta)).await.is_err() {
-                            break; // Receiver dropped
+                    // Wait for next event with timeout
+                    event = tokio::time::timeout(Duration::from_secs(30), stream.next()) => {
+                        match event {
+                            Ok(Some(Ok(ResponseEvent::Delta(delta)))) => {
+                                content.push_str(&delta);
+                                if tx.send(StreamEvent::Delta(delta)).await.is_err() {
+                                    break; // Receiver dropped
+                                }
+                            }
+                            Ok(Some(Ok(ResponseEvent::Reasoning(r)))) => {
+                                reasoning.push_str(&r);
+                                if tx.send(StreamEvent::Reasoning(r)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(Some(Ok(ResponseEvent::Done(response)))) => {
+                                tokens = Some(cortex_engine::streaming::StreamTokenUsage::from(
+                                    response.usage,
+                                ));
+                                let _ = tx
+                                    .send(StreamEvent::Done {
+                                        content,
+                                        reasoning,
+                                        tokens,
+                                    })
+                                    .await;
+                                break;
+                            }
+                            Ok(Some(Ok(ResponseEvent::Error(e)))) => {
+                                let _ = tx.send(StreamEvent::Error(e)).await;
+                                break;
+                            }
+                            Ok(Some(Ok(ResponseEvent::ToolCall(tool_call)))) => {
+                                // Parse arguments from JSON string
+                                let arguments = serde_json::from_str(&tool_call.arguments)
+                                    .unwrap_or_else(|_| serde_json::json!({"raw": tool_call.arguments}));
+                                // Send tool call to main event loop for processing
+                                if tx
+                                    .send(StreamEvent::ToolCall {
+                                        id: tool_call.id.clone(),
+                                        name: tool_call.name.clone(),
+                                        arguments,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    break; // Receiver dropped
+                                }
+                            }
+                            Ok(Some(Err(e))) => {
+                                let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                                break;
+                            }
+                            Ok(None) => {
+                                // Stream ended without Done event
+                                let _ = tx
+                                    .send(StreamEvent::Done {
+                                        content,
+                                        reasoning,
+                                        tokens,
+                                    })
+                                    .await;
+                                break;
+                            }
+                            Err(_) => {
+                                // Timeout
+                                let _ = tx
+                                    .send(StreamEvent::Error("Response timeout".to_string()))
+                                    .await;
+                                break;
+                            }
                         }
-                    }
-                    Ok(Some(Ok(ResponseEvent::Reasoning(r)))) => {
-                        reasoning.push_str(&r);
-                        if tx.send(StreamEvent::Reasoning(r)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(Some(Ok(ResponseEvent::Done(response)))) => {
-                        tokens = Some(cortex_engine::streaming::StreamTokenUsage::from(
-                            response.usage,
-                        ));
-                        let _ = tx
-                            .send(StreamEvent::Done {
-                                content,
-                                reasoning,
-                                tokens,
-                            })
-                            .await;
-                        break;
-                    }
-                    Ok(Some(Ok(ResponseEvent::Error(e)))) => {
-                        let _ = tx.send(StreamEvent::Error(e)).await;
-                        break;
-                    }
-                    Ok(Some(Ok(ResponseEvent::ToolCall(tool_call)))) => {
-                        // Parse arguments from JSON string
-                        let arguments = serde_json::from_str(&tool_call.arguments)
-                            .unwrap_or_else(|_| serde_json::json!({"raw": tool_call.arguments}));
-                        // Send tool call to main event loop for processing
-                        if tx
-                            .send(StreamEvent::ToolCall {
-                                id: tool_call.id.clone(),
-                                name: tool_call.name.clone(),
-                                arguments,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            break; // Receiver dropped
-                        }
-                    }
-                    Ok(Some(Err(e))) => {
-                        let _ = tx.send(StreamEvent::Error(e.to_string())).await;
-                        break;
-                    }
-                    Ok(None) => {
-                        // Stream ended without Done event
-                        let _ = tx
-                            .send(StreamEvent::Done {
-                                content,
-                                reasoning,
-                                tokens,
-                            })
-                            .await;
-                        break;
-                    }
-                    Err(_) => {
-                        // Timeout
-                        let _ = tx
-                            .send(StreamEvent::Error("Response timeout".to_string()))
-                            .await;
-                        break;
                     }
                 }
             }
@@ -762,80 +764,89 @@ impl EventLoop {
             let mut reasoning = String::new();
             let mut tokens: Option<cortex_engine::streaming::StreamTokenUsage> = None;
 
+            // Process stream events using tokio::select! for faster cancellation response
             loop {
-                if cancelled.load(Ordering::SeqCst) {
-                    let _ = tx
-                        .send(StreamEvent::Error("Cancelled by user".to_string()))
-                        .await;
-                    break;
-                }
+                tokio::select! {
+                    // Check for cancellation with polling
+                    _ = async {
+                        while !cancelled.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                    } => {
+                        let _ = tx
+                            .send(StreamEvent::Error("Cancelled by user".to_string()))
+                            .await;
+                        break;
+                    }
 
-                let event = tokio::time::timeout(Duration::from_secs(30), stream.next()).await;
-
-                match event {
-                    Ok(Some(Ok(ResponseEvent::Delta(delta)))) => {
-                        content.push_str(&delta);
-                        if tx.send(StreamEvent::Delta(delta)).await.is_err() {
-                            break;
+                    // Wait for next event with timeout
+                    event = tokio::time::timeout(Duration::from_secs(30), stream.next()) => {
+                        match event {
+                            Ok(Some(Ok(ResponseEvent::Delta(delta)))) => {
+                                content.push_str(&delta);
+                                if tx.send(StreamEvent::Delta(delta)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(Some(Ok(ResponseEvent::Reasoning(r)))) => {
+                                reasoning.push_str(&r);
+                                if tx.send(StreamEvent::Reasoning(r)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(Some(Ok(ResponseEvent::Done(response)))) => {
+                                tokens = Some(cortex_engine::streaming::StreamTokenUsage::from(
+                                    response.usage,
+                                ));
+                                let _ = tx
+                                    .send(StreamEvent::Done {
+                                        content,
+                                        reasoning,
+                                        tokens,
+                                    })
+                                    .await;
+                                break;
+                            }
+                            Ok(Some(Ok(ResponseEvent::Error(e)))) => {
+                                let _ = tx.send(StreamEvent::Error(e)).await;
+                                break;
+                            }
+                            Ok(Some(Ok(ResponseEvent::ToolCall(tool_call)))) => {
+                                let arguments = serde_json::from_str(&tool_call.arguments)
+                                    .unwrap_or_else(|_| serde_json::json!({"raw": tool_call.arguments}));
+                                if tx
+                                    .send(StreamEvent::ToolCall {
+                                        id: tool_call.id.clone(),
+                                        name: tool_call.name.clone(),
+                                        arguments,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Ok(Some(Err(e))) => {
+                                let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                                break;
+                            }
+                            Ok(None) => {
+                                let _ = tx
+                                    .send(StreamEvent::Done {
+                                        content,
+                                        reasoning,
+                                        tokens,
+                                    })
+                                    .await;
+                                break;
+                            }
+                            Err(_) => {
+                                let _ = tx
+                                    .send(StreamEvent::Error("Response timeout".to_string()))
+                                    .await;
+                                break;
+                            }
                         }
-                    }
-                    Ok(Some(Ok(ResponseEvent::Reasoning(r)))) => {
-                        reasoning.push_str(&r);
-                        if tx.send(StreamEvent::Reasoning(r)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(Some(Ok(ResponseEvent::Done(response)))) => {
-                        tokens = Some(cortex_engine::streaming::StreamTokenUsage::from(
-                            response.usage,
-                        ));
-                        let _ = tx
-                            .send(StreamEvent::Done {
-                                content,
-                                reasoning,
-                                tokens,
-                            })
-                            .await;
-                        break;
-                    }
-                    Ok(Some(Ok(ResponseEvent::Error(e)))) => {
-                        let _ = tx.send(StreamEvent::Error(e)).await;
-                        break;
-                    }
-                    Ok(Some(Ok(ResponseEvent::ToolCall(tool_call)))) => {
-                        let arguments = serde_json::from_str(&tool_call.arguments)
-                            .unwrap_or_else(|_| serde_json::json!({"raw": tool_call.arguments}));
-                        if tx
-                            .send(StreamEvent::ToolCall {
-                                id: tool_call.id.clone(),
-                                name: tool_call.name.clone(),
-                                arguments,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Ok(Some(Err(e))) => {
-                        let _ = tx.send(StreamEvent::Error(e.to_string())).await;
-                        break;
-                    }
-                    Ok(None) => {
-                        let _ = tx
-                            .send(StreamEvent::Done {
-                                content,
-                                reasoning,
-                                tokens,
-                            })
-                            .await;
-                        break;
-                    }
-                    Err(_) => {
-                        let _ = tx
-                            .send(StreamEvent::Error("Response timeout".to_string()))
-                            .await;
-                        break;
                     }
                 }
             }

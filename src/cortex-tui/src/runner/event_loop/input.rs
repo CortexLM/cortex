@@ -368,24 +368,45 @@ impl EventLoop {
             return Ok(());
         }
 
-        // Check if app is idle (nothing active that ESC should cancel)
-        let is_idle = !self.app_state.streaming.is_streaming
-            && self.app_state.pending_approval.is_none()
-            && !self.app_state.has_queued_messages()
-            && !self.app_state.autocomplete.visible;
-
-        if is_idle {
-            if self.app_state.handle_esc() {
-                self.app_state.set_quit();
-                return Ok(());
-            } else {
-                self.app_state.toasts.info("Press ESC again to quit");
-                self.render(terminal)?;
-                return Ok(());
-            }
+        // Priority 2: If streaming is active, cancel it
+        if self.app_state.streaming.is_streaming {
+            self.cancel_streaming();
+            self.render(terminal)?;
+            return Ok(());
         }
 
-        Ok(())
+        // Priority 3: If there are queued messages, cancel them
+        if self.app_state.has_queued_messages() {
+            let count = self.app_state.queued_count();
+            self.app_state.clear_message_queue();
+            self.add_system_message(&format!("Cancelled {} queued message(s)", count));
+            self.render(terminal)?;
+            return Ok(());
+        }
+
+        // Priority 4: If there's pending approval, reject it
+        if self.app_state.pending_approval.is_some() {
+            self.app_state.reject();
+            self.render(terminal)?;
+            return Ok(());
+        }
+
+        // Priority 5: If autocomplete is visible, hide it (already handled in handle_autocomplete_key)
+        if self.app_state.autocomplete.visible {
+            self.app_state.autocomplete.hide();
+            self.render(terminal)?;
+            return Ok(());
+        }
+
+        // Priority 6: Double-tap ESC to quit when idle
+        if self.app_state.handle_esc() {
+            self.app_state.set_quit();
+            Ok(())
+        } else {
+            self.app_state.toasts.info("Press ESC again to quit");
+            self.render(terminal)?;
+            Ok(())
+        }
     }
 
     /// Handle autocomplete navigation keys
