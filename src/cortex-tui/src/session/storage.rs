@@ -22,6 +22,37 @@ const META_FILE: &str = "meta.json";
 const HISTORY_FILE: &str = "history.jsonl";
 
 // ============================================================
+// SECURITY HELPERS
+// ============================================================
+
+/// Sanitize a session ID to prevent path traversal attacks.
+///
+/// Only allows alphanumeric characters, hyphens, and underscores.
+/// Any other characters (including path separators) are replaced with underscores.
+fn sanitize_session_id(session_id: &str) -> String {
+    session_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Validate a session ID for safe filesystem use.
+///
+/// Returns true if the session_id contains only safe characters.
+pub fn validate_session_id(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+// ============================================================
 // SESSION STORAGE
 // ============================================================
 
@@ -49,8 +80,21 @@ impl SessionStorage {
     }
 
     /// Gets the directory for a specific session.
+    ///
+    /// # Security
+    ///
+    /// The session_id is validated to prevent path traversal attacks.
+    /// Only alphanumeric characters, hyphens, and underscores are allowed.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic but will return an invalid path if
+    /// the session_id contains disallowed characters. Use `validate_session_id`
+    /// before calling this function for untrusted input.
     pub fn session_dir(&self, session_id: &str) -> PathBuf {
-        self.base_dir.join(session_id)
+        // Sanitize session_id to prevent path traversal
+        let sanitized_id = sanitize_session_id(session_id);
+        self.base_dir.join(&sanitized_id)
     }
 
     /// Gets the metadata file path for a session.
@@ -428,5 +472,46 @@ mod tests {
 
         let loaded = storage.load_meta(&session_id).unwrap();
         assert!(loaded.archived);
+    }
+
+    #[test]
+    fn test_validate_session_id() {
+        // Valid IDs
+        assert!(validate_session_id("abc-123"));
+        assert!(validate_session_id("test_session"));
+        assert!(validate_session_id("ABC123"));
+        
+        // Invalid IDs - path traversal attempts
+        assert!(!validate_session_id("../../../etc"));
+        assert!(!validate_session_id(".."));
+        assert!(!validate_session_id("test/../passwd"));
+        assert!(!validate_session_id("test/subdir"));
+        assert!(!validate_session_id(""));
+    }
+
+    #[test]
+    fn test_sanitize_session_id() {
+        // Normal ID stays the same
+        assert_eq!(sanitize_session_id("abc-123"), "abc-123");
+        assert_eq!(sanitize_session_id("test_session"), "test_session");
+        
+        // Path traversal gets sanitized
+        assert_eq!(sanitize_session_id("../../../etc"), "________etc");
+        assert_eq!(sanitize_session_id("test/subdir"), "test_subdir");
+        assert_eq!(sanitize_session_id("test\x00evil"), "test_evil");
+    }
+
+    #[test]
+    fn test_session_dir_path_traversal() {
+        let (storage, temp) = create_test_storage();
+        let base_dir = temp.path().to_path_buf();
+        
+        // Attempt path traversal - should be sanitized
+        let malicious_id = "../../../etc/passwd";
+        let result_path = storage.session_dir(malicious_id);
+        
+        // The result should still be under base_dir, not escaping it
+        assert!(result_path.starts_with(&base_dir));
+        assert!(!result_path.to_string_lossy().contains(".."));
     }
 }
