@@ -87,6 +87,9 @@ impl SessionStorage {
     // ========================================================================
 
     /// Saves session metadata.
+    ///
+    /// Uses atomic write (temp file + rename) with fsync for durability.
+    /// This prevents data loss on crash or forceful termination.
     pub fn save_meta(&self, meta: &SessionMeta) -> Result<()> {
         self.ensure_session_dir(&meta.id)?;
 
@@ -94,12 +97,36 @@ impl SessionStorage {
         let content =
             serde_json::to_string_pretty(meta).context("Failed to serialize session metadata")?;
 
-        // Atomic write: write to temp file then rename
+        // Atomic write: write to temp file, fsync, then rename
         let temp_path = path.with_extension("json.tmp");
-        fs::write(&temp_path, &content)
+
+        // Write and sync temp file
+        let file = File::create(&temp_path)
+            .with_context(|| format!("Failed to create temp metadata file: {:?}", temp_path))?;
+        let mut writer = BufWriter::new(file);
+        writer
+            .write_all(content.as_bytes())
             .with_context(|| format!("Failed to write temp metadata file: {:?}", temp_path))?;
+        writer.flush()?;
+
+        // Ensure data is durably written to disk (fsync) before rename
+        writer.get_ref().sync_all().with_context(|| {
+            format!("Failed to sync temp metadata file to disk: {:?}", temp_path)
+        })?;
+
+        // Rename temp file to final path
         fs::rename(&temp_path, &path)
             .with_context(|| format!("Failed to rename metadata file: {:?}", path))?;
+
+        // Sync parent directory on Unix for crash safety (ensures directory entry is persisted)
+        #[cfg(unix)]
+        {
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
+        }
 
         Ok(())
     }
@@ -211,6 +238,16 @@ impl SessionStorage {
 
         fs::rename(&temp_path, &path)
             .with_context(|| format!("Failed to rename history file: {:?}", path))?;
+
+        // Sync parent directory on Unix for crash safety (ensures directory entry is persisted)
+        #[cfg(unix)]
+        {
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
+        }
 
         Ok(())
     }
