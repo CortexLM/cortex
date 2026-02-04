@@ -65,7 +65,7 @@ async fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
 
         match fs::rename(&temp_path, path).await {
             Ok(()) => break,
-            Err(e) if retries > 0 => {
+            Err(_) if retries > 0 => {
                 retries -= 1;
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 continue;
