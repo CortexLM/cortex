@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use cortex_common::DEFAULT_BATCH_TIMEOUT_SECS;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -337,14 +338,30 @@ impl ToolHandler for BatchToolHandler {
         // Validate calls
         self.validate_calls(&args.calls)?;
 
+        // Determine overall batch timeout (wraps around entire parallel execution)
+        let batch_timeout_secs = args.timeout_secs.unwrap_or(DEFAULT_BATCH_TIMEOUT_SECS);
+        let batch_timeout = Duration::from_secs(batch_timeout_secs);
+
         // Determine per-tool timeout (prevents single tool from blocking others)
         let tool_timeout_secs = args.tool_timeout_secs.unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS);
         let tool_timeout = Duration::from_secs(tool_timeout_secs);
 
-        // Execute all tools in parallel
-        let batch_result = self
-            .execute_parallel(args.calls, context, tool_timeout)
-            .await;
+        // Execute all tools in parallel with overall batch timeout
+        let batch_result = match timeout(
+            batch_timeout,
+            self.execute_parallel(args.calls, context, tool_timeout),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                // Batch-level timeout exceeded
+                return Ok(ToolResult::error(format!(
+                    "Batch execution timed out after {}s. Consider using a longer timeout_secs or reducing the number of tools.",
+                    batch_timeout_secs
+                )));
+            }
+        };
 
         // Format output
         let output = self.format_result(&batch_result);
@@ -667,5 +684,59 @@ mod tests {
             "Execution took {}ms, expected < 500ms for parallel execution",
             elapsed.as_millis()
         );
+    }
+
+    #[tokio::test]
+    async fn test_batch_timeout() {
+        // Create an executor with a slow tool
+        struct SlowExecutor;
+
+        #[async_trait]
+        impl BatchToolExecutor for SlowExecutor {
+            async fn execute_tool(
+                &self,
+                _name: &str,
+                _arguments: Value,
+                _context: &ToolContext,
+            ) -> Result<ToolResult> {
+                // Sleep longer than batch timeout
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok(ToolResult::success("Done"))
+            }
+
+            fn has_tool(&self, _name: &str) -> bool {
+                true
+            }
+        }
+
+        let executor: Arc<dyn BatchToolExecutor> = Arc::new(SlowExecutor);
+        let handler = BatchToolHandler::new(executor);
+        let context = ToolContext::new(PathBuf::from("."));
+
+        // Use a very short batch timeout (1 second) to test timeout behavior
+        let args = json!({
+            "calls": [
+                {"tool": "SlowTool", "arguments": {}}
+            ],
+            "timeout_secs": 1
+        });
+
+        let start = Instant::now();
+        let result = handler.execute(args, &context).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        let tool_result = result.unwrap();
+
+        // Should timeout quickly (around 1 second)
+        assert!(
+            elapsed.as_secs() < 3,
+            "Batch should have timed out quickly, but took {}s",
+            elapsed.as_secs()
+        );
+
+        // Should have timed out
+        assert!(!tool_result.success);
+        assert!(tool_result.output.contains("timed out"));
     }
 }
