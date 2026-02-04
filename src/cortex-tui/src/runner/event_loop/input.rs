@@ -596,7 +596,9 @@ impl EventLoop {
         match event {
             AppEvent::StreamingStarted => {
                 self.stream_controller.start_processing();
-                self.app_state.start_streaming(None);
+                // Don't reset timer here - this is triggered by backend TaskStarted event
+                // which could be either a new prompt or a continuation
+                self.app_state.start_streaming(None, false);
             }
 
             AppEvent::StreamingChunk(chunk) => {

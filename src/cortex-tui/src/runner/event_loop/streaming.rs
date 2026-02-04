@@ -111,7 +111,7 @@ impl EventLoop {
 
         // Start streaming UI state
         self.stream_controller.start_processing();
-        self.app_state.start_streaming(None);
+        self.app_state.start_streaming(None, true); // Reset timer for new user prompt
 
         // Reset cancellation flag and stream_done flag for new request
         self.streaming_cancelled.store(false, Ordering::SeqCst);
@@ -688,7 +688,7 @@ impl EventLoop {
 
         // Start streaming UI state
         self.stream_controller.start_processing();
-        self.app_state.start_streaming(None);
+        self.app_state.start_streaming(None, false); // Don't reset timer for tool continuation
 
         // Reset cancellation flag and stream_done flag
         self.streaming_cancelled.store(false, Ordering::SeqCst);
