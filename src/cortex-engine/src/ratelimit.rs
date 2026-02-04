@@ -341,9 +341,13 @@ impl ConcurrencyLimiter {
     }
 
     /// Acquire a permit.
-    pub async fn acquire(&self) -> ConcurrencyPermit {
-        let permit = self.semaphore.clone().acquire_owned().await.unwrap();
-        ConcurrencyPermit { _permit: permit }
+    ///
+    /// Returns an error if the semaphore is closed.
+    pub async fn acquire(&self) -> Result<ConcurrencyPermit> {
+        let permit = self.semaphore.clone().acquire_owned().await.map_err(|_| {
+            CortexError::Internal("concurrency limiter semaphore closed unexpectedly".into())
+        })?;
+        Ok(ConcurrencyPermit { _permit: permit })
     }
 
     /// Try to acquire a permit.
@@ -595,8 +599,8 @@ mod tests {
     async fn test_concurrency_limiter() {
         let limiter = ConcurrencyLimiter::new(2);
 
-        let _p1 = limiter.acquire().await;
-        let _p2 = limiter.acquire().await;
+        let _p1 = limiter.acquire().await.unwrap();
+        let _p2 = limiter.acquire().await.unwrap();
 
         // Third should fail immediately
         assert!(limiter.try_acquire().is_none());

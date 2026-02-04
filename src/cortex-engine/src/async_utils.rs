@@ -147,13 +147,17 @@ impl ConcurrencyLimiter {
     }
 
     /// Execute with limit.
-    pub async fn execute<F, Fut, T>(&self, f: F) -> T
+    ///
+    /// Returns an error if the semaphore is closed.
+    pub async fn execute<F, Fut, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = T>,
     {
-        let _permit = self.semaphore.acquire().await.unwrap();
-        f().await
+        let _permit = self.semaphore.acquire().await.map_err(|_| {
+            CortexError::Internal("concurrency limiter semaphore closed unexpectedly".into())
+        })?;
+        Ok(f().await)
     }
 
     /// Get available permits.
@@ -178,26 +182,36 @@ impl<T: Clone> AsyncOnce<T> {
     }
 
     /// Get or initialize.
-    pub async fn get_or_init<F, Fut>(&self, init: F) -> T
+    ///
+    /// Returns an error if the internal state is inconsistent (value missing after init flag set).
+    pub async fn get_or_init<F, Fut>(&self, init: F) -> Result<T>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = T>,
     {
         // Fast path
         if *self.initialized.read().await {
-            return self.value.read().await.clone().unwrap();
+            return self.value.read().await.clone().ok_or_else(|| {
+                CortexError::Internal(
+                    "AsyncOnce: value missing despite initialized flag being set".into(),
+                )
+            });
         }
 
         // Slow path
         let mut initialized = self.initialized.write().await;
         if *initialized {
-            return self.value.read().await.clone().unwrap();
+            return self.value.read().await.clone().ok_or_else(|| {
+                CortexError::Internal(
+                    "AsyncOnce: value missing despite initialized flag being set".into(),
+                )
+            });
         }
 
         let value = init().await;
         *self.value.write().await = Some(value.clone());
         *initialized = true;
-        value
+        Ok(value)
     }
 
     /// Check if initialized.
@@ -399,7 +413,9 @@ impl<K: std::hash::Hash + Eq + Clone, V: Clone> AsyncCache<K, V> {
 }
 
 /// Run futures concurrently with limit.
-pub async fn concurrent<F, Fut, T>(items: impl IntoIterator<Item = F>, limit: usize) -> Vec<T>
+///
+/// Returns an error if the semaphore is closed unexpectedly.
+pub async fn concurrent<F, Fut, T>(items: impl IntoIterator<Item = F>, limit: usize) -> Result<Vec<T>>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = T>,
@@ -410,12 +426,17 @@ where
     for item in items {
         let sem = semaphore.clone();
         handles.push(async move {
-            let _permit = sem.acquire().await.unwrap();
-            item().await
+            let _permit = sem.acquire().await.map_err(|_| {
+                CortexError::Internal("concurrent execution semaphore closed unexpectedly".into())
+            })?;
+            Ok(item().await)
         });
     }
 
-    futures::future::join_all(handles).await
+    futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .collect()
 }
 
 /// Select the first future to complete.
@@ -503,7 +524,10 @@ mod tests {
             }));
         }
 
-        futures::future::join_all(handles).await;
+        let results: Vec<_> = futures::future::join_all(handles).await;
+        for result in results {
+            assert!(result.is_ok());
+        }
         assert_eq!(*counter.lock().await, 5);
     }
 
@@ -511,8 +535,8 @@ mod tests {
     async fn test_async_once() {
         let once: AsyncOnce<i32> = AsyncOnce::new();
 
-        let v1 = once.get_or_init(|| async { 42 }).await;
-        let v2 = once.get_or_init(|| async { 100 }).await;
+        let v1 = once.get_or_init(|| async { 42 }).await.unwrap();
+        let v2 = once.get_or_init(|| async { 100 }).await.unwrap();
 
         assert_eq!(v1, 42);
         assert_eq!(v2, 42);
@@ -560,7 +584,7 @@ mod tests {
             Box::new(|| Box::pin(async { 2 })),
             Box::new(|| Box::pin(async { 3 })),
         ];
-        let results = concurrent(items, 2).await;
+        let results = concurrent(items, 2).await.unwrap();
 
         assert_eq!(results.len(), 3);
     }
