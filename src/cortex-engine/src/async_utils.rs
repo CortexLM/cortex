@@ -3,6 +3,7 @@
 //! Provides utilities for async operations including
 //! timeouts, retries, and concurrency control.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -213,8 +214,10 @@ impl<T: Clone> Default for AsyncOnce<T> {
 }
 
 /// Async queue.
+///
+/// Uses VecDeque internally for O(1) push and pop operations.
 pub struct AsyncQueue<T> {
-    items: RwLock<Vec<T>>,
+    items: RwLock<VecDeque<T>>,
     capacity: Option<usize>,
 }
 
@@ -222,7 +225,7 @@ impl<T> AsyncQueue<T> {
     /// Create a new queue.
     pub fn new() -> Self {
         Self {
-            items: RwLock::new(Vec::new()),
+            items: RwLock::new(VecDeque::new()),
             capacity: None,
         }
     }
@@ -230,7 +233,7 @@ impl<T> AsyncQueue<T> {
     /// Create with capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            items: RwLock::new(Vec::with_capacity(capacity)),
+            items: RwLock::new(VecDeque::with_capacity(capacity)),
             capacity: Some(capacity),
         }
     }
@@ -245,18 +248,17 @@ impl<T> AsyncQueue<T> {
             return false;
         }
 
-        items.push(item);
+        items.push_back(item);
         true
     }
 
     /// Pop an item.
+    ///
+    /// Uses VecDeque::pop_front() for O(1) complexity instead of
+    /// Vec::remove(0) which has O(n) complexity.
     pub async fn pop(&self) -> Option<T> {
         let mut items = self.items.write().await;
-        if items.is_empty() {
-            None
-        } else {
-            Some(items.remove(0))
-        }
+        items.pop_front()
     }
 
     /// Get length.
