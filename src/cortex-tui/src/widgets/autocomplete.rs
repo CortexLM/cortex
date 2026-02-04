@@ -77,10 +77,11 @@ impl<'a> AutocompletePopup<'a> {
         let item_count = self.state.visible_items().len() as u16;
         let height = item_count * ITEM_HEIGHT + 2; // +2 for borders
 
-        // Calculate width based on content
+        // Calculate width based on visible/filtered items only (not all items)
+        // This prevents the popup from being too wide when the filtered list is smaller
         let content_width = self
             .state
-            .items
+            .visible_items()
             .iter()
             .map(|item| {
                 let icon_width = if item.icon != '\0' { 2 } else { 0 };
@@ -204,11 +205,19 @@ impl Widget for AutocompletePopup<'_> {
 
         let (width, height) = self.calculate_dimensions();
 
-        // Position the popup above the input area
-        // We assume `area` is positioned where the popup should appear
+        // Position the popup above the input area if there's room, otherwise below
+        // This prevents the popup from going off-screen at the top
+        let y = if area.y >= height {
+            // Enough room above - position popup above the input
+            area.y.saturating_sub(height)
+        } else {
+            // Not enough room above - position popup below the input
+            area.bottom()
+        };
+
         let popup_area = Rect {
             x: area.x,
-            y: area.y.saturating_sub(height),
+            y,
             width: width.min(area.width),
             height,
         };
