@@ -401,11 +401,11 @@ impl EventLoop {
         // Priority 6: Double-tap ESC to quit when idle
         if self.app_state.handle_esc() {
             self.app_state.set_quit();
-            return Ok(());
+            Ok(())
         } else {
             self.app_state.toasts.info("Press ESC again to quit");
             self.render(terminal)?;
-            return Ok(());
+            Ok(())
         }
     }
 
