@@ -40,7 +40,8 @@ pub async fn request_id_middleware(mut request: Request, next: Next) -> Response
     let mut response = next.run(request).await;
     response.headers_mut().insert(
         REQUEST_ID_HEADER,
-        HeaderValue::from_str(&request_id).unwrap(),
+        HeaderValue::from_str(&request_id)
+            .unwrap_or_else(|_| HeaderValue::from_static("invalid-request-id")),
     );
 
     response
