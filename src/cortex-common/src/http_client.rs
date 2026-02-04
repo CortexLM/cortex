@@ -13,21 +13,47 @@
 use reqwest::Client;
 use std::time::Duration;
 
+// ============================================================
+// Timeout Configuration Constants
+// ============================================================
+//
+// Timeout Hierarchy Documentation
+// ===============================
+//
+// This module defines the authoritative timeout constants for HTTP operations.
+// Other modules should reference these constants or document deviations.
+//
+// Timeout Categories:
+// - Request timeouts: Total time for a complete request/response cycle
+// - Connection timeouts: Time to establish TCP connection
+// - Read timeouts: Time to receive response data
+// - Pool timeouts: How long idle connections stay in pool
+//
+// Recommended Naming Convention:
+// - Constants: SCREAMING_SNAKE_CASE with Duration type
+// - Config fields: snake_case with _secs suffix for u64 values
+//
+// ============================================================
+
 /// User-Agent string for all HTTP requests
 pub const USER_AGENT: &str = concat!("cortex-cli/", env!("CARGO_PKG_VERSION"));
 
-/// Default timeout for standard API requests (30 seconds)
+/// Default timeout for standard HTTP requests (30 seconds).
+/// Used for non-streaming API calls, health checks with retries, etc.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Extended timeout for LLM streaming requests (5 minutes)
+/// Timeout for streaming HTTP requests (5 minutes).
+/// Longer duration to accommodate LLM inference time.
 pub const STREAMING_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Short timeout for health checks (5 seconds)
+/// Timeout for health check requests (5 seconds).
+/// Short timeout since health endpoints should respond quickly.
 pub const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Connection pool idle timeout to ensure DNS is re-resolved periodically.
+/// Idle timeout for connection pool (60 seconds).
+/// Connections are closed after being idle for this duration
+/// to allow DNS re-resolution for services behind load balancers.
 /// This helps with failover scenarios where DNS records change (#2177).
-/// Set to 60 seconds to balance between performance and DNS freshness.
 pub const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Creates an HTTP client with default configuration (30s timeout).
