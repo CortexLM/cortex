@@ -34,7 +34,7 @@ impl<'a> ActionHandler<'a> {
         // Send to backend
         if let Some(session) = self.session {
             session.send_message(text).await?;
-            self.state.start_streaming(None);
+            self.state.start_streaming(None, true); // Reset timer for new user prompt
             self.stream.start_processing();
         }
 

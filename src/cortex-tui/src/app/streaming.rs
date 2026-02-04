@@ -21,13 +21,20 @@ pub struct StreamingState {
 }
 
 impl StreamingState {
-    pub fn start(&mut self, tool: Option<String>) {
+    /// Start streaming with option to reset the prompt timer.
+    ///
+    /// # Arguments
+    /// * `tool` - Optional tool name being executed
+    /// * `reset_timer` - If true, resets `prompt_started_at` to now (use for new user prompts).
+    ///   If false, preserves existing timer (use for tool continuations).
+    pub fn start(&mut self, tool: Option<String>, reset_timer: bool) {
         self.is_streaming = true;
         self.thinking = true;
         self.current_tool = tool;
         self.task_started_at = Some(Instant::now());
-        // Only set prompt_started_at if not already set (first call in a turn)
-        if self.prompt_started_at.is_none() {
+        // Reset prompt timer only when explicitly requested (new user prompt)
+        // or when not yet set (first call)
+        if reset_timer || self.prompt_started_at.is_none() {
             self.prompt_started_at = Some(Instant::now());
         }
     }

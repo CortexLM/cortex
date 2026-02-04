@@ -460,9 +460,14 @@ impl AppState {
 // ============================================================================
 
 impl AppState {
-    /// Start streaming a response
-    pub fn start_streaming(&mut self, tool: Option<String>) {
-        self.streaming.start(tool);
+    /// Start streaming a response.
+    ///
+    /// # Arguments
+    /// * `tool` - Optional tool name being executed
+    /// * `reset_timer` - If true, resets the prompt elapsed timer (use for new user prompts).
+    ///   If false, preserves existing timer (use for tool continuations).
+    pub fn start_streaming(&mut self, tool: Option<String>, reset_timer: bool) {
+        self.streaming.start(tool, reset_timer);
         // Use typewriter only if streaming animation is enabled
         if self.streaming_enabled {
             self.typewriter = Some(Typewriter::dynamic(String::new(), 500.0));
