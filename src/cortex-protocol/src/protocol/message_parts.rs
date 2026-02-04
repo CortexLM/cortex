@@ -182,7 +182,6 @@ pub enum ToolState {
     },
 }
 
-
 impl ToolState {
     /// Check if transitioning to the given state is valid.
     ///
