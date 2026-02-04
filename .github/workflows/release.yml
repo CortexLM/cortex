@@ -150,12 +150,20 @@ jobs:
           shared-key: ${{ needs.prepare.outputs.cache_key }}
 
       # =========================================================================
+      # Linux dependencies (required for alsa-sys crate)
+      # =========================================================================
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
+      # =========================================================================
       # Static musl build setup (for portable Linux binaries)
       # =========================================================================
       - name: Install musl toolchain (x86_64 static)
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
-          sudo apt-get update
           sudo apt-get install -y musl-tools musl-dev
           # Verify musl-gcc is available
           which musl-gcc
@@ -164,7 +172,6 @@ jobs:
       - name: Install musl toolchain (aarch64 static)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
-          sudo apt-get update
           # For cross-compiling to aarch64-musl, we need the cross toolchain
           sudo apt-get install -y musl-tools musl-dev gcc-aarch64-linux-gnu
           # Install aarch64-linux-musl-gcc cross compiler
