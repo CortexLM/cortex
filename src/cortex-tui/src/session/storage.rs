@@ -480,7 +480,7 @@ mod tests {
         assert!(validate_session_id("abc-123"));
         assert!(validate_session_id("test_session"));
         assert!(validate_session_id("ABC123"));
-        
+
         // Invalid IDs - path traversal attempts
         assert!(!validate_session_id("../../../etc"));
         assert!(!validate_session_id(".."));
@@ -494,7 +494,7 @@ mod tests {
         // Normal ID stays the same
         assert_eq!(sanitize_session_id("abc-123"), "abc-123");
         assert_eq!(sanitize_session_id("test_session"), "test_session");
-        
+
         // Path traversal gets sanitized
         assert_eq!(sanitize_session_id("../../../etc"), "________etc");
         assert_eq!(sanitize_session_id("test/subdir"), "test_subdir");
@@ -505,11 +505,11 @@ mod tests {
     fn test_session_dir_path_traversal() {
         let (storage, temp) = create_test_storage();
         let base_dir = temp.path().to_path_buf();
-        
+
         // Attempt path traversal - should be sanitized
         let malicious_id = "../../../etc/passwd";
         let result_path = storage.session_dir(malicious_id);
-        
+
         // The result should still be under base_dir, not escaping it
         assert!(result_path.starts_with(&base_dir));
         assert!(!result_path.to_string_lossy().contains(".."));
