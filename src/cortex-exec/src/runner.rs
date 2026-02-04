@@ -195,7 +195,10 @@ impl ExecRunner {
             self.client = Some(client);
         }
 
-        Ok(self.client.as_ref().unwrap().as_ref())
+        self.client
+            .as_ref()
+            .map(|c| c.as_ref())
+            .ok_or_else(|| CortexError::Internal("LLM client not initialized".to_string()))
     }
 
     /// Get filtered tool definitions based on options.
