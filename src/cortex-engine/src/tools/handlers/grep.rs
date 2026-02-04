@@ -29,6 +29,7 @@ struct GrepArgs {
     glob_pattern: Option<String>,
     #[serde(default = "default_output_mode")]
     output_mode: String,
+    #[serde(alias = "head_limit")]
     max_results: Option<usize>,
     #[serde(default)]
     multiline: bool,
