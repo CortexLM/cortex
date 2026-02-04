@@ -114,6 +114,15 @@ fn validate_session_id(session_id: &str) -> Result<()> {
     )
 }
 
+/// Safely get a string prefix by character count, not byte count.
+/// This avoids panics on multi-byte UTF-8 characters.
+fn safe_char_prefix(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => &s[..byte_idx],
+        None => s, // String has fewer than max_chars characters
+    }
+}
+
 /// Get the lock file path.
 fn get_lock_file_path() -> PathBuf {
     dirs::home_dir()
@@ -156,7 +165,7 @@ pub fn is_session_locked(session_id: &str) -> bool {
     match load_lock_file() {
         Ok(lock_file) => lock_file.locked_sessions.iter().any(|entry| {
             entry.session_id == session_id
-                || session_id.starts_with(&entry.session_id[..8.min(entry.session_id.len())])
+                || session_id.starts_with(safe_char_prefix(&entry.session_id, 8))
         }),
         Err(_) => false,
     }
@@ -308,7 +317,7 @@ async fn run_list(args: LockListArgs) -> Result<()> {
         println!("{}", "-".repeat(60));
 
         for entry in &lock_file.locked_sessions {
-            let short_id = &entry.session_id[..8.min(entry.session_id.len())];
+            let short_id = safe_char_prefix(&entry.session_id, 8);
             println!("  {} - locked at {}", short_id, entry.locked_at);
             if let Some(ref reason) = entry.reason {
                 println!("    Reason: {}", reason);
@@ -332,7 +341,7 @@ async fn run_check(args: LockCheckArgs) -> Result<()> {
         e.session_id == args.session_id
             || args
                 .session_id
-                .starts_with(&e.session_id[..8.min(e.session_id.len())])
+                .starts_with(safe_char_prefix(&e.session_id, 8))
     });
 
     if is_locked {
@@ -342,7 +351,7 @@ async fn run_check(args: LockCheckArgs) -> Result<()> {
             e.session_id == args.session_id
                 || args
                     .session_id
-                    .starts_with(&e.session_id[..8.min(e.session_id.len())])
+                    .starts_with(safe_char_prefix(&e.session_id, 8))
         }) && let Some(ref reason) = entry.reason
         {
             println!("Reason: {}", reason);
@@ -507,5 +516,40 @@ mod tests {
         // Path should include .cortex directory
         let path_str = path.to_string_lossy();
         assert!(path_str.contains(".cortex"));
+    }
+
+    #[test]
+    fn test_safe_char_prefix_ascii() {
+        // ASCII strings should work correctly
+        assert_eq!(safe_char_prefix("abcdefghij", 8), "abcdefgh");
+        assert_eq!(safe_char_prefix("abc", 8), "abc");
+        assert_eq!(safe_char_prefix("", 8), "");
+        assert_eq!(safe_char_prefix("12345678", 8), "12345678");
+    }
+
+    #[test]
+    fn test_safe_char_prefix_utf8_multibyte() {
+        // Multi-byte UTF-8 characters should not panic
+        // Each emoji is 4 bytes, so 8 chars = 32 bytes
+        let emoji_id = "🔥🎉🚀💡🌟✨🎯🔮extra";
+        assert_eq!(safe_char_prefix(emoji_id, 8), "🔥🎉🚀💡🌟✨🎯🔮");
+
+        // Mixed ASCII and multi-byte
+        let mixed = "ab🔥cd🎉ef";
+        assert_eq!(safe_char_prefix(mixed, 4), "ab🔥c");
+        assert_eq!(safe_char_prefix(mixed, 8), "ab🔥cd🎉ef");
+
+        // Chinese characters (3 bytes each)
+        let chinese = "中文测试会话标识符";
+        assert_eq!(safe_char_prefix(chinese, 4), "中文测试");
+    }
+
+    #[test]
+    fn test_safe_char_prefix_boundary() {
+        // Edge cases
+        assert_eq!(safe_char_prefix("a", 0), "");
+        assert_eq!(safe_char_prefix("a", 1), "a");
+        assert_eq!(safe_char_prefix("🔥", 1), "🔥");
+        assert_eq!(safe_char_prefix("🔥", 0), "");
     }
 }
