@@ -162,16 +162,24 @@ pub async fn open_external_editor(initial_content: &str) -> Result<String, Edito
     // Get the editor command
     let editor_cmd = get_editor()?;
 
-    // Create a temporary file
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join(format!("cortex_prompt_{}.md", std::process::id()));
+    // Create a temporary file with a secure random name to prevent symlink attacks.
+    // Using tempfile crate ensures proper security (O_EXCL, restricted permissions).
+    let temp_file = tempfile::Builder::new()
+        .prefix("cortex_prompt_")
+        .suffix(".md")
+        .rand_bytes(16)
+        .tempfile()
+        .map_err(EditorError::Io)?;
 
-    // Write initial content
+    // Write initial content using the secure file handle
     {
-        let mut file = std::fs::File::create(&temp_file)?;
+        let mut file = temp_file.reopen().map_err(EditorError::Io)?;
         file.write_all(initial_content.as_bytes())?;
         file.flush()?;
     }
+
+    // Keep the temp file alive (don't let it be deleted yet)
+    let temp_file = temp_file.into_temp_path();
 
     // Parse the editor command
     let parts: Vec<&str> = editor_cmd.split_whitespace().collect();
@@ -219,16 +227,24 @@ pub fn open_external_editor_sync(initial_content: &str) -> Result<String, Editor
     // Get the editor command
     let editor_cmd = get_editor()?;
 
-    // Create a temporary file
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join(format!("cortex_prompt_{}.md", std::process::id()));
+    // Create a temporary file with a secure random name to prevent symlink attacks.
+    // Using tempfile crate ensures proper security (O_EXCL, restricted permissions).
+    let temp_file = tempfile::Builder::new()
+        .prefix("cortex_prompt_")
+        .suffix(".md")
+        .rand_bytes(16)
+        .tempfile()
+        .map_err(EditorError::Io)?;
 
-    // Write initial content
+    // Write initial content using the secure file handle
     {
-        let mut file = std::fs::File::create(&temp_file)?;
+        let mut file = temp_file.reopen().map_err(EditorError::Io)?;
         file.write_all(initial_content.as_bytes())?;
         file.flush()?;
     }
+
+    // Keep the temp file alive (don't let it be deleted yet)
+    let temp_file = temp_file.into_temp_path();
 
     // Parse the editor command
     let parts: Vec<&str> = editor_cmd.split_whitespace().collect();
@@ -264,12 +280,13 @@ pub fn open_external_editor_sync(initial_content: &str) -> Result<String, Editor
     Ok(content.trim().to_string())
 }
 
-/// Gets the path to the temporary file that would be used.
+/// Gets an example path pattern for temporary files.
 ///
-/// Useful for displaying to the user.
+/// Note: Actual temp files use random suffixes for security.
+/// This function returns a pattern showing the general location.
 pub fn get_temp_file_path() -> PathBuf {
     let temp_dir = std::env::temp_dir();
-    temp_dir.join(format!("cortex_prompt_{}.md", std::process::id()))
+    temp_dir.join("cortex_prompt_XXXXXXXXXXXXXXXX.md")
 }
 
 // ============================================================

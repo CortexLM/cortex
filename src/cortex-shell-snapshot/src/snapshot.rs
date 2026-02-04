@@ -115,12 +115,13 @@ impl ShellSnapshot {
     }
 
     /// Generate a restore script that sources this snapshot.
+    ///
+    /// The path is properly escaped to prevent shell injection attacks.
+    /// Paths containing single quotes are escaped using shell-safe quoting.
     pub fn restore_script(&self) -> String {
         let header = scripts::restore_header(self.metadata.shell_type);
-        format!(
-            "{header}\n# Source snapshot\nsource '{}'\n",
-            self.path.display()
-        )
+        let escaped_path = shell_escape_path(&self.path);
+        format!("{header}\n# Source snapshot\nsource {escaped_path}\n")
     }
 
     /// Save the snapshot to disk.
@@ -197,6 +198,27 @@ impl Drop for ShellSnapshot {
     }
 }
 
+/// Escape a path for safe use in shell commands.
+///
+/// This function handles paths containing single quotes by using the
+/// shell-safe escaping technique: 'path'"'"'with'"'"'quotes'
+///
+/// For paths without single quotes, simple single-quoting is used.
+fn shell_escape_path(path: &Path) -> String {
+    let path_str = path.display().to_string();
+
+    if !path_str.contains('\'') {
+        // Simple case: no single quotes, just wrap in single quotes
+        format!("'{}'", path_str)
+    } else {
+        // Complex case: escape single quotes using '"'"' technique
+        // This closes the single-quoted string, adds a double-quoted single quote,
+        // and reopens the single-quoted string
+        let escaped = path_str.replace('\'', "'\"'\"'");
+        format!("'{}'", escaped)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +242,27 @@ mod tests {
             filename,
             "snapshot_12345678-1234-1234-1234-123456789012.zsh"
         );
+    }
+
+    #[test]
+    fn test_shell_escape_path_simple() {
+        let path = Path::new("/tmp/test/snapshot.sh");
+        let escaped = shell_escape_path(path);
+        assert_eq!(escaped, "'/tmp/test/snapshot.sh'");
+    }
+
+    #[test]
+    fn test_shell_escape_path_with_single_quotes() {
+        let path = Path::new("/tmp/test's/snap'shot.sh");
+        let escaped = shell_escape_path(path);
+        // Single quotes should be escaped using '"'"' technique
+        assert_eq!(escaped, "'/tmp/test'\"'\"'s/snap'\"'\"'shot.sh'");
+    }
+
+    #[test]
+    fn test_shell_escape_path_spaces() {
+        let path = Path::new("/tmp/test path/snapshot.sh");
+        let escaped = shell_escape_path(path);
+        assert_eq!(escaped, "'/tmp/test path/snapshot.sh'");
     }
 }
