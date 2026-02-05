@@ -17,9 +17,12 @@ path = "src/lib.rs"
 workspace = true
 
 [features]
-default = ["cortex-tui"]
+default = ["cortex-tui", "audio"]
 # Use the new Cortex TUI (120 FPS, Cortex theme)
 cortex-tui = ["dep:cortex-tui"]
+# Audio notifications - disabled on musl targets due to alsa-sys incompatibility
+# Falls back to terminal bell when disabled
+audio = ["cortex-tui?/audio"]
 
 [dependencies]
 cortex-engine = { workspace = true }
