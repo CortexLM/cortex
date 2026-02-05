@@ -172,13 +172,12 @@ jobs:
       - name: Install musl toolchain (aarch64 static)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
-          # For cross-compiling to aarch64-musl, we need the cross toolchain
-          sudo apt-get install -y musl-tools musl-dev gcc-aarch64-linux-gnu
-          # Install aarch64-linux-musl-gcc cross compiler
-          wget -q https://musl.cc/aarch64-linux-musl-cross.tgz
-          tar xzf aarch64-linux-musl-cross.tgz
-          sudo mv aarch64-linux-musl-cross /opt/
-          echo "/opt/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+          # Since we're running on native ARM64, we don't need cross-compilation
+          # Just install the musl toolchain natively
+          sudo apt-get install -y musl-tools musl-dev
+          # Verify musl-gcc is available
+          which musl-gcc
+          musl-gcc --version
 
       # Windows ARM64 requires clang from Visual Studio for building the ring crate
       # See: https://github.com/briansmith/ring/blob/main/BUILDING.md
@@ -259,13 +258,14 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
           # Build without audio feature (rodio/alsa) for musl - uses terminal bell fallback
+          # Using native musl-gcc since we're on an ARM64 runner building for ARM64 target
           cargo +nightly build --release --target ${{ matrix.target }} -p cortex-cli --no-default-features --features cortex-tui
         env:
           RUSTFLAGS: "-Zthreads=32 -C target-feature=+crt-static"
           CARGO_PROFILE_RELEASE_LTO: thin
-          CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
-          AR_aarch64_unknown_linux_musl: aarch64-linux-musl-ar
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          AR_aarch64_unknown_linux_musl: ar
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
 
       # =========================================================================
       # Verify static binary (for musl builds)
