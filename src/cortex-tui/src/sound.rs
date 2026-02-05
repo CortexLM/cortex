@@ -10,12 +10,12 @@
 //! On platforms without audio support (e.g., musl builds), falls back to
 //! terminal bell notifications.
 
-use std::io::Write;
 #[cfg(feature = "audio")]
 use std::io::Cursor;
+use std::io::Write;
+use std::sync::OnceLock;
 #[cfg(feature = "audio")]
 use std::sync::mpsc;
-use std::sync::OnceLock;
 #[cfg(feature = "audio")]
 use std::thread;
 
