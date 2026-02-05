@@ -223,6 +223,13 @@ impl EventLoop {
             return Ok(());
         }
 
+        // Handle inline approval UI when pending approval exists
+        if self.app_state.pending_approval.is_some() {
+            if self.handle_inline_approval_key(key_event, terminal).await? {
+                return Ok(());
+            }
+        }
+
         // Check if a card is active and handle its input first
         if self.card_handler.is_active() && self.card_handler.handle_key(key_event) {
             // Process any pending card actions
@@ -500,6 +507,194 @@ impl EventLoop {
                 Ok(false)
             }
         }
+    }
+
+    /// Handle inline approval UI key events.
+    /// Returns true if the key was handled (approval action taken), false otherwise.
+    async fn handle_inline_approval_key(
+        &mut self,
+        key_event: crossterm::event::KeyEvent,
+        terminal: &mut CortexTerminal,
+    ) -> Result<bool> {
+        use crate::app::{InlineApprovalSelection, RiskLevelSelection};
+        use crossterm::event::KeyCode;
+
+        // Check if risk level submenu is visible
+        let show_submenu = self
+            .app_state
+            .pending_approval
+            .as_ref()
+            .map(|a| a.show_risk_submenu)
+            .unwrap_or(false);
+
+        if show_submenu {
+            // Handle risk level submenu keys
+            match key_event.code {
+                KeyCode::Char('1') => {
+                    // Select Low risk level and approve
+                    self.handle_approve_with_risk_level(RiskLevelSelection::Low)
+                        .await?;
+                    self.render(terminal)?;
+                    return Ok(true);
+                }
+                KeyCode::Char('2') => {
+                    // Select Medium risk level and approve
+                    self.handle_approve_with_risk_level(RiskLevelSelection::Medium)
+                        .await?;
+                    self.render(terminal)?;
+                    return Ok(true);
+                }
+                KeyCode::Char('3') => {
+                    // Select High risk level and approve
+                    self.handle_approve_with_risk_level(RiskLevelSelection::High)
+                        .await?;
+                    self.render(terminal)?;
+                    return Ok(true);
+                }
+                KeyCode::Esc => {
+                    // Close submenu, back to main approval UI
+                    if let Some(ref mut approval) = self.app_state.pending_approval {
+                        approval.show_risk_submenu = false;
+                    }
+                    self.render(terminal)?;
+                    return Ok(true);
+                }
+                KeyCode::Left => {
+                    // Navigate risk level selection left
+                    if let Some(ref mut approval) = self.app_state.pending_approval {
+                        approval.selected_risk_level = approval.selected_risk_level.prev();
+                    }
+                    self.render(terminal)?;
+                    return Ok(true);
+                }
+                KeyCode::Right => {
+                    // Navigate risk level selection right
+                    if let Some(ref mut approval) = self.app_state.pending_approval {
+                        approval.selected_risk_level = approval.selected_risk_level.next();
+                    }
+                    self.render(terminal)?;
+                    return Ok(true);
+                }
+                KeyCode::Enter => {
+                    // Confirm selected risk level
+                    let risk_level = self
+                        .app_state
+                        .pending_approval
+                        .as_ref()
+                        .map(|a| a.selected_risk_level)
+                        .unwrap_or_default();
+                    self.handle_approve_with_risk_level(risk_level).await?;
+                    self.render(terminal)?;
+                    return Ok(true);
+                }
+                _ => {
+                    // Consume other keys when submenu is visible
+                    return Ok(true);
+                }
+            }
+        }
+
+        // Handle main approval UI keys
+        match key_event.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                // Accept once
+                self.handle_approve().await?;
+                self.render(terminal)?;
+                Ok(true)
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                // Reject
+                self.handle_reject().await?;
+                self.render(terminal)?;
+                Ok(true)
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                // Show risk level submenu
+                if let Some(ref mut approval) = self.app_state.pending_approval {
+                    approval.show_risk_submenu = true;
+                    approval.selected_risk_level = RiskLevelSelection::default();
+                }
+                self.render(terminal)?;
+                Ok(true)
+            }
+            KeyCode::Left => {
+                // Navigate selection left
+                if let Some(ref mut approval) = self.app_state.pending_approval {
+                    approval.selected_action = approval.selected_action.prev();
+                }
+                self.render(terminal)?;
+                Ok(true)
+            }
+            KeyCode::Right => {
+                // Navigate selection right
+                if let Some(ref mut approval) = self.app_state.pending_approval {
+                    approval.selected_action = approval.selected_action.next();
+                }
+                self.render(terminal)?;
+                Ok(true)
+            }
+            KeyCode::Enter => {
+                // Confirm selected action
+                let action = self
+                    .app_state
+                    .pending_approval
+                    .as_ref()
+                    .map(|a| a.selected_action)
+                    .unwrap_or_default();
+                match action {
+                    InlineApprovalSelection::AcceptOnce => {
+                        self.handle_approve().await?;
+                    }
+                    InlineApprovalSelection::Reject => {
+                        self.handle_reject().await?;
+                    }
+                    InlineApprovalSelection::AcceptAndSet => {
+                        // Show risk level submenu
+                        if let Some(ref mut approval) = self.app_state.pending_approval {
+                            approval.show_risk_submenu = true;
+                            approval.selected_risk_level = RiskLevelSelection::default();
+                        }
+                    }
+                }
+                self.render(terminal)?;
+                Ok(true)
+            }
+            _ => {
+                // Don't consume other keys - allow them to pass through
+                // This allows things like Ctrl+C to work
+                Ok(false)
+            }
+        }
+    }
+
+    /// Handle approval with risk level - approves the tool and updates permission mode
+    async fn handle_approve_with_risk_level(
+        &mut self,
+        risk_level: crate::app::RiskLevelSelection,
+    ) -> Result<()> {
+        use crate::app::RiskLevelSelection;
+        use crate::permissions::PermissionMode;
+
+        // Update permission mode based on selected risk level
+        self.app_state.permission_mode = match risk_level {
+            RiskLevelSelection::Low => PermissionMode::Low,
+            RiskLevelSelection::Medium => PermissionMode::Medium,
+            RiskLevelSelection::High => PermissionMode::High,
+        };
+
+        // Sync permission mode with the manager
+        self.sync_permission_mode();
+
+        // Show toast notification about the mode change
+        let mode_name = self.app_state.permission_mode.display_name();
+        self.app_state
+            .toasts
+            .info(&format!("Risk level set to: {}", mode_name));
+
+        // Now approve the tool
+        self.handle_approve().await?;
+
+        Ok(())
     }
 
     /// Handle terminal resize event

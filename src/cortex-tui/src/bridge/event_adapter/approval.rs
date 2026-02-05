@@ -49,6 +49,9 @@ pub fn create_approval_state(request: &ExecApprovalRequestEvent) -> ApprovalStat
         tool_args_json: Some(tool_args),
         diff_preview,
         approval_mode: ApprovalMode::Ask,
+        selected_action: Default::default(),
+        show_risk_submenu: false,
+        selected_risk_level: Default::default(),
     }
 }
 
@@ -81,6 +84,9 @@ pub fn create_patch_approval_state(request: &ApplyPatchApprovalRequestEvent) -> 
         tool_args_json: Some(tool_args),
         diff_preview: Some(request.patch.clone()),
         approval_mode: ApprovalMode::Ask,
+        selected_action: Default::default(),
+        show_risk_submenu: false,
+        selected_risk_level: Default::default(),
     }
 }
 

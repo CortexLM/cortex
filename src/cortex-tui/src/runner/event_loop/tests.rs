@@ -3,7 +3,10 @@
 #[cfg(test)]
 mod tests {
     use crate::actions::ActionContext;
-    use crate::app::{AppState, ApprovalMode, ApprovalState, FocusTarget};
+    use crate::app::{
+        AppState, ApprovalMode, ApprovalState, FocusTarget, InlineApprovalSelection,
+        RiskLevelSelection,
+    };
     use crate::runner::event_loop::EventLoop;
 
     #[test]
@@ -43,6 +46,9 @@ mod tests {
             tool_args_json: Some(serde_json::json!({})),
             diff_preview: None,
             approval_mode: ApprovalMode::Ask,
+            selected_action: InlineApprovalSelection::default(),
+            show_risk_submenu: false,
+            selected_risk_level: RiskLevelSelection::default(),
         });
         let event_loop = EventLoop::new(app_state);
 

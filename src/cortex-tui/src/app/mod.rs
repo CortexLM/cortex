@@ -12,7 +12,7 @@ mod subagent;
 mod types;
 
 // Re-export all public types
-pub use approval::{ApprovalState, PendingToolResult};
+pub use approval::{ApprovalState, InlineApprovalSelection, PendingToolResult, RiskLevelSelection};
 pub use autocomplete::{AutocompleteItem, AutocompleteState};
 pub use session::{ActiveModal, SessionSummary};
 pub use state::AppState;

@@ -1,5 +1,63 @@
 use super::types::ApprovalMode;
 
+/// State for inline approval selection in input zone
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InlineApprovalSelection {
+    #[default]
+    AcceptOnce, // 'y' - accept this time
+    Reject,       // 'n' - reject
+    AcceptAndSet, // 'a' - accept and set risk level
+}
+
+impl InlineApprovalSelection {
+    /// Move selection to the next item
+    pub fn next(self) -> Self {
+        match self {
+            Self::Reject => Self::AcceptOnce,
+            Self::AcceptOnce => Self::AcceptAndSet,
+            Self::AcceptAndSet => Self::Reject,
+        }
+    }
+
+    /// Move selection to the previous item
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Reject => Self::AcceptAndSet,
+            Self::AcceptOnce => Self::Reject,
+            Self::AcceptAndSet => Self::AcceptOnce,
+        }
+    }
+}
+
+/// State for risk level submenu
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RiskLevelSelection {
+    #[default]
+    Low,
+    Medium,
+    High,
+}
+
+impl RiskLevelSelection {
+    /// Move selection to the next item
+    pub fn next(self) -> Self {
+        match self {
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::Low,
+        }
+    }
+
+    /// Move selection to the previous item
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Low => Self::High,
+            Self::Medium => Self::Low,
+            Self::High => Self::Medium,
+        }
+    }
+}
+
 /// State for pending tool approval
 #[derive(Debug, Clone, Default)]
 pub struct ApprovalState {
@@ -11,6 +69,12 @@ pub struct ApprovalState {
     pub tool_args_json: Option<serde_json::Value>,
     pub diff_preview: Option<String>,
     pub approval_mode: ApprovalMode,
+    /// Currently selected action in inline approval UI
+    pub selected_action: InlineApprovalSelection,
+    /// Whether the risk level submenu is visible
+    pub show_risk_submenu: bool,
+    /// Selected risk level in submenu
+    pub selected_risk_level: RiskLevelSelection,
 }
 
 impl ApprovalState {
@@ -23,6 +87,9 @@ impl ApprovalState {
             tool_args_json: Some(tool_args),
             diff_preview: None,
             approval_mode: ApprovalMode::default(),
+            selected_action: InlineApprovalSelection::default(),
+            show_risk_submenu: false,
+            selected_risk_level: RiskLevelSelection::default(),
         }
     }
 
