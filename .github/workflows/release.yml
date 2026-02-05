@@ -246,7 +246,8 @@ jobs:
       - name: Build release binary (static musl x86_64)
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
-          cargo +nightly build --release --target ${{ matrix.target }} -p cortex-cli
+          # Build without audio feature (rodio/alsa) for musl - uses terminal bell fallback
+          cargo +nightly build --release --target ${{ matrix.target }} -p cortex-cli --no-default-features --features cortex-tui
         env:
           RUSTFLAGS: "-Zthreads=32 -C target-feature=+crt-static"
           CARGO_PROFILE_RELEASE_LTO: thin
@@ -257,7 +258,8 @@ jobs:
       - name: Build release binary (static musl aarch64)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
-          cargo +nightly build --release --target ${{ matrix.target }} -p cortex-cli
+          # Build without audio feature (rodio/alsa) for musl - uses terminal bell fallback
+          cargo +nightly build --release --target ${{ matrix.target }} -p cortex-cli --no-default-features --features cortex-tui
         env:
           RUSTFLAGS: "-Zthreads=32 -C target-feature=+crt-static"
           CARGO_PROFILE_RELEASE_LTO: thin

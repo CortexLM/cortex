@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = ["audio"]
+# Audio notifications - disabled on musl targets due to alsa-sys incompatibility
+audio = ["dep:rodio"]
+
 [dependencies]
 # Cortex TUI core (the TUI engine)
 cortex-core = { path = "../cortex-core" }
@@ -66,8 +71,8 @@ walkdir = { workspace = true }
 # External editor
 which = { workspace = true }
 
-# Audio notifications
-rodio = { workspace = true }
+# Audio notifications (optional - disabled on musl targets)
+rodio = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

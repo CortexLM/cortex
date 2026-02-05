@@ -6,10 +6,17 @@
 //! Audio playback is handled in a dedicated thread since rodio's OutputStream
 //! is not Send/Sync. We use a channel-based approach to send sound requests
 //! from any thread to the dedicated audio thread.
+//!
+//! On platforms without audio support (e.g., musl builds), falls back to
+//! terminal bell notifications.
 
-use std::io::{Cursor, Write};
+#[cfg(feature = "audio")]
+use std::io::Cursor;
+use std::io::Write;
 use std::sync::OnceLock;
+#[cfg(feature = "audio")]
 use std::sync::mpsc;
+#[cfg(feature = "audio")]
 use std::thread;
 
 /// Type of sound notification
@@ -23,16 +30,24 @@ pub enum SoundType {
 
 /// Channel sender for sound requests (Send + Sync)
 /// Using sync_channel with capacity of 16 to prevent unbounded growth
+#[cfg(feature = "audio")]
 static SOUND_SENDER: OnceLock<mpsc::SyncSender<SoundType>> = OnceLock::new();
 
+/// Track whether sound system has been initialized (for non-audio builds)
+#[cfg(not(feature = "audio"))]
+static SOUND_INITIALIZED: OnceLock<bool> = OnceLock::new();
+
 /// Embedded WAV data for response complete sound
+#[cfg(feature = "audio")]
 const COMPLETE_WAV: &[u8] = include_bytes!("sounds/complete.wav");
 /// Embedded WAV data for approval required sound
+#[cfg(feature = "audio")]
 const APPROVAL_WAV: &[u8] = include_bytes!("sounds/approval.wav");
 
 /// Initialize the global sound system.
 /// Spawns a dedicated audio thread that owns the OutputStream.
 /// Should be called once at application startup.
+#[cfg(feature = "audio")]
 pub fn init() {
     // Only initialize once
     if SOUND_SENDER.get().is_some() {
@@ -78,7 +93,17 @@ pub fn init() {
         .expect("Failed to spawn audio thread");
 }
 
+/// Initialize the global sound system (no-op for non-audio builds).
+/// Falls back to terminal bell for notifications.
+#[cfg(not(feature = "audio"))]
+pub fn init() {
+    // Mark as initialized so is_initialized() returns true
+    let _ = SOUND_INITIALIZED.set(true);
+    tracing::debug!("Audio support not available, using terminal bell fallback");
+}
+
 /// Internal function to play WAV data using a stream handle
+#[cfg(feature = "audio")]
 fn play_wav_internal(
     handle: &rodio::OutputStreamHandle,
     data: &'static [u8],
@@ -103,6 +128,7 @@ fn emit_terminal_bell() {
 /// If `enabled` is false or audio is unavailable, this function does nothing.
 /// Falls back to terminal bell if the sound system is not initialized.
 /// This function is non-blocking - sound plays in background thread.
+#[cfg(feature = "audio")]
 pub fn play(sound_type: SoundType, enabled: bool) {
     if !enabled {
         return;
@@ -121,6 +147,16 @@ pub fn play(sound_type: SoundType, enabled: bool) {
     }
 }
 
+/// Play a notification sound (non-audio build - uses terminal bell).
+#[cfg(not(feature = "audio"))]
+pub fn play(_sound_type: SoundType, enabled: bool) {
+    if !enabled {
+        return;
+    }
+    // No audio support, use terminal bell
+    emit_terminal_bell();
+}
+
 /// Play notification for response completion
 pub fn play_response_complete(enabled: bool) {
     play(SoundType::ResponseComplete, enabled);
@@ -133,8 +169,15 @@ pub fn play_approval_required(enabled: bool) {
 
 /// Check if the sound system has been initialized.
 /// Useful for testing and diagnostics.
+#[cfg(feature = "audio")]
 pub fn is_initialized() -> bool {
     SOUND_SENDER.get().is_some()
+}
+
+/// Check if the sound system has been initialized (non-audio build).
+#[cfg(not(feature = "audio"))]
+pub fn is_initialized() -> bool {
+    SOUND_INITIALIZED.get().is_some()
 }
 
 #[cfg(test)]
@@ -183,6 +226,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "audio")]
     fn test_embedded_wav_data_not_empty() {
         // Verify that the embedded WAV files are not empty
         assert!(!COMPLETE_WAV.is_empty(), "complete.wav should not be empty");
@@ -190,6 +234,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "audio")]
     fn test_embedded_wav_data_has_riff_header() {
         // WAV files should start with "RIFF" magic bytes
         assert!(
