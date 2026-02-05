@@ -16,6 +16,9 @@ audio = ["dep:rodio"]
 # Cortex TUI core (the TUI engine)
 cortex-core = { path = "../cortex-core" }
 
+# Auto-update system
+cortex-update = { path = "../cortex-update" }
+
 # Centralized TUI components
 cortex-tui-components = { path = "../cortex-tui-components" }
 

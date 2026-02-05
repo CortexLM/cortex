@@ -125,6 +125,7 @@ fn parse_version(version: &str) -> (u32, u32, u32, String) {
 }
 
 /// Check if a version meets the minimum requirement.
+#[allow(dead_code)]
 pub fn meets_minimum(current: &str, minimum: &str) -> bool {
     compare_versions(current, minimum) != VersionComparison::Older
 }

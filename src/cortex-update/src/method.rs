@@ -1,6 +1,8 @@
 //! Installation method detection.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+#[cfg(test)]
 use std::path::PathBuf;
 
 /// Installation method for Cortex CLI.
@@ -27,10 +29,10 @@ impl InstallMethod {
     /// Detect the installation method based on environment and paths.
     pub fn detect() -> Self {
         // 1. Check executable path first
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(method) = Self::detect_from_path(&exe_path) {
-                return method;
-            }
+        if let Ok(exe_path) = std::env::current_exe()
+            && let Some(method) = Self::detect_from_path(&exe_path)
+        {
+            return method;
         }
 
         // 2. Platform-specific defaults
@@ -40,7 +42,7 @@ impl InstallMethod {
             if which_exists("winget") {
                 return Self::WinGet;
             }
-            return Self::PowerShellScript;
+            Self::PowerShellScript
         }
 
         #[cfg(not(windows))]
@@ -49,12 +51,12 @@ impl InstallMethod {
             if which_exists("brew") {
                 return Self::Homebrew;
             }
-            return Self::CurlScript;
+            Self::CurlScript
         }
     }
 
     /// Detect from executable path.
-    fn detect_from_path(path: &PathBuf) -> Option<Self> {
+    fn detect_from_path(path: &Path) -> Option<Self> {
         let path_str = path.to_string_lossy().to_lowercase();
 
         // Homebrew paths (macOS and Linux)

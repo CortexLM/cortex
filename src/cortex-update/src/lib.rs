@@ -1,4 +1,3 @@
-#![allow(warnings, clippy::all)]
 //! Cortex Update - Auto-update system for Cortex CLI
 //!
 //! Provides automatic update checking and installation via:
@@ -36,6 +35,7 @@ mod version;
 
 pub use api::{CortexSoftwareClient, ReleaseAsset, ReleaseInfo};
 pub use config::{ReleaseChannel, UpdateConfig, UpdateMode};
+pub use download::DownloadProgress;
 pub use error::{UpdateError, UpdateResult};
 pub use install::DownloadedUpdate;
 pub use manager::{UpdateInfo, UpdateManager, UpdateOutcome};

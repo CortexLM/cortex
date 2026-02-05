@@ -4,7 +4,7 @@ use super::auth_status::AuthStatus;
 use super::exit_info::{AppExitInfo, ExitReason};
 use super::trusted_workspaces::{is_workspace_trusted, mark_workspace_trusted};
 
-use crate::app::AppState;
+use crate::app::{AppState, UpdateStatus};
 use crate::bridge::SessionBridge;
 use crate::providers::ProviderManager;
 use crate::runner::event_loop::EventLoop;
@@ -15,7 +15,9 @@ use anyhow::Result;
 use cortex_engine::Config;
 use cortex_login::{CredentialsStoreMode, load_auth, logout_with_fallback};
 use cortex_protocol::ConversationId;
+use cortex_update::UpdateManager;
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing;
 
 // ============================================================================
@@ -552,6 +554,23 @@ impl AppRunner {
         let session_history_task =
             tokio::task::spawn_blocking(|| CortexSession::list_recent(50).ok());
 
+        // 2. Background update check task - check for new versions without blocking startup
+        let update_check_task = tokio::spawn(async move {
+            match UpdateManager::new() {
+                Ok(manager) => match manager.check_update().await {
+                    Ok(info) => info,
+                    Err(e) => {
+                        tracing::debug!("Update check failed: {}", e);
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::debug!("Failed to create update manager: {}", e);
+                    None
+                }
+            }
+        });
+
         // 3. Models prefetch and session validation - spawn in background
         // We use a channel to receive results and update provider_manager later
         let models_and_validation_task = {
@@ -638,6 +657,23 @@ impl AppRunner {
                 "Loaded {} Cortex session(s) from history",
                 app_state.session_history.len()
             );
+        }
+
+        // Collect update check result (with short timeout to not block startup)
+        if let Ok(Ok(Some(info))) =
+            tokio::time::timeout(Duration::from_secs(3), update_check_task).await
+        {
+            tracing::info!(
+                "Update available: {} -> {}",
+                info.current_version,
+                info.latest_version
+            );
+            app_state.set_update_status(UpdateStatus::Available {
+                version: info.latest_version.clone(),
+            });
+            app_state.set_update_info(Some(info));
+        } else {
+            tracing::debug!("Update check did not complete in time or no update available");
         }
 
         // Check validation result (with short timeout - don't block TUI)

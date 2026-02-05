@@ -34,6 +34,7 @@ pub async fn verify_sha256(path: &Path, expected: &str) -> UpdateResult<()> {
 }
 
 /// Verify SHA256 checksum synchronously (for smaller files).
+#[allow(dead_code)]
 pub fn verify_sha256_sync(path: &Path, expected: &str) -> UpdateResult<()> {
     let content = std::fs::read(path)?;
     let result = Sha256::digest(&content);
@@ -49,6 +50,7 @@ pub fn verify_sha256_sync(path: &Path, expected: &str) -> UpdateResult<()> {
 }
 
 /// Calculate SHA256 hash of a file.
+#[allow(dead_code)]
 pub async fn calculate_sha256(path: &Path) -> UpdateResult<String> {
     let mut file = tokio::fs::File::open(path).await?;
     let mut hasher = Sha256::new();
