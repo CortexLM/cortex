@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::app::{MainAgentTodoItem, MainAgentTodoStatus};
 use crate::events::ToolEvent;
 use crate::session::StoredToolCall;
 use crate::views::tool_call::format_result_summary;
@@ -17,6 +18,11 @@ impl EventLoop {
         args: serde_json::Value,
     ) {
         tracing::info!("Spawning tool execution: {} ({})", tool_name, tool_call_id);
+
+        // Handle TodoWrite tool - update main agent todos immediately for real-time display
+        if tool_name == "TodoWrite" {
+            self.handle_main_agent_todo_write(&args);
+        }
 
         // Get tool registry
         let Some(registry) = self.tool_registry.clone() else {
@@ -638,6 +644,80 @@ impl EventLoop {
                             .await;
                     }
                 }
+            }
+        }
+    }
+
+    /// Handle main agent's TodoWrite tool call.
+    /// Parses the todos argument and updates app_state for real-time display.
+    fn handle_main_agent_todo_write(&mut self, args: &serde_json::Value) {
+        // TodoWrite format: { todos: "1. [status] content\n2. [status] content\n..." }
+        // OR the newer format: { todos: [{ content, status, ... }] }
+
+        // Try to parse as string format first (numbered list)
+        if let Some(todos_str) = args.get("todos").and_then(|v| v.as_str()) {
+            let todos: Vec<MainAgentTodoItem> = todos_str
+                .lines()
+                .filter_map(|line| {
+                    // Parse lines like "1. [completed] First task"
+                    let line = line.trim();
+                    if line.is_empty() {
+                        return None;
+                    }
+
+                    // Skip the number prefix (e.g., "1. ")
+                    let content_start = line.find(']').map(|i| i + 1)?;
+                    let status_start = line.find('[')?;
+
+                    let status_str = &line[status_start + 1..content_start - 1];
+                    let content = line[content_start..].trim().to_string();
+
+                    if content.is_empty() {
+                        return None;
+                    }
+
+                    let status = match status_str {
+                        "in_progress" => MainAgentTodoStatus::InProgress,
+                        "completed" => MainAgentTodoStatus::Completed,
+                        _ => MainAgentTodoStatus::Pending,
+                    };
+
+                    Some(MainAgentTodoItem { content, status })
+                })
+                .collect();
+
+            if !todos.is_empty() {
+                tracing::debug!("Main agent todo list updated: {} items", todos.len());
+                self.app_state.update_main_todos(todos);
+            }
+            return;
+        }
+
+        // Try array format (legacy or alternative)
+        if let Some(todos_arr) = args.get("todos").and_then(|v| v.as_array()) {
+            let todos: Vec<MainAgentTodoItem> = todos_arr
+                .iter()
+                .filter_map(|t| {
+                    let content = t.get("content").and_then(|v| v.as_str())?;
+                    let status_str = t
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("pending");
+                    let status = match status_str {
+                        "in_progress" => MainAgentTodoStatus::InProgress,
+                        "completed" => MainAgentTodoStatus::Completed,
+                        _ => MainAgentTodoStatus::Pending,
+                    };
+                    Some(MainAgentTodoItem {
+                        content: content.to_string(),
+                        status,
+                    })
+                })
+                .collect();
+
+            if !todos.is_empty() {
+                tracing::debug!("Main agent todo list updated: {} items", todos.len());
+                self.app_state.update_main_todos(todos);
             }
         }
     }

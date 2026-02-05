@@ -15,7 +15,7 @@ mod types;
 pub use approval::{ApprovalState, PendingToolResult};
 pub use autocomplete::{AutocompleteItem, AutocompleteState};
 pub use session::{ActiveModal, SessionSummary};
-pub use state::AppState;
+pub use state::{AppState, MainAgentTodoItem, MainAgentTodoStatus};
 pub use streaming::StreamingState;
 pub use subagent::{
     SubagentDisplayStatus, SubagentTaskDisplay, SubagentTodoItem, SubagentTodoStatus,

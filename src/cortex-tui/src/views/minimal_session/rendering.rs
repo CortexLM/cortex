@@ -14,7 +14,9 @@ use cortex_core::markdown::MarkdownTheme;
 use cortex_core::widgets::{Brain, Message, MessageRole};
 use cortex_tui_components::welcome_card::{InfoCard, InfoCardPair, ToLines, WelcomeCard};
 
-use crate::app::{AppState, SubagentDisplayStatus, SubagentTaskDisplay};
+use crate::app::{
+    AppState, MainAgentTodoItem, MainAgentTodoStatus, SubagentDisplayStatus, SubagentTaskDisplay,
+};
 use crate::ui::colors::AdaptiveColors;
 use crate::views::tool_call::{ContentSegment, ToolCallDisplay, ToolStatus};
 
@@ -411,6 +413,81 @@ pub fn render_subagent(
         lines.push(Line::from(vec![
             Span::styled("  ⎿ ", Style::default().fg(colors.text_muted)),
             Span::styled(activity, Style::default().fg(colors.text_dim)),
+        ]));
+    }
+
+    lines.push(Line::from("")); // Spacing
+    lines
+}
+
+/// Renders the main agent's todo list above the input field.
+///
+/// Format:
+/// ```text
+/// 📋 Plan
+///   ⎿ ○ First task
+///     ● Second task  (highlighted for in_progress)
+///     ✓ Third task  (strikethrough for completed)
+/// ```
+pub fn render_main_agent_todos(
+    todos: &[MainAgentTodoItem],
+    width: u16,
+    colors: &AdaptiveColors,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    if todos.is_empty() {
+        return lines;
+    }
+
+    // Header line
+    lines.push(Line::from(vec![
+        Span::styled("📋 ", Style::default().fg(colors.accent)),
+        Span::styled(
+            "Plan",
+            Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Calculate content width (accounting for indentation)
+    let content_width = (width as usize).saturating_sub(8); // 8 chars for "  ⎿ ○ "
+
+    // Todo items
+    for (i, todo) in todos.iter().enumerate() {
+        let prefix = if i == 0 { "  ⎿ " } else { "    " };
+
+        let (status_marker, status_color, text_modifier) = match todo.status {
+            MainAgentTodoStatus::Completed => ("✓", colors.success, Modifier::CROSSED_OUT),
+            MainAgentTodoStatus::InProgress => ("●", colors.accent, Modifier::empty()),
+            MainAgentTodoStatus::Pending => ("○", colors.text_muted, Modifier::empty()),
+        };
+
+        // Truncate content if too long
+        let content = if todo.content.len() > content_width {
+            format!(
+                "{}...",
+                &todo
+                    .content
+                    .chars()
+                    .take(content_width.saturating_sub(3))
+                    .collect::<String>()
+            )
+        } else {
+            todo.content.clone()
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(colors.text_muted)),
+            Span::styled(status_marker, Style::default().fg(status_color)),
+            Span::styled(" ", Style::default()),
+            Span::styled(
+                content,
+                Style::default()
+                    .fg(colors.text_dim)
+                    .add_modifier(text_modifier),
+            ),
         ]));
     }
 

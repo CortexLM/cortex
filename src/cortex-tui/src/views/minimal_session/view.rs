@@ -17,8 +17,9 @@ use crate::widgets::{HintContext, KeyHints, StatusIndicator};
 
 use super::layout::LayoutManager;
 use super::rendering::{
-    _render_motd, generate_message_lines, generate_welcome_lines, render_message,
-    render_scroll_to_bottom_hint, render_scrollbar, render_subagent, render_tool_call,
+    _render_motd, generate_message_lines, generate_welcome_lines, render_main_agent_todos,
+    render_message, render_scroll_to_bottom_hint, render_scrollbar, render_subagent,
+    render_tool_call,
 };
 
 // Re-export for convenience
@@ -572,6 +573,14 @@ impl<'a> Widget for MinimalSessionView<'a> {
         let input_height: u16 = 3;
         let hints_height: u16 = 1;
 
+        // Calculate main agent todos height (header + items + spacing)
+        let main_todos_height: u16 = if self.app_state.has_main_todos() {
+            // 1 for header + number of todos + 1 for spacing
+            (self.app_state.main_agent_todos.len() as u16) + 2
+        } else {
+            0
+        };
+
         // Calculate welcome card heights from render_motd constants
         let welcome_card_height = 11_u16;
         let info_cards_height = 4_u16;
@@ -584,7 +593,12 @@ impl<'a> Widget for MinimalSessionView<'a> {
         layout.gap(1);
 
         // Calculate available height for scrollable content (before input/hints)
-        let bottom_reserved = status_height + input_height + autocomplete_height + hints_height + 2; // +2 for gaps
+        let bottom_reserved = main_todos_height
+            + status_height
+            + input_height
+            + autocomplete_height
+            + hints_height
+            + 2; // +2 for gaps
         let available_height = area.height.saturating_sub(1 + bottom_reserved); // 1 for top margin
 
         // Render scrollable content area (welcome cards + messages together)
@@ -596,7 +610,17 @@ impl<'a> Widget for MinimalSessionView<'a> {
         let content_end_y = content_area.y + actual_content_height;
         let mut next_y = content_end_y + 1; // +1 gap after content
 
-        // 5. Status indicator (if task running) - follows content
+        // 4.5. Main agent todos (if any) - above status indicator
+        if self.app_state.has_main_todos() {
+            let todo_lines =
+                render_main_agent_todos(&self.app_state.main_agent_todos, area.width, &self.colors);
+            let todo_area = Rect::new(area.x, next_y, area.width, main_todos_height);
+            let paragraph = Paragraph::new(todo_lines);
+            paragraph.render(todo_area, buf);
+            next_y += main_todos_height;
+        }
+
+        // 5. Status indicator (if task running) - follows todos (or content if no todos)
         if is_task_running {
             let status_area = Rect::new(area.x, next_y, area.width, status_height);
             let header = self.status_header();
@@ -608,7 +632,7 @@ impl<'a> Widget for MinimalSessionView<'a> {
             next_y += status_height;
         }
 
-        // 6. Input area - follows status (or content if no status)
+        // 6. Input area - follows status (or todos/content if no status)
         let input_y = next_y;
         let input_area = Rect::new(area.x, input_y, area.width, input_height);
 

@@ -22,6 +22,26 @@ use super::streaming::StreamingState;
 use super::subagent::SubagentTaskDisplay;
 use super::types::{AppView, FocusTarget, OperationMode};
 
+/// A todo item for the main agent's todo list display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MainAgentTodoItem {
+    /// Content/description of the todo.
+    pub content: String,
+    /// Status of this todo item.
+    pub status: MainAgentTodoStatus,
+}
+
+/// Status of a main agent todo item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainAgentTodoStatus {
+    /// Not started yet.
+    Pending,
+    /// Currently being worked on.
+    InProgress,
+    /// Completed.
+    Completed,
+}
+
 /// Main application state
 pub struct AppState {
     pub view: AppView,
@@ -172,6 +192,8 @@ pub struct AppState {
     pub user_email: Option<String>,
     /// Organization name for welcome screen
     pub org_name: Option<String>,
+    /// Main agent's todo list items (from TodoWrite tool calls).
+    pub main_agent_todos: Vec<MainAgentTodoItem>,
 }
 
 impl AppState {
@@ -272,6 +294,7 @@ impl AppState {
             user_name: None,
             user_email: None,
             org_name: None,
+            main_agent_todos: Vec::new(),
         }
     }
 
@@ -677,5 +700,26 @@ impl AppState {
     /// Scroll the diff view
     pub fn scroll_diff(&mut self, delta: i32) {
         self.diff_scroll = (self.diff_scroll + delta).max(0);
+    }
+}
+
+// ============================================================================
+// APPSTATE METHODS - Main Agent Todos
+// ============================================================================
+
+impl AppState {
+    /// Update the main agent's todo list.
+    pub fn update_main_todos(&mut self, todos: Vec<MainAgentTodoItem>) {
+        self.main_agent_todos = todos;
+    }
+
+    /// Clear the main agent's todo list.
+    pub fn clear_main_todos(&mut self) {
+        self.main_agent_todos.clear();
+    }
+
+    /// Check if the main agent has any todos.
+    pub fn has_main_todos(&self) -> bool {
+        !self.main_agent_todos.is_empty()
     }
 }
