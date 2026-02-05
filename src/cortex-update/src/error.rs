@@ -90,6 +90,10 @@ pub enum UpdateError {
     // Cancelled
     #[error("Update cancelled by user")]
     Cancelled,
+
+    // Security errors
+    #[error("Insecure URL rejected (HTTPS required): {url}")]
+    InsecureUrl { url: String },
 }
 
 impl UpdateError {

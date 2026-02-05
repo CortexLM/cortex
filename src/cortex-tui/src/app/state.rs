@@ -7,6 +7,9 @@ use cortex_core::{
     style::ThemeColors,
     widgets::{CortexInput, Message},
 };
+// DownloadProgress and UpdateInfo are used in future download tracking feature
+#[allow(unused_imports)]
+use cortex_update::{DownloadProgress, UpdateInfo};
 use uuid::Uuid;
 
 use crate::permissions::PermissionMode;
@@ -21,6 +24,59 @@ use super::session::{ActiveModal, SessionSummary};
 use super::streaming::StreamingState;
 use super::subagent::SubagentTaskDisplay;
 use super::types::{AppView, FocusTarget, OperationMode};
+
+/// Status of the auto-update system
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum UpdateStatus {
+    /// No update check performed yet
+    #[default]
+    NotChecked,
+    /// An update is available
+    Available {
+        /// The new version available
+        version: String,
+    },
+    /// Currently downloading the update
+    Downloading {
+        /// The version being downloaded
+        version: String,
+        /// Download progress percentage (0-100)
+        progress: u8,
+    },
+    /// Download complete, restart required
+    ReadyToRestart {
+        /// The version that was downloaded
+        version: String,
+    },
+}
+
+impl UpdateStatus {
+    /// Returns true if an update notification should be shown
+    pub fn should_show_banner(&self) -> bool {
+        matches!(
+            self,
+            UpdateStatus::Available { .. }
+                | UpdateStatus::Downloading { .. }
+                | UpdateStatus::ReadyToRestart { .. }
+        )
+    }
+
+    /// Get the banner text for the current status
+    pub fn banner_text(&self) -> Option<String> {
+        match self {
+            UpdateStatus::Available { version } => {
+                Some(format!("A new version ({}) is available", version))
+            }
+            UpdateStatus::Downloading { progress, .. } => {
+                Some(format!("Downloading update... {}%", progress))
+            }
+            UpdateStatus::ReadyToRestart { .. } => {
+                Some("You must restart to run the latest version".to_string())
+            }
+            _ => None,
+        }
+    }
+}
 
 /// Main application state
 pub struct AppState {
@@ -172,6 +228,10 @@ pub struct AppState {
     pub user_email: Option<String>,
     /// Organization name for welcome screen
     pub org_name: Option<String>,
+    /// Current update status for the banner notification
+    pub update_status: UpdateStatus,
+    /// Cached update info when an update is available
+    pub update_info: Option<cortex_update::UpdateInfo>,
 }
 
 impl AppState {
@@ -272,6 +332,8 @@ impl AppState {
             user_name: None,
             user_email: None,
             org_name: None,
+            update_status: UpdateStatus::default(),
+            update_info: None,
         }
     }
 
@@ -677,5 +739,41 @@ impl AppState {
     /// Scroll the diff view
     pub fn scroll_diff(&mut self, delta: i32) {
         self.diff_scroll = (self.diff_scroll + delta).max(0);
+    }
+}
+
+// ============================================================================
+// APPSTATE METHODS - Update Status
+// ============================================================================
+
+impl AppState {
+    /// Set the update status
+    pub fn set_update_status(&mut self, status: UpdateStatus) {
+        self.update_status = status;
+    }
+
+    /// Set update info when an update is available
+    pub fn set_update_info(&mut self, info: Option<cortex_update::UpdateInfo>) {
+        self.update_info = info;
+    }
+
+    /// Check if an update banner should be shown
+    pub fn should_show_update_banner(&self) -> bool {
+        self.update_status.should_show_banner()
+    }
+
+    /// Get the update banner text if one should be shown
+    pub fn get_update_banner_text(&self) -> Option<String> {
+        self.update_status.banner_text()
+    }
+
+    /// Update download progress
+    pub fn update_download_progress(&mut self, progress: u8) {
+        if let UpdateStatus::Downloading { version, .. } = &self.update_status {
+            self.update_status = UpdateStatus::Downloading {
+                version: version.clone(),
+                progress,
+            };
+        }
     }
 }

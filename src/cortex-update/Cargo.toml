@@ -39,6 +39,9 @@ flate2 = "1.0"
 zip = "2.2"
 tar = "0.4"
 
+# Secure random
+getrandom = "0.2"
+
 # Self-replacement
 self-replace = "1.5"
 

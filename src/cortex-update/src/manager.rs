@@ -1,7 +1,5 @@
 //! Update manager - main API for update operations.
 
-use std::path::PathBuf;
-
 use crate::CURRENT_VERSION;
 use crate::api::{CortexSoftwareClient, ReleaseAsset, ReleaseInfo};
 use crate::config::{ReleaseChannel, UpdateConfig};
@@ -61,7 +59,7 @@ impl UpdateManager {
     /// Create with a specific config.
     pub fn with_config(config: UpdateConfig) -> UpdateResult<Self> {
         let client = if let Some(url) = &config.custom_url {
-            CortexSoftwareClient::with_url(url.clone())
+            CortexSoftwareClient::with_url(url.clone())?
         } else {
             CortexSoftwareClient::new()
         };
@@ -89,10 +87,12 @@ impl UpdateManager {
     pub async fn check_update(&self) -> UpdateResult<Option<UpdateInfo>> {
         // Try to use cache first
         if let Some(cache) = VersionCache::load() {
-            if cache.is_valid(&self.config) {
-                if cache.has_update() && !self.config.is_version_skipped(&cache.latest.version) {
-                    return Ok(Some(self.build_update_info(&cache.latest)?));
-                }
+            if cache.is_valid(&self.config)
+                && cache.has_update()
+                && !self.config.is_version_skipped(&cache.latest.version)
+            {
+                return Ok(Some(self.build_update_info(&cache.latest)?));
+            } else if cache.is_valid(&self.config) {
                 return Ok(None);
             }
         }

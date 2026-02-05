@@ -63,16 +63,13 @@ impl Downloader {
     /// Uses a randomly-named subdirectory to prevent symlink attacks and
     /// predictable file name exploits.
     pub fn new(client: CortexSoftwareClient) -> UpdateResult<Self> {
-        // Use a random suffix to prevent predictable temp directory names
-        // This mitigates symlink attacks where an attacker pre-creates
-        // files with expected names
-        let random_suffix: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0)
-            ^ std::process::id() as u64;
+        // Use cryptographically secure random bytes to prevent predictable temp directory names
+        // This mitigates symlink attacks where an attacker pre-creates files with expected names
+        let mut random_bytes = [0u8; 8];
+        getrandom::getrandom(&mut random_bytes).map_err(|_| UpdateError::TempDirFailed)?;
+        let random_suffix = u64::from_ne_bytes(random_bytes);
 
-        let temp_dir = std::env::temp_dir().join(format!("cortex-update-{:x}", random_suffix));
+        let temp_dir = std::env::temp_dir().join(format!("cortex-update-{:016x}", random_suffix));
 
         // Create with restrictive permissions on Unix
         #[cfg(unix)]
@@ -123,6 +120,7 @@ impl Downloader {
     }
 
     /// Download a signature file.
+    #[allow(dead_code)]
     pub async fn download_signature(&self, url: &str, version: &str) -> UpdateResult<PathBuf> {
         let filename = format!("{}.sig", version);
         let dest = self.temp_dir.join(filename);
@@ -134,11 +132,13 @@ impl Downloader {
     }
 
     /// Get the temp directory path.
+    #[allow(dead_code)]
     pub fn temp_dir(&self) -> &Path {
         &self.temp_dir
     }
 
     /// Clean up temp files.
+    #[allow(dead_code)]
     pub fn cleanup(&self) -> UpdateResult<()> {
         if self.temp_dir.exists() {
             std::fs::remove_dir_all(&self.temp_dir)?;

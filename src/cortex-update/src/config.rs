@@ -106,10 +106,17 @@ impl UpdateConfig {
             .map(|h| h.join(".cortex").join("update.json"))
             .filter(|p| p.exists());
 
-        if let Some(path) = config_path {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(config) = serde_json::from_str(&content) {
-                    return config;
+        if let Some(path) = config_path
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            match serde_json::from_str(&content) {
+                Ok(config) => return config,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to parse update config at {}: {}. Using defaults.",
+                        path.display(),
+                        e
+                    );
                 }
             }
         }

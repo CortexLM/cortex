@@ -960,3 +960,65 @@ pub fn render_motd_compact(
 
     Paragraph::new(lines).render(text_area, buf);
 }
+
+/// Renders an update notification banner above the input box.
+/// Shows different states: Available, Downloading (with progress), ReadyToRestart
+pub fn render_update_banner(
+    area: Rect,
+    buf: &mut Buffer,
+    colors: &AdaptiveColors,
+    update_status: &crate::app::UpdateStatus,
+) {
+    use crate::app::UpdateStatus;
+
+    if area.is_empty() || area.height < 1 {
+        return;
+    }
+
+    let (icon, text, style) = match update_status {
+        UpdateStatus::Available { version } => {
+            let icon = "↑";
+            let text = format!(" A new version ({}) is available ", version);
+            let style = Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD);
+            (icon, text, style)
+        }
+        UpdateStatus::Downloading {
+            version: _,
+            progress,
+        } => {
+            let icon = "⟳";
+            let text = format!(" Downloading update... {}% ", progress);
+            let style = Style::default().fg(colors.warning);
+            (icon, text, style)
+        }
+        UpdateStatus::ReadyToRestart { version: _ } => {
+            let icon = "✓";
+            let text = " You must restart to run the latest version ".to_string();
+            let style = Style::default()
+                .fg(colors.success)
+                .add_modifier(Modifier::BOLD);
+            (icon, text, style)
+        }
+        _ => return, // Don't render for other states
+    };
+
+    // Calculate banner width
+    let banner_width = (icon.len() + text.len() + 2) as u16; // +2 for spacing
+
+    // Position at left side of the area with some padding
+    let x = area.x + 2;
+    let y = area.y;
+
+    // Ensure we don't overflow
+    if x + banner_width > area.right() {
+        return;
+    }
+
+    // Render icon
+    buf.set_string(x, y, icon, style);
+
+    // Render text
+    buf.set_string(x + icon.len() as u16 + 1, y, &text, style);
+}

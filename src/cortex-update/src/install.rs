@@ -120,37 +120,114 @@ impl Installer {
     }
 
     /// Extract a tar.gz archive.
-    async fn extract_tar_gz(&self, archive: &Path, dest: &Path) -> UpdateResult<PathBuf> {
+    ///
+    /// Uses single-pass extraction with inline validation to prevent TOCTOU race conditions.
+    async fn extract_tar_gz(&self, archive_path: &Path, dest: &Path) -> UpdateResult<PathBuf> {
         use flate2::read::GzDecoder;
         use std::fs::File;
         use tar::Archive;
 
-        let file = File::open(archive)?;
+        let file = File::open(archive_path)?;
         let gz = GzDecoder::new(file);
         let mut archive = Archive::new(gz);
 
-        archive
-            .unpack(dest)
+        // Single-pass: validate and extract each entry to prevent TOCTOU race conditions
+        for entry_result in archive
+            .entries()
             .map_err(|e| UpdateError::ExtractionFailed {
                 message: e.to_string(),
+            })?
+        {
+            let mut entry = entry_result.map_err(|e| UpdateError::ExtractionFailed {
+                message: e.to_string(),
             })?;
+
+            let path = entry.path().map_err(|e| UpdateError::ExtractionFailed {
+                message: e.to_string(),
+            })?;
+
+            // Check for path traversal
+            if path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(UpdateError::ExtractionFailed {
+                    message: format!("Path traversal detected in archive: {}", path.display()),
+                });
+            }
+
+            // Extract the entry immediately after validation
+            entry
+                .unpack_in(dest)
+                .map_err(|e| UpdateError::ExtractionFailed {
+                    message: e.to_string(),
+                })?;
+        }
 
         self.find_binary(dest).await
     }
 
     /// Extract a zip archive.
-    async fn extract_zip(&self, archive: &Path, dest: &Path) -> UpdateResult<PathBuf> {
-        let file = std::fs::File::open(archive)?;
+    ///
+    /// Uses single-pass extraction with inline validation to prevent TOCTOU race conditions.
+    async fn extract_zip(&self, archive_path: &Path, dest: &Path) -> UpdateResult<PathBuf> {
+        let file = std::fs::File::open(archive_path)?;
         let mut archive =
             zip::ZipArchive::new(file).map_err(|e| UpdateError::ExtractionFailed {
                 message: e.to_string(),
             })?;
 
-        archive
-            .extract(dest)
-            .map_err(|e| UpdateError::ExtractionFailed {
-                message: e.to_string(),
-            })?;
+        // Single-pass: validate and extract each entry to prevent TOCTOU race conditions
+        for i in 0..archive.len() {
+            let mut zip_file = archive
+                .by_index(i)
+                .map_err(|e| UpdateError::ExtractionFailed {
+                    message: e.to_string(),
+                })?;
+
+            let path = std::path::Path::new(zip_file.name());
+
+            // Check for path traversal
+            if path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(UpdateError::ExtractionFailed {
+                    message: format!("Path traversal detected in archive: {}", zip_file.name()),
+                });
+            }
+
+            // Determine the output path
+            let outpath = dest.join(zip_file.name());
+
+            // Extract the entry immediately after validation
+            if zip_file.is_dir() {
+                std::fs::create_dir_all(&outpath)?;
+            } else {
+                // Ensure parent directory exists
+                if let Some(parent) = outpath.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut outfile =
+                    std::fs::File::create(&outpath).map_err(|e| UpdateError::ExtractionFailed {
+                        message: format!("Failed to create file {}: {}", outpath.display(), e),
+                    })?;
+                std::io::copy(&mut zip_file, &mut outfile).map_err(|e| {
+                    UpdateError::ExtractionFailed {
+                        message: format!("Failed to extract {}: {}", outpath.display(), e),
+                    }
+                })?;
+
+                // Set file permissions on Unix
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Some(mode) = zip_file.unix_mode() {
+                        std::fs::set_permissions(&outpath, std::fs::Permissions::from_mode(mode))?;
+                    }
+                }
+            }
+        }
 
         self.find_binary(dest).await
     }
@@ -244,6 +321,11 @@ impl Installer {
         const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
         const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x4;
 
+        // SAFETY: MoveFileExW is a Windows API function that schedules a file move/rename
+        // operation to occur at the next system restart. We pass valid null-terminated
+        // wide strings for source and destination paths. The MOVEFILE_DELAY_UNTIL_REBOOT
+        // flag ensures this is a deferred operation. The return value of 0 indicates failure,
+        // in which case we retrieve the error via last_os_error().
         let result = unsafe {
             windows_sys::Win32::Storage::FileSystem::MoveFileExW(
                 old_path.as_ptr(),
@@ -269,6 +351,7 @@ impl Installer {
 }
 
 /// Check if we have permission to write to the installation directory.
+#[allow(dead_code)]
 pub fn check_write_permission() -> UpdateResult<()> {
     let exe_path = std::env::current_exe()?;
     let parent = exe_path

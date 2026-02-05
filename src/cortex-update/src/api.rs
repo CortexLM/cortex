@@ -90,16 +90,31 @@ impl CortexSoftwareClient {
 impl CortexSoftwareClient {
     /// Create a new client with the default URL.
     pub fn new() -> Self {
-        Self::with_url(SOFTWARE_URL.to_string())
+        // Default URL is known to be HTTPS, so unwrap is safe
+        Self::with_url(SOFTWARE_URL.to_string()).expect("Default SOFTWARE_URL must be HTTPS")
     }
 
     /// Create a new client with a custom URL.
-    pub fn with_url(base_url: String) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `UpdateError::InsecureUrl` if the URL does not use HTTPS
+    /// (except for localhost/127.0.0.1 which are allowed for development).
+    pub fn with_url(base_url: String) -> UpdateResult<Self> {
+        // Validate URL uses HTTPS for security (allow http for localhost development only)
+        let url_lower = base_url.to_lowercase();
+        if !url_lower.starts_with("https://")
+            && !url_lower.starts_with("http://localhost")
+            && !url_lower.starts_with("http://127.0.0.1")
+        {
+            return Err(UpdateError::InsecureUrl { url: base_url });
+        }
+
         let client = create_client_builder()
             .build()
             .unwrap_or_else(|_| Client::new());
 
-        Self { client, base_url }
+        Ok(Self { client, base_url })
     }
 
     /// Get the latest release for a channel.
@@ -204,6 +219,17 @@ impl CortexSoftwareClient {
     where
         F: FnMut(u64, u64), // (downloaded, total)
     {
+        // Validate asset URL uses HTTPS (allow localhost for development)
+        let url_lower = asset.url.to_lowercase();
+        if !url_lower.starts_with("https://")
+            && !url_lower.starts_with("http://localhost")
+            && !url_lower.starts_with("http://127.0.0.1")
+        {
+            return Err(UpdateError::InsecureUrl {
+                url: asset.url.clone(),
+            });
+        }
+
         let response =
             self.client
                 .get(&asset.url)

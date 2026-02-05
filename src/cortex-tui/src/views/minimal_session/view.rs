@@ -569,6 +569,8 @@ impl<'a> Widget for MinimalSessionView<'a> {
             self.app_state.autocomplete.visible && self.app_state.autocomplete.has_items();
         let autocomplete_height: u16 = if autocomplete_visible { 10 } else { 0 };
         let status_height: u16 = if is_task_running { 1 } else { 0 };
+        let show_update_banner = self.app_state.should_show_update_banner();
+        let update_banner_height: u16 = if show_update_banner { 1 } else { 0 };
         let input_height: u16 = 3;
         let hints_height: u16 = 1;
 
@@ -584,7 +586,12 @@ impl<'a> Widget for MinimalSessionView<'a> {
         layout.gap(1);
 
         // Calculate available height for scrollable content (before input/hints)
-        let bottom_reserved = status_height + input_height + autocomplete_height + hints_height + 2; // +2 for gaps
+        let bottom_reserved = status_height
+            + update_banner_height
+            + input_height
+            + autocomplete_height
+            + hints_height
+            + 2; // +2 for gaps
         let available_height = area.height.saturating_sub(1 + bottom_reserved); // 1 for top margin
 
         // Render scrollable content area (welcome cards + messages together)
@@ -608,7 +615,19 @@ impl<'a> Widget for MinimalSessionView<'a> {
             next_y += status_height;
         }
 
-        // 6. Input area - follows status (or content if no status)
+        // 5.5 Update banner (if applicable) - above input
+        if show_update_banner {
+            let banner_area = Rect::new(area.x, next_y, area.width, update_banner_height);
+            super::rendering::render_update_banner(
+                banner_area,
+                buf,
+                &self.colors,
+                &self.app_state.update_status,
+            );
+            next_y += update_banner_height;
+        }
+
+        // 6. Input area - follows update banner (or status if no banner)
         let input_y = next_y;
         let input_area = Rect::new(area.x, input_y, area.width, input_height);
 
