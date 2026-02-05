@@ -14,8 +14,12 @@ use cortex_core::markdown::MarkdownTheme;
 use cortex_core::widgets::{Brain, Message, MessageRole};
 use cortex_tui_components::welcome_card::{InfoCard, InfoCardPair, ToLines, WelcomeCard};
 
-use crate::app::{AppState, SubagentDisplayStatus, SubagentTaskDisplay};
+use crate::app::{
+    AppState, ApprovalState, InlineApprovalSelection, RiskLevelSelection,
+    SubagentDisplayStatus, SubagentTaskDisplay,
+};
 use crate::ui::colors::AdaptiveColors;
+use crate::ui::consts::border;
 use crate::views::tool_call::{ContentSegment, ToolCallDisplay, ToolStatus};
 
 use super::VERSION;
@@ -974,4 +978,229 @@ pub fn render_motd_compact(
     ];
 
     Paragraph::new(lines).render(text_area, buf);
+}
+
+/// Renders the inline approval UI in the input zone area.
+///
+/// Layout:
+/// ```text
+/// ╭─ Tool Approval ─────────────────────────────────────────╮
+/// │ ⚠ Execute: tool_name                                    │
+/// │   args summary (truncated)...                           │
+/// │ [n] Reject  [y] Accept Once  [a] Accept & Set Risk      │
+/// ╰─────────────────────────────────────────────────────────╯
+/// ```
+///
+/// When risk submenu is active:
+/// ```text
+/// ╭─ Set Risk Level ────────────────────────────────────────╮
+/// │ [1] Low  [2] Medium  [3] High  [Esc] Cancel             │
+/// ╰─────────────────────────────────────────────────────────╯
+/// ```
+pub fn render_inline_approval(area: Rect, buf: &mut Buffer, approval: &ApprovalState, colors: &AdaptiveColors) {
+    if area.is_empty() || area.height < 4 {
+        return;
+    }
+
+    let dim_style = Style::default().fg(colors.text_dim);
+    let accent_style = Style::default().fg(colors.accent);
+    let border_style = dim_style;
+
+    // Draw top border with title
+    if let Some(cell) = buf.cell_mut((area.x, area.y)) {
+        cell.set_char(border::TOP_LEFT).set_style(border_style);
+    }
+    if let Some(cell) = buf.cell_mut((area.right() - 1, area.y)) {
+        cell.set_char(border::TOP_RIGHT).set_style(border_style);
+    }
+    for x in (area.x + 1)..(area.right() - 1) {
+        if let Some(cell) = buf.cell_mut((x, area.y)) {
+            cell.set_char(border::HORIZONTAL).set_style(border_style);
+        }
+    }
+
+    // Render title in top border
+    let title = if approval.show_risk_submenu {
+        " Set Risk Level "
+    } else {
+        " Tool Approval "
+    };
+    let title_x = area.x + 2;
+    buf.set_string(title_x, area.y, title, accent_style);
+
+    // Draw bottom border
+    if let Some(cell) = buf.cell_mut((area.x, area.bottom() - 1)) {
+        cell.set_char(border::BOTTOM_LEFT).set_style(border_style);
+    }
+    if let Some(cell) = buf.cell_mut((area.right() - 1, area.bottom() - 1)) {
+        cell.set_char(border::BOTTOM_RIGHT).set_style(border_style);
+    }
+    for x in (area.x + 1)..(area.right() - 1) {
+        if let Some(cell) = buf.cell_mut((x, area.bottom() - 1)) {
+            cell.set_char(border::HORIZONTAL).set_style(border_style);
+        }
+    }
+
+    // Draw side borders
+    for y in (area.y + 1)..(area.bottom() - 1) {
+        if let Some(cell) = buf.cell_mut((area.x, y)) {
+            cell.set_char(border::VERTICAL).set_style(border_style);
+        }
+        if let Some(cell) = buf.cell_mut((area.right() - 1, y)) {
+            cell.set_char(border::VERTICAL).set_style(border_style);
+        }
+    }
+
+    let content_x = area.x + 2;
+    let content_width = area.width.saturating_sub(4) as usize;
+
+    if approval.show_risk_submenu {
+        // Risk level submenu content
+        let y = area.y + 1;
+        
+        // Build risk level options
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        
+        let low_selected = approval.selected_risk_level == RiskLevelSelection::Low;
+        let med_selected = approval.selected_risk_level == RiskLevelSelection::Medium;
+        let high_selected = approval.selected_risk_level == RiskLevelSelection::High;
+        
+        // [1] Low
+        spans.push(Span::styled("[1]", if low_selected { accent_style } else { dim_style }));
+        spans.push(Span::styled(" Low  ", if low_selected { 
+            Style::default().fg(colors.success) 
+        } else { 
+            dim_style 
+        }));
+        
+        // [2] Medium
+        spans.push(Span::styled("[2]", if med_selected { accent_style } else { dim_style }));
+        spans.push(Span::styled(" Medium  ", if med_selected { 
+            Style::default().fg(colors.warning) 
+        } else { 
+            dim_style 
+        }));
+        
+        // [3] High
+        spans.push(Span::styled("[3]", if high_selected { accent_style } else { dim_style }));
+        spans.push(Span::styled(" High  ", if high_selected { 
+            Style::default().fg(colors.error) 
+        } else { 
+            dim_style 
+        }));
+        
+        // [Esc] Cancel
+        spans.push(Span::styled("[Esc]", dim_style));
+        spans.push(Span::styled(" Cancel", dim_style));
+        
+        let line = Line::from(spans);
+        Paragraph::new(line).render(
+            Rect::new(content_x, y, area.width.saturating_sub(4), 1),
+            buf,
+        );
+    } else {
+        // Main approval UI content
+        // Line 1: ⚠ Execute: tool_name
+        let y1 = area.y + 1;
+        let warning_char = "⚠";
+        let tool_display = format!(" Execute: {}", approval.tool_name);
+        buf.set_string(content_x, y1, warning_char, Style::default().fg(colors.warning));
+        buf.set_string(
+            content_x + 2,
+            y1,
+            &tool_display,
+            Style::default().fg(colors.text).add_modifier(Modifier::BOLD),
+        );
+
+        // Line 2: args summary (truncated)
+        let y2 = area.y + 2;
+        let args_summary = if let Some(ref args_json) = approval.tool_args_json {
+            // Create compact summary of args
+            format_args_summary(args_json, content_width.saturating_sub(4))
+        } else {
+            truncate_string(&approval.tool_args, content_width.saturating_sub(4))
+        };
+        buf.set_string(content_x + 2, y2, &args_summary, dim_style);
+
+        // Line 3: Action buttons
+        let y3 = area.y + 3;
+        
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        
+        let reject_selected = approval.selected_action == InlineApprovalSelection::Reject;
+        let accept_selected = approval.selected_action == InlineApprovalSelection::AcceptOnce;
+        let set_selected = approval.selected_action == InlineApprovalSelection::AcceptAndSet;
+        
+        // [n] Reject
+        spans.push(Span::styled("[n]", if reject_selected { accent_style } else { dim_style }));
+        spans.push(Span::styled(" Reject  ", if reject_selected { 
+            Style::default().fg(colors.error) 
+        } else { 
+            dim_style 
+        }));
+        
+        // [y] Accept Once
+        spans.push(Span::styled("[y]", if accept_selected { accent_style } else { dim_style }));
+        spans.push(Span::styled(" Accept Once  ", if accept_selected { 
+            Style::default().fg(colors.success) 
+        } else { 
+            dim_style 
+        }));
+        
+        // [a] Accept & Set Risk
+        spans.push(Span::styled("[a]", if set_selected { accent_style } else { dim_style }));
+        spans.push(Span::styled(" Accept & Set Risk", if set_selected { 
+            Style::default().fg(colors.warning) 
+        } else { 
+            dim_style 
+        }));
+        
+        let line = Line::from(spans);
+        Paragraph::new(line).render(
+            Rect::new(content_x, y3, area.width.saturating_sub(4), 1),
+            buf,
+        );
+    }
+}
+
+/// Format JSON args into a compact summary string
+fn format_args_summary(args: &serde_json::Value, max_width: usize) -> String {
+    match args {
+        serde_json::Value::Object(map) => {
+            let parts: Vec<String> = map.iter()
+                .take(3) // Only show first 3 args
+                .map(|(k, v)| {
+                    let v_str = match v {
+                        serde_json::Value::String(s) => {
+                            if s.len() > 30 {
+                                format!("\"{}...\"", &s.chars().take(27).collect::<String>())
+                            } else {
+                                format!("\"{}\"", s)
+                            }
+                        }
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::Null => "null".to_string(),
+                        serde_json::Value::Array(a) => format!("[{} items]", a.len()),
+                        serde_json::Value::Object(_) => "{...}".to_string(),
+                    };
+                    format!("{}={}", k, v_str)
+                })
+                .collect();
+            let summary = parts.join(", ");
+            truncate_string(&summary, max_width)
+        }
+        _ => truncate_string(&args.to_string(), max_width),
+    }
+}
+
+/// Truncate a string to fit within max_width, adding "..." if needed
+fn truncate_string(s: &str, max_width: usize) -> String {
+    if s.len() <= max_width {
+        s.to_string()
+    } else if max_width > 3 {
+        format!("{}...", &s.chars().take(max_width - 3).collect::<String>())
+    } else {
+        s.chars().take(max_width).collect()
+    }
 }

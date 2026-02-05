@@ -32,6 +32,9 @@ impl AppState {
             tool_args_json,
             diff_preview,
             approval_mode: ApprovalMode::Ask,
+            selected_action: Default::default(),
+            show_risk_submenu: false,
+            selected_risk_level: Default::default(),
         });
         self.set_view(AppView::Approval);
     }
@@ -51,6 +54,9 @@ impl AppState {
             tool_args_json: Some(tool_args),
             diff_preview,
             approval_mode: ApprovalMode::Ask,
+            selected_action: Default::default(),
+            show_risk_submenu: false,
+            selected_risk_level: Default::default(),
         });
         self.set_view(AppView::Approval);
 

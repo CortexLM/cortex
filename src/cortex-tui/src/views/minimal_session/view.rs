@@ -17,8 +17,9 @@ use crate::widgets::{HintContext, KeyHints, StatusIndicator};
 
 use super::layout::LayoutManager;
 use super::rendering::{
-    _render_motd, generate_message_lines, generate_welcome_lines, render_message,
-    render_scroll_to_bottom_hint, render_scrollbar, render_subagent, render_tool_call,
+    _render_motd, generate_message_lines, generate_welcome_lines, render_inline_approval,
+    render_message, render_scroll_to_bottom_hint, render_scrollbar, render_subagent,
+    render_tool_call,
 };
 
 // Re-export for convenience
@@ -263,8 +264,18 @@ impl<'a> MinimalSessionView<'a> {
     }
 
     /// Renders the input area.
+    /// If there's a pending approval, renders the inline approval UI instead.
     fn render_input(&self, area: Rect, buf: &mut Buffer) {
         if area.is_empty() || area.height < 3 {
+            return;
+        }
+
+        // Check for pending approval - render inline approval UI instead of normal input
+        if let Some(ref approval) = self.app_state.pending_approval {
+            // Calculate height needed for inline approval (5 lines: border + 3 content + border)
+            let approval_height = 5_u16.min(area.height);
+            let approval_area = Rect::new(area.x, area.y, area.width, approval_height);
+            render_inline_approval(approval_area, buf, approval, &self.colors);
             return;
         }
 

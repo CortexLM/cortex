@@ -170,7 +170,7 @@ impl EventLoop {
     }
 
     /// Handle approve action
-    async fn handle_approve(&mut self) -> Result<()> {
+    pub(super) async fn handle_approve(&mut self) -> Result<()> {
         use crate::views::tool_call::ToolStatus;
 
         if let Some(approval) = self.app_state.approve() {
@@ -216,7 +216,7 @@ impl EventLoop {
     }
 
     /// Handle reject action
-    async fn handle_reject(&mut self) -> Result<()> {
+    pub(super) async fn handle_reject(&mut self) -> Result<()> {
         if let Some(approval) = self.app_state.reject() {
             // Update tool status to failed
             self.app_state.update_tool_result(
