@@ -518,7 +518,9 @@ impl AppState {
         } else {
             self.chat_scroll = self.chat_scroll.saturating_add(delta as usize);
         }
-        self.chat_scroll_pinned_bottom = false;
+        // Only unpin from bottom if we actually scrolled away from it
+        // When chat_scroll is 0, we're at the bottom, so keep pinned
+        self.chat_scroll_pinned_bottom = self.chat_scroll == 0;
         self.show_scrollbar();
     }
 
