@@ -669,8 +669,14 @@ impl EventLoop {
                 self.app_state.streaming.current_tool = None;
             }
 
-            AppEvent::ToolProgress { name: _, status: _ } => {
-                // Tool progress updates are handled by stream controller
+            AppEvent::ToolProgress { name, status } => {
+                // Forward output to tool call's live_output buffer for real-time display
+                // Note: `name` here is actually the call_id from ExecCommandOutputDeltaEvent
+                for line in status.lines() {
+                    if !line.is_empty() {
+                        self.app_state.append_tool_output(&name, line.to_string());
+                    }
+                }
             }
 
             AppEvent::ToolApproved(_) | AppEvent::ToolRejected(_) => {

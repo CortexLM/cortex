@@ -142,10 +142,20 @@ pub fn format_tool_summary(name: &str, args: &Value) -> String {
             format_first_arg(args)
         }
         "execute" | "bash" => {
-            if let Some(cmd) = args.get("command")
-                && let Some(cmd_str) = cmd.as_str()
-            {
-                let truncated = truncate_str(cmd_str, 50);
+            if let Some(cmd) = args.get("command") {
+                // Handle both string and array formats
+                let cmd_str = if let Some(s) = cmd.as_str() {
+                    s.to_string()
+                } else if let Some(arr) = cmd.as_array() {
+                    // Join array elements with spaces
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                } else {
+                    return format_first_arg(args);
+                };
+                let truncated = truncate_str(&cmd_str, 50);
                 return format!("$ {truncated}");
             }
             format_first_arg(args)
@@ -365,6 +375,37 @@ mod tests {
     }
 
     #[test]
+    fn test_append_output_keeps_last_3_lines() {
+        let mut display =
+            ToolCallDisplay::new("test-id".to_string(), "execute".to_string(), json!({}), 0);
+
+        // Append 5 lines - should only keep last 3
+        display.append_output("line 1".to_string());
+        display.append_output("line 2".to_string());
+        display.append_output("line 3".to_string());
+        display.append_output("line 4".to_string());
+        display.append_output("line 5".to_string());
+
+        assert_eq!(display.live_output.len(), 3);
+        assert_eq!(display.live_output[0], "line 3");
+        assert_eq!(display.live_output[1], "line 4");
+        assert_eq!(display.live_output[2], "line 5");
+    }
+
+    #[test]
+    fn test_clear_live_output() {
+        let mut display =
+            ToolCallDisplay::new("test-id".to_string(), "execute".to_string(), json!({}), 0);
+
+        display.append_output("line 1".to_string());
+        display.append_output("line 2".to_string());
+        assert_eq!(display.live_output.len(), 2);
+
+        display.clear_live_output();
+        assert!(display.live_output.is_empty());
+    }
+
+    #[test]
     fn test_format_tool_summary_read() {
         let args = json!({"file_path": "/home/user/projects/myapp/src/main.rs"});
         let summary = format_tool_summary("read", &args);
@@ -375,6 +416,14 @@ mod tests {
     fn test_format_tool_summary_bash() {
         let args = json!({"command": "cargo build --release"});
         let summary = format_tool_summary("bash", &args);
+        assert_eq!(summary, "$ cargo build --release");
+    }
+
+    #[test]
+    fn test_format_tool_summary_execute_array() {
+        // Execute tool receives command as array from LLM
+        let args = json!({"command": ["cargo", "build", "--release"]});
+        let summary = format_tool_summary("execute", &args);
         assert_eq!(summary, "$ cargo build --release");
     }
 
