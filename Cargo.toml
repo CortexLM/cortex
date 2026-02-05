@@ -195,7 +195,7 @@ cortex-app-server = { path = "src/cortex-app-server" }
 cortex-commands = { path = "src/cortex-commands" }
 cortex-storage = { path = "src/cortex-storage" }
 cortex-core = { path = "src/cortex-core" }
-cortex-tui = { path = "src/cortex-tui" }
+cortex-tui = { path = "src/cortex-tui", default-features = false }
 cortex-tui-capture = { path = "src/cortex-tui-capture" }
 cortex-tui-components = { path = "src/cortex-tui-components" }
 cortex-update = { path = "src/cortex-update" }
