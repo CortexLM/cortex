@@ -89,50 +89,35 @@ pub fn render_message_with_theme(
             lines.extend(rendered_lines);
         }
         MessageRole::System => {
-            // Detect error messages - no prefix, show in error color
+            // Detect error messages - show in error color
             let is_error = msg.content.contains("Check your")
                 || msg.content.contains("Access denied")
                 || msg.content.contains("timed out")
                 || msg.content.contains("failed")
                 || msg.content.contains("Invalid")
                 || msg.content.contains("limit")
-                || msg.content.starts_with("Error:");
+                || msg.content.starts_with("Error:")
+                || msg.content.contains("provider appears to be overloaded")
+                || msg.content.contains("internet connection")
+                || msg.content.contains("proxy is experiencing issues");
 
-            let (prefix, text_color) = if is_error {
-                // Error messages: no prefix, use error color
-                (Span::raw(""), colors.error)
+            // No prefix for any system messages - use error color for errors, muted for info
+            let text_color = if is_error {
+                colors.error
             } else {
-                // Info messages: [i] prefix, use muted color
-                (
-                    Span::styled("[i] ", Style::default().fg(colors.text_muted)),
-                    colors.text_muted,
-                )
+                colors.text_muted
             };
 
-            // Calculate available width for text
-            let prefix_width = if is_error { 0 } else { 2 };
-            let text_width = (width as usize).saturating_sub(prefix_width + 1);
+            // Calculate available width for text (no prefix)
+            let text_width = (width as usize).saturating_sub(1);
 
             // Wrap text and render each line
             let wrapped_lines = wrap_text(&msg.content, text_width);
-            for (i, line_content) in wrapped_lines.iter().enumerate() {
-                if i == 0 {
-                    let mut spans = Vec::new();
-                    if !is_error {
-                        spans.push(prefix.clone());
-                    }
-                    spans.push(Span::styled(
-                        line_content.clone(),
-                        Style::default().fg(text_color),
-                    ));
-                    lines.push(Line::from(spans));
-                } else {
-                    let indent = if is_error { "" } else { "  " };
-                    lines.push(Line::from(vec![
-                        Span::raw(indent.to_string()),
-                        Span::styled(line_content.clone(), Style::default().fg(text_color)),
-                    ]));
-                }
+            for line_content in wrapped_lines.iter() {
+                lines.push(Line::from(vec![Span::styled(
+                    line_content.clone(),
+                    Style::default().fg(text_color),
+                )]));
             }
         }
         MessageRole::Tool => {
