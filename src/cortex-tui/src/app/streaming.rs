@@ -4,6 +4,9 @@ use std::time::Instant;
 #[derive(Debug, Clone, Default)]
 pub struct StreamingState {
     pub is_streaming: bool,
+    /// Whether we are actively receiving tokens from the LLM.
+    /// False when waiting for first token (processing), true when streaming.
+    pub is_actively_streaming: bool,
     pub current_tool: Option<String>,
     pub tool_status: Option<String>,
     pub thinking: bool,
@@ -29,6 +32,7 @@ impl StreamingState {
     ///   If false, preserves existing timer (use for tool continuations).
     pub fn start(&mut self, tool: Option<String>, reset_timer: bool) {
         self.is_streaming = true;
+        self.is_actively_streaming = false; // Not yet receiving tokens
         self.thinking = true;
         self.current_tool = tool;
         self.task_started_at = Some(Instant::now());
@@ -37,6 +41,12 @@ impl StreamingState {
         if reset_timer || self.prompt_started_at.is_none() {
             self.prompt_started_at = Some(Instant::now());
         }
+    }
+
+    /// Mark that we started actively receiving tokens from the LLM.
+    /// This transitions from "Execute" (waiting) to "Streaming.." state.
+    pub fn start_active_streaming(&mut self) {
+        self.is_actively_streaming = true;
     }
 
     /// Get the elapsed seconds since the task started
@@ -57,6 +67,7 @@ impl StreamingState {
     /// Reset streaming state when task completes
     pub fn stop(&mut self) {
         self.is_streaming = false;
+        self.is_actively_streaming = false;
         self.thinking = false;
         self.current_tool = None;
         self.tool_status = None;
