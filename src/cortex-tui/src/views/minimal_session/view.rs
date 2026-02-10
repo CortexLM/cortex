@@ -402,7 +402,12 @@ impl<'a> MinimalSessionView<'a> {
         } else if self.app_state.streaming.thinking && self.app_state.thinking_budget.is_some() {
             "Thinking".to_string()
         } else if self.app_state.streaming.is_streaming {
-            "Working".to_string()
+            // Differentiate between waiting for first token and actively streaming
+            if self.app_state.streaming.is_actively_streaming {
+                "Streaming..".to_string()
+            } else {
+                "Execute".to_string()
+            }
         } else {
             "Idle".to_string()
         }

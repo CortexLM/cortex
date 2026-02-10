@@ -305,6 +305,8 @@ impl EventLoop {
         match event {
             StreamEvent::Delta(delta) => {
                 self.stream_controller.append_text(&delta);
+                // Mark that we are now actively receiving tokens (transition from Execute to Streaming..)
+                self.app_state.streaming.start_active_streaming();
                 // Track text for interleaved display
                 self.app_state.append_streaming_text(&delta);
                 // Keep scroll at bottom if pinned (user hasn't scrolled up)
