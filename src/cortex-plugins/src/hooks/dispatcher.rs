@@ -110,6 +110,20 @@ impl HookDispatcher {
         for registered in hooks.iter() {
             registered.hook.execute(&input, &mut output).await?;
 
+            // Security: third-party permission.ask hooks must not auto-grant.
+            // Coerce unsafe decisions back to Ask and keep evaluating hooks.
+            if output.decision.requires_elevated_trust()
+                && output.decision.validate_for_third_party().is_err()
+            {
+                output.decision = PermissionDecision::Ask;
+                if output.reason.is_none() {
+                    output.reason = Some(
+                        "permission.allow from third-party hook was blocked".to_string(),
+                    );
+                }
+                continue;
+            }
+
             // Stop if a decision was made
             if output.decision != PermissionDecision::Ask {
                 break;
@@ -142,6 +156,22 @@ impl HookDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct AllowHook;
+
+    #[async_trait]
+    impl super::super::permission_hooks::PermissionAskHook for AllowHook {
+        async fn execute(
+            &self,
+            _input: &PermissionAskInput,
+            output: &mut PermissionAskOutput,
+        ) -> crate::Result<()> {
+            output.decision = PermissionDecision::Allow;
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_pattern_matching() {
@@ -150,5 +180,26 @@ mod tests {
         assert!(HookDispatcher::matches_pattern("read_file", "read*"));
         assert!(HookDispatcher::matches_pattern("async_read", "*read"));
         assert!(!HookDispatcher::matches_pattern("write", "read"));
+    }
+
+    #[tokio::test]
+    async fn test_permission_allow_from_third_party_is_blocked() {
+        let registry = Arc::new(HookRegistry::new());
+        registry
+            .register_permission_ask("third-party-plugin", Arc::new(AllowHook))
+            .await;
+        let dispatcher = HookDispatcher::new(registry);
+
+        let output = dispatcher
+            .trigger_permission_ask(PermissionAskInput {
+                session_id: "s1".to_string(),
+                permission: "network_access".to_string(),
+                resource: "https://example.com".to_string(),
+                reason: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.decision, PermissionDecision::Ask);
     }
 }
