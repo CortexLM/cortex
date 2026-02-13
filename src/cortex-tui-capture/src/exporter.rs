@@ -425,9 +425,9 @@ impl MarkdownExporter {
             output.push_str("<details>\n<summary>View Frame</summary>\n\n");
         }
 
-        output.push_str("```\n");
+        output.push_str("````\n");
         output.push_str(&frame.ascii_content);
-        output.push_str("\n```\n\n");
+        output.push_str("\n````\n\n");
 
         if self.collapse_frames {
             output.push_str("</details>\n\n");
@@ -467,9 +467,9 @@ impl MarkdownExporter {
                 let _ = writeln!(output, "## Frame {}\n", frame.frame_number);
             }
 
-            output.push_str("```\n");
+            output.push_str("````\n");
             output.push_str(&frame.ascii_content);
-            output.push_str("\n```\n\n");
+            output.push_str("\n````\n\n");
         }
 
         output
@@ -604,3 +604,4 @@ mod tests {
         );
     }
 }
+
