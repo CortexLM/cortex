@@ -512,7 +512,32 @@ impl ExecCli {
                         eprintln!("\x1b[1;33m[WARN]\x1b[0m {}", w.message);
                     }
                 }
-                _ => {}
+                EventMsg::StreamError(e) => {
+                    error_occurred = true;
+                    error_message = Some(e.message.clone());
+                    if is_text {
+                        eprintln!("\x1b[1;31m[STREAM ERROR]\x1b[0m {}", e.message);
+                    }
+                    break;
+                }
+                EventMsg::ApplyPatchApprovalRequest(p) => {
+                    if is_text && self.verbose {
+                        eprintln!("\x1b[1;33m[PATCH]\x1b[0m Patch approval requested: {}", p.id);
+                    }
+                }
+                EventMsg::ElicitationRequest(e) => {
+                    if is_text && self.verbose {
+                        eprintln!(
+                            "\x1b[1;33m[ELICITATION]\x1b[0m Elicitation requested: {}",
+                            e.request_id
+                        );
+                    }
+                }
+                other => {
+                    if self.verbose {
+                        eprintln!("Unhandled event: {:?}", other);
+                    }
+                }
             }
         }
 

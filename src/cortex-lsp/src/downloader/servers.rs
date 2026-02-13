@@ -9,10 +9,14 @@ pub fn gopls() -> DownloadableServer {
         name: "gopls".to_string(),
         github_repo: "golang/tools".to_string(),
         binary_pattern: "gopls{ext}".to_string(),
-        asset_pattern: "gopls.{os}-{arch}*".to_string(),
+        asset_pattern: "gopls-{os}-{arch}*".to_string(),
         is_archive: false,
         archive_binary_path: None,
-        install_method: None,
+        install_method: Some(InstallMethod::CustomUrl {
+            url_pattern: "https://proxy.golang.org/golang.org/x/tools/gopls/@v/{version}.zip".to_string(),
+            is_archive: true,
+            archive_binary_path: Some("gopls".to_string()),
+        }),
     }
 }
 

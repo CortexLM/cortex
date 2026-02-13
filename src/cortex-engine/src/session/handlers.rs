@@ -162,7 +162,45 @@ impl Session {
             Op::DisableMcpServer { name } => {
                 info!("Disabling MCP server: {}...", name);
             }
-            _ => {}
+            Op::PatchApproval { id, decision } => {
+                info!("Handling patch approval: {} - {:?}", id, decision);
+                // TODO: Forward to patch manager
+            }
+            Op::ResolveElicitation {
+                server_name,
+                request_id,
+                decision,
+            } => {
+                info!(
+                    "Resolving elicitation: {}/{} - {:?}",
+                    server_name, request_id, decision
+                );
+                // TODO: Forward to elicitation manager
+            }
+            Op::ListMcpTools => {
+                info!("Listing MCP tools...");
+            }
+            Op::ListCustomPrompts => {
+                info!("Listing custom prompts...");
+            }
+            Op::GetSessionTimeline => {
+                info!("Fetching session timeline...");
+            }
+            Op::Review { review_request } => {
+                info!("Requesting code review: {:?}", review_request);
+            }
+            Op::RunUserShellCommand { command } => {
+                info!("Running user shell command: {}", command);
+            }
+            Op::AddToHistory { text } => {
+                info!("Adding to history: {}", text);
+            }
+            Op::GetHistoryEntryRequest { offset, log_id } => {
+                info!("Fetching history entry: {}/{}", offset, log_id);
+            }
+            other => {
+                tracing::warn!("Unhandled operation: {:?}", other);
+            }
         }
         Ok(())
     }
