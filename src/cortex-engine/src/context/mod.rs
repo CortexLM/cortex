@@ -111,7 +111,7 @@ impl ContextManager {
         if self.config.auto_compact {
             let usage = self.token_budget.current_usage();
             if usage > self.config.compaction_threshold {
-                self.compact().await?;
+                self.compaction.compact(&mut conv)?;
             }
         }
 

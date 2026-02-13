@@ -176,16 +176,33 @@ impl SkillPermissionChecker {
     ///
     /// This checks the permission to load and execute a skill.
     pub async fn can_load_skill(&self, skill_name: &str) -> Result<bool> {
-        let response = self
-            .permission_manager
-            .check_skill_permission(skill_name)
-            .await;
+        let response = self.permission_manager.check_skill_permission(skill_name).await;
+
+        // If parent inheritance is enabled and current manager doesn't allow,
+        // check parent
+        let final_response = if response == PermissionResponse::Ask
+            && self.inherit_parent_permissions
+            && self.parent_manager.is_some()
+        {
+            if let Some(ref parent) = self.parent_manager {
+                let parent_response = parent.check_skill_permission(skill_name).await;
+                if parent_response == PermissionResponse::Allow {
+                    parent_response
+                } else {
+                    response
+                }
+            } else {
+                response
+            }
+        } else {
+            response
+        };
 
         let decision = SkillPermissionDecision::new(
             skill_name,
             None,
-            response,
-            match response {
+            final_response,
+            match final_response {
                 PermissionResponse::Allow => "Skill loading allowed",
                 PermissionResponse::Deny => "Skill loading denied",
                 PermissionResponse::Ask => "Skill loading requires user confirmation",
@@ -194,7 +211,7 @@ impl SkillPermissionChecker {
 
         self.log_decision(decision).await;
 
-        match response {
+        match final_response {
             PermissionResponse::Allow => {
                 info!(skill = skill_name, "Skill loading permitted");
                 Ok(true)
@@ -535,3 +552,4 @@ mod tests {
         assert!(!decisions.is_empty());
     }
 }
+

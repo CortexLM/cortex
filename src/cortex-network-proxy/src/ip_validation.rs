@@ -121,8 +121,9 @@ pub async fn host_resolves_to_non_public(host: &str, _port: u16) -> bool {
             false
         }
         Err(_) => {
-            // If we can't resolve, be safe and allow (the connection will fail anyway)
-            false
+            // If we can't resolve, be safe and block (the connection would likely fail anyway,
+            // but fail-closed is better for security)
+            true
         }
     }
 }

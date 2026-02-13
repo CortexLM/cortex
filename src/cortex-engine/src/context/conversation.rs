@@ -116,6 +116,15 @@ impl Conversation {
         self.updated_at = std::time::Instant::now();
     }
 
+    /// Recompute turn count.
+    pub fn recompute_turns(&mut self) {
+        self.turn_count = self
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .count() as u32;
+    }
+
     /// Get the last message.
     pub fn last_message(&self) -> Option<&Message> {
         self.messages.last()
@@ -160,6 +169,9 @@ impl Conversation {
         if index < self.messages.len() {
             let msg = self.messages.remove(index);
             self.token_count = self.token_count.saturating_sub(estimate_tokens(&msg));
+            if msg.role == MessageRole::User {
+                self.turn_count = self.turn_count.saturating_sub(1);
+            }
             Some(msg)
         } else {
             None
@@ -171,6 +183,10 @@ impl Conversation {
         let tokens = estimate_tokens(&message);
         self.token_count += tokens;
 
+        if message.role == MessageRole::User {
+            self.turn_count += 1;
+        }
+
         let index = index.min(self.messages.len());
         self.messages.insert(index, message);
         self.updated_at = std::time::Instant::now();
@@ -179,9 +195,14 @@ impl Conversation {
     /// Truncate to N messages.
     pub fn truncate(&mut self, n: usize) {
         if n < self.messages.len() {
-            let removed: u32 = self.messages[n..].iter().map(estimate_tokens).sum();
+            let removed_tokens: u32 = self.messages[n..].iter().map(estimate_tokens).sum();
+            let removed_turns: u32 = self.messages[n..]
+                .iter()
+                .filter(|m| m.role == MessageRole::User)
+                .count() as u32;
             self.messages.truncate(n);
-            self.token_count = self.token_count.saturating_sub(removed);
+            self.token_count = self.token_count.saturating_sub(removed_tokens);
+            self.turn_count = self.turn_count.saturating_sub(removed_turns);
             self.updated_at = std::time::Instant::now();
         }
     }
@@ -191,6 +212,9 @@ impl Conversation {
         while self.token_count > max_tokens && !self.messages.is_empty() {
             if let Some(msg) = self.messages.first() {
                 let tokens = estimate_tokens(msg);
+                if msg.role == MessageRole::User {
+                    self.turn_count = self.turn_count.saturating_sub(1);
+                }
                 self.messages.remove(0);
                 self.token_count = self.token_count.saturating_sub(tokens);
             }
@@ -436,3 +460,4 @@ mod tests {
         assert_eq!(fork.len(), 2);
     }
 }
+
