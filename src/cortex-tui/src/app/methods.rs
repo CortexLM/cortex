@@ -326,6 +326,8 @@ impl AppState {
     /// Update tool call result
     pub fn update_tool_result(&mut self, id: &str, output: String, success: bool, summary: String) {
         if let Some(call) = self.tool_calls.iter_mut().find(|c| c.id == id) {
+            // Clear live output when tool completes (replaced by result summary)
+            call.clear_live_output();
             call.set_result(ToolResultDisplay {
                 output,
                 success,

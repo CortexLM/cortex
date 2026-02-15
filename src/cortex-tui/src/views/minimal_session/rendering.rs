@@ -206,26 +206,67 @@ pub fn render_tool_call(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(summary_truncated, Style::default().fg(colors.text_dim)),
+        Span::styled(summary_truncated.clone(), Style::default().fg(colors.text_dim)),
     ]));
+
+    // For Execute tool: show command on second line with double-tab indentation when running
+    let is_execute = call.name.to_lowercase() == "execute" || call.name.to_lowercase() == "bash";
+    if is_execute && call.status == ToolStatus::Running {
+        // Show the command being executed (extracted from summary which starts with "$ ")
+        let cmd_display = if summary_truncated.starts_with("$ ") {
+            summary_truncated.clone()
+        } else if let Some(cmd) = call.arguments.get("command") {
+            if let Some(s) = cmd.as_str() {
+                format!("$ {}", s)
+            } else if let Some(arr) = cmd.as_array() {
+                let cmd_str: String = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("$ {}", cmd_str)
+            } else {
+                "$ ...".to_string()
+            }
+        } else {
+            "$ ...".to_string()
+        };
+        // Truncate command if too long
+        let cmd_truncated = if cmd_display.len() > line_width {
+            format!(
+                "{}...",
+                &cmd_display
+                    .chars()
+                    .take(line_width.saturating_sub(3))
+                    .collect::<String>()
+            )
+        } else {
+            cmd_display
+        };
+        lines.push(Line::from(vec![
+            Span::raw("        "), // 8 spaces = 2x tabs
+            Span::styled(cmd_truncated, Style::default().fg(colors.text)),
+        ]));
+    }
 
     // Live output lines (for Running status with output)
     if call.status == ToolStatus::Running && !call.live_output.is_empty() {
         for output_line in &call.live_output {
-            // Truncate long lines to fit terminal width
-            let truncated = if output_line.len() > line_width {
+            // Truncate long lines to fit terminal width (accounting for 8-char indent)
+            let output_width = (width as usize).saturating_sub(10);
+            let truncated = if output_line.len() > output_width {
                 format!(
                     "{}...",
                     &output_line
                         .chars()
-                        .take(line_width.saturating_sub(3))
+                        .take(output_width.saturating_sub(3))
                         .collect::<String>()
                 )
             } else {
                 output_line.clone()
             };
             lines.push(Line::from(vec![
-                Span::styled("  │ ", Style::default().fg(colors.text_muted)),
+                Span::raw("        "), // 8 spaces = 2x tabs for output lines
                 Span::styled(truncated, Style::default().fg(colors.text_dim)),
             ]));
         }
