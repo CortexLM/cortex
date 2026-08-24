@@ -1,0 +1,8 @@
+[epoch]
+target = 50
+uid0_burn_sink = true
+
+[weights]
+design_bps = 3000
+prism_bps = 4500
+bounty_bps = 2500
