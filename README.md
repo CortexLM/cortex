@@ -1,51 +1,73 @@
 <div align="center">
 
-# BASE
+# Cortex
 
-**Multi-challenge Bittensor subnet control plane (Rust).**
+**Bittensor subnet control plane for decentralized collaborative AI research (Rust).**
 
-[![CI](https://github.com/BaseIntelligence/base/actions/workflows/ci.yml/badge.svg)](https://github.com/BaseIntelligence/base/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/BaseIntelligence/base)](https://github.com/BaseIntelligence/base/blob/main/LICENSE)
+[![CI](https://github.com/CortexLM/cortex/actions/workflows/ci.yml/badge.svg)](https://github.com/CortexLM/cortex/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/CortexLM/cortex)](https://github.com/CortexLM/cortex/blob/main/LICENSE)
 [![Bittensor](https://img.shields.io/badge/Bittensor-subnet-black.svg)](https://bittensor.com/)
 
-![BASE Banner](assets/banner.jpg)
+![Cortex Banner](assets/banner.jpg)
 
 </div>
 
 ## What it is
 
-BASE is the Bittensor subnet control plane for BaseIntelligence. This branch (`main`)
-is the **Rust** workspace: gateway, validator, agent-challenge, miner
-CVM templates, and shared crates. It coordinates agent challenges (native pack
-executor — no Harbor product CLI), seals a final weight vector, and serves it to
-validators. The gateway is the sole TLS / public edge process.
+Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) is the Rust
+control plane for a multi-challenge Bittensor subnet. Challenge services on
+the **master** host accept miner work over HTTP, sign score leaves, and the
+**gateway** (master-only) seals an epoch weight bundle. Validators **fetch**
+`GET /v1/weights/latest` and submit on-chain weights. They do not execute
+challenges.
 
-- **Agent packs**: Harbor-format task workspaces from the pinned catalog
-  ([BaseIntelligence/deepagent](https://huggingface.co/datasets/BaseIntelligence/deepagent) /
-  git pin), graded by the in-tree native executor + Docker socket-proxy.
-- **Miner CVM**: Phala / dstack measured compose — `socket-proxy` + `agent` +
-  `attest-helper` (digest-pinned images on GHCR).
-- **Emission**: validators call on-chain `set_weights` from sealed
-  `GET /v1/weights/latest` — never the gateway.
+Live challenges today:
 
-## Branch
+| Challenge | How miners submit | Spec |
+|-----------|-------------------|------|
+| **Design** | ZIP harness (`agent.py` + `pyproject.toml`) → sandboxed pages + admin winners | [`docs/DESIGN_CHALLENGE.md`](docs/DESIGN_CHALLENGE.md) |
+| **Prism** | AutoModel pin + patch → operator-owned GPU recipe eval | [`docs/PRISM.md`](docs/PRISM.md) |
 
-| Branch | Role |
-|--------|------|
-| **`main`** | Active Rust control plane (this tree). PRs target `main`. |
-| `dev` | Kept alive for in-flight work; merges back into `main`. |
-| `legacy/main-pre-rust` (tag) | Legacy / prior stack — do not mix secret material across histories. |
+There is **no miner Phala/CVM path** on this branch (agent-v1 / Harbor pack
+executors were removed). Operator-facing map: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+Some env vars, host paths, GHCR package names, and crypto domain tags still
+spell `BASE_*` / `base`. That is intentional — see [`docs/NAMING.md`](docs/NAMING.md).
+
+## Architecture (short)
+
+```text
+Miners --HTTP--> gateway (TLS) --proxy--> design-challenge / prism-challenge
+                                          | signed leaves
+                                          v
+                              gateway seals EpochBundleV1
+                                          |
+Validators <--- GET /v1/weights/latest ---+
+     |
+     +--> on-chain set_weights / CRV4 timelock
+```
+
+- Gateway is the sole public edge and **only** runs on the subnet-owner host
+  (`docker compose --profile master`).
+- Trust roots (`config/challenges.toml`, `config/measurements.toml`) are
+  owner-signed **local files**, never fetched from the gateway.
+- Unsealed / decode-error latest weights are a **burn vector** (uid 0 = 100%,
+  `sealed: false`), not a 404.
 
 ## Miners
 
-Day-1: [docs/external-miner/](docs/external-miner/)
+HTTP submit only. Start at [docs/external-miner/](docs/external-miner/).
 
-1. Deploy a measured CVM (`miner deploy`) with digest-pinned `base-agent` +
-   `base-attest-helper` + socket-proxy.
-2. Fund your own Phala account; hotkey + launch token + receipt sk are **files**
-   under `/run/base/` (never env secret values).
-3. Certify each epoch (`miner certify`) via loopback attest-helper
-   `GET /v1/quote` → validator attest API.
+```text
+https://<gateway>/challenge/design/...
+https://<gateway>/challenge/prism/...
+```
+
+Public miner docs (examples only — no control-plane code):
+[design-challenge](https://github.com/BaseIntelligence/design-challenge),
+[prism](https://github.com/BaseIntelligence/prism).
+
+Never put mnemonics or challenge signing keys in miner clients.
 
 ## Validators
 
@@ -55,7 +77,7 @@ Weight-only path after seal:
 curl -fsS "$GATEWAY/v1/weights/latest"
 ```
 
-Then `set_weights` with your wallet. Operator compose:
+Then `set_weights` / CRV4 with the validator wallet. Operator compose:
 
 ```bash
 ./deploy/scripts/materialize-env.sh
@@ -63,39 +85,59 @@ docker compose up -d                  # postgres, validator, updater, socket-pro
 docker compose --profile master up -d # + gateway (subnet owner host only)
 ```
 
-Details: [deploy/README.md](deploy/README.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Local full-stack smoke (testnet 541 + optional tunnel):
+
+```bash
+./deploy/scripts/local-e2e.sh --help
+./deploy/scripts/local-e2e.sh --smoke
+```
+
+Details: [deploy/README.md](deploy/README.md), [docs/runbooks/local-testnet-e2e.md](docs/runbooks/local-testnet-e2e.md).
 
 ## Images (GHCR)
 
-CI workflow [`.github/workflows/images.yml`](.github/workflows/images.yml) builds
-and pushes digest-pinned service images to `ghcr.io/baseintelligence/base/*`.
-Never `:latest` in measured compose.
+CI [`.github/workflows/images.yml`](.github/workflows/images.yml) builds
+digest-pinned images. The registry path is still
+`ghcr.io/baseintelligence/base/<suffix>` (historical package name; see
+[docs/NAMING.md](docs/NAMING.md)). Never `:latest` in measured compose.
 
 | Target | Image suffix |
 |--------|----------------|
 | validator | `validator` |
 | gateway | `gateway` |
 | updater | `updater` |
-| agent-challenge | `agent-challenge` |
-| base-agent | `base-agent` (miner runner) |
-| base-attest-helper | `base-attest-helper` (quote helper) |
+| prism-challenge | `prism-challenge` |
+| design-challenge | `design-challenge` |
+| design-egress-proxy | `design-egress-proxy` |
 
-## Toolchain
+## Toolchain and gates
 
 - Rust **1.96.0** (`rust-toolchain.toml`)
 - Workspace: `crates/*`, `bins/*`, `xtask`
-- Gates: `fmt`, `clippy -D warnings`, `test`, `cargo deny`, `xtask loc-cap`,
-  `xtask consensus-lint`, `xtask spec-check`, `xtask agent-challenge-check`
+- Core gate: `cargo test --workspace`
+- CI also runs `fmt`, `clippy -D warnings`, `cargo deny`, and
+
+```bash
+cargo run -p xtask -- loc-cap
+cargo run -p xtask -- consensus-lint
+cargo run -p xtask -- spec-check
+cargo run -p xtask -- design-check
+cargo run -p xtask -- external-docs-check
+```
 
 ## Docs
 
 | Doc | Content |
 |-----|---------|
+| [AGENTS.md](AGENTS.md) | Agent / operator contract |
+| [docs/NAMING.md](docs/NAMING.md) | Cortex vs leftover `base` identifiers |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to change this repo |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System map |
-| [docs/AGENT_CHALLENGE.md](docs/AGENT_CHALLENGE.md) | Pack grade + miner CVM contract |
-| [docs/BUNDLE_SPEC.md](docs/BUNDLE_SPEC.md) | Sealed weight bundle |
+| [docs/BUNDLE_SPEC.md](docs/BUNDLE_SPEC.md) | Sealed weight bundle (frozen) |
+| [docs/DESIGN_CHALLENGE.md](docs/DESIGN_CHALLENGE.md) | Design challenge (frozen) |
+| [docs/PRISM.md](docs/PRISM.md) | Prism challenge |
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Security claims |
-| [docs/runbooks/](docs/runbooks/) | Ops cutovers (incl. measurement re-pin) |
+| [docs/runbooks/](docs/runbooks/) | Ops procedures |
 
 ## License
 

@@ -1,4 +1,4 @@
-# base deploy (compose)
+# Cortex deploy (compose)
 
 ## Services
 

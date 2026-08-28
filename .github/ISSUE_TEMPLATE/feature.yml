@@ -1,0 +1,46 @@
+name: Feature request
+description: Propose a change to the Cortex control plane
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Frozen specs (`docs/BUNDLE_SPEC.md`, `docs/DESIGN_CHALLENGE.md`) pin
+        incentive / scoring / consensus semantics. A feature that changes those
+        needs an explicit spec + xtask pin update, not a drive-by PR.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should Cortex do instead? Name crates/binaries if you know them.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - challenge (design / prism)
+        - gateway / weights
+        - validator / chain
+        - deploy / ops
+        - docs / branding
+        - other
+    validations:
+      required: true
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: I have read AGENTS.md and docs/NAMING.md (BASE_* / domain tags stay).
+          required: true
+        - label: This is not a request to fork cryptographic domain tags or on-chain names.
+          required: true

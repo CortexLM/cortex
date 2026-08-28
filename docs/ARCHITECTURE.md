@@ -1,4 +1,4 @@
-# base architecture
+# Cortex architecture
 
 Operator-facing map of the control plane. Normative byte contracts live in the frozen specs:
 
@@ -19,7 +19,7 @@ Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
 
 ## 1. Goals
 
-- Lighter Rust control plane than the Python BASE stack.
+- Lighter Rust control plane than the prior Python stack.
 - Gateway runs **only** as subnet owner (master). Startup asserts hotkey == on-chain `SubnetOwnerHotkey` or exits `2` before bind.
 - Validators **recompute** the weight vector from a signed, merkle-rooted epoch bundle. Challenge keys and measurements come from **owner-signed local files**, never from gateway HTTP.
 - CRV4 timelock commit-reveal on Bittensor testnet/mainnet as configured. Reveal is automatic on-chain.

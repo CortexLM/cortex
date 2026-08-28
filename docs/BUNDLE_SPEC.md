@@ -1,4 +1,4 @@
-# base Epoch Bundle Specification
+# Cortex Epoch Bundle Specification
 
 **Status:** FROZEN (task 8 wave gate)  
 **Normative for:** `bundle`, `aggregate`, gateway seal, validator verify/recompute  

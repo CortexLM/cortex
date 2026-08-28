@@ -612,8 +612,7 @@ returns 403). Operators hit `design-challenge:8093` on the master host
 | `design-prompts` | Pinned prompt bank + deterministic weighted selection |
 | `design-sandbox` | Two-phase Docker + `SimSandbox` |
 | `design-sanitize` | HTML/CSS sanitize + viewer headers |
-| `design-rating` | Legacy Elo helpers (not on leaf path) |
-| `design-store` | `DesignStore` trait, memory + DB adapter |
+| `design-store` | `DesignStore` trait, memory + DB adapter (`design_rating` table) |
 | `design-egress-proxy` | Open egress proxy (internal blocklist) + budgeted LLM path |
 | `design-http` | Miner/viewer/admin winners/stats HTTP API |
 | `design-challenge` | Orchestrator, agentic, scoring, leaf emit |

@@ -1,10 +1,11 @@
-//! Typed layered configuration for base binaries.
+//! Typed layered configuration for Cortex binaries.
 //!
 //! # Layers (later wins)
 //!
 //! 1. **Defaults** — chain endpoint, epoch length, D6/D21/D26 knobs.
-//! 2. **`base.toml`** (or path from `BASE_CONFIG`) — optional file.
-//! 3. **`BASE_*` environment variables** — highest precedence.
+//! 2. **`base.toml`** (or path from `BASE_CONFIG` / `CORTEX_CONFIG`) — optional file.
+//! 3. **`BASE_*` environment variables** — highest precedence. Matching
+//!    `CORTEX_*` names are aliases; `BASE_*` wins when both are set.
 //!
 //! # Validation
 //!
@@ -20,8 +21,8 @@ mod role;
 
 pub use error::{Error, Issue, ValidationReport};
 pub use load::{
-    base_env_from_process, database_url_from, keys, load, load_from, load_from_toml_str,
-    resolve_toml_path, DEFAULT_CHAIN_ENDPOINT, DEFAULT_EPOCH_LENGTH,
+    base_env_from_process, cortex_alias_key, database_url_from, keys, load, load_from,
+    load_from_toml_str, resolve_toml_path, DEFAULT_CHAIN_ENDPOINT, DEFAULT_EPOCH_LENGTH,
     DEFAULT_MAX_COLLATERAL_AGE_SECS, DEFAULT_MIN_PEER_SAMPLE, DEFAULT_MIN_SHARE_MASS_BPS,
     DEFAULT_ROTATION_EPOCHS, MAX_SHARE_MASS_BPS,
 };
@@ -381,5 +382,54 @@ domain = "ignored-for-updater.example"
             database_url_from(None, &BTreeMap::new()).expect("resolve"),
             None
         );
+    }
+
+    #[test]
+    fn cortex_alias_loads_when_base_unset() {
+        let env = BTreeMap::from([
+            ("CORTEX_ROLE".to_owned(), "validator".to_owned()),
+            ("CORTEX_NETUID".to_owned(), "7".to_owned()),
+            (
+                "CORTEX_DATABASE_URL".to_owned(),
+                "postgres://cortex/db".to_owned(),
+            ),
+            (
+                "CORTEX_CHAIN_ENDPOINT".to_owned(),
+                "wss://alias.example/ws".to_owned(),
+            ),
+        ]);
+        let cfg = load_from_toml_str(None, &env).expect("cortex alias");
+        assert_eq!(cfg.role, Role::Validator);
+        assert_eq!(cfg.netuid.get(), 7);
+        assert_eq!(cfg.database_url.as_deref(), Some("postgres://cortex/db"));
+        assert_eq!(cfg.chain_endpoint, "wss://alias.example/ws");
+    }
+
+    #[test]
+    fn base_env_wins_over_cortex_alias() {
+        let env = BTreeMap::from([
+            (keys::ROLE.to_owned(), "miner".to_owned()),
+            ("CORTEX_ROLE".to_owned(), "validator".to_owned()),
+            (keys::NETUID.to_owned(), "3".to_owned()),
+            ("CORTEX_NETUID".to_owned(), "99".to_owned()),
+        ]);
+        let cfg = load_from_toml_str(None, &env).expect("base wins");
+        assert_eq!(cfg.role, Role::Miner);
+        assert_eq!(cfg.netuid.get(), 3);
+    }
+
+    #[test]
+    fn cortex_config_path_alias_resolves() {
+        let env = BTreeMap::from([("CORTEX_CONFIG".to_owned(), "/tmp/cortex.toml".to_owned())]);
+        assert_eq!(
+            resolve_toml_path(&env),
+            Some(std::path::PathBuf::from("/tmp/cortex.toml"))
+        );
+    }
+
+    #[test]
+    fn cortex_alias_key_maps_base_prefix() {
+        assert_eq!(cortex_alias_key(keys::ROLE).as_deref(), Some("CORTEX_ROLE"));
+        assert_eq!(cortex_alias_key("OTHER"), None);
     }
 }

@@ -1595,16 +1595,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "design-rating"
-version = "0.1.0"
-dependencies = [
- "design-challenge-task",
- "hex",
- "sha2 0.10.9",
- "thiserror 2.0.19",
-]
-
-[[package]]
 name = "design-sandbox"
 version = "0.1.0"
 dependencies = [

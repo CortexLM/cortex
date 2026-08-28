@@ -30,8 +30,8 @@ const DEFAULT_REPO: &str = "BaseIntelligence/top-prism-architecture";
 const DEFAULT_REVISION: &str = "main";
 /// Hub regular (non-LFS) file ceiling used by the ndjson commit API.
 const REGULAR_FILE_MAX: usize = 5 * 1024 * 1024;
-/// Org banner mirrored from the Base monorepo (model card + org profile).
-const BANNER_URL: &str = "https://github.com/BaseIntelligence/base/raw/main/assets/banner.jpg";
+/// Org banner mirrored from the Cortex monorepo (model card + org profile).
+const BANNER_URL: &str = "https://github.com/CortexLM/cortex/raw/main/assets/banner.jpg";
 
 /// GPT-2 Large (774M) Prism-protocol public-pack reference (eval-only).
 const GPT2_LARGE_LABEL: &str = "GPT-2 Large (774M)";

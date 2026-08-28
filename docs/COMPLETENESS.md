@@ -1,4 +1,4 @@
-# Base completeness matrix
+# Cortex completeness matrix
 
 Honest per-component status as of `main` HEAD. Updated as phases land.
 
@@ -53,7 +53,7 @@ Removed (replaced by design + prism HTTP paths; no Phala/CVM miner).
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Crates (`crates/design-*`) | done | task, harness, prompts, sandbox, sanitize, rating, store, egress-proxy, challenge. |
+| Crates (`crates/design-*`) | done | task, harness, prompts, sandbox, sanitize, store, egress-proxy, challenge. Elo lives in `design_rating` Postgres via `design-db` / `design-store-pg` — not a standalone crate. |
 | Binary (`bins/design-challenge`) | done | HTTP API on `:8093`. |
 | Binary (`bins/design-egress-proxy`) | done | Open egress proxy (internal blocklist) + budgeted LLM path. |
 | Spec + checklist | done | [`DESIGN_CHALLENGE.md`](DESIGN_CHALLENGE.md) + checklist; `xtask design-check`. |
