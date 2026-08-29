@@ -1,5 +1,7 @@
 # AGENTS.md — deploy (DigitalOcean + Compose)
 
+Read [`../.rules/`](../.rules/00-overview.md) before any PR; this file is the deploy-scoped slice of that contract.
+
 Operator/agent contract for staging and prod. Full procedures live in [`README.md`](README.md); do not duplicate them here.
 
 ## Topology (4 droplets, NYC1)
@@ -49,7 +51,7 @@ Migrations (`crates/db/migrations`) run on boot in gateway when `BASE_DATABASE_U
 
 Bounty scores **only** from the CortexLM/backend public feed. Set `BOUNTY_BACKEND_PUBLIC_URL` on the host (`deploy/env/bounty-challenge.env`; never bake a hostname into git). The service fetches `/v1/bounty/public/leaderboard` + `/reports`, signs an exact-`E` leaf set every `BOUNTY_EMIT_POLL_SECS` (default 120), and posts to the master gateway — validators only ever verify the sealed bundle.
 
-With no readable feed the host answers **503** on `POST /v1/reports` and pays nobody: it covers `E` with `NoScore(ChallengeInternal)`, so the 7000 bps burns to uid 0 while D24 still holds (leaving `E` uncovered would 409 the seal for *every* challenge, since bounty holds a paid trust-root row). `BOUNTY_FORCE_SIM` is retired and ignored; `assert-compose-matrix.sh` fails if any compose file reintroduces it. Verify with `./deploy/scripts/local-e2e.sh --smoke` (it POSTs ingest and asserts 503 without a feed, 401 with one) or by hand: `GET /challenge/bounty/v1/status` → `scoring_backend`, `can_score`. Details: [`docs/BOUNTY.md`](../docs/BOUNTY.md).
+With no readable feed the host answers **503** on `POST /v1/reports` and pays nobody: it covers `E` with `NoScore(ChallengeInternal)`, so the 7000 bps burns to uid 0 while D24 still holds (leaving `E` uncovered would 409 the seal for *every* challenge, since bounty holds a paid trust-root row). `BOUNTY_FORCE_SIM` is retired and ignored; `assert-compose-matrix.sh` fails if any compose file reintroduces it. Verify with `./deploy/scripts/local-e2e.sh --smoke` (it POSTs ingest and asserts 503 without a feed, 401 with one) or by hand: `GET /challenge/bounty/v1/status` → `scoring_backend`, `can_score`. Details: [`.rules/contracts/BOUNTY.md`](../.rules/contracts/BOUNTY.md).
 
 ## Prism Lium GPU profiles (do not mix)
 
@@ -59,7 +61,7 @@ Second profile: **4× RTX 5090** (`PRISM_POD_GPU_COUNT=4`). Override needles
 with `PRISM_POD_GPU_NAME`. Never fall through to 8×5090. Prefer an
 unsplittable full-host 6000 rent when Lium will not split. Do **not** flip
 live `:28092` scoring/emission when changing pod width. Details:
-[`docs/PRISM.md`](../docs/PRISM.md), [`docs/runbooks/prism-enable-lium-and-emission.md`](../docs/runbooks/prism-enable-lium-and-emission.md).
+[`.rules/contracts/PRISM.md`](../.rules/contracts/PRISM.md).
 
 Verify rows (local master stack):
 
@@ -71,7 +73,8 @@ docker compose -f docker-compose.yml exec -T postgres \
 
 ## Local testnet E2E
 
-Full procedure: [`docs/runbooks/local-testnet-e2e.md`](../docs/runbooks/local-testnet-e2e.md).
+Local gate list and probe table: [`../.rules/20-pre-prod-local.md`](../.rules/20-pre-prod-local.md).
+Authoritative flags: `./deploy/scripts/local-e2e.sh --help`.
 
 ```bash
 ./deploy/scripts/materialize-env.sh
@@ -160,14 +163,14 @@ Ladder: CI → GHCR digests → `deploy/pins/staging.json` (committed by `images
 - Identity OOB on host: `/etc/base/age-identity.txt` (or `AGE_IDENTITY`) — never in Terraform/cloud-init.
 - Materialize: `./deploy/scripts/materialize-env.sh` → `deploy/env/*.env` mode **0600**.
 - Runtime secret files (wallets, keys): mode **0400**, owner **uid 65532**.
-- Helpers: `age-encrypt-env.sh`, `age-push-env.sh`. Checklist: [`docs/OPERATOR_SECURITY.md`](../docs/OPERATOR_SECURITY.md).
+- Helpers: `age-encrypt-env.sh`, `age-push-env.sh`. Pre-prod checklist: [`../.rules/20-pre-prod-local.md`](../.rules/20-pre-prod-local.md) § 5.
 
 ## First prod tag checklist
 
 1. Staging healthy on the exact commit you will tag; `deploy/pins/staging.json` `commit_sha` matches that SHA.
 2. Digests recorded / promoted for services you will ship (`promote.sh`, `verify-task-43.sh` locally if needed).
 3. Age identity + env ages present on both prod hosts; wallets hotkeys under `deploy/secrets/wallets/` (0400 / 65532).
-4. Mainnet owner wallet placed; set `BASE_GATEWAY_REQUIRE_OWNER=1` when ready (ops gap until then — see [`docs/COMPLETENESS.md`](../docs/COMPLETENESS.md)).
+4. Mainnet owner wallet placed; set `BASE_GATEWAY_REQUIRE_OWNER=1` when ready (ops gap until then).
 5. Cut `vX.Y.Z` on `main`, push tag; pass `deploy-prod` preflight + `environment: production` reviewers.
 6. Smoke `/healthz` on both prod hosts; confirm `evil-gateway` absent.
 

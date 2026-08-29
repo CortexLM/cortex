@@ -1,5 +1,5 @@
 //! Fail if external miner docs drift from `bundle` `PROTOCOL_VERSION`,
-//! if live HTTP miner paths are missing, or if `docs/THREAT_MODEL.md`
+//! if live HTTP miner paths are missing, or if the relocated `THREAT_MODEL.md`
 //! D19 claim is not word-for-word vs plan pin.
 
 use std::fs;
@@ -11,7 +11,7 @@ const D19_VERBATIM: &str = "base guarantees *no equivocation between validators*
 /// Marker comment required in external miner docs.
 const BADGE_COMMENT_PREFIX: &str = "<!-- protocol_version:";
 
-/// Content pins required in `docs/external-miner/README.md`.
+/// Content pins required in `.rules/contracts/external-miner/README.md`.
 const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("bounty_challenge", "bounty"),
     ("proof_challenge", "proof"),
@@ -170,7 +170,7 @@ fn check_external_miner_docs(
     expected: u16,
     failures: &mut Vec<String>,
 ) -> Result<(), String> {
-    let dir = workspace_root.join("docs/external-miner");
+    let dir = workspace_root.join(".rules/contracts/external-miner");
     if !dir.is_dir() {
         failures.push(format!("missing directory {}", dir.display()));
         return Ok(());
@@ -182,15 +182,15 @@ fn check_external_miner_docs(
     match extract_badge_version(&readme_body) {
         Ok(v) if v == expected => {}
         Ok(v) => failures.push(format!(
-            "docs/external-miner/README.md protocol_version badge={v} != bundle PROTOCOL_VERSION={expected}"
+            ".rules/contracts/external-miner/README.md protocol_version badge={v} != bundle PROTOCOL_VERSION={expected}"
         )),
-        Err(e) => failures.push(format!("docs/external-miner/README.md: {e}")),
+        Err(e) => failures.push(format!(".rules/contracts/external-miner/README.md: {e}")),
     }
 
     for (name, needle) in EXTERNAL_MINER_PINS {
         if !readme_body.contains(needle) {
             failures.push(format!(
-                "docs/external-miner/README.md missing pin {name}: {needle:?}"
+                ".rules/contracts/external-miner/README.md missing pin {name}: {needle:?}"
             ));
         }
     }
@@ -208,7 +208,7 @@ fn check_external_miner_docs(
         let path = dir.join(required);
         if !path.is_file() {
             failures.push(format!(
-                "docs/external-miner/{required} missing (HTTP submit guide required)"
+                ".rules/contracts/external-miner/{required} missing (HTTP submit guide required)"
             ));
         }
     }
@@ -220,7 +220,7 @@ fn check_external_miner_docs(
         };
         for needle in *pins {
             if !body.contains(needle) {
-                failures.push(format!("docs/external-miner/{page} missing pin {needle:?}"));
+                failures.push(format!(".rules/contracts/external-miner/{page} missing pin {needle:?}"));
             }
         }
     }
@@ -235,7 +235,7 @@ fn check_external_miner_docs(
                 .any(|l| l.contains(banned) && !l.contains("reject") && !l.contains("refus"));
             if mentioned_as_allowed {
                 failures.push(format!(
-                    "docs/external-miner/relearn-image.md mentions {banned:?} outside a rejection"
+                    ".rules/contracts/external-miner/relearn-image.md mentions {banned:?} outside a rejection"
                 ));
             }
         }
@@ -324,17 +324,17 @@ fn extract_badge_version(body: &str) -> Result<u16, String> {
 }
 
 fn check_threat_model_d19(workspace_root: &Path, failures: &mut Vec<String>) -> Result<(), String> {
-    let path = workspace_root.join("docs/THREAT_MODEL.md");
+    let path = workspace_root.join(".rules/contracts/THREAT_MODEL.md");
     let body = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
 
     // Prefer fenced section after the D19 heading.
     let Some(idx) = body.find("## 1. D19") else {
-        failures.push("docs/THREAT_MODEL.md missing heading `## 1. D19`".into());
+        failures.push(".rules/contracts/THREAT_MODEL.md missing heading `## 1. D19`".into());
         return Ok(());
     };
     let rest = &body[idx..];
     let Some(after_blank) = rest.split("\n\n").nth(2) else {
-        failures.push("docs/THREAT_MODEL.md: could not locate D19 claim paragraph".into());
+        failures.push(".rules/contracts/THREAT_MODEL.md: could not locate D19 claim paragraph".into());
         return Ok(());
     };
     // Paragraph until next blank line or heading
@@ -350,7 +350,7 @@ fn check_threat_model_d19(workspace_root: &Path, failures: &mut Vec<String>) -> 
 
     if !matched {
         failures.push(format!(
-            "docs/THREAT_MODEL.md D19 claim is not word-for-word vs plan D19.\n  expected (first 120 chars): {:?}\n  found paragraph (first 120): {:?}",
+            ".rules/contracts/THREAT_MODEL.md D19 claim is not word-for-word vs plan D19.\n  expected (first 120 chars): {:?}\n  found paragraph (first 120): {:?}",
             D19_VERBATIM.chars().take(120).collect::<String>(),
             para.chars().take(120).collect::<String>()
         ));
@@ -362,7 +362,7 @@ fn check_threat_model_supporting_pins(
     workspace_root: &Path,
     failures: &mut Vec<String>,
 ) -> Result<(), String> {
-    let path = workspace_root.join("docs/THREAT_MODEL.md");
+    let path = workspace_root.join(".rules/contracts/THREAT_MODEL.md");
     let body = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let pins = [
         ("D11", "do **not** claim env **values** are verified"),
@@ -380,7 +380,7 @@ fn check_threat_model_supporting_pins(
     for (name, needle) in pins {
         if !body.contains(needle) {
             failures.push(format!(
-                "docs/THREAT_MODEL.md missing pin {name}: {needle:?}"
+                ".rules/contracts/THREAT_MODEL.md missing pin {name}: {needle:?}"
             ));
         }
     }

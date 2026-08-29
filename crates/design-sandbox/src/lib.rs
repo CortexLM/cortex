@@ -541,9 +541,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     const BASELINE_AGENT: &str =
-        include_str!("../../../docs/external-miner/examples/design-baseline/agent.py");
-    const BASELINE_PYPROJECT: &str =
-        include_str!("../../../docs/external-miner/examples/design-baseline/pyproject.toml");
+        include_str!("../../../.rules/contracts/external-miner/examples/design-baseline/agent.py");
+    const BASELINE_PYPROJECT: &str = include_str!(
+        "../../../.rules/contracts/external-miner/examples/design-baseline/pyproject.toml"
+    );
 
     #[test]
     fn install_env_carries_no_miner_secrets() {

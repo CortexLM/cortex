@@ -1,10 +1,11 @@
-//! Fail if `docs/DESIGN_CHALLENGE.md` is missing required freeze pins.
+//! Fail if `.rules/contracts/DESIGN_CHALLENGE.md` is missing required freeze pins.
 
+use crate::CONTRACTS_DIR;
 use std::fs;
 use std::path::Path;
 
 /// Heading markers that must appear in `DESIGN_CHALLENGE.md`.
-/// Pin letters match [`docs/DESIGN_CHALLENGE_CHECKLIST.md`].
+/// Pin letters match `.rules/contracts/DESIGN_CHALLENGE_CHECKLIST.md`.
 const SECTION_MARKERS: &[(&str, &str)] = &[
     ("T", "## 1. What runs where (topology)"),
     ("I", "## 2. Identifiers and versions"),
@@ -96,8 +97,9 @@ const CONTENT_PINS: &[(&str, &str)] = &[
 ///
 /// Returns a multi-line error when the spec file is missing or any pin fails.
 pub fn run(workspace_root: &Path) -> Result<(), String> {
-    let spec_path = workspace_root.join("docs/DESIGN_CHALLENGE.md");
-    let checklist_path = workspace_root.join("docs/DESIGN_CHALLENGE_CHECKLIST.md");
+    let contracts = workspace_root.join(CONTRACTS_DIR);
+    let spec_path = contracts.join("DESIGN_CHALLENGE.md");
+    let checklist_path = contracts.join("DESIGN_CHALLENGE_CHECKLIST.md");
 
     if !checklist_path.is_file() {
         return Err(format!(

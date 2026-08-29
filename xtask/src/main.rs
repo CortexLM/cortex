@@ -5,9 +5,12 @@
 //! - `consensus-lint` — fail if listed consensus crates use forbidden tokens (D8)
 //! - `metadata-snapshot` — fetch testnet metadata + epoch-schedule sources into `metadata/testnet.lock`
 //! - `natural-pack` — build the pinned G5 natural-document eval packs into the operator assets dir
-//! - `spec-check` — fail if `docs/BUNDLE_SPEC.md` is missing plan pins (a)–(l)
-//! - `design-check` — fail if `docs/DESIGN_CHALLENGE.md` is missing freeze pins
+//! - `spec-check` — fail if `.rules/contracts/BUNDLE_SPEC.md` is missing plan pins (a)–(l)
+//! - `design-check` — fail if `.rules/contracts/DESIGN_CHALLENGE.md` is missing freeze pins
 //! - `external-docs-check` — fail if external miner docs `protocol_version` ≠ bundle, or D19 drifts
+//! - `rules-check` — fail if the `.rules/` agent contract, PR template, or markdown links drift
+//! - `version` — single-source-of-truth workspace version: show, check, bump, verify-bump
+//! - `pr-check` — fail if a pull-request body is missing the `.rules/` attestation
 //! - `relearn-t2i-holdout` — select a Relearn T2I holdout slice and print its commitment
 //! - `relearn-holdout` — select a Relearn holdout slice and print its commitment
 //! - `relearn-agent-holdout` — select a Relearn Agent episode set and print its commitment
@@ -22,11 +25,20 @@ mod external_docs_check;
 mod loc_cap;
 mod metadata_snapshot;
 mod natural_pack;
+mod pr_check;
 mod proof_holdout;
 mod proof_topic;
 mod relearn_holdout;
+mod rules_check;
 mod spec_check;
 mod t2i_holdout;
+mod version;
+
+/// Frozen normative contracts (specs, checklists, miner docs) live here.
+///
+/// There is no `docs/` tree: the human front door is `README.md` and the agent
+/// contract is `.rules/` (see `.rules/10-maintenance.md`).
+pub const CONTRACTS_DIR: &str = ".rules/contracts";
 
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -90,12 +102,28 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
-    /// Fail if `docs/BUNDLE_SPEC.md` is missing required (a)–(l) pins (task 8).
+    /// Fail if `.rules/contracts/BUNDLE_SPEC.md` is missing required (a)–(l) pins (task 8).
     SpecCheck,
-    /// Fail if `docs/DESIGN_CHALLENGE.md` is missing required freeze pins.
+    /// Fail if `.rules/contracts/DESIGN_CHALLENGE.md` is missing required freeze pins.
     DesignCheck,
     /// Fail if external miner docs `protocol_version` differs from `bundle`, or `THREAT_MODEL` D19 drifts.
     ExternalDocsCheck,
+    /// Fail if the `.rules/` agent contract, PR template, or repo markdown links drift.
+    RulesCheck,
+    /// Workspace version: single source of truth is `[workspace.package] version`.
+    Version {
+        #[command(subcommand)]
+        action: Option<version::Action>,
+    },
+    /// Fail if a pull-request body is missing the `.rules/` attestation checkboxes.
+    PrCheck {
+        /// File holding the PR body (`-` reads stdin).
+        #[arg(long)]
+        body_file: PathBuf,
+        /// Treat the PR as a draft: report missing attestation without failing.
+        #[arg(long)]
+        draft: bool,
+    },
     /// Select a Relearn holdout slice and print its pin commitment.
     ///
     /// Item ids are never printed. Production salts stay off git. Refuses the
@@ -277,6 +305,9 @@ fn dispatch(command: Command, root: &Path) -> Result<(), String> {
         Command::SpecCheck => spec_check::run(root),
         Command::DesignCheck => design_check::run(root),
         Command::ExternalDocsCheck => external_docs_check::run(root),
+        Command::RulesCheck => rules_check::run(root),
+        Command::Version { action } => version::run(root, action.as_ref()),
+        Command::PrCheck { body_file, draft } => pr_check::run(&body_file, draft),
         Command::RelearnHoldout {
             catalog,
             salt,

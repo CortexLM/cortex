@@ -33,7 +33,8 @@ examples only.
 Do not treat leftover `BASE_*` environment names, `/opt/base` host paths, or
 `base-*-v1` domain tags as vulnerabilities. Those strings are measured into
 live miner CVMs and on-chain/signature domains. See
-[docs/NAMING.md](docs/NAMING.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+[`.rules/60-naming.md`](.rules/60-naming.md) and
+[`.rules/contracts/THREAT_MODEL.md`](.rules/contracts/THREAT_MODEL.md).
 
 ## Supported versions
 

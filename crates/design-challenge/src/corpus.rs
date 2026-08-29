@@ -5,7 +5,7 @@ use challenge_agentic::{same_miner_identity, CorpusEntry, GateCorpusEntry};
 use design_store::HarnessRow;
 
 const BASELINE_AGENT: &str =
-    include_str!("../../../docs/external-miner/examples/design-baseline/agent.py");
+    include_str!("../../../.rules/contracts/external-miner/examples/design-baseline/agent.py");
 
 fn other_miners<'a>(
     cand: &'a HarnessRow,

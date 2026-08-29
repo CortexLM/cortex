@@ -14,7 +14,7 @@
 #   ./deploy/scripts/local-e2e.sh --smoke --no-weights-smoke
 #   ./deploy/scripts/local-e2e.sh --down
 #
-# See docs/runbooks/local-testnet-e2e.md
+# See .rules/20-pre-prod-local.md and deploy/AGENTS.md § Local testnet E2E
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

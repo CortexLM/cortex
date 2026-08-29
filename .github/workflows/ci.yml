@@ -58,6 +58,15 @@ jobs:
       - name: xtask external-docs-check
         run: cargo run -p xtask -- external-docs-check
 
+      # Repo discipline: .rules/ complete, no docs/ tree, PR template matches
+      # the attestation pr-gate enforces, local gate list matches this file,
+      # and no markdown link in those surfaces dangles.
+      - name: xtask rules-check
+        run: cargo run -p xtask -- rules-check
+
+      - name: xtask version check
+        run: cargo run -p xtask -- version check
+
       - name: clippy with dcap feature (release path)
         run: cargo clippy -p validator-bin --features dcap --all-targets -- -D warnings
 

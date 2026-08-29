@@ -2,6 +2,19 @@
 
 <!-- What does this PR change, and why? -->
 
+## Rules attestation (required — `pr-gate` fails a ready PR without all four)
+
+Tick only what you actually did. See [`.rules/30-pr.md`](../.rules/30-pr.md).
+
+- [ ] I read all of `.rules/` before opening this PR and before marking it ready
+- [ ] `AGENTS.md`, `README.md` and `.rules/` are accurate for this change, or N/A with a reason below
+- [ ] Local pre-prod gates in `.rules/20-pre-prod-local.md` all passed
+- [ ] Version bumped per `.rules/50-versioning.md`
+
+Version before → after: <!-- e.g. 0.2.0 → 0.2.1 -->
+
+N/A reasons (if any): <!-- which box, and why it does not apply -->
+
 ## Greptile
 
 Every PR is reviewed by Greptile before merge. Config: `.greptile/`.
@@ -9,11 +22,28 @@ Every PR is reviewed by Greptile before merge. Config: `.greptile/`.
 - [ ] Greptile has reviewed this PR; findings are fixed or answered
 - [ ] If the bot was silent, I commented `@greptileai review`
 
-## Test plan
+## Local gates run
 
-- [ ] `cargo test --workspace` (or note the subset and why)
-- [ ] `cargo fmt --all -- --check`
-- [ ] Clippy / deny / xtask gates if this PR touches crates they cover
+<!-- Paste or trim; these are the commands from .rules/20-pre-prod-local.md -->
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo deny check
+cargo run -p xtask -- loc-cap
+cargo run -p xtask -- consensus-lint
+cargo run -p xtask -- spec-check
+cargo run -p xtask -- design-check
+cargo run -p xtask -- external-docs-check
+cargo run -p xtask -- rules-check
+cargo run -p xtask -- version check
+```
+
+## Challenge verification (if this PR touches a challenge)
+
+<!-- Healthz is not proof. Which submission did you simulate: bounty pair+report,
+     proof topic submit, edges, leaf → seal → sealed: true? -->
 
 ## Risk
 
@@ -24,4 +54,4 @@ Every PR is reviewed by Greptile before merge. Config: `.greptile/`.
 I did **not** rename `BASE_*` environment variables, deployed host paths
 (`/opt/base`, `/run/base`, …), GHCR `baseintelligence/base` package names, or
 `base-*-v1` cryptographic domain tags, unless this PR’s purpose is a coordinated
-cutover documented in `docs/NAMING.md`.
+cutover documented in [`.rules/60-naming.md`](../.rules/60-naming.md).

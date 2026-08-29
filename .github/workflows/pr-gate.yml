@@ -1,0 +1,73 @@
+name: pr-gate
+
+# A PR is not reviewable until its author attests to having read `.rules/` and
+# to having run the local pre-prod gates, and until the workspace version has
+# moved. Both checks live in xtask so the template, the gate, and the rules
+# text cannot drift apart (`.rules/30-pr.md`, `.rules/50-versioning.md`).
+#
+# `edited` and `ready_for_review` are in the trigger list on purpose: ticking a
+# checkbox or flipping a draft must re-run the gate.
+
+on:
+  pull_request:
+    branches: [main]
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+      - ready_for_review
+      - converted_to_draft
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pr-gate:
+    name: rules attestation · version bump
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Via env, never inline interpolation: a PR body is untrusted input.
+      - name: Materialize PR body
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+
+      - name: xtask pr-check (rules attestation)
+        env:
+          DRAFT_FLAG: ${{ github.event.pull_request.draft && '--draft' || '' }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          cargo run -p xtask -- pr-check --body-file "$RUNNER_TEMP/pr-body.md" $DRAFT_FLAG
+
+      - name: Fetch base branch
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+
+      - name: xtask version verify-bump
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          cargo run -p xtask -- version verify-bump --base "origin/$BASE_REF"
