@@ -27,10 +27,7 @@ jobs:
             "base/gateway"
             "base/validator"
             "base/updater"
-            "base/prism-challenge"
-            "base/design-challenge"
-            "base/design-egress-proxy"
-            "base/design-runtime"
+            "base/relearn-challenge"
           )
           ok=0
           # First list packages to Learn exact names (debug)

@@ -1,0 +1,29 @@
+[package]
+name = "relearn-eval"
+description = "Relearn eval loop: digest freeze, holdout unseal, Lium/sim, receipts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+hex = "0.4"
+prism-competition = { path = "../prism-competition" }
+prism-lium = { path = "../prism-lium" }
+prism-lium-types = { path = "../prism-lium-types" }
+relearn-challenge-task = { path = "../relearn-challenge-task" }
+relearn-score = { path = "../relearn-score" }
+relearn-store = { path = "../relearn-store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[lints]
+workspace = true

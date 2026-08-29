@@ -1,0 +1,27 @@
+[package]
+name = "relearn-challenge-bin"
+description = "relearn-challenge operator binary (health + miner submit on :8095)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "relearn-challenge"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+challenge-keys = { path = "../../crates/challenge-keys" }
+clap = { version = "4", features = ["derive", "env"] }
+relearn-challenge = { path = "../../crates/relearn-challenge" }
+relearn-eval = { path = "../../crates/relearn-eval" }
+relearn-store = { path = "../../crates/relearn-store" }
+telemetry = { path = "../../crates/telemetry" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+tracing = "0.1"
+
+[lints]
+workspace = true

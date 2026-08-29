@@ -1,0 +1,17 @@
+# Cortex pin for the split CortexLM/relearn challenge repo.
+# Deploy = bump eval_image_digest + relearn_git_sha after relearn CI is green.
+# Never put secrets in this file.
+
+base_model = "Qwen/Qwen3.8-Flash-Next"
+teacher_model = "zai-org/GLM-5.3"
+teacher_nvfp4 = "Inferact/GLM-5.3-NVFP4"
+# v0 default: teacher-only HTTP API (or Sim). NVFP4-on-Lium is preferred
+# when the operator can rent an 8× Blackwell-class host
+# (RELEARN_TEACHER_BACKEND=lium). Miner weights are never served via the
+# teacher API — that endpoint is judge-only.
+teacher_backend = "http_api"
+eval_image = "ghcr.io/cortexlm/relearn-eval"
+# Empty until the first digest-pinned image ships from CortexLM/relearn CI.
+eval_image_digest = ""
+relearn_git = "https://github.com/CortexLM/relearn"
+relearn_git_sha = ""

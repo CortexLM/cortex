@@ -2,7 +2,7 @@ blank_issues_enabled: true
 contact_links:
   - name: Miner submit docs
     url: https://github.com/CortexLM/cortex/blob/main/docs/external-miner/README.md
-    about: HTTP submit guides live in docs/external-miner (and the public design-challenge / prism repos).
+    about: HTTP submit guides live in docs/external-miner and the public CortexLM/relearn repo.
   - name: Security report
     url: https://github.com/CortexLM/cortex/security/advisories/new
     about: Private vulnerability reporting — do not file a public issue.

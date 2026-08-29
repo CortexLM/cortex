@@ -346,27 +346,19 @@ fn s9_repo_config_loads_when_present() {
     }
     let (ch, ms) = load_config_dir(&root, 0, 3).expect("committed config must verify");
     let primary = ch.primary().unwrap();
-    assert_eq!(primary.body.challenges.len(), 2);
-    // Emission 100% prism (2026-08-16): design 0 / prism 10000 (was 5000/5000).
-    let design = primary.body.get(b"design").expect("design row");
-    assert_eq!(design.emission_share_bps, 0);
+    assert_eq!(primary.body.challenges.len(), 1);
+    let relearn = primary.body.get(b"relearn").expect("relearn row");
+    assert_eq!(relearn.emission_share_bps, BPS_DENOM);
     assert_eq!(
-        encode_hex(&design.public_key),
-        "3e27f87d8330006a73174001120c3455f16b95fee098bb8c2bab9d5053840418"
+        encode_hex(&relearn.public_key),
+        "8ab577207bb6dfc770a850710824a098d53b1ee90abb92925bd0928937131674"
     );
-    let prism = primary.body.get(b"prism").expect("prism row");
-    assert_eq!(prism.emission_share_bps, BPS_DENOM);
-    assert_eq!(
-        encode_hex(&prism.public_key),
-        "bcd50bb830e050ed4b011dd8f1d2f126fdb42dc55b45ece30a7d5c8ceb3c5219"
-    );
-    assert_ne!(prism.public_key, design.public_key);
+    assert!(primary.body.get(b"design").is_none());
+    assert!(primary.body.get(b"prism").is_none());
     let shares = primary.body.emission_shares();
-    assert_eq!(shares.len(), 2);
-    assert_eq!(shares[0].0, b"design");
-    assert_eq!(shares[0].1, 0);
-    assert_eq!(shares[1].0, b"prism");
-    assert_eq!(shares[1].1, BPS_DENOM);
+    assert_eq!(shares.len(), 1);
+    assert_eq!(shares[0].0, b"relearn");
+    assert_eq!(shares[0].1, BPS_DENOM);
     // base-agent CVM path removed — committed allowlist is empty (fail-closed).
     let entries = &ms.primary().unwrap().body.entries;
     assert!(

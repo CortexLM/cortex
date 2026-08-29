@@ -9,6 +9,6 @@ mod frames;
 mod paginate;
 mod types;
 
-pub use frames::{coding_arena, design_frame, prism_frame};
+pub use frames::{coding_arena, design_frame, prism_frame, relearn_frame};
 pub use paginate::page_slice;
 pub use types::*;

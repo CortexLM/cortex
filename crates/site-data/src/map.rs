@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 use serde_json::Value;
 
 use keystore::{ss58_encode, BITTENSOR_SS58_PREFIX};
-use site_types::{coding_arena, design_frame, prism_frame};
+use site_types::{coding_arena, design_frame, prism_frame, relearn_frame};
 use site_types::{
     ActivityEvent, ActivitySeverity, Agent, Arena, ArenaSlug, LeaderboardRow, LossPoint,
     LossSeries, PrismTelemetry, PrismTelemetryPoint, PrismWindow, RulesGate, SealedPaths,
@@ -397,18 +397,29 @@ fn format_g2_score(v: f64) -> String {
     }
 }
 
-/// All three arenas (coding always paused).
+/// Live arenas: coding (paused) + relearn. Design/Prism are retired products.
 #[must_use]
 pub fn list_arenas(
-    design_dash: Option<&Value>,
-    prism_status: Option<&Value>,
-    prism_subs: Option<&Value>,
+    _design_dash: Option<&Value>,
+    relearn_status: Option<&Value>,
+    _prism_subs: Option<&Value>,
 ) -> Vec<Arena> {
-    vec![
-        coding_arena(),
-        design_arena_from_dashboard(design_dash),
-        prism_arena_from_live(prism_status, prism_subs),
-    ]
+    vec![coding_arena(), relearn_arena_from_live(relearn_status)]
+}
+
+/// Relearn card from `/v1/status` (or the static frame when the backend is down).
+#[must_use]
+pub fn relearn_arena_from_live(status: Option<&Value>) -> Arena {
+    let mut arena = relearn_frame();
+    if let Some(s) = status {
+        if let Some(id) = s.get("champion_id").and_then(|v| v.as_str()) {
+            if !id.is_empty() {
+                arena.best_score = id.to_owned();
+            }
+        }
+        arena.status = "live".into();
+    }
+    arena
 }
 
 fn format_elo(v: f64) -> String {

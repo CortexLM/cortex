@@ -1,5 +1,5 @@
 //! Fail if external miner docs drift from `bundle` `PROTOCOL_VERSION`,
-//! if design/prism HTTP miner paths are missing, or if `docs/THREAT_MODEL.md`
+//! if relearn HTTP miner paths are missing, or if `docs/THREAT_MODEL.md`
 //! D19 claim is not word-for-word vs plan pin.
 
 use std::fs;
@@ -11,30 +11,15 @@ const D19_VERBATIM: &str = "base guarantees *no equivocation between validators*
 /// Marker comment required in external miner docs.
 const BADGE_COMMENT_PREFIX: &str = "<!-- protocol_version:";
 
-/// Content pins required across `docs/external-miner/` (design + prism HTTP).
+/// Content pins required across `docs/external-miner/` (relearn HTTP).
 const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
-    ("design_challenge", "design"),
-    ("prism_challenge", "prism"),
+    ("relearn_challenge", "relearn"),
     ("http_submit", "HTTP"),
-    ("design_spec_link", "DESIGN_CHALLENGE.md"),
-    ("prism_spec_link", "PRISM.md"),
+    ("lium_byok", "X-Lium-Api-Key"),
     ("no_phala_cvm", "no Phala/CVM"),
     ("bundle_spec_link", "BUNDLE_SPEC.md"),
-];
-
-/// Pins required in `docs/external-miner/prism.md` for recipe 2.1 `AutoModel`.
-const PRISM_AUTOMODEL_PINS: &[(&str, &str)] = &[
-    ("recipe_2_1_0", "2.1.0"),
-    ("automodel_base_member", "automodel.base"),
-    ("automodel_patch_member", "automodel.patch"),
-    ("live_pin_id", "automodel@v0.5.0"),
-    ("recipe_json_pin_id", "automodel_pin_id"),
-    ("diff_route", "/v1/submissions/{id}/diff"),
-    ("lium_byok", "X-Lium-Api-Key"),
-    ("verda_byok", "X-Verda-Client-Id"),
-    ("competition_id", "prism-v2.1"),
-    ("scoring_generation_21", "scoring_generation"),
-    ("new_competition", "new competition"),
+    ("base_model", "Qwen/Qwen3.8-Flash-Next"),
+    ("teacher_model", "zai-org/GLM-5.3"),
 ];
 
 /// Substrings that must not appear as live miner guidance (removed path).
@@ -61,7 +46,7 @@ pub fn run(workspace_root: &Path) -> Result<(), String> {
 
     if failures.is_empty() {
         println!(
-            "external-docs-check OK (protocol_version={protocol_version}, design/prism HTTP, D19 verbatim match)"
+            "external-docs-check OK (protocol_version={protocol_version}, relearn HTTP, D19 verbatim match)"
         );
         Ok(())
     } else {
@@ -133,34 +118,13 @@ fn check_external_miner_docs(
         }
     }
 
-    // Required pages for design/prism HTTP submit.
-    for required in ["design.md", "prism.md", "troubleshoot.md"] {
+    // Required pages for relearn HTTP submit.
+    for required in ["relearn.md", "troubleshoot.md"] {
         let path = dir.join(required);
         if !path.is_file() {
             failures.push(format!(
                 "docs/external-miner/{required} missing (HTTP submit guide required)"
             ));
-        }
-    }
-
-    let prism_md = dir.join("prism.md");
-    if prism_md.is_file() {
-        let prism_body = fs::read_to_string(&prism_md)
-            .map_err(|e| format!("read {}: {e}", prism_md.display()))?;
-        for (name, needle) in PRISM_AUTOMODEL_PINS {
-            if !prism_body.contains(needle) {
-                failures.push(format!(
-                    "docs/external-miner/prism.md missing AutoModel pin {name}: {needle:?}"
-                ));
-            }
-        }
-        // Stale plan wording — live pin ids are tag-shaped (`automodel@…`).
-        if prism_body.contains("automodel-<12hex>") {
-            failures.push(
-                "docs/external-miner/prism.md still mentions stale pin shape automodel-<12hex> \
-                 (live pin is automodel@v0.5.0)"
-                    .into(),
-            );
         }
     }
 
@@ -190,7 +154,7 @@ fn check_external_miner_docs(
         for banned in FORBIDDEN_LIVE_PATHS {
             if lower.contains(&banned.to_ascii_lowercase()) {
                 failures.push(format!(
-                    "{} contains removed miner-path string {banned:?} (use design/prism HTTP only)",
+                    "{} contains removed miner-path string {banned:?} (use relearn HTTP only)",
                     path.strip_prefix(workspace_root).unwrap_or(&path).display()
                 ));
             }
@@ -327,25 +291,18 @@ mod tests {
     }
 
     #[test]
-    fn external_pins_cover_design_prism() {
+    fn external_pins_cover_relearn() {
         assert!(EXTERNAL_MINER_PINS
             .iter()
-            .any(|(n, _)| *n == "design_challenge"));
+            .any(|(n, _)| *n == "relearn_challenge"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
-            .any(|(n, _)| *n == "prism_challenge"));
+            .any(|(n, v)| *n == "base_model" && *v == "Qwen/Qwen3.8-Flash-Next"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "teacher_model" && *v == "zai-org/GLM-5.3"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
             .any(|(n, v)| *n == "no_phala_cvm" && *v == "no Phala/CVM"));
-    }
-
-    #[test]
-    fn prism_automodel_pins_cover_recipe_2() {
-        assert!(PRISM_AUTOMODEL_PINS
-            .iter()
-            .any(|(n, v)| *n == "live_pin_id" && *v == "automodel@v0.5.0"));
-        assert!(PRISM_AUTOMODEL_PINS
-            .iter()
-            .any(|(n, v)| *n == "automodel_patch_member" && *v == "automodel.patch"));
     }
 }

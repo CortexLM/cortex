@@ -15,21 +15,21 @@
 ## What it is
 
 Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) is the Rust
-control plane for a multi-challenge Bittensor subnet. Challenge services on
-the **master** host accept miner work over HTTP, sign score leaves, and the
-**gateway** (master-only) seals an epoch weight bundle. Validators **fetch**
-`GET /v1/weights/latest` and submit on-chain weights. They do not execute
-challenges.
-
-Live challenges today:
+control plane for a **one-challenge** Bittensor subnet (**Relearn**). The
+challenge service on the **master** host accepts miner work over HTTP, signs
+score leaves, and the **gateway** (master-only) seals an epoch weight bundle.
+Validators **fetch** `GET /v1/weights/latest` and submit on-chain weights.
+They do not execute the challenge.
 
 | Challenge | How miners submit | Spec |
 |-----------|-------------------|------|
-| **Design** | ZIP harness (`agent.py` + `pyproject.toml`) → sandboxed pages + admin winners | [`docs/DESIGN_CHALLENGE.md`](docs/DESIGN_CHALLENGE.md) |
-| **Prism** | AutoModel pin + patch → operator-owned GPU recipe eval | [`docs/PRISM.md`](docs/PRISM.md) |
+| **Relearn** | Artifact digest + Lium BYOK → paired displacement vs champion | [`docs/RELEARN.md`](docs/RELEARN.md) |
 
-There is **no miner Phala/CVM path** on this branch (agent-v1 / Harbor pack
-executors were removed). Operator-facing map: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Eval image, harness, generators, and miner docs live in
+[`CortexLM/relearn`](https://github.com/CortexLM/relearn). Design and Prism
+are retired products (libraries / frozen specs remain). There is **no miner
+Phala/CVM / TDX path**. Operator-facing map:
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Some env vars, host paths, GHCR package names, and crypto domain tags still
 spell `BASE_*` / `base`. That is intentional — see [`docs/NAMING.md`](docs/NAMING.md).
@@ -37,7 +37,7 @@ spell `BASE_*` / `base`. That is intentional — see [`docs/NAMING.md`](docs/NAM
 ## Architecture (short)
 
 ```text
-Miners --HTTP--> gateway (TLS) --proxy--> design-challenge / prism-challenge
+Miners --HTTP--> gateway (TLS) --proxy--> relearn-challenge
                                           | signed leaves
                                           v
                               gateway seals EpochBundleV1
@@ -59,13 +59,11 @@ Validators <--- GET /v1/weights/latest ---+
 HTTP submit only. Start at [docs/external-miner/](docs/external-miner/).
 
 ```text
-https://<gateway>/challenge/design/...
-https://<gateway>/challenge/prism/...
+https://<gateway>/challenge/relearn/...
 ```
 
-Public miner docs (examples only — no control-plane code):
-[design-challenge](https://github.com/BaseIntelligence/design-challenge),
-[prism](https://github.com/BaseIntelligence/prism).
+Public miner + eval repo (no control-plane code):
+[CortexLM/relearn](https://github.com/CortexLM/relearn).
 
 Never put mnemonics or challenge signing keys in miner clients.
 
@@ -106,9 +104,7 @@ digest-pinned images. The registry path is still
 | validator | `validator` |
 | gateway | `gateway` |
 | updater | `updater` |
-| prism-challenge | `prism-challenge` |
-| design-challenge | `design-challenge` |
-| design-egress-proxy | `design-egress-proxy` |
+| relearn-challenge | `relearn-challenge` |
 
 ## Toolchain and gates
 
@@ -134,8 +130,9 @@ cargo run -p xtask -- external-docs-check
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to change this repo |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System map |
 | [docs/BUNDLE_SPEC.md](docs/BUNDLE_SPEC.md) | Sealed weight bundle (frozen) |
-| [docs/DESIGN_CHALLENGE.md](docs/DESIGN_CHALLENGE.md) | Design challenge (frozen) |
-| [docs/PRISM.md](docs/PRISM.md) | Prism challenge |
+| [docs/RELEARN.md](docs/RELEARN.md) | Relearn (live) |
+| [docs/DESIGN_CHALLENGE.md](docs/DESIGN_CHALLENGE.md) | Design (archived freeze) |
+| [docs/PRISM.md](docs/PRISM.md) | Prism (archived) |
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Security claims |
 | [docs/runbooks/](docs/runbooks/) | Ops procedures |
 

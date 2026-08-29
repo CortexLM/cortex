@@ -45,31 +45,21 @@ Honest per-component status as of `main` HEAD. Updated as phases land.
 | Bundle seal (`POST /v1/weights/raw` → `GET /v1/weights/latest`) | done | Unsealed: fail-closed burn (`sealed: false`, uid 0 = 100%) instead of 404. |
 | Chain backend | done | Live only. `fake_owner` was removed from `bins/gateway`. |
 
-## agent-challenge / hypertraining-challenge
+## agent-challenge / hypertraining-challenge / design / prism (products)
 
-Removed (replaced by design + prism HTTP paths; no Phala/CVM miner).
+Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` paired tests, receipts, emit/carry) stay as libraries. Frozen specs (`DESIGN_CHALLENGE.md`, `PRISM.md`) remain for `xtask` gates.
 
-## design-challenge
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Crates (`crates/design-*`) | done | task, harness, prompts, sandbox, sanitize, store, egress-proxy, challenge. Elo lives in `design_rating` Postgres via `design-db` / `design-store-pg` — not a standalone crate. |
-| Binary (`bins/design-challenge`) | done | HTTP API on `:8093`. |
-| Binary (`bins/design-egress-proxy`) | done | Open egress proxy (internal blocklist) + budgeted LLM path. |
-| Spec + checklist | done | [`DESIGN_CHALLENGE.md`](DESIGN_CHALLENGE.md) + checklist; `xtask design-check`. |
-| Compose / images | in progress | deploy-wiring todo (port `28093` local). |
-| Emission | **0 bps** | Prism 100% (10000 bps; sum `10000`). |
-
-## prism-challenge
+## relearn-challenge
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Crate (`crates/prism-challenge`) | done | Lium client + sim backend + pipeline. |
-| Binary (`bins/prism-challenge`) | done | Health + submit on `:8092`. |
-| Compose service | done | Added to `docker-compose.yml` on `:8092`. |
-| Dockerfile target | done | `deploy/Dockerfile` target `prism-challenge`. |
-| GHCR image | done | Added to `images.yml` matrix and `ghcr-public.yml`. |
-| Emission | **10000 bps** | Prism 100% (sum `10000`). |
+| Crates (`crates/relearn-*`) | **done** | task, score, store, eval, http, challenge. |
+| Binary (`bins/relearn-challenge`) | **done** | HTTP API on `:8095`. |
+| Compose / images | **done** | Default compose + `images.yml` target `relearn-challenge`. |
+| Eval pin | **v0** | `config/relearn-pin.toml` — digest + `CortexLM/relearn` SHA empty until first green challenge CI. |
+| Teacher | **v0** | Default HTTP API / Sim. NVFP4-on-Lium (`Inferact/GLM-5.3-NVFP4`) when operator sets `RELEARN_TEACHER_BACKEND=lium`. Judge-only; miner weights never served via that API. |
+| Emission | **10000 bps** | Relearn 100% (sum `10000`). |
+| Spec | live | [`RELEARN.md`](RELEARN.md). |
 
 ## Infrastructure
 
@@ -100,10 +90,9 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| design harness / sandbox | done | Two-phase Docker + `SimSandbox`; `base_design` SDK injected; sanitize + CSP viewer. |
-| design rating / elimination | done | Integer Elo (K=32), bottom 20% / 4-round cooldown, exact-E leaves. |
-| design API | done | Harness/quota/runs/viewer/annotate/ops on `:8093`. |
-| prism Lium backend | done | `PRISM_FORCE_SIM=false` in staging; the binary logs `eval_backend=lium`. API key is mounted from a file so it never appears in `docker inspect`. |
+| relearn HTTP / promote | **done** | `POST /v1/submissions` freeze → unseal → paired judge; `POST /v1/admin/promote` bearer; never crowns a regression. |
+| relearn Lium rails | **done** (sim default) | Reuses `prism-lium` client + `SimLiumBackend`. Live rent refuses without `sha256:` eval digest; miner BYOK never logged. |
+| design / prism product APIs | retired | Crates remain as unused libraries. |
 | prism orchestration | done | DB-backed claim/execute/review/similarity/score state machine (`prism_submission` + append-only `prism_stage_event`), pre-pod screens (copy gate + static cheat + AST similarity) before Lium rent, sweeper (10h grace + pre-reclaim log harvest; skips live workers), **detached harness + resume-first boot/periodic reconcile** (reattach live pods via sealed BYOK; fail-closed only when unreattachable — `control_plane_restart` / `harness_detached`; `GET /v1/submissions/{id}/logs`), epoch-close batched D24 leaf emission with **WTA** (`prism-emit` outbox: `emitted_epoch` watermark + `prism_emit_cursor` + positive-score carry + `apply_wta`, migration 0012). `PRISM_MAX_CONCURRENT_EVALS` default/prod = 8. |
 | prism recipe v1 | done | `prism-recipe` contract, fineweb-edu pinned shard (URL + SHA-256, harness re-verifies), 6h train / 7h pod caps, baseline sources, recipe pin hex on the API. |
 | prism v3 harness | done (branch `prism-better`) | Multi-file harness package (`main.py` + `prismlib/`, miner code in `unshare --net` subprocess), seeded train stream with authoritative token counter, G6 probes, `prismlib/cheatguard.py` AST audit, METRICS_JSON v2, miner-chosen tokenizer, G5 RULER/BABILong/natural (pretrain-only), `RECIPE_VERSION 1.4.0`. |
@@ -127,8 +116,8 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 |-----|--------|
 | DCAP verify holds the attest mutex | A cold Intel PCS fetch (up to 20 s) serialises attestation submissions. |
 | DCAP error classification | Matches on `anyhow` message text; re-run `cargo test -p attest-policy --features dcap` after any `dcap-qvl` bump. |
-| Design compose/images | deploy-wiring in progress; local port `28093` documented. |
-| Design emission ceremony | Emission disabled (0 bps); prism at 100% (10000 bps). Optional prod `design_sk` / owner key rotation still pending. |
+| Relearn eval image digest | Empty until `CortexLM/relearn` CI publishes a digest-pinned `relearn-eval` image. Live Lium rent is refused until then. |
+| Relearn public repo | `gh repo create CortexLM/relearn` needs org write; seed is in `docs/external-miner/relearn-seed/` until the public repo exists. |
 | Mainnet (netuid 100) | Owner wallet not yet on this machine, so prod runs with `BASE_GATEWAY_REQUIRE_OWNER=0`. |
 | Prod pin placeholders | `deploy/pins/prod.json` still ships zero-digests until the first successful promote; registry mode rejects placeholders. |
 | Spaces backup secrets | First prod promote is fail-closed without `BASE_BACKUP_ENDPOINT` + `SPACES_ACCESS_KEY_ID` / `SPACES_SECRET_ACCESS_KEY` (or AWS_* fallbacks) in GitHub. |

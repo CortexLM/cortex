@@ -5,8 +5,9 @@ Operator-facing map of the control plane. Normative byte contracts live in the f
 | Spec | Status | Role |
 |------|--------|------|
 | [`BUNDLE_SPEC.md`](./BUNDLE_SPEC.md) | **FROZEN** | Epoch bundle SCALE layout, merkle, aggregation, on-chain payload bounds |
-| [`DESIGN_CHALLENGE.md`](./DESIGN_CHALLENGE.md) | **FROZEN** | `design` challenge: harness sandbox, agentic review, admin winners, D24 leaves |
-| [`PRISM.md`](./PRISM.md) | live | `prism` Lium GPU recipe challenge (HTTP submit) |
+| [`DESIGN_CHALLENGE.md`](./DESIGN_CHALLENGE.md) | archived freeze | Retired `design` product (not live) |
+| [`PRISM.md`](./PRISM.md) | archived | Retired `prism` product (Lium rails reused by Relearn) |
+| [`RELEARN.md`](./RELEARN.md) | live | `relearn` post-training factory (HTTP submit, no CVM) |
 
 Do not restate those contracts here. Link them.
 
@@ -23,7 +24,7 @@ Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
 - Gateway runs **only** as subnet owner (master). Startup asserts hotkey == on-chain `SubnetOwnerHotkey` or exits `2` before bind.
 - Validators **recompute** the weight vector from a signed, merkle-rooted epoch bundle. Challenge keys and measurements come from **owner-signed local files**, never from gateway HTTP.
 - CRV4 timelock commit-reveal on Bittensor testnet/mainnet as configured. Reveal is automatic on-chain.
-- Challenges accept miner work over **HTTP** (design Python harness sandbox; prism Lium GPU eval). No miner Phala/CVM path.
+- The live challenge accepts miner work over **HTTP** (Relearn digest freeze → Lium/sim eval). No miner Phala/CVM / TDX path.
 
 ---
 
@@ -34,8 +35,7 @@ Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
                     │  Master host (compose profile master) │
                     │  postgres · gateway · validator ·     │
                     │  updater · socket-proxy ·             │
-                    │  prism-challenge · design-challenge · │
-                    │  design-egress-proxy                  │
+                    │  relearn-challenge                    │
                     └───────────────┬─────────────────────┘
                                     │ TLS terminates in gateway (D20)
                                     │ /challenge/{id}/*  /v1/bundle/*
@@ -48,7 +48,7 @@ Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
                                     │ HTTP submit
                     ┌───────────────▼─────────────────────┐
                     │  Miner clients (no TEE required)     │
-                    │  design harness / prism scripts       │
+                    │  relearn artifact digest + Lium BYOK  │
                     └─────────────────────────────────────┘
 ```
 
@@ -56,9 +56,7 @@ Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
 |----------------|------|
 | `gateway` | Master-only: registry, reverse proxy, bundle seal/serve, sole TLS owner; mounts marketing [`SITE_API.md`](./SITE_API.md) (`GET /v1/site/*`) |
 | `validator` | Fetch/mirror bundle, verify, recompute, peer cross-check, CRV4 submit, dissent |
-| `design-challenge` | **Master-only:** sandbox harness runs, sanitize/viewer, scoring, sign leaves |
-| `design-egress-proxy` | **Master-only:** open sandbox egress (internal-target blocklist) + budgeted LLM path |
-| `prism-challenge` | **Master-only:** Lium (or sim) recipe eval, review gate, sign leaves |
+| `relearn-challenge` | **Master-only:** digest freeze, holdout unseal, Lium/sim eval, operator promote, sign leaves |
 | `updater` | Digest-pinned rollouts via `docker-socket-proxy` (master) |
 | `trustroot` | Offline keygen / sign / verify for owner-signed TOML |
 | `bundle` | SCALE types, seal, verify (`PROTOCOL_VERSION`) |
@@ -95,7 +93,7 @@ Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
 | `config/measurements.toml` + `.sig` | yes | every validator from **disk** |
 | Challenge / owner mini-secrets | **never** | challenge service / offline ceremony only |
 
-Current emission posture: `design = 0` bps, `prism = 10000` bps (100% prism; sum = 10000).
+Current emission posture: `relearn = 10000` bps (100%; one-challenge subnet).
 
 Gateway DB is **routing only**. It is never a source of challenge keys, emission shares, or measurements (D18, D23).
 

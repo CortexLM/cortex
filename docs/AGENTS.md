@@ -33,8 +33,7 @@ Public miner docs live **outside** this monorepo (examples + human guides only �
 
 | Challenge | Repo |
 |-----------|------|
-| Design | [`BaseIntelligence/design-challenge`](https://github.com/BaseIntelligence/design-challenge) |
-| Prism | [`BaseIntelligence/prism`](https://github.com/BaseIntelligence/prism) |
+| Relearn | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) |
 
 `docs/external-miner/` remains the in-repo mirror for CI (`external-docs-check`) and operators. When challenge APIs or rules change, update **both** the public repo and `external-miner/` (see root [`../AGENTS.md`](../AGENTS.md) § Challenge public docs).
 
@@ -42,9 +41,9 @@ Public miner docs live **outside** this monorepo (examples + human guides only �
 
 When updating challenge or local-subnet docs/runbooks, keep these invariants:
 
-- **Master-only eval** — design/prism challenge services run on master; validator has **no challenge exec** (fetch sealed weights only).
-- **Simulate submissions** — submit baseline **and** a cheat fixture through the challenge service; poll `/events` + `/logs`; do not treat `/health` alone as proof.
-- **Design admin winners** — after clean `awaiting_admin`, operator bearer awards 1|2 winners; then leaf → seal path.
+- **Master-only eval** — `relearn-challenge` runs on master; validator has **no challenge exec** (fetch sealed weights only).
+- **Simulate submissions** — `POST /v1/submissions` then poll `GET /v1/submissions/{id}`; do not treat `/health` alone as proof. A regression must not become champion.
+- **Relearn promote** — after clean `awaiting_admin`, operator bearer `POST /v1/admin/promote`; then leaf → seal path.
 - **No host Sim in staging/prod** — Docker only; `SimSandbox` / `BASE_ALLOW_HOST_SIM` are CI/local opt-in.
 - **Seal path** — `POST /v1/weights/raw` → seal → `GET /v1/weights/latest` with `sealed: true` (unsealed burn fallback is always available). That path needs `challenge_sk` + `gateway_sk`, **not** a gateway owner wallet. Validator wallets are for on-chain submit only.
 - Normative local procedure: [`runbooks/local-testnet-e2e.md`](runbooks/local-testnet-e2e.md). Repo contract: [`../AGENTS.md`](../AGENTS.md) § Challenge verification.

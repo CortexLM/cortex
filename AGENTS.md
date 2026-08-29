@@ -2,7 +2,7 @@
 
 Short contract for agents and operators. Prefer linking over restating runbooks.
 
-**Product:** Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) — Bittensor subnet control plane for decentralized collaborative AI research via multiple challenges. Naming split (Cortex vs leftover `base` / `BASE_*`): [`docs/NAMING.md`](docs/NAMING.md).
+**Product:** Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) — Bittensor subnet control plane for a **one-challenge** post-training factory (**Relearn**). Challenge code lives in [`CortexLM/relearn`](https://github.com/CortexLM/relearn). Naming split (Cortex vs leftover `base` / `BASE_*`): [`docs/NAMING.md`](docs/NAMING.md).
 
 ## Monorepo map
 
@@ -34,7 +34,7 @@ Working branch: **`main`**. Prod ships from annotated tags `v*.*.*` cut on `main
 |-----|-----|------------|
 | `gateway_sk` | Gateway | Bundle **seal** signatures (`POST /v1/admin/seal`) |
 | `gateway_admin_token` | Gateway + seal scripts | Bearer for **`/v1/admin/*`** (seal, backends, attest-grant). **Required** when `BASE_GATEWAY_REQUIRE_OWNER=1` |
-| `prism_sk` / `design_sk` | Challenge / smoke | Signed leaves (`POST /v1/weights/raw`); pubs must match trust root |
+| `relearn_sk` | Relearn / smoke | Signed leaves (`POST /v1/weights/raw`); pub must match trust root |
 | Gateway owner wallet + `BASE_GATEWAY_REQUIRE_OWNER` | Gateway | Master-only **identity** check (live/prod). **Not** required to seal or serve `/v1/weights/latest` |
 | Validator wallet | Validator | On-chain weight **submit** only — validators *fetch* sealed weights; they do not need a gateway wallet |
 
@@ -46,10 +46,9 @@ Each live challenge has a **separate public GitHub repo** for miners. Those repo
 
 | Challenge | Public repo | Role |
 |-----------|-------------|------|
-| Design | [`BaseIntelligence/design-challenge`](https://github.com/BaseIntelligence/design-challenge) | Miner docs + baseline harness |
-| Prism | [`BaseIntelligence/prism`](https://github.com/BaseIntelligence/prism) | Miner docs + recipe examples (publish / keep in sync; no control-plane code) |
+| Relearn | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) | Eval image, harness, generators, teacher, miner docs |
 
-Those public URLs are historical org names; this control-plane repo is `CortexLM/cortex`. Monorepo mirror for CI and operators: [`docs/external-miner/`](docs/external-miner/). Frozen contracts stay in this repo (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`, …).
+This control-plane repo is `CortexLM/cortex`. Monorepo miner-doc mirror: [`docs/external-miner/`](docs/external-miner/). Historical frozen specs (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`) stay archived; they are not live products.
 
 **When a challenge product or public API changes**, agents **must** update:
 
@@ -64,12 +63,11 @@ When verifying a challenge (local-e2e, staging, or focused tests), **simulate a 
 
 1. Happy-path harness / intake POST (or equivalent) through the challenge service on master.
 2. Edge / failure probes: bad harness, sanitize reject, quota, wrong routes/auth.
-3. **Design — baseline:** submit the reference agent at [`docs/external-miner/examples/design-baseline/`](docs/external-miner/examples/design-baseline/) (`agent.py` + `pyproject.toml`). After `POST /v1/harness`, poll `GET /v1/runs/{id}` + `/events` + `/logs?since=` until `awaiting_admin` / terminal; assert `GET /v1/runs/{id}/pages` lists `index.html`, `pricing.html`, `components.html` and `GET /v1/view/{run_id}/{page}` returns **200**; probe `GET /v1/stats` and `GET /v1/dashboard`.
-4. **Design — cheat:** submit a malicious/copy harness; expect agentic `cheat`/`suspicious` → `Score(0)` (not admin-eligible). Poll events/logs the same way.
-5. **Design — admin winners:** with operator bearer (`deploy/secrets/design/annotator_tokens`), `GET /v1/admin/rounds/{id}/candidates` then `POST /v1/admin/rounds/{id}/winners` with 1 or 2 clean harness ids (`SCORE_MAX` or `SCORE_MAX/2`).
-6. Leaf emission → `POST /v1/weights/raw` → seal → `GET /v1/weights/latest` with **`sealed: true`** (burn fallback alone is not a real seal).
+3. **Relearn — submit:** `POST /v1/submissions` with a 64-hex hotkey + artifact digest (optional `X-Lium-Api-Key`). Poll `GET /v1/submissions/{id}` until `awaiting_admin` or `rejected`. Holdout must stay sealed until the digest freezes. A regression must not become champion.
+4. **Relearn — promote:** with operator bearer (`deploy/secrets/relearn/admin_tokens`), `POST /v1/admin/promote` only for an eligible paired win.
+5. Leaf emission → `POST /v1/weights/raw` → seal → `GET /v1/weights/latest` with **`sealed: true`** (burn fallback alone is not a real seal).
 
-**Never host Sim in staging/prod** — Docker sandbox only there. `SimSandbox` / `BASE_ALLOW_HOST_SIM=1` is CI/local opt-in only; do **not** treat stub pages (`sim-install-ok` / `sim-run-ok` without executing `agent.py`) as proof. Prefer `DESIGN_FORCE_SIM=false` + OpenRouter when `deploy/secrets/openrouter/api_key` is present.
+**Never host Sim in staging/prod** for live scoring. `RELEARN_FORCE_SIM=1` is CI/local opt-in only. Live rent requires a digest pin in `config/relearn-pin.toml` plus miner BYOK (`LIUM_API_KEY` / `X-Lium-Api-Key`). Never log or commit that key.
 
 Local smoke automates the weights seal step via `weights-smoke` inside `./deploy/scripts/local-e2e.sh --smoke` (see [`deploy/AGENTS.md`](deploy/AGENTS.md) and [`docs/runbooks/local-testnet-e2e.md`](docs/runbooks/local-testnet-e2e.md)).
 
@@ -113,7 +111,7 @@ Match CI (`.github/workflows/ci.yml`):
 | Doc authority vs evidence | [`docs/AGENTS.md`](docs/AGENTS.md) |
 | Component status | [`docs/COMPLETENESS.md`](docs/COMPLETENESS.md) |
 | Frozen contracts | [`docs/BUNDLE_SPEC.md`](docs/BUNDLE_SPEC.md), [`docs/DESIGN_CHALLENGE.md`](docs/DESIGN_CHALLENGE.md), [`docs/PRISM.md`](docs/PRISM.md) |
-| Miner HTTP submit | [`docs/external-miner/`](docs/external-miner/) · public: [design-challenge](https://github.com/BaseIntelligence/design-challenge), [prism](https://github.com/BaseIntelligence/prism) |
+| Miner HTTP submit | [`docs/external-miner/`](docs/external-miner/) · public: [CortexLM/relearn](https://github.com/CortexLM/relearn) |
 | Threat / operator checklist | [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md), [`docs/OPERATOR_SECURITY.md`](docs/OPERATOR_SECURITY.md) |
 
 ## Do not commit

@@ -19,14 +19,10 @@ services:
   # Updater disabled on validator until GHCR pins wired.
   updater:
     profiles: ["never"]
-  # Challenges + Docker sock proxy are master-only (harness eval / sandbox).
+  # Challenges + Docker sock proxy are master-only.
   # Validators fetch sealed weights from the master gateway; they do not run
   # miner code or hold challenge mini-secrets.
-  prism-challenge:
-    profiles: ["never"]
-  design-challenge:
-    profiles: ["never"]
-  design-egress-proxy:
+  relearn-challenge:
     profiles: ["never"]
   socket-proxy:
     profiles: ["never"]

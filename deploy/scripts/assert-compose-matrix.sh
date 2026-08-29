@@ -51,7 +51,7 @@ services=$(render \
 if echo "$services" | grep -qx "gateway"; then
   fail "validator role renders gateway (must not)"
 fi
-for banned in design-challenge design-egress-proxy prism-challenge socket-proxy; do
+for banned in relearn-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
   if echo "$services" | grep -qx "$banned"; then
     fail "validator role renders $banned (master-only; must not)"
   fi
@@ -67,9 +67,14 @@ services=$(render \
 if ! echo "$services" | grep -qx "gateway"; then
   fail "master role does not render gateway (must)"
 fi
-for required in design-challenge design-egress-proxy prism-challenge socket-proxy; do
+for required in relearn-challenge socket-proxy; do
   if ! echo "$services" | grep -qx "$required"; then
     fail "master role does not render $required (must)"
+  fi
+done
+for retired in design-challenge design-egress-proxy prism-challenge; do
+  if echo "$services" | grep -qx "$retired"; then
+    fail "master role still renders retired $retired"
   fi
 done
 if echo "$services" | grep -qx "validator"; then
@@ -104,7 +109,7 @@ services=$(render \
 if echo "$services" | grep -qx "evil-gateway"; then
   fail "prod validator renders evil-gateway (must not)"
 fi
-for banned in design-challenge design-egress-proxy prism-challenge socket-proxy; do
+for banned in relearn-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
   if echo "$services" | grep -qx "$banned"; then
     fail "prod validator renders $banned (master-only; must not)"
   fi
@@ -123,30 +128,27 @@ for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
     fail "$env_file enables BASE_ALLOW_HOST_SIM (host Sim forbidden on droplets)"
   fi
   if echo "$rendered" | grep -qE 'DESIGN_FORCE_SIM:[[:space:]]*["'\'']?(1|true|TRUE|yes)["'\'']?'; then
-    fail "$env_file enables DESIGN_FORCE_SIM (Docker-only on droplets)"
+    fail "$env_file enables DESIGN_FORCE_SIM (retired; must not ship)"
   fi
-  # Screenshot Chromium isolation: must force egress proxy (not empty / direct).
-  if ! echo "$rendered" | grep -qE 'DESIGN_SCREENSHOT_PROXY:[[:space:]]*http://design-egress-proxy:8094'; then
-    fail "$env_file master render missing DESIGN_SCREENSHOT_PROXY=http://design-egress-proxy:8094"
+  if echo "$rendered" | grep -qE 'RELEARN_FORCE_SIM:[[:space:]]*["'\'']?(1|true|TRUE|yes)["'\'']?'; then
+    fail "$env_file enables RELEARN_FORCE_SIM (sim is local-only; must not ship on droplets)"
   fi
 done
 echo "OK: staging/prod do not enable host SimSandbox"
-echo "OK: staging/prod force screenshot Chromium through design-egress-proxy"
 
-# --- prism-challenge + design-challenge present in default ---
+# --- relearn-challenge present in default; design/prism retired ---
 default_services=$(render \
   -f docker-compose.yml \
   config --services)
-if ! echo "$default_services" | grep -qx "prism-challenge"; then
-  fail "prism-challenge not in default compose"
+if ! echo "$default_services" | grep -qx "relearn-challenge"; then
+  fail "relearn-challenge not in default compose"
 fi
-if ! echo "$default_services" | grep -qx "design-challenge"; then
-  fail "design-challenge not in default compose"
-fi
-if ! echo "$default_services" | grep -qx "design-egress-proxy"; then
-  fail "design-egress-proxy not in default compose"
-fi
-echo "OK: prism-challenge + design-challenge + design-egress-proxy in default compose"
+for retired in prism-challenge design-challenge design-egress-proxy; do
+  if echo "$default_services" | grep -qx "$retired"; then
+    fail "retired $retired still in default compose"
+  fi
+done
+echo "OK: relearn-challenge in default compose; design/prism retired"
 
 # --- no fake chain backend survives anywhere in the matrix ---
 for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
@@ -211,14 +213,10 @@ echo "$local_services" | grep -qx "gateway" \
   || fail "env-local master stack does not render gateway"
 echo "$local_services" | grep -qx "validator" \
   || fail "env-local master stack does not render co-located validator"
-echo "$local_services" | grep -qx "prism-challenge" \
-  || fail "env-local master stack does not render prism-challenge"
-echo "$local_services" | grep -qx "design-challenge" \
-  || fail "env-local master stack does not render design-challenge"
-echo "$local_services" | grep -qx "design-egress-proxy" \
-  || fail "env-local master stack does not render design-egress-proxy"
-echo "$local_rendered" | grep -qE 'published: "?28093"?' \
-  || fail "env-local does not publish design-challenge on 28093"
+echo "$local_services" | grep -qx "relearn-challenge" \
+  || fail "env-local master stack does not render relearn-challenge"
+echo "$local_rendered" | grep -qE 'published: "?28095"?' \
+  || fail "env-local does not publish relearn-challenge on 28095"
 for banned in agent-challenge hypertraining-challenge miner-agent miner-socket-proxy base-agent; do
   if echo "$local_services" | grep -qx "$banned"; then
     fail "removed service still rendered: $banned"
@@ -230,6 +228,6 @@ for banned in agent-challenge hypertraining-challenge miner-agent miner-socket-p
     fail "removed service still in default compose: $banned"
   fi
 done
-echo "OK: env-local preserves testnet/541; design on 28093; removed agent/hypertraining/miner services"
+echo "OK: env-local preserves testnet/541; relearn on 28095; removed agent/hypertraining/miner services"
 
 echo "assert-compose-matrix: all checks passed"

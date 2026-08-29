@@ -8,10 +8,12 @@ use serde::{Deserialize, Serialize};
 pub enum ArenaSlug {
     /// Coding (paused).
     Coding,
-    /// Design challenge.
+    /// Design challenge (retired).
     Design,
-    /// Prism challenge.
+    /// Prism challenge (retired).
     Prism,
+    /// Relearn post-training factory.
+    Relearn,
 }
 
 impl ArenaSlug {
@@ -22,6 +24,7 @@ impl ArenaSlug {
             "coding" => Some(Self::Coding),
             "design" => Some(Self::Design),
             "prism" => Some(Self::Prism),
+            "relearn" => Some(Self::Relearn),
             _ => None,
         }
     }
@@ -33,6 +36,7 @@ impl ArenaSlug {
             Self::Coding => "coding",
             Self::Design => "design",
             Self::Prism => "prism",
+            Self::Relearn => "relearn",
         }
     }
 }
@@ -47,6 +51,8 @@ pub enum ScoringMethod {
     Elo,
     /// Prism spectral fusion / BPB.
     SpectralFusion,
+    /// Relearn paired displacement vs champion.
+    Displacement,
 }
 
 /// Reference chip on an arena card.

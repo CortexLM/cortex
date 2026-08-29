@@ -38,8 +38,7 @@ TUNNEL_CONFIG="$ROOT/.local/cloudflared-quick.yml"
 COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-base}"
 GATEWAY_HOST_PORT="${LOCAL_GATEWAY_HOST_PORT:-8080}"
 VALIDATOR_HOST_PORT="${LOCAL_VALIDATOR_HOST_PORT:-28080}"
-PRISM_HOST_PORT="${LOCAL_PRISM_HOST_PORT:-28092}"
-DESIGN_HOST_PORT="${LOCAL_DESIGN_HOST_PORT:-28093}"
+RELEARN_HOST_PORT="${LOCAL_RELEARN_HOST_PORT:-28095}"
 BASE_SECRETS_DIR="${BASE_SECRETS_DIR:-${HOME}/.base-secrets}"
 
 # Default public-only hotkey for smoke (same placeholder as gateway.env.example usage).
@@ -79,8 +78,8 @@ Prerequisites:
   - deploy/env/*.env via materialize-env.sh (examples OK for smoke)
   - For --live: base-owner wallet under deploy/secrets/wallets/ (btcli layout)
   - For --live on-chain weight submit: base-validator wallet
-  - Secret files: gateway_sk (seal), prism_sk/design_sk (challenge leaf sigs).
-    Smoke prefers ~/.base-secrets/challenge-*.sk when pubs match trust root;
+  - Secret files: gateway_sk (seal), relearn_sk (challenge leaf sigs).
+    Smoke prefers ~/.base-secrets/challenge-relearn.sk when pubs match trust root;
     otherwise mints and rebuilds the local trust root. Gateway wallet is NOT
     required to serve sealed weights.
 
@@ -89,18 +88,14 @@ Environment knobs (optional):
   BASE_SECRETS_DIR            Challenge/owner age/sk sources (default: ~/.base-secrets)
   BASE_DOCKER_BUILD_FROM      prebuilt|source (default: prebuilt)
   LOCAL_GATEWAY_HOTKEY        Override smoke public hotkey (64 hex)
-  LOCAL_PRISM_FORCE_SIM       default true
-  LOCAL_DESIGN_FORCE_SIM      default true
-  LOCAL_DESIGN_EGRESS_SIM     default true
-  LOCAL_DESIGN_SIM_STAGE_DELAY_MS  ms pause after each design stage (default 0)
-  LOCAL_PRISM_SIM_STAGE_DELAY_MS   ms pause after each prism stage (default 0)
+  LOCAL_RELEARN_FORCE_SIM     default true
   LOCAL_ATTEST_VERIFIER       default mock_ok
 
 Wallet roles:
   - Gateway owner wallet / REQUIRE_OWNER: master-only identity check (live).
     Not required for POST /v1/weights/raw, admin seal, or GET /v1/weights/latest.
   - gateway_sk: mini-secret for bundle seal signatures (required for seal).
-  - prism_sk / design_sk: challenge leaf signatures (must match trust root pubs).
+  - relearn_sk: challenge leaf signatures (must match trust root pubs).
   - Validator wallet: on-chain weight submit only (not weights/latest serving).
 
 EOF
@@ -220,8 +215,7 @@ start_tunnel() {
 ensure_env_files() {
   # Challenge env files are required by compose (BASE_DATABASE_URL → Postgres).
   if [[ ! -f deploy/env/postgres.env || ! -f deploy/env/gateway.env \
-    || ! -f deploy/env/validator.env || ! -f deploy/env/design-challenge.env \
-    || ! -f deploy/env/prism-challenge.env ]]; then
+    || ! -f deploy/env/validator.env || ! -f deploy/env/relearn-challenge.env ]]; then
     log "materializing deploy/env/*.env from examples"
     ./deploy/scripts/materialize-env.sh
   fi
@@ -230,7 +224,7 @@ ensure_env_files() {
   local url
   url="$(database_url_from_postgres_env)"
   for f in deploy/env/gateway.env deploy/env/validator.env \
-    deploy/env/design-challenge.env deploy/env/prism-challenge.env; do
+    deploy/env/relearn-challenge.env; do
     if grep -q '^BASE_DATABASE_URL=' "$f" 2>/dev/null; then
       sed -i "s|^BASE_DATABASE_URL=.*|BASE_DATABASE_URL=${url}|" "$f"
     else
@@ -241,9 +235,8 @@ ensure_env_files() {
 }
 
 ensure_state_dirs() {
-  mkdir -p "$STATE_DIR/design/staging"
-  # Design sandbox binds must be writable by uid 65532 inside containers.
-  chmod 777 "$STATE_DIR/design/staging" 2>/dev/null || true
+  mkdir -p "$STATE_DIR/relearn"
+  chmod 777 "$STATE_DIR/relearn" 2>/dev/null || true
 }
 
 # Create a 32-byte secret file if missing. live mode refuses to invent wallets.
@@ -342,20 +335,16 @@ PY
 ensure_secrets() {
   ensure_secret_file deploy/secrets/gateway_sk "gateway seal mini-secret"
   ensure_challenge_sk_aligned \
-    deploy/secrets/prism_sk prism \
-    "${BASE_SECRETS_DIR}/challenge-prism.sk"
-  ensure_challenge_sk_aligned \
-    deploy/secrets/design_sk design \
-    "${BASE_SECRETS_DIR}/challenge-design.sk"
-  mkdir -p deploy/secrets/lium deploy/secrets/openrouter deploy/secrets/design
+    deploy/secrets/relearn_sk relearn \
+    "${BASE_SECRETS_DIR}/challenge-relearn.sk"
+  mkdir -p deploy/secrets/lium deploy/secrets/relearn
   # Touch placeholders so compose bind-mounts stay files/dirs of the right kind.
   [[ -e deploy/secrets/lium/api_key ]] || : >deploy/secrets/lium/api_key
   [[ -e deploy/secrets/lium/ssh_ed25519 ]] || : >deploy/secrets/lium/ssh_ed25519
   [[ -e deploy/secrets/lium/ssh_ed25519.pub ]] || : >deploy/secrets/lium/ssh_ed25519.pub
-  [[ -e deploy/secrets/openrouter/api_key ]] || : >deploy/secrets/openrouter/api_key
-  [[ -e deploy/secrets/design/annotator_tokens ]] || : >deploy/secrets/design/annotator_tokens
-  chown 65532:65532 deploy/secrets/design/annotator_tokens 2>/dev/null || true
-  chmod 0400 deploy/secrets/design/annotator_tokens 2>/dev/null || true
+  [[ -e deploy/secrets/relearn/admin_tokens ]] || : >deploy/secrets/relearn/admin_tokens
+  chown 65532:65532 deploy/secrets/relearn/admin_tokens 2>/dev/null || true
+  chmod 0400 deploy/secrets/relearn/admin_tokens 2>/dev/null || true
 }
 
 # Ephemeral owner-signed trust root for local stacks (prod owner key is not required).
@@ -363,30 +352,27 @@ ensure_secrets() {
 # /etc/base/config inside gateway/validator. BASE_TRUST_ROOT_DIR must be the
 # *in-container* path — a host absolute path is invisible to containers.
 #
-# Challenge public_keys ALWAYS come from deploy/secrets/{prism,design}_sk so
+# Challenge public_keys ALWAYS come from deploy/secrets/relearn_sk so
 # leaf signatures verify. A stale trust root with mismatched pubs is rebuilt.
 ensure_local_trust_root() {
   local dir="$ROOT/.local/trust-root"
   mkdir -p "$dir"
   export BASE_TRUST_ROOT_DIR=/etc/base/config
 
-  local prism_pk design_pk
-  prism_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/prism_sk")"
-  design_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/design_sk")"
+  local relearn_pk
+  relearn_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/relearn_sk")"
 
   local need_rebuild=0
   if [[ ! -f "$dir/challenges.toml" || ! -f "$dir/challenges.toml.sig" || ! -f "$dir/owner.pubkey" ]]; then
     need_rebuild=1
   else
-    python3 - "$dir/challenges.toml" "$prism_pk" "$design_pk" <<'PY' || need_rebuild=1
+    python3 - "$dir/challenges.toml" "$relearn_pk" <<'PY' || need_rebuild=1
 import sys, tomllib
 from pathlib import Path
 doc = tomllib.loads(Path(sys.argv[1]).read_text())
 rows = {c["id"]: c.get("public_key", "").lower() for c in doc.get("challenges", [])}
-want = {"prism": sys.argv[2].lower(), "design": sys.argv[3].lower()}
-for cid, pk in want.items():
-    if rows.get(cid) != pk:
-        sys.exit(1)
+if rows.get("relearn") != sys.argv[2].lower() or set(rows) != {"relearn"}:
+    sys.exit(1)
 sys.exit(0)
 PY
   fi
@@ -412,15 +398,13 @@ PY
       --out-secret "$dir/owner.age" \
       --age-recipient "$recip"
   fi
-  python3 - "$dir/challenges.toml" "$prism_pk" "$design_pk" <<'PY2'
+  python3 - "$dir/challenges.toml" "$relearn_pk" <<'PY2'
 import pathlib, sys
-prism_pk, design_pk = sys.argv[2], sys.argv[3]
+relearn_pk = sys.argv[2]
 text = (
     "version = 1\nintroduced_epoch = 0\n\n"
-    f'[[challenges]]\nid = "prism"\npublic_key = "{prism_pk}"\n'
+    f'[[challenges]]\nid = "relearn"\npublic_key = "{relearn_pk}"\n'
     "emission_share_bps = 10000\npolicy = \"all_metagraph_hotkeys\"\n\n"
-    f'[[challenges]]\nid = "design"\npublic_key = "{design_pk}"\n'
-    "emission_share_bps = 0\npolicy = \"all_metagraph_hotkeys\"\n\n"
 )
 pathlib.Path(sys.argv[1]).write_text(text)
 PY2
@@ -477,7 +461,7 @@ port_in_use() {
 
 check_host_ports() {
   local p
-  for p in "$GATEWAY_HOST_PORT" "$VALIDATOR_HOST_PORT" "$PRISM_HOST_PORT" "$DESIGN_HOST_PORT"; do
+  for p in "$GATEWAY_HOST_PORT" "$VALIDATOR_HOST_PORT" "$RELEARN_HOST_PORT"; do
     if port_in_use "$p"; then
       # Allow re-bind when this compose project already publishes the port.
       if docker ps --format '{{.Names}} {{.Ports}}' \
@@ -494,16 +478,11 @@ export_mode_env() {
   export BASE_STATE_DIR="$STATE_DIR"
   export BASE_DOCKER_BUILD_FROM="${BASE_DOCKER_BUILD_FROM:-prebuilt}"
   export BASE_GATEWAY_ENDPOINT="${BASE_GATEWAY_ENDPOINT:-http://gateway:8080}"
-  export LOCAL_PRISM_FORCE_SIM="${LOCAL_PRISM_FORCE_SIM:-true}"
-  export LOCAL_DESIGN_FORCE_SIM="${LOCAL_DESIGN_FORCE_SIM:-true}"
-  # Host SimSandbox opt-in for local overlay only (bin refuse on prod/mainnet).
-  export BASE_ALLOW_HOST_SIM="${BASE_ALLOW_HOST_SIM:-1}"
-  export LOCAL_DESIGN_EGRESS_SIM="${LOCAL_DESIGN_EGRESS_SIM:-true}"
+  export LOCAL_RELEARN_FORCE_SIM="${LOCAL_RELEARN_FORCE_SIM:-true}"
   export LOCAL_ATTEST_VERIFIER="${LOCAL_ATTEST_VERIFIER:-mock_ok}"
   export LOCAL_GATEWAY_HOST_PORT="$GATEWAY_HOST_PORT"
   export LOCAL_VALIDATOR_HOST_PORT="$VALIDATOR_HOST_PORT"
-  export LOCAL_PRISM_HOST_PORT="$PRISM_HOST_PORT"
-  export LOCAL_DESIGN_HOST_PORT="$DESIGN_HOST_PORT"
+  export LOCAL_RELEARN_HOST_PORT="$RELEARN_HOST_PORT"
   # Align app DATABASE_URL with whatever postgres.env will create (avoids
   # stale gateway.env pointing at a different database name).
   if [[ -z "${LOCAL_DATABASE_URL:-}" && -f "$ROOT/deploy/env/postgres.env" ]]; then
@@ -582,15 +561,13 @@ wait_all_health() {
   local soft_wait=30
   local saved="$WAIT_SECS"
   WAIT_SECS="$soft_wait"
-  wait_health prism-challenge "http://127.0.0.1:${PRISM_HOST_PORT}/health" || \
-    log "warning: prism not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
-  wait_health design-challenge "http://127.0.0.1:${DESIGN_HOST_PORT}/health" || \
-    log "warning: design not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
+  wait_health relearn-challenge "http://127.0.0.1:${RELEARN_HOST_PORT}/health" || \
+    log "warning: relearn not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
   WAIT_SECS="$saved"
 }
 
 # Prove seal→serve without a gateway owner wallet: signed leaves + admin seal +
-# GET /v1/weights/latest must be 200. Uses prism_sk + gateway_sk only.
+# GET /v1/weights/latest must be 200. Uses relearn_sk + gateway_sk only.
 probe_weights_latest() {
   if [[ "$DO_WEIGHTS_SMOKE" -ne 1 ]]; then
     log "skipping weights seal smoke (--no-weights-smoke)"
@@ -614,8 +591,8 @@ probe_weights_latest() {
   log "running weights-smoke (leaf submit → admin/seal → weights/latest)"
   ./target/release/weights-smoke \
     --gateway "$gw" \
-    --challenge-sk "$ROOT/deploy/secrets/prism_sk" \
-    --challenge-id prism \
+    --challenge-sk "$ROOT/deploy/secrets/relearn_sk" \
+    --challenge-id relearn \
     --netuid "$netuid" \
     --chain-endpoint "$endpoint" \
     | tee /tmp/local-e2e-weights-latest.json \
@@ -639,8 +616,7 @@ print_summary() {
 Internal (compose network):
   gateway:            http://gateway:8080
   validator probe:    http://127.0.0.1:${VALIDATOR_HOST_PORT}/healthz
-  prism:              http://127.0.0.1:${PRISM_HOST_PORT}/health
-  design:             http://127.0.0.1:${DESIGN_HOST_PORT}/health
+  relearn:            http://127.0.0.1:${RELEARN_HOST_PORT}/health
 
 EOF
   if [[ -n "$pub" ]]; then

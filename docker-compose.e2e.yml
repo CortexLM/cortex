@@ -12,22 +12,12 @@ services:
       - "8089:8080"
     environment:
       BASE_ROLE: validator
-  prism-challenge:
+  relearn-challenge:
     ports:
-      - "8092:8092"
+      - "8095:8095"
     environment:
-      BASE_CHALLENGE_BIND: 0.0.0.0:8092
-  design-challenge:
-    ports:
-      - "8093:8093"
-    environment:
-      BASE_CHALLENGE_BIND: 0.0.0.0:8093
-      # Test-only host Sim (never set on staging/prod overlays).
-      BASE_ALLOW_HOST_SIM: "1"
-      DESIGN_FORCE_SIM: "true"
-  design-egress-proxy:
-    environment:
-      DESIGN_EGRESS_SIM: "true"
+      BASE_CHALLENGE_BIND: 0.0.0.0:8095
+      RELEARN_FORCE_SIM: "true"
   socket-proxy:
     ports:
       - "2375:2375"

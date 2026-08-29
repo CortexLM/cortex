@@ -12,7 +12,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::state::SiteState;
-use crate::upstream::{self, DESIGN, PRISM};
+use crate::upstream::{self, DESIGN, PRISM, RELEARN};
+use site_data::map::relearn_arena_from_live;
 use site_data::map::{
     activity_from_lives, design_arena_from_dashboard, design_leaderboard, design_submission,
     enrich_leaderboard_uids, enrich_leaderboard_weights, enrich_submission_uids,
@@ -116,6 +117,10 @@ async fn fetch_design_dash(st: &SiteState) -> Option<Value> {
 
 async fn fetch_prism_status(st: &SiteState) -> Option<Value> {
     upstream::get_json_opt(st, PRISM, "/v1/status").await
+}
+
+async fn fetch_relearn_status(st: &SiteState) -> Option<Value> {
+    upstream::get_json_opt(st, RELEARN, "/v1/status").await
 }
 
 async fn fetch_prism_subs(st: &SiteState, limit: u32) -> Option<Value> {
@@ -227,17 +232,15 @@ fn decorate_submissions(st: &SiteState, rows: &mut [crate::Submission]) {
 
 async fn network_stats(st: &SiteState) -> NetworkStats {
     let (block, chain_epoch, validators) = chain_snapshot(st);
-    let design = fetch_design_dash(st).await;
-    let prism = fetch_prism_status(st).await;
-    let prism_subs = fetch_prism_subs(st, 200).await;
-    let arenas = arenas_with_emission(st, design.as_ref(), prism.as_ref(), prism_subs.as_ref());
+    let relearn = fetch_relearn_status(st).await;
+    let arenas = arenas_with_emission(st, None, relearn.as_ref(), None);
     let agents: u32 = arenas.iter().map(|a| a.agents).sum();
     let tao_price = site_data::price::tao_price_usd(&st.client, &st.tao_price).await;
     NetworkStats {
-        epoch: epoch_from_lives(design.as_ref(), prism.as_ref(), chain_epoch),
+        epoch: epoch_from_lives(None, relearn.as_ref(), chain_epoch),
         agents,
         validators: u32::try_from(validators.len()).unwrap_or(0),
-        arenas: 3,
+        arenas: 2,
         emission_per_day: 0.0,
         tao_price,
         block_height: block,
@@ -302,15 +305,8 @@ async fn get_landing(State(st): State<SiteState>) -> impl IntoResponse {
 }
 
 async fn get_arenas(State(st): State<SiteState>) -> impl IntoResponse {
-    let design = fetch_design_dash(&st).await;
-    let prism = fetch_prism_status(&st).await;
-    let prism_subs = fetch_prism_subs(&st, 200).await;
-    Json(arenas_with_emission(
-        &st,
-        design.as_ref(),
-        prism.as_ref(),
-        prism_subs.as_ref(),
-    ))
+    let relearn = fetch_relearn_status(&st).await;
+    Json(arenas_with_emission(&st, None, relearn.as_ref(), None))
 }
 
 async fn get_arena(State(st): State<SiteState>, Path(slug): Path<String>) -> Response {
@@ -325,6 +321,7 @@ async fn get_arena(State(st): State<SiteState>, Path(slug): Path<String>) -> Res
             let subs = fetch_prism_subs(&st, 200).await;
             prism_arena_from_live(status.as_ref(), subs.as_ref())
         }
+        ArenaSlug::Relearn => relearn_arena_from_live(fetch_relearn_status(&st).await.as_ref()),
     };
     apply_emission(&st, &mut arena);
     Json(arena).into_response()
@@ -583,6 +580,7 @@ async fn get_leaderboard(
         ArenaSlug::Prism => {
             Json(prism_leaderboard_json(&st, page, page_size, needle).await).into_response()
         }
+        ArenaSlug::Relearn => Json(empty_leaderboard_json(page, page_size)).into_response(),
     }
 }
 
@@ -599,7 +597,7 @@ async fn get_submissions(
     let status_filter = q.status.as_deref();
     let needle = q.q.as_deref();
     match slug {
-        ArenaSlug::Coding => {
+        ArenaSlug::Coding | ArenaSlug::Relearn => {
             Json(page_slice::<crate::Submission>(&[], page, page_size)).into_response()
         }
         ArenaSlug::Design => {
@@ -1345,16 +1343,10 @@ mod tests {
 
         let (s, v) = call(app.clone(), "/v1/site/arenas").await;
         assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v.as_array().unwrap().len(), 3);
+        assert_eq!(v.as_array().unwrap().len(), 2);
         assert_eq!(v[0]["slug"], "coding");
-        // List rows without v2.1 markers must not inflate Prism agents / BPB.
-        assert_eq!(v[2]["slug"], "prism");
-        assert_eq!(v[2]["bestScoreLabel"], "BEST G2");
-        assert_eq!(v[2]["agents"], 0);
-        assert_eq!(v[2]["bestScore"], "—");
-        assert_eq!(v[1]["bestScore"], "1,300");
-        assert_eq!(v[1]["roundId"], 9);
-        assert_eq!(v[1]["secondsRemaining"], 120);
+        assert_eq!(v[1]["slug"], "relearn");
+        assert_eq!(v[1]["bestScoreLabel"], "DISPLACE");
 
         let (s, v) = call(app.clone(), "/v1/site/arenas/design/submissions").await;
         assert_eq!(s, StatusCode::OK, "{v}");
@@ -1715,7 +1707,7 @@ mod tests {
         };
         let st = st.with_weights(
             Arc::new(ChallengesBody {
-                challenges: vec![entry("design", 5_000), entry("prism", 5_000)],
+                challenges: vec![entry("relearn", 10_000)],
             }),
             Arc::new(|| None),
         );
@@ -1723,19 +1715,17 @@ mod tests {
 
         let (s, v) = call(app.clone(), "/v1/site/arenas").await;
         assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v[1]["emissionShare"], 0.5);
-        assert_eq!(v[2]["emissionShare"], 0.5);
+        assert_eq!(v[1]["slug"], "relearn");
+        assert_eq!(v[1]["emissionShare"], 1.0);
         // Unsealed: effective weights stay 0.
         assert_eq!(v[1]["weight"], 0.0);
-        assert_eq!(v[2]["weight"], 0.0);
 
         let (s, v) = call(app.clone(), "/v1/site/weights").await;
         assert_eq!(s, StatusCode::OK, "{v}");
         assert_eq!(v["sealed"], false);
         assert_eq!(v["burnShare"], 1.0);
-        assert_eq!(v["emissionShares"][0]["arena"], "design");
-        assert_eq!(v["emissionShares"][0]["share"], 0.5);
-        assert_eq!(v["emissionShares"][1]["arena"], "prism");
+        assert_eq!(v["emissionShares"][0]["arena"], "relearn");
+        assert_eq!(v["emissionShares"][0]["share"], 1.0);
         assert!(v["hotkeyWeights"].as_array().unwrap().is_empty());
     }
 

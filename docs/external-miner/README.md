@@ -8,34 +8,34 @@
 This badge must match `bundle::PROTOCOL_VERSION` in crate `bundle`.  
 CI gate: `cargo run -p xtask -- external-docs-check`.
 
-Agent-v1 / Phala CVM / hypertraining miner paths are **removed**. Miners submit
-over HTTP to the live challenges:
+Cortex is a **one-challenge subnet**: **Relearn**. Design and Prism are retired
+as products (their crates remain as unused libraries / historical specs).
 
 | Challenge | `challenge_id` | Scoring | Guide | Public miner repo |
 |-----------|----------------|---------|-------|-------------------|
-| Design | `design` | `challenge_scoring_version` **2** (daily share ≥2 wins + agentic) | [design.md](./design.md) | [BaseIntelligence/design-challenge](https://github.com/BaseIntelligence/design-challenge) |
-| Prism | `prism` | `challenge_scoring_version` **4** (G2 public-suite benchmarks) | [prism.md](./prism.md) | [BaseIntelligence/prism](https://github.com/BaseIntelligence/prism) |
+| Relearn | `relearn` | `challenge_scoring_version` **1** (paired displacement vs champion) | [relearn.md](./relearn.md) | [CortexLM/relearn](https://github.com/CortexLM/relearn) |
+
+Pinned models (verified Hugging Face ids):
+
+- Base: `Qwen/Qwen3.8-Flash-Next`
+- Teacher / judge: `zai-org/GLM-5.3`
 
 Do **not** conflate version axes:
 
 | Axis | Value | Meaning |
 |------|-------|---------|
 | Bundle `protocol_version` | **1** | Leaf / merkle / weight bytes ([`BUNDLE_SPEC.md`](../BUNDLE_SPEC.md)) |
-| Design scoring | **1** | Agentic anti-cheat + admin winners 1\|2 ([`DESIGN_CHALLENGE.md`](../DESIGN_CHALLENGE.md)) |
-| Prism scoring | **2** | Pure bpb + agentic/AST/metrics anti-cheat ([`PRISM.md`](../PRISM.md)) |
+| Relearn scoring | **1** | Displacement vs previous champion + overfit gates |
 
 | Page | Topic |
 |------|-------|
-| [design.md](./design.md) | Design harness (`agent.py` + `pyproject.toml`) HTTP submit |
-| [examples/design-baseline/](./examples/design-baseline/) | Reference design miner (`llm.chat` → required HTML pages) |
-| [prism.md](./prism.md) | Prism AutoModel patch (`automodel.base` + `automodel.patch`) HTTP submit |
-| [examples/dense-1b/](./examples/dense-1b/) | Reference Prism miner (dense ~975M, ZeRO-1) |
-| [troubleshoot.md](./troubleshoot.md) | Common HTTP / quota / scoring failures |
+| [relearn.md](./relearn.md) | Artifact digest HTTP submit, Lium BYOK, promote |
+| [troubleshoot.md](./troubleshoot.md) | Common HTTP / scoring failures |
 
 Normative contracts:
 
-- Design freeze: [`../DESIGN_CHALLENGE.md`](../DESIGN_CHALLENGE.md)
-- Prism: [`../PRISM.md`](../PRISM.md) + [`../PRISM_RECIPE.md`](../PRISM_RECIPE.md)
+- Relearn (this repo): [`../ARCHITECTURE.md`](../ARCHITECTURE.md) + `config/relearn-pin.toml`
+- Public eval image / harness: [CortexLM/relearn](https://github.com/CortexLM/relearn)
 - Bundle bytes: [`../BUNDLE_SPEC.md`](../BUNDLE_SPEC.md)
 - Threat claim (D19): [`../THREAT_MODEL.md`](../THREAT_MODEL.md) §1
 
@@ -44,16 +44,15 @@ Normative contracts:
 Production/staging miners call the **gateway** reverse proxy:
 
 ```text
-https://<gateway>/challenge/design/...
-https://<gateway>/challenge/prism/...
+https://<gateway>/challenge/relearn/...
 ```
 
 Local smoke (host ports from `env-local.yml`):
 
 ```bash
-curl -sS http://127.0.0.1:28093/health   # design-challenge
-curl -sS http://127.0.0.1:28092/health   # prism-challenge
+curl -sS http://127.0.0.1:28095/health   # relearn-challenge
 ```
 
-Never paste mnemonics or challenge signing keys into miner clients. Hotkeys are
-public 64-hex identifiers only.
+Never paste mnemonics, Lium keys, or challenge signing keys into miner clients
+or into git. Hotkeys are public 64-hex identifiers only. Read `LIUM_API_KEY`
+from the environment (or send `X-Lium-Api-Key` on submit) — never commit it.

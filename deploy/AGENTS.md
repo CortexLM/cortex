@@ -35,8 +35,7 @@ Compose always runs a digest-pinned `postgres` service (`base-pgdata` volume, he
 
 | Data | Store |
 |------|--------|
-| Design harnesses / runs / stages / artifacts metadata / admin rounds | **Postgres** (`design_*`) |
-| Prism submissions / stage events | **Postgres** (`prism_*`) |
+| Relearn submissions (v0) | **in-memory** (`relearn-store`); Postgres can replace without changing HTTP |
 | Gateway raw weight leaves + sealed bundles | **Postgres** (`raw_weight_snapshot`, `epoch_bundle`, …) |
 | Validator attestations (when DB configured) | **Postgres** |
 | Design sandbox staging files | volume `${BASE_STATE_DIR}/design/staging` + `design-artifacts` |
@@ -44,7 +43,7 @@ Compose always runs a digest-pinned `postgres` service (`base-pgdata` volume, he
 | site-api (`GET /v1/site/*`) | no DB — proxies challenge upstreams via gateway |
 | Unit/integration tests | may construct `Memory*Store` directly; omit `BASE_DATABASE_URL` only there |
 
-Migrations (`crates/db/migrations`) run on boot in gateway / design-challenge / prism-challenge when `BASE_DATABASE_URL` is set. Compose requires `deploy/env/{design,prism}-challenge.env` so challenges cannot silently boot on memory.
+Migrations (`crates/db/migrations`) run on boot in gateway when `BASE_DATABASE_URL` is set. Compose requires `deploy/env/relearn-challenge.env` so the live challenge cannot silently boot without operator config.
 
 ## Prism Lium GPU profiles (do not mix)
 
@@ -86,7 +85,7 @@ Full procedure: [`docs/runbooks/local-testnet-e2e.md`](../docs/runbooks/local-te
 | `base-validator` wallet | **no** (fetch-only) | for on-chain weight submit |
 | Fresh `target/release/{gateway,validator,…}` (or `BASE_DOCKER_BUILD_FROM=source`) | recommended | **required** for real chain |
 
-**Weights seal smoke (default on `--smoke`):** after healthz, `local-e2e.sh` runs `weights-smoke` — signed prism leaves for the live metagraph → `POST /v1/admin/seal` → assert `GET /v1/weights/latest` is **200** with **`sealed: true`**. Skip with `--no-weights-smoke`. Pre-seal, latest is **200 burn** (`sealed: false`, uid 0 = 100%) — never 404; that is unrelated to a missing gateway owner wallet. Prefer `--burn` on mainnet when sealing without real challenge scores (all `NoScore` → uid 0).
+**Weights seal smoke (default on `--smoke`):** after healthz, `local-e2e.sh` runs `weights-smoke` — signed relearn leaves for the live metagraph → `POST /v1/admin/seal` → assert `GET /v1/weights/latest` is **200** with **`sealed: true`**. Skip with `--no-weights-smoke`. Pre-seal, latest is **200 burn** (`sealed: false`, uid 0 = 100%) — never 404; that is unrelated to a missing gateway owner wallet. Prefer `--burn` on mainnet when sealing without real challenge scores (all `NoScore` → uid 0).
 
 **Interim prod burn seal (retired while prism auto-emits):** `weights-smoke --burn` posts all-`NoScore` at a **block-scale** epoch. That hid the live Prism 2.1 WTA winner (chain epoch ~24k) because `/v1/weights/latest` had no chain-scale bundle to prefer. Keep the script for emergency burn-only windows; **do not** enable `base-burn-seal.timer` when Prism is emitting scores. `remote-deploy` on master enables real-seal and disables the burn timer.
 

@@ -6,7 +6,6 @@
 #
 # Usage:
 #   GATEWAY_URL=http://127.0.0.1:8080 ./deploy/scripts/register-challenge-backends.sh
-#   # or via docker network from the host after compose up:
 #   ./deploy/scripts/register-challenge-backends.sh --compose
 set -euo pipefail
 
@@ -14,16 +13,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
 GATEWAY_URL="${GATEWAY_URL:-http://127.0.0.1:8080}"
-PRISM_URL="${PRISM_BACKEND_URL:-http://prism-challenge:8092}"
-DESIGN_URL="${DESIGN_BACKEND_URL:-http://design-challenge:8093}"
+RELEARN_URL="${RELEARN_BACKEND_URL:-http://relearn-challenge:8095}"
 COMPOSE_MODE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --compose) COMPOSE_MODE=1; shift ;;
     --gateway-url) GATEWAY_URL="$2"; shift 2 ;;
-    --prism-url) PRISM_URL="$2"; shift 2 ;;
-    --design-url) DESIGN_URL="$2"; shift 2 ;;
+    --relearn-url) RELEARN_URL="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,12p' "$0"
       exit 0
@@ -33,7 +30,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 resolve_admin_token() {
-  # Prefer env token; else file (prod: deploy/secrets/gateway_admin_token).
   if [[ -n "${BASE_GATEWAY_ADMIN_TOKEN:-}" ]]; then
     printf '%s' "${BASE_GATEWAY_ADMIN_TOKEN}"
     return 0
@@ -85,17 +81,12 @@ register_one() {
   esac
 }
 
-register_one prism "$PRISM_URL"
-register_one design "$DESIGN_URL"
+register_one relearn "$RELEARN_URL"
 
-# Smoke the proxy path (health, not healthz — challenge services use /health).
 if [[ "$COMPOSE_MODE" -eq 1 ]]; then
   docker compose -f docker-compose.yml -f deploy/compose/role-master.yml \
-    exec -T gateway curl -fsS -m 5 http://127.0.0.1:8080/challenge/prism/health >/dev/null
-  docker compose -f docker-compose.yml -f deploy/compose/role-master.yml \
-    exec -T gateway curl -fsS -m 5 http://127.0.0.1:8080/challenge/design/health >/dev/null
+    exec -T gateway curl -fsS -m 5 http://127.0.0.1:8080/challenge/relearn/health >/dev/null
 else
-  curl -fsS -m 5 "${GATEWAY_URL%/}/challenge/prism/health" >/dev/null
-  curl -fsS -m 5 "${GATEWAY_URL%/}/challenge/design/health" >/dev/null
+  curl -fsS -m 5 "${GATEWAY_URL%/}/challenge/relearn/health" >/dev/null
 fi
-echo "challenge proxy health: ok (prism + design)"
+echo "challenge proxy health: ok (relearn)"

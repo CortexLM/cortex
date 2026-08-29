@@ -8,6 +8,8 @@ use crate::state::SiteState;
 /// Challenge ids registered on the gateway.
 pub const DESIGN: &str = "design";
 pub const PRISM: &str = "prism";
+/// Live one-challenge subnet.
+pub const RELEARN: &str = "relearn";
 
 /// Upstream fetch error.
 #[derive(Debug)]

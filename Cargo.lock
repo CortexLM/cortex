@@ -4512,6 +4512,105 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "relearn-challenge"
+version = "0.1.0"
+dependencies = [
+ "bundle",
+ "challenge-common",
+ "crypto",
+ "hex",
+ "relearn-challenge-task",
+ "relearn-eval",
+ "relearn-http",
+ "relearn-score",
+ "relearn-store",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "relearn-challenge-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "challenge-keys",
+ "clap",
+ "relearn-challenge",
+ "relearn-eval",
+ "relearn-store",
+ "telemetry",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "relearn-challenge-task"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "relearn-eval"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "prism-competition",
+ "prism-lium",
+ "prism-lium-types",
+ "relearn-challenge-task",
+ "relearn-score",
+ "relearn-store",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "relearn-http"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "hex",
+ "http-body-util",
+ "relearn-challenge-task",
+ "relearn-eval",
+ "relearn-score",
+ "relearn-store",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "relearn-score"
+version = "0.1.0"
+dependencies = [
+ "prism-competition",
+ "relearn-challenge-task",
+ "serde",
+]
+
+[[package]]
+name = "relearn-store"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "prism-competition",
+ "relearn-challenge-task",
+ "relearn-score",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"

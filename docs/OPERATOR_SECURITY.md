@@ -13,7 +13,8 @@ Use this before every promote and after every incident. Architecture: [`ARCHITEC
 - [ ] Challenge signing secrets are **files** mounted into the challenge service, not env values (D11).
 - [ ] Owner and challenge mini-secrets never committed; only `*.pubkey` / TOML bodies + detached `.sig` in git.
 - [ ] Cloudflare / DO / Phala tokens live only in operator secret stores, not in docs or CI logs.
-- [ ] Design agentic review: OpenRouter key is mounted on `design-challenge` / `design-egress-proxy` as a **file**, never into miner sandboxes. The ephemeral `design-review` container must receive the key via a **file mount** (`OPENROUTER_API_KEY_FILE`), never as `OPENROUTER_API_KEY` in container env (`/proc/<pid>/environ` is boot-fixed). `run_command` must keep procfs and `/run/review-secrets` denied. Do not turn off `AGENTIC_ENABLE_RUN_COMMAND` in prod without a replacement inspection path.
+- [ ] Relearn miner BYOK (`LIUM_API_KEY` / `X-Lium-Api-Key`) is never written to git, compose env committed files, or logs. Control-plane Lium mounts under `deploy/secrets/lium` are files, mode **0400**, uid **65532**.
+- [ ] Teacher HTTP API (`RELEARN_TEACHER_API_URL`) is **judge-only**. Never point it at miner weights as the served / scored artifact.
 
 ---
 
@@ -22,8 +23,8 @@ Use this before every promote and after every incident. Architecture: [`ARCHITEC
 - [ ] Every image reference is digest-pinned (`repo@sha256:<64 hex>`). No `:latest`.
 - [ ] Exactly one mount of `/var/run/docker.sock`: on `socket-proxy` (read-only).
 - [ ] socket-proxy allowlist matches updater needs (`CONTAINERS`, `IMAGES`, `POST` as configured).
-- [ ] `design-challenge` sets `DESIGN_SCREENSHOT_PROXY=http://design-egress-proxy:8094` (screenshot Chromium must not talk direct to the `base` network).
-- [ ] Staging/prod never set `BASE_ALLOW_HOST_SIM` / `DESIGN_FORCE_SIM=true` (asserted by `assert-compose-matrix.sh`).
+- [ ] Staging/prod never set `BASE_ALLOW_HOST_SIM` / `DESIGN_FORCE_SIM` / `RELEARN_FORCE_SIM=true` as a live scoring path (asserted by `assert-compose-matrix.sh` for host Sim).
+- [ ] Relearn live rent requires `config/relearn-pin.toml` `eval_image_digest` starting with `sha256:`. No floating eval tags.
 - [ ] Gateway service uses compose profile **`master`** only on the owner host.
 - [ ] Profile `evil-gateway` is **absent** from prod hosts. Spot-check:
 
