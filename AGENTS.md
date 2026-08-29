@@ -48,7 +48,7 @@ Each live challenge has a **separate public GitHub repo** for miners. Those repo
 |-----------|-------------|------|
 | Relearn | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) | Eval image, harness, generators, teacher, miner docs |
 
-This control-plane repo is `CortexLM/cortex`. Monorepo miner-doc mirror: [`docs/external-miner/`](docs/external-miner/). Historical frozen specs (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`) stay archived; they are not live products.
+This control-plane repo is `CortexLM/cortex`. Short miner pointer: [`docs/external-miner/relearn.md`](docs/external-miner/relearn.md). Long miner guide lives in the public challenge repo. Historical frozen specs (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`) stay archived; they are not live products. Do not send miners to Design or Prism docs.
 
 **When a challenge product or public API changes**, agents **must** update:
 
@@ -111,7 +111,8 @@ Match CI (`.github/workflows/ci.yml`):
 | Doc authority vs evidence | [`docs/AGENTS.md`](docs/AGENTS.md) |
 | Component status | [`docs/COMPLETENESS.md`](docs/COMPLETENESS.md) |
 | Frozen contracts | [`docs/BUNDLE_SPEC.md`](docs/BUNDLE_SPEC.md), [`docs/DESIGN_CHALLENGE.md`](docs/DESIGN_CHALLENGE.md), [`docs/PRISM.md`](docs/PRISM.md) |
-| Miner HTTP submit | [`docs/external-miner/`](docs/external-miner/) · public: [CortexLM/relearn](https://github.com/CortexLM/relearn) |
+| Relearn miners | [`docs/external-miner/relearn.md`](docs/external-miner/relearn.md) · long guide: [CortexLM/relearn](https://github.com/CortexLM/relearn) |
+| Validators | [`docs/VALIDATORS.md`](docs/VALIDATORS.md) |
 | Threat / operator checklist | [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md), [`docs/OPERATOR_SECURITY.md`](docs/OPERATOR_SECURITY.md) |
 
 ## Do not commit

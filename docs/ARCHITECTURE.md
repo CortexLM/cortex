@@ -11,10 +11,14 @@ Operator-facing map of the control plane. Normative byte contracts live in the f
 
 Do not restate those contracts here. Link them.
 
+Audiences (do not mix):
+
+- Miners (Relearn): [`external-miner/relearn.md`](./external-miner/relearn.md)
+- Validators: [`VALIDATORS.md`](./VALIDATORS.md)
+
 Security claim and what it excludes: [`THREAT_MODEL.md`](./THREAT_MODEL.md).  
 Operator checklist: [`OPERATOR_SECURITY.md`](./OPERATOR_SECURITY.md).  
-Runbooks: [`runbooks/`](./runbooks/).  
-Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
+Runbooks: [`runbooks/`](./runbooks/).
 
 ---
 

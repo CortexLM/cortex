@@ -82,19 +82,9 @@ not the product name.
 
 ## Public miner repos (other GitHub repositories)
 
-Miner-facing documentation still lives in the historical public repos until
-those orgs publish a CortexLM mirror:
-
-- [`BaseIntelligence/design-challenge`](https://github.com/BaseIntelligence/design-challenge)
-- [`BaseIntelligence/prism`](https://github.com/BaseIntelligence/prism)
-
-This monorepo’s operator mirror is [`docs/external-miner/`](external-miner/).
-Do not rewrite those URLs here unless the public repos actually move.
-
-HuggingFace / GitHub top-model defaults (`BaseIntelligence/top-prism-architecture`,
-`BaseIntelligence/prism` `top-model/`) are publish targets configured in
-compose. Changing the default without a matching Hub/GitHub move breaks
-top-model publish.
+Live miner docs: [`CortexLM/relearn`](https://github.com/CortexLM/relearn).
+Short pointer in this repo: [`docs/external-miner/relearn.md`](external-miner/relearn.md).
+Design and Prism public repos are historical, not live miner paths.
 
 ## Postgres
 

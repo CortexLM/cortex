@@ -5,6 +5,6 @@ current champion. Regressions are never crowned.
 
 - Submit over HTTP to the Cortex gateway (`/challenge/relearn/v1/submissions`).
 - Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
-- Official public benchmarks are out of bounds (see `eval/decontam`).
+- Wait for operator promote (`awaiting_admin`).
 
 Control plane: <https://github.com/CortexLM/cortex>
