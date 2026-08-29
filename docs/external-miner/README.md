@@ -3,7 +3,7 @@
 # External miner docs
 
 **Bundle `protocol_version`:** `1`  
-**Miner path:** HTTP submit only — **no Phala/CVM**
+**Miner path:** HTTP submit. **Miner pays Lium** (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 
 This badge must match `bundle::PROTOCOL_VERSION` in crate `bundle`.  
 CI gate: `cargo run -p xtask -- external-docs-check`.

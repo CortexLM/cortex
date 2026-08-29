@@ -2,7 +2,7 @@
 
 # External miner — troubleshoot (HTTP)
 
-**Path:** HTTP submit to **relearn** only — **no Phala/CVM**
+**Path:** HTTP submit to **relearn**. Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 
 ## Relearn
 

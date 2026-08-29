@@ -6,11 +6,10 @@
 **Base model (verified):** `Qwen/Qwen3.8-Flash-Next`  
 **Teacher / judge (verified):** `zai-org/GLM-5.3`  
 **Eval image:** digest-pinned from [CortexLM/relearn](https://github.com/CortexLM/relearn)  
-**No Phala/CVM. No TDX.**
 
 Miners improve the pinned base. Score is **displacement vs the previous
-champion** on a holdout that is unsealed **only after** the submission digest
-freezes. A regression is never crowned.
+champion**. A regression is never crowned. **Miner pays Lium**
+(`LIUM_API_KEY` / `X-Lium-Api-Key`).
 
 ## Submit
 
@@ -52,7 +51,7 @@ The teacher API is **judge-only** — miner weights are never the served model.
 
 Do not train or score on official public benchmark items. The factory uses
 disjoint train/eval generators and decontamination against official benches.
-Holdout items are synthetic and unsealed after digest freeze.
+Holdout items are synthetic.
 
 ## Routes
 

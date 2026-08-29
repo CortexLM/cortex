@@ -7,7 +7,7 @@ Operator-facing map of the control plane. Normative byte contracts live in the f
 | [`BUNDLE_SPEC.md`](./BUNDLE_SPEC.md) | **FROZEN** | Epoch bundle SCALE layout, merkle, aggregation, on-chain payload bounds |
 | [`DESIGN_CHALLENGE.md`](./DESIGN_CHALLENGE.md) | archived freeze | Retired `design` product (not live) |
 | [`PRISM.md`](./PRISM.md) | archived | Retired `prism` product (Lium rails reused by Relearn) |
-| [`RELEARN.md`](./RELEARN.md) | live | `relearn` post-training factory (HTTP submit, no CVM) |
+| [`RELEARN.md`](./RELEARN.md) | live | `relearn` post-training factory (HTTP submit; miners pay Lium) |
 
 Do not restate those contracts here. Link them.
 
@@ -24,7 +24,7 @@ Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
 - Gateway runs **only** as subnet owner (master). Startup asserts hotkey == on-chain `SubnetOwnerHotkey` or exits `2` before bind.
 - Validators **recompute** the weight vector from a signed, merkle-rooted epoch bundle. Challenge keys and measurements come from **owner-signed local files**, never from gateway HTTP.
 - CRV4 timelock commit-reveal on Bittensor testnet/mainnet as configured. Reveal is automatic on-chain.
-- The live challenge accepts miner work over **HTTP** (Relearn digest freeze → Lium/sim eval). No miner Phala/CVM / TDX path.
+- The live challenge accepts miner work over **HTTP** (Relearn → Lium/sim eval). Miners pay Lium.
 
 ---
 
@@ -47,7 +47,7 @@ Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
                     └───────────────┬─────────────────────┘
                                     │ HTTP submit
                     ┌───────────────▼─────────────────────┐
-                    │  Miner clients (no TEE required)     │
+                    │  Miner clients                       │
                     │  relearn artifact digest + Lium BYOK  │
                     └─────────────────────────────────────┘
 ```

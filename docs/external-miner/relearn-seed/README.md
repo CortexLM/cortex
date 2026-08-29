@@ -13,7 +13,7 @@ plane, gateway, or validator. Those live in [`CortexLM/cortex`](https://github.c
 | Teacher / judge | `zai-org/GLM-5.3` |
 | Teacher NVFP4 | `Inferact/GLM-5.3-NVFP4` |
 | Score | Displacement vs the previous champion |
-| Trust | No TDX / no Phala CVM. Miner pays Lium. Holdout unseals after digest freeze. |
+| Trust | Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`) |
 
 Cortex pins this repo's git SHA and the eval image digest in
 `config/relearn-pin.toml`. Deploy = bump the pin after this repo's CI is green.

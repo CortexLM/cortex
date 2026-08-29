@@ -27,8 +27,8 @@ They do not execute the challenge.
 
 Eval image, harness, generators, and miner docs live in
 [`CortexLM/relearn`](https://github.com/CortexLM/relearn). Design and Prism
-are retired products (libraries / frozen specs remain). There is **no miner
-Phala/CVM / TDX path**. Operator-facing map:
+are retired products (libraries / frozen specs remain). Miners pay Lium
+(`LIUM_API_KEY` / `X-Lium-Api-Key`). Operator-facing map:
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Some env vars, host paths, GHCR package names, and crypto domain tags still

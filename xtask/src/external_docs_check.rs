@@ -16,7 +16,7 @@ const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("relearn_challenge", "relearn"),
     ("http_submit", "HTTP"),
     ("lium_byok", "X-Lium-Api-Key"),
-    ("no_phala_cvm", "no Phala/CVM"),
+    ("lium_pay", "Miner pays Lium"),
     ("bundle_spec_link", "BUNDLE_SPEC.md"),
     ("base_model", "Qwen/Qwen3.8-Flash-Next"),
     ("teacher_model", "zai-org/GLM-5.3"),
@@ -303,6 +303,6 @@ mod tests {
             .any(|(n, v)| *n == "teacher_model" && *v == "zai-org/GLM-5.3"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
-            .any(|(n, v)| *n == "no_phala_cvm" && *v == "no Phala/CVM"));
+            .any(|(n, v)| *n == "lium_pay" && *v == "Miner pays Lium"));
     }
 }

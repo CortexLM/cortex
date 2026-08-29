@@ -107,11 +107,11 @@ pub fn relearn_frame() -> Arena {
         slug: ArenaSlug::Relearn,
         name: "Relearn".into(),
         tagline: "Post-training factory: miners improve Qwen3.8-Flash-Next; score is displacement vs the previous champion.".into(),
-        description: "One-challenge subnet. Submit an improved artifact of the pinned base model. Holdout stays sealed until the submission digest freezes. Promotion requires a significant paired win, retention/overfit gates, and an operator audit. Regressions are never crowned. No TDX / Phala CVM.".into(),
+        description: "One-challenge subnet. Submit an improved artifact of the pinned base model. Miners pay Lium. Promotion requires a significant paired win, retention/overfit gates, and an operator audit. Regressions are never crowned.".into(),
         status: "live".into(),
         scoring: ScoringMethod::Displacement,
         mechanism: vec![
-            "Digest freeze → holdout unseal".into(),
+            "Miners pay Lium (BYOK)".into(),
             "Paired displacement vs champion".into(),
             "Operator-audited promote (never a regression)".into(),
         ],

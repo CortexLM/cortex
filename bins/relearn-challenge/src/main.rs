@@ -1,7 +1,7 @@
 //! `relearn-challenge` — master-only Relearn service (port 8095).
 //!
 //! Miner HTTP submit → digest freeze → holdout unseal → sim/Lium eval →
-//! operator-audited promote. No TDX / Phala CVM.
+//! operator-audited promote. Miners pay Lium.
 
 #![forbid(unsafe_code)]
 
@@ -22,7 +22,7 @@ use tokio::net::TcpListener;
 #[derive(Debug, Parser)]
 #[command(
     name = "relearn-challenge",
-    about = "Relearn challenge service (port 8095, master→Lium/sim, no CVM)"
+    about = "Relearn challenge service (port 8095, master→Lium/sim)"
 )]
 struct Cli {
     /// Bind address (default 0.0.0.0:8095).

@@ -17,9 +17,8 @@ This repo is the control plane and pins `config/relearn-pin.toml`.
 | `SCORE_MAX` | `1_000_000` |
 | Emission | `10000` bps |
 
-No TDX / Phala CVM. Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
-Control plane rents a digest-pinned eval image and operator-SSH harvests
-receipts. Holdout unseals only after the submission digest freezes.
+Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`). The control plane
+rents a digest-pinned eval image and operator-SSH harvests receipts.
 
 ## Submit / promote
 

@@ -79,8 +79,6 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         "relearn_git": st.pin.relearn_git,
         "relearn_git_sha": st.pin.relearn_git_sha,
         "champion_id": champ,
-        "tdx": false,
-        "phala_cvm": false,
     }))
 }
 

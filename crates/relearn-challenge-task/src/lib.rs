@@ -8,7 +8,7 @@
 //! ```
 //!
 //! Distinct from `design` / `prism` so leaf digests never collide.
-//! No TDX / Phala CVM — master-centralized Lium eval.
+//! Master-centralized Lium eval; miners pay Lium.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::doc_markdown)]
