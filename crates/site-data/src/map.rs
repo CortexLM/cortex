@@ -414,7 +414,7 @@ pub fn relearn_arena_from_live(status: Option<&Value>) -> Arena {
     if let Some(s) = status {
         if let Some(id) = s.get("champion_id").and_then(|v| v.as_str()) {
             if !id.is_empty() {
-                arena.best_score = id.to_owned();
+                id.clone_into(&mut arena.best_score);
             }
         }
         arena.status = "live".into();

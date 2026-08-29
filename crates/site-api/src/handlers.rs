@@ -573,14 +573,15 @@ async fn get_leaderboard(
     let page_size = q.page_size.unwrap_or(24);
     let needle = q.q.as_deref();
     match slug {
-        ArenaSlug::Coding => Json(empty_leaderboard_json(page, page_size)).into_response(),
         ArenaSlug::Design => {
             Json(design_leaderboard_json(&st, page, page_size, needle).await).into_response()
         }
         ArenaSlug::Prism => {
             Json(prism_leaderboard_json(&st, page, page_size, needle).await).into_response()
         }
-        ArenaSlug::Relearn => Json(empty_leaderboard_json(page, page_size)).into_response(),
+        ArenaSlug::Coding | ArenaSlug::Relearn => {
+            Json(empty_leaderboard_json(page, page_size)).into_response()
+        }
     }
 }
 
