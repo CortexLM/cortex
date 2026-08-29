@@ -1,6 +1,6 @@
 [package]
 name = "config"
-description = "Typed layered configuration: defaults → base.toml → BASE_*"
+description = "Typed layered configuration: defaults → base.toml → BASE_* (CORTEX_* aliases)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -6,7 +6,7 @@ How to treat documentation in this repo.
 
 | Kind | Paths | Treat as |
 |------|-------|----------|
-| **Normative** | `ARCHITECTURE.md`, frozen specs (`BUNDLE_SPEC.md`, `DESIGN_CHALLENGE.md`, `PRISM.md`, …), `THREAT_MODEL.md`, `OPERATOR_SECURITY.md`, `COMPLETENESS.md`, `runbooks/`, `external-miner/` | Source of truth for contracts, ops, and status |
+| **Normative** | `ARCHITECTURE.md`, `NAMING.md`, frozen specs (`BUNDLE_SPEC.md`, `DESIGN_CHALLENGE.md`, `PRISM.md`, …), `THREAT_MODEL.md`, `OPERATOR_SECURITY.md`, `COMPLETENESS.md`, `runbooks/`, `external-miner/` | Source of truth for contracts, ops, naming, and status |
 | **Non-normative** | `evidence/`, `spikes/` | Historical ops notes / experiments. **Do not** implement against them as spec; **do not** delete in cleanup passes without an explicit ops decision |
 
 When a spike or evidence report conflicts with a frozen spec or runbook, the normative doc wins.

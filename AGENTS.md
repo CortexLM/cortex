@@ -1,6 +1,8 @@
-# AGENTS.md — BASE control plane
+# AGENTS.md — Cortex control plane
 
 Short contract for agents and operators. Prefer linking over restating runbooks.
+
+**Product:** Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) — Bittensor subnet control plane for decentralized collaborative AI research via multiple challenges. Naming split (Cortex vs leftover `base` / `BASE_*`): [`docs/NAMING.md`](docs/NAMING.md).
 
 ## Monorepo map
 
@@ -22,6 +24,9 @@ Working branch: **`main`**. Prod ships from annotated tags `v*.*.*` cut on `main
 - **Gateway runs on master only** (`--profile master` / `role-master.yml`). Validators point at the master gateway over VPC.
 - **`evil-gateway` is test-only** — never enable on prod hosts; assert with `deploy/scripts/assert-evil-gateway-not-default.sh`.
 - Platform is **DigitalOcean Droplets + Docker Compose**, not App Platform / DOKS.
+- **Do not rename `BASE_*` env vars, deployed paths, or crypto domain tags.** They are measured into miner CVM `app-compose.json` and live on droplets / RTMR3 pin continuity. `CORTEX_*` is an accepted alias in `crates/config` only. See [`docs/NAMING.md`](docs/NAMING.md).
+- Frozen specs (`docs/BUNDLE_SPEC.md`, `docs/DESIGN_CHALLENGE.md`) are pinned by xtask. Do not weaken gates or rewrite incentive / scoring / consensus semantics.
+- `unsafe_code = forbid`. No `unwrap` / `expect` in non-test code.
 
 ## Wallet / key roles (do not conflate)
 
@@ -44,7 +49,7 @@ Each live challenge has a **separate public GitHub repo** for miners. Those repo
 | Design | [`BaseIntelligence/design-challenge`](https://github.com/BaseIntelligence/design-challenge) | Miner docs + baseline harness |
 | Prism | [`BaseIntelligence/prism`](https://github.com/BaseIntelligence/prism) | Miner docs + recipe examples (publish / keep in sync; no control-plane code) |
 
-Monorepo mirror for CI and operators: [`docs/external-miner/`](docs/external-miner/). Frozen contracts stay in this repo (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`, …).
+Those public URLs are historical org names; this control-plane repo is `CortexLM/cortex`. Monorepo mirror for CI and operators: [`docs/external-miner/`](docs/external-miner/). Frozen contracts stay in this repo (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`, …).
 
 **When a challenge product or public API changes**, agents **must** update:
 
@@ -68,6 +73,22 @@ When verifying a challenge (local-e2e, staging, or focused tests), **simulate a 
 
 Local smoke automates the weights seal step via `weights-smoke` inside `./deploy/scripts/local-e2e.sh --smoke` (see [`deploy/AGENTS.md`](deploy/AGENTS.md) and [`docs/runbooks/local-testnet-e2e.md`](docs/runbooks/local-testnet-e2e.md)).
 
+## Commands (local)
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo deny check
+cargo run -p xtask -- loc-cap
+cargo run -p xtask -- consensus-lint
+cargo run -p xtask -- spec-check
+cargo run -p xtask -- design-check
+cargo run -p xtask -- external-docs-check
+```
+
+Commit subjects: `type(scope): summary` (lowercase, ≤72 chars). Hooks: `./scripts/install-githooks.sh`.
+
 ## Required gates (before merge)
 
 Match CI (`.github/workflows/ci.yml`):
@@ -86,6 +107,7 @@ Match CI (`.github/workflows/ci.yml`):
 | Need | Start here |
 |------|------------|
 | System map / process topology | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| Cortex vs leftover `base` names | [`docs/NAMING.md`](docs/NAMING.md) |
 | Deploy / Compose / DO topology | [`deploy/README.md`](deploy/README.md) + [`deploy/AGENTS.md`](deploy/AGENTS.md) |
 | **Local full-subnet test** (master+gateway+validator on testnet 541 + tunnel) | [`docs/runbooks/local-testnet-e2e.md`](docs/runbooks/local-testnet-e2e.md) · [`deploy/AGENTS.md`](deploy/AGENTS.md) § Local testnet E2E · `./deploy/scripts/local-e2e.sh --help` |
 | Doc authority vs evidence | [`docs/AGENTS.md`](docs/AGENTS.md) |

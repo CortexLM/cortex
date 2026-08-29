@@ -1,0 +1,65 @@
+name: Bug report
+description: Something in the Cortex control plane is wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for defects in **this** repo (gateway, validator, challenges, deploy).
+        Security issues: do **not** file here — see [SECURITY.md](../SECURITY.md).
+        Miner-facing public repos are separate (design-challenge / prism).
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What broke, in one or two sentences.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - gateway
+        - validator
+        - design-challenge
+        - prism-challenge
+        - deploy / compose
+        - docs
+        - other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Commit SHA on main, or annotated tag (v*.*.*).
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Commands you ran (cargo test, local-e2e, curl). No secrets, no exploit payloads.
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+    validations:
+      required: true
+  - type: checkboxes
+    id: naming
+    attributes:
+      label: Naming
+      options:
+        - label: I am not asking to rename BASE_* env vars, /opt/base paths, or base-*-v1 domain tags (see docs/NAMING.md).
+          required: true

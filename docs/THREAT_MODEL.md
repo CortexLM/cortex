@@ -1,9 +1,9 @@
-# base threat model
+# Cortex threat model
 
 This document states the **honest** security claim and the properties we deliberately do **not** claim. Overclaiming is treated as a project failure mode.
 
-Frozen contracts: [`BUNDLE_SPEC.md`](./BUNDLE_SPEC.md), [`AGENT_CHALLENGE.md`](./AGENT_CHALLENGE.md).  
-Architecture map: [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+Frozen contracts: [`BUNDLE_SPEC.md`](./BUNDLE_SPEC.md), [`DESIGN_CHALLENGE.md`](./DESIGN_CHALLENGE.md).  
+Architecture map: [`ARCHITECTURE.md`](./ARCHITECTURE.md). Prism: [`PRISM.md`](./PRISM.md).
 
 CI enforces that §1 matches plan decision **D19** word for word (`cargo run -p xtask -- external-docs-check`).
 
