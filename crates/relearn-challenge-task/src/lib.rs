@@ -42,33 +42,36 @@ pub const SCORE_MAX: u64 = 1_000_000;
 /// Confirmed 2026-08-29: <https://huggingface.co/Qwen/Qwen3.8-Flash-Next>
 pub const BASE_MODEL_ID: &str = "Qwen/Qwen3.8-Flash-Next";
 
-/// Verified Hugging Face id for the frozen teacher / judge.
-///
-/// Confirmed 2026-08-29: <https://huggingface.co/zai-org/GLM-5.3>
-pub const TEACHER_MODEL_ID: &str = "zai-org/GLM-5.3";
+/// Wire id for the v0 HTTP teacher. Override with `RELEARN_TEACHER_MODEL`.
+pub const TEACHER_MODEL_ID: &str = "kimi-k3";
 
-/// Community NVFP4 checkpoint for Blackwell serving (not the scored artifact).
+/// Hugging Face-style alias some OpenAI-compatible hosts use.
+pub const TEACHER_MODEL_HF_ALIAS: &str = "moonshotai/Kimi-K3";
+
+/// Frozen GLM teacher — optional override, not the v0 default.
+pub const TEACHER_GLM_MODEL_ID: &str = "zai-org/GLM-5.3";
+
+/// Community NVFP4 checkpoint (optional Lium serve; not the v0 default).
 pub const TEACHER_NVFP4_ID: &str = "Inferact/GLM-5.3-NVFP4";
 
 /// Public miner / eval-image repo.
 pub const RELEARN_GIT_URL: &str = "https://github.com/CortexLM/relearn";
 
-/// Teacher serving mode. NVFP4-on-Lium is preferred when a Blackwell node
-/// can be rented; otherwise a teacher-only HTTP API is the documented fallback.
+/// Teacher serving mode. v0 default is a teacher-only HTTP API.
 /// Miner weights are never served through the teacher API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TeacherBackend {
-    /// Frozen GLM-5.3 NVFP4 on a digest-pinned Lium pod (preferred).
+    /// Optional NVFP4 on a digest-pinned Lium pod (`RELEARN_TEACHER_BACKEND=lium`).
     LiumNvfp4,
-    /// Teacher-only OpenAI-compatible HTTP API (fallback).
+    /// Teacher-only OpenAI-compatible HTTP API (v0 default).
     HttpApi,
-    /// Deterministic offline judge (CI / local).
+    /// Deterministic offline judge (CI / `RELEARN_FORCE_SIM`).
     Sim,
 }
 
 impl TeacherBackend {
-    /// Parse from env (`RELEARN_TEACHER_BACKEND`).
+    /// Parse from env (`RELEARN_TEACHER_BACKEND`). Empty → HTTP API.
     #[must_use]
     pub fn from_env() -> Self {
         match std::env::var("RELEARN_TEACHER_BACKEND")
@@ -77,24 +80,63 @@ impl TeacherBackend {
             .as_str()
         {
             "lium" | "lium_nvfp4" | "nvfp4" => Self::LiumNvfp4,
-            "http" | "http_api" | "api" => Self::HttpApi,
-            _ => Self::Sim,
+            "sim" => Self::Sim,
+            _ => Self::HttpApi,
         }
     }
 }
 
-/// Default teacher backend for v0: HTTP API (or Sim when no URL).
-///
-/// GLM-5.3 is a ~743B MoE. NVFP4 (`Inferact/GLM-5.3-NVFP4`) wants an 8×
-/// Blackwell-class host. That is the preferred production path when the
-/// operator can rent it; it is not the default for CI or a laptop.
+/// Default teacher backend for v0: HTTP API unless sim is forced.
 #[must_use]
-pub fn default_teacher_backend(api_url_set: bool) -> TeacherBackend {
-    if api_url_set {
-        TeacherBackend::HttpApi
-    } else {
+pub fn default_teacher_backend(force_sim: bool) -> TeacherBackend {
+    if force_sim {
         TeacherBackend::Sim
+    } else {
+        TeacherBackend::HttpApi
     }
+}
+
+/// `RELEARN_TEACHER_API_URL` when set. No baked host — missing means skip/sim.
+#[must_use]
+pub fn teacher_api_url() -> Option<String> {
+    std::env::var("RELEARN_TEACHER_API_URL")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// `RELEARN_TEACHER_MODEL`, or [`TEACHER_MODEL_ID`].
+#[must_use]
+pub fn teacher_model_from_env() -> String {
+    std::env::var("RELEARN_TEACHER_MODEL")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| TEACHER_MODEL_ID.to_owned())
+}
+
+/// Bearer for the teacher HTTP API. Never log the value.
+///
+/// Reads `RELEARN_TEACHER_API_KEY` only.
+#[must_use]
+pub fn teacher_api_key() -> Option<String> {
+    std::env::var("RELEARN_TEACHER_API_KEY")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// True when `model` is the configured HTTP teacher or the optional GLM pin.
+#[must_use]
+pub fn is_configured_teacher_model(model: &str) -> bool {
+    let m = model.trim();
+    if m.is_empty() {
+        return false;
+    }
+    m == TEACHER_MODEL_ID
+        || m.eq_ignore_ascii_case(TEACHER_MODEL_HF_ALIAS)
+        || m == TEACHER_GLM_MODEL_ID
+        || m == teacher_model_from_env()
 }
 
 #[cfg(test)]
@@ -112,14 +154,23 @@ mod tests {
     #[test]
     fn verified_model_ids() {
         assert_eq!(BASE_MODEL_ID, "Qwen/Qwen3.8-Flash-Next");
-        assert_eq!(TEACHER_MODEL_ID, "zai-org/GLM-5.3");
-        assert!(TEACHER_NVFP4_ID.contains("NVFP4"));
+        assert_eq!(TEACHER_MODEL_ID, "kimi-k3");
+        assert_eq!(TEACHER_GLM_MODEL_ID, "zai-org/GLM-5.3");
+        assert!(teacher_api_url().is_none());
     }
 
     #[test]
-    fn teacher_backend_never_defaults_to_serving_miner_weights() {
-        assert_eq!(default_teacher_backend(false), TeacherBackend::Sim);
-        assert_eq!(default_teacher_backend(true), TeacherBackend::HttpApi);
+    fn teacher_backend_defaults_to_http_api() {
+        assert_eq!(default_teacher_backend(false), TeacherBackend::HttpApi);
+        assert_eq!(default_teacher_backend(true), TeacherBackend::Sim);
+    }
+
+    #[test]
+    fn kimi_and_glm_are_configured_teachers() {
+        assert!(is_configured_teacher_model("kimi-k3"));
+        assert!(is_configured_teacher_model("moonshotai/Kimi-K3"));
+        assert!(is_configured_teacher_model(TEACHER_GLM_MODEL_ID));
+        assert!(!is_configured_teacher_model(""));
     }
 
     #[test]

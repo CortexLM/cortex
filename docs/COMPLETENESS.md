@@ -57,7 +57,7 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Binary (`bins/relearn-challenge`) | **done** | HTTP API on `:8095`. |
 | Compose / images | **done** | Default compose + `images.yml` target `relearn-challenge`. |
 | Eval pin | **v0** | `config/relearn-pin.toml` — digest + `CortexLM/relearn` SHA empty until first green challenge CI. |
-| Teacher | **v0** | Default HTTP API / Sim. NVFP4-on-Lium (`Inferact/GLM-5.3-NVFP4`) when operator sets `RELEARN_TEACHER_BACKEND=lium`. Judge-only; miner weights never served via that API. |
+| Teacher | **v0** | HTTP API from operator env (`RELEARN_TEACHER_API_URL`, `RELEARN_TEACHER_MODEL`, `RELEARN_TEACHER_API_KEY`). Missing URL/key → sim. Judge-only; miner weights never served via that API. |
 | Emission | **10000 bps** | Relearn 100% (sum `10000`). |
 | Spec | live | [`RELEARN.md`](RELEARN.md). |
 

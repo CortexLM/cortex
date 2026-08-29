@@ -202,6 +202,8 @@ services:
       RELEARN_FORCE_SIM: "${RELEARN_FORCE_SIM:-false}"
       RELEARN_PIN_FILE: /etc/base/config/relearn-pin.toml
       RELEARN_TEACHER_BACKEND: "${RELEARN_TEACHER_BACKEND:-http_api}"
+      RELEARN_TEACHER_API_URL: "${RELEARN_TEACHER_API_URL:-}"
+      RELEARN_TEACHER_MODEL: "${RELEARN_TEACHER_MODEL:-}"
       RELEARN_ADMIN_TOKENS_FILE: /run/base/relearn/admin_tokens
       BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
     env_file:

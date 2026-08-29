@@ -57,3 +57,5 @@ services:
       # Live path on droplets: sim is local-only (`env-local.yml`).
       RELEARN_FORCE_SIM: "false"
       RELEARN_TEACHER_BACKEND: "http_api"
+      RELEARN_TEACHER_API_URL: "${RELEARN_TEACHER_API_URL:-}"
+      RELEARN_TEACHER_MODEL: "${RELEARN_TEACHER_MODEL:-}"

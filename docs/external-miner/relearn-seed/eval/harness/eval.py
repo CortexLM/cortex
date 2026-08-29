@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 BASE_MODEL = os.environ.get("RELEARN_BASE_MODEL", "Qwen/Qwen3.8-Flash-Next")
-TEACHER_MODEL = os.environ.get("RELEARN_TEACHER_MODEL", "zai-org/GLM-5.3")
+TEACHER_MODEL = os.environ.get("RELEARN_TEACHER_MODEL", "kimi-k3")
 
 
 def _series(prefix: str, digest: str, seed: str, n: int, bias: float) -> dict[str, float]:

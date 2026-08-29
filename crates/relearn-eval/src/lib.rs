@@ -18,7 +18,8 @@ use prism_competition::ExampleSeries;
 use prism_lium::{EvalJobBackend, SimLiumBackend};
 use prism_lium_types::{EvalReceipt, InstanceSpec, NoScoreGate, RemoteExecResult};
 use relearn_challenge_task::{
-    default_teacher_backend, TeacherBackend, BASE_MODEL_ID, TEACHER_MODEL_ID, TEACHER_NVFP4_ID,
+    default_teacher_backend, is_configured_teacher_model, TeacherBackend, BASE_MODEL_ID,
+    TEACHER_MODEL_ID, TEACHER_NVFP4_ID,
 };
 use relearn_score::SliceScores;
 use relearn_store::{unseal_holdout, Holdout};
@@ -31,7 +32,7 @@ use thiserror::Error;
 pub struct RelearnPin {
     /// `Qwen/Qwen3.8-Flash-Next`.
     pub base_model: String,
-    /// `zai-org/GLM-5.3`.
+    /// HTTP teacher wire id (`kimi-k3` default; GLM optional override).
     pub teacher_model: String,
     /// Optional NVFP4 id for Lium serving.
     pub teacher_nvfp4: String,
@@ -53,7 +54,7 @@ impl Default for RelearnPin {
             base_model: BASE_MODEL_ID.into(),
             teacher_model: TEACHER_MODEL_ID.into(),
             teacher_nvfp4: TEACHER_NVFP4_ID.into(),
-            teacher_backend: TeacherBackend::Sim,
+            teacher_backend: TeacherBackend::HttpApi,
             eval_image: "ghcr.io/cortexlm/relearn-eval".into(),
             eval_image_digest: String::new(),
             relearn_git: relearn_challenge_task::RELEARN_GIT_URL.into(),
@@ -220,7 +221,12 @@ pub struct TeacherJudgeRequest {
 
 /// Refuse any attempt to send miner weights through the teacher API.
 pub fn teacher_judge_guard(req: &TeacherJudgeRequest, pin: &RelearnPin) -> Result<(), EvalError> {
-    if req.model != pin.teacher_model && req.model != TEACHER_MODEL_ID {
+    let model = req.model.trim();
+    let looks_like_digest = model.len() == 64 && model.chars().all(|c| c.is_ascii_hexdigit());
+    if looks_like_digest {
+        return Err(EvalError::TeacherMinerWeights);
+    }
+    if model != pin.teacher_model && !is_configured_teacher_model(model) {
         return Err(EvalError::TeacherMinerWeights);
     }
     let lower = req.candidate.to_ascii_lowercase();
@@ -230,23 +236,23 @@ pub fn teacher_judge_guard(req: &TeacherJudgeRequest, pin: &RelearnPin) -> Resul
     Ok(())
 }
 
-/// Resolve the v0 teacher backend. NVFP4-on-Lium is preferred when the
-/// operator sets `RELEARN_TEACHER_BACKEND=lium` **and** can rent an 8×
-/// Blackwell host; otherwise HTTP API (if `RELEARN_TEACHER_API_URL` is set)
-/// or Sim. Miner weights are never the served model.
+/// Resolve the v0 teacher backend. HTTP API is the default. Sim when
+/// `RELEARN_FORCE_SIM` is set or `RELEARN_TEACHER_BACKEND=sim`. Lium NVFP4
+/// only when the operator sets `RELEARN_TEACHER_BACKEND=lium`.
+/// Miner weights are never the served model.
 #[must_use]
 pub fn resolve_teacher_backend() -> TeacherBackend {
-    let env = TeacherBackend::from_env();
-    if env == TeacherBackend::LiumNvfp4 {
-        return TeacherBackend::LiumNvfp4;
+    let force_sim = matches!(
+        std::env::var("RELEARN_FORCE_SIM")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    );
+    if force_sim {
+        return default_teacher_backend(true);
     }
-    let api = std::env::var("RELEARN_TEACHER_API_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-    if env == TeacherBackend::HttpApi || api.is_some() {
-        return default_teacher_backend(api.is_some());
-    }
-    TeacherBackend::Sim
+    TeacherBackend::from_env()
 }
 
 /// Rent a digest-pinned eval pod, exec, harvest, terminate.
@@ -337,6 +343,18 @@ mod tests {
             model: TEACHER_MODEL_ID.into(),
         };
         assert!(teacher_judge_guard(&good, &pin).is_ok());
+        let glm = TeacherJudgeRequest {
+            prompt: "score".into(),
+            candidate: "ok".into(),
+            model: relearn_challenge_task::TEACHER_GLM_MODEL_ID.into(),
+        };
+        assert!(teacher_judge_guard(&glm, &pin).is_ok());
+        let digest = TeacherJudgeRequest {
+            prompt: "score".into(),
+            candidate: "ok".into(),
+            model: "ab".repeat(32),
+        };
+        assert!(teacher_judge_guard(&digest, &pin).is_err());
     }
 
     #[test]
@@ -359,11 +377,12 @@ mod tests {
     fn toml_pin_roundtrip() {
         let body = r#"
 base_model = "Qwen/Qwen3.8-Flash-Next"
-teacher_model = "zai-org/GLM-5.3"
+teacher_model = "kimi-k3"
 teacher_backend = "http_api"
 "#;
         let p = RelearnPin::from_toml(body);
         assert_eq!(p.base_model, BASE_MODEL_ID);
+        assert_eq!(p.teacher_model, TEACHER_MODEL_ID);
         assert_eq!(p.teacher_backend, TeacherBackend::HttpApi);
     }
 }

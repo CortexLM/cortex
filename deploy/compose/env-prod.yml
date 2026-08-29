@@ -58,4 +58,6 @@ services:
     environment:
       RELEARN_FORCE_SIM: "false"
       RELEARN_TEACHER_BACKEND: "http_api"
+      RELEARN_TEACHER_API_URL: "${RELEARN_TEACHER_API_URL:-}"
+      RELEARN_TEACHER_MODEL: "${RELEARN_TEACHER_MODEL:-}"
       BASE_CHAIN_ENDPOINTS: "wss://bittensor-finney.api.onfinality.io/public-ws,wss://entrypoint-finney.opentensor.ai:443"

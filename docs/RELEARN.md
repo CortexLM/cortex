@@ -11,7 +11,7 @@ This repo pins them in `config/relearn-pin.toml`.
 | `challenge_id` | `relearn` |
 | `challenge_scoring_version` | `1` |
 | Base model | `Qwen/Qwen3.8-Flash-Next` |
-| Teacher / judge | `zai-org/GLM-5.3` |
+| Teacher / judge | HTTP API (operator sets `RELEARN_TEACHER_*`) |
 | Port | `8095` (local host `28095`) |
 | Emission | `10000` bps |
 

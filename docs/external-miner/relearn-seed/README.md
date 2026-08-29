@@ -10,11 +10,12 @@ plane, gateway, or validator. Those live in [`CortexLM/cortex`](https://github.c
 | Pin | Value |
 |-----|--------|
 | Base model | `Qwen/Qwen3.8-Flash-Next` |
-| Teacher / judge | `zai-org/GLM-5.3` |
-| Teacher NVFP4 | `Inferact/GLM-5.3-NVFP4` |
+| Teacher / judge | HTTP API (operator env) |
 | Score | Displacement vs the previous champion |
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
+Teacher URL, model, and key are operator host env:
+`RELEARN_TEACHER_API_URL`, `RELEARN_TEACHER_MODEL`, `RELEARN_TEACHER_API_KEY`.
 
 Cortex pins this repo's git SHA and the eval image digest in
 `config/relearn-pin.toml`. Deploy = bump the pin after this repo's CI is green.
@@ -40,12 +41,6 @@ Never commit `LIUM_API_KEY` or any secret.
 | `eval/Dockerfile` | Digest-pinned eval image |
 | `eval/harness/` | Pod entry: load base + miner artifact, score holdout |
 | `eval/generators/` | Disjoint train / eval synthetic factory |
-| `eval/teacher/` | Frozen GLM-5.3 judge (HTTP API; never serves miner weights) |
-| `eval/decontam/` | Official-bench n-gram blocklist |
+| `eval/teacher/` | HTTP judge (env-only URL; never serves miner weights) |
+| `eval/decontam/` | n-gram blocklist |
 | `docs/` | Miner-facing human docs |
-
-## Teacher serving
-
-Prefer NVFP4 on Lium when an 8× Blackwell-class host is available.
-v0 fallback: teacher-only HTTP API. The scored artifact is always the
-miner weights loaded **inside** the eval image — never via the teacher API.

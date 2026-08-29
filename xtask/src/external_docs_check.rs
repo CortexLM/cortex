@@ -19,7 +19,7 @@ const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("lium_pay", "Miner pays Lium"),
     ("bundle_spec_link", "BUNDLE_SPEC.md"),
     ("base_model", "Qwen/Qwen3.8-Flash-Next"),
-    ("teacher_model", "zai-org/GLM-5.3"),
+    ("teacher_model", "kimi-k3"),
 ];
 
 /// Substrings that must not appear as live miner guidance (removed path).
@@ -300,7 +300,7 @@ mod tests {
             .any(|(n, v)| *n == "base_model" && *v == "Qwen/Qwen3.8-Flash-Next"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
-            .any(|(n, v)| *n == "teacher_model" && *v == "zai-org/GLM-5.3"));
+            .any(|(n, v)| *n == "teacher_model" && *v == "kimi-k3"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
             .any(|(n, v)| *n == "lium_pay" && *v == "Miner pays Lium"));

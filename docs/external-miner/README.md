@@ -14,7 +14,7 @@ Live challenge is **Relearn** (`challenge_id` `relearn`). HTTP submit.
 |-----------|-------------------|-------------------------|
 | Relearn | [relearn.md](./relearn.md) | [CortexLM/relearn](https://github.com/CortexLM/relearn) |
 
-Pinned models: `Qwen/Qwen3.8-Flash-Next`, `zai-org/GLM-5.3`.
+Pinned models: `Qwen/Qwen3.8-Flash-Next`, teacher `kimi-k3`.
 Bundle bytes: [`BUNDLE_SPEC.md`](../BUNDLE_SPEC.md).
 
 ```text

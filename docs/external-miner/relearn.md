@@ -8,6 +8,10 @@ Cortex pin: [`config/relearn-pin.toml`](../../config/relearn-pin.toml).
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 
+Teacher is an HTTP API. The operator sets `RELEARN_TEACHER_API_URL`,
+`RELEARN_TEACHER_MODEL`, and `RELEARN_TEACHER_API_KEY` on the host. You
+do not.
+
 ## Submit
 
 ```bash

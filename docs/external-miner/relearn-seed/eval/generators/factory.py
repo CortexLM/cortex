@@ -1,4 +1,4 @@
-"""Synthetic factory: champion generates, frozen GLM-5.3 judges.
+"""Synthetic factory: champion generates, HTTP teacher judges.
 
 Train and eval generators are disjoint (different seeds). Items that
 collide with the official-bench blocklist are dropped.

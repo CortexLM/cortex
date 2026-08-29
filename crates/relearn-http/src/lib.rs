@@ -379,6 +379,6 @@ mod tests {
             relearn_challenge_task::BASE_MODEL_ID,
             "Qwen/Qwen3.8-Flash-Next"
         );
-        assert_eq!(relearn_challenge_task::TEACHER_MODEL_ID, "zai-org/GLM-5.3");
+        assert_eq!(relearn_challenge_task::TEACHER_MODEL_ID, "kimi-k3");
     }
 }

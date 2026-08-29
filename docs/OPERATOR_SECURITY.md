@@ -14,7 +14,7 @@ Use this before every promote and after every incident. Architecture: [`ARCHITEC
 - [ ] Owner and challenge mini-secrets never committed; only `*.pubkey` / TOML bodies + detached `.sig` in git.
 - [ ] Cloudflare / DO / Phala tokens live only in operator secret stores, not in docs or CI logs.
 - [ ] Relearn miner BYOK (`LIUM_API_KEY` / `X-Lium-Api-Key`) is never written to git, compose env committed files, or logs. Control-plane Lium mounts under `deploy/secrets/lium` are files, mode **0400**, uid **65532**.
-- [ ] Teacher HTTP API (`RELEARN_TEACHER_API_URL`) is **judge-only**. Never point it at miner weights as the served / scored artifact.
+- [ ] Teacher HTTP API (`RELEARN_TEACHER_API_URL` + `RELEARN_TEACHER_API_KEY`) is **judge-only**. Never commit the key. Never point the API at miner weights as the served / scored artifact.
 
 ---
 
