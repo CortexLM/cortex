@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "aggregate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "sha2 0.10.9",
 ]
@@ -360,7 +360,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "attest-http"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "attest-policy",
  "axum",
@@ -377,14 +377,14 @@ dependencies = [
 
 [[package]]
 name = "attest-parse"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "attest-policy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "attest-parse",
  "attest-replay",
@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "attest-replay"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -711,7 +711,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bundle"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aggregate",
  "chain",
@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "chain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "parity-scale-codec",
  "reqwest 0.12.28",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "chain-live"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ark-serialize",
  "blake2",
@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "challenge-agentic"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "challenge-agentic-types",
@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "challenge-agentic-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -869,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "challenge-ast"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rustpython-parser",
  "serde",
@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "challenge-common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bundle",
  "chain",
@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "challenge-keys"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crypto",
  "hex",
@@ -904,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "challenge-review-bin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "challenge-agentic",
  "serde_json",
@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "compose-hash"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "sha2 0.10.9",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "tempfile",
@@ -1195,7 +1195,7 @@ checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 
 [[package]]
 name = "crosscheck"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "chain",
@@ -1219,7 +1219,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "parity-scale-codec",
  "rand_core 0.6.4",
@@ -1354,7 +1354,7 @@ checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
 name = "db"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "db",
  "serde_json",
@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "design-challenge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "design-challenge-bin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "design-challenge-task"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bundle",
  "design-store",
@@ -1618,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "design-db"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "db",
  "serde_json",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "design-egress-proxy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "hex",
@@ -1646,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "design-egress-proxy-bin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
@@ -1658,7 +1658,7 @@ dependencies = [
 
 [[package]]
 name = "design-harness"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "design-challenge-task",
  "hex",
@@ -1671,7 +1671,7 @@ dependencies = [
 
 [[package]]
 name = "design-http"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1694,7 +1694,7 @@ dependencies = [
 
 [[package]]
 name = "design-prompts"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "design-challenge-task",
  "hex",
@@ -1706,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "design-sandbox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "design-challenge-task",
  "design-harness",
@@ -1722,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "design-sanitize"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ammonia",
  "design-harness",
@@ -1736,7 +1736,7 @@ dependencies = [
 
 [[package]]
 name = "design-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1747,7 +1747,7 @@ dependencies = [
 
 [[package]]
 name = "design-store-pg"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "db",
@@ -1799,7 +1799,7 @@ dependencies = [
 
 [[package]]
 name = "dissent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aggregate",
  "axum",
@@ -1822,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "docker-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2208,7 +2208,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aggregate",
  "axum",
@@ -2248,7 +2248,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-bin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "chain-live",
@@ -2263,7 +2263,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-compat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "hex",
@@ -2282,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "crypto",
@@ -2298,7 +2298,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-registry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "parking_lot",
  "serde",
@@ -2309,7 +2309,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-store-pg"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bundle",
  "db",
@@ -3032,7 +3032,7 @@ dependencies = [
 
 [[package]]
 name = "keystore"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake2",
  "crypto",
@@ -3122,7 +3122,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "lium-rent-pool"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "lock_api"
@@ -3253,7 +3253,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "merkle"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "sha2 0.10.9",
 ]
@@ -3857,7 +3857,7 @@ dependencies = [
 
 [[package]]
 name = "prism-artifacts"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "hex",
@@ -3871,7 +3871,7 @@ dependencies = [
 
 [[package]]
 name = "prism-attribution"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3893,7 +3893,7 @@ dependencies = [
 
 [[package]]
 name = "prism-automodel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "prism-tree",
@@ -3907,7 +3907,7 @@ dependencies = [
 
 [[package]]
 name = "prism-budget"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3915,7 +3915,7 @@ dependencies = [
 
 [[package]]
 name = "prism-challenge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -3965,7 +3965,7 @@ dependencies = [
 
 [[package]]
 name = "prism-challenge-bin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "assert_cmd",
  "axum",
@@ -4000,11 +4000,11 @@ dependencies = [
 
 [[package]]
 name = "prism-challenge-task"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "prism-competition"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "prism-challenge-task",
  "prism-store",
@@ -4013,7 +4013,7 @@ dependencies = [
 
 [[package]]
 name = "prism-emit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bundle",
  "challenge-common",
@@ -4030,7 +4030,7 @@ dependencies = [
 
 [[package]]
 name = "prism-eval-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "db",
@@ -4050,7 +4050,7 @@ dependencies = [
 
 [[package]]
 name = "prism-final"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bundle",
  "challenge-agentic",
@@ -4065,7 +4065,7 @@ dependencies = [
 
 [[package]]
 name = "prism-intake"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -4082,7 +4082,7 @@ dependencies = [
 
 [[package]]
 name = "prism-lium"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "lium-rent-pool",
@@ -4103,7 +4103,7 @@ dependencies = [
 
 [[package]]
 name = "prism-lium-harness"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "prism-automodel",
@@ -4115,7 +4115,7 @@ dependencies = [
 
 [[package]]
 name = "prism-lium-payer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chacha20poly1305",
  "http",
@@ -4131,7 +4131,7 @@ dependencies = [
 
 [[package]]
 name = "prism-lium-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "prism-recipe",
@@ -4143,7 +4143,7 @@ dependencies = [
 
 [[package]]
 name = "prism-orphan"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bundle",
@@ -4160,7 +4160,7 @@ dependencies = [
 
 [[package]]
 name = "prism-pipeline"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "bundle",
@@ -4183,7 +4183,7 @@ dependencies = [
 
 [[package]]
 name = "prism-playground"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "prism-artifacts",
@@ -4197,7 +4197,7 @@ dependencies = [
 
 [[package]]
 name = "prism-recipe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "prism-automodel",
@@ -4212,7 +4212,7 @@ dependencies = [
 
 [[package]]
 name = "prism-registry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -4233,7 +4233,7 @@ dependencies = [
 
 [[package]]
 name = "prism-review"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "hex",
@@ -4249,7 +4249,7 @@ dependencies = [
 
 [[package]]
 name = "prism-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "db",
@@ -4267,7 +4267,7 @@ dependencies = [
 
 [[package]]
 name = "prism-store-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "prism-lium-types",
  "prism-review",
@@ -4278,7 +4278,7 @@ dependencies = [
 
 [[package]]
 name = "prism-tree"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "serde",
@@ -4290,7 +4290,7 @@ dependencies = [
 
 [[package]]
 name = "prism-verda"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4312,7 +4312,7 @@ dependencies = [
 
 [[package]]
 name = "prism-zoneb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "serde",
@@ -5321,7 +5321,7 @@ checksum = "1e061d1b48cb8d38042de4ae0a7a6401009d6143dc80d2e2d6f31f0bdd6470c7"
 
 [[package]]
 name = "review-docker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "challenge-agentic",
@@ -5928,7 +5928,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "site-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "chain",
@@ -5953,7 +5953,7 @@ dependencies = [
 
 [[package]]
 name = "site-data"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bundle",
  "hex",
@@ -5969,7 +5969,7 @@ dependencies = [
 
 [[package]]
 name = "site-prism"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "site-data",
@@ -5978,7 +5978,7 @@ dependencies = [
 
 [[package]]
 name = "site-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6295,7 +6295,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "submission-gating"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chain",
@@ -6308,7 +6308,7 @@ dependencies = [
 
 [[package]]
 name = "submit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chain",
  "dissent",
@@ -6412,7 +6412,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "telemetry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "http",
@@ -6853,7 +6853,7 @@ dependencies = [
 
 [[package]]
 name = "trustroot"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crypto",
  "parity-scale-codec",
@@ -6868,7 +6868,7 @@ dependencies = [
 
 [[package]]
 name = "trustroot-bin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "crypto",
@@ -7042,7 +7042,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "updater"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "docker-engine",
  "reqwest 0.12.28",
@@ -7057,7 +7057,7 @@ dependencies = [
 
 [[package]]
 name = "updater-bin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tokio",
  "tracing",
@@ -7109,7 +7109,7 @@ dependencies = [
 
 [[package]]
 name = "validator"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aggregate",
  "attest-http",
@@ -7146,7 +7146,7 @@ dependencies = [
 
 [[package]]
 name = "validator-bin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bundle",
  "chain",
@@ -7164,14 +7164,14 @@ dependencies = [
 
 [[package]]
 name = "validator-sync"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chain",
 ]
 
 [[package]]
 name = "validator-verify"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aggregate",
  "axum",
@@ -7404,7 +7404,7 @@ dependencies = [
 
 [[package]]
 name = "weights-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bundle",
  "config",
@@ -7419,7 +7419,7 @@ dependencies = [
 
 [[package]]
 name = "weights-smoke"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bundle",
  "chain",
@@ -7751,7 +7751,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake2",
  "clap",
