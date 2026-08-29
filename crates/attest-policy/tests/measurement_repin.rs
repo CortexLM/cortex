@@ -6,7 +6,7 @@
 //!
 //! Live CVM MRTD/RTMR for the normative post-proxy template must still be
 //! captured before production scoring depends on Verified — see
-//! docs/runbooks/measurement-repin-socket-proxy.md.
+//! the socket-proxy measurement re-pin procedure (deploy/AGENTS.md).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

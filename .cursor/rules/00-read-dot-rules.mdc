@@ -1,0 +1,38 @@
+---
+description: Mandatory - read .rules/ before opening or updating any PR in this repo
+alwaysApply: true
+---
+
+# Read `.rules/` first
+
+Before you change anything in this repository, read **all** of `.rules/`:
+
+- `.rules/00-overview.md` — the reading duty and the doc surfaces
+- `.rules/10-maintenance.md` — hygiene, no dead code, keep the repo true A→Z
+- `.rules/20-pre-prod-local.md` — the exact local gates that must pass
+- `.rules/30-pr.md` — PR shape and the required attestation
+- `.rules/40-agents.md` — keeping `AGENTS.md` accurate in the same PR
+- `.rules/50-versioning.md` — automatic versioning
+- `.rules/60-naming.md` — frozen `base` / `BASE_*` / domain-tag spellings
+
+`.rules/contracts/` holds frozen, gate-pinned specs. Read the ones your change
+touches; never weaken a gate or rewrite incentive, scoring, or consensus
+semantics to make a diff pass.
+
+## Hard requirements for every PR
+
+1. There is no `docs/` tree. `README.md` is the only human doc, `AGENTS.md` is
+   the agent/operator contract, `.rules/` is this contract. Update them in the
+   same PR as the code.
+2. Run every command in `.rules/20-pre-prod-local.md` locally before calling
+   anything ready, mergeable, or shippable.
+3. Bump the workspace version: `cargo run -p xtask -- version bump`. CI fails a
+   PR whose version matches `main`.
+4. Fill the attestation checkboxes in `.github/PULL_REQUEST_TEMPLATE.md`. Do not
+   mark a PR ready with an unticked box, and never tick a box you did not earn.
+5. Self-check before you hand the PR over:
+
+```bash
+cargo run -p xtask -- rules-check
+cargo run -p xtask -- version verify-bump --base origin/main
+```

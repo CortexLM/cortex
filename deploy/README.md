@@ -42,8 +42,9 @@ docker compose --profile master up -d
 ### Full local testnet E2E (recommended)
 
 Master + gateway + validator + challenges on **testnet 541**, with an ephemeral
-cloudflared public URL for the gateway. Procedure:
-[`docs/runbooks/local-testnet-e2e.md`](../docs/runbooks/local-testnet-e2e.md).
+cloudflared public URL for the gateway. Prereqs and probes:
+[`AGENTS.md`](AGENTS.md) § Local testnet E2E and
+[`../.rules/20-pre-prod-local.md`](../.rules/20-pre-prod-local.md).
 
 ```bash
 ./deploy/scripts/local-e2e.sh --help

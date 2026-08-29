@@ -1,5 +1,7 @@
 # AGENTS.md — deploy (DigitalOcean + Compose)
 
+Read [`../.rules/`](../.rules/00-overview.md) before any PR; this file is the deploy-scoped slice of that contract.
+
 Operator/agent contract for staging and prod. Full procedures live in [`README.md`](README.md); do not duplicate them here.
 
 ## Topology (4 droplets, NYC1)
@@ -54,7 +56,7 @@ Second profile: **4× RTX 5090** (`PRISM_POD_GPU_COUNT=4`). Override needles
 with `PRISM_POD_GPU_NAME`. Never fall through to 8×5090. Prefer an
 unsplittable full-host 6000 rent when Lium will not split. Do **not** flip
 live `:28092` scoring/emission when changing pod width. Details:
-[`docs/PRISM.md`](../docs/PRISM.md), [`docs/runbooks/prism-enable-lium-and-emission.md`](../docs/runbooks/prism-enable-lium-and-emission.md).
+[`.rules/contracts/PRISM.md`](../.rules/contracts/PRISM.md).
 
 Verify rows (local master stack):
 
@@ -66,7 +68,8 @@ docker compose -f docker-compose.yml exec -T postgres \
 
 ## Local testnet E2E
 
-Full procedure: [`docs/runbooks/local-testnet-e2e.md`](../docs/runbooks/local-testnet-e2e.md).
+Local gate list and probe table: [`../.rules/20-pre-prod-local.md`](../.rules/20-pre-prod-local.md).
+Authoritative flags: `./deploy/scripts/local-e2e.sh --help`.
 
 ```bash
 ./deploy/scripts/materialize-env.sh
@@ -155,14 +158,14 @@ Ladder: CI → GHCR digests → `deploy/pins/staging.json` (committed by `images
 - Identity OOB on host: `/etc/base/age-identity.txt` (or `AGE_IDENTITY`) — never in Terraform/cloud-init.
 - Materialize: `./deploy/scripts/materialize-env.sh` → `deploy/env/*.env` mode **0600**.
 - Runtime secret files (wallets, keys): mode **0400**, owner **uid 65532**.
-- Helpers: `age-encrypt-env.sh`, `age-push-env.sh`. Checklist: [`docs/OPERATOR_SECURITY.md`](../docs/OPERATOR_SECURITY.md).
+- Helpers: `age-encrypt-env.sh`, `age-push-env.sh`. Pre-prod checklist: [`../.rules/20-pre-prod-local.md`](../.rules/20-pre-prod-local.md) § 5.
 
 ## First prod tag checklist
 
 1. Staging healthy on the exact commit you will tag; `deploy/pins/staging.json` `commit_sha` matches that SHA.
 2. Digests recorded / promoted for services you will ship (`promote.sh`, `verify-task-43.sh` locally if needed).
 3. Age identity + env ages present on both prod hosts; wallets hotkeys under `deploy/secrets/wallets/` (0400 / 65532).
-4. Mainnet owner wallet placed; set `BASE_GATEWAY_REQUIRE_OWNER=1` when ready (ops gap until then — see [`docs/COMPLETENESS.md`](../docs/COMPLETENESS.md)).
+4. Mainnet owner wallet placed; set `BASE_GATEWAY_REQUIRE_OWNER=1` when ready (ops gap until then).
 5. Cut `vX.Y.Z` on `main`, push tag; pass `deploy-prod` preflight + `environment: production` reviewers.
 6. Smoke `/healthz` on both prod hosts; confirm `evil-gateway` absent.
 

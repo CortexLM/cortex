@@ -36,8 +36,8 @@ COPY xtask ./xtask
 # Keep workspace metadata members that Docker context needs
 COPY config ./config
 # design-challenge embeds the published baseline agent as the agentic review
-# corpus anchor (include_str! in crates/design-challenge/src/orchestrator.rs).
-COPY docs/external-miner/examples/design-baseline ./docs/external-miner/examples/design-baseline
+# corpus anchor (include_str! in crates/design-challenge/src/corpus.rs).
+COPY .rules/contracts/external-miner/examples/design-baseline ./.rules/contracts/external-miner/examples/design-baseline
 # validator-bin/dcap turns on real Intel DCAP quote verification; without it the
 # validator parks every attestation instead of verifying it.
 RUN cargo build --release \

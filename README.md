@@ -12,33 +12,59 @@
 
 </div>
 
+> **Contributing, human or agent?** Read [`.rules/`](.rules/00-overview.md)
+> first — all of it — then [`AGENTS.md`](AGENTS.md). This README is the only
+> human-facing document in the repo; `.rules/` is the enforceable contract for
+> changing it.
+
+## Contents
+
+- [What it is](#what-it-is) · [Challenges](#challenges) · [Architecture](#architecture)
+- [Build and test](#build-and-test) · [Run it locally before prod](#run-it-locally-before-prod)
+- [Miners](#miners) · [Validators](#validators) · [Images](#images)
+- [Versioning](#versioning) · [Where things live](#where-things-live) · [License](#license)
+
 ## What it is
 
 Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) is the Rust
-control plane for a multi-challenge Bittensor subnet. Challenge services on
-the **master** host accept miner work over HTTP, sign score leaves, and the
+control plane for a multi-challenge Bittensor subnet. Challenge services on the
+**master** host accept miner work over HTTP and sign score leaves; the
 **gateway** (master-only) seals an epoch weight bundle. Validators **fetch**
-`GET /v1/weights/latest` and submit on-chain weights. They do not execute
-challenges.
+`GET /v1/weights/latest`, recompute the vector from the sealed bundle, and
+submit on-chain weights. Validators never execute challenges.
 
-Live challenges today:
+Design goals, in one list:
 
-| Challenge | How miners submit | Spec |
-|-----------|-------------------|------|
-| **Design** | ZIP harness (`agent.py` + `pyproject.toml`) → sandboxed pages + admin winners | [`docs/DESIGN_CHALLENGE.md`](docs/DESIGN_CHALLENGE.md) |
-| **Prism** | AutoModel pin + patch → operator-owned GPU recipe eval | [`docs/PRISM.md`](docs/PRISM.md) |
-
-There is **no miner Phala/CVM path** on this branch (agent-v1 / Harbor pack
-executors were removed). Operator-facing map: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+- A lighter Rust control plane than the prior Python stack.
+- The gateway runs **only** as the subnet owner: startup asserts its hotkey
+  equals the on-chain `SubnetOwnerHotkey` or exits `2` before it binds.
+- Validators **recompute** weights from a signed, merkle-rooted bundle. Challenge
+  keys and measurements come from **owner-signed local files**, never over
+  gateway HTTP.
+- CRV4 timelock commit-reveal on testnet/mainnet as configured; reveal is
+  automatic on-chain.
+- Miners submit over **HTTP**. There is no miner Phala/CVM path (agent-v1 and
+  Harbor pack executors were removed).
 
 Some env vars, host paths, GHCR package names, and crypto domain tags still
-spell `BASE_*` / `base`. That is intentional — see [`docs/NAMING.md`](docs/NAMING.md).
+spell `BASE_*` / `base`. That is deliberate and frozen — see
+[`.rules/60-naming.md`](.rules/60-naming.md).
 
-## Architecture (short)
+## Challenges
+
+| Challenge | How miners submit | Contract |
+|-----------|-------------------|----------|
+| **Design** | ZIP harness (`agent.py` + `pyproject.toml`) → sandboxed pages + admin winners | [`.rules/contracts/DESIGN_CHALLENGE.md`](.rules/contracts/DESIGN_CHALLENGE.md) (frozen) |
+| **Prism** | AutoModel pin + patch → operator-owned GPU recipe eval | [`.rules/contracts/PRISM.md`](.rules/contracts/PRISM.md) |
+
+Current emission posture: `design = 0` bps, `prism = 10000` bps (100% prism,
+sum `10000`), owner-signed in `config/challenges.toml`.
+
+## Architecture
 
 ```text
 Miners --HTTP--> gateway (TLS) --proxy--> design-challenge / prism-challenge
-                                          | signed leaves
+                                          | challenge-signed leaves
                                           v
                               gateway seals EpochBundleV1
                                           |
@@ -47,27 +73,130 @@ Validators <--- GET /v1/weights/latest ---+
      +--> on-chain set_weights / CRV4 timelock
 ```
 
-- Gateway is the sole public edge and **only** runs on the subnet-owner host
-  (`docker compose --profile master`).
-- Trust roots (`config/challenges.toml`, `config/measurements.toml`) are
-  owner-signed **local files**, never fetched from the gateway.
-- Unsealed / decode-error latest weights are a **burn vector** (uid 0 = 100%,
-  `sealed: false`), not a 404.
+One epoch, end to end:
+
+1. **Pin** — the seal path pins `block_hash` / metagraph root at the epoch
+   boundary.
+2. **Leaves** — challenges sign `Score` / `NoScore` leaves for the
+   validator-derived expected set (D24). A tip epoch may *supersede* a leaf when
+   its signed `payload_digest` changes; identical digests are idempotent.
+3. **Seal** — the gateway builds `EpochBundleV1`, computes the merkle root, and
+   signs the body. The merkle root is **not** in the on-chain weight payload.
+4. **Distribute** — `GET /v1/weights/latest` serves the newest revision of the
+   highest chain-scale sealed epoch. Unsealed or decode-error responses are a
+   **burn vector** (uid 0 = 100%, `sealed: false`), never a 404.
+5. **Verify** — each validator loads **local** owner-signed `challenges.toml` +
+   `measurements.toml` and rejects leaves signed by unknown keys (D18).
+6. **Cross-check** — hotkey-authenticated peer root exchange with a minimum
+   sample (D26); signed bundle + peer statements persist as local evidence.
+7. **Recompute** — integer aggregation (Hamilton, house 65535) compared against
+   the gateway's `final_vector`.
+8. **Submit** — `WeightsTlockPayload { hotkey, uids, values, version_key }` only,
+   with the CRV4 reveal round derived from schedule inputs (D22).
+
+| Process / crate | Role |
+|-----------------|------|
+| `gateway` | Master-only: registry, reverse proxy, bundle seal/serve, sole TLS owner |
+| `validator` | Fetch/mirror bundle, verify, recompute, peer cross-check, CRV4 submit, dissent |
+| `design-challenge` | Master-only: sandboxed harness runs, sanitize/viewer, scoring, sign leaves |
+| `design-egress-proxy` | Master-only: sandbox egress control + budgeted LLM path |
+| `prism-challenge` | Master-only: Lium (or sim) recipe eval, review gate, sign leaves |
+| `updater` | Digest-pinned rollouts via `docker-socket-proxy` (master) |
+| `trustroot` | Offline keygen / sign / verify for owner-signed TOML |
+| `bundle` / `aggregate` | SCALE bundle types + seal/verify; integer aggregation |
+| `crosscheck` / `dissent` | Peer roots and the three-outcome policy |
+| `db` | Postgres persistence (bundles, evidence, dissent, challenge tables) |
+| `xtask` | Repo gates: loc-cap, consensus-lint, spec/design/external-docs, rules-check, version |
+
+Byte-level contracts are frozen in
+[`.rules/contracts/`](.rules/contracts/README.md); the honest security claim and
+what it excludes is [`.rules/contracts/THREAT_MODEL.md`](.rules/contracts/THREAT_MODEL.md).
+
+## Build and test
+
+Rust **1.96.0**, pinned by `rust-toolchain.toml`. Workspace members are
+`crates/*`, `bins/*`, and `xtask`.
+
+```bash
+cargo test --workspace
+```
+
+That is the core gate. Everything CI runs, in order:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo deny check
+cargo run -p xtask -- loc-cap
+cargo run -p xtask -- consensus-lint
+cargo run -p xtask -- spec-check
+cargo run -p xtask -- design-check
+cargo run -p xtask -- external-docs-check
+cargo run -p xtask -- rules-check
+cargo run -p xtask -- version check
+cargo clippy -p validator-bin --features dcap --all-targets -- -D warnings
+bash deploy/scripts/assert-compose-matrix.sh
+```
+
+Optional local hooks matching the cheap half of CI:
+
+```bash
+./scripts/install-githooks.sh
+```
+
+The authoritative list, plus the challenge-submission and pre-prod checks, is
+[`.rules/20-pre-prod-local.md`](.rules/20-pre-prod-local.md).
+
+## Run it locally before prod
+
+Nothing reaches staging or prod before the full stack is green on a developer
+machine. `local-e2e.sh` brings up master + gateway + validator + challenges
+against Finney **testnet netuid 541**, with an optional ephemeral public URL.
+
+```bash
+./deploy/scripts/materialize-env.sh        # deploy/env/*.env, mode 0600
+./deploy/scripts/local-e2e.sh --dry-run    # plan + compose render, no containers
+./deploy/scripts/local-e2e.sh --smoke      # stack + healthz + weights seal smoke
+./deploy/scripts/local-e2e.sh --live       # owner wallet + REQUIRE_OWNER=1
+./deploy/scripts/local-e2e.sh --down       # teardown
+./deploy/scripts/local-e2e.sh --help       # authoritative flags
+```
+
+| Probe | URL |
+|-------|-----|
+| gateway | `http://127.0.0.1:8080/healthz` |
+| sealed weights | `http://127.0.0.1:8080/v1/weights/latest` |
+| validator | `http://127.0.0.1:28080/healthz` |
+| prism | `http://127.0.0.1:28092/health` |
+| design | `http://127.0.0.1:28093/health` |
+
+`--smoke` runs `weights-smoke`: signed leaves → `POST /v1/admin/seal` → assert
+`GET /v1/weights/latest` is 200 with `sealed: true`. It needs `gateway_sk` and a
+challenge signing key whose pub matches the local trust root — **not** a gateway
+owner wallet. Prereqs, secrets layout, and the compose matrix are in
+[`deploy/AGENTS.md`](deploy/AGENTS.md) and [`deploy/README.md`](deploy/README.md).
+
+Healthz alone never proves a challenge works: simulate a real submission, the
+cheat path, the admin-winners path, and the seal. See
+[`.rules/20-pre-prod-local.md`](.rules/20-pre-prod-local.md) § 4.
 
 ## Miners
 
-HTTP submit only. Start at [docs/external-miner/](docs/external-miner/).
+HTTP submit only. Start at
+[`.rules/contracts/external-miner/`](.rules/contracts/external-miner/README.md).
 
 ```text
 https://<gateway>/challenge/design/...
 https://<gateway>/challenge/prism/...
 ```
 
-Public miner docs (examples only — no control-plane code):
+Public miner repos (human docs and examples only — no control-plane code):
 [design-challenge](https://github.com/BaseIntelligence/design-challenge),
 [prism](https://github.com/BaseIntelligence/prism).
 
-Never put mnemonics or challenge signing keys in miner clients.
+Never put mnemonics or challenge signing keys in a miner client. Hotkeys are
+public 64-hex identifiers.
 
 ## Validators
 
@@ -85,24 +214,15 @@ docker compose up -d                  # postgres, validator, updater, socket-pro
 docker compose --profile master up -d # + gateway (subnet owner host only)
 ```
 
-Local full-stack smoke (testnet 541 + optional tunnel):
+## Images
 
-```bash
-./deploy/scripts/local-e2e.sh --help
-./deploy/scripts/local-e2e.sh --smoke
-```
-
-Details: [deploy/README.md](deploy/README.md), [docs/runbooks/local-testnet-e2e.md](docs/runbooks/local-testnet-e2e.md).
-
-## Images (GHCR)
-
-CI [`.github/workflows/images.yml`](.github/workflows/images.yml) builds
-digest-pinned images. The registry path is still
-`ghcr.io/baseintelligence/base/<suffix>` (historical package name; see
-[docs/NAMING.md](docs/NAMING.md)). Never `:latest` in measured compose.
+`.github/workflows/images.yml` builds digest-pinned images. The registry path is
+still `ghcr.io/baseintelligence/base/<suffix>` (historical package name; see
+[`.rules/60-naming.md`](.rules/60-naming.md)). Never `:latest` in a measured
+compose path.
 
 | Target | Image suffix |
-|--------|----------------|
+|--------|--------------|
 | validator | `validator` |
 | gateway | `gateway` |
 | updater | `updater` |
@@ -110,34 +230,34 @@ digest-pinned images. The registry path is still
 | design-challenge | `design-challenge` |
 | design-egress-proxy | `design-egress-proxy` |
 
-## Toolchain and gates
+## Versioning
 
-- Rust **1.96.0** (`rust-toolchain.toml`)
-- Workspace: `crates/*`, `bins/*`, `xtask`
-- Core gate: `cargo test --workspace`
-- CI also runs `fmt`, `clippy -D warnings`, `cargo deny`, and
+The single source of truth is `[workspace.package] version` in the root
+`Cargo.toml`; all members inherit it and `Cargo.lock` is derived from it. There
+is no `VERSION` file and no second packaging system.
 
 ```bash
-cargo run -p xtask -- loc-cap
-cargo run -p xtask -- consensus-lint
-cargo run -p xtask -- spec-check
-cargo run -p xtask -- design-check
-cargo run -p xtask -- external-docs-check
+cargo run -p xtask -- version          # print the current version
+cargo run -p xtask -- version check    # members inherit + Cargo.lock in sync
+cargo run -p xtask -- version bump     # level derived from Conventional Commits
 ```
 
-## Docs
+`feat` → minor, breaking → major (minor while the major is `0`), everything else
+→ patch. CI fails a pull request that does not bump the version. Prod ships from
+annotated tags `vX.Y.Z` cut on `main`. Full rules:
+[`.rules/50-versioning.md`](.rules/50-versioning.md).
 
-| Doc | Content |
-|-----|---------|
-| [AGENTS.md](AGENTS.md) | Agent / operator contract |
-| [docs/NAMING.md](docs/NAMING.md) | Cortex vs leftover `base` identifiers |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | How to change this repo |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System map |
-| [docs/BUNDLE_SPEC.md](docs/BUNDLE_SPEC.md) | Sealed weight bundle (frozen) |
-| [docs/DESIGN_CHALLENGE.md](docs/DESIGN_CHALLENGE.md) | Design challenge (frozen) |
-| [docs/PRISM.md](docs/PRISM.md) | Prism challenge |
-| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Security claims |
-| [docs/runbooks/](docs/runbooks/) | Ops procedures |
+## Where things live
+
+| Need | Path |
+|------|------|
+| Agent + PR contract (read first) | [`.rules/00-overview.md`](.rules/00-overview.md) |
+| Repo map, non-negotiables, verification duties | [`AGENTS.md`](AGENTS.md) |
+| Frozen specs, threat model, miner docs | [`.rules/contracts/README.md`](.rules/contracts/README.md) |
+| Deploy topology, promote/rollback, secrets | [`deploy/README.md`](deploy/README.md), [`deploy/AGENTS.md`](deploy/AGENTS.md) |
+| Trust-root ceremony | [`config/CEREMONY.md`](config/CEREMONY.md) |
+| Reporting a vulnerability | [`SECURITY.md`](SECURITY.md) |
+| Code owners | [`CODEOWNERS`](CODEOWNERS) |
 
 ## License
 

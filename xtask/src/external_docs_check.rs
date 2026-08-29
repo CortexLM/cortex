@@ -1,9 +1,15 @@
-//! Fail if external miner docs drift from `bundle` `PROTOCOL_VERSION`,
-//! if design/prism HTTP miner paths are missing, or if `docs/THREAT_MODEL.md`
-//! D19 claim is not word-for-word vs plan pin.
+//! Fail if external miner docs drift from `bundle` `PROTOCOL_VERSION`, if
+//! design/prism HTTP miner paths are missing, or if the relocated
+//! `THREAT_MODEL.md` D19 claim is not word-for-word vs plan pin.
 
 use std::fs;
 use std::path::Path;
+
+/// Miner-facing docs, mirrored to the public challenge repos.
+const MINER_REL: &str = ".rules/contracts/external-miner";
+
+/// Threat model, relative to the workspace root.
+const THREAT_REL: &str = ".rules/contracts/THREAT_MODEL.md";
 
 /// Plan D19 claim body (after "verbatim in docs:"). Must match `THREAT_MODEL` section 1.
 const D19_VERBATIM: &str = "base guarantees *no equivocation between validators* and *no undetected deviation by the gateway from the owner-signed challenge and measurement artifacts*. It does **not** guarantee (i) that a challenge's scores are honest, (ii) that the owner is honest — the owner signs the trust roots and runs the gateway, so a malicious owner can authorize a dishonest challenge or a backdoored measurement, (iii) completeness beyond what D24 provides, nor (iv) **chain-anchored, third-party-auditable non-equivocation** — per D5 the property is peer-consensus plus local evidence, verifiable by the participating validators and not by an outside observer after the fact.";
@@ -11,7 +17,7 @@ const D19_VERBATIM: &str = "base guarantees *no equivocation between validators*
 /// Marker comment required in external miner docs.
 const BADGE_COMMENT_PREFIX: &str = "<!-- protocol_version:";
 
-/// Content pins required across `docs/external-miner/` (design + prism HTTP).
+/// Content pins required across the miner docs (design + prism HTTP).
 const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("design_challenge", "design"),
     ("prism_challenge", "prism"),
@@ -22,7 +28,7 @@ const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("bundle_spec_link", "BUNDLE_SPEC.md"),
 ];
 
-/// Pins required in `docs/external-miner/prism.md` for recipe 2.1 `AutoModel`.
+/// Pins required in the miner `prism.md` for recipe 2.1 `AutoModel`.
 const PRISM_AUTOMODEL_PINS: &[(&str, &str)] = &[
     ("recipe_2_1_0", "2.1.0"),
     ("automodel_base_member", "automodel.base"),
@@ -108,7 +114,7 @@ fn check_external_miner_docs(
     expected: u16,
     failures: &mut Vec<String>,
 ) -> Result<(), String> {
-    let dir = workspace_root.join("docs/external-miner");
+    let dir = workspace_root.join(MINER_REL);
     if !dir.is_dir() {
         failures.push(format!("missing directory {}", dir.display()));
         return Ok(());
@@ -120,15 +126,15 @@ fn check_external_miner_docs(
     match extract_badge_version(&readme_body) {
         Ok(v) if v == expected => {}
         Ok(v) => failures.push(format!(
-            "docs/external-miner/README.md protocol_version badge={v} != bundle PROTOCOL_VERSION={expected}"
+            "{MINER_REL}/README.md protocol_version badge={v} != bundle PROTOCOL_VERSION={expected}"
         )),
-        Err(e) => failures.push(format!("docs/external-miner/README.md: {e}")),
+        Err(e) => failures.push(format!("{MINER_REL}/README.md: {e}")),
     }
 
     for (name, needle) in EXTERNAL_MINER_PINS {
         if !readme_body.contains(needle) {
             failures.push(format!(
-                "docs/external-miner/README.md missing pin {name}: {needle:?}"
+                "{MINER_REL}/README.md missing pin {name}: {needle:?}"
             ));
         }
     }
@@ -138,7 +144,7 @@ fn check_external_miner_docs(
         let path = dir.join(required);
         if !path.is_file() {
             failures.push(format!(
-                "docs/external-miner/{required} missing (HTTP submit guide required)"
+                "{MINER_REL}/{required} missing (HTTP submit guide required)"
             ));
         }
     }
@@ -150,17 +156,16 @@ fn check_external_miner_docs(
         for (name, needle) in PRISM_AUTOMODEL_PINS {
             if !prism_body.contains(needle) {
                 failures.push(format!(
-                    "docs/external-miner/prism.md missing AutoModel pin {name}: {needle:?}"
+                    "{MINER_REL}/prism.md missing AutoModel pin {name}: {needle:?}"
                 ));
             }
         }
         // Stale plan wording — live pin ids are tag-shaped (`automodel@…`).
         if prism_body.contains("automodel-<12hex>") {
-            failures.push(
-                "docs/external-miner/prism.md still mentions stale pin shape automodel-<12hex> \
+            failures.push(format!(
+                "{MINER_REL}/prism.md still mentions stale pin shape automodel-<12hex> \
                  (live pin is automodel@v0.5.0)"
-                    .into(),
-            );
+            ));
         }
     }
 
@@ -247,17 +252,19 @@ fn extract_badge_version(body: &str) -> Result<u16, String> {
 }
 
 fn check_threat_model_d19(workspace_root: &Path, failures: &mut Vec<String>) -> Result<(), String> {
-    let path = workspace_root.join("docs/THREAT_MODEL.md");
+    let path = workspace_root.join(THREAT_REL);
     let body = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
 
     // Prefer fenced section after the D19 heading.
     let Some(idx) = body.find("## 1. D19") else {
-        failures.push("docs/THREAT_MODEL.md missing heading `## 1. D19`".into());
+        failures.push(format!("{THREAT_REL} missing heading `## 1. D19`"));
         return Ok(());
     };
     let rest = &body[idx..];
     let Some(after_blank) = rest.split("\n\n").nth(2) else {
-        failures.push("docs/THREAT_MODEL.md: could not locate D19 claim paragraph".into());
+        failures.push(format!(
+            "{THREAT_REL}: could not locate D19 claim paragraph"
+        ));
         return Ok(());
     };
     // Paragraph until next blank line or heading
@@ -273,7 +280,7 @@ fn check_threat_model_d19(workspace_root: &Path, failures: &mut Vec<String>) -> 
 
     if !matched {
         failures.push(format!(
-            "docs/THREAT_MODEL.md D19 claim is not word-for-word vs plan D19.\n  expected (first 120 chars): {:?}\n  found paragraph (first 120): {:?}",
+            "{THREAT_REL} D19 claim is not word-for-word vs plan D19.\n  expected (first 120 chars): {:?}\n  found paragraph (first 120): {:?}",
             D19_VERBATIM.chars().take(120).collect::<String>(),
             para.chars().take(120).collect::<String>()
         ));
@@ -285,7 +292,7 @@ fn check_threat_model_supporting_pins(
     workspace_root: &Path,
     failures: &mut Vec<String>,
 ) -> Result<(), String> {
-    let path = workspace_root.join("docs/THREAT_MODEL.md");
+    let path = workspace_root.join(THREAT_REL);
     let body = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let pins = [
         ("D11", "do **not** claim env **values** are verified"),
@@ -302,9 +309,7 @@ fn check_threat_model_supporting_pins(
     ];
     for (name, needle) in pins {
         if !body.contains(needle) {
-            failures.push(format!(
-                "docs/THREAT_MODEL.md missing pin {name}: {needle:?}"
-            ));
+            failures.push(format!("{THREAT_REL} missing pin {name}: {needle:?}"));
         }
     }
     Ok(())
@@ -313,6 +318,13 @@ fn check_threat_model_supporting_pins(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CONTRACTS_DIR;
+
+    #[test]
+    fn relocated_paths_stay_under_contracts() {
+        assert!(MINER_REL.starts_with(CONTRACTS_DIR));
+        assert!(THREAT_REL.starts_with(CONTRACTS_DIR));
+    }
 
     #[test]
     fn extract_badge_from_comment() {

@@ -25,7 +25,7 @@ fn creds() -> Option<VerdaCreds> {
 fn dense_zip() -> Vec<u8> {
     use std::io::Write;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/external-miner/examples/dense-1b");
+        .join("../../.rules/contracts/external-miner/examples/dense-1b");
     let mut buf = std::io::Cursor::new(Vec::new());
     {
         let mut w = zip::ZipWriter::new(&mut buf);

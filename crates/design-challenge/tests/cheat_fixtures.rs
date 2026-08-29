@@ -23,9 +23,10 @@ use design_store::{FinalScore, HarnessRow};
 use tempfile::tempdir;
 
 const BASELINE_AGENT: &str =
-    include_str!("../../../docs/external-miner/examples/design-baseline/agent.py");
-const BASELINE_PYPROJECT: &str =
-    include_str!("../../../docs/external-miner/examples/design-baseline/pyproject.toml");
+    include_str!("../../../.rules/contracts/external-miner/examples/design-baseline/agent.py");
+const BASELINE_PYPROJECT: &str = include_str!(
+    "../../../.rules/contracts/external-miner/examples/design-baseline/pyproject.toml"
+);
 
 const TWITTER_CLONE_HTML: &str = r#"<!DOCTYPE html>
 <html>

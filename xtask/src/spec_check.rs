@@ -1,5 +1,6 @@
-//! Fail if `docs/BUNDLE_SPEC.md` is missing required plan item 8 pins (a)–(l).
+//! Fail if `.rules/contracts/BUNDLE_SPEC.md` is missing required plan item 8 pins (a)–(l).
 
+use crate::CONTRACTS_DIR;
 use std::fs;
 use std::path::Path;
 
@@ -44,8 +45,9 @@ const CONTENT_PINS: &[(&str, &str)] = &[
 ///
 /// Returns a multi-line error when the spec file is missing or any pin fails.
 pub fn run(workspace_root: &Path) -> Result<(), String> {
-    let spec_path = workspace_root.join("docs/BUNDLE_SPEC.md");
-    let checklist_path = workspace_root.join("docs/BUNDLE_SPEC_CHECKLIST.md");
+    let contracts = workspace_root.join(CONTRACTS_DIR);
+    let spec_path = contracts.join("BUNDLE_SPEC.md");
+    let checklist_path = contracts.join("BUNDLE_SPEC_CHECKLIST.md");
 
     if !checklist_path.is_file() {
         return Err(format!(

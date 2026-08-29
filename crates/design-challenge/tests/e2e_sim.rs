@@ -15,9 +15,10 @@ use design_sanitize::sanitize_bundle;
 use design_store::{DesignStore, HarnessRow, MemoryDesignStore, RunStage, RunState};
 
 const BASELINE_AGENT: &str =
-    include_str!("../../../docs/external-miner/examples/design-baseline/agent.py");
-const BASELINE_PYPROJECT: &str =
-    include_str!("../../../docs/external-miner/examples/design-baseline/pyproject.toml");
+    include_str!("../../../.rules/contracts/external-miner/examples/design-baseline/agent.py");
+const BASELINE_PYPROJECT: &str = include_str!(
+    "../../../.rules/contracts/external-miner/examples/design-baseline/pyproject.toml"
+);
 
 #[tokio::test]
 async fn sim_pipeline_pages_and_admin_score() {
