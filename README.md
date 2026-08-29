@@ -22,6 +22,6 @@ Some env vars and host paths still spell `BASE_*`. That is leftover naming,
 not a second product.
 
 - **[How to mine — Relearn](docs/external-miner/relearn.md)**
-- **[How to validate](docs/VALIDATORS.md)**
+- **[How to validate](docs/external-miner/validators.md)**
 
 Apache License 2.0 — see [LICENSE](./LICENSE).

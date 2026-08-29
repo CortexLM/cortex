@@ -1,7 +1,7 @@
 # Relearn (live challenge)
 
 Control-plane notes. Miners start at [`external-miner/relearn.md`](./external-miner/relearn.md).
-Validators start at [`VALIDATORS.md`](./VALIDATORS.md).
+Validators start at [`external-miner/validators.md`](./external-miner/validators.md).
 
 Eval image and harness live in [`CortexLM/relearn`](https://github.com/CortexLM/relearn).
 This repo pins them in `config/relearn-pin.toml`.

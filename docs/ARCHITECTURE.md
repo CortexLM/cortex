@@ -14,7 +14,7 @@ Do not restate those contracts here. Link them.
 Audiences (do not mix):
 
 - Miners (Relearn): [`external-miner/relearn.md`](./external-miner/relearn.md)
-- Validators: [`VALIDATORS.md`](./VALIDATORS.md)
+- Validators: [`external-miner/validators.md`](./external-miner/validators.md)
 
 Security claim and what it excludes: [`THREAT_MODEL.md`](./THREAT_MODEL.md).  
 Operator checklist: [`OPERATOR_SECURITY.md`](./OPERATOR_SECURITY.md).  

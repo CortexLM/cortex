@@ -1,3 +1,5 @@
+<!-- protocol_version: 1 -->
+
 # Validators
 
 Relearn scoring is centralized (master + Lium). You still run a validator.
@@ -22,10 +24,10 @@ Unsealed or decode-error latest is a **burn vector** (`sealed: false`, uid 0 = 1
 
 ## Run
 
-Binary: [`bins/validator`](../bins/validator) (`validator-bin`, bin name `validator`).
-Compose role: [`deploy/compose/role-validator.yml`](../deploy/compose/role-validator.yml)
+Binary: [`bins/validator`](../../bins/validator) (`validator-bin`, bin name `validator`).
+Compose role: [`deploy/compose/role-validator.yml`](../../deploy/compose/role-validator.yml)
 (no gateway, no `relearn-challenge`).
-Env: [`deploy/env/validator.env.example`](../deploy/env/validator.env.example).
+Env: [`deploy/env/validator.env.example`](../../deploy/env/validator.env.example).
 
 ```bash
 # required: BASE_ROLE=validator, BASE_NETUID, database URL, BASE_CHAIN_ENDPOINT

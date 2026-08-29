@@ -35,7 +35,7 @@ Public miner docs live **outside** this monorepo (examples + human guides only �
 |-----------|------|
 | Relearn | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) |
 
-`docs/external-miner/relearn.md` is the short Cortex pointer. The long miner guide lives in [`CortexLM/relearn`](https://github.com/CortexLM/relearn). Validators: [`VALIDATORS.md`](./VALIDATORS.md). When challenge APIs change, update **both** the public repo and `external-miner/` (see root [`../AGENTS.md`](../AGENTS.md) § Challenge public docs).
+`docs/external-miner/relearn.md` is the short Cortex pointer. The long miner guide lives in [`CortexLM/relearn`](https://github.com/CortexLM/relearn). Validators: [`external-miner/validators.md`](./external-miner/validators.md). When challenge APIs change, update **both** the public repo and `external-miner/` (see root [`../AGENTS.md`](../AGENTS.md) § Challenge public docs).
 
 ## Challenge / local E2E verification
 
