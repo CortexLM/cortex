@@ -14,4 +14,4 @@ eval_image = "ghcr.io/cortexlm/relearn-eval"
 # Empty until the first digest-pinned image ships from CortexLM/relearn CI.
 eval_image_digest = ""
 relearn_git = "https://github.com/CortexLM/relearn"
-relearn_git_sha = ""
+relearn_git_sha = "6e952d1e5edd6e6906ba7fe8442898f334400fb4"
