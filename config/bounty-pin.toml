@@ -1,0 +1,7 @@
+# Cortex pin for Bounty Challenge.
+# Never put secrets, Chat inject tokens, or teacher hosts in this file.
+
+challenge_id = "bounty"
+scoring_version = 1
+# Unguessable Chat inject is env-only. Leave empty in git.
+# BOUNTY_CHAT_COMMAND=

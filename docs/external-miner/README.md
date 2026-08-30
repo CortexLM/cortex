@@ -8,17 +8,19 @@
 This badge must match `bundle::PROTOCOL_VERSION` in crate `bundle`.
 CI gate: `cargo run -p xtask -- external-docs-check`.
 
-Live challenge is **Relearn** (`challenge_id` `relearn`). HTTP submit.
+Live challenges: **Relearn** (`relearn`) and **Bounty** (`bounty`). HTTP submit.
 
-| Challenge | Guide (this repo) | Long guide + eval image |
-|-----------|-------------------|-------------------------|
-| Relearn | [relearn.md](./relearn.md) | [CortexLM/relearn](https://github.com/CortexLM/relearn) |
+| Challenge | Guide (this repo) | Notes |
+|-----------|-------------------|-------|
+| Relearn | [relearn.md](./relearn.md) | Long guide + eval image: [CortexLM/relearn](https://github.com/CortexLM/relearn) |
+| Bounty | [bounty.md](./bounty.md) | Pair via `cortex-bounty`; Chat inject is `BOUNTY_CHAT_COMMAND` (env-only) |
 
 Pinned models: `Qwen/Qwen3.8-Flash-Next`, teacher `kimi-k3`.
 Bundle bytes: [`BUNDLE_SPEC.md`](../BUNDLE_SPEC.md).
 
 ```text
 https://<gateway>/challenge/relearn/...
+https://<gateway>/challenge/bounty/...
 ```
 
 Never put mnemonics or challenge signing keys in miner clients.

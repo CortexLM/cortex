@@ -1,0 +1,22 @@
+[package]
+name = "cortex-bounty"
+description = "Miner CLI: pair a Bittensor hotkey to Cortex Chat for Bounty Challenge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "cortex-bounty"
+path = "src/main.rs"
+
+[dependencies]
+bounty-challenge-task = { path = "../../crates/bounty-challenge-task" }
+clap = { version = "4", features = ["derive", "env"] }
+hex = "0.4"
+keystore = { path = "../../crates/keystore" }
+
+[lints]
+workspace = true

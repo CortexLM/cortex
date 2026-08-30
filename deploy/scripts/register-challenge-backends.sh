@@ -14,6 +14,7 @@ cd "$ROOT"
 
 GATEWAY_URL="${GATEWAY_URL:-http://127.0.0.1:8080}"
 RELEARN_URL="${RELEARN_BACKEND_URL:-http://relearn-challenge:8095}"
+BOUNTY_URL="${BOUNTY_BACKEND_URL:-http://bounty-challenge:8096}"
 COMPOSE_MODE=0
 
 while [[ $# -gt 0 ]]; do
@@ -21,6 +22,7 @@ while [[ $# -gt 0 ]]; do
     --compose) COMPOSE_MODE=1; shift ;;
     --gateway-url) GATEWAY_URL="$2"; shift 2 ;;
     --relearn-url) RELEARN_URL="$2"; shift 2 ;;
+    --bounty-url) BOUNTY_URL="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,12p' "$0"
       exit 0
@@ -82,11 +84,15 @@ register_one() {
 }
 
 register_one relearn "$RELEARN_URL"
+register_one bounty "$BOUNTY_URL"
 
 if [[ "$COMPOSE_MODE" -eq 1 ]]; then
   docker compose -f docker-compose.yml -f deploy/compose/role-master.yml \
     exec -T gateway curl -fsS -m 5 http://127.0.0.1:8080/challenge/relearn/health >/dev/null
+  docker compose -f docker-compose.yml -f deploy/compose/role-master.yml \
+    exec -T gateway curl -fsS -m 5 http://127.0.0.1:8080/challenge/bounty/health >/dev/null
 else
   curl -fsS -m 5 "${GATEWAY_URL%/}/challenge/relearn/health" >/dev/null
+  curl -fsS -m 5 "${GATEWAY_URL%/}/challenge/bounty/health" >/dev/null
 fi
-echo "challenge proxy health: ok (relearn)"
+echo "challenge proxy health: ok (relearn, bounty)"

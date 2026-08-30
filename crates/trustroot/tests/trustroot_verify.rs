@@ -346,19 +346,24 @@ fn s9_repo_config_loads_when_present() {
     }
     let (ch, ms) = load_config_dir(&root, 0, 3).expect("committed config must verify");
     let primary = ch.primary().unwrap();
-    assert_eq!(primary.body.challenges.len(), 1);
+    assert_eq!(primary.body.challenges.len(), 2);
     let relearn = primary.body.get(b"relearn").expect("relearn row");
-    assert_eq!(relearn.emission_share_bps, BPS_DENOM);
+    assert_eq!(relearn.emission_share_bps, 7000);
     assert_eq!(
         encode_hex(&relearn.public_key),
         "8ab577207bb6dfc770a850710824a098d53b1ee90abb92925bd0928937131674"
     );
+    let bounty = primary.body.get(b"bounty").expect("bounty row");
+    assert_eq!(bounty.emission_share_bps, 3000);
+    assert_eq!(
+        encode_hex(&bounty.public_key),
+        "d2ffbe70de7c052deafaba48b90544db4abc1133278c907f2018f457f34aac25"
+    );
     assert!(primary.body.get(b"design").is_none());
     assert!(primary.body.get(b"prism").is_none());
     let shares = primary.body.emission_shares();
-    assert_eq!(shares.len(), 1);
-    assert_eq!(shares[0].0, b"relearn");
-    assert_eq!(shares[0].1, BPS_DENOM);
+    assert_eq!(shares.len(), 2);
+    assert_eq!(shares.iter().map(|s| s.1).sum::<u16>(), BPS_DENOM);
     // base-agent CVM path removed — committed allowlist is empty (fail-closed).
     let entries = &ms.primary().unwrap().body.entries;
     assert!(

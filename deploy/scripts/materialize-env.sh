@@ -38,8 +38,8 @@ materialize_one() {
 }
 
 # Challenge env files carry BASE_DATABASE_URL (must match postgres.env).
-# Without them, compose refuses to start relearn (required env_file).
-for svc in postgres validator gateway updater relearn-challenge; do
+# Without them, compose refuses to start challenges (required env_file).
+for svc in postgres validator gateway updater relearn-challenge bounty-challenge; do
   materialize_one "$svc"
 done
 

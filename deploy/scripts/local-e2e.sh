@@ -39,6 +39,7 @@ COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-base}"
 GATEWAY_HOST_PORT="${LOCAL_GATEWAY_HOST_PORT:-8080}"
 VALIDATOR_HOST_PORT="${LOCAL_VALIDATOR_HOST_PORT:-28080}"
 RELEARN_HOST_PORT="${LOCAL_RELEARN_HOST_PORT:-28095}"
+BOUNTY_HOST_PORT="${LOCAL_BOUNTY_HOST_PORT:-28096}"
 BASE_SECRETS_DIR="${BASE_SECRETS_DIR:-${HOME}/.base-secrets}"
 
 # Default public-only hotkey for smoke (same placeholder as gateway.env.example usage).
@@ -215,7 +216,8 @@ start_tunnel() {
 ensure_env_files() {
   # Challenge env files are required by compose (BASE_DATABASE_URL → Postgres).
   if [[ ! -f deploy/env/postgres.env || ! -f deploy/env/gateway.env \
-    || ! -f deploy/env/validator.env || ! -f deploy/env/relearn-challenge.env ]]; then
+    || ! -f deploy/env/validator.env || ! -f deploy/env/relearn-challenge.env \
+    || ! -f deploy/env/bounty-challenge.env ]]; then
     log "materializing deploy/env/*.env from examples"
     ./deploy/scripts/materialize-env.sh
   fi
@@ -224,7 +226,7 @@ ensure_env_files() {
   local url
   url="$(database_url_from_postgres_env)"
   for f in deploy/env/gateway.env deploy/env/validator.env \
-    deploy/env/relearn-challenge.env; do
+    deploy/env/relearn-challenge.env deploy/env/bounty-challenge.env; do
     if grep -q '^BASE_DATABASE_URL=' "$f" 2>/dev/null; then
       sed -i "s|^BASE_DATABASE_URL=.*|BASE_DATABASE_URL=${url}|" "$f"
     else
@@ -337,14 +339,19 @@ ensure_secrets() {
   ensure_challenge_sk_aligned \
     deploy/secrets/relearn_sk relearn \
     "${BASE_SECRETS_DIR}/challenge-relearn.sk"
-  mkdir -p deploy/secrets/lium deploy/secrets/relearn
+  ensure_challenge_sk_aligned \
+    deploy/secrets/bounty_sk bounty \
+    "${BASE_SECRETS_DIR}/challenge-bounty.sk"
+  mkdir -p deploy/secrets/lium deploy/secrets/relearn deploy/secrets/bounty
   # Touch placeholders so compose bind-mounts stay files/dirs of the right kind.
   [[ -e deploy/secrets/lium/api_key ]] || : >deploy/secrets/lium/api_key
   [[ -e deploy/secrets/lium/ssh_ed25519 ]] || : >deploy/secrets/lium/ssh_ed25519
   [[ -e deploy/secrets/lium/ssh_ed25519.pub ]] || : >deploy/secrets/lium/ssh_ed25519.pub
   [[ -e deploy/secrets/relearn/admin_tokens ]] || : >deploy/secrets/relearn/admin_tokens
-  chown 65532:65532 deploy/secrets/relearn/admin_tokens 2>/dev/null || true
-  chmod 0400 deploy/secrets/relearn/admin_tokens 2>/dev/null || true
+  [[ -e deploy/secrets/bounty/admin_tokens ]] || : >deploy/secrets/bounty/admin_tokens
+  [[ -e deploy/secrets/bounty/session_secret ]] || dd if=/dev/urandom bs=32 count=1 status=none of=deploy/secrets/bounty/session_secret
+  chown 65532:65532 deploy/secrets/relearn/admin_tokens deploy/secrets/bounty/admin_tokens deploy/secrets/bounty/session_secret 2>/dev/null || true
+  chmod 0400 deploy/secrets/relearn/admin_tokens deploy/secrets/bounty/admin_tokens deploy/secrets/bounty/session_secret 2>/dev/null || true
 }
 
 # Ephemeral owner-signed trust root for local stacks (prod owner key is not required).
@@ -352,26 +359,27 @@ ensure_secrets() {
 # /etc/base/config inside gateway/validator. BASE_TRUST_ROOT_DIR must be the
 # *in-container* path — a host absolute path is invisible to containers.
 #
-# Challenge public_keys ALWAYS come from deploy/secrets/relearn_sk so
+# Challenge public_keys ALWAYS come from deploy/secrets/*_sk so
 # leaf signatures verify. A stale trust root with mismatched pubs is rebuilt.
 ensure_local_trust_root() {
   local dir="$ROOT/.local/trust-root"
   mkdir -p "$dir"
   export BASE_TRUST_ROOT_DIR=/etc/base/config
 
-  local relearn_pk
+  local relearn_pk bounty_pk
   relearn_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/relearn_sk")"
+  bounty_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/bounty_sk")"
 
   local need_rebuild=0
   if [[ ! -f "$dir/challenges.toml" || ! -f "$dir/challenges.toml.sig" || ! -f "$dir/owner.pubkey" ]]; then
     need_rebuild=1
   else
-    python3 - "$dir/challenges.toml" "$relearn_pk" <<'PY' || need_rebuild=1
+    python3 - "$dir/challenges.toml" "$relearn_pk" "$bounty_pk" <<'PY' || need_rebuild=1
 import sys, tomllib
 from pathlib import Path
 doc = tomllib.loads(Path(sys.argv[1]).read_text())
 rows = {c["id"]: c.get("public_key", "").lower() for c in doc.get("challenges", [])}
-if rows.get("relearn") != sys.argv[2].lower() or set(rows) != {"relearn"}:
+if rows.get("relearn") != sys.argv[2].lower() or rows.get("bounty") != sys.argv[3].lower() or set(rows) != {"relearn", "bounty"}:
     sys.exit(1)
 sys.exit(0)
 PY
@@ -398,13 +406,16 @@ PY
       --out-secret "$dir/owner.age" \
       --age-recipient "$recip"
   fi
-  python3 - "$dir/challenges.toml" "$relearn_pk" <<'PY2'
+  python3 - "$dir/challenges.toml" "$relearn_pk" "$bounty_pk" <<'PY2'
 import pathlib, sys
 relearn_pk = sys.argv[2]
+bounty_pk = sys.argv[3]
 text = (
     "version = 1\nintroduced_epoch = 0\n\n"
     f'[[challenges]]\nid = "relearn"\npublic_key = "{relearn_pk}"\n'
-    "emission_share_bps = 10000\npolicy = \"all_metagraph_hotkeys\"\n\n"
+    "emission_share_bps = 7000\npolicy = \"all_metagraph_hotkeys\"\n\n"
+    f'[[challenges]]\nid = "bounty"\npublic_key = "{bounty_pk}"\n'
+    "emission_share_bps = 3000\npolicy = \"all_metagraph_hotkeys\"\n\n"
 )
 pathlib.Path(sys.argv[1]).write_text(text)
 PY2
@@ -563,6 +574,8 @@ wait_all_health() {
   WAIT_SECS="$soft_wait"
   wait_health relearn-challenge "http://127.0.0.1:${RELEARN_HOST_PORT}/health" || \
     log "warning: relearn not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
+  wait_health bounty-challenge "http://127.0.0.1:${BOUNTY_HOST_PORT}/health" || \
+    log "warning: bounty not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
   WAIT_SECS="$saved"
 }
 

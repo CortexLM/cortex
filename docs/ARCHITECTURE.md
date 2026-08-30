@@ -28,7 +28,7 @@ Runbooks: [`runbooks/`](./runbooks/).
 - Gateway runs **only** as subnet owner (master). Startup asserts hotkey == on-chain `SubnetOwnerHotkey` or exits `2` before bind.
 - Validators **recompute** the weight vector from a signed, merkle-rooted epoch bundle. Challenge keys and measurements come from **owner-signed local files**, never from gateway HTTP.
 - CRV4 timelock commit-reveal on Bittensor testnet/mainnet as configured. Reveal is automatic on-chain.
-- The live challenge accepts miner work over **HTTP** (Relearn → Lium/sim eval). Miners pay Lium.
+- Live challenges accept miner work over **HTTP** (Relearn → Lium/sim eval; Bounty → pair + reports). Miners pay Lium when a key is present.
 
 ---
 
@@ -39,7 +39,7 @@ Runbooks: [`runbooks/`](./runbooks/).
                     │  Master host (compose profile master) │
                     │  postgres · gateway · validator ·     │
                     │  updater · socket-proxy ·             │
-                    │  relearn-challenge                    │
+                    │  relearn-challenge · bounty-challenge │
                     └───────────────┬─────────────────────┘
                                     │ TLS terminates in gateway (D20)
                                     │ /challenge/{id}/*  /v1/bundle/*
@@ -53,6 +53,7 @@ Runbooks: [`runbooks/`](./runbooks/).
                     ┌───────────────▼─────────────────────┐
                     │  Miner clients                       │
                     │  relearn artifact digest + Lium BYOK  │
+                    │  bounty pair + bug reports            │
                     └─────────────────────────────────────┘
 ```
 
@@ -61,6 +62,7 @@ Runbooks: [`runbooks/`](./runbooks/).
 | `gateway` | Master-only: registry, reverse proxy, bundle seal/serve, sole TLS owner; mounts marketing [`SITE_API.md`](./SITE_API.md) (`GET /v1/site/*`) |
 | `validator` | Fetch/mirror bundle, verify, recompute, peer cross-check, CRV4 submit, dissent |
 | `relearn-challenge` | **Master-only:** digest freeze, holdout unseal, Lium/sim eval, operator promote, sign leaves |
+| `bounty-challenge` | **Master-only:** hotkey pair, bug reports, operator adjudicate, sign leaves |
 | `updater` | Digest-pinned rollouts via `docker-socket-proxy` (master) |
 | `trustroot` | Offline keygen / sign / verify for owner-signed TOML |
 | `bundle` | SCALE types, seal, verify (`PROTOCOL_VERSION`) |
@@ -97,7 +99,7 @@ Runbooks: [`runbooks/`](./runbooks/).
 | `config/measurements.toml` + `.sig` | yes | every validator from **disk** |
 | Challenge / owner mini-secrets | **never** | challenge service / offline ceremony only |
 
-Current emission posture: `relearn = 10000` bps (100%; one-challenge subnet).
+Current emission posture: `relearn = 7000` bps, `bounty = 3000` bps (sum 10000; operator can retune).
 
 Gateway DB is **routing only**. It is never a source of challenge keys, emission shares, or measurements (D18, D23).
 

@@ -23,6 +23,7 @@ body:
         - gateway
         - validator
         - relearn-challenge
+        - bounty-challenge
         - deploy / compose
         - docs
         - other

@@ -1,13 +1,18 @@
 # Owner-signed challenges trust root (D18/D23/D24).
 # Signed with throwaway owner key (see owner.pubkey). Production rotation: CEREMONY.md.
 #
-# Emission: relearn = 10000 bps (100%; one-challenge subnet). Design and Prism
-# are retired as products.
+# Emission: relearn = 7000 bps, bounty = 3000 bps (sum 10000). Operator can retune.
 version = 1
 introduced_epoch = 0
 
 [[challenges]]
 id = "relearn"
 public_key = "8ab577207bb6dfc770a850710824a098d53b1ee90abb92925bd0928937131674"
-emission_share_bps = 10000
+emission_share_bps = 7000
+policy = "all_metagraph_hotkeys"
+
+[[challenges]]
+id = "bounty"
+public_key = "d2ffbe70de7c052deafaba48b90544db4abc1133278c907f2018f457f34aac25"
+emission_share_bps = 3000
 policy = "all_metagraph_hotkeys"

@@ -58,8 +58,19 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Compose / images | **done** | Default compose + `images.yml` target `relearn-challenge`. |
 | Eval pin | **v0** | `config/relearn-pin.toml` — digest + `CortexLM/relearn` SHA empty until first green challenge CI. |
 | Teacher | **v0** | HTTP API from operator env (`RELEARN_TEACHER_API_URL`, `RELEARN_TEACHER_MODEL`, `RELEARN_TEACHER_API_KEY`). Missing URL/key → sim. Judge-only; miner weights never served via that API. |
-| Emission | **10000 bps** | Relearn 100% (sum `10000`). |
+| Emission | **7000 bps** | Default share; Bounty takes `3000` (sum `10000`). |
 | Spec | live | [`RELEARN.md`](RELEARN.md). |
+
+## bounty-challenge
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Crates (`crates/bounty-*`) | **done** | task (pairing), score, store, http, challenge. |
+| Binary (`bins/bounty-challenge`) | **done** | HTTP API on `:8096`. |
+| Miner CLI (`bins/cortex-bounty`) | **done** | `pair --hotkey`; Chat inject from `BOUNTY_CHAT_COMMAND`. |
+| Compose / images | **done** | Default compose + `images.yml` target `bounty-challenge`. |
+| Emission | **3000 bps** | Default share; operator can retune (sum `10000`). |
+| Spec | live | [`BOUNTY.md`](BOUNTY.md). |
 
 ## Infrastructure
 
@@ -91,6 +102,7 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 | Component | Status | Notes |
 |-----------|--------|-------|
 | relearn HTTP / promote | **done** | `POST /v1/submissions` freeze → unseal → paired judge; `POST /v1/admin/promote` bearer; never crowns a regression. |
+| bounty HTTP / adjudicate | **done** | `POST /v1/pair` (sr25519) + `POST /v1/reports`; `POST /v1/admin/adjudicate`; precision displacement vs champion. |
 | relearn Lium rails | **done** (sim default) | Reuses `prism-lium` client + `SimLiumBackend`. Live rent refuses without `sha256:` eval digest; miner BYOK never logged. |
 | design / prism product APIs | retired | Crates remain as unused libraries. |
 | prism orchestration | done | DB-backed claim/execute/review/similarity/score state machine (`prism_submission` + append-only `prism_stage_event`), pre-pod screens (copy gate + static cheat + AST similarity) before Lium rent, sweeper (10h grace + pre-reclaim log harvest; skips live workers), **detached harness + resume-first boot/periodic reconcile** (reattach live pods via sealed BYOK; fail-closed only when unreattachable — `control_plane_restart` / `harness_detached`; `GET /v1/submissions/{id}/logs`), epoch-close batched D24 leaf emission with **WTA** (`prism-emit` outbox: `emitted_epoch` watermark + `prism_emit_cursor` + positive-score carry + `apply_wta`, migration 0012). `PRISM_MAX_CONCURRENT_EVALS` default/prod = 8. |

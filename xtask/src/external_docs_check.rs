@@ -11,15 +11,17 @@ const D19_VERBATIM: &str = "base guarantees *no equivocation between validators*
 /// Marker comment required in external miner docs.
 const BADGE_COMMENT_PREFIX: &str = "<!-- protocol_version:";
 
-/// Content pins required across `docs/external-miner/` (relearn HTTP).
+/// Content pins required across `docs/external-miner/` (relearn + bounty HTTP).
 const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("relearn_challenge", "relearn"),
+    ("bounty_challenge", "bounty"),
     ("http_submit", "HTTP"),
     ("lium_byok", "X-Lium-Api-Key"),
     ("lium_pay", "Miner pays Lium"),
     ("bundle_spec_link", "BUNDLE_SPEC.md"),
     ("base_model", "Qwen/Qwen3.8-Flash-Next"),
     ("teacher_model", "kimi-k3"),
+    ("bounty_placeholder", "BOUNTY_CHAT_COMMAND"),
 ];
 
 /// Substrings that must not appear as live miner guidance (removed path).
@@ -46,7 +48,7 @@ pub fn run(workspace_root: &Path) -> Result<(), String> {
 
     if failures.is_empty() {
         println!(
-            "external-docs-check OK (protocol_version={protocol_version}, relearn HTTP, D19 verbatim match)"
+            "external-docs-check OK (protocol_version={protocol_version}, relearn+bounty HTTP, D19 verbatim match)"
         );
         Ok(())
     } else {
@@ -118,8 +120,8 @@ fn check_external_miner_docs(
         }
     }
 
-    // Required pages for relearn HTTP submit.
-    for required in ["relearn.md", "troubleshoot.md"] {
+    // Required pages for live HTTP submit.
+    for required in ["relearn.md", "bounty.md", "troubleshoot.md"] {
         let path = dir.join(required);
         if !path.is_file() {
             failures.push(format!(
@@ -304,5 +306,8 @@ mod tests {
         assert!(EXTERNAL_MINER_PINS
             .iter()
             .any(|(n, v)| *n == "lium_pay" && *v == "Miner pays Lium"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, _)| *n == "bounty_challenge"));
     }
 }

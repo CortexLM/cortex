@@ -18,6 +18,11 @@ services:
     environment:
       BASE_CHALLENGE_BIND: 0.0.0.0:8095
       RELEARN_FORCE_SIM: "true"
+  bounty-challenge:
+    ports:
+      - "8096:8096"
+    environment:
+      BASE_CHALLENGE_BIND: 0.0.0.0:8096
   socket-proxy:
     ports:
       - "2375:2375"

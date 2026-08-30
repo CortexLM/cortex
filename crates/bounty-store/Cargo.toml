@@ -1,0 +1,20 @@
+[package]
+name = "bounty-store"
+description = "In-memory Bounty pairings, reports, and champion holdout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bounty-challenge-task = { path = "../bounty-challenge-task" }
+bounty-score = { path = "../bounty-score" }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"
+
+[lints]
+workspace = true

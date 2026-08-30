@@ -46,8 +46,8 @@ services:
       - ./deploy/secrets/wallets:/run/base/wallets:ro
       - ./deploy/secrets/gateway_admin_token:/run/secrets/gateway_admin_token:ro
       # The sealer must sign with the same staging trust root the validator
-      # verifies against (relearn 10000), or /v1/weights/latest never
-      # shows relearn weight and the validator flags emission share mismatch (D23).
+      # verifies against (relearn 7000 + bounty 3000), or /v1/weights/latest
+      # never shows challenge weight and the validator flags emission share mismatch (D23).
       - ./config/challenges.staging.toml:/etc/base/config/challenges.toml:ro
       - ./config/challenges.staging.toml.sig:/etc/base/config/challenges.toml.sig:ro
   relearn-challenge:

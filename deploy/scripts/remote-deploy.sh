@@ -31,7 +31,7 @@ REMOTE_DIR="${BASE_REMOTE_DIR:-/opt/base}"
 # bind source and the container's BASE_VERIFY_WORK_ROOT byte-for-byte.
 STATE_ROOT="${BASE_STATE_DIR:-/var/lib/base}"
 GHCR_PREFIX="${BASE_GHCR_PREFIX:-ghcr.io/baseintelligence/base}"
-PIN_SERVICES=(validator gateway updater relearn-challenge)
+PIN_SERVICES=(validator gateway updater relearn-challenge bounty-challenge)
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 if [[ -n "${BASE_SSH_IDENTITY:-}" ]]; then
   SSH_OPTS+=(-i "$BASE_SSH_IDENTITY")
@@ -160,8 +160,8 @@ fi
 
 echo "remote-deploy: rsync tree"
 if [[ "$BUILD_FROM" == "prebuilt" ]]; then
-  for b in validator gateway updater relearn-challenge; do
-    [[ -x "$ROOT/target/release/$b" ]] || die "missing prebuilt binary target/release/$b — run: cargo build --release --features validator-bin/dcap -p validator-bin -p gateway-bin -p updater-bin -p relearn-challenge-bin"
+  for b in validator gateway updater relearn-challenge bounty-challenge; do
+    [[ -x "$ROOT/target/release/$b" ]] || die "missing prebuilt binary target/release/$b — run: cargo build --release --features validator-bin/dcap -p validator-bin -p gateway-bin -p updater-bin -p relearn-challenge-bin -p bounty-challenge-bin"
   done
 fi
 
@@ -191,13 +191,16 @@ rsync -az --delete \
 # absent; if a directory already poisoned the path, replace it with a file.
 ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
   '$REMOTE_DIR/deploy/secrets/relearn' \
+  '$REMOTE_DIR/deploy/secrets/bounty' \
   '$REMOTE_DIR/deploy/secrets/wallets' \
   && chmod 700 '$REMOTE_DIR/deploy/secrets' '$REMOTE_DIR/deploy/secrets/lium' \
   && for f in api_key ssh_ed25519 ssh_ed25519.pub; do \
        [ -e '$REMOTE_DIR/deploy/secrets/lium/'\$f ] || : > '$REMOTE_DIR/deploy/secrets/lium/'\$f; \
      done \
   && [ -e '$REMOTE_DIR/deploy/secrets/relearn/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/relearn/admin_tokens' \
-  && for sk in relearn_sk; do \
+  && [ -e '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' \
+  && [ -e '$REMOTE_DIR/deploy/secrets/bounty/session_secret' ] || : > '$REMOTE_DIR/deploy/secrets/bounty/session_secret' \
+  && for sk in relearn_sk bounty_sk; do \
        p='$REMOTE_DIR/deploy/secrets/'\$sk; \
        if [ -d \"\$p\" ]; then rm -rf \"\$p\"; fi; \
        [ -e \"\$p\" ] || : > \"\$p\"; \
@@ -205,8 +208,11 @@ ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
      done \
   && chmod 400 '$REMOTE_DIR/deploy/secrets/lium/'* \
        '$REMOTE_DIR/deploy/secrets/relearn/admin_tokens' \
+       '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' \
+       '$REMOTE_DIR/deploy/secrets/bounty/session_secret' \
   && chown -R 65532:65532 '$REMOTE_DIR/deploy/secrets/lium' \
        '$REMOTE_DIR/deploy/secrets/relearn' \
+       '$REMOTE_DIR/deploy/secrets/bounty' \
   && chmod -R a-w '$REMOTE_DIR/deploy/secrets/wallets' 2>/dev/null; \
   chown -R 65532:65532 '$REMOTE_DIR/deploy/secrets/wallets' 2>/dev/null; true"
 
@@ -271,6 +277,7 @@ if [[ "$BUILD_FROM" == "prebuilt" ]]; then
     "$ROOT/target/release/gateway" \
     "$ROOT/target/release/updater" \
     "$ROOT/target/release/relearn-challenge" \
+    "$ROOT/target/release/bounty-challenge" \
     "$HOST:$REMOTE_DIR/target/release/"
 fi
 
@@ -331,6 +338,7 @@ PY
 import json, sys
 optional = {
     "relearn-challenge",
+    "bounty-challenge",
     "base-attest-helper",
 }
 data = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -398,7 +406,7 @@ docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} \$UP_PROFILE "\${UP_ARGS[@
 # validator-host wallet for WeightsSetRateLimit / CRV4 commits.
 if [[ '$ROLE' == 'validator' ]]; then
   docker compose ${COMPOSE_FILES[*]} rm -sf \
-    relearn-challenge socket-proxy \
+    relearn-challenge bounty-challenge socket-proxy \
     >/dev/null 2>&1 || true
 elif [[ '$ROLE' == 'master' ]]; then
   docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} rm -sf validator \
@@ -476,6 +484,7 @@ headers = {
 }
 backends = [
     ("relearn", "http://relearn-challenge:8095"),
+    ("bounty", "http://bounty-challenge:8096"),
 ]
 failed = False
 for cid, url in backends:

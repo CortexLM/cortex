@@ -51,7 +51,7 @@ services=$(render \
 if echo "$services" | grep -qx "gateway"; then
   fail "validator role renders gateway (must not)"
 fi
-for banned in relearn-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
+for banned in relearn-challenge bounty-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
   if echo "$services" | grep -qx "$banned"; then
     fail "validator role renders $banned (master-only; must not)"
   fi
@@ -67,7 +67,7 @@ services=$(render \
 if ! echo "$services" | grep -qx "gateway"; then
   fail "master role does not render gateway (must)"
 fi
-for required in relearn-challenge socket-proxy; do
+for required in relearn-challenge bounty-challenge socket-proxy; do
   if ! echo "$services" | grep -qx "$required"; then
     fail "master role does not render $required (must)"
   fi
@@ -109,7 +109,7 @@ services=$(render \
 if echo "$services" | grep -qx "evil-gateway"; then
   fail "prod validator renders evil-gateway (must not)"
 fi
-for banned in relearn-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
+for banned in relearn-challenge bounty-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
   if echo "$services" | grep -qx "$banned"; then
     fail "prod validator renders $banned (master-only; must not)"
   fi
@@ -136,19 +136,22 @@ for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
 done
 echo "OK: staging/prod do not enable host SimSandbox"
 
-# --- relearn-challenge present in default; design/prism retired ---
+# --- relearn + bounty present in default; design/prism retired ---
 default_services=$(render \
   -f docker-compose.yml \
   config --services)
 if ! echo "$default_services" | grep -qx "relearn-challenge"; then
   fail "relearn-challenge not in default compose"
 fi
+if ! echo "$default_services" | grep -qx "bounty-challenge"; then
+  fail "bounty-challenge not in default compose"
+fi
 for retired in prism-challenge design-challenge design-egress-proxy; do
   if echo "$default_services" | grep -qx "$retired"; then
     fail "retired $retired still in default compose"
   fi
 done
-echo "OK: relearn-challenge in default compose; design/prism retired"
+echo "OK: relearn-challenge + bounty-challenge in default compose; design/prism retired"
 
 # --- no fake chain backend survives anywhere in the matrix ---
 for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
@@ -215,8 +218,12 @@ echo "$local_services" | grep -qx "validator" \
   || fail "env-local master stack does not render co-located validator"
 echo "$local_services" | grep -qx "relearn-challenge" \
   || fail "env-local master stack does not render relearn-challenge"
+echo "$local_services" | grep -qx "bounty-challenge" \
+  || fail "env-local master stack does not render bounty-challenge"
 echo "$local_rendered" | grep -qE 'published: "?28095"?' \
   || fail "env-local does not publish relearn-challenge on 28095"
+echo "$local_rendered" | grep -qE 'published: "?28096"?' \
+  || fail "env-local does not publish bounty-challenge on 28096"
 for banned in agent-challenge hypertraining-challenge miner-agent miner-socket-proxy base-agent; do
   if echo "$local_services" | grep -qx "$banned"; then
     fail "removed service still rendered: $banned"

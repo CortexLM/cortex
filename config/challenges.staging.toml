@@ -1,5 +1,5 @@
 # STAGING-ONLY trust root override (testnet 541): mirrors prod emission shares
-# so the staging e2e can prove relearn weights end-to-end.
+# so the staging e2e can prove relearn + bounty weights end-to-end.
 #
 # Mounted over /etc/base/config/challenges.toml by deploy/compose/env-staging.yml
 # only. Signed with the same throwaway owner key as config/challenges.toml
@@ -10,5 +10,11 @@ introduced_epoch = 0
 [[challenges]]
 id = "relearn"
 public_key = "8ab577207bb6dfc770a850710824a098d53b1ee90abb92925bd0928937131674"
-emission_share_bps = 10000
+emission_share_bps = 7000
+policy = "all_metagraph_hotkeys"
+
+[[challenges]]
+id = "bounty"
+public_key = "d2ffbe70de7c052deafaba48b90544db4abc1133278c907f2018f457f34aac25"
+emission_share_bps = 3000
 policy = "all_metagraph_hotkeys"

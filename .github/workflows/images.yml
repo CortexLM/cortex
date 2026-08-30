@@ -73,6 +73,9 @@ jobs:
           - target: relearn-challenge
             image_suffix: relearn-challenge
             dockerfile: deploy/Dockerfile
+          - target: bounty-challenge
+            image_suffix: bounty-challenge
+            dockerfile: deploy/Dockerfile
           - target: ""
             image_suffix: base-attest-helper
             dockerfile: deploy/attest-helper/Dockerfile
@@ -274,6 +277,7 @@ jobs:
               "gateway",
               "updater",
               "relearn-challenge",
+              "bounty-challenge",
               "base-attest-helper",
           }
           assert set(images) == expected, (set(images), expected)
@@ -341,10 +345,10 @@ jobs:
           cp "$SRC" "deploy/digests/${SHA}.json"
           echo "Recorded digest manifest: deploy/digests/${SHA}.json"
           chmod +x deploy/scripts/promote.sh
-          # Pin services only (validator/gateway/updater/relearn-challenge).
+          # Pin services only (validator/gateway/updater/relearn-challenge/bounty-challenge).
           # --skip-backup: this job records CI digests; Spaces/PG backup runs at
           # prod promote (deploy-prod.yml, fail-closed).
-          for svc in validator gateway updater relearn-challenge; do
+          for svc in validator gateway updater relearn-challenge bounty-challenge; do
             IMAGE=$(python3 -c '
           import json, sys
           d = json.load(open(sys.argv[1]))
@@ -363,7 +367,7 @@ jobs:
           import json, sys
           p = json.load(open("deploy/pins/staging.json"))
           assert p["commit_sha"] == sys.argv[1], (p["commit_sha"], sys.argv[1])
-          for s in ("validator", "gateway", "updater", "relearn-challenge"):
+          for s in ("validator", "gateway", "updater", "relearn-challenge", "bounty-challenge"):
               assert s in p["services"], s
               assert p["services"][s]["digest"].startswith("sha256:")
           print("staging pins ok", p["commit_sha"])
@@ -411,6 +415,7 @@ jobs:
             "base/validator"
             "base/updater"
             "base/relearn-challenge"
+            "base/bounty-challenge"
           )
           ok=0
           # First list packages to Learn exact names (debug)

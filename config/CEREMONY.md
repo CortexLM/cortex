@@ -12,16 +12,15 @@ Offline, operator-only. Never commit secrets. Prefer `/root/.base-secrets/` (mod
 | `config/measurements.toml` | Measurement allowlist; empty = fail-closed (base-agent CVM path removed). |
 | `config/measurements.toml.sig` | Detached owner signature. |
 
-### Design challenge enablement (post agent/hypertraining removal)
+### Live challenges (Relearn + Bounty)
 
-Current committed `challenges.toml` has **two** rows: `design` @ 5000 bps and
-`prism` @ 5000 bps (50/50; sum = 10000). The `design` public key was generated
-with the **dev throwaway** `challenge-design.age` under `~/.base-secrets/`.
-A future production owner/key ceremony may still:
+Current committed `challenges.toml` has **two** rows: `relearn` @ 7000 bps and
+`bounty` @ 3000 bps (sum = 10000). Operator may retune shares; the sum must
+remain 10000. A production owner/key ceremony:
 
-1. Keygen a production `design_sk` (keep off-git; materialize as `deploy/secrets/design_sk`).
-2. Replace the `design` `public_key` row in `config/challenges.toml`.
-3. Optionally move bps between `prism` and `design` (sum must remain 10000).
+1. Keygen production `relearn_sk` / `bounty_sk` (keep off-git; materialize under `deploy/secrets/`).
+2. Replace the matching `public_key` rows in `config/challenges.toml`.
+3. Optionally move bps between `relearn` and `bounty` (sum must remain 10000).
 4. Re-sign with the **production** owner key (`sign --kind challenges`).
 5. Verify under `config/owner.pubkey` (or the production owner pubkey after rotation).
 

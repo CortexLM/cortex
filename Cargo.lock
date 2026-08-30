@@ -607,6 +607,80 @@ dependencies = [
 ]
 
 [[package]]
+name = "bounty-challenge"
+version = "0.1.0"
+dependencies = [
+ "bounty-challenge-task",
+ "bounty-http",
+ "bounty-score",
+ "bounty-store",
+ "bundle",
+ "challenge-common",
+ "hex",
+]
+
+[[package]]
+name = "bounty-challenge-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bounty-challenge",
+ "challenge-keys",
+ "clap",
+ "telemetry",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "bounty-challenge-task"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "keystore",
+ "schnorrkel",
+ "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "bounty-http"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bounty-challenge-task",
+ "bounty-score",
+ "bounty-store",
+ "hex",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "bounty-score"
+version = "0.1.0"
+dependencies = [
+ "bounty-challenge-task",
+ "serde",
+]
+
+[[package]]
+name = "bounty-store"
+version = "0.1.0"
+dependencies = [
+ "bounty-challenge-task",
+ "bounty-score",
+ "hex",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "bstr"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1009,6 +1083,16 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "cortex-bounty"
+version = "0.1.0"
+dependencies = [
+ "bounty-challenge-task",
+ "clap",
+ "hex",
+ "keystore",
+]
 
 [[package]]
 name = "cpubits"

@@ -34,16 +34,18 @@ Public miner docs live **outside** this monorepo (examples + human guides only �
 | Challenge | Repo |
 |-----------|------|
 | Relearn | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) |
+| Bounty | this repo [`external-miner/bounty.md`](./external-miner/bounty.md) |
 
-`docs/external-miner/relearn.md` is the short Cortex pointer. The long miner guide lives in [`CortexLM/relearn`](https://github.com/CortexLM/relearn). Validators: [`external-miner/validators.md`](./external-miner/validators.md). When challenge APIs change, update **both** the public repo and `external-miner/` (see root [`../AGENTS.md`](../AGENTS.md) § Challenge public docs).
+`docs/external-miner/relearn.md` is the short Cortex pointer. The long Relearn guide lives in [`CortexLM/relearn`](https://github.com/CortexLM/relearn). Bounty pairing lives in this repo. Validators: [`external-miner/validators.md`](./external-miner/validators.md). When challenge APIs change, update **both** the public repo (when one exists) and `external-miner/` (see root [`../AGENTS.md`](../AGENTS.md) § Challenge public docs).
 
 ## Challenge / local E2E verification
 
 When updating challenge or local-subnet docs/runbooks, keep these invariants:
 
-- **Master-only eval** — `relearn-challenge` runs on master; validator has **no challenge exec** (fetch sealed weights only).
-- **Simulate submissions** — `POST /v1/submissions` then poll `GET /v1/submissions/{id}`; do not treat `/health` alone as proof. A regression must not become champion.
+- **Master-only eval** — `relearn-challenge` and `bounty-challenge` run on master; validator has **no challenge exec** (fetch sealed weights only).
+- **Simulate submissions** — Relearn: `POST /v1/submissions` then poll `GET /v1/submissions/{id}`; Bounty: pair + `POST /v1/reports`. Do not treat `/health` alone as proof. A regression must not become champion.
 - **Relearn promote** — after clean `awaiting_admin`, operator bearer `POST /v1/admin/promote`; then leaf → seal path.
+- **Bounty adjudicate** — operator bearer `POST /v1/admin/adjudicate` (`valid` / `already_fixed_not_prod` / `invalid_malicious` / `duplicate`).
 - **No host Sim in staging/prod** — Docker only; `SimSandbox` / `BASE_ALLOW_HOST_SIM` are CI/local opt-in.
 - **Seal path** — `POST /v1/weights/raw` → seal → `GET /v1/weights/latest` with `sealed: true` (unsealed burn fallback is always available). That path needs `challenge_sk` + `gateway_sk`, **not** a gateway owner wallet. Validator wallets are for on-chain submit only.
 - Normative local procedure: [`runbooks/local-testnet-e2e.md`](runbooks/local-testnet-e2e.md). Repo contract: [`../AGENTS.md`](../AGENTS.md) § Challenge verification.

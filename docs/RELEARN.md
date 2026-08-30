@@ -13,7 +13,7 @@ This repo pins them in `config/relearn-pin.toml`.
 | Base model | `Qwen/Qwen3.8-Flash-Next` |
 | Teacher / judge | HTTP API (operator sets `RELEARN_TEACHER_*`) |
 | Port | `8095` (local host `28095`) |
-| Emission | `10000` bps |
+| Emission | `7000` bps (default; Bounty `3000`) |
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`). Operator promote is
 `POST /v1/admin/promote`. Epoch emit is champion lattice; others `NoScore` (D24).

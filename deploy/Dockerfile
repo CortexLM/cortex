@@ -41,15 +41,18 @@ RUN cargo build --release \
       -p gateway-bin \
       -p updater-bin \
       -p relearn-challenge-bin \
+      -p bounty-challenge-bin \
  && strip target/release/validator \
            target/release/gateway \
            target/release/updater \
            target/release/relearn-challenge \
+           target/release/bounty-challenge \
  && mkdir -p /out \
  && cp target/release/validator \
        target/release/gateway \
        target/release/updater \
-       target/release/relearn-challenge /out/
+       target/release/relearn-challenge \
+       target/release/bounty-challenge /out/
 
 # -----------------------------------------------------------------------------
 # Prebuilt path — copy host target/release artifacts (local verify only)
@@ -63,6 +66,7 @@ COPY target/release/validator \
      target/release/gateway \
      target/release/updater \
      target/release/relearn-challenge \
+     target/release/bounty-challenge \
      /out/
 
 # -----------------------------------------------------------------------------
@@ -113,3 +117,11 @@ RUN apt-get update \
 USER base
 COPY --from=artifacts --chown=base:base /out/relearn-challenge /usr/local/bin/relearn-challenge
 ENTRYPOINT ["/usr/local/bin/relearn-challenge"]
+
+FROM runtime-base AS bounty-challenge
+USER root
+RUN mkdir -p /var/lib/bounty \
+    && chown -R base:base /var/lib/bounty
+USER base
+COPY --from=artifacts --chown=base:base /out/bounty-challenge /usr/local/bin/bounty-challenge
+ENTRYPOINT ["/usr/local/bin/bounty-challenge"]

@@ -43,7 +43,7 @@ Compose always runs a digest-pinned `postgres` service (`base-pgdata` volume, he
 | site-api (`GET /v1/site/*`) | no DB — proxies challenge upstreams via gateway |
 | Unit/integration tests | may construct `Memory*Store` directly; omit `BASE_DATABASE_URL` only there |
 
-Migrations (`crates/db/migrations`) run on boot in gateway when `BASE_DATABASE_URL` is set. Compose requires `deploy/env/relearn-challenge.env` so the live challenge cannot silently boot without operator config.
+Migrations (`crates/db/migrations`) run on boot in gateway when `BASE_DATABASE_URL` is set. Compose requires `deploy/env/relearn-challenge.env` and `deploy/env/bounty-challenge.env` so live challenges cannot silently boot without operator config.
 
 ## Prism Lium GPU profiles (do not mix)
 
