@@ -4678,6 +4678,105 @@ dependencies = [
 ]
 
 [[package]]
+name = "relearn-mm-challenge"
+version = "0.1.0"
+dependencies = [
+ "bundle",
+ "challenge-common",
+ "crypto",
+ "hex",
+ "relearn-mm-eval",
+ "relearn-mm-http",
+ "relearn-mm-score",
+ "relearn-mm-store",
+ "relearn-mm-task",
+ "serde",
+]
+
+[[package]]
+name = "relearn-mm-challenge-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "challenge-keys",
+ "clap",
+ "relearn-mm-challenge",
+ "relearn-mm-eval",
+ "relearn-mm-task",
+ "telemetry",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "relearn-mm-eval"
+version = "0.1.0"
+dependencies = [
+ "prism-competition",
+ "prism-lium",
+ "prism-lium-types",
+ "relearn-challenge-task",
+ "relearn-mm-score",
+ "relearn-mm-store",
+ "relearn-mm-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "relearn-mm-http"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "hex",
+ "http-body-util",
+ "relearn-mm-eval",
+ "relearn-mm-score",
+ "relearn-mm-store",
+ "relearn-mm-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "relearn-mm-score"
+version = "0.1.0"
+dependencies = [
+ "prism-competition",
+ "relearn-mm-task",
+ "serde",
+]
+
+[[package]]
+name = "relearn-mm-store"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "prism-competition",
+ "relearn-mm-score",
+ "relearn-mm-task",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "relearn-mm-task"
+version = "0.1.0"
+dependencies = [
+ "relearn-challenge-task",
+ "serde",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "relearn-score"
 version = "0.1.0"
 dependencies = [
