@@ -1,7 +1,9 @@
 //! `bounty-challenge` — master-only Bounty service (port 8096).
 //!
-//! Pair hotkey ↔ Cortex Chat account, accept bug reports, operator
-//! adjudicate. Validators never evaluate reports; they verify sealed bundles.
+//! Internal ingest: pair hotkey ↔ Cortex Chat account, accept bug reports,
+//! operator adjudicate. Scoring/weights **read** the CortexLM/backend public
+//! feed (`BOUNTY_BACKEND_PUBLIC_URL`). This binary does not serve a public
+//! leaderboard. Validators never evaluate reports; they verify sealed bundles.
 
 #![forbid(unsafe_code)]
 
@@ -11,7 +13,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use bounty_challenge::{
-    bounty_router, hash_admin_token, AppState, BountyStore, CHALLENGE_ID, SCORING_VERSION,
+    backend_public_url, bounty_router, hash_admin_token, AppState, BountyStore, CHALLENGE_ID,
+    SCORING_VERSION,
 };
 use challenge_keys::load_challenge_secret;
 use clap::Parser;
@@ -36,6 +39,10 @@ struct Cli {
     /// Session HMAC secret file. Random-at-boot when omitted (dev only).
     #[arg(long, env = "BOUNTY_SESSION_SECRET_FILE")]
     session_secret_file: Option<PathBuf>,
+    /// CortexLM/backend public base URL. Empty → skip fetch (CI / sim).
+    /// Never bake a host; operators set this on the host.
+    #[arg(long, env = "BOUNTY_BACKEND_PUBLIC_URL")]
+    backend_public_url: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -56,6 +63,17 @@ fn run(cli: &Cli) -> Result<(), String> {
     }
     let admin_hashes = load_admin_hashes(cli.admin_tokens_file.as_deref());
     let session_secret = load_session_secret(cli.session_secret_file.as_deref())?;
+    if cli
+        .backend_public_url
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+        || backend_public_url().is_some()
+    {
+        tracing::info!("bounty scoring reads CortexLM/backend public API");
+    } else {
+        tracing::info!("BOUNTY_BACKEND_PUBLIC_URL unset — skip backend public fetch (sim/CI)");
+    }
     let state = AppState {
         store: BountyStore::new(),
         session_secret: Arc::new(session_secret),

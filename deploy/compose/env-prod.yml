@@ -61,3 +61,7 @@ services:
       RELEARN_TEACHER_API_URL: "${RELEARN_TEACHER_API_URL:-}"
       RELEARN_TEACHER_MODEL: "${RELEARN_TEACHER_MODEL:-}"
       BASE_CHAIN_ENDPOINTS: "wss://bittensor-finney.api.onfinality.io/public-ws,wss://entrypoint-finney.opentensor.ai:443"
+  bounty-challenge:
+    environment:
+      # CortexLM/backend public base. Empty → skip / sim. Never bake a host.
+      BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"

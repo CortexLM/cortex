@@ -9,14 +9,22 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bounty_challenge_task::{CHALLENGE_ID_BYTES, SCORE_MAX};
-use bounty_score::{champion_hold_lattice, lattice_from_precision, MinerHoldout};
+mod backend;
+
+use bounty_challenge_task::{hotkey_hex, CHALLENGE_ID_BYTES, SCORE_MAX};
+use bounty_score::{
+    champion_hold_lattice, lattice_from_precision, score_plan_from_snapshot, MinerHoldout,
+    PublicScorePlan, PublicSnapshot,
+};
 use bounty_store::MemoryStore;
 use bundle::{NoScoreReasonCode, ScoreOrAbsence};
 use challenge_common::{emit_signed_leaf_set, Hotkey, LeafEmitError};
 
+pub use backend::{
+    fetch_public_snapshot, public_path, snapshot_from_json, try_fetch_public_snapshot, BackendError,
+};
 pub use bounty_challenge_task::{
-    chat_command_display, CHALLENGE_ID, CHALLENGE_ID_BYTES as BOUNTY_ID_BYTES,
+    backend_public_url, chat_command_display, CHALLENGE_ID, CHALLENGE_ID_BYTES as BOUNTY_ID_BYTES,
     CHAT_COMMAND_PLACEHOLDER, SCORE_MAX as BOUNTY_SCORE_MAX, SCORING_VERSION, TERMS_TEXT,
 };
 pub use bounty_http::{bounty_router, hash_admin_token, AppState};
@@ -93,6 +101,25 @@ pub fn parse_hotkey_hex(hex_s: &str) -> Option<Hotkey> {
     <[u8; 32]>::try_from(bytes).ok()
 }
 
+/// Map a backend public snapshot onto D24 scores for `expected`.
+#[must_use]
+pub fn emission_from_public_snapshot(
+    expected: &BTreeSet<Hotkey>,
+    snap: &PublicSnapshot,
+) -> (PublicScorePlan, BTreeMap<Hotkey, ScoreOrAbsence>) {
+    let plan = score_plan_from_snapshot(snap);
+    let champ = plan.champion_hex.as_deref().and_then(parse_hotkey_hex);
+    let mut holdouts = BTreeMap::new();
+    for h in expected {
+        let hex_s = hotkey_hex(h);
+        if let Some(row) = plan.holdouts.get(&hex_s) {
+            holdouts.insert(*h, row.clone());
+        }
+    }
+    let scores = emission_scores(expected, champ, plan.champion_lattice, &holdouts);
+    (plan, scores)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +177,43 @@ mod tests {
             ScoreOrAbsence::NoScore {
                 reason: NoScoreReasonCode::NotAttempted
             }
+        ));
+    }
+
+    #[test]
+    fn emission_maps_backend_public_snapshot() {
+        let alice = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
+        let snap = snapshot_from_json(
+            &format!(r#"{{"items":[{{"hotkey":"{alice}","valid_count":3}}]}}"#),
+            &format!(
+                r#"{{"items":[
+                {{"id":"1","hotkey":"{alice}","status":"valid",
+                  "problem_found":"seal 500","adjudicator":"bounty-adjudicator@cortex",
+                  "justification":"reproduced","adjudicated_at":"2026-08-30T00:00:00Z",
+                  "created_at":"2026-08-29T00:00:00Z"}},
+                {{"id":"2","hotkey":"{alice}","status":"valid",
+                  "problem_found":"proxy 502","adjudicator":"bounty-adjudicator@cortex",
+                  "justification":"reproduced","adjudicated_at":"2026-08-30T00:00:00Z",
+                  "created_at":"2026-08-29T01:00:00Z"}},
+                {{"id":"3","hotkey":"{alice}","status":"valid",
+                  "problem_found":"health flap","adjudicator":"bounty-adjudicator@cortex",
+                  "justification":"reproduced","adjudicated_at":"2026-08-30T00:00:00Z",
+                  "created_at":"2026-08-29T02:00:00Z"}}
+            ]}}"#
+            ),
+        )
+        .expect("mock");
+        let hk = parse_hotkey_hex(&hotkey_hex(
+            &bounty_challenge_task::parse_hotkey(alice).expect("alice"),
+        ))
+        .expect("hex");
+        let mut expected = BTreeSet::new();
+        expected.insert(hk);
+        let (plan, scores) = emission_from_public_snapshot(&expected, &snap);
+        assert!(plan.champion_hex.is_some());
+        assert!(matches!(
+            scores[&hk],
+            ScoreOrAbsence::Score { value } if value > 0
         ));
     }
 }

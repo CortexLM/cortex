@@ -48,7 +48,7 @@ Each live challenge has a **separate public GitHub repo** for miners. Those repo
 | Challenge | Public repo | Role |
 |-----------|-------------|------|
 | Relearn | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) | Eval image, harness, generators, teacher, miner docs |
-| Bounty | this repo [`docs/external-miner/bounty.md`](docs/external-miner/bounty.md) | Miner pairing + report path; Chat backend is a separate PR |
+| Bounty | this repo [`docs/external-miner/bounty.md`](docs/external-miner/bounty.md) | Miner pairing + report path; subnet **reads** CortexLM/backend public API (does not serve one) |
 
 This control-plane repo is `CortexLM/cortex`. Short miner pointers: [`docs/external-miner/relearn.md`](docs/external-miner/relearn.md), [`docs/external-miner/bounty.md`](docs/external-miner/bounty.md). Historical frozen specs (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`) stay archived; they are not live products. Do not send miners to Design or Prism docs.
 
@@ -67,7 +67,7 @@ When verifying a challenge (local-e2e, staging, or focused tests), **simulate a 
 2. Edge / failure probes: bad harness, sanitize reject, quota, wrong routes/auth.
 3. **Relearn — submit:** `POST /v1/submissions` with a 64-hex hotkey + artifact digest (optional `X-Lium-Api-Key`). Poll `GET /v1/submissions/{id}` until `awaiting_admin` or `rejected`. Holdout must stay sealed until the digest freezes. A regression must not become champion.
 4. **Relearn — promote:** with operator bearer (`deploy/secrets/relearn/admin_tokens`), `POST /v1/admin/promote` only for an eligible paired win.
-5. **Bounty — pair + report:** `cortex-bounty pair --hotkey <ss58> --account-id <id>`, then `POST /v1/pair` (terms + signature) and `POST /v1/reports`. Operator bearer `POST /v1/admin/adjudicate` (`valid` / `already_fixed_not_prod` / `invalid_malicious` / `duplicate`).
+5. **Bounty — pair + report:** `cortex-bounty pair --hotkey <ss58> --account-id <id>`, then `POST /v1/pair` (terms + signature) and `POST /v1/reports`. Operator bearer `POST /v1/admin/adjudicate` (`valid` / `already_fixed_not_prod` / `invalid_malicious` / `duplicate`). Scoring **reads** CortexLM/backend public JSON (`BOUNTY_BACKEND_PUBLIC_URL`); do not serve `/v1/public/*` from this repo.
 6. Leaf emission → `POST /v1/weights/raw` → seal → `GET /v1/weights/latest` with **`sealed: true`** (burn fallback alone is not a real seal).
 
 **Never host Sim in staging/prod** for live scoring. `RELEARN_FORCE_SIM=1` is CI/local opt-in only. Live rent requires a digest pin in `config/relearn-pin.toml` plus miner BYOK (`LIUM_API_KEY` / `X-Lium-Api-Key`). Never log or commit that key.

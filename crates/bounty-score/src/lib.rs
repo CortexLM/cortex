@@ -14,6 +14,13 @@
 use bounty_challenge_task::SCORE_MAX;
 use serde::{Deserialize, Serialize};
 
+mod public;
+pub use public::{
+    holdouts_from_reports, parse_leaderboard, parse_reports, rank_leaderboard, scorable,
+    score_plan_from_snapshot, LeaderboardRow, PublicReport, PublicScorePlan, PublicSnapshot,
+    PublicStatus,
+};
+
 /// Credit applied to a valid unique reproducing bug.
 pub const VALID_CREDIT: i64 = 100;
 

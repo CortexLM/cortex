@@ -153,6 +153,18 @@ pub fn chat_command_display() -> String {
     chat_command_from_env().unwrap_or_else(|| CHAT_COMMAND_PLACEHOLDER.to_owned())
 }
 
+/// `BOUNTY_BACKEND_PUBLIC_URL` when set. Empty / missing → `None` (skip / sim).
+///
+/// Cortex **reads** the Chat backend public feed. It does not serve one.
+/// Never bake a host into git.
+#[must_use]
+pub fn backend_public_url() -> Option<String> {
+    std::env::var("BOUNTY_BACKEND_PUBLIC_URL")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
 /// Accept `[A-Za-z0-9._:-]` up to 128 chars.
 pub fn validate_account_id(id: &str) -> Result<(), PairError> {
     if id.is_empty() || id.len() > 128 {
@@ -349,6 +361,11 @@ mod tests {
         assert!(chat_command_from_env().is_none());
         assert_eq!(chat_command_display(), CHAT_COMMAND_PLACEHOLDER);
         assert!(!CHAT_COMMAND_PLACEHOLDER.contains("/miner"));
+    }
+
+    #[test]
+    fn backend_public_url_env_only() {
+        assert!(backend_public_url().is_none());
     }
 
     #[test]

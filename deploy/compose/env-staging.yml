@@ -59,3 +59,7 @@ services:
       RELEARN_TEACHER_BACKEND: "http_api"
       RELEARN_TEACHER_API_URL: "${RELEARN_TEACHER_API_URL:-}"
       RELEARN_TEACHER_MODEL: "${RELEARN_TEACHER_MODEL:-}"
+  bounty-challenge:
+    environment:
+      # CortexLM/backend public base. Empty → skip / sim. Never bake a host.
+      BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"

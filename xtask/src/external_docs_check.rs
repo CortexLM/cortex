@@ -22,6 +22,8 @@ const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("base_model", "Qwen/Qwen3.8-Flash-Next"),
     ("teacher_model", "kimi-k3"),
     ("bounty_placeholder", "BOUNTY_CHAT_COMMAND"),
+    ("bounty_backend_url", "BOUNTY_BACKEND_PUBLIC_URL"),
+    ("bounty_backend_consumer", "CortexLM/backend"),
 ];
 
 /// Substrings that must not appear as live miner guidance (removed path).
@@ -309,5 +311,11 @@ mod tests {
         assert!(EXTERNAL_MINER_PINS
             .iter()
             .any(|(n, _)| *n == "bounty_challenge"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "bounty_backend_url" && *v == "BOUNTY_BACKEND_PUBLIC_URL"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "bounty_backend_consumer" && *v == "CortexLM/backend"));
     }
 }

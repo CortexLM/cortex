@@ -617,6 +617,9 @@ dependencies = [
  "bundle",
  "challenge-common",
  "hex",
+ "reqwest 0.12.28",
+ "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]
@@ -666,6 +669,7 @@ version = "0.1.0"
 dependencies = [
  "bounty-challenge-task",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

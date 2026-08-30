@@ -103,7 +103,14 @@ curl -sS -X POST https://<gateway>/challenge/bounty/v1/reports \
   }'
 ```
 
-Poll `GET /challenge/bounty/v1/reports/{id}`.
+Poll `GET /challenge/bounty/v1/reports/{id}`. That path is internal ingest,
+not a public leaderboard.
+
+**Public consumers** (leaderboard + published reports) hit
+**CortexLM/backend** — not this subnet. Cortex **reads**
+`/v1/bounty/public/leaderboard` and `/v1/bounty/public/reports` from
+`BOUNTY_BACKEND_PUBLIC_URL` (operator env; empty → skip / sim). Scoring
+uses `problem_found` + `justification` + hotkey counts on those payloads.
 
 ## Scoring (precision, not volume)
 

@@ -13,7 +13,7 @@ Live challenges: **Relearn** (`relearn`) and **Bounty** (`bounty`). HTTP submit.
 | Challenge | Guide (this repo) | Notes |
 |-----------|-------------------|-------|
 | Relearn | [relearn.md](./relearn.md) | Long guide + eval image: [CortexLM/relearn](https://github.com/CortexLM/relearn) |
-| Bounty | [bounty.md](./bounty.md) | Pair via `cortex-bounty`; Chat inject is `BOUNTY_CHAT_COMMAND` (env-only) |
+| Bounty | [bounty.md](./bounty.md) | Pair via `cortex-bounty`; Chat inject is `BOUNTY_CHAT_COMMAND` (env-only). Public leaderboard/reports live in CortexLM/backend; Cortex reads `BOUNTY_BACKEND_PUBLIC_URL` |
 
 Pinned models: `Qwen/Qwen3.8-Flash-Next`, teacher `kimi-k3`.
 Bundle bytes: [`BUNDLE_SPEC.md`](../BUNDLE_SPEC.md).

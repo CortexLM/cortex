@@ -247,6 +247,7 @@ services:
       BASE_CHALLENGE_BIND: 0.0.0.0:8096
       BASE_CHALLENGE_SK_FILE: /run/base/challenge_sk
       BOUNTY_CHAT_COMMAND: "${BOUNTY_CHAT_COMMAND:-}"
+      BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"
       BOUNTY_ADMIN_TOKENS_FILE: /run/base/bounty/admin_tokens
       BOUNTY_SESSION_SECRET_FILE: /run/base/bounty/session_secret
       BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}

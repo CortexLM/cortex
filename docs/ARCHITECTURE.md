@@ -62,7 +62,7 @@ Runbooks: [`runbooks/`](./runbooks/).
 | `gateway` | Master-only: registry, reverse proxy, bundle seal/serve, sole TLS owner; mounts marketing [`SITE_API.md`](./SITE_API.md) (`GET /v1/site/*`) |
 | `validator` | Fetch/mirror bundle, verify, recompute, peer cross-check, CRV4 submit, dissent |
 | `relearn-challenge` | **Master-only:** digest freeze, holdout unseal, Lium/sim eval, operator promote, sign leaves |
-| `bounty-challenge` | **Master-only:** hotkey pair, bug reports, operator adjudicate, sign leaves |
+| `bounty-challenge` | **Master-only:** internal pair/reports/adjudicate; **reads** CortexLM/backend public API for scoring; sign leaves |
 | `updater` | Digest-pinned rollouts via `docker-socket-proxy` (master) |
 | `trustroot` | Offline keygen / sign / verify for owner-signed TOML |
 | `bundle` | SCALE types, seal, verify (`PROTOCOL_VERSION`) |

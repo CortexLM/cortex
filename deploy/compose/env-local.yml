@@ -76,3 +76,4 @@ services:
     environment:
       BASE_DATABASE_URL: ${LOCAL_DATABASE_URL:-postgres://base:base_dev_only_change_me@postgres:5432/base}
       BOUNTY_CHAT_COMMAND: "${BOUNTY_CHAT_COMMAND:-}"
+      BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"

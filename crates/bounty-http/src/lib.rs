@@ -1,4 +1,8 @@
-//! Bounty HTTP API (master-only).
+//! Bounty HTTP API (master-only, **internal ingest**).
+//!
+//! Cortex does **not** serve a public leaderboard/report API. Public consumers
+//! hit CortexLM/backend (`GET /v1/bounty/public/leaderboard|reports`). This
+//! service only reads that feed for scoring (see `bounty-challenge::backend`).
 //!
 //! Gateway proxies `/challenge/bounty/*` onto this service:
 //!
@@ -7,10 +11,12 @@
 //! GET  /v1/status
 //! POST /v1/pair                 verify hotkey sig, bind account, session claim
 //! POST /v1/reports              bug report + session (optional X-Lium-Api-Key)
-//! GET  /v1/reports
+//! GET  /v1/reports              internal ingest list (not a public board)
 //! GET  /v1/reports/{id}
 //! POST /v1/admin/adjudicate     valid | already_fixed_not_prod | invalid_malicious | duplicate
 //! ```
+//!
+//! There is no `/v1/public/*` route.
 
 #![forbid(unsafe_code)]
 #![allow(
@@ -30,8 +36,8 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bounty_challenge_task::{
-    hotkey_hex, parse_hotkey, parse_signature, verify_pair_signature, PairChallenge, CHALLENGE_ID,
-    SCORE_MAX, SCORING_VERSION, TERMS_TEXT,
+    backend_public_url, hotkey_hex, parse_hotkey, parse_signature, verify_pair_signature,
+    PairChallenge, CHALLENGE_ID, SCORE_MAX, SCORING_VERSION, TERMS_TEXT,
 };
 use bounty_score::Adjudication;
 use bounty_store::{report_fingerprint, MemoryStore, Report, ReportState};
@@ -76,6 +82,7 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         "scoring_version": SCORING_VERSION,
         "score_max": SCORE_MAX,
         "champion_hotkey": champ,
+        "backend_public_configured": backend_public_url().is_some(),
         "terms": TERMS_TEXT,
     }))
 }
@@ -505,5 +512,19 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{adj}");
         assert_eq!(adj["state"], "invalid_malicious");
+    }
+
+    #[tokio::test]
+    async fn does_not_serve_public_leaderboard() {
+        let (app, _) = app();
+        let (st, _) = json_req(
+            app,
+            "GET",
+            "/v1/public/leaderboard",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
     }
 }
