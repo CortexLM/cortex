@@ -4700,6 +4700,122 @@ dependencies = [
 ]
 
 [[package]]
+name = "relearn-t2i-challenge"
+version = "0.1.0"
+dependencies = [
+ "bundle",
+ "challenge-common",
+ "crypto",
+ "hex",
+ "relearn-t2i-eval",
+ "relearn-t2i-http",
+ "relearn-t2i-score",
+ "relearn-t2i-store",
+ "relearn-t2i-task",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "relearn-t2i-challenge-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "challenge-keys",
+ "clap",
+ "relearn-t2i-challenge",
+ "relearn-t2i-eval",
+ "relearn-t2i-task",
+ "telemetry",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "relearn-t2i-eval"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "prism-competition",
+ "prism-lium",
+ "prism-lium-types",
+ "relearn-t2i-judge",
+ "relearn-t2i-score",
+ "relearn-t2i-store",
+ "relearn-t2i-task",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "relearn-t2i-http"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "hex",
+ "http-body-util",
+ "relearn-t2i-eval",
+ "relearn-t2i-judge",
+ "relearn-t2i-score",
+ "relearn-t2i-store",
+ "relearn-t2i-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "relearn-t2i-judge"
+version = "0.1.0"
+dependencies = [
+ "relearn-t2i-task",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "relearn-t2i-score"
+version = "0.1.0"
+dependencies = [
+ "prism-competition",
+ "relearn-t2i-judge",
+ "relearn-t2i-task",
+ "serde",
+]
+
+[[package]]
+name = "relearn-t2i-store"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "prism-competition",
+ "relearn-t2i-score",
+ "relearn-t2i-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "relearn-t2i-task"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7223,6 +7339,7 @@ dependencies = [
  "hex",
  "parity-scale-codec",
  "regex",
+ "relearn-t2i-task",
  "reqwest 0.12.28",
  "scale-info",
  "serde",

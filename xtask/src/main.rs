@@ -8,6 +8,7 @@
 //! - `spec-check` — fail if `docs/BUNDLE_SPEC.md` is missing plan pins (a)–(l)
 //! - `design-check` — fail if `docs/DESIGN_CHALLENGE.md` is missing freeze pins
 //! - `external-docs-check` — fail if external miner docs `protocol_version` ≠ bundle, or D19 drifts
+//! - `relearn-t2i-holdout` — select a Relearn T2I holdout slice and print its commitment
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod consensus_lint;
@@ -17,6 +18,7 @@ mod loc_cap;
 mod metadata_snapshot;
 mod natural_pack;
 mod spec_check;
+mod t2i_holdout;
 
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -86,6 +88,26 @@ enum Command {
     DesignCheck,
     /// Fail if external miner docs `protocol_version` differs from `bundle`, or `THREAT_MODEL` D19 drifts.
     ExternalDocsCheck,
+    /// Select a Relearn T2I holdout slice and print its pin commitment.
+    ///
+    /// Prompt ids are never printed. Production salts stay off git.
+    RelearnT2iHoldout {
+        /// Bench prompt file (`qwen_image_bench_hf_v0518.jsonl`).
+        #[arg(long)]
+        bench: PathBuf,
+        /// Selection salt.
+        #[arg(long)]
+        salt: String,
+        /// Holdout prompt count.
+        #[arg(long, default_value_t = 40)]
+        size: usize,
+        /// Prompt ids published in the pin's public split (repeatable).
+        #[arg(long = "exclude")]
+        exclude: Vec<u32>,
+        /// Write records here (outside the repo, mode 0600).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn workspace_root() -> Result<PathBuf, String> {
@@ -150,6 +172,19 @@ fn main() -> ExitCode {
         Command::SpecCheck => spec_check::run(&root),
         Command::DesignCheck => design_check::run(&root),
         Command::ExternalDocsCheck => external_docs_check::run(&root),
+        Command::RelearnT2iHoldout {
+            bench,
+            salt,
+            size,
+            exclude,
+            out,
+        } => t2i_holdout::run(&t2i_holdout::HoldoutArgs {
+            bench,
+            salt,
+            size,
+            exclude,
+            out,
+        }),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

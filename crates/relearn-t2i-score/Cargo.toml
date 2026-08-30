@@ -1,0 +1,18 @@
+[package]
+name = "relearn-t2i-score"
+description = "Relearn T2I displacement scoring: pillar gates, seed replay, contamination"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+prism-competition = { path = "../prism-competition" }
+relearn-t2i-judge = { path = "../relearn-t2i-judge" }
+relearn-t2i-task = { path = "../relearn-t2i-task" }
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true
