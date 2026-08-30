@@ -12,15 +12,17 @@ Offline, operator-only. Never commit secrets. Prefer `/root/.base-secrets/` (mod
 | `config/measurements.toml` | Measurement allowlist; empty = fail-closed (base-agent CVM path removed). |
 | `config/measurements.toml.sig` | Detached owner signature. |
 
-### Live challenges (Relearn + Bounty)
+### Live challenges (Relearn LLM + Relearn T2I + Relearn Multimodal + Bounty)
 
-Current committed `challenges.toml` has **two** rows: `relearn` @ 7000 bps and
-`bounty` @ 3000 bps (sum = 10000). Operator may retune shares; the sum must
-remain 10000. A production owner/key ceremony:
+Current committed `challenges.toml` has **four** rows: `relearn` @ 4000,
+`relearn-t2i` @ 1500, `relearn-mm` @ 1500, and `bounty` @ 3000 bps
+(sum = 10000). Operator may retune shares; the sum must remain 10000, and no
+two rows may share a public key. A production owner/key ceremony:
 
-1. Keygen production `relearn_sk` / `bounty_sk` (keep off-git; materialize under `deploy/secrets/`).
+1. Keygen production `relearn_sk` / `relearn_t2i_sk` / `relearn_mm_sk` /
+   `bounty_sk` (keep off-git; materialize under `deploy/secrets/`).
 2. Replace the matching `public_key` rows in `config/challenges.toml`.
-3. Optionally move bps between `relearn` and `bounty` (sum must remain 10000).
+3. Optionally move bps between challenges (sum must remain 10000).
 4. Re-sign with the **production** owner key (`sign --kind challenges`).
 5. Verify under `config/owner.pubkey` (or the production owner pubkey after rotation).
 

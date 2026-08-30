@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::doc_markdown)]
 
 //! The committed `config/relearn-t2i-pin.toml` must load and satisfy every
 //! product rule: Cosmos3 base, OpenMDW 1.1, Q-Judger as the only judge, a

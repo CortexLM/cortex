@@ -24,6 +24,10 @@ services:
   # miner code or hold challenge mini-secrets.
   relearn-challenge:
     profiles: ["never"]
+  relearn-t2i-challenge:
+    profiles: ["never"]
+  relearn-mm-challenge:
+    profiles: ["never"]
   bounty-challenge:
     profiles: ["never"]
   socket-proxy:

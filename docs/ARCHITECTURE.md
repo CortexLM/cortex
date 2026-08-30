@@ -8,12 +8,15 @@ Operator-facing map of the control plane. Normative byte contracts live in the f
 | [`DESIGN_CHALLENGE.md`](./DESIGN_CHALLENGE.md) | archived freeze | Retired `design` product (not live) |
 | [`PRISM.md`](./PRISM.md) | archived | Retired `prism` product (Lium rails reused by Relearn) |
 | [`RELEARN.md`](./RELEARN.md) | live | `relearn` post-training factory (HTTP submit; miners pay Lium) |
+| [`RELEARN-T2I.md`](./RELEARN-T2I.md) | live | `relearn-t2i` — Cosmos3 fine-tunes judged by Q-Judger |
+| [`RELEARN-MM.md`](./RELEARN-MM.md) | live | `relearn-mm` — permissive vision encoder on the champion LLM |
+| [`BOUNTY.md`](./BOUNTY.md) | live | `bounty` — paired bug reports |
 
 Do not restate those contracts here. Link them.
 
 Audiences (do not mix):
 
-- Miners (Relearn): [`external-miner/relearn.md`](./external-miner/relearn.md)
+- Miners: [`external-miner/README.md`](./external-miner/README.md) indexes all four challenges
 - Validators: [`external-miner/validators.md`](./external-miner/validators.md)
 
 Security claim and what it excludes: [`THREAT_MODEL.md`](./THREAT_MODEL.md).  
@@ -39,7 +42,10 @@ Runbooks: [`runbooks/`](./runbooks/).
                     │  Master host (compose profile master) │
                     │  postgres · gateway · validator ·     │
                     │  updater · socket-proxy ·             │
-                    │  relearn-challenge · bounty-challenge │
+                    │  relearn-challenge ·                  │
+                    │  relearn-t2i-challenge ·              │
+                    │  relearn-mm-challenge ·               │
+                    │  bounty-challenge                     │
                     └───────────────┬─────────────────────┘
                                     │ TLS terminates in gateway (D20)
                                     │ /challenge/{id}/*  /v1/bundle/*
@@ -53,6 +59,7 @@ Runbooks: [`runbooks/`](./runbooks/).
                     ┌───────────────▼─────────────────────┐
                     │  Miner clients                       │
                     │  relearn artifact digest + Lium BYOK  │
+                    │  t2i / mm artifact + manifest         │
                     │  bounty pair + bug reports            │
                     └─────────────────────────────────────┘
 ```
@@ -62,6 +69,8 @@ Runbooks: [`runbooks/`](./runbooks/).
 | `gateway` | Master-only: registry, reverse proxy, bundle seal/serve, sole TLS owner; mounts marketing [`SITE_API.md`](./SITE_API.md) (`GET /v1/site/*`) |
 | `validator` | Fetch/mirror bundle, verify, recompute, peer cross-check, CRV4 submit, dissent |
 | `relearn-challenge` | **Master-only:** digest freeze, holdout unseal, Lium/sim eval, operator promote, sign leaves |
+| `relearn-t2i-challenge` | **Master-only:** frozen prompt cells at pinned seeds, Q-Judger scoring, pillar / replay / contamination gates, sign leaves |
+| `relearn-mm-challenge` | **Master-only:** text-intact rerun (hard gate), vision + agentic holdout with a pixel-shuffle control, sign leaves |
 | `bounty-challenge` | **Master-only:** internal pair/reports/adjudicate; **reads** CortexLM/backend public API for scoring; sign leaves |
 | `updater` | Digest-pinned rollouts via `docker-socket-proxy` (master) |
 | `trustroot` | Offline keygen / sign / verify for owner-signed TOML |
@@ -99,7 +108,9 @@ Runbooks: [`runbooks/`](./runbooks/).
 | `config/measurements.toml` + `.sig` | yes | every validator from **disk** |
 | Challenge / owner mini-secrets | **never** | challenge service / offline ceremony only |
 
-Current emission posture: `relearn = 7000` bps, `bounty = 3000` bps (sum 10000; operator can retune).
+Current emission posture: `relearn = 4000`, `relearn-t2i = 1500`,
+`relearn-mm = 1500`, `bounty = 3000` bps (sum 10000; operator can retune).
+Each challenge signs leaves under its **own** key; no two rows share one.
 
 Gateway DB is **routing only**. It is never a source of challenge keys, emission shares, or measurements (D18, D23).
 

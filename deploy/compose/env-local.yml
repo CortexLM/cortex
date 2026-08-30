@@ -70,6 +70,24 @@ services:
       RELEARN_FORCE_SIM: "${LOCAL_RELEARN_FORCE_SIM:-true}"
       BASE_SUBMISSION_GATING: "${LOCAL_SUBMISSION_GATING:-0}"
 
+  relearn-t2i-challenge:
+    ports:
+      - "127.0.0.1:${LOCAL_RELEARN_T2I_HOST_PORT:-28097}:8097"
+    environment:
+      BASE_DATABASE_URL: ${LOCAL_DATABASE_URL:-postgres://base:base_dev_only_change_me@postgres:5432/base}
+      # No Lium spend and no Q-Judger endpoint on a laptop unless opted in.
+      RELEARN_T2I_FORCE_SIM: "${LOCAL_RELEARN_T2I_FORCE_SIM:-true}"
+      BASE_SUBMISSION_GATING: "${LOCAL_SUBMISSION_GATING:-0}"
+
+  relearn-mm-challenge:
+    ports:
+      - "127.0.0.1:${LOCAL_RELEARN_MM_HOST_PORT:-28098}:8098"
+    environment:
+      BASE_DATABASE_URL: ${LOCAL_DATABASE_URL:-postgres://base:base_dev_only_change_me@postgres:5432/base}
+      RELEARN_MM_FORCE_SIM: "${LOCAL_RELEARN_MM_FORCE_SIM:-true}"
+      RELEARN_MM_CHAMPION_LM_HASH: "${RELEARN_MM_CHAMPION_LM_HASH:-}"
+      BASE_SUBMISSION_GATING: "${LOCAL_SUBMISSION_GATING:-0}"
+
   bounty-challenge:
     ports:
       - "127.0.0.1:${LOCAL_BOUNTY_HOST_PORT:-28096}:8096"

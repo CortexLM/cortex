@@ -28,6 +28,8 @@ jobs:
             "base/validator"
             "base/updater"
             "base/relearn-challenge"
+            "base/relearn-t2i-challenge"
+            "base/relearn-mm-challenge"
             "base/bounty-challenge"
           )
           ok=0

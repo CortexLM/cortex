@@ -11,9 +11,11 @@ const D19_VERBATIM: &str = "base guarantees *no equivocation between validators*
 /// Marker comment required in external miner docs.
 const BADGE_COMMENT_PREFIX: &str = "<!-- protocol_version:";
 
-/// Content pins required across `docs/external-miner/` (relearn + bounty HTTP).
+/// Content pins required in `docs/external-miner/README.md`.
 const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("relearn_challenge", "relearn"),
+    ("relearn_t2i_challenge", "relearn-t2i"),
+    ("relearn_mm_challenge", "relearn-mm"),
     ("bounty_challenge", "bounty"),
     ("http_submit", "HTTP"),
     ("lium_byok", "X-Lium-Api-Key"),
@@ -21,10 +23,41 @@ const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("bundle_spec_link", "BUNDLE_SPEC.md"),
     ("base_model", "Qwen/Qwen3.8-Flash-Next"),
     ("teacher_model", "kimi-k3"),
+    ("t2i_base_model", "nvidia/Cosmos3-Super-Text2Image"),
+    ("t2i_judge", "Qwen/Qwen-Image-Bench"),
+    ("t2i_flux_rejected", "Flux is rejected"),
+    ("mm_encoder", "google/siglip2-so400m-patch14-384"),
     ("bounty_placeholder", "BOUNTY_CHAT_COMMAND"),
     ("bounty_backend_url", "BOUNTY_BACKEND_PUBLIC_URL"),
     ("bounty_backend_consumer", "CortexLM/backend"),
 ];
+
+/// Per-page pins. A challenge product rule that is not in the miner's own guide
+/// is not a rule they will follow.
+const PAGE_PINS: &[(&str, &[&str])] = &[
+    (
+        "relearn-t2i.md",
+        &[
+            "nvidia/Cosmos3-Super-Text2Image",
+            "OpenMDW 1.1",
+            "Qwen/Qwen-Image-Bench",
+            "Flux is rejected",
+            "Q-Judger is the only judge",
+        ],
+    ),
+    (
+        "relearn-mm.md",
+        &[
+            "google/siglip2-so400m-patch14-384",
+            "Apache-2.0",
+            "zero on this challenge",
+            "shuffled",
+        ],
+    ),
+];
+
+/// A T2I page that names Flux as an allowed base is a product bug, not a typo.
+const T2I_FORBIDDEN_BASES: &[&str] = &["flux.1-dev", "flux.1-schnell", "flux.1-pro"];
 
 /// Substrings that must not appear as live miner guidance (removed path).
 const FORBIDDEN_LIVE_PATHS: &[&str] = &[
@@ -50,7 +83,7 @@ pub fn run(workspace_root: &Path) -> Result<(), String> {
 
     if failures.is_empty() {
         println!(
-            "external-docs-check OK (protocol_version={protocol_version}, relearn+bounty HTTP, D19 verbatim match)"
+            "external-docs-check OK (protocol_version={protocol_version}, relearn + relearn-t2i + relearn-mm + bounty HTTP, D19 verbatim match)"
         );
         Ok(())
     } else {
@@ -123,12 +156,46 @@ fn check_external_miner_docs(
     }
 
     // Required pages for live HTTP submit.
-    for required in ["relearn.md", "bounty.md", "troubleshoot.md"] {
+    for required in [
+        "relearn.md",
+        "relearn-t2i.md",
+        "relearn-mm.md",
+        "bounty.md",
+        "troubleshoot.md",
+    ] {
         let path = dir.join(required);
         if !path.is_file() {
             failures.push(format!(
                 "docs/external-miner/{required} missing (HTTP submit guide required)"
             ));
+        }
+    }
+
+    for (page, pins) in PAGE_PINS {
+        let path = dir.join(page);
+        let Ok(body) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for needle in *pins {
+            if !body.contains(needle) {
+                failures.push(format!("docs/external-miner/{page} missing pin {needle:?}"));
+            }
+        }
+    }
+
+    // The T2I guide must reject Flux, never offer it as a base.
+    let t2i = dir.join("relearn-t2i.md");
+    if let Ok(body) = fs::read_to_string(&t2i) {
+        let lower = body.to_ascii_lowercase();
+        for banned in T2I_FORBIDDEN_BASES {
+            let mentioned_as_allowed = lower
+                .split('\n')
+                .any(|l| l.contains(banned) && !l.contains("reject") && !l.contains("refus"));
+            if mentioned_as_allowed {
+                failures.push(format!(
+                    "docs/external-miner/relearn-t2i.md mentions {banned:?} outside a rejection"
+                ));
+            }
         }
     }
 
@@ -317,5 +384,46 @@ mod tests {
         assert!(EXTERNAL_MINER_PINS
             .iter()
             .any(|(n, v)| *n == "bounty_backend_consumer" && *v == "CortexLM/backend"));
+    }
+
+    #[test]
+    fn external_pins_cover_the_new_relearn_challenges() {
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "t2i_base_model" && *v == "nvidia/Cosmos3-Super-Text2Image"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "t2i_judge" && *v == "Qwen/Qwen-Image-Bench"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "t2i_flux_rejected" && *v == "Flux is rejected"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "mm_encoder" && *v == "google/siglip2-so400m-patch14-384"));
+    }
+
+    #[test]
+    fn page_pins_hold_the_product_rules() {
+        let t2i = PAGE_PINS
+            .iter()
+            .find(|(p, _)| *p == "relearn-t2i.md")
+            .map(|(_, pins)| *pins)
+            .unwrap_or_default();
+        assert!(t2i.contains(&"Flux is rejected"));
+        assert!(t2i.contains(&"Q-Judger is the only judge"));
+        let mm = PAGE_PINS
+            .iter()
+            .find(|(p, _)| *p == "relearn-mm.md")
+            .map(|(_, pins)| *pins)
+            .unwrap_or_default();
+        assert!(mm.contains(&"zero on this challenge"));
+        assert!(mm.contains(&"shuffled"));
+    }
+
+    #[test]
+    fn t2i_forbidden_bases_name_the_flux_variants() {
+        assert!(T2I_FORBIDDEN_BASES.contains(&"flux.1-dev"));
+        assert!(T2I_FORBIDDEN_BASES.contains(&"flux.1-schnell"));
+        assert!(T2I_FORBIDDEN_BASES.contains(&"flux.1-pro"));
     }
 }

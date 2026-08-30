@@ -51,7 +51,7 @@ services=$(render \
 if echo "$services" | grep -qx "gateway"; then
   fail "validator role renders gateway (must not)"
 fi
-for banned in relearn-challenge bounty-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
+for banned in relearn-challenge relearn-t2i-challenge relearn-mm-challenge bounty-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
   if echo "$services" | grep -qx "$banned"; then
     fail "validator role renders $banned (master-only; must not)"
   fi
@@ -67,7 +67,7 @@ services=$(render \
 if ! echo "$services" | grep -qx "gateway"; then
   fail "master role does not render gateway (must)"
 fi
-for required in relearn-challenge bounty-challenge socket-proxy; do
+for required in relearn-challenge relearn-t2i-challenge relearn-mm-challenge bounty-challenge socket-proxy; do
   if ! echo "$services" | grep -qx "$required"; then
     fail "master role does not render $required (must)"
   fi
@@ -109,7 +109,7 @@ services=$(render \
 if echo "$services" | grep -qx "evil-gateway"; then
   fail "prod validator renders evil-gateway (must not)"
 fi
-for banned in relearn-challenge bounty-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
+for banned in relearn-challenge relearn-t2i-challenge relearn-mm-challenge bounty-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
   if echo "$services" | grep -qx "$banned"; then
     fail "prod validator renders $banned (master-only; must not)"
   fi
@@ -130,28 +130,29 @@ for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
   if echo "$rendered" | grep -qE 'DESIGN_FORCE_SIM:[[:space:]]*["'\'']?(1|true|TRUE|yes)["'\'']?'; then
     fail "$env_file enables DESIGN_FORCE_SIM (retired; must not ship)"
   fi
-  if echo "$rendered" | grep -qE 'RELEARN_FORCE_SIM:[[:space:]]*["'\'']?(1|true|TRUE|yes)["'\'']?'; then
-    fail "$env_file enables RELEARN_FORCE_SIM (sim is local-only; must not ship on droplets)"
-  fi
+  for sim_var in RELEARN_FORCE_SIM RELEARN_T2I_FORCE_SIM RELEARN_MM_FORCE_SIM; do
+    if echo "$rendered" | grep -qE "${sim_var}:[[:space:]]*[\"']?(1|true|TRUE|yes)[\"']?"; then
+      fail "$env_file enables $sim_var (sim is local-only; must not ship on droplets)"
+    fi
+  done
 done
 echo "OK: staging/prod do not enable host SimSandbox"
 
-# --- relearn + bounty present in default; design/prism retired ---
+# --- all four live challenges present in default; design/prism retired ---
 default_services=$(render \
   -f docker-compose.yml \
   config --services)
-if ! echo "$default_services" | grep -qx "relearn-challenge"; then
-  fail "relearn-challenge not in default compose"
-fi
-if ! echo "$default_services" | grep -qx "bounty-challenge"; then
-  fail "bounty-challenge not in default compose"
-fi
+for required in relearn-challenge relearn-t2i-challenge relearn-mm-challenge bounty-challenge; do
+  if ! echo "$default_services" | grep -qx "$required"; then
+    fail "$required not in default compose"
+  fi
+done
 for retired in prism-challenge design-challenge design-egress-proxy; do
   if echo "$default_services" | grep -qx "$retired"; then
     fail "retired $retired still in default compose"
   fi
 done
-echo "OK: relearn-challenge + bounty-challenge in default compose; design/prism retired"
+echo "OK: relearn, relearn-t2i, relearn-mm, bounty in default compose; design/prism retired"
 
 # --- no fake chain backend survives anywhere in the matrix ---
 for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
@@ -216,14 +217,17 @@ echo "$local_services" | grep -qx "gateway" \
   || fail "env-local master stack does not render gateway"
 echo "$local_services" | grep -qx "validator" \
   || fail "env-local master stack does not render co-located validator"
-echo "$local_services" | grep -qx "relearn-challenge" \
-  || fail "env-local master stack does not render relearn-challenge"
-echo "$local_services" | grep -qx "bounty-challenge" \
-  || fail "env-local master stack does not render bounty-challenge"
-echo "$local_rendered" | grep -qE 'published: "?28095"?' \
-  || fail "env-local does not publish relearn-challenge on 28095"
-echo "$local_rendered" | grep -qE 'published: "?28096"?' \
-  || fail "env-local does not publish bounty-challenge on 28096"
+for required in relearn-challenge relearn-t2i-challenge relearn-mm-challenge bounty-challenge; do
+  echo "$local_services" | grep -qx "$required" \
+    || fail "env-local master stack does not render $required"
+done
+for probe in 28095:relearn-challenge 28096:bounty-challenge \
+             28097:relearn-t2i-challenge 28098:relearn-mm-challenge; do
+  port=${probe%%:*}
+  svc=${probe#*:}
+  echo "$local_rendered" | grep -qE "published: \"?${port}\"?" \
+    || fail "env-local does not publish $svc on $port"
+done
 for banned in agent-challenge hypertraining-challenge miner-agent miner-socket-proxy base-agent; do
   if echo "$local_services" | grep -qx "$banned"; then
     fail "removed service still rendered: $banned"
@@ -235,6 +239,6 @@ for banned in agent-challenge hypertraining-challenge miner-agent miner-socket-p
     fail "removed service still in default compose: $banned"
   fi
 done
-echo "OK: env-local preserves testnet/541; relearn on 28095; removed agent/hypertraining/miner services"
+echo "OK: env-local preserves testnet/541; challenges on 28095-28098; removed agent/hypertraining/miner services"
 
 echo "assert-compose-matrix: all checks passed"

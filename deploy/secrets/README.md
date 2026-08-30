@@ -3,8 +3,10 @@
 Containers run as `base` (uid **65532**). Host secret files MUST be:
 
 ```bash
-chown 65532:65532 deploy/secrets/gateway_sk deploy/secrets/relearn_sk deploy/secrets/bounty_sk
-chmod 0400 deploy/secrets/gateway_sk deploy/secrets/relearn_sk deploy/secrets/bounty_sk
+for f in gateway_sk relearn_sk relearn_t2i_sk relearn_mm_sk bounty_sk; do
+  chown 65532:65532 "deploy/secrets/$f"
+  chmod 0400 "deploy/secrets/$f"
+done
 ```
 
 Bind-mounts use the file inode; directory mode 0700 is OK.
@@ -15,7 +17,9 @@ Bind-mounts use the file inode; directory mode 0700 is OK.
 |------|---------|-------|
 | `gateway_sk` | gateway | Bundle seal mini-secret (`BASE_GATEWAY_SK_FILE`) |
 | `gateway_admin_token` | gateway + seal scripts | Bearer for `/v1/admin/*` (`BASE_GATEWAY_ADMIN_TOKEN_FILE`). **Required** when `BASE_GATEWAY_REQUIRE_OWNER=1`. Mode **0400**, uid **65532** |
-| `relearn_sk` | relearn-challenge | Relearn leaf mini-secret; pub must match `config/challenges.toml` |
+| `relearn_sk` | relearn-challenge | Relearn LLM leaf mini-secret; pub must match `config/challenges.toml` |
+| `relearn_t2i_sk` | relearn-t2i-challenge | Relearn T2I leaf mini-secret; pub must match `config/challenges.toml` |
+| `relearn_mm_sk` | relearn-mm-challenge | Relearn Multimodal leaf mini-secret; pub must match `config/challenges.toml` |
 | `bounty_sk` | bounty-challenge | Bounty leaf mini-secret; pub must match `config/challenges.toml` |
 | `prism_sk` / `design_sk` | retired products | Do not mount on the live compose path |
 
@@ -28,6 +32,44 @@ chmod 0400 deploy/secrets/gateway_admin_token
 
 Local dummy for development: decrypt with age:
 `age -d -i ~/.base-secrets/age-identity.txt -o deploy/secrets/design_sk ~/.base-secrets/design-dummy.age`
+
+## Relearn T2I / Relearn Multimodal
+
+| Path | Used by | Notes |
+|------|---------|-------|
+| `relearn-t2i/holdout.json` | relearn-t2i-challenge | Frozen holdout prompt records. **Never commit.** Verified at boot against `holdout_commitment` in `config/relearn-t2i-pin.toml`; a mismatch means submissions answer **503** rather than falling back to the public split. Mode **0400**, uid **65532** |
+| `relearn-t2i/admin_tokens` | relearn-t2i-challenge | One operator bearer per line for `POST /v1/admin/promote` |
+| `relearn-mm/admin_tokens` | relearn-mm-challenge | One operator bearer per line for `POST /v1/admin/promote` |
+
+Regenerate the T2I holdout with the private salt (keep the salt off git — it is
+what makes the holdout unguessable):
+
+```bash
+mkdir -p deploy/secrets/relearn-t2i deploy/secrets/relearn-mm
+# Public split ids come from the pin; every one of them must be excluded.
+mapfile -t EXCLUDE < <(python3 -c '
+import tomllib
+from pathlib import Path
+doc = tomllib.loads(Path("config/relearn-t2i-pin.toml").read_text())
+for i in doc["prompts"]["public_ids"]:
+    print(f"--exclude={i}")
+')
+cargo run -p xtask -- relearn-t2i-holdout \
+  --bench ~/.base-secrets/qwen_image_bench_hf_v0518.jsonl \
+  --salt "$RELEARN_T2I_HOLDOUT_SALT" \
+  --size 40 "${EXCLUDE[@]}" \
+  --out deploy/secrets/relearn-t2i/holdout.json
+# Paste the printed holdout_commitment into config/relearn-t2i-pin.toml and
+# re-sign the trust root (config/CEREMONY.md).
+touch deploy/secrets/relearn-t2i/admin_tokens deploy/secrets/relearn-mm/admin_tokens
+chown -R 65532:65532 deploy/secrets/relearn-t2i deploy/secrets/relearn-mm
+chmod 0400 deploy/secrets/relearn-t2i/* deploy/secrets/relearn-mm/*
+```
+
+The Relearn Multimodal service also needs `RELEARN_MM_CHAMPION_LM_HASH` (the
+SHA-256 of the champion Relearn LLM weights). It is not a secret — it is the
+reference an encoder-only submission must hash-match — but without it those
+submissions are rejected.
 
 ## Design challenge
 

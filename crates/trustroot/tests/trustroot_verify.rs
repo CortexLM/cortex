@@ -346,23 +346,61 @@ fn s9_repo_config_loads_when_present() {
     }
     let (ch, ms) = load_config_dir(&root, 0, 3).expect("committed config must verify");
     let primary = ch.primary().unwrap();
-    assert_eq!(primary.body.challenges.len(), 2);
-    let relearn = primary.body.get(b"relearn").expect("relearn row");
-    assert_eq!(relearn.emission_share_bps, 7000);
-    assert_eq!(
-        encode_hex(&relearn.public_key),
-        "8ab577207bb6dfc770a850710824a098d53b1ee90abb92925bd0928937131674"
-    );
-    let bounty = primary.body.get(b"bounty").expect("bounty row");
-    assert_eq!(bounty.emission_share_bps, 3000);
-    assert_eq!(
-        encode_hex(&bounty.public_key),
-        "d2ffbe70de7c052deafaba48b90544db4abc1133278c907f2018f457f34aac25"
-    );
+    assert_eq!(primary.body.challenges.len(), 4);
+
+    // Four live challenges: Relearn LLM, Relearn T2I, Relearn Multimodal, Bounty.
+    let expected: [(&[u8], u16, &str); 4] = [
+        (
+            b"relearn",
+            4000,
+            "8ab577207bb6dfc770a850710824a098d53b1ee90abb92925bd0928937131674",
+        ),
+        (
+            b"relearn-t2i",
+            1500,
+            "923324e1df896b20c49c47f40dacbc4c53cab23e6cc5a1136529302b4c2da110",
+        ),
+        (
+            b"relearn-mm",
+            1500,
+            "220e489f8157e477730e2e3ee6ce51be0fcf8779575c486a70658a28d5a51841",
+        ),
+        (
+            b"bounty",
+            3000,
+            "d2ffbe70de7c052deafaba48b90544db4abc1133278c907f2018f457f34aac25",
+        ),
+    ];
+    for (id, bps, pk) in expected {
+        let row = primary
+            .body
+            .get(id)
+            .unwrap_or_else(|| panic!("{} row", String::from_utf8_lossy(id)));
+        assert_eq!(
+            row.emission_share_bps,
+            bps,
+            "{}",
+            String::from_utf8_lossy(id)
+        );
+        assert_eq!(encode_hex(&row.public_key), pk);
+    }
+
+    // Every challenge must sign under its own key, so no two rows may share one.
+    let mut keys: Vec<String> = primary
+        .body
+        .challenges
+        .iter()
+        .map(|c| encode_hex(&c.public_key))
+        .collect();
+    keys.sort();
+    let total = keys.len();
+    keys.dedup();
+    assert_eq!(keys.len(), total, "challenge public keys must be distinct");
+
     assert!(primary.body.get(b"design").is_none());
     assert!(primary.body.get(b"prism").is_none());
     let shares = primary.body.emission_shares();
-    assert_eq!(shares.len(), 2);
+    assert_eq!(shares.len(), 4);
     assert_eq!(shares.iter().map(|s| s.1).sum::<u16>(), BPS_DENOM);
     // base-agent CVM path removed — committed allowlist is empty (fail-closed).
     let entries = &ms.primary().unwrap().body.entries;

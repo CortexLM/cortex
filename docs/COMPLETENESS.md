@@ -58,8 +58,35 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Compose / images | **done** | Default compose + `images.yml` target `relearn-challenge`. |
 | Eval pin | **v0** | `config/relearn-pin.toml` — digest + `CortexLM/relearn` SHA empty until first green challenge CI. |
 | Teacher | **v0** | HTTP API from operator env (`RELEARN_TEACHER_API_URL`, `RELEARN_TEACHER_MODEL`, `RELEARN_TEACHER_API_KEY`). Missing URL/key → sim. Judge-only; miner weights never served via that API. |
-| Emission | **7000 bps** | Default share; Bounty takes `3000` (sum `10000`). |
+| Emission | **4000 bps** | Default share (sum across all four challenges is `10000`). |
 | Spec | live | [`RELEARN.md`](RELEARN.md). |
+
+## relearn-t2i-challenge
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Crates (`crates/relearn-t2i-*`) | **done** | task (Cosmos3 pin, frozen prompts, seed lattice), judge (Q-Judger wire format), score (pillar / replay / faithfulness / contamination gates), store, eval, http, challenge. |
+| Binary (`bins/relearn-t2i-challenge`) | **done** | HTTP API on `:8097`. |
+| Compose / images | **done** | Default compose + `images.yml` target `relearn-t2i-challenge`. |
+| Generator pin | **done** | `nvidia/Cosmos3-Super-Text2Image` (OpenMDW 1.1, card verified). Flux-family bases refused at pin load, submit, and eval. |
+| Judge pin | **done** | Q-Judger (`Qwen/Qwen-Image-Bench`), card-fixed inference. No alternate judge is accepted. |
+| Eval pin | **v0** | `config/relearn-t2i-pin.toml` — `eval_image_digest` empty until first green challenge CI; live rent refused until then. |
+| Holdout | **done** | Commitment in git, records operator-side (`RELEARN_T2I_HOLDOUT_FILE`) and verified at boot. Mismatch → submissions 503. |
+| Emission | **1500 bps** | Default share. |
+| Spec | live | [`RELEARN-T2I.md`](RELEARN-T2I.md). |
+
+## relearn-mm-challenge
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Crates (`crates/relearn-mm-*`) | **done** | task (permissive encoder policy), score (LM-intact hard gate, vision + agentic paired tests, pixel-shuffle control), store, eval, http, challenge. |
+| Binary (`bins/relearn-mm-challenge`) | **done** | HTTP API on `:8098`. |
+| Compose / images | **done** | Default compose + `images.yml` target `relearn-mm-challenge`. |
+| Encoder pin | **done** | `google/siglip2-so400m-patch14-384` (Apache-2.0, card verified). Miner encoders must be Apache-2.0 / MIT / BSD / ISC. |
+| Eval pin | **v0** | `config/relearn-mm-pin.toml` — `eval_image_digest` empty until first green challenge CI. |
+| LM gate | **done** | Text holdout rerun vs champion − ε; encoder-only submissions must hash-match `RELEARN_MM_CHAMPION_LM_HASH`. |
+| Emission | **1500 bps** | Default share. |
+| Spec | live | [`RELEARN-MM.md`](RELEARN-MM.md). |
 
 ## bounty-challenge
 
@@ -128,7 +155,9 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 |-----|--------|
 | DCAP verify holds the attest mutex | A cold Intel PCS fetch (up to 20 s) serialises attestation submissions. |
 | DCAP error classification | Matches on `anyhow` message text; re-run `cargo test -p attest-policy --features dcap` after any `dcap-qvl` bump. |
-| Relearn eval image digest | Empty until `CortexLM/relearn` CI publishes a digest-pinned `relearn-eval` image. Live Lium rent is refused until then. |
+| Relearn eval image digests | Empty until `CortexLM/relearn` CI publishes digest-pinned `relearn-eval`, `relearn-t2i-eval`, and `relearn-mm-eval` images. Live Lium rent is refused until then. |
+| Relearn T2I holdout salt | The committed `holdout_commitment` uses the documented **dev** salt so local and staging work out of the box. Production must rotate to a private salt, replace the commitment, and re-sign. |
+| Relearn Multimodal champion LM hash | `RELEARN_MM_CHAMPION_LM_HASH` is operator-supplied. Unset means encoder-only submissions are rejected (they cannot prove the LM is unchanged). |
 | Relearn public repo | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) exists; this repo pins `relearn_git_sha`. Seed mirror: `docs/external-miner/relearn-seed/`. |
 | Mainnet (netuid 100) | Owner wallet not yet on this machine, so prod runs with `BASE_GATEWAY_REQUIRE_OWNER=0`. |
 | Prod pin placeholders | `deploy/pins/prod.json` still ships zero-digests until the first successful promote; registry mode rejects placeholders. |

@@ -41,17 +41,23 @@ RUN cargo build --release \
       -p gateway-bin \
       -p updater-bin \
       -p relearn-challenge-bin \
+      -p relearn-t2i-challenge-bin \
+      -p relearn-mm-challenge-bin \
       -p bounty-challenge-bin \
  && strip target/release/validator \
            target/release/gateway \
            target/release/updater \
            target/release/relearn-challenge \
+           target/release/relearn-t2i-challenge \
+           target/release/relearn-mm-challenge \
            target/release/bounty-challenge \
  && mkdir -p /out \
  && cp target/release/validator \
        target/release/gateway \
        target/release/updater \
        target/release/relearn-challenge \
+       target/release/relearn-t2i-challenge \
+       target/release/relearn-mm-challenge \
        target/release/bounty-challenge /out/
 
 # -----------------------------------------------------------------------------
@@ -66,6 +72,8 @@ COPY target/release/validator \
      target/release/gateway \
      target/release/updater \
      target/release/relearn-challenge \
+     target/release/relearn-t2i-challenge \
+     target/release/relearn-mm-challenge \
      target/release/bounty-challenge \
      /out/
 
@@ -117,6 +125,29 @@ RUN apt-get update \
 USER base
 COPY --from=artifacts --chown=base:base /out/relearn-challenge /usr/local/bin/relearn-challenge
 ENTRYPOINT ["/usr/local/bin/relearn-challenge"]
+
+FROM runtime-base AS relearn-t2i-challenge
+# Cosmos3 generation and Q-Judger scoring both run on rented GPUs over SSH.
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/lib/relearn-t2i \
+    && chown -R base:base /var/lib/relearn-t2i
+USER base
+COPY --from=artifacts --chown=base:base /out/relearn-t2i-challenge /usr/local/bin/relearn-t2i-challenge
+ENTRYPOINT ["/usr/local/bin/relearn-t2i-challenge"]
+
+FROM runtime-base AS relearn-mm-challenge
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/lib/relearn-mm \
+    && chown -R base:base /var/lib/relearn-mm
+USER base
+COPY --from=artifacts --chown=base:base /out/relearn-mm-challenge /usr/local/bin/relearn-mm-challenge
+ENTRYPOINT ["/usr/local/bin/relearn-mm-challenge"]
 
 FROM runtime-base AS bounty-challenge
 USER root

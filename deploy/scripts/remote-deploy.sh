@@ -31,7 +31,7 @@ REMOTE_DIR="${BASE_REMOTE_DIR:-/opt/base}"
 # bind source and the container's BASE_VERIFY_WORK_ROOT byte-for-byte.
 STATE_ROOT="${BASE_STATE_DIR:-/var/lib/base}"
 GHCR_PREFIX="${BASE_GHCR_PREFIX:-ghcr.io/baseintelligence/base}"
-PIN_SERVICES=(validator gateway updater relearn-challenge bounty-challenge)
+PIN_SERVICES=(validator gateway updater relearn-challenge relearn-t2i-challenge relearn-mm-challenge bounty-challenge)
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 if [[ -n "${BASE_SSH_IDENTITY:-}" ]]; then
   SSH_OPTS+=(-i "$BASE_SSH_IDENTITY")
@@ -160,8 +160,8 @@ fi
 
 echo "remote-deploy: rsync tree"
 if [[ "$BUILD_FROM" == "prebuilt" ]]; then
-  for b in validator gateway updater relearn-challenge bounty-challenge; do
-    [[ -x "$ROOT/target/release/$b" ]] || die "missing prebuilt binary target/release/$b — run: cargo build --release --features validator-bin/dcap -p validator-bin -p gateway-bin -p updater-bin -p relearn-challenge-bin -p bounty-challenge-bin"
+  for b in validator gateway updater relearn-challenge relearn-t2i-challenge relearn-mm-challenge bounty-challenge; do
+    [[ -x "$ROOT/target/release/$b" ]] || die "missing prebuilt binary target/release/$b — run: cargo build --release --features validator-bin/dcap -p validator-bin -p gateway-bin -p updater-bin -p relearn-challenge-bin -p relearn-t2i-challenge-bin -p relearn-mm-challenge-bin -p bounty-challenge-bin"
   done
 fi
 
@@ -191,6 +191,8 @@ rsync -az --delete \
 # absent; if a directory already poisoned the path, replace it with a file.
 ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
   '$REMOTE_DIR/deploy/secrets/relearn' \
+  '$REMOTE_DIR/deploy/secrets/relearn-t2i' \
+  '$REMOTE_DIR/deploy/secrets/relearn-mm' \
   '$REMOTE_DIR/deploy/secrets/bounty' \
   '$REMOTE_DIR/deploy/secrets/wallets' \
   && chmod 700 '$REMOTE_DIR/deploy/secrets' '$REMOTE_DIR/deploy/secrets/lium' \
@@ -198,9 +200,11 @@ ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
        [ -e '$REMOTE_DIR/deploy/secrets/lium/'\$f ] || : > '$REMOTE_DIR/deploy/secrets/lium/'\$f; \
      done \
   && [ -e '$REMOTE_DIR/deploy/secrets/relearn/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/relearn/admin_tokens' \
+  && [ -e '$REMOTE_DIR/deploy/secrets/relearn-t2i/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/relearn-t2i/admin_tokens' \
+  && [ -e '$REMOTE_DIR/deploy/secrets/relearn-mm/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/relearn-mm/admin_tokens' \
   && [ -e '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' \
   && [ -e '$REMOTE_DIR/deploy/secrets/bounty/session_secret' ] || : > '$REMOTE_DIR/deploy/secrets/bounty/session_secret' \
-  && for sk in relearn_sk bounty_sk; do \
+  && for sk in relearn_sk relearn_t2i_sk relearn_mm_sk bounty_sk; do \
        p='$REMOTE_DIR/deploy/secrets/'\$sk; \
        if [ -d \"\$p\" ]; then rm -rf \"\$p\"; fi; \
        [ -e \"\$p\" ] || : > \"\$p\"; \
@@ -208,16 +212,22 @@ ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
      done \
   && chmod 400 '$REMOTE_DIR/deploy/secrets/lium/'* \
        '$REMOTE_DIR/deploy/secrets/relearn/admin_tokens' \
+       '$REMOTE_DIR/deploy/secrets/relearn-t2i/admin_tokens' \
+       '$REMOTE_DIR/deploy/secrets/relearn-mm/admin_tokens' \
        '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' \
        '$REMOTE_DIR/deploy/secrets/bounty/session_secret' \
   && chown -R 65532:65532 '$REMOTE_DIR/deploy/secrets/lium' \
        '$REMOTE_DIR/deploy/secrets/relearn' \
+       '$REMOTE_DIR/deploy/secrets/relearn-t2i' \
+       '$REMOTE_DIR/deploy/secrets/relearn-mm' \
        '$REMOTE_DIR/deploy/secrets/bounty' \
   && chmod -R a-w '$REMOTE_DIR/deploy/secrets/wallets' 2>/dev/null; \
   chown -R 65532:65532 '$REMOTE_DIR/deploy/secrets/wallets' 2>/dev/null; true"
 
-# Relearn artifact staging (host path for harvested receipts).
-ssh_h "install -d -m 0775 -o 65532 -g 65532 '$STATE_ROOT/relearn'"
+# Relearn artifact staging (host paths for harvested receipts).
+for area in relearn relearn-t2i relearn-mm; do
+  ssh_h "install -d -m 0775 -o 65532 -g 65532 '$STATE_ROOT/\$area'"
+done
 
 
 # Materialize missing env from examples (dev-safe placeholders) if absent
@@ -254,13 +264,22 @@ case "$ENV" in
   prod)    COMPOSE_FILES+=(-f deploy/compose/env-prod.yml) ;;
 esac
 
-# Relearn pin: config/relearn-pin.toml is rsynced with the tree. Live Lium
-# rent refuses until eval_image_digest is a real sha256 pin.
+# Challenge pins are rsynced with the tree. Live Lium rent refuses until each
+# eval_image_digest is a real sha256 pin.
 if [[ "$ROLE" == "master" ]]; then
-  if ssh_h "test -f '$REMOTE_DIR/config/relearn-pin.toml'"; then
-    echo "remote-deploy: relearn pin present at $REMOTE_DIR/config/relearn-pin.toml"
-  else
-    echo "remote-deploy: WARNING: relearn pin missing at $REMOTE_DIR/config/relearn-pin.toml" >&2
+  for pin in relearn-pin.toml relearn-t2i-pin.toml relearn-mm-pin.toml; do
+    if ssh_h "test -f '$REMOTE_DIR/config/$pin'"; then
+      echo "remote-deploy: pin present at $REMOTE_DIR/config/$pin"
+    else
+      echo "remote-deploy: WARNING: pin missing at $REMOTE_DIR/config/$pin" >&2
+    fi
+  done
+  # Relearn T2I refuses submissions without a holdout file matching the pin's
+  # commitment. Warn loudly rather than letting the operator find out via 503s.
+  if ! ssh_h "test -s '$REMOTE_DIR/deploy/secrets/relearn-t2i/holdout.json'"; then
+    echo "remote-deploy: WARNING: relearn-t2i holdout records missing at" \
+      "$REMOTE_DIR/deploy/secrets/relearn-t2i/holdout.json;" \
+      "generate with: cargo run -p xtask -- relearn-t2i-holdout" >&2
   fi
 fi
 
@@ -277,6 +296,8 @@ if [[ "$BUILD_FROM" == "prebuilt" ]]; then
     "$ROOT/target/release/gateway" \
     "$ROOT/target/release/updater" \
     "$ROOT/target/release/relearn-challenge" \
+    "$ROOT/target/release/relearn-t2i-challenge" \
+    "$ROOT/target/release/relearn-mm-challenge" \
     "$ROOT/target/release/bounty-challenge" \
     "$HOST:$REMOTE_DIR/target/release/"
 fi
@@ -338,6 +359,8 @@ PY
 import json, sys
 optional = {
     "relearn-challenge",
+    "relearn-t2i-challenge",
+    "relearn-mm-challenge",
     "bounty-challenge",
     "base-attest-helper",
 }
@@ -406,7 +429,8 @@ docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} \$UP_PROFILE "\${UP_ARGS[@
 # validator-host wallet for WeightsSetRateLimit / CRV4 commits.
 if [[ '$ROLE' == 'validator' ]]; then
   docker compose ${COMPOSE_FILES[*]} rm -sf \
-    relearn-challenge bounty-challenge socket-proxy \
+    relearn-challenge relearn-t2i-challenge relearn-mm-challenge \
+    bounty-challenge socket-proxy \
     >/dev/null 2>&1 || true
 elif [[ '$ROLE' == 'master' ]]; then
   docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} rm -sf validator \
@@ -484,6 +508,8 @@ headers = {
 }
 backends = [
     ("relearn", "http://relearn-challenge:8095"),
+    ("relearn-t2i", "http://relearn-t2i-challenge:8097"),
+    ("relearn-mm", "http://relearn-mm-challenge:8098"),
     ("bounty", "http://bounty-challenge:8096"),
 ]
 failed = False
