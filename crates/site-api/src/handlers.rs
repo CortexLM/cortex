@@ -12,23 +12,23 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::state::SiteState;
-use crate::upstream::{self, DESIGN, PRISM, RELEARN};
-use site_data::map::relearn_arena_from_live;
+use crate::upstream::{self, DESIGN, PRISM, RELEARN, RELEARN_MM, RELEARN_T2I};
 use site_data::map::{
     activity_from_lives, design_arena_from_dashboard, design_leaderboard, design_submission,
     enrich_leaderboard_uids, enrich_leaderboard_weights, enrich_submission_uids,
-    is_prism_champion_submission, leaderboard_matches_query, list_arenas, prism_arena_from_live,
+    is_prism_champion_submission, leaderboard_matches_query, prism_arena_from_live,
     prism_bpb_leaderboard, prism_submission, prism_telemetry, prism_window,
     submission_matches_query, uid_index_from_hotkeys,
 };
+use site_data::map::{hydrate_arena, relearn_arena_from_live};
 use site_prism::{
     enrich_leaderboard_row_from_detail_with_zone, enrich_submission_from_detail_with_zone,
     fill_v21_run_from_live, infer_recipe_era, infer_recipe_era_with_live, map_benchmarks,
     payload_is_v21_contest, pin_id_from_payload, prism_reference_baselines,
     prism_submission_detail_with_zone,
 };
-use site_types::coding_arena;
 use site_types::page_slice;
+use site_types::{coding_arena, relearn_mm_frame, relearn_t2i_frame};
 use site_types::{
     ArenaSlug, Governance, LandingSummary, MetricsEmission, MetricsPassRate, MetricsPopulation,
     NetworkMetrics, NetworkStats, RecipeEra, ResultsMatrix, Validator,
@@ -121,6 +121,35 @@ async fn fetch_prism_status(st: &SiteState) -> Option<Value> {
 
 async fn fetch_relearn_status(st: &SiteState) -> Option<Value> {
     upstream::get_json_opt(st, RELEARN, "/v1/status").await
+}
+
+async fn fetch_relearn_t2i_status(st: &SiteState) -> Option<Value> {
+    upstream::get_json_opt(st, RELEARN_T2I, "/v1/status").await
+}
+
+async fn fetch_relearn_mm_status(st: &SiteState) -> Option<Value> {
+    upstream::get_json_opt(st, RELEARN_MM, "/v1/status").await
+}
+
+/// Every live arena with trust-root emission shares applied.
+///
+/// The three Relearn challenges are fetched together so the emission column
+/// sums to the trust root rather than showing one challenge's slice as the
+/// whole subnet.
+async fn live_arenas(st: &SiteState) -> Vec<site_types::Arena> {
+    let relearn = fetch_relearn_status(st).await;
+    let t2i = fetch_relearn_t2i_status(st).await;
+    let mm = fetch_relearn_mm_status(st).await;
+    let mut arenas = vec![
+        coding_arena(),
+        relearn_arena_from_live(relearn.as_ref()),
+        hydrate_arena(relearn_t2i_frame(), t2i.as_ref()),
+        hydrate_arena(relearn_mm_frame(), mm.as_ref()),
+    ];
+    for arena in &mut arenas {
+        apply_emission(st, arena);
+    }
+    arenas
 }
 
 async fn fetch_prism_subs(st: &SiteState, limit: u32) -> Option<Value> {
@@ -233,14 +262,15 @@ fn decorate_submissions(st: &SiteState, rows: &mut [crate::Submission]) {
 async fn network_stats(st: &SiteState) -> NetworkStats {
     let (block, chain_epoch, validators) = chain_snapshot(st);
     let relearn = fetch_relearn_status(st).await;
-    let arenas = arenas_with_emission(st, None, relearn.as_ref(), None);
+    let arenas = live_arenas(st).await;
     let agents: u32 = arenas.iter().map(|a| a.agents).sum();
     let tao_price = site_data::price::tao_price_usd(&st.client, &st.tao_price).await;
+    let arena_count = u32::try_from(arenas.len()).unwrap_or(0);
     NetworkStats {
         epoch: epoch_from_lives(None, relearn.as_ref(), chain_epoch),
         agents,
         validators: u32::try_from(validators.len()).unwrap_or(0),
-        arenas: 2,
+        arenas: arena_count,
         emission_per_day: 0.0,
         tao_price,
         block_height: block,
@@ -260,30 +290,15 @@ fn apply_emission(st: &SiteState, arena: &mut site_types::Arena) {
         site_data::weights::arena_weight(st.trust_root(), st.latest_sealed_bundle(), slug);
 }
 
-/// Arena list with trust-root emission shares + sealed-vector weights applied.
-fn arenas_with_emission(
-    st: &SiteState,
-    design: Option<&Value>,
-    prism: Option<&Value>,
-    prism_subs: Option<&Value>,
-) -> Vec<site_types::Arena> {
-    let mut arenas = list_arenas(design, prism, prism_subs);
-    for arena in &mut arenas {
-        apply_emission(st, arena);
-    }
-    arenas
-}
-
 async fn get_network(State(st): State<SiteState>) -> impl IntoResponse {
     Json(network_stats(&st).await)
 }
 
 async fn get_landing(State(st): State<SiteState>) -> impl IntoResponse {
     let design = fetch_design_dash(&st).await;
-    let prism = fetch_prism_status(&st).await;
     let prism_subs = fetch_prism_subs(&st, 200).await;
     let stats = network_stats(&st).await;
-    let arenas = arenas_with_emission(&st, design.as_ref(), prism.as_ref(), prism_subs.as_ref());
+    let arenas = live_arenas(&st).await;
     let design_runs = design
         .as_ref()
         .and_then(|d| d.get("recent_runs"))
@@ -305,8 +320,7 @@ async fn get_landing(State(st): State<SiteState>) -> impl IntoResponse {
 }
 
 async fn get_arenas(State(st): State<SiteState>) -> impl IntoResponse {
-    let relearn = fetch_relearn_status(&st).await;
-    Json(arenas_with_emission(&st, None, relearn.as_ref(), None))
+    Json(live_arenas(&st).await)
 }
 
 async fn get_arena(State(st): State<SiteState>, Path(slug): Path<String>) -> Response {
@@ -322,6 +336,14 @@ async fn get_arena(State(st): State<SiteState>, Path(slug): Path<String>) -> Res
             prism_arena_from_live(status.as_ref(), subs.as_ref())
         }
         ArenaSlug::Relearn => relearn_arena_from_live(fetch_relearn_status(&st).await.as_ref()),
+        ArenaSlug::RelearnT2i => hydrate_arena(
+            relearn_t2i_frame(),
+            fetch_relearn_t2i_status(&st).await.as_ref(),
+        ),
+        ArenaSlug::RelearnMm => hydrate_arena(
+            relearn_mm_frame(),
+            fetch_relearn_mm_status(&st).await.as_ref(),
+        ),
     };
     apply_emission(&st, &mut arena);
     Json(arena).into_response()
@@ -579,7 +601,10 @@ async fn get_leaderboard(
         ArenaSlug::Prism => {
             Json(prism_leaderboard_json(&st, page, page_size, needle).await).into_response()
         }
-        ArenaSlug::Coding | ArenaSlug::Relearn => {
+        // Relearn challenges publish a champion, not a leaderboard: every
+        // non-champion row is an explicit NoScore (D24), so a paged list of
+        // them would be a page of zeroes.
+        ArenaSlug::Coding | ArenaSlug::Relearn | ArenaSlug::RelearnT2i | ArenaSlug::RelearnMm => {
             Json(empty_leaderboard_json(page, page_size)).into_response()
         }
     }
@@ -598,7 +623,7 @@ async fn get_submissions(
     let status_filter = q.status.as_deref();
     let needle = q.q.as_deref();
     match slug {
-        ArenaSlug::Coding | ArenaSlug::Relearn => {
+        ArenaSlug::Coding | ArenaSlug::Relearn | ArenaSlug::RelearnT2i | ArenaSlug::RelearnMm => {
             Json(page_slice::<crate::Submission>(&[], page, page_size)).into_response()
         }
         ArenaSlug::Design => {
@@ -1002,8 +1027,7 @@ async fn get_metrics(
     let (block, chain_epoch, validators) = chain_snapshot(&st);
     let design = fetch_design_dash(&st).await;
     let prism = fetch_prism_status(&st).await;
-    let prism_subs = fetch_prism_subs(&st, 200).await;
-    let arenas = arenas_with_emission(&st, design.as_ref(), prism.as_ref(), prism_subs.as_ref());
+    let arenas = live_arenas(&st).await;
     let epoch = epoch_from_lives(design.as_ref(), prism.as_ref(), chain_epoch);
     let agents: u32 = arenas.iter().map(|a| a.agents).sum();
     let tao_price = site_data::price::tao_price_usd(&st.client, &st.tao_price).await;
@@ -1336,6 +1360,30 @@ mod tests {
             .await;
     }
 
+    /// Coding plus the three Relearn challenges, in trust-root order.
+    ///
+    /// All three Relearn arenas are listed even when their backends are down,
+    /// so the emission column still sums to the trust root instead of showing
+    /// one challenge's slice as the whole subnet.
+    fn assert_live_arena_list(v: &Value) {
+        let slugs: Vec<&str> = v
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|a| a["slug"].as_str().unwrap_or_default())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            slugs,
+            vec!["coding", "relearn", "relearn-t2i", "relearn-mm"],
+            "{v}"
+        );
+        assert_eq!(v[1]["bestScoreLabel"], "DISPLACE");
+        assert_eq!(v[2]["name"], "Relearn T2I");
+        assert_eq!(v[3]["name"], "Relearn Multimodal");
+    }
+
     #[tokio::test]
     async fn arenas_and_design_submissions_from_mocks() {
         let (design, prism, st) = setup().await;
@@ -1344,10 +1392,7 @@ mod tests {
 
         let (s, v) = call(app.clone(), "/v1/site/arenas").await;
         assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v.as_array().unwrap().len(), 2);
-        assert_eq!(v[0]["slug"], "coding");
-        assert_eq!(v[1]["slug"], "relearn");
-        assert_eq!(v[1]["bestScoreLabel"], "DISPLACE");
+        assert_live_arena_list(&v);
 
         let (s, v) = call(app.clone(), "/v1/site/arenas/design/submissions").await;
         assert_eq!(s, StatusCode::OK, "{v}");

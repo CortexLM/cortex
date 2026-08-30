@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Arena identifier.
+///
+/// The wire form of every live variant equals its trust-root `challenge_id`,
+/// because `apply_emission` matches emission shares by that string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArenaSlug {
@@ -12,8 +15,14 @@ pub enum ArenaSlug {
     Design,
     /// Prism challenge (retired).
     Prism,
-    /// Relearn post-training factory.
+    /// Relearn LLM post-training factory.
     Relearn,
+    /// Relearn T2I image generation.
+    #[serde(rename = "relearn-t2i")]
+    RelearnT2i,
+    /// Relearn Multimodal vision encoder.
+    #[serde(rename = "relearn-mm")]
+    RelearnMm,
 }
 
 impl ArenaSlug {
@@ -25,6 +34,8 @@ impl ArenaSlug {
             "design" => Some(Self::Design),
             "prism" => Some(Self::Prism),
             "relearn" => Some(Self::Relearn),
+            "relearn-t2i" => Some(Self::RelearnT2i),
+            "relearn-mm" => Some(Self::RelearnMm),
             _ => None,
         }
     }
@@ -37,6 +48,8 @@ impl ArenaSlug {
             Self::Design => "design",
             Self::Prism => "prism",
             Self::Relearn => "relearn",
+            Self::RelearnT2i => "relearn-t2i",
+            Self::RelearnMm => "relearn-mm",
         }
     }
 }

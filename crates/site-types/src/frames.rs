@@ -100,14 +100,82 @@ pub fn prism_frame() -> Arena {
     }
 }
 
-/// Relearn arena frame; counters filled by caller from live status.
+/// Relearn T2I arena frame; counters filled by caller from live status.
+#[must_use]
+pub fn relearn_t2i_frame() -> Arena {
+    Arena {
+        slug: ArenaSlug::RelearnT2i,
+        name: "Relearn T2I".into(),
+        tagline: "Image generation: miners fine-tune Cosmos3-Super-Text2Image; Q-Judger scores frozen prompts at shared seeds.".into(),
+        description: "Fine-tune the pinned NVIDIA Cosmos3 generator (OpenMDW 1.1). Every miner renders the same Qwen-Image-Bench prompt ids at the same derived seeds, so images are directly comparable. Q-Judger is the only judge. Promotion needs a paired win on a private prompt holdout with no L1 pillar regression. Flux-family bases are rejected.".into(),
+        status: "live".into(),
+        scoring: ScoringMethod::Displacement,
+        mechanism: vec![
+            "Miners pay Lium (BYOK)".into(),
+            "Q-Judger on frozen prompts at shared seeds".into(),
+            "No pillar may regress; seed replay + contamination gates".into(),
+        ],
+        agents: 0,
+        best_score: "—".into(),
+        best_score_label: "DISPLACE".into(),
+        emission_share: 1.0,
+        weight: 1.0,
+        rewards_per_day: 0.0,
+        references: vec![ProjectReference {
+            name: "Relearn".into(),
+            repo: "CortexLM/relearn".into(),
+            repo_url: "https://github.com/CortexLM/relearn".into(),
+        }],
+        source_url: "https://github.com/CortexLM/relearn".into(),
+        plate: "/plates/relearn.svg".into(),
+        round_id: None,
+        round_ends_at: None,
+        seconds_remaining: None,
+    }
+}
+
+/// Relearn Multimodal arena frame; counters filled by caller from live status.
+#[must_use]
+pub fn relearn_mm_frame() -> Arena {
+    Arena {
+        slug: ArenaSlug::RelearnMm,
+        name: "Relearn Multimodal".into(),
+        tagline: "Give the champion LLM eyes: train a permissive vision encoder without regressing the language model.".into(),
+        description: "Attach an Apache-2.0 / MIT / BSD / ISC vision encoder plus projector to the champion Relearn LLM. Two gates, both mandatory: the text holdout must hold (a regression is worth zero, not a lower score), and the image holdout plus agentic image-tool traces must beat the champion. Every trace is replayed with shuffled pixels, so a model that ignores the image cannot pass.".into(),
+        status: "live".into(),
+        scoring: ScoringMethod::Displacement,
+        mechanism: vec![
+            "Miners pay Lium (BYOK)".into(),
+            "LLM-intact hard gate before any vision credit".into(),
+            "Pixel-shuffle control on agentic traces".into(),
+        ],
+        agents: 0,
+        best_score: "—".into(),
+        best_score_label: "DISPLACE".into(),
+        emission_share: 1.0,
+        weight: 1.0,
+        rewards_per_day: 0.0,
+        references: vec![ProjectReference {
+            name: "Relearn".into(),
+            repo: "CortexLM/relearn".into(),
+            repo_url: "https://github.com/CortexLM/relearn".into(),
+        }],
+        source_url: "https://github.com/CortexLM/relearn".into(),
+        plate: "/plates/relearn.svg".into(),
+        round_id: None,
+        round_ends_at: None,
+        seconds_remaining: None,
+    }
+}
+
+/// Relearn LLM arena frame; counters filled by caller from live status.
 #[must_use]
 pub fn relearn_frame() -> Arena {
     Arena {
         slug: ArenaSlug::Relearn,
-        name: "Relearn".into(),
+        name: "Relearn LLM".into(),
         tagline: "Post-training factory: miners improve Qwen3.8-Flash-Next; score is displacement vs the previous champion.".into(),
-        description: "One-challenge subnet. Submit an improved artifact of the pinned base model. Miners pay Lium. Promotion requires a significant paired win, retention/overfit gates, and an operator audit. Regressions are never crowned.".into(),
+        description: "Submit an improved artifact of the pinned base model. Miners pay Lium. Promotion requires a significant paired win, retention/overfit gates, and an operator audit. Regressions are never crowned.".into(),
         status: "live".into(),
         scoring: ScoringMethod::Displacement,
         mechanism: vec![

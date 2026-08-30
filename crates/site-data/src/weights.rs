@@ -232,6 +232,34 @@ mod tests {
     }
 
     #[test]
+    fn every_live_arena_slug_matches_a_trust_root_share() {
+        // The site matches emission by slug string, so an arena whose slug is
+        // not the challenge id would silently show a 0 % share while that
+        // challenge really earns emission.
+        let root = ChallengesBody {
+            challenges: vec![
+                entry("relearn", 4000),
+                entry("relearn-t2i", 1500),
+                entry("relearn-mm", 1500),
+                entry("bounty", 3000),
+            ],
+        };
+        let shares = configured_shares(Some(&root));
+        let sum: f64 = shares.iter().map(|(_, v)| *v).sum();
+        assert!((sum - 1.0).abs() < 1e-9, "shares sum to {sum}");
+
+        for slug in ["relearn", "relearn-t2i", "relearn-mm"] {
+            let arena_slug = site_types::ArenaSlug::parse(slug)
+                .unwrap_or_else(|| panic!("{slug} must parse as an arena slug"));
+            assert_eq!(arena_slug.as_str(), slug);
+            let Some((_, share)) = shares.iter().find(|(s, _)| s == slug) else {
+                panic!("no trust-root share for {slug}");
+            };
+            assert!(*share > 0.0, "{slug} share is zero");
+        }
+    }
+
+    #[test]
     fn unsealed_is_fail_closed() {
         let root = trust_root();
         let w = site_weights(100, Some(&root), None);
