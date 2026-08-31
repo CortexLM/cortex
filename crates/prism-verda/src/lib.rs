@@ -641,7 +641,9 @@ mod tests {
 
     #[test]
     fn pick_b200_then_fallback() {
-        let _guard = COMPUTE_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = COMPUTE_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let rows = vec![
             json!({"name": "H100", "size": 1, "is_available": true}),
             json!({"name": "1x B200", "size": 1, "is_available": true}),
@@ -663,7 +665,9 @@ mod tests {
 
     #[test]
     fn pick_honors_compute_override() {
-        let _guard = COMPUTE_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = COMPUTE_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let rows = vec![
             json!({"name": "B200", "size": 1, "is_available": true}),
             json!({"name": "L40S", "size": 1, "is_available": true}),
