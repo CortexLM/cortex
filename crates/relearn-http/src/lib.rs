@@ -335,9 +335,13 @@ fn err(code: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
 /// retrying instead of reading a sim number as a verdict.
 fn eval_err(e: &EvalError) -> (StatusCode, Json<serde_json::Value>) {
     let code = match e {
+        // A provider or eval-image failure is the host being unable to score
+        // right now, not the miner's mistake: retrying is the correct response.
         EvalError::HoldoutSealed
         | EvalError::EvalImageUnpinned
-        | EvalError::LiveHarvestUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        | EvalError::LiveHarvestUnavailable
+        | EvalError::Backend(_)
+        | EvalError::Baseline(_) => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     err(code, &e.to_string())

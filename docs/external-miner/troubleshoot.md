@@ -19,6 +19,8 @@
 | `503` on submit | Holdout file missing or mismatched | Operator: `RELEARN_HOLDOUT_FILE` must match the pin commitment |
 | `503 eval image digest not pinned` | Host has no `sha256:` eval image and did not opt into sim | Wait for relearn CI to publish a digest. `GET /v1/status` shows `can_score: false` |
 | `503 … no in-process sim` | Digest is pinned but the live harvest is not wired on that host | Operator issue; `/v1/status` shows `live_harvest_wired: false`. The control plane refuses to substitute sim numbers |
+| `503 backend: lium …` | The eval pod could not be rented, reached, or torn down | Transient. Retry; the run is not banked and no verdict was recorded |
+| `503 recorded baseline: …` | The eval image returned a document bound to another run, image, or holdout | Operator issue; a mismatched document is never accepted as a score |
 | `503 no champion baseline recorded` | The host has not measured the base model, so there is nothing to compare against | Operator issue; `/v1/status` shows `champion_baseline_recorded: false` |
 | Repeated `503`, no submission id | Nothing was scored, so nothing was stored | Expected. A refused attempt is not a submission and does not consume anything |
 | `rejected` with `Canaries` | Catastrophic forgetting | Base-model canaries must stay ≥ 0.95 |

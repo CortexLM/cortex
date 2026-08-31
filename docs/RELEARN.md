@@ -60,8 +60,8 @@ the sim baseline. A live host has two sources, tried in this order:
    verified at boot against the pin's `eval_image_digest` **and**
    `holdout_commitment`, so a measurement from another image or another holdout
    is refused, as is one missing a series the gates read.
-2. **Wired harvest** — the eval image's `LiveScorer`, when the control plane
-   has one.
+2. **Wired harvest** — the live scorer below, which measures the base model
+   through the eval image at boot.
 
 A live host never falls back to the sim baseline. Judging a live challenger
 against simulated champion scores would let any artifact displace a champion
@@ -85,6 +85,61 @@ that was never measured.
 `general_canary` must be non-empty: a champion the gates cannot read would
 reject every challenger for a reason the miner cannot act on, so that is
 refused at boot instead. The file is operator state — never commit it.
+
+## Eval image contract
+
+Live scoring runs the digest-pinned `eval_image` on a Lium pod. The control
+plane client is [`crates/relearn-lium-harvest`](../crates/relearn-lium-harvest);
+the scoring code itself lives in
+[`CortexLM/relearn`](https://github.com/CortexLM/relearn). Nothing in this repo
+can compute a live score, and there is no sim fallback: a pod that does not
+return a well-formed, correctly bound document is a 503.
+
+Per run the control plane:
+
+1. Boots `eval_image@<digest>` with the master SSH public key
+   (`LIUM_SSH_PUBLIC_KEY_FILE`) on a pod the **miner** pays for
+   (`LIUM_API_KEY`), under the price / GPU / lifetime guardrails.
+2. Writes `request.json` into `/tmp/relearn_eval` over stdin — run inputs are
+   never interpolated into the remote command.
+3. Runs `relearn-eval score --request request.json --out metrics.json`.
+4. Reads back `RELEARN_METRICS=<document>` and `RELEARN_EVAL_OK`.
+5. Scrubs the workdir, terminates, and **requires verified termination** before
+   accepting any score. An orphan pod keeps spending the miner's money, so it
+   outranks whatever the run returned.
+
+The image must print `RELEARN_METRICS=` followed by one line of JSON, then
+`RELEARN_EVAL_OK` on success. The document is the baseline envelope above plus
+the run identity:
+
+```json
+{
+  "schema_version": 1,
+  "submission_digest": "<echo of the request>",
+  "artifact_digest": "<echo of the request>",
+  "eval_image_digest": "sha256:…",
+  "holdout_commitment": "…",
+  "holdout": {}, "public": {}, "perturbed": {},
+  "canaries": {}, "general_canary": {},
+  "agent_trace": 0.0,
+  "vision_shuffle": {}
+}
+```
+
+`submission_digest` and `artifact_digest` are checked against what was asked, so
+a pod cannot answer with another artifact's numbers or replay an earlier run.
+`eval_image_digest` and `holdout_commitment` are checked against the pin. Any
+mismatch is a 503, not a score.
+
+**The request carries the holdout items.** The pod sees the private split for
+the duration of the run — a model cannot be scored on prompts it is not shown.
+The mitigations are the digest-pinned image, delivery into `/tmp/relearn_eval`
+rather than any persisted path, the post-run scrub, and verified termination.
+Rotate the holdout (private salt **and** catalog, then re-sign) if a pod is ever
+suspected of exfiltration; the commitment makes drift detectable but not
+exfiltration. Operators who consider that exposure unacceptable should keep the
+challenge on the recorded-baseline path and treat live scoring as gated on a
+future in-enclave design.
 
 ## Holdout and anti-overfit gates
 

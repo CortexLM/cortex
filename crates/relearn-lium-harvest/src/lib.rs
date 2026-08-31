@@ -109,17 +109,27 @@ pub trait EvalPod: Send + Sync {
     async fn shutdown(&self, instance_id: &str) -> Result<bool, EvalError>;
 }
 
+/// Lium SSH key name the harvest registers its public key under.
+pub const SSH_KEY_NAME: &str = "relearn-eval-worker";
+
 /// [`LiveScorer`] over a digest-pinned eval image on a Lium pod.
 pub struct LiumHarvest {
     pod: Arc<dyn EvalPod>,
     limits: HarvestLimits,
+    /// Master's SSH public key(s). The pod is unreachable without one, so the
+    /// request could not be delivered and no metrics could be read back.
+    ssh_public_keys: Vec<String>,
 }
 
 impl LiumHarvest {
     /// Wrap a pod transport.
     #[must_use]
-    pub fn new(pod: Arc<dyn EvalPod>, limits: HarvestLimits) -> Self {
-        Self { pod, limits }
+    pub fn new(pod: Arc<dyn EvalPod>, limits: HarvestLimits, ssh_public_keys: Vec<String>) -> Self {
+        Self {
+            pod,
+            limits,
+            ssh_public_keys,
+        }
     }
 
     fn spec(&self, pin: &RelearnPin, frozen_digest: &str) -> InstanceSpec {
@@ -129,8 +139,8 @@ impl LiumHarvest {
             max_price_per_hour: self.limits.max_price_per_hour,
             gpu_count: self.limits.gpu_count,
             image_digest: Some(pin.eval_image_digest.clone()),
-            ssh_public_keys: Vec::new(),
-            ssh_key_name: None,
+            ssh_public_keys: self.ssh_public_keys.clone(),
+            ssh_key_name: Some(SSH_KEY_NAME.to_owned()),
             preferred_offer_id: None,
             template_id: None,
             template_name: None,
@@ -169,6 +179,11 @@ impl LiveScorer for LiumHarvest {
         }
         if holdout.is_empty() {
             return Err(EvalError::HoldoutSealed);
+        }
+        if self.ssh_public_keys.iter().all(|k| k.trim().is_empty()) {
+            return Err(EvalError::Backend(
+                "no master SSH public key; the pod would be unreachable".into(),
+            ));
         }
         let request = HarvestRequest {
             schema_version: RELEARN_METRICS_SCHEMA,
@@ -333,7 +348,11 @@ mod tests {
     }
 
     fn harvest(pod: Arc<FakePod>) -> LiumHarvest {
-        LiumHarvest::new(pod, HarvestLimits::default())
+        LiumHarvest::new(
+            pod,
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAmaster".into()],
+        )
     }
 
     #[tokio::test]
@@ -362,6 +381,28 @@ mod tests {
         assert_eq!(log.requests[0].holdout.len(), 120);
         assert_eq!(log.requests[0].artifact_digest, "artifact-1");
         assert_eq!(log.shutdowns, vec!["pod-1".to_owned()]);
+        assert_eq!(
+            log.booted[0].ssh_public_keys,
+            vec!["ssh-ed25519 AAAAmaster"]
+        );
+        assert_eq!(log.booted[0].ssh_key_name.as_deref(), Some(SSH_KEY_NAME));
+    }
+
+    #[tokio::test]
+    async fn refuses_without_a_master_ssh_key_and_never_boots() {
+        let hold = recs(120);
+        let p = pin(&hold);
+        let pod = Arc::new(FakePod::ok(document(&p, &hold, "f", "a", 0.6)));
+        let transport: Arc<dyn EvalPod> = pod.clone();
+        let err = LiumHarvest::new(transport, HarvestLimits::default(), Vec::new())
+            .score(&p, "f", "a", &hold)
+            .await
+            .expect_err("unreachable pod");
+        assert!(matches!(err, EvalError::Backend(_)), "{err}");
+        assert!(
+            pod.log().booted.is_empty(),
+            "must not rent a pod it cannot reach"
+        );
     }
 
     #[tokio::test]

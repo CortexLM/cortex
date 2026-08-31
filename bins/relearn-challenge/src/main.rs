@@ -176,16 +176,50 @@ fn build_live_scorer(backend: EvalBackend, run_timeout_secs: u64) -> Option<Arc<
         .ok()
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())?;
-    // Never logged, never echoed on /v1/status.
-    let client = match LiumClient::new(key) {
+    // Never logged, never echoed on /v1/status. `LIUM_API_BASE_URL` lets a
+    // staging host point at a stand-in provider instead of spending real money.
+    let base_url = std::env::var("LIUM_API_BASE_URL")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
+    let built = match base_url {
+        Some(url) => LiumClient::with_base_url(key, url),
+        None => LiumClient::new(key),
+    };
+    let client = match built {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("lium client unavailable ({e}); live harvest not wired");
             return None;
         }
     };
+    // Without the master public key the pod boots unreachable: the request
+    // could not be delivered and no metrics could be read back.
+    let Some(ssh_pub) = load_ssh_public_key() else {
+        tracing::warn!(
+            "live harvest not wired: no SSH public key (LIUM_SSH_PUBLIC_KEY_FILE or default)"
+        );
+        return None;
+    };
     let pod = Arc::new(LiumEvalPod::new(client, run_timeout_secs));
-    Some(Arc::new(LiumHarvest::new(pod, HarvestLimits::default())))
+    Some(Arc::new(LiumHarvest::new(
+        pod,
+        HarvestLimits::default(),
+        vec![ssh_pub],
+    )))
+}
+
+/// Master SSH public key for harvest pods. Same convention as
+/// `prism-challenge`: `LIUM_SSH_PUBLIC_KEY_FILE`, else the default path.
+fn load_ssh_public_key() -> Option<String> {
+    let p = std::env::var("LIUM_SSH_PUBLIC_KEY_FILE").map_or_else(
+        |_| PathBuf::from("/root/.config/prism-mission/lium_ssh_ed25519.pub"),
+        PathBuf::from,
+    );
+    std::fs::read_to_string(p)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
 }
 
 fn load_pin(path: Option<&Path>) -> Result<RelearnPin, String> {
@@ -406,7 +440,9 @@ mod tests {
         let _guard = LIUM_ENV
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pubkey = stub_ssh_pubkey("wired");
         std::env::set_var("LIUM_API_KEY", "test-key-not-a-real-secret");
+        std::env::set_var("LIUM_SSH_PUBLIC_KEY_FILE", &pubkey);
 
         let live = build_live_scorer(EvalBackend::Lium, 900);
         assert!(
@@ -426,7 +462,22 @@ mod tests {
             build_live_scorer(EvalBackend::Lium, 900).is_none(),
             "a blank key is not a key"
         );
+
+        // A pod with no master key is unreachable, so it must not be rented.
+        std::env::set_var("LIUM_API_KEY", "test-key-not-a-real-secret");
+        std::env::set_var("LIUM_SSH_PUBLIC_KEY_FILE", "/nonexistent/id.pub");
+        assert!(
+            build_live_scorer(EvalBackend::Lium, 900).is_none(),
+            "no master SSH public key means no harvest"
+        );
         std::env::remove_var("LIUM_API_KEY");
+        std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
+    }
+
+    fn stub_ssh_pubkey(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("relearn-test-{tag}.pub"));
+        std::fs::write(&path, "ssh-ed25519 AAAAtest relearn-test\n").expect("write pubkey");
+        path
     }
 
     /// A wired harvest is what turns `live_harvest_wired` on, and the readiness
@@ -436,9 +487,12 @@ mod tests {
         let _guard = LIUM_ENV
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pubkey = stub_ssh_pubkey("ready");
         std::env::set_var("LIUM_API_KEY", "test-key-not-a-real-secret");
+        std::env::set_var("LIUM_SSH_PUBLIC_KEY_FILE", &pubkey);
         let live = build_live_scorer(EvalBackend::Lium, 900).expect("wired");
         std::env::remove_var("LIUM_API_KEY");
+        std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
 
         let unpinned = RelearnPin::default();
         assert!(
