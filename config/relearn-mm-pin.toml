@@ -19,8 +19,10 @@
 challenge_id = "relearn-mm"
 scoring_version = 1
 
-# Language side: the Relearn champion's base model.
-lm_base_model = "Qwen/Qwen3.8-Flash-Next"
+# Language side: the Relearn champion's base model. Must equal the live
+# `base_model` in config/relearn-pin.toml — the encoder attaches to that LM,
+# so a different id here is a mismatch, not a choice.
+lm_base_model = "Qwen/Qwen3.8-27B"
 
 encoder_model = "google/siglip2-so400m-patch14-384"
 encoder_license = "apache-2.0"

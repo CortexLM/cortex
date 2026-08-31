@@ -13,7 +13,7 @@ import os
 import sys
 from pathlib import Path
 
-BASE_MODEL = os.environ.get("RELEARN_BASE_MODEL", "Qwen/Qwen3.8-Flash-Next")
+BASE_MODEL = os.environ.get("RELEARN_BASE_MODEL", "Qwen/Qwen3.8-27B")
 TEACHER_MODEL = os.environ.get("RELEARN_TEACHER_MODEL", "kimi-k3")
 
 

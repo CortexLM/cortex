@@ -379,7 +379,7 @@ mod tests {
         let (st, body) =
             json_req(app("op"), "GET", "/v1/status", serde_json::json!({}), None).await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!(body["lm_base_model"], "Qwen/Qwen3.8-Flash-Next");
+        assert_eq!(body["lm_base_model"], "Qwen/Qwen3.8-27B");
         assert_eq!(body["encoder_model"], "google/siglip2-so400m-patch14-384");
         assert_eq!(body["encoder_license"], "apache-2.0");
         assert_eq!(body["champion_lm_weights_hash"], CHAMP_HASH);

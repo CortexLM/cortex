@@ -184,7 +184,9 @@ mod tests {
 
     #[test]
     fn lm_side_tracks_the_relearn_champion_base() {
-        assert_eq!(LM_BASE_MODEL_ID, "Qwen/Qwen3.8-Flash-Next");
+        // Alias, not a copy: the MM pin cannot drift off the live LLM base.
+        assert_eq!(LM_BASE_MODEL_ID, relearn_challenge_task::BASE_MODEL_ID);
+        assert_eq!(LM_BASE_MODEL_ID, "Qwen/Qwen3.8-27B");
     }
 
     #[test]

@@ -283,7 +283,7 @@ mod tests {
     const BODY: &str = r#"
 challenge_id = "relearn-mm"
 scoring_version = 1
-lm_base_model = "Qwen/Qwen3.8-Flash-Next"
+lm_base_model = "Qwen/Qwen3.8-27B"
 encoder_model = "google/siglip2-so400m-patch14-384"
 encoder_license = "apache-2.0"
 vision_items_per_task = 40
@@ -295,7 +295,7 @@ text_holdout_items = 120
     fn default_pin_is_siglip2_on_the_relearn_base() {
         let p = RelearnMmPin::default();
         assert_eq!(p.encoder_model, "google/siglip2-so400m-patch14-384");
-        assert_eq!(p.lm_base_model, "Qwen/Qwen3.8-Flash-Next");
+        assert_eq!(p.lm_base_model, "Qwen/Qwen3.8-27B");
         assert!(!p.can_rent());
         p.validate().expect("default validates");
     }
