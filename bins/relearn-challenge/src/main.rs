@@ -43,7 +43,11 @@ struct Cli {
     #[arg(long, env = "BASE_CHALLENGE_SK_FILE")]
     challenge_sk_file: Option<PathBuf>,
     /// Force sim eval (no Lium spend). CI / local only — never a live scorer.
-    #[arg(long, env = "RELEARN_FORCE_SIM", default_value_t = false)]
+    ///
+    /// `RELEARN_FORCE_SIM` is read by `resolve_eval_backend`, which accepts
+    /// `1` / `true` / `yes`, so it is deliberately not bound here: clap would
+    /// reject the documented `RELEARN_FORCE_SIM=1` and refuse to boot.
+    #[arg(long, default_value_t = false)]
     force_sim: bool,
     /// Operator bearer tokens file (one per line). Empty → admin 503.
     #[arg(long, env = "RELEARN_ADMIN_TOKENS_FILE")]
@@ -172,4 +176,27 @@ async fn serve(bind: SocketAddr, state: AppState) -> Result<(), String> {
         })
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `RELEARN_FORCE_SIM=1` is what every doc and runbook says to set. Binding
+    /// it to a clap `bool` made clap reject `1` and the service refused to
+    /// boot, so the documented sim opt-in was unreachable.
+    #[test]
+    fn documented_force_sim_values_do_not_break_argument_parsing() {
+        for value in ["1", "true", "yes", "false", ""] {
+            std::env::set_var("RELEARN_FORCE_SIM", value);
+            let cli = Cli::try_parse_from(["relearn-challenge"])
+                .unwrap_or_else(|e| panic!("RELEARN_FORCE_SIM={value:?} broke parsing: {e}"));
+            assert!(!cli.force_sim, "env must not set the flag");
+        }
+        std::env::set_var("RELEARN_FORCE_SIM", "1");
+        assert_eq!(resolve_eval_backend(), EvalBackend::Sim);
+        std::env::set_var("RELEARN_FORCE_SIM", "false");
+        assert_eq!(resolve_eval_backend(), EvalBackend::Lium);
+        std::env::remove_var("RELEARN_FORCE_SIM");
+    }
 }
