@@ -122,9 +122,11 @@ fn run(cli: &Cli) -> Result<(), String> {
         EvalBackend::Lium if live_scorer.is_some() => {
             tracing::info!("live harvest wired: digest-pinned eval image on Lium");
         }
+        // The baseline file cannot stand in for this: it covers the champion
+        // only, and every submission still needs its own measurement.
         EvalBackend::Lium => tracing::warn!(
-            "live harvest not wired (LIUM_API_KEY unset); submissions will 503 unless \
-             RELEARN_BASE_CHAMPION_FILE covers the baseline and a harvest is configured"
+            "live harvest not wired; every submission will 503. Set the Lium credentials \
+             and LIUM_SSH_PUBLIC_KEY_FILE (deploy/env/relearn-challenge.env.example)"
         ),
         EvalBackend::Sim => {}
     }
