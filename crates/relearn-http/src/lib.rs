@@ -28,8 +28,10 @@ use axum::{Json, Router};
 use std::collections::BTreeSet;
 
 use relearn_challenge_task::{CHALLENGE_ID, SCORE_MAX, SCORING_VERSION};
-use relearn_eval::{eval_after_freeze, resolve_teacher_backend, RelearnPin};
-use relearn_score::{contaminated_fingerprints, judge_challenger};
+use relearn_eval::{
+    eval_after_freeze, force_sim, resolve_teacher_backend, EvalBackend, EvalError, RelearnPin,
+};
+use relearn_score::{contamination_evidence, judge_challenger};
 use relearn_store::{
     freeze_submission_digest, ArtifactManifest, MemoryStore, Submission, SubmissionState,
 };
@@ -43,6 +45,8 @@ pub struct AppState {
     pub store: MemoryStore,
     /// Eval / model pins.
     pub pin: RelearnPin,
+    /// Backend that is allowed to produce scores on this host.
+    pub backend: EvalBackend,
     /// Operator bearer hashes (sha256 hex). Empty → admin 503.
     pub admin_hashes: Arc<Vec<String>>,
 }
@@ -78,6 +82,11 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         "teacher_backend": resolve_teacher_backend(),
         "eval_image": st.pin.eval_image,
         "eval_image_digest": st.pin.eval_image_digest,
+        // Which scorer this host will actually use, and whether sim was opted
+        // into. Miners can see that a run was not a real eval.
+        "eval_backend": st.backend,
+        "force_sim": force_sim(),
+        "can_score": st.backend == EvalBackend::Sim || st.pin.can_rent(),
         "relearn_git": st.pin.relearn_git,
         "relearn_git_sha": st.pin.relearn_git_sha,
         // Commitment + size + loaded. Never ids, prompts, or image hashes.
@@ -102,6 +111,7 @@ struct SubmitResp {
     submission_digest: String,
     state: SubmissionState,
     holdout_unsealed: bool,
+    eval_backend: EvalBackend,
     eligible: bool,
 }
 
@@ -163,8 +173,8 @@ async fn submit(
         .unseal_holdout(&submission_digest)
         .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
 
-    let eval = eval_after_freeze(&submission_digest, &artifact, &holdout)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let eval = eval_after_freeze(&st.pin, &submission_digest, &artifact, &holdout, st.backend)
+        .map_err(|e| eval_err(&e))?;
 
     let train_ids: BTreeSet<u32> = body.manifest.train_item_ids.iter().copied().collect();
     let train_images: BTreeSet<String> = body
@@ -180,8 +190,10 @@ async fn submit(
         .map(|s| s.trim().to_owned())
         .collect();
     let mut scores = eval.scores;
-    scores.contaminated_fingerprints =
-        contaminated_fingerprints(&train_ids, &train_images, &train_datasets, &holdout);
+    // An empty manifest leaves the evidence undeclared, which the judge treats
+    // as a failed gate rather than a clean run.
+    scores.contamination =
+        contamination_evidence(&train_ids, &train_images, &train_datasets, &holdout);
 
     let champ = st.store.champion_scores().ok().flatten().ok_or_else(|| {
         err(
@@ -217,6 +229,7 @@ async fn submit(
             submission_digest: row.submission_digest,
             state: row.state,
             holdout_unsealed: eval.holdout_items > 0,
+            eval_backend: eval.backend,
             eligible,
         }),
     ))
@@ -286,6 +299,18 @@ fn err(code: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     (code, Json(serde_json::json!({ "error": msg })))
 }
 
+/// A host that cannot score is unavailable, not broken. `503` keeps miners
+/// retrying instead of reading a sim number as a verdict.
+fn eval_err(e: &EvalError) -> (StatusCode, Json<serde_json::Value>) {
+    let code = match e {
+        EvalError::HoldoutSealed
+        | EvalError::EvalImageUnpinned
+        | EvalError::LiveHarvestUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    err(code, &e.to_string())
+}
+
 /// Hash an admin token the same way the server does.
 #[must_use]
 pub fn hash_admin_token(token: &str) -> String {
@@ -331,12 +356,23 @@ mod tests {
             .collect()
     }
 
-    fn app_with(token: &str, load: bool) -> Router {
+    /// Training metadata a real miner declares. An empty manifest is a
+    /// separate case (`empty_manifest_cannot_dodge_the_contamination_gate`).
+    fn declared_manifest() -> serde_json::Value {
+        serde_json::json!({
+            "train_item_ids": (1..=40).collect::<Vec<u32>>(),
+            "train_image_hashes": [],
+            "train_dataset_ids": ["cortex-public-v0"],
+        })
+    }
+
+    fn app_backend(token: &str, load: bool, backend: EvalBackend, eval_digest: &str) -> Router {
         let recs = holdout();
         let pin = RelearnPin {
             holdout_commitment: holdout_commitment(&recs),
             holdout_size: recs.len(),
             public_ids: (1..=40).collect(),
+            eval_image_digest: eval_digest.to_owned(),
             ..RelearnPin::default()
         };
         let store = MemoryStore::new();
@@ -354,8 +390,13 @@ mod tests {
         relearn_router(AppState {
             store,
             pin,
+            backend,
             admin_hashes: Arc::new(vec![hash_admin_token(token)]),
         })
+    }
+
+    fn app_with(token: &str, load: bool) -> Router {
+        app_backend(token, load, EvalBackend::Sim, "")
     }
 
     async fn json_req(
@@ -399,6 +440,7 @@ mod tests {
             serde_json::json!({
                 "miner_hotkey": digest("miner-hotkey"),
                 "artifact_digest": artifact,
+                "manifest": declared_manifest(),
             }),
             None,
         )
@@ -409,8 +451,10 @@ mod tests {
             64
         );
         assert!(created["holdout_unsealed"].as_bool().unwrap_or(false));
+        assert_eq!(created["eval_backend"], "sim");
+        assert_eq!(created["eligible"], true, "{created}");
 
-        if created["eligible"] == true {
+        {
             let id = created["id"].as_str().expect("id");
             let (st, promoted) = json_req(
                 app,
@@ -485,9 +529,10 @@ mod tests {
 
     #[tokio::test]
     async fn contaminated_training_metadata_cannot_promote() {
+        let app = app_with("op", true);
         let hold_id = holdout()[0].id;
         let (st, created) = json_req(
-            app_with("op", true),
+            app.clone(),
             "POST",
             "/v1/submissions",
             serde_json::json!({
@@ -501,5 +546,134 @@ mod tests {
         assert_eq!(st, StatusCode::CREATED, "{created}");
         assert_eq!(created["eligible"], false);
         assert_eq!(created["state"], "rejected");
+
+        let id = created["id"].as_str().expect("id");
+        let (_st, row) = json_req(
+            app,
+            "GET",
+            &format!("/v1/submissions/{id}"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        let failed = row["verdict"]["failed"].to_string();
+        assert!(failed.contains("\"contamination\""), "{failed}");
+    }
+
+    /// Same artifact digest that `submit_eval_promote_happy_path` promotes, so
+    /// the only difference here is the missing training metadata.
+    #[tokio::test]
+    async fn empty_manifest_cannot_dodge_the_contamination_gate() {
+        let app = app_with("op-test-token", true);
+        for manifest in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({
+                "train_item_ids": [],
+                "train_image_hashes": [],
+                "train_dataset_ids": [],
+            }),
+        ] {
+            let mut body = serde_json::json!({
+                "miner_hotkey": digest("miner-hotkey"),
+                "artifact_digest": digest("miner-strong-adapter"),
+            });
+            if !manifest.is_null() {
+                body["manifest"] = manifest.clone();
+            }
+            let (st, created) = json_req(app.clone(), "POST", "/v1/submissions", body, None).await;
+            assert_eq!(st, StatusCode::CREATED, "{created}");
+            assert_eq!(created["eligible"], false, "manifest={manifest}");
+            assert_eq!(created["state"], "rejected", "manifest={manifest}");
+
+            let id = created["id"].as_str().expect("id");
+            let (st, row) = json_req(
+                app.clone(),
+                "GET",
+                &format!("/v1/submissions/{id}"),
+                serde_json::json!({}),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let failed = row["verdict"]["failed"].to_string();
+            assert!(
+                failed.contains("contamination_evidence_missing"),
+                "manifest={manifest} failed={failed}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn live_submit_refuses_without_a_pinned_eval_image() {
+        let (st, body) = json_req(
+            app_backend("op", true, EvalBackend::Lium, ""),
+            "POST",
+            "/v1/submissions",
+            serde_json::json!({
+                "miner_hotkey": digest("miner-hotkey"),
+                "artifact_digest": digest("miner-strong-adapter"),
+                "manifest": declared_manifest(),
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let msg = body["error"].as_str().unwrap_or_default();
+        assert!(msg.contains("eval image digest not pinned"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn live_submit_never_scores_with_the_sim_harness() {
+        let (st, body) = json_req(
+            app_backend(
+                "op",
+                true,
+                EvalBackend::Lium,
+                &format!("sha256:{}", "ab".repeat(32)),
+            ),
+            "POST",
+            "/v1/submissions",
+            serde_json::json!({
+                "miner_hotkey": digest("miner-hotkey"),
+                "artifact_digest": digest("miner-strong-adapter"),
+                "manifest": declared_manifest(),
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no in-process sim"));
+    }
+
+    #[tokio::test]
+    async fn status_reports_the_scorer_this_host_will_use() {
+        let (st, sim) = json_req(
+            app_with("op", true),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(sim["eval_backend"], "sim");
+        assert_eq!(sim["can_score"], true);
+
+        let (st, live) = json_req(
+            app_backend("op", true, EvalBackend::Lium, ""),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(live["eval_backend"], "lium");
+        assert_eq!(live["eval_image_digest"], "");
+        assert_eq!(live["can_score"], false);
     }
 }

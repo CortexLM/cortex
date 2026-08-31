@@ -3,6 +3,11 @@
 //! Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`). The control plane
 //! only ever boots a digest-pinned eval image. Teacher HTTP is judge-only
 //! and never serves miner weights as the scored artifact.
+//!
+//! The deterministic sim scorer is **not** a fallback. It runs only when the
+//! operator sets `RELEARN_FORCE_SIM=1`; otherwise a host without a
+//! `sha256:` eval-image pin refuses to score at all rather than shipping
+//! sim numbers to the lattice.
 
 #![forbid(unsafe_code)]
 #![allow(
@@ -23,7 +28,10 @@ use relearn_challenge_task::{
     default_teacher_backend, is_configured_teacher_model, HoldoutItem, HoldoutTask, TeacherBackend,
     BASE_MODEL_ID, MIN_HOLDOUT_ITEMS, TEACHER_MODEL_ID, TEACHER_NVFP4_ID,
 };
-use relearn_score::{ShuffleEvidence, SliceScores, MIN_SHUFFLE_DROP};
+use relearn_score::{
+    ContaminationEvidence, ShuffleEvidence, SliceScores, MAX_PERTURB_DROP, MAX_PUBLIC_PRIVATE_GAP,
+    MIN_SHUFFLE_DROP,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -129,6 +137,38 @@ impl RelearnPin {
     }
 }
 
+/// Where a Relearn eval actually runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalBackend {
+    /// Digest-pinned eval image on a Lium pod (production default).
+    Lium,
+    /// Deterministic offline scorer. CI / local opt-in only, never a fallback.
+    Sim,
+}
+
+/// True when the operator explicitly opted into sim scoring.
+#[must_use]
+pub fn force_sim() -> bool {
+    matches!(
+        std::env::var("RELEARN_FORCE_SIM")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
+/// Resolve the scoring backend for this host. Sim is never implicit.
+#[must_use]
+pub fn resolve_eval_backend() -> EvalBackend {
+    if force_sim() {
+        EvalBackend::Sim
+    } else {
+        EvalBackend::Lium
+    }
+}
+
 /// Eval errors.
 #[derive(Debug, Error)]
 pub enum EvalError {
@@ -144,6 +184,12 @@ pub enum EvalError {
     /// Teacher API is not allowed to receive miner weights.
     #[error("teacher API refused miner-weight payload")]
     TeacherMinerWeights,
+    /// A live run was asked for without a digest-pinned eval image.
+    #[error("eval image digest not pinned; refuse live scoring (RELEARN_FORCE_SIM=1 is CI only)")]
+    EvalImageUnpinned,
+    /// A live run reached the in-process scorer. It must not silently sim.
+    #[error("live holdout harvest is driven by the digest-pinned eval image; no in-process sim")]
+    LiveHarvestUnavailable,
 }
 
 /// One finished eval.
@@ -153,6 +199,8 @@ pub struct EvalOutcome {
     pub scores: SliceScores,
     /// Integrity receipt.
     pub receipt: EvalReceipt,
+    /// Backend that produced the scores.
+    pub backend: EvalBackend,
     /// Holdout item count that was scored (ids stay off the HTTP row).
     pub holdout_items: usize,
 }
@@ -178,12 +226,77 @@ fn series_ids(prefix: &str, ids: &[u32], digest: &str, salt: &str, bias: f64) ->
     }))
 }
 
+/// Per-item noise band around the sim skill level.
+///
+/// Smaller than [`SIM_SKILL_SPAN`] so a skill gap survives the noise and the
+/// paired test can actually decide; larger than `DEADZONE` so items are not
+/// all ties.
+const SIM_NOISE: f64 = 0.10;
+
+/// How far sim skill moves the mean holdout score.
+const SIM_SKILL_SPAN: f64 = 0.30;
+
+/// Sim skill of the base champion, in `[0, 1]`.
+///
+/// Fixed rather than digest-derived so a harness can aim above or below it.
+pub const BASE_CHAMPION_SKILL: f64 = 0.40;
+
+/// Deterministic sim skill of an artifact, in `[0, 1]`.
+///
+/// A digest above [`BASE_CHAMPION_SKILL`] by more than the noise band beats
+/// the sim champion; one below it loses. That is the point: the offline
+/// harness has to be able to produce both verdicts.
+#[must_use]
+pub fn sim_artifact_skill(artifact_digest: &str) -> f64 {
+    unit(&[artifact_digest, "skill"], 0)
+}
+
+fn skill_series(
+    prefix: &str,
+    ids: &[u32],
+    digest: &str,
+    salt: &str,
+    skill: f64,
+    bias: f64,
+) -> ExampleSeries {
+    ExampleSeries::from_pairs(ids.iter().map(|id| {
+        let v = unit(&[digest, salt, &id.to_string()], *id);
+        (
+            format!("{prefix}{id}"),
+            (0.45 + SIM_SKILL_SPAN * skill + SIM_NOISE * v + bias).clamp(0.0, 1.0),
+        )
+    }))
+}
+
 /// Deterministic sim scores from a frozen digest + verified holdout records.
 ///
 /// Public and general-canary series are produced from salts that do **not**
 /// include the holdout prompts, so they cannot reconstruct the private split.
+///
+/// Skill comes from [`sim_artifact_skill`]. Use
+/// [`sim_slice_scores_at_skill`] to pin it.
 #[must_use]
 pub fn sim_slice_scores(artifact_digest: &str, holdout: &[HoldoutItem]) -> SliceScores {
+    sim_slice_scores_at_skill(
+        artifact_digest,
+        holdout,
+        sim_artifact_skill(artifact_digest),
+    )
+}
+
+/// Sim scores at an explicit skill level in `[0, 1]`.
+///
+/// The retention series are derived from the holdout series rather than drawn
+/// independently: perturbation, public gap, and canaries are gates on the
+/// *same* model, so an offline harness whose slices disagree with each other
+/// would fail every gate no matter what the submission did.
+#[must_use]
+pub fn sim_slice_scores_at_skill(
+    artifact_digest: &str,
+    holdout: &[HoldoutItem],
+    skill: f64,
+) -> SliceScores {
+    let skill = skill.clamp(0.0, 1.0);
     let hold_ids: Vec<u32> = holdout.iter().map(|r| r.id).collect();
     let public_ids: Vec<u32> = (1..=40).collect();
     let mut vision_shuffle = BTreeMap::new();
@@ -204,9 +317,25 @@ pub fn sim_slice_scores(artifact_digest: &str, holdout: &[HoldoutItem]) -> Slice
         );
     }
     SliceScores {
-        holdout: series_ids("h", &hold_ids, artifact_digest, "hold", 0.15),
-        public: series_ids("p", &public_ids, artifact_digest, "public", 0.0),
-        perturbed: series_ids("x", &hold_ids, artifact_digest, "pert", -0.02),
+        holdout: skill_series("h", &hold_ids, artifact_digest, "hold", skill, 0.0),
+        // Train-adjacent, so a little easier — but inside the memorization gap.
+        public: skill_series(
+            "p",
+            &public_ids,
+            artifact_digest,
+            "public",
+            skill,
+            0.5 * MAX_PUBLIC_PRIVATE_GAP,
+        ),
+        // A perturbed rerun of the same model: the "hold" draw again, small drop.
+        perturbed: skill_series(
+            "x",
+            &hold_ids,
+            artifact_digest,
+            "hold",
+            skill,
+            -0.5 * MAX_PERTURB_DROP,
+        ),
         canaries: series_ids("c", &(0..40).collect::<Vec<_>>(), "canary", "base", 0.45),
         general_canary: series_ids(
             "g",
@@ -217,21 +346,39 @@ pub fn sim_slice_scores(artifact_digest: &str, holdout: &[HoldoutItem]) -> Slice
         ),
         agent_trace: 0.85,
         vision_shuffle,
-        contaminated_fingerprints: Vec::new(),
+        contamination: ContaminationEvidence::default(),
     }
 }
 
 /// Baseline champion on the verified holdout (no miner adapter).
+///
+/// These are sim numbers. Only seed them as the champion baseline on a host
+/// that resolved [`EvalBackend::Sim`]; a live challenger must never be judged
+/// against a simulated champion.
 #[must_use]
 pub fn base_champion_scores(holdout: &[HoldoutItem]) -> SliceScores {
-    sim_slice_scores("base-relearn-champion", holdout)
+    sim_slice_scores_at_skill("base-relearn-champion", holdout, BASE_CHAMPION_SKILL)
 }
 
 /// Score only after the submission digest is frozen and holdout records exist.
+///
+/// `backend` comes from [`resolve_eval_backend`] and is the only thing that
+/// can select sim. On [`EvalBackend::Lium`] this refuses rather than falling
+/// back: without a `sha256:` eval-image pin the answer is
+/// [`EvalError::EvalImageUnpinned`], and with one the scores have to come from
+/// the eval image itself ([`EvalError::LiveHarvestUnavailable`]).
+///
+/// # Errors
+///
+/// [`EvalError::HoldoutSealed`] before the freeze / without verified records,
+/// [`EvalError::EvalImageUnpinned`] or [`EvalError::LiveHarvestUnavailable`]
+/// on a live host, and [`EvalError::Integrity`] when the receipt gate fails.
 pub fn eval_after_freeze(
+    pin: &RelearnPin,
     frozen_digest: &str,
     artifact_digest: &str,
     holdout: &[HoldoutItem],
+    backend: EvalBackend,
 ) -> Result<EvalOutcome, EvalError> {
     if frozen_digest.trim().is_empty() {
         return Err(EvalError::HoldoutSealed);
@@ -239,16 +386,27 @@ pub fn eval_after_freeze(
     if holdout.is_empty() {
         return Err(EvalError::HoldoutSealed);
     }
-    let scores = sim_slice_scores(artifact_digest, holdout);
+    let scores = match backend {
+        EvalBackend::Sim => sim_slice_scores(artifact_digest, holdout),
+        EvalBackend::Lium => {
+            if !pin.can_rent() {
+                return Err(EvalError::EvalImageUnpinned);
+            }
+            return Err(EvalError::LiveHarvestUnavailable);
+        }
+    };
     let metrics = serde_json::to_vec(&serde_json::json!({
         "holdout_n": scores.holdout.len(),
         "agent_trace": scores.agent_trace,
     }))
     .unwrap_or_default();
     let receipt = EvalReceipt {
-        provider: "sim".into(),
+        provider: match backend {
+            EvalBackend::Sim => "sim".into(),
+            EvalBackend::Lium => "lium".into(),
+        },
         pod_id: format!("sim-{}", &frozen_digest[..8.min(frozen_digest.len())]),
-        image_digest: String::new(),
+        image_digest: pin.eval_image_digest.clone(),
         submission_hash: frozen_digest.to_owned(),
         metrics_hash: EvalReceipt::hash_metrics_bytes(&metrics),
         termination_verified: true,
@@ -257,6 +415,7 @@ pub fn eval_after_freeze(
     Ok(EvalOutcome {
         scores,
         receipt,
+        backend,
         holdout_items: holdout.len(),
     })
 }
@@ -295,14 +454,7 @@ pub fn teacher_judge_guard(req: &TeacherJudgeRequest, pin: &RelearnPin) -> Resul
 /// Miner weights are never the served model.
 #[must_use]
 pub fn resolve_teacher_backend() -> TeacherBackend {
-    let force_sim = matches!(
-        std::env::var("RELEARN_FORCE_SIM")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes"
-    );
-    if force_sim {
+    if force_sim() {
         return default_teacher_backend(true);
     }
     TeacherBackend::from_env()
@@ -320,9 +472,7 @@ pub async fn rent_eval(
     artifact_digest: &str,
 ) -> Result<(RemoteExecResult, String), EvalError> {
     if !pin.can_rent() {
-        return Err(EvalError::Integrity(
-            "eval image digest not pinned; refuse live rent".into(),
-        ));
+        return Err(EvalError::EvalImageUnpinned);
     }
     let spec = InstanceSpec {
         name: format!("relearn-{}", &frozen_digest[..12.min(frozen_digest.len())]),
@@ -395,14 +545,65 @@ mod tests {
     #[test]
     fn scoring_happens_only_after_freeze_and_unseal() {
         let hold = recs(120);
-        assert!(eval_after_freeze("", "art", &hold).is_err());
-        assert!(eval_after_freeze("digest-a", "art", &[]).is_err());
-        let out = eval_after_freeze("digest-a", "art", &hold).expect("eval");
+        let pin = RelearnPin::default();
+        assert!(eval_after_freeze(&pin, "", "art", &hold, EvalBackend::Sim).is_err());
+        assert!(eval_after_freeze(&pin, "digest-a", "art", &[], EvalBackend::Sim).is_err());
+        let out =
+            eval_after_freeze(&pin, "digest-a", "art", &hold, EvalBackend::Sim).expect("eval");
         assert_eq!(out.receipt.submission_hash, "digest-a");
+        assert_eq!(out.backend, EvalBackend::Sim);
         assert_eq!(out.holdout_items, 120);
         assert!(out.scores.holdout.len() >= 100);
         assert!(!out.scores.general_canary.is_empty());
         assert_eq!(out.scores.vision_shuffle.len(), 4);
+    }
+
+    #[test]
+    fn live_eval_without_a_digest_pin_refuses_instead_of_simming() {
+        let hold = recs(120);
+        let err = eval_after_freeze(
+            &RelearnPin::default(),
+            "digest-a",
+            "art",
+            &hold,
+            EvalBackend::Lium,
+        )
+        .expect_err("live eval must refuse without a digest pin");
+        assert!(matches!(err, EvalError::EvalImageUnpinned), "{err}");
+        assert!(err.to_string().contains("eval image digest not pinned"));
+    }
+
+    #[test]
+    fn live_eval_with_a_digest_pin_never_falls_back_to_sim() {
+        let pin = RelearnPin {
+            eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
+            ..RelearnPin::default()
+        };
+        let err = eval_after_freeze(&pin, "digest-a", "art", &recs(120), EvalBackend::Lium)
+            .expect_err("live scores must come from the eval image");
+        assert!(matches!(err, EvalError::LiveHarvestUnavailable), "{err}");
+    }
+
+    #[test]
+    fn sim_receipt_declares_the_sim_provider() {
+        let out = eval_after_freeze(
+            &RelearnPin::default(),
+            "digest-a",
+            "art",
+            &recs(120),
+            EvalBackend::Sim,
+        )
+        .expect("sim eval");
+        assert_eq!(out.receipt.provider, "sim");
+        assert!(out.receipt.image_digest.is_empty());
+    }
+
+    #[test]
+    fn sim_is_opt_in_only() {
+        // Nothing in this process sets RELEARN_FORCE_SIM, so a default host
+        // resolves the live backend.
+        assert!(!force_sim());
+        assert_eq!(resolve_eval_backend(), EvalBackend::Lium);
     }
 
     #[test]
@@ -473,6 +674,53 @@ public_ids = [1, 2, 3]
     fn pin_without_holdout_commitment_fails_validate() {
         let p = RelearnPin::from_toml("base_model = \"Qwen/Qwen3.8-27B\"\n").expect("parse");
         assert!(matches!(p.validate(), Err(PinError::BadHoldoutCommitment)));
+    }
+
+    #[test]
+    fn sim_harness_can_express_a_win_and_a_loss() {
+        let hold = recs(120);
+        let champ = base_champion_scores(&hold);
+        let strong = sim_slice_scores_at_skill("art", &hold, BASE_CHAMPION_SKILL + 0.35);
+        let weak = sim_slice_scores_at_skill("art", &hold, BASE_CHAMPION_SKILL - 0.35);
+
+        let mut win = strong;
+        win.contamination = relearn_score::ContaminationEvidence {
+            declared_dataset_ids: 1,
+            ..relearn_score::ContaminationEvidence::default()
+        };
+        let v = relearn_score::judge_challenger(&champ, &win);
+        assert!(v.eligible, "failed={:?}", v.failed);
+        assert!(v.lattice > 0);
+
+        let mut lose = weak;
+        lose.contamination = win.contamination.clone();
+        let v = relearn_score::judge_challenger(&champ, &lose);
+        assert!(!v.eligible);
+        assert_eq!(v.lattice, 0);
+    }
+
+    #[test]
+    fn sim_retention_slices_agree_with_the_holdout_draw() {
+        // Perturbation and public-gap gates are about the *same* model, so a
+        // harness whose slices are drawn independently would fail them for
+        // every submission and no sim run could ever reach awaiting_admin.
+        let hold = recs(120);
+        let s = sim_slice_scores_at_skill("art", &hold, 0.8);
+        let h = SliceScores::mean(&s.holdout).expect("holdout mean");
+        let p = SliceScores::mean(&s.perturbed).expect("perturbed mean");
+        let pub_m = SliceScores::mean(&s.public).expect("public mean");
+        assert!(h - p <= MAX_PERTURB_DROP, "perturb drop {}", h - p);
+        assert!(h - p > 0.0, "perturbation must cost something");
+        assert!(pub_m - h <= MAX_PUBLIC_PRIVATE_GAP, "gap {}", pub_m - h);
+    }
+
+    #[test]
+    fn sim_skill_is_deterministic_per_digest() {
+        assert!((sim_artifact_skill("art") - sim_artifact_skill("art")).abs() < f64::EPSILON);
+        assert!((sim_artifact_skill("art") - sim_artifact_skill("other")).abs() > f64::EPSILON);
+        let a = sim_slice_scores("art", &recs(120));
+        let b = sim_slice_scores("art", &recs(120));
+        assert_eq!(a.holdout, b.holdout);
     }
 
     #[test]

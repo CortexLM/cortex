@@ -20,7 +20,9 @@ pub use relearn_challenge_task::{
     BASE_MODEL_ID, CHALLENGE_ID, CHALLENGE_ID_BYTES as RELEARN_ID_BYTES,
     SCORE_MAX as RELEARN_SCORE_MAX, SCORING_VERSION, TEACHER_MODEL_ID,
 };
-pub use relearn_eval::{resolve_teacher_backend, RelearnPin};
+pub use relearn_eval::{
+    force_sim, resolve_eval_backend, resolve_teacher_backend, EvalBackend, RelearnPin,
+};
 pub use relearn_http::{hash_admin_token, relearn_router, AppState};
 pub use relearn_store::MemoryStore;
 

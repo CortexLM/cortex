@@ -50,6 +50,32 @@ pub const MIN_AGENT_TRACE: f64 = 0.5;
 /// Slice id bound into the paired test.
 pub const HOLDOUT_SLICE_ID: &str = "relearn-holdout";
 
+/// What a submission declared about its training data, plus what leaked.
+///
+/// The contamination gate reads miner-declared metadata, so an empty manifest
+/// is *absence of evidence*, not a clean bill of health. Keeping the declared
+/// counts next to the hits is what lets [`judge_challenger`] tell "declared
+/// nothing" apart from "declared data with no holdout overlap".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContaminationEvidence {
+    /// Distinct train item ids the submission declared.
+    pub declared_ids: usize,
+    /// Distinct train image hashes the submission declared.
+    pub declared_image_hashes: usize,
+    /// Distinct train dataset ids the submission declared.
+    pub declared_dataset_ids: usize,
+    /// Holdout fingerprints found inside the declared metadata.
+    pub hits: Vec<String>,
+}
+
+impl ContaminationEvidence {
+    /// Whether the submission declared anything the gate could check.
+    #[must_use]
+    pub fn is_declared(&self) -> bool {
+        self.declared_ids > 0 || self.declared_image_hashes > 0 || self.declared_dataset_ids > 0
+    }
+}
+
 /// Pixel-shuffle evidence for one vision family.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct ShuffleEvidence {
@@ -92,8 +118,8 @@ pub struct SliceScores {
     pub agent_trace: f64,
     /// Pixel-shuffle control, one entry per vision family that had images.
     pub vision_shuffle: BTreeMap<HoldoutTask, ShuffleEvidence>,
-    /// Holdout fingerprints found in the submission's training metadata.
-    pub contaminated_fingerprints: Vec<String>,
+    /// Declared training metadata and the holdout fingerprints inside it.
+    pub contamination: ContaminationEvidence,
 }
 
 impl Default for SliceScores {
@@ -106,7 +132,7 @@ impl Default for SliceScores {
             general_canary: ExampleSeries::default(),
             agent_trace: 0.0,
             vision_shuffle: BTreeMap::new(),
-            contaminated_fingerprints: Vec::new(),
+            contamination: ContaminationEvidence::default(),
         }
     }
 }
@@ -150,6 +176,9 @@ pub enum GateFail {
     AgentTrace,
     /// Eval item ids / image hashes appear in training metadata.
     Contamination,
+    /// The submission declared no training metadata, so the contamination
+    /// gate had nothing to check (fail-closed; an empty manifest is not a pass).
+    ContaminationEvidenceMissing,
     /// Shuffling the image pixels barely changed the score.
     IgnoresTheImage {
         /// Family that ignored the pixels.
@@ -196,21 +225,30 @@ pub struct PromoteVerdict {
     pub lattice: u64,
 }
 
-/// Eval fingerprints that leaked into a submission's training metadata.
+/// Declared training metadata plus the eval fingerprints that leaked into it.
+///
+/// Returns the declared counts as well as the hits so a submission that
+/// declared nothing cannot be read as a clean run.
 #[must_use]
-pub fn contaminated_fingerprints(
+pub fn contamination_evidence(
     train_ids: &BTreeSet<u32>,
     train_image_hashes: &BTreeSet<String>,
     train_dataset_ids: &BTreeSet<String>,
     holdout: &[HoldoutItem],
-) -> Vec<String> {
-    contamination(train_ids, train_image_hashes, train_dataset_ids, holdout)
+) -> ContaminationEvidence {
+    ContaminationEvidence {
+        declared_ids: train_ids.len(),
+        declared_image_hashes: train_image_hashes.len(),
+        declared_dataset_ids: train_dataset_ids.len(),
+        hits: contamination(train_ids, train_image_hashes, train_dataset_ids, holdout),
+    }
 }
 
 /// Judge challenger vs champion. Never returns `eligible` on a regression.
 ///
 /// The lattice is holdout-only. General-bench canary, public gap, shuffle, and
-/// contamination can only zero a run.
+/// contamination can only zero a run. Missing evidence — no public split, no
+/// general canary, no declared training metadata — is a fail, not a pass.
 #[must_use]
 pub fn judge_challenger(champion: &SliceScores, challenger: &SliceScores) -> PromoteVerdict {
     let mut failed = Vec::new();
@@ -290,8 +328,12 @@ pub fn judge_challenger(champion: &SliceScores, challenger: &SliceScores) -> Pro
         failed.push(GateFail::AgentTrace);
     }
 
-    if !challenger.contaminated_fingerprints.is_empty() {
-        failed.push(GateFail::Contamination);
+    if challenger.contamination.is_declared() {
+        if !challenger.contamination.hits.is_empty() {
+            failed.push(GateFail::Contamination);
+        }
+    } else {
+        failed.push(GateFail::ContaminationEvidenceMissing);
     }
 
     for task in HoldoutTask::VISION {
@@ -361,6 +403,15 @@ mod tests {
             .collect()
     }
 
+    fn declared_clean() -> ContaminationEvidence {
+        ContaminationEvidence {
+            declared_ids: 40,
+            declared_image_hashes: 12,
+            declared_dataset_ids: 2,
+            hits: Vec::new(),
+        }
+    }
+
     fn slice(hold: f64, public: f64, pert: f64, canary: f64, trace: f64) -> SliceScores {
         SliceScores {
             holdout: series("h", 120, hold),
@@ -370,7 +421,7 @@ mod tests {
             general_canary: series("g", 40, 0.97),
             agent_trace: trace,
             vision_shuffle: vision_ok(),
-            contaminated_fingerprints: Vec::new(),
+            contamination: declared_clean(),
         }
     }
 
@@ -465,11 +516,69 @@ mod tests {
     fn contamination_blocks_promotion() {
         let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
         let mut chal = slice(0.80, 0.80, 0.79, 0.99, 0.9);
-        chal.contaminated_fingerprints = vec!["id:900".into()];
+        chal.contamination.hits = vec!["id:900".into()];
         let v = judge_challenger(&champ, &chal);
         assert!(v.failed.contains(&GateFail::Contamination));
         assert!(!v.eligible);
         assert_eq!(v.lattice, 0);
+    }
+
+    #[test]
+    fn empty_training_metadata_is_fail_closed_not_a_clean_run() {
+        let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
+        let mut chal = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+        chal.contamination = ContaminationEvidence::default();
+        let v = judge_challenger(&champ, &chal);
+        assert!(
+            v.failed.contains(&GateFail::ContaminationEvidenceMissing),
+            "{:?}",
+            v.failed
+        );
+        assert!(!v.eligible);
+        assert_eq!(v.lattice, 0);
+    }
+
+    #[test]
+    fn declaring_only_dataset_ids_still_takes_the_gate() {
+        let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
+        let mut chal = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+        chal.contamination = ContaminationEvidence {
+            declared_dataset_ids: 1,
+            ..ContaminationEvidence::default()
+        };
+        assert!(chal.contamination.is_declared());
+        let v = judge_challenger(&champ, &chal);
+        assert!(!v.failed.contains(&GateFail::ContaminationEvidenceMissing));
+        assert!(v.eligible, "{:?}", v.failed);
+    }
+
+    #[test]
+    fn evidence_counts_declared_metadata_and_hits() {
+        let ids: BTreeSet<u32> = [900, 901].into_iter().collect();
+        let images: BTreeSet<String> = ["ab".repeat(32)].into_iter().collect();
+        let datasets: BTreeSet<String> = ["dev".to_owned()].into_iter().collect();
+        let holdout = vec![HoldoutItem {
+            id: 900,
+            prompt: "a holdout prompt with several words in it".into(),
+            dataset_id: "dev".into(),
+            task: HoldoutTask::Text,
+            image_hash: String::new(),
+        }];
+        let ev = contamination_evidence(&ids, &images, &datasets, &holdout);
+        assert_eq!(ev.declared_ids, 2);
+        assert_eq!(ev.declared_image_hashes, 1);
+        assert_eq!(ev.declared_dataset_ids, 1);
+        assert!(ev.is_declared());
+        assert!(ev.hits.iter().any(|h| h == "id:900"), "{:?}", ev.hits);
+
+        let empty = contamination_evidence(
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &holdout,
+        );
+        assert!(!empty.is_declared());
+        assert!(empty.hits.is_empty());
     }
 
     #[test]

@@ -8,6 +8,10 @@
 //! match, the service still serves `/health` and `/v1/status` but refuses
 //! submissions: scoring a reconstructable seed or the public split would
 //! silently turn the anti-overfit gates off.
+//!
+//! The same rule applies to the scorer itself. Without `RELEARN_FORCE_SIM=1`
+//! the host needs a `sha256:` eval-image pin, and submissions answer 503 until
+//! it has one. Sim is never a fallback.
 
 #![forbid(unsafe_code)]
 
@@ -19,8 +23,8 @@ use std::sync::Arc;
 use challenge_keys::load_challenge_secret;
 use clap::Parser;
 use relearn_challenge::{
-    hash_admin_token, parse_holdout_file, relearn_router, AppState, MemoryStore, RelearnPin,
-    CHALLENGE_ID, SCORING_VERSION,
+    hash_admin_token, parse_holdout_file, relearn_router, resolve_eval_backend, AppState,
+    EvalBackend, MemoryStore, RelearnPin, CHALLENGE_ID, SCORING_VERSION,
 };
 use relearn_eval::base_champion_scores;
 use tokio::net::TcpListener;
@@ -38,7 +42,7 @@ struct Cli {
     /// Challenge mini-secret file (leaf signatures).
     #[arg(long, env = "BASE_CHALLENGE_SK_FILE")]
     challenge_sk_file: Option<PathBuf>,
-    /// Force sim eval (no Lium spend).
+    /// Force sim eval (no Lium spend). CI / local only — never a live scorer.
     #[arg(long, env = "RELEARN_FORCE_SIM", default_value_t = false)]
     force_sim: bool,
     /// Operator bearer tokens file (one per line). Empty → admin 503.
@@ -69,8 +73,17 @@ fn run(cli: &Cli) -> Result<(), String> {
         let _sk = load_challenge_secret(p).map_err(|e| format!("challenge sk: {e}"))?;
     }
     let pin = load_pin(cli.pin_file.as_deref())?;
-    if cli.force_sim {
-        tracing::info!("RELEARN_FORCE_SIM=1 — sim eval only");
+    let backend = if cli.force_sim {
+        tracing::info!("RELEARN_FORCE_SIM=1 — deterministic offline eval, not a real eval");
+        EvalBackend::Sim
+    } else {
+        resolve_eval_backend()
+    };
+    if backend == EvalBackend::Lium && !pin.can_rent() {
+        tracing::warn!(
+            "eval_image_digest not pinned; submissions will 503 until CortexLM/relearn CI \
+             publishes a sha256 eval image (sim is opt-in via RELEARN_FORCE_SIM, never a fallback)"
+        );
     }
     let admin_hashes = load_admin_hashes(cli.admin_tokens_file.as_deref());
     let store = MemoryStore::new();
@@ -81,14 +94,19 @@ fn run(cli: &Cli) -> Result<(), String> {
         Ok(n) => tracing::info!(holdout_items = n, "holdout verified against pin commitment"),
         Err(e) => tracing::warn!("holdout unavailable ({e}); submissions will 503 until fixed"),
     }
-    if let Ok(recs) = store.unseal_holdout("boot-baseline") {
-        store
-            .set_base_champion(base_champion_scores(&recs))
-            .map_err(|e| e.to_string())?;
+    // The sim baseline is only a valid comparison basis on a sim host. A live
+    // challenger judged against simulated champion scores would be meaningless.
+    if backend == EvalBackend::Sim {
+        if let Ok(recs) = store.unseal_holdout("boot-baseline") {
+            store
+                .set_base_champion(base_champion_scores(&recs))
+                .map_err(|e| e.to_string())?;
+        }
     }
     let state = AppState {
         store,
         pin,
+        backend,
         admin_hashes: Arc::new(admin_hashes),
     };
     let rt = tokio::runtime::Builder::new_multi_thread()
