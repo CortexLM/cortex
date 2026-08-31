@@ -1,6 +1,6 @@
 # Relearn miner docs
 
-Improve `Qwen/Qwen3.8-Flash-Next`. Score is paired displacement vs the
+Improve `Qwen/Qwen3.8-27B`. Score is paired displacement vs the
 current champion. Regressions are never crowned.
 
 - Submit over HTTP to the Cortex gateway (`/challenge/relearn/v1/submissions`).

@@ -13,7 +13,7 @@ Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 
 | Thing | Value |
 |-------|-------|
-| Language side | the champion Relearn LLM (base `Qwen/Qwen3.8-Flash-Next`) |
+| Language side | the champion Relearn LLM (base `Qwen/Qwen3.8-27B`) |
 | Vision encoder pin | `google/siglip2-so400m-patch14-384` (Apache-2.0) |
 | Accepted encoder licenses | **Apache-2.0, MIT, BSD-2/3-Clause, ISC** |
 

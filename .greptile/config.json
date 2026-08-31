@@ -1,0 +1,9 @@
+{
+  "labels": true,
+  "commentOnChanges": true,
+  "ignorePatterns": [
+    "docs/evidence/**",
+    "docs/spikes/**",
+    "Cargo.lock"
+  ]
+}

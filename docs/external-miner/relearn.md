@@ -1,15 +1,19 @@
 <!-- protocol_version: 1 -->
 
-# Relearn — miners
+# Relearn LLM — miners
 
-One live challenge. Long guide, eval image, and harness:
+The live challenge. Challenge id is `relearn`. Long guide, eval image, and harness:
 [CortexLM/relearn](https://github.com/CortexLM/relearn).
 Cortex pin: [`config/relearn-pin.toml`](../../config/relearn-pin.toml).
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 
-Teacher is an HTTP API. The operator sets `RELEARN_TEACHER_API_URL`,
-`RELEARN_TEACHER_MODEL`, and `RELEARN_TEACHER_API_KEY` on the host. You
+You post-train `Qwen/Qwen3.8-27B` (Apache-2.0, native VLM). There is no
+separate encoder-attach challenge and no SigLIP to glue on.
+
+Teacher is an HTTP API served from an operator local directory. The operator
+sets `RELEARN_TEACHER_API_URL`, `RELEARN_TEACHER_MODEL`,
+`RELEARN_TEACHER_API_KEY`, and `RELEARN_TEACHER_LOCAL_DIR` on the host. You
 do not.
 
 ## How you are scored

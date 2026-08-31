@@ -9,8 +9,8 @@ plane, gateway, or validator. Those live in [`CortexLM/cortex`](https://github.c
 
 | Pin | Value |
 |-----|--------|
-| Base model | `Qwen/Qwen3.8-Flash-Next` |
-| Teacher / judge | HTTP API (operator env) |
+| Base model | `Qwen/Qwen3.8-27B` |
+| Teacher / judge | HTTP API from `RELEARN_TEACHER_LOCAL_DIR` (never a Hugging Face repo id) |
 | Score | Displacement vs the previous champion |
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).

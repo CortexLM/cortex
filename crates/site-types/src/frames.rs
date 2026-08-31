@@ -174,7 +174,7 @@ pub fn relearn_frame() -> Arena {
     Arena {
         slug: ArenaSlug::Relearn,
         name: "Relearn LLM".into(),
-        tagline: "Post-training factory: miners improve Qwen3.8-Flash-Next; score is displacement vs the previous champion.".into(),
+        tagline: "Post-training factory: miners improve Qwen3.8-27B; score is displacement vs the previous champion.".into(),
         description: "Submit an improved artifact of the pinned base model. Miners pay Lium. Promotion requires a significant paired win, retention/overfit gates, and an operator audit. Regressions are never crowned.".into(),
         status: "live".into(),
         scoring: ScoringMethod::Displacement,

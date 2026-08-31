@@ -2,6 +2,13 @@
 
 <!-- What does this PR change, and why? -->
 
+## Greptile
+
+Every PR is reviewed by Greptile before merge. Config: `.greptile/`.
+
+- [ ] Greptile has reviewed this PR; findings are fixed or answered
+- [ ] If the bot was silent, I commented `@greptileai review`
+
 ## Test plan
 
 - [ ] `cargo test --workspace` (or note the subset and why)

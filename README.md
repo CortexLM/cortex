@@ -20,7 +20,7 @@ not run evals.
 
 | Challenge | id | What miners improve | Default emission |
 |-----------|-----|---------------------|------------------|
-| **Relearn LLM** | `relearn` | Post-train `Qwen/Qwen3.8-Flash-Next` | 4000 bps |
+| **Relearn LLM** | `relearn` | Post-train `Qwen/Qwen3.8-27B` (native VLM) | 4000 bps |
 | **Relearn T2I** | `relearn-t2i` | Fine-tune `nvidia/Cosmos3-Super-Text2Image`, judged by Q-Judger | 1500 bps |
 | **Relearn Multimodal** | `relearn-mm` | Attach a permissive vision encoder to the champion LLM without regressing it | 1500 bps |
 | **Bounty** | `bounty` | File real bug reports against the subnet | 3000 bps |

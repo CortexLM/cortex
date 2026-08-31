@@ -17,10 +17,14 @@
 # (config/CEREMONY.md). A documented salt plus a public catalog would let
 # miners reconstruct the scored split.
 
-base_model = "Qwen/Qwen3.8-Flash-Next"
-# HTTP teacher model id. Operator may override with RELEARN_TEACHER_MODEL.
-teacher_model = "kimi-k3"
-teacher_nvfp4 = "Inferact/GLM-5.3-NVFP4"
+# Base miners post-train. Qwen/Qwen3.8-27B is Apache-2.0, public, native VLM.
+# Not Flash-Next. No SigLIP / encoder-attach product on this challenge.
+base_model = "Qwen/Qwen3.8-27B"
+# HTTP teacher wire id. Operator may override with RELEARN_TEACHER_MODEL.
+teacher_model = "glm-5.3-flash"
+# Weights id to download. Serve with vLLM from RELEARN_TEACHER_LOCAL_DIR.
+# Never pass this Hugging Face repo id to vLLM.
+teacher_nvfp4 = "LibertAIDAI/GLM-5.3-Flash-NVFP4"
 teacher_backend = "http_api"
 eval_image = "ghcr.io/cortexlm/relearn-eval"
 # Empty until the first digest-pinned image ships from CortexLM/relearn CI.

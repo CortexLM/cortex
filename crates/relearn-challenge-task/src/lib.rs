@@ -46,11 +46,18 @@ pub const SCORE_MAX: u64 = 1_000_000;
 
 /// Verified Hugging Face id for the base model miners improve.
 ///
-/// Confirmed 2026-08-29: <https://huggingface.co/Qwen/Qwen3.8-Flash-Next>
-pub const BASE_MODEL_ID: &str = "Qwen/Qwen3.8-Flash-Next";
+/// Confirmed 2026-08-31: public, ungated, Apache-2.0, native VLM.
+/// <https://huggingface.co/Qwen/Qwen3.8-27B>
+///
+/// `Qwen/Qwen3.8-Flash-Next` is a real card (license `other`) and is not
+/// the live pin.
+pub const BASE_MODEL_ID: &str = "Qwen/Qwen3.8-27B";
 
-/// Wire id for the v0 HTTP teacher. Override with `RELEARN_TEACHER_MODEL`.
-pub const TEACHER_MODEL_ID: &str = "kimi-k3";
+/// HTTP teacher wire id. Override with `RELEARN_TEACHER_MODEL`.
+pub const TEACHER_MODEL_ID: &str = "glm-5.3-flash";
+
+/// Legacy Kimi wire id — still accepted when the operator overrides.
+pub const TEACHER_KIMI_MODEL_ID: &str = "kimi-k3";
 
 /// Hugging Face-style alias some OpenAI-compatible hosts use.
 pub const TEACHER_MODEL_HF_ALIAS: &str = "moonshotai/Kimi-K3";
@@ -58,8 +65,13 @@ pub const TEACHER_MODEL_HF_ALIAS: &str = "moonshotai/Kimi-K3";
 /// Frozen GLM teacher — optional override, not the v0 default.
 pub const TEACHER_GLM_MODEL_ID: &str = "zai-org/GLM-5.3";
 
-/// Community NVFP4 checkpoint (optional Lium serve; not the v0 default).
-pub const TEACHER_NVFP4_ID: &str = "Inferact/GLM-5.3-NVFP4";
+/// NVFP4 teacher weights. Download, then serve from a local directory.
+///
+/// Confirmed 2026-08-31: public, ungated, MIT.
+/// <https://huggingface.co/LibertAIDAI/GLM-5.3-Flash-NVFP4>
+///
+/// Never pass this id to vLLM. Use [`teacher_local_dir`].
+pub const TEACHER_NVFP4_ID: &str = "LibertAIDAI/GLM-5.3-Flash-NVFP4";
 
 /// Public miner / eval-image repo.
 pub const RELEARN_GIT_URL: &str = "https://github.com/CortexLM/relearn";
@@ -142,9 +154,41 @@ pub fn is_configured_teacher_model(model: &str) -> bool {
         return false;
     }
     m == TEACHER_MODEL_ID
+        || m == TEACHER_KIMI_MODEL_ID
         || m.eq_ignore_ascii_case(TEACHER_MODEL_HF_ALIAS)
         || m == TEACHER_GLM_MODEL_ID
         || m == teacher_model_from_env()
+}
+
+/// Local directory of teacher weights for vLLM.
+///
+/// Point vLLM at this path. Never pass a Hugging Face repo id (`org/name`)
+/// as the vLLM model argument. Reads `RELEARN_TEACHER_LOCAL_DIR` only.
+#[must_use]
+pub fn teacher_local_dir() -> Option<String> {
+    std::env::var("RELEARN_TEACHER_LOCAL_DIR")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// True when `s` looks like a Hugging Face `org/name` repo id.
+///
+/// vLLM must never be given this form; use [`teacher_local_dir`] instead.
+#[must_use]
+pub fn looks_like_hf_repo_id(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.starts_with('/') || s.starts_with('.') {
+        return false;
+    }
+    let mut parts = s.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(org), Some(name), None)
+            if !org.is_empty()
+                && !name.is_empty()
+                && org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    )
 }
 
 #[cfg(test)]
@@ -161,10 +205,15 @@ mod tests {
 
     #[test]
     fn verified_model_ids() {
-        assert_eq!(BASE_MODEL_ID, "Qwen/Qwen3.8-Flash-Next");
-        assert_eq!(TEACHER_MODEL_ID, "kimi-k3");
+        assert_eq!(BASE_MODEL_ID, "Qwen/Qwen3.8-27B");
+        assert_eq!(TEACHER_MODEL_ID, "glm-5.3-flash");
+        assert_eq!(TEACHER_NVFP4_ID, "LibertAIDAI/GLM-5.3-Flash-NVFP4");
         assert_eq!(TEACHER_GLM_MODEL_ID, "zai-org/GLM-5.3");
         assert!(teacher_api_url().is_none());
+        assert!(teacher_local_dir().is_none());
+        assert!(looks_like_hf_repo_id(TEACHER_NVFP4_ID));
+        assert!(looks_like_hf_repo_id(BASE_MODEL_ID));
+        assert!(!looks_like_hf_repo_id("/models/glm-5.3-flash-nvfp4"));
     }
 
     #[test]
@@ -175,6 +224,7 @@ mod tests {
 
     #[test]
     fn kimi_and_glm_are_configured_teachers() {
+        assert!(is_configured_teacher_model("glm-5.3-flash"));
         assert!(is_configured_teacher_model("kimi-k3"));
         assert!(is_configured_teacher_model("moonshotai/Kimi-K3"));
         assert!(is_configured_teacher_model(TEACHER_GLM_MODEL_ID));

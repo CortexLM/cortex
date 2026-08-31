@@ -10,7 +10,7 @@ This repo pins them in `config/relearn-mm-pin.toml`.
 |-------|--------|
 | `challenge_id` | `relearn-mm` |
 | `challenge_scoring_version` | `1` |
-| Language side | `Qwen/Qwen3.8-Flash-Next` (the Relearn champion's base) |
+| Language side | the live Relearn LLM champion (`Qwen/Qwen3.8-27B`) |
 | Vision encoder pin | `google/siglip2-so400m-patch14-384` (Apache-2.0) |
 | Accepted encoder licenses | Apache-2.0, MIT, BSD-2/3-Clause, ISC |
 | Port | `8098` (local host `28098`) |

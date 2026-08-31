@@ -2,7 +2,9 @@
 
 Short contract for agents and operators. Prefer linking over restating runbooks.
 
-**Product:** Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) — Bittensor subnet control plane for decentralized collaborative AI research via the **Relearn LLM**, **Relearn T2I**, **Relearn Multimodal**, and **Bounty** challenges. Relearn eval lives in [`CortexLM/relearn`](https://github.com/CortexLM/relearn). Naming split (Cortex vs leftover `base` / `BASE_*`): [`docs/NAMING.md`](docs/NAMING.md).
+**Product:** Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) — Bittensor subnet control plane. The **live** challenge is **Relearn LLM** (`relearn`); T2I, encoder-attach Multimodal, and Bounty stay off. Base `Qwen/Qwen3.8-27B`; teacher `LibertAIDAI/GLM-5.3-Flash-NVFP4` from `RELEARN_TEACHER_LOCAL_DIR`. Relearn eval lives in [`CortexLM/relearn`](https://github.com/CortexLM/relearn). Naming split (Cortex vs leftover `base` / `BASE_*`): [`docs/NAMING.md`](docs/NAMING.md).
+
+PRs require a [Greptile](https://greptile.com) review (`.greptile/`). If the bot is silent, comment `@greptileai review`.
 
 ## Monorepo map
 

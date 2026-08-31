@@ -441,11 +441,12 @@ mod tests {
 
     #[test]
     fn model_pins_are_verified_ids() {
+        assert_eq!(relearn_challenge_task::BASE_MODEL_ID, "Qwen/Qwen3.8-27B");
+        assert_eq!(relearn_challenge_task::TEACHER_MODEL_ID, "glm-5.3-flash");
         assert_eq!(
-            relearn_challenge_task::BASE_MODEL_ID,
-            "Qwen/Qwen3.8-Flash-Next"
+            relearn_challenge_task::TEACHER_NVFP4_ID,
+            "LibertAIDAI/GLM-5.3-Flash-NVFP4"
         );
-        assert_eq!(relearn_challenge_task::TEACHER_MODEL_ID, "kimi-k3");
     }
 
     #[tokio::test]

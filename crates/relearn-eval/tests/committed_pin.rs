@@ -30,6 +30,14 @@ fn committed_pin_has_a_holdout_commitment() {
 }
 
 #[test]
+fn committed_pin_has_the_locked_model_ids() {
+    let p = pin();
+    assert_eq!(p.base_model, "Qwen/Qwen3.8-27B");
+    assert_eq!(p.teacher_nvfp4, "LibertAIDAI/GLM-5.3-Flash-NVFP4");
+    assert_eq!(p.teacher_model, "glm-5.3-flash");
+}
+
+#[test]
 fn pin_carries_no_endpoint_or_secret_or_t2i_salt() {
     let body = std::fs::read_to_string(pin_path()).expect("read pin");
     let lower = body.to_ascii_lowercase();

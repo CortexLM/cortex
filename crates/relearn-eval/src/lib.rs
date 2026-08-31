@@ -34,9 +34,9 @@ use thiserror::Error;
 pub struct RelearnPin {
     /// Language / VLM base. Do not recale here; the pin owner owns the id.
     pub base_model: String,
-    /// HTTP teacher wire id (`kimi-k3` default; GLM optional override).
+    /// HTTP teacher wire id (`glm-5.3-flash` default).
     pub teacher_model: String,
-    /// Optional NVFP4 id for Lium serving.
+    /// NVFP4 weights id to download. Serve from `RELEARN_TEACHER_LOCAL_DIR`.
     pub teacher_nvfp4: String,
     /// `lium_nvfp4` | `http_api` | `sim`.
     pub teacher_backend: TeacherBackend,
@@ -453,8 +453,8 @@ mod tests {
     #[test]
     fn toml_pin_roundtrip() {
         let body = r#"
-base_model = "Qwen/Qwen3.8-Flash-Next"
-teacher_model = "kimi-k3"
+base_model = "Qwen/Qwen3.8-27B"
+teacher_model = "glm-5.3-flash"
 teacher_backend = "http_api"
 holdout_commitment = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 holdout_size = 120
@@ -471,7 +471,7 @@ public_ids = [1, 2, 3]
 
     #[test]
     fn pin_without_holdout_commitment_fails_validate() {
-        let p = RelearnPin::from_toml("base_model = \"Qwen/Qwen3.8-Flash-Next\"\n").expect("parse");
+        let p = RelearnPin::from_toml("base_model = \"Qwen/Qwen3.8-27B\"\n").expect("parse");
         assert!(matches!(p.validate(), Err(PinError::BadHoldoutCommitment)));
     }
 
