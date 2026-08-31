@@ -199,6 +199,7 @@ async fn submit(
         st.backend,
         st.live(),
     )
+    .await
     .map_err(|e| eval_err(&e))?;
 
     let train_ids: BTreeSet<u32> = body.manifest.train_item_ids.iter().copied().collect();
@@ -353,6 +354,7 @@ pub fn hash_admin_token(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
@@ -406,8 +408,9 @@ mod tests {
         skill: f64,
     }
 
+    #[async_trait]
     impl LiveScorer for StubScorer {
-        fn score(
+        async fn score(
             &self,
             _pin: &RelearnPin,
             _frozen: &str,
@@ -418,11 +421,16 @@ mod tests {
         }
     }
 
-    fn app_backend(token: &str, load: bool, backend: EvalBackend, eval_digest: &str) -> Router {
-        app_full(token, load, backend, eval_digest, None, true)
+    async fn app_backend(
+        token: &str,
+        load: bool,
+        backend: EvalBackend,
+        eval_digest: &str,
+    ) -> Router {
+        app_full(token, load, backend, eval_digest, None, true).await
     }
 
-    fn app_full(
+    async fn app_full(
         token: &str,
         load: bool,
         backend: EvalBackend,
@@ -455,7 +463,9 @@ mod tests {
                     backend,
                     recorded_baseline(&pin, &recs),
                     live.as_deref(),
-                ) {
+                )
+                .await
+                {
                     store.set_base_champion(scores).expect("base");
                 }
             }
@@ -489,8 +499,8 @@ mod tests {
         })
     }
 
-    fn app_with(token: &str, load: bool) -> Router {
-        app_backend(token, load, EvalBackend::Sim, "")
+    async fn app_with(token: &str, load: bool) -> Router {
+        app_backend(token, load, EvalBackend::Sim, "").await
     }
 
     async fn json_req(
@@ -518,7 +528,7 @@ mod tests {
     #[tokio::test]
     async fn submit_eval_promote_happy_path() {
         let token = "op-test-token";
-        let app = app_with(token, true);
+        let app = app_with(token, true).await;
 
         let (st, health) =
             json_req(app.clone(), "GET", "/health", serde_json::json!({}), None).await;
@@ -565,7 +575,7 @@ mod tests {
 
     #[tokio::test]
     async fn promote_requires_bearer() {
-        let app = app_with("x", true);
+        let app = app_with("x", true).await;
         let (st, _) = json_req(
             app,
             "POST",
@@ -590,7 +600,7 @@ mod tests {
     #[tokio::test]
     async fn status_publishes_the_seal_not_holdout_items() {
         let (st, body) = json_req(
-            app_with("op", true),
+            app_with("op", true).await,
             "GET",
             "/v1/status",
             serde_json::json!({}),
@@ -608,7 +618,7 @@ mod tests {
     #[tokio::test]
     async fn submit_without_a_loaded_holdout_is_unavailable_not_scored() {
         let (st, body) = json_req(
-            app_with("op", false),
+            app_with("op", false).await,
             "POST",
             "/v1/submissions",
             serde_json::json!({
@@ -623,7 +633,7 @@ mod tests {
 
     #[tokio::test]
     async fn contaminated_training_metadata_cannot_promote() {
-        let app = app_with("op", true);
+        let app = app_with("op", true).await;
         let hold_id = holdout()[0].id;
         let (st, created) = json_req(
             app.clone(),
@@ -658,7 +668,7 @@ mod tests {
     /// the only difference here is the missing training metadata.
     #[tokio::test]
     async fn empty_manifest_cannot_dodge_the_contamination_gate() {
-        let app = app_with("op-test-token", true);
+        let app = app_with("op-test-token", true).await;
         for manifest in [
             serde_json::Value::Null,
             serde_json::json!({}),
@@ -701,7 +711,7 @@ mod tests {
     #[tokio::test]
     async fn live_submit_refuses_without_a_pinned_eval_image() {
         let (st, body) = json_req(
-            app_backend("op", true, EvalBackend::Lium, ""),
+            app_backend("op", true, EvalBackend::Lium, "").await,
             "POST",
             "/v1/submissions",
             serde_json::json!({
@@ -725,7 +735,8 @@ mod tests {
                 true,
                 EvalBackend::Lium,
                 &format!("sha256:{}", "ab".repeat(32)),
-            ),
+            )
+            .await,
             "POST",
             "/v1/submissions",
             serde_json::json!({
@@ -760,6 +771,7 @@ mod tests {
         // Operator-recorded measurement, verified against the pin.
         let recorded = recorded_baseline(&pin, &recs).expect("recorded");
         let live = boot_base_champion(&pin, &recs, EvalBackend::Lium, Some(recorded), None)
+            .await
             .expect("live baseline");
         assert_eq!(live.holdout.len(), recs.len());
         assert!(!live.general_canary.is_empty(), "gates need the canary");
@@ -768,11 +780,13 @@ mod tests {
         // Wired harvest is the other live source.
         let stub = StubScorer { skill: 0.4 };
         let harvested = boot_base_champion(&pin, &recs, EvalBackend::Lium, None, Some(&stub))
+            .await
             .expect("harvested baseline");
         assert_eq!(harvested.holdout.len(), recs.len());
 
         // Neither source: refuse, never quietly fall back to sim numbers.
         let err = boot_base_champion(&pin, &recs, EvalBackend::Lium, None, None)
+            .await
             .expect_err("no live source");
         assert!(matches!(err, EvalError::LiveHarvestUnavailable), "{err}");
 
@@ -785,7 +799,8 @@ mod tests {
                 &pin.eval_image_digest,
                 Some(Arc::new(StubScorer { skill: 0.4 })),
                 true,
-            ),
+            )
+            .await,
             "GET",
             "/v1/status",
             serde_json::json!({}),
@@ -814,7 +829,8 @@ mod tests {
                 skill: BASE_CHAMPION_SKILL + 0.35,
             })),
             true,
-        );
+        )
+        .await;
 
         // Contamination is a real gate on this path, not a skipped one.
         let hold_id = holdout()[0].id;
@@ -880,7 +896,7 @@ mod tests {
     /// scores and appear on no operator surface.
     #[tokio::test]
     async fn refused_submissions_leave_no_evaluating_rows() {
-        let unpinned = app_backend("op", true, EvalBackend::Lium, "");
+        let unpinned = app_backend("op", true, EvalBackend::Lium, "").await;
         let no_baseline = app_full(
             "op",
             true,
@@ -890,9 +906,10 @@ mod tests {
             // Digest pinned and harvest wired, but the operator never recorded
             // the baseline: refuse, and bank nothing.
             false,
-        );
+        )
+        .await;
         // Third case: sim host that never loaded a holdout.
-        let sealed = app_with("op", false);
+        let sealed = app_with("op", false).await;
 
         for (label, app) in [
             ("unpinned digest", unpinned),
@@ -926,7 +943,7 @@ mod tests {
     #[tokio::test]
     async fn unpinned_digest_reports_the_pin_not_the_baseline() {
         let (st, body) = json_req(
-            app_backend("op", true, EvalBackend::Lium, ""),
+            app_backend("op", true, EvalBackend::Lium, "").await,
             "POST",
             "/v1/submissions",
             serde_json::json!({
@@ -946,7 +963,7 @@ mod tests {
     #[tokio::test]
     async fn status_reports_the_scorer_this_host_will_use() {
         let (st, sim) = json_req(
-            app_with("op", true),
+            app_with("op", true).await,
             "GET",
             "/v1/status",
             serde_json::json!({}),
@@ -958,7 +975,7 @@ mod tests {
         assert_eq!(sim["can_score"], true);
 
         let (st, live) = json_req(
-            app_backend("op", true, EvalBackend::Lium, ""),
+            app_backend("op", true, EvalBackend::Lium, "").await,
             "GET",
             "/v1/status",
             serde_json::json!({}),

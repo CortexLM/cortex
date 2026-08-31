@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 
+use async_trait::async_trait;
 use prism_competition::ExampleSeries;
 use prism_lium::{EvalJobBackend, SimLiumBackend};
 use prism_lium_types::{EvalReceipt, InstanceSpec, NoScoreGate, RemoteExecResult};
@@ -303,6 +304,9 @@ impl BaselineMeasurement {
 /// The same scorer measures the boot baseline and every challenger: a live
 /// challenger compared against a champion the host never measured is not a
 /// comparison, and a champion measured by a different scorer is not either.
+///
+/// The Lium implementation is `relearn-lium-harvest`.
+#[async_trait]
 pub trait LiveScorer: Send + Sync {
     /// Score one artifact on the verified holdout.
     ///
@@ -312,13 +316,85 @@ pub trait LiveScorer: Send + Sync {
     /// # Errors
     ///
     /// Implementation-defined; surfaced to the miner as a 503.
-    fn score(
+    async fn score(
         &self,
         pin: &RelearnPin,
         frozen_digest: &str,
         artifact_digest: &str,
         holdout: &[HoldoutItem],
     ) -> Result<SliceScores, EvalError>;
+}
+
+/// Schema version of the metrics document the eval image emits.
+pub const RELEARN_METRICS_SCHEMA: u32 = 1;
+
+/// The document `eval_image` must print for one scored artifact.
+///
+/// This is the image contract (see `docs/RELEARN.md` § Eval image contract).
+/// It is the [`BaselineMeasurement`] envelope plus the run identity, so the
+/// operator's baseline file is literally this image's output for the base
+/// model — one format, not two.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelearnEvalMetrics {
+    /// Must equal [`RELEARN_METRICS_SCHEMA`].
+    pub schema_version: u32,
+    /// Frozen submission digest the run was asked for.
+    pub submission_digest: String,
+    /// Artifact digest the run was asked for.
+    pub artifact_digest: String,
+    /// Measured series, image digest, and holdout commitment.
+    #[serde(flatten)]
+    pub measurement: BaselineMeasurement,
+}
+
+impl RelearnEvalMetrics {
+    /// Parse a metrics document emitted by the eval image.
+    ///
+    /// # Errors
+    ///
+    /// [`EvalError::Baseline`] when the body is not a metrics object.
+    pub fn from_json(body: &str) -> Result<Self, EvalError> {
+        serde_json::from_str(body).map_err(|e| EvalError::Baseline(e.to_string()))
+    }
+
+    /// Bind the document to the run that was requested.
+    ///
+    /// Without this a pod could answer with another artifact's numbers, or
+    /// replay an earlier run's.
+    ///
+    /// # Errors
+    ///
+    /// [`EvalError::Baseline`] on a schema, run-identity, image, holdout, or
+    /// missing-series mismatch.
+    pub fn verify(
+        &self,
+        pin: &RelearnPin,
+        frozen_digest: &str,
+        artifact_digest: &str,
+        holdout: &[HoldoutItem],
+    ) -> Result<(), EvalError> {
+        if self.schema_version != RELEARN_METRICS_SCHEMA {
+            return Err(EvalError::Baseline(format!(
+                "metrics schema_version {}, expected {RELEARN_METRICS_SCHEMA}",
+                self.schema_version
+            )));
+        }
+        if self.submission_digest.trim() != frozen_digest.trim() {
+            return Err(EvalError::Baseline(
+                "metrics submission_digest is not the frozen run".into(),
+            ));
+        }
+        if !self
+            .artifact_digest
+            .trim()
+            .eq_ignore_ascii_case(artifact_digest.trim())
+        {
+            return Err(EvalError::Baseline(
+                "metrics artifact_digest is not the scored artifact".into(),
+            ));
+        }
+        self.measurement.verify(pin, holdout)
+    }
 }
 
 /// Whether this host can produce a verdict at all, and why not if it cannot.
@@ -543,7 +619,7 @@ pub fn base_champion_scores(holdout: &[HoldoutItem]) -> SliceScores {
 /// [`EvalError::Baseline`] when a recorded measurement does not match the pin,
 /// and [`EvalError::LiveHarvestUnavailable`] when a live host has neither
 /// source.
-pub fn boot_base_champion(
+pub async fn boot_base_champion(
     pin: &RelearnPin,
     holdout: &[HoldoutItem],
     backend: EvalBackend,
@@ -564,7 +640,9 @@ pub fn boot_base_champion(
                 return Ok(m.into_slice_scores());
             }
             let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
-            scorer.score(pin, BASE_CHAMPION_RUN, BASE_CHAMPION_ARTIFACT, holdout)
+            scorer
+                .score(pin, BASE_CHAMPION_RUN, BASE_CHAMPION_ARTIFACT, holdout)
+                .await
         }
     }
 }
@@ -582,7 +660,7 @@ pub fn boot_base_champion(
 /// [`EvalError::HoldoutSealed`] before the freeze / without verified records,
 /// [`EvalError::EvalImageUnpinned`] or [`EvalError::LiveHarvestUnavailable`]
 /// on a live host, and [`EvalError::Integrity`] when the receipt gate fails.
-pub fn eval_after_freeze(
+pub async fn eval_after_freeze(
     pin: &RelearnPin,
     frozen_digest: &str,
     artifact_digest: &str,
@@ -603,7 +681,9 @@ pub fn eval_after_freeze(
                 return Err(EvalError::EvalImageUnpinned);
             }
             let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
-            scorer.score(pin, frozen_digest, artifact_digest, holdout)?
+            scorer
+                .score(pin, frozen_digest, artifact_digest, holdout)
+                .await?
         }
     };
     let metrics = serde_json::to_vec(&serde_json::json!({
@@ -753,13 +833,22 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn scoring_happens_only_after_freeze_and_unseal() {
+    #[tokio::test]
+    async fn scoring_happens_only_after_freeze_and_unseal() {
         let hold = recs(120);
         let pin = RelearnPin::default();
-        assert!(eval_after_freeze(&pin, "", "art", &hold, EvalBackend::Sim, None).is_err());
-        assert!(eval_after_freeze(&pin, "digest-a", "art", &[], EvalBackend::Sim, None).is_err());
+        assert!(
+            eval_after_freeze(&pin, "", "art", &hold, EvalBackend::Sim, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            eval_after_freeze(&pin, "digest-a", "art", &[], EvalBackend::Sim, None)
+                .await
+                .is_err()
+        );
         let out = eval_after_freeze(&pin, "digest-a", "art", &hold, EvalBackend::Sim, None)
+            .await
             .expect("eval");
         assert_eq!(out.receipt.submission_hash, "digest-a");
         assert_eq!(out.backend, EvalBackend::Sim);
@@ -769,8 +858,8 @@ mod tests {
         assert_eq!(out.scores.vision_shuffle.len(), 4);
     }
 
-    #[test]
-    fn live_eval_without_a_digest_pin_refuses_instead_of_simming() {
+    #[tokio::test]
+    async fn live_eval_without_a_digest_pin_refuses_instead_of_simming() {
         let hold = recs(120);
         let err = eval_after_freeze(
             &RelearnPin::default(),
@@ -780,24 +869,26 @@ mod tests {
             EvalBackend::Lium,
             None,
         )
+        .await
         .expect_err("live eval must refuse without a digest pin");
         assert!(matches!(err, EvalError::EvalImageUnpinned), "{err}");
         assert!(err.to_string().contains("eval image digest not pinned"));
     }
 
-    #[test]
-    fn live_eval_with_a_digest_pin_never_falls_back_to_sim() {
+    #[tokio::test]
+    async fn live_eval_with_a_digest_pin_never_falls_back_to_sim() {
         let pin = RelearnPin {
             eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
             ..RelearnPin::default()
         };
         let err = eval_after_freeze(&pin, "digest-a", "art", &recs(120), EvalBackend::Lium, None)
+            .await
             .expect_err("live scores must come from the eval image");
         assert!(matches!(err, EvalError::LiveHarvestUnavailable), "{err}");
     }
 
-    #[test]
-    fn sim_receipt_declares_the_sim_provider() {
+    #[tokio::test]
+    async fn sim_receipt_declares_the_sim_provider() {
         let out = eval_after_freeze(
             &RelearnPin::default(),
             "digest-a",
@@ -806,6 +897,7 @@ mod tests {
             EvalBackend::Sim,
             None,
         )
+        .await
         .expect("sim eval");
         assert_eq!(out.receipt.provider, "sim");
         assert!(out.receipt.image_digest.is_empty());
@@ -836,8 +928,9 @@ mod tests {
 
     struct Harvest;
 
+    #[async_trait]
     impl LiveScorer for Harvest {
-        fn score(
+        async fn score(
             &self,
             _pin: &RelearnPin,
             _frozen: &str,
@@ -848,8 +941,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn live_boot_records_a_baseline_from_either_live_source() {
+    #[tokio::test]
+    async fn live_boot_records_a_baseline_from_either_live_source() {
         let hold = recs(120);
         let pin = live_pin();
         let recorded = boot_base_champion(
@@ -859,27 +952,31 @@ mod tests {
             Some(measurement(&pin, &hold)),
             None,
         )
+        .await
         .expect("recorded baseline");
         assert_eq!(recorded.holdout.len(), 120);
         let harvested = boot_base_champion(&pin, &hold, EvalBackend::Lium, None, Some(&Harvest))
+            .await
             .expect("harvested baseline");
         assert_eq!(harvested.holdout.len(), 120);
     }
 
-    #[test]
-    fn live_boot_never_falls_back_to_the_sim_baseline() {
+    #[tokio::test]
+    async fn live_boot_never_falls_back_to_the_sim_baseline() {
         let hold = recs(120);
         let pin = live_pin();
         assert!(matches!(
-            boot_base_champion(&pin, &hold, EvalBackend::Lium, None, None),
+            boot_base_champion(&pin, &hold, EvalBackend::Lium, None, None).await,
             Err(EvalError::LiveHarvestUnavailable)
         ));
         assert!(matches!(
-            boot_base_champion(&RelearnPin::default(), &hold, EvalBackend::Lium, None, None),
+            boot_base_champion(&RelearnPin::default(), &hold, EvalBackend::Lium, None, None).await,
             Err(EvalError::EvalImageUnpinned)
         ));
         // Sim hosts still get the sim baseline, and it is not the live one.
-        let sim = boot_base_champion(&pin, &hold, EvalBackend::Sim, None, None).expect("sim");
+        let sim = boot_base_champion(&pin, &hold, EvalBackend::Sim, None, None)
+            .await
+            .expect("sim");
         assert_eq!(sim.holdout, base_champion_scores(&hold).holdout);
     }
 
@@ -954,8 +1051,8 @@ mod tests {
         assert!(scoring_readiness(&live, EvalBackend::Lium, Some(&Harvest)).is_ok());
     }
 
-    #[test]
-    fn live_eval_uses_the_wired_harvest_not_the_sim_harness() {
+    #[tokio::test]
+    async fn live_eval_uses_the_wired_harvest_not_the_sim_harness() {
         let hold = recs(120);
         let pin = live_pin();
         let out = eval_after_freeze(
@@ -966,6 +1063,7 @@ mod tests {
             EvalBackend::Lium,
             Some(&Harvest),
         )
+        .await
         .expect("live eval");
         assert_eq!(out.backend, EvalBackend::Lium);
         assert_eq!(out.receipt.provider, "lium");

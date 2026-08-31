@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use challenge_keys::load_challenge_secret;
 use clap::Parser;
+use prism_lium::LiumClient;
 use relearn_challenge::{
     hash_admin_token, parse_holdout_file, relearn_router, resolve_eval_backend, AppState,
     BaselineMeasurement, EvalBackend, LiveScorer, MemoryStore, RelearnPin, BASE_CHAMPION_RUN,
@@ -30,6 +31,7 @@ use relearn_challenge::{
 #[cfg(test)]
 use relearn_challenge::{holdout_commitment, HoldoutItem, HoldoutTask};
 use relearn_eval::boot_base_champion;
+use relearn_lium_harvest::{HarvestLimits, LiumEvalPod, LiumHarvest};
 use tokio::net::TcpListener;
 
 /// Operator Relearn challenge service CLI.
@@ -61,6 +63,9 @@ struct Cli {
     /// Operator holdout records (JSON array). Never in git.
     #[arg(long, env = "RELEARN_HOLDOUT_FILE")]
     holdout_file: Option<PathBuf>,
+    /// Seconds the eval image gets to score one artifact on the pod.
+    #[arg(long, env = "RELEARN_EVAL_TIMEOUT_SECS", default_value_t = 3600)]
+    eval_timeout_secs: u64,
     /// Champion baseline measured by the pinned eval image on the base model.
     ///
     /// Required on a live host: the gates compare against this. Verified
@@ -107,14 +112,37 @@ fn run(cli: &Cli) -> Result<(), String> {
         Ok(n) => tracing::info!(holdout_items = n, "holdout verified against pin commitment"),
         Err(e) => tracing::warn!("holdout unavailable ({e}); submissions will 503 until fixed"),
     }
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let live_scorer = build_live_scorer(backend, cli.eval_timeout_secs);
+    match backend {
+        EvalBackend::Lium if live_scorer.is_some() => {
+            tracing::info!("live harvest wired: digest-pinned eval image on Lium");
+        }
+        EvalBackend::Lium => tracing::warn!(
+            "live harvest not wired (LIUM_API_KEY unset); submissions will 503 unless \
+             RELEARN_BASE_CHAMPION_FILE covers the baseline and a harvest is configured"
+        ),
+        EvalBackend::Sim => {}
+    }
+
     // Record the baseline with the scorer this host will actually use. A sim
     // host gets sim numbers; a live host takes the operator's eval-image
-    // measurement. Without a baseline no gate can run — contamination,
-    // public-holdout gap, and pixel-shuffle all need a champion to compare
-    // against — so a live host that skips this 503s every submission.
+    // measurement, else measures the base model through the harvest. Without a
+    // baseline no gate can run — contamination, public-holdout gap, and
+    // pixel-shuffle all need a champion to compare against — so a live host
+    // that skips this 503s every submission.
     let recorded = load_recorded_baseline(cli.base_champion_file.as_deref())?;
-    let live_scorer: Option<Arc<dyn LiveScorer>> = None;
-    match record_base_champion(&store, &pin, backend, recorded, live_scorer.as_deref()) {
+    match rt.block_on(record_base_champion(
+        &store,
+        &pin,
+        backend,
+        recorded,
+        live_scorer.as_deref(),
+    )) {
         Ok(n) => tracing::info!(
             eval_backend = ?backend,
             holdout_items = n,
@@ -132,11 +160,32 @@ fn run(cli: &Cli) -> Result<(), String> {
         live_scorer,
         admin_hashes: Arc::new(admin_hashes),
     };
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
     rt.block_on(serve(cli.bind, state))
+}
+
+/// Wire the live harvest on the Lium path.
+///
+/// Sim hosts never get one: sim is selected by `RELEARN_FORCE_SIM` and scores
+/// in-process. On the Lium path the miner's `LIUM_API_KEY` pays for the pod, so
+/// no key means no harvest and the host refuses rather than inventing numbers.
+fn build_live_scorer(backend: EvalBackend, run_timeout_secs: u64) -> Option<Arc<dyn LiveScorer>> {
+    if backend != EvalBackend::Lium {
+        return None;
+    }
+    let key = std::env::var("LIUM_API_KEY")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())?;
+    // Never logged, never echoed on /v1/status.
+    let client = match LiumClient::new(key) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("lium client unavailable ({e}); live harvest not wired");
+            return None;
+        }
+    };
+    let pod = Arc::new(LiumEvalPod::new(client, run_timeout_secs));
+    Some(Arc::new(LiumHarvest::new(pod, HarvestLimits::default())))
 }
 
 fn load_pin(path: Option<&Path>) -> Result<RelearnPin, String> {
@@ -174,7 +223,7 @@ fn load_recorded_baseline(path: Option<&Path>) -> Result<Option<BaselineMeasurem
         .map_err(|e| format!("{}: {e}", p.display()))
 }
 
-fn record_base_champion(
+async fn record_base_champion(
     store: &MemoryStore,
     pin: &RelearnPin,
     backend: EvalBackend,
@@ -184,8 +233,9 @@ fn record_base_champion(
     let recs = store
         .unseal_holdout(BASE_CHAMPION_RUN)
         .map_err(|e| e.to_string())?;
-    let scores =
-        boot_base_champion(pin, &recs, backend, recorded, live).map_err(|e| e.to_string())?;
+    let scores = boot_base_champion(pin, &recs, backend, recorded, live)
+        .await
+        .map_err(|e| e.to_string())?;
     store.set_base_champion(scores).map_err(|e| e.to_string())?;
     Ok(recs.len())
 }
@@ -270,8 +320,8 @@ mod tests {
 
     /// The boot path, not just the library: a live host must come up with a
     /// champion baseline, otherwise every submission 503s before the gates.
-    #[test]
-    fn live_boot_records_the_champion_baseline_from_the_operator_file() {
+    #[tokio::test]
+    async fn live_boot_records_the_champion_baseline_from_the_operator_file() {
         let recs = holdout();
         let pin = RelearnPin {
             holdout_commitment: holdout_commitment(&recs),
@@ -300,13 +350,14 @@ mod tests {
         };
 
         let n = record_base_champion(&store, &pin, EvalBackend::Lium, Some(file), None)
+            .await
             .expect("live baseline recorded");
         assert_eq!(n, recs.len());
         assert!(store.champion_scores().expect("read").is_some());
     }
 
-    #[test]
-    fn live_boot_without_a_baseline_source_records_nothing() {
+    #[tokio::test]
+    async fn live_boot_without_a_baseline_source_records_nothing() {
         let recs = holdout();
         let pin = RelearnPin {
             holdout_commitment: holdout_commitment(&recs),
@@ -315,15 +366,19 @@ mod tests {
             ..RelearnPin::default()
         };
         let store = seeded(&pin, &recs);
-        assert!(record_base_champion(&store, &pin, EvalBackend::Lium, None, None).is_err());
+        assert!(
+            record_base_champion(&store, &pin, EvalBackend::Lium, None, None)
+                .await
+                .is_err()
+        );
         assert!(
             store.champion_scores().expect("read").is_none(),
             "a live host must not inherit sim numbers as its champion"
         );
     }
 
-    #[test]
-    fn sim_boot_still_records_the_sim_baseline() {
+    #[tokio::test]
+    async fn sim_boot_still_records_the_sim_baseline() {
         let recs = holdout();
         let pin = RelearnPin {
             holdout_commitment: holdout_commitment(&recs),
@@ -331,7 +386,9 @@ mod tests {
             ..RelearnPin::default()
         };
         let store = seeded(&pin, &recs);
-        record_base_champion(&store, &pin, EvalBackend::Sim, None, None).expect("sim baseline");
+        record_base_champion(&store, &pin, EvalBackend::Sim, None, None)
+            .await
+            .expect("sim baseline");
         assert!(store.champion_scores().expect("read").is_some());
     }
 
@@ -340,4 +397,68 @@ mod tests {
         assert!(load_recorded_baseline(None).expect("no path").is_none());
         assert!(load_recorded_baseline(Some(Path::new("/nonexistent/baseline.json"))).is_err());
     }
+
+    /// The wiring the Subnet Owner asked for: the harvest is built on the LIVE
+    /// Lium path, not only under `FORCE_SIM`. Sim scores in-process and must
+    /// never be handed a Lium harvest.
+    #[test]
+    fn live_harvest_is_wired_on_the_lium_path_not_on_sim() {
+        let _guard = LIUM_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("LIUM_API_KEY", "test-key-not-a-real-secret");
+
+        let live = build_live_scorer(EvalBackend::Lium, 900);
+        assert!(
+            live.is_some(),
+            "Lium boot must wire the digest-pinned harvest"
+        );
+        assert!(
+            build_live_scorer(EvalBackend::Sim, 900).is_none(),
+            "sim scores in-process; a Lium harvest there would spend money"
+        );
+
+        // No miner key, no pod: refuse rather than invent numbers.
+        std::env::remove_var("LIUM_API_KEY");
+        assert!(build_live_scorer(EvalBackend::Lium, 900).is_none());
+        std::env::set_var("LIUM_API_KEY", "   ");
+        assert!(
+            build_live_scorer(EvalBackend::Lium, 900).is_none(),
+            "a blank key is not a key"
+        );
+        std::env::remove_var("LIUM_API_KEY");
+    }
+
+    /// A wired harvest is what turns `live_harvest_wired` on, and the readiness
+    /// check is what a submission consults before spending anything.
+    #[test]
+    fn a_wired_harvest_makes_a_pinned_host_ready_to_score() {
+        let _guard = LIUM_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("LIUM_API_KEY", "test-key-not-a-real-secret");
+        let live = build_live_scorer(EvalBackend::Lium, 900).expect("wired");
+        std::env::remove_var("LIUM_API_KEY");
+
+        let unpinned = RelearnPin::default();
+        assert!(
+            relearn_eval::scoring_readiness(&unpinned, EvalBackend::Lium, Some(live.as_ref()))
+                .is_err(),
+            "a wired harvest still needs a digest pin"
+        );
+
+        let pinned = RelearnPin {
+            eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
+            ..RelearnPin::default()
+        };
+        assert!(
+            relearn_eval::scoring_readiness(&pinned, EvalBackend::Lium, None).is_err(),
+            "a digest pin alone is not enough"
+        );
+        relearn_eval::scoring_readiness(&pinned, EvalBackend::Lium, Some(live.as_ref()))
+            .expect("pinned digest + wired harvest can score");
+    }
+
+    /// `LIUM_API_KEY` is process-wide, so the tests that set it must not race.
+    static LIUM_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
