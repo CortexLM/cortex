@@ -54,7 +54,7 @@ pub const SCORE_MAX: u64 = 1_000_000;
 pub const BASE_MODEL_ID: &str = "Qwen/Qwen3.8-27B";
 
 /// HTTP teacher wire id. Override with `RELEARN_TEACHER_MODEL`.
-pub const TEACHER_MODEL_ID: &str = "glm-5.3-flash";
+pub const TEACHER_MODEL_ID: &str = "glm-5.3";
 
 /// Legacy Kimi wire id — still accepted when the operator overrides.
 pub const TEACHER_KIMI_MODEL_ID: &str = "kimi-k3";
@@ -67,11 +67,13 @@ pub const TEACHER_GLM_MODEL_ID: &str = "zai-org/GLM-5.3";
 
 /// NVFP4 teacher weights. Download, then serve from a local directory.
 ///
-/// Confirmed 2026-08-31: public, ungated, MIT.
-/// <https://huggingface.co/LibertAIDAI/GLM-5.3-Flash-NVFP4>
+/// Confirmed 2026-08-31: public, ungated, 97 files, license `other`
+/// (GLM-5.3), base `zai-org/GLM-5.3`.
+/// <https://huggingface.co/incoai/GLM-5.3-NVFP4>
 ///
-/// Never pass this id to vLLM. Use [`teacher_local_dir`].
-pub const TEACHER_NVFP4_ID: &str = "LibertAIDAI/GLM-5.3-Flash-NVFP4";
+/// Not the Flash NVFP4. Never DFlash2 (CC BY-NC-ND). Never pass this id
+/// to vLLM. Use [`teacher_local_dir`]. Operator shape: 2xB300, tp2.
+pub const TEACHER_NVFP4_ID: &str = "incoai/GLM-5.3-NVFP4";
 
 /// Public miner / eval-image repo.
 pub const RELEARN_GIT_URL: &str = "https://github.com/CortexLM/relearn";
@@ -206,14 +208,14 @@ mod tests {
     #[test]
     fn verified_model_ids() {
         assert_eq!(BASE_MODEL_ID, "Qwen/Qwen3.8-27B");
-        assert_eq!(TEACHER_MODEL_ID, "glm-5.3-flash");
-        assert_eq!(TEACHER_NVFP4_ID, "LibertAIDAI/GLM-5.3-Flash-NVFP4");
+        assert_eq!(TEACHER_MODEL_ID, "glm-5.3");
+        assert_eq!(TEACHER_NVFP4_ID, "incoai/GLM-5.3-NVFP4");
         assert_eq!(TEACHER_GLM_MODEL_ID, "zai-org/GLM-5.3");
         assert!(teacher_api_url().is_none());
         assert!(teacher_local_dir().is_none());
         assert!(looks_like_hf_repo_id(TEACHER_NVFP4_ID));
         assert!(looks_like_hf_repo_id(BASE_MODEL_ID));
-        assert!(!looks_like_hf_repo_id("/models/glm-5.3-flash-nvfp4"));
+        assert!(!looks_like_hf_repo_id("/models/glm-5.3-nvfp4"));
     }
 
     #[test]
@@ -224,7 +226,7 @@ mod tests {
 
     #[test]
     fn kimi_and_glm_are_configured_teachers() {
-        assert!(is_configured_teacher_model("glm-5.3-flash"));
+        assert!(is_configured_teacher_model("glm-5.3"));
         assert!(is_configured_teacher_model("kimi-k3"));
         assert!(is_configured_teacher_model("moonshotai/Kimi-K3"));
         assert!(is_configured_teacher_model(TEACHER_GLM_MODEL_ID));

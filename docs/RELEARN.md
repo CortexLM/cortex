@@ -16,8 +16,9 @@ This repo pins them in `config/relearn-pin.toml`.
 | `challenge_id` | `relearn` |
 | `challenge_scoring_version` | `1` |
 | Base model | `Qwen/Qwen3.8-27B` (Apache-2.0, native VLM). Not Flash-Next. |
-| Teacher weights | `LibertAIDAI/GLM-5.3-Flash-NVFP4` — download, then serve from `RELEARN_TEACHER_LOCAL_DIR`. Never pass the Hugging Face repo id to vLLM. |
-| Teacher / judge | HTTP API (operator sets `RELEARN_TEACHER_*`; wire id `glm-5.3-flash`) |
+| Teacher weights | `incoai/GLM-5.3-NVFP4` (full GLM-5.3 NVFP4) — download, then serve from `RELEARN_TEACHER_LOCAL_DIR`. Never pass the Hugging Face repo id to vLLM. Not Flash. Never DFlash2 (CC BY-NC-ND). |
+| Teacher / judge | HTTP API (operator sets `RELEARN_TEACHER_*`; wire id `glm-5.3`) |
+| Operator GPUs | 2×B300, tensor-parallel 2 (docs only). If OOM, raise tp on those 2 GPUs — do not add an 8-GPU layout. |
 | Port | `8095` (local host `28095`) |
 | Emission | `4000` bps (default) |
 
