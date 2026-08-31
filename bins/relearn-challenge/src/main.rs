@@ -24,9 +24,12 @@ use challenge_keys::load_challenge_secret;
 use clap::Parser;
 use relearn_challenge::{
     hash_admin_token, parse_holdout_file, relearn_router, resolve_eval_backend, AppState,
-    EvalBackend, MemoryStore, RelearnPin, CHALLENGE_ID, SCORING_VERSION,
+    BaselineMeasurement, EvalBackend, LiveScorer, MemoryStore, RelearnPin, BASE_CHAMPION_RUN,
+    CHALLENGE_ID, SCORING_VERSION,
 };
-use relearn_eval::base_champion_scores;
+#[cfg(test)]
+use relearn_challenge::{holdout_commitment, HoldoutItem, HoldoutTask};
+use relearn_eval::boot_base_champion;
 use tokio::net::TcpListener;
 
 /// Operator Relearn challenge service CLI.
@@ -58,6 +61,12 @@ struct Cli {
     /// Operator holdout records (JSON array). Never in git.
     #[arg(long, env = "RELEARN_HOLDOUT_FILE")]
     holdout_file: Option<PathBuf>,
+    /// Champion baseline measured by the pinned eval image on the base model.
+    ///
+    /// Required on a live host: the gates compare against this. Verified
+    /// against the pin's `eval_image_digest` + `holdout_commitment` at boot.
+    #[arg(long, env = "RELEARN_BASE_CHAMPION_FILE")]
+    base_champion_file: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -98,19 +107,29 @@ fn run(cli: &Cli) -> Result<(), String> {
         Ok(n) => tracing::info!(holdout_items = n, "holdout verified against pin commitment"),
         Err(e) => tracing::warn!("holdout unavailable ({e}); submissions will 503 until fixed"),
     }
-    // The sim baseline is only a valid comparison basis on a sim host. A live
-    // challenger judged against simulated champion scores would be meaningless.
-    if backend == EvalBackend::Sim {
-        if let Ok(recs) = store.unseal_holdout("boot-baseline") {
-            store
-                .set_base_champion(base_champion_scores(&recs))
-                .map_err(|e| e.to_string())?;
-        }
+    // Record the baseline with the scorer this host will actually use. A sim
+    // host gets sim numbers; a live host takes the operator's eval-image
+    // measurement. Without a baseline no gate can run — contamination,
+    // public-holdout gap, and pixel-shuffle all need a champion to compare
+    // against — so a live host that skips this 503s every submission.
+    let recorded = load_recorded_baseline(cli.base_champion_file.as_deref())?;
+    let live_scorer: Option<Arc<dyn LiveScorer>> = None;
+    match record_base_champion(&store, &pin, backend, recorded, live_scorer.as_deref()) {
+        Ok(n) => tracing::info!(
+            eval_backend = ?backend,
+            holdout_items = n,
+            "champion baseline recorded"
+        ),
+        Err(e) => tracing::warn!(
+            eval_backend = ?backend,
+            "champion baseline not recorded ({e}); submissions will 503 until it is"
+        ),
     }
     let state = AppState {
         store,
         pin,
         backend,
+        live_scorer,
         admin_hashes: Arc::new(admin_hashes),
     };
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -143,6 +162,32 @@ fn load_holdout(
         .load_holdout(records, &[], &pin.public_ids)
         .map_err(|e| e.to_string())?;
     Ok(n)
+}
+
+fn load_recorded_baseline(path: Option<&Path>) -> Result<Option<BaselineMeasurement>, String> {
+    let Some(p) = path else {
+        return Ok(None);
+    };
+    let body = std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?;
+    BaselineMeasurement::from_json(&body)
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", p.display()))
+}
+
+fn record_base_champion(
+    store: &MemoryStore,
+    pin: &RelearnPin,
+    backend: EvalBackend,
+    recorded: Option<BaselineMeasurement>,
+    live: Option<&dyn LiveScorer>,
+) -> Result<usize, String> {
+    let recs = store
+        .unseal_holdout(BASE_CHAMPION_RUN)
+        .map_err(|e| e.to_string())?;
+    let scores =
+        boot_base_champion(pin, &recs, backend, recorded, live).map_err(|e| e.to_string())?;
+    store.set_base_champion(scores).map_err(|e| e.to_string())?;
+    Ok(recs.len())
 }
 
 fn load_admin_hashes(path: Option<&Path>) -> Vec<String> {
@@ -198,5 +243,101 @@ mod tests {
         std::env::set_var("RELEARN_FORCE_SIM", "false");
         assert_eq!(resolve_eval_backend(), EvalBackend::Lium);
         std::env::remove_var("RELEARN_FORCE_SIM");
+    }
+
+    fn holdout() -> Vec<HoldoutItem> {
+        (1..=120)
+            .map(|id| HoldoutItem {
+                id: 800 + id,
+                prompt: format!("holdout item {id} with enough words for a trigram"),
+                dataset_id: "dev".into(),
+                task: HoldoutTask::Text,
+                image_hash: String::new(),
+            })
+            .collect()
+    }
+
+    fn seeded(pin: &RelearnPin, recs: &[HoldoutItem]) -> MemoryStore {
+        let store = MemoryStore::new();
+        store
+            .set_holdout_commitment(&pin.holdout_commitment, pin.holdout_size)
+            .expect("commit");
+        store
+            .load_holdout(recs.to_vec(), &[], &pin.public_ids)
+            .expect("load");
+        store
+    }
+
+    /// The boot path, not just the library: a live host must come up with a
+    /// champion baseline, otherwise every submission 503s before the gates.
+    #[test]
+    fn live_boot_records_the_champion_baseline_from_the_operator_file() {
+        let recs = holdout();
+        let pin = RelearnPin {
+            holdout_commitment: holdout_commitment(&recs),
+            holdout_size: recs.len(),
+            eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
+            ..RelearnPin::default()
+        };
+        let store = seeded(&pin, &recs);
+        assert!(store.champion_scores().expect("read").is_none());
+
+        let measured = relearn_eval::sim_slice_scores_at_skill(
+            relearn_eval::BASE_CHAMPION_ARTIFACT,
+            &recs,
+            relearn_eval::BASE_CHAMPION_SKILL,
+        );
+        let file = BaselineMeasurement {
+            eval_image_digest: pin.eval_image_digest.clone(),
+            holdout_commitment: pin.holdout_commitment.clone(),
+            holdout: measured.holdout.by_cluster,
+            public: measured.public.by_cluster,
+            perturbed: measured.perturbed.by_cluster,
+            canaries: measured.canaries.by_cluster,
+            general_canary: measured.general_canary.by_cluster,
+            agent_trace: measured.agent_trace,
+            vision_shuffle: measured.vision_shuffle,
+        };
+
+        let n = record_base_champion(&store, &pin, EvalBackend::Lium, Some(file), None)
+            .expect("live baseline recorded");
+        assert_eq!(n, recs.len());
+        assert!(store.champion_scores().expect("read").is_some());
+    }
+
+    #[test]
+    fn live_boot_without_a_baseline_source_records_nothing() {
+        let recs = holdout();
+        let pin = RelearnPin {
+            holdout_commitment: holdout_commitment(&recs),
+            holdout_size: recs.len(),
+            eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
+            ..RelearnPin::default()
+        };
+        let store = seeded(&pin, &recs);
+        assert!(record_base_champion(&store, &pin, EvalBackend::Lium, None, None).is_err());
+        assert!(
+            store.champion_scores().expect("read").is_none(),
+            "a live host must not inherit sim numbers as its champion"
+        );
+    }
+
+    #[test]
+    fn sim_boot_still_records_the_sim_baseline() {
+        let recs = holdout();
+        let pin = RelearnPin {
+            holdout_commitment: holdout_commitment(&recs),
+            holdout_size: recs.len(),
+            ..RelearnPin::default()
+        };
+        let store = seeded(&pin, &recs);
+        record_base_champion(&store, &pin, EvalBackend::Sim, None, None).expect("sim baseline");
+        assert!(store.champion_scores().expect("read").is_some());
+    }
+
+    #[test]
+    fn missing_baseline_file_is_none_and_a_bad_one_is_an_error() {
+        assert!(load_recorded_baseline(None).expect("no path").is_none());
+        assert!(load_recorded_baseline(Some(Path::new("/nonexistent/baseline.json"))).is_err());
     }
 }

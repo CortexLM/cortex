@@ -15,13 +15,14 @@ use relearn_challenge_task::{CHALLENGE_ID_BYTES, SCORE_MAX};
 use relearn_score::champion_hold_lattice;
 use relearn_store::SubmissionState;
 
-pub use relearn_challenge_task::HoldoutItem;
+pub use relearn_challenge_task::{holdout_commitment, HoldoutItem, HoldoutTask};
 pub use relearn_challenge_task::{
     BASE_MODEL_ID, CHALLENGE_ID, CHALLENGE_ID_BYTES as RELEARN_ID_BYTES,
     SCORE_MAX as RELEARN_SCORE_MAX, SCORING_VERSION, TEACHER_MODEL_ID,
 };
 pub use relearn_eval::{
-    force_sim, resolve_eval_backend, resolve_teacher_backend, EvalBackend, RelearnPin,
+    force_sim, resolve_eval_backend, resolve_teacher_backend, BaselineMeasurement, EvalBackend,
+    LiveScorer, RelearnPin, BASE_CHAMPION_RUN,
 };
 pub use relearn_http::{hash_admin_token, relearn_router, AppState};
 pub use relearn_store::MemoryStore;

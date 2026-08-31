@@ -190,7 +190,171 @@ pub enum EvalError {
     /// A live run reached the in-process scorer. It must not silently sim.
     #[error("live holdout harvest is driven by the digest-pinned eval image; no in-process sim")]
     LiveHarvestUnavailable,
+    /// The operator-recorded champion baseline does not match the pin.
+    #[error("recorded baseline: {0}")]
+    Baseline(String),
 }
+
+/// Champion baseline measured by the digest-pinned eval image and installed by
+/// the operator (`RELEARN_BASE_CHAMPION_FILE`).
+///
+/// A live host needs a champion baseline before any gate can run, and it must
+/// not be sim numbers. Until the eval-image harvest is wired into the control
+/// plane, this is how the operator records one: run the pinned image on the
+/// base model once, install the result. [`Self::verify`] binds it to the pin,
+/// so a measurement from a different image or a different holdout is refused.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BaselineMeasurement {
+    /// Eval image digest that produced these numbers. Must equal the pin's.
+    pub eval_image_digest: String,
+    /// Holdout commitment measured against. Must equal the pin's.
+    pub holdout_commitment: String,
+    /// Per-item holdout scores. The only series that may enter the lattice.
+    pub holdout: BTreeMap<String, f64>,
+    /// Public / training-adjacent split.
+    pub public: BTreeMap<String, f64>,
+    /// Holdout items after the pinned perturbation.
+    pub perturbed: BTreeMap<String, f64>,
+    /// Known-answer base-competence canaries.
+    pub canaries: BTreeMap<String, f64>,
+    /// General benches (MMLU / MMMU / …), off the visible score.
+    pub general_canary: BTreeMap<String, f64>,
+    /// Agent-trace quality in `[0, 1]`.
+    pub agent_trace: f64,
+    /// Pixel-shuffle control per vision family.
+    pub vision_shuffle: BTreeMap<HoldoutTask, ShuffleEvidence>,
+}
+
+impl BaselineMeasurement {
+    /// Parse an operator baseline file body.
+    ///
+    /// # Errors
+    ///
+    /// [`EvalError::Baseline`] when the body is not a baseline object.
+    pub fn from_json(body: &str) -> Result<Self, EvalError> {
+        serde_json::from_str(body).map_err(|e| EvalError::Baseline(e.to_string()))
+    }
+
+    /// Check the measurement against the pin before it becomes the champion.
+    ///
+    /// # Errors
+    ///
+    /// [`EvalError::Baseline`] on an image / holdout mismatch, or when a series
+    /// the gates need is missing. A champion the gates cannot use would reject
+    /// every challenger for reasons the miner cannot act on.
+    pub fn verify(&self, pin: &RelearnPin, holdout: &[HoldoutItem]) -> Result<(), EvalError> {
+        let bad = |m: String| Err(EvalError::Baseline(m));
+        if self.eval_image_digest.trim() != pin.eval_image_digest.trim() {
+            return bad(format!(
+                "measured by eval image {:?}, pin is {:?}",
+                self.eval_image_digest, pin.eval_image_digest
+            ));
+        }
+        if !self
+            .holdout_commitment
+            .trim()
+            .eq_ignore_ascii_case(pin.holdout_commitment.trim())
+        {
+            return bad("holdout commitment does not match the pin".into());
+        }
+        if self.holdout.len() != holdout.len() {
+            return bad(format!(
+                "{} holdout scores for {} verified items",
+                self.holdout.len(),
+                holdout.len()
+            ));
+        }
+        if self.general_canary.is_empty() {
+            return bad("no general-bench canary; every challenger would fail closed".into());
+        }
+        if self.public.is_empty() {
+            return bad("no public split; the memorization gap gate cannot run".into());
+        }
+        if !self.agent_trace.is_finite() || !(0.0..=1.0).contains(&self.agent_trace) {
+            return bad(format!("agent_trace {} outside [0, 1]", self.agent_trace));
+        }
+        Ok(())
+    }
+
+    /// Convert to champion slices. Contamination is challenger-side only.
+    #[must_use]
+    pub fn into_slice_scores(self) -> SliceScores {
+        let series = |m: BTreeMap<String, f64>| ExampleSeries::from_pairs(m);
+        SliceScores {
+            holdout: series(self.holdout),
+            public: series(self.public),
+            perturbed: series(self.perturbed),
+            canaries: series(self.canaries),
+            general_canary: series(self.general_canary),
+            agent_trace: self.agent_trace,
+            vision_shuffle: self.vision_shuffle,
+            contamination: ContaminationEvidence::default(),
+        }
+    }
+}
+
+/// Holdout measurements produced by the digest-pinned eval image.
+///
+/// The implementation is not in this repo. The control plane holds a handle to
+/// the eval image's harvest and never computes live numbers itself, so sim can
+/// never arrive through this trait.
+///
+/// The same scorer measures the boot baseline and every challenger: a live
+/// challenger compared against a champion the host never measured is not a
+/// comparison, and a champion measured by a different scorer is not either.
+pub trait LiveScorer: Send + Sync {
+    /// Score one artifact on the verified holdout.
+    ///
+    /// `frozen_digest` binds the run. `artifact_digest` is the miner artifact,
+    /// or [`BASE_CHAMPION_ARTIFACT`] for the boot baseline.
+    ///
+    /// # Errors
+    ///
+    /// Implementation-defined; surfaced to the miner as a 503.
+    fn score(
+        &self,
+        pin: &RelearnPin,
+        frozen_digest: &str,
+        artifact_digest: &str,
+        holdout: &[HoldoutItem],
+    ) -> Result<SliceScores, EvalError>;
+}
+
+/// Whether this host can produce a verdict at all, and why not if it cannot.
+///
+/// Checked before the holdout is scored so a live run never spends the miner's
+/// Lium budget on a submission the host could never judge, and so the miner is
+/// told the root cause (no digest pin) rather than a downstream symptom.
+///
+/// # Errors
+///
+/// [`EvalError::EvalImageUnpinned`] without a `sha256:` eval-image digest, and
+/// [`EvalError::LiveHarvestUnavailable`] when no [`LiveScorer`] is wired.
+pub fn scoring_readiness(
+    pin: &RelearnPin,
+    backend: EvalBackend,
+    live: Option<&dyn LiveScorer>,
+) -> Result<(), EvalError> {
+    match backend {
+        EvalBackend::Sim => Ok(()),
+        EvalBackend::Lium => {
+            if !pin.can_rent() {
+                return Err(EvalError::EvalImageUnpinned);
+            }
+            if live.is_none() {
+                return Err(EvalError::LiveHarvestUnavailable);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Artifact id of the un-post-trained base model on the holdout.
+pub const BASE_CHAMPION_ARTIFACT: &str = "base-relearn-champion";
+
+/// Run id bound into the boot baseline measurement.
+pub const BASE_CHAMPION_RUN: &str = "boot-baseline";
 
 /// One finished eval.
 #[derive(Debug, Clone)]
@@ -354,10 +518,55 @@ pub fn sim_slice_scores_at_skill(
 ///
 /// These are sim numbers. Only seed them as the champion baseline on a host
 /// that resolved [`EvalBackend::Sim`]; a live challenger must never be judged
-/// against a simulated champion.
+/// against a simulated champion. Live hosts use [`boot_base_champion`].
 #[must_use]
 pub fn base_champion_scores(holdout: &[HoldoutItem]) -> SliceScores {
-    sim_slice_scores_at_skill("base-relearn-champion", holdout, BASE_CHAMPION_SKILL)
+    sim_slice_scores_at_skill(BASE_CHAMPION_ARTIFACT, holdout, BASE_CHAMPION_SKILL)
+}
+
+/// Champion baseline for this host, measured by the scorer submissions face.
+///
+/// A live host records the base model through the eval image; it does not fall
+/// back to [`base_champion_scores`]. Without a baseline the gates never run —
+/// contamination, public-holdout gap, and pixel-shuffle all need a champion to
+/// compare against — so this is called at boot and its failure is the reason
+/// submissions refuse, reported on `/v1/status`.
+///
+/// A live host takes the operator-recorded measurement when there is one, and
+/// otherwise measures through the wired harvest. Sim numbers are not a
+/// candidate on a live host at all.
+///
+/// # Errors
+///
+/// [`EvalError::HoldoutSealed`] with no verified records,
+/// [`EvalError::EvalImageUnpinned`] without a digest pin,
+/// [`EvalError::Baseline`] when a recorded measurement does not match the pin,
+/// and [`EvalError::LiveHarvestUnavailable`] when a live host has neither
+/// source.
+pub fn boot_base_champion(
+    pin: &RelearnPin,
+    holdout: &[HoldoutItem],
+    backend: EvalBackend,
+    recorded: Option<BaselineMeasurement>,
+    live: Option<&dyn LiveScorer>,
+) -> Result<SliceScores, EvalError> {
+    if holdout.is_empty() {
+        return Err(EvalError::HoldoutSealed);
+    }
+    match backend {
+        EvalBackend::Sim => Ok(base_champion_scores(holdout)),
+        EvalBackend::Lium => {
+            if !pin.can_rent() {
+                return Err(EvalError::EvalImageUnpinned);
+            }
+            if let Some(m) = recorded {
+                m.verify(pin, holdout)?;
+                return Ok(m.into_slice_scores());
+            }
+            let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
+            scorer.score(pin, BASE_CHAMPION_RUN, BASE_CHAMPION_ARTIFACT, holdout)
+        }
+    }
 }
 
 /// Score only after the submission digest is frozen and holdout records exist.
@@ -365,8 +574,8 @@ pub fn base_champion_scores(holdout: &[HoldoutItem]) -> SliceScores {
 /// `backend` comes from [`resolve_eval_backend`] and is the only thing that
 /// can select sim. On [`EvalBackend::Lium`] this refuses rather than falling
 /// back: without a `sha256:` eval-image pin the answer is
-/// [`EvalError::EvalImageUnpinned`], and with one the scores have to come from
-/// the eval image itself ([`EvalError::LiveHarvestUnavailable`]).
+/// [`EvalError::EvalImageUnpinned`], and without a wired [`LiveScorer`] it is
+/// [`EvalError::LiveHarvestUnavailable`]. Sim is never substituted.
 ///
 /// # Errors
 ///
@@ -379,6 +588,7 @@ pub fn eval_after_freeze(
     artifact_digest: &str,
     holdout: &[HoldoutItem],
     backend: EvalBackend,
+    live: Option<&dyn LiveScorer>,
 ) -> Result<EvalOutcome, EvalError> {
     if frozen_digest.trim().is_empty() {
         return Err(EvalError::HoldoutSealed);
@@ -392,7 +602,8 @@ pub fn eval_after_freeze(
             if !pin.can_rent() {
                 return Err(EvalError::EvalImageUnpinned);
             }
-            return Err(EvalError::LiveHarvestUnavailable);
+            let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
+            scorer.score(pin, frozen_digest, artifact_digest, holdout)?
         }
     };
     let metrics = serde_json::to_vec(&serde_json::json!({
@@ -546,10 +757,10 @@ mod tests {
     fn scoring_happens_only_after_freeze_and_unseal() {
         let hold = recs(120);
         let pin = RelearnPin::default();
-        assert!(eval_after_freeze(&pin, "", "art", &hold, EvalBackend::Sim).is_err());
-        assert!(eval_after_freeze(&pin, "digest-a", "art", &[], EvalBackend::Sim).is_err());
-        let out =
-            eval_after_freeze(&pin, "digest-a", "art", &hold, EvalBackend::Sim).expect("eval");
+        assert!(eval_after_freeze(&pin, "", "art", &hold, EvalBackend::Sim, None).is_err());
+        assert!(eval_after_freeze(&pin, "digest-a", "art", &[], EvalBackend::Sim, None).is_err());
+        let out = eval_after_freeze(&pin, "digest-a", "art", &hold, EvalBackend::Sim, None)
+            .expect("eval");
         assert_eq!(out.receipt.submission_hash, "digest-a");
         assert_eq!(out.backend, EvalBackend::Sim);
         assert_eq!(out.holdout_items, 120);
@@ -567,6 +778,7 @@ mod tests {
             "art",
             &hold,
             EvalBackend::Lium,
+            None,
         )
         .expect_err("live eval must refuse without a digest pin");
         assert!(matches!(err, EvalError::EvalImageUnpinned), "{err}");
@@ -579,7 +791,7 @@ mod tests {
             eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
             ..RelearnPin::default()
         };
-        let err = eval_after_freeze(&pin, "digest-a", "art", &recs(120), EvalBackend::Lium)
+        let err = eval_after_freeze(&pin, "digest-a", "art", &recs(120), EvalBackend::Lium, None)
             .expect_err("live scores must come from the eval image");
         assert!(matches!(err, EvalError::LiveHarvestUnavailable), "{err}");
     }
@@ -592,10 +804,175 @@ mod tests {
             "art",
             &recs(120),
             EvalBackend::Sim,
+            None,
         )
         .expect("sim eval");
         assert_eq!(out.receipt.provider, "sim");
         assert!(out.receipt.image_digest.is_empty());
+    }
+
+    fn live_pin() -> RelearnPin {
+        RelearnPin {
+            eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
+            holdout_commitment: "aa".repeat(32),
+            ..RelearnPin::default()
+        }
+    }
+
+    fn measurement(pin: &RelearnPin, hold: &[HoldoutItem]) -> BaselineMeasurement {
+        let s = sim_slice_scores_at_skill(BASE_CHAMPION_ARTIFACT, hold, BASE_CHAMPION_SKILL);
+        BaselineMeasurement {
+            eval_image_digest: pin.eval_image_digest.clone(),
+            holdout_commitment: pin.holdout_commitment.clone(),
+            holdout: s.holdout.by_cluster,
+            public: s.public.by_cluster,
+            perturbed: s.perturbed.by_cluster,
+            canaries: s.canaries.by_cluster,
+            general_canary: s.general_canary.by_cluster,
+            agent_trace: s.agent_trace,
+            vision_shuffle: s.vision_shuffle,
+        }
+    }
+
+    struct Harvest;
+
+    impl LiveScorer for Harvest {
+        fn score(
+            &self,
+            _pin: &RelearnPin,
+            _frozen: &str,
+            artifact: &str,
+            holdout: &[HoldoutItem],
+        ) -> Result<SliceScores, EvalError> {
+            Ok(sim_slice_scores_at_skill(artifact, holdout, 0.5))
+        }
+    }
+
+    #[test]
+    fn live_boot_records_a_baseline_from_either_live_source() {
+        let hold = recs(120);
+        let pin = live_pin();
+        let recorded = boot_base_champion(
+            &pin,
+            &hold,
+            EvalBackend::Lium,
+            Some(measurement(&pin, &hold)),
+            None,
+        )
+        .expect("recorded baseline");
+        assert_eq!(recorded.holdout.len(), 120);
+        let harvested = boot_base_champion(&pin, &hold, EvalBackend::Lium, None, Some(&Harvest))
+            .expect("harvested baseline");
+        assert_eq!(harvested.holdout.len(), 120);
+    }
+
+    #[test]
+    fn live_boot_never_falls_back_to_the_sim_baseline() {
+        let hold = recs(120);
+        let pin = live_pin();
+        assert!(matches!(
+            boot_base_champion(&pin, &hold, EvalBackend::Lium, None, None),
+            Err(EvalError::LiveHarvestUnavailable)
+        ));
+        assert!(matches!(
+            boot_base_champion(&RelearnPin::default(), &hold, EvalBackend::Lium, None, None),
+            Err(EvalError::EvalImageUnpinned)
+        ));
+        // Sim hosts still get the sim baseline, and it is not the live one.
+        let sim = boot_base_champion(&pin, &hold, EvalBackend::Sim, None, None).expect("sim");
+        assert_eq!(sim.holdout, base_champion_scores(&hold).holdout);
+    }
+
+    #[test]
+    fn recorded_baseline_is_bound_to_the_pinned_image_and_holdout() {
+        let hold = recs(120);
+        let pin = live_pin();
+        measurement(&pin, &hold).verify(&pin, &hold).expect("clean");
+
+        let mut other_image = measurement(&pin, &hold);
+        other_image.eval_image_digest = format!("sha256:{}", "cd".repeat(32));
+        assert!(matches!(
+            other_image.verify(&pin, &hold),
+            Err(EvalError::Baseline(_))
+        ));
+
+        let mut other_holdout = measurement(&pin, &hold);
+        other_holdout.holdout_commitment = "bb".repeat(32);
+        assert!(matches!(
+            other_holdout.verify(&pin, &hold),
+            Err(EvalError::Baseline(_))
+        ));
+
+        let mut short = measurement(&pin, &hold);
+        short.holdout.pop_last();
+        assert!(matches!(
+            short.verify(&pin, &hold),
+            Err(EvalError::Baseline(_))
+        ));
+    }
+
+    #[test]
+    fn recorded_baseline_must_carry_the_series_the_gates_read() {
+        let hold = recs(120);
+        let pin = live_pin();
+        for break_it in [0_u8, 1, 2] {
+            let mut m = measurement(&pin, &hold);
+            match break_it {
+                0 => m.general_canary.clear(),
+                1 => m.public.clear(),
+                _ => m.agent_trace = 7.0,
+            }
+            assert!(
+                matches!(m.verify(&pin, &hold), Err(EvalError::Baseline(_))),
+                "case {break_it} must be refused at boot, not silently reject every challenger"
+            );
+        }
+    }
+
+    #[test]
+    fn recorded_baseline_round_trips_through_json() {
+        let hold = recs(120);
+        let pin = live_pin();
+        let body = serde_json::to_string(&measurement(&pin, &hold)).expect("json");
+        let back = BaselineMeasurement::from_json(&body).expect("parse");
+        back.verify(&pin, &hold).expect("verifies");
+        assert!(BaselineMeasurement::from_json("not json").is_err());
+    }
+
+    #[test]
+    fn readiness_names_the_root_cause() {
+        let live = live_pin();
+        assert!(scoring_readiness(&RelearnPin::default(), EvalBackend::Sim, None).is_ok());
+        assert!(matches!(
+            scoring_readiness(&RelearnPin::default(), EvalBackend::Lium, None),
+            Err(EvalError::EvalImageUnpinned)
+        ));
+        assert!(matches!(
+            scoring_readiness(&live, EvalBackend::Lium, None),
+            Err(EvalError::LiveHarvestUnavailable)
+        ));
+        assert!(scoring_readiness(&live, EvalBackend::Lium, Some(&Harvest)).is_ok());
+    }
+
+    #[test]
+    fn live_eval_uses_the_wired_harvest_not_the_sim_harness() {
+        let hold = recs(120);
+        let pin = live_pin();
+        let out = eval_after_freeze(
+            &pin,
+            "digest-a",
+            "art",
+            &hold,
+            EvalBackend::Lium,
+            Some(&Harvest),
+        )
+        .expect("live eval");
+        assert_eq!(out.backend, EvalBackend::Lium);
+        assert_eq!(out.receipt.provider, "lium");
+        assert_eq!(out.receipt.image_digest, pin.eval_image_digest);
+        // The harvest pinned skill 0.5; the sim harness would have used the
+        // digest-derived skill, so these must differ.
+        assert_ne!(out.scores.holdout, sim_slice_scores("art", &hold).holdout);
     }
 
     #[test]

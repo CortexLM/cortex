@@ -29,7 +29,8 @@ use std::collections::BTreeSet;
 
 use relearn_challenge_task::{CHALLENGE_ID, SCORE_MAX, SCORING_VERSION};
 use relearn_eval::{
-    eval_after_freeze, force_sim, resolve_teacher_backend, EvalBackend, EvalError, RelearnPin,
+    eval_after_freeze, force_sim, resolve_teacher_backend, scoring_readiness, EvalBackend,
+    EvalError, LiveScorer, RelearnPin,
 };
 use relearn_score::{contamination_evidence, judge_challenger};
 use relearn_store::{
@@ -47,8 +48,23 @@ pub struct AppState {
     pub pin: RelearnPin,
     /// Backend that is allowed to produce scores on this host.
     pub backend: EvalBackend,
+    /// Harvest handle for the digest-pinned eval image. `None` on a live host
+    /// means nothing can score, so submissions refuse.
+    pub live_scorer: Option<Arc<dyn LiveScorer>>,
     /// Operator bearer hashes (sha256 hex). Empty → admin 503.
     pub admin_hashes: Arc<Vec<String>>,
+}
+
+impl AppState {
+    /// Borrow the live harvest handle, if the operator wired one.
+    fn live(&self) -> Option<&dyn LiveScorer> {
+        self.live_scorer.as_deref()
+    }
+
+    /// Whether this host can produce a verdict at all.
+    fn can_score(&self) -> bool {
+        scoring_readiness(&self.pin, self.backend, self.live()).is_ok()
+    }
 }
 
 /// Build the router.
@@ -86,7 +102,11 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         // into. Miners can see that a run was not a real eval.
         "eval_backend": st.backend,
         "force_sim": force_sim(),
-        "can_score": st.backend == EvalBackend::Sim || st.pin.can_rent(),
+        "can_score": st.can_score(),
+        // Both are prerequisites for a live verdict, so name them separately:
+        // "can_score: false" without them is the usual operator confusion.
+        "live_harvest_wired": st.live_scorer.is_some(),
+        "champion_baseline_recorded": st.store.champion_scores().ok().flatten().is_some(),
         "relearn_git": st.pin.relearn_git,
         "relearn_git_sha": st.pin.relearn_git_sha,
         // Commitment + size + loaded. Never ids, prompts, or image hashes.
@@ -150,31 +170,36 @@ async fn submit(
     let nonce = nonce_from(&hotkey, &artifact);
     let submission_digest = freeze_submission_digest(&hotkey, &artifact, &nonce);
 
-    let row = Submission {
-        id: String::new(),
-        miner_hotkey: hotkey,
-        artifact_digest: artifact.clone(),
-        artifact_uri: body.artifact_uri,
-        manifest: body.manifest.clone(),
-        nonce,
-        submission_digest: submission_digest.clone(),
-        state: SubmissionState::Evaluating,
-        receipt_json: None,
-        verdict: None,
-        detail: None,
-    };
-    let row = st
-        .store
-        .insert(row)
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
-
+    // Everything that can refuse runs before the row exists. A 503 means
+    // scoring never started, so it must not leave a spammable `evaluating`
+    // row behind that carries no scores and shows up on no operator surface.
     let holdout = st
         .store
         .unseal_holdout(&submission_digest)
         .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
 
-    let eval = eval_after_freeze(&st.pin, &submission_digest, &artifact, &holdout, st.backend)
-        .map_err(|e| eval_err(&e))?;
+    // Root cause first: an unpinned digest is why there is no harvest and no
+    // baseline either, so report that rather than a downstream symptom.
+    scoring_readiness(&st.pin, st.backend, st.live()).map_err(|e| eval_err(&e))?;
+
+    // Before the eval, not after: on a live host the eval spends the miner's
+    // Lium budget, and there is no verdict to be had without a baseline.
+    let champ = st.store.champion_scores().ok().flatten().ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no champion baseline recorded",
+        )
+    })?;
+
+    let eval = eval_after_freeze(
+        &st.pin,
+        &submission_digest,
+        &artifact,
+        &holdout,
+        st.backend,
+        st.live(),
+    )
+    .map_err(|e| eval_err(&e))?;
 
     let train_ids: BTreeSet<u32> = body.manifest.train_item_ids.iter().copied().collect();
     let train_images: BTreeSet<String> = body
@@ -195,31 +220,37 @@ async fn submit(
     scores.contamination =
         contamination_evidence(&train_ids, &train_images, &train_datasets, &holdout);
 
-    let champ = st.store.champion_scores().ok().flatten().ok_or_else(|| {
-        err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no champion baseline recorded",
-        )
-    })?;
     let verdict = judge_challenger(&champ, &scores);
-    st.store
-        .record_scores(&row.id, scores)
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
     let eligible = verdict.eligible;
-    let state = if eligible {
-        SubmissionState::AwaitingAdmin
-    } else {
-        SubmissionState::Rejected
-    };
-    let receipt = serde_json::to_string(&eval.receipt).unwrap_or_default();
     let detail = if eligible {
         None
     } else {
         Some(format!("gates={:?}", verdict.failed))
     };
+    // Scoring finished, so the attempt is now worth persisting — once, in its
+    // final state, rather than inserted as `evaluating` and patched.
     let row = st
         .store
-        .patch(&row.id, Some(state), Some(receipt), Some(verdict), detail)
+        .insert(Submission {
+            id: String::new(),
+            miner_hotkey: hotkey,
+            artifact_digest: artifact,
+            artifact_uri: body.artifact_uri,
+            manifest: body.manifest,
+            nonce,
+            submission_digest,
+            state: if eligible {
+                SubmissionState::AwaitingAdmin
+            } else {
+                SubmissionState::Rejected
+            },
+            receipt_json: Some(serde_json::to_string(&eval.receipt).unwrap_or_default()),
+            verdict: Some(verdict),
+            detail,
+        })
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
+    st.store
+        .record_scores(&row.id, scores)
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
 
     Ok((
@@ -326,7 +357,10 @@ mod tests {
     use axum::http::Request;
     use http_body_util::BodyExt;
     use relearn_challenge_task::{holdout_commitment, HoldoutItem, HoldoutTask};
-    use relearn_eval::base_champion_scores;
+    use relearn_eval::{
+        boot_base_champion, sim_slice_scores_at_skill, BaselineMeasurement, BASE_CHAMPION_ARTIFACT,
+        BASE_CHAMPION_SKILL,
+    };
     use tower::ServiceExt;
 
     fn digest(label: &str) -> String {
@@ -366,7 +400,36 @@ mod tests {
         })
     }
 
+    /// Stand-in for the eval image's harvest. Real live scores come from
+    /// `CortexLM/relearn`; this exists so the gate path can be exercised.
+    struct StubScorer {
+        skill: f64,
+    }
+
+    impl LiveScorer for StubScorer {
+        fn score(
+            &self,
+            _pin: &RelearnPin,
+            _frozen: &str,
+            artifact: &str,
+            holdout: &[HoldoutItem],
+        ) -> Result<relearn_score::SliceScores, EvalError> {
+            Ok(sim_slice_scores_at_skill(artifact, holdout, self.skill))
+        }
+    }
+
     fn app_backend(token: &str, load: bool, backend: EvalBackend, eval_digest: &str) -> Router {
+        app_full(token, load, backend, eval_digest, None, true)
+    }
+
+    fn app_full(
+        token: &str,
+        load: bool,
+        backend: EvalBackend,
+        eval_digest: &str,
+        live: Option<Arc<dyn LiveScorer>>,
+        baseline: bool,
+    ) -> Router {
         let recs = holdout();
         let pin = RelearnPin {
             holdout_commitment: holdout_commitment(&recs),
@@ -383,15 +446,46 @@ mod tests {
             store
                 .load_holdout(recs.clone(), &[], &pin.public_ids)
                 .expect("load");
-            store
-                .set_base_champion(base_champion_scores(&recs))
-                .expect("base");
+            // Same as boot: a host that cannot measure a baseline does not get
+            // one, and its submissions refuse.
+            if baseline {
+                if let Ok(scores) = boot_base_champion(
+                    &pin,
+                    &recs,
+                    backend,
+                    recorded_baseline(&pin, &recs),
+                    live.as_deref(),
+                ) {
+                    store.set_base_champion(scores).expect("base");
+                }
+            }
         }
         relearn_router(AppState {
             store,
             pin,
             backend,
+            live_scorer: live,
             admin_hashes: Arc::new(vec![hash_admin_token(token)]),
+        })
+    }
+
+    /// What an operator installs via `RELEARN_BASE_CHAMPION_FILE`: the base
+    /// model measured by the pinned eval image.
+    fn recorded_baseline(pin: &RelearnPin, recs: &[HoldoutItem]) -> Option<BaselineMeasurement> {
+        if !pin.can_rent() {
+            return None;
+        }
+        let s = sim_slice_scores_at_skill(BASE_CHAMPION_ARTIFACT, recs, BASE_CHAMPION_SKILL);
+        Some(BaselineMeasurement {
+            eval_image_digest: pin.eval_image_digest.clone(),
+            holdout_commitment: pin.holdout_commitment.clone(),
+            holdout: s.holdout.by_cluster,
+            public: s.public.by_cluster,
+            perturbed: s.perturbed.by_cluster,
+            canaries: s.canaries.by_cluster,
+            general_canary: s.general_canary.by_cluster,
+            agent_trace: s.agent_trace,
+            vision_shuffle: s.vision_shuffle,
         })
     }
 
@@ -647,6 +741,206 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("no in-process sim"));
+    }
+
+    /// The bug: baseline seeding used to be sim-only, so the moment a `sha256:`
+    /// eval image was pinned, every submit answered `no champion baseline
+    /// recorded` before contamination / public-holdout / shuffle could run.
+    #[tokio::test]
+    async fn live_boot_records_a_champion_baseline_without_force_sim() {
+        let recs = holdout();
+        let pin = RelearnPin {
+            holdout_commitment: holdout_commitment(&recs),
+            holdout_size: recs.len(),
+            eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
+            ..RelearnPin::default()
+        };
+        assert!(!force_sim(), "this test is the live path");
+
+        // Operator-recorded measurement, verified against the pin.
+        let recorded = recorded_baseline(&pin, &recs).expect("recorded");
+        let live = boot_base_champion(&pin, &recs, EvalBackend::Lium, Some(recorded), None)
+            .expect("live baseline");
+        assert_eq!(live.holdout.len(), recs.len());
+        assert!(!live.general_canary.is_empty(), "gates need the canary");
+        assert!(!live.public.is_empty(), "gates need the public split");
+
+        // Wired harvest is the other live source.
+        let stub = StubScorer { skill: 0.4 };
+        let harvested = boot_base_champion(&pin, &recs, EvalBackend::Lium, None, Some(&stub))
+            .expect("harvested baseline");
+        assert_eq!(harvested.holdout.len(), recs.len());
+
+        // Neither source: refuse, never quietly fall back to sim numbers.
+        let err = boot_base_champion(&pin, &recs, EvalBackend::Lium, None, None)
+            .expect_err("no live source");
+        assert!(matches!(err, EvalError::LiveHarvestUnavailable), "{err}");
+
+        // And the served host reports it.
+        let (st, body) = json_req(
+            app_full(
+                "op",
+                true,
+                EvalBackend::Lium,
+                &pin.eval_image_digest,
+                Some(Arc::new(StubScorer { skill: 0.4 })),
+                true,
+            ),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["eval_backend"], "lium");
+        assert_eq!(body["force_sim"], false);
+        assert_eq!(body["champion_baseline_recorded"], true, "{body}");
+        assert_eq!(body["can_score"], true);
+    }
+
+    /// With a pinned digest and a wired harvest, a submission must actually
+    /// reach the gates instead of stopping at a missing baseline.
+    #[tokio::test]
+    async fn live_submit_with_a_pinned_digest_reaches_the_gates() {
+        let token = "op-test-token";
+        let app = app_full(
+            token,
+            true,
+            EvalBackend::Lium,
+            &format!("sha256:{}", "ab".repeat(32)),
+            // Above BASE_CHAMPION_SKILL, so this challenger displaces.
+            Some(Arc::new(StubScorer {
+                skill: BASE_CHAMPION_SKILL + 0.35,
+            })),
+            true,
+        );
+
+        // Contamination is a real gate on this path, not a skipped one.
+        let hold_id = holdout()[0].id;
+        let (st, dirty) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            serde_json::json!({
+                "miner_hotkey": digest("miner-hotkey"),
+                "artifact_digest": digest("contaminated"),
+                "manifest": { "train_item_ids": [hold_id] },
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{dirty}");
+        assert_eq!(dirty["eval_backend"], "lium");
+        assert_eq!(dirty["eligible"], false);
+        let id = dirty["id"].as_str().expect("id");
+        let (_st, row) = json_req(
+            app.clone(),
+            "GET",
+            &format!("/v1/submissions/{id}"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        let failed = row["verdict"]["failed"].to_string();
+        assert!(failed.contains("\"contamination\""), "{failed}");
+
+        // And a clean one clears every gate and can promote.
+        let (st, clean) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            serde_json::json!({
+                "miner_hotkey": digest("miner-hotkey"),
+                "artifact_digest": digest("clean-live-adapter"),
+                "manifest": declared_manifest(),
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{clean}");
+        assert_eq!(clean["state"], "awaiting_admin", "{clean}");
+        assert_eq!(clean["eligible"], true, "{clean}");
+
+        let id = clean["id"].as_str().expect("id");
+        let (st, promoted) = json_req(
+            app,
+            "POST",
+            "/v1/admin/promote",
+            serde_json::json!({ "submission_id": id }),
+            Some(token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{promoted}");
+        assert_eq!(promoted["state"], "champion");
+    }
+
+    /// A refusal means scoring never started, so it must not bank a row.
+    /// Otherwise anyone can fill the store with `evaluating` rows that carry no
+    /// scores and appear on no operator surface.
+    #[tokio::test]
+    async fn refused_submissions_leave_no_evaluating_rows() {
+        let unpinned = app_backend("op", true, EvalBackend::Lium, "");
+        let no_baseline = app_full(
+            "op",
+            true,
+            EvalBackend::Lium,
+            &format!("sha256:{}", "cd".repeat(32)),
+            Some(Arc::new(StubScorer { skill: 0.4 })),
+            // Digest pinned and harvest wired, but the operator never recorded
+            // the baseline: refuse, and bank nothing.
+            false,
+        );
+        // Third case: sim host that never loaded a holdout.
+        let sealed = app_with("op", false);
+
+        for (label, app) in [
+            ("unpinned digest", unpinned),
+            ("no baseline", no_baseline),
+            ("sealed holdout", sealed),
+        ] {
+            for _ in 0..3 {
+                let (st, body) = json_req(
+                    app.clone(),
+                    "POST",
+                    "/v1/submissions",
+                    serde_json::json!({
+                        "miner_hotkey": digest("miner-hotkey"),
+                        "artifact_digest": digest("spam"),
+                        "manifest": declared_manifest(),
+                    }),
+                    None,
+                )
+                .await;
+                assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{label}: {body}");
+            }
+            let (st, list) =
+                json_req(app, "GET", "/v1/submissions", serde_json::json!({}), None).await;
+            assert_eq!(st, StatusCode::OK);
+            let items = list["items"].as_array().expect("items");
+            assert!(items.is_empty(), "{label} banked rows: {list}");
+        }
+    }
+
+    /// `no baseline` must not be the message when the digest pin is the cause.
+    #[tokio::test]
+    async fn unpinned_digest_reports_the_pin_not_the_baseline() {
+        let (st, body) = json_req(
+            app_backend("op", true, EvalBackend::Lium, ""),
+            "POST",
+            "/v1/submissions",
+            serde_json::json!({
+                "miner_hotkey": digest("miner-hotkey"),
+                "artifact_digest": digest("x"),
+                "manifest": declared_manifest(),
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+        let msg = body["error"].as_str().unwrap_or_default();
+        assert!(msg.contains("eval image digest not pinned"), "{body}");
+        assert!(!msg.contains("baseline"), "{body}");
     }
 
     #[tokio::test]
