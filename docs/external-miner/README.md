@@ -35,3 +35,7 @@ https://<gateway>/challenge/bounty/...
 
 Never put mnemonics or challenge signing keys in miner clients.
 Read `LIUM_API_KEY` from the environment. Do not commit it.
+
+Control-plane PRs on `CortexLM/cortex` need a Greptile review before merge
+(`.greptile/`; comment `@greptileai review` if the bot is silent). That is
+an operator gate, not a miner submit step.

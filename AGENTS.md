@@ -112,6 +112,7 @@ Match CI (`.github/workflows/ci.yml`):
 - `cargo run -p xtask -- spec-check`
 - `cargo run -p xtask -- design-check`
 - `cargo run -p xtask -- external-docs-check`
+- Greptile review (template checkbox; `@greptileai review` if silent)
 
 ## Where to read what
 
