@@ -68,7 +68,7 @@ Runbooks: [`runbooks/`](./runbooks/).
 |----------------|------|
 | `gateway` | Master-only: registry, reverse proxy, bundle seal/serve, sole TLS owner; mounts marketing [`SITE_API.md`](./SITE_API.md) (`GET /v1/site/*`) |
 | `validator` | Fetch/mirror bundle, verify, recompute, peer cross-check, CRV4 submit, dissent |
-| `relearn-challenge` | **Master-only:** digest freeze, holdout unseal, Lium/sim eval, operator promote, sign leaves |
+| `relearn-challenge` | **Master-only:** digest freeze, operator holdout unseal (commitment-checked), Lium/sim eval, contamination / public–holdout / canary / shuffle gates, operator promote, sign leaves |
 | `relearn-t2i-challenge` | **Master-only:** frozen prompt cells at pinned seeds, Q-Judger scoring, pillar / replay / contamination gates, sign leaves |
 | `relearn-mm-challenge` | **Master-only:** text-intact rerun (hard gate), vision + agentic holdout with a pixel-shuffle control, sign leaves |
 | `bounty-challenge` | **Master-only:** internal pair/reports/adjudicate; **reads** CortexLM/backend public API for scoring; sign leaves |

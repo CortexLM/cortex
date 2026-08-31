@@ -37,9 +37,31 @@ Local dummy for development: decrypt with age:
 
 | Path | Used by | Notes |
 |------|---------|-------|
+| `relearn/holdout.json` | relearn-challenge | Frozen holdout items. **Never commit.** Verified at boot against `holdout_commitment` in `config/relearn-pin.toml`; a mismatch means submissions answer **503**. Mode **0400**, uid **65532** |
 | `relearn-t2i/holdout.json` | relearn-t2i-challenge | Frozen holdout prompt records. **Never commit.** Verified at boot against `holdout_commitment` in `config/relearn-t2i-pin.toml`; a mismatch means submissions answer **503** rather than falling back to the public split. Mode **0400**, uid **65532** |
 | `relearn-t2i/admin_tokens` | relearn-t2i-challenge | One operator bearer per line for `POST /v1/admin/promote` |
 | `relearn-mm/admin_tokens` | relearn-mm-challenge | One operator bearer per line for `POST /v1/admin/promote` |
+
+Regenerate the Relearn holdout with a **private** salt (never the T2I/dev salt
+and never a salt that is committed to git):
+
+```bash
+mkdir -p deploy/secrets/relearn
+mapfile -t EXCLUDE < <(python3 -c '
+import tomllib
+from pathlib import Path
+doc = tomllib.loads(Path("config/relearn-pin.toml").read_text())
+for i in doc.get("public_ids", []):
+    print(f"--exclude={i}")
+')
+cargo run -p xtask -- relearn-holdout \
+  --catalog ~/.base-secrets/relearn-catalog.json \
+  --salt "$RELEARN_HOLDOUT_SALT" \
+  --size 120 "${EXCLUDE[@]}" \
+  --out deploy/secrets/relearn/holdout.json
+# Paste the printed holdout_commitment into config/relearn-pin.toml and
+# re-sign the trust root (config/CEREMONY.md).
+```
 
 Regenerate the T2I holdout with the private salt (keep the salt off git — it is
 what makes the holdout unguessable):

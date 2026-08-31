@@ -4636,7 +4636,10 @@ dependencies = [
 name = "relearn-challenge-task"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -4657,6 +4660,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.19",
  "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -4794,6 +4798,7 @@ dependencies = [
  "relearn-challenge-task",
  "relearn-score",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.19",
 ]
@@ -7438,6 +7443,7 @@ dependencies = [
  "hex",
  "parity-scale-codec",
  "regex",
+ "relearn-challenge-task",
  "relearn-t2i-task",
  "reqwest 0.12.28",
  "scale-info",

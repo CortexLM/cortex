@@ -53,10 +53,11 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Crates (`crates/relearn-*`) | **done** | task, score, store, eval, http, challenge. |
+| Crates (`crates/relearn-*`) | **done** | task (holdout commitment + contamination fingerprints), score (public–holdout gap, contamination, vision shuffle, off-path general-bench canary), store, eval, http, challenge. |
 | Binary (`bins/relearn-challenge`) | **done** | HTTP API on `:8095`. |
 | Compose / images | **done** | Default compose + `images.yml` target `relearn-challenge`. |
 | Eval pin | **v0** | `config/relearn-pin.toml` — digest + `CortexLM/relearn` SHA empty until first green challenge CI. |
+| Holdout | **done** | Commitment in git, records operator-side (`RELEARN_HOLDOUT_FILE`) and verified at boot. Mismatch → submissions 503. |
 | Teacher | **v0** | HTTP API from operator env (`RELEARN_TEACHER_API_URL`, `RELEARN_TEACHER_MODEL`, `RELEARN_TEACHER_API_KEY`). Missing URL/key → sim. Judge-only; miner weights never served via that API. |
 | Emission | **4000 bps** | Default share (sum across all four challenges is `10000`). |
 | Spec | live | [`RELEARN.md`](RELEARN.md). |
@@ -157,6 +158,7 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 | DCAP error classification | Matches on `anyhow` message text; re-run `cargo test -p attest-policy --features dcap` after any `dcap-qvl` bump. |
 | Relearn eval image digests | Empty until `CortexLM/relearn` CI publishes digest-pinned `relearn-eval`, `relearn-t2i-eval`, and `relearn-mm-eval` images. Live Lium rent is refused until then. |
 | Relearn T2I holdout salt | The committed `holdout_commitment` uses the documented **dev** salt so local and staging work out of the box. Production must rotate to a private salt, replace the commitment, and re-sign. |
+| Relearn holdout salt | The committed `holdout_commitment` uses the local salt `cortex-relearn-dev-holdout-v0` (not the T2I/dev salt) over a synthetic catalog so CI can boot. Production must rotate to a private salt **and** a private catalog, replace the commitment, and re-sign. |
 | Relearn Multimodal champion LM hash | `RELEARN_MM_CHAMPION_LM_HASH` is operator-supplied. Unset means encoder-only submissions are rejected (they cannot prove the LM is unchanged). |
 | Relearn public repo | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) exists; this repo pins `relearn_git_sha`. Seed mirror: `docs/external-miner/relearn-seed/`. |
 | Mainnet (netuid 100) | Owner wallet not yet on this machine, so prod runs with `BASE_GATEWAY_REQUIRE_OWNER=0`. |

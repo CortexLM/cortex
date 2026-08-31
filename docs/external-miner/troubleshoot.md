@@ -12,6 +12,10 @@
 | `awaiting_admin` but no weights | Operator has not promoted | `POST /v1/admin/promote` is operator-only |
 | `rejected` with `Regression` | Challenger did not displace the champion | Improve the artifact; regressions are never crowned |
 | `rejected` with `PublicPrivateGap` | Overfit / contamination | Public-private gap exceeded the gate |
+| `rejected` with `Contamination` | Training metadata overlapped the holdout | Drop holdout ids / image hashes from `manifest.train_*` |
+| `rejected` with `CanaryRegression` | General-bench drop past ε | Off-path MMLU/MMMU canary; not in the visible score |
+| `rejected` with `IgnoresTheImage` | Pixel-shuffle control | Vision family scored the same on shuffled pixels |
+| `503` on submit | Holdout file missing or mismatched | Operator: `RELEARN_HOLDOUT_FILE` must match the pin commitment |
 | `rejected` with `Canaries` | Catastrophic forgetting | Base-model canaries must stay ≥ 0.95 |
 | Live Lium skipped | No `eval_image_digest` pin or no `X-Lium-Api-Key` | Cortex refuses rent until relearn CI publishes a digest; sim still scores |
 | Teacher 4xx | Miner weights sent to the judge API | Teacher is judge-only; never the scored artifact |

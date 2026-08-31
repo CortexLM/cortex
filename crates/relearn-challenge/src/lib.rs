@@ -15,6 +15,7 @@ use relearn_challenge_task::{CHALLENGE_ID_BYTES, SCORE_MAX};
 use relearn_score::champion_hold_lattice;
 use relearn_store::SubmissionState;
 
+pub use relearn_challenge_task::HoldoutItem;
 pub use relearn_challenge_task::{
     BASE_MODEL_ID, CHALLENGE_ID, CHALLENGE_ID_BYTES as RELEARN_ID_BYTES,
     SCORE_MAX as RELEARN_SCORE_MAX, SCORING_VERSION, TEACHER_MODEL_ID,
@@ -22,6 +23,15 @@ pub use relearn_challenge_task::{
 pub use relearn_eval::{resolve_teacher_backend, RelearnPin};
 pub use relearn_http::{hash_admin_token, relearn_router, AppState};
 pub use relearn_store::MemoryStore;
+
+/// Load frozen holdout records from an operator JSON file body.
+///
+/// # Errors
+///
+/// Returns the serde message when the body is not an item array.
+pub fn parse_holdout_file(body: &str) -> Result<Vec<HoldoutItem>, String> {
+    serde_json::from_str(body).map_err(|e| format!("parse holdout records: {e}"))
+}
 
 /// Build a D24-complete score map: champion (if any) gets a positive lattice;
 /// everyone else is explicit `NoScore` (never silent).
@@ -123,5 +133,13 @@ mod tests {
         let e = BTreeSet::new();
         let leaves = emit_epoch(&sk(), 1, &e, None, 0).expect("empty E");
         assert!(leaves.is_empty());
+    }
+
+    #[test]
+    fn holdout_file_parses_records() {
+        let body = r#"[{"id": 900, "prompt": "a red cube", "dataset_id": "dev", "task": "text"}]"#;
+        let recs = parse_holdout_file(body).expect("parse");
+        assert_eq!(recs.len(), 1);
+        assert!(parse_holdout_file("not json").is_err());
     }
 }

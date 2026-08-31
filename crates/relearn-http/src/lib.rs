@@ -25,12 +25,13 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use std::collections::BTreeSet;
+
 use relearn_challenge_task::{CHALLENGE_ID, SCORE_MAX, SCORING_VERSION};
-use relearn_eval::{base_champion_scores, eval_after_freeze, resolve_teacher_backend, RelearnPin};
-use relearn_score::judge_challenger;
+use relearn_eval::{eval_after_freeze, resolve_teacher_backend, RelearnPin};
+use relearn_score::{contaminated_fingerprints, judge_challenger};
 use relearn_store::{
-    freeze_submission_digest, public_holdout, sealed_holdout, MemoryStore, Submission,
-    SubmissionState,
+    freeze_submission_digest, ArtifactManifest, MemoryStore, Submission, SubmissionState,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -67,6 +68,7 @@ async fn health() -> impl IntoResponse {
 
 async fn status(State(st): State<AppState>) -> impl IntoResponse {
     let champ = st.store.champion_id().ok().flatten();
+    let seal = st.store.holdout_seal().ok();
     Json(serde_json::json!({
         "challenge_id": CHALLENGE_ID,
         "scoring_version": SCORING_VERSION,
@@ -78,6 +80,9 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         "eval_image_digest": st.pin.eval_image_digest,
         "relearn_git": st.pin.relearn_git,
         "relearn_git_sha": st.pin.relearn_git_sha,
+        // Commitment + size + loaded. Never ids, prompts, or image hashes.
+        "holdout": seal,
+        "public_ids": st.pin.public_ids,
         "champion_id": champ,
     }))
 }
@@ -87,6 +92,8 @@ struct SubmitBody {
     miner_hotkey: String,
     artifact_digest: String,
     artifact_uri: Option<String>,
+    #[serde(default)]
+    manifest: ArtifactManifest,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,13 +139,13 @@ async fn submit(
 
     let nonce = nonce_from(&hotkey, &artifact);
     let submission_digest = freeze_submission_digest(&hotkey, &artifact, &nonce);
-    let pending = sealed_holdout(0, &submission_digest);
 
     let row = Submission {
         id: String::new(),
         miner_hotkey: hotkey,
         artifact_digest: artifact.clone(),
         artifact_uri: body.artifact_uri,
+        manifest: body.manifest.clone(),
         nonce,
         submission_digest: submission_digest.clone(),
         state: SubmissionState::Evaluating,
@@ -151,19 +158,40 @@ async fn submit(
         .insert(row)
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
 
-    let eval = eval_after_freeze(&pending, &submission_digest, &artifact)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let _public = public_holdout(&eval.holdout);
-
-    let champ = st
+    let holdout = st
         .store
-        .champion_scores()
-        .ok()
-        .flatten()
-        .unwrap_or_else(base_champion_scores);
-    let verdict = judge_challenger(&champ, &eval.scores);
+        .unseal_holdout(&submission_digest)
+        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+
+    let eval = eval_after_freeze(&submission_digest, &artifact, &holdout)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let train_ids: BTreeSet<u32> = body.manifest.train_item_ids.iter().copied().collect();
+    let train_images: BTreeSet<String> = body
+        .manifest
+        .train_image_hashes
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .collect();
+    let train_datasets: BTreeSet<String> = body
+        .manifest
+        .train_dataset_ids
+        .iter()
+        .map(|s| s.trim().to_owned())
+        .collect();
+    let mut scores = eval.scores;
+    scores.contaminated_fingerprints =
+        contaminated_fingerprints(&train_ids, &train_images, &train_datasets, &holdout);
+
+    let champ = st.store.champion_scores().ok().flatten().ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no champion baseline recorded",
+        )
+    })?;
+    let verdict = judge_challenger(&champ, &scores);
     st.store
-        .record_scores(&row.id, eval.scores.clone())
+        .record_scores(&row.id, scores)
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
     let eligible = verdict.eligible;
     let state = if eligible {
@@ -188,7 +216,7 @@ async fn submit(
             id: row.id,
             submission_digest: row.submission_digest,
             state: row.state,
-            holdout_unsealed: eval.holdout.unsealed,
+            holdout_unsealed: eval.holdout_items > 0,
             eligible,
         }),
     ))
@@ -272,12 +300,62 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use relearn_challenge_task::{holdout_commitment, HoldoutItem, HoldoutTask};
+    use relearn_eval::base_champion_scores;
     use tower::ServiceExt;
 
     fn digest(label: &str) -> String {
         let mut h = Sha256::new();
         h.update(label.as_bytes());
         hex::encode(h.finalize())
+    }
+
+    fn holdout() -> Vec<HoldoutItem> {
+        (1..=120)
+            .map(|id| {
+                let (task, image_hash) = match id % 5 {
+                    1 => (HoldoutTask::Captioning, format!("{id:064x}")),
+                    2 => (HoldoutTask::Vqa, format!("{:064x}", id + 200)),
+                    3 => (HoldoutTask::Ocr, format!("{:064x}", id + 400)),
+                    4 => (HoldoutTask::Spatial, format!("{:064x}", id + 600)),
+                    _ => (HoldoutTask::Text, String::new()),
+                };
+                HoldoutItem {
+                    id: 800 + id,
+                    prompt: format!("holdout item {id} with enough words for a trigram"),
+                    dataset_id: "dev".into(),
+                    task,
+                    image_hash,
+                }
+            })
+            .collect()
+    }
+
+    fn app_with(token: &str, load: bool) -> Router {
+        let recs = holdout();
+        let pin = RelearnPin {
+            holdout_commitment: holdout_commitment(&recs),
+            holdout_size: recs.len(),
+            public_ids: (1..=40).collect(),
+            ..RelearnPin::default()
+        };
+        let store = MemoryStore::new();
+        store
+            .set_holdout_commitment(&pin.holdout_commitment, pin.holdout_size)
+            .expect("commit");
+        if load {
+            store
+                .load_holdout(recs.clone(), &[], &pin.public_ids)
+                .expect("load");
+            store
+                .set_base_champion(base_champion_scores(&recs))
+                .expect("base");
+        }
+        relearn_router(AppState {
+            store,
+            pin,
+            admin_hashes: Arc::new(vec![hash_admin_token(token)]),
+        })
     }
 
     async fn json_req(
@@ -305,15 +383,7 @@ mod tests {
     #[tokio::test]
     async fn submit_eval_promote_happy_path() {
         let token = "op-test-token";
-        let store = MemoryStore::new();
-        store
-            .set_base_champion(base_champion_scores())
-            .expect("base");
-        let app = relearn_router(AppState {
-            store,
-            pin: RelearnPin::default(),
-            admin_hashes: Arc::new(vec![hash_admin_token(token)]),
-        });
+        let app = app_with(token, true);
 
         let (st, health) =
             json_req(app.clone(), "GET", "/health", serde_json::json!({}), None).await;
@@ -357,11 +427,7 @@ mod tests {
 
     #[tokio::test]
     async fn promote_requires_bearer() {
-        let app = relearn_router(AppState {
-            store: MemoryStore::new(),
-            pin: RelearnPin::default(),
-            admin_hashes: Arc::new(vec![hash_admin_token("x")]),
-        });
+        let app = app_with("x", true);
         let (st, _) = json_req(
             app,
             "POST",
@@ -380,5 +446,59 @@ mod tests {
             "Qwen/Qwen3.8-Flash-Next"
         );
         assert_eq!(relearn_challenge_task::TEACHER_MODEL_ID, "kimi-k3");
+    }
+
+    #[tokio::test]
+    async fn status_publishes_the_seal_not_holdout_items() {
+        let (st, body) = json_req(
+            app_with("op", true),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["holdout"]["loaded"], true);
+        assert_eq!(body["holdout"]["size"], 120);
+        let dump = body.to_string();
+        assert!(!dump.contains("holdout item"), "{dump}");
+        assert!(!dump.contains("\"id\":801"));
+    }
+
+    #[tokio::test]
+    async fn submit_without_a_loaded_holdout_is_unavailable_not_scored() {
+        let (st, body) = json_req(
+            app_with("op", false),
+            "POST",
+            "/v1/submissions",
+            serde_json::json!({
+                "miner_hotkey": digest("miner-hotkey"),
+                "artifact_digest": digest("x"),
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    }
+
+    #[tokio::test]
+    async fn contaminated_training_metadata_cannot_promote() {
+        let hold_id = holdout()[0].id;
+        let (st, created) = json_req(
+            app_with("op", true),
+            "POST",
+            "/v1/submissions",
+            serde_json::json!({
+                "miner_hotkey": digest("miner-hotkey"),
+                "artifact_digest": digest("miner-strong-adapter"),
+                "manifest": { "train_item_ids": [hold_id] },
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_eq!(created["eligible"], false);
+        assert_eq!(created["state"], "rejected");
     }
 }

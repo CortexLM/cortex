@@ -11,7 +11,14 @@
 //! Master-centralized Lium eval; miners pay Lium.
 
 #![forbid(unsafe_code)]
-#![allow(clippy::doc_markdown)]
+#![allow(clippy::doc_markdown, clippy::module_name_repetitions)]
+
+mod holdout;
+
+pub use holdout::{
+    contamination, holdout_commitment, near_duplicates, verify_holdout_items, HoldoutError,
+    HoldoutItem, HoldoutTask, MIN_HOLDOUT_ITEMS, NGRAM_JACCARD_MAX,
+};
 
 /// Normative challenge id (trust-root / leaf `challenge_id` string).
 pub const CHALLENGE_ID: &str = "relearn";
@@ -59,12 +66,13 @@ pub const RELEARN_GIT_URL: &str = "https://github.com/CortexLM/relearn";
 
 /// Teacher serving mode. v0 default is a teacher-only HTTP API.
 /// Miner weights are never served through the teacher API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TeacherBackend {
     /// Optional NVFP4 on a digest-pinned Lium pod (`RELEARN_TEACHER_BACKEND=lium`).
     LiumNvfp4,
     /// Teacher-only OpenAI-compatible HTTP API (v0 default).
+    #[default]
     HttpApi,
     /// Deterministic offline judge (CI / `RELEARN_FORCE_SIM`).
     Sim,

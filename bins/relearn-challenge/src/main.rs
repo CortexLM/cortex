@@ -2,20 +2,27 @@
 //!
 //! Miner HTTP submit → digest freeze → holdout unseal → sim/Lium eval →
 //! operator-audited promote. Miners pay Lium.
+//!
+//! Holdout records are loaded from an operator file and verified against the
+//! commitment in `config/relearn-pin.toml`. If that file is absent or does not
+//! match, the service still serves `/health` and `/v1/status` but refuses
+//! submissions: scoring a reconstructable seed or the public split would
+//! silently turn the anti-overfit gates off.
 
 #![forbid(unsafe_code)]
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use challenge_keys::load_challenge_secret;
 use clap::Parser;
 use relearn_challenge::{
-    hash_admin_token, relearn_router, AppState, MemoryStore, CHALLENGE_ID, SCORING_VERSION,
+    hash_admin_token, parse_holdout_file, relearn_router, AppState, MemoryStore, RelearnPin,
+    CHALLENGE_ID, SCORING_VERSION,
 };
-use relearn_eval::{base_champion_scores, RelearnPin};
+use relearn_eval::base_champion_scores;
 use tokio::net::TcpListener;
 
 /// Operator Relearn challenge service CLI.
@@ -40,6 +47,9 @@ struct Cli {
     /// Pin file (`config/relearn-pin.toml`).
     #[arg(long, env = "RELEARN_PIN_FILE")]
     pin_file: Option<PathBuf>,
+    /// Operator holdout records (JSON array). Never in git.
+    #[arg(long, env = "RELEARN_HOLDOUT_FILE")]
+    holdout_file: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -58,15 +68,24 @@ fn run(cli: &Cli) -> Result<(), String> {
     if let Some(p) = &cli.challenge_sk_file {
         let _sk = load_challenge_secret(p).map_err(|e| format!("challenge sk: {e}"))?;
     }
-    let pin = load_pin(cli.pin_file.as_deref());
+    let pin = load_pin(cli.pin_file.as_deref())?;
     if cli.force_sim {
         tracing::info!("RELEARN_FORCE_SIM=1 — sim eval only");
     }
     let admin_hashes = load_admin_hashes(cli.admin_tokens_file.as_deref());
     let store = MemoryStore::new();
     store
-        .set_base_champion(base_champion_scores())
+        .set_holdout_commitment(&pin.holdout_commitment, pin.holdout_size)
         .map_err(|e| e.to_string())?;
+    match load_holdout(&store, &pin, cli.holdout_file.as_deref()) {
+        Ok(n) => tracing::info!(holdout_items = n, "holdout verified against pin commitment"),
+        Err(e) => tracing::warn!("holdout unavailable ({e}); submissions will 503 until fixed"),
+    }
+    if let Ok(recs) = store.unseal_holdout("boot-baseline") {
+        store
+            .set_base_champion(base_champion_scores(&recs))
+            .map_err(|e| e.to_string())?;
+    }
     let state = AppState {
         store,
         pin,
@@ -79,13 +98,32 @@ fn run(cli: &Cli) -> Result<(), String> {
     rt.block_on(serve(cli.bind, state))
 }
 
-fn load_pin(path: Option<&std::path::Path>) -> RelearnPin {
-    path.and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|s| RelearnPin::from_toml(&s))
-        .unwrap_or_default()
+fn load_pin(path: Option<&Path>) -> Result<RelearnPin, String> {
+    let Some(p) = path else {
+        return Ok(RelearnPin::default());
+    };
+    let body = std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?;
+    let pin = RelearnPin::from_toml(&body).map_err(|e| e.to_string())?;
+    pin.validate().map_err(|e| e.to_string())?;
+    Ok(pin)
 }
 
-fn load_admin_hashes(path: Option<&std::path::Path>) -> Vec<String> {
+fn load_holdout(
+    store: &MemoryStore,
+    pin: &RelearnPin,
+    path: Option<&Path>,
+) -> Result<usize, String> {
+    let p = path.ok_or("RELEARN_HOLDOUT_FILE not set")?;
+    let body = std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?;
+    let records = parse_holdout_file(&body)?;
+    let n = records.len();
+    store
+        .load_holdout(records, &[], &pin.public_ids)
+        .map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
+fn load_admin_hashes(path: Option<&Path>) -> Vec<String> {
     let Some(p) = path else {
         return Vec::new();
     };

@@ -1,6 +1,21 @@
 # Cortex pin for the split CortexLM/relearn challenge repo.
 # Deploy = bump eval_image_digest + relearn_git_sha after relearn CI is green.
-# Never put secrets in this file.
+# Never put secrets, teacher endpoints, or holdout items in this file.
+#
+# The holdout split is NOT in this file. Git carries only its commitment; the
+# records live in an operator file (`RELEARN_HOLDOUT_FILE`) and are checked
+# against the commitment at boot. Regenerate with:
+#
+#   cargo run -p xtask -- relearn-holdout --catalog <catalog.json> \
+#     --salt "$RELEARN_HOLDOUT_SALT" --size 120 --exclude <each public id> \
+#     --out /root/.base-secrets/relearn-holdout.json
+#
+# The committed commitment below is the LOCAL salt
+# "cortex-relearn-dev-holdout-v0" over a synthetic catalog so CI and staging
+# can boot. That salt is NOT the T2I/dev salt. Production must rotate to a
+# private salt + private catalog, replace the commitment, and re-sign
+# (config/CEREMONY.md). A documented salt plus a public catalog would let
+# miners reconstruct the scored split.
 
 base_model = "Qwen/Qwen3.8-Flash-Next"
 # HTTP teacher model id. Operator may override with RELEARN_TEACHER_MODEL.
@@ -12,3 +27,14 @@ eval_image = "ghcr.io/cortexlm/relearn-eval"
 eval_image_digest = ""
 relearn_git = "https://github.com/CortexLM/relearn"
 relearn_git_sha = "6e952d1e5edd6e6906ba7fe8442898f334400fb4"
+
+# Public split ids (miners may train on these). Holdout selection must exclude
+# every one of them. The scored holdout records stay off git.
+public_ids = [
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+  11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+  21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+  31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+]
+holdout_commitment = "84aed1547520f39c325712822a3533dc384d2c0a8f152d8acc686b0b7a921065"
+holdout_size = 120

@@ -1,24 +1,32 @@
 //! Displacement scoring for Relearn.
 //!
-//! Score is challenger vs the previous champion on a shared holdout slice.
+//! Score is challenger vs the previous champion on a shared **holdout** slice.
 //! A regression is never crowned. Promotion additionally requires the
-//! operator-audited paired win plus retention / overfit gates.
+//! operator-audited paired win plus retention / overfit / contamination gates.
+//!
+//! The visible lattice is computed from the holdout paired test only. Public
+//! split, general-bench canaries, and pixel-shuffle are gates: they can zero
+//! a run but they never enter the lattice. Miners overfit anything that pays.
 
 #![forbid(unsafe_code)]
 #![allow(
     clippy::missing_errors_doc,
     clippy::doc_markdown,
     clippy::cast_precision_loss,
-    clippy::cast_possible_truncation
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::module_name_repetitions
 )]
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use prism_competition::{
     paired_test, Direction, ExampleSeries, PairedInput, PairedOutcome, PairedRefusal, DEADZONE,
 };
-use relearn_challenge_task::SCORE_MAX;
+use relearn_challenge_task::{contamination, HoldoutItem, HoldoutTask, SCORE_MAX};
 use serde::{Deserialize, Serialize};
 
-/// Maximum allowed public-private accuracy gap (absolute).
+/// Maximum allowed public-minus-holdout gap (absolute).
 pub const MAX_PUBLIC_PRIVATE_GAP: f64 = 0.08;
 
 /// Maximum allowed drop under input perturbation (absolute).
@@ -27,22 +35,80 @@ pub const MAX_PERTURB_DROP: f64 = 0.05;
 /// Minimum canary accuracy (known-answer items the base model already solves).
 pub const MIN_CANARY_ACCURACY: f64 = 0.95;
 
+/// Largest tolerated drop vs the champion on the general-bench canary.
+///
+/// MMLU / MMMU / similar stay **off** the visible score. A regression past
+/// this epsilon is a hard zero, not a reduced lattice.
+pub const CANARY_EPSILON: f64 = 0.02;
+
+/// Minimum score drop required when vision-item pixels are shuffled.
+pub const MIN_SHUFFLE_DROP: f64 = 0.10;
+
 /// Minimum agent-trace score (first-class; 0..1).
 pub const MIN_AGENT_TRACE: f64 = 0.5;
+
+/// Slice id bound into the paired test.
+pub const HOLDOUT_SLICE_ID: &str = "relearn-holdout";
+
+/// Pixel-shuffle evidence for one vision family.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShuffleEvidence {
+    /// Items scored in this family.
+    pub items: u32,
+    /// Mean score with the real image (`0..=1`).
+    pub score: f64,
+    /// Mean score with the image pixels shuffled (`0..=1`).
+    pub shuffled_score: f64,
+}
+
+impl ShuffleEvidence {
+    /// How much the score fell when the image was destroyed.
+    #[must_use]
+    pub fn shuffle_drop(&self) -> f64 {
+        self.score - self.shuffled_score
+    }
+
+    /// Whether the model demonstrably used the image.
+    #[must_use]
+    pub fn uses_the_image(&self) -> bool {
+        self.items > 0 && self.shuffle_drop() >= MIN_SHUFFLE_DROP - DEADZONE
+    }
+}
 
 /// Per-example holdout measurements for one submission.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceScores {
-    /// Holdout items (scored artifact). Higher is better.
+    /// Holdout items (the only series that may enter the lattice).
     pub holdout: ExampleSeries,
-    /// Public / training-adjacent canary slice (overfit detector).
+    /// Public / training-adjacent split (overfit detector; never lattice).
     pub public: ExampleSeries,
     /// Same holdout items after a pinned perturbation.
     pub perturbed: ExampleSeries,
     /// Known-answer canaries (base-model already-correct items).
     pub canaries: ExampleSeries,
+    /// General benches (MMLU / MMMU / …). Off the visible score path.
+    pub general_canary: ExampleSeries,
     /// Agent-trace quality in `[0, 1]` (first-class; not a side channel).
     pub agent_trace: f64,
+    /// Pixel-shuffle control, one entry per vision family that had images.
+    pub vision_shuffle: BTreeMap<HoldoutTask, ShuffleEvidence>,
+    /// Holdout fingerprints found in the submission's training metadata.
+    pub contaminated_fingerprints: Vec<String>,
+}
+
+impl Default for SliceScores {
+    fn default() -> Self {
+        Self {
+            holdout: ExampleSeries::default(),
+            public: ExampleSeries::default(),
+            perturbed: ExampleSeries::default(),
+            canaries: ExampleSeries::default(),
+            general_canary: ExampleSeries::default(),
+            agent_trace: 0.0,
+            vision_shuffle: BTreeMap::new(),
+            contaminated_fingerprints: Vec::new(),
+        }
+    }
 }
 
 impl SliceScores {
@@ -67,12 +133,28 @@ pub enum GateFail {
     Regression,
     /// Public-private gap too large (memorization / contamination).
     PublicPrivateGap,
+    /// Public split evidence was missing (fail-closed).
+    PublicEvidenceMissing,
     /// Perturbed holdout collapsed (brittle / overfit).
     Perturbation,
-    /// Canaries failed (catastrophic forgetting of base competence).
+    /// Base-competence canaries failed.
     Canaries,
+    /// General-bench canary regressed past [`CANARY_EPSILON`].
+    CanaryRegression {
+        /// Size of the drop in bps.
+        drop_bps: u64,
+    },
+    /// General-bench canary did not run.
+    CanaryEvidenceMissing,
     /// Agent-trace score below floor.
     AgentTrace,
+    /// Eval item ids / image hashes appear in training metadata.
+    Contamination,
+    /// Shuffling the image pixels barely changed the score.
+    IgnoresTheImage {
+        /// Family that ignored the pixels.
+        task: HoldoutTask,
+    },
     /// Paired test refused (slice mismatch / too thin).
     PairedRefusal,
 }
@@ -114,7 +196,21 @@ pub struct PromoteVerdict {
     pub lattice: u64,
 }
 
+/// Eval fingerprints that leaked into a submission's training metadata.
+#[must_use]
+pub fn contaminated_fingerprints(
+    train_ids: &BTreeSet<u32>,
+    train_image_hashes: &BTreeSet<String>,
+    train_dataset_ids: &BTreeSet<String>,
+    holdout: &[HoldoutItem],
+) -> Vec<String> {
+    contamination(train_ids, train_image_hashes, train_dataset_ids, holdout)
+}
+
 /// Judge challenger vs champion. Never returns `eligible` on a regression.
+///
+/// The lattice is holdout-only. General-bench canary, public gap, shuffle, and
+/// contamination can only zero a run.
 #[must_use]
 pub fn judge_challenger(champion: &SliceScores, challenger: &SliceScores) -> PromoteVerdict {
     let mut failed = Vec::new();
@@ -122,7 +218,7 @@ pub fn judge_challenger(champion: &SliceScores, challenger: &SliceScores) -> Pro
     let input = PairedInput {
         metric: "relearn.holdout".into(),
         direction: Direction::HigherBetter,
-        slice_id: "holdout".into(),
+        slice_id: HOLDOUT_SLICE_ID.into(),
         champion: champion.holdout.clone(),
         challenger: challenger.holdout.clone(),
     };
@@ -147,13 +243,17 @@ pub fn judge_challenger(champion: &SliceScores, challenger: &SliceScores) -> Pro
         None => failed.push(GateFail::NoPairedWin),
     }
 
-    if let (Some(pub_m), Some(priv_m)) = (
+    match (
         SliceScores::mean(&challenger.public),
         SliceScores::mean(&challenger.holdout),
     ) {
-        if (pub_m - priv_m).abs() > MAX_PUBLIC_PRIVATE_GAP + DEADZONE {
-            failed.push(GateFail::PublicPrivateGap);
+        (None, _) => failed.push(GateFail::PublicEvidenceMissing),
+        (Some(pub_m), Some(priv_m)) => {
+            if pub_m - priv_m > MAX_PUBLIC_PRIVATE_GAP + DEADZONE {
+                failed.push(GateFail::PublicPrivateGap);
+            }
         }
+        (Some(_), None) => failed.push(GateFail::PairedRefusal),
     }
 
     if let (Some(h), Some(p)) = (
@@ -171,8 +271,36 @@ pub fn judge_challenger(champion: &SliceScores, challenger: &SliceScores) -> Pro
         }
     }
 
+    match (
+        SliceScores::mean(&champion.general_canary),
+        SliceScores::mean(&challenger.general_canary),
+    ) {
+        (None, _) | (_, None) => failed.push(GateFail::CanaryEvidenceMissing),
+        (Some(champ_c), Some(chal_c)) => {
+            let drop = champ_c - chal_c;
+            if drop > CANARY_EPSILON + DEADZONE {
+                failed.push(GateFail::CanaryRegression {
+                    drop_bps: (drop * 10_000.0).round().max(0.0) as u64,
+                });
+            }
+        }
+    }
+
     if challenger.agent_trace + DEADZONE < MIN_AGENT_TRACE {
         failed.push(GateFail::AgentTrace);
+    }
+
+    if !challenger.contaminated_fingerprints.is_empty() {
+        failed.push(GateFail::Contamination);
+    }
+
+    for task in HoldoutTask::VISION {
+        let Some(ev) = challenger.vision_shuffle.get(&task) else {
+            continue;
+        };
+        if !ev.uses_the_image() {
+            failed.push(GateFail::IgnoresTheImage { task });
+        }
     }
 
     failed.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
@@ -217,13 +345,32 @@ mod tests {
         ExampleSeries::from_pairs((0..n).map(|i| (format!("{prefix}{i}"), val)))
     }
 
+    fn vision_ok() -> BTreeMap<HoldoutTask, ShuffleEvidence> {
+        HoldoutTask::VISION
+            .into_iter()
+            .map(|t| {
+                (
+                    t,
+                    ShuffleEvidence {
+                        items: 40,
+                        score: 0.70,
+                        shuffled_score: 0.40,
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn slice(hold: f64, public: f64, pert: f64, canary: f64, trace: f64) -> SliceScores {
         SliceScores {
             holdout: series("h", 120, hold),
             public: series("p", 120, public),
             perturbed: series("x", 120, pert),
             canaries: series("c", 40, canary),
+            general_canary: series("g", 40, 0.97),
             agent_trace: trace,
+            vision_shuffle: vision_ok(),
+            contaminated_fingerprints: Vec::new(),
         }
     }
 
@@ -247,11 +394,22 @@ mod tests {
     }
 
     #[test]
-    fn public_private_gap_blocks() {
+    fn public_far_above_holdout_blocks() {
         let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
         let leak = slice(0.80, 0.99, 0.79, 0.99, 0.9);
         let v = judge_challenger(&champ, &leak);
         assert!(v.failed.contains(&GateFail::PublicPrivateGap));
+        assert!(!v.eligible);
+        assert_eq!(v.lattice, 0);
+    }
+
+    #[test]
+    fn empty_public_is_fail_closed() {
+        let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
+        let mut chal = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+        chal.public = ExampleSeries::default();
+        let v = judge_challenger(&champ, &chal);
+        assert!(v.failed.contains(&GateFail::PublicEvidenceMissing));
         assert!(!v.eligible);
     }
 
@@ -262,6 +420,90 @@ mod tests {
         let v = judge_challenger(&champ, &forget);
         assert!(v.failed.contains(&GateFail::Canaries));
         assert!(!v.eligible);
+    }
+
+    #[test]
+    fn general_canary_regression_is_a_hard_zero_off_the_lattice() {
+        let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
+        let mut chal = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+        chal.general_canary = series("g", 40, 0.70);
+        let v = judge_challenger(&champ, &chal);
+        assert!(
+            v.failed
+                .iter()
+                .any(|f| matches!(f, GateFail::CanaryRegression { .. })),
+            "{:?}",
+            v.failed
+        );
+        assert!(!v.eligible);
+        assert_eq!(v.lattice, 0);
+        assert!(
+            v.paired.expect("holdout still ran").displaces,
+            "canary must not be mixed into the holdout win"
+        );
+    }
+
+    #[test]
+    fn missing_general_canary_is_fail_closed() {
+        let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
+        let mut chal = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+        chal.general_canary = ExampleSeries::default();
+        let v = judge_challenger(&champ, &chal);
+        assert!(v.failed.contains(&GateFail::CanaryEvidenceMissing));
+        assert_eq!(v.lattice, 0);
+    }
+
+    #[test]
+    fn noise_inside_canary_epsilon_is_tolerated() {
+        let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
+        let mut chal = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+        chal.general_canary = series("g", 40, 0.96);
+        assert!(judge_challenger(&champ, &chal).eligible);
+    }
+
+    #[test]
+    fn contamination_blocks_promotion() {
+        let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
+        let mut chal = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+        chal.contaminated_fingerprints = vec!["id:900".into()];
+        let v = judge_challenger(&champ, &chal);
+        assert!(v.failed.contains(&GateFail::Contamination));
+        assert!(!v.eligible);
+        assert_eq!(v.lattice, 0);
+    }
+
+    #[test]
+    fn pixel_shuffle_is_required_on_every_vision_family() {
+        let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
+        for task in HoldoutTask::VISION {
+            let mut chal = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+            chal.vision_shuffle.insert(
+                task,
+                ShuffleEvidence {
+                    items: 40,
+                    score: 0.80,
+                    shuffled_score: 0.79,
+                },
+            );
+            let v = judge_challenger(&champ, &chal);
+            assert!(
+                v.failed.contains(&GateFail::IgnoresTheImage { task }),
+                "family {task:?} must take the shuffle control, failed={:?}",
+                v.failed
+            );
+            assert_eq!(v.lattice, 0);
+        }
+    }
+
+    #[test]
+    fn text_only_holdout_does_not_require_shuffle() {
+        let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
+        let mut chal = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+        chal.vision_shuffle.clear();
+        assert!(
+            judge_challenger(&champ, &chal).eligible,
+            "no images ⇒ no shuffle gate"
+        );
     }
 
     #[test]

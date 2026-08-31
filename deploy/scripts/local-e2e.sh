@@ -367,15 +367,48 @@ ensure_secrets() {
   [[ -e deploy/secrets/bounty/session_secret ]] || dd if=/dev/urandom bs=32 count=1 status=none of=deploy/secrets/bounty/session_secret
   # Relearn T2I refuses submissions without holdout records matching the pin
   # commitment. Local smoke materializes them from the documented dev salt.
+  ensure_relearn_holdout
   ensure_t2i_holdout
   local guarded=(deploy/secrets/bounty/session_secret)
   for area in relearn relearn-t2i relearn-mm bounty; do
     guarded+=("deploy/secrets/$area/admin_tokens")
   done
+  [[ -e deploy/secrets/relearn/holdout.json ]] \
+    && guarded+=(deploy/secrets/relearn/holdout.json)
   [[ -e deploy/secrets/relearn-t2i/holdout.json ]] \
     && guarded+=(deploy/secrets/relearn-t2i/holdout.json)
   chown 65532:65532 "${guarded[@]}" 2>/dev/null || true
   chmod 0400 "${guarded[@]}" 2>/dev/null || true
+}
+
+# Materialize Relearn holdout records for a local run from the synthetic
+# catalog + local salt (never the T2I/dev salt). Matches the committed pin.
+ensure_relearn_holdout() {
+  [[ -s deploy/secrets/relearn/holdout.json ]] && return 0
+  mkdir -p deploy/secrets/relearn
+  local -a excludes=()
+  local id
+  while read -r id; do
+    excludes+=(--exclude "$id")
+  done < <(relearn_public_ids)
+  log "generating relearn holdout records (synthetic catalog, local salt)"
+  cargo run -q -p xtask -- relearn-holdout \
+    --synthetic \
+    --salt "${RELEARN_HOLDOUT_SALT:-cortex-relearn-dev-holdout-v0}" \
+    --size 120 \
+    "${excludes[@]}" \
+    --out "$ROOT/deploy/secrets/relearn/holdout.json"
+}
+
+# Public item ids from the committed Relearn pin, one per line.
+relearn_public_ids() {
+  python3 -c '
+import sys, tomllib
+from pathlib import Path
+doc = tomllib.loads(Path(sys.argv[1]).read_text())
+for i in doc.get("public_ids", []):
+    print(i)
+' "$ROOT/config/relearn-pin.toml"
 }
 
 # Materialize Relearn T2I holdout prompt records for a local run.

@@ -9,7 +9,10 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+hex = "0.4"
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"
 
 [lints]
 workspace = true
