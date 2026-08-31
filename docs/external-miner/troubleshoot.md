@@ -13,11 +13,14 @@
 | `rejected` with `Regression` | Challenger did not displace the champion | Improve the artifact; regressions are never crowned |
 | `rejected` with `PublicPrivateGap` | Overfit / contamination | Public-private gap exceeded the gate |
 | `rejected` with `Contamination` | Training metadata overlapped the holdout | Drop holdout ids / image hashes from `manifest.train_*` |
+| `rejected` with `ContaminationEvidenceMissing` | `manifest` declared nothing | Fill `manifest.train_item_ids` / `train_image_hashes` / `train_dataset_ids`. An empty manifest fails the gate instead of skipping it |
 | `rejected` with `CanaryRegression` | General-bench drop past ε | Off-path MMLU/MMMU canary; not in the visible score |
 | `rejected` with `IgnoresTheImage` | Pixel-shuffle control | Vision family scored the same on shuffled pixels |
 | `503` on submit | Holdout file missing or mismatched | Operator: `RELEARN_HOLDOUT_FILE` must match the pin commitment |
+| `503 eval image digest not pinned` | Host has no `sha256:` eval image and did not opt into sim | Wait for relearn CI to publish a digest. `GET /v1/status` shows `can_score: false` |
+| `503 … no in-process sim` | Digest is pinned but the live harvest is not wired on that host | Operator issue; the control plane refuses to substitute sim numbers |
 | `rejected` with `Canaries` | Catastrophic forgetting | Base-model canaries must stay ≥ 0.95 |
-| Live Lium skipped | No `eval_image_digest` pin or no `X-Lium-Api-Key` | Cortex refuses rent until relearn CI publishes a digest; sim still scores |
+| `eval_backend: "sim"` on your row | Operator set `RELEARN_FORCE_SIM=1` | CI / local only. Not a live verdict; prod and staging set it to `false` |
 | Teacher 4xx | Miner weights sent to the judge API | Teacher is judge-only; never the scored artifact |
 
 ## Bounty

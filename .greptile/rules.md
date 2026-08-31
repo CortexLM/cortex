@@ -7,8 +7,13 @@ encoder-attach Multimodal, and Bounty stay off but their contracts still apply
 when those files are touched.
 
 - **Fail-closed.** Missing holdout file, commitment mismatch, unpinned eval
-  digest, or unset teacher → refuse / 503 / sim-only. Never score the public
-  split as a substitute. `*_FORCE_SIM` is CI/local only.
+  digest, or unset teacher → refuse / 503. Never score the public split as a
+  substitute. `*_FORCE_SIM` is CI/local only and must be the *only* way to
+  reach a sim scorer: sim is never a fallback for a missing live eval, and the
+  resolved backend belongs on `/v1/status` and on the submit row.
+- **Absence of evidence is a failed gate.** Empty public split, missing general
+  canary, or an undeclared miner `manifest` must fail the corresponding gate
+  rather than skip it.
 - **Holdout stays off git.** Pins may carry `public_ids`, `holdout_commitment`,
   `holdout_size`. Do not commit holdout items, prompts, salts, or canary benches.
 - **No Modal.** No Modal tokens, deploy files, profile names, or `modal.com`

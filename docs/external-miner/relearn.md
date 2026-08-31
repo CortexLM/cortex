@@ -26,7 +26,7 @@ The holdout commitment and size are published; the items are not.
 |------|----------------------|
 | **Holdout win** | Paired win on the private split. This is the only number that can become lattice |
 | **Public–holdout gap** | A huge public score with a flat holdout is rejected as overfitting |
-| **No contamination** | If a holdout item id or image hash shows up in `manifest.train_*`, the run is rejected |
+| **No contamination** | If a holdout item id or image hash shows up in `manifest.train_*`, the run is rejected. Submitting an **empty** `manifest` does not skip this gate — it fails it (`contamination_evidence_missing`), so declare what you trained on |
 | **Pixel shuffle** | Vision families (caption / VQA / OCR / spatial) must get worse when pixels are shuffled |
 | **General benches** | MMLU / MMMU-style canaries are **not** in the visible score. A drop past ε vs the champion zeros the run |
 
@@ -41,14 +41,25 @@ curl -sS -X POST https://<gateway>/challenge/relearn/v1/submissions \
     "artifact_digest": "<sha256 of your artifact>",
     "artifact_uri": "optional-url",
     "manifest": {
-      "train_item_ids": [],
-      "train_image_hashes": [],
-      "train_dataset_ids": []
+      "train_item_ids": [1, 2, 3],
+      "train_image_hashes": ["<sha256 of each training image>"],
+      "train_dataset_ids": ["my-sft-mix-v3"]
     }
   }'
 ```
 
+`manifest` is required evidence, not decoration. Declare the public item ids,
+image hashes, and dataset ids you trained on. All three arrays empty (or no
+`manifest` at all) is rejected — the contamination gate cannot clear a run it
+has nothing to check.
+
 Poll `GET /challenge/relearn/v1/submissions/{id}`. Eligible runs sit at
 `awaiting_admin` until an operator promotes. You do not promote.
+
+The response carries `eval_backend`. `lium` is a real eval on the pinned eval
+image; `sim` is the operator's offline harness (CI / local only) and is not a
+live verdict. `GET /challenge/relearn/v1/status` shows the same field plus
+`can_score`, so you can tell before submitting whether the host will score at
+all. While `can_score` is `false`, submissions answer **503**.
 
 Never commit the Lium key. If something fails, see [troubleshoot.md](./troubleshoot.md).

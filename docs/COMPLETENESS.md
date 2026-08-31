@@ -53,7 +53,7 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Crates (`crates/relearn-*`) | **done** | task (holdout commitment + contamination fingerprints), score (public–holdout gap, contamination, vision shuffle, off-path general-bench canary), store, eval, http, challenge. |
+| Crates (`crates/relearn-*`) | **done** | task (holdout commitment + contamination fingerprints), score (public–holdout gap, contamination evidence, vision shuffle, off-path general-bench canary), store, eval, http, challenge. |
 | Binary (`bins/relearn-challenge`) | **done** | HTTP API on `:8095`. |
 | Compose / images | **done** | Default compose + `images.yml` target `relearn-challenge`. |
 | Eval pin | **v0** | `config/relearn-pin.toml` — digest + `CortexLM/relearn` SHA empty until first green challenge CI. |
@@ -129,9 +129,9 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| relearn HTTP / promote | **done** | `POST /v1/submissions` freeze → unseal → paired judge; `POST /v1/admin/promote` bearer; never crowns a regression. |
+| relearn HTTP / promote | **done** | `POST /v1/submissions` freeze → unseal → paired judge; `POST /v1/admin/promote` bearer; never crowns a regression. Refuses to score at all without a digest-pinned eval image (or the `RELEARN_FORCE_SIM` opt-in), and an undeclared `manifest` fails the contamination gate rather than skipping it. |
 | bounty HTTP / adjudicate | **done** | Internal ingest: `POST /v1/pair` (sr25519) + `POST /v1/reports`; `POST /v1/admin/adjudicate`. Scoring **fetches** CortexLM/backend `GET /v1/bounty/public/leaderboard` + `/reports` (`BOUNTY_BACKEND_PUBLIC_URL`; unset → skip). |
-| relearn Lium rails | **done** (sim default) | Reuses `prism-lium` client + `SimLiumBackend`. Live rent refuses without `sha256:` eval digest; miner BYOK never logged. |
+| relearn Lium rails | **done** (fail-closed) | Reuses `prism-lium` client + `SimLiumBackend`. Live rent **and** live scoring refuse without a `sha256:` eval digest; sim only via `RELEARN_FORCE_SIM`; miner BYOK never logged. |
 | design / prism product APIs | retired | Crates remain as unused libraries. |
 | prism orchestration | done | DB-backed claim/execute/review/similarity/score state machine (`prism_submission` + append-only `prism_stage_event`), pre-pod screens (copy gate + static cheat + AST similarity) before Lium rent, sweeper (10h grace + pre-reclaim log harvest; skips live workers), **detached harness + resume-first boot/periodic reconcile** (reattach live pods via sealed BYOK; fail-closed only when unreattachable — `control_plane_restart` / `harness_detached`; `GET /v1/submissions/{id}/logs`), epoch-close batched D24 leaf emission with **WTA** (`prism-emit` outbox: `emitted_epoch` watermark + `prism_emit_cursor` + positive-score carry + `apply_wta`, migration 0012). `PRISM_MAX_CONCURRENT_EVALS` default/prod = 8. |
 | prism recipe v1 | done | `prism-recipe` contract, fineweb-edu pinned shard (URL + SHA-256, harness re-verifies), 6h train / 7h pod caps, baseline sources, recipe pin hex on the API. |
@@ -158,7 +158,8 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 | DCAP error classification | Matches on `anyhow` message text; re-run `cargo test -p attest-policy --features dcap` after any `dcap-qvl` bump. |
 | Relearn eval image digests | Empty until `CortexLM/relearn` CI publishes digest-pinned `relearn-eval`, `relearn-t2i-eval`, and `relearn-mm-eval` images. Live Lium rent is refused until then. |
 | Relearn T2I holdout salt | The committed `holdout_commitment` uses the documented **dev** salt so local and staging work out of the box. Production must rotate to a private salt, replace the commitment, and re-sign. |
-| Relearn holdout salt | The committed `holdout_commitment` uses the local salt `cortex-relearn-dev-holdout-v0` (not the T2I/dev salt) over a synthetic catalog so CI can boot. Production must rotate to a private salt **and** a private catalog, replace the commitment, and re-sign. |
+| Relearn holdout salt | The committed `holdout_commitment` is the CI / local one — a documented dev salt over a synthetic catalog so the stack boots without operator secrets. It is **not** the live seal. Production must rotate to a private salt **and** a private catalog, replace the commitment in `config/relearn-pin.toml`, and re-sign the trust root ([`../config/CEREMONY.md`](../config/CEREMONY.md)). |
+| Relearn live scoring | With no `sha256:` eval-image digest, `POST /challenge/relearn/v1/submissions` answers **503**. Sim is opt-in (`RELEARN_FORCE_SIM=1`, CI / local only) and is reported as `eval_backend` on `/v1/status` and on the submit row — it is never a fallback. |
 | Relearn Multimodal champion LM hash | `RELEARN_MM_CHAMPION_LM_HASH` is operator-supplied. Unset means encoder-only submissions are rejected (they cannot prove the LM is unchanged). |
 | Relearn public repo | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) exists; this repo pins `relearn_git_sha`. Seed mirror: `docs/external-miner/relearn-seed/`. |
 | Mainnet (netuid 100) | Owner wallet not yet on this machine, so prod runs with `BASE_GATEWAY_REQUIRE_OWNER=0`. |

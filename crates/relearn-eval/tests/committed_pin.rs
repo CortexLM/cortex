@@ -49,9 +49,39 @@ fn pin_carries_no_endpoint_or_secret_or_t2i_salt() {
         "https://api.",
         "modal",
         "cortex-t2i-dev-holdout-v0",
+        // Naming the dev salt here reads as the live seal. The pin says the
+        // commitment is the CI one and points at the ceremony instead.
+        "cortex-relearn-dev-holdout-v0",
     ] {
         assert!(!lower.contains(banned), "pin mentions {banned:?}");
     }
+}
+
+#[test]
+fn pin_says_its_commitment_is_not_the_live_seal() {
+    let body = std::fs::read_to_string(pin_path()).expect("read pin");
+    assert!(
+        body.contains("CEREMONY.md"),
+        "pin must point at the ceremony"
+    );
+    let lower = body.to_ascii_lowercase();
+    assert!(
+        lower.contains("not the live seal"),
+        "pin must not present the CI commitment as production"
+    );
+    assert!(
+        lower.contains("private catalog"),
+        "prod must rotate the catalog as well as the salt"
+    );
+}
+
+#[test]
+fn committed_pin_cannot_rent_or_score_live_yet() {
+    let p = pin();
+    assert!(
+        !p.can_rent(),
+        "an eval digest landed; drop this test and enable live scoring deliberately"
+    );
 }
 
 #[test]

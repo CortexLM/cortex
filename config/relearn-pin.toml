@@ -10,12 +10,14 @@
 #     --salt "$RELEARN_HOLDOUT_SALT" --size 120 --exclude <each public id> \
 #     --out /root/.base-secrets/relearn-holdout.json
 #
-# The committed commitment below is the LOCAL salt
-# "cortex-relearn-dev-holdout-v0" over a synthetic catalog so CI and staging
-# can boot. That salt is NOT the T2I/dev salt. Production must rotate to a
-# private salt + private catalog, replace the commitment, and re-sign
-# (config/CEREMONY.md). A documented salt plus a public catalog would let
-# miners reconstruct the scored split.
+# The commitment below is the CI / local one: a documented dev salt (see the
+# default in deploy/scripts/local-e2e.sh) over a synthetic catalog, so the
+# stack can boot without operator secrets. It is NOT the live seal.
+#
+# Production MUST rotate to a private salt AND a private catalog, replace the
+# commitment here, and re-sign the trust root (config/CEREMONY.md). Shipping a
+# documented salt over a public catalog would let miners reconstruct the
+# scored split.
 
 # Base miners post-train. Qwen/Qwen3.8-27B is Apache-2.0, public, native VLM.
 # Not Flash-Next. No SigLIP / encoder-attach product on this challenge.
@@ -28,6 +30,8 @@ teacher_nvfp4 = "LibertAIDAI/GLM-5.3-Flash-NVFP4"
 teacher_backend = "http_api"
 eval_image = "ghcr.io/cortexlm/relearn-eval"
 # Empty until the first digest-pinned image ships from CortexLM/relearn CI.
+# While empty, POST /v1/submissions answers 503 on any host that did not opt
+# into sim with RELEARN_FORCE_SIM=1. Sim is never a fallback.
 eval_image_digest = ""
 relearn_git = "https://github.com/CortexLM/relearn"
 relearn_git_sha = "6e952d1e5edd6e6906ba7fe8442898f334400fb4"

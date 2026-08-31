@@ -24,6 +24,24 @@ This repo pins them in `config/relearn-pin.toml`.
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`). Operator promote is
 `POST /v1/admin/promote`. Epoch emit is champion lattice; others `NoScore` (D24).
 
+## Who is allowed to produce a score
+
+The deterministic offline harness is not a fallback. A host scores only when
+one of these holds:
+
+| Condition | `POST /v1/submissions` |
+|-----------|------------------------|
+| `eval_image_digest` is a `sha256:` pin | live eval on a digest-pinned Lium pod |
+| `RELEARN_FORCE_SIM=1` (CI / local only) | sim, reported as `eval_backend: "sim"` |
+| neither | **503** — `eval image digest not pinned` |
+
+`GET /v1/status` publishes `eval_backend`, `force_sim`, and `can_score`, and
+every submit row echoes `eval_backend`, so a sim run is never mistaken for a
+real verdict. The pin currently ships an empty `eval_image_digest`, so live
+hosts answer 503 until `CortexLM/relearn` CI publishes an image. The sim base
+champion is seeded only on a sim host: judging a live challenger against
+simulated champion scores would mean nothing.
+
 ## Holdout and anti-overfit gates
 
 The holdout is **not** in git. `config/relearn-pin.toml` carries only
@@ -32,13 +50,16 @@ The holdout is **not** in git. `config/relearn-pin.toml` carries only
 means submissions answer **503** rather than scoring a reconstructable seed
 or the public split.
 
+The committed commitment is the CI / local one (a documented dev salt over a
+synthetic catalog). It is **not** the live seal — see the ceremony step below.
+
 Promotion requires every gate:
 
 | Gate | Rule |
 |------|------|
 | Holdout displacement | Bootstrap paired test on the private split (the only series that may enter the lattice) |
 | Public–holdout gap | Public far above holdout signals memorization; empty public is fail-closed |
-| Contamination | Any holdout id / image hash in submitted training metadata rejects the run |
+| Contamination | Any holdout id / image hash in submitted training metadata rejects the run. An **undeclared** `manifest` is `contamination_evidence_missing`, not a pass: absence of evidence cannot clear the gate |
 | Pixel shuffle | Every vision family present in the holdout (caption / VQA / OCR / spatial) must drop ≥ `MIN_SHUFFLE_DROP` when pixels are shuffled |
 | General-bench canary | MMLU / MMMU-style slice is **off** the visible score. Regression past `CANARY_EPSILON` vs the champion is a hard zero |
 | Perturbation / base canaries / agent-trace | Existing retention floors still apply |
@@ -54,3 +75,7 @@ cargo run -p xtask -- relearn-holdout \
 
 Paste the printed `holdout_commitment` into `config/relearn-pin.toml`, then
 re-sign the trust root ([`../config/CEREMONY.md`](../config/CEREMONY.md)).
+
+Production must rotate the salt **and** the catalog. Keeping the committed
+CI commitment on a live host means the split is reconstructable from public
+material. The records themselves never enter git, and neither does the salt.
