@@ -38,9 +38,11 @@ one of these holds:
 
 `GET /v1/status` publishes `eval_backend`, `force_sim`, `can_score`,
 `live_harvest_wired`, and `champion_baseline_recorded`, and every submit row
-echoes `eval_backend`, so a sim run is never mistaken for a real verdict. The
-pin currently ships an empty `eval_image_digest`, so live hosts answer 503
-until `CortexLM/relearn` CI publishes an image.
+echoes `eval_backend`, so a sim run is never mistaken for a real verdict.
+
+`eval_image_digest` is pinned (`CortexLM/relearn` PR #2), so the image half is
+done. A live host must still wire the harvest and record a champion baseline
+before `can_score` turns true; each has its own 503.
 
 A refusal is not a submission: nothing is persisted unless scoring produced a
 verdict, so a 503 leaves no row behind.

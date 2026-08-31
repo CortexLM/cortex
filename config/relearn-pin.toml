@@ -32,12 +32,18 @@ teacher_model = "glm-5.3"
 teacher_nvfp4 = "incoai/GLM-5.3-NVFP4"
 teacher_backend = "http_api"
 eval_image = "ghcr.io/cortexlm/relearn-eval"
-# Empty until the first digest-pinned image ships from CortexLM/relearn CI.
-# While empty, POST /v1/submissions answers 503 on any host that did not opt
-# into sim with RELEARN_FORCE_SIM=1. Sim is never a fallback.
-eval_image_digest = ""
+# Digest-only, never a floating tag. This image implements the harvest
+# contract in docs/RELEARN.md § Eval image contract; the control-plane client
+# refuses any document not bound to this digest.
+#
+# Pinning the image is not the whole job: a live host also needs the harvest
+# wired and a champion baseline recorded (both operator state, see
+# deploy/env/relearn-challenge.env.example). Check GET /v1/status ->
+# can_score, live_harvest_wired, champion_baseline_recorded.
+eval_image_digest = "sha256:303c63573c9492b1214fa8071977b26a96acc25eaba258c2958c4773a3cd5e45"
 relearn_git = "https://github.com/CortexLM/relearn"
-relearn_git_sha = "6e952d1e5edd6e6906ba7fe8442898f334400fb4"
+# CortexLM/relearn PR #2 head — the commit that built the digest above.
+relearn_git_sha = "82e2144266aee3ffdd276396905820bc4e53f3b5"
 
 # Public split ids (miners may train on these). Holdout selection must exclude
 # every one of them. The scored holdout records stay off git.

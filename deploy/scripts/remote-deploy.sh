@@ -281,6 +281,19 @@ if [[ "$ROLE" == "master" ]]; then
       "$REMOTE_DIR/deploy/secrets/relearn-t2i/holdout.json;" \
       "generate with: cargo run -p xtask -- relearn-t2i-holdout" >&2
   fi
+  # Relearn LLM is the live challenge and its eval image is pinned, so these
+  # two files are the difference between scoring and 503 on every submission.
+  if ! ssh_h "test -s '$REMOTE_DIR/deploy/secrets/relearn/holdout.json'"; then
+    echo "remote-deploy: WARNING: relearn holdout records missing at" \
+      "$REMOTE_DIR/deploy/secrets/relearn/holdout.json;" \
+      "generate with: cargo run -p xtask -- relearn-holdout" >&2
+  fi
+  if ! ssh_h "test -s '$REMOTE_DIR/deploy/secrets/relearn/base-champion.json'"; then
+    echo "remote-deploy: WARNING: relearn champion baseline missing at" \
+      "$REMOTE_DIR/deploy/secrets/relearn/base-champion.json;" \
+      "every submission will 503 with 'no champion baseline recorded'" \
+      "(docs/RELEARN.md § Champion baseline)" >&2
+  fi
 fi
 
 GE_EXPORT=""
