@@ -19,8 +19,8 @@ and Bounty are **not live**. HTTP submit.
 | Bounty | [bounty.md](./bounty.md) | Not live. Pair via `cortex-bounty`; Chat inject is `BOUNTY_CHAT_COMMAND` (env-only). Cortex reads CortexLM/backend at `BOUNTY_BACKEND_PUBLIC_URL` |
 
 Pinned live model: `Qwen/Qwen3.8-27B`. Teacher weights
-`LibertAIDAI/GLM-5.3-Flash-NVFP4` (served from a local dir, never passed as a
-Hugging Face repo id to vLLM). Wire id `glm-5.3-flash`.
+`incoai/GLM-5.3-NVFP4` (served from a local dir, never passed as a
+Hugging Face repo id to vLLM). Wire id `glm-5.3`.
 Bundle bytes: [`BUNDLE_SPEC.md`](../BUNDLE_SPEC.md).
 
 Every Relearn challenge promotes champion-versus-challenger on a **private

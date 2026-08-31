@@ -42,7 +42,7 @@ use thiserror::Error;
 pub struct RelearnPin {
     /// Language / VLM base. Do not recale here; the pin owner owns the id.
     pub base_model: String,
-    /// HTTP teacher wire id (`glm-5.3-flash` default).
+    /// HTTP teacher wire id (`glm-5.3` default).
     pub teacher_model: String,
     /// NVFP4 weights id to download. Serve from `RELEARN_TEACHER_LOCAL_DIR`.
     pub teacher_nvfp4: String,
@@ -655,7 +655,7 @@ mod tests {
     fn toml_pin_roundtrip() {
         let body = r#"
 base_model = "Qwen/Qwen3.8-27B"
-teacher_model = "glm-5.3-flash"
+teacher_model = "glm-5.3"
 teacher_backend = "http_api"
 holdout_commitment = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 holdout_size = 120

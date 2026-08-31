@@ -22,8 +22,8 @@ const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("lium_pay", "Miner pays Lium"),
     ("bundle_spec_link", "BUNDLE_SPEC.md"),
     ("base_model", "Qwen/Qwen3.8-27B"),
-    ("teacher_nvfp4", "LibertAIDAI/GLM-5.3-Flash-NVFP4"),
-    ("teacher_model", "glm-5.3-flash"),
+    ("teacher_nvfp4", "incoai/GLM-5.3-NVFP4"),
+    ("teacher_model", "glm-5.3"),
     ("t2i_base_model", "nvidia/Cosmos3-Super-Text2Image"),
     ("t2i_judge", "Qwen/Qwen-Image-Bench"),
     ("t2i_flux_rejected", "Flux is rejected"),
@@ -372,10 +372,10 @@ mod tests {
             .any(|(n, v)| *n == "base_model" && *v == "Qwen/Qwen3.8-27B"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
-            .any(|(n, v)| *n == "teacher_nvfp4" && *v == "LibertAIDAI/GLM-5.3-Flash-NVFP4"));
+            .any(|(n, v)| *n == "teacher_nvfp4" && *v == "incoai/GLM-5.3-NVFP4"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
-            .any(|(n, v)| *n == "teacher_model" && *v == "glm-5.3-flash"));
+            .any(|(n, v)| *n == "teacher_model" && *v == "glm-5.3"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
             .any(|(n, v)| *n == "lium_pay" && *v == "Miner pays Lium"));

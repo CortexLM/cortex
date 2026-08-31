@@ -58,7 +58,7 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Compose / images | **done** | Default compose + `images.yml` target `relearn-challenge`. |
 | Eval pin | **v0** | `config/relearn-pin.toml` — digest + `CortexLM/relearn` SHA empty until first green challenge CI. |
 | Holdout | **done** | Commitment in git, records operator-side (`RELEARN_HOLDOUT_FILE`) and verified at boot. Mismatch → submissions 503. |
-| Teacher | **v0** | Weights `LibertAIDAI/GLM-5.3-Flash-NVFP4` served from `RELEARN_TEACHER_LOCAL_DIR` (never pass the Hugging Face repo id to vLLM). HTTP wire via `RELEARN_TEACHER_*`. Missing URL/key → sim. Judge-only. |
+| Teacher | **v0** | Weights `incoai/GLM-5.3-NVFP4` served from `RELEARN_TEACHER_LOCAL_DIR` (never pass the Hugging Face repo id to vLLM). HTTP wire `glm-5.3`. Missing URL/key → sim. Judge-only. |
 | Emission | **4000 bps** | Default share (sum across all four challenges is `10000`). |
 | Spec | live | [`RELEARN.md`](RELEARN.md). |
 

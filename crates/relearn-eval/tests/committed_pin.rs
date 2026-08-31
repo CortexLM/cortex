@@ -33,8 +33,8 @@ fn committed_pin_has_a_holdout_commitment() {
 fn committed_pin_has_the_locked_model_ids() {
     let p = pin();
     assert_eq!(p.base_model, "Qwen/Qwen3.8-27B");
-    assert_eq!(p.teacher_nvfp4, "LibertAIDAI/GLM-5.3-Flash-NVFP4");
-    assert_eq!(p.teacher_model, "glm-5.3-flash");
+    assert_eq!(p.teacher_nvfp4, "incoai/GLM-5.3-NVFP4");
+    assert_eq!(p.teacher_model, "glm-5.3");
 }
 
 #[test]
