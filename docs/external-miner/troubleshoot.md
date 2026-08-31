@@ -18,7 +18,9 @@
 | `rejected` with `IgnoresTheImage` | Pixel-shuffle control | Vision family scored the same on shuffled pixels |
 | `503` on submit | Holdout file missing or mismatched | Operator: `RELEARN_HOLDOUT_FILE` must match the pin commitment |
 | `503 eval image digest not pinned` | Host has no `sha256:` eval image and did not opt into sim | Wait for relearn CI to publish a digest. `GET /v1/status` shows `can_score: false` |
-| `503 … no in-process sim` | Digest is pinned but the live harvest is not wired on that host | Operator issue; the control plane refuses to substitute sim numbers |
+| `503 … no in-process sim` | Digest is pinned but the live harvest is not wired on that host | Operator issue; `/v1/status` shows `live_harvest_wired: false`. The control plane refuses to substitute sim numbers |
+| `503 no champion baseline recorded` | The host has not measured the base model, so there is nothing to compare against | Operator issue; `/v1/status` shows `champion_baseline_recorded: false` |
+| Repeated `503`, no submission id | Nothing was scored, so nothing was stored | Expected. A refused attempt is not a submission and does not consume anything |
 | `rejected` with `Canaries` | Catastrophic forgetting | Base-model canaries must stay ≥ 0.95 |
 | `eval_backend: "sim"` on your row | Operator set `RELEARN_FORCE_SIM=1` | CI / local only. Not a live verdict; prod and staging set it to `false` |
 | Teacher 4xx | Miner weights sent to the judge API | Teacher is judge-only; never the scored artifact |

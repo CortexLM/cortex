@@ -36,12 +36,55 @@ one of these holds:
 | `RELEARN_FORCE_SIM=1` (CI / local only) | sim, reported as `eval_backend: "sim"` |
 | neither | **503** — `eval image digest not pinned` |
 
-`GET /v1/status` publishes `eval_backend`, `force_sim`, and `can_score`, and
-every submit row echoes `eval_backend`, so a sim run is never mistaken for a
-real verdict. The pin currently ships an empty `eval_image_digest`, so live
-hosts answer 503 until `CortexLM/relearn` CI publishes an image. The sim base
-champion is seeded only on a sim host: judging a live challenger against
-simulated champion scores would mean nothing.
+`GET /v1/status` publishes `eval_backend`, `force_sim`, `can_score`,
+`live_harvest_wired`, and `champion_baseline_recorded`, and every submit row
+echoes `eval_backend`, so a sim run is never mistaken for a real verdict. The
+pin currently ships an empty `eval_image_digest`, so live hosts answer 503
+until `CortexLM/relearn` CI publishes an image.
+
+A refusal is not a submission: nothing is persisted unless scoring produced a
+verdict, so a 503 leaves no row behind.
+
+## Champion baseline (required on a live host)
+
+Every gate is a comparison against the champion — the paired holdout test, the
+public–holdout gap, the general-bench canary, pixel-shuffle. With no champion
+recorded there is nothing to compare against and submissions answer **503
+`no champion baseline recorded`** before any gate runs.
+
+The baseline must come from the same scorer submissions face. A sim host uses
+the sim baseline. A live host has two sources, tried in this order:
+
+1. **Operator-recorded measurement** — `RELEARN_BASE_CHAMPION_FILE`. Run the
+   digest-pinned eval image on `base_model` once and install the result. It is
+   verified at boot against the pin's `eval_image_digest` **and**
+   `holdout_commitment`, so a measurement from another image or another holdout
+   is refused, as is one missing a series the gates read.
+2. **Wired harvest** — the eval image's `LiveScorer`, when the control plane
+   has one.
+
+A live host never falls back to the sim baseline. Judging a live challenger
+against simulated champion scores would let any artifact displace a champion
+that was never measured.
+
+```json
+{
+  "eval_image_digest": "sha256:<the pin's digest>",
+  "holdout_commitment": "<the pin's commitment>",
+  "holdout":         { "<item key>": 0.0 },
+  "public":          { "<item key>": 0.0 },
+  "perturbed":       { "<item key>": 0.0 },
+  "canaries":        { "<item key>": 0.0 },
+  "general_canary":  { "<item key>": 0.0 },
+  "agent_trace": 0.0,
+  "vision_shuffle": { "captioning": { "items": 40, "score": 0.0, "shuffled_score": 0.0 } }
+}
+```
+
+`holdout` must carry one entry per verified holdout item. `public` and
+`general_canary` must be non-empty: a champion the gates cannot read would
+reject every challenger for a reason the miner cannot act on, so that is
+refused at boot instead. The file is operator state — never commit it.
 
 ## Holdout and anti-overfit gates
 

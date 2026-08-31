@@ -14,6 +14,12 @@ when those files are touched.
 - **Absence of evidence is a failed gate.** Empty public split, missing general
   canary, or an undeclared miner `manifest` must fail the corresponding gate
   rather than skip it.
+- **A refusal is not a submission.** Fail-closed paths must not persist a row,
+  charge a miner, or rent a pod before scoring starts. Report the root cause
+  (unpinned digest) rather than a downstream symptom (missing baseline).
+- **Champions are measured by the scorer challengers face.** Never seed a live
+  host's baseline with sim numbers, and never leave a live host with no
+  baseline — the gates are comparisons and cannot run without one.
 - **Holdout stays off git.** Pins may carry `public_ids`, `holdout_commitment`,
   `holdout_size`. Do not commit holdout items, prompts, salts, or canary benches.
 - **No Modal.** No Modal tokens, deploy files, profile names, or `modal.com`
