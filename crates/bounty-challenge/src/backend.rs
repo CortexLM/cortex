@@ -111,15 +111,15 @@ mod tests {
             {"hotkey":"5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty","valid_count":0}
         ]}"#;
         let rp = r#"{"items":[
-            {"id":"1","hotkey":"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY","status":"valid",
+            {"id":"1","hotkey":"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY","status":"valid","severity":"major",
              "problem_found":"seal returns 500","adjudicator":"bounty-adjudicator@cortex",
              "justification":"reproduced empty-bundle seal","adjudicated_at":"2026-08-30T00:00:00Z",
              "created_at":"2026-08-29T00:00:00Z"},
-            {"id":"2","hotkey":"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY","status":"valid",
+            {"id":"2","hotkey":"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY","status":"valid","severity":"major",
              "problem_found":"proxy 502","adjudicator":"bounty-adjudicator@cortex",
              "justification":"reproduced on master","adjudicated_at":"2026-08-30T00:00:00Z",
              "created_at":"2026-08-29T01:00:00Z"},
-            {"id":"3","hotkey":"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY","status":"valid",
+            {"id":"3","hotkey":"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY","status":"valid","severity":"major",
              "problem_found":"health flap","adjudicator":"bounty-adjudicator@cortex",
              "justification":"reproduced","adjudicated_at":"2026-08-30T00:00:00Z",
              "created_at":"2026-08-29T02:00:00Z"}

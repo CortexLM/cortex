@@ -153,7 +153,7 @@ pub fn chat_command_display() -> String {
     chat_command_from_env().unwrap_or_else(|| CHAT_COMMAND_PLACEHOLDER.to_owned())
 }
 
-/// `BOUNTY_BACKEND_PUBLIC_URL` when set. Empty / missing → `None` (skip / sim).
+/// `BOUNTY_BACKEND_PUBLIC_URL` when set. Empty / missing → `None`.
 ///
 /// Cortex **reads** the Chat backend public feed. It does not serve one.
 /// Never bake a host into git.
@@ -164,6 +164,67 @@ pub fn backend_public_url() -> Option<String> {
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
 }
+
+/// True when the operator explicitly opted into the offline scorer.
+///
+/// Sim exists for CI and local development. It is never implicit: a host with
+/// no backend feed and no opt-in cannot turn reports into weight, and says so
+/// on `/v1/status` rather than accepting work it will never pay for.
+#[must_use]
+pub fn force_sim() -> bool {
+    matches!(
+        std::env::var("BOUNTY_FORCE_SIM")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
+/// Where this host's bounty scores come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoringBackend {
+    /// Adjudications published by CortexLM/backend.
+    BackendPublic,
+    /// Locally adjudicated reports only (CI / local development).
+    Sim,
+    /// Neither is configured: this host cannot produce weight.
+    Unconfigured,
+}
+
+/// Resolve the scoring backend for this host. Sim is never implicit.
+#[must_use]
+pub fn resolve_scoring_backend() -> ScoringBackend {
+    if force_sim() {
+        return ScoringBackend::Sim;
+    }
+    if backend_public_url().is_some() {
+        ScoringBackend::BackendPublic
+    } else {
+        ScoringBackend::Unconfigured
+    }
+}
+
+/// Most reports one hotkey may leave awaiting adjudication.
+///
+/// Adjudication is the scarce resource in this challenge: every pending report
+/// costs a human or an agent a triage pass. Without a cap one miner can flood
+/// the queue and starve everyone else's reports of attention, which is a
+/// denial of service on the incentive rather than on the service.
+pub const MAX_PENDING_REPORTS_PER_HOTKEY: usize = 5;
+
+/// Shortest interval between two reports from one hotkey.
+pub const MIN_REPORT_INTERVAL_SECS: u64 = 60;
+
+/// Shortest body a report may have.
+///
+/// Not a quality bar — an operator still adjudicates. It exists so a one-word
+/// submission cannot occupy a queue slot.
+pub const MIN_REPORT_BODY_CHARS: usize = 80;
+
+/// Shortest reproduction section a report may have.
+pub const MIN_REPRO_CHARS: usize = 20;
 
 /// Accept `[A-Za-z0-9._:-]` up to 128 chars.
 pub fn validate_account_id(id: &str) -> Result<(), PairError> {
@@ -366,6 +427,22 @@ mod tests {
     #[test]
     fn backend_public_url_env_only() {
         assert!(backend_public_url().is_none());
+    }
+
+    /// With no feed and no opt-in this host cannot turn a report into weight,
+    /// and must say so rather than quietly collecting unpaid work.
+    #[test]
+    fn scoring_is_unconfigured_until_a_feed_or_an_explicit_opt_in() {
+        assert!(!force_sim());
+        assert_eq!(resolve_scoring_backend(), ScoringBackend::Unconfigured);
+    }
+
+    #[test]
+    fn ingest_quotas_are_tight_enough_to_protect_triage() {
+        assert!(MAX_PENDING_REPORTS_PER_HOTKEY > 0);
+        assert!(MAX_PENDING_REPORTS_PER_HOTKEY <= 10);
+        assert!(MIN_REPORT_INTERVAL_SECS >= 30);
+        assert!(MIN_REPORT_BODY_CHARS >= 40);
     }
 
     #[test]

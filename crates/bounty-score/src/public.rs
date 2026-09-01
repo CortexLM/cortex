@@ -10,7 +10,8 @@ use bounty_challenge_task::{hotkey_hex, parse_hotkey};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    judge_challenger, lattice_from_precision, Adjudication, ChampionVerdict, MinerHoldout,
+    judge_challenger, lattice_from_precision_and_impact, Adjudication, ChampionVerdict,
+    MinerHoldout, Severity,
 };
 
 /// Published report as served by the backend public API.
@@ -28,6 +29,10 @@ pub struct PublicReport {
     pub adjudicator: String,
     /// Why the agent accepted or rejected. Required for scoring.
     pub justification: String,
+    /// Operator severity. Required on a `valid` row before it can be credited;
+    /// a bug nobody priced cannot be paid for.
+    #[serde(default)]
+    pub severity: Option<Severity>,
     /// RFC3339 adjudicate time.
     pub adjudicated_at: String,
     /// RFC3339 create time.
@@ -89,6 +94,11 @@ impl PublicStatus {
 }
 
 /// True when the report may enter scoring (published + justified).
+///
+/// Note what this does **not** require: a severity. An unpriced `valid` row
+/// still enters as [`MinerHoldout::valid_unpriced`], where it fails the
+/// severity-evidence gate. Dropping it instead would let a miner escape the
+/// gate by having the operator forget a field.
 #[must_use]
 pub fn scorable(report: &PublicReport) -> bool {
     report.status.adjudication().is_some()
@@ -135,7 +145,7 @@ pub fn holdouts_from_reports(reports: &[PublicReport]) -> BTreeMap<String, Miner
             continue;
         };
         let key = hotkey_hex(&bytes);
-        out.entry(key).or_default().record(v);
+        out.entry(key).or_default().record(v, r.severity);
     }
     out
 }
@@ -152,7 +162,7 @@ pub fn rank_leaderboard(rows: &[LeaderboardRow]) -> Vec<LeaderboardRow> {
     v
 }
 
-/// Score plan from a backend snapshot: precision holdouts + champion lattice.
+/// Score plan from a backend snapshot: adjudication tallies + champion lattice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicScorePlan {
     /// Hex hotkey → holdout tallies.
@@ -167,9 +177,13 @@ pub struct PublicScorePlan {
 
 /// Build a score plan from backend public JSON objects.
 ///
-/// Reports missing `problem_found` or `justification` are dropped.
-/// Champion is the highest-precision miner that displaces the previous
-/// (or the first eligible). Leaderboard `valid_count` breaks ties.
+/// Reports missing `problem_found` or `justification` are dropped. Champion is
+/// the highest-precision miner that displaces the previous (or the first
+/// eligible).
+///
+/// The leaderboard only breaks ties in the walk order. It is a published
+/// `valid_count` and nothing more: a hotkey that tops it without adjudicated,
+/// justified reports has no tallies, is never judged, and is paid nothing.
 #[must_use]
 pub fn score_plan_from_snapshot(snap: &PublicSnapshot) -> PublicScorePlan {
     let holdouts = holdouts_from_reports(&snap.reports);
@@ -202,8 +216,8 @@ pub fn score_plan_from_snapshot(snap: &PublicSnapshot) -> PublicScorePlan {
             champion_hex = Some(h.clone());
             champion_lattice = v.lattice;
             if champion_lattice == 0 {
-                if let Some(p) = chall.precision_bps() {
-                    champion_lattice = lattice_from_precision(p);
+                if let (Some(p), Some(i)) = (chall.precision_bps(), chall.impact_bps()) {
+                    champion_lattice = lattice_from_precision_and_impact(p, i);
                 }
             }
             champ_hold = chall.clone();
@@ -234,6 +248,7 @@ mod tests {
             problem_found: problem.into(),
             adjudicator: "bounty-adjudicator@cortex".into(),
             justification: why.into(),
+            severity: matches!(status, PublicStatus::Valid).then_some(Severity::Major),
             adjudicated_at: "2026-08-30T00:00:00Z".into(),
             created_at: "2026-08-29T00:00:00Z".into(),
             related_report_id: None,
@@ -251,7 +266,7 @@ mod tests {
         let h = holdouts_from_reports(&reports);
         assert_eq!(h.len(), 1);
         let only = h.values().next().expect("one");
-        assert_eq!(only.valid, 1);
+        assert_eq!(only.valid(), 1);
     }
 
     #[test]
@@ -320,7 +335,52 @@ mod tests {
         let a_hex = hotkey_hex(&parse_hotkey(HK_A).expect("a"));
         assert_eq!(champ, &a_hex);
         assert!(plan.champion_lattice > 0);
-        assert_eq!(plan.holdouts.get(&a_hex).map(|h| h.valid), Some(3));
+        assert_eq!(plan.holdouts.get(&a_hex).map(MinerHoldout::valid), Some(3));
+    }
+
+    /// The published leaderboard is informational. Topping it without
+    /// adjudicated, justified reports is worth nothing, or the backend feed
+    /// would be the thing miners farm instead of the bugs.
+    #[test]
+    fn topping_the_public_leaderboard_alone_pays_nothing() {
+        let plan = score_plan_from_snapshot(&PublicSnapshot {
+            leaderboard: vec![LeaderboardRow {
+                hotkey: HK_B.into(),
+                valid_count: 9_999,
+                weight: Some(u64::MAX),
+            }],
+            reports: Vec::new(),
+        });
+        assert!(plan.champion_hex.is_none());
+        assert_eq!(plan.champion_lattice, 0);
+        assert!(plan.holdouts.is_empty());
+    }
+
+    /// A `valid` row the operator never priced must not be silently dropped:
+    /// it has to reach the severity-evidence gate.
+    #[test]
+    fn an_unpriced_valid_row_reaches_the_gate_instead_of_vanishing() {
+        let mut rows: Vec<PublicReport> = (1..=4)
+            .map(|i| {
+                report(
+                    &i.to_string(),
+                    HK_A,
+                    PublicStatus::Valid,
+                    &format!("bug {i}"),
+                    "reproduced on master",
+                )
+            })
+            .collect();
+        rows[0].severity = None;
+        let plan = score_plan_from_snapshot(&PublicSnapshot {
+            leaderboard: Vec::new(),
+            reports: rows,
+        });
+        let hex = hotkey_hex(&parse_hotkey(HK_A).expect("a"));
+        let tally = plan.holdouts.get(&hex).expect("tally");
+        assert_eq!(tally.valid_unpriced, 1);
+        assert_eq!(tally.valid(), 3);
+        assert!(plan.champion_hex.is_none(), "unpriced rows block the crown");
     }
 
     #[test]

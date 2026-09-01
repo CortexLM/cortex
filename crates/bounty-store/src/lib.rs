@@ -10,8 +10,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use bounty_challenge_task::{hotkey_hex, SESSION_DOMAIN};
-use bounty_score::{judge_challenger, Adjudication, ChampionVerdict, MinerHoldout};
+use bounty_challenge_task::{
+    hotkey_hex, MAX_PENDING_REPORTS_PER_HOTKEY, MIN_REPORT_INTERVAL_SECS, SESSION_DOMAIN,
+};
+use bounty_score::{judge_challenger, Adjudication, ChampionVerdict, MinerHoldout, Severity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -77,10 +79,17 @@ pub struct Report {
     pub state: ReportState,
     /// Operator verdict (if any).
     pub adjudication: Option<Adjudication>,
+    /// Operator severity, set with a `valid` verdict. A valid report without
+    /// one is not creditable.
+    #[serde(default)]
+    pub severity: Option<Severity>,
     /// If duplicate, the original report id.
     pub duplicate_of: Option<String>,
     /// Displacement verdict after this adjudication (if any).
     pub champion_verdict: Option<ChampionVerdict>,
+    /// Unix-seconds submit time. Drives the per-hotkey rate window.
+    #[serde(default)]
+    pub created_at: u64,
 }
 
 /// Session claim returned by `POST /v1/pair`.
@@ -108,6 +117,12 @@ pub enum StoreError {
     /// Illegal transition or reuse.
     #[error("{0}")]
     Illegal(String),
+    /// The hotkey is over an ingest quota.
+    ///
+    /// Separate from [`Self::Illegal`] because the caller answers `429`, not
+    /// `409`: the report is fine, the queue is not.
+    #[error("{0}")]
+    Quota(String),
 }
 
 /// In-memory store (v0).
@@ -190,9 +205,39 @@ impl MemoryStore {
         Err(StoreError::NotFound("session".into()))
     }
 
-    /// Insert a pending report. Same fingerprint as an open/valid report → duplicate.
-    pub fn insert_report(&self, mut row: Report) -> Result<Report, StoreError> {
+    /// Insert a pending report, subject to the per-hotkey ingest quotas.
+    ///
+    /// Same fingerprint as an open/valid report → duplicate.
+    ///
+    /// The quotas exist because adjudication, not storage, is what this
+    /// challenge is short of: one miner filling the queue starves every other
+    /// miner's reports of the triage pass that turns them into weight.
+    pub fn insert_report(&self, mut row: Report, now_unix: u64) -> Result<Report, StoreError> {
         let mut g = self.lock()?;
+        let pending = g
+            .reports
+            .values()
+            .filter(|r| r.miner_hotkey == row.miner_hotkey && r.state == ReportState::Pending)
+            .count();
+        if pending >= MAX_PENDING_REPORTS_PER_HOTKEY {
+            return Err(StoreError::Quota(format!(
+                "{pending} reports already awaiting adjudication for this hotkey \
+                 (max {MAX_PENDING_REPORTS_PER_HOTKEY})"
+            )));
+        }
+        let last = g
+            .reports
+            .values()
+            .filter(|r| r.miner_hotkey == row.miner_hotkey)
+            .map(|r| r.created_at)
+            .max()
+            .unwrap_or(0);
+        if last > 0 && now_unix.saturating_sub(last) < MIN_REPORT_INTERVAL_SECS {
+            return Err(StoreError::Quota(format!(
+                "one report per {MIN_REPORT_INTERVAL_SECS}s per hotkey"
+            )));
+        }
+        row.created_at = now_unix;
         if row.id.is_empty() {
             row.id = next_id(&mut g.next, "by");
         }
@@ -230,10 +275,15 @@ impl MemoryStore {
     }
 
     /// Operator adjudicate. Updates champion when the reporter displaces.
+    ///
+    /// `severity` prices a `valid` verdict. Omitting it does not silently
+    /// drop the report: it lands as an unpriced valid, which the severity
+    /// evidence gate refuses to crown.
     pub fn adjudicate(
         &self,
         id: &str,
         verdict: Adjudication,
+        severity: Option<Severity>,
         duplicate_of: Option<String>,
     ) -> Result<Report, StoreError> {
         let mut g = self.lock()?;
@@ -263,6 +313,11 @@ impl MemoryStore {
                 .ok_or_else(|| StoreError::NotFound(id.to_owned()))?;
             row.state = ReportState::from(verdict);
             row.adjudication = Some(verdict);
+            row.severity = if verdict == Adjudication::Valid {
+                severity
+            } else {
+                None
+            };
             row.duplicate_of = duplicate_of;
             row.miner_hotkey.clone()
         };
@@ -309,7 +364,7 @@ fn holdout_for(reports: &BTreeMap<String, Report>, hotkey: &str) -> MinerHoldout
             continue;
         }
         if let Some(v) = r.adjudication {
-            h.record(v);
+            h.record(v, r.severity);
         }
     }
     h
@@ -382,40 +437,33 @@ mod tests {
             .is_err());
     }
 
+    fn report(hotkey: &str, title: &str, body: &str) -> Report {
+        Report {
+            id: String::new(),
+            miner_hotkey: hotkey.to_owned(),
+            account_id: "acct".into(),
+            title: title.to_owned(),
+            body: body.to_owned(),
+            repro_steps: "curl the route and watch it 500".into(),
+            fingerprint: report_fingerprint(title, body),
+            state: ReportState::Pending,
+            adjudication: None,
+            severity: None,
+            duplicate_of: None,
+            champion_verdict: None,
+            created_at: 0,
+        }
+    }
+
     #[test]
     fn duplicate_fingerprint_auto_marks() {
         let s = MemoryStore::new();
-        let fp = report_fingerprint("same bug", "steps");
         let a = s
-            .insert_report(Report {
-                id: String::new(),
-                miner_hotkey: "aa".repeat(32),
-                account_id: "a".into(),
-                title: "same bug".into(),
-                body: "steps".into(),
-                repro_steps: "1".into(),
-                fingerprint: fp.clone(),
-                state: ReportState::Pending,
-                adjudication: None,
-                duplicate_of: None,
-                champion_verdict: None,
-            })
+            .insert_report(report(&"aa".repeat(32), "same bug", "steps"), 1_000)
             .expect("a");
         assert_eq!(a.state, ReportState::Pending);
         let b = s
-            .insert_report(Report {
-                id: String::new(),
-                miner_hotkey: "bb".repeat(32),
-                account_id: "b".into(),
-                title: "same bug".into(),
-                body: "steps".into(),
-                repro_steps: "1".into(),
-                fingerprint: fp,
-                state: ReportState::Pending,
-                adjudication: None,
-                duplicate_of: None,
-                champion_verdict: None,
-            })
+            .insert_report(report(&"bb".repeat(32), "same bug", "steps"), 1_000)
             .expect("b");
         assert_eq!(b.state, ReportState::Duplicate);
         assert_eq!(b.duplicate_of.as_deref(), Some(a.id.as_str()));
@@ -428,30 +476,86 @@ mod tests {
         let mut last = String::new();
         for i in 0..3 {
             let row = s
-                .insert_report(Report {
-                    id: String::new(),
-                    miner_hotkey: hk.clone(),
-                    account_id: "acct".into(),
-                    title: format!("bug {i}"),
-                    body: format!("body {i}"),
-                    repro_steps: "repro".into(),
-                    fingerprint: report_fingerprint(&format!("bug {i}"), &format!("body {i}")),
-                    state: ReportState::Pending,
-                    adjudication: None,
-                    duplicate_of: None,
-                    champion_verdict: None,
-                })
+                .insert_report(
+                    report(&hk, &format!("bug {i}"), &format!("body {i}")),
+                    1_000 + i * MIN_REPORT_INTERVAL_SECS,
+                )
                 .expect("ins");
             last = row.id;
-            s.adjudicate(&last, Adjudication::Valid, None).expect("adj");
+            s.adjudicate(&last, Adjudication::Valid, Some(Severity::Major), None)
+                .expect("adj");
         }
         let row = s.get_report(&last).expect("get");
         assert_eq!(row.adjudication, Some(Adjudication::Valid));
+        assert_eq!(row.severity, Some(Severity::Major));
         assert_eq!(
             s.champion_hotkey().expect("champ").as_deref(),
             Some(hk.as_str())
         );
-        let v = row.champion_verdict.expect("verdict");
-        assert!(v.eligible);
+        assert!(row.champion_verdict.expect("verdict").eligible);
+    }
+
+    /// Adjudication is the scarce resource: one hotkey must not be able to
+    /// fill the queue and starve everyone else's reports of a triage pass.
+    #[test]
+    fn a_hotkey_cannot_flood_the_adjudication_queue() {
+        let s = MemoryStore::new();
+        let hk = "dd".repeat(32);
+        let mut at = 1_000;
+        for i in 0..MAX_PENDING_REPORTS_PER_HOTKEY {
+            s.insert_report(report(&hk, &format!("bug {i}"), &format!("body {i}")), at)
+                .expect("within quota");
+            at += MIN_REPORT_INTERVAL_SECS;
+        }
+        let err = s
+            .insert_report(report(&hk, "one too many", "body"), at)
+            .expect_err("over quota");
+        assert!(matches!(err, StoreError::Quota(_)), "{err}");
+
+        // Another hotkey is unaffected: the quota is per miner, not global.
+        s.insert_report(report(&"ee".repeat(32), "someone else", "body"), at)
+            .expect("other hotkey");
+
+        // Clearing the queue frees the slot again.
+        let pending = s
+            .list_reports()
+            .expect("list")
+            .into_iter()
+            .find(|r| r.miner_hotkey == hk)
+            .expect("pending");
+        s.adjudicate(&pending.id, Adjudication::InvalidMalicious, None, None)
+            .expect("adjudicate");
+        s.insert_report(report(&hk, "after triage", "body"), at + 10_000)
+            .expect("slot freed");
+    }
+
+    #[test]
+    fn reports_from_one_hotkey_are_rate_limited() {
+        let s = MemoryStore::new();
+        let hk = "ff".repeat(32);
+        s.insert_report(report(&hk, "first", "body"), 1_000)
+            .expect("first");
+        let err = s
+            .insert_report(report(&hk, "second", "body"), 1_001)
+            .expect_err("too fast");
+        assert!(matches!(err, StoreError::Quota(_)), "{err}");
+        s.insert_report(report(&hk, "second", "body"), 1_000 + MIN_REPORT_INTERVAL_SECS)
+            .expect("after the window");
+    }
+
+    /// A valid verdict with no severity is recorded as unpriced rather than
+    /// dropped, so the scoring gate sees it.
+    #[test]
+    fn a_valid_verdict_without_severity_is_unpriced_not_silent() {
+        let s = MemoryStore::new();
+        let hk = "ab".repeat(32);
+        let row = s
+            .insert_report(report(&hk, "unpriced", "body"), 1_000)
+            .expect("ins");
+        s.adjudicate(&row.id, Adjudication::Valid, None, None)
+            .expect("adj");
+        let tally = s.holdout(&hk).expect("tally");
+        assert_eq!(tally.valid_unpriced, 1);
+        assert_eq!(tally.valid(), 0);
     }
 }

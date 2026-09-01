@@ -13,8 +13,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use bounty_challenge::{
-    backend_public_url, bounty_router, hash_admin_token, AppState, BountyStore, CHALLENGE_ID,
-    SCORING_VERSION,
+    bounty_router, hash_admin_token, resolve_scoring_backend, AppState, BountyStore,
+    ScoringBackend, CHALLENGE_ID, SCORING_VERSION,
 };
 use challenge_keys::load_challenge_secret;
 use clap::Parser;
@@ -63,20 +63,35 @@ fn run(cli: &Cli) -> Result<(), String> {
     }
     let admin_hashes = load_admin_hashes(cli.admin_tokens_file.as_deref());
     let session_secret = load_session_secret(cli.session_secret_file.as_deref())?;
-    if cli
+    // The CLI flag and the env var are the same knob; `resolve_scoring_backend`
+    // reads the env, so a flag-only invocation has to publish it first.
+    if let Some(url) = cli
         .backend_public_url
         .as_deref()
         .map(str::trim)
-        .is_some_and(|s| !s.is_empty())
-        || backend_public_url().is_some()
+        .filter(|s| !s.is_empty())
     {
-        tracing::info!("bounty scoring reads CortexLM/backend public API");
-    } else {
-        tracing::info!("BOUNTY_BACKEND_PUBLIC_URL unset — skip backend public fetch (sim/CI)");
+        std::env::set_var("BOUNTY_BACKEND_PUBLIC_URL", url);
+    }
+    let scoring = resolve_scoring_backend();
+    match scoring {
+        ScoringBackend::BackendPublic => {
+            tracing::info!("bounty scoring reads the CortexLM/backend public API");
+        }
+        ScoringBackend::Sim => {
+            tracing::info!("BOUNTY_FORCE_SIM=1 — locally adjudicated reports only, not a live feed");
+        }
+        // Reports would be real work this host could never pay for, so ingest
+        // refuses rather than banking them.
+        ScoringBackend::Unconfigured => tracing::warn!(
+            "no scoring backend: set BOUNTY_BACKEND_PUBLIC_URL (or BOUNTY_FORCE_SIM=1 for CI). \
+             POST /v1/reports will answer 503 until then"
+        ),
     }
     let state = AppState {
         store: BountyStore::new(),
         session_secret: Arc::new(session_secret),
+        scoring,
         admin_hashes: Arc::new(admin_hashes),
     };
     let rt = tokio::runtime::Builder::new_multi_thread()

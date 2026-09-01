@@ -13,8 +13,8 @@ mod backend;
 
 use bounty_challenge_task::{hotkey_hex, CHALLENGE_ID_BYTES, SCORE_MAX};
 use bounty_score::{
-    champion_hold_lattice, lattice_from_precision, score_plan_from_snapshot, MinerHoldout,
-    PublicScorePlan, PublicSnapshot,
+    champion_hold_lattice, lattice_from_precision_and_impact, score_plan_from_snapshot,
+    MinerHoldout, PublicScorePlan, PublicSnapshot,
 };
 use bounty_store::MemoryStore;
 use bundle::{NoScoreReasonCode, ScoreOrAbsence};
@@ -24,8 +24,9 @@ pub use backend::{
     fetch_public_snapshot, public_path, snapshot_from_json, try_fetch_public_snapshot, BackendError,
 };
 pub use bounty_challenge_task::{
-    backend_public_url, chat_command_display, CHALLENGE_ID, CHALLENGE_ID_BYTES as BOUNTY_ID_BYTES,
-    CHAT_COMMAND_PLACEHOLDER, SCORE_MAX as BOUNTY_SCORE_MAX, SCORING_VERSION, TERMS_TEXT,
+    backend_public_url, chat_command_display, force_sim, resolve_scoring_backend, ScoringBackend,
+    CHALLENGE_ID, CHALLENGE_ID_BYTES as BOUNTY_ID_BYTES, CHAT_COMMAND_PLACEHOLDER,
+    SCORE_MAX as BOUNTY_SCORE_MAX, SCORING_VERSION, TERMS_TEXT,
 };
 pub use bounty_http::{bounty_router, hash_admin_token, AppState};
 pub use bounty_store::MemoryStore as BountyStore;
@@ -86,9 +87,10 @@ pub fn live_champion_lattice(store: &MemoryStore, champion_hotkey: Option<&str>)
     let Ok(h) = store.holdout(hk) else {
         return 0;
     };
-    if let Some(p) = h.precision_bps() {
+    if let (Some(p), Some(impact)) = (h.precision_bps(), h.impact_bps()) {
         if h.decided() > 0 && h.net_credit() >= 0 {
-            return lattice_from_precision(p).max(champion_hold_lattice() / 4);
+            return lattice_from_precision_and_impact(p, impact)
+                .max(champion_hold_lattice() / 4);
         }
     }
     champion_hold_lattice()
@@ -142,10 +144,8 @@ mod tests {
         holdouts.insert(
             b,
             MinerHoldout {
-                valid: 0,
-                already_fixed: 0,
                 malicious: 3,
-                duplicate: 0,
+                ..MinerHoldout::default()
             },
         );
         let leaves = emit_epoch(&sk(), 9, &e, Some(a), 12_000, &holdouts).expect("emit");
@@ -187,15 +187,15 @@ mod tests {
             &format!(r#"{{"items":[{{"hotkey":"{alice}","valid_count":3}}]}}"#),
             &format!(
                 r#"{{"items":[
-                {{"id":"1","hotkey":"{alice}","status":"valid",
+                {{"id":"1","hotkey":"{alice}","status":"valid","severity":"major",
                   "problem_found":"seal 500","adjudicator":"bounty-adjudicator@cortex",
                   "justification":"reproduced","adjudicated_at":"2026-08-30T00:00:00Z",
                   "created_at":"2026-08-29T00:00:00Z"}},
-                {{"id":"2","hotkey":"{alice}","status":"valid",
+                {{"id":"2","hotkey":"{alice}","status":"valid","severity":"major",
                   "problem_found":"proxy 502","adjudicator":"bounty-adjudicator@cortex",
                   "justification":"reproduced","adjudicated_at":"2026-08-30T00:00:00Z",
                   "created_at":"2026-08-29T01:00:00Z"}},
-                {{"id":"3","hotkey":"{alice}","status":"valid",
+                {{"id":"3","hotkey":"{alice}","status":"valid","severity":"major",
                   "problem_found":"health flap","adjudicator":"bounty-adjudicator@cortex",
                   "justification":"reproduced","adjudicated_at":"2026-08-30T00:00:00Z",
                   "created_at":"2026-08-29T02:00:00Z"}}
