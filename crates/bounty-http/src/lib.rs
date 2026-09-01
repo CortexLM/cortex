@@ -412,10 +412,6 @@ mod tests {
         s
     }
 
-    fn dummy_public() -> [u8; 32] {
-        public_from_mini_secret(&dummy_secret()).expect("pk")
-    }
-
     fn app() -> (Router, String) {
         app_scoring(ScoringBackend::Sim)
     }
@@ -467,14 +463,23 @@ mod tests {
     }
 
     fn pair_payload(exp: u64) -> serde_json::Value {
-        let pk = dummy_public();
+        pair_payload_for(&dummy_secret(), "acct-http", "0123456789abcdef", exp)
+    }
+
+    fn pair_payload_for(
+        secret: &[u8; 32],
+        account: &str,
+        nonce: &str,
+        exp: u64,
+    ) -> serde_json::Value {
+        let pk = public_from_mini_secret(secret).expect("pk");
         let c = PairChallenge {
-            account_id: "acct-http".into(),
-            nonce: "0123456789abcdef".into(),
+            account_id: account.into(),
+            nonce: nonce.into(),
             exp,
         };
         let challenge = c.encode().expect("enc");
-        let sig = sign_pair_challenge(&dummy_secret(), &challenge).expect("sign");
+        let sig = sign_pair_challenge(secret, &challenge).expect("sign");
         let _code = pairing_code(&challenge, &hex::encode(sig), &hotkey_ss58(&pk));
         serde_json::json!({
             "account_id": c.account_id,
@@ -694,6 +699,68 @@ mod tests {
             let (st, v) = json_req(app.clone(), "POST", "/v1/reports", body, None).await;
             assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
         }
+    }
+
+    /// Same title+body as a closed original is still a duplicate — a second
+    /// miner cannot farm the fingerprint after the first report is rejected.
+    #[tokio::test]
+    async fn a_closed_fingerprint_cannot_be_refiled() {
+        let (app, token) = app();
+        let exp = unix_now().saturating_add(600);
+        let (st, paired) = json_req(app.clone(), "POST", "/v1/pair", pair_payload(exp), None).await;
+        assert_eq!(st, StatusCode::CREATED, "{paired}");
+        let session = paired["session"].as_str().expect("session");
+
+        let title = "seal returns 500 on empty bundle";
+        let (st, created) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/reports",
+            report_body(session, title),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_eq!(created["state"], "pending");
+        let fingerprint = created["fingerprint"].as_str().expect("fp").to_owned();
+
+        let (st, adj) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/adjudicate",
+            serde_json::json!({
+                "report_id": created["id"],
+                "verdict": "invalid_malicious",
+            }),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{adj}");
+
+        let mut other = [0x22u8; 32];
+        other[0] = 0x43;
+        let (st, paired2) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/pair",
+            pair_payload_for(&other, "acct-other", "fedcba9876543210", exp),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{paired2}");
+        let session2 = paired2["session"].as_str().expect("session2");
+
+        let (st, refile) = json_req(
+            app,
+            "POST",
+            "/v1/reports",
+            report_body(session2, title),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{refile}");
+        assert_eq!(refile["state"], "duplicate", "{refile}");
+        assert_eq!(refile["fingerprint"], fingerprint);
     }
 
     #[tokio::test]

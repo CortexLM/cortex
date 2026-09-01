@@ -77,12 +77,20 @@ impl AppState {
         self.store.champion_scores().ok().flatten().is_some()
     }
 
+    /// Whether the operator holdout is verified loaded on this host.
+    fn holdout_loaded(&self) -> bool {
+        self.store.holdout_seal().ok().is_some_and(|s| s.loaded)
+    }
+
     /// Whether this host can produce a verdict at all.
     ///
-    /// False until the live path has a recorded champion. Submit already 503s
-    /// with `no champion baseline recorded`; status must not contradict that.
+    /// False until the holdout is loaded **and** a champion baseline is
+    /// recorded. Submit already 503s in both cases; status must not
+    /// contradict that.
     fn can_score(&self) -> bool {
-        scoring_readiness(&self.pin, &self.judge, self.live()).is_ok() && self.champion_recorded()
+        self.holdout_loaded()
+            && scoring_readiness(&self.pin, &self.judge, self.live()).is_ok()
+            && self.champion_recorded()
     }
 }
 
@@ -841,6 +849,27 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn status_cannot_score_until_the_holdout_is_loaded() {
+        let pin = test_pin();
+        let store = MemoryStore::new();
+        store
+            .set_holdout_commitment(&pin.prompts.holdout_commitment, pin.prompts.holdout_size)
+            .expect("commit");
+        let app = relearn_t2i_router(AppState {
+            store,
+            pin,
+            judge: JudgeConfig::sim(),
+            live_judge: None,
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+        });
+        let (st, body) = json_req(app, "GET", "/v1/status", serde_json::json!({}), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["holdout"]["loaded"], false, "{body}");
+        assert_eq!(body["can_score"], false, "{body}");
+        assert_eq!(body["force_sim"], false, "{body}");
     }
 
     #[tokio::test]

@@ -83,14 +83,18 @@ fn committed_pin_allows_live_rent() {
     assert!(p.can_rent(), "eval_image_digest must be a sha256 pin");
     assert_eq!(
         p.eval_image_digest,
-        "sha256:201cc5d29c219097642d61ce4dd713d482a4d0502e49699a22f0a94da4983aaa"
+        "sha256:cbc4bbb80e421952696156a0ceb6d646448e421770ab01d8ad7be5dc989ae0f5"
     );
     assert_eq!(
         p.relearn_git_sha,
-        "d107a7c1bf5577d306d4d13f763604ab926ed6a3"
+        "f3cfa69bb634a5d61984d836c23a3f9e22a47683"
     );
     assert_eq!(p.relearn_git_sha.len(), 40);
     assert!(p.relearn_git_sha.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(
+        !p.eval_image_digest.contains("201cc5d29c"),
+        "do not pin the digest whose judge used max_tokens 32 / content null"
+    );
     assert!(
         !p.eval_image_digest.contains("86240d7617"),
         "do not pin the pre-CUDA digest"

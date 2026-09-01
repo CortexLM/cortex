@@ -69,13 +69,20 @@ impl AppState {
         self.store.champion_scores().ok().flatten().is_some()
     }
 
+    /// Whether the operator holdout is verified loaded on this host.
+    fn holdout_loaded(&self) -> bool {
+        self.store.holdout_seal().ok().is_some_and(|s| s.loaded)
+    }
+
     /// Whether this host can produce a verdict at all.
     ///
-    /// False until the live path has a recorded champion. Submit already 503s
-    /// with `no champion baseline recorded`; status must not contradict that
-    /// (same class of lie as advertising `can_score` with the holdout sealed).
+    /// False until the holdout is loaded **and** a champion baseline is
+    /// recorded. Submit already 503s in both cases; status must not
+    /// contradict that.
     fn can_score(&self) -> bool {
-        scoring_readiness(&self.pin, self.backend, self.live()).is_ok() && self.champion_recorded()
+        self.holdout_loaded()
+            && scoring_readiness(&self.pin, self.backend, self.live()).is_ok()
+            && self.champion_recorded()
     }
 }
 
@@ -711,6 +718,22 @@ mod tests {
         let dump = body.to_string();
         assert!(!dump.contains("holdout item"), "{dump}");
         assert!(!dump.contains("\"id\":801"));
+    }
+
+    #[tokio::test]
+    async fn status_cannot_score_until_the_holdout_is_loaded() {
+        let (st, body) = json_req(
+            app_with("op", false).await,
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["holdout"]["loaded"], false, "{body}");
+        assert_eq!(body["can_score"], false, "{body}");
+        assert_eq!(body["force_sim"], false, "{body}");
     }
 
     #[tokio::test]
