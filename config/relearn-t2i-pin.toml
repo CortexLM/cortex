@@ -44,8 +44,8 @@ judge_model = "Qwen/Qwen-Image-Bench"
 judge_dataset = "Qwen/Qwen-Image-Bench"
 judge_git = "https://github.com/QwenLM/Qwen-Image-Bench"
 
-eval_image = "ghcr.io/cortexlm/relearn-t2i-eval"
-# Same manifest is also published as ghcr.io/cortexlm/relearn-image-eval.
+eval_image = "ghcr.io/cortexlm/relearn-image-eval"
+# Same digest is also published as ghcr.io/cortexlm/relearn-t2i-eval.
 # Digest from CortexLM/relearn PR #3 (`54d3537`), published by
 # `publish-challenge-images`. Digest-only, never a floating tag.
 eval_image_digest = "sha256:81c40dc6d5b0f66be6927b69f2129565a0cefd7331bb65b27f5a7792ab87e7ea"

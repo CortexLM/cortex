@@ -138,7 +138,7 @@ impl Default for RelearnT2iPin {
             judge_model: JUDGE_MODEL_ID.into(),
             judge_dataset: JUDGE_DATASET_ID.into(),
             judge_git: JUDGE_GIT_URL.into(),
-            eval_image: "ghcr.io/cortexlm/relearn-t2i-eval".into(),
+            eval_image: "ghcr.io/cortexlm/relearn-image-eval".into(),
             eval_image_digest: String::new(),
             relearn_git: RELEARN_GIT_URL.into(),
             relearn_git_sha: String::new(),

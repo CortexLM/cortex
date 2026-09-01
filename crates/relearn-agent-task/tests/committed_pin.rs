@@ -86,11 +86,14 @@ fn eval_image_is_digest_only() {
         !p.eval_image.contains(':'),
         "the tag belongs in eval_image_digest, not eval_image"
     );
-    let hex = p.eval_image_digest.trim_start_matches("sha256:");
-    assert_eq!(hex.len(), 64);
-    assert!(hex
-        .chars()
-        .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    assert_eq!(
+        p.eval_image_digest,
+        "sha256:4db52b132fe150aa487825f4fb0a7bfe4018b13e16c01355607f6609dd4213f1"
+    );
+    assert_eq!(
+        p.relearn_git_sha,
+        "54d3537f41fd76222acd7da932496c15046b42dd"
+    );
     assert!(p.can_rent());
 }
 

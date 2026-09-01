@@ -9,8 +9,8 @@ you cannot see. Long guide, eval image, and harness:
 [CortexLM/relearn](https://github.com/CortexLM/relearn).
 Cortex pin: [`config/relearn-t2i-pin.toml`](../../config/relearn-t2i-pin.toml)
 (the file keeps the pre-launch `t2i` spelling; the challenge id is `relearn-image`).
-Eval image: `ghcr.io/cortexlm/relearn-t2i-eval@sha256:81c40dc6…` (same
-manifest as `relearn-image-eval`; [`CortexLM/relearn`](https://github.com/CortexLM/relearn) PR #3).
+Eval image: `ghcr.io/cortexlm/relearn-image-eval@sha256:81c40dc6…` (same
+manifest as `relearn-t2i-eval`; [`CortexLM/relearn`](https://github.com/CortexLM/relearn) PR #3).
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 

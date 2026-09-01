@@ -107,19 +107,19 @@ fn pin_carries_no_endpoint_or_secret() {
 #[test]
 fn eval_image_is_digest_only() {
     let p = pin();
-    assert!(
-        p.eval_image == "ghcr.io/cortexlm/relearn-t2i-eval"
-            || p.eval_image == "ghcr.io/cortexlm/relearn-image-eval"
-    );
+    assert_eq!(p.eval_image, "ghcr.io/cortexlm/relearn-image-eval");
     assert!(
         !p.eval_image.contains(':'),
         "the tag belongs in eval_image_digest, not eval_image"
     );
-    let hex = p.eval_image_digest.trim_start_matches("sha256:");
-    assert_eq!(hex.len(), 64);
-    assert!(hex
-        .chars()
-        .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    assert_eq!(
+        p.eval_image_digest,
+        "sha256:81c40dc6d5b0f66be6927b69f2129565a0cefd7331bb65b27f5a7792ab87e7ea"
+    );
+    assert_eq!(
+        p.relearn_git_sha,
+        "54d3537f41fd76222acd7da932496c15046b42dd"
+    );
     assert!(p.can_rent());
 }
 
