@@ -126,6 +126,14 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         // "can_score: false" without them is the usual operator confusion.
         "live_harvest_wired": st.live_scorer.is_some(),
         "champion_baseline_recorded": st.champion_recorded(),
+        // Name of the priming var only — never a host or pod path.
+        "base_weights": {
+            "primed": st.live().map_or(
+                st.backend != EvalBackend::Lium,
+                LiveScorer::base_weights_primed,
+            ),
+            "via": st.live().and_then(LiveScorer::base_weights_via),
+        },
         "relearn_git": st.pin.relearn_git,
         "relearn_git_sha": st.pin.relearn_git_sha,
         // Commitment + size + loaded. Never ids, prompts, or image hashes.
@@ -505,6 +513,29 @@ mod tests {
             holdout: &[HoldoutItem],
         ) -> Result<relearn_score::SliceScores, EvalError> {
             Ok(sim_slice_scores_at_skill(artifact, holdout, self.skill))
+        }
+    }
+
+    struct UnprimedScorer;
+
+    #[async_trait]
+    impl LiveScorer for UnprimedScorer {
+        async fn score(
+            &self,
+            _pin: &RelearnPin,
+            _frozen: &str,
+            _artifact: &str,
+            _holdout: &[HoldoutItem],
+        ) -> Result<relearn_score::SliceScores, EvalError> {
+            Err(EvalError::Backend("must not score".into()))
+        }
+        fn ready(&self) -> Result<(), EvalError> {
+            Err(EvalError::Backend(
+                "RELEARN_BASE_MODEL_DIR not set and RELEARN_ALLOW_MODEL_DOWNLOAD is not 1".into(),
+            ))
+        }
+        fn base_weights_primed(&self) -> bool {
+            false
         }
     }
 
@@ -1234,6 +1265,8 @@ mod tests {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(sim["eval_backend"], "sim");
         assert_eq!(sim["can_score"], true);
+        assert_eq!(sim["base_weights"]["primed"], true);
+        assert!(sim["base_weights"]["via"].is_null());
 
         let (st, live) = json_req(
             app_backend("op", true, EvalBackend::Lium, "").await,
@@ -1247,5 +1280,28 @@ mod tests {
         assert_eq!(live["eval_backend"], "lium");
         assert_eq!(live["eval_image_digest"], "");
         assert_eq!(live["can_score"], false);
+        assert_eq!(live["base_weights"]["primed"], false);
+        assert!(!live.to_string().contains("/models"));
+    }
+
+    #[tokio::test]
+    async fn status_says_base_weights_are_unprimed_without_leaking_a_path() {
+        let app = app_full(
+            "op",
+            true,
+            EvalBackend::Lium,
+            &format!("sha256:{}", "ab".repeat(32)),
+            Some(Arc::new(UnprimedScorer)),
+            true,
+        )
+        .await;
+        let (st, body) = json_req(app, "GET", "/v1/status", serde_json::json!({}), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["live_harvest_wired"], true);
+        assert_eq!(body["base_weights"]["primed"], false, "{body}");
+        assert!(body["base_weights"]["via"].is_null(), "{body}");
+        assert_eq!(body["can_score"], false, "{body}");
+        assert!(!body.to_string().contains("/models"), "{body}");
+        assert!(!body.to_string().contains("teacher.invalid"), "{body}");
     }
 }

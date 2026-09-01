@@ -203,12 +203,20 @@ fn build_live_scorer(backend: EvalBackend, run_timeout_secs: u64) -> Option<Arc<
     if teacher.has_judge() {
         tracing::info!(
             forwarded = ?teacher.present_names(),
+            base_weights_primed = teacher.has_base_weights(),
+            base_weights_via = ?teacher.base_weights_via(),
             "teacher config will be forwarded into the eval pod"
         );
     } else {
         tracing::warn!(
             "RELEARN_TEACHER_API_URL unset; the eval image has no judge and every submission \
              will 503 before a pod is rented"
+        );
+    }
+    if teacher.has_judge() && !teacher.has_base_weights() {
+        tracing::warn!(
+            "RELEARN_BASE_MODEL_DIR unset and RELEARN_ALLOW_MODEL_DOWNLOAD is not 1; \
+             every submission will 503 before a pod is rented"
         );
     }
     let pod = Arc::new(harvest_pod::LiumEvalPod::new(

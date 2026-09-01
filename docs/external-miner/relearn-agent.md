@@ -86,7 +86,8 @@ commitment and size, and the three arms the eval must run. It never reveals
 episode ids, goals, or observation hashes.
 
 It also reports whether this host can score at all: `eval_backend`,
-`force_sim`, `live_harvest_wired`, `champion_baseline_recorded`, and
+`force_sim`, `live_harvest_wired`, `champion_baseline_recorded`,
+`base_weights`, and
 `can_score`. When `can_score` is false every submit answers **503** and nothing
 is stored — that is the host being unready, not your artifact being rejected,
 so retry rather than resubmitting variants. A missing `RELEARN_TEACHER_API_URL`

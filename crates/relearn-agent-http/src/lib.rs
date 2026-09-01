@@ -121,6 +121,13 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         // "can_score: false" without them is the usual operator confusion.
         "live_harvest_wired": st.live_scorer.is_some(),
         "champion_baseline_recorded": st.champion_recorded(),
+        "base_weights": {
+            "primed": st.live().map_or(
+                st.backend != EvalBackend::Lium,
+                LiveScorer::base_weights_primed,
+            ),
+            "via": st.live().and_then(LiveScorer::base_weights_via),
+        },
         // The arms that make this an agent challenge rather than a prompt set.
         "gates": ["trace_replay", "tool_ablation", "observation_shuffle"],
         "relearn_git": st.pin.relearn_git,
@@ -1064,6 +1071,7 @@ mod tests {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(sim["eval_backend"], "sim");
         assert_eq!(sim["can_score"], true);
+        assert_eq!(sim["base_weights"]["primed"], true);
 
         let (st, live) = json_req(
             app_full("op", EvalBackend::Lium, "", None, true, false).await,
@@ -1077,5 +1085,7 @@ mod tests {
         assert_eq!(live["eval_backend"], "lium");
         assert_eq!(live["can_score"], false);
         assert_eq!(live["live_harvest_wired"], false);
+        assert_eq!(live["base_weights"]["primed"], false);
+        assert!(!live.to_string().contains("/models"));
     }
 }

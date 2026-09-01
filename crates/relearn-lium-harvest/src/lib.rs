@@ -69,6 +69,35 @@ pub struct TeacherEnv {
     pub model: Option<String>,
     /// `RELEARN_TEACHER_API_KEY`. Secret; see [`Self::secrets`].
     pub api_key: Option<String>,
+    /// `RELEARN_BASE_MODEL_DIR` as the eval **pod** sees it (e.g. `/models/base`).
+    ///
+    /// Not a path that only exists on the teacher host. The CUDA image does
+    /// not bake Qwen; without this or [`Self::allow_model_download`] preflight
+    /// exits 2.
+    pub base_model_dir: Option<String>,
+    /// `HF_HOME` on the pod, when the operator set one.
+    pub hf_home: Option<String>,
+    /// `HF_HUB_CACHE` on the pod, when the operator set one.
+    pub hf_hub_cache: Option<String>,
+    /// `RELEARN_ALLOW_MODEL_DOWNLOAD=1`. First champion pull only; never defaulted.
+    pub allow_model_download: bool,
+}
+
+fn env_trim(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 impl TeacherEnv {
@@ -77,11 +106,12 @@ impl TeacherEnv {
     pub fn from_host_env() -> Self {
         Self {
             api_url: relearn_challenge_task::teacher_api_url(),
-            model: std::env::var("RELEARN_TEACHER_MODEL")
-                .ok()
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty()),
+            model: env_trim("RELEARN_TEACHER_MODEL"),
             api_key: relearn_challenge_task::teacher_api_key(),
+            base_model_dir: env_trim("RELEARN_BASE_MODEL_DIR"),
+            hf_home: env_trim("HF_HOME"),
+            hf_hub_cache: env_trim("HF_HUB_CACHE"),
+            allow_model_download: env_flag("RELEARN_ALLOW_MODEL_DOWNLOAD"),
         }
     }
 
@@ -91,6 +121,31 @@ impl TeacherEnv {
         self.api_url
             .as_deref()
             .is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// Whether the pod will have a backbone: local dir, or an explicit download.
+    #[must_use]
+    pub fn has_base_weights(&self) -> bool {
+        self.base_model_dir
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            || self.allow_model_download
+    }
+
+    /// Which priming var is set. Name only — never the path.
+    #[must_use]
+    pub fn base_weights_via(&self) -> Option<&'static str> {
+        if self
+            .base_model_dir
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            Some("RELEARN_BASE_MODEL_DIR")
+        } else if self.allow_model_download {
+            Some("RELEARN_ALLOW_MODEL_DOWNLOAD")
+        } else {
+            None
+        }
     }
 
     /// Variable names present, for logs and `/v1/status`. Never values.
@@ -105,6 +160,18 @@ impl TeacherEnv {
         }
         if self.api_key.is_some() {
             names.push("RELEARN_TEACHER_API_KEY");
+        }
+        if self.base_model_dir.is_some() {
+            names.push("RELEARN_BASE_MODEL_DIR");
+        }
+        if self.hf_home.is_some() {
+            names.push("HF_HOME");
+        }
+        if self.hf_hub_cache.is_some() {
+            names.push("HF_HUB_CACHE");
+        }
+        if self.allow_model_download {
+            names.push("RELEARN_ALLOW_MODEL_DOWNLOAD");
         }
         names
     }
@@ -132,6 +199,18 @@ impl TeacherEnv {
             lines.push(format!("RELEARN_TEACHER_API_KEY={key}"));
         }
         lines.push(format!("RELEARN_BASE_MODEL={}", pin.base_model));
+        if let Some(dir) = &self.base_model_dir {
+            lines.push(format!("RELEARN_BASE_MODEL_DIR={dir}"));
+        }
+        if let Some(home) = &self.hf_home {
+            lines.push(format!("HF_HOME={home}"));
+        }
+        if let Some(cache) = &self.hf_hub_cache {
+            lines.push(format!("HF_HUB_CACHE={cache}"));
+        }
+        if self.allow_model_download {
+            lines.push("RELEARN_ALLOW_MODEL_DOWNLOAD=1".into());
+        }
         lines.push(String::new());
         lines.join("\n")
     }
@@ -387,7 +466,24 @@ impl LiveScorer for LiumHarvest {
                     .into(),
             ));
         }
+        // The image does not bake Qwen. A rented B200 that sees only the HF
+        // id preflight-exits 2; refuse before the rent.
+        if !self.teacher.has_base_weights() {
+            return Err(EvalError::Backend(
+                "RELEARN_BASE_MODEL_DIR not set and RELEARN_ALLOW_MODEL_DOWNLOAD is not 1; \
+                 the eval image has no base weights and would preflight-fail"
+                    .into(),
+            ));
+        }
         Ok(())
+    }
+
+    fn base_weights_primed(&self) -> bool {
+        self.teacher.has_base_weights()
+    }
+
+    fn base_weights_via(&self) -> Option<&'static str> {
+        self.teacher.base_weights_via()
     }
 }
 
@@ -520,8 +616,9 @@ mod tests {
     fn teacher() -> TeacherEnv {
         TeacherEnv {
             api_url: Some("http://teacher.invalid/v1".into()),
-            model: None,
             api_key: Some("tk-live-secret-value-0123456789".into()),
+            base_model_dir: Some("/models/base".into()),
+            ..TeacherEnv::default()
         }
     }
 
@@ -711,6 +808,11 @@ mod tests {
             env.contains(&format!("RELEARN_BASE_MODEL={}", p.base_model)),
             "{env}"
         );
+        assert!(env.contains("RELEARN_BASE_MODEL_DIR=/models/base"), "{env}");
+        assert!(
+            !env.contains("RELEARN_ALLOW_MODEL_DOWNLOAD"),
+            "ALLOW_DOWNLOAD is never defaulted: {env}"
+        );
     }
 
     #[tokio::test]
@@ -733,6 +835,107 @@ mod tests {
             pod.log().booted.is_empty(),
             "never pay for a pod that cannot score"
         );
+    }
+
+    #[tokio::test]
+    async fn no_base_weights_refuses_before_renting_a_pod() {
+        let hold = recs(120);
+        let p = pin(&hold);
+        let pod = Arc::new(FakePod::ok(document(&p, &hold, "f", "a", 0.6)));
+        let transport: Arc<dyn EvalPod> = pod.clone();
+        let err = LiumHarvest::new(
+            transport,
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAmaster".into()],
+            TeacherEnv {
+                api_url: Some("http://teacher.invalid/v1".into()),
+                ..TeacherEnv::default()
+            },
+        )
+        .score(&p, "f", "a", &hold)
+        .await
+        .expect_err("no backbone");
+        assert!(err.to_string().contains("RELEARN_BASE_MODEL_DIR"), "{err}");
+        assert!(
+            err.to_string().contains("RELEARN_ALLOW_MODEL_DOWNLOAD"),
+            "{err}"
+        );
+        assert!(
+            pod.log().booted.is_empty(),
+            "never pay for a pod that will preflight-fail"
+        );
+    }
+
+    #[test]
+    fn env_file_forwards_dir_hf_and_explicit_download() {
+        let hold = recs(4);
+        let p = pin(&hold);
+        let env = TeacherEnv {
+            api_url: Some("http://teacher.invalid/v1".into()),
+            base_model_dir: Some("/models/base".into()),
+            hf_home: Some("/models/hf".into()),
+            hf_hub_cache: Some("/models/hf/hub".into()),
+            allow_model_download: true,
+            ..TeacherEnv::default()
+        }
+        .env_file(&p);
+        assert!(env.contains("RELEARN_BASE_MODEL_DIR=/models/base"), "{env}");
+        assert!(env.contains("HF_HOME=/models/hf"), "{env}");
+        assert!(env.contains("HF_HUB_CACHE=/models/hf/hub"), "{env}");
+        assert!(env.contains("RELEARN_ALLOW_MODEL_DOWNLOAD=1"), "{env}");
+        let names = TeacherEnv {
+            base_model_dir: Some("/models/base".into()),
+            allow_model_download: true,
+            ..TeacherEnv::default()
+        }
+        .present_names();
+        assert!(names.contains(&"RELEARN_BASE_MODEL_DIR"));
+        assert!(names.contains(&"RELEARN_ALLOW_MODEL_DOWNLOAD"));
+        assert!(!names.join(",").contains("/models"), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn allow_download_without_dir_is_enough_to_rent() {
+        let hold = recs(120);
+        let p = pin(&hold);
+        let pod = Arc::new(FakePod::ok(document(&p, &hold, "f", "a", 0.6)));
+        let transport: Arc<dyn EvalPod> = pod.clone();
+        LiumHarvest::new(
+            transport,
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAmaster".into()],
+            TeacherEnv {
+                api_url: Some("http://teacher.invalid/v1".into()),
+                allow_model_download: true,
+                ..TeacherEnv::default()
+            },
+        )
+        .score(&p, "f", "a", &hold)
+        .await
+        .expect("ALLOW_DOWNLOAD is the first-champion path");
+        let env = &pod.log().env_files[0];
+        assert!(env.contains("RELEARN_ALLOW_MODEL_DOWNLOAD=1"), "{env}");
+        assert!(!env.contains("RELEARN_BASE_MODEL_DIR="), "{env}");
+    }
+
+    #[test]
+    fn allow_download_alone_is_enough_to_prime() {
+        let allow = TeacherEnv {
+            allow_model_download: true,
+            ..TeacherEnv::default()
+        };
+        assert!(allow.has_base_weights());
+        assert_eq!(
+            allow.base_weights_via(),
+            Some("RELEARN_ALLOW_MODEL_DOWNLOAD")
+        );
+        let dir = TeacherEnv {
+            base_model_dir: Some("/models/base".into()),
+            allow_model_download: true,
+            ..TeacherEnv::default()
+        };
+        assert_eq!(dir.base_weights_via(), Some("RELEARN_BASE_MODEL_DIR"));
+        assert!(!TeacherEnv::default().has_base_weights());
     }
 
     /// A pod that boots, runs, and prints no marker is the hardest failure to

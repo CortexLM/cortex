@@ -145,6 +145,16 @@ pub trait LiveScorer: Send + Sync {
     fn ready(&self) -> Result<(), EvalError> {
         Ok(())
     }
+
+    /// Whether the harvest will hand the pod a backbone (dir or explicit pull).
+    fn base_weights_primed(&self) -> bool {
+        true
+    }
+
+    /// Which priming var is set. Name only; never a filesystem path.
+    fn base_weights_via(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Champion baseline measured by the digest-pinned eval image.

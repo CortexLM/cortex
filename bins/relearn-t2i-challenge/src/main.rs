@@ -220,12 +220,20 @@ fn build_live_judge(judge: &JudgeConfig, run_timeout_secs: u64) -> Option<Arc<dy
     if judge_env.has_judge() {
         tracing::info!(
             forwarded = ?judge_env.present_names(),
+            base_weights_primed = judge_env.has_base_weights(),
+            base_weights_via = ?judge_env.base_weights_via(),
             "judge config will be forwarded into the eval pod"
         );
     } else {
         tracing::warn!(
             "RELEARN_T2I_JUDGE_API_URL unset; the eval image has no judge and every submission \
              will 503 before a pod is rented"
+        );
+    }
+    if judge_env.has_judge() && !judge_env.has_base_weights() {
+        tracing::warn!(
+            "RELEARN_T2I_BASE_MODEL_DIR unset and RELEARN_ALLOW_MODEL_DOWNLOAD is not 1; \
+             every submission will 503 before a pod is rented"
         );
     }
     let pod = Arc::new(harvest_pod::LiumEvalPod::new(

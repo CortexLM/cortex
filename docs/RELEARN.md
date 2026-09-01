@@ -129,12 +129,18 @@ it, and a missing judge URL is why a pod can boot, run, and never print
 | `RELEARN_TEACHER_MODEL` | host env, else the pin's `teacher_model` | yes (defaulted) |
 | `RELEARN_TEACHER_API_KEY` | host env | only if the teacher API requires auth |
 | `RELEARN_BASE_MODEL` | the pin's `base_model` | yes |
+| `RELEARN_BASE_MODEL_DIR` | host env | **pod path** to Qwen (e.g. `/models/base`). Not a teacher-host path. Required unless `RELEARN_ALLOW_MODEL_DOWNLOAD=1` |
+| `HF_HOME` / `HF_HUB_CACHE` | host env | optional pod cache paths after a first pull |
+| `RELEARN_ALLOW_MODEL_DOWNLOAD` | host env | first champion pull only. **Never defaulted.** After Lium caches weights, pin `RELEARN_BASE_MODEL_DIR` to that path and unset this |
 
 Only the names are in git. Values are operator state, delivered in
 `teacher.env` over stdin with `umask 077` — never on the remote command line,
 where the key would sit in the pod's process table. A host missing the judge
-URL reports `can_score: false` and refuses **before** renting, rather than
-paying for a pod that cannot score.
+URL, or missing both `RELEARN_BASE_MODEL_DIR` and
+`RELEARN_ALLOW_MODEL_DOWNLOAD=1`, reports `can_score: false` and
+`base_weights.primed: false` and refuses **before** renting, rather than
+paying for a pod that cannot score. The image does not bake Qwen. `/v1/status`
+publishes the priming **var name** only, never the path.
 
 **`RELEARN_TEACHER_API_KEY` crosses to a miner-paid pod.** Use a teacher
 credential scoped and rate-limited for this purpose, and rotate it on

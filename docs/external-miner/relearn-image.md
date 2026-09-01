@@ -124,7 +124,8 @@ inference parameters, the sampler recipe, and the holdout commitment and size.
 It never reveals holdout prompt ids or text.
 
 It also reports whether this host can score at all: `judge_backend`,
-`force_sim`, `live_harvest_wired`, `champion_baseline_recorded`, and
+`force_sim`, `live_harvest_wired`, `champion_baseline_recorded`,
+`base_weights`, and
 `can_score`. When `can_score` is false every submit answers **503** and nothing
 is stored — that is the host being unready, not your artifact being rejected,
 so retry rather than resubmitting variants. A missing `RELEARN_T2I_JUDGE_API_URL`

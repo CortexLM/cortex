@@ -63,7 +63,8 @@ Poll `GET /challenge/relearn/v1/submissions/{id}`. Eligible runs sit at
 The response carries `eval_backend`. `lium` is a real eval on the pinned eval
 image; `sim` is the operator's offline harness (CI / local only) and is not a
 live verdict. `GET /challenge/relearn/v1/status` shows the same field plus
-`can_score`, so you can tell before submitting whether the host will score at
-all. While `can_score` is `false`, submissions answer **503**.
+`can_score` and `base_weights` (`primed` + which var, never a path), so you
+can tell before submitting whether the host will score at all. While
+`can_score` is `false`, submissions answer **503**.
 
 Never commit the Lium key. If something fails, see [troubleshoot.md](./troubleshoot.md).

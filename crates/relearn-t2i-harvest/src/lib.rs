@@ -132,6 +132,31 @@ pub struct JudgeEnv {
     pub model: Option<String>,
     /// `RELEARN_T2I_JUDGE_API_KEY`. Secret; see [`Self::secrets`].
     pub api_key: Option<String>,
+    /// Backbone dir as the eval **pod** sees it. Cosmos3 is not baked in.
+    pub base_model_dir: Option<String>,
+    /// `HF_HOME` on the pod, when the operator set one.
+    pub hf_home: Option<String>,
+    /// `HF_HUB_CACHE` on the pod, when the operator set one.
+    pub hf_hub_cache: Option<String>,
+    /// Explicit one-shot pull. Never defaulted on.
+    pub allow_model_download: bool,
+}
+
+fn env_trim(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 impl JudgeEnv {
@@ -140,11 +165,14 @@ impl JudgeEnv {
     pub fn from_host_env() -> Self {
         Self {
             api_url: relearn_t2i_eval::judge_api_url(),
-            model: std::env::var("RELEARN_T2I_JUDGE_MODEL")
-                .ok()
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty()),
+            model: env_trim("RELEARN_T2I_JUDGE_MODEL"),
             api_key: relearn_t2i_eval::judge_api_key(),
+            base_model_dir: env_trim("RELEARN_T2I_BASE_MODEL_DIR")
+                .or_else(|| env_trim("RELEARN_BASE_MODEL_DIR")),
+            hf_home: env_trim("HF_HOME"),
+            hf_hub_cache: env_trim("HF_HUB_CACHE"),
+            allow_model_download: env_flag("RELEARN_T2I_ALLOW_MODEL_DOWNLOAD")
+                || env_flag("RELEARN_ALLOW_MODEL_DOWNLOAD"),
         }
     }
 
@@ -154,6 +182,31 @@ impl JudgeEnv {
         self.api_url
             .as_deref()
             .is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// Whether the pod will have Cosmos3: local dir, or an explicit download.
+    #[must_use]
+    pub fn has_base_weights(&self) -> bool {
+        self.base_model_dir
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            || self.allow_model_download
+    }
+
+    /// Which priming var is set. Name only — never the path.
+    #[must_use]
+    pub fn base_weights_via(&self) -> Option<&'static str> {
+        if self
+            .base_model_dir
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            Some("RELEARN_T2I_BASE_MODEL_DIR")
+        } else if self.allow_model_download {
+            Some("RELEARN_ALLOW_MODEL_DOWNLOAD")
+        } else {
+            None
+        }
     }
 
     /// Variable names present, for logs. Never values.
@@ -168,6 +221,18 @@ impl JudgeEnv {
         }
         if self.api_key.is_some() {
             names.push("RELEARN_T2I_JUDGE_API_KEY");
+        }
+        if self.base_model_dir.is_some() {
+            names.push("RELEARN_T2I_BASE_MODEL_DIR");
+        }
+        if self.hf_home.is_some() {
+            names.push("HF_HOME");
+        }
+        if self.hf_hub_cache.is_some() {
+            names.push("HF_HUB_CACHE");
+        }
+        if self.allow_model_download {
+            names.push("RELEARN_ALLOW_MODEL_DOWNLOAD");
         }
         names
     }
@@ -194,6 +259,20 @@ impl JudgeEnv {
             lines.push(format!("RELEARN_T2I_JUDGE_API_KEY={key}"));
         }
         lines.push(format!("RELEARN_T2I_BASE_MODEL={}", pin.base));
+        if let Some(dir) = &self.base_model_dir {
+            lines.push(format!("RELEARN_T2I_BASE_MODEL_DIR={dir}"));
+            lines.push(format!("RELEARN_BASE_MODEL_DIR={dir}"));
+        }
+        if let Some(home) = &self.hf_home {
+            lines.push(format!("HF_HOME={home}"));
+        }
+        if let Some(cache) = &self.hf_hub_cache {
+            lines.push(format!("HF_HUB_CACHE={cache}"));
+        }
+        if self.allow_model_download {
+            lines.push("RELEARN_T2I_ALLOW_MODEL_DOWNLOAD=1".into());
+            lines.push("RELEARN_ALLOW_MODEL_DOWNLOAD=1".into());
+        }
         lines.push(String::new());
         lines.join("\n")
     }
@@ -355,7 +434,22 @@ impl LiveJudge for LiumImageHarvest {
                     .into(),
             ));
         }
+        if !self.judge.has_base_weights() {
+            return Err(EvalError::Backend(
+                "RELEARN_T2I_BASE_MODEL_DIR not set and RELEARN_ALLOW_MODEL_DOWNLOAD is not 1; \
+                 the eval image has no base weights and would preflight-fail"
+                    .into(),
+            ));
+        }
         Ok(())
+    }
+
+    fn base_weights_primed(&self) -> bool {
+        self.judge.has_base_weights()
+    }
+
+    fn base_weights_via(&self) -> Option<&'static str> {
+        self.judge.base_weights_via()
     }
 }
 
@@ -504,8 +598,9 @@ mod tests {
     fn judge() -> JudgeEnv {
         JudgeEnv {
             api_url: Some("http://judge.invalid/v1".into()),
-            model: None,
             api_key: Some("jk-live-secret-value-0123456789".into()),
+            base_model_dir: Some("/models/base".into()),
+            ..JudgeEnv::default()
         }
     }
 
@@ -701,6 +796,11 @@ mod tests {
             env.contains(&format!("RELEARN_T2I_BASE_MODEL={}", p.base)),
             "{env}"
         );
+        assert!(env.contains("RELEARN_BASE_MODEL_DIR=/models/base"), "{env}");
+        assert!(
+            !env.contains("RELEARN_ALLOW_MODEL_DOWNLOAD"),
+            "ALLOW_DOWNLOAD is never defaulted: {env}"
+        );
     }
 
     #[tokio::test]
@@ -724,6 +824,33 @@ mod tests {
         assert!(
             pod.log().booted.is_empty(),
             "never pay for a pod that cannot score"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_base_weights_refuses_before_renting_a_pod() {
+        let p = pin();
+        let pod = Arc::new(FakePod::ok(document(&p, "f", "a", 0.6)));
+        let transport: Arc<dyn EvalPod> = pod.clone();
+        let err = LiumImageHarvest::new(
+            transport,
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAmaster".into()],
+            JudgeEnv {
+                api_url: Some("http://judge.invalid/v1".into()),
+                ..JudgeEnv::default()
+            },
+        )
+        .score(&p, "f", "a", &holdout(), &ArtifactManifest::default())
+        .await
+        .expect_err("no backbone");
+        assert!(
+            err.to_string().contains("RELEARN_T2I_BASE_MODEL_DIR"),
+            "{err}"
+        );
+        assert!(
+            pod.log().booted.is_empty(),
+            "never pay for a pod that will preflight-fail"
         );
     }
 }

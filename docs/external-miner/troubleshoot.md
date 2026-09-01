@@ -21,6 +21,7 @@
 | `503 … no in-process sim` | Digest is pinned but the live harvest is not wired on that host | Operator issue; `/v1/status` shows `live_harvest_wired: false`. The control plane refuses to substitute sim numbers |
 | `503 backend: lium …` | The eval pod could not be rented, reached, or torn down | Transient. Retry; the run is not banked and no verdict was recorded |
 | `503 backend: RELEARN_TEACHER_API_URL not set …` | Operator has not configured the judge the eval image needs | Operator issue; `/v1/status` shows `can_score: false`. No pod was rented |
+| `503 backend: RELEARN_BASE_MODEL_DIR not set …` | Eval pod has no Qwen (image does not bake 27B) | Operator: first champion harvest sets `RELEARN_ALLOW_MODEL_DOWNLOAD=1` (forwarded into `teacher.env`). After Lium caches, pin `RELEARN_BASE_MODEL_DIR` to the **pod** path. `/v1/status` → `base_weights.primed`. No pod was rented |
 | `503 backend: RELEARN_T2I_JUDGE_API_URL not set …` | Operator has not configured Q-Judger for Image | Same as the teacher URL: `can_score: false`, no pod |
 | `rejected` with `Contamination` / `ContaminationEvidenceMissing` and no receipt | Training metadata overlapped the holdout, or `manifest` declared nothing | Expected. The host refuses **before** renting so junk cannot spend a pod |
 | `503 … did not print RELEARN_EVAL_OK; run.log tail: …` | The eval image ran and exited without scoring | The tail is the image's own log (truncated, secrets redacted). Usually an operator-side judge or model-loading failure, not your artifact |

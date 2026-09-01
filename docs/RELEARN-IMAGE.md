@@ -145,12 +145,16 @@ it, and a missing judge URL is why a pod can boot, run, and never print
 | `RELEARN_T2I_JUDGE_MODEL` | host env, else the pin's `judge_model` | yes (defaulted) |
 | `RELEARN_T2I_JUDGE_API_KEY` | host env | only if the judge API requires auth |
 | `RELEARN_T2I_BASE_MODEL` | the pin's `base` | yes |
+| `RELEARN_T2I_BASE_MODEL_DIR` / `RELEARN_BASE_MODEL_DIR` | host env | **pod path** to Cosmos3. Required unless `RELEARN_ALLOW_MODEL_DOWNLOAD=1` |
+| `HF_HOME` / `HF_HUB_CACHE` | host env | optional pod cache paths |
+| `RELEARN_T2I_ALLOW_MODEL_DOWNLOAD` / `RELEARN_ALLOW_MODEL_DOWNLOAD` | host env | first champion pull only. Never defaulted |
 
 Only the names are in git. Values are operator state, delivered in
 `teacher.env` over stdin with `umask 077` — never on the remote command line,
 where the key would sit in the pod's process table. A host missing the judge
-URL reports `can_score: false` and refuses **before** renting, rather than
-paying for a pod that cannot score.
+URL, or missing both a pod backbone dir and `RELEARN_ALLOW_MODEL_DOWNLOAD=1`,
+reports `can_score: false` and `base_weights.primed: false` and refuses
+**before** renting. `/v1/status` publishes the priming var name only.
 
 **`RELEARN_T2I_JUDGE_API_KEY` crosses to a miner-paid pod.** Use a judge
 credential scoped and rate-limited for this purpose, and rotate it on

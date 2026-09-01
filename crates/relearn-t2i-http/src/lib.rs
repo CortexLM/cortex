@@ -139,6 +139,13 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         // "can_score: false" without them is the usual operator confusion.
         "live_harvest_wired": st.live_judge.is_some(),
         "champion_baseline_recorded": st.champion_recorded(),
+        "base_weights": {
+            "primed": st.live().map_or(
+                st.judge.backend != JudgeBackend::Lium,
+                LiveJudge::base_weights_primed,
+            ),
+            "via": st.live().and_then(LiveJudge::base_weights_via),
+        },
         // Whether an endpoint is set, never the endpoint itself.
         "judge_endpoint_configured": st.judge.endpoint_configured(),
         "sampler": st.pin.sampler,
@@ -1261,6 +1268,7 @@ mod tests {
         assert_eq!(sim["judge_backend"], "sim");
         assert_eq!(sim["can_score"], true);
         assert_eq!(sim["challenge_id"], "relearn-image");
+        assert_eq!(sim["base_weights"]["primed"], true);
 
         let (st, live) = json_req(
             app_full("op", test_pin(), live_judge_config(), None, false).await,

@@ -140,11 +140,15 @@ it, and a missing teacher URL is why a pod can boot, run, and never print
 | `RELEARN_TEACHER_MODEL` | host env, else the pin's `teacher_model` | yes (defaulted) |
 | `RELEARN_TEACHER_API_KEY` | host env | only if the teacher API requires auth |
 | `RELEARN_BASE_MODEL` | the pin's `base_model` | yes |
+| `RELEARN_BASE_MODEL_DIR` | host env | **pod path** to Qwen. Required unless `RELEARN_ALLOW_MODEL_DOWNLOAD=1` |
+| `HF_HOME` / `HF_HUB_CACHE` | host env | optional pod cache paths |
+| `RELEARN_ALLOW_MODEL_DOWNLOAD` | host env | first champion pull only. Never defaulted |
 
 Only the names are in git. Values are operator state, delivered in
 `teacher.env` over stdin with `umask 077` — never on the remote command line.
-A host missing the teacher URL reports `can_score: false` and refuses
-**before** renting.
+A host missing the teacher URL, or missing both a pod `RELEARN_BASE_MODEL_DIR`
+and `RELEARN_ALLOW_MODEL_DOWNLOAD=1`, reports `can_score: false` and
+`base_weights.primed: false` and refuses **before** renting.
 
 **`RELEARN_TEACHER_API_KEY` crosses to a miner-paid pod.** Scope and
 rate-limit that credential, rotate it on suspicion, or leave it unset if the
