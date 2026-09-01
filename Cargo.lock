@@ -4610,6 +4610,124 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "relearn-agent-challenge"
+version = "0.1.0"
+dependencies = [
+ "bundle",
+ "challenge-common",
+ "crypto",
+ "hex",
+ "relearn-agent-eval",
+ "relearn-agent-http",
+ "relearn-agent-score",
+ "relearn-agent-store",
+ "relearn-agent-task",
+ "serde_json",
+]
+
+[[package]]
+name = "relearn-agent-challenge-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "challenge-keys",
+ "clap",
+ "harvest-pod",
+ "prism-lium",
+ "relearn-agent-challenge",
+ "relearn-agent-harvest",
+ "telemetry",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "relearn-agent-eval"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "prism-competition",
+ "prism-lium-types",
+ "relearn-agent-score",
+ "relearn-agent-store",
+ "relearn-agent-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "relearn-agent-harvest"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "harvest-pod",
+ "prism-lium-types",
+ "relearn-agent-eval",
+ "relearn-agent-score",
+ "relearn-agent-task",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "relearn-agent-http"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "hex",
+ "http-body-util",
+ "relearn-agent-eval",
+ "relearn-agent-score",
+ "relearn-agent-store",
+ "relearn-agent-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "relearn-agent-score"
+version = "0.1.0"
+dependencies = [
+ "prism-competition",
+ "relearn-agent-task",
+ "serde",
+]
+
+[[package]]
+name = "relearn-agent-store"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "prism-competition",
+ "relearn-agent-score",
+ "relearn-agent-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "relearn-agent-task"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "relearn-challenge"
 version = "0.1.0"
 dependencies = [

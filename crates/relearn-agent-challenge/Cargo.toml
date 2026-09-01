@@ -1,0 +1,26 @@
+[package]
+name = "relearn-agent-challenge"
+description = "Relearn Agent orchestrator: submit, eval, operator promote, D24 emit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bundle = { path = "../bundle" }
+challenge-common = { path = "../challenge-common" }
+hex = "0.4"
+relearn-agent-eval = { path = "../relearn-agent-eval" }
+relearn-agent-http = { path = "../relearn-agent-http" }
+relearn-agent-score = { path = "../relearn-agent-score" }
+relearn-agent-store = { path = "../relearn-agent-store" }
+relearn-agent-task = { path = "../relearn-agent-task" }
+serde_json = "1"
+
+[dev-dependencies]
+crypto = { path = "../crypto" }
+
+[lints]
+workspace = true
