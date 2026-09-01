@@ -1,8 +1,13 @@
 # Owner-signed challenges trust root (D18/D23/D24).
 # Signed with throwaway owner key (see owner.pubkey). Production rotation: CEREMONY.md.
 #
-# Emission: relearn = 4000, relearn-t2i = 1500, relearn-mm = 1500,
-# bounty = 3000 bps (sum 10000). Operator can retune; the sum must stay 10000.
+# Four live challenges. Emission: relearn = 4000, relearn-image = 1500,
+# relearn-agent = 1500, bounty = 3000 bps (sum 10000). Operator can retune;
+# the sum must stay 10000.
+#
+# `relearn-mm` (encoder-attach) is OFF: it has no row here, so it has no
+# emission and no leaf may verify under this root. Its code stays in the repo
+# behind the `mm` compose profile.
 version = 1
 introduced_epoch = 0
 
@@ -13,13 +18,13 @@ emission_share_bps = 4000
 policy = "all_metagraph_hotkeys"
 
 [[challenges]]
-id = "relearn-t2i"
+id = "relearn-image"
 public_key = "923324e1df896b20c49c47f40dacbc4c53cab23e6cc5a1136529302b4c2da110"
 emission_share_bps = 1500
 policy = "all_metagraph_hotkeys"
 
 [[challenges]]
-id = "relearn-mm"
+id = "relearn-agent"
 public_key = "220e489f8157e477730e2e3ee6ce51be0fcf8779575c486a70658a28d5a51841"
 emission_share_bps = 1500
 policy = "all_metagraph_hotkeys"
