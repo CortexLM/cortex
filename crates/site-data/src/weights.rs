@@ -239,8 +239,8 @@ mod tests {
         let root = ChallengesBody {
             challenges: vec![
                 entry("relearn", 4000),
-                entry("relearn-t2i", 1500),
-                entry("relearn-mm", 1500),
+                entry("relearn-image", 1500),
+                entry("relearn-agent", 1500),
                 entry("bounty", 3000),
             ],
         };
@@ -248,7 +248,7 @@ mod tests {
         let sum: f64 = shares.iter().map(|(_, v)| *v).sum();
         assert!((sum - 1.0).abs() < 1e-9, "shares sum to {sum}");
 
-        for slug in ["relearn", "relearn-t2i", "relearn-mm"] {
+        for slug in ["relearn", "relearn-image", "relearn-agent"] {
             let arena_slug = site_types::ArenaSlug::parse(slug)
                 .unwrap_or_else(|| panic!("{slug} must parse as an arena slug"));
             assert_eq!(arena_slug.as_str(), slug);

@@ -1,4 +1,18 @@
-# Relearn Multimodal (live challenge)
+# Relearn Multimodal (OFF)
+
+> **Not live.** `relearn-mm` has no row in
+> [`../config/challenges.toml`](../config/challenges.toml), so it has no
+> emission and no leaf signed by its key can verify. The compose service sits
+> behind the `mm` profile and never renders on a default or master stack;
+> `deploy/scripts/assert-compose-matrix.sh` asserts both halves of that.
+>
+> It is off rather than deleted: the encoder pins and licence rules below are
+> still the design, and turning it on is a trust-root ceremony (add a row with
+> its own key, move bps out of the four live challenges) rather than a rewrite.
+> The vision work now lives in [`RELEARN.md`](./RELEARN.md) — the base is a
+> native VLM with captioning / VQA / OCR / spatial holdout families and a
+> pixel-shuffle control — and the agentic work in
+> [`RELEARN-AGENT.md`](./RELEARN-AGENT.md).
 
 Control-plane notes. Miners start at [`external-miner/relearn-mm.md`](./external-miner/relearn-mm.md).
 Validators start at [`external-miner/validators.md`](./external-miner/validators.md).
@@ -13,8 +27,8 @@ This repo pins them in `config/relearn-mm-pin.toml`.
 | Language side | the live Relearn LLM champion (`Qwen/Qwen3.8-27B`) |
 | Vision encoder pin | `google/siglip2-so400m-patch14-384` (Apache-2.0) |
 | Accepted encoder licenses | Apache-2.0, MIT, BSD-2/3-Clause, ISC |
-| Port | `8098` (local host `28098`) |
-| Emission | `1500` bps |
+| Port | `8098` (`mm` profile only) |
+| Emission | `0` — no trust-root row |
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`). Operator promote is
 `POST /v1/admin/promote`. Epoch emit is champion lattice; others `NoScore` (D24).

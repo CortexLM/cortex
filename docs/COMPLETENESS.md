@@ -62,32 +62,51 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Emission | **4000 bps** | Default share (sum across all four challenges is `10000`). |
 | Spec | live | [`RELEARN.md`](RELEARN.md). |
 
-## relearn-t2i-challenge
+## relearn-t2i-challenge (`relearn-image`)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Crates (`crates/relearn-t2i-*`) | **done** | task (Cosmos3 pin, frozen prompts, seed lattice), judge (Q-Judger wire format), score (pillar / replay / faithfulness / contamination gates), store, eval, http, challenge. |
+| Challenge id | **done** | `relearn-image` on the wire; crates, service, env prefix, and pin filename keep the pre-launch `t2i` spelling because the domain tags are hashed into the committed holdout commitment ([`NAMING.md`](NAMING.md)). |
+| Crates (`crates/relearn-t2i-*`) | **done** | task (Cosmos3 pin, frozen prompts, seed lattice), judge (Q-Judger wire format), score (pillar / replay / faithfulness / contamination-evidence / capability-canary / public-gap gates), store, eval, harvest, http, challenge. |
 | Binary (`bins/relearn-t2i-challenge`) | **done** | HTTP API on `:8097`. |
 | Compose / images | **done** | Default compose + `images.yml` target `relearn-t2i-challenge`. |
 | Generator pin | **done** | `nvidia/Cosmos3-Super-Text2Image` (OpenMDW 1.1, card verified). Flux-family bases refused at pin load, submit, and eval. |
 | Judge pin | **done** | Q-Judger (`Qwen/Qwen-Image-Bench`), card-fixed inference. No alternate judge is accepted. |
-| Eval pin | **v0** | `config/relearn-t2i-pin.toml` — `eval_image_digest` empty until first green challenge CI; live rent refused until then. |
+| Eval pin | **v0** | `config/relearn-t2i-pin.toml` — `eval_image_digest` empty until first green challenge CI; live scoring refused until then. |
 | Holdout | **done** | Commitment in git, records operator-side (`RELEARN_T2I_HOLDOUT_FILE`) and verified at boot. Mismatch → submissions 503. |
+| Live harvest | **done** | `crates/relearn-t2i-harvest` over the shared `harvest-pod` transport; wired from `LIUM_API_KEY` + `LIUM_SSH_PUBLIC_KEY_FILE`, reported as `live_harvest_wired`. |
+| Champion baseline | **done** | `RELEARN_T2I_BASE_CHAMPION_FILE` (verified against the pin) or the wired harvest. A live host never inherits sim numbers; without one every submission 503s. |
 | Emission | **1500 bps** | Default share. |
-| Spec | live | [`RELEARN-T2I.md`](RELEARN-T2I.md). |
+| Spec | live | [`RELEARN-IMAGE.md`](RELEARN-IMAGE.md). |
 
-## relearn-mm-challenge
+## relearn-agent-challenge
 
 | Component | Status | Notes |
 |-----------|--------|-------|
+| Crates (`crates/relearn-agent-*`) | **done** | task (episode type, commitment, pin), score (trace-replay / tool-ablation / observation-shuffle / canary / contamination gates), store, eval, harvest, http, challenge. |
+| Binary (`bins/relearn-agent-challenge`) | **done** | HTTP API on `:8099`. |
+| Compose / images | **done** | Default compose + `images.yml` target `relearn-agent-challenge`. |
+| Base pin | **done** | `Qwen/Qwen3.8-27B` — the same checkpoint as `relearn`, refused at pin load if swapped. A second post-train of that base, not a rename of it. |
+| Eval pin | **v0** | `config/relearn-agent-pin.toml` — `eval_image_digest` empty until `CortexLM/relearn` publishes the agent image. Until then a live host answers 503 on every submission, which is the correct output of a challenge that cannot measure anything. |
+| Episodes | **done** | Commitment in git, episodes operator-side (`RELEARN_AGENT_HOLDOUT_FILE`) and verified at boot. An episode needing no tool call is refused at load. |
+| Live harvest | **done** | `crates/relearn-agent-harvest`; the request names the three required arms so a missing arm is the image's fault, not an ambiguity. |
+| Emission | **1500 bps** | Default share. |
+| Spec | live | [`RELEARN-AGENT.md`](RELEARN-AGENT.md). |
+
+## relearn-mm-challenge (off)
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Trust root | **off** | No row in `config/challenges.toml`: no emission, and no leaf signed by its key can verify. |
+| Compose | **off** | `mm` profile only; `assert-compose-matrix.sh` fails if it renders on a default or master stack. |
 | Crates (`crates/relearn-mm-*`) | **done** | task (permissive encoder policy), score (LM-intact hard gate, vision + agentic paired tests, pixel-shuffle control), store, eval, http, challenge. |
 | Binary (`bins/relearn-mm-challenge`) | **done** | HTTP API on `:8098`. |
-| Compose / images | **done** | Default compose + `images.yml` target `relearn-mm-challenge`. |
+| Compose / images | **profile-gated** | `mm` profile; no `images.yml` target while it is off. |
 | Encoder pin | **done** | `google/siglip2-so400m-patch14-384` (Apache-2.0, card verified). Miner encoders must be Apache-2.0 / MIT / BSD / ISC. |
 | Eval pin | **v0** | `config/relearn-mm-pin.toml` — `eval_image_digest` empty until first green challenge CI. |
 | LM gate | **done** | Text holdout rerun vs champion − ε; encoder-only submissions must hash-match `RELEARN_MM_CHAMPION_LM_HASH`. |
-| Emission | **1500 bps** | Default share. |
-| Spec | live | [`RELEARN-MM.md`](RELEARN-MM.md). |
+| Emission | **0** | No trust-root row. |
+| Spec | off | [`RELEARN-MM.md`](RELEARN-MM.md). |
 
 ## bounty-challenge
 
@@ -156,14 +175,15 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 |-----|--------|
 | DCAP verify holds the attest mutex | A cold Intel PCS fetch (up to 20 s) serialises attestation submissions. |
 | DCAP error classification | Matches on `anyhow` message text; re-run `cargo test -p attest-policy --features dcap` after any `dcap-qvl` bump. |
-| Relearn eval image digests | `relearn-eval` is pinned (`sha256:303c6357…`). `relearn-t2i-eval` and `relearn-mm-eval` are still empty, so live rent stays refused on those two challenges — both are off anyway. |
-| Relearn T2I holdout salt | The committed `holdout_commitment` uses the documented **dev** salt so local and staging work out of the box. Production must rotate to a private salt, replace the commitment, and re-sign. |
+| Relearn eval image digests | `relearn-eval` is pinned (`sha256:303c6357…`). `relearn-image-eval` and `relearn-agent-eval` are still empty, so those two live challenges answer **503** on every submission and emit burn. That is the intended fail-closed state, not an outage: they start paying when `CortexLM/relearn` publishes the images and the digests are pinned here. |
+| Relearn Image / Agent holdout salts | Both committed commitments use documented **dev** salts so local and staging work out of the box. Production must rotate to a private salt **and** a private catalogue for each, replace the commitments, and re-sign. |
 | Relearn holdout salt | The committed `holdout_commitment` is the CI / local one — a documented dev salt over a synthetic catalog so the stack boots without operator secrets. It is **not** the live seal. Production must rotate to a private salt **and** a private catalog, replace the commitment in `config/relearn-pin.toml`, and re-sign the trust root ([`../config/CEREMONY.md`](../config/CEREMONY.md)). |
 | Relearn live scoring | The eval image is pinned, so the remaining blockers are operator state: the harvest (`live_harvest_wired`) and the champion baseline (`champion_baseline_recorded`). Each has its own **503** and its own boot-log line. Sim is opt-in (`RELEARN_FORCE_SIM=1`, CI / local only), reported as `eval_backend` on `/v1/status` and on the submit row — never a fallback. Refusals persist no row. |
 | Relearn live harvest | Control-plane client is **done** (`crates/relearn-lium-harvest`): boot the digest-pinned image, deliver the request, read `RELEARN_METRICS=`, verify against pin + run identity, terminate with verification. Wired on the Lium path from `LIUM_API_KEY` + `LIUM_SSH_PUBLIC_KEY_FILE`; `/v1/status` reports `live_harvest_wired`. The **scoring code** ships in [`CortexLM/relearn`](https://github.com/CortexLM/relearn) and must implement the contract in [`RELEARN.md`](RELEARN.md) § Eval image contract — an image that does not print a bound `RELEARN_METRICS=` document is a 503, never a sim score. |
 | Relearn holdout on rented pods | The harvest request carries the holdout items, so a rented pod sees the private split for the run. Mitigated by the digest-pinned image, `/tmp/relearn_eval` delivery, post-run scrub, and verified termination — not eliminated. Rotate salt + catalog and re-sign on suspicion. An in-enclave design would be needed to remove the exposure. |
 | Relearn champion baseline | Live hosts need an operator-recorded measurement (`RELEARN_BASE_CHAMPION_FILE`, verified against the pin's `eval_image_digest` + `holdout_commitment`). Unset means `champion_baseline_recorded: false` and every submission 503s before the gates. Sim hosts seed the sim baseline. |
-| Relearn Multimodal champion LM hash | `RELEARN_MM_CHAMPION_LM_HASH` is operator-supplied. Unset means encoder-only submissions are rejected (they cannot prove the LM is unchanged). |
+| Bounty severity on the backend feed | Scoring credits a `valid` row only when the backend publishes a `severity`. Until CortexLM/backend emits it, valid rows land as `valid_unpriced`, no miner can be crowned, and the share burns. Fail-closed by design: an unpriced bug cannot be paid for. |
+| Bounty scoring backend | With neither `BOUNTY_BACKEND_PUBLIC_URL` nor `BOUNTY_FORCE_SIM=1`, `POST /v1/reports` answers **503** rather than collecting bug-hunting work the host could never pay for. |
 | Relearn public repo | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) exists; this repo pins `relearn_git_sha` = `82e21442…`, the head of **PR #2, which is open, not merged**. Re-pin to the merge commit once it lands, or the pinned SHA will not be reachable from that repo's default branch. Seed mirror: `docs/external-miner/relearn-seed/`. |
 | Mainnet (netuid 100) | Owner wallet not yet on this machine, so prod runs with `BASE_GATEWAY_REQUIRE_OWNER=0`. |
 | Prod pin placeholders | `deploy/pins/prod.json` still ships zero-digests until the first successful promote; registry mode rejects placeholders. |

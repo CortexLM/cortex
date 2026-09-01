@@ -2,6 +2,18 @@
 
 # Relearn Multimodal — miners
 
+> **This challenge is off.** `relearn-mm` has no row in
+> [`config/challenges.toml`](../../config/challenges.toml), so it has **no
+> emission** and no leaf signed by its key can verify. Submitting to it earns
+> nothing. The vision work miners came here for now lives in
+> [Relearn](./relearn.md) — `Qwen/Qwen3.8-27B` is a native VLM and the holdout
+> already carries captioning, VQA, OCR, and spatial families with a
+> pixel-shuffle control. The agentic side lives in
+> [Relearn Agent](./relearn-agent.md).
+>
+> The page stays for the archived encoder pins and the licence rules, which
+> still apply if the challenge is turned back on with a trust-root ceremony.
+
 Give the champion Relearn LLM eyes, without breaking its language ability. Long
 guide, eval image, and harness:
 [CortexLM/relearn](https://github.com/CortexLM/relearn).

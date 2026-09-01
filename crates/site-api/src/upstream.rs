@@ -8,12 +8,12 @@ use crate::state::SiteState;
 /// Challenge ids registered on the gateway.
 pub const DESIGN: &str = "design";
 pub const PRISM: &str = "prism";
-/// Relearn LLM post-training factory.
+/// Relearn post-training factory.
 pub const RELEARN: &str = "relearn";
-/// Relearn T2I image generation.
-pub const RELEARN_T2I: &str = "relearn-t2i";
-/// Relearn Multimodal vision encoder.
-pub const RELEARN_MM: &str = "relearn-mm";
+/// Relearn Image generation.
+pub const RELEARN_IMAGE: &str = "relearn-image";
+/// Relearn Agent: replayed tool traces.
+pub const RELEARN_AGENT: &str = "relearn-agent";
 
 /// Upstream fetch error.
 #[derive(Debug)]

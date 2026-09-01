@@ -100,12 +100,12 @@ pub fn prism_frame() -> Arena {
     }
 }
 
-/// Relearn T2I arena frame; counters filled by caller from live status.
+/// Relearn Image arena frame; counters filled by caller from live status.
 #[must_use]
-pub fn relearn_t2i_frame() -> Arena {
+pub fn relearn_image_frame() -> Arena {
     Arena {
-        slug: ArenaSlug::RelearnT2i,
-        name: "Relearn T2I".into(),
+        slug: ArenaSlug::RelearnImage,
+        name: "Relearn Image".into(),
         tagline: "Image generation: miners fine-tune Cosmos3-Super-Text2Image; Q-Judger scores frozen prompts at shared seeds.".into(),
         description: "Fine-tune the pinned NVIDIA Cosmos3 generator (OpenMDW 1.1). Every miner renders the same Qwen-Image-Bench prompt ids at the same derived seeds, so images are directly comparable. Q-Judger is the only judge. Promotion needs a paired win on a private prompt holdout with no L1 pillar regression. Flux-family bases are rejected.".into(),
         status: "live".into(),
@@ -114,6 +114,7 @@ pub fn relearn_t2i_frame() -> Arena {
             "Miners pay Lium (BYOK)".into(),
             "Q-Judger on frozen prompts at shared seeds".into(),
             "No pillar may regress; seed replay + contamination gates".into(),
+            "Capability canary off the paid score; regression is a hard zero".into(),
         ],
         agents: 0,
         best_score: "—".into(),
@@ -134,20 +135,20 @@ pub fn relearn_t2i_frame() -> Arena {
     }
 }
 
-/// Relearn Multimodal arena frame; counters filled by caller from live status.
+/// Relearn Agent arena frame; counters filled by caller from live status.
 #[must_use]
-pub fn relearn_mm_frame() -> Arena {
+pub fn relearn_agent_frame() -> Arena {
     Arena {
-        slug: ArenaSlug::RelearnMm,
-        name: "Relearn Multimodal".into(),
-        tagline: "Give the champion LLM eyes: train a permissive vision encoder without regressing the language model.".into(),
-        description: "Attach an Apache-2.0 / MIT / BSD / ISC vision encoder plus projector to the champion Relearn LLM. Two gates, both mandatory: the text holdout must hold (a regression is worth zero, not a lower score), and the image holdout plus agentic image-tool traces must beat the champion. Every trace is replayed with shuffled pixels, so a model that ignores the image cannot pass.".into(),
+        slug: ArenaSlug::RelearnAgent,
+        name: "Relearn Agent".into(),
+        tagline: "Tool use, not answers: miners post-train Qwen3.8-27B into an agent, and every run is replayed to prove it used the environment.".into(),
+        description: "Solve episodes — a goal plus a tool environment — on a private set you never see. Task success alone is not enough: the emitted tool calls are re-executed for grounding, and the same episodes are re-run with the tools stubbed and with the observation swapped. A model that answers just as well without them never used them, and scores zero however high its success rate.".into(),
         status: "live".into(),
         scoring: ScoringMethod::Displacement,
         mechanism: vec![
             "Miners pay Lium (BYOK)".into(),
-            "LLM-intact hard gate before any vision credit".into(),
-            "Pixel-shuffle control on agentic traces".into(),
+            "Emitted tool traces replayed for grounding".into(),
+            "Tool-ablation and observation-shuffle arms must both drop".into(),
         ],
         agents: 0,
         best_score: "—".into(),
@@ -168,12 +169,12 @@ pub fn relearn_mm_frame() -> Arena {
     }
 }
 
-/// Relearn LLM arena frame; counters filled by caller from live status.
+/// Relearn arena frame; counters filled by caller from live status.
 #[must_use]
 pub fn relearn_frame() -> Arena {
     Arena {
         slug: ArenaSlug::Relearn,
-        name: "Relearn LLM".into(),
+        name: "Relearn".into(),
         tagline: "Post-training factory: miners improve Qwen3.8-27B; score is displacement vs the previous champion.".into(),
         description: "Submit an improved artifact of the pinned base model. Miners pay Lium. Promotion requires a significant paired win, retention/overfit gates, and an operator audit. Regressions are never crowned.".into(),
         status: "live".into(),

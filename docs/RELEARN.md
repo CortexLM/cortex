@@ -1,9 +1,11 @@
-# Relearn LLM (live challenge)
+# Relearn (live challenge)
 
-Sibling challenges: [`RELEARN-T2I.md`](./RELEARN-T2I.md) (image generation,
-judged by Q-Judger) and [`RELEARN-MM.md`](./RELEARN-MM.md) (vision encoder on
-this challenge's champion). They share the champion-versus-challenger holdout
-shape and the Lium payment model, and each signs leaves under its own key.
+Sibling challenges: [`RELEARN-IMAGE.md`](./RELEARN-IMAGE.md) (`relearn-image`,
+image generation judged by Q-Judger) and [`RELEARN-AGENT.md`](./RELEARN-AGENT.md)
+(`relearn-agent`, replayed tool traces on **this challenge's base checkpoint**,
+not on its champion). They share the champion-versus-challenger holdout shape
+and the Lium payment model, and each signs leaves under its own key.
+[`RELEARN-MM.md`](./RELEARN-MM.md) is off.
 
 Control-plane notes. Miners start at [`external-miner/relearn.md`](./external-miner/relearn.md).
 Validators start at [`external-miner/validators.md`](./external-miner/validators.md).

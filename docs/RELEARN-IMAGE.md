@@ -1,6 +1,6 @@
-# Relearn T2I (live challenge)
+# Relearn Image (live challenge)
 
-Control-plane notes. Miners start at [`external-miner/relearn-t2i.md`](./external-miner/relearn-t2i.md).
+Control-plane notes. Miners start at [`external-miner/relearn-image.md`](./external-miner/relearn-image.md).
 Validators start at [`external-miner/validators.md`](./external-miner/validators.md).
 
 Eval image and harness live in [`CortexLM/relearn`](https://github.com/CortexLM/relearn).
@@ -8,13 +8,14 @@ This repo pins them in `config/relearn-t2i-pin.toml`.
 
 | Field | Value |
 |-------|--------|
-| `challenge_id` | `relearn-t2i` |
+| `challenge_id` | `relearn-image` |
 | `challenge_scoring_version` | `1` |
 | Generator seed | `nvidia/Cosmos3-Super-Text2Image` (OpenMDW 1.1) |
 | Judge | Q-Judger — `Qwen/Qwen-Image-Bench` (Apache-2.0, from Qwen3.6-27B) |
 | Prompt set | `Qwen/Qwen-Image-Bench` dataset, ids 1..=1000 |
 | Port | `8097` (local host `28097`) |
 | Emission | `1500` bps |
+| Crates / service / env prefix | `relearn-t2i-*`, `relearn-t2i-challenge`, `RELEARN_T2I_*` — the pre-launch spelling, kept because the domain tags are hashed into the committed holdout commitment ([`NAMING.md`](./NAMING.md)) |
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`). Operator promote is
 `POST /v1/admin/promote`. Epoch emit is champion lattice; others `NoScore` (D24).
@@ -60,9 +61,10 @@ Promotion requires every gate:
 | Pillar regression | No L1 pillar may drop more than `PILLAR_EPSILON` (2 paper points). A large Alignment gain cannot hide a Quality collapse |
 | Seed replay | Three pinned cells regenerated; exact image hash, or embedding drift ≤ `MAX_REPLAY_DRIFT` |
 | Prompt faithfulness | ≥ 8 agentic spot checks (counts, rendered text, spatial relations) agreeing with Q-Judger Alignment ≥ 75 % |
-| Contamination | Any eval prompt id in the submitted training metadata rejects the submission |
+| Contamination | Any eval prompt id in the submitted training metadata rejects the submission. An **undeclared** manifest is `contamination_evidence_missing`, not a pass: absence of evidence cannot clear the gate |
+| Capability canary | A fixed general-prompt slice is **off** the visible score. Regression past `CANARY_EPSILON` vs the champion is a hard zero |
 | Judge N/A rate | Above 25 % the run is void, never a score of zero |
-| Public–holdout gap | Public far above holdout signals memorization |
+| Public–holdout gap | Public far above holdout signals memorization; empty public is fail-closed |
 
 ## Operator
 
@@ -82,3 +84,62 @@ re-sign the trust root ([`../config/CEREMONY.md`](../config/CEREMONY.md)).
 development. It is reported on `/v1/status` as `judge_backend: sim` so it cannot
 be mistaken for a real run, and `deploy/scripts/assert-compose-matrix.sh` fails
 if a staging or prod overlay enables it.
+
+## Who is allowed to produce a score
+
+The offline judge is not a fallback. A host scores only when one of these holds:
+
+| Condition | `POST /v1/submissions` |
+|-----------|------------------------|
+| `RELEARN_T2I_FORCE_SIM=1` (CI / local only) | sim, reported as `judge_backend: "sim"` |
+| digest-pinned `eval_image_digest` **and** a wired harvest **and** a recorded champion baseline | live eval on a digest-pinned Lium pod |
+| anything less | **503** — naming the first missing piece |
+
+`GET /v1/status` publishes `judge_backend`, `force_sim`, `can_score`,
+`live_harvest_wired`, and `champion_baseline_recorded`, so a sim run is never
+mistaken for a real verdict and an operator can see which piece is missing.
+
+A refusal is not a submission: nothing is persisted unless scoring produced a
+verdict, so a 503 leaves no row behind.
+
+## Champion baseline (required on a live host)
+
+Every gate is a comparison against the champion. With none recorded,
+submissions answer **503 `no champion baseline recorded`** before any gate
+runs. The baseline must come from the same scorer submissions face: a sim host
+uses the sim baseline, and a live host uses either an operator measurement
+(`RELEARN_T2I_BASE_CHAMPION_FILE`, verified at boot against the pin's
+`eval_image_digest` **and** `holdout_commitment`) or the wired harvest. A live
+host never falls back to sim numbers — judging a live challenger against a
+simulated champion would let any artifact displace a champion that was never
+measured.
+
+## Eval image contract
+
+Live scoring runs the digest-pinned `eval_image` on a Lium pod. The
+control-plane client is [`crates/relearn-t2i-harvest`](../crates/relearn-t2i-harvest);
+Cosmos3 generation and the Q-Judger pass both live in
+[`CortexLM/relearn`](https://github.com/CortexLM/relearn). Nothing in this repo
+can compute a live score.
+
+Per run the control plane boots `eval_image@<digest>` with the master SSH
+public key on a pod the **miner** pays for, writes `request.json` into
+`/tmp/relearn_image_eval` over stdin (run inputs are never interpolated into
+the remote command), runs `relearn-image-eval score`, reads back
+`RELEARN_IMAGE_METRICS=<document>` and `RELEARN_IMAGE_EVAL_OK`, scrubs the
+workdir, and **requires verified termination** before accepting any score. An
+orphan pod keeps spending the miner's money, so it outranks whatever the run
+returned.
+
+The request carries the frozen prompt strings and the derived seeds for both
+splits, so a stale bench snapshot on the image cannot silently change what was
+scored. `submission_digest` and `artifact_digest` are checked against what was
+asked, and `eval_image_digest` / `holdout_commitment` against the pin. Any
+mismatch is a 503, not a score.
+
+**The request carries the holdout prompts.** The pod sees the private split for
+the duration of the run — a generator cannot be scored on prompts it is not
+shown. The mitigations are the digest-pinned image, delivery into a scratch
+path, the post-run scrub, and verified termination. Rotate the holdout (salt
+**and** bench snapshot, then re-sign) if a pod is ever suspected of
+exfiltration.

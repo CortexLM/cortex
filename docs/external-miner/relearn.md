@@ -1,8 +1,12 @@
 <!-- protocol_version: 1 -->
 
-# Relearn LLM — miners
+# Relearn — miners
 
-The live challenge. Challenge id is `relearn`. Long guide, eval image, and harness:
+Challenge id is `relearn`. One of four live challenges; the others are
+[Relearn Image](./relearn-image.md), [Relearn Agent](./relearn-agent.md), and
+[Bounty](./bounty.md). Relearn Agent post-trains the **same** checkpoint, so
+read both before you pick: this page pays for answers, that one pays for
+grounded tool use. Long guide, eval image, and harness:
 [CortexLM/relearn](https://github.com/CortexLM/relearn).
 Cortex pin: [`config/relearn-pin.toml`](../../config/relearn-pin.toml).
 

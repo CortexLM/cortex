@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::state::SiteState;
-use crate::upstream::{self, DESIGN, PRISM, RELEARN, RELEARN_MM, RELEARN_T2I};
+use crate::upstream::{self, DESIGN, PRISM, RELEARN, RELEARN_AGENT, RELEARN_IMAGE};
 use site_data::map::{
     activity_from_lives, design_arena_from_dashboard, design_leaderboard, design_submission,
     enrich_leaderboard_uids, enrich_leaderboard_weights, enrich_submission_uids,
@@ -28,7 +28,7 @@ use site_prism::{
     prism_submission_detail_with_zone,
 };
 use site_types::page_slice;
-use site_types::{coding_arena, relearn_mm_frame, relearn_t2i_frame};
+use site_types::{coding_arena, relearn_agent_frame, relearn_image_frame};
 use site_types::{
     ArenaSlug, Governance, LandingSummary, MetricsEmission, MetricsPassRate, MetricsPopulation,
     NetworkMetrics, NetworkStats, RecipeEra, ResultsMatrix, Validator,
@@ -123,12 +123,12 @@ async fn fetch_relearn_status(st: &SiteState) -> Option<Value> {
     upstream::get_json_opt(st, RELEARN, "/v1/status").await
 }
 
-async fn fetch_relearn_t2i_status(st: &SiteState) -> Option<Value> {
-    upstream::get_json_opt(st, RELEARN_T2I, "/v1/status").await
+async fn fetch_relearn_image_status(st: &SiteState) -> Option<Value> {
+    upstream::get_json_opt(st, RELEARN_IMAGE, "/v1/status").await
 }
 
-async fn fetch_relearn_mm_status(st: &SiteState) -> Option<Value> {
-    upstream::get_json_opt(st, RELEARN_MM, "/v1/status").await
+async fn fetch_relearn_agent_status(st: &SiteState) -> Option<Value> {
+    upstream::get_json_opt(st, RELEARN_AGENT, "/v1/status").await
 }
 
 /// Every live arena with trust-root emission shares applied.
@@ -138,13 +138,13 @@ async fn fetch_relearn_mm_status(st: &SiteState) -> Option<Value> {
 /// whole subnet.
 async fn live_arenas(st: &SiteState) -> Vec<site_types::Arena> {
     let relearn = fetch_relearn_status(st).await;
-    let t2i = fetch_relearn_t2i_status(st).await;
-    let mm = fetch_relearn_mm_status(st).await;
+    let image = fetch_relearn_image_status(st).await;
+    let agent = fetch_relearn_agent_status(st).await;
     let mut arenas = vec![
         coding_arena(),
         relearn_arena_from_live(relearn.as_ref()),
-        hydrate_arena(relearn_t2i_frame(), t2i.as_ref()),
-        hydrate_arena(relearn_mm_frame(), mm.as_ref()),
+        hydrate_arena(relearn_image_frame(), image.as_ref()),
+        hydrate_arena(relearn_agent_frame(), agent.as_ref()),
     ];
     for arena in &mut arenas {
         apply_emission(st, arena);
@@ -336,13 +336,13 @@ async fn get_arena(State(st): State<SiteState>, Path(slug): Path<String>) -> Res
             prism_arena_from_live(status.as_ref(), subs.as_ref())
         }
         ArenaSlug::Relearn => relearn_arena_from_live(fetch_relearn_status(&st).await.as_ref()),
-        ArenaSlug::RelearnT2i => hydrate_arena(
-            relearn_t2i_frame(),
-            fetch_relearn_t2i_status(&st).await.as_ref(),
+        ArenaSlug::RelearnImage => hydrate_arena(
+            relearn_image_frame(),
+            fetch_relearn_image_status(&st).await.as_ref(),
         ),
-        ArenaSlug::RelearnMm => hydrate_arena(
-            relearn_mm_frame(),
-            fetch_relearn_mm_status(&st).await.as_ref(),
+        ArenaSlug::RelearnAgent => hydrate_arena(
+            relearn_agent_frame(),
+            fetch_relearn_agent_status(&st).await.as_ref(),
         ),
     };
     apply_emission(&st, &mut arena);
@@ -604,7 +604,7 @@ async fn get_leaderboard(
         // Relearn challenges publish a champion, not a leaderboard: every
         // non-champion row is an explicit NoScore (D24), so a paged list of
         // them would be a page of zeroes.
-        ArenaSlug::Coding | ArenaSlug::Relearn | ArenaSlug::RelearnT2i | ArenaSlug::RelearnMm => {
+        ArenaSlug::Coding | ArenaSlug::Relearn | ArenaSlug::RelearnImage | ArenaSlug::RelearnAgent => {
             Json(empty_leaderboard_json(page, page_size)).into_response()
         }
     }
@@ -623,7 +623,7 @@ async fn get_submissions(
     let status_filter = q.status.as_deref();
     let needle = q.q.as_deref();
     match slug {
-        ArenaSlug::Coding | ArenaSlug::Relearn | ArenaSlug::RelearnT2i | ArenaSlug::RelearnMm => {
+        ArenaSlug::Coding | ArenaSlug::Relearn | ArenaSlug::RelearnImage | ArenaSlug::RelearnAgent => {
             Json(page_slice::<crate::Submission>(&[], page, page_size)).into_response()
         }
         ArenaSlug::Design => {
@@ -1376,12 +1376,12 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(
             slugs,
-            vec!["coding", "relearn", "relearn-t2i", "relearn-mm"],
+            vec!["coding", "relearn", "relearn-image", "relearn-agent"],
             "{v}"
         );
         assert_eq!(v[1]["bestScoreLabel"], "DISPLACE");
-        assert_eq!(v[2]["name"], "Relearn T2I");
-        assert_eq!(v[3]["name"], "Relearn Multimodal");
+        assert_eq!(v[2]["name"], "Relearn Image");
+        assert_eq!(v[3]["name"], "Relearn Agent");
     }
 
     #[tokio::test]

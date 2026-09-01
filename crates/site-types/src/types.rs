@@ -15,14 +15,14 @@ pub enum ArenaSlug {
     Design,
     /// Prism challenge (retired).
     Prism,
-    /// Relearn LLM post-training factory.
+    /// Relearn post-training factory.
     Relearn,
-    /// Relearn T2I image generation.
-    #[serde(rename = "relearn-t2i")]
-    RelearnT2i,
-    /// Relearn Multimodal vision encoder.
-    #[serde(rename = "relearn-mm")]
-    RelearnMm,
+    /// Relearn Image generation.
+    #[serde(rename = "relearn-image")]
+    RelearnImage,
+    /// Relearn Agent: replayed tool traces.
+    #[serde(rename = "relearn-agent")]
+    RelearnAgent,
 }
 
 impl ArenaSlug {
@@ -34,8 +34,8 @@ impl ArenaSlug {
             "design" => Some(Self::Design),
             "prism" => Some(Self::Prism),
             "relearn" => Some(Self::Relearn),
-            "relearn-t2i" => Some(Self::RelearnT2i),
-            "relearn-mm" => Some(Self::RelearnMm),
+            "relearn-image" => Some(Self::RelearnImage),
+            "relearn-agent" => Some(Self::RelearnAgent),
             _ => None,
         }
     }
@@ -48,8 +48,8 @@ impl ArenaSlug {
             Self::Design => "design",
             Self::Prism => "prism",
             Self::Relearn => "relearn",
-            Self::RelearnT2i => "relearn-t2i",
-            Self::RelearnMm => "relearn-mm",
+            Self::RelearnImage => "relearn-image",
+            Self::RelearnAgent => "relearn-agent",
         }
     }
 }

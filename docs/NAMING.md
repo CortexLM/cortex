@@ -20,6 +20,30 @@ in a drive-by rename.
 | Cryptographic domain tags, signing context | `base-*-v1` (frozen) |
 | Compose project, host paths, GHCR package path | `base` / `/opt/base` / `ghcr.io/baseintelligence/base/*` |
 
+## Challenge ids vs crate names
+
+The same rule applies inside the challenge tree. A challenge id is a **wire**
+identifier: it is signed into every leaf, routed at `/challenge/{id}/…`, and
+hashed into the trust root. A crate or service name is not.
+
+| Product | Challenge id (wire) | Crates / service / env prefix |
+|---------|--------------------|-------------------------------|
+| Relearn | `relearn` | `relearn-*`, `relearn-challenge`, `RELEARN_*` |
+| Relearn Image | `relearn-image` | `relearn-t2i-*`, `relearn-t2i-challenge`, `RELEARN_T2I_*` |
+| Relearn Agent | `relearn-agent` | `relearn-agent-*`, `relearn-agent-challenge`, `RELEARN_AGENT_*` |
+| Bounty | `bounty` | `bounty-*`, `bounty-challenge`, `BOUNTY_*` |
+
+Relearn Image keeps the pre-launch `t2i` spelling in its crates, service, env
+prefix, pin filename, and deployed paths. That is not laziness: its
+`base-relearn-t2i-*` domain tags are hashed into the committed
+`holdout_commitment`, so renaming them would invalidate the pin and every
+operator holdout file generated against it. Same reasoning as `BASE_*` above —
+rename the product, freeze the identifiers that are measured.
+
+`relearn-mm` is off and has no row in `config/challenges.toml`. Its crates and
+its `mm`-profile compose service still exist; nothing routes or signs under
+that id.
+
 ## Environment variables
 
 `crates/config` reads **`BASE_*` as the canonical names**. Matching

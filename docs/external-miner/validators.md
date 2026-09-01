@@ -2,8 +2,13 @@
 
 # Validators
 
-Relearn scoring is centralized (master + Lium). Bounty adjudication is
-operator-side on master. You still run a validator.
+Relearn, Relearn Image, and Relearn Agent scoring are centralized (master +
+Lium). Bounty adjudication is operator-side on master. You still run a
+validator.
+
+Live ids and emission: `relearn` 4000 bps, `relearn-image` 1500,
+`relearn-agent` 1500, `bounty` 3000. `relearn-mm` has no row and earns 0 — a
+leaf claiming that id fails the trust-root check, which is the point.
 
 ## Job
 
@@ -21,14 +26,14 @@ Unsealed or decode-error latest is a **burn vector** (`sealed: false`, uid 0 = 1
 
 - Run evals
 - Rent Lium
-- Promote Relearn champions (`POST /v1/admin/promote` is master / operator)
+- Promote champions on any Relearn challenge (`POST /v1/admin/promote` is master / operator)
 - Adjudicate Bounty reports (`POST /challenge/bounty/v1/admin/adjudicate`)
 
 ## Run
 
 Binary: [`bins/validator`](../../bins/validator) (`validator-bin`, bin name `validator`).
 Compose role: [`deploy/compose/role-validator.yml`](../../deploy/compose/role-validator.yml)
-(no gateway, no `relearn-challenge` / `bounty-challenge`).
+(no gateway, no challenge services at all).
 Env: [`deploy/env/validator.env.example`](../../deploy/env/validator.env.example).
 
 ```bash

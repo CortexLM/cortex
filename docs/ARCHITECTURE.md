@@ -8,8 +8,9 @@ Operator-facing map of the control plane. Normative byte contracts live in the f
 | [`DESIGN_CHALLENGE.md`](./DESIGN_CHALLENGE.md) | archived freeze | Retired `design` product (not live) |
 | [`PRISM.md`](./PRISM.md) | archived | Retired `prism` product (Lium rails reused by Relearn) |
 | [`RELEARN.md`](./RELEARN.md) | live | `relearn` post-training factory (HTTP submit; miners pay Lium) |
-| [`RELEARN-T2I.md`](./RELEARN-T2I.md) | live | `relearn-t2i` — Cosmos3 fine-tunes judged by Q-Judger |
-| [`RELEARN-MM.md`](./RELEARN-MM.md) | live | `relearn-mm` — permissive vision encoder on the champion LLM |
+| [`RELEARN-IMAGE.md`](./RELEARN-IMAGE.md) | live | `relearn-image` — Cosmos3 fine-tunes judged by Q-Judger (crates keep the `t2i` spelling) |
+| [`RELEARN-AGENT.md`](./RELEARN-AGENT.md) | live | `relearn-agent` — replayed tool traces on the same base checkpoint as `relearn` |
+| [`RELEARN-MM.md`](./RELEARN-MM.md) | **off** | `relearn-mm` — no trust-root row, no emission; `mm` compose profile only |
 | [`BOUNTY.md`](./BOUNTY.md) | live | `bounty` — paired bug reports |
 
 Do not restate those contracts here. Link them.
@@ -43,8 +44,8 @@ Runbooks: [`runbooks/`](./runbooks/).
                     │  postgres · gateway · validator ·     │
                     │  updater · socket-proxy ·             │
                     │  relearn-challenge ·                  │
-                    │  relearn-t2i-challenge ·              │
-                    │  relearn-mm-challenge ·               │
+                    │  relearn-t2i-challenge (relearn-image)│
+                    │  relearn-agent-challenge ·            │
                     │  bounty-challenge                     │
                     └───────────────┬─────────────────────┘
                                     │ TLS terminates in gateway (D20)
@@ -59,7 +60,7 @@ Runbooks: [`runbooks/`](./runbooks/).
                     ┌───────────────▼─────────────────────┐
                     │  Miner clients                       │
                     │  relearn artifact digest + Lium BYOK  │
-                    │  t2i / mm artifact + manifest         │
+                    │  image / agent artifact + manifest    │
                     │  bounty pair + bug reports            │
                     └─────────────────────────────────────┘
 ```
@@ -69,8 +70,9 @@ Runbooks: [`runbooks/`](./runbooks/).
 | `gateway` | Master-only: registry, reverse proxy, bundle seal/serve, sole TLS owner; mounts marketing [`SITE_API.md`](./SITE_API.md) (`GET /v1/site/*`) |
 | `validator` | Fetch/mirror bundle, verify, recompute, peer cross-check, CRV4 submit, dissent |
 | `relearn-challenge` | **Master-only:** digest freeze, operator holdout unseal (commitment-checked), Lium/sim eval, contamination / public–holdout / canary / shuffle gates, operator promote, sign leaves |
-| `relearn-t2i-challenge` | **Master-only:** frozen prompt cells at pinned seeds, Q-Judger scoring, pillar / replay / contamination gates, sign leaves |
-| `relearn-mm-challenge` | **Master-only:** text-intact rerun (hard gate), vision + agentic holdout with a pixel-shuffle control, sign leaves |
+| `relearn-t2i-challenge` | **Master-only** (serves `relearn-image`): frozen prompt cells at pinned seeds, Q-Judger scoring, pillar / replay / contamination / capability-canary gates, sign leaves |
+| `relearn-agent-challenge` | **Master-only:** episode replay, trace grounding, tool-ablation and observation-shuffle arms, contamination / canary gates, sign leaves |
+| `relearn-mm-challenge` | **Off** (`mm` profile): text-intact rerun, vision + agentic holdout with a pixel-shuffle control. No trust-root row, so it emits nothing |
 | `bounty-challenge` | **Master-only:** internal pair/reports/adjudicate; **reads** CortexLM/backend public API for scoring; sign leaves |
 | `updater` | Digest-pinned rollouts via `docker-socket-proxy` (master) |
 | `trustroot` | Offline keygen / sign / verify for owner-signed TOML |
@@ -108,9 +110,11 @@ Runbooks: [`runbooks/`](./runbooks/).
 | `config/measurements.toml` + `.sig` | yes | every validator from **disk** |
 | Challenge / owner mini-secrets | **never** | challenge service / offline ceremony only |
 
-Current emission posture: `relearn = 4000`, `relearn-t2i = 1500`,
-`relearn-mm = 1500`, `bounty = 3000` bps (sum 10000; operator can retune).
-Each challenge signs leaves under its **own** key; no two rows share one.
+Current emission posture: `relearn = 4000`, `relearn-image = 1500`,
+`relearn-agent = 1500`, `bounty = 3000` bps (sum 10000; operator can retune).
+`relearn-mm` has no row, so it earns 0 and a leaf claiming that id fails the
+trust-root check. Each live challenge signs leaves under its **own** key; no
+two rows share one.
 
 Gateway DB is **routing only**. It is never a source of challenge keys, emission shares, or measurements (D18, D23).
 
