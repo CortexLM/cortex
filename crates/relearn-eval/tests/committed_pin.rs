@@ -83,10 +83,18 @@ fn committed_pin_allows_live_rent() {
     assert!(p.can_rent(), "eval_image_digest must be a sha256 pin");
     assert_eq!(
         p.eval_image_digest,
-        "sha256:303c63573c9492b1214fa8071977b26a96acc25eaba258c2958c4773a3cd5e45"
+        "sha256:0083967170ddc0fc892857ef8df12db93ff40e3c62b30ded6459d26df5c9498a"
+    );
+    assert_eq!(
+        p.relearn_git_sha,
+        "822d272972ef92c0a92ef2e2a9ba51a54f5165fd"
     );
     assert_eq!(p.relearn_git_sha.len(), 40);
     assert!(p.relearn_git_sha.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(
+        !p.eval_image_digest.contains("303c63573c"),
+        "do not pin the digest that printed no RELEARN_EVAL_OK"
+    );
 }
 
 /// A floating tag in a deploy path is how a "pinned" image silently changes

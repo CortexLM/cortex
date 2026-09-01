@@ -40,10 +40,11 @@ eval_image = "ghcr.io/cortexlm/relearn-eval"
 # wired and a champion baseline recorded (both operator state, see
 # deploy/env/relearn-challenge.env.example). Check GET /v1/status ->
 # can_score, live_harvest_wired, champion_baseline_recorded.
-eval_image_digest = "sha256:303c63573c9492b1214fa8071977b26a96acc25eaba258c2958c4773a3cd5e45"
+eval_image_digest = "sha256:0083967170ddc0fc892857ef8df12db93ff40e3c62b30ded6459d26df5c9498a"
 relearn_git = "https://github.com/CortexLM/relearn"
-# CortexLM/relearn PR #2 head — the commit that built the digest above.
-relearn_git_sha = "82e2144266aee3ffdd276396905820bc4e53f3b5"
+# CortexLM/relearn PR #2 head — the commit that built the digest above
+# (the image that prints RELEARN_EVAL_OK).
+relearn_git_sha = "822d272972ef92c0a92ef2e2a9ba51a54f5165fd"
 
 # Public split ids (miners may train on these). Holdout selection must exclude
 # every one of them. The scored holdout records stay off git.
