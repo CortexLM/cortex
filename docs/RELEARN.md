@@ -104,13 +104,47 @@ Per run the control plane:
 1. Boots `eval_image@<digest>` with the master SSH public key
    (`LIUM_SSH_PUBLIC_KEY_FILE`) on a pod the **miner** pays for
    (`LIUM_API_KEY`), under the price / GPU / lifetime guardrails.
-2. Writes `request.json` into `/tmp/relearn_eval` over stdin — run inputs are
-   never interpolated into the remote command.
-3. Runs `relearn-eval score --request request.json --out metrics.json`.
+2. Writes `request.json` and `teacher.env` into `/tmp/relearn_eval` over stdin
+   — nothing is interpolated into the remote command.
+3. Sources `teacher.env` with `set -a`, then runs
+   `relearn-eval score --request request.json --out metrics.json`.
 4. Reads back `RELEARN_METRICS=<document>` and `RELEARN_EVAL_OK`.
 5. Scrubs the workdir, terminates, and **requires verified termination** before
    accepting any score. An orphan pod keeps spending the miner's money, so it
    outranks whatever the run returned.
+
+### Pod environment
+
+A Lium `InstanceSpec` has no env field, so the pod inherits **nothing** from
+the master. Everything the image reads from its environment has to be handed to
+it, and a missing judge URL is why a pod can boot, run, and never print
+`RELEARN_EVAL_OK`:
+
+| Variable | Source | Required |
+|----------|--------|----------|
+| `RELEARN_TEACHER_API_URL` | host env | **yes** — no judge, no score |
+| `RELEARN_TEACHER_MODEL` | host env, else the pin's `teacher_model` | yes (defaulted) |
+| `RELEARN_TEACHER_API_KEY` | host env | only if the teacher API requires auth |
+| `RELEARN_BASE_MODEL` | the pin's `base_model` | yes |
+
+Only the names are in git. Values are operator state, delivered in
+`teacher.env` over stdin with `umask 077` — never on the remote command line,
+where the key would sit in the pod's process table. A host missing the judge
+URL reports `can_score: false` and refuses **before** renting, rather than
+paying for a pod that cannot score.
+
+**`RELEARN_TEACHER_API_KEY` crosses to a miner-paid pod.** Use a teacher
+credential scoped and rate-limited for this purpose, and rotate it on
+suspicion; the pod could otherwise spend the operator's teacher quota. If the
+teacher API can be reached from the pod without auth (network-restricted),
+leave the key unset and nothing is forwarded.
+
+### Diagnosing a run that produced no marker
+
+The remote command echoes `exit=<rc>` and the last 8 KiB of `run.log`. When the
+`RELEARN_EVAL_OK` marker is missing, the control plane returns that tail in the
+503 (2 KiB) and logs it (8 KiB), with the metrics document and marker lines
+stripped and the forwarded secrets redacted — the tail is miner-visible.
 
 The image must print `RELEARN_METRICS=` followed by one line of JSON, then
 `RELEARN_EVAL_OK` on success. The document is the baseline envelope above plus

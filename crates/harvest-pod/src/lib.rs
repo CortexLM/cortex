@@ -24,6 +24,8 @@ use prism_lium::{
 };
 use prism_lium_types::InstanceSpec;
 
+pub use prism_lium::truncate_tail;
+
 /// SSH attempts for each step.
 const SSH_ATTEMPTS: u32 = 3;
 /// Seconds between SSH attempts.
@@ -47,23 +49,45 @@ pub struct PodProgram {
     pub ok_marker: &'static str,
 }
 
+/// Env file the pod sources before the entrypoint, when one was staged.
+///
+/// A Lium `InstanceSpec` has no env field, so this file (delivered over
+/// stdin, never the command line) is how judge credentials reach the image.
+pub const ENV_FILE: &str = "teacher.env";
+
+/// Request file the image parses.
+pub const REQUEST_FILE: &str = "request.json";
+
 impl PodProgram {
+    /// Command that stages one file under [`Self::workdir`] from stdin.
+    ///
+    /// `name` is a fixed control-plane constant, never miner input.
+    #[must_use]
+    pub fn stage_named_cmd(&self, name: &str) -> String {
+        let dir = self.workdir;
+        format!("set -e; mkdir -p {dir}; cd {dir}; umask 077; cat > {name}; wc -c < {name}")
+    }
+
     /// Command that stages the request under [`Self::workdir`] from stdin.
     ///
     /// Run inputs never reach the shell: a crafted digest interpolated into a
     /// command would be remote code execution on a pod the miner pays for.
     #[must_use]
     pub fn stage_cmd(&self) -> String {
-        let dir = self.workdir;
-        format!(
-            "set -e; mkdir -p {dir}; cd {dir}; umask 077; cat > request.json; wc -c < request.json"
-        )
+        self.stage_named_cmd(REQUEST_FILE)
+    }
+
+    /// Command that stages [`ENV_FILE`] from stdin.
+    #[must_use]
+    pub fn stage_env_cmd(&self) -> String {
+        self.stage_named_cmd(ENV_FILE)
     }
 
     /// Command that runs the image entrypoint and prints the metrics document.
     ///
     /// The log tail comes last so a consumer that truncates loses diagnostics
-    /// rather than the metrics line.
+    /// rather than the metrics line. `set -a` + [`ENV_FILE`] is the only way
+    /// the image sees host env: a Lium `InstanceSpec` has no env field.
     #[must_use]
     pub fn run_cmd(&self, timeout_secs: u64) -> String {
         let Self {
@@ -74,11 +98,12 @@ impl PodProgram {
         } = *self;
         format!(
             "set +e; cd {workdir} || exit 1; \
+             set -a; [ -f {ENV_FILE} ] && . ./{ENV_FILE}; set +a; \
              timeout --kill-after=60 {timeout_secs} {entrypoint} \
-               --request request.json --out metrics.json > run.log 2>&1; \
+               --request {REQUEST_FILE} --out metrics.json > run.log 2>&1; \
              rc=$?; \
              if [ -f metrics.json ]; then printf '{metrics_marker}'; cat metrics.json; printf '\\n'; fi; \
-             if [ $rc -eq 0 ]; then echo {ok_marker}; fi; \
+             if [ $rc -eq 0 ]; then echo {ok_marker}; else echo \"exit=$rc\"; fi; \
              tail -c 8192 run.log 2>/dev/null || true"
         )
     }
@@ -120,8 +145,16 @@ pub trait EvalPod: Send + Sync {
     /// Boot the digest-pinned image and return the instance id.
     async fn boot(&self, spec: &InstanceSpec) -> Result<String, String>;
 
-    /// Deliver `request` bytes, run the image, return its stdout.
-    async fn run(&self, instance_id: &str, request: &[u8]) -> Result<String, String>;
+    /// Deliver `request` bytes (and optional env file), run the image, return stdout.
+    ///
+    /// `env_file` is written to [`ENV_FILE`] over stdin when non-empty. Empty
+    /// skips that stage so challenges without a judge host stay env-free.
+    async fn run(
+        &self,
+        instance_id: &str,
+        request: &[u8],
+        env_file: &[u8],
+    ) -> Result<String, String>;
 
     /// Terminate. `Ok(true)` only when the provider confirms the pod is gone.
     async fn shutdown(&self, instance_id: &str) -> Result<bool, String>;
@@ -182,7 +215,12 @@ impl EvalPod for LiumEvalPod {
         Ok(inst.id)
     }
 
-    async fn run(&self, instance_id: &str, request: &[u8]) -> Result<String, String> {
+    async fn run(
+        &self,
+        instance_id: &str,
+        request: &[u8],
+        env_file: &[u8],
+    ) -> Result<String, String> {
         let key = resolve_private_key(None).map_err(|e| e.to_string())?;
         let target = self.target(instance_id).await?;
 
@@ -197,6 +235,22 @@ impl EvalPod for LiumEvalPod {
         )
         .await
         .map_err(|e| format!("stage request: {e}"))?;
+
+        // Over stdin, not the command line: a credential interpolated into
+        // the remote command would sit in the pod's process table.
+        if !env_file.is_empty() {
+            ssh_exec_stdin(
+                &target,
+                &key,
+                &self.program.stage_env_cmd(),
+                env_file,
+                SSH_ATTEMPTS,
+                SSH_RETRY_SECS,
+                SSH_SHORT_TIMEOUT_SECS,
+            )
+            .await
+            .map_err(|e| format!("stage teacher env: {e}"))?;
+        }
 
         // `allow_fail`: a non-zero image exit still has to be harvested, since
         // the log tail is the only diagnosis the operator gets.
@@ -266,6 +320,26 @@ mod tests {
         assert!(!cmd.contains("artifact_digest"));
         assert!(PROGRAM.stage_cmd().contains("cat > request.json"));
         assert!(PROGRAM.stage_cmd().contains("umask 077"));
+    }
+
+    #[test]
+    fn the_pod_env_is_sourced_from_a_file_not_the_command_line() {
+        let cmd = PROGRAM.run_cmd(600);
+        assert!(cmd.contains("set -a; [ -f teacher.env ] && . ./teacher.env; set +a"));
+        let sourced = cmd.find("teacher.env").unwrap_or(usize::MAX);
+        let scored = cmd.find("demo-eval score").unwrap_or(0);
+        assert!(
+            sourced < scored,
+            "env must be sourced before the run: {cmd}"
+        );
+        assert!(!cmd.contains("RELEARN_TEACHER"), "no values in the command");
+        assert!(PROGRAM.stage_env_cmd().contains("cat > teacher.env"));
+        assert!(PROGRAM.stage_env_cmd().contains("umask 077"));
+    }
+
+    #[test]
+    fn a_non_zero_exit_is_reported_in_stdout() {
+        assert!(PROGRAM.run_cmd(600).contains("echo \"exit=$rc\""));
     }
 
     #[test]

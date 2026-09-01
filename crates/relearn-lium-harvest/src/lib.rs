@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use harvest_pod::{EvalPod, PodProgram};
+use harvest_pod::{truncate_tail, EvalPod, PodProgram};
 use prism_lium_types::InstanceSpec;
 use relearn_challenge_task::HoldoutItem;
 use relearn_eval::{EvalError, LiveScorer, RelearnEvalMetrics, RelearnPin, RELEARN_METRICS_SCHEMA};
@@ -48,6 +48,128 @@ pub const PROGRAM: PodProgram = PodProgram {
     metrics_marker: METRICS_MARKER,
     ok_marker: OK_MARKER,
 };
+
+/// Teacher / judge configuration the eval image reads from its environment.
+///
+/// `InstanceSpec` cannot carry environment — Lium provisioning has no env
+/// field — so the pod sees nothing the control plane does not hand it over
+/// SSH. Without `RELEARN_TEACHER_API_URL` the image has no judge and exits
+/// non-zero, which is a pod that boots, runs, and never prints
+/// [`OK_MARKER`].
+///
+/// Only the variable **names** are in git. Values come from the live host and
+/// travel in an env file delivered over stdin, so nothing — least of all the
+/// API key — reaches the remote command line or the pod's process table.
+#[derive(Debug, Clone, Default)]
+pub struct TeacherEnv {
+    /// `RELEARN_TEACHER_API_URL`. The image refuses to score without it.
+    pub api_url: Option<String>,
+    /// `RELEARN_TEACHER_MODEL`. Falls back to the pin's `teacher_model`.
+    pub model: Option<String>,
+    /// `RELEARN_TEACHER_API_KEY`. Secret; see [`Self::secrets`].
+    pub api_key: Option<String>,
+}
+
+impl TeacherEnv {
+    /// Read the operator's teacher config off the host environment.
+    #[must_use]
+    pub fn from_host_env() -> Self {
+        Self {
+            api_url: relearn_challenge_task::teacher_api_url(),
+            model: std::env::var("RELEARN_TEACHER_MODEL")
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty()),
+            api_key: relearn_challenge_task::teacher_api_key(),
+        }
+    }
+
+    /// Whether the image has the one variable it cannot run without.
+    #[must_use]
+    pub fn has_judge(&self) -> bool {
+        self.api_url
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// Variable names present, for logs and `/v1/status`. Never values.
+    #[must_use]
+    pub fn present_names(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.api_url.is_some() {
+            names.push("RELEARN_TEACHER_API_URL");
+        }
+        if self.model.is_some() {
+            names.push("RELEARN_TEACHER_MODEL");
+        }
+        if self.api_key.is_some() {
+            names.push("RELEARN_TEACHER_API_KEY");
+        }
+        names
+    }
+
+    /// Values that must never appear in an error body or a log line.
+    #[must_use]
+    pub fn secrets(&self) -> Vec<String> {
+        self.api_key.iter().cloned().collect()
+    }
+
+    /// `KEY=value` lines for the pod env file, with the pin's model as the
+    /// default so the image and the control plane agree on the wire id.
+    #[must_use]
+    pub fn env_file(&self, pin: &RelearnPin) -> String {
+        let model = self
+            .model
+            .clone()
+            .unwrap_or_else(|| pin.teacher_model.clone());
+        let mut lines = Vec::new();
+        if let Some(url) = &self.api_url {
+            lines.push(format!("RELEARN_TEACHER_API_URL={url}"));
+        }
+        lines.push(format!("RELEARN_TEACHER_MODEL={model}"));
+        if let Some(key) = &self.api_key {
+            lines.push(format!("RELEARN_TEACHER_API_KEY={key}"));
+        }
+        lines.push(format!("RELEARN_BASE_MODEL={}", pin.base_model));
+        lines.push(String::new());
+        lines.join("\n")
+    }
+}
+
+/// Replace secret values with a placeholder before anything is surfaced.
+///
+/// The image's log tail goes into a miner-visible 503, and the pod was handed
+/// the teacher key, so an image that echoes its own environment would leak it.
+#[must_use]
+pub fn redact(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_owned();
+    for s in secrets {
+        let s = s.trim();
+        // Short values would redact half the log; a real credential is long.
+        if s.len() >= 8 {
+            out = out.replace(s, "[redacted]");
+        }
+    }
+    out
+}
+
+/// Diagnostic tail of the image's stdout: everything that is not the metrics
+/// document or a marker line, redacted and bounded.
+#[must_use]
+pub fn log_tail(stdout: &str, secrets: &[String], max_bytes: usize) -> String {
+    let body: String = stdout
+        .lines()
+        .filter(|l| !l.starts_with(METRICS_MARKER) && l.trim_end() != OK_MARKER)
+        .collect::<Vec<_>>()
+        .join("\n");
+    truncate_tail(&redact(body.trim(), secrets), max_bytes)
+}
+
+/// Bytes of image log surfaced to the miner in a 503.
+pub const LOG_TAIL_HTTP_BYTES: usize = 2_048;
+
+/// Bytes of image log written to the operator's own log.
+pub const LOG_TAIL_OPERATOR_BYTES: usize = 8_192;
 
 /// What the eval image is asked to score.
 ///
@@ -109,17 +231,31 @@ pub struct LiumHarvest {
     /// Master's SSH public key(s). The pod is unreachable without one, so the
     /// request could not be delivered and no metrics could be read back.
     ssh_public_keys: Vec<String>,
+    /// Teacher config forwarded into the pod environment.
+    teacher: TeacherEnv,
 }
 
 impl LiumHarvest {
     /// Wrap a pod transport.
     #[must_use]
-    pub fn new(pod: Arc<dyn EvalPod>, limits: HarvestLimits, ssh_public_keys: Vec<String>) -> Self {
+    pub fn new(
+        pod: Arc<dyn EvalPod>,
+        limits: HarvestLimits,
+        ssh_public_keys: Vec<String>,
+        teacher: TeacherEnv,
+    ) -> Self {
         Self {
             pod,
             limits,
             ssh_public_keys,
+            teacher,
         }
+    }
+
+    /// Teacher variable names this harvest will forward. Never values.
+    #[must_use]
+    pub fn teacher_env_names(&self) -> Vec<&'static str> {
+        self.teacher.present_names()
     }
 
     fn spec(&self, pin: &RelearnPin, frozen_digest: &str) -> InstanceSpec {
@@ -164,11 +300,9 @@ impl LiveScorer for LiumHarvest {
         if holdout.is_empty() {
             return Err(EvalError::HoldoutSealed);
         }
-        if self.ssh_public_keys.iter().all(|k| k.trim().is_empty()) {
-            return Err(EvalError::Backend(
-                "no master SSH public key; the pod would be unreachable".into(),
-            ));
-        }
+        // Same checks `scoring_readiness` runs before a submission gets this
+        // far, repeated because nothing else stands between here and a rent.
+        self.ready()?;
         let request = HarvestRequest {
             schema_version: RELEARN_METRICS_SCHEMA,
             submission_digest: frozen_digest.to_owned(),
@@ -187,7 +321,10 @@ impl LiveScorer for LiumHarvest {
             .boot(&self.spec(pin, frozen_digest))
             .await
             .map_err(EvalError::Backend)?;
-        let run = self.pod.run(&instance, &body).await;
+        let run = self
+            .pod
+            .run(&instance, &body, self.teacher.env_file(pin).as_bytes())
+            .await;
         let shutdown = self.pod.shutdown(&instance).await;
 
         // Teardown first, as `rent_eval` does: an orphan pod keeps spending the
@@ -204,17 +341,47 @@ impl LiveScorer for LiumHarvest {
 
         let stdout = run.map_err(EvalError::Backend)?;
         if !PROGRAM.ran_to_completion(&stdout) {
+            let secrets = self.teacher.secrets();
+            // A pod that boots, runs, and prints no marker is the hardest
+            // failure to diagnose from the outside, so the image's own log is
+            // the answer. Redacted: the pod was handed the teacher key, and
+            // this tail goes into a miner-visible 503.
             tracing::warn!(
                 instance,
+                tail = %log_tail(&stdout, &secrets, LOG_TAIL_OPERATOR_BYTES),
                 "eval image did not print {OK_MARKER}; refusing the run"
             );
+            let tail = log_tail(&stdout, &secrets, LOG_TAIL_HTTP_BYTES);
+            let detail = if tail.is_empty() {
+                "no output".to_owned()
+            } else {
+                tail
+            };
             return Err(EvalError::Backend(format!(
-                "eval image did not print {OK_MARKER}"
+                "eval image did not print {OK_MARKER}; run.log tail: {detail}"
             )));
         }
         let metrics = extract_metrics(&stdout)?;
         metrics.verify(pin, frozen_digest, artifact_digest, holdout)?;
         Ok(metrics.measurement.into_slice_scores())
+    }
+
+    fn ready(&self) -> Result<(), EvalError> {
+        if self.ssh_public_keys.iter().all(|k| k.trim().is_empty()) {
+            return Err(EvalError::Backend(
+                "no master SSH public key; the eval pod would be unreachable".into(),
+            ));
+        }
+        // The pod inherits nothing from this host, so without the judge URL the
+        // image exits non-zero after the rent has already been paid for.
+        if !self.teacher.has_judge() {
+            return Err(EvalError::Backend(
+                "RELEARN_TEACHER_API_URL not set on this host; the eval image has no judge \
+                 and would exit without scoring"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -290,6 +457,7 @@ mod tests {
     struct Recorder {
         booted: Vec<InstanceSpec>,
         requests: Vec<HarvestRequest>,
+        env_files: Vec<String>,
         shutdowns: Vec<String>,
     }
 
@@ -322,9 +490,18 @@ mod tests {
             Ok("pod-1".into())
         }
 
-        async fn run(&self, _instance_id: &str, request: &[u8]) -> Result<String, String> {
+        async fn run(
+            &self,
+            _instance_id: &str,
+            request: &[u8],
+            env_file: &[u8],
+        ) -> Result<String, String> {
             let parsed: HarvestRequest = serde_json::from_slice(request).expect("request json");
-            self.log().requests.push(parsed);
+            let mut log = self.log();
+            log.requests.push(parsed);
+            log.env_files
+                .push(String::from_utf8_lossy(env_file).into_owned());
+            drop(log);
             self.stdout.clone()
         }
 
@@ -334,11 +511,20 @@ mod tests {
         }
     }
 
+    fn teacher() -> TeacherEnv {
+        TeacherEnv {
+            api_url: Some("http://teacher.invalid/v1".into()),
+            model: None,
+            api_key: Some("tk-live-secret-value-0123456789".into()),
+        }
+    }
+
     fn harvest(pod: Arc<FakePod>) -> LiumHarvest {
         LiumHarvest::new(
             pod,
             HarvestLimits::default(),
             vec!["ssh-ed25519 AAAAmaster".into()],
+            teacher(),
         )
     }
 
@@ -381,7 +567,7 @@ mod tests {
         let p = pin(&hold);
         let pod = Arc::new(FakePod::ok(document(&p, &hold, "f", "a", 0.6)));
         let transport: Arc<dyn EvalPod> = pod.clone();
-        let err = LiumHarvest::new(transport, HarvestLimits::default(), Vec::new())
+        let err = LiumHarvest::new(transport, HarvestLimits::default(), Vec::new(), teacher())
             .score(&p, "f", "a", &hold)
             .await
             .expect_err("unreachable pod");
@@ -480,6 +666,130 @@ mod tests {
             .await
             .expect_err("no ok marker");
         assert!(matches!(err, EvalError::Backend(_)), "{err}");
+    }
+
+    /// The live failure this fixes: a pod that boots and runs but sees no
+    /// teacher config, because `InstanceSpec` cannot carry environment.
+    #[tokio::test]
+    async fn the_teacher_env_is_forwarded_into_the_pod() {
+        let hold = recs(120);
+        let p = pin(&hold);
+        let pod = Arc::new(FakePod::ok(document(&p, &hold, "f", "a", 0.6)));
+        harvest(Arc::clone(&pod))
+            .score(&p, "f", "a", &hold)
+            .await
+            .expect("harvest");
+
+        let log = pod.log();
+        let env = &log.env_files[0];
+        assert!(
+            env.contains("RELEARN_TEACHER_API_URL=http://teacher.invalid/v1"),
+            "{env}"
+        );
+        // Model defaults to the pin so the image and the pin agree.
+        assert!(
+            env.contains(&format!("RELEARN_TEACHER_MODEL={}", p.teacher_model)),
+            "{env}"
+        );
+        assert!(env.contains("RELEARN_TEACHER_API_KEY="), "{env}");
+        assert!(
+            env.contains(&format!("RELEARN_BASE_MODEL={}", p.base_model)),
+            "{env}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_judge_url_refuses_before_renting_a_pod() {
+        let hold = recs(120);
+        let p = pin(&hold);
+        let pod = Arc::new(FakePod::ok(document(&p, &hold, "f", "a", 0.6)));
+        let transport: Arc<dyn EvalPod> = pod.clone();
+        let err = LiumHarvest::new(
+            transport,
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAmaster".into()],
+            TeacherEnv::default(),
+        )
+        .score(&p, "f", "a", &hold)
+        .await
+        .expect_err("no judge");
+        assert!(err.to_string().contains("RELEARN_TEACHER_API_URL"), "{err}");
+        assert!(
+            pod.log().booted.is_empty(),
+            "never pay for a pod that cannot score"
+        );
+    }
+
+    /// A pod that boots, runs, and prints no marker is the hardest failure to
+    /// diagnose from outside, so the image's own log has to come back.
+    #[tokio::test]
+    async fn a_missing_marker_surfaces_the_redacted_log_tail() {
+        let hold = recs(120);
+        let p = pin(&hold);
+        let pod = Arc::new(FakePod::ok(
+            "loading base model\nRELEARN_TEACHER_API_KEY=tk-live-secret-value-0123456789\n\
+             RuntimeError: judge unreachable\nexit=1\n"
+                .to_owned(),
+        ));
+        let err = harvest(pod)
+            .score(&p, "f", "a", &hold)
+            .await
+            .expect_err("no marker");
+        let msg = err.to_string();
+        assert!(msg.contains("RuntimeError: judge unreachable"), "{msg}");
+        assert!(msg.contains("exit=1"), "{msg}");
+        assert!(
+            !msg.contains("tk-live-secret-value-0123456789"),
+            "the teacher key must never reach a miner-visible body: {msg}"
+        );
+        assert!(msg.contains("[redacted]"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn an_empty_log_still_says_something_useful() {
+        let hold = recs(120);
+        let p = pin(&hold);
+        let pod = Arc::new(FakePod::ok(String::new()));
+        let err = harvest(pod)
+            .score(&p, "f", "a", &hold)
+            .await
+            .expect_err("silence");
+        assert!(err.to_string().contains("no output"), "{err}");
+    }
+
+    #[test]
+    fn redaction_needs_a_credential_sized_secret() {
+        // Redacting a short value would blank half the log for no gain.
+        assert_eq!(redact("a and b", &["a".into()]), "a and b");
+        assert_eq!(
+            redact("key=abcdefghij done", &["abcdefghij".into()]),
+            "key=[redacted] done"
+        );
+    }
+
+    #[test]
+    fn the_log_tail_drops_the_metrics_document() {
+        let hold = recs(120);
+        let p = pin(&hold);
+        let full = document(&p, &hold, "f", "a", 0.5);
+        let tail = log_tail(&full, &[], LOG_TAIL_HTTP_BYTES);
+        assert!(!tail.contains(METRICS_MARKER), "{tail}");
+        assert!(!tail.contains("holdout_commitment"), "{tail}");
+        assert!(tail.contains("boot ok"), "{tail}");
+    }
+
+    #[test]
+    fn env_names_are_reported_without_values() {
+        let names = teacher().present_names();
+        assert!(names.contains(&"RELEARN_TEACHER_API_URL"));
+        assert!(names.contains(&"RELEARN_TEACHER_API_KEY"));
+        assert!(
+            !names.contains(&"RELEARN_TEACHER_MODEL"),
+            "unset on this host"
+        );
+        let joined = names.join(",");
+        assert!(!joined.contains("teacher.invalid"), "{joined}");
+        assert!(!joined.contains("tk-live"), "{joined}");
     }
 
     #[tokio::test]

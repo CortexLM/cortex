@@ -31,7 +31,7 @@ use relearn_challenge::{
 #[cfg(test)]
 use relearn_challenge::{holdout_commitment, HoldoutItem, HoldoutTask};
 use relearn_eval::boot_base_champion;
-use relearn_lium_harvest::{HarvestLimits, LiumEvalPod, LiumHarvest};
+use relearn_lium_harvest::{HarvestLimits, LiumEvalPod, LiumHarvest, TeacherEnv};
 use tokio::net::TcpListener;
 
 /// Operator Relearn challenge service CLI.
@@ -203,6 +203,21 @@ fn build_live_scorer(backend: EvalBackend, run_timeout_secs: u64) -> Option<Arc<
         );
         return None;
     };
+    // A Lium InstanceSpec has no env field, so the pod inherits nothing from
+    // this host. The image refuses to score without the judge URL, which looks
+    // like a pod that boots, runs, and never prints its OK marker.
+    let teacher = TeacherEnv::from_host_env();
+    if teacher.has_judge() {
+        tracing::info!(
+            forwarded = ?teacher.present_names(),
+            "teacher config will be forwarded into the eval pod"
+        );
+    } else {
+        tracing::warn!(
+            "RELEARN_TEACHER_API_URL unset; the eval image has no judge and every submission \
+             will 503 before a pod is rented"
+        );
+    }
     let pod = Arc::new(LiumEvalPod::new(
         client,
         run_timeout_secs,
@@ -212,6 +227,7 @@ fn build_live_scorer(backend: EvalBackend, run_timeout_secs: u64) -> Option<Arc<
         pod,
         HarvestLimits::default(),
         vec![ssh_pub],
+        teacher,
     )))
 }
 
@@ -496,9 +512,25 @@ mod tests {
         let pubkey = stub_ssh_pubkey("ready");
         std::env::set_var("LIUM_API_KEY", "test-key-not-a-real-secret");
         std::env::set_var("LIUM_SSH_PUBLIC_KEY_FILE", &pubkey);
+
+        // A harvest with no judge is wired but not ready: the eval image would
+        // exit without scoring, so that must surface before a pod is rented.
+        std::env::remove_var("RELEARN_TEACHER_API_URL");
+        let judgeless = build_live_scorer(EvalBackend::Lium, 900).expect("wired");
+        let pinned = RelearnPin {
+            eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
+            ..RelearnPin::default()
+        };
+        let err =
+            relearn_eval::scoring_readiness(&pinned, EvalBackend::Lium, Some(judgeless.as_ref()))
+                .expect_err("no judge configured");
+        assert!(err.to_string().contains("RELEARN_TEACHER_API_URL"), "{err}");
+
+        std::env::set_var("RELEARN_TEACHER_API_URL", "http://teacher.invalid/v1");
         let live = build_live_scorer(EvalBackend::Lium, 900).expect("wired");
         std::env::remove_var("LIUM_API_KEY");
         std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
+        std::env::remove_var("RELEARN_TEACHER_API_URL");
 
         let unpinned = RelearnPin::default();
         assert!(
@@ -507,10 +539,6 @@ mod tests {
             "a wired harvest still needs a digest pin"
         );
 
-        let pinned = RelearnPin {
-            eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
-            ..RelearnPin::default()
-        };
         assert!(
             relearn_eval::scoring_readiness(&pinned, EvalBackend::Lium, None).is_err(),
             "a digest pin alone is not enough"

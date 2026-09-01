@@ -209,7 +209,7 @@ impl LiveJudge for LiumImageHarvest {
             .boot(&self.spec(pin, frozen_digest))
             .await
             .map_err(EvalError::Backend)?;
-        let run = self.pod.run(&instance, &body).await;
+        let run = self.pod.run(&instance, &body, b"").await;
         let shutdown = self.pod.shutdown(&instance).await;
 
         // Teardown outranks the run: an orphan pod keeps spending the miner's
@@ -360,7 +360,12 @@ mod tests {
             Ok("pod-1".into())
         }
 
-        async fn run(&self, _instance_id: &str, request: &[u8]) -> Result<String, String> {
+        async fn run(
+            &self,
+            _instance_id: &str,
+            request: &[u8],
+            _env_file: &[u8],
+        ) -> Result<String, String> {
             let parsed: HarvestRequest = serde_json::from_slice(request).expect("request json");
             self.log().requests.push(parsed);
             self.stdout.clone()
