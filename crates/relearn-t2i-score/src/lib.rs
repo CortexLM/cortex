@@ -17,8 +17,18 @@
 //!   rendered text, spatial relations) must agree with Q-Judger's Alignment
 //!   pillar. Disagreement discards the run rather than trusting one of them.
 //! - **Contamination** — eval prompt ids appearing in submitted training
-//!   metadata reject the submission outright.
+//!   metadata reject the submission outright, and a submission that declared
+//!   no training metadata at all fails the same gate: absence of evidence is
+//!   not evidence of a clean run.
 //! - **N/A rate** — a judge that declined most items did not produce a score.
+//! - **Capability canary** — a fixed general-purpose prompt slice that is
+//!   **off** the visible score. A miner who buys holdout points by wrecking
+//!   everything the generator could already do takes a hard zero, and cannot
+//!   see the canary in the number they are paid on.
+//!
+//! Only the holdout paired test feeds the lattice. Public split, capability
+//! canary, replay, faithfulness, and contamination can zero a run and never
+//! raise one. Miners overfit anything that pays.
 //!
 //! All series are on the normalized `0..=1` scale (paper points ÷ 100), which
 //! makes one `prism_competition` dead-zone unit equal one paper point.
@@ -62,6 +72,13 @@ pub const MIN_FAITHFULNESS_AGREEMENT: f64 = 0.75;
 
 /// Largest tolerated public-minus-holdout gap (overfit / contamination signal).
 pub const MAX_PUBLIC_HOLDOUT_GAP: f64 = 0.08;
+
+/// Largest tolerated drop vs the champion on the capability canary.
+///
+/// The canary is **off** the visible score. A regression past this epsilon is
+/// a hard zero, not a reduced lattice: a generator that trades away general
+/// competence for holdout points is not an improvement to pay for.
+pub const CANARY_EPSILON: f64 = 0.02;
 
 /// Minimum head-to-head A/B win rate (bps of decided cells).
 pub const MIN_AB_WIN_RATE_BPS: u64 = 5_000;
@@ -133,7 +150,31 @@ impl FaithfulnessEvidence {
     }
 }
 
-/// Per-artifact T2I measurements. Series keys are `p{id}#v{variation}`.
+/// What a submission declared about its training data, plus what leaked.
+///
+/// The contamination gate reads miner-declared metadata, so an empty manifest
+/// is *absence of evidence*, not a clean bill of health. Keeping the declared
+/// counts next to the hits is what lets [`judge_challenger`] tell "declared
+/// nothing" apart from "declared data with no eval-prompt overlap".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContaminationEvidence {
+    /// Distinct bench prompt ids the submission declared training on.
+    pub declared_prompt_ids: usize,
+    /// Distinct training dataset ids the submission declared.
+    pub declared_dataset_ids: usize,
+    /// Scored prompt ids found inside the declared metadata.
+    pub hits: Vec<u32>,
+}
+
+impl ContaminationEvidence {
+    /// Whether the submission declared anything the gate could check.
+    #[must_use]
+    pub fn is_declared(&self) -> bool {
+        self.declared_prompt_ids > 0 || self.declared_dataset_ids > 0
+    }
+}
+
+/// Per-artifact Image measurements. Series keys are `p{id}#v{variation}`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct T2iSliceScores {
     /// Normalized Q-Judger totals on the holdout split.
@@ -142,14 +183,16 @@ pub struct T2iSliceScores {
     pub public: ExampleSeries,
     /// Normalized per-pillar series on the holdout split.
     pub holdout_by_pillar: BTreeMap<L1Dimension, ExampleSeries>,
+    /// General-capability prompt slice. Off the visible score path.
+    pub capability_canary: ExampleSeries,
     /// Share of level-3 items the judge declined.
     pub na_rate: f64,
     /// Seed-replay evidence.
     pub replay: ReplayEvidence,
     /// Agentic faithfulness evidence.
     pub faithfulness: FaithfulnessEvidence,
-    /// Eval prompt ids found in the submission's training metadata.
-    pub contaminated_prompt_ids: Vec<u32>,
+    /// Declared training metadata and the eval prompt ids inside it.
+    pub contamination: ContaminationEvidence,
 }
 
 impl T2iSliceScores {
@@ -253,8 +296,20 @@ pub enum GateFail {
     PromptFaithfulness,
     /// Eval prompt ids appear in the submission's training metadata.
     Contamination,
+    /// The submission declared no training metadata, so the contamination gate
+    /// had nothing to check (fail-closed; an empty manifest is not a pass).
+    ContaminationEvidenceMissing,
     /// Public split far above holdout (memorization / contamination).
     PublicHoldoutGap,
+    /// Public split evidence was missing (fail-closed).
+    PublicEvidenceMissing,
+    /// Capability canary regressed past [`CANARY_EPSILON`].
+    CapabilityCanaryRegression {
+        /// Size of the drop in bps of the normalized scale.
+        drop_bps: u64,
+    },
+    /// The capability canary did not run on one of the two sides.
+    CapabilityCanaryEvidenceMissing,
     /// Paired test refused (slice mismatch / too thin).
     PairedRefusal,
 }
@@ -369,16 +424,42 @@ pub fn judge_challenger(champion: &T2iSliceScores, challenger: &T2iSliceScores) 
     if !challenger.faithfulness.passes() {
         failed.push(GateFail::PromptFaithfulness);
     }
-    if !challenger.contaminated_prompt_ids.is_empty() {
-        failed.push(GateFail::Contamination);
+
+    if challenger.contamination.is_declared() {
+        if !challenger.contamination.hits.is_empty() {
+            failed.push(GateFail::Contamination);
+        }
+    } else {
+        failed.push(GateFail::ContaminationEvidenceMissing);
     }
 
-    if let (Some(pub_m), Some(hold_m)) = (
+    match (
         T2iSliceScores::mean(&challenger.public),
         T2iSliceScores::mean(&challenger.holdout),
     ) {
-        if pub_m - hold_m > MAX_PUBLIC_HOLDOUT_GAP + DEADZONE {
-            failed.push(GateFail::PublicHoldoutGap);
+        (None, _) => failed.push(GateFail::PublicEvidenceMissing),
+        (Some(pub_m), Some(hold_m)) => {
+            if pub_m - hold_m > MAX_PUBLIC_HOLDOUT_GAP + DEADZONE {
+                failed.push(GateFail::PublicHoldoutGap);
+            }
+        }
+        (Some(_), None) => failed.push(GateFail::PairedRefusal),
+    }
+
+    // Off the visible score on purpose: a miner tunes what they are paid on,
+    // so the general-capability slice only ever removes a verdict.
+    match (
+        T2iSliceScores::mean(&champion.capability_canary),
+        T2iSliceScores::mean(&challenger.capability_canary),
+    ) {
+        (None, _) | (_, None) => failed.push(GateFail::CapabilityCanaryEvidenceMissing),
+        (Some(champ_c), Some(chal_c)) => {
+            let drop = champ_c - chal_c;
+            if drop > CANARY_EPSILON + DEADZONE {
+                failed.push(GateFail::CapabilityCanaryRegression {
+                    drop_bps: (drop * 10_000.0).round().max(0.0) as u64,
+                });
+            }
         }
     }
 
@@ -476,15 +557,24 @@ mod tests {
         }
     }
 
+    fn declared_clean() -> ContaminationEvidence {
+        ContaminationEvidence {
+            declared_prompt_ids: 24,
+            declared_dataset_ids: 2,
+            hits: Vec::new(),
+        }
+    }
+
     fn slice(total: f64) -> T2iSliceScores {
         T2iSliceScores {
             holdout: series(120, total),
             public: series(120, total),
             holdout_by_pillar: pillars(total),
+            capability_canary: series(40, 0.97),
             na_rate: 0.05,
             replay: good_replay(),
             faithfulness: good_faith(),
-            contaminated_prompt_ids: Vec::new(),
+            contamination: declared_clean(),
         }
     }
 
@@ -619,9 +709,86 @@ mod tests {
     #[test]
     fn contamination_blocks() {
         let mut chal = slice(0.80);
-        chal.contaminated_prompt_ids = vec![902];
+        chal.contamination.hits = vec![902];
         let v = judge_challenger(&slice(0.50), &chal);
         assert!(v.failed.contains(&GateFail::Contamination));
+        assert_eq!(v.lattice, 0);
+    }
+
+    /// The dodge the id-only gate allowed: declare nothing, be treated as
+    /// clean. An undeclared manifest fails the gate instead.
+    #[test]
+    fn empty_training_metadata_is_fail_closed_not_a_clean_run() {
+        let mut chal = slice(0.80);
+        chal.contamination = ContaminationEvidence::default();
+        let v = judge_challenger(&slice(0.50), &chal);
+        assert!(
+            v.failed.contains(&GateFail::ContaminationEvidenceMissing),
+            "{:?}",
+            v.failed
+        );
+        assert!(!v.eligible);
+        assert_eq!(v.lattice, 0);
+    }
+
+    #[test]
+    fn declaring_only_dataset_ids_still_takes_the_gate() {
+        let mut chal = slice(0.80);
+        chal.contamination = ContaminationEvidence {
+            declared_dataset_ids: 1,
+            ..ContaminationEvidence::default()
+        };
+        let v = judge_challenger(&slice(0.50), &chal);
+        assert!(!v.failed.contains(&GateFail::ContaminationEvidenceMissing));
+        assert!(v.eligible, "{:?}", v.failed);
+    }
+
+    /// The canary must be able to zero a run that wins the holdout outright,
+    /// and it must not be reachable through the paid number.
+    #[test]
+    fn capability_canary_regression_is_a_hard_zero_off_the_lattice() {
+        let champ = slice(0.50);
+        let mut chal = slice(0.80);
+        chal.capability_canary = series(40, 0.70);
+        let v = judge_challenger(&champ, &chal);
+        assert!(
+            v.failed
+                .iter()
+                .any(|f| matches!(f, GateFail::CapabilityCanaryRegression { .. })),
+            "{:?}",
+            v.failed
+        );
+        assert!(!v.eligible);
+        assert_eq!(v.lattice, 0);
+        assert!(
+            v.paired.expect("holdout still ran").displaces,
+            "the canary must not be mixed into the holdout win"
+        );
+    }
+
+    #[test]
+    fn missing_capability_canary_is_fail_closed() {
+        let mut chal = slice(0.80);
+        chal.capability_canary = ExampleSeries::default();
+        let v = judge_challenger(&slice(0.50), &chal);
+        assert!(v.failed.contains(&GateFail::CapabilityCanaryEvidenceMissing));
+        assert_eq!(v.lattice, 0);
+    }
+
+    #[test]
+    fn canary_noise_inside_epsilon_is_tolerated() {
+        let mut chal = slice(0.80);
+        chal.capability_canary = series(40, 0.96);
+        assert!(judge_challenger(&slice(0.50), &chal).eligible);
+    }
+
+    #[test]
+    fn empty_public_split_is_fail_closed() {
+        let mut chal = slice(0.80);
+        chal.public = ExampleSeries::default();
+        let v = judge_challenger(&slice(0.50), &chal);
+        assert!(v.failed.contains(&GateFail::PublicEvidenceMissing));
+        assert!(!v.eligible);
     }
 
     #[test]

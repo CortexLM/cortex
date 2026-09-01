@@ -1,14 +1,19 @@
-//! Relearn T2I challenge identity, verified model pins, and seed derivation.
+//! Relearn Image challenge identity, verified model pins, and seed derivation.
 //!
 //! ```text
-//! challenge_id     = "relearn-t2i"
+//! challenge_id     = "relearn-image"
 //! scoring_version  = 1
 //! task_id domain   = b"base-relearn-t2i-task-id-v1"
 //! receipt domain   = b"base-relearn-t2i-receipt-v1"
 //! ```
 //!
-//! Distinct from `relearn` / `relearn-mm` / `bounty` so leaf digests never
+//! Distinct from `relearn` / `relearn-agent` / `bounty` so leaf digests never
 //! collide. Master-centralized eval; miners pay Lium.
+//!
+//! The crate, env prefix, and domain tags keep the pre-launch `t2i` spelling.
+//! The domain tags are hashed into the committed holdout commitment and into
+//! every leaf digest, so renaming them would invalidate pins rather than
+//! rename a product ([`docs/NAMING.md`](../../../docs/NAMING.md)).
 //!
 //! Two rules in this crate are product rules, not style:
 //!
@@ -34,10 +39,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Normative challenge id (trust-root / leaf `challenge_id` string).
-pub const CHALLENGE_ID: &str = "relearn-t2i";
+pub const CHALLENGE_ID: &str = "relearn-image";
 
 /// UTF-8 bytes of [`CHALLENGE_ID`].
-pub const CHALLENGE_ID_BYTES: &[u8] = b"relearn-t2i";
+pub const CHALLENGE_ID_BYTES: &[u8] = b"relearn-image";
+
+/// Pre-launch spelling kept by the crate names, env prefix, and domain tags.
+///
+/// Never a challenge id: nothing signs or routes under this string.
+pub const INTERNAL_NAME: &str = "relearn-t2i";
 
 /// Live `challenge_scoring_version` (Q-Judger displacement + pillar gates).
 pub const SCORING_VERSION: u16 = 1;
@@ -236,11 +246,20 @@ mod tests {
 
     #[test]
     fn challenge_id_is_distinct() {
-        assert_eq!(CHALLENGE_ID, "relearn-t2i");
-        assert_eq!(CHALLENGE_ID_BYTES, b"relearn-t2i");
-        for other in ["relearn", "relearn-mm", "bounty", "prism", "design"] {
+        assert_eq!(CHALLENGE_ID, "relearn-image");
+        assert_eq!(CHALLENGE_ID_BYTES, b"relearn-image");
+        for other in [
+            "relearn",
+            "relearn-agent",
+            "relearn-mm",
+            "bounty",
+            "prism",
+            "design",
+        ] {
             assert_ne!(CHALLENGE_ID, other);
         }
+        // The legacy spelling must never route or sign.
+        assert_ne!(CHALLENGE_ID, INTERNAL_NAME);
     }
 
     #[test]

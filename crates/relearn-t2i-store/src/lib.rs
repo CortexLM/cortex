@@ -60,6 +60,12 @@ pub struct ArtifactManifest {
     /// Bench prompt ids present in the submitted training metadata.
     #[serde(default)]
     pub train_prompt_ids: Vec<u32>,
+    /// Training dataset ids the submission declares.
+    ///
+    /// Declaring something is what lets the contamination gate run at all: a
+    /// manifest that declares nothing fails closed rather than passing.
+    #[serde(default)]
+    pub train_dataset_ids: Vec<String>,
     /// `cell_key` → sha256 hex of the image the miner claims that cell produced.
     /// The seed-replay gate regenerates a few of these.
     #[serde(default)]

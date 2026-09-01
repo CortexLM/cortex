@@ -1,6 +1,6 @@
 [package]
 name = "relearn-t2i-http"
-description = "Relearn T2I HTTP surface: submit, status, prompt split, admin promote"
+description = "Relearn Image HTTP surface: submit, status, prompt split, admin promote"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -22,7 +22,9 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 
 [dev-dependencies]
+async-trait = "0.1"
 http-body-util = "0.1"
+prism-competition = { path = "../prism-competition" }
 tower = { version = "0.5", features = ["util"] }
 
 [lints]

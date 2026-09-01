@@ -1,4 +1,4 @@
-//! Relearn T2I orchestrator helpers: D24 leaf plan + crate re-exports.
+//! Relearn Image orchestrator helpers: D24 leaf plan + crate re-exports.
 
 #![forbid(unsafe_code)]
 #![allow(
@@ -15,7 +15,10 @@ use relearn_t2i_score::champion_hold_lattice;
 use relearn_t2i_store::SubmissionState;
 use relearn_t2i_task::{CHALLENGE_ID_BYTES, SCORE_MAX};
 
-pub use relearn_t2i_eval::{resolve_judge_backend, JudgeBackend, JudgeConfig};
+pub use relearn_t2i_eval::{
+    boot_base_champion, force_sim, resolve_judge_backend, scoring_readiness, JudgeBackend,
+    JudgeConfig, LiveJudge, T2iBaselineMeasurement,
+};
 pub use relearn_t2i_http::{hash_admin_token, relearn_t2i_router, AppState};
 pub use relearn_t2i_store::{ArtifactManifest, MemoryStore};
 pub use relearn_t2i_task::{
@@ -137,9 +140,11 @@ mod tests {
     }
 
     #[test]
-    fn leaf_domain_is_not_the_text_challenge() {
-        assert_eq!(RELEARN_T2I_ID_BYTES, b"relearn-t2i");
-        assert_ne!(RELEARN_T2I_ID_BYTES, b"relearn");
+    fn leaf_domain_is_not_another_live_challenge() {
+        assert_eq!(RELEARN_T2I_ID_BYTES, b"relearn-image");
+        for other in [&b"relearn"[..], b"relearn-agent", b"bounty"] {
+            assert_ne!(RELEARN_T2I_ID_BYTES, other);
+        }
     }
 
     #[test]

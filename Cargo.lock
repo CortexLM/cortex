@@ -2427,6 +2427,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b43ede17f21864e81be2fa654110bf1e793774238d86ef8555c37e6519c0403"
 
 [[package]]
+name = "harvest-pod"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "prism-lium",
+ "prism-lium-types",
+ "tokio",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4689,7 +4699,7 @@ name = "relearn-lium-harvest"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "prism-lium",
+ "harvest-pod",
  "prism-lium-types",
  "relearn-challenge-task",
  "relearn-eval",
@@ -4846,8 +4856,11 @@ dependencies = [
  "axum",
  "challenge-keys",
  "clap",
+ "harvest-pod",
+ "prism-lium",
  "relearn-t2i-challenge",
  "relearn-t2i-eval",
+ "relearn-t2i-harvest",
  "relearn-t2i-task",
  "telemetry",
  "tokio",
@@ -4858,6 +4871,7 @@ dependencies = [
 name = "relearn-t2i-eval"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "hex",
  "prism-competition",
  "prism-lium",
@@ -4875,12 +4889,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "relearn-t2i-harvest"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "harvest-pod",
+ "prism-competition",
+ "prism-lium-types",
+ "relearn-t2i-eval",
+ "relearn-t2i-score",
+ "relearn-t2i-task",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "relearn-t2i-http"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "hex",
  "http-body-util",
+ "prism-competition",
  "relearn-t2i-eval",
  "relearn-t2i-judge",
  "relearn-t2i-score",
