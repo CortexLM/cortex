@@ -773,7 +773,9 @@ impl EvalJobBackend for LiumClient {
             self.ensure_ssh_key(pk, Some(key_name)).await?;
         }
 
-        let mut offers = self.list_offers(Some(spec.max_price_per_hour)).await?;
+        // Do not drop over-price NCU hosts here — those must become
+        // `PriceExceeded`, not a silent `gpu_count=1` split.
+        let mut offers = self.list_offers(None).await?;
         let pref = GpuPreference::for_request(spec.gpu_count);
         pref.filter_sort_offers(&mut offers, spec.gpu_count);
         let candidates: Vec<Offer> = match &spec.preferred_offer_id {
@@ -801,14 +803,17 @@ impl EvalJobBackend for LiumClient {
         let mut swapped_forbidden_template = false;
 
         let mut last_err = String::from("no offer tried");
+        let mut ncu_over_price: Option<(f64, f64)> = None;
         'offers: for selected in &candidates {
             if selected.price_per_hour > spec.max_price_per_hour {
+                if selected.ncu_profiling_enabled {
+                    ncu_over_price = Some((selected.price_per_hour, spec.max_price_per_hour));
+                }
                 continue;
             }
             let effective =
                 prism_lium_types::effective_gpu_count(selected.gpu_count, &selected.gpu_type);
-            // Split hosts: requested width (1× B200 on an 8× node).
-            // Non-split: 1-GPU stays 1; else whole host. Never 8×5090 fallback.
+            // Split hosts: requested width. NCU / non-split: whole host.
             let rent_gpu_count = selected.rent_count(spec.gpu_count);
             if pref.matches_pin("RTX 5090") && rent_gpu_count >= 8 && spec.gpu_count < 8 {
                 return Err(LiumError::Api(format!(
@@ -901,6 +906,13 @@ impl EvalJobBackend for LiumClient {
         }
         self.reclaim_pods_named(&spec.name).await;
         if last_err == "no offer tried" {
+            if let Some((offer_price, max_price)) = ncu_over_price {
+                return Err(CostGuardrailError::PriceExceeded {
+                    offer_price,
+                    max_price,
+                }
+                .into());
+            }
             return Err(CostGuardrailError::NoCapacity.into());
         }
         Err(LiumError::Api(last_err))
@@ -987,7 +999,7 @@ mod tests {
     use super::*;
     use crate::ASSETS_ENV_LOCK;
     use prism_lium_harness::RECIPES_TEMPLATE_NAME;
-    use wiremock::matchers::{body_json, method, path};
+    use wiremock::matchers::{body_json, body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -1523,10 +1535,91 @@ mod tests {
             ]),
         )
         .await;
-        mount_rent_path(&server, "eight-b200-idle", "pod-split-1").await;
+        Mock::given(method("POST"))
+            .and(path("/executors/eight-b200-idle/rent"))
+            .and(body_partial_json(serde_json::json!({"gpu_count": 1})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "pod-split-1"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/pods/pod-split-1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": "pod-split-1", "status": "RUNNING"})),
+            )
+            .mount(&server)
+            .await;
         let c = LiumClient::with_base_url("test-key", server.uri()).unwrap();
         let inst = c.provision(&provision_spec()).await.unwrap();
         assert_eq!(inst.id, "pod-split-1");
+    }
+
+    #[tokio::test]
+    async fn provision_rents_whole_host_on_ncu_2x_b200() {
+        let server = MockServer::start().await;
+        mount_common(
+            &server,
+            serde_json::json!([{
+                "id": "4a36877c",
+                "machine_name": "NVIDIA B200",
+                "gpu_count": 2,
+                "available_gpu_count": 2,
+                "min_gpu_count_for_rental": 1,
+                "ncu_profiling_enabled": true,
+                "price_per_gpu": 5.5
+            }]),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/executors/4a36877c/rent"))
+            .and(body_partial_json(serde_json::json!({"gpu_count": 2})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "pod-ncu"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/pods/pod-ncu"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": "pod-ncu", "status": "RUNNING"})),
+            )
+            .mount(&server)
+            .await;
+        let c = LiumClient::with_base_url("test-key", server.uri()).unwrap();
+        // HarvestLimits.gpu_count stays 1; rent_count upsizes NCU to 2.
+        let inst = c.provision(&provision_spec()).await.unwrap();
+        assert_eq!(inst.id, "pod-ncu");
+        assert_eq!(provision_spec().gpu_count, 1);
+    }
+
+    #[tokio::test]
+    async fn provision_ncu_over_price_is_named_error_not_split() {
+        let server = MockServer::start().await;
+        mount_common(
+            &server,
+            serde_json::json!([{
+                "id": "ncu-dear",
+                "machine_name": "NVIDIA B200",
+                "gpu_count": 2,
+                "available_gpu_count": 2,
+                "min_gpu_count_for_rental": 1,
+                "ncu_profiling_enabled": true,
+                "price_per_gpu": 9.0
+            }]),
+        )
+        .await;
+        let c = LiumClient::with_base_url("test-key", server.uri()).unwrap();
+        let err = c.provision(&provision_spec()).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LiumError::Cost(CostGuardrailError::PriceExceeded { .. })
+            ),
+            "got {err}"
+        );
     }
 
     #[tokio::test]
