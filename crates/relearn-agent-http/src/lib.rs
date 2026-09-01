@@ -59,9 +59,18 @@ impl AppState {
         self.live_scorer.as_deref()
     }
 
+    /// Verified holdout episodes are loaded (commitment matched at boot).
+    fn holdout_loaded(&self) -> bool {
+        self.store.holdout_seal().ok().is_some_and(|s| s.loaded)
+    }
+
     /// Whether this host can produce a verdict at all.
+    ///
+    /// False until the holdout is verified loaded. A sim backend with an
+    /// empty episode file is not a scorer — submit already 503s, and status
+    /// must not contradict that.
     fn can_score(&self) -> bool {
-        scoring_readiness(&self.pin, self.backend, self.live()).is_ok()
+        scoring_readiness(&self.pin, self.backend, self.live(), self.holdout_loaded()).is_ok()
     }
 }
 
@@ -175,7 +184,8 @@ async fn submit(
 
     // Root cause first: an unpinned digest is why there is no harvest and no
     // baseline either, so report that rather than a downstream symptom.
-    scoring_readiness(&st.pin, st.backend, st.live()).map_err(|e| eval_err(&e))?;
+    scoring_readiness(&st.pin, st.backend, st.live(), st.holdout_loaded())
+        .map_err(|e| eval_err(&e))?;
 
     // Before the eval, not after: on a live host the eval spends the miner's
     // Lium budget, and there is no verdict to be had without a baseline.
@@ -561,6 +571,46 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
+
+    /// Status must not advertise `can_score` when submit would 503. A sim
+    /// host with no verified episodes is the live-replay case: holdout file
+    /// missing, `eval_backend: sim`, submit 503, status used to lie.
+    #[tokio::test]
+    async fn status_cannot_score_until_episodes_are_loaded() {
+        let (st, body) = json_req(
+            app_full("op", EvalBackend::Sim, "", None, false, false).await,
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["eval_backend"], "sim");
+        assert_eq!(body["holdout"]["loaded"], false);
+        assert_eq!(body["can_score"], false, "{body}");
+
+        let (st, live) = json_req(
+            app_full(
+                "op",
+                EvalBackend::Lium,
+                &format!("sha256:{}", "ab".repeat(32)),
+                Some(Arc::new(StubScorer { skill: 0.4 })),
+                false,
+                false,
+            )
+            .await,
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(live["live_harvest_wired"], true);
+        assert_eq!(live["holdout"]["loaded"], false);
+        assert_eq!(live["can_score"], false, "{live}");
     }
 
     #[tokio::test]

@@ -325,17 +325,25 @@ fn unwrap_observation_shuffle(value: &mut serde_json::Value) {
 ///
 /// Checked before any episode is replayed so a live run never spends the
 /// miner's Lium budget on a submission the host could never judge, and so the
-/// miner is told the root cause (no digest pin) rather than a symptom.
+/// miner is told the root cause (unloaded holdout, no digest pin) rather
+/// than a symptom.
 ///
 /// # Errors
 ///
+/// [`EvalError::EpisodesSealed`] when the holdout is not verified loaded,
 /// [`EvalError::EvalImageUnpinned`] without a `sha256:` eval-image digest, and
 /// [`EvalError::LiveHarvestUnavailable`] when no [`LiveScorer`] is wired.
 pub fn scoring_readiness(
     pin: &RelearnAgentPin,
     backend: EvalBackend,
     live: Option<&dyn LiveScorer>,
+    holdout_loaded: bool,
 ) -> Result<(), EvalError> {
+    // Root cause first: a host with no verified episodes cannot score, even
+    // in sim. Status must not report `can_score` for that host.
+    if !holdout_loaded {
+        return Err(EvalError::EpisodesSealed);
+    }
     match backend {
         EvalBackend::Sim => Ok(()),
         EvalBackend::Lium => {
@@ -555,7 +563,7 @@ pub async fn eval_after_freeze(
     if frozen_digest.trim().is_empty() || episodes.is_empty() {
         return Err(EvalError::EpisodesSealed);
     }
-    scoring_readiness(pin, backend, live)?;
+    scoring_readiness(pin, backend, live, !episodes.is_empty())?;
     let scores = match backend {
         EvalBackend::Sim => sim_slice_scores(artifact_digest, episodes),
         EvalBackend::Lium => {
@@ -790,16 +798,20 @@ mod tests {
     fn readiness_names_the_root_cause() {
         let eps = episodes(120);
         let live = live_pin(&eps);
-        scoring_readiness(&RelearnAgentPin::default(), EvalBackend::Sim, None).expect("sim");
+        scoring_readiness(&RelearnAgentPin::default(), EvalBackend::Sim, None, true).expect("sim");
         assert!(matches!(
-            scoring_readiness(&RelearnAgentPin::default(), EvalBackend::Lium, None),
+            scoring_readiness(&live, EvalBackend::Sim, None, false),
+            Err(EvalError::EpisodesSealed)
+        ));
+        assert!(matches!(
+            scoring_readiness(&RelearnAgentPin::default(), EvalBackend::Lium, None, true),
             Err(EvalError::EvalImageUnpinned)
         ));
         assert!(matches!(
-            scoring_readiness(&live, EvalBackend::Lium, None),
+            scoring_readiness(&live, EvalBackend::Lium, None, true),
             Err(EvalError::LiveHarvestUnavailable)
         ));
-        scoring_readiness(&live, EvalBackend::Lium, Some(&Harvest)).expect("ready");
+        scoring_readiness(&live, EvalBackend::Lium, Some(&Harvest), true).expect("ready");
     }
 
     #[test]
