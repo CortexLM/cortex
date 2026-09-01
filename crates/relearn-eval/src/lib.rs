@@ -323,6 +323,19 @@ pub trait LiveScorer: Send + Sync {
         artifact_digest: &str,
         holdout: &[HoldoutItem],
     ) -> Result<SliceScores, EvalError>;
+
+    /// Whether this scorer could run right now.
+    ///
+    /// Checked by [`scoring_readiness`] so a gap the scorer knows about — no
+    /// judge configured, no key to reach the pod — shows up on `/v1/status`
+    /// and in the 503 instead of only after a pod has been paid for.
+    ///
+    /// # Errors
+    ///
+    /// Implementation-defined; the default is always ready.
+    fn ready(&self) -> Result<(), EvalError> {
+        Ok(())
+    }
 }
 
 /// Schema version of the metrics document the eval image emits.
@@ -418,10 +431,8 @@ pub fn scoring_readiness(
             if !pin.can_rent() {
                 return Err(EvalError::EvalImageUnpinned);
             }
-            if live.is_none() {
-                return Err(EvalError::LiveHarvestUnavailable);
-            }
-            Ok(())
+            let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
+            scorer.ready()
         }
     }
 }

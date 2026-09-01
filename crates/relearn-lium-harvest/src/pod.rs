@@ -22,27 +22,39 @@ const SSH_RETRY_SECS: u64 = 10;
 /// Timeout for the short setup / harvest commands.
 const SSH_SHORT_TIMEOUT_SECS: u64 = 120;
 
-/// Command that stages the request under [`POD_WORKDIR`] from stdin.
-fn stage_cmd() -> String {
+/// Command that stages one file under [`POD_WORKDIR`] from stdin.
+///
+/// `name` is a fixed control-plane constant, never miner input.
+fn stage_cmd(name: &str) -> String {
     format!(
         "set -e; mkdir -p {POD_WORKDIR}; cd {POD_WORKDIR}; \
-         umask 077; cat > request.json; wc -c < request.json"
+         umask 077; cat > {name}; wc -c < {name}"
     )
 }
+
+/// Env file the pod sources before the entrypoint.
+const ENV_FILE: &str = "teacher.env";
+
+/// Request file the image parses.
+const REQUEST_FILE: &str = "request.json";
 
 /// Command that runs the image entrypoint and prints the metrics document.
 ///
 /// The entrypoint and the sidecar name are the image contract; see
-/// `docs/RELEARN.md` § Eval image contract. Nothing miner-controlled is
-/// interpolated here — the run inputs travel in `request.json`.
+/// `docs/RELEARN.md` § Eval image contract. Nothing miner-controlled and no
+/// secret is interpolated here — run inputs travel in `request.json` and the
+/// teacher config in `teacher.env`, both delivered over stdin. `set -a` is
+/// what puts the env file's values in the image's environment; a Lium
+/// `InstanceSpec` has no env field, so the pod inherits nothing otherwise.
 fn run_cmd(timeout_secs: u64) -> String {
     format!(
         "set +e; cd {POD_WORKDIR} || exit 1; \
+         set -a; [ -f {ENV_FILE} ] && . ./{ENV_FILE}; set +a; \
          timeout --kill-after=60 {timeout_secs} relearn-eval score \
-           --request request.json --out metrics.json > run.log 2>&1; \
+           --request {REQUEST_FILE} --out metrics.json > run.log 2>&1; \
          rc=$?; \
          if [ -f metrics.json ]; then printf '{METRICS_MARKER}'; cat metrics.json; printf '\\n'; fi; \
-         if [ $rc -eq 0 ]; then echo {OK_MARKER}; fi; \
+         if [ $rc -eq 0 ]; then echo {OK_MARKER}; else echo \"exit=$rc\"; fi; \
          tail -c 8192 run.log 2>/dev/null || true"
     )
 }
@@ -102,7 +114,12 @@ impl EvalPod for LiumEvalPod {
         Ok(inst.id)
     }
 
-    async fn run(&self, instance_id: &str, request: &HarvestRequest) -> Result<String, EvalError> {
+    async fn run(
+        &self,
+        instance_id: &str,
+        request: &HarvestRequest,
+        env_file: &str,
+    ) -> Result<String, EvalError> {
         let key = resolve_private_key(None).map_err(|e| EvalError::Backend(e.to_string()))?;
         let target = self.target(instance_id).await?;
         let body = serde_json::to_vec(request)
@@ -111,7 +128,7 @@ impl EvalPod for LiumEvalPod {
         ssh_exec_stdin(
             &target,
             &key,
-            &stage_cmd(),
+            &stage_cmd(REQUEST_FILE),
             &body,
             SSH_ATTEMPTS,
             SSH_RETRY_SECS,
@@ -119,6 +136,20 @@ impl EvalPod for LiumEvalPod {
         )
         .await
         .map_err(|e| EvalError::Backend(format!("stage request: {e}")))?;
+
+        // Over stdin, not the command line: the teacher key would otherwise sit
+        // in the pod's process table, on hardware the miner pays for.
+        ssh_exec_stdin(
+            &target,
+            &key,
+            &stage_cmd(ENV_FILE),
+            env_file.as_bytes(),
+            SSH_ATTEMPTS,
+            SSH_RETRY_SECS,
+            SSH_SHORT_TIMEOUT_SECS,
+        )
+        .await
+        .map_err(|e| EvalError::Backend(format!("stage teacher env: {e}")))?;
 
         // `allow_fail`: a non-zero image exit still has to be harvested, since
         // the log tail is the only diagnosis the operator gets.
@@ -184,8 +215,33 @@ mod tests {
         let cmd = run_cmd(600);
         assert!(cmd.contains("--request request.json"));
         assert!(!cmd.contains("artifact_digest"));
-        assert!(stage_cmd().contains("cat > request.json"));
-        assert!(stage_cmd().contains("umask 077"));
+        assert!(stage_cmd(REQUEST_FILE).contains("cat > request.json"));
+        assert!(stage_cmd(REQUEST_FILE).contains("umask 077"));
+    }
+
+    #[test]
+    fn the_pod_env_is_sourced_from_a_file_not_the_command_line() {
+        // A Lium InstanceSpec has no env field, so `set -a` + the env file is
+        // the only way the image sees RELEARN_TEACHER_*. Putting values in the
+        // command would publish the teacher key to the pod's process table.
+        let cmd = run_cmd(600);
+        assert!(cmd.contains("set -a; [ -f teacher.env ] && . ./teacher.env; set +a"));
+        let sourced = cmd.find("teacher.env").unwrap_or(usize::MAX);
+        let scored = cmd.find("relearn-eval score").unwrap_or(0);
+        assert!(
+            sourced < scored,
+            "env must be sourced before the run: {cmd}"
+        );
+        assert!(!cmd.contains("RELEARN_TEACHER"), "no values in the command");
+        assert!(stage_cmd(ENV_FILE).contains("cat > teacher.env"));
+        assert!(stage_cmd(ENV_FILE).contains("umask 077"));
+    }
+
+    #[test]
+    fn a_non_zero_exit_is_reported_in_stdout() {
+        // Without this the operator sees an empty tail and no exit code for a
+        // pod that booted, ran, and printed no marker.
+        assert!(run_cmd(600).contains("echo \"exit=$rc\""));
     }
 
     #[test]
