@@ -31,11 +31,14 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use relearn_t2i_eval::{
-    eval_after_freeze, force_sim, scoring_readiness, EvalError, JudgeBackend, JudgeConfig,
-    LiveJudge,
+    contamination_evidence, eval_after_freeze, force_sim, scoring_readiness, EvalError,
+    JudgeBackend, JudgeConfig, LiveJudge,
 };
 use relearn_t2i_judge::JudgeInference;
-use relearn_t2i_score::judge_challenger;
+use relearn_t2i_score::{
+    judge_challenger, pre_eval_contamination_verdict, ContaminationEvidence, PromoteVerdict,
+    T2iSliceScores,
+};
 use relearn_t2i_store::{
     freeze_submission_digest, ArtifactManifest, MemoryStore, Submission, SubmissionState,
 };
@@ -244,6 +247,22 @@ async fn submit(
         )
     })?;
 
+    let holdout_ids: Vec<u32> = holdout.iter().map(|p| p.id).collect();
+    let contamination = contamination_evidence(&body.manifest, &holdout_ids);
+    if let Some(verdict) = pre_eval_contamination_verdict(&contamination) {
+        return persist_pre_eval_reject(
+            &st,
+            body,
+            hotkey,
+            artifact,
+            nonce,
+            submission_digest,
+            contamination,
+            verdict,
+            holdout_ids.len(),
+        );
+    }
+
     let eval = eval_after_freeze(
         &st.pin,
         &holdout,
@@ -299,6 +318,51 @@ async fn submit(
             judge_backend: eval.backend,
             holdout_cells: eval.holdout_cells,
             eligible,
+        }),
+    ))
+}
+
+fn persist_pre_eval_reject(
+    st: &AppState,
+    body: SubmitBody,
+    hotkey: String,
+    artifact: String,
+    nonce: String,
+    submission_digest: String,
+    contamination: ContaminationEvidence,
+    verdict: PromoteVerdict,
+    holdout_cells: usize,
+) -> Result<(StatusCode, Json<SubmitResp>), (StatusCode, Json<serde_json::Value>)> {
+    let mut scores = T2iSliceScores::default();
+    scores.contamination = contamination;
+    let row = st
+        .store
+        .insert(Submission {
+            id: String::new(),
+            miner_hotkey: hotkey,
+            artifact_digest: artifact,
+            artifact_uri: body.artifact_uri,
+            manifest: body.manifest,
+            nonce,
+            submission_digest,
+            state: SubmissionState::Rejected,
+            receipt_json: None,
+            detail: Some(format!("gates={:?}", verdict.failed)),
+            verdict: Some(verdict),
+        })
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
+    st.store
+        .record_scores(&row.id, scores)
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(SubmitResp {
+            id: row.id,
+            submission_digest: row.submission_digest,
+            state: row.state,
+            judge_backend: st.judge.backend,
+            holdout_cells,
+            eligible: false,
         }),
     ))
 }
@@ -560,6 +624,27 @@ mod tests {
                 .map(|(d, s)| (*d, bump(s, 0.15)))
                 .collect();
             Ok(scores)
+        }
+    }
+
+    struct CountingJudge {
+        hits: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LiveJudge for CountingJudge {
+        async fn score(
+            &self,
+            pin: &RelearnT2iPin,
+            frozen: &str,
+            artifact: &str,
+            holdout: &[FrozenPrompt],
+            manifest: &relearn_t2i_store::ArtifactManifest,
+        ) -> Result<relearn_t2i_score::T2iSliceScores, EvalError> {
+            self.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            StubJudge
+                .score(pin, frozen, artifact, holdout, manifest)
+                .await
         }
     }
 
@@ -1002,6 +1087,40 @@ mod tests {
                 .to_string()
                 .contains("contamination_evidence_missing"),
             "{row}"
+        );
+    }
+
+    #[tokio::test]
+    async fn contamination_is_rejected_without_renting() {
+        let judge = Arc::new(CountingJudge {
+            hits: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let app = app_full(
+            "op",
+            live_pin(),
+            live_judge_config(),
+            Some(judge.clone()),
+            true,
+        )
+        .await;
+        let mut dirty = pinned_manifest_json();
+        dirty["train_prompt_ids"] = serde_json::json!([holdout()[0].id]);
+        for manifest in [pinned_manifest_json(), dirty] {
+            let (st, created) = json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                submit_body("junk-image", &manifest),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{created}");
+            assert_eq!(created["eligible"], false, "{created}");
+        }
+        assert_eq!(
+            judge.hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "contaminated / empty-evidence must not rent a pod"
         );
     }
 

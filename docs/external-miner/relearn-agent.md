@@ -89,7 +89,9 @@ It also reports whether this host can score at all: `eval_backend`,
 `force_sim`, `live_harvest_wired`, `champion_baseline_recorded`, and
 `can_score`. When `can_score` is false every submit answers **503** and nothing
 is stored — that is the host being unready, not your artifact being rejected,
-so retry rather than resubmitting variants. A run scored offline is reported as
+so retry rather than resubmitting variants. A missing `RELEARN_TEACHER_API_URL`
+is one such case (no pod is rented). A contaminated or empty-evidence
+`manifest` is rejected without renting. A run scored offline is reported as
 `eval_backend: sim` and is never a real verdict.
 
 Never commit the Lium key. If something fails, see [troubleshoot.md](./troubleshoot.md).

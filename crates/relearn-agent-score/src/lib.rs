@@ -116,6 +116,12 @@ impl ContaminationEvidence {
             || self.declared_observation_hashes > 0
             || self.declared_environment_ids > 0
     }
+
+    /// Whether eval would be wasted: undeclared metadata or a holdout hit.
+    #[must_use]
+    pub fn blocks_eval(&self) -> bool {
+        !self.is_declared() || !self.hits.is_empty()
+    }
 }
 
 /// Per-artifact Agent measurements. Series keys are `e{episode_id}`.
@@ -238,6 +244,30 @@ pub struct PromoteVerdict {
     pub failed: Vec<GateFail>,
     /// Lattice score to emit if this hotkey is the live champion (`0` else).
     pub lattice: u64,
+}
+
+/// Verdict for a submission that must not be scored: contaminated or silent.
+///
+/// Returns `None` when the evidence is declared and clean. Used before a
+/// Lium rent so junk cannot spend the pod.
+#[must_use]
+pub fn pre_eval_contamination_verdict(ev: &ContaminationEvidence) -> Option<PromoteVerdict> {
+    if !ev.blocks_eval() {
+        return None;
+    }
+    let failed = if ev.is_declared() {
+        vec![GateFail::Contamination]
+    } else {
+        vec![GateFail::ContaminationEvidenceMissing]
+    };
+    Some(PromoteVerdict {
+        eligible: false,
+        paired: None,
+        tool_ablation: AblationEvidence::default(),
+        observation_shuffle: AblationEvidence::default(),
+        failed,
+        lattice: 0,
+    })
 }
 
 fn bps(x: f64) -> u64 {

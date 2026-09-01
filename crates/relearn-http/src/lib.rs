@@ -32,7 +32,10 @@ use relearn_eval::{
     eval_after_freeze, force_sim, resolve_teacher_backend, scoring_readiness, EvalBackend,
     EvalError, LiveScorer, RelearnPin,
 };
-use relearn_score::{contamination_evidence, judge_challenger};
+use relearn_score::{
+    contamination_evidence, judge_challenger, pre_eval_contamination_verdict,
+    ContaminationEvidence, PromoteVerdict, SliceScores,
+};
 use relearn_store::{
     freeze_submission_digest, ArtifactManifest, MemoryStore, Submission, SubmissionState,
 };
@@ -191,17 +194,6 @@ async fn submit(
         )
     })?;
 
-    let eval = eval_after_freeze(
-        &st.pin,
-        &submission_digest,
-        &artifact,
-        &holdout,
-        st.backend,
-        st.live(),
-    )
-    .await
-    .map_err(|e| eval_err(&e))?;
-
     let train_ids: BTreeSet<u32> = body.manifest.train_item_ids.iter().copied().collect();
     let train_images: BTreeSet<String> = body
         .manifest
@@ -215,11 +207,38 @@ async fn submit(
         .iter()
         .map(|s| s.trim().to_owned())
         .collect();
-    let mut scores = eval.scores;
-    // An empty manifest leaves the evidence undeclared, which the judge treats
-    // as a failed gate rather than a clean run.
-    scores.contamination =
+    let contamination =
         contamination_evidence(&train_ids, &train_images, &train_datasets, &holdout);
+
+    // Before the rent: a contaminated or silent manifest cannot produce a
+    // lattice score, so it must not spend a Lium pod (or the teacher key).
+    if let Some(verdict) = pre_eval_contamination_verdict(&contamination) {
+        return persist_pre_eval_reject(
+            &st,
+            body,
+            hotkey,
+            artifact,
+            nonce,
+            submission_digest,
+            contamination,
+            verdict,
+            holdout.len(),
+        );
+    }
+
+    let eval = eval_after_freeze(
+        &st.pin,
+        &submission_digest,
+        &artifact,
+        &holdout,
+        st.backend,
+        st.live(),
+    )
+    .await
+    .map_err(|e| eval_err(&e))?;
+
+    let mut scores = eval.scores;
+    scores.contamination = contamination;
 
     let verdict = judge_challenger(&champ, &scores);
     let eligible = verdict.eligible;
@@ -263,6 +282,51 @@ async fn submit(
             holdout_unsealed: eval.holdout_items > 0,
             eval_backend: eval.backend,
             eligible,
+        }),
+    ))
+}
+
+fn persist_pre_eval_reject(
+    st: &AppState,
+    body: SubmitBody,
+    hotkey: String,
+    artifact: String,
+    nonce: String,
+    submission_digest: String,
+    contamination: ContaminationEvidence,
+    verdict: PromoteVerdict,
+    holdout_items: usize,
+) -> Result<(StatusCode, Json<SubmitResp>), (StatusCode, Json<serde_json::Value>)> {
+    let mut scores = SliceScores::default();
+    scores.contamination = contamination;
+    let row = st
+        .store
+        .insert(Submission {
+            id: String::new(),
+            miner_hotkey: hotkey,
+            artifact_digest: artifact,
+            artifact_uri: body.artifact_uri,
+            manifest: body.manifest,
+            nonce,
+            submission_digest,
+            state: SubmissionState::Rejected,
+            receipt_json: None,
+            detail: Some(format!("gates={:?}", verdict.failed)),
+            verdict: Some(verdict),
+        })
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
+    st.store
+        .record_scores(&row.id, scores)
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(SubmitResp {
+            id: row.id,
+            submission_digest: row.submission_digest,
+            state: row.state,
+            holdout_unsealed: holdout_items > 0,
+            eval_backend: st.backend,
+            eligible: false,
         }),
     ))
 }
@@ -422,6 +486,24 @@ mod tests {
             holdout: &[HoldoutItem],
         ) -> Result<relearn_score::SliceScores, EvalError> {
             Ok(sim_slice_scores_at_skill(artifact, holdout, self.skill))
+        }
+    }
+
+    struct CountingScorer {
+        hits: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LiveScorer for CountingScorer {
+        async fn score(
+            &self,
+            _pin: &RelearnPin,
+            _frozen: &str,
+            artifact: &str,
+            holdout: &[HoldoutItem],
+        ) -> Result<relearn_score::SliceScores, EvalError> {
+            self.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(sim_slice_scores_at_skill(artifact, holdout, 0.8))
         }
     }
 
@@ -710,6 +792,48 @@ mod tests {
                 "manifest={manifest} failed={failed}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn contamination_is_rejected_without_renting() {
+        let scorer = Arc::new(CountingScorer {
+            hits: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let app = app_full(
+            "op",
+            true,
+            EvalBackend::Lium,
+            &format!("sha256:{}", "ab".repeat(32)),
+            Some(scorer.clone()),
+            true,
+        )
+        .await;
+        let hold_id = holdout()[0].id;
+        for manifest in [
+            serde_json::json!({}),
+            serde_json::json!({ "train_item_ids": [hold_id] }),
+        ] {
+            let (st, created) = json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                serde_json::json!({
+                    "miner_hotkey": digest("miner-hotkey"),
+                    "artifact_digest": digest("junk-adapter"),
+                    "manifest": manifest,
+                }),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{created}");
+            assert_eq!(created["eligible"], false, "{created}");
+            assert_eq!(created["state"], "rejected", "{created}");
+        }
+        assert_eq!(
+            scorer.hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "contaminated / empty-evidence must not rent a pod"
+        );
     }
 
     #[tokio::test]

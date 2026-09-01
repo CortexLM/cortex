@@ -131,6 +131,36 @@ workdir, and **requires verified termination** before accepting any score. An
 orphan pod keeps spending the miner's money, so it outranks whatever the run
 returned.
 
+### Pod environment
+
+A Lium `InstanceSpec` has no env field, so the pod inherits **nothing** from
+the master. Everything the image reads from its environment has to be handed to
+it, and a missing judge URL is why a pod can boot, run, and never print
+`RELEARN_EVAL_OK`:
+
+| Variable | Source | Required |
+|----------|--------|----------|
+| `RELEARN_T2I_JUDGE_API_URL` | host env | **yes** — no judge, no score |
+| `RELEARN_T2I_JUDGE_MODEL` | host env, else the pin's `judge_model` | yes (defaulted) |
+| `RELEARN_T2I_JUDGE_API_KEY` | host env | only if the judge API requires auth |
+| `RELEARN_T2I_BASE_MODEL` | the pin's `base` | yes |
+
+Only the names are in git. Values are operator state, delivered in
+`teacher.env` over stdin with `umask 077` — never on the remote command line,
+where the key would sit in the pod's process table. A host missing the judge
+URL reports `can_score: false` and refuses **before** renting, rather than
+paying for a pod that cannot score.
+
+**`RELEARN_T2I_JUDGE_API_KEY` crosses to a miner-paid pod.** Use a judge
+credential scoped and rate-limited for this purpose, and rotate it on
+suspicion; the pod could otherwise spend the operator's Q-Judger quota. If the
+judge API can be reached from the pod without auth (network-restricted),
+leave the key unset and nothing is forwarded.
+
+A contaminated or empty-evidence `manifest` is rejected **before** the rent
+as well: those submissions cannot produce a lattice score, so they must not
+spend a pod or the judge key.
+
 The markers are the language challenge's markers. What keeps a digest pinned
 into the wrong challenge from scoring something else is `challenge_id` inside
 the document and the non-overlapping series keys (`p<id>#v<n>` here), not a

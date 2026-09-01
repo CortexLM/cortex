@@ -139,6 +139,10 @@ suspicion; the pod could otherwise spend the operator's teacher quota. If the
 teacher API can be reached from the pod without auth (network-restricted),
 leave the key unset and nothing is forwarded.
 
+A contaminated or empty-evidence `manifest` is rejected **before** the rent
+as well: those submissions cannot produce a lattice score, so they must not
+spend a pod or the teacher key.
+
 ### Diagnosing a run that produced no marker
 
 The remote command echoes `exit=<rc>` and the last 8 KiB of `run.log`. When the

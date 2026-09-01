@@ -482,6 +482,19 @@ pub trait LiveJudge: Send + Sync {
         holdout: &[FrozenPrompt],
         manifest: &ArtifactManifest,
     ) -> Result<T2iSliceScores, EvalError>;
+
+    /// Whether this judge could run right now.
+    ///
+    /// Checked by [`scoring_readiness`] so a gap the harvest knows about — no
+    /// Q-Judger URL, no key to reach the pod — shows up on `/v1/status` and
+    /// in the 503 instead of only after a pod has been paid for.
+    ///
+    /// # Errors
+    ///
+    /// Implementation-defined; the default is always ready.
+    fn ready(&self) -> Result<(), EvalError> {
+        Ok(())
+    }
 }
 
 /// Schema version of the metrics document the eval image emits.
@@ -675,10 +688,8 @@ pub fn scoring_readiness(
             if !pin.can_rent() {
                 return Err(EvalError::EvalImageUnpinned);
             }
-            if live.is_none() {
-                return Err(EvalError::LiveHarvestUnavailable);
-            }
-            Ok(())
+            let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
+            scorer.ready()
         }
     }
 }

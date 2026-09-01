@@ -28,7 +28,7 @@ use relearn_agent_challenge::{
     BaselineMeasurement, EvalBackend, LiveScorer, MemoryStore, RelearnAgentPin, BASE_CHAMPION_RUN,
     CHALLENGE_ID, SCORING_VERSION,
 };
-use relearn_agent_harvest::{HarvestLimits, LiumAgentHarvest};
+use relearn_agent_harvest::{HarvestLimits, LiumAgentHarvest, TeacherEnv};
 use tokio::net::TcpListener;
 
 /// Operator Relearn Agent challenge service CLI.
@@ -199,6 +199,18 @@ fn build_live_scorer(backend: EvalBackend, run_timeout_secs: u64) -> Option<Arc<
         );
         return None;
     };
+    let teacher = TeacherEnv::from_host_env();
+    if teacher.has_judge() {
+        tracing::info!(
+            forwarded = ?teacher.present_names(),
+            "teacher config will be forwarded into the eval pod"
+        );
+    } else {
+        tracing::warn!(
+            "RELEARN_TEACHER_API_URL unset; the eval image has no judge and every submission \
+             will 503 before a pod is rented"
+        );
+    }
     let pod = Arc::new(harvest_pod::LiumEvalPod::new(
         client,
         run_timeout_secs,
@@ -208,6 +220,7 @@ fn build_live_scorer(backend: EvalBackend, run_timeout_secs: u64) -> Option<Arc<
         pod,
         HarvestLimits::default(),
         vec![ssh_pub],
+        teacher,
     )))
 }
 
@@ -435,6 +448,43 @@ mod tests {
         );
         std::env::remove_var("LIUM_API_KEY");
         std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
+    }
+
+    #[test]
+    fn a_wired_harvest_without_a_teacher_url_is_not_ready() {
+        let _guard = LIUM_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pubkey = stub_ssh_pubkey("agent-ready");
+        std::env::set_var("LIUM_API_KEY", "test-key-not-a-real-secret");
+        std::env::set_var("LIUM_SSH_PUBLIC_KEY_FILE", &pubkey);
+        std::env::remove_var("RELEARN_TEACHER_API_URL");
+        let judgeless = build_live_scorer(EvalBackend::Lium, 900).expect("wired");
+        let pinned = RelearnAgentPin {
+            eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
+            ..RelearnAgentPin::default()
+        };
+        let err = relearn_agent_challenge::scoring_readiness(
+            &pinned,
+            EvalBackend::Lium,
+            Some(judgeless.as_ref()),
+            true,
+        )
+        .expect_err("no judge configured");
+        assert!(err.to_string().contains("RELEARN_TEACHER_API_URL"), "{err}");
+
+        std::env::set_var("RELEARN_TEACHER_API_URL", "http://teacher.invalid/v1");
+        let live = build_live_scorer(EvalBackend::Lium, 900).expect("wired");
+        relearn_agent_challenge::scoring_readiness(
+            &pinned,
+            EvalBackend::Lium,
+            Some(live.as_ref()),
+            true,
+        )
+        .expect("pinned digest + teacher URL can score");
+        std::env::remove_var("LIUM_API_KEY");
+        std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
+        std::env::remove_var("RELEARN_TEACHER_API_URL");
     }
 
     fn stub_ssh_pubkey(tag: &str) -> PathBuf {

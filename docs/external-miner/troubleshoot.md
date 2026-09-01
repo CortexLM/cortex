@@ -21,6 +21,8 @@
 | `503 … no in-process sim` | Digest is pinned but the live harvest is not wired on that host | Operator issue; `/v1/status` shows `live_harvest_wired: false`. The control plane refuses to substitute sim numbers |
 | `503 backend: lium …` | The eval pod could not be rented, reached, or torn down | Transient. Retry; the run is not banked and no verdict was recorded |
 | `503 backend: RELEARN_TEACHER_API_URL not set …` | Operator has not configured the judge the eval image needs | Operator issue; `/v1/status` shows `can_score: false`. No pod was rented |
+| `503 backend: RELEARN_T2I_JUDGE_API_URL not set …` | Operator has not configured Q-Judger for Image | Same as the teacher URL: `can_score: false`, no pod |
+| `rejected` with `Contamination` / `ContaminationEvidenceMissing` and no receipt | Training metadata overlapped the holdout, or `manifest` declared nothing | Expected. The host refuses **before** renting so junk cannot spend a pod |
 | `503 … did not print RELEARN_EVAL_OK; run.log tail: …` | The eval image ran and exited without scoring | The tail is the image's own log (truncated, secrets redacted). Usually an operator-side judge or model-loading failure, not your artifact |
 | `503 recorded baseline: …` | The eval image returned a document bound to another run, image, or holdout | Operator issue; a mismatched document is never accepted as a score |
 | `503 no champion baseline recorded` | The host has not measured the base model, so there is nothing to compare against | Operator issue; `/v1/status` shows `champion_baseline_recorded: false` |
@@ -38,7 +40,8 @@
 | `401 invalid_session` on reports | Session claim expired or wrong | Re-run `cortex-bounty pair` and paste the new code in Chat |
 | `already_fixed_not_prod` | Bug already patched, not in prod | Ack only — no reward, no penalty |
 | `invalid_malicious` | Fabricated / does not exist | Penalty (burn toward uid 0) |
-| `duplicate` | Same fingerprint as an open report | No extra reward, no penalty |
+| `duplicate` | Same fingerprint as a prior report (including already-closed ones) | No extra reward, no penalty. Whitespace-only edits of the same title+body still match |
+| `400 title_and_body_must_differ` / `body_lacks_distinct_evidence` | Title pasted as the body, or a repeated-token farm | Write a real report: distinct title, body, and repro |
 | Chat inject unknown | Guessing a slash command | The inject token is unguessable and comes from `BOUNTY_CHAT_COMMAND` |
 
 Never paste `LIUM_API_KEY`, challenge secrets, Chat inject tokens, or mnemonics into tickets or git.

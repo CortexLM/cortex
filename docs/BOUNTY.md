@@ -85,9 +85,16 @@ local adjudications only; it is CI/local, reported on `/v1/status`, and
 enables it.
 
 Ingest quotas, all per hotkey and all published on `/v1/status`: at most 5
-reports awaiting adjudication, one report per 60s, an 80-character body, and a
-20-character reproduction. Over the cap is `429`; too thin is `400`. Neither
-records anything against the miner — the report is fine, the queue is not.
+reports awaiting adjudication, one report per 60s, an 80-character body, a
+20-character reproduction, and at least four distinct body tokens. Title and
+body must differ after whitespace collapse. Over the cap is `429`; too thin
+is `400`. Neither records anything against the miner — the report is fine,
+the queue is not.
+
+The same title+body fingerprint, after case and whitespace collapse, is
+always a `duplicate` — including when the original was already closed as
+invalid or already-fixed. Re-filing the same text after a reject does not
+open a new triage slot.
 
 Chat inject is env-only (`BOUNTY_CHAT_COMMAND`). Docs and examples use the
 placeholder `<BOUNTY_CHAT_COMMAND>` only. Never commit the live token.

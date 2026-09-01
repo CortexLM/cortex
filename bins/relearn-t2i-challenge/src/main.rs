@@ -32,7 +32,7 @@ use relearn_t2i_challenge::{
     JudgeBackend, JudgeConfig, LiveJudge, MemoryStore, RelearnT2iPin, T2iBaselineMeasurement,
     CHALLENGE_ID, SCORING_VERSION,
 };
-use relearn_t2i_harvest::{HarvestLimits, LiumImageHarvest};
+use relearn_t2i_harvest::{HarvestLimits, JudgeEnv, LiumImageHarvest};
 use relearn_t2i_task::FrozenPrompt;
 use tokio::net::TcpListener;
 
@@ -216,6 +216,18 @@ fn build_live_judge(judge: &JudgeConfig, run_timeout_secs: u64) -> Option<Arc<dy
         );
         return None;
     };
+    let judge_env = JudgeEnv::from_host_env();
+    if judge_env.has_judge() {
+        tracing::info!(
+            forwarded = ?judge_env.present_names(),
+            "judge config will be forwarded into the eval pod"
+        );
+    } else {
+        tracing::warn!(
+            "RELEARN_T2I_JUDGE_API_URL unset; the eval image has no judge and every submission \
+             will 503 before a pod is rented"
+        );
+    }
     let pod = Arc::new(harvest_pod::LiumEvalPod::new(
         client,
         run_timeout_secs,
@@ -225,6 +237,7 @@ fn build_live_judge(judge: &JudgeConfig, run_timeout_secs: u64) -> Option<Arc<dy
         pod,
         HarvestLimits::default(),
         vec![ssh_pub],
+        judge_env,
     )))
 }
 
@@ -455,6 +468,37 @@ mod tests {
         );
         std::env::remove_var("LIUM_API_KEY");
         std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
+    }
+
+    #[test]
+    fn a_wired_harvest_without_a_judge_url_is_not_ready() {
+        let _guard = LIUM_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pubkey = stub_ssh_pubkey("image-ready");
+        std::env::set_var("LIUM_API_KEY", "test-key-not-a-real-secret");
+        std::env::set_var("LIUM_SSH_PUBLIC_KEY_FILE", &pubkey);
+        std::env::remove_var("RELEARN_T2I_JUDGE_API_URL");
+        let live_cfg = JudgeConfig::http_api("http://judge.invalid/v1");
+        let judgeless = build_live_judge(&live_cfg, 900).expect("wired");
+        let pinned = RelearnT2iPin {
+            eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
+            ..RelearnT2iPin::default()
+        };
+        let err = relearn_t2i_eval::scoring_readiness(&pinned, &live_cfg, Some(judgeless.as_ref()))
+            .expect_err("no judge configured");
+        assert!(
+            err.to_string().contains("RELEARN_T2I_JUDGE_API_URL"),
+            "{err}"
+        );
+
+        std::env::set_var("RELEARN_T2I_JUDGE_API_URL", "http://judge.invalid/v1");
+        let live = build_live_judge(&live_cfg, 900).expect("wired");
+        relearn_t2i_eval::scoring_readiness(&pinned, &live_cfg, Some(live.as_ref()))
+            .expect("pinned digest + judge URL can score");
+        std::env::remove_var("LIUM_API_KEY");
+        std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
+        std::env::remove_var("RELEARN_T2I_JUDGE_API_URL");
     }
 
     fn stub_ssh_pubkey(tag: &str) -> PathBuf {

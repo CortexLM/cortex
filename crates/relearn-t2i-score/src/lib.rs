@@ -172,6 +172,12 @@ impl ContaminationEvidence {
     pub fn is_declared(&self) -> bool {
         self.declared_prompt_ids > 0 || self.declared_dataset_ids > 0
     }
+
+    /// Whether eval would be wasted: undeclared metadata or a holdout hit.
+    #[must_use]
+    pub fn blocks_eval(&self) -> bool {
+        !self.is_declared() || !self.hits.is_empty()
+    }
 }
 
 /// Per-artifact Image measurements. Series keys are `p{id}#v{variation}`.
@@ -353,6 +359,30 @@ pub struct PromoteVerdict {
     pub failed: Vec<GateFail>,
     /// Lattice score to emit if this hotkey is the live champion (`0` otherwise).
     pub lattice: u64,
+}
+
+/// Verdict for a submission that must not be scored: contaminated or silent.
+///
+/// Returns `None` when the evidence is declared and clean. Used before a
+/// Lium rent so junk cannot spend the pod.
+#[must_use]
+pub fn pre_eval_contamination_verdict(ev: &ContaminationEvidence) -> Option<PromoteVerdict> {
+    if !ev.blocks_eval() {
+        return None;
+    }
+    let failed = if ev.is_declared() {
+        vec![GateFail::Contamination]
+    } else {
+        vec![GateFail::ContaminationEvidenceMissing]
+    };
+    Some(PromoteVerdict {
+        eligible: false,
+        paired: None,
+        ab: PairedAb::default(),
+        pillars: BTreeMap::new(),
+        failed,
+        lattice: 0,
+    })
 }
 
 /// Eval prompt ids that leaked into a submission's training metadata.

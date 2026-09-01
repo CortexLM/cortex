@@ -226,11 +226,18 @@ pub const MIN_REPORT_BODY_CHARS: usize = 80;
 /// Shortest reproduction section a report may have.
 pub const MIN_REPRO_CHARS: usize = 20;
 
+/// Distinct body tokens (length ≥ 3) a report must carry.
+///
+/// Stops a repeated-character or one-word farm from clearing the character
+/// floor. An operator still decides whether the bug is real.
+pub const MIN_UNIQUE_BODY_TOKENS: usize = 4;
+
 // Quotas that do not bind are quotas that do not protect triage, and a quota
 // wide enough to be harmless is the kind of constant that drifts wider.
 const _: () = assert!(MAX_PENDING_REPORTS_PER_HOTKEY > 0 && MAX_PENDING_REPORTS_PER_HOTKEY <= 10);
 const _: () = assert!(MIN_REPORT_INTERVAL_SECS >= 30);
 const _: () = assert!(MIN_REPORT_BODY_CHARS >= 40 && MIN_REPRO_CHARS >= 10);
+const _: () = assert!(MIN_UNIQUE_BODY_TOKENS >= 3);
 
 /// Accept `[A-Za-z0-9._:-]` up to 128 chars.
 pub fn validate_account_id(id: &str) -> Result<(), PairError> {

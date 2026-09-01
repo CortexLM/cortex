@@ -39,10 +39,12 @@ use bounty_challenge_task::{
     backend_public_url, force_sim, hotkey_hex, parse_hotkey, parse_signature,
     verify_pair_signature, PairChallenge, ScoringBackend, CHALLENGE_ID,
     MAX_PENDING_REPORTS_PER_HOTKEY, MIN_REPORT_BODY_CHARS, MIN_REPORT_INTERVAL_SECS,
-    MIN_REPRO_CHARS, SCORE_MAX, SCORING_VERSION, TERMS_TEXT,
+    MIN_REPRO_CHARS, MIN_UNIQUE_BODY_TOKENS, SCORE_MAX, SCORING_VERSION, TERMS_TEXT,
 };
 use bounty_score::{Adjudication, Severity, MAX_TRIAGE_NOISE_BPS, MIN_PRECISION_BPS};
-use bounty_store::{report_fingerprint, MemoryStore, Report, ReportState, StoreError};
+use bounty_store::{
+    normalize_report_text, report_fingerprint, MemoryStore, Report, ReportState, StoreError,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -291,6 +293,11 @@ fn validate_substance(
     if title.trim().is_empty() || body.trim().is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "title_and_body_required"));
     }
+    let title_n = normalize_report_text(title);
+    let body_n = normalize_report_text(body);
+    if title_n == body_n {
+        return Err(err(StatusCode::BAD_REQUEST, "title_and_body_must_differ"));
+    }
     if body.trim().chars().count() < MIN_REPORT_BODY_CHARS {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -302,6 +309,13 @@ fn validate_substance(
             StatusCode::BAD_REQUEST,
             &format!("repro_steps must be at least {MIN_REPRO_CHARS} characters"),
         ));
+    }
+    let unique = body_n
+        .split_whitespace()
+        .filter(|w| w.chars().count() >= 3)
+        .collect::<std::collections::BTreeSet<_>>();
+    if unique.len() < MIN_UNIQUE_BODY_TOKENS {
+        return Err(err(StatusCode::BAD_REQUEST, "body_lacks_distinct_evidence"));
     }
     Ok(())
 }
@@ -656,12 +670,25 @@ mod tests {
             json_req(app.clone(), "POST", "/v1/pair", pair_payload(exp), None).await;
         let session = paired["session"].as_str().expect("session");
 
+        let long = "the seal route returns 500 when the bundle is empty instead of 400 documented";
         for body in [
             serde_json::json!({ "session": session, "title": "x", "body": "broken" }),
             serde_json::json!({
                 "session": session,
                 "title": "no repro",
                 "body": "a".repeat(MIN_REPORT_BODY_CHARS),
+            }),
+            serde_json::json!({
+                "session": session,
+                "title": long,
+                "body": long,
+                "repro_steps": "curl the seal route with no leaves and watch it 500",
+            }),
+            serde_json::json!({
+                "session": session,
+                "title": "repeated filler",
+                "body": "aaaa ".repeat(24),
+                "repro_steps": "curl the seal route with no leaves and watch it 500",
             }),
         ] {
             let (st, v) = json_req(app.clone(), "POST", "/v1/reports", body, None).await;

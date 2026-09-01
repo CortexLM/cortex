@@ -30,7 +30,7 @@ pub enum ReportState {
     AlreadyFixedNotProd,
     /// Malicious / fabricated.
     InvalidMalicious,
-    /// Duplicate of an open report.
+    /// Duplicate of a prior report (open, valid, or already closed).
     Duplicate,
 }
 
@@ -207,11 +207,13 @@ impl MemoryStore {
 
     /// Insert a pending report, subject to the per-hotkey ingest quotas.
     ///
-    /// Same fingerprint as an open/valid report → duplicate.
+    /// Same fingerprint as any prior report → duplicate.
     ///
-    /// The quotas exist because adjudication, not storage, is what this
-    /// challenge is short of: one miner filling the queue starves every other
-    /// miner's reports of the triage pass that turns them into weight.
+    /// A closed original (invalid, already-fixed) must not reopen a triage
+    /// slot: re-filing the same text after a reject is the farm. The quotas
+    /// exist because adjudication, not storage, is what this challenge is
+    /// short of: one miner filling the queue starves every other miner's
+    /// reports of the triage pass that turns them into weight.
     pub fn insert_report(&self, mut row: Report, now_unix: u64) -> Result<Report, StoreError> {
         let mut g = self.lock()?;
         let pending = g
@@ -241,14 +243,10 @@ impl MemoryStore {
         if row.id.is_empty() {
             row.id = next_id(&mut g.next, "by");
         }
-        if let Some(orig) = g.fingerprints.get(&row.fingerprint) {
-            if let Some(existing) = g.reports.get(orig) {
-                if matches!(existing.state, ReportState::Pending | ReportState::Valid) {
-                    row.state = ReportState::Duplicate;
-                    row.adjudication = Some(Adjudication::Duplicate);
-                    row.duplicate_of = Some(orig.clone());
-                }
-            }
+        if let Some(orig) = g.fingerprints.get(&row.fingerprint).cloned() {
+            row.state = ReportState::Duplicate;
+            row.adjudication = Some(Adjudication::Duplicate);
+            row.duplicate_of = Some(orig);
         } else {
             g.fingerprints
                 .insert(row.fingerprint.clone(), row.id.clone());
@@ -397,14 +395,23 @@ fn crypto_eq(a: &str, b: &str) -> bool {
         == 0
 }
 
+/// Collapse internal whitespace and case so padding cannot dodge dedup.
+#[must_use]
+pub fn normalize_report_text(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
 /// SHA-256 fingerprint of normalized title+body.
 #[must_use]
 pub fn report_fingerprint(title: &str, body: &str) -> String {
     let mut h = Sha256::new();
     h.update(REPORT_TAG);
-    h.update(title.trim().to_ascii_lowercase().as_bytes());
+    h.update(normalize_report_text(title).as_bytes());
     h.update([0xff]);
-    h.update(body.trim().to_ascii_lowercase().as_bytes());
+    h.update(normalize_report_text(body).as_bytes());
     hex::encode(h.finalize())
 }
 
@@ -467,6 +474,30 @@ mod tests {
             .expect("b");
         assert_eq!(b.state, ReportState::Duplicate);
         assert_eq!(b.duplicate_of.as_deref(), Some(a.id.as_str()));
+    }
+
+    #[test]
+    fn fingerprint_collapses_internal_whitespace() {
+        assert_eq!(
+            report_fingerprint("Same   Bug", "steps\n\n  here"),
+            report_fingerprint("same bug", "steps here")
+        );
+    }
+
+    #[test]
+    fn refile_after_a_closed_original_is_still_duplicate() {
+        let s = MemoryStore::new();
+        let a = s
+            .insert_report(report(&"aa".repeat(32), "same bug", "steps"), 1_000)
+            .expect("a");
+        s.adjudicate(&a.id, Adjudication::InvalidMalicious, None, None)
+            .expect("closed");
+        let b = s
+            .insert_report(report(&"bb".repeat(32), "same   bug", "steps"), 1_000)
+            .expect("b");
+        assert_eq!(b.state, ReportState::Duplicate);
+        assert_eq!(b.duplicate_of.as_deref(), Some(a.id.as_str()));
+        assert_eq!(b.adjudication, Some(Adjudication::Duplicate));
     }
 
     #[test]

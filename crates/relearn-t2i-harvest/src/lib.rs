@@ -114,6 +114,90 @@ impl Default for HarvestLimits {
     }
 }
 
+/// Q-Judger configuration the eval image reads from its environment.
+///
+/// `InstanceSpec` cannot carry environment, so the pod sees nothing the
+/// control plane does not hand it over SSH. Without
+/// `RELEARN_T2I_JUDGE_API_URL` the image has no judge and exits without
+/// printing [`OK_MARKER`].
+///
+/// Only the variable **names** are in git. Values travel in an env file
+/// delivered over stdin.
+#[derive(Debug, Clone, Default)]
+pub struct JudgeEnv {
+    /// `RELEARN_T2I_JUDGE_API_URL`. The image refuses to score without it.
+    pub api_url: Option<String>,
+    /// `RELEARN_T2I_JUDGE_MODEL`. Falls back to the pin's `judge_model`.
+    pub model: Option<String>,
+    /// `RELEARN_T2I_JUDGE_API_KEY`. Secret; see [`Self::secrets`].
+    pub api_key: Option<String>,
+}
+
+impl JudgeEnv {
+    /// Read the operator's judge config off the host environment.
+    #[must_use]
+    pub fn from_host_env() -> Self {
+        Self {
+            api_url: relearn_t2i_eval::judge_api_url(),
+            model: std::env::var("RELEARN_T2I_JUDGE_MODEL")
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty()),
+            api_key: relearn_t2i_eval::judge_api_key(),
+        }
+    }
+
+    /// Whether the image has the one variable it cannot run without.
+    #[must_use]
+    pub fn has_judge(&self) -> bool {
+        self.api_url
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// Variable names present, for logs. Never values.
+    #[must_use]
+    pub fn present_names(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.api_url.is_some() {
+            names.push("RELEARN_T2I_JUDGE_API_URL");
+        }
+        if self.model.is_some() {
+            names.push("RELEARN_T2I_JUDGE_MODEL");
+        }
+        if self.api_key.is_some() {
+            names.push("RELEARN_T2I_JUDGE_API_KEY");
+        }
+        names
+    }
+
+    /// Values that must never appear in an error body or a log line.
+    #[must_use]
+    pub fn secrets(&self) -> Vec<String> {
+        self.api_key.iter().cloned().collect()
+    }
+
+    /// `KEY=value` lines for the pod env file.
+    #[must_use]
+    pub fn env_file(&self, pin: &RelearnT2iPin) -> String {
+        let model = self
+            .model
+            .clone()
+            .unwrap_or_else(|| pin.judge_model.clone());
+        let mut lines = Vec::new();
+        if let Some(url) = &self.api_url {
+            lines.push(format!("RELEARN_T2I_JUDGE_API_URL={url}"));
+        }
+        lines.push(format!("RELEARN_T2I_JUDGE_MODEL={model}"));
+        if let Some(key) = &self.api_key {
+            lines.push(format!("RELEARN_T2I_JUDGE_API_KEY={key}"));
+        }
+        lines.push(format!("RELEARN_T2I_BASE_MODEL={}", pin.base));
+        lines.push(String::new());
+        lines.join("\n")
+    }
+}
+
 /// [`LiveJudge`] over a digest-pinned eval image on a Lium pod.
 pub struct LiumImageHarvest {
     pod: Arc<dyn EvalPod>,
@@ -121,17 +205,31 @@ pub struct LiumImageHarvest {
     /// Master's SSH public key(s). The pod is unreachable without one, so the
     /// request could not be delivered and no metrics could be read back.
     ssh_public_keys: Vec<String>,
+    /// Judge config forwarded into the pod environment.
+    judge: JudgeEnv,
 }
 
 impl LiumImageHarvest {
     /// Wrap a pod transport.
     #[must_use]
-    pub fn new(pod: Arc<dyn EvalPod>, limits: HarvestLimits, ssh_public_keys: Vec<String>) -> Self {
+    pub fn new(
+        pod: Arc<dyn EvalPod>,
+        limits: HarvestLimits,
+        ssh_public_keys: Vec<String>,
+        judge: JudgeEnv,
+    ) -> Self {
         Self {
             pod,
             limits,
             ssh_public_keys,
+            judge,
         }
+    }
+
+    /// Judge variable names this harvest will forward. Never values.
+    #[must_use]
+    pub fn judge_env_names(&self) -> Vec<&'static str> {
+        self.judge.present_names()
     }
 
     fn spec(&self, pin: &RelearnT2iPin, frozen_digest: &str) -> InstanceSpec {
@@ -177,11 +275,7 @@ impl LiveJudge for LiumImageHarvest {
         if holdout.is_empty() {
             return Err(EvalError::Holdout("holdout still sealed".into()));
         }
-        if self.ssh_public_keys.iter().all(|k| k.trim().is_empty()) {
-            return Err(EvalError::Backend(
-                "no master SSH public key; the pod would be unreachable".into(),
-            ));
-        }
+        self.ready()?;
         let expected = holdout
             .len()
             .saturating_mul(pin.prompts.variations_per_prompt as usize);
@@ -209,7 +303,10 @@ impl LiveJudge for LiumImageHarvest {
             .boot(&self.spec(pin, frozen_digest))
             .await
             .map_err(EvalError::Backend)?;
-        let run = self.pod.run(&instance, &body, b"").await;
+        let run = self
+            .pod
+            .run(&instance, &body, self.judge.env_file(pin).as_bytes())
+            .await;
         let shutdown = self.pod.shutdown(&instance).await;
 
         // Teardown outranks the run: an orphan pod keeps spending the miner's
@@ -237,6 +334,22 @@ impl LiveJudge for LiumImageHarvest {
         let metrics = extract_metrics(&stdout)?;
         metrics.verify(pin, frozen_digest, artifact_digest, expected)?;
         Ok(metrics.measurement.into_slice_scores())
+    }
+
+    fn ready(&self) -> Result<(), EvalError> {
+        if self.ssh_public_keys.iter().all(|k| k.trim().is_empty()) {
+            return Err(EvalError::Backend(
+                "no master SSH public key; the eval pod would be unreachable".into(),
+            ));
+        }
+        if !self.judge.has_judge() {
+            return Err(EvalError::Backend(
+                "RELEARN_T2I_JUDGE_API_URL not set on this host; the eval image has no judge \
+                 and would exit without scoring"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -328,6 +441,7 @@ mod tests {
     struct Recorder {
         booted: Vec<InstanceSpec>,
         requests: Vec<HarvestRequest>,
+        env_files: Vec<String>,
         shutdowns: Vec<String>,
     }
 
@@ -364,10 +478,14 @@ mod tests {
             &self,
             _instance_id: &str,
             request: &[u8],
-            _env_file: &[u8],
+            env_file: &[u8],
         ) -> Result<String, String> {
             let parsed: HarvestRequest = serde_json::from_slice(request).expect("request json");
-            self.log().requests.push(parsed);
+            let mut log = self.log();
+            log.requests.push(parsed);
+            log.env_files
+                .push(String::from_utf8_lossy(env_file).into_owned());
+            drop(log);
             self.stdout.clone()
         }
 
@@ -377,11 +495,20 @@ mod tests {
         }
     }
 
+    fn judge() -> JudgeEnv {
+        JudgeEnv {
+            api_url: Some("http://judge.invalid/v1".into()),
+            model: None,
+            api_key: Some("jk-live-secret-value-0123456789".into()),
+        }
+    }
+
     fn harvest(pod: Arc<FakePod>) -> LiumImageHarvest {
         LiumImageHarvest::new(
             pod,
             HarvestLimits::default(),
             vec!["ssh-ed25519 AAAAmaster".into()],
+            judge(),
         )
     }
 
@@ -459,6 +586,7 @@ mod tests {
             Arc::clone(&pod) as Arc<dyn EvalPod>,
             HarvestLimits::default(),
             Vec::new(),
+            judge(),
         );
         assert!(keyless
             .score(&p, "f", "a", &holdout(), &ArtifactManifest::default())
@@ -534,5 +662,53 @@ mod tests {
                 "body {body:?} must not score"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_judge_env_is_forwarded_into_the_pod() {
+        let p = pin();
+        let pod = Arc::new(FakePod::ok(document(&p, "f", "a", 0.6)));
+        harvest(Arc::clone(&pod))
+            .score(&p, "f", "a", &holdout(), &ArtifactManifest::default())
+            .await
+            .expect("harvest");
+        let env = &pod.log().env_files[0];
+        assert!(
+            env.contains("RELEARN_T2I_JUDGE_API_URL=http://judge.invalid/v1"),
+            "{env}"
+        );
+        assert!(
+            env.contains(&format!("RELEARN_T2I_JUDGE_MODEL={}", p.judge_model)),
+            "{env}"
+        );
+        assert!(env.contains("RELEARN_T2I_JUDGE_API_KEY="), "{env}");
+        assert!(
+            env.contains(&format!("RELEARN_T2I_BASE_MODEL={}", p.base)),
+            "{env}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_judge_url_refuses_before_renting_a_pod() {
+        let p = pin();
+        let pod = Arc::new(FakePod::ok(document(&p, "f", "a", 0.6)));
+        let transport: Arc<dyn EvalPod> = pod.clone();
+        let err = LiumImageHarvest::new(
+            transport,
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAmaster".into()],
+            JudgeEnv::default(),
+        )
+        .score(&p, "f", "a", &holdout(), &ArtifactManifest::default())
+        .await
+        .expect_err("no judge");
+        assert!(
+            err.to_string().contains("RELEARN_T2I_JUDGE_API_URL"),
+            "{err}"
+        );
+        assert!(
+            pod.log().booted.is_empty(),
+            "never pay for a pod that cannot score"
+        );
     }
 }

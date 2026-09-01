@@ -126,6 +126,33 @@ the remote command), runs `relearn-agent-eval score`, reads back
 `RELEARN_METRICS=<document>` and `RELEARN_EVAL_OK`, scrubs the
 workdir, and **requires verified termination** before accepting any score.
 
+### Pod environment
+
+A Lium `InstanceSpec` has no env field, so the pod inherits **nothing** from
+the master. Everything the image reads from its environment has to be handed to
+it, and a missing teacher URL is why a pod can boot, run, and never print
+`RELEARN_EVAL_OK`:
+
+| Variable | Source | Required |
+|----------|--------|----------|
+| `RELEARN_TEACHER_API_URL` | host env | **yes** — no judge, no score |
+| `RELEARN_TEACHER_MODEL` | host env, else the pin's `teacher_model` | yes (defaulted) |
+| `RELEARN_TEACHER_API_KEY` | host env | only if the teacher API requires auth |
+| `RELEARN_BASE_MODEL` | the pin's `base_model` | yes |
+
+Only the names are in git. Values are operator state, delivered in
+`teacher.env` over stdin with `umask 077` — never on the remote command line.
+A host missing the teacher URL reports `can_score: false` and refuses
+**before** renting.
+
+**`RELEARN_TEACHER_API_KEY` crosses to a miner-paid pod.** Scope and
+rate-limit that credential, rotate it on suspicion, or leave it unset if the
+pod can reach the teacher without auth.
+
+A contaminated or empty-evidence `manifest` is rejected **before** the rent
+as well: those submissions cannot produce a lattice score, so they must not
+spend a pod or the teacher key.
+
 The markers are the language challenge's markers. What keeps the challenges
 apart is `challenge_id` in the document and the non-overlapping series keys
 (`t<id>` / `s<id>` / `o<id>` here).
