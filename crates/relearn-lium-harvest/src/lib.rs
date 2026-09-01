@@ -16,18 +16,17 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
 
-mod pod;
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use harvest_pod::{EvalPod, PodProgram};
 use prism_lium_types::InstanceSpec;
 use relearn_challenge_task::HoldoutItem;
 use relearn_eval::{EvalError, LiveScorer, RelearnEvalMetrics, RelearnPin, RELEARN_METRICS_SCHEMA};
 use relearn_score::SliceScores;
 use serde::{Deserialize, Serialize};
 
-pub use pod::LiumEvalPod;
+pub use harvest_pod::LiumEvalPod;
 
 /// Prefix the eval image prints before its metrics document.
 ///
@@ -41,6 +40,14 @@ pub const OK_MARKER: &str = "RELEARN_EVAL_OK";
 
 /// Directory the request and metrics sidecar live in, on the pod.
 pub const POD_WORKDIR: &str = "/tmp/relearn_eval";
+
+/// Image contract for `relearn-eval` (`docs/RELEARN.md` § Eval image contract).
+pub const PROGRAM: PodProgram = PodProgram {
+    workdir: POD_WORKDIR,
+    entrypoint: "relearn-eval score",
+    metrics_marker: METRICS_MARKER,
+    ok_marker: OK_MARKER,
+};
 
 /// What the eval image is asked to score.
 ///
@@ -92,23 +99,6 @@ impl Default for HarvestLimits {
     }
 }
 
-/// One pod's lifecycle for one harvest.
-///
-/// Split from [`LiumHarvest`] so the lifecycle, teardown, and document
-/// verification are testable without a Lium account. [`LiumEvalPod`] is the
-/// real transport.
-#[async_trait]
-pub trait EvalPod: Send + Sync {
-    /// Boot the digest-pinned image and return the instance id.
-    async fn boot(&self, spec: &InstanceSpec) -> Result<String, EvalError>;
-
-    /// Deliver `request`, run the image, return its stdout.
-    async fn run(&self, instance_id: &str, request: &HarvestRequest) -> Result<String, EvalError>;
-
-    /// Terminate. `Ok(true)` only when the provider confirms the pod is gone.
-    async fn shutdown(&self, instance_id: &str) -> Result<bool, EvalError>;
-}
-
 /// Lium SSH key name the harvest registers its public key under.
 pub const SSH_KEY_NAME: &str = "relearn-eval-worker";
 
@@ -153,16 +143,10 @@ impl LiumHarvest {
 /// Accepts a bare JSON body too, so a future image that writes only the
 /// sidecar still works.
 pub fn extract_metrics(stdout: &str) -> Result<RelearnEvalMetrics, EvalError> {
-    if let Some(line) = stdout.lines().find(|l| l.starts_with(METRICS_MARKER)) {
-        return RelearnEvalMetrics::from_json(&line[METRICS_MARKER.len()..]);
-    }
-    let trimmed = stdout.trim();
-    if trimmed.starts_with('{') {
-        return RelearnEvalMetrics::from_json(trimmed);
-    }
-    Err(EvalError::Backend(format!(
-        "eval image printed no {METRICS_MARKER} document"
-    )))
+    let body = PROGRAM.extract_document(stdout).ok_or_else(|| {
+        EvalError::Backend(format!("eval image printed no {METRICS_MARKER} document"))
+    })?;
+    RelearnEvalMetrics::from_json(body)
 }
 
 #[async_trait]
@@ -195,9 +179,15 @@ impl LiveScorer for LiumHarvest {
             holdout_commitment: pin.holdout_commitment.clone(),
             holdout: holdout.to_vec(),
         };
+        let body = serde_json::to_vec(&request)
+            .map_err(|e| EvalError::Backend(format!("encode request: {e}")))?;
 
-        let instance = self.pod.boot(&self.spec(pin, frozen_digest)).await?;
-        let run = self.pod.run(&instance, &request).await;
+        let instance = self
+            .pod
+            .boot(&self.spec(pin, frozen_digest))
+            .await
+            .map_err(EvalError::Backend)?;
+        let run = self.pod.run(&instance, &body).await;
         let shutdown = self.pod.shutdown(&instance).await;
 
         // Teardown first, as `rent_eval` does: an orphan pod keeps spending the
@@ -209,11 +199,11 @@ impl LiveScorer for LiumHarvest {
                     "pod {instance} terminate not verified"
                 )))
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(EvalError::Backend(e)),
         }
 
-        let stdout = run?;
-        if !stdout.lines().any(|l| l.trim_end() == OK_MARKER) {
+        let stdout = run.map_err(EvalError::Backend)?;
+        if !PROGRAM.ran_to_completion(&stdout) {
             tracing::warn!(
                 instance,
                 "eval image did not print {OK_MARKER}; refusing the run"
@@ -327,21 +317,18 @@ mod tests {
 
     #[async_trait]
     impl EvalPod for FakePod {
-        async fn boot(&self, spec: &InstanceSpec) -> Result<String, EvalError> {
+        async fn boot(&self, spec: &InstanceSpec) -> Result<String, String> {
             self.log().booted.push(spec.clone());
             Ok("pod-1".into())
         }
 
-        async fn run(
-            &self,
-            _instance_id: &str,
-            request: &HarvestRequest,
-        ) -> Result<String, EvalError> {
-            self.log().requests.push(request.clone());
-            self.stdout.clone().map_err(EvalError::Backend)
+        async fn run(&self, _instance_id: &str, request: &[u8]) -> Result<String, String> {
+            let parsed: HarvestRequest = serde_json::from_slice(request).expect("request json");
+            self.log().requests.push(parsed);
+            self.stdout.clone()
         }
 
-        async fn shutdown(&self, instance_id: &str) -> Result<bool, EvalError> {
+        async fn shutdown(&self, instance_id: &str) -> Result<bool, String> {
             self.log().shutdowns.push(instance_id.to_owned());
             Ok(self.verified)
         }

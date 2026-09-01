@@ -1,0 +1,20 @@
+[package]
+name = "harvest-pod"
+description = "Shared Lium transport for digest-pinned challenge eval images"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+prism-lium = { path = "../prism-lium" }
+prism-lium-types = { path = "../prism-lium-types" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

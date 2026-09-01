@@ -203,7 +203,11 @@ fn build_live_scorer(backend: EvalBackend, run_timeout_secs: u64) -> Option<Arc<
         );
         return None;
     };
-    let pod = Arc::new(LiumEvalPod::new(client, run_timeout_secs));
+    let pod = Arc::new(LiumEvalPod::new(
+        client,
+        run_timeout_secs,
+        relearn_lium_harvest::PROGRAM,
+    ));
     Some(Arc::new(LiumHarvest::new(
         pod,
         HarvestLimits::default(),

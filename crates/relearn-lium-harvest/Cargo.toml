@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
-prism-lium = { path = "../prism-lium" }
+harvest-pod = { path = "../harvest-pod" }
 prism-lium-types = { path = "../prism-lium-types" }
 relearn-challenge-task = { path = "../relearn-challenge-task" }
 relearn-eval = { path = "../relearn-eval" }
