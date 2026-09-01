@@ -74,8 +74,8 @@ jobs:
             image_suffix: relearn-challenge
           - target: relearn-t2i-challenge
             image_suffix: relearn-t2i-challenge
-          - target: relearn-mm-challenge
-            image_suffix: relearn-mm-challenge
+          - target: relearn-agent-challenge
+            image_suffix: relearn-agent-challenge
             dockerfile: deploy/Dockerfile
           - target: bounty-challenge
             image_suffix: bounty-challenge
@@ -282,7 +282,7 @@ jobs:
               "updater",
               "relearn-challenge",
               "relearn-t2i-challenge",
-              "relearn-mm-challenge",
+              "relearn-agent-challenge",
               "bounty-challenge",
               "base-attest-helper",
           }
@@ -354,7 +354,7 @@ jobs:
           # Pin services only (validator/gateway/updater/the four challenges).
           # --skip-backup: this job records CI digests; Spaces/PG backup runs at
           # prod promote (deploy-prod.yml, fail-closed).
-          for svc in validator gateway updater relearn-challenge relearn-t2i-challenge relearn-mm-challenge bounty-challenge; do
+          for svc in validator gateway updater relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge; do
             IMAGE=$(python3 -c '
           import json, sys
           d = json.load(open(sys.argv[1]))
@@ -373,7 +373,7 @@ jobs:
           import json, sys
           p = json.load(open("deploy/pins/staging.json"))
           assert p["commit_sha"] == sys.argv[1], (p["commit_sha"], sys.argv[1])
-          for s in ("validator", "gateway", "updater", "relearn-challenge", "relearn-t2i-challenge", "relearn-mm-challenge", "bounty-challenge"):
+          for s in ("validator", "gateway", "updater", "relearn-challenge", "relearn-t2i-challenge", "relearn-agent-challenge", "bounty-challenge"):
               assert s in p["services"], s
               assert p["services"][s]["digest"].startswith("sha256:")
           print("staging pins ok", p["commit_sha"])
@@ -422,7 +422,7 @@ jobs:
             "base/updater"
             "base/relearn-challenge"
             "base/relearn-t2i-challenge"
-            "base/relearn-mm-challenge"
+            "base/relearn-agent-challenge"
             "base/bounty-challenge"
           )
           ok=0

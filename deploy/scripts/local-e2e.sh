@@ -41,7 +41,7 @@ VALIDATOR_HOST_PORT="${LOCAL_VALIDATOR_HOST_PORT:-28080}"
 RELEARN_HOST_PORT="${LOCAL_RELEARN_HOST_PORT:-28095}"
 BOUNTY_HOST_PORT="${LOCAL_BOUNTY_HOST_PORT:-28096}"
 RELEARN_T2I_HOST_PORT="${LOCAL_RELEARN_T2I_HOST_PORT:-28097}"
-RELEARN_MM_HOST_PORT="${LOCAL_RELEARN_MM_HOST_PORT:-28098}"
+RELEARN_AGENT_HOST_PORT="${LOCAL_RELEARN_AGENT_HOST_PORT:-28099}"
 BASE_SECRETS_DIR="${BASE_SECRETS_DIR:-${HOME}/.base-secrets}"
 
 # Default public-only hotkey for smoke (same placeholder as gateway.env.example usage).
@@ -220,7 +220,7 @@ ensure_env_files() {
   if [[ ! -f deploy/env/postgres.env || ! -f deploy/env/gateway.env \
     || ! -f deploy/env/validator.env || ! -f deploy/env/relearn-challenge.env \
     || ! -f deploy/env/relearn-t2i-challenge.env \
-    || ! -f deploy/env/relearn-mm-challenge.env \
+    || ! -f deploy/env/relearn-agent-challenge.env \
     || ! -f deploy/env/bounty-challenge.env ]]; then
     log "materializing deploy/env/*.env from examples"
     ./deploy/scripts/materialize-env.sh
@@ -231,7 +231,7 @@ ensure_env_files() {
   url="$(database_url_from_postgres_env)"
   for f in deploy/env/gateway.env deploy/env/validator.env \
     deploy/env/relearn-challenge.env deploy/env/relearn-t2i-challenge.env \
-    deploy/env/relearn-mm-challenge.env deploy/env/bounty-challenge.env; do
+    deploy/env/relearn-agent-challenge.env deploy/env/bounty-challenge.env; do
     if grep -q '^BASE_DATABASE_URL=' "$f" 2>/dev/null; then
       sed -i "s|^BASE_DATABASE_URL=.*|BASE_DATABASE_URL=${url}|" "$f"
     else
@@ -242,7 +242,7 @@ ensure_env_files() {
 }
 
 ensure_state_dirs() {
-  for area in relearn relearn-t2i relearn-mm; do
+  for area in relearn relearn-t2i relearn-agent; do
     mkdir -p "$STATE_DIR/$area"
     chmod 777 "$STATE_DIR/$area" 2>/dev/null || true
   done
@@ -350,18 +350,18 @@ ensure_secrets() {
     deploy/secrets/relearn_t2i_sk relearn-t2i \
     "${BASE_SECRETS_DIR}/challenge-relearn-t2i.sk"
   ensure_challenge_sk_aligned \
-    deploy/secrets/relearn_mm_sk relearn-mm \
-    "${BASE_SECRETS_DIR}/challenge-relearn-mm.sk"
+    deploy/secrets/relearn_agent_sk relearn-agent \
+    "${BASE_SECRETS_DIR}/challenge-relearn-agent.sk"
   ensure_challenge_sk_aligned \
     deploy/secrets/bounty_sk bounty \
     "${BASE_SECRETS_DIR}/challenge-bounty.sk"
   mkdir -p deploy/secrets/lium deploy/secrets/relearn \
-    deploy/secrets/relearn-t2i deploy/secrets/relearn-mm deploy/secrets/bounty
+    deploy/secrets/relearn-t2i deploy/secrets/relearn-agent deploy/secrets/bounty
   # Touch placeholders so compose bind-mounts stay files/dirs of the right kind.
   [[ -e deploy/secrets/lium/api_key ]] || : >deploy/secrets/lium/api_key
   [[ -e deploy/secrets/lium/ssh_ed25519 ]] || : >deploy/secrets/lium/ssh_ed25519
   [[ -e deploy/secrets/lium/ssh_ed25519.pub ]] || : >deploy/secrets/lium/ssh_ed25519.pub
-  for area in relearn relearn-t2i relearn-mm bounty; do
+  for area in relearn relearn-t2i relearn-agent bounty; do
     [[ -e "deploy/secrets/$area/admin_tokens" ]] || : >"deploy/secrets/$area/admin_tokens"
   done
   [[ -e deploy/secrets/bounty/session_secret ]] || dd if=/dev/urandom bs=32 count=1 status=none of=deploy/secrets/bounty/session_secret
@@ -370,7 +370,7 @@ ensure_secrets() {
   ensure_relearn_holdout
   ensure_t2i_holdout
   local guarded=(deploy/secrets/bounty/session_secret)
-  for area in relearn relearn-t2i relearn-mm bounty; do
+  for area in relearn relearn-t2i relearn-agent bounty; do
     guarded+=("deploy/secrets/$area/admin_tokens")
   done
   [[ -e deploy/secrets/relearn/holdout.json ]] \
@@ -460,25 +460,25 @@ ensure_local_trust_root() {
   mkdir -p "$dir"
   export BASE_TRUST_ROOT_DIR=/etc/base/config
 
-  local relearn_pk t2i_pk mm_pk bounty_pk
+  local relearn_pk t2i_pk agent_pk bounty_pk
   relearn_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/relearn_sk")"
   t2i_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/relearn_t2i_sk")"
-  mm_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/relearn_mm_sk")"
+  agent_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/relearn_agent_sk")"
   bounty_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/bounty_sk")"
 
   local need_rebuild=0
   if [[ ! -f "$dir/challenges.toml" || ! -f "$dir/challenges.toml.sig" || ! -f "$dir/owner.pubkey" ]]; then
     need_rebuild=1
   else
-    python3 - "$dir/challenges.toml" "$relearn_pk" "$t2i_pk" "$mm_pk" "$bounty_pk" <<'PY' || need_rebuild=1
+    python3 - "$dir/challenges.toml" "$relearn_pk" "$t2i_pk" "$agent_pk" "$bounty_pk" <<'PY' || need_rebuild=1
 import sys, tomllib
 from pathlib import Path
 doc = tomllib.loads(Path(sys.argv[1]).read_text())
 rows = {c["id"]: c.get("public_key", "").lower() for c in doc.get("challenges", [])}
 want = {
     "relearn": sys.argv[2].lower(),
-    "relearn-t2i": sys.argv[3].lower(),
-    "relearn-mm": sys.argv[4].lower(),
+    "relearn-image": sys.argv[3].lower(),
+    "relearn-agent": sys.argv[4].lower(),
     "bounty": sys.argv[5].lower(),
 }
 sys.exit(0 if rows == want else 1)
@@ -506,15 +506,15 @@ PY
       --out-secret "$dir/owner.age" \
       --age-recipient "$recip"
   fi
-  python3 - "$dir/challenges.toml" "$relearn_pk" "$t2i_pk" "$mm_pk" "$bounty_pk" <<'PY2'
+  python3 - "$dir/challenges.toml" "$relearn_pk" "$t2i_pk" "$agent_pk" "$bounty_pk" <<'PY2'
 import pathlib, sys
 
 # Mirrors config/challenges.toml. Shares must sum to 10000 or the validator
 # flags an emission-share mismatch (D23).
 rows = [
     ("relearn", sys.argv[2], 4000),
-    ("relearn-t2i", sys.argv[3], 1500),
-    ("relearn-mm", sys.argv[4], 1500),
+    ("relearn-image", sys.argv[3], 1500),
+    ("relearn-agent", sys.argv[4], 1500),
     ("bounty", sys.argv[5], 3000),
 ]
 text = "version = 1\nintroduced_epoch = 0\n"
@@ -579,7 +579,7 @@ port_in_use() {
 check_host_ports() {
   local p
   for p in "$GATEWAY_HOST_PORT" "$VALIDATOR_HOST_PORT" "$RELEARN_HOST_PORT" \
-    "$RELEARN_T2I_HOST_PORT" "$RELEARN_MM_HOST_PORT"; do
+    "$RELEARN_T2I_HOST_PORT" "$RELEARN_AGENT_HOST_PORT"; do
     if port_in_use "$p"; then
       # Allow re-bind when this compose project already publishes the port.
       if docker ps --format '{{.Names}} {{.Ports}}' \
@@ -602,7 +602,7 @@ export_mode_env() {
   export LOCAL_VALIDATOR_HOST_PORT="$VALIDATOR_HOST_PORT"
   export LOCAL_RELEARN_HOST_PORT="$RELEARN_HOST_PORT"
   export LOCAL_RELEARN_T2I_HOST_PORT="$RELEARN_T2I_HOST_PORT"
-  export LOCAL_RELEARN_MM_HOST_PORT="$RELEARN_MM_HOST_PORT"
+  export LOCAL_RELEARN_AGENT_HOST_PORT="$RELEARN_AGENT_HOST_PORT"
   # Align app DATABASE_URL with whatever postgres.env will create (avoids
   # stale gateway.env pointing at a different database name).
   if [[ -z "${LOCAL_DATABASE_URL:-}" && -f "$ROOT/deploy/env/postgres.env" ]]; then
@@ -684,9 +684,9 @@ wait_all_health() {
   wait_health relearn-challenge "http://127.0.0.1:${RELEARN_HOST_PORT}/health" || \
     log "warning: relearn not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
   wait_health relearn-t2i-challenge "http://127.0.0.1:${RELEARN_T2I_HOST_PORT}/health" || \
-    log "warning: relearn-t2i not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
-  wait_health relearn-mm-challenge "http://127.0.0.1:${RELEARN_MM_HOST_PORT}/health" || \
-    log "warning: relearn-mm not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
+    log "warning: relearn-image not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
+  wait_health relearn-agent-challenge "http://127.0.0.1:${RELEARN_AGENT_HOST_PORT}/health" || \
+    log "warning: relearn-agent not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
   wait_health bounty-challenge "http://127.0.0.1:${BOUNTY_HOST_PORT}/health" || \
     log "warning: bounty not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
   WAIT_SECS="$saved"
@@ -743,8 +743,8 @@ Internal (compose network):
   gateway:            http://gateway:8080
   validator probe:    http://127.0.0.1:${VALIDATOR_HOST_PORT}/healthz
   relearn:            http://127.0.0.1:${RELEARN_HOST_PORT}/health
-  relearn-t2i:        http://127.0.0.1:${RELEARN_T2I_HOST_PORT}/health
-  relearn-mm:         http://127.0.0.1:${RELEARN_MM_HOST_PORT}/health
+  relearn-image:      http://127.0.0.1:${RELEARN_T2I_HOST_PORT}/health
+  relearn-agent:      http://127.0.0.1:${RELEARN_AGENT_HOST_PORT}/health
   bounty:             http://127.0.0.1:${BOUNTY_HOST_PORT}/health
 
 EOF

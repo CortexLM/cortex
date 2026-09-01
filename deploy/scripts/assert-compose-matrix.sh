@@ -51,7 +51,7 @@ services=$(render \
 if echo "$services" | grep -qx "gateway"; then
   fail "validator role renders gateway (must not)"
 fi
-for banned in relearn-challenge relearn-t2i-challenge relearn-mm-challenge bounty-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
+for banned in relearn-challenge relearn-t2i-challenge relearn-agent-challenge relearn-mm-challenge bounty-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
   if echo "$services" | grep -qx "$banned"; then
     fail "validator role renders $banned (master-only; must not)"
   fi
@@ -67,7 +67,7 @@ services=$(render \
 if ! echo "$services" | grep -qx "gateway"; then
   fail "master role does not render gateway (must)"
 fi
-for required in relearn-challenge relearn-t2i-challenge relearn-mm-challenge bounty-challenge socket-proxy; do
+for required in relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge socket-proxy; do
   if ! echo "$services" | grep -qx "$required"; then
     fail "master role does not render $required (must)"
   fi
@@ -77,6 +77,11 @@ for retired in design-challenge design-egress-proxy prism-challenge; do
     fail "master role still renders retired $retired"
   fi
 done
+# relearn-mm has no trust-root row, so a master host that brings it up would
+# run a challenge whose leaves can never verify.
+if echo "$services" | grep -qx "relearn-mm-challenge"; then
+  fail "master role renders relearn-mm-challenge (no trust-root row; must not)"
+fi
 if echo "$services" | grep -qx "validator"; then
   fail "master role renders validator (dual submitter; must not — use validator host)"
 fi
@@ -109,7 +114,7 @@ services=$(render \
 if echo "$services" | grep -qx "evil-gateway"; then
   fail "prod validator renders evil-gateway (must not)"
 fi
-for banned in relearn-challenge relearn-t2i-challenge relearn-mm-challenge bounty-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
+for banned in relearn-challenge relearn-t2i-challenge relearn-agent-challenge relearn-mm-challenge bounty-challenge socket-proxy design-challenge design-egress-proxy prism-challenge; do
   if echo "$services" | grep -qx "$banned"; then
     fail "prod validator renders $banned (master-only; must not)"
   fi
@@ -130,7 +135,7 @@ for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
   if echo "$rendered" | grep -qE 'DESIGN_FORCE_SIM:[[:space:]]*["'\'']?(1|true|TRUE|yes)["'\'']?'; then
     fail "$env_file enables DESIGN_FORCE_SIM (retired; must not ship)"
   fi
-  for sim_var in RELEARN_FORCE_SIM RELEARN_T2I_FORCE_SIM RELEARN_MM_FORCE_SIM; do
+  for sim_var in RELEARN_FORCE_SIM RELEARN_T2I_FORCE_SIM RELEARN_AGENT_FORCE_SIM RELEARN_MM_FORCE_SIM BOUNTY_FORCE_SIM; do
     if echo "$rendered" | grep -qE "${sim_var}:[[:space:]]*[\"']?(1|true|TRUE|yes)[\"']?"; then
       fail "$env_file enables $sim_var (sim is local-only; must not ship on droplets)"
     fi
@@ -138,11 +143,11 @@ for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
 done
 echo "OK: staging/prod do not enable host SimSandbox"
 
-# --- all four live challenges present in default; design/prism retired ---
+# --- all four live challenges present in default; mm off; design/prism retired ---
 default_services=$(render \
   -f docker-compose.yml \
   config --services)
-for required in relearn-challenge relearn-t2i-challenge relearn-mm-challenge bounty-challenge; do
+for required in relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge; do
   if ! echo "$default_services" | grep -qx "$required"; then
     fail "$required not in default compose"
   fi
@@ -152,7 +157,14 @@ for retired in prism-challenge design-challenge design-egress-proxy; do
     fail "retired $retired still in default compose"
   fi
 done
-echo "OK: relearn, relearn-t2i, relearn-mm, bounty in default compose; design/prism retired"
+if echo "$default_services" | grep -qx "relearn-mm-challenge"; then
+  fail "relearn-mm-challenge renders by default (emission 0, must stay behind the mm profile)"
+fi
+# The profile still has to work, or "off" would mean "deleted".
+mm_services=$(render -f docker-compose.yml --profile mm config --services)
+echo "$mm_services" | grep -qx "relearn-mm-challenge" \
+  || fail "the mm profile does not render relearn-mm-challenge"
+echo "OK: relearn, relearn-image, relearn-agent, bounty in default compose; mm profile-gated; design/prism retired"
 
 # --- no fake chain backend survives anywhere in the matrix ---
 for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
@@ -217,12 +229,12 @@ echo "$local_services" | grep -qx "gateway" \
   || fail "env-local master stack does not render gateway"
 echo "$local_services" | grep -qx "validator" \
   || fail "env-local master stack does not render co-located validator"
-for required in relearn-challenge relearn-t2i-challenge relearn-mm-challenge bounty-challenge; do
+for required in relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge; do
   echo "$local_services" | grep -qx "$required" \
     || fail "env-local master stack does not render $required"
 done
 for probe in 28095:relearn-challenge 28096:bounty-challenge \
-             28097:relearn-t2i-challenge 28098:relearn-mm-challenge; do
+             28097:relearn-t2i-challenge 28099:relearn-agent-challenge; do
   port=${probe%%:*}
   svc=${probe#*:}
   echo "$local_rendered" | grep -qE "published: \"?${port}\"?" \
@@ -239,6 +251,6 @@ for banned in agent-challenge hypertraining-challenge miner-agent miner-socket-p
     fail "removed service still in default compose: $banned"
   fi
 done
-echo "OK: env-local preserves testnet/541; challenges on 28095-28098; removed agent/hypertraining/miner services"
+echo "OK: env-local preserves testnet/541; live challenges on 28095-28097 and 28099; removed agent/hypertraining/miner services"
 
 echo "assert-compose-matrix: all checks passed"

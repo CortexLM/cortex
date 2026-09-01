@@ -24,17 +24,18 @@ services:
     environment:
       BASE_CHALLENGE_BIND: 0.0.0.0:8097
       RELEARN_T2I_FORCE_SIM: "true"
-  relearn-mm-challenge:
+  relearn-agent-challenge:
     ports:
-      - "8098:8098"
+      - "8099:8099"
     environment:
-      BASE_CHALLENGE_BIND: 0.0.0.0:8098
-      RELEARN_MM_FORCE_SIM: "true"
+      BASE_CHALLENGE_BIND: 0.0.0.0:8099
+      RELEARN_AGENT_FORCE_SIM: "true"
   bounty-challenge:
     ports:
       - "8096:8096"
     environment:
       BASE_CHALLENGE_BIND: 0.0.0.0:8096
+      BOUNTY_FORCE_SIM: "true"
   socket-proxy:
     ports:
       - "2375:2375"

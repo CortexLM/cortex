@@ -26,6 +26,8 @@ services:
     profiles: ["never"]
   relearn-t2i-challenge:
     profiles: ["never"]
+  relearn-agent-challenge:
+    profiles: ["never"]
   relearn-mm-challenge:
     profiles: ["never"]
   bounty-challenge:

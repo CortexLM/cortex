@@ -42,6 +42,7 @@ RUN cargo build --release \
       -p updater-bin \
       -p relearn-challenge-bin \
       -p relearn-t2i-challenge-bin \
+      -p relearn-agent-challenge-bin \
       -p relearn-mm-challenge-bin \
       -p bounty-challenge-bin \
  && strip target/release/validator \
@@ -49,6 +50,7 @@ RUN cargo build --release \
            target/release/updater \
            target/release/relearn-challenge \
            target/release/relearn-t2i-challenge \
+           target/release/relearn-agent-challenge \
            target/release/relearn-mm-challenge \
            target/release/bounty-challenge \
  && mkdir -p /out \
@@ -57,6 +59,7 @@ RUN cargo build --release \
        target/release/updater \
        target/release/relearn-challenge \
        target/release/relearn-t2i-challenge \
+       target/release/relearn-agent-challenge \
        target/release/relearn-mm-challenge \
        target/release/bounty-challenge /out/
 
@@ -73,6 +76,7 @@ COPY target/release/validator \
      target/release/updater \
      target/release/relearn-challenge \
      target/release/relearn-t2i-challenge \
+     target/release/relearn-agent-challenge \
      target/release/relearn-mm-challenge \
      target/release/bounty-challenge \
      /out/
@@ -137,6 +141,18 @@ RUN apt-get update \
 USER base
 COPY --from=artifacts --chown=base:base /out/relearn-t2i-challenge /usr/local/bin/relearn-t2i-challenge
 ENTRYPOINT ["/usr/local/bin/relearn-t2i-challenge"]
+
+FROM runtime-base AS relearn-agent-challenge
+# Episode replay and both ablation arms run on rented GPUs over SSH.
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/lib/relearn-agent \
+    && chown -R base:base /var/lib/relearn-agent
+USER base
+COPY --from=artifacts --chown=base:base /out/relearn-agent-challenge /usr/local/bin/relearn-agent-challenge
+ENTRYPOINT ["/usr/local/bin/relearn-agent-challenge"]
 
 FROM runtime-base AS relearn-mm-challenge
 USER root

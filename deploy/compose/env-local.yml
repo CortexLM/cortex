@@ -79,6 +79,17 @@ services:
       RELEARN_T2I_FORCE_SIM: "${LOCAL_RELEARN_T2I_FORCE_SIM:-true}"
       BASE_SUBMISSION_GATING: "${LOCAL_SUBMISSION_GATING:-0}"
 
+  relearn-agent-challenge:
+    ports:
+      - "127.0.0.1:${LOCAL_RELEARN_AGENT_HOST_PORT:-28099}:8099"
+    environment:
+      BASE_DATABASE_URL: ${LOCAL_DATABASE_URL:-postgres://base:base_dev_only_change_me@postgres:5432/base}
+      # No Lium spend on a laptop unless operator opts in.
+      RELEARN_AGENT_FORCE_SIM: "${LOCAL_RELEARN_AGENT_FORCE_SIM:-true}"
+      BASE_SUBMISSION_GATING: "${LOCAL_SUBMISSION_GATING:-0}"
+
+  # relearn-mm stays behind the `mm` profile, so this only takes effect when an
+  # operator asks for it explicitly. It never renders on the default stack.
   relearn-mm-challenge:
     ports:
       - "127.0.0.1:${LOCAL_RELEARN_MM_HOST_PORT:-28098}:8098"
@@ -93,5 +104,8 @@ services:
       - "127.0.0.1:${LOCAL_BOUNTY_HOST_PORT:-28096}:8096"
     environment:
       BASE_DATABASE_URL: ${LOCAL_DATABASE_URL:-postgres://base:base_dev_only_change_me@postgres:5432/base}
+      # Local adjudications only: a laptop has no backend feed, and without an
+      # opt-in the service would refuse every report.
+      BOUNTY_FORCE_SIM: "${LOCAL_BOUNTY_FORCE_SIM:-true}"
       BOUNTY_CHAT_COMMAND: "${BOUNTY_CHAT_COMMAND:-}"
       BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"

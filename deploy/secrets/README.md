@@ -3,7 +3,7 @@
 Containers run as `base` (uid **65532**). Host secret files MUST be:
 
 ```bash
-for f in gateway_sk relearn_sk relearn_t2i_sk relearn_mm_sk bounty_sk; do
+for f in gateway_sk relearn_sk relearn_t2i_sk relearn_agent_sk bounty_sk; do
   chown 65532:65532 "deploy/secrets/$f"
   chmod 0400 "deploy/secrets/$f"
 done
@@ -18,8 +18,8 @@ Bind-mounts use the file inode; directory mode 0700 is OK.
 | `gateway_sk` | gateway | Bundle seal mini-secret (`BASE_GATEWAY_SK_FILE`) |
 | `gateway_admin_token` | gateway + seal scripts | Bearer for `/v1/admin/*` (`BASE_GATEWAY_ADMIN_TOKEN_FILE`). **Required** when `BASE_GATEWAY_REQUIRE_OWNER=1`. Mode **0400**, uid **65532** |
 | `relearn_sk` | relearn-challenge | Relearn LLM leaf mini-secret; pub must match `config/challenges.toml` |
-| `relearn_t2i_sk` | relearn-t2i-challenge | Relearn T2I leaf mini-secret; pub must match `config/challenges.toml` |
-| `relearn_mm_sk` | relearn-mm-challenge | Relearn Multimodal leaf mini-secret; pub must match `config/challenges.toml` |
+| `relearn_t2i_sk` | relearn-t2i-challenge | Relearn Image (`relearn-image`) leaf mini-secret; pub must match `config/challenges.toml` |
+| `relearn_agent_sk` | relearn-agent-challenge | Relearn Agent leaf mini-secret; pub must match `config/challenges.toml` |
 | `bounty_sk` | bounty-challenge | Bounty leaf mini-secret; pub must match `config/challenges.toml` |
 | `prism_sk` / `design_sk` | retired products | Do not mount on the live compose path |
 
@@ -40,7 +40,10 @@ Local dummy for development: decrypt with age:
 | `relearn/holdout.json` | relearn-challenge | Frozen holdout items. **Never commit.** Verified at boot against `holdout_commitment` in `config/relearn-pin.toml`; a mismatch means submissions answer **503**. Mode **0400**, uid **65532** |
 | `relearn-t2i/holdout.json` | relearn-t2i-challenge | Frozen holdout prompt records. **Never commit.** Verified at boot against `holdout_commitment` in `config/relearn-t2i-pin.toml`; a mismatch means submissions answer **503** rather than falling back to the public split. Mode **0400**, uid **65532** |
 | `relearn-t2i/admin_tokens` | relearn-t2i-challenge | One operator bearer per line for `POST /v1/admin/promote` |
-| `relearn-mm/admin_tokens` | relearn-mm-challenge | One operator bearer per line for `POST /v1/admin/promote` |
+| `relearn-t2i/base_champion.json` | relearn-t2i-challenge | Base checkpoint measured by the pinned eval image. **Never commit.** A live host answers **503** on every submission until it exists, because every gate compares against it. Mode **0400**, uid **65532** |
+| `relearn-agent/episodes.json` | relearn-agent-challenge | Frozen holdout episodes (goal + tools + observation hash). **Never commit.** Verified at boot against `holdout_commitment` in `config/relearn-agent-pin.toml`. Mode **0400**, uid **65532** |
+| `relearn-agent/base_champion.json` | relearn-agent-challenge | Base checkpoint measured by the pinned agent eval image, including the trace-replay and ablation arms. **Never commit.** Mode **0400**, uid **65532** |
+| `relearn-agent/admin_tokens` | relearn-agent-challenge | One operator bearer per line for `POST /v1/admin/promote` |
 
 Regenerate the Relearn holdout with a **private** salt (never the T2I/dev salt
 and never a salt that is committed to git):
@@ -67,7 +70,7 @@ Regenerate the T2I holdout with the private salt (keep the salt off git — it i
 what makes the holdout unguessable):
 
 ```bash
-mkdir -p deploy/secrets/relearn-t2i deploy/secrets/relearn-mm
+mkdir -p deploy/secrets/relearn-t2i deploy/secrets/relearn-agent
 # Public split ids come from the pin; every one of them must be excluded.
 mapfile -t EXCLUDE < <(python3 -c '
 import tomllib
@@ -83,9 +86,9 @@ cargo run -p xtask -- relearn-t2i-holdout \
   --out deploy/secrets/relearn-t2i/holdout.json
 # Paste the printed holdout_commitment into config/relearn-t2i-pin.toml and
 # re-sign the trust root (config/CEREMONY.md).
-touch deploy/secrets/relearn-t2i/admin_tokens deploy/secrets/relearn-mm/admin_tokens
-chown -R 65532:65532 deploy/secrets/relearn-t2i deploy/secrets/relearn-mm
-chmod 0400 deploy/secrets/relearn-t2i/* deploy/secrets/relearn-mm/*
+touch deploy/secrets/relearn-t2i/admin_tokens deploy/secrets/relearn-agent/admin_tokens
+chown -R 65532:65532 deploy/secrets/relearn-t2i deploy/secrets/relearn-agent
+chmod 0400 deploy/secrets/relearn-t2i/* deploy/secrets/relearn-agent/*
 ```
 
 The Relearn Multimodal service also needs `RELEARN_MM_CHAMPION_LM_HASH` (the
