@@ -1147,10 +1147,8 @@ mod tests {
         InstanceSpec {
             docker_image: Some("ghcr.io/cortexlm/relearn-eval".into()),
             image_digest: Some(digest),
-            template_name: Some("relearn-eval-abababab".into()),
-            startup_commands: Some(
-                "/usr/bin/tini -- /usr/bin/relearn-eval-entrypoint serve USER_PUBLIC_KEY".into(),
-            ),
+            template_name: Some("relearn-eval-abababababab".into()),
+            startup_commands: None,
             ..provision_spec()
         }
     }
@@ -1185,17 +1183,14 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/templates"))
             .and(body_json(serde_json::json!({
-                "name": "relearn-eval-abababab",
-                "docker_image": "ghcr.io/cortexlm/relearn-eval",
-                "docker_image_digest": digest,
+                "name": "relearn-eval-abababababab",
+                "docker_image": format!("ghcr.io/cortexlm/relearn-eval@{digest}"),
                 "internal_ports": [22],
                 "is_private": true,
-                "container_start_immediately": true,
-                "startup_commands": "/usr/bin/tini -- /usr/bin/relearn-eval-entrypoint serve USER_PUBLIC_KEY"
+                "container_start_immediately": true
             })))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"id": "harvest-tmpl"})),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "harvest-tmpl"})),
             )
             .expect(1)
             .mount(&server)
@@ -1273,17 +1268,14 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/templates"))
             .and(body_json(serde_json::json!({
-                "name": "relearn-eval-abababab",
-                "docker_image": "ghcr.io/cortexlm/relearn-eval",
-                "docker_image_digest": digest,
+                "name": "relearn-eval-abababababab",
+                "docker_image": format!("ghcr.io/cortexlm/relearn-eval@{digest}"),
                 "internal_ports": [22],
                 "is_private": true,
-                "container_start_immediately": true,
-                "startup_commands": "/usr/bin/tini -- /usr/bin/relearn-eval-entrypoint serve USER_PUBLIC_KEY"
+                "container_start_immediately": true
             })))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"id": "harvest-tmpl"})),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "harvest-tmpl"})),
             )
             .mount(&server)
             .await;

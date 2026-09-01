@@ -166,14 +166,12 @@ pub struct DigestPinnedRent {
     pub repository: String,
     /// `sha256:` + 64 lowercase hex.
     pub digest: String,
-    /// Must include the digest prefix so name reuse cannot pick prism-recipe-v10.
+    /// Must include the 12-hex digest prefix so name reuse cannot pick prism-recipe-v10.
     pub template_name: String,
-    /// Must inject `USER_PUBLIC_KEY` and start this image, not prism-pod-entrypoint.
-    pub startup_commands: String,
 }
 
 impl DigestPinnedRent {
-    /// Lium create payload `docker_image` is the repo; digest is sent separately.
+    /// Full pin ref Lium must pull: `ghcr.io/…/relearn-eval@sha256:…`.
     #[must_use]
     pub fn docker_image_ref(&self) -> String {
         format!("{}@{}", self.repository, self.digest)
@@ -193,19 +191,26 @@ impl DigestPinnedRent {
         )
     }
 
-    /// POST `/templates` body for a public GHCR pin (no provider credential).
+    /// POST `/templates` body: full `repo@digest`, no Prism tag, no startup.
+    ///
+    /// The harvest image `CMD ["serve"]` starts sshd. Sending
+    /// `prism-pod-entrypoint` or `v10-cuda13-te` would 127 on this image.
     ///
     /// # Errors
     ///
     /// Private-registry create without a credential.
     pub fn create_body(&self) -> Result<serde_json::Value, LiumError> {
-        lium_template_create_body(
-            &self.template_name,
-            &self.docker_image_ref(),
-            None,
-            Some(self.startup_commands.as_str()),
-            None,
-        )
+        let docker_image = self.docker_image_ref();
+        if private_registry_needs_credential(&docker_image, None) {
+            return Err(LiumError::Integrity(private_template_create_error()));
+        }
+        Ok(serde_json::json!({
+            "name": self.template_name,
+            "docker_image": docker_image,
+            "internal_ports": [22],
+            "is_private": true,
+            "container_start_immediately": true,
+        }))
     }
 }
 
@@ -238,7 +243,7 @@ fn digest_hex(digest: &str) -> Result<&str, LiumError> {
 ///
 /// # Errors
 ///
-/// Incomplete pin, recipes image, or startup that would boot prism-pod.
+/// Incomplete pin, recipes image, or a startup that would boot prism-pod.
 pub fn digest_pinned_rent(spec: &InstanceSpec) -> Result<Option<DigestPinnedRent>, LiumError> {
     let repository = spec
         .docker_image
@@ -269,7 +274,7 @@ pub fn digest_pinned_rent(spec: &InstanceSpec) -> Result<Option<DigestPinnedRent
             )
         })?;
     let hex = digest_hex(digest)?;
-    let prefix = &hex[..8];
+    let prefix = &hex[..12];
     let template_name = spec
         .template_name
         .as_deref()
@@ -291,32 +296,21 @@ pub fn digest_pinned_rent(spec: &InstanceSpec) -> Result<Option<DigestPinnedRent
             "digest-pinned harvest template_name must not be a Prism recipes template".into(),
         ));
     }
-    let startup_commands = spec
+    if spec
         .startup_commands
         .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            LiumError::Integrity(
-                "digest-pinned harvest requires startup_commands for this image".into(),
-            )
-        })?;
-    if !startup_commands.contains("USER_PUBLIC_KEY") {
+        .is_some_and(|s| !s.trim().is_empty())
+    {
         return Err(LiumError::Integrity(
-            "harvest startup_commands must include USER_PUBLIC_KEY so Lium injects the rental key"
+            "digest-pinned harvest must not set startup_commands; the image CMD [\"serve\"] \
+             starts sshd (do not send prism-pod-entrypoint)"
                 .into(),
-        ));
-    }
-    if startup_commands.contains("prism-pod-entrypoint") {
-        return Err(LiumError::Integrity(
-            "harvest startup_commands must not start prism-pod-entrypoint".into(),
         ));
     }
     Ok(Some(DigestPinnedRent {
         repository: repository.to_owned(),
         digest: digest.to_owned(),
         template_name: template_name.to_owned(),
-        startup_commands: startup_commands.to_owned(),
     }))
 }
 
@@ -677,7 +671,8 @@ mod tests {
         credential_scoped_template_name, digest_pinned_rent, is_digest_image_ref,
         is_template_rent_forbidden, listed_digest_template_id, lium_template_create_body,
         private_registry_needs_credential, public_template_fallback_id,
-        rentable_fallback_template_id, template_name_for_image, RECIPES_TEMPLATE_STARTUP,
+        rentable_fallback_template_id, template_name_for_image, DigestPinnedRent,
+        RECIPES_TEMPLATE_STARTUP,
     };
     use prism_lium_types::InstanceSpec;
 
@@ -759,15 +754,13 @@ mod tests {
     }
 
     #[test]
-    fn digest_pinned_rent_requires_ghcr_name_and_this_image_startup() {
+    fn digest_pinned_rent_requires_ghcr_name_and_no_prism_startup() {
         let digest = format!("sha256:{}", "ab".repeat(32));
         let mut spec = InstanceSpec {
             docker_image: Some("ghcr.io/cortexlm/relearn-eval".into()),
             image_digest: Some(digest.clone()),
-            template_name: Some("relearn-eval-abababab".into()),
-            startup_commands: Some(
-                "/usr/bin/tini -- /usr/bin/relearn-eval-entrypoint serve USER_PUBLIC_KEY".into(),
-            ),
+            template_name: Some("relearn-eval-abababababab".into()),
+            startup_commands: None,
             ..InstanceSpec::default()
         };
         let plan = digest_pinned_rent(&spec).expect("plan").expect("pinned");
@@ -777,6 +770,18 @@ mod tests {
             plan.docker_image_ref(),
             format!("ghcr.io/cortexlm/relearn-eval@{digest}")
         );
+        let body = plan.create_body().expect("create");
+        assert_eq!(
+            body["docker_image"].as_str(),
+            Some(plan.docker_image_ref().as_str())
+        );
+        assert!(body.get("docker_image_tag").is_none());
+        assert!(body.get("docker_image_digest").is_none());
+        assert!(body.get("startup_commands").is_none());
+        assert!(!body["docker_image"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("v10-cuda13-te"));
 
         spec.docker_image = None;
         assert!(digest_pinned_rent(&spec).expect("prism").is_none());
@@ -784,13 +789,38 @@ mod tests {
         spec.docker_image = Some("ghcr.io/cortexlm/relearn-eval".into());
         spec.template_name = Some("prism-recipe-v10".into());
         assert!(digest_pinned_rent(&spec).is_err());
-        spec.template_name = Some("relearn-eval-abababab".into());
+        spec.template_name = Some("relearn-eval-abababababab".into());
         spec.startup_commands = Some(RECIPES_TEMPLATE_STARTUP.into());
         assert!(digest_pinned_rent(&spec).is_err());
-        spec.startup_commands =
-            Some("/usr/bin/tini -- /usr/bin/relearn-eval-entrypoint serve USER_PUBLIC_KEY".into());
+        spec.startup_commands = None;
+        spec.template_name = Some("relearn-eval-abababab".into());
+        assert!(
+            digest_pinned_rent(&spec).is_err(),
+            "8-hex name must not match the 12-hex prefix"
+        );
+        spec.template_name = Some("relearn-eval-abababababab".into());
         spec.docker_image = Some("registry.digitalocean.com/basecrawl/prism-pod".into());
         assert!(digest_pinned_rent(&spec).is_err());
+    }
+
+    #[test]
+    fn harvest_create_body_is_the_live_pin_ref() {
+        let plan = DigestPinnedRent {
+            repository: "ghcr.io/cortexlm/relearn-eval".into(),
+            digest: "sha256:201cc5d29c219097642d61ce4dd713d482a4d0502e49699a22f0a94da4983aaa"
+                .into(),
+            template_name: "relearn-eval-201cc5d29c21".into(),
+        };
+        let body = plan.create_body().expect("create");
+        assert_eq!(
+            body["docker_image"].as_str(),
+            Some(
+                "ghcr.io/cortexlm/relearn-eval@sha256:201cc5d29c219097642d61ce4dd713d482a4d0502e49699a22f0a94da4983aaa"
+            )
+        );
+        assert_eq!(body["name"].as_str(), Some("relearn-eval-201cc5d29c21"));
+        assert!(body.get("docker_image_tag").is_none());
+        assert!(body.get("startup_commands").is_none());
     }
 
     #[test]
@@ -798,15 +828,14 @@ mod tests {
         let digest = format!("sha256:{}", "ab".repeat(32));
         let listed = serde_json::json!([
             {"name": "prism-recipe-v10", "id": "recipes", "docker_image": "daturaai/pytorch"},
-            {"name": "relearn-eval-abababab", "id": "harvest",
-             "docker_image": "ghcr.io/cortexlm/relearn-eval",
-             "docker_image_digest": digest}
+            {"name": "relearn-eval-abababababab", "id": "harvest",
+             "docker_image": format!("ghcr.io/cortexlm/relearn-eval@{digest}")}
         ]);
         let arr = listed.as_array().expect("array");
         assert_eq!(
             listed_digest_template_id(
                 arr,
-                "relearn-eval-abababab",
+                "relearn-eval-abababababab",
                 "ghcr.io/cortexlm/relearn-eval",
                 &digest
             )
@@ -834,7 +863,7 @@ mod tests {
         );
         let wrong = listed_digest_template_id(
             arr,
-            "relearn-eval-abababab",
+            "relearn-eval-abababababab",
             "ghcr.io/cortexlm/relearn-eval",
             &format!("sha256:{}", "cd".repeat(32)),
         );

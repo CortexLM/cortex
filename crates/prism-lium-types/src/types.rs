@@ -210,8 +210,8 @@ pub struct InstanceSpec {
     /// Digest-pinned harvest image repo (no tag), e.g. `ghcr.io/cortexlm/relearn-eval`.
     /// When set with `image_digest`, provision must rent that image — not prism-recipe-v10.
     pub docker_image: Option<String>,
-    /// Lium template startup. Digest-pinned harvest must inject `USER_PUBLIC_KEY`
-    /// then exec this image's entrypoint — never `/usr/local/bin/prism-pod-entrypoint`.
+    /// Lium template startup. Digest-pinned harvest must leave this unset:
+    /// the eval image `CMD ["serve"]` starts sshd. Never send prism-pod-entrypoint.
     pub startup_commands: Option<String>,
     /// SSH public keys (required for real Lium rent).
     pub ssh_public_keys: Vec<String>,

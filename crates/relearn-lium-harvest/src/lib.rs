@@ -48,7 +48,6 @@ pub const PROGRAM: PodProgram = PodProgram {
     metrics_marker: METRICS_MARKER,
     ok_marker: OK_MARKER,
     score_binary: "/usr/bin/relearn-eval",
-    serve_entrypoint: "/usr/bin/relearn-eval-entrypoint",
 };
 
 /// Teacher / judge configuration the eval image reads from its environment.
@@ -268,7 +267,7 @@ impl LiumHarvest {
             gpu_count: self.limits.gpu_count,
             image_digest: Some(pin.eval_image_digest.clone()),
             docker_image: Some(pin.eval_image.clone()),
-            startup_commands: Some(PROGRAM.startup_commands()),
+            startup_commands: None,
             ssh_public_keys: self.ssh_public_keys.clone(),
             ssh_key_name: Some(SSH_KEY_NAME.to_owned()),
             preferred_offer_id: None,
@@ -564,15 +563,9 @@ mod tests {
         );
         assert_eq!(
             log.booted[0].template_name.as_deref(),
-            Some("relearn-eval-abababab")
+            Some("relearn-eval-abababababab")
         );
-        let startup = log.booted[0]
-            .startup_commands
-            .as_deref()
-            .unwrap_or_default();
-        assert!(startup.contains("relearn-eval-entrypoint"), "{startup}");
-        assert!(startup.contains("USER_PUBLIC_KEY"), "{startup}");
-        assert!(!startup.contains("prism-pod-entrypoint"), "{startup}");
+        assert!(log.booted[0].startup_commands.is_none());
         assert_eq!(log.requests[0].holdout.len(), 120);
         assert_eq!(log.requests[0].artifact_digest, "artifact-1");
         assert_eq!(log.shutdowns, vec!["pod-1".to_owned()]);

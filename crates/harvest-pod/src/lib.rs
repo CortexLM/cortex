@@ -49,8 +49,6 @@ pub struct PodProgram {
     pub ok_marker: &'static str,
     /// Absolute path of the scoring binary the image must ship.
     pub score_binary: &'static str,
-    /// Image serve entrypoint Lium starts (with `USER_PUBLIC_KEY`).
-    pub serve_entrypoint: &'static str,
 }
 
 /// Env file the pod sources before the entrypoint, when one was staged.
@@ -105,7 +103,6 @@ impl PodProgram {
             metrics_marker,
             ok_marker,
             score_binary: _,
-            serve_entrypoint: _,
         } = *self;
         let (bin, args) = match entrypoint.split_once(char::is_whitespace) {
             Some((bin, rest)) => (bin, rest.trim()),
@@ -158,18 +155,6 @@ impl PodProgram {
         stdout.lines().any(|l| l.trim_end() == self.ok_marker)
     }
 
-    /// Lium startup for this image: inject the rental key, then this entrypoint.
-    ///
-    /// Must not mention `/usr/local/bin/prism-pod-entrypoint` — that binary
-    /// lives on Prism recipes pods, not on the harvest pin.
-    #[must_use]
-    pub fn startup_commands(&self) -> String {
-        format!(
-            "/usr/bin/tini -- {} serve USER_PUBLIC_KEY",
-            self.serve_entrypoint
-        )
-    }
-
     /// Fail-closed probe after RUNNING, before the holdout is staged.
     #[must_use]
     pub fn probe_cmd(&self) -> String {
@@ -177,10 +162,10 @@ impl PodProgram {
     }
 }
 
-/// `ghcr.io/cortexlm/relearn-eval` + `sha256:201cc5d2…` → `relearn-eval-201cc5d2`.
+/// `ghcr.io/cortexlm/relearn-eval` + `sha256:201cc5d2…` → `relearn-eval-201cc5d29c21`.
 ///
-/// The digest prefix is required so listed-template reuse cannot pick
-/// `prism-recipe-v10` by name.
+/// Twelve hex chars so listed-template reuse cannot pick
+/// `prism-recipe-v10-digest-fe1197b26e30-tagged` by name.
 #[must_use]
 pub fn harvest_template_name(docker_image: &str, digest: &str) -> String {
     let repo = docker_image
@@ -189,7 +174,7 @@ pub fn harvest_template_name(docker_image: &str, digest: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("eval");
     let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
-    let prefix = hex.get(..8).unwrap_or(hex);
+    let prefix = hex.get(..12).unwrap_or(hex);
     format!("{repo}-{prefix}")
 }
 
@@ -395,7 +380,6 @@ mod tests {
         metrics_marker: "DEMO_METRICS=",
         ok_marker: "DEMO_EVAL_OK",
         score_binary: "/usr/bin/demo-eval",
-        serve_entrypoint: "/usr/bin/demo-eval-entrypoint",
     };
 
     #[test]
@@ -477,26 +461,15 @@ mod tests {
                 "ghcr.io/cortexlm/relearn-eval",
                 "sha256:201cc5d29c219097642d61ce4dd713d482a4d0502e49699a22f0a94da4983aaa"
             ),
-            "relearn-eval-201cc5d2"
+            "relearn-eval-201cc5d29c21"
         );
         assert_eq!(
             harvest_template_name(
                 "ghcr.io/cortexlm/relearn-image-eval",
                 &format!("sha256:{}", "ab".repeat(32))
             ),
-            "relearn-image-eval-abababab"
+            "relearn-image-eval-abababababab"
         );
-    }
-
-    #[test]
-    fn startup_starts_this_image_not_prism_recipes() {
-        let cmd = PROGRAM.startup_commands();
-        assert!(cmd.contains("USER_PUBLIC_KEY"), "{cmd}");
-        assert!(
-            cmd.contains("/usr/bin/tini -- /usr/bin/demo-eval-entrypoint serve"),
-            "{cmd}"
-        );
-        assert!(!cmd.contains("prism-pod-entrypoint"), "{cmd}");
     }
 
     #[test]
