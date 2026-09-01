@@ -27,7 +27,7 @@ mod pin;
 
 pub use episode::{
     contamination, episode_commitment, verify_episodes, AgentEpisode, EpisodeError, ToolKind,
-    MIN_HOLDOUT_EPISODES,
+    ToolSchema, TraceStep, MIN_HOLDOUT_EPISODES,
 };
 pub use pin::{PinError, RelearnAgentPin};
 
@@ -60,6 +60,9 @@ pub const SCORE_MAX: u64 = 1_000_000;
 /// The same checkpoint the `relearn` challenge pins: public, ungated,
 /// Apache-2.0, native VLM. <https://huggingface.co/Qwen/Qwen3.8-27B>
 pub const BASE_MODEL_ID: &str = "Qwen/Qwen3.8-27B";
+
+/// Teacher wire id. Judge-only, and only for the free-text final answer.
+pub const TEACHER_MODEL_ID: &str = "glm-5.3";
 
 /// Public miner / eval-image repo (shared with the other Relearn challenges).
 pub const RELEARN_GIT_URL: &str = "https://github.com/CortexLM/relearn";

@@ -245,10 +245,13 @@ async fn submit_report(
         champion_verdict: None,
         created_at: 0,
     };
-    let row = st.store.insert_report(row, unix_now()).map_err(|e| match e {
-        StoreError::Quota(m) => err(StatusCode::TOO_MANY_REQUESTS, &m),
-        _ => err(StatusCode::INTERNAL_SERVER_ERROR, "store"),
-    })?;
+    let row = st
+        .store
+        .insert_report(row, unix_now())
+        .map_err(|e| match e {
+            StoreError::Quota(m) => err(StatusCode::TOO_MANY_REQUESTS, &m),
+            _ => err(StatusCode::INTERNAL_SERVER_ERROR, "store"),
+        })?;
     Ok((
         StatusCode::CREATED,
         Json(ReportResp {
@@ -627,7 +630,10 @@ mod tests {
         assert_eq!(body["can_score"], false);
         assert_eq!(body["force_sim"], false);
         let paid = body["scoring"]["paid_on"].to_string();
-        assert!(paid.contains("precision") && paid.contains("severity_impact"), "{paid}");
+        assert!(
+            paid.contains("precision") && paid.contains("severity_impact"),
+            "{paid}"
+        );
         assert!(
             body["scoring"]["off_score_gates"]
                 .to_string()

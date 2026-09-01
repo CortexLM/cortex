@@ -72,7 +72,7 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Compose / images | **done** | Default compose + `images.yml` target `relearn-t2i-challenge`. |
 | Generator pin | **done** | `nvidia/Cosmos3-Super-Text2Image` (OpenMDW 1.1, card verified). Flux-family bases refused at pin load, submit, and eval. |
 | Judge pin | **done** | Q-Judger (`Qwen/Qwen-Image-Bench`), card-fixed inference. No alternate judge is accepted. |
-| Eval pin | **v0** | `config/relearn-t2i-pin.toml` — `eval_image_digest` empty until first green challenge CI; live scoring refused until then. |
+| Eval pin | **done** | `config/relearn-t2i-pin.toml` — `eval_image_digest` `sha256:81c40dc6…` + `relearn_git_sha` `54d3537f…` ([`CortexLM/relearn`](https://github.com/CortexLM/relearn) PR #3). Same digest is published as `relearn-image-eval` and `relearn-t2i-eval`. Digest-only, no floating tag. |
 | Holdout | **done** | Commitment in git, records operator-side (`RELEARN_T2I_HOLDOUT_FILE`) and verified at boot. Mismatch → submissions 503. |
 | Live harvest | **done** | `crates/relearn-t2i-harvest` over the shared `harvest-pod` transport; wired from `LIUM_API_KEY` + `LIUM_SSH_PUBLIC_KEY_FILE`, reported as `live_harvest_wired`. |
 | Champion baseline | **done** | `RELEARN_T2I_BASE_CHAMPION_FILE` (verified against the pin) or the wired harvest. A live host never inherits sim numbers; without one every submission 503s. |
@@ -87,7 +87,7 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Binary (`bins/relearn-agent-challenge`) | **done** | HTTP API on `:8099`. |
 | Compose / images | **done** | Default compose + `images.yml` target `relearn-agent-challenge`. |
 | Base pin | **done** | `Qwen/Qwen3.8-27B` — the same checkpoint as `relearn`, refused at pin load if swapped. A second post-train of that base, not a rename of it. |
-| Eval pin | **v0** | `config/relearn-agent-pin.toml` — `eval_image_digest` empty until `CortexLM/relearn` publishes the agent image. Until then a live host answers 503 on every submission, which is the correct output of a challenge that cannot measure anything. |
+| Eval pin | **done** | `config/relearn-agent-pin.toml` — `eval_image_digest` `sha256:4db52b13…` + `relearn_git_sha` `54d3537f…` ([`CortexLM/relearn`](https://github.com/CortexLM/relearn) PR #3). Digest-only, no floating tag. |
 | Episodes | **done** | Commitment in git, episodes operator-side (`RELEARN_AGENT_HOLDOUT_FILE`) and verified at boot. An episode needing no tool call is refused at load. |
 | Live harvest | **done** | `crates/relearn-agent-harvest`; the request names the three required arms so a missing arm is the image's fault, not an ambiguity. |
 | Emission | **1500 bps** | Default share. |
@@ -112,7 +112,7 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Crates (`crates/bounty-*`) | **done** | task (pairing), score, store, http (internal ingest), challenge (backend public **consumer**). |
+| Crates (`crates/bounty-*`) | **done** | task (pairing), score (precision × severity, triage-noise canary off the lattice), store, http (fail-closed ingest + quotas), challenge (backend public **consumer**). |
 | Binary (`bins/bounty-challenge`) | **done** | Internal HTTP on `:8096`. Does **not** serve `/v1/public/*`. |
 | Miner CLI (`bins/cortex-bounty`) | **done** | `pair --hotkey`; Chat inject from `BOUNTY_CHAT_COMMAND`. |
 | Compose / images | **done** | Default compose + `images.yml` target `bounty-challenge`. |
@@ -149,7 +149,7 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 | Component | Status | Notes |
 |-----------|--------|-------|
 | relearn HTTP / promote | **done** | `POST /v1/submissions` freeze → unseal → paired judge; `POST /v1/admin/promote` bearer; never crowns a regression. Refuses to score at all without a digest-pinned eval image (or the `RELEARN_FORCE_SIM` opt-in), and an undeclared `manifest` fails the contamination gate rather than skipping it. |
-| bounty HTTP / adjudicate | **done** | Internal ingest: `POST /v1/pair` (sr25519) + `POST /v1/reports`; `POST /v1/admin/adjudicate`. Scoring **fetches** CortexLM/backend `GET /v1/bounty/public/leaderboard` + `/reports` (`BOUNTY_BACKEND_PUBLIC_URL`; unset → skip). |
+| bounty HTTP / adjudicate | **done** | Internal ingest: `POST /v1/pair` (sr25519) + `POST /v1/reports`; `POST /v1/admin/adjudicate`. Scoring **fetches** CortexLM/backend `GET /v1/bounty/public/leaderboard` + `/reports`. Unset `BOUNTY_BACKEND_PUBLIC_URL` without `BOUNTY_FORCE_SIM=1` → `can_score: false` and reports **503** (fail-closed; never skip). |
 | relearn Lium rails | **done** (fail-closed) | Reuses `prism-lium` client + `SimLiumBackend`. Live rent **and** live scoring refuse without a `sha256:` eval digest; sim only via `RELEARN_FORCE_SIM`; miner BYOK never logged. |
 | design / prism product APIs | retired | Crates remain as unused libraries. |
 | prism orchestration | done | DB-backed claim/execute/review/similarity/score state machine (`prism_submission` + append-only `prism_stage_event`), pre-pod screens (copy gate + static cheat + AST similarity) before Lium rent, sweeper (10h grace + pre-reclaim log harvest; skips live workers), **detached harness + resume-first boot/periodic reconcile** (reattach live pods via sealed BYOK; fail-closed only when unreattachable — `control_plane_restart` / `harness_detached`; `GET /v1/submissions/{id}/logs`), epoch-close batched D24 leaf emission with **WTA** (`prism-emit` outbox: `emitted_epoch` watermark + `prism_emit_cursor` + positive-score carry + `apply_wta`, migration 0012). `PRISM_MAX_CONCURRENT_EVALS` default/prod = 8. |

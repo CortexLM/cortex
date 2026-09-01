@@ -17,14 +17,16 @@ Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 | Thing | Value |
 |-------|-------|
 | Base model | `Qwen/Qwen3.8-27B` — Apache-2.0, public, ungated, native VLM |
-| Unit of work | An **episode**: a goal plus a tool environment, not a prompt |
-| Tools | `inspect`, `search`, `execute`, `lookup` — a closed set the harness implements |
+| Unit of work | A **recorded tool-use trace**: goal, tool schemas, steps (arguments + observations), final answer |
+| Eval image | `ghcr.io/cortexlm/relearn-agent-eval@sha256:4db52b13…` ([`CortexLM/relearn`](https://github.com/CortexLM/relearn) PR #3) |
 
 This is the same checkpoint the [`relearn`](./relearn.md) challenge pins, and it
 is **not** the same challenge. `relearn` scores answers. This one scores
-*episodes*: the model is dropped into an environment with an observation it has
-to look at and tools it has to call, and only a run that got to the answer
-through them counts.
+*traces*: the model is dropped into an environment with tools it has to call,
+and only a run that reached the answer through those tools counts. The scored
+holdout is a set of recorded traces, not a list of prompts. Tool names are
+whatever that episode's environment exposes — the CI catalogue uses
+`inspect` / `lookup`; live catalogues are free-form.
 
 ## How you are scored
 
@@ -39,8 +41,8 @@ model that memorised the answer. So the same eval run also measures:
 |------|----------------------|
 | **Holdout win** | You are compared on a **private** episode set you never see. Winning the published split proves nothing |
 | **Trace replay** | Your emitted tool calls are re-executed against the episode's environment. A call whose arguments are not derivable from the goal or an earlier observation, or a final answer that appears before the observation supporting it, is not a grounded solve. Mean validity below 0.80 fails |
-| **Tool ablation** | The same episodes are re-run with the tools stubbed out. If your success barely moves, the environment was never load-bearing and you are not an agent. The drop must be at least 0.20 |
-| **Observation shuffle** | The same episodes are re-run with another episode's observation. If your success barely moves, you answered the prompt, not the task. The drop must be at least 0.15 |
+| **Tool ablation** | The same episodes are re-run with the tools stubbed out. If your success barely moves, the environment was never load-bearing and you are not an agent. The drop must be at least 0.10 |
+| **Observation shuffle** | The same episodes are re-run with another episode's observation. If your success barely moves, you answered the prompt, not the task. The drop must be at least 0.10 |
 | **Capability canary** | A general instruction-following slice, scored on the same run and **kept out of the number you are paid on**. Regressing more than ~2 points below the champion is a hard zero |
 | **Public–holdout gap** | A published-split score far above your holdout reads as memorization and fails. An empty public split fails too |
 | **No contamination** | Holdout episode ids or observation hashes in your training metadata reject the submission. **Declaring nothing fails too** — an empty manifest leaves the gate with nothing to check |

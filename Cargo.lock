@@ -4722,6 +4722,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.19",
  "toml",
@@ -5016,6 +5017,7 @@ dependencies = [
  "prism-lium-types",
  "relearn-t2i-eval",
  "relearn-t2i-score",
+ "relearn-t2i-store",
  "relearn-t2i-task",
  "serde",
  "serde_json",

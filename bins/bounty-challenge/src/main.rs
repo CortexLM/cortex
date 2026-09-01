@@ -79,7 +79,9 @@ fn run(cli: &Cli) -> Result<(), String> {
             tracing::info!("bounty scoring reads the CortexLM/backend public API");
         }
         ScoringBackend::Sim => {
-            tracing::info!("BOUNTY_FORCE_SIM=1 — locally adjudicated reports only, not a live feed");
+            tracing::info!(
+                "BOUNTY_FORCE_SIM=1 — locally adjudicated reports only, not a live feed"
+            );
         }
         // Reports would be real work this host could never pay for, so ingest
         // refuses rather than banking them.

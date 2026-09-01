@@ -17,7 +17,7 @@
 | `rejected` with `CanaryRegression` | General-bench drop past ε | Off-path MMLU/MMMU canary; not in the visible score |
 | `rejected` with `IgnoresTheImage` | Pixel-shuffle control | Vision family scored the same on shuffled pixels |
 | `503` on submit | Holdout file missing or mismatched | Operator: `RELEARN_HOLDOUT_FILE` must match the pin commitment |
-| `503 eval image digest not pinned` | Host has no `sha256:` eval image and did not opt into sim | Wait for relearn CI to publish a digest. `GET /v1/status` shows `can_score: false` |
+| `503 eval image digest not pinned` | Host has no `sha256:` eval image and did not opt into sim | Image and Agent digests are already pinned (`relearn` PR #3). A 503 here is an operator pin/file mismatch, not a missing publish. `GET /v1/status` shows `can_score: false` |
 | `503 … no in-process sim` | Digest is pinned but the live harvest is not wired on that host | Operator issue; `/v1/status` shows `live_harvest_wired: false`. The control plane refuses to substitute sim numbers |
 | `503 backend: lium …` | The eval pod could not be rented, reached, or torn down | Transient. Retry; the run is not banked and no verdict was recorded |
 | `503 recorded baseline: …` | The eval image returned a document bound to another run, image, or holdout | Operator issue; a mismatched document is never accepted as a score |

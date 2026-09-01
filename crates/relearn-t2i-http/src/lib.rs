@@ -547,6 +547,7 @@ mod tests {
             _frozen: &str,
             artifact: &str,
             holdout: &[FrozenPrompt],
+            _manifest: &relearn_t2i_store::ArtifactManifest,
         ) -> Result<relearn_t2i_score::T2iSliceScores, EvalError> {
             let ids: Vec<u32> = holdout.iter().map(|p| p.id).collect();
             let mut scores = relearn_t2i_eval::sim_slice_scores(pin, &ids, artifact)?;
@@ -650,8 +651,14 @@ mod tests {
 
     #[tokio::test]
     async fn public_prompts_are_published_with_seeds_and_the_holdout_is_not() {
-        let (st, body) =
-            json_req(app("op").await, "GET", "/v1/prompts", serde_json::json!({}), None).await;
+        let (st, body) = json_req(
+            app("op").await,
+            "GET",
+            "/v1/prompts",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
         let cells = body["public"].as_array().expect("cells");
         assert_eq!(cells.len(), 100);
@@ -891,8 +898,14 @@ mod tests {
         )
         .await;
 
-        let (st, status) =
-            json_req(app.clone(), "GET", "/v1/status", serde_json::json!({}), None).await;
+        let (st, status) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(status["judge_backend"], "http_api");
         assert_eq!(status["force_sim"], false);
@@ -924,7 +937,9 @@ mod tests {
         )
         .await;
         assert!(
-            row["verdict"]["failed"].to_string().contains("contamination"),
+            row["verdict"]["failed"]
+                .to_string()
+                .contains("contamination"),
             "{row}"
         );
 

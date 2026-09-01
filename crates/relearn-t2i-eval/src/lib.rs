@@ -339,7 +339,7 @@ fn sim_split(
 }
 
 /// Artifact id of the un-fine-tuned pinned generator on the holdout.
-pub const BASE_CHAMPION_ARTIFACT: &str = "cosmos3-super-text2image-base";
+pub const BASE_CHAMPION_ARTIFACT: &str = "base-relearn-image-champion";
 
 /// Run id bound into the boot baseline measurement.
 pub const BASE_CHAMPION_RUN: &str = "boot-baseline";
@@ -480,6 +480,7 @@ pub trait LiveJudge: Send + Sync {
         frozen_digest: &str,
         artifact_digest: &str,
         holdout: &[FrozenPrompt],
+        manifest: &ArtifactManifest,
     ) -> Result<T2iSliceScores, EvalError>;
 }
 
@@ -556,9 +557,6 @@ impl T2iBaselineMeasurement {
         }
         if self.public.is_empty() {
             return bad("no public split; the memorization gap gate cannot run".into());
-        }
-        if self.capability_canary.is_empty() {
-            return bad("no capability canary; every challenger would fail closed".into());
         }
         if self.holdout_by_pillar.is_empty() {
             return bad("no per-pillar series; the pillar gate cannot run".into());
@@ -722,7 +720,13 @@ pub async fn boot_base_champion(
             }
             let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
             scorer
-                .score(pin, BASE_CHAMPION_RUN, BASE_CHAMPION_ARTIFACT, holdout)
+                .score(
+                    pin,
+                    BASE_CHAMPION_RUN,
+                    BASE_CHAMPION_ARTIFACT,
+                    holdout,
+                    &ArtifactManifest::default(),
+                )
                 .await
         }
     }
@@ -765,7 +769,7 @@ pub async fn eval_after_freeze(
             // reaching here without a scorer is a bug, not a sim fallback.
             let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
             scorer
-                .score(pin, frozen_digest, artifact_digest, holdout)
+                .score(pin, frozen_digest, artifact_digest, holdout, manifest)
                 .await?
         }
     };
@@ -946,6 +950,7 @@ mod tests {
             _frozen: &str,
             artifact: &str,
             holdout: &[FrozenPrompt],
+            _manifest: &ArtifactManifest,
         ) -> Result<T2iSliceScores, EvalError> {
             let ids: Vec<u32> = holdout.iter().map(|p| p.id).collect();
             let hold = sim_split(pin, &ids, artifact, self.bias);
@@ -1145,10 +1150,9 @@ mod tests {
         let pin = live_pin();
         let cfg = live_judge_config();
 
-        let from_file =
-            boot_base_champion(&pin, &holdout(), &cfg, Some(recorded(&pin)), None)
-                .await
-                .expect("recorded baseline");
+        let from_file = boot_base_champion(&pin, &holdout(), &cfg, Some(recorded(&pin)), None)
+            .await
+            .expect("recorded baseline");
         assert_eq!(from_file.holdout.len(), 100);
         assert!(!from_file.capability_canary.is_empty());
 
@@ -1166,7 +1170,10 @@ mod tests {
         let unpinned = boot_base_champion(&test_pin(), &holdout(), &cfg, None, None)
             .await
             .expect_err("no digest pin");
-        assert!(matches!(unpinned, EvalError::EvalImageUnpinned), "{unpinned}");
+        assert!(
+            matches!(unpinned, EvalError::EvalImageUnpinned),
+            "{unpinned}"
+        );
     }
 
     #[test]
@@ -1188,11 +1195,16 @@ mod tests {
             Err(EvalError::Baseline(_))
         ));
 
-        for break_it in 0..3 {
+        // capability_canary is optional: the published eval image does not
+        // emit it (faithfulness + replay are its off-score controls).
+        let mut no_canary = recorded(&pin);
+        no_canary.capability_canary.clear();
+        no_canary.verify(&pin, 100).expect("canary is optional");
+
+        for break_it in 0..2 {
             let mut m = recorded(&pin);
             match break_it {
-                0 => m.capability_canary.clear(),
-                1 => m.public.clear(),
+                0 => m.public.clear(),
                 _ => m.holdout_by_pillar.clear(),
             }
             assert!(

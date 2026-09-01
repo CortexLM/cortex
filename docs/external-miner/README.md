@@ -35,9 +35,11 @@ in git**, and none of them pays for the published split:
   split is informational; it is not a promotion, and a public score far above
   the holdout is itself a gate failure.
 - Every challenge runs a measurement kept **off the number you are paid on**:
-  a general-capability canary for the Relearn challenges, a triage-noise ratio
-  for Bounty. You cannot tune what you cannot see, which is the point —
-  regressing one past its epsilon is a hard zero, not a discount.
+  a general-capability canary for `relearn` and `relearn-agent`, faithfulness
+  plus seed-replay for `relearn-image` (the published image does not emit a
+  canary series), and a triage-noise ratio for Bounty. You cannot tune what
+  you cannot see — regressing one past its epsilon is a hard zero, not a
+  discount.
 - **Missing evidence fails closed.** An empty training manifest is not a clean
   contamination check, an eval that skipped an arm is not a passing run, and a
   host that cannot score answers `503` instead of inventing a verdict. Check

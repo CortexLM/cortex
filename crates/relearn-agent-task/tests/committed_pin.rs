@@ -5,7 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use relearn_agent_task::{RelearnAgentPin, BASE_MODEL_ID, MIN_HOLDOUT_EPISODES};
+use relearn_agent_task::{
+    episode_commitment, AgentEpisode, RelearnAgentPin, BASE_MODEL_ID, MIN_HOLDOUT_EPISODES,
+};
 
 fn pin_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -38,6 +40,7 @@ fn committed_pin_has_an_episode_commitment() {
 fn committed_pin_has_the_locked_base() {
     assert_eq!(pin().base_model, BASE_MODEL_ID);
     assert_eq!(pin().base_model, "Qwen/Qwen3.8-27B");
+    assert_eq!(pin().teacher_model, "glm-5.3");
 }
 
 #[test]
@@ -83,13 +86,6 @@ fn eval_image_is_digest_only() {
         !p.eval_image.contains(':'),
         "the tag belongs in eval_image_digest, not eval_image"
     );
-    if p.eval_image_digest.is_empty() {
-        // No agent eval image published yet: a live host must refuse rather
-        // than score, and the pin must say so.
-        assert!(!p.can_rent());
-        assert!(body().contains("503"), "pin must state the live behaviour");
-        return;
-    }
     let hex = p.eval_image_digest.trim_start_matches("sha256:");
     assert_eq!(hex.len(), 64);
     assert!(hex
@@ -98,10 +94,29 @@ fn eval_image_is_digest_only() {
     assert!(p.can_rent());
 }
 
+/// The committed commitment is the CI synthetic set (ids 41..=160), not a
+/// live catalogue. Rotating production replaces this value.
+#[test]
+fn ci_synthetic_commitment_matches_the_pin() {
+    let episodes: Vec<AgentEpisode> = (41..=160)
+        .map(|id| {
+            AgentEpisode::synthetic(
+                id,
+                format!(
+                    "synthetic agent episode {id}: recover a figure that only appears after \
+                     inspecting the attached record"
+                ),
+            )
+        })
+        .collect();
+    assert_eq!(episodes.len(), 120);
+    assert_eq!(episode_commitment(&episodes), pin().holdout_commitment);
+}
+
 #[test]
 fn pin_does_not_embed_episodes() {
     let text = body();
     assert!(!text.contains("[[episodes"));
-    assert!(!text.contains("observation_hash"));
-    assert!(!text.contains("answer_hash"));
+    assert!(!text.contains("final_answer"));
+    assert!(!text.contains("observation_image_hash"));
 }

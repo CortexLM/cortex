@@ -415,8 +415,9 @@ mod tests {
         assert!(load_recorded_baseline(Some(Path::new("/nonexistent/baseline.json"))).is_err());
     }
 
-    /// The harvest is built on the live judge path, not only under FORCE_SIM.
-    /// Sim scores in-process and must never be handed a Lium harvest.
+    /// The harvest is built on the live judge path, not only under
+    /// `RELEARN_T2I_FORCE_SIM`. Sim scores in-process and must never be handed
+    /// a Lium harvest.
     #[test]
     fn live_harvest_is_wired_on_the_judge_path_not_on_sim() {
         let _guard = LIUM_ENV

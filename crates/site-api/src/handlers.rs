@@ -604,9 +604,10 @@ async fn get_leaderboard(
         // Relearn challenges publish a champion, not a leaderboard: every
         // non-champion row is an explicit NoScore (D24), so a paged list of
         // them would be a page of zeroes.
-        ArenaSlug::Coding | ArenaSlug::Relearn | ArenaSlug::RelearnImage | ArenaSlug::RelearnAgent => {
-            Json(empty_leaderboard_json(page, page_size)).into_response()
-        }
+        ArenaSlug::Coding
+        | ArenaSlug::Relearn
+        | ArenaSlug::RelearnImage
+        | ArenaSlug::RelearnAgent => Json(empty_leaderboard_json(page, page_size)).into_response(),
     }
 }
 
@@ -623,7 +624,10 @@ async fn get_submissions(
     let status_filter = q.status.as_deref();
     let needle = q.q.as_deref();
     match slug {
-        ArenaSlug::Coding | ArenaSlug::Relearn | ArenaSlug::RelearnImage | ArenaSlug::RelearnAgent => {
+        ArenaSlug::Coding
+        | ArenaSlug::Relearn
+        | ArenaSlug::RelearnImage
+        | ArenaSlug::RelearnAgent => {
             Json(page_slice::<crate::Submission>(&[], page, page_size)).into_response()
         }
         ArenaSlug::Design => {

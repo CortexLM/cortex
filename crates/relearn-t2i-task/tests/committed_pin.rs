@@ -105,6 +105,25 @@ fn pin_carries_no_endpoint_or_secret() {
 }
 
 #[test]
+fn eval_image_is_digest_only() {
+    let p = pin();
+    assert!(
+        p.eval_image == "ghcr.io/cortexlm/relearn-t2i-eval"
+            || p.eval_image == "ghcr.io/cortexlm/relearn-image-eval"
+    );
+    assert!(
+        !p.eval_image.contains(':'),
+        "the tag belongs in eval_image_digest, not eval_image"
+    );
+    let hex = p.eval_image_digest.trim_start_matches("sha256:");
+    assert_eq!(hex.len(), 64);
+    assert!(hex
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    assert!(p.can_rent());
+}
+
+#[test]
 fn flux_never_appears_as_a_pinned_base() {
     let body = std::fs::read_to_string(pin_path()).expect("read pin");
     for line in body.lines() {

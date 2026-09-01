@@ -152,11 +152,12 @@ mod tests {
 
     #[test]
     fn episode_file_parses_records() {
-        let body = r#"[{"id":900,"goal":"find the total","environment_id":"dev",
-            "tools":["inspect"],"observation_hash":"aa","answer_hash":"bb","min_tool_calls":2}]"#;
-        let recs = parse_episode_file(body).expect("parse");
+        let rec = AgentEpisode::synthetic(900, "find the total");
+        let body = serde_json::to_string(&vec![rec]).expect("json");
+        let recs = parse_episode_file(&body).expect("parse");
         assert_eq!(recs.len(), 1);
-        assert_eq!(recs[0].tools, vec![ToolKind::Inspect]);
+        assert_eq!(recs[0].tools[0].name, "inspect");
+        assert!(!recs[0].steps.is_empty());
         assert!(parse_episode_file("not json").is_err());
     }
 

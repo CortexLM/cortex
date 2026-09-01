@@ -89,8 +89,7 @@ pub fn live_champion_lattice(store: &MemoryStore, champion_hotkey: Option<&str>)
     };
     if let (Some(p), Some(impact)) = (h.precision_bps(), h.impact_bps()) {
         if h.decided() > 0 && h.net_credit() >= 0 {
-            return lattice_from_precision_and_impact(p, impact)
-                .max(champion_hold_lattice() / 4);
+            return lattice_from_precision_and_impact(p, impact).max(champion_hold_lattice() / 4);
         }
     }
     champion_hold_lattice()

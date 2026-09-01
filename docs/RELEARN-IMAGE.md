@@ -62,7 +62,7 @@ Promotion requires every gate:
 | Seed replay | Three pinned cells regenerated; exact image hash, or embedding drift ≤ `MAX_REPLAY_DRIFT` |
 | Prompt faithfulness | ≥ 8 agentic spot checks (counts, rendered text, spatial relations) agreeing with Q-Judger Alignment ≥ 75 % |
 | Contamination | Any eval prompt id in the submitted training metadata rejects the submission. An **undeclared** manifest is `contamination_evidence_missing`, not a pass: absence of evidence cannot clear the gate |
-| Capability canary | A fixed general-prompt slice is **off** the visible score. Regression past `CANARY_EPSILON` vs the champion is a hard zero |
+| Capability canary | Off the visible score when measured. The published eval image does not emit this series (faithfulness + seed-replay are its off-score controls), so **both-empty is a skip**. One-sided absence, or a drop past `CANARY_EPSILON` when both sides measured it, is a hard zero |
 | Judge N/A rate | Above 25 % the run is void, never a score of zero |
 | Public–holdout gap | Public far above holdout signals memorization; empty public is fail-closed |
 
@@ -126,16 +126,21 @@ Per run the control plane boots `eval_image@<digest>` with the master SSH
 public key on a pod the **miner** pays for, writes `request.json` into
 `/tmp/relearn_image_eval` over stdin (run inputs are never interpolated into
 the remote command), runs `relearn-image-eval score`, reads back
-`RELEARN_IMAGE_METRICS=<document>` and `RELEARN_IMAGE_EVAL_OK`, scrubs the
+`RELEARN_METRICS=<document>` and `RELEARN_EVAL_OK`, scrubs the
 workdir, and **requires verified termination** before accepting any score. An
 orphan pod keeps spending the miner's money, so it outranks whatever the run
 returned.
 
-The request carries the frozen prompt strings and the derived seeds for both
-splits, so a stale bench snapshot on the image cannot silently change what was
-scored. `submission_digest` and `artifact_digest` are checked against what was
-asked, and `eval_image_digest` / `holdout_commitment` against the pin. Any
-mismatch is a 503, not a score.
+The markers are the language challenge's markers. What keeps a digest pinned
+into the wrong challenge from scoring something else is `challenge_id` inside
+the document and the non-overlapping series keys (`p<id>#v<n>` here), not a
+different prefix.
+
+The request carries the frozen prompt strings, the seed lattice (`pin_salt`,
+`variations_per_prompt`), the sampler, and the miner's manifest. The image
+derives cells itself. `submission_digest` and `artifact_digest` are checked
+against what was asked, and `eval_image_digest` / `holdout_commitment` against
+the pin. Any mismatch is a 503, not a score.
 
 **The request carries the holdout prompts.** The pod sees the private split for
 the duration of the run — a generator cannot be scored on prompts it is not

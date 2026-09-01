@@ -23,14 +23,18 @@ use harvest_pod::{EvalPod, PodProgram};
 use prism_lium_types::InstanceSpec;
 use relearn_t2i_eval::{EvalError, LiveJudge, T2iEvalMetrics, T2I_METRICS_SCHEMA};
 use relearn_t2i_score::T2iSliceScores;
-use relearn_t2i_task::{FrozenPrompt, RelearnT2iPin, SeedCell};
+use relearn_t2i_store::ArtifactManifest;
+use relearn_t2i_task::{FrozenPrompt, RelearnT2iPin};
 use serde::{Deserialize, Serialize};
 
 /// Prefix the eval image prints before its metrics document.
-pub const METRICS_MARKER: &str = "RELEARN_IMAGE_METRICS=";
+///
+/// Shared with the other Relearn images on purpose: a harvest client is this
+/// crate with a different document type, not a second marker protocol.
+pub const METRICS_MARKER: &str = "RELEARN_METRICS=";
 
 /// Marker the eval image prints on a completed run.
-pub const OK_MARKER: &str = "RELEARN_IMAGE_EVAL_OK";
+pub const OK_MARKER: &str = "RELEARN_EVAL_OK";
 
 /// Directory the request and metrics sidecar live in, on the pod.
 pub const POD_WORKDIR: &str = "/tmp/relearn_image_eval";
@@ -46,38 +50,20 @@ pub const PROGRAM: PodProgram = PodProgram {
     ok_marker: OK_MARKER,
 };
 
-/// One scored `(prompt_id, variation_index)` cell, with the prompt verbatim.
-///
-/// The pod receives the frozen prompt string rather than an id it would have
-/// to look up, so a stale bench snapshot on the image cannot silently change
-/// what was scored.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RequestCell {
-    /// Bench prompt id.
-    pub prompt_id: u32,
-    /// Variation index within the prompt.
-    pub variation_index: u32,
-    /// Derived generation seed for this cell.
-    pub seed: u64,
-    /// `p{prompt_id}#v{variation_index}`.
-    pub cell_key: String,
-    /// Prompt string, replayed verbatim (never upsampled on the scored split).
-    pub prompt: String,
-}
-
 /// What the eval image is asked to score.
 ///
-/// This carries the **holdout prompts**, so the pod sees the private split for
-/// the duration of the run. That is inherent to scoring on rented hardware: a
-/// generator cannot be scored on prompts it is not shown. The mitigations are
-/// the digest-pinned image, delivery into [`POD_WORKDIR`] rather than any
-/// persisted path, the post-run scrub, and verified termination. Rotate the
-/// holdout (salt + bench snapshot, then re-sign) if a pod is ever suspected of
-/// exfiltration.
+/// This is the published image's request (`docs/IMAGE-EVAL-IMAGE.md` in
+/// [`CortexLM/relearn`](https://github.com/CortexLM/relearn)): frozen prompts
+/// under `holdout` / `public`, the seed lattice, the sampler, and the miner's
+/// manifest. The image derives cells itself from `pin_salt` +
+/// `variations_per_prompt`. Unknown fields are tolerated on the image side;
+/// missing ones are a failed run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarvestRequest {
     /// Must equal [`T2I_METRICS_SCHEMA`].
     pub schema_version: u32,
+    /// `relearn-image` (or the legacy `relearn-t2i` the image still accepts).
+    pub challenge_id: String,
     /// Frozen submission digest. Echoed back in the metrics document.
     pub submission_digest: String,
     /// Artifact to score. Echoed back in the metrics document.
@@ -90,13 +76,18 @@ pub struct HarvestRequest {
     pub eval_image_digest: String,
     /// Commitment the holdout prompts below must hash to.
     pub holdout_commitment: String,
+    /// Salt mixed into every generation seed.
+    pub pin_salt: String,
+    /// Images generated per prompt.
+    pub variations_per_prompt: u32,
+    /// Private split, prompts verbatim.
+    pub holdout: Vec<FrozenPrompt>,
+    /// Published split, prompts verbatim.
+    pub public: Vec<FrozenPrompt>,
     /// Frozen sampler configuration.
     pub sampler: relearn_t2i_task::SamplerConfig,
-    /// Private split cells to score.
-    pub holdout_cells: Vec<RequestCell>,
-    /// Published split cells (informational, but measured on the same run so
-    /// the public–holdout gap gate compares like with like).
-    pub public_cells: Vec<RequestCell>,
+    /// Miner's declared base, license, train ids, and claimed output hashes.
+    pub manifest: ArtifactManifest,
 }
 
 /// Cost and shape guardrails for one harvest pod.
@@ -162,30 +153,6 @@ impl LiumImageHarvest {
     }
 }
 
-/// Expand a split into request cells, prompts verbatim.
-fn cells(pin: &RelearnT2iPin, prompts: &[FrozenPrompt]) -> Vec<RequestCell> {
-    let ids: Vec<u32> = prompts.iter().map(|p| p.id).collect();
-    pin.seed_cells(&ids)
-        .into_iter()
-        .filter_map(
-            |SeedCell {
-                 prompt_id,
-                 variation_index,
-                 seed,
-             }| {
-                let record = prompts.iter().find(|p| p.id == prompt_id)?;
-                Some(RequestCell {
-                    prompt_id,
-                    variation_index,
-                    seed,
-                    cell_key: relearn_t2i_task::cell_key(prompt_id, variation_index),
-                    prompt: record.generator_input().to_owned(),
-                })
-            },
-        )
-        .collect()
-}
-
 /// Pull the metrics document out of the image's stdout.
 pub fn extract_metrics(stdout: &str) -> Result<T2iEvalMetrics, EvalError> {
     let body = PROGRAM.extract_document(stdout).ok_or_else(|| {
@@ -202,6 +169,7 @@ impl LiveJudge for LiumImageHarvest {
         frozen_digest: &str,
         artifact_digest: &str,
         holdout: &[FrozenPrompt],
+        manifest: &ArtifactManifest,
     ) -> Result<T2iSliceScores, EvalError> {
         if !pin.can_rent() {
             return Err(EvalError::EvalImageUnpinned);
@@ -214,19 +182,24 @@ impl LiveJudge for LiumImageHarvest {
                 "no master SSH public key; the pod would be unreachable".into(),
             ));
         }
-        let holdout_cells = cells(pin, holdout);
-        let expected = holdout_cells.len();
+        let expected = holdout
+            .len()
+            .saturating_mul(pin.prompts.variations_per_prompt as usize);
         let request = HarvestRequest {
             schema_version: T2I_METRICS_SCHEMA,
+            challenge_id: relearn_t2i_task::CHALLENGE_ID.to_owned(),
             submission_digest: frozen_digest.to_owned(),
             artifact_digest: artifact_digest.to_owned(),
             base_model: pin.base.clone(),
             judge_model: pin.judge_model.clone(),
             eval_image_digest: pin.eval_image_digest.clone(),
             holdout_commitment: pin.prompts.holdout_commitment.clone(),
+            pin_salt: pin.prompts.pin_salt.clone(),
+            variations_per_prompt: pin.prompts.variations_per_prompt,
+            holdout: holdout.to_vec(),
+            public: pin.frozen_prompts.clone(),
             sampler: pin.sampler.clone(),
-            holdout_cells,
-            public_cells: cells(pin, &pin.frozen_prompts),
+            manifest: manifest.clone(),
         };
         let body = serde_json::to_vec(&request)
             .map_err(|e| EvalError::Backend(format!("encode request: {e}")))?;
@@ -273,7 +246,7 @@ mod tests {
     use std::sync::Mutex;
 
     use relearn_t2i_eval::T2iBaselineMeasurement;
-    use relearn_t2i_task::{frozen_prompt_commitment, L1Dimension, PromptPin};
+    use relearn_t2i_task::{cell_key, frozen_prompt_commitment, L1Dimension, PromptPin};
 
     use super::*;
 
@@ -313,9 +286,11 @@ mod tests {
                 .map(|i| (format!("{prefix}{i}"), v))
                 .collect::<BTreeMap<String, f64>>()
         };
-        let hold: BTreeMap<String, f64> = cells(p, &holdout())
+        let ids: Vec<u32> = holdout().iter().map(|h| h.id).collect();
+        let hold: BTreeMap<String, f64> = p
+            .seed_cells(&ids)
             .into_iter()
-            .map(|c| (c.cell_key, level))
+            .map(|c| (cell_key(c.prompt_id, c.variation_index), level))
             .collect();
         let m = T2iEvalMetrics {
             schema_version: T2I_METRICS_SCHEMA,
@@ -410,7 +385,13 @@ mod tests {
         let p = pin();
         let pod = Arc::new(FakePod::ok(document(&p, "frozen-1", "artifact-1", 0.61)));
         let scores = harvest(Arc::clone(&pod))
-            .score(&p, "frozen-1", "artifact-1", &holdout())
+            .score(
+                &p,
+                "frozen-1",
+                "artifact-1",
+                &holdout(),
+                &ArtifactManifest::default(),
+            )
             .await
             .expect("harvest");
 
@@ -424,30 +405,28 @@ mod tests {
             Some(p.eval_image_digest.as_str())
         );
         assert_eq!(log.booted[0].ssh_key_name.as_deref(), Some(SSH_KEY_NAME));
-        assert_eq!(log.requests[0].holdout_cells.len(), 100);
+        assert_eq!(log.requests[0].holdout.len(), 25);
+        assert_eq!(log.requests[0].challenge_id, "relearn-image");
         assert_eq!(log.requests[0].artifact_digest, "artifact-1");
         assert_eq!(log.shutdowns, vec!["pod-1".to_owned()]);
     }
 
     /// Miners never bring an upsampler to the scored split, so the pod must be
-    /// handed the frozen strings and the derived seeds, not ids to resolve.
+    /// handed the frozen strings and the seed lattice, not ids to resolve.
     #[tokio::test]
-    async fn the_request_carries_frozen_prompts_and_derived_seeds() {
+    async fn the_request_carries_frozen_prompts_and_the_seed_lattice() {
         let p = pin();
         let pod = Arc::new(FakePod::ok(document(&p, "f", "a", 0.5)));
         harvest(Arc::clone(&pod))
-            .score(&p, "f", "a", &holdout())
+            .score(&p, "f", "a", &holdout(), &ArtifactManifest::default())
             .await
             .expect("harvest");
         let log = pod.log();
-        let cell = &log.requests[0].holdout_cells[0];
-        assert!(cell.seed > 0);
-        assert!(cell.prompt.starts_with("prompt 9"));
-        assert_eq!(
-            cell.cell_key,
-            relearn_t2i_task::cell_key(cell.prompt_id, cell.variation_index)
-        );
-        assert!(!log.requests[0].public_cells.is_empty());
+        let req = &log.requests[0];
+        assert_eq!(req.holdout[0].text, "prompt 900");
+        assert!(!req.pin_salt.is_empty());
+        assert_eq!(req.variations_per_prompt, 4);
+        assert!(!req.public.is_empty());
     }
 
     #[tokio::test]
@@ -459,7 +438,13 @@ mod tests {
         };
         let pod = Arc::new(FakePod::ok(String::new()));
         let err = harvest(Arc::clone(&pod))
-            .score(&unpinned, "f", "a", &holdout())
+            .score(
+                &unpinned,
+                "f",
+                "a",
+                &holdout(),
+                &ArtifactManifest::default(),
+            )
             .await
             .expect_err("unpinned");
         assert!(matches!(err, EvalError::EvalImageUnpinned), "{err}");
@@ -470,7 +455,10 @@ mod tests {
             HarvestLimits::default(),
             Vec::new(),
         );
-        assert!(keyless.score(&p, "f", "a", &holdout()).await.is_err());
+        assert!(keyless
+            .score(&p, "f", "a", &holdout(), &ArtifactManifest::default())
+            .await
+            .is_err());
         assert!(pod.log().booted.is_empty());
     }
 
@@ -483,7 +471,7 @@ mod tests {
             log: Mutex::new(Recorder::default()),
         });
         assert!(harvest(Arc::clone(&failed))
-            .score(&p, "f", "a", &holdout())
+            .score(&p, "f", "a", &holdout(), &ArtifactManifest::default())
             .await
             .is_err());
         assert_eq!(failed.log().shutdowns, vec!["pod-1".to_owned()]);
@@ -494,7 +482,7 @@ mod tests {
             log: Mutex::new(Recorder::default()),
         });
         let err = harvest(orphan)
-            .score(&p, "f", "a", &holdout())
+            .score(&p, "f", "a", &holdout(), &ArtifactManifest::default())
             .await
             .expect_err("orphan pod");
         assert!(matches!(err, EvalError::Integrity(_)), "{err}");
@@ -503,10 +491,19 @@ mod tests {
     #[tokio::test]
     async fn a_document_for_another_run_is_refused() {
         let p = pin();
-        for (frozen, artifact) in [("frozen-1", "someone-else"), ("an-earlier-run", "artifact-1")] {
+        for (frozen, artifact) in [
+            ("frozen-1", "someone-else"),
+            ("an-earlier-run", "artifact-1"),
+        ] {
             let pod = Arc::new(FakePod::ok(document(&p, frozen, artifact, 0.9)));
             let err = harvest(pod)
-                .score(&p, "frozen-1", "artifact-1", &holdout())
+                .score(
+                    &p,
+                    "frozen-1",
+                    "artifact-1",
+                    &holdout(),
+                    &ArtifactManifest::default(),
+                )
                 .await
                 .expect_err("run identity mismatch");
             assert!(matches!(err, EvalError::Baseline(_)), "{err}");
@@ -525,7 +522,10 @@ mod tests {
         ] {
             let pod = Arc::new(FakePod::ok(body.clone()));
             assert!(
-                harvest(pod).score(&p, "f", "a", &holdout()).await.is_err(),
+                harvest(pod)
+                    .score(&p, "f", "a", &holdout(), &ArtifactManifest::default())
+                    .await
+                    .is_err(),
                 "body {body:?} must not score"
             );
         }

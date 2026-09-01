@@ -311,7 +311,7 @@ async fn serve(bind: SocketAddr, state: AppState) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use relearn_agent_challenge::{episode_commitment, AgentEpisode, ToolKind};
+    use relearn_agent_challenge::{episode_commitment, AgentEpisode};
 
     use super::*;
 
@@ -319,9 +319,8 @@ mod tests {
     fn documented_force_sim_values_do_not_break_argument_parsing() {
         for value in ["1", "true", "yes", "false", ""] {
             std::env::set_var("RELEARN_AGENT_FORCE_SIM", value);
-            let cli = Cli::try_parse_from(["relearn-agent-challenge"]).unwrap_or_else(|e| {
-                panic!("RELEARN_AGENT_FORCE_SIM={value:?} broke parsing: {e}")
-            });
+            let cli = Cli::try_parse_from(["relearn-agent-challenge"])
+                .unwrap_or_else(|e| panic!("RELEARN_AGENT_FORCE_SIM={value:?} broke parsing: {e}"));
             assert!(!cli.force_sim, "env must not set the flag");
         }
         std::env::set_var("RELEARN_AGENT_FORCE_SIM", "1");
@@ -339,14 +338,11 @@ mod tests {
 
     fn episodes() -> Vec<AgentEpisode> {
         (1..=120)
-            .map(|i| AgentEpisode {
-                id: 800 + i,
-                goal: format!("episode {i} asks for a figure buried in the ledger"),
-                environment_id: "dev-env".into(),
-                tools: vec![ToolKind::Inspect, ToolKind::Search],
-                observation_hash: format!("{i:064x}"),
-                answer_hash: format!("{:064x}", i + 500_000),
-                min_tool_calls: 2,
+            .map(|i| {
+                AgentEpisode::synthetic(
+                    800 + i,
+                    format!("episode {i} asks for a figure buried in the ledger"),
+                )
             })
             .collect()
     }

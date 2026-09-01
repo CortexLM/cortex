@@ -612,10 +612,7 @@ mod tests {
         assert_eq!(lattice_from_precision(0), 0);
         assert_eq!(lattice_from_precision(10_000), SCORE_MAX);
         assert_eq!(lattice_from_precision(5_000), SCORE_MAX / 2);
-        assert_eq!(
-            lattice_from_precision_and_impact(10_000, 10_000),
-            SCORE_MAX
-        );
+        assert_eq!(lattice_from_precision_and_impact(10_000, 10_000), SCORE_MAX);
         assert_eq!(
             lattice_from_precision_and_impact(10_000, 5_000),
             SCORE_MAX / 2

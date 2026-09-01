@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{episode::MIN_HOLDOUT_EPISODES, BASE_MODEL_ID, RELEARN_GIT_URL};
+use crate::{episode::MIN_HOLDOUT_EPISODES, BASE_MODEL_ID, RELEARN_GIT_URL, TEACHER_MODEL_ID};
 
 /// Pinned eval image and episode set for the Agent challenge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,6 +14,9 @@ use crate::{episode::MIN_HOLDOUT_EPISODES, BASE_MODEL_ID, RELEARN_GIT_URL};
 pub struct RelearnAgentPin {
     /// Base checkpoint miners post-train.
     pub base_model: String,
+    /// Teacher wire id. Judge-only; actions are graded against the recording.
+    #[serde(default = "default_teacher")]
+    pub teacher_model: String,
     /// Eval image reference (no floating tag in prod).
     pub eval_image: String,
     /// `sha256:…` digest. Empty until the first green relearn CI image.
@@ -30,10 +33,15 @@ pub struct RelearnAgentPin {
     pub public_ids: Vec<u32>,
 }
 
+fn default_teacher() -> String {
+    TEACHER_MODEL_ID.into()
+}
+
 impl Default for RelearnAgentPin {
     fn default() -> Self {
         Self {
             base_model: BASE_MODEL_ID.into(),
+            teacher_model: TEACHER_MODEL_ID.into(),
             eval_image: "ghcr.io/cortexlm/relearn-agent-eval".into(),
             eval_image_digest: String::new(),
             relearn_git: RELEARN_GIT_URL.into(),
@@ -150,7 +158,10 @@ public_ids = [1, 2, 3]
             holdout_size: 4,
             ..RelearnAgentPin::default()
         };
-        assert!(matches!(thin.validate(), Err(PinError::TooFewEpisodes { .. })));
+        assert!(matches!(
+            thin.validate(),
+            Err(PinError::TooFewEpisodes { .. })
+        ));
     }
 
     #[test]
@@ -161,7 +172,10 @@ public_ids = [1, 2, 3]
             holdout_size: 120,
             ..RelearnAgentPin::default()
         };
-        assert!(matches!(swapped.validate(), Err(PinError::WrongBase { .. })));
+        assert!(matches!(
+            swapped.validate(),
+            Err(PinError::WrongBase { .. })
+        ));
     }
 
     #[test]

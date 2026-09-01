@@ -31,13 +31,15 @@ eval_image = "ghcr.io/cortexlm/relearn-agent-eval"
 # three arms (trace replay, tool ablation, observation shuffle); the
 # control-plane client refuses any document not bound to this digest.
 #
-# Empty until CortexLM/relearn publishes the agent eval image. Until then a
-# live host answers 503 on every submission (GET /v1/status -> can_score,
+# Digest from CortexLM/relearn PR #3 (`54d3537`), published by
+# `publish-challenge-images`. A live host still needs the harvest wired and
+# a champion baseline recorded (GET /v1/status -> can_score,
 # live_harvest_wired, champion_baseline_recorded). Sim is opt-in via
 # RELEARN_AGENT_FORCE_SIM and is never a fallback.
-eval_image_digest = ""
+eval_image_digest = "sha256:4db52b132fe150aa487825f4fb0a7bfe4018b13e16c01355607f6609dd4213f1"
 relearn_git = "https://github.com/CortexLM/relearn"
-relearn_git_sha = ""
+relearn_git_sha = "54d3537f41fd76222acd7da932496c15046b42dd"
+teacher_model = "glm-5.3"
 
 # Public episode ids (miners may train on these). Holdout selection must
 # exclude every one of them. The scored episodes stay off git.
@@ -47,5 +49,7 @@ public_ids = [
   21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
   31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
 ]
-holdout_commitment = "456e9ec51d9f4010d603697eb0fdcf38717963ea0836bbe84ea12690407aef2c"
+# CI / local seal: `AgentEpisode::synthetic` over ids 41..=160 (public 1..=40
+# excluded). Production MUST replace this after rotating the catalogue.
+holdout_commitment = "5b7bd02741082bf73212d96834465f941406277660894b034ae5b4dd608dd0fe"
 holdout_size = 120

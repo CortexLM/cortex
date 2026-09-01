@@ -170,7 +170,11 @@ impl LiumEvalPod {
 impl EvalPod for LiumEvalPod {
     async fn boot(&self, spec: &InstanceSpec) -> Result<String, String> {
         // `provision` applies the cost guardrails and cleans up on failure.
-        let inst = self.client.provision(spec).await.map_err(|e| e.to_string())?;
+        let inst = self
+            .client
+            .provision(spec)
+            .await
+            .map_err(|e| e.to_string())?;
         self.client
             .wait_until_running(&inst.id)
             .await

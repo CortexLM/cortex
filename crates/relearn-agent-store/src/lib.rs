@@ -323,20 +323,15 @@ pub fn holdout_slice_id(epoch: u64, commitment: &str) -> String {
 #[cfg(test)]
 mod tests {
     use prism_competition::ExampleSeries;
-    use relearn_agent_task::{episode_commitment, ToolKind};
+    use relearn_agent_task::episode_commitment;
 
     use super::*;
 
     fn episode(id: u32) -> AgentEpisode {
-        AgentEpisode {
+        AgentEpisode::synthetic(
             id,
-            goal: format!("holdout episode {id} about a warehouse audit trail"),
-            environment_id: "dev-env".into(),
-            tools: vec![ToolKind::Inspect, ToolKind::Search],
-            observation_hash: format!("{id:064x}"),
-            answer_hash: format!("{:064x}", id + 500_000),
-            min_tool_calls: 2,
-        }
+            format!("holdout episode {id} about a warehouse audit trail"),
+        )
     }
 
     fn episodes() -> Vec<AgentEpisode> {
@@ -414,7 +409,10 @@ mod tests {
         st.load_episodes(episodes(), &[], &[]).expect("load");
         let json = serde_json::to_string(&st.holdout_seal().expect("seal")).expect("json");
         for id in 900..=903 {
-            assert!(!json.contains(&format!("{id}")), "seal leaked id {id}: {json}");
+            assert!(
+                !json.contains(&format!("{id}")),
+                "seal leaked id {id}: {json}"
+            );
         }
         assert!(!json.contains("warehouse"));
     }
@@ -443,7 +441,10 @@ mod tests {
         let st = MemoryStore::new();
         st.set_base_champion(slice(0.4)).expect("base");
         let r = st
-            .insert(row(SubmissionState::AwaitingAdmin, Some(eligible_verdict())))
+            .insert(row(
+                SubmissionState::AwaitingAdmin,
+                Some(eligible_verdict()),
+            ))
             .expect("insert");
         st.record_scores(&r.id, slice(0.8)).expect("scores");
         st.promote(&r.id).expect("promote");

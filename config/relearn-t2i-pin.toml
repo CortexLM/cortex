@@ -1,4 +1,5 @@
-# Cortex pin for Relearn T2I (challenge_id = "relearn-t2i").
+# Cortex pin for Relearn Image (challenge_id = "relearn-image").
+# Crate / env / domain tags keep the pre-launch `t2i` spelling.
 #
 # Never put secrets, judge endpoints, or holdout prompt records in this file.
 #
@@ -31,7 +32,7 @@
 # so local and staging runs work out of the box. Production must rotate to a
 # private salt, replace the commitment, and re-sign (config/CEREMONY.md).
 
-challenge_id = "relearn-t2i"
+challenge_id = "relearn-image"
 scoring_version = 1
 
 base = "nvidia/Cosmos3-Super-Text2Image"
@@ -44,9 +45,12 @@ judge_dataset = "Qwen/Qwen-Image-Bench"
 judge_git = "https://github.com/QwenLM/Qwen-Image-Bench"
 
 eval_image = "ghcr.io/cortexlm/relearn-t2i-eval"
-# Empty until the first digest-pinned image ships from CortexLM/relearn CI.
-eval_image_digest = ""
+# Same manifest is also published as ghcr.io/cortexlm/relearn-image-eval.
+# Digest from CortexLM/relearn PR #3 (`54d3537`), published by
+# `publish-challenge-images`. Digest-only, never a floating tag.
+eval_image_digest = "sha256:81c40dc6d5b0f66be6927b69f2129565a0cefd7331bb65b27f5a7792ab87e7ea"
 relearn_git = "https://github.com/CortexLM/relearn"
+relearn_git_sha = "54d3537f41fd76222acd7da932496c15046b42dd"
 
 # Frozen sampler recipe, from the Cosmos3-Super-Text2Image card.
 [sampler]

@@ -11,8 +11,8 @@ This repo pins them in `config/relearn-agent-pin.toml`.
 | `challenge_id` | `relearn-agent` |
 | `challenge_scoring_version` | `1` |
 | Base model | `Qwen/Qwen3.8-27B` — the **same** checkpoint [`relearn`](./RELEARN.md) pins |
-| Unit of work | An **episode**: goal + tool environment + observation, not a prompt |
-| Tools | `inspect`, `search`, `execute`, `lookup` (closed set) |
+| Unit of work | A **recorded tool-use trace**: goal, tool schemas, steps, final answer |
+| Tools | Free-form schemas on the wire; CI synthetic catalogue uses `inspect` / `lookup` |
 | Port | `8099` (local host `28099`) |
 | Emission | `1500` bps |
 
@@ -97,10 +97,9 @@ one of these holds:
 arms. A refusal is not a submission: nothing is persisted unless scoring
 produced a verdict, so a 503 leaves no row behind.
 
-`eval_image_digest` is empty until `CortexLM/relearn` publishes the agent eval
-image, so a live host refuses every submission today. That is the intended
-state, not an outage: burn is the correct output of a challenge that cannot
-measure anything.
+`eval_image_digest` is pinned (`CortexLM/relearn` PR #3). A live host still
+needs the harvest wired and a champion baseline recorded; without those every
+submission answers 503. That is the intended fail-closed state, not an outage.
 
 ## Champion baseline (required on a live host)
 
@@ -124,14 +123,19 @@ Per run the control plane boots `eval_image@<digest>` with the master SSH
 public key on a pod the **miner** pays for, writes `request.json` into
 `/tmp/relearn_agent_eval` over stdin (run inputs are never interpolated into
 the remote command), runs `relearn-agent-eval score`, reads back
-`RELEARN_AGENT_METRICS=<document>` and `RELEARN_AGENT_EVAL_OK`, scrubs the
+`RELEARN_METRICS=<document>` and `RELEARN_EVAL_OK`, scrubs the
 workdir, and **requires verified termination** before accepting any score.
 
-The request names the arms the image must run, so a missing arm is the image's
-fault rather than an ambiguity the control plane has to guess about.
-`submission_digest` and `artifact_digest` are checked against what was asked,
-and `eval_image_digest` / `holdout_commitment` against the pin. Any mismatch is
-a 503, not a score.
+The markers are the language challenge's markers. What keeps the challenges
+apart is `challenge_id` in the document and the non-overlapping series keys
+(`t<id>` / `s<id>` / `o<id>` here).
+
+The request carries recorded tool-use traces (goal, tool schemas, every step's
+arguments and observation, final answer) under `holdout`. A model that answers
+the prompt without using the tools fails the withheld-observation and shuffle
+controls. `submission_digest` and `artifact_digest` are checked against what
+was asked, and `eval_image_digest` / `holdout_commitment` against the pin. Any
+mismatch is a 503, not a score.
 
 **The request carries the episodes.** The pod sees the private set for the
 duration of the run — an agent cannot be scored in an environment it is not

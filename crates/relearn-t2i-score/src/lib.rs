@@ -452,6 +452,10 @@ pub fn judge_challenger(champion: &T2iSliceScores, challenger: &T2iSliceScores) 
         T2iSliceScores::mean(&champion.capability_canary),
         T2iSliceScores::mean(&challenger.capability_canary),
     ) {
+        // The published eval image does not emit this series; faithfulness
+        // and seed-replay are its off-score controls. Skip when neither side
+        // measured it. One-sided absence is still fail-closed.
+        (None, None) => {}
         (None, _) | (_, None) => failed.push(GateFail::CapabilityCanaryEvidenceMissing),
         (Some(champ_c), Some(chal_c)) => {
             let drop = champ_c - chal_c;
@@ -771,7 +775,9 @@ mod tests {
         let mut chal = slice(0.80);
         chal.capability_canary = ExampleSeries::default();
         let v = judge_challenger(&slice(0.50), &chal);
-        assert!(v.failed.contains(&GateFail::CapabilityCanaryEvidenceMissing));
+        assert!(v
+            .failed
+            .contains(&GateFail::CapabilityCanaryEvidenceMissing));
         assert_eq!(v.lattice, 0);
     }
 

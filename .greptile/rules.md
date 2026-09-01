@@ -1,19 +1,20 @@
 # Cortex review rules
 
 This is a Bittensor subnet control plane (`CortexLM/cortex`), not an app-platform
-or SOC2 checklist. Challenge ids in-tree: `relearn`, `relearn-t2i`,
-`relearn-mm`, `bounty`. The **live** path is Relearn LLM (`relearn`). T2I,
-encoder-attach Multimodal, and Bounty stay off but their contracts still apply
-when those files are touched.
+or SOC2 checklist. Four **live** challenge ids: `relearn` (4000 bps),
+`relearn-image` (1500; crates keep the `relearn-t2i-*` spelling),
+`relearn-agent` (1500), `bounty` (3000). `relearn-mm` is **off** (no trust-root
+row, `mm` compose profile only).
 
 - **Fail-closed.** Missing holdout file, commitment mismatch, unpinned eval
   digest, or unset teacher → refuse / 503. Never score the public split as a
   substitute. `*_FORCE_SIM` is CI/local only and must be the *only* way to
   reach a sim scorer: sim is never a fallback for a missing live eval, and the
   resolved backend belongs on `/v1/status` and on the submit row.
-- **Absence of evidence is a failed gate.** Empty public split, missing general
-  canary, or an undeclared miner `manifest` must fail the corresponding gate
-  rather than skip it.
+- **Absence of evidence is a failed gate.** Empty public split or an undeclared
+  miner `manifest` must fail the corresponding gate rather than skip it. A
+  one-sided canary fails; both-empty is a skip only on `relearn-image`, whose
+  published eval image does not emit that series.
 - **A refusal is not a submission.** Fail-closed paths must not persist a row,
   charge a miner, or rent a pod before scoring starts. Report the root cause
   (unpinned digest) rather than a downstream symptom (missing baseline).

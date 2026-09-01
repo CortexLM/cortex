@@ -9,6 +9,8 @@ you cannot see. Long guide, eval image, and harness:
 [CortexLM/relearn](https://github.com/CortexLM/relearn).
 Cortex pin: [`config/relearn-t2i-pin.toml`](../../config/relearn-t2i-pin.toml)
 (the file keeps the pre-launch `t2i` spelling; the challenge id is `relearn-image`).
+Eval image: `ghcr.io/cortexlm/relearn-t2i-eval@sha256:81c40dc6…` (same
+manifest as `relearn-image-eval`; [`CortexLM/relearn`](https://github.com/CortexLM/relearn) PR #3).
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 
@@ -65,7 +67,7 @@ Promotion needs all of this, not just a higher total:
 | **Seed replay** | Three pinned `(prompt_id, seed)` cells are regenerated and compared with the outputs you claimed. Non-determinism or different weights than the ones you shipped fails |
 | **Prompt faithfulness** | Small agentic checks (count the objects, read the rendered text, check the spatial relation) must agree with Q-Judger's Alignment pillar |
 | **No contamination** | If an eval prompt id shows up in your training metadata, the submission is rejected. **Declaring nothing fails too**: an empty manifest leaves the gate with nothing to check, which is a failure, not a clean bill of health |
-| **Capability canary** | A fixed general-prompt slice, scored on the same run and **kept out of the number you are paid on**. Dropping more than ~2 paper points below the champion on it is a hard zero — buying holdout points by wrecking everything the generator could already do is not an improvement |
+| **Capability canary** | Off the paid number when the eval image emits it. The published image does not; faithfulness and seed-replay are its off-score controls. If a later image measures the slice on **both** sides, dropping more than ~2 paper points below the champion is a hard zero. One-sided absence still fails closed |
 | **Public–holdout gap** | A public score far above your holdout reads as memorization and fails. An empty public split fails too |
 | **Judge N/A rate** | If Q-Judger declines most items, the run is void |
 

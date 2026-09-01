@@ -304,7 +304,9 @@ fn admin_ok(headers: &HeaderMap, hashes: &[String]) -> bool {
     }
     let mut h = Sha256::new();
     h.update(token.as_bytes());
-    hashes.iter().any(|x| x == &hex::encode(h.clone().finalize()))
+    hashes
+        .iter()
+        .any(|x| x == &hex::encode(h.clone().finalize()))
 }
 
 fn err(code: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
@@ -344,7 +346,7 @@ mod tests {
         BASE_CHAMPION_SKILL,
     };
     use relearn_agent_score::AgentSliceScores;
-    use relearn_agent_task::{episode_commitment, AgentEpisode, ToolKind};
+    use relearn_agent_task::{episode_commitment, AgentEpisode};
     use tower::ServiceExt;
 
     use super::*;
@@ -357,14 +359,11 @@ mod tests {
 
     fn episodes() -> Vec<AgentEpisode> {
         (1..=120)
-            .map(|i| AgentEpisode {
-                id: 800 + i,
-                goal: format!("episode {i} asks for a figure buried in the ledger"),
-                environment_id: "dev-env".into(),
-                tools: vec![ToolKind::Inspect, ToolKind::Lookup],
-                observation_hash: format!("{i:064x}"),
-                answer_hash: format!("{:064x}", i + 500_000),
-                min_tool_calls: 2,
+            .map(|i| {
+                AgentEpisode::synthetic(
+                    800 + i,
+                    format!("episode {i} asks for a figure buried in the ledger"),
+                )
             })
             .collect()
     }
@@ -444,14 +443,9 @@ mod tests {
                 .load_episodes(episodes(), &[], &p.public_ids)
                 .expect("load");
             if baseline {
-                if let Ok(scores) = boot_base_champion(
-                    &p,
-                    &episodes(),
-                    backend,
-                    recorded(&p),
-                    live.as_deref(),
-                )
-                .await
+                if let Ok(scores) =
+                    boot_base_champion(&p, &episodes(), backend, recorded(&p), live.as_deref())
+                        .await
                 {
                     store.set_base_champion(scores).expect("base");
                 }
@@ -488,7 +482,7 @@ mod tests {
         (status, v)
     }
 
-    fn submit_body(label: &str, manifest: serde_json::Value) -> serde_json::Value {
+    fn submit_body(label: &str, manifest: &serde_json::Value) -> serde_json::Value {
         serde_json::json!({
             "miner_hotkey": digest("miner-hotkey"),
             "artifact_digest": digest(label),
@@ -510,7 +504,7 @@ mod tests {
             app.clone(),
             "POST",
             "/v1/submissions",
-            submit_body("miner-strong-agent", declared_manifest()),
+            submit_body("miner-strong-agent", &declared_manifest()),
             None,
         )
         .await;
@@ -575,7 +569,7 @@ mod tests {
             app_full("op", EvalBackend::Sim, "", None, false, false).await,
             "POST",
             "/v1/submissions",
-            submit_body("x", declared_manifest()),
+            submit_body("x", &declared_manifest()),
             None,
         )
         .await;
@@ -588,7 +582,7 @@ mod tests {
             app_full("op", EvalBackend::Lium, "", None, true, false).await,
             "POST",
             "/v1/submissions",
-            submit_body("x", declared_manifest()),
+            submit_body("x", &declared_manifest()),
             None,
         )
         .await;
@@ -612,7 +606,7 @@ mod tests {
             .await,
             "POST",
             "/v1/submissions",
-            submit_body("x", declared_manifest()),
+            submit_body("x", &declared_manifest()),
             None,
         )
         .await;
@@ -648,7 +642,7 @@ mod tests {
                     app.clone(),
                     "POST",
                     "/v1/submissions",
-                    submit_body("spam", declared_manifest()),
+                    submit_body("spam", &declared_manifest()),
                     None,
                 )
                 .await;
@@ -681,8 +675,14 @@ mod tests {
         )
         .await;
 
-        let (st, status) =
-            json_req(app.clone(), "GET", "/v1/status", serde_json::json!({}), None).await;
+        let (st, status) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(status["eval_backend"], "lium");
         assert_eq!(status["force_sim"], false);
@@ -698,7 +698,7 @@ mod tests {
             "/v1/submissions",
             submit_body(
                 "contaminated",
-                serde_json::json!({ "train_episode_ids": [hold_id] }),
+                &serde_json::json!({ "train_episode_ids": [hold_id] }),
             ),
             None,
         )
@@ -716,7 +716,9 @@ mod tests {
         )
         .await;
         assert!(
-            row["verdict"]["failed"].to_string().contains("contamination"),
+            row["verdict"]["failed"]
+                .to_string()
+                .contains("contamination"),
             "{row}"
         );
 
@@ -725,7 +727,7 @@ mod tests {
             app.clone(),
             "POST",
             "/v1/submissions",
-            submit_body("clean-live-agent", declared_manifest()),
+            submit_body("clean-live-agent", &declared_manifest()),
             None,
         )
         .await;
@@ -759,7 +761,7 @@ mod tests {
                 app.clone(),
                 "POST",
                 "/v1/submissions",
-                submit_body("miner-strong-agent", manifest.clone()),
+                submit_body("miner-strong-agent", &manifest),
                 None,
             )
             .await;

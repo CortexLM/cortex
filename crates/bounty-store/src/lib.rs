@@ -539,8 +539,11 @@ mod tests {
             .insert_report(report(&hk, "second", "body"), 1_001)
             .expect_err("too fast");
         assert!(matches!(err, StoreError::Quota(_)), "{err}");
-        s.insert_report(report(&hk, "second", "body"), 1_000 + MIN_REPORT_INTERVAL_SECS)
-            .expect("after the window");
+        s.insert_report(
+            report(&hk, "second", "body"),
+            1_000 + MIN_REPORT_INTERVAL_SECS,
+        )
+        .expect("after the window");
     }
 
     /// A valid verdict with no severity is recorded as unpriced rather than

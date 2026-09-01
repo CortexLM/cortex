@@ -41,7 +41,7 @@ Local dummy for development: decrypt with age:
 | `relearn-t2i/holdout.json` | relearn-t2i-challenge | Frozen holdout prompt records. **Never commit.** Verified at boot against `holdout_commitment` in `config/relearn-t2i-pin.toml`; a mismatch means submissions answer **503** rather than falling back to the public split. Mode **0400**, uid **65532** |
 | `relearn-t2i/admin_tokens` | relearn-t2i-challenge | One operator bearer per line for `POST /v1/admin/promote` |
 | `relearn-t2i/base_champion.json` | relearn-t2i-challenge | Base checkpoint measured by the pinned eval image. **Never commit.** A live host answers **503** on every submission until it exists, because every gate compares against it. Mode **0400**, uid **65532** |
-| `relearn-agent/episodes.json` | relearn-agent-challenge | Frozen holdout episodes (goal + tools + observation hash). **Never commit.** Verified at boot against `holdout_commitment` in `config/relearn-agent-pin.toml`. Mode **0400**, uid **65532** |
+| `relearn-agent/episodes.json` | relearn-agent-challenge | Frozen holdout **recorded traces** (goal, tool schemas, steps with arguments/observations, final answer). **Never commit.** Verified at boot against `holdout_commitment` in `config/relearn-agent-pin.toml`. Mode **0400**, uid **65532** |
 | `relearn-agent/base_champion.json` | relearn-agent-challenge | Base checkpoint measured by the pinned agent eval image, including the trace-replay and ablation arms. **Never commit.** Mode **0400**, uid **65532** |
 | `relearn-agent/admin_tokens` | relearn-agent-challenge | One operator bearer per line for `POST /v1/admin/promote` |
 

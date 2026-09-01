@@ -1,9 +1,11 @@
 //! Frozen Relearn Agent episodes and the pin commitment.
 //!
-//! Git carries only `holdout_commitment` + `holdout_size`. The episodes live
-//! in an operator file (`RELEARN_AGENT_HOLDOUT_FILE`) and are checked at boot.
-//! A mismatch is fail-closed: submissions answer 503 rather than scoring a
-//! reconstructable set or falling back to the published split.
+//! An episode is a **recorded tool-use trace**, not a prompt. The published
+//! eval image ([`CortexLM/relearn`](https://github.com/CortexLM/relearn)
+//! PR #3) replays each step on the recorded prefix and refuses a request
+//! whose traces do not hash to `holdout_commitment`. Git carries only that
+//! commitment + `holdout_size`; the traces live in an operator file
+//! (`RELEARN_AGENT_HOLDOUT_FILE`) and are checked at boot.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -20,11 +22,8 @@ pub const MIN_HOLDOUT_EPISODES: usize = 100;
 /// holdout episodes.
 pub const NGRAM_JACCARD_MAX: f64 = 0.80;
 
-/// A tool the episode's environment exposes.
-///
-/// The set is closed on purpose. An episode that needs a tool the harness does
-/// not implement is not replayable, and a trace that calls a tool outside this
-/// set is not grounded.
+/// A tool the synthetic / CI harness names. Live catalogues use free-form
+/// [`ToolSchema`] names; this closed set is only a convenience for fixtures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolKind {
@@ -39,7 +38,7 @@ pub enum ToolKind {
 }
 
 impl ToolKind {
-    /// Every tool the harness implements.
+    /// Every named tool the synthetic harness uses.
     pub const ALL: [Self; 4] = [Self::Inspect, Self::Search, Self::Execute, Self::Lookup];
 
     /// Wire name.
@@ -54,31 +53,80 @@ impl ToolKind {
     }
 }
 
-/// One frozen episode.
+/// One tool the episode made available, as the eval image sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolSchema {
+    /// Tool name the model is shown.
+    pub name: String,
+    /// Human description. Not part of the commitment.
+    #[serde(default)]
+    pub description: String,
+    /// JSON-schema-ish parameter object. Not part of the commitment.
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+}
+
+impl ToolSchema {
+    /// Named tool with an empty schema.
+    #[must_use]
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        }
+    }
+}
+
+/// One recorded turn: the action that was taken, and what came back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceStep {
+    /// Tool that was called.
+    pub tool: String,
+    /// Arguments, as an object. Canonicalized before hashing.
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+    /// What the tool returned. Pixels stay out: those are named by hash.
+    #[serde(default)]
+    pub observation: String,
+    /// SHA-256 hex of a screenshot observation, when the step has one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub observation_image_hash: String,
+}
+
+impl TraceStep {
+    /// Arguments encoded the way the eval image commits them.
+    ///
+    /// Sorted keys, no whitespace — so the commitment does not depend on how
+    /// the operator's exporter happened to serialize the same object.
+    #[must_use]
+    pub fn arguments_json(&self) -> String {
+        canonical_json(&self.arguments)
+    }
+}
+
+/// One frozen episode: a recorded tool-use trace.
 ///
-/// The observation payload itself stays out of git and out of the commitment
-/// body; only its hash is committed, exactly as the `relearn` holdout commits
-/// image hashes.
+/// This is the harvest request's `holdout[]` item. The eval image refuses a
+/// request whose traces do not hash to the pin's `holdout_commitment`, so the
+/// preimage here **is** the image's preimage — goal, dataset, tools, every
+/// step's tool / arguments / observation / image hash, and the final answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentEpisode {
     /// Stable episode id. Never published for the holdout split.
     pub id: u32,
     /// What the agent is asked to accomplish.
     pub goal: String,
-    /// Source environment id (fingerprint only).
-    #[serde(default)]
-    pub environment_id: String,
+    /// Source catalogue / environment id (fingerprint only).
+    #[serde(default, alias = "environment_id")]
+    pub dataset_id: String,
     /// Tools this episode's environment exposes.
-    pub tools: Vec<ToolKind>,
-    /// SHA-256 hex of the observation payload handed to the agent.
-    pub observation_hash: String,
-    /// SHA-256 hex of the reference answer.
-    pub answer_hash: String,
-    /// Tool calls the shortest grounded solution needs.
-    ///
-    /// An episode solvable with zero tool calls cannot separate an agent from
-    /// a model that memorised the answer, so it is refused at load.
-    pub min_tool_calls: u32,
+    pub tools: Vec<ToolSchema>,
+    /// Recorded steps, in order. An episode with none cannot be replayed.
+    pub steps: Vec<TraceStep>,
+    /// Reference final answer. Graded by the teacher; actions are not.
+    #[serde(default)]
+    pub final_answer: String,
 }
 
 impl AgentEpisode {
@@ -88,12 +136,78 @@ impl AgentEpisode {
         format!("episode:{}", self.id)
     }
 
-    /// Observation fingerprint, when the hash is well-formed.
+    /// Tool calls the recorded solution made. Zero is refused at load.
+    #[must_use]
+    pub fn min_tool_calls(&self) -> u32 {
+        u32::try_from(self.steps.len()).unwrap_or(u32::MAX)
+    }
+
+    /// SHA-256 hex of the first image observation, else of the first text one.
+    #[must_use]
+    pub fn observation_hash(&self) -> String {
+        if let Some(img) = self
+            .steps
+            .iter()
+            .map(|s| s.observation_image_hash.trim())
+            .find(|h| !h.is_empty())
+        {
+            return img.to_ascii_lowercase();
+        }
+        let mut h = Sha256::new();
+        for step in &self.steps {
+            h.update(step.observation.as_bytes());
+            h.update([0xff]);
+        }
+        hex::encode(h.finalize())
+    }
+
+    /// Observation fingerprint, when one exists.
     #[must_use]
     pub fn observation_fingerprint(&self) -> Option<String> {
-        let h = self.observation_hash.trim().to_ascii_lowercase();
-        (h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()))
-            .then(|| format!("observation:{h}"))
+        let hash = self.observation_hash();
+        (hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| format!("observation:{hash}"))
+    }
+
+    /// A minimal valid recorded episode, for CI and local catalogues.
+    ///
+    /// Production must use a private catalogue. This constructor exists so
+    /// every test fixture speaks the same wire the eval image accepts.
+    #[must_use]
+    pub fn synthetic(id: u32, goal: impl Into<String>) -> Self {
+        let figure = 1_000 + id;
+        Self {
+            id,
+            goal: goal.into(),
+            dataset_id: "synthetic-dev".into(),
+            tools: vec![
+                ToolSchema {
+                    name: "inspect".into(),
+                    description: "Read a region of the attached record".into(),
+                    parameters: serde_json::json!({"path": {"type": "string"}}),
+                },
+                ToolSchema {
+                    name: "lookup".into(),
+                    description: "Fetch a row from the offline table".into(),
+                    parameters: serde_json::json!({"key": {"type": "string"}}),
+                },
+            ],
+            steps: vec![
+                TraceStep {
+                    tool: "inspect".into(),
+                    arguments: serde_json::json!({"path": format!("record/{id}")}),
+                    observation: format!("{{\"figure\":{figure}}}"),
+                    observation_image_hash: String::new(),
+                },
+                TraceStep {
+                    tool: "lookup".into(),
+                    arguments: serde_json::json!({"key": format!("k-{id}")}),
+                    observation: format!("{{\"value\":{figure}}}"),
+                    observation_image_hash: String::new(),
+                },
+            ],
+            final_answer: format!("The figure is {figure}."),
+        }
     }
 }
 
@@ -112,11 +226,14 @@ pub enum EpisodeError {
     /// An episode exposes no tools, so nothing distinguishes it from a prompt.
     #[error("episode {0} exposes no tools")]
     NoTools(u32),
-    /// An episode is solvable without touching the environment.
-    #[error("episode {0} needs no tool call; it cannot detect a memorised answer")]
+    /// An episode has no recorded steps, so nothing can be replayed.
+    #[error("episode {0} has no recorded steps; it cannot detect a memorised answer")]
     NoToolCallRequired(u32),
-    /// An episode is missing a real observation or answer hash.
-    #[error("episode {0} has a malformed {1} hash")]
+    /// A recorded step names a tool the episode does not expose.
+    #[error("episode {0} records a call to {1:?}, which is not in its schema")]
+    UnknownTool(u32, String),
+    /// An image observation hash is not 64 hex chars.
+    #[error("episode {0} has a malformed observation_image_hash")]
     MalformedHash(u32, &'static str),
     /// The supplied set does not match the committed digest.
     #[error("episode commitment mismatch (expected {expected}, got {got})")]
@@ -142,10 +259,48 @@ pub enum EpisodeError {
     NearDuplicate(String),
 }
 
-/// Commitment over an episode set.
+/// Canonical JSON matching the eval image (`separators=(",", ":")`, sorted keys).
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".into(),
+        serde_json::Value::Bool(true) => "true".into(),
+        serde_json::Value::Bool(false) => "false".into(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into()),
+        serde_json::Value::Array(items) => {
+            let parts: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", parts.join(","))
+        }
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let parts: Vec<String> = keys
+                .into_iter()
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap_or_else(|_| "\"\"".into()),
+                        canonical_json(&map[k])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+    }
+}
+
+fn field(h: &mut Sha256, value: &str) {
+    let body = value.as_bytes();
+    h.update(u64::try_from(body.len()).unwrap_or(u64::MAX).to_le_bytes());
+    h.update(body);
+}
+
+/// Commitment over a recorded-trace set.
 ///
-/// Domain-separated, id-sorted, and length-prefixed so neither reordering nor
-/// splicing two goals together can collide.
+/// Byte-for-byte the eval image's `trace_commitment`: domain-separated,
+/// id-sorted, length-prefixed, covering every field that decides what counts
+/// as a correct action. Editing an observation, a recorded argument, or the
+/// step order would otherwise be an editable knob on a "verified" holdout.
 #[must_use]
 pub fn episode_commitment(episodes: &[AgentEpisode]) -> String {
     let mut sorted: Vec<&AgentEpisode> = episodes.iter().collect();
@@ -160,23 +315,33 @@ pub fn episode_commitment(episodes: &[AgentEpisode]) -> String {
     );
     for e in sorted {
         h.update(e.id.to_le_bytes());
-        h.update(e.min_tool_calls.to_le_bytes());
-        let mut tools: Vec<&str> = e.tools.iter().map(|t| t.as_str()).collect();
-        tools.sort_unstable();
-        tools.dedup();
-        h.update(u64::try_from(tools.len()).unwrap_or(u64::MAX).to_le_bytes());
-        for t in tools {
-            h.update(t.as_bytes());
-            h.update([0xff]);
+        for value in [&e.goal, &e.dataset_id, &e.final_answer] {
+            field(&mut h, value);
         }
-        for field in [
-            e.goal.as_str(),
-            e.environment_id.as_str(),
-            e.observation_hash.trim(),
-            e.answer_hash.trim(),
-        ] {
-            h.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
-            h.update(field.as_bytes());
+        h.update(
+            u64::try_from(e.tools.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        for tool in &e.tools {
+            field(&mut h, &tool.name);
+        }
+        h.update(
+            u64::try_from(e.steps.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        for step in &e.steps {
+            let args = step.arguments_json();
+            let img = step.observation_image_hash.trim().to_ascii_lowercase();
+            for value in [
+                step.tool.as_str(),
+                args.as_str(),
+                step.observation.as_str(),
+                img.as_str(),
+            ] {
+                field(&mut h, value);
+            }
         }
     }
     hex::encode(h.finalize())
@@ -199,14 +364,18 @@ fn validate(episodes: &[AgentEpisode]) -> Result<(), EpisodeError> {
         if e.tools.is_empty() {
             return Err(EpisodeError::NoTools(e.id));
         }
-        if e.min_tool_calls == 0 {
+        if e.steps.is_empty() {
             return Err(EpisodeError::NoToolCallRequired(e.id));
         }
-        if !hex64(&e.observation_hash) {
-            return Err(EpisodeError::MalformedHash(e.id, "observation"));
-        }
-        if !hex64(&e.answer_hash) {
-            return Err(EpisodeError::MalformedHash(e.id, "answer"));
+        let names: BTreeSet<&str> = e.tools.iter().map(|t| t.name.as_str()).collect();
+        for step in &e.steps {
+            if !names.contains(step.tool.as_str()) {
+                return Err(EpisodeError::UnknownTool(e.id, step.tool.clone()));
+            }
+            let img = step.observation_image_hash.trim();
+            if !img.is_empty() && !hex64(img) {
+                return Err(EpisodeError::MalformedHash(e.id, "observation_image"));
+            }
         }
         if !seen.insert(e.id) {
             return Err(EpisodeError::DuplicateId(e.id));
@@ -241,10 +410,7 @@ fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
         return 0.0;
     }
     #[allow(clippy::cast_precision_loss)]
-    let (inter, union) = (
-        a.intersection(b).count() as f64,
-        a.union(b).count() as f64,
-    );
+    let (inter, union) = (a.intersection(b).count() as f64, a.union(b).count() as f64);
     if union <= 0.0 {
         0.0
     } else {
@@ -360,21 +526,16 @@ mod tests {
     use super::*;
 
     fn episode(id: u32, goal: &str) -> AgentEpisode {
-        AgentEpisode {
-            id,
-            goal: goal.into(),
-            environment_id: "dev-env".into(),
-            tools: vec![ToolKind::Inspect, ToolKind::Lookup],
-            observation_hash: format!("{id:064x}"),
-            answer_hash: format!("{:064x}", id + 500_000),
-            min_tool_calls: 2,
-        }
+        AgentEpisode::synthetic(id, goal)
     }
 
     fn holdout() -> Vec<AgentEpisode> {
         vec![
             episode(900, "find the invoice total hidden in the scanned ledger"),
-            episode(901, "reconcile the shipment rows against the manifest table"),
+            episode(
+                901,
+                "reconcile the shipment rows against the manifest table",
+            ),
         ]
     }
 
@@ -394,14 +555,19 @@ mod tests {
     fn commitment_tracks_the_environment_not_just_the_goal() {
         let base = episode_commitment(&holdout());
         let mut tools = holdout();
-        tools[0].tools = vec![ToolKind::Search];
+        tools[0].tools = vec![ToolSchema::named("search")];
+        tools[0].steps[0].tool = "search".into();
+        tools[0].steps[1].tool = "search".into();
         assert_ne!(base, episode_commitment(&tools));
         let mut steps = holdout();
-        steps[0].min_tool_calls = 5;
+        steps[0].steps.pop();
         assert_ne!(base, episode_commitment(&steps));
         let mut obs = holdout();
-        obs[0].observation_hash = "ab".repeat(32);
+        obs[0].steps[0].observation = "edited".into();
         assert_ne!(base, episode_commitment(&obs));
+        let mut args = holdout();
+        args[0].steps[0].arguments = serde_json::json!({"path": "other"});
+        assert_ne!(base, episode_commitment(&args));
     }
 
     #[test]
@@ -416,7 +582,7 @@ mod tests {
     #[test]
     fn an_episode_with_no_required_tool_call_is_refused() {
         let mut recs = holdout();
-        recs[0].min_tool_calls = 0;
+        recs[0].steps.clear();
         assert!(matches!(
             verify_episodes(&recs, &[], &[], "00", 2),
             Err(EpisodeError::NoToolCallRequired(900))
@@ -451,11 +617,15 @@ mod tests {
     #[test]
     fn a_shared_observation_is_a_near_duplicate() {
         let mut public = vec![episode(1, "a public episode about a warehouse audit")];
-        public[0].observation_hash = "cd".repeat(32);
+        public[0].steps[0].observation = "shared-payload".into();
         let mut hold = vec![episode(900, "a holdout episode about a harbour audit")];
-        hold[0].observation_hash = "cd".repeat(32);
+        hold[0].steps[0].observation = "shared-payload".into();
+        hold[0].steps[1].observation = public[0].steps[1].observation.clone();
         let hits = near_duplicates(&public, &hold);
-        assert!(hits.iter().any(|h| h.starts_with("observation:")), "{hits:?}");
+        assert!(
+            hits.iter().any(|h| h.starts_with("observation:")),
+            "{hits:?}"
+        );
     }
 
     #[test]
@@ -478,7 +648,7 @@ mod tests {
     fn contamination_detects_episode_and_observation_overlap() {
         let hold = holdout();
         let ids: BTreeSet<u32> = [900].into_iter().collect();
-        let obs: BTreeSet<String> = [hold[1].observation_hash.clone()].into_iter().collect();
+        let obs: BTreeSet<String> = [hold[1].observation_hash()].into_iter().collect();
         let none = BTreeSet::new();
         assert!(contamination(&ids, &none, &hold)
             .iter()
@@ -487,5 +657,16 @@ mod tests {
             .iter()
             .any(|h| h.starts_with("observation:")));
         assert!(contamination(&BTreeSet::new(), &none, &hold).is_empty());
+    }
+
+    #[test]
+    fn arguments_canonicalize_the_way_the_image_does() {
+        let a = TraceStep {
+            tool: "lookup".into(),
+            arguments: serde_json::json!({"b": 1, "a": 2}),
+            observation: String::new(),
+            observation_image_hash: String::new(),
+        };
+        assert_eq!(a.arguments_json(), r#"{"a":2,"b":1}"#);
     }
 }

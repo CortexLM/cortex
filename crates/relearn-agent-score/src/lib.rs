@@ -45,10 +45,14 @@ use serde::{Deserialize, Serialize};
 pub const MIN_TRACE_VALIDITY: f64 = 0.80;
 
 /// Minimum success drop when the episode's tools are stubbed out.
-pub const MIN_ABLATION_DROP: f64 = 0.20;
+///
+/// Matches the published eval image's `MIN_BLIND_DROP` (0.10): the same
+/// measurement `relearn_mm_score` applies to pixels, applied here to tool
+/// results.
+pub const MIN_ABLATION_DROP: f64 = 0.10;
 
-/// Minimum success drop when the episode's observation is swapped.
-pub const MIN_SHUFFLE_DROP: f64 = 0.15;
+/// Minimum success drop when the episode's observation is withheld / shuffled.
+pub const MIN_SHUFFLE_DROP: f64 = 0.10;
 
 /// Largest tolerated public-minus-holdout gap (memorization signal).
 pub const MAX_PUBLIC_HOLDOUT_GAP: f64 = 0.08;
@@ -66,10 +70,12 @@ pub const CANARY_EPSILON: f64 = 0.02;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct AblationEvidence {
     /// Episodes measured under the changed condition.
+    #[serde(alias = "traces")]
     pub episodes: u32,
     /// Mean success with the environment intact (`0..=1`).
     pub score: f64,
     /// Mean success under the changed condition (`0..=1`).
+    #[serde(alias = "degraded_score")]
     pub ablated_score: f64,
 }
 
@@ -238,6 +244,44 @@ fn bps(x: f64) -> u64 {
     (x * 10_000.0).round().max(0.0) as u64
 }
 
+/// The three arms that separate an agent from a model that memorised the
+/// answers. Each one is fail-closed when it did not run.
+fn grounding_failures(challenger: &AgentSliceScores) -> Vec<GateFail> {
+    let mut failed = Vec::new();
+
+    match AgentSliceScores::mean(&challenger.trace_valid) {
+        None => failed.push(GateFail::TraceEvidenceMissing),
+        Some(v) => {
+            if v + DEADZONE < MIN_TRACE_VALIDITY {
+                failed.push(GateFail::TraceInvalid {
+                    validity_bps: bps(v),
+                });
+            }
+        }
+    }
+
+    if challenger.tool_ablation.episodes == 0 {
+        failed.push(GateFail::ToolAblationEvidenceMissing);
+    } else if !challenger.tool_ablation.shows_dependence(MIN_ABLATION_DROP) {
+        failed.push(GateFail::AnswersWithoutTools {
+            drop_bps: bps(challenger.tool_ablation.drop().max(0.0)),
+        });
+    }
+
+    if challenger.observation_shuffle.episodes == 0 {
+        failed.push(GateFail::ObservationShuffleEvidenceMissing);
+    } else if !challenger
+        .observation_shuffle
+        .shows_dependence(MIN_SHUFFLE_DROP)
+    {
+        failed.push(GateFail::IgnoresTheObservation {
+            drop_bps: bps(challenger.observation_shuffle.drop().max(0.0)),
+        });
+    }
+
+    failed
+}
+
 /// Judge challenger vs champion. Never returns `eligible` on a regression.
 ///
 /// The lattice is holdout-only. Trace replay, ablation, shuffle, public gap,
@@ -277,35 +321,7 @@ pub fn judge_challenger(
         None => failed.push(GateFail::NoPairedWin),
     }
 
-    match AgentSliceScores::mean(&challenger.trace_valid) {
-        None => failed.push(GateFail::TraceEvidenceMissing),
-        Some(v) => {
-            if v + DEADZONE < MIN_TRACE_VALIDITY {
-                failed.push(GateFail::TraceInvalid {
-                    validity_bps: bps(v),
-                });
-            }
-        }
-    }
-
-    if challenger.tool_ablation.episodes == 0 {
-        failed.push(GateFail::ToolAblationEvidenceMissing);
-    } else if !challenger.tool_ablation.shows_dependence(MIN_ABLATION_DROP) {
-        failed.push(GateFail::AnswersWithoutTools {
-            drop_bps: bps(challenger.tool_ablation.drop().max(0.0)),
-        });
-    }
-
-    if challenger.observation_shuffle.episodes == 0 {
-        failed.push(GateFail::ObservationShuffleEvidenceMissing);
-    } else if !challenger
-        .observation_shuffle
-        .shows_dependence(MIN_SHUFFLE_DROP)
-    {
-        failed.push(GateFail::IgnoresTheObservation {
-            drop_bps: bps(challenger.observation_shuffle.drop().max(0.0)),
-        });
-    }
+    failed.extend(grounding_failures(challenger));
 
     match (
         AgentSliceScores::mean(&challenger.public),

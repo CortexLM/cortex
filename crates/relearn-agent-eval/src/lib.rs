@@ -151,13 +151,17 @@ pub struct BaselineMeasurement {
     pub holdout: BTreeMap<String, f64>,
     /// Per-episode task success on the published split.
     pub public: BTreeMap<String, f64>,
-    /// Per-episode trace validity from the replay.
+    /// Per-episode action score from the replay (`tool_call` on the wire).
+    #[serde(alias = "tool_call")]
     pub trace_valid: BTreeMap<String, f64>,
-    /// General instruction-following canary. Off the visible score.
+    /// Shipped canary slice (`canaries` on the wire). Off the visible score.
+    #[serde(alias = "canaries")]
     pub capability_canary: BTreeMap<String, f64>,
-    /// Success with the episode's tools stubbed out.
+    /// Success with observations withheld (`tool_blind` on the wire).
+    #[serde(alias = "tool_blind")]
     pub tool_ablation: AblationEvidence,
-    /// Success with another episode's observation.
+    /// Success with screenshot pixels shuffled. The image nests this under
+    /// `{"image": …}`; [`Self::from_json`] unwraps that.
     pub observation_shuffle: AblationEvidence,
 }
 
@@ -168,7 +172,10 @@ impl BaselineMeasurement {
     ///
     /// [`EvalError::Baseline`] when the body is not a baseline object.
     pub fn from_json(body: &str) -> Result<Self, EvalError> {
-        serde_json::from_str(body).map_err(|e| EvalError::Baseline(e.to_string()))
+        let mut value: serde_json::Value =
+            serde_json::from_str(body).map_err(|e| EvalError::Baseline(e.to_string()))?;
+        unwrap_observation_shuffle(&mut value);
+        serde_json::from_value(value).map_err(|e| EvalError::Baseline(e.to_string()))
     }
 
     /// Check the measurement against the pin before it becomes the champion.
@@ -256,7 +263,10 @@ impl AgentEvalMetrics {
     ///
     /// [`EvalError::Baseline`] when the body is not a metrics object.
     pub fn from_json(body: &str) -> Result<Self, EvalError> {
-        serde_json::from_str(body).map_err(|e| EvalError::Baseline(e.to_string()))
+        let mut value: serde_json::Value =
+            serde_json::from_str(body).map_err(|e| EvalError::Baseline(e.to_string()))?;
+        unwrap_observation_shuffle(&mut value);
+        serde_json::from_value(value).map_err(|e| EvalError::Baseline(e.to_string()))
     }
 
     /// Bind the document to the run that was requested.
@@ -296,6 +306,18 @@ impl AgentEvalMetrics {
             ));
         }
         self.measurement.verify(pin, episodes)
+    }
+}
+
+/// The published image nests shuffle evidence under `{"image": …}`.
+fn unwrap_observation_shuffle(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(os) = obj.get_mut("observation_shuffle") {
+        if let Some(image) = os.get("image").cloned() {
+            *os = image;
+        }
     }
 }
 
@@ -572,20 +594,17 @@ pub async fn eval_after_freeze(
 #[cfg(test)]
 mod tests {
     use relearn_agent_score::MIN_TRACE_VALIDITY;
-    use relearn_agent_task::{episode_commitment, ToolKind};
+    use relearn_agent_task::episode_commitment;
 
     use super::*;
 
     fn episodes(n: u32) -> Vec<AgentEpisode> {
         (1..=n)
-            .map(|i| AgentEpisode {
-                id: 800 + i,
-                goal: format!("episode {i} asks for a figure buried in the ledger"),
-                environment_id: "dev-env".into(),
-                tools: vec![ToolKind::Inspect, ToolKind::Lookup],
-                observation_hash: format!("{i:064x}"),
-                answer_hash: format!("{:064x}", i + 500_000),
-                min_tool_calls: 2,
+            .map(|i| {
+                AgentEpisode::synthetic(
+                    800 + i,
+                    format!("episode {i} asks for a figure buried in the ledger"),
+                )
             })
             .collect()
     }
@@ -671,18 +690,14 @@ mod tests {
         )
         .await
         .expect_err("no digest pin");
-        assert!(matches!(unpinned, EvalError::EvalImageUnpinned), "{unpinned}");
+        assert!(
+            matches!(unpinned, EvalError::EvalImageUnpinned),
+            "{unpinned}"
+        );
 
-        let unwired = eval_after_freeze(
-            &live_pin(&eps),
-            "d",
-            "art",
-            &eps,
-            EvalBackend::Lium,
-            None,
-        )
-        .await
-        .expect_err("no harvest");
+        let unwired = eval_after_freeze(&live_pin(&eps), "d", "art", &eps, EvalBackend::Lium, None)
+            .await
+            .expect_err("no harvest");
         assert!(
             matches!(unwired, EvalError::LiveHarvestUnavailable),
             "{unwired}"

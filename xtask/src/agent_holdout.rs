@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use relearn_agent_task::{episode_commitment, AgentEpisode, ToolKind};
+use relearn_agent_task::{episode_commitment, AgentEpisode};
 use sha2::{Digest, Sha256};
 
 /// Domain tag for episode selection. Distinct from the commitment domain.
@@ -110,24 +110,13 @@ fn read_catalog(path: &Path) -> Result<Vec<AgentEpisode>, String> {
 fn synthetic_catalog() -> Vec<AgentEpisode> {
     (1..=200)
         .map(|id| {
-            let tools = match id % 4 {
-                0 => vec![ToolKind::Inspect, ToolKind::Lookup],
-                1 => vec![ToolKind::Search, ToolKind::Execute],
-                2 => vec![ToolKind::Inspect, ToolKind::Search, ToolKind::Execute],
-                _ => vec![ToolKind::Lookup, ToolKind::Execute],
-            };
-            AgentEpisode {
+            AgentEpisode::synthetic(
                 id,
-                goal: format!(
+                format!(
                     "synthetic agent episode {id}: recover a figure that only appears after \
                      inspecting the attached record"
                 ),
-                environment_id: "synthetic-dev".into(),
-                tools,
-                observation_hash: format!("{:064x}", id + 10_000),
-                answer_hash: format!("{:064x}", id + 900_000),
-                min_tool_calls: 2 + u32::from(id % 3 == 0),
-            }
+            )
         })
         .collect()
 }
@@ -144,7 +133,7 @@ fn select(
             !excluded.contains(&e.id)
                 && !e.goal.trim().is_empty()
                 && !e.tools.is_empty()
-                && e.min_tool_calls > 0
+                && !e.steps.is_empty()
         })
         .map(|e| (rank(salt, e.id), e.clone()))
         .collect();
@@ -201,7 +190,7 @@ mod tests {
         let picked = select(&rows, "salt", 50, &BTreeSet::new()).expect("picked");
         assert!(picked
             .iter()
-            .all(|e| e.min_tool_calls > 0 && !e.tools.is_empty()));
+            .all(|e| !e.steps.is_empty() && !e.tools.is_empty()));
     }
 
     #[test]
@@ -223,7 +212,6 @@ mod tests {
     #[test]
     fn tracked_output_paths_are_refused() {
         assert!(refuse_repo_path(Path::new("config/episodes.json")).is_err());
-        refuse_repo_path(Path::new("/root/.base-secrets/relearn-agent-episodes.json"))
-            .expect("ok");
+        refuse_repo_path(Path::new("/root/.base-secrets/relearn-agent-episodes.json")).expect("ok");
     }
 }

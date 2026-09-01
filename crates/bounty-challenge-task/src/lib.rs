@@ -226,6 +226,12 @@ pub const MIN_REPORT_BODY_CHARS: usize = 80;
 /// Shortest reproduction section a report may have.
 pub const MIN_REPRO_CHARS: usize = 20;
 
+// Quotas that do not bind are quotas that do not protect triage, and a quota
+// wide enough to be harmless is the kind of constant that drifts wider.
+const _: () = assert!(MAX_PENDING_REPORTS_PER_HOTKEY > 0 && MAX_PENDING_REPORTS_PER_HOTKEY <= 10);
+const _: () = assert!(MIN_REPORT_INTERVAL_SECS >= 30);
+const _: () = assert!(MIN_REPORT_BODY_CHARS >= 40 && MIN_REPRO_CHARS >= 10);
+
 /// Accept `[A-Za-z0-9._:-]` up to 128 chars.
 pub fn validate_account_id(id: &str) -> Result<(), PairError> {
     if id.is_empty() || id.len() > 128 {
@@ -435,14 +441,6 @@ mod tests {
     fn scoring_is_unconfigured_until_a_feed_or_an_explicit_opt_in() {
         assert!(!force_sim());
         assert_eq!(resolve_scoring_backend(), ScoringBackend::Unconfigured);
-    }
-
-    #[test]
-    fn ingest_quotas_are_tight_enough_to_protect_triage() {
-        assert!(MAX_PENDING_REPORTS_PER_HOTKEY > 0);
-        assert!(MAX_PENDING_REPORTS_PER_HOTKEY <= 10);
-        assert!(MIN_REPORT_INTERVAL_SECS >= 30);
-        assert!(MIN_REPORT_BODY_CHARS >= 40);
     }
 
     #[test]

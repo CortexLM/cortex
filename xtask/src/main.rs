@@ -178,9 +178,20 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = match cli.command {
-        Command::LocCap => loc_cap::run(&root),
-        Command::ConsensusLint => consensus_lint::run(&root),
+    match dispatch(cli.command, &root) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("xtask error: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)] // one arm per subcommand; splitting hides the map
+fn dispatch(command: Command, root: &Path) -> Result<(), String> {
+    match command {
+        Command::LocCap => loc_cap::run(root),
+        Command::ConsensusLint => consensus_lint::run(root),
         Command::MetadataSnapshot {
             endpoint,
             netuid,
@@ -193,7 +204,7 @@ fn main() -> ExitCode {
                 out,
                 check,
             };
-            metadata_snapshot::run(&root, &args)
+            metadata_snapshot::run(root, &args)
         }
         Command::NaturalPack {
             out,
@@ -218,11 +229,11 @@ fn main() -> ExitCode {
                 offline,
                 check,
             };
-            natural_pack::run(&root, &args)
+            natural_pack::run(root, &args)
         }
-        Command::SpecCheck => spec_check::run(&root),
-        Command::DesignCheck => design_check::run(&root),
-        Command::ExternalDocsCheck => external_docs_check::run(&root),
+        Command::SpecCheck => spec_check::run(root),
+        Command::DesignCheck => design_check::run(root),
+        Command::ExternalDocsCheck => external_docs_check::run(root),
         Command::RelearnHoldout {
             catalog,
             salt,
@@ -266,12 +277,5 @@ fn main() -> ExitCode {
             exclude,
             out,
         }),
-    };
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("xtask error: {err}");
-            ExitCode::FAILURE
-        }
     }
 }

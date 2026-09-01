@@ -21,18 +21,19 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use harvest_pod::{EvalPod, PodProgram};
 use prism_lium_types::InstanceSpec;
-use relearn_agent_eval::{
-    AgentEvalMetrics, EvalError, LiveScorer, AGENT_METRICS_SCHEMA,
-};
+use relearn_agent_eval::{AgentEvalMetrics, EvalError, LiveScorer, AGENT_METRICS_SCHEMA};
 use relearn_agent_score::AgentSliceScores;
 use relearn_agent_task::{AgentEpisode, RelearnAgentPin};
 use serde::{Deserialize, Serialize};
 
 /// Prefix the eval image prints before its metrics document.
-pub const METRICS_MARKER: &str = "RELEARN_AGENT_METRICS=";
+///
+/// Shared with the other Relearn images on purpose: a harvest client is this
+/// crate with a different document type, not a second marker protocol.
+pub const METRICS_MARKER: &str = "RELEARN_METRICS=";
 
 /// Marker the eval image prints on a completed run.
-pub const OK_MARKER: &str = "RELEARN_AGENT_EVAL_OK";
+pub const OK_MARKER: &str = "RELEARN_EVAL_OK";
 
 /// Directory the request and metrics sidecar live in, on the pod.
 pub const POD_WORKDIR: &str = "/tmp/relearn_agent_eval";
@@ -50,38 +51,37 @@ pub const PROGRAM: PodProgram = PodProgram {
 
 /// What the eval image is asked to score.
 ///
-/// This carries the **holdout episodes**, so the pod sees the private set for
-/// the duration of the run: an agent cannot be scored in an environment it is
-/// not given. The mitigations are the digest-pinned image, delivery into
-/// [`POD_WORKDIR`] rather than any persisted path, the post-run scrub, and
-/// verified termination. Rotate the episode set (salt + catalogue, then
-/// re-sign) if a pod is ever suspected of exfiltration.
+/// This is the published image's request (`docs/AGENT-EVAL-IMAGE.md` in
+/// [`CortexLM/relearn`](https://github.com/CortexLM/relearn)): recorded traces
+/// under `holdout`, plus the run identity. Unknown fields are tolerated on
+/// the image side; missing ones are a failed run.
+///
+/// The request carries the **private holdout**. Rotate the episode set (salt
+/// + catalogue, then re-sign) if a pod is ever suspected of exfiltration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarvestRequest {
     /// Must equal [`AGENT_METRICS_SCHEMA`].
     pub schema_version: u32,
+    /// Must be `relearn-agent`. The image refuses any other challenge.
+    pub challenge_id: String,
     /// Frozen submission digest. Echoed back in the metrics document.
     pub submission_digest: String,
     /// Artifact to score. Echoed back in the metrics document.
     pub artifact_digest: String,
     /// Base checkpoint the artifact post-trained.
     pub base_model: String,
+    /// Teacher wire id. Judge-only, for the free-text final answer.
+    pub teacher_model: String,
     /// Eval image digest, so the image can stamp its own provenance.
     pub eval_image_digest: String,
     /// Commitment the episodes below must hash to.
     pub holdout_commitment: String,
-    /// Published episode ids (measured on the same run so the gap gate
-    /// compares like with like).
-    pub public_ids: Vec<u32>,
-    /// The verified episodes to replay.
-    pub episodes: Vec<AgentEpisode>,
-    /// Arms the image must run beside the plain replay. Naming them in the
-    /// request is what makes a missing arm the image's fault rather than an
-    /// ambiguity the control plane has to guess about.
-    pub arms: Vec<String>,
+    /// The verified recorded traces to replay.
+    pub holdout: Vec<AgentEpisode>,
 }
 
-/// Arms the eval image must run for a verdict.
+/// Arms the eval image always runs. Published on `/v1/status`; the image
+/// itself decides the set — naming them here is documentation, not a knob.
 pub const REQUIRED_ARMS: [&str; 3] = ["trace_replay", "tool_ablation", "observation_shuffle"];
 
 /// Cost and shape guardrails for one harvest pod.
@@ -176,14 +176,14 @@ impl LiveScorer for LiumAgentHarvest {
         }
         let request = HarvestRequest {
             schema_version: AGENT_METRICS_SCHEMA,
+            challenge_id: relearn_agent_task::CHALLENGE_ID.to_owned(),
             submission_digest: frozen_digest.to_owned(),
             artifact_digest: artifact_digest.to_owned(),
             base_model: pin.base_model.clone(),
+            teacher_model: pin.teacher_model.clone(),
             eval_image_digest: pin.eval_image_digest.clone(),
             holdout_commitment: pin.holdout_commitment.clone(),
-            public_ids: pin.public_ids.clone(),
-            episodes: episodes.to_vec(),
-            arms: REQUIRED_ARMS.iter().map(|a| (*a).to_owned()).collect(),
+            holdout: episodes.to_vec(),
         };
         let body = serde_json::to_vec(&request)
             .map_err(|e| EvalError::Backend(format!("encode request: {e}")))?;
@@ -231,20 +231,17 @@ mod tests {
 
     use relearn_agent_eval::BaselineMeasurement;
     use relearn_agent_score::AblationEvidence;
-    use relearn_agent_task::{episode_commitment, ToolKind};
+    use relearn_agent_task::episode_commitment;
 
     use super::*;
 
     fn episodes(n: u32) -> Vec<AgentEpisode> {
         (1..=n)
-            .map(|i| AgentEpisode {
-                id: 800 + i,
-                goal: format!("episode {i} asks for a figure buried in the ledger"),
-                environment_id: "dev-env".into(),
-                tools: vec![ToolKind::Inspect, ToolKind::Lookup],
-                observation_hash: format!("{i:064x}"),
-                answer_hash: format!("{:064x}", i + 500_000),
-                min_tool_calls: 2,
+            .map(|i| {
+                AgentEpisode::synthetic(
+                    800 + i,
+                    format!("episode {i} asks for a figure buried in the ledger"),
+                )
             })
             .collect()
     }
@@ -381,8 +378,9 @@ mod tests {
             Some(p.eval_image_digest.as_str())
         );
         assert_eq!(log.booted[0].ssh_key_name.as_deref(), Some(SSH_KEY_NAME));
-        assert_eq!(log.requests[0].episodes.len(), 120);
-        assert_eq!(log.requests[0].arms, REQUIRED_ARMS);
+        assert_eq!(log.requests[0].holdout.len(), 120);
+        assert_eq!(log.requests[0].challenge_id, "relearn-agent");
+        assert_eq!(log.requests[0].teacher_model, p.teacher_model);
         assert_eq!(log.shutdowns, vec!["pod-1".to_owned()]);
     }
 
@@ -398,10 +396,12 @@ mod tests {
             .await
             .expect("harvest");
         let log = pod.log();
-        let ep = &log.requests[0].episodes[0];
+        let ep = &log.requests[0].holdout[0];
         assert!(!ep.tools.is_empty());
-        assert_eq!(ep.observation_hash.len(), 64);
-        assert!(ep.min_tool_calls > 0);
+        assert_eq!(ep.observation_hash().len(), 64);
+        assert!(ep.min_tool_calls() > 0);
+        assert!(!ep.steps.is_empty());
+        assert!(!ep.final_answer.is_empty());
     }
 
     #[tokio::test]
@@ -460,7 +460,10 @@ mod tests {
     async fn a_document_for_another_run_is_refused() {
         let eps = episodes(120);
         let p = pin(&eps);
-        for (frozen, artifact) in [("frozen-1", "someone-else"), ("an-earlier-run", "artifact-1")] {
+        for (frozen, artifact) in [
+            ("frozen-1", "someone-else"),
+            ("an-earlier-run", "artifact-1"),
+        ] {
             let pod = Arc::new(FakePod::ok(document(&p, &eps, frozen, artifact, 0.9)));
             let err = harvest(pod)
                 .score(&p, "frozen-1", "artifact-1", &eps)

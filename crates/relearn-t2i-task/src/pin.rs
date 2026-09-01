@@ -114,6 +114,9 @@ pub struct RelearnT2iPin {
     pub eval_image_digest: String,
     /// Miner-facing repo.
     pub relearn_git: String,
+    /// Pinned git SHA of the harness repo that built `eval_image_digest`.
+    #[serde(default)]
+    pub relearn_git_sha: String,
     /// Frozen sampler recipe.
     pub sampler: SamplerConfig,
     /// Split and seed pins.
@@ -138,6 +141,7 @@ impl Default for RelearnT2iPin {
             eval_image: "ghcr.io/cortexlm/relearn-t2i-eval".into(),
             eval_image_digest: String::new(),
             relearn_git: RELEARN_GIT_URL.into(),
+            relearn_git_sha: String::new(),
             sampler: SamplerConfig::default(),
             prompts: PromptPin::default(),
             frozen_prompts: Vec::new(),
@@ -359,7 +363,7 @@ mod tests {
     fn pin_body(base: &str, judge: &str) -> String {
         let mut body = format!(
             r#"
-challenge_id = "relearn-t2i"
+challenge_id = "relearn-image"
 scoring_version = 1
 base = "{base}"
 base_license = "OpenMDW-1.1"
