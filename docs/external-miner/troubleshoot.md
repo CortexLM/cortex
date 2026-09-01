@@ -25,7 +25,7 @@
 | `rejected` with `Contamination` / `ContaminationEvidenceMissing` and no receipt | Training metadata overlapped the holdout, or `manifest` declared nothing | Expected. The host refuses **before** renting so junk cannot spend a pod |
 | `503 … did not print RELEARN_EVAL_OK; run.log tail: …` | The eval image ran and exited without scoring | The tail is the image's own log (truncated, secrets redacted). Usually an operator-side judge or model-loading failure, not your artifact |
 | `503 recorded baseline: …` | The eval image returned a document bound to another run, image, or holdout | Operator issue; a mismatched document is never accepted as a score |
-| `503 no champion baseline recorded` | The host has not measured the base model, so there is nothing to compare against | Operator issue; `/v1/status` shows `champion_baseline_recorded: false` |
+| `503 no champion baseline recorded` | The host has not measured the base model, so there is nothing to compare against | Operator issue; `/v1/status` shows `champion_baseline_recorded: false` and `can_score: false`. A champion harvest that exits 127 (binary not on the SSH PATH) leaves the baseline unrecorded — the image must ship `/usr/bin/relearn-eval` |
 | Repeated `503`, no submission id | Nothing was scored, so nothing was stored | Expected. A refused attempt is not a submission and does not consume anything |
 | `rejected` with `Canaries` | Catastrophic forgetting | Base-model canaries must stay ≥ 0.95 |
 | `eval_backend: "sim"` on your row | Operator set `RELEARN_FORCE_SIM=1` | CI / local only. Not a live verdict; prod and staging set it to `false` |

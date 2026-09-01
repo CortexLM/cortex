@@ -67,13 +67,19 @@ impl AppState {
         self.store.holdout_seal().ok().is_some_and(|s| s.loaded)
     }
 
+    /// Whether a champion baseline is in the store.
+    fn champion_recorded(&self) -> bool {
+        self.store.champion_scores().ok().flatten().is_some()
+    }
+
     /// Whether this host can produce a verdict at all.
     ///
-    /// False until the holdout is verified loaded. A sim backend with an
-    /// empty episode file is not a scorer — submit already 503s, and status
-    /// must not contradict that.
+    /// False until the holdout is verified loaded **and** a champion baseline
+    /// is recorded. Submit already 503s in both cases; status must not
+    /// contradict that.
     fn can_score(&self) -> bool {
         scoring_readiness(&self.pin, self.backend, self.live(), self.holdout_loaded()).is_ok()
+            && self.champion_recorded()
     }
 }
 
@@ -114,7 +120,7 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         // Both are prerequisites for a live verdict, so name them separately:
         // "can_score: false" without them is the usual operator confusion.
         "live_harvest_wired": st.live_scorer.is_some(),
-        "champion_baseline_recorded": st.store.champion_scores().ok().flatten().is_some(),
+        "champion_baseline_recorded": st.champion_recorded(),
         // The arms that make this an agent challenge rather than a prompt set.
         "gates": ["trace_replay", "tool_ablation", "observation_shuffle"],
         "relearn_git": st.pin.relearn_git,
@@ -955,6 +961,51 @@ mod tests {
             scorer.hits.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "contaminated / empty-evidence must not rent a pod"
+        );
+    }
+
+    #[tokio::test]
+    async fn can_score_is_false_until_the_champion_baseline_is_recorded() {
+        let app = app_full(
+            "op",
+            EvalBackend::Lium,
+            &format!("sha256:{}", "ab".repeat(32)),
+            Some(Arc::new(StubScorer {
+                skill: BASE_CHAMPION_SKILL + 0.35,
+            })),
+            true,
+            false,
+        )
+        .await;
+        let (st, body) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["live_harvest_wired"], true);
+        assert_eq!(body["holdout"]["loaded"], true);
+        assert_eq!(body["champion_baseline_recorded"], false, "{body}");
+        assert_eq!(body["can_score"], false, "{body}");
+
+        let (st, created) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body("clean-live-agent", &declared_manifest()),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{created}");
+        assert!(
+            created["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no champion baseline recorded"),
+            "{created}"
         );
     }
 

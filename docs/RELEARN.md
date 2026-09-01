@@ -107,7 +107,10 @@ Per run the control plane:
 2. Writes `request.json` and `teacher.env` into `/tmp/relearn_eval` over stdin
    — nothing is interpolated into the remote command.
 3. Sources `teacher.env` with `set -a`, then runs
-   `relearn-eval score --request request.json --out metrics.json`.
+   `/usr/bin/relearn-eval` (else `command -v relearn-eval`)
+   `score --request request.json --out metrics.json`. A non-interactive
+   SSH PATH that cannot see the binary is why a pod exits 127 with no
+   `RELEARN_EVAL_OK`.
 4. Reads back `RELEARN_METRICS=<document>` and `RELEARN_EVAL_OK`.
 5. Scrubs the workdir, terminates, and **requires verified termination** before
    accepting any score. An orphan pod keeps spending the miner's money, so it

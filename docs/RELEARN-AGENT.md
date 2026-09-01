@@ -122,7 +122,8 @@ can run an episode.
 Per run the control plane boots `eval_image@<digest>` with the master SSH
 public key on a pod the **miner** pays for, writes `request.json` into
 `/tmp/relearn_agent_eval` over stdin (run inputs are never interpolated into
-the remote command), runs `relearn-agent-eval score`, reads back
+the remote command), runs `/usr/bin/relearn-agent-eval` (else
+`command -v relearn-agent-eval`) `score`, reads back
 `RELEARN_METRICS=<document>` and `RELEARN_EVAL_OK`, scrubs the
 workdir, and **requires verified termination** before accepting any score.
 

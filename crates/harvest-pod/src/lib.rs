@@ -88,6 +88,11 @@ impl PodProgram {
     /// The log tail comes last so a consumer that truncates loses diagnostics
     /// rather than the metrics line. `set -a` + [`ENV_FILE`] is the only way
     /// the image sees host env: a Lium `InstanceSpec` has no env field.
+    ///
+    /// The binary is resolved as `/usr/bin/<name>` first, then `command -v`.
+    /// A non-interactive SSH session often has a login-less PATH that misses
+    /// the image's install location; exit 127 with no `OK` marker is that miss,
+    /// not a scoring failure.
     #[must_use]
     pub fn run_cmd(&self, timeout_secs: u64) -> String {
         let Self {
@@ -96,10 +101,22 @@ impl PodProgram {
             metrics_marker,
             ok_marker,
         } = *self;
+        let (bin, args) = match entrypoint.split_once(char::is_whitespace) {
+            Some((bin, rest)) => (bin, rest.trim()),
+            None => (entrypoint, ""),
+        };
+        let args = if args.is_empty() {
+            String::new()
+        } else {
+            format!(" {args}")
+        };
         format!(
             "set +e; cd {workdir} || exit 1; \
              set -a; [ -f {ENV_FILE} ] && . ./{ENV_FILE}; set +a; \
-             timeout --kill-after=60 {timeout_secs} {entrypoint} \
+             bin={bin}; \
+             if [ -x \"/usr/bin/$bin\" ]; then resolved=\"/usr/bin/$bin\"; \
+             else resolved=$(command -v \"$bin\" 2>/dev/null || echo \"/usr/bin/$bin\"); fi; \
+             timeout --kill-after=60 {timeout_secs} \"$resolved\"{args} \
                --request {REQUEST_FILE} --out metrics.json > run.log 2>&1; \
              rc=$?; \
              if [ -f metrics.json ]; then printf '{metrics_marker}'; cat metrics.json; printf '\\n'; fi; \
@@ -327,7 +344,7 @@ mod tests {
         let cmd = PROGRAM.run_cmd(600);
         assert!(cmd.contains("set -a; [ -f teacher.env ] && . ./teacher.env; set +a"));
         let sourced = cmd.find("teacher.env").unwrap_or(usize::MAX);
-        let scored = cmd.find("demo-eval score").unwrap_or(0);
+        let scored = cmd.find("demo-eval").unwrap_or(0);
         assert!(
             sourced < scored,
             "env must be sourced before the run: {cmd}"
@@ -340,6 +357,21 @@ mod tests {
     #[test]
     fn a_non_zero_exit_is_reported_in_stdout() {
         assert!(PROGRAM.run_cmd(600).contains("echo \"exit=$rc\""));
+    }
+
+    #[test]
+    fn the_entrypoint_is_resolved_off_the_login_path() {
+        let cmd = PROGRAM.run_cmd(600);
+        assert!(
+            cmd.contains("/usr/bin/$bin") && cmd.contains("command -v"),
+            "non-interactive SSH PATH must not have to find the binary: {cmd}"
+        );
+        assert!(cmd.contains("bin=demo-eval"), "{cmd}");
+        assert!(cmd.contains("\"$resolved\" score"), "{cmd}");
+        assert!(
+            !cmd.contains(" timeout --kill-after=60 600 demo-eval "),
+            "bare PATH lookup is how a shipped /usr/bin binary exits 127: {cmd}"
+        );
     }
 
     #[test]

@@ -64,9 +64,18 @@ impl AppState {
         self.live_scorer.as_deref()
     }
 
+    /// Whether a champion baseline is in the store.
+    fn champion_recorded(&self) -> bool {
+        self.store.champion_scores().ok().flatten().is_some()
+    }
+
     /// Whether this host can produce a verdict at all.
+    ///
+    /// False until the live path has a recorded champion. Submit already 503s
+    /// with `no champion baseline recorded`; status must not contradict that
+    /// (same class of lie as advertising `can_score` with the holdout sealed).
     fn can_score(&self) -> bool {
-        scoring_readiness(&self.pin, self.backend, self.live()).is_ok()
+        scoring_readiness(&self.pin, self.backend, self.live()).is_ok() && self.champion_recorded()
     }
 }
 
@@ -109,7 +118,7 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         // Both are prerequisites for a live verdict, so name them separately:
         // "can_score: false" without them is the usual operator confusion.
         "live_harvest_wired": st.live_scorer.is_some(),
-        "champion_baseline_recorded": st.store.champion_scores().ok().flatten().is_some(),
+        "champion_baseline_recorded": st.champion_recorded(),
         "relearn_git": st.pin.relearn_git,
         "relearn_git_sha": st.pin.relearn_git_sha,
         // Commitment + size + loaded. Never ids, prompts, or image hashes.
@@ -1089,6 +1098,53 @@ mod tests {
         let msg = body["error"].as_str().unwrap_or_default();
         assert!(msg.contains("eval image digest not pinned"), "{body}");
         assert!(!msg.contains("baseline"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn can_score_is_false_until_the_champion_baseline_is_recorded() {
+        let app = app_full(
+            "op",
+            true,
+            EvalBackend::Lium,
+            &format!("sha256:{}", "ab".repeat(32)),
+            Some(Arc::new(StubScorer { skill: 0.8 })),
+            false,
+        )
+        .await;
+        let (st, body) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["eval_backend"], "lium");
+        assert_eq!(body["live_harvest_wired"], true);
+        assert_eq!(body["champion_baseline_recorded"], false, "{body}");
+        assert_eq!(body["can_score"], false, "{body}");
+
+        let (st, created) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            serde_json::json!({
+                "miner_hotkey": digest("miner-hotkey"),
+                "artifact_digest": digest("miner-strong-adapter"),
+                "manifest": declared_manifest(),
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{created}");
+        assert!(
+            created["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no champion baseline recorded"),
+            "{created}"
+        );
     }
 
     #[tokio::test]

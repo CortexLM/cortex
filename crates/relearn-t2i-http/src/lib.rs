@@ -72,9 +72,17 @@ impl AppState {
         self.live_judge.as_deref()
     }
 
+    /// Whether a champion baseline is in the store.
+    fn champion_recorded(&self) -> bool {
+        self.store.champion_scores().ok().flatten().is_some()
+    }
+
     /// Whether this host can produce a verdict at all.
+    ///
+    /// False until the live path has a recorded champion. Submit already 503s
+    /// with `no champion baseline recorded`; status must not contradict that.
     fn can_score(&self) -> bool {
-        scoring_readiness(&self.pin, &self.judge, self.live()).is_ok()
+        scoring_readiness(&self.pin, &self.judge, self.live()).is_ok() && self.champion_recorded()
     }
 }
 
@@ -122,7 +130,7 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         // Both are prerequisites for a live verdict, so name them separately:
         // "can_score: false" without them is the usual operator confusion.
         "live_harvest_wired": st.live_judge.is_some(),
-        "champion_baseline_recorded": st.store.champion_scores().ok().flatten().is_some(),
+        "champion_baseline_recorded": st.champion_recorded(),
         // Whether an endpoint is set, never the endpoint itself.
         "judge_endpoint_configured": st.judge.endpoint_configured(),
         "sampler": st.pin.sampler,
@@ -1124,6 +1132,47 @@ mod tests {
             judge.hits.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "contaminated / empty-evidence must not rent a pod"
+        );
+    }
+
+    #[tokio::test]
+    async fn can_score_is_false_until_the_champion_baseline_is_recorded() {
+        let app = app_full(
+            "op",
+            live_pin(),
+            live_judge_config(),
+            Some(Arc::new(StubJudge)),
+            false,
+        )
+        .await;
+        let (st, body) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["live_harvest_wired"], true);
+        assert_eq!(body["champion_baseline_recorded"], false, "{body}");
+        assert_eq!(body["can_score"], false, "{body}");
+
+        let (st, created) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body("clean-live-finetune", &declared_manifest_json()),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{created}");
+        assert!(
+            created["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no champion baseline recorded"),
+            "{created}"
         );
     }
 

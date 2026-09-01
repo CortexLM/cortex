@@ -125,7 +125,8 @@ can compute a live score.
 Per run the control plane boots `eval_image@<digest>` with the master SSH
 public key on a pod the **miner** pays for, writes `request.json` into
 `/tmp/relearn_image_eval` over stdin (run inputs are never interpolated into
-the remote command), runs `relearn-image-eval score`, reads back
+the remote command), runs `/usr/bin/relearn-image-eval` (else
+`command -v relearn-image-eval`) `score`, reads back
 `RELEARN_METRICS=<document>` and `RELEARN_EVAL_OK`, scrubs the
 workdir, and **requires verified termination** before accepting any score. An
 orphan pod keeps spending the miner's money, so it outranks whatever the run
