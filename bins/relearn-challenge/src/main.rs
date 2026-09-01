@@ -535,10 +535,23 @@ mod tests {
         assert!(err.to_string().contains("RELEARN_TEACHER_API_URL"), "{err}");
 
         std::env::set_var("RELEARN_TEACHER_API_URL", "http://teacher.invalid/v1");
+        std::env::remove_var("RELEARN_ALLOW_MODEL_DOWNLOAD");
+        std::env::remove_var("RELEARN_BASE_MODEL_DIR");
+        let unprimed = build_live_scorer(EvalBackend::Lium, 900).expect("wired");
+        let weights_err =
+            relearn_eval::scoring_readiness(&pinned, EvalBackend::Lium, Some(unprimed.as_ref()))
+                .expect_err("no backbone");
+        assert!(
+            weights_err.to_string().contains("RELEARN_BASE_MODEL_DIR"),
+            "{weights_err}"
+        );
+
+        std::env::set_var("RELEARN_ALLOW_MODEL_DOWNLOAD", "1");
         let live = build_live_scorer(EvalBackend::Lium, 900).expect("wired");
         std::env::remove_var("LIUM_API_KEY");
         std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
         std::env::remove_var("RELEARN_TEACHER_API_URL");
+        std::env::remove_var("RELEARN_ALLOW_MODEL_DOWNLOAD");
 
         let unpinned = RelearnPin::default();
         assert!(

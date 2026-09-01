@@ -501,12 +501,29 @@ mod tests {
         );
 
         std::env::set_var("RELEARN_T2I_JUDGE_API_URL", "http://judge.invalid/v1");
+        std::env::remove_var("RELEARN_ALLOW_MODEL_DOWNLOAD");
+        std::env::remove_var("RELEARN_T2I_ALLOW_MODEL_DOWNLOAD");
+        std::env::remove_var("RELEARN_BASE_MODEL_DIR");
+        std::env::remove_var("RELEARN_T2I_BASE_MODEL_DIR");
+        let unprimed = build_live_judge(&live_cfg, 900).expect("wired");
+        let weights_err =
+            relearn_t2i_eval::scoring_readiness(&pinned, &live_cfg, Some(unprimed.as_ref()))
+                .expect_err("no backbone");
+        assert!(
+            weights_err
+                .to_string()
+                .contains("RELEARN_T2I_BASE_MODEL_DIR"),
+            "{weights_err}"
+        );
+
+        std::env::set_var("RELEARN_ALLOW_MODEL_DOWNLOAD", "1");
         let live = build_live_judge(&live_cfg, 900).expect("wired");
         relearn_t2i_eval::scoring_readiness(&pinned, &live_cfg, Some(live.as_ref()))
-            .expect("pinned digest + judge URL can score");
+            .expect("pinned digest + judge URL + ALLOW_DOWNLOAD can score");
         std::env::remove_var("LIUM_API_KEY");
         std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
         std::env::remove_var("RELEARN_T2I_JUDGE_API_URL");
+        std::env::remove_var("RELEARN_ALLOW_MODEL_DOWNLOAD");
     }
 
     fn stub_ssh_pubkey(tag: &str) -> PathBuf {
