@@ -56,7 +56,7 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Crates (`crates/relearn-*`) | **done** | task (holdout commitment + contamination fingerprints), score (public–holdout gap, contamination evidence, vision shuffle, off-path general-bench canary), store, eval, http, challenge. |
 | Binary (`bins/relearn-challenge`) | **done** | HTTP API on `:8095`. |
 | Compose / images | **done** | Default compose + `images.yml` target `relearn-challenge`. |
-| Eval pin | **done** | `config/relearn-pin.toml` — `eval_image_digest` `sha256:303c6357…` + `relearn_git_sha` `82e21442…` (`CortexLM/relearn` PR #2). Digest-only, no floating tag. |
+| Eval pin | **done** | `config/relearn-pin.toml` — `eval_image_digest` `sha256:00839671…` + `relearn_git_sha` `822d2729…` (`CortexLM/relearn` PR #2). Digest-only, no floating tag. |
 | Holdout | **done** | Commitment in git, records operator-side (`RELEARN_HOLDOUT_FILE`) and verified at boot. Mismatch → submissions 503. |
 | Teacher | **v0** | Weights `incoai/GLM-5.3-NVFP4` served from `RELEARN_TEACHER_LOCAL_DIR` (never pass the Hugging Face repo id to vLLM). HTTP wire `glm-5.3`. Missing URL/key → sim. Judge-only. |
 | Emission | **4000 bps** | Default share (sum across all four challenges is `10000`). |
@@ -156,7 +156,7 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 |-----|--------|
 | DCAP verify holds the attest mutex | A cold Intel PCS fetch (up to 20 s) serialises attestation submissions. |
 | DCAP error classification | Matches on `anyhow` message text; re-run `cargo test -p attest-policy --features dcap` after any `dcap-qvl` bump. |
-| Relearn eval image digests | `relearn-eval` is pinned (`sha256:303c6357…`). `relearn-t2i-eval` and `relearn-mm-eval` are still empty, so live rent stays refused on those two challenges — both are off anyway. |
+| Relearn eval image digests | `relearn-eval` is pinned (`sha256:00839671…`). `relearn-t2i-eval` and `relearn-mm-eval` are still empty, so live rent stays refused on those two challenges — both are off anyway. |
 | Relearn T2I holdout salt | The committed `holdout_commitment` uses the documented **dev** salt so local and staging work out of the box. Production must rotate to a private salt, replace the commitment, and re-sign. |
 | Relearn holdout salt | The committed `holdout_commitment` is the CI / local one — a documented dev salt over a synthetic catalog so the stack boots without operator secrets. It is **not** the live seal. Production must rotate to a private salt **and** a private catalog, replace the commitment in `config/relearn-pin.toml`, and re-sign the trust root ([`../config/CEREMONY.md`](../config/CEREMONY.md)). |
 | Relearn live scoring | The eval image is pinned, so the remaining blockers are operator state: the harvest (`live_harvest_wired`) and the champion baseline (`champion_baseline_recorded`). Each has its own **503** and its own boot-log line. Sim is opt-in (`RELEARN_FORCE_SIM=1`, CI / local only), reported as `eval_backend` on `/v1/status` and on the submit row — never a fallback. Refusals persist no row. |
@@ -165,7 +165,7 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 | Relearn teacher key on rented pods | `RELEARN_TEACHER_API_KEY` is forwarded into the pod when set, because a Lium `InstanceSpec` carries no env and the image judges over HTTP. Delivered over stdin (never a command line), scrubbed after the run, and redacted out of any surfaced log. A miner-controlled pod could still spend the operator's teacher quota — scope and rate-limit that credential, or leave it unset when the pod reaches the teacher without auth. |
 | Relearn champion baseline | Live hosts need an operator-recorded measurement (`RELEARN_BASE_CHAMPION_FILE`, verified against the pin's `eval_image_digest` + `holdout_commitment`). Unset means `champion_baseline_recorded: false` and every submission 503s before the gates. Sim hosts seed the sim baseline. |
 | Relearn Multimodal champion LM hash | `RELEARN_MM_CHAMPION_LM_HASH` is operator-supplied. Unset means encoder-only submissions are rejected (they cannot prove the LM is unchanged). |
-| Relearn public repo | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) exists; this repo pins `relearn_git_sha` = `82e21442…`, the head of **PR #2, which is open, not merged**. Re-pin to the merge commit once it lands, or the pinned SHA will not be reachable from that repo's default branch. Seed mirror: `docs/external-miner/relearn-seed/`. |
+| Relearn public repo | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) exists; this repo pins `relearn_git_sha` = `822d2729…`, the head of **PR #2, which is open, not merged**. Re-pin to the merge commit once it lands, or the pinned SHA will not be reachable from that repo's default branch. Seed mirror: `docs/external-miner/relearn-seed/`. |
 | Mainnet (netuid 100) | Owner wallet not yet on this machine, so prod runs with `BASE_GATEWAY_REQUIRE_OWNER=0`. |
 | Prod pin placeholders | `deploy/pins/prod.json` still ships zero-digests until the first successful promote; registry mode rejects placeholders. |
 | Spaces backup secrets | First prod promote is fail-closed without `BASE_BACKUP_ENDPOINT` + `SPACES_ACCESS_KEY_ID` / `SPACES_SECRET_ACCESS_KEY` (or AWS_* fallbacks) in GitHub. |
