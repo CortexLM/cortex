@@ -846,6 +846,8 @@ pub async fn rent_eval(
         max_price_per_hour: 48.0,
         gpu_count: 8,
         image_digest: Some(pin.eval_image_digest.clone()),
+        docker_image: None,
+        startup_commands: None,
         ssh_public_keys: Vec::new(),
         ssh_key_name: None,
         preferred_offer_id: None,

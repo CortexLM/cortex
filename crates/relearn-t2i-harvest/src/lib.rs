@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use harvest_pod::{EvalPod, PodProgram};
+use harvest_pod::{harvest_template_name, EvalPod, PodProgram};
 use prism_lium_types::InstanceSpec;
 use relearn_t2i_eval::{EvalError, LiveJudge, T2iEvalMetrics, T2I_METRICS_SCHEMA};
 use relearn_t2i_score::T2iSliceScores;
@@ -48,6 +48,8 @@ pub const PROGRAM: PodProgram = PodProgram {
     entrypoint: "relearn-image-eval score",
     metrics_marker: METRICS_MARKER,
     ok_marker: OK_MARKER,
+    score_binary: "/usr/bin/relearn-image-eval",
+    serve_entrypoint: "/usr/bin/relearn-image-eval-entrypoint",
 };
 
 /// What the eval image is asked to score.
@@ -242,11 +244,16 @@ impl LiumImageHarvest {
             max_price_per_hour: self.limits.max_price_per_hour,
             gpu_count: self.limits.gpu_count,
             image_digest: Some(pin.eval_image_digest.clone()),
+            docker_image: Some(pin.eval_image.clone()),
+            startup_commands: Some(PROGRAM.startup_commands()),
             ssh_public_keys: self.ssh_public_keys.clone(),
             ssh_key_name: Some(SSH_KEY_NAME.to_owned()),
             preferred_offer_id: None,
             template_id: None,
-            template_name: None,
+            template_name: Some(harvest_template_name(
+                &pin.eval_image,
+                &pin.eval_image_digest,
+            )),
         }
     }
 }
@@ -536,6 +543,24 @@ mod tests {
             log.booted[0].image_digest.as_deref(),
             Some(p.eval_image_digest.as_str())
         );
+        assert_eq!(
+            log.booted[0].docker_image.as_deref(),
+            Some(p.eval_image.as_str())
+        );
+        assert_eq!(
+            log.booted[0].template_name.as_deref(),
+            Some("relearn-image-eval-abababab")
+        );
+        let startup = log.booted[0]
+            .startup_commands
+            .as_deref()
+            .unwrap_or_default();
+        assert!(
+            startup.contains("relearn-image-eval-entrypoint"),
+            "{startup}"
+        );
+        assert!(startup.contains("USER_PUBLIC_KEY"), "{startup}");
+        assert!(!startup.contains("prism-pod-entrypoint"), "{startup}");
         assert_eq!(log.booted[0].ssh_key_name.as_deref(), Some(SSH_KEY_NAME));
         assert_eq!(log.requests[0].holdout.len(), 25);
         assert_eq!(log.requests[0].challenge_id, "relearn-image");

@@ -155,6 +155,8 @@ async fn live_rent_ssh_eval_terminate() {
             max_price_per_hour: max_price,
             gpu_count,
             image_digest: None,
+            docker_image: None,
+            startup_commands: None,
             ssh_public_keys: vec![pub_key.clone()],
             ssh_key_name: Some("prism-mission-worker".into()),
             preferred_offer_id: Some(offer.id.clone()),

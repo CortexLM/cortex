@@ -47,6 +47,10 @@ pub struct PodProgram {
     pub metrics_marker: &'static str,
     /// Marker the image prints on a completed run.
     pub ok_marker: &'static str,
+    /// Absolute path of the scoring binary the image must ship.
+    pub score_binary: &'static str,
+    /// Image serve entrypoint Lium starts (with `USER_PUBLIC_KEY`).
+    pub serve_entrypoint: &'static str,
 }
 
 /// Env file the pod sources before the entrypoint, when one was staged.
@@ -100,6 +104,8 @@ impl PodProgram {
             entrypoint,
             metrics_marker,
             ok_marker,
+            score_binary: _,
+            serve_entrypoint: _,
         } = *self;
         let (bin, args) = match entrypoint.split_once(char::is_whitespace) {
             Some((bin, rest)) => (bin, rest.trim()),
@@ -151,6 +157,51 @@ impl PodProgram {
     pub fn ran_to_completion(&self, stdout: &str) -> bool {
         stdout.lines().any(|l| l.trim_end() == self.ok_marker)
     }
+
+    /// Lium startup for this image: inject the rental key, then this entrypoint.
+    ///
+    /// Must not mention `/usr/local/bin/prism-pod-entrypoint` — that binary
+    /// lives on Prism recipes pods, not on the harvest pin.
+    #[must_use]
+    pub fn startup_commands(&self) -> String {
+        format!(
+            "/usr/bin/tini -- {} serve USER_PUBLIC_KEY",
+            self.serve_entrypoint
+        )
+    }
+
+    /// Fail-closed probe after RUNNING, before the holdout is staged.
+    #[must_use]
+    pub fn probe_cmd(&self) -> String {
+        format!("test -f {bin} && test -x {bin}", bin = self.score_binary)
+    }
+}
+
+/// `ghcr.io/cortexlm/relearn-eval` + `sha256:201cc5d2…` → `relearn-eval-201cc5d2`.
+///
+/// The digest prefix is required so listed-template reuse cannot pick
+/// `prism-recipe-v10` by name.
+#[must_use]
+pub fn harvest_template_name(docker_image: &str, digest: &str) -> String {
+    let repo = docker_image
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("eval");
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    let prefix = hex.get(..8).unwrap_or(hex);
+    format!("{repo}-{prefix}")
+}
+
+/// Operator error when the rented template is not the harvest pin.
+#[must_use]
+pub fn missing_score_binary_error(spec: &InstanceSpec, bin: &str, cause: &str) -> String {
+    format!(
+        "harvest image missing executable {bin} (template docker_image={} pin digest={}); \
+         refusing to stage the holdout: {cause}",
+        spec.docker_image.as_deref().unwrap_or("unset"),
+        spec.image_digest.as_deref().unwrap_or("unset"),
+    )
 }
 
 /// One pod's lifecycle for one harvest.
@@ -202,6 +253,25 @@ impl LiumEvalPod {
         self.program
     }
 
+    async fn probe_score_binary(&self, instance_id: &str) -> Result<(), String> {
+        if self.program.score_binary.is_empty() {
+            return Err("PodProgram.score_binary is empty".into());
+        }
+        let key = resolve_private_key(None).map_err(|e| e.to_string())?;
+        let target = self.target(instance_id).await?;
+        ssh_exec(
+            &target,
+            &key,
+            &self.program.probe_cmd(),
+            SSH_ATTEMPTS,
+            SSH_RETRY_SECS,
+            SSH_SHORT_TIMEOUT_SECS,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
     async fn target(&self, instance_id: &str) -> Result<SshTarget, String> {
         let raw = self
             .client
@@ -229,6 +299,14 @@ impl EvalPod for LiumEvalPod {
             .wait_until_running(&inst.id)
             .await
             .map_err(|e| e.to_string())?;
+        if let Err(cause) = self.probe_score_binary(&inst.id).await {
+            let _ = self.shutdown(&inst.id).await;
+            return Err(missing_score_binary_error(
+                spec,
+                self.program.score_binary,
+                &cause,
+            ));
+        }
         Ok(inst.id)
     }
 
@@ -316,6 +394,8 @@ mod tests {
         entrypoint: "demo-eval score",
         metrics_marker: "DEMO_METRICS=",
         ok_marker: "DEMO_EVAL_OK",
+        score_binary: "/usr/bin/demo-eval",
+        serve_entrypoint: "/usr/bin/demo-eval-entrypoint",
     };
 
     #[test]
@@ -388,6 +468,53 @@ mod tests {
         assert_eq!(PROGRAM.extract_document(" {\"a\":1} "), Some("{\"a\":1}"));
         assert_eq!(PROGRAM.extract_document("segfault"), None);
         assert!(!PROGRAM.ran_to_completion("segfault"));
+    }
+
+    #[test]
+    fn harvest_template_name_includes_the_digest_prefix() {
+        assert_eq!(
+            harvest_template_name(
+                "ghcr.io/cortexlm/relearn-eval",
+                "sha256:201cc5d29c219097642d61ce4dd713d482a4d0502e49699a22f0a94da4983aaa"
+            ),
+            "relearn-eval-201cc5d2"
+        );
+        assert_eq!(
+            harvest_template_name(
+                "ghcr.io/cortexlm/relearn-image-eval",
+                &format!("sha256:{}", "ab".repeat(32))
+            ),
+            "relearn-image-eval-abababab"
+        );
+    }
+
+    #[test]
+    fn startup_starts_this_image_not_prism_recipes() {
+        let cmd = PROGRAM.startup_commands();
+        assert!(cmd.contains("USER_PUBLIC_KEY"), "{cmd}");
+        assert!(
+            cmd.contains("/usr/bin/tini -- /usr/bin/demo-eval-entrypoint serve"),
+            "{cmd}"
+        );
+        assert!(!cmd.contains("prism-pod-entrypoint"), "{cmd}");
+    }
+
+    #[test]
+    fn probe_requires_the_score_binary_before_the_holdout() {
+        assert_eq!(
+            PROGRAM.probe_cmd(),
+            "test -f /usr/bin/demo-eval && test -x /usr/bin/demo-eval"
+        );
+        let spec = InstanceSpec {
+            docker_image: Some("ghcr.io/cortexlm/relearn-eval".into()),
+            image_digest: Some(format!("sha256:{}", "ab".repeat(32))),
+            ..InstanceSpec::default()
+        };
+        let err = missing_score_binary_error(&spec, "/usr/bin/relearn-eval", "exit 1");
+        assert!(err.contains("ghcr.io/cortexlm/relearn-eval"), "{err}");
+        assert!(err.contains("abababab"), "{err}");
+        assert!(err.contains("/usr/bin/relearn-eval"), "{err}");
+        assert!(err.contains("refusing to stage the holdout"), "{err}");
     }
 
     #[test]

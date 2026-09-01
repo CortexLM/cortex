@@ -207,6 +207,12 @@ pub struct InstanceSpec {
     pub gpu_count: u32,
     /// Optional image / template digest pin (integrity).
     pub image_digest: Option<String>,
+    /// Digest-pinned harvest image repo (no tag), e.g. `ghcr.io/cortexlm/relearn-eval`.
+    /// When set with `image_digest`, provision must rent that image — not prism-recipe-v10.
+    pub docker_image: Option<String>,
+    /// Lium template startup. Digest-pinned harvest must inject `USER_PUBLIC_KEY`
+    /// then exec this image's entrypoint — never `/usr/local/bin/prism-pod-entrypoint`.
+    pub startup_commands: Option<String>,
     /// SSH public keys (required for real Lium rent).
     pub ssh_public_keys: Vec<String>,
     /// Optional Lium SSH key name for `ensure_ssh_key`.
@@ -219,6 +225,16 @@ pub struct InstanceSpec {
     pub template_name: Option<String>,
 }
 
+impl InstanceSpec {
+    /// Harvest rent: `docker_image` is set so provision must not use prism-recipe.
+    #[must_use]
+    pub fn digest_pinned_harvest(&self) -> bool {
+        self.docker_image
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+    }
+}
+
 impl Default for InstanceSpec {
     fn default() -> Self {
         Self {
@@ -227,6 +243,8 @@ impl Default for InstanceSpec {
             max_price_per_hour: DEFAULT_MAX_PRICE_PER_HOUR,
             gpu_count: DEFAULT_POD_GPU_COUNT,
             image_digest: None,
+            docker_image: None,
+            startup_commands: None,
             ssh_public_keys: vec![],
             ssh_key_name: Some("prism-mission-worker".into()),
             preferred_offer_id: None,
