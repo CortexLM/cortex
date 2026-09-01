@@ -1,0 +1,51 @@
+# Cortex pin for the Relearn Agent challenge (`relearn-agent`).
+# Deploy = bump eval_image_digest + relearn_git_sha after relearn CI is green.
+# Never put secrets, endpoints, or episodes in this file.
+#
+# The holdout episode set is NOT in this file. Git carries only its
+# commitment; the episodes live in an operator file
+# (`RELEARN_AGENT_HOLDOUT_FILE`) and are checked against the commitment at
+# boot. Regenerate with:
+#
+#   cargo run -p xtask -- relearn-agent-holdout --catalog <catalogue.json> \
+#     --salt "$RELEARN_AGENT_HOLDOUT_SALT" --size 120 --exclude <each public id> \
+#     --out /root/.base-secrets/relearn-agent-episodes.json
+#
+# The commitment below is the CI / local one: a documented dev salt over the
+# synthetic catalogue, so the stack can boot without operator secrets. It is
+# NOT the live seal.
+#
+# Production MUST rotate to a private salt AND a private catalogue, replace the
+# commitment here, and re-sign the trust root (config/CEREMONY.md). Shipping a
+# documented salt over a synthetic catalogue would let miners reconstruct the
+# scored set.
+
+# Same checkpoint the `relearn` challenge pins. This challenge is a second,
+# independent post-train of it — agentic tool use scored by replayed traces —
+# not a rename of `relearn`.
+base_model = "Qwen/Qwen3.8-27B"
+
+eval_image = "ghcr.io/cortexlm/relearn-agent-eval"
+# Digest-only, never a floating tag. This image implements the harvest
+# contract in docs/RELEARN-AGENT.md § Eval image contract and must run all
+# three arms (trace replay, tool ablation, observation shuffle); the
+# control-plane client refuses any document not bound to this digest.
+#
+# Empty until CortexLM/relearn publishes the agent eval image. Until then a
+# live host answers 503 on every submission (GET /v1/status -> can_score,
+# live_harvest_wired, champion_baseline_recorded). Sim is opt-in via
+# RELEARN_AGENT_FORCE_SIM and is never a fallback.
+eval_image_digest = ""
+relearn_git = "https://github.com/CortexLM/relearn"
+relearn_git_sha = ""
+
+# Public episode ids (miners may train on these). Holdout selection must
+# exclude every one of them. The scored episodes stay off git.
+public_ids = [
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+  11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+  21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+  31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+]
+holdout_commitment = "456e9ec51d9f4010d603697eb0fdcf38717963ea0836bbe84ea12690407aef2c"
+holdout_size = 120

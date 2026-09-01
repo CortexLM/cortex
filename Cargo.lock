@@ -7613,6 +7613,7 @@ dependencies = [
  "hex",
  "parity-scale-codec",
  "regex",
+ "relearn-agent-task",
  "relearn-challenge-task",
  "relearn-t2i-task",
  "reqwest 0.12.28",

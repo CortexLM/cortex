@@ -10,8 +10,10 @@
 //! - `external-docs-check` — fail if external miner docs `protocol_version` ≠ bundle, or D19 drifts
 //! - `relearn-t2i-holdout` — select a Relearn T2I holdout slice and print its commitment
 //! - `relearn-holdout` — select a Relearn holdout slice and print its commitment
+//! - `relearn-agent-holdout` — select a Relearn Agent episode set and print its commitment
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod agent_holdout;
 mod consensus_lint;
 mod design_check;
 mod external_docs_check;
@@ -114,6 +116,29 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Select a Relearn Agent episode set and print its pin commitment.
+    ///
+    /// Episode ids and goals are never printed. Production salts stay off git.
+    RelearnAgentHoldout {
+        /// Operator catalogue JSON (array of episodes).
+        #[arg(long)]
+        catalog: Option<PathBuf>,
+        /// Selection salt. Never reuse another challenge's salt.
+        #[arg(long)]
+        salt: String,
+        /// Holdout episode count.
+        #[arg(long, default_value_t = 120)]
+        size: usize,
+        /// Episode ids published in the pin's public split (repeatable).
+        #[arg(long = "exclude")]
+        exclude: Vec<u32>,
+        /// Build a local-only synthetic catalogue.
+        #[arg(long)]
+        synthetic: bool,
+        /// Write episodes here (outside the repo, mode 0600).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Select a Relearn T2I holdout slice and print its pin commitment.
     ///
     /// Prompt ids are never printed. Production salts stay off git.
@@ -206,6 +231,21 @@ fn main() -> ExitCode {
             synthetic,
             out,
         } => relearn_holdout::run(&relearn_holdout::HoldoutArgs {
+            catalog,
+            salt,
+            size,
+            exclude,
+            synthetic,
+            out,
+        }),
+        Command::RelearnAgentHoldout {
+            catalog,
+            salt,
+            size,
+            exclude,
+            synthetic,
+            out,
+        } => agent_holdout::run(&agent_holdout::HoldoutArgs {
             catalog,
             salt,
             size,
