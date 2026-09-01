@@ -286,6 +286,7 @@ async fn submit(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist_pre_eval_reject(
     st: &AppState,
     body: SubmitBody,
@@ -297,8 +298,10 @@ fn persist_pre_eval_reject(
     verdict: PromoteVerdict,
     holdout_items: usize,
 ) -> Result<(StatusCode, Json<SubmitResp>), (StatusCode, Json<serde_json::Value>)> {
-    let mut scores = SliceScores::default();
-    scores.contamination = contamination;
+    let scores = SliceScores {
+        contamination,
+        ..SliceScores::default()
+    };
     let row = st
         .store
         .insert(Submission {

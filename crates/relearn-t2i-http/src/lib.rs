@@ -259,7 +259,7 @@ async fn submit(
             submission_digest,
             contamination,
             verdict,
-            holdout_ids.len(),
+            st.pin.seed_cells(&holdout_ids).len(),
         );
     }
 
@@ -322,6 +322,7 @@ async fn submit(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist_pre_eval_reject(
     st: &AppState,
     body: SubmitBody,
@@ -333,8 +334,10 @@ fn persist_pre_eval_reject(
     verdict: PromoteVerdict,
     holdout_cells: usize,
 ) -> Result<(StatusCode, Json<SubmitResp>), (StatusCode, Json<serde_json::Value>)> {
-    let mut scores = T2iSliceScores::default();
-    scores.contamination = contamination;
+    let scores = T2iSliceScores {
+        contamination,
+        ..T2iSliceScores::default()
+    };
     let row = st
         .store
         .insert(Submission {
@@ -773,7 +776,7 @@ mod tests {
             app.clone(),
             "POST",
             "/v1/submissions",
-            submit_body("miner-strong-finetune", &pinned_manifest_json()),
+            submit_body("miner-strong-finetune", &declared_manifest_json()),
             None,
         )
         .await;
