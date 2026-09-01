@@ -433,39 +433,8 @@ pub fn judge_challenger(champion: &T2iSliceScores, challenger: &T2iSliceScores) 
         failed.push(GateFail::ContaminationEvidenceMissing);
     }
 
-    match (
-        T2iSliceScores::mean(&challenger.public),
-        T2iSliceScores::mean(&challenger.holdout),
-    ) {
-        (None, _) => failed.push(GateFail::PublicEvidenceMissing),
-        (Some(pub_m), Some(hold_m)) => {
-            if pub_m - hold_m > MAX_PUBLIC_HOLDOUT_GAP + DEADZONE {
-                failed.push(GateFail::PublicHoldoutGap);
-            }
-        }
-        (Some(_), None) => failed.push(GateFail::PairedRefusal),
-    }
-
-    // Off the visible score on purpose: a miner tunes what they are paid on,
-    // so the general-capability slice only ever removes a verdict.
-    match (
-        T2iSliceScores::mean(&champion.capability_canary),
-        T2iSliceScores::mean(&challenger.capability_canary),
-    ) {
-        // The published eval image does not emit this series; faithfulness
-        // and seed-replay are its off-score controls. Skip when neither side
-        // measured it. One-sided absence is still fail-closed.
-        (None, None) => {}
-        (None, _) | (_, None) => failed.push(GateFail::CapabilityCanaryEvidenceMissing),
-        (Some(champ_c), Some(chal_c)) => {
-            let drop = champ_c - chal_c;
-            if drop > CANARY_EPSILON + DEADZONE {
-                failed.push(GateFail::CapabilityCanaryRegression {
-                    drop_bps: (drop * 10_000.0).round().max(0.0) as u64,
-                });
-            }
-        }
-    }
+    failed.extend(public_gap_failures(challenger));
+    failed.extend(canary_failures(champion, challenger));
 
     failed.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
     failed.dedup();
@@ -486,6 +455,46 @@ pub fn judge_challenger(champion: &T2iSliceScores, challenger: &T2iSliceScores) 
         pillars,
         failed,
         lattice,
+    }
+}
+
+fn public_gap_failures(challenger: &T2iSliceScores) -> Vec<GateFail> {
+    match (
+        T2iSliceScores::mean(&challenger.public),
+        T2iSliceScores::mean(&challenger.holdout),
+    ) {
+        (None, _) => vec![GateFail::PublicEvidenceMissing],
+        (Some(pub_m), Some(hold_m)) if pub_m - hold_m > MAX_PUBLIC_HOLDOUT_GAP + DEADZONE => {
+            vec![GateFail::PublicHoldoutGap]
+        }
+        (Some(_), None) => vec![GateFail::PairedRefusal],
+        (Some(_), Some(_)) => vec![],
+    }
+}
+
+/// Off the visible score: a miner tunes what they are paid on, so this
+/// slice only ever removes a verdict.
+///
+/// The published eval image does not emit the series; faithfulness and
+/// seed-replay are its off-score controls. Skip when neither side measured
+/// it. One-sided absence is still fail-closed.
+fn canary_failures(champion: &T2iSliceScores, challenger: &T2iSliceScores) -> Vec<GateFail> {
+    match (
+        T2iSliceScores::mean(&champion.capability_canary),
+        T2iSliceScores::mean(&challenger.capability_canary),
+    ) {
+        (None, None) => vec![],
+        (None, _) | (_, None) => vec![GateFail::CapabilityCanaryEvidenceMissing],
+        (Some(champ_c), Some(chal_c)) => {
+            let drop = champ_c - chal_c;
+            if drop > CANARY_EPSILON + DEADZONE {
+                vec![GateFail::CapabilityCanaryRegression {
+                    drop_bps: (drop * 10_000.0).round().max(0.0) as u64,
+                }]
+            } else {
+                vec![]
+            }
+        }
     }
 }
 
