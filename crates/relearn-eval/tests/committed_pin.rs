@@ -83,14 +83,18 @@ fn committed_pin_allows_live_rent() {
     assert!(p.can_rent(), "eval_image_digest must be a sha256 pin");
     assert_eq!(
         p.eval_image_digest,
-        "sha256:0083967170ddc0fc892857ef8df12db93ff40e3c62b30ded6459d26df5c9498a"
+        "sha256:86240d7617d296dc12c9f215b6156b127c60dc2baafe87db6dea7a3b7bbb68ba"
     );
     assert_eq!(
         p.relearn_git_sha,
-        "822d272972ef92c0a92ef2e2a9ba51a54f5165fd"
+        "9998154fec288cafc185a0478748db2243fada5f"
     );
     assert_eq!(p.relearn_git_sha.len(), 40);
     assert!(p.relearn_git_sha.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(
+        !p.eval_image_digest.contains("0083967170"),
+        "do not pin the digest that exited 127 (no /usr/bin/relearn-eval)"
+    );
     assert!(
         !p.eval_image_digest.contains("303c63573c"),
         "do not pin the digest that printed no RELEARN_EVAL_OK"
