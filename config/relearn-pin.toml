@@ -42,9 +42,9 @@ eval_image = "ghcr.io/cortexlm/relearn-eval"
 # can_score, live_harvest_wired, champion_baseline_recorded.
 #
 # CUDA scoring image with the GLM-5.3 judge fix; CI PATH-checked
-# /usr/bin/relearn-eval. Do not pin sha256:201cc5d2… (judge max_tokens 32 /
-# content null), sha256:86240d76…, sha256:00839671… (exit 127), or
-# sha256:303c6357… (printed no RELEARN_EVAL_OK).
+# /usr/bin/relearn-eval. Do not pin sha256:201cc5d2… (judge generation
+# cap 32 / empty content), sha256:86240d76…, sha256:00839671… (exit 127),
+# or sha256:303c6357… (printed no RELEARN_EVAL_OK).
 eval_image_digest = "sha256:cbc4bbb80e421952696156a0ceb6d646448e421770ab01d8ad7be5dc989ae0f5"
 relearn_git = "https://github.com/CortexLM/relearn"
 # CortexLM/relearn commit that built the digest above.

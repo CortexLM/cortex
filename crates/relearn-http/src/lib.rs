@@ -737,6 +737,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mismatched_holdout_cannot_load_so_submit_is_unavailable() {
+        let recs = holdout();
+        let pin = RelearnPin {
+            holdout_commitment: holdout_commitment(&recs),
+            holdout_size: recs.len(),
+            public_ids: (1..=40).collect(),
+            ..RelearnPin::default()
+        };
+        let store = MemoryStore::new();
+        store
+            .set_holdout_commitment(&pin.holdout_commitment, pin.holdout_size)
+            .expect("commit");
+        let mut leaked = recs;
+        leaked[0].prompt = "leaked".into();
+        assert!(
+            store.load_holdout(leaked, &[], &pin.public_ids).is_err(),
+            "a commitment mismatch must not load"
+        );
+        let app = relearn_router(AppState {
+            store,
+            pin,
+            backend: EvalBackend::Sim,
+            live_scorer: None,
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+        });
+        let (st, status) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(status["holdout"]["loaded"], false, "{status}");
+        assert_eq!(status["can_score"], false, "{status}");
+        let (st, body) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            serde_json::json!({
+                "miner_hotkey": digest("miner-hotkey"),
+                "artifact_digest": digest("x"),
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    }
+
+    #[tokio::test]
     async fn submit_without_a_loaded_holdout_is_unavailable_not_scored() {
         let (st, body) = json_req(
             app_with("op", false).await,

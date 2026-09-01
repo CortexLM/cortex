@@ -703,6 +703,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mismatched_episodes_cannot_load_so_submit_is_unavailable() {
+        let p = pin("");
+        let store = MemoryStore::new();
+        store
+            .set_holdout_commitment(&p.holdout_commitment, p.holdout_size)
+            .expect("commit");
+        let mut leaked = episodes();
+        leaked[0].goal = "leaked".into();
+        assert!(
+            store.load_episodes(leaked, &[], &p.public_ids).is_err(),
+            "a commitment mismatch must not load"
+        );
+        let app = relearn_agent_router(AppState {
+            store,
+            pin: p,
+            backend: EvalBackend::Sim,
+            live_scorer: None,
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+        });
+        let (st, status) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(status["holdout"]["loaded"], false, "{status}");
+        assert_eq!(status["can_score"], false, "{status}");
+        let (st, body) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body("x", &declared_manifest()),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    }
+
+    #[tokio::test]
     async fn submit_without_loaded_episodes_is_unavailable_not_scored() {
         let (st, body) = json_req(
             app_full("op", EvalBackend::Sim, "", None, false, false).await,
