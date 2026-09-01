@@ -952,6 +952,26 @@ mod tests {
         }
     }
 
+    struct Unready;
+
+    #[async_trait]
+    impl LiveScorer for Unready {
+        async fn score(
+            &self,
+            _pin: &RelearnPin,
+            _frozen: &str,
+            _artifact: &str,
+            _holdout: &[HoldoutItem],
+        ) -> Result<SliceScores, EvalError> {
+            Err(EvalError::Backend("must not score".into()))
+        }
+        fn ready(&self) -> Result<(), EvalError> {
+            Err(EvalError::Backend(
+                "RELEARN_TEACHER_API_URL not set on this host".into(),
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn live_boot_records_a_baseline_from_either_live_source() {
         let hold = recs(120);
@@ -1060,25 +1080,6 @@ mod tests {
             Err(EvalError::LiveHarvestUnavailable)
         ));
         assert!(scoring_readiness(&live, EvalBackend::Lium, Some(&Harvest)).is_ok());
-
-        struct Unready;
-        #[async_trait]
-        impl LiveScorer for Unready {
-            async fn score(
-                &self,
-                _pin: &RelearnPin,
-                _frozen: &str,
-                _artifact: &str,
-                _holdout: &[HoldoutItem],
-            ) -> Result<SliceScores, EvalError> {
-                Err(EvalError::Backend("must not score".into()))
-            }
-            fn ready(&self) -> Result<(), EvalError> {
-                Err(EvalError::Backend(
-                    "RELEARN_TEACHER_API_URL not set on this host".into(),
-                ))
-            }
-        }
         let err = scoring_readiness(&live, EvalBackend::Lium, Some(&Unready))
             .expect_err("unready scorer");
         assert!(err.to_string().contains("RELEARN_TEACHER_API_URL"), "{err}");
