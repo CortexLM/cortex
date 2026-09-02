@@ -4,7 +4,9 @@
 //! `{BOUNTY_BACKEND_PUBLIC_URL}/v1/bounty/public/leaderboard`
 //! `{BOUNTY_BACKEND_PUBLIC_URL}/v1/bounty/public/reports`
 //!
-//! Missing URL → skip / sim. No host is baked in.
+//! A missing URL, an HTTP failure, and unparseable JSON are all errors. None
+//! of them is a skip: this feed *is* the scorer, so a host that cannot read it
+//! has nothing to pay miners on and must say so. No host is baked in.
 
 use bounty_challenge_task::backend_public_url;
 use bounty_score::{parse_leaderboard, parse_reports, PublicSnapshot};
@@ -14,7 +16,7 @@ use thiserror::Error;
 /// beyond the operator-configured base (trimmed).
 #[derive(Debug, Error)]
 pub enum BackendError {
-    /// `BOUNTY_BACKEND_PUBLIC_URL` unset — caller should skip / sim.
+    /// `BOUNTY_BACKEND_PUBLIC_URL` unset — this host cannot score.
     #[error("BOUNTY_BACKEND_PUBLIC_URL unset")]
     Unset,
     /// HTTP transport or status.
@@ -35,7 +37,9 @@ pub fn public_path(base: &str, tail: &str) -> String {
 /// Load a snapshot from a configured backend URL.
 ///
 /// # Errors
-/// [`BackendError::Unset`] when the env is empty (CI-safe skip).
+/// [`BackendError::Unset`] when neither the argument nor the env carries a
+/// base URL, [`BackendError::Fetch`] on transport or non-2xx, and
+/// [`BackendError::Json`] when a body does not match the public DTO.
 pub async fn fetch_public_snapshot(base: Option<&str>) -> Result<PublicSnapshot, BackendError> {
     let url = match base {
         Some(u) if !u.trim().is_empty() => u.trim().to_owned(),
@@ -76,15 +80,6 @@ pub fn snapshot_from_json(
         leaderboard: parse_leaderboard(leaderboard).map_err(BackendError::Json)?,
         reports: parse_reports(reports).map_err(BackendError::Json)?,
     })
-}
-
-/// Fetch when `BOUNTY_BACKEND_PUBLIC_URL` is set; `Ok(None)` when unset (CI skip).
-pub async fn try_fetch_public_snapshot() -> Result<Option<PublicSnapshot>, BackendError> {
-    match fetch_public_snapshot(None).await {
-        Ok(s) => Ok(Some(s)),
-        Err(BackendError::Unset) => Ok(None),
-        Err(e) => Err(e),
-    }
 }
 
 #[cfg(test)]
@@ -131,15 +126,27 @@ mod tests {
         assert_eq!(plan.holdouts.len(), 1);
     }
 
+    /// An unset feed is a refusal, not a quiet skip. A skip here would let a
+    /// host that reads nothing keep serving ingest and emitting leaves.
     #[tokio::test]
-    async fn fetch_skips_when_url_unset() {
+    async fn an_unset_url_is_an_error_not_a_skip() {
         if backend_public_url().is_some() {
             eprintln!("skip unset assertion: BOUNTY_BACKEND_PUBLIC_URL is set");
             return;
         }
         let err = fetch_public_snapshot(None).await.expect_err("unset");
-        assert!(matches!(err, BackendError::Unset));
-        let skip = try_fetch_public_snapshot().await.expect("skip");
-        assert!(skip.is_none());
+        assert!(matches!(err, BackendError::Unset), "{err}");
+        let blank = fetch_public_snapshot(Some("   ")).await.expect_err("blank");
+        assert!(matches!(blank, BackendError::Unset), "{blank}");
+    }
+
+    /// A closed port is the shape of a backend outage. It must surface as a
+    /// fetch error so the caller emits nothing.
+    #[tokio::test]
+    async fn an_unreachable_backend_is_a_fetch_error() {
+        let err = fetch_public_snapshot(Some("http://127.0.0.1:1"))
+            .await
+            .expect_err("unreachable");
+        assert!(matches!(err, BackendError::Fetch), "{err}");
     }
 }

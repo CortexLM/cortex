@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 bounty-challenge = { path = "../../crates/bounty-challenge" }
+chain-live = { path = "../../crates/chain-live" }
 challenge-keys = { path = "../../crates/challenge-keys" }
 clap = { version = "4", features = ["derive", "env"] }
 telemetry = { path = "../../crates/telemetry" }

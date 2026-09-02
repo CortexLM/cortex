@@ -3,6 +3,8 @@
 //! Cortex does **not** serve a public leaderboard/report API. Public consumers
 //! hit CortexLM/backend (`GET /v1/bounty/public/leaderboard|reports`). This
 //! service only reads that feed for scoring (see `bounty-challenge::backend`).
+//! That feed is the only scorer: without it ingest answers 503 rather than
+//! banking bug-hunting work this host could never pay for.
 //!
 //! Gateway proxies `/challenge/bounty/*` onto this service:
 //!
@@ -36,10 +38,10 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bounty_challenge_task::{
-    backend_public_url, force_sim, hotkey_hex, parse_hotkey, parse_signature,
-    verify_pair_signature, PairChallenge, ScoringBackend, CHALLENGE_ID,
-    MAX_PENDING_REPORTS_PER_HOTKEY, MIN_REPORT_BODY_CHARS, MIN_REPORT_INTERVAL_SECS,
-    MIN_REPRO_CHARS, MIN_UNIQUE_BODY_TOKENS, SCORE_MAX, SCORING_VERSION, TERMS_TEXT,
+    backend_public_url, hotkey_hex, parse_hotkey, parse_signature, verify_pair_signature,
+    PairChallenge, ScoringBackend, CHALLENGE_ID, MAX_PENDING_REPORTS_PER_HOTKEY,
+    MIN_REPORT_BODY_CHARS, MIN_REPORT_INTERVAL_SECS, MIN_REPRO_CHARS, MIN_UNIQUE_BODY_TOKENS,
+    SCORE_MAX, SCORING_VERSION, TERMS_TEXT,
 };
 use bounty_score::{Adjudication, Severity, MAX_TRIAGE_NOISE_BPS, MIN_PRECISION_BPS};
 use bounty_store::{
@@ -95,10 +97,9 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         "scoring_version": SCORING_VERSION,
         "score_max": SCORE_MAX,
         "champion_hotkey": champ,
-        // Where scores come from, and whether the offline scorer was opted
-        // into. A miner can see that this host is not producing weight.
+        // Where scores come from. There is one scorer — the backend public
+        // feed — so a miner can see whether this host produces weight at all.
         "scoring_backend": st.scoring,
-        "force_sim": force_sim(),
         "can_score": st.can_score(),
         "backend_public_configured": backend_public_url().is_some(),
         // Published so miners can see what is being measured — and what is
@@ -213,8 +214,7 @@ async fn submit_report(
     if !st.can_score() {
         return Err(err(
             StatusCode::SERVICE_UNAVAILABLE,
-            "scoring unconfigured: set BOUNTY_BACKEND_PUBLIC_URL, \
-             or BOUNTY_FORCE_SIM=1 for CI",
+            "scoring unconfigured: set BOUNTY_BACKEND_PUBLIC_URL",
         ));
     }
 
@@ -413,7 +413,7 @@ mod tests {
     }
 
     fn app() -> (Router, String) {
-        app_scoring(ScoringBackend::Sim)
+        app_scoring(ScoringBackend::BackendPublic)
     }
 
     fn app_scoring(scoring: ScoringBackend) -> (Router, String) {
@@ -608,8 +608,9 @@ mod tests {
         assert_eq!(bad["state"], "invalid_malicious");
     }
 
-    /// A host with no backend feed and no sim opt-in cannot turn a report into
-    /// weight, so it must refuse the work instead of banking it unpaid.
+    /// A host with no backend feed cannot turn a report into weight, so it
+    /// must refuse the work instead of banking it unpaid. There is no offline
+    /// scorer to fall back to.
     #[tokio::test]
     async fn an_unconfigured_host_refuses_reports_instead_of_collecting_them() {
         let (app, _) = app_scoring(ScoringBackend::Unconfigured);
@@ -647,7 +648,11 @@ mod tests {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(body["scoring_backend"], "unconfigured");
         assert_eq!(body["can_score"], false);
-        assert_eq!(body["force_sim"], false);
+        assert_eq!(body["backend_public_configured"], false);
+        assert!(
+            body.get("force_sim").is_none(),
+            "an offline scorer is not a thing this challenge has: {body}"
+        );
         let paid = body["scoring"]["paid_on"].to_string();
         assert!(
             paid.contains("precision") && paid.contains("severity_impact"),
