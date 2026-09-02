@@ -80,7 +80,8 @@ scorer. Each tick the challenge service:
 2. derives `E` from the metagraph at `last_epoch_block` (`AllMetagraphHotkeys`)
 3. maps published rows onto one leaf per hotkey in `E` for the current subnet
    epoch (champion → `Score`, net-malicious → `InvalidResponse`, everyone else
-   → `NotAttempted`)
+   → `NotAttempted`); an unreadable feed pays nobody but still covers `E` with
+   `ChallengeInternal`
 4. `POST /v1/weights/raw` on the gateway, which seals what validators fetch
 
 Operator knobs: `BASE_CHALLENGE_GATEWAY_ENDPOINT`, `BASE_NETUID`,
@@ -99,9 +100,29 @@ neither is a degraded mode:
 
 - `POST /v1/reports` answers **503** without storing anything. Accepting
   reports there would take real work (finding a real bug) and pay nothing.
-- the emitter signs **no leaf at all**, so the 3000 bps share burns to uid 0.
-  An all-`NoScore` set would be a verdict — "nobody found anything this
-  epoch" — that a host which read nothing has no standing to reach.
+- the emitter pays **nobody**: it covers `E` with
+  `NoScore(ChallengeInternal)` (`BUNDLE_SPEC` §3.3.1 — "challenge-side fault;
+  still must cover the participant"), so the 3000 bps burns to uid 0.
+
+Covering `E` is not a hedge, it is the difference between bounty failing and
+the subnet failing. Bounty holds a **paid** trust-root row, and D24 requires a
+leaf per participant for every paid challenge: leave `E` uncovered and
+`POST /v1/admin/seal` answers **409 incomplete_participant_set** for the whole
+bundle, so relearn's weights go unsealed too. The emitter therefore runs even
+on a host with no feed at all — it simply never pays.
+
+A failed tick also tries not to take back a score. Once the process has scored
+an epoch, a feed outage inside that same epoch **holds** instead of superseding
+a champion's leaf with a burn; a backend hiccup does not get to decide the
+epoch. The watermark is in-process (the gateway has no read side for raw
+leaves), so a restart during an outage can still burn an epoch that had
+scores — the next successful tick supersedes it back. The bias is deliberate:
+burning pays nobody who was not already paid, while staying silent would 409
+the seal for every challenge.
+
+Only a missing `BASE_CHALLENGE_SK_FILE` stops emission entirely — a leaf the
+trust root rejects is not weight — and that case is logged as the 409 it will
+cause.
 
 **There is no offline scorer.** `BOUNTY_FORCE_SIM` is retired: it is ignored,
 warned about at boot, and `deploy/scripts/assert-compose-matrix.sh` fails if

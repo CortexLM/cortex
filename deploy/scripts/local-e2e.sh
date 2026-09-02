@@ -752,7 +752,7 @@ probe_bounty_fail_closed() {
     [[ "$code" == "503" ]] || die "bounty ingest answered HTTP $code with no backend feed (expected 503 fail-closed)"
     grep -q 'scoring unconfigured' /tmp/local-e2e-bounty-report.json \
       || die "bounty 503 did not name the missing backend feed"
-    log "bounty fail-closed OK: no feed → POST /v1/reports 503, no leaf emitted"
+    log "bounty fail-closed OK: no feed → POST /v1/reports 503, leaves pay nobody"
   else
     [[ "$code" == "401" ]] || die "bounty ingest answered HTTP $code with a feed configured (expected 401 invalid_session)"
     log "bounty ingest OK: feed configured → POST /v1/reports reaches session auth"

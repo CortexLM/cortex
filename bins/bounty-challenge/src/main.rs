@@ -7,8 +7,9 @@
 //! Validators never evaluate reports; they verify sealed bundles.
 //!
 //! The feed is the only scorer. Without it ingest answers 503 and the emitter
-//! signs nothing, so the challenge share burns to uid 0 instead of paying on
-//! numbers no validator could reproduce.
+//! pays nobody — it still covers the expected set with
+//! `NoScore(ChallengeInternal)`, so the challenge share burns to uid 0 without
+//! failing D24 for every other challenge in the bundle.
 
 #![forbid(unsafe_code)]
 
@@ -47,7 +48,7 @@ struct Cli {
     #[arg(long, env = "BOUNTY_SESSION_SECRET_FILE")]
     session_secret_file: Option<PathBuf>,
     /// CortexLM/backend public base URL. Empty → this host cannot score:
-    /// ingest 503s and no leaf is signed. Never bake a host; operators set
+    /// ingest 503s and every leaf is a burn. Never bake a host; operators set
     /// this on the host.
     #[arg(long, env = "BOUNTY_BACKEND_PUBLIC_URL")]
     backend_public_url: Option<String>,
@@ -120,10 +121,10 @@ fn run(cli: &Cli) -> Result<(), String> {
             tracing::info!("bounty scoring reads the CortexLM/backend public API");
         }
         // Reports would be real work this host could never pay for, so ingest
-        // refuses rather than banking them, and the emitter signs nothing.
+        // refuses rather than banking them, and every leaf is a burn.
         ScoringBackend::Unconfigured => tracing::warn!(
             "no scoring backend: set BOUNTY_BACKEND_PUBLIC_URL. POST /v1/reports will answer \
-             503 and no leaf will be emitted (the challenge share burns to uid 0) until then"
+             503 and the emitter will pay nobody (the challenge share burns to uid 0) until then"
         ),
     }
     let state = AppState {
@@ -143,22 +144,22 @@ fn run(cli: &Cli) -> Result<(), String> {
     rt.block_on(serve(cli.bind, state))
 }
 
-/// Wire the leaf emitter, or explain why this host will not emit.
+/// Wire the leaf emitter.
 ///
-/// Both refusals are load-bearing: an unconfigured host has no adjudications
-/// to pay on, and a host with no challenge key cannot sign a leaf the trust
-/// root would accept. Neither is a reason to invent scores.
+/// An unconfigured host still gets one. It pays nobody — every leaf is
+/// `NoScore(ChallengeInternal)`, so the share burns to uid 0 — but bounty
+/// holds a paid trust-root row, and a paid challenge with no leaves fails D24:
+/// the seal would 409 for *every* challenge. Only a missing challenge key
+/// stops emission, because a leaf the trust root rejects is not weight.
 fn build_emitter(
     cli: &Cli,
     scoring: ScoringBackend,
     sk: Option<[u8; 32]>,
 ) -> Result<Option<Arc<BountyEmitter<chain_live::LiveChainClient>>>, String> {
-    if scoring != ScoringBackend::BackendPublic {
-        return Ok(None);
-    }
     let Some(sk) = sk else {
         tracing::warn!(
-            "no BASE_CHALLENGE_SK_FILE: bounty cannot sign leaves, so nothing will be emitted"
+            "no BASE_CHALLENGE_SK_FILE: bounty cannot sign leaves, so nothing will be emitted \
+             and POST /v1/admin/seal will answer 409 while bounty holds a paid trust-root row"
         );
         return Ok(None);
     };
@@ -172,11 +173,16 @@ fn build_emitter(
     let mut chain = chain_live::LiveChainClient::connect(&cli.chain_endpoint)
         .map_err(|e| format!("chain connect: {e}"))?;
     chain.set_netuid(cli.netuid);
+    let emits = match scoring {
+        ScoringBackend::BackendPublic => "backend public rows → signed leaves",
+        ScoringBackend::Unconfigured => "no feed → burn leaves only (share burns to uid 0)",
+    };
     tracing::info!(
         netuid = cli.netuid,
         gateway = %cli.gateway_endpoint,
         poll_secs = cli.emit_poll_secs,
-        "bounty emitter wired: backend public rows → signed leaves"
+        emits,
+        "bounty emitter wired"
     );
     Ok(Some(Arc::new(BountyEmitter::new(
         chain,
@@ -250,13 +256,19 @@ mod tests {
         Cli::try_parse_from(["bounty-challenge"]).expect("defaults parse")
     }
 
-    /// The boot path, not just the library: a host with no feed wires no
-    /// emitter, so it cannot post a leaf set nobody adjudicated.
+    /// A host with no feed still has to cover `E` — bounty holds a paid
+    /// trust-root row, so leaving it uncovered would 409 the whole seal. The
+    /// emitter is wired; it simply pays nobody.
     #[test]
-    fn an_unconfigured_host_wires_no_emitter() {
+    fn an_unconfigured_host_still_wires_the_emitter_to_cover_e() {
         let wired = build_emitter(&cli(), ScoringBackend::Unconfigured, Some([3u8; 32]))
-            .expect("no emitter is not an error");
-        assert!(wired.is_none());
+            .expect("wire")
+            .expect("emitter");
+        assert_eq!(
+            wired.scored_epoch(),
+            0,
+            "an unconfigured host has scored nothing"
+        );
     }
 
     /// A leaf the trust root would reject is not weight, so a missing
@@ -273,7 +285,7 @@ mod tests {
         let wired = build_emitter(&cli(), ScoringBackend::BackendPublic, Some([3u8; 32]))
             .expect("wire")
             .expect("emitter");
-        assert_eq!(wired.emitted_epoch(), 0);
+        assert_eq!(wired.scored_epoch(), 0);
     }
 
     /// `BOUNTY_FORCE_SIM` used to select an offline scorer. It is retired, and
@@ -283,11 +295,6 @@ mod tests {
         std::env::set_var("BOUNTY_FORCE_SIM", "1");
         assert!(legacy_sim_opt_in_present());
         assert_eq!(resolve_scoring_backend(), ScoringBackend::Unconfigured);
-        assert!(
-            build_emitter(&cli(), resolve_scoring_backend(), Some([3u8; 32]))
-                .expect("wire")
-                .is_none()
-        );
         std::env::remove_var("BOUNTY_FORCE_SIM");
     }
 }

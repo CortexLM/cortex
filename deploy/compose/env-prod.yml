@@ -74,7 +74,7 @@ services:
   bounty-challenge:
     environment:
       # CortexLM/backend public base. Empty → this host cannot score:
-      # POST /v1/reports answers 503 and no leaf is emitted, so the 3000 bps
-      # share burns to uid 0. Never bake a host.
+      # POST /v1/reports answers 503 and every bounty leaf is an explicit
+      # no-score, so the 3000 bps share burns to uid 0. Never bake a host.
       BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"
       BASE_CHAIN_ENDPOINTS: "wss://bittensor-finney.api.onfinality.io/public-ws,wss://entrypoint-finney.opentensor.ai:443"

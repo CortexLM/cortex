@@ -31,8 +31,9 @@ Unsealed or decode-error latest is a **burn vector** (`sealed: false`, uid 0 = 1
 - Read the Bounty public feed. Bounty adjudications live in CortexLM/backend;
   the challenge service on master fetches them and signs leaves, and you verify
   the sealed bundle like any other challenge. An epoch where that host could
-  not read the feed simply has no bounty leaves, and the 3000 bps burns to
-  uid 0 — that is fail-closed, not a gateway you should work around.
+  not read the feed still carries a full bounty leaf set — every leaf a
+  `NoScore`, reason `ChallengeInternal` (6) — so D24 holds and the 3000 bps
+  burns to uid 0. That is fail-closed working, not a bundle to dissent on.
 
 ## Run
 

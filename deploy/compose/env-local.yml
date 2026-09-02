@@ -106,8 +106,8 @@ services:
       BASE_DATABASE_URL: ${LOCAL_DATABASE_URL:-postgres://base:base_dev_only_change_me@postgres:5432/base}
       BOUNTY_CHAT_COMMAND: "${BOUNTY_CHAT_COMMAND:-}"
       # There is no offline bounty scorer. A laptop with no feed answers 503 on
-      # ingest and emits no leaf; point this at a stand-in backend (or the real
-      # one) to exercise scoring locally.
+      # ingest and emits burn leaves only; point this at a stand-in backend (or
+      # the real one) to exercise scoring locally.
       BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"
       # Tighter than prod so a local run sees a leaf set without waiting.
       BOUNTY_EMIT_POLL_SECS: "${LOCAL_BOUNTY_EMIT_POLL_SECS:-30}"

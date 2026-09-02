@@ -1,25 +1,29 @@
 //! Bounty emission is only as real as the backend feed behind it.
 //!
-//! Two properties are load-bearing and neither is visible from a unit test of
+//! Three properties are load-bearing and none is visible from a unit test of
 //! the scorer:
 //!
-//! 1. A host that cannot read `{BOUNTY_BACKEND_PUBLIC_URL}/v1/bounty/public/*`
-//!    signs **no leaf at all** — not even an all-`NoScore` set, which would be
-//!    a verdict ("nobody found anything") this host has no standing to reach.
-//! 2. A host that *can* read it turns published rows into scored leaves for
-//!    metagraph hotkeys, which is how a validator ever sees bounty weight.
+//! 1. A host that *can* read `{BOUNTY_BACKEND_PUBLIC_URL}/v1/bounty/public/*`
+//!    turns published rows into scored leaves for metagraph hotkeys, which is
+//!    how a validator ever sees bounty weight.
+//! 2. A host that cannot read it pays **nobody** — every leaf is
+//!    `NoScore(ChallengeInternal)`, so the challenge share burns to uid 0 —
+//!    while still covering `E`, because a paid challenge with no leaves fails
+//!    D24 and takes every other challenge's seal down with it.
+//! 3. A feed outage inside an already-scored epoch does not take back the
+//!    scores the backend really did publish.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use bounty_challenge::{BountyEmitter, EmitError, GatewayClient, GatewayClientConfig};
+use bounty_challenge::{BountyEmitter, EmitOutcome, GatewayClient, GatewayClientConfig};
 use chain::{
     AxonInfo, ChainClient, ChainError, FakeChain, FakeChainConfig, Metagraph, WeightsTlockPayload,
 };
@@ -162,19 +166,41 @@ async fn spawn_backend() -> String {
     serve(app).await
 }
 
-/// A backend that answers, but with 500s — the shape of an outage.
-async fn spawn_broken_backend() -> (String, Arc<AtomicUsize>) {
+/// Request counter + health switch for [`spawn_flaky_backend`].
+type Flaky = (Arc<AtomicUsize>, Arc<AtomicBool>);
+
+/// A backend that answers, but with 500s — the shape of an outage. Flip
+/// `healthy` to let the same base URL recover mid-epoch.
+async fn spawn_flaky_backend() -> (String, Arc<AtomicUsize>, Arc<AtomicBool>) {
     let hits = Arc::new(AtomicUsize::new(0));
+    let healthy = Arc::new(AtomicBool::new(false));
+    let state: Flaky = (Arc::clone(&hits), Arc::clone(&healthy));
     let app = Router::new()
         .route(
-            "/v1/bounty/public/{tail}",
-            get(|State(h): State<Arc<AtomicUsize>>| async move {
+            "/v1/bounty/public/leaderboard",
+            get(|State((h, ok)): State<Flaky>| async move {
                 h.fetch_add(1, Ordering::Relaxed);
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                json_or_500(&ok, leaderboard_json())
             }),
         )
-        .with_state(Arc::clone(&hits));
-    (serve(app).await, hits)
+        .route(
+            "/v1/bounty/public/reports",
+            get(|State((h, ok)): State<Flaky>| async move {
+                h.fetch_add(1, Ordering::Relaxed);
+                json_or_500(&ok, reports_json())
+            }),
+        )
+        .with_state(state);
+    (serve(app).await, hits, healthy)
+}
+
+fn json_or_500(healthy: &AtomicBool, body: serde_json::Value) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if healthy.load(Ordering::Relaxed) {
+        Json(body).into_response()
+    } else {
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    }
 }
 
 async fn serve(app: Router) -> String {
@@ -205,9 +231,29 @@ fn leaf_for(accepted: &Accepted, hotkey: [u8; 32]) -> serde_json::Value {
         .lock()
         .expect("lock")
         .iter()
-        .find(|v| v["miner_hotkey"] == serde_json::Value::String(hex_key.clone()))
+        .rfind(|v| v["miner_hotkey"] == serde_json::Value::String(hex_key.clone()))
         .cloned()
         .unwrap_or_else(|| panic!("no leaf for {hex_key}"))
+}
+
+fn accepted_count(accepted: &Accepted) -> usize {
+    accepted.lock().expect("lock").len()
+}
+
+/// Assert every metagraph hotkey got a leaf carrying `no_score.reason`.
+/// Reason 6 = `ChallengeInternal` (`BUNDLE_SPEC` §3.3.1).
+fn assert_burn_covers_e(accepted: &Accepted) {
+    for hotkey in [CHAMPION, MALICIOUS, SILENT] {
+        let leaf = leaf_for(accepted, hotkey);
+        assert_eq!(
+            leaf["score_or_absence"]["no_score"]["reason"], 6,
+            "a host that read nothing must pay nobody: {leaf}"
+        );
+        assert!(
+            leaf["score_or_absence"].get("score").is_none(),
+            "a burn leaf must carry no score: {leaf}"
+        );
+    }
 }
 
 /// The happy path a validator depends on: published backend rows become
@@ -219,17 +265,27 @@ async fn mock_backend_rows_become_scored_leaves_for_metagraph_hotkeys() {
     let (gateway, accepted) = spawn_gateway().await;
     let em = emitter(Some(backend), &gateway);
 
-    let tick = em.tick().await.expect("tick");
-    assert_eq!(tick.participants, 3, "every hotkey in E needs a leaf");
-    assert_eq!(tick.paid, 1, "one champion was paid");
-    assert_eq!(tick.epoch, chain::fake_defaults::SUBNET_EPOCH_INDEX);
-    assert_eq!(tick.pin_block, chain::fake_defaults::LAST_EPOCH_BLOCK);
-    assert_eq!(em.emitted_epoch(), tick.epoch);
-    assert_eq!(accepted.lock().expect("lock").len(), 3);
+    let epoch = match em.tick().await.expect("tick") {
+        EmitOutcome::Scored {
+            epoch,
+            pin_block,
+            participants,
+            paid,
+        } => {
+            assert_eq!(participants, 3, "every hotkey in E needs a leaf");
+            assert_eq!(paid, 1, "one champion was paid");
+            assert_eq!(pin_block, chain::fake_defaults::LAST_EPOCH_BLOCK);
+            epoch
+        }
+        other => panic!("a readable feed must score: {other:?}"),
+    };
+    assert_eq!(epoch, chain::fake_defaults::SUBNET_EPOCH_INDEX);
+    assert_eq!(em.scored_epoch(), epoch);
+    assert_eq!(accepted_count(&accepted), 3);
 
     let champion = leaf_for(&accepted, CHAMPION);
     assert_eq!(champion["challenge_id"], "bounty");
-    assert_eq!(champion["epoch"], tick.epoch);
+    assert_eq!(champion["epoch"], epoch);
     assert!(
         champion["score_or_absence"]["score"]["value"]
             .as_u64()
@@ -250,59 +306,115 @@ async fn mock_backend_rows_become_scored_leaves_for_metagraph_hotkeys() {
     );
 }
 
-/// No feed configured is a refusal. A skip here would leave the challenge
-/// looking healthy while paying nobody, and (worse) let a later local scorer
-/// mint weight no validator can reproduce.
+/// No feed configured pays nobody. It still has to cover `E`: bounty holds a
+/// paid trust-root row, and a paid challenge with no leaves makes
+/// `POST /v1/admin/seal` answer 409 for the whole bundle — an unconfigured
+/// bounty host would take relearn's weights down with it.
 #[tokio::test]
-async fn an_unset_backend_url_emits_nothing() {
+async fn an_unset_backend_url_burns_without_paying_anyone() {
     let (gateway, accepted) = spawn_gateway().await;
     let em = emitter(None, &gateway);
 
-    let err = em.tick().await.expect_err("unset feed");
-    assert!(
-        matches!(err, EmitError::Backend(_)),
-        "unset must fail on the feed, before any chain or gateway work: {err}"
-    );
-    assert!(
-        err.to_string().contains("BOUNTY_BACKEND_PUBLIC_URL"),
-        "{err}"
-    );
-    assert_eq!(em.emitted_epoch(), 0);
-    assert!(
-        accepted.lock().expect("lock").is_empty(),
-        "an unreadable feed must not produce a leaf set"
+    match em.tick().await.expect("burn covers E") {
+        EmitOutcome::Burned {
+            epoch,
+            participants,
+            reason,
+        } => {
+            assert_eq!(epoch, chain::fake_defaults::SUBNET_EPOCH_INDEX);
+            assert_eq!(participants, 3);
+            assert!(reason.contains("BOUNTY_BACKEND_PUBLIC_URL"), "{reason}");
+        }
+        other => panic!("unset feed must burn, not score: {other:?}"),
+    }
+    assert_eq!(accepted_count(&accepted), 3);
+    assert_burn_covers_e(&accepted);
+    assert_eq!(
+        em.scored_epoch(),
+        0,
+        "a burn is not a score and must not mark the epoch as scored"
     );
 }
 
 /// A blank value is the shape of an unset compose variable
 /// (`BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"`).
 #[tokio::test]
-async fn a_blank_backend_url_emits_nothing() {
+async fn a_blank_backend_url_burns_without_paying_anyone() {
     let (gateway, accepted) = spawn_gateway().await;
     let em = emitter(Some("   ".to_owned()), &gateway);
 
     assert!(matches!(
-        em.tick().await.expect_err("blank feed"),
-        EmitError::Backend(_)
+        em.tick().await.expect("burn covers E"),
+        EmitOutcome::Burned { .. }
     ));
-    assert!(accepted.lock().expect("lock").is_empty());
+    assert_burn_covers_e(&accepted);
 }
 
-/// A backend outage is not "everyone scored zero".
+/// A backend outage is not "the champion earned this". Nobody is paid until
+/// the feed answers, and then the gateway supersedes the burn with the real
+/// scores for the same epoch.
 #[tokio::test]
-async fn a_failing_backend_emits_nothing() {
-    let (backend, hits) = spawn_broken_backend().await;
+async fn a_failing_backend_burns_until_it_recovers() {
+    let (backend, hits, healthy) = spawn_flaky_backend().await;
     let (gateway, accepted) = spawn_gateway().await;
     let em = emitter(Some(backend), &gateway);
 
-    let err = em.tick().await.expect_err("backend 500");
-    assert!(matches!(err, EmitError::Backend(_)), "{err}");
+    assert!(matches!(
+        em.tick().await.expect("burn covers E"),
+        EmitOutcome::Burned { .. }
+    ));
     assert!(
         hits.load(Ordering::Relaxed) >= 1,
         "the feed was really asked"
     );
+    assert_burn_covers_e(&accepted);
+
+    healthy.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        em.tick().await.expect("recovered"),
+        EmitOutcome::Scored { paid: 1, .. }
+    ));
     assert!(
-        accepted.lock().expect("lock").is_empty(),
-        "a 5xx feed must not become an all-NoScore verdict"
+        leaf_for(&accepted, CHAMPION)["score_or_absence"]["score"]["value"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "the recovered tick must supersede the burn with the published score"
+    );
+}
+
+/// The reverse direction: once an epoch is scored, an outage inside it must
+/// not take the score back, or a backend hiccup would decide the epoch.
+#[tokio::test]
+async fn an_outage_after_a_scored_epoch_holds_instead_of_burning_it() {
+    let (backend, _hits, healthy) = spawn_flaky_backend().await;
+    healthy.store(true, Ordering::Relaxed);
+    let (gateway, accepted) = spawn_gateway().await;
+    let em = emitter(Some(backend), &gateway);
+
+    assert!(matches!(
+        em.tick().await.expect("scored"),
+        EmitOutcome::Scored { paid: 1, .. }
+    ));
+    let after_scored = accepted_count(&accepted);
+
+    healthy.store(false, Ordering::Relaxed);
+    match em.tick().await.expect("hold") {
+        EmitOutcome::Held { epoch, .. } => {
+            assert_eq!(epoch, chain::fake_defaults::SUBNET_EPOCH_INDEX);
+        }
+        other => panic!("an outage must not overwrite a scored epoch: {other:?}"),
+    }
+    assert_eq!(
+        accepted_count(&accepted),
+        after_scored,
+        "holding must post nothing at all"
+    );
+    assert!(
+        leaf_for(&accepted, CHAMPION)["score_or_absence"]["score"]["value"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "the champion's score must still stand"
     );
 }

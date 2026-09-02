@@ -30,7 +30,7 @@ pub use bounty_challenge_task::{
 pub use bounty_http::{bounty_router, hash_admin_token, AppState};
 pub use bounty_store::MemoryStore as BountyStore;
 pub use challenge_common::{GatewayClient, GatewayClientConfig};
-pub use emit::{BountyEmitter, EmitError, EmitTick, DEFAULT_EMIT_POLL_SECS};
+pub use emit::{BountyEmitter, EmitError, EmitOutcome, DEFAULT_EMIT_POLL_SECS};
 
 /// Build a D24-complete score map.
 ///
