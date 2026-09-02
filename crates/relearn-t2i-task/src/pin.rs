@@ -1,7 +1,61 @@
 //! `config/relearn-t2i-pin.toml`: base checkpoint, judge, sampler, splits.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// CI / local fixture commitment: documented dev salt over Qwen-Image-Bench.
+///
+/// Labeled in `config/relearn-t2i-pin.toml`. Never a live emissions pin.
+pub const FIXTURE_HOLDOUT_COMMITMENT: &str =
+    "bdb6652b6b54a9607c5fdc019a7b73a17defb835efae5755db129cf426252870";
+
+/// Private live commitment (64 hex). Not a file in git.
+pub const LIVE_HOLDOUT_COMMITMENT_ENV: &str = "RELEARN_T2I_HOLDOUT_COMMITMENT";
+
+/// Secret-store file whose whole body is the private live commitment.
+pub const LIVE_HOLDOUT_COMMITMENT_FILE_ENV: &str = "RELEARN_T2I_HOLDOUT_COMMITMENT_FILE";
+
+/// True when `hex` is the public CI fixture.
+#[must_use]
+pub fn is_fixture_holdout_commitment(hex: &str) -> bool {
+    hex.trim().eq_ignore_ascii_case(FIXTURE_HOLDOUT_COMMITMENT)
+}
+
+/// Read a private live commitment from the environment or secret-store file.
+///
+/// # Errors
+///
+/// [`PinError::BadHoldoutCommitment`], [`PinError::FixtureHoldoutNotLive`],
+/// or [`PinError::LiveHoldoutIo`].
+pub fn read_private_holdout_commitment() -> Result<Option<String>, PinError> {
+    if let Ok(path) = std::env::var(LIVE_HOLDOUT_COMMITMENT_FILE_ENV) {
+        let path = path.trim();
+        if !path.is_empty() {
+            return parse_private_commitment(
+                &std::fs::read_to_string(Path::new(path))
+                    .map_err(|e| PinError::LiveHoldoutIo(format!("read {path}: {e}")))?,
+            )
+            .map(Some);
+        }
+    }
+    match std::env::var(LIVE_HOLDOUT_COMMITMENT_ENV) {
+        Ok(raw) if !raw.trim().is_empty() => parse_private_commitment(&raw).map(Some),
+        _ => Ok(None),
+    }
+}
+
+fn parse_private_commitment(raw: &str) -> Result<String, PinError> {
+    let c = raw.trim();
+    if c.len() != 64 || !c.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(PinError::BadHoldoutCommitment);
+    }
+    if is_fixture_holdout_commitment(c) {
+        return Err(PinError::FixtureHoldoutNotLive);
+    }
+    Ok(c.to_ascii_lowercase())
+}
 
 use crate::prompts::FrozenPrompt;
 use crate::{
@@ -191,6 +245,19 @@ pub enum PinError {
     /// Holdout commitment is not a 64-hex digest.
     #[error("prompts.holdout_commitment must be 64 hex chars")]
     BadHoldoutCommitment,
+    /// Live scoring was asked to use the public CI fixture.
+    #[error(
+        "live holdout must not be the public CI fixture; set {LIVE_HOLDOUT_COMMITMENT_ENV} or {LIVE_HOLDOUT_COMMITMENT_FILE_ENV}"
+    )]
+    FixtureHoldoutNotLive,
+    /// Live scoring has no private commitment from the secret store.
+    #[error(
+        "live holdout unconfigured; set {LIVE_HOLDOUT_COMMITMENT_ENV} or {LIVE_HOLDOUT_COMMITMENT_FILE_ENV}"
+    )]
+    LiveHoldoutUnconfigured,
+    /// Secret-store file for the live commitment could not be read.
+    #[error("live holdout secret: {0}")]
+    LiveHoldoutIo(String),
 }
 
 /// One image cell to generate: prompt, variation index, and frozen seed.
@@ -293,6 +360,34 @@ impl RelearnT2iPin {
     #[must_use]
     pub fn can_rent(&self) -> bool {
         self.eval_image_digest.starts_with("sha256:") && self.eval_image_digest.len() >= 71
+    }
+
+    /// True when this pin still carries the public CI fixture commitment.
+    #[must_use]
+    pub fn is_fixture_holdout(&self) -> bool {
+        is_fixture_holdout_commitment(&self.prompts.holdout_commitment)
+    }
+
+    /// Replace the git fixture with a private live commitment.
+    ///
+    /// # Errors
+    ///
+    /// [`PinError::BadHoldoutCommitment`] or [`PinError::FixtureHoldoutNotLive`].
+    pub fn bind_private_holdout(&mut self, commitment: &str) -> Result<(), PinError> {
+        self.prompts.holdout_commitment = parse_private_commitment(commitment)?;
+        Ok(())
+    }
+
+    /// Bind the private live commitment from the environment / secret store.
+    ///
+    /// # Errors
+    ///
+    /// [`PinError::LiveHoldoutUnconfigured`] when neither override is set.
+    pub fn bind_live_holdout_from_env(&mut self) -> Result<(), PinError> {
+        let Some(c) = read_private_holdout_commitment()? else {
+            return Err(PinError::LiveHoldoutUnconfigured);
+        };
+        self.bind_private_holdout(&c)
     }
 
     /// Frozen seed for one cell.

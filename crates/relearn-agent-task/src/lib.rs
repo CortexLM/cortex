@@ -29,7 +29,10 @@ pub use episode::{
     contamination, episode_commitment, verify_episodes, AgentEpisode, EpisodeError, ToolKind,
     ToolSchema, TraceStep, MIN_HOLDOUT_EPISODES,
 };
-pub use pin::{PinError, RelearnAgentPin};
+pub use pin::{
+    is_fixture_holdout_commitment, read_private_holdout_commitment, PinError, RelearnAgentPin,
+    FIXTURE_HOLDOUT_COMMITMENT, LIVE_HOLDOUT_COMMITMENT_ENV, LIVE_HOLDOUT_COMMITMENT_FILE_ENV,
+};
 
 /// Normative challenge id (trust-root / leaf `challenge_id` string).
 pub const CHALLENGE_ID: &str = "relearn-agent";

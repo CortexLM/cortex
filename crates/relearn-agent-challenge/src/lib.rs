@@ -24,8 +24,8 @@ pub use relearn_agent_http::{hash_admin_token, relearn_agent_router, AppState};
 pub use relearn_agent_store::{ArtifactManifest, MemoryStore};
 pub use relearn_agent_task::{
     episode_commitment, AgentEpisode, RelearnAgentPin, ToolKind, BASE_MODEL_ID, CHALLENGE_ID,
-    CHALLENGE_ID_BYTES as RELEARN_AGENT_ID_BYTES, SCORE_MAX as RELEARN_AGENT_SCORE_MAX,
-    SCORING_VERSION,
+    CHALLENGE_ID_BYTES as RELEARN_AGENT_ID_BYTES, FIXTURE_HOLDOUT_COMMITMENT,
+    SCORE_MAX as RELEARN_AGENT_SCORE_MAX, SCORING_VERSION,
 };
 
 /// Build a D24-complete score map: champion (if any) gets a positive lattice;

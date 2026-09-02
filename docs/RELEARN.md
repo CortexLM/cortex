@@ -223,8 +223,11 @@ cargo run -p xtask -- relearn-holdout \
   --out deploy/secrets/relearn/holdout.json
 ```
 
-Paste the printed `holdout_commitment` into `config/relearn-pin.toml`, then
-re-sign the trust root ([`../config/CEREMONY.md`](../config/CEREMONY.md)).
+Install the printed `holdout_commitment` on the host as
+`RELEARN_HOLDOUT_COMMITMENT` (or a secret-store file). Do **not** paste it
+into `config/relearn-pin.toml` — that file stays the public CI fixture, and
+live scoring refuses a pin that equals the fixture. Ceremony:
+[`../config/CEREMONY.md`](../config/CEREMONY.md).
 
 Production must rotate the salt **and** the catalog. Keeping the committed
 CI commitment on a live host means the split is reconstructable from public

@@ -72,6 +72,10 @@ struct Cli {
     /// against the pin's `eval_image_digest` + `holdout_commitment` at boot.
     #[arg(long, env = "RELEARN_BASE_CHAMPION_FILE")]
     base_champion_file: Option<PathBuf>,
+    /// Persisted submissions, evaluation results, and champion. Restored at
+    /// boot; a corrupt file refuses to serve rather than empty-scoring.
+    #[arg(long, env = "RELEARN_STATE_FILE")]
+    state_file: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -90,13 +94,21 @@ fn run(cli: &Cli) -> Result<(), String> {
     if let Some(p) = &cli.challenge_sk_file {
         let _sk = load_challenge_secret(p).map_err(|e| format!("challenge sk: {e}"))?;
     }
-    let pin = load_pin(cli.pin_file.as_deref())?;
+    let mut pin = load_pin(cli.pin_file.as_deref())?;
     let backend = if cli.force_sim {
         tracing::info!("RELEARN_FORCE_SIM=1 — deterministic offline eval, not a real eval");
         EvalBackend::Sim
     } else {
         resolve_eval_backend()
     };
+    if backend != EvalBackend::Sim {
+        match pin.bind_live_holdout_from_env() {
+            Ok(()) => tracing::info!("live holdout commitment bound from secret store"),
+            Err(e) => tracing::warn!(
+                "live holdout not bound ({e}); submissions will 503 until a private commitment is supplied"
+            ),
+        }
+    }
     if backend == EvalBackend::Lium && !pin.can_rent() {
         tracing::warn!(
             "eval_image_digest not pinned; submissions will 503 until CortexLM/relearn CI \
@@ -104,7 +116,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         );
     }
     let admin_hashes = load_admin_hashes(cli.admin_tokens_file.as_deref());
-    let store = MemoryStore::new();
+    let store = MemoryStore::open(cli.state_file.as_deref()).map_err(|e| e.to_string())?;
     store
         .set_holdout_commitment(&pin.holdout_commitment, pin.holdout_size)
         .map_err(|e| e.to_string())?;
@@ -460,6 +472,20 @@ mod tests {
     fn missing_baseline_file_is_none_and_a_bad_one_is_an_error() {
         assert!(load_recorded_baseline(None).expect("no path").is_none());
         assert!(load_recorded_baseline(Some(Path::new("/nonexistent/baseline.json"))).is_err());
+    }
+
+    #[test]
+    fn corrupt_state_file_fails_closed_instead_of_empty_scoring() {
+        let dir = std::env::temp_dir().join(format!("relearn-bin-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("state.json");
+        std::fs::write(&path, "not-a-store").expect("write");
+        let Err(err) = MemoryStore::open(Some(&path)) else {
+            panic!("corrupt restore must fail closed")
+        };
+        assert!(err.to_string().contains("restore"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The wiring the Subnet Owner asked for: the harvest is built on the LIVE

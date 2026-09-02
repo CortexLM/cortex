@@ -11,8 +11,8 @@
 //! GET  /v1/status
 //! POST /v1/pair                 verify hotkey sig, bind account, session claim
 //! POST /v1/reports              bug report + session (optional X-Lium-Api-Key)
-//! GET  /v1/reports              internal ingest list (not a public board)
-//! GET  /v1/reports/{id}
+//! GET  /v1/reports              operator ingest list (bearer; not a public board)
+//! GET  /v1/reports/{id}         operator read (bearer)
 //! POST /v1/admin/adjudicate     valid | already_fixed_not_prod | invalid_malicious | duplicate
 //! ```
 //!
@@ -265,15 +265,21 @@ async fn submit_report(
     ))
 }
 
-async fn list_reports(State(st): State<AppState>) -> impl IntoResponse {
+async fn list_reports(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    require_operator(&headers, &st.admin_hashes)?;
     let rows = st.store.list_reports().unwrap_or_default();
-    Json(serde_json::json!({ "items": rows }))
+    Ok(Json(serde_json::json!({ "items": rows })))
 }
 
 async fn get_report(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    require_operator(&headers, &st.admin_hashes)?;
     let row = st
         .store
         .get_report(&id)
@@ -330,17 +336,25 @@ struct AdjudicateBody {
     duplicate_of: Option<String>,
 }
 
+fn require_operator(
+    headers: &HeaderMap,
+    hashes: &[String],
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if hashes.is_empty() {
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "auth_unconfigured"));
+    }
+    if !admin_ok(headers, hashes) {
+        return Err(err(StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
+    Ok(())
+}
+
 async fn adjudicate(
     State(st): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<AdjudicateBody>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    if st.admin_hashes.is_empty() {
-        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "auth_unconfigured"));
-    }
-    if !admin_ok(&headers, &st.admin_hashes) {
-        return Err(err(StatusCode::UNAUTHORIZED, "unauthorized"));
-    }
+    require_operator(&headers, &st.admin_hashes)?;
     let row = st
         .store
         .adjudicate(
@@ -632,12 +646,77 @@ mod tests {
             .unwrap_or_default()
             .contains("scoring unconfigured"));
 
-        let (st, list) = json_req(app, "GET", "/v1/reports", serde_json::json!({}), None).await;
+        let (st, list) = json_req(
+            app,
+            "GET",
+            "/v1/reports",
+            serde_json::json!({}),
+            Some("op-test-token"),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
         assert!(
             list["items"].as_array().is_some_and(Vec::is_empty),
             "a refused report must not be banked: {list}"
         );
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_report_reads_are_denied() {
+        let (app, token) = app();
+        let exp = unix_now().saturating_add(600);
+        let (_st, paired) =
+            json_req(app.clone(), "POST", "/v1/pair", pair_payload(exp), None).await;
+        let session = paired["session"].as_str().expect("session");
+        let (created, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/reports",
+            report_body(session, "a real bug"),
+            None,
+        )
+        .await;
+        assert_eq!(created, StatusCode::CREATED, "{body}");
+        let id = body["id"].as_str().expect("id");
+
+        let (st, list) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/reports",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{list}");
+        let dumped = list.to_string();
+        assert!(!dumped.contains("repro_steps"), "{dumped}");
+        assert!(!dumped.contains("account_id"), "{dumped}");
+        assert!(!dumped.contains("miner_hotkey"), "{dumped}");
+
+        let (st, one) = json_req(
+            app.clone(),
+            "GET",
+            &format!("/v1/reports/{id}"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{one}");
+        let dumped = one.to_string();
+        assert!(!dumped.contains("repro_steps"), "{dumped}");
+        assert!(!dumped.contains("account_id"), "{dumped}");
+        assert!(!dumped.contains("miner_hotkey"), "{dumped}");
+
+        let (st, list) = json_req(
+            app,
+            "GET",
+            "/v1/reports",
+            serde_json::json!({}),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{list}");
+        assert_eq!(list["items"].as_array().map(Vec::len), Some(1));
     }
 
     #[tokio::test]

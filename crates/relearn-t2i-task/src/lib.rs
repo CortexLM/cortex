@@ -30,7 +30,11 @@
 mod pin;
 mod prompts;
 
-pub use pin::{PinError, PromptPin, RelearnT2iPin, SamplerConfig, SeedCell, MIN_SCORED_CELLS};
+pub use pin::{
+    is_fixture_holdout_commitment, read_private_holdout_commitment, PinError, PromptPin,
+    RelearnT2iPin, SamplerConfig, SeedCell, FIXTURE_HOLDOUT_COMMITMENT,
+    LIVE_HOLDOUT_COMMITMENT_ENV, LIVE_HOLDOUT_COMMITMENT_FILE_ENV, MIN_SCORED_CELLS,
+};
 pub use prompts::{
     frozen_prompt_commitment, verify_holdout_prompts, FrozenPrompt, HoldoutError, PromptSplit,
 };

@@ -208,6 +208,9 @@ pub enum EvalError {
     /// The operator-recorded champion baseline does not match the pin.
     #[error("recorded baseline: {0}")]
     Baseline(String),
+    /// Live scoring was asked to use the public CI fixture holdout.
+    #[error("live holdout must not be the public CI fixture; set RELEARN_T2I_HOLDOUT_COMMITMENT")]
+    FixtureHoldoutNotLive,
     /// The judge declined too many items to produce a comparable score.
     #[error("judge N/A rate {rate:.3} above the {max:.3} ceiling")]
     NotApplicableRate {
@@ -695,6 +698,9 @@ pub fn scoring_readiness(
     match judge.backend {
         JudgeBackend::Sim => Ok(()),
         JudgeBackend::HttpApi | JudgeBackend::Lium => {
+            if pin.is_fixture_holdout() {
+                return Err(EvalError::FixtureHoldoutNotLive);
+            }
             if !pin.can_rent() {
                 return Err(EvalError::EvalImageUnpinned);
             }
@@ -1260,6 +1266,13 @@ mod tests {
             scoring_readiness(&live_pin(), &unset, Some(&stub)),
             Err(EvalError::JudgeUnconfigured)
         ));
+        let mut fixture = live_pin();
+        fixture.prompts.holdout_commitment = relearn_t2i_task::FIXTURE_HOLDOUT_COMMITMENT.into();
+        assert!(matches!(
+            scoring_readiness(&fixture, &live_judge_config(), Some(&stub)),
+            Err(EvalError::FixtureHoldoutNotLive)
+        ));
+        scoring_readiness(&fixture, &sim(), None).expect("sim fixture");
     }
 
     #[test]

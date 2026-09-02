@@ -13,10 +13,14 @@
 )]
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use relearn_challenge_task::{verify_holdout_items, HoldoutError, HoldoutItem, HOLDOUT_DOMAIN};
-use relearn_score::{PromoteVerdict, SliceScores};
+use prism_competition::ExampleSeries;
+use relearn_challenge_task::{
+    verify_holdout_items, HoldoutError, HoldoutItem, HoldoutTask, HOLDOUT_DOMAIN,
+};
+use relearn_score::{ContaminationEvidence, PromoteVerdict, ShuffleEvidence, SliceScores};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -105,12 +109,27 @@ pub enum StoreError {
     /// Operator holdout file did not match the committed digest.
     #[error("holdout: {0}")]
     Holdout(#[from] HoldoutError),
+    /// State file could not be written.
+    #[error("persist: {0}")]
+    Persist(String),
+    /// State file was present but could not be restored.
+    #[error("restore: {0}")]
+    Restore(String),
 }
 
+/// Persisted snapshot version. Bump when the on-disk shape changes.
+const PERSIST_VERSION: u32 = 1;
+
 /// In-memory store (v0). Postgres can replace this without changing the HTTP surface.
+///
+/// When opened with a state file, submissions, evaluation results, and the
+/// champion are restored before serve and rewritten after each mutation.
+/// Holdout records stay out of the file — they come from the operator holdout
+/// path and must not leak through a copied state file.
 #[derive(Clone, Default)]
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
+    persist_path: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -126,11 +145,170 @@ struct Inner {
     holdout_size: usize,
 }
 
+#[derive(Serialize, Deserialize)]
+struct PersistSnapshot {
+    version: u32,
+    next: u64,
+    submissions: BTreeMap<String, Submission>,
+    scores: BTreeMap<String, PersistSlice>,
+    champion_id: Option<String>,
+    champion_scores: Option<PersistSlice>,
+    base_champion: Option<PersistSlice>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistSlice {
+    holdout: BTreeMap<String, f64>,
+    public: BTreeMap<String, f64>,
+    perturbed: BTreeMap<String, f64>,
+    canaries: BTreeMap<String, f64>,
+    general_canary: BTreeMap<String, f64>,
+    agent_trace: f64,
+    vision_shuffle: BTreeMap<HoldoutTask, ShuffleEvidence>,
+    contamination: ContaminationEvidence,
+}
+
+impl From<&SliceScores> for PersistSlice {
+    fn from(s: &SliceScores) -> Self {
+        Self {
+            holdout: s.holdout.by_cluster.clone(),
+            public: s.public.by_cluster.clone(),
+            perturbed: s.perturbed.by_cluster.clone(),
+            canaries: s.canaries.by_cluster.clone(),
+            general_canary: s.general_canary.by_cluster.clone(),
+            agent_trace: s.agent_trace,
+            vision_shuffle: s.vision_shuffle.clone(),
+            contamination: s.contamination.clone(),
+        }
+    }
+}
+
+impl From<PersistSlice> for SliceScores {
+    fn from(s: PersistSlice) -> Self {
+        Self {
+            holdout: ExampleSeries {
+                by_cluster: s.holdout,
+            },
+            public: ExampleSeries {
+                by_cluster: s.public,
+            },
+            perturbed: ExampleSeries {
+                by_cluster: s.perturbed,
+            },
+            canaries: ExampleSeries {
+                by_cluster: s.canaries,
+            },
+            general_canary: ExampleSeries {
+                by_cluster: s.general_canary,
+            },
+            agent_trace: s.agent_trace,
+            vision_shuffle: s.vision_shuffle,
+            contamination: s.contamination,
+        }
+    }
+}
+
 impl MemoryStore {
     /// Empty store.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Open a store, restoring from `path` when the file exists.
+    ///
+    /// A missing file is a first boot (empty store that will persist there).
+    /// A present but corrupt file is a hard error — never silently empty-score.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Restore`] when the file exists but cannot be decoded.
+    pub fn open(path: Option<&Path>) -> Result<Self, StoreError> {
+        match path {
+            None => Ok(Self::new()),
+            Some(p) if p.exists() => Self::restore_from(p),
+            Some(p) => Ok(Self {
+                persist_path: Some(p.to_path_buf()),
+                inner: Arc::new(Mutex::new(Inner::default())),
+            }),
+        }
+    }
+
+    /// Restore submissions, evaluation results, and champion from `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Restore`] on I/O, parse, or version mismatch.
+    pub fn restore_from(path: &Path) -> Result<Self, StoreError> {
+        let body = std::fs::read_to_string(path)
+            .map_err(|e| StoreError::Restore(format!("read {}: {e}", path.display())))?;
+        let snap: PersistSnapshot = serde_json::from_str(&body)
+            .map_err(|e| StoreError::Restore(format!("parse {}: {e}", path.display())))?;
+        if snap.version != PERSIST_VERSION {
+            return Err(StoreError::Restore(format!(
+                "{}: unsupported persist version {}",
+                path.display(),
+                snap.version
+            )));
+        }
+        let inner = Inner {
+            next: snap.next,
+            submissions: snap.submissions,
+            champion_id: snap.champion_id,
+            scores: snap
+                .scores
+                .into_iter()
+                .map(|(k, v)| (k, SliceScores::from(v)))
+                .collect(),
+            champion_scores: snap.champion_scores.map(SliceScores::from),
+            base_champion: snap.base_champion.map(SliceScores::from),
+            holdout: None,
+            holdout_commitment: String::new(),
+            holdout_size: 0,
+        };
+        Ok(Self {
+            persist_path: Some(path.to_path_buf()),
+            inner: Arc::new(Mutex::new(inner)),
+        })
+    }
+
+    fn persist(&self) -> Result<(), StoreError> {
+        let Some(path) = &self.persist_path else {
+            return Ok(());
+        };
+        let snap = {
+            let g = self.lock()?;
+            PersistSnapshot {
+                version: PERSIST_VERSION,
+                next: g.next,
+                submissions: g.submissions.clone(),
+                scores: g
+                    .scores
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.into()))
+                    .collect(),
+                champion_id: g.champion_id.clone(),
+                champion_scores: g.champion_scores.as_ref().map(PersistSlice::from),
+                base_champion: g.base_champion.as_ref().map(PersistSlice::from),
+            }
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| StoreError::Persist(format!("mkdir {}: {e}", parent.display())))?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        let body = serde_json::to_string(&snap)
+            .map_err(|e| StoreError::Persist(format!("encode: {e}")))?;
+        std::fs::write(&tmp, body)
+            .map_err(|e| StoreError::Persist(format!("write {}: {e}", tmp.display())))?;
+        std::fs::rename(&tmp, path).map_err(|e| {
+            StoreError::Persist(format!(
+                "rename {} -> {}: {e}",
+                tmp.display(),
+                path.display()
+            ))
+        })?;
+        Ok(())
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>, StoreError> {
@@ -197,6 +375,8 @@ impl MemoryStore {
             row.id = format!("rl_{n:016x}");
         }
         g.submissions.insert(row.id.clone(), row.clone());
+        drop(g);
+        self.persist()?;
         Ok(row)
     }
 
@@ -243,7 +423,10 @@ impl MemoryStore {
         if let Some(d) = detail {
             row.detail = Some(d);
         }
-        Ok(row.clone())
+        let out = row.clone();
+        drop(g);
+        self.persist()?;
+        Ok(out)
     }
 
     /// Current champion submission id.
@@ -291,22 +474,26 @@ impl MemoryStore {
             g.champion_scores = Some(s);
         }
         g.champion_id = Some(id.to_owned());
-        g.submissions
+        let out = g
+            .submissions
             .get(id)
             .cloned()
-            .ok_or_else(|| StoreError::NotFound(id.to_owned()))
+            .ok_or_else(|| StoreError::NotFound(id.to_owned()))?;
+        drop(g);
+        self.persist()?;
+        Ok(out)
     }
 
     /// Persist challenger slices so a later promote displaces vs this run.
     pub fn record_scores(&self, id: &str, scores: SliceScores) -> Result<(), StoreError> {
         self.lock()?.scores.insert(id.to_owned(), scores);
-        Ok(())
+        self.persist()
     }
 
     /// Seed / replace the implicit base-model champion scores.
     pub fn set_base_champion(&self, scores: SliceScores) -> Result<(), StoreError> {
         self.lock()?.base_champion = Some(scores);
-        Ok(())
+        self.persist()
     }
 
     /// Champion slice scores (promoted miner, else base model).
@@ -480,5 +667,51 @@ mod tests {
         assert_eq!(a, holdout_slice_id(3, "aa"));
         assert_ne!(a, holdout_slice_id(4, "aa"));
         assert_ne!(a, holdout_slice_id(3, "bb"));
+    }
+
+    #[test]
+    fn restart_restores_submissions_scores_and_champion() {
+        let dir =
+            std::env::temp_dir().join(format!("relearn-store-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("state.json");
+
+        let first = MemoryStore::open(Some(&path)).expect("first boot");
+        first.set_base_champion(slice(0.4)).expect("base");
+        let row = first
+            .insert(row(
+                SubmissionState::AwaitingAdmin,
+                Some(PromoteVerdict {
+                    eligible: true,
+                    paired: None,
+                    failed: Vec::new(),
+                    lattice: 12,
+                }),
+            ))
+            .expect("insert");
+        first.record_scores(&row.id, slice(0.8)).expect("scores");
+        first.promote(&row.id).expect("promote");
+
+        let restarted = MemoryStore::open(Some(&path)).expect("restore");
+        let got = restarted.get(&row.id).expect("row survived");
+        assert_eq!(got.state, SubmissionState::Champion);
+        assert_eq!(restarted.champion_id().expect("id"), Some(row.id));
+        let champ = restarted.champion_scores().expect("read").expect("some");
+        assert!((SliceScores::mean(&champ.holdout).unwrap_or(0.0) - 0.8).abs() < 1e-9);
+        assert!(
+            !restarted.holdout_seal().expect("seal").loaded,
+            "holdout records must not ride along in the state file"
+        );
+
+        std::fs::write(&path, "{not-json").expect("corrupt");
+        let Err(err) = MemoryStore::open(Some(&path)) else {
+            panic!("corrupt restore must fail closed")
+        };
+        assert!(
+            err.to_string().contains("restore"),
+            "corrupt restore must fail closed: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

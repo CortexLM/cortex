@@ -466,6 +466,7 @@ fn eval_err(e: &EvalError) -> (StatusCode, Json<serde_json::Value>) {
         EvalError::Holdout(_)
         | EvalError::EvalImageUnpinned
         | EvalError::LiveHarvestUnavailable
+        | EvalError::FixtureHoldoutNotLive
         | EvalError::JudgeUnconfigured
         | EvalError::Backend(_)
         | EvalError::Baseline(_) => StatusCode::SERVICE_UNAVAILABLE,

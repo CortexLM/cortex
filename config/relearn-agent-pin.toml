@@ -11,14 +11,13 @@
 #     --salt "$RELEARN_AGENT_HOLDOUT_SALT" --size 120 --exclude <each public id> \
 #     --out /root/.base-secrets/relearn-agent-episodes.json
 #
-# The commitment below is the CI / local one: a documented dev salt over the
-# synthetic catalogue, so the stack can boot without operator secrets. It is
-# NOT the live seal.
-#
-# Production MUST rotate to a private salt AND a private catalogue, replace the
-# commitment here, and re-sign the trust root (config/CEREMONY.md). Shipping a
-# documented salt over a synthetic catalogue would let miners reconstruct the
-# scored set.
+# The commitment below is the CI / local fixture: a documented synthetic
+# catalogue so the stack can boot without operator secrets. It is NOT the live seal.
+# Live scoring refuses this digest and requires a private commitment via
+# RELEARN_AGENT_HOLDOUT_COMMITMENT or RELEARN_AGENT_HOLDOUT_COMMITMENT_FILE
+# (secret store — never a file in git). Do not paste a production commitment
+# here: anything in git is public. Production must rotate the private catalogue
+# and salt (config/CEREMONY.md).
 
 # Same checkpoint the `relearn` challenge pins. This challenge is a second,
 # independent post-train of it — agentic tool use scored by replayed traces —
@@ -49,7 +48,6 @@ public_ids = [
   21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
   31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
 ]
-# CI / local seal: `AgentEpisode::synthetic` over ids 41..=160 (public 1..=40
-# excluded). Production MUST replace this after rotating the catalogue.
+# CI / local fixture only. Live hosts must override via secret store.
 holdout_commitment = "5b7bd02741082bf73212d96834465f941406277660894b034ae5b4dd608dd0fe"
 holdout_size = 120

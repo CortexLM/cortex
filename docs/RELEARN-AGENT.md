@@ -52,8 +52,10 @@ An episode that needs no tool call is refused at load, along with one that
 exposes no tools: neither can separate an agent from recall, so neither belongs
 in the set.
 
-The committed commitment is the CI / local one (a documented dev salt over a
-synthetic catalogue). It is **not** the live seal — see the ceremony below.
+The committed commitment is the labeled CI / local fixture. It is **not** the
+live seal. A live host refuses that digest unless a private commitment is
+supplied via `RELEARN_AGENT_HOLDOUT_COMMITMENT` / `_FILE` (secret store, never
+git). See the ceremony below.
 
 Promotion requires every gate:
 
@@ -77,9 +79,11 @@ cargo run -p xtask -- relearn-agent-holdout \
   --out deploy/secrets/relearn-agent/episodes.json
 ```
 
-Paste the printed `holdout_commitment` into `config/relearn-agent-pin.toml`,
-then re-sign the trust root ([`../config/CEREMONY.md`](../config/CEREMONY.md)).
-Production must rotate the salt **and** the catalogue.
+Install the printed `holdout_commitment` on the host as
+`RELEARN_AGENT_HOLDOUT_COMMITMENT` (or a secret-store file). Do **not** paste
+it into `config/relearn-agent-pin.toml` — that file stays the public CI
+fixture, and live scoring refuses a pin that equals the fixture. Production
+must rotate the salt **and** the catalogue.
 
 ## Who is allowed to produce a score
 

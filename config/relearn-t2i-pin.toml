@@ -28,9 +28,12 @@
 #     --salt "$RELEARN_T2I_HOLDOUT_SALT" --size 40 --exclude <each public id> \
 #     --out /root/.base-secrets/relearn-t2i-holdout.json
 #
-# The committed commitment below is the DEV salt "cortex-t2i-dev-holdout-v0",
-# so local and staging runs work out of the box. Production must rotate to a
-# private salt, replace the commitment, and re-sign (config/CEREMONY.md).
+# The committed commitment below is the CI / local fixture (documented
+# development salt over the public bench). It is NOT the live seal. Live
+# scoring refuses this digest and requires a private commitment via
+# RELEARN_T2I_HOLDOUT_COMMITMENT or RELEARN_T2I_HOLDOUT_COMMITMENT_FILE
+# (secret store — never a file in git). Do not paste a production commitment
+# here: anything in git is public.
 
 challenge_id = "relearn-image"
 scoring_version = 1

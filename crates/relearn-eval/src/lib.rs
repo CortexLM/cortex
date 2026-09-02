@@ -20,6 +20,7 @@
 )]
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use async_trait::async_trait;
 use prism_competition::ExampleSeries;
@@ -83,6 +84,59 @@ impl Default for RelearnPin {
     }
 }
 
+/// CI / local fixture commitment in `config/relearn-pin.toml`.
+///
+/// Never a live emissions pin. Reconstructing the synthetic catalog reproduces
+/// this digest exactly.
+pub const FIXTURE_HOLDOUT_COMMITMENT: &str =
+    "84aed1547520f39c325712822a3533dc384d2c0a8f152d8acc686b0b7a921065";
+
+/// Private live commitment (64 hex). Not a file in git.
+pub const LIVE_HOLDOUT_COMMITMENT_ENV: &str = "RELEARN_HOLDOUT_COMMITMENT";
+
+/// Secret-store file whose whole body is the private live commitment.
+pub const LIVE_HOLDOUT_COMMITMENT_FILE_ENV: &str = "RELEARN_HOLDOUT_COMMITMENT_FILE";
+
+/// True when `hex` is the public CI fixture.
+#[must_use]
+pub fn is_fixture_holdout_commitment(hex: &str) -> bool {
+    hex.trim().eq_ignore_ascii_case(FIXTURE_HOLDOUT_COMMITMENT)
+}
+
+/// Read a private live commitment from the environment or secret-store file.
+///
+/// # Errors
+///
+/// [`PinError::BadHoldoutCommitment`], [`PinError::FixtureHoldoutNotLive`],
+/// or [`PinError::LiveHoldoutIo`].
+pub fn read_private_holdout_commitment() -> Result<Option<String>, PinError> {
+    if let Ok(path) = std::env::var(LIVE_HOLDOUT_COMMITMENT_FILE_ENV) {
+        let path = path.trim();
+        if !path.is_empty() {
+            return parse_private_commitment(
+                &std::fs::read_to_string(Path::new(path))
+                    .map_err(|e| PinError::LiveHoldoutIo(format!("read {path}: {e}")))?,
+            )
+            .map(Some);
+        }
+    }
+    match std::env::var(LIVE_HOLDOUT_COMMITMENT_ENV) {
+        Ok(raw) if !raw.trim().is_empty() => parse_private_commitment(&raw).map(Some),
+        _ => Ok(None),
+    }
+}
+
+fn parse_private_commitment(raw: &str) -> Result<String, PinError> {
+    let c = raw.trim();
+    if c.len() != 64 || !c.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(PinError::BadHoldoutCommitment);
+    }
+    if is_fixture_holdout_commitment(c) {
+        return Err(PinError::FixtureHoldoutNotLive);
+    }
+    Ok(c.to_ascii_lowercase())
+}
+
 /// Why a pin was refused.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PinError {
@@ -100,6 +154,19 @@ pub enum PinError {
         /// Required floor.
         min: usize,
     },
+    /// Live scoring was asked to use the public CI fixture.
+    #[error(
+        "live holdout must not be the public CI fixture; set {LIVE_HOLDOUT_COMMITMENT_ENV} or {LIVE_HOLDOUT_COMMITMENT_FILE_ENV}"
+    )]
+    FixtureHoldoutNotLive,
+    /// Live scoring has no private commitment from the secret store.
+    #[error(
+        "live holdout unconfigured; set {LIVE_HOLDOUT_COMMITMENT_ENV} or {LIVE_HOLDOUT_COMMITMENT_FILE_ENV}"
+    )]
+    LiveHoldoutUnconfigured,
+    /// Secret-store file for the live commitment could not be read.
+    #[error("live holdout secret: {0}")]
+    LiveHoldoutIo(String),
 }
 
 impl RelearnPin {
@@ -135,6 +202,34 @@ impl RelearnPin {
     #[must_use]
     pub fn can_rent(&self) -> bool {
         self.eval_image_digest.starts_with("sha256:") && self.eval_image_digest.len() >= 71
+    }
+
+    /// True when this pin still carries the public CI fixture commitment.
+    #[must_use]
+    pub fn is_fixture_holdout(&self) -> bool {
+        is_fixture_holdout_commitment(&self.holdout_commitment)
+    }
+
+    /// Replace the git fixture with a private live commitment.
+    ///
+    /// # Errors
+    ///
+    /// [`PinError::BadHoldoutCommitment`] or [`PinError::FixtureHoldoutNotLive`].
+    pub fn bind_private_holdout(&mut self, commitment: &str) -> Result<(), PinError> {
+        self.holdout_commitment = parse_private_commitment(commitment)?;
+        Ok(())
+    }
+
+    /// Bind the private live commitment from the environment / secret store.
+    ///
+    /// # Errors
+    ///
+    /// [`PinError::LiveHoldoutUnconfigured`] when neither override is set.
+    pub fn bind_live_holdout_from_env(&mut self) -> Result<(), PinError> {
+        let Some(c) = read_private_holdout_commitment()? else {
+            return Err(PinError::LiveHoldoutUnconfigured);
+        };
+        self.bind_private_holdout(&c)
     }
 }
 
@@ -194,6 +289,9 @@ pub enum EvalError {
     /// The operator-recorded champion baseline does not match the pin.
     #[error("recorded baseline: {0}")]
     Baseline(String),
+    /// Live scoring was asked to use the public CI fixture holdout.
+    #[error("live holdout must not be the public CI fixture; set RELEARN_HOLDOUT_COMMITMENT")]
+    FixtureHoldoutNotLive,
 }
 
 /// Champion baseline measured by the digest-pinned eval image and installed by
@@ -438,6 +536,9 @@ pub fn scoring_readiness(
     match backend {
         EvalBackend::Sim => Ok(()),
         EvalBackend::Lium => {
+            if pin.is_fixture_holdout() {
+                return Err(EvalError::FixtureHoldoutNotLive);
+            }
             if !pin.can_rent() {
                 return Err(EvalError::EvalImageUnpinned);
             }
@@ -1095,6 +1196,13 @@ mod tests {
         let err = scoring_readiness(&live, EvalBackend::Lium, Some(&Unready))
             .expect_err("unready scorer");
         assert!(err.to_string().contains("RELEARN_TEACHER_API_URL"), "{err}");
+        let mut fixture = live;
+        fixture.holdout_commitment = FIXTURE_HOLDOUT_COMMITMENT.into();
+        assert!(matches!(
+            scoring_readiness(&fixture, EvalBackend::Lium, Some(&Harvest)),
+            Err(EvalError::FixtureHoldoutNotLive)
+        ));
+        scoring_readiness(&fixture, EvalBackend::Sim, None).expect("sim fixture");
     }
 
     #[tokio::test]

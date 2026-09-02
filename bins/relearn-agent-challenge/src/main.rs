@@ -87,13 +87,21 @@ fn run(cli: &Cli) -> Result<(), String> {
     if let Some(p) = &cli.challenge_sk_file {
         let _sk = load_challenge_secret(p).map_err(|e| format!("challenge sk: {e}"))?;
     }
-    let pin = load_pin(cli.pin_file.as_deref())?;
+    let mut pin = load_pin(cli.pin_file.as_deref())?;
     let backend = if cli.force_sim {
         tracing::info!("RELEARN_AGENT_FORCE_SIM=1 — deterministic offline eval, not a real eval");
         EvalBackend::Sim
     } else {
         relearn_agent_challenge::resolve_eval_backend()
     };
+    if backend != EvalBackend::Sim {
+        match pin.bind_live_holdout_from_env() {
+            Ok(()) => tracing::info!("live holdout commitment bound from secret store"),
+            Err(e) => tracing::warn!(
+                "live holdout not bound ({e}); submissions will 503 until a private commitment is supplied"
+            ),
+        }
+    }
     if backend == EvalBackend::Lium && !pin.can_rent() {
         tracing::warn!(
             "eval_image_digest not pinned; submissions will 503 until CortexLM/relearn CI \
@@ -510,6 +518,19 @@ mod tests {
         std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
         std::env::remove_var("RELEARN_TEACHER_API_URL");
         std::env::remove_var("RELEARN_ALLOW_MODEL_DOWNLOAD");
+    }
+
+    #[test]
+    fn live_readiness_refuses_the_git_fixture_commitment() {
+        let pin = RelearnAgentPin {
+            eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
+            holdout_commitment: relearn_agent_challenge::FIXTURE_HOLDOUT_COMMITMENT.into(),
+            holdout_size: 120,
+            ..RelearnAgentPin::default()
+        };
+        let err = relearn_agent_challenge::scoring_readiness(&pin, EvalBackend::Lium, None, true)
+            .expect_err("fixture");
+        assert!(err.to_string().contains("public CI fixture"), "{err}");
     }
 
     fn stub_ssh_pubkey(tag: &str) -> PathBuf {

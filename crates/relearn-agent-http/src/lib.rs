@@ -407,6 +407,7 @@ fn eval_err(e: &EvalError) -> (StatusCode, Json<serde_json::Value>) {
         EvalError::EpisodesSealed
         | EvalError::EvalImageUnpinned
         | EvalError::LiveHarvestUnavailable
+        | EvalError::FixtureHoldoutNotLive
         | EvalError::Backend(_)
         | EvalError::Baseline(_) => StatusCode::SERVICE_UNAVAILABLE,
         EvalError::Integrity(_) => StatusCode::INTERNAL_SERVER_ERROR,

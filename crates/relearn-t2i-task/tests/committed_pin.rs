@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use relearn_t2i_task::{
     base_is_rejected, is_bench_prompt_id, RelearnT2iPin, BASE_MODEL_ID, BASE_MODEL_LICENSE,
-    JUDGE_MODEL_ID, MIN_SCORED_CELLS,
+    FIXTURE_HOLDOUT_COMMITMENT, JUDGE_MODEL_ID, MIN_SCORED_CELLS,
 };
 
 fn pin_path() -> PathBuf {
@@ -93,6 +93,11 @@ fn holdout_is_committed_but_not_published() {
     }
     assert!(!body.contains("holdout_prompt"));
     assert!(!body.contains("holdout_ids"));
+    assert_eq!(p.prompts.holdout_commitment, FIXTURE_HOLDOUT_COMMITMENT);
+    assert!(
+        p.is_fixture_holdout(),
+        "the git pin must stay the labeled CI fixture, never a live seal"
+    );
 }
 
 #[test]

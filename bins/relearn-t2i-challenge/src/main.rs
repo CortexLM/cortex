@@ -97,13 +97,21 @@ fn run(cli: &Cli) -> Result<(), String> {
     if let Some(p) = &cli.challenge_sk_file {
         let _sk = load_challenge_secret(p).map_err(|e| format!("challenge sk: {e}"))?;
     }
-    let pin = load_pin(cli.pin_file.as_deref())?;
+    let mut pin = load_pin(cli.pin_file.as_deref())?;
     let judge = if cli.force_sim {
         tracing::info!("RELEARN_T2I_FORCE_SIM=1 — deterministic offline judge, not a real eval");
         JudgeConfig::sim()
     } else {
         JudgeConfig::from_env()
     };
+    if judge.backend != JudgeBackend::Sim {
+        match pin.bind_live_holdout_from_env() {
+            Ok(()) => tracing::info!("live holdout commitment bound from secret store"),
+            Err(e) => tracing::warn!(
+                "live holdout not bound ({e}); submissions will 503 until a private commitment is supplied"
+            ),
+        }
+    }
     if judge.backend != JudgeBackend::Sim && !pin.can_rent() {
         tracing::warn!(
             "eval_image_digest not pinned; submissions will 503 until CortexLM/relearn CI \

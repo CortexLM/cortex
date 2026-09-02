@@ -77,8 +77,11 @@ cargo run -p xtask -- relearn-t2i-holdout \
   --out deploy/secrets/relearn-t2i/holdout.json
 ```
 
-Paste the printed `holdout_commitment` into `config/relearn-t2i-pin.toml`, then
-re-sign the trust root ([`../config/CEREMONY.md`](../config/CEREMONY.md)).
+Install the printed `holdout_commitment` on the host as
+`RELEARN_T2I_HOLDOUT_COMMITMENT` (or a secret-store file). Do **not** paste
+it into `config/relearn-t2i-pin.toml` — that file stays the public CI
+fixture, and live scoring refuses a pin that equals the fixture. Ceremony:
+[`../config/CEREMONY.md`](../config/CEREMONY.md).
 
 `RELEARN_T2I_FORCE_SIM=1` selects a deterministic offline judge for CI and local
 development. It is reported on `/v1/status` as `judge_backend: sim` so it cannot

@@ -10,15 +10,15 @@ publish = false
 
 [dependencies]
 hex = "0.4"
+prism-competition = { path = "../prism-competition" }
 relearn-challenge-task = { path = "../relearn-challenge-task" }
 relearn-score = { path = "../relearn-score" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 
 [dev-dependencies]
-prism-competition = { path = "../prism-competition" }
-serde_json = "1"
 
 [lints]
 workspace = true

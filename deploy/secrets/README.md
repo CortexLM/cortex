@@ -62,8 +62,8 @@ cargo run -p xtask -- relearn-holdout \
   --salt "$RELEARN_HOLDOUT_SALT" \
   --size 120 "${EXCLUDE[@]}" \
   --out deploy/secrets/relearn/holdout.json
-# Paste the printed holdout_commitment into config/relearn-pin.toml and
-# re-sign the trust root (config/CEREMONY.md).
+# Install the printed holdout_commitment as RELEARN_HOLDOUT_COMMITMENT
+# (or a secret-store file). Do not paste it into config/relearn-pin.toml.
 ```
 
 Regenerate the T2I holdout with the private salt (keep the salt off git — it is
@@ -84,8 +84,8 @@ cargo run -p xtask -- relearn-t2i-holdout \
   --salt "$RELEARN_T2I_HOLDOUT_SALT" \
   --size 40 "${EXCLUDE[@]}" \
   --out deploy/secrets/relearn-t2i/holdout.json
-# Paste the printed holdout_commitment into config/relearn-t2i-pin.toml and
-# re-sign the trust root (config/CEREMONY.md).
+# Install the printed holdout_commitment as RELEARN_T2I_HOLDOUT_COMMITMENT
+# (or a secret-store file). Do not paste it into config/relearn-t2i-pin.toml.
 touch deploy/secrets/relearn-t2i/admin_tokens deploy/secrets/relearn-agent/admin_tokens
 chown -R 65532:65532 deploy/secrets/relearn-t2i deploy/secrets/relearn-agent
 chmod 0400 deploy/secrets/relearn-t2i/* deploy/secrets/relearn-agent/*

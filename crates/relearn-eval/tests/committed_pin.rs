@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use relearn_eval::RelearnPin;
+use relearn_eval::{RelearnPin, FIXTURE_HOLDOUT_COMMITMENT};
 
 fn pin_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -27,6 +27,11 @@ fn committed_pin_has_a_holdout_commitment() {
     assert_eq!(p.holdout_commitment.len(), 64);
     assert!(p.holdout_size >= relearn_challenge_task::MIN_HOLDOUT_ITEMS);
     assert!(!p.public_ids.is_empty());
+    assert_eq!(p.holdout_commitment, FIXTURE_HOLDOUT_COMMITMENT);
+    assert!(
+        p.is_fixture_holdout(),
+        "the git pin must stay the labeled CI fixture, never a live seal"
+    );
 }
 
 #[test]

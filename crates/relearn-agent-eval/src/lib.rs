@@ -95,6 +95,11 @@ pub enum EvalError {
     /// The operator-recorded champion baseline does not match the pin.
     #[error("recorded baseline: {0}")]
     Baseline(String),
+    /// Live scoring was asked to use the public CI fixture holdout.
+    #[error(
+        "live holdout must not be the public CI fixture; set RELEARN_AGENT_HOLDOUT_COMMITMENT"
+    )]
+    FixtureHoldoutNotLive,
 }
 
 /// Artifact id of the un-post-trained base model on the episode set.
@@ -370,6 +375,9 @@ pub fn scoring_readiness(
     match backend {
         EvalBackend::Sim => Ok(()),
         EvalBackend::Lium => {
+            if pin.is_fixture_holdout() {
+                return Err(EvalError::FixtureHoldoutNotLive);
+            }
             if !pin.can_rent() {
                 return Err(EvalError::EvalImageUnpinned);
             }
@@ -623,7 +631,7 @@ pub async fn eval_after_freeze(
 #[cfg(test)]
 mod tests {
     use relearn_agent_score::MIN_TRACE_VALIDITY;
-    use relearn_agent_task::episode_commitment;
+    use relearn_agent_task::{episode_commitment, FIXTURE_HOLDOUT_COMMITMENT};
 
     use super::*;
 
@@ -833,6 +841,13 @@ mod tests {
             Err(EvalError::LiveHarvestUnavailable)
         ));
         scoring_readiness(&live, EvalBackend::Lium, Some(&Harvest), true).expect("ready");
+        let mut fixture = live;
+        fixture.holdout_commitment = FIXTURE_HOLDOUT_COMMITMENT.into();
+        assert!(matches!(
+            scoring_readiness(&fixture, EvalBackend::Lium, Some(&Harvest), true),
+            Err(EvalError::FixtureHoldoutNotLive)
+        ));
+        scoring_readiness(&fixture, EvalBackend::Sim, None, true).expect("sim fixture");
     }
 
     #[test]

@@ -6,7 +6,8 @@
 use std::path::{Path, PathBuf};
 
 use relearn_agent_task::{
-    episode_commitment, AgentEpisode, RelearnAgentPin, BASE_MODEL_ID, MIN_HOLDOUT_EPISODES,
+    episode_commitment, AgentEpisode, RelearnAgentPin, BASE_MODEL_ID, FIXTURE_HOLDOUT_COMMITMENT,
+    MIN_HOLDOUT_EPISODES,
 };
 
 fn pin_path() -> PathBuf {
@@ -114,6 +115,11 @@ fn ci_synthetic_commitment_matches_the_pin() {
         .collect();
     assert_eq!(episodes.len(), 120);
     assert_eq!(episode_commitment(&episodes), pin().holdout_commitment);
+    assert_eq!(pin().holdout_commitment, FIXTURE_HOLDOUT_COMMITMENT);
+    assert!(
+        pin().is_fixture_holdout(),
+        "the git pin must stay the labeled CI fixture, never a live seal"
+    );
 }
 
 #[test]
