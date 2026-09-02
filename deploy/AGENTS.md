@@ -45,6 +45,12 @@ Compose always runs a digest-pinned `postgres` service (`base-pgdata` volume, he
 
 Migrations (`crates/db/migrations`) run on boot in gateway when `BASE_DATABASE_URL` is set. Compose requires `deploy/env/relearn-challenge.env` and `deploy/env/bounty-challenge.env` so live challenges cannot silently boot without operator config.
 
+## Bounty scorer (host-set, fail-closed)
+
+Bounty scores **only** from the CortexLM/backend public feed. Set `BOUNTY_BACKEND_PUBLIC_URL` on the host (`deploy/env/bounty-challenge.env`; never bake a hostname into git). The service fetches `/v1/bounty/public/leaderboard` + `/reports`, signs an exact-`E` leaf set every `BOUNTY_EMIT_POLL_SECS` (default 120), and posts to the master gateway — validators only ever verify the sealed bundle.
+
+With no readable feed the host answers **503** on `POST /v1/reports` and emits **no leaf**, so the 3000 bps share burns to uid 0. `BOUNTY_FORCE_SIM` is retired and ignored; `assert-compose-matrix.sh` fails if any compose file reintroduces it. Verify with `./deploy/scripts/local-e2e.sh --smoke` (it POSTs ingest and asserts 503 without a feed, 401 with one) or by hand: `GET /challenge/bounty/v1/status` → `scoring_backend`, `can_score`. Details: [`docs/BOUNTY.md`](../docs/BOUNTY.md).
+
 ## Prism Lium GPU profiles (do not mix)
 
 Default 1B train SKU is **2× NVIDIA RTX PRO 6000 Blackwell Server Edition**

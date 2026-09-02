@@ -71,18 +71,45 @@ triage capacity the whole challenge runs on. Above `MAX_TRIAGE_NOISE_BPS` it is
 a hard zero, and because it is absent from the paid number a miner tuning
 precision cannot tune it away.
 
-## Fail-closed ingest
+## From a published row to a validator's weight
 
-Scoring needs the backend feed. `GET /v1/status` publishes `scoring_backend`
-(`backend_public` | `sim` | `unconfigured`), `force_sim`, and `can_score`.
+The backend feed is not a dashboard this subnet reads for colour — it is the
+scorer. Each tick the challenge service:
 
-With neither `BOUNTY_BACKEND_PUBLIC_URL` nor `BOUNTY_FORCE_SIM=1`, the host
-cannot turn a report into weight, and `POST /v1/reports` answers **503**
-without storing anything. Accepting reports there would take real work —
-finding a real bug — and pay nothing for it. `BOUNTY_FORCE_SIM=1` selects
-local adjudications only; it is CI/local, reported on `/v1/status`, and
-`deploy/scripts/assert-compose-matrix.sh` fails if a staging or prod overlay
-enables it.
+1. `GET {BOUNTY_BACKEND_PUBLIC_URL}/v1/bounty/public/leaderboard` + `/reports`
+2. derives `E` from the metagraph at `last_epoch_block` (`AllMetagraphHotkeys`)
+3. maps published rows onto one leaf per hotkey in `E` for the current subnet
+   epoch (champion → `Score`, net-malicious → `InvalidResponse`, everyone else
+   → `NotAttempted`)
+4. `POST /v1/weights/raw` on the gateway, which seals what validators fetch
+
+Operator knobs: `BASE_CHALLENGE_GATEWAY_ENDPOINT`, `BASE_NETUID`,
+`BASE_CHAIN_ENDPOINT(S)`, `BOUNTY_EMIT_POLL_SECS` (default 120s). Re-emitting
+the current epoch is normal: the gateway supersedes on a changed digest and
+409s an identical one.
+
+## Fail-closed ingest and emission
+
+`GET /v1/status` publishes `scoring_backend` (`backend_public` |
+`unconfigured`), `backend_public_configured`, and `can_score`.
+
+Without `BOUNTY_BACKEND_PUBLIC_URL` — or when the feed is unreachable, 5xx, or
+unparseable — the host cannot turn a report into weight. Two things follow, and
+neither is a degraded mode:
+
+- `POST /v1/reports` answers **503** without storing anything. Accepting
+  reports there would take real work (finding a real bug) and pay nothing.
+- the emitter signs **no leaf at all**, so the 3000 bps share burns to uid 0.
+  An all-`NoScore` set would be a verdict — "nobody found anything this
+  epoch" — that a host which read nothing has no standing to reach.
+
+**There is no offline scorer.** `BOUNTY_FORCE_SIM` is retired: it is ignored,
+warned about at boot, and `deploy/scripts/assert-compose-matrix.sh` fails if
+any compose file sets it. A local stand-in here would pay miners on
+adjudications no validator could reproduce, which is exactly what the sealed
+bundle exists to prevent. To exercise scoring locally, point
+`BOUNTY_BACKEND_PUBLIC_URL` at a stand-in backend that serves the two public
+routes.
 
 Ingest quotas, all per hotkey and all published on `/v1/status`: at most 5
 reports awaiting adjudication, one report per 60s, an 80-character body, a
