@@ -105,7 +105,9 @@ pub fn refresh_serve_freshness(resp: &mut WeightsLatestResponse) {
 /// Fail-closed burn vector when no sealed bundle is available (or decode fails).
 ///
 /// Serves `{uid: 0 → 1.0}` under `burn-uid0.v1` so `GET /v1/weights/latest` never
-/// 404s. `sealed` is `false`; validators must not treat this as a Match path.
+/// 404s. `sealed` is `false`; validators must not Match or submit this. Submitting
+/// it pays the registered owner (UID 0 is the owner+validator hotkey) — that is
+/// the bug this label must not be treated as a miner payout.
 #[must_use]
 pub fn build_burn_fallback(netuid: u16) -> WeightsLatestResponse {
     let seal = SealRecord::now(0);

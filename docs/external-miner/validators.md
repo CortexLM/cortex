@@ -20,7 +20,7 @@ leaf claiming that id fails the trust-root check, which is the point.
 
 If you skip verification, a bad gateway can publish fake weights. That is the job: consensus check on a sealed result, not a second eval farm.
 
-Unsealed or decode-error latest is a **burn vector** (`sealed: false`, uid 0 = 100%). Do not treat that as a real seal.
+Unsealed or decode-error latest is a **burn vector** (`sealed: false`, uid 0 = 100%). Do not treat that as a real seal. Do not submit it, and do not submit a previously verified seal (LKG) while latest is unsealed. A sealed vector that is a pure burn to the registered owner or a validator-permit UID must not be submitted either — Yuma would pay that hotkey, which is not a burn.
 
 ## Not your job
 

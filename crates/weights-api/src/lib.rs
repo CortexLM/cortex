@@ -9,7 +9,9 @@
 //! captured by the bundle store at seal time. When no sealed bundle is available
 //! (or decode fails), the gateway serves [`build_burn_fallback`] — uid 0 at 100%
 //! under `burn-uid0.v1` — rather than 404, so validators never see an empty
-//! weights endpoint.
+//! weights endpoint. That fallback is a **label**, not a miner payout: validators
+//! must not Match or submit it. Submitting `burn-uid0.v1` pays the registered
+//! owner (UID 0 is the owner+validator hotkey on this subnet) — that is the bug.
 //!
 //! HTTP serve applies [`refresh_serve_freshness`] so wall-clock fields stay
 //! inside the Python client's pydantic / stale checks even when the underlying
