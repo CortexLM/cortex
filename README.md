@@ -45,10 +45,30 @@ passing.
 Some env vars and host paths still spell `BASE_*`. That is leftover naming,
 not a second product.
 
-- **[How to mine — Relearn](docs/external-miner/relearn.md)**
-- **[How to mine — Relearn Image](docs/external-miner/relearn-image.md)**
-- **[How to mine — Relearn Agent](docs/external-miner/relearn-agent.md)**
-- **[How to mine — Bounty](docs/external-miner/bounty.md)**
-- **[How to validate](docs/external-miner/validators.md)**
+## Mine
+
+Miners and validators talk to one public gateway:
+**`https://network.cortex.foundation`**. Install the subnet CLI:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CortexLM/cortex/main/scripts/install-ctx.sh | sh
+
+ctx challenges   # the four live challenges and what they pay for
+ctx status       # can each challenge score right now, and is the epoch sealed
+```
+
+`ctx` ([`bins/ctx`](bins/ctx)) submits to all four live challenges and handles
+Bounty pairing; `curl` works just as well against the same routes.
+
+| Challenge | Start with | Guide |
+|-----------|-----------|-------|
+| Relearn | `ctx relearn submit` | **[How to mine — Relearn](docs/external-miner/relearn.md)** |
+| Relearn Image | `ctx image submit` | **[How to mine — Relearn Image](docs/external-miner/relearn-image.md)** |
+| Relearn Agent | `ctx agent submit` | **[How to mine — Relearn Agent](docs/external-miner/relearn-agent.md)** |
+| Bounty | `ctx bounty pair` | **[How to mine — Bounty](docs/external-miner/bounty.md)** |
+
+Start at **[docs/external-miner/](docs/external-miner/README.md)** for the
+A→Z, and **[How to validate](docs/external-miner/validators.md)** if you run a
+validator.
 
 Apache License 2.0 — see [LICENSE](./LICENSE).

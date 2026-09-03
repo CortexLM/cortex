@@ -1,6 +1,7 @@
-//! Fail if external miner docs drift from `bundle` `PROTOCOL_VERSION`,
-//! if relearn HTTP miner paths are missing, or if `docs/THREAT_MODEL.md`
-//! D19 claim is not word-for-word vs plan pin.
+//! Fail if external miner docs drift from `bundle` `PROTOCOL_VERSION`, from the
+//! gateway host `ctx` ships with, or from the live challenge product rules; if
+//! relearn HTTP miner paths are missing; or if `docs/THREAT_MODEL.md` D19 claim
+//! is not word-for-word vs plan pin.
 
 use std::fs;
 use std::path::Path;
@@ -35,9 +36,46 @@ const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("private_holdout", "private holdout"),
     ("off_score_gate", "off the number you are paid on"),
     ("fail_closed", "fails closed"),
-    ("bounty_placeholder", "BOUNTY_CHAT_COMMAND"),
-    ("bounty_backend_url", "BOUNTY_BACKEND_PUBLIC_URL"),
     ("bounty_backend_consumer", "CortexLM/backend"),
+    // A miner who cannot install the CLI cannot follow any of the guides.
+    ("ctx_install_script", "scripts/install-ctx.sh"),
+    ("ctx_help", "ctx --help"),
+    ("ctx_status", "ctx status"),
+    ("can_score", "can_score"),
+];
+
+/// Every miner page must name the real gateway host, not a placeholder.
+///
+/// The value is read from `bins/ctx`, so the docs and the binary's default
+/// cannot drift apart.
+const GATEWAY_CONST_FILE: &str = "bins/ctx/src/api.rs";
+
+/// Const declaration the host is parsed out of.
+const GATEWAY_CONST_PREFIX: &str = "pub const DEFAULT_GATEWAY: &str =";
+
+/// Pages a miner reads. They must resolve every host and never hand a miner an
+/// operator env var to set.
+const MINER_PAGES: &[&str] = &[
+    "README.md",
+    "relearn.md",
+    "relearn-image.md",
+    "relearn-agent.md",
+    "relearn-mm.md",
+    "bounty.md",
+    "troubleshoot.md",
+];
+
+/// Strings that turn a miner guide into an operator runbook. Bounty Chat
+/// activation is shown by `ctx` after pairing; the scorer feed and the gateway
+/// endpoint are host config. A miner who is told to export one of these has
+/// been handed a secret they cannot have.
+///
+/// `validators.md` is exempt: a validator does set `BASE_GATEWAY_ENDPOINT` on
+/// its own process.
+const MINER_FORBIDDEN_ENV: &[&str] = &[
+    "BOUNTY_CHAT_COMMAND",
+    "BOUNTY_BACKEND_PUBLIC_URL",
+    "BASE_GATEWAY_",
 ];
 
 /// Per-page pins. A challenge product rule that is not in the miner's own guide
@@ -110,13 +148,15 @@ pub fn run(workspace_root: &Path) -> Result<(), String> {
     let mut failures = Vec::new();
 
     let protocol_version = read_bundle_protocol_version(workspace_root)?;
+    let gateway = read_ctx_default_gateway(workspace_root)?;
     check_external_miner_docs(workspace_root, protocol_version, &mut failures)?;
+    check_gateway_host(workspace_root, &gateway, &mut failures)?;
     check_threat_model_d19(workspace_root, &mut failures)?;
     check_threat_model_supporting_pins(workspace_root, &mut failures)?;
 
     if failures.is_empty() {
         println!(
-            "external-docs-check OK (protocol_version={protocol_version}, relearn + relearn-image + relearn-agent + bounty HTTP, D19 verbatim match)"
+            "external-docs-check OK (protocol_version={protocol_version}, gateway={gateway}, relearn + relearn-image + relearn-agent + bounty HTTP, D19 verbatim match)"
         );
         Ok(())
     } else {
@@ -156,6 +196,109 @@ fn read_bundle_protocol_version(workspace_root: &Path) -> Result<u16, String> {
         "PROTOCOL_VERSION const not found in {}",
         types_rs.display()
     ))
+}
+
+/// Every `.md` under a directory, recursively.
+fn markdown_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        for entry in fs::read_dir(&next).map_err(|e| format!("read_dir {}: {e}", next.display()))? {
+            let path = entry.map_err(|e| format!("dirent: {e}"))?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Read `DEFAULT_GATEWAY` out of the `ctx` CLI so docs cannot name a different
+/// host than the binary miners install.
+fn read_ctx_default_gateway(workspace_root: &Path) -> Result<String, String> {
+    let path = workspace_root.join(GATEWAY_CONST_FILE);
+    let body = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    for line in body.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix(GATEWAY_CONST_PREFIX) {
+            let host = rest.trim().trim_end_matches(';').trim().trim_matches('"');
+            if host.starts_with("https://") && !host.ends_with('/') {
+                return Ok(host.to_owned());
+            }
+            return Err(format!(
+                "{GATEWAY_CONST_FILE}: DEFAULT_GATEWAY must be an https URL without a trailing slash, got {host:?}"
+            ));
+        }
+    }
+    Err(format!(
+        "{GATEWAY_CONST_FILE} has no `{GATEWAY_CONST_PREFIX} \"…\"` line"
+    ))
+}
+
+/// Miner docs must resolve every host, and must not hand a miner operator env.
+///
+/// A guide with a `<gateway>` placeholder is a guide the miner cannot run: they
+/// either guess a host or give up, and both look like the subnet being closed.
+fn check_gateway_host(
+    workspace_root: &Path,
+    gateway: &str,
+    failures: &mut Vec<String>,
+) -> Result<(), String> {
+    let dir = workspace_root.join("docs/external-miner");
+    if !dir.is_dir() {
+        return Ok(());
+    }
+
+    // Recursive: the seed copies of the public miner repos live in
+    // subdirectories, and a placeholder host there is just as unusable.
+    for path in markdown_files(&dir)? {
+        let rel = path
+            .strip_prefix(workspace_root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        let body = fs::read_to_string(&path).map_err(|e| format!("read {rel}: {e}"))?;
+        for placeholder in ["<gateway>", "<GATEWAY>", "<host>"] {
+            if body.contains(placeholder) {
+                failures.push(format!(
+                    "{rel} still has the {placeholder:?} placeholder; write {gateway} instead"
+                ));
+            }
+        }
+    }
+
+    for page in MINER_PAGES {
+        let path = dir.join(page);
+        let Ok(body) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if !body.contains(gateway) {
+            failures.push(format!(
+                "docs/external-miner/{page} never names the gateway {gateway}"
+            ));
+        }
+        for banned in MINER_FORBIDDEN_ENV {
+            if body.contains(banned) {
+                failures.push(format!(
+                    "docs/external-miner/{page} tells a miner about operator env {banned:?}; \
+                     use a ctx command or a concrete URL"
+                ));
+            }
+        }
+    }
+
+    // The top-level README is the first thing a miner reads.
+    let root_readme = workspace_root.join("README.md");
+    let body = fs::read_to_string(&root_readme).map_err(|e| format!("read README.md: {e}"))?;
+    for needle in [gateway, "scripts/install-ctx.sh", "ctx challenges"] {
+        if !body.contains(needle) {
+            failures.push(format!("README.md missing miner pin {needle:?}"));
+        }
+    }
+    Ok(())
 }
 
 fn check_external_miner_docs(
@@ -417,10 +560,49 @@ mod tests {
             .any(|(n, _)| *n == "bounty_challenge"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
-            .any(|(n, v)| *n == "bounty_backend_url" && *v == "BOUNTY_BACKEND_PUBLIC_URL"));
-        assert!(EXTERNAL_MINER_PINS
-            .iter()
             .any(|(n, v)| *n == "bounty_backend_consumer" && *v == "CortexLM/backend"));
+    }
+
+    /// The index used to require the operator env names as pins, which is how
+    /// miner docs ended up instructing miners to export a Chat token.
+    #[test]
+    fn the_index_does_not_pin_operator_env_names() {
+        for (_, value) in EXTERNAL_MINER_PINS {
+            assert!(
+                !MINER_FORBIDDEN_ENV.iter().any(|b| value.contains(b)),
+                "pin {value:?} names operator env"
+            );
+        }
+    }
+
+    #[test]
+    fn miner_pages_must_not_hand_out_operator_env() {
+        for banned in ["BOUNTY_CHAT_COMMAND", "BOUNTY_BACKEND_PUBLIC_URL"] {
+            assert!(MINER_FORBIDDEN_ENV.contains(&banned), "missing {banned}");
+        }
+        // Validators legitimately set their own gateway endpoint.
+        assert!(!MINER_PAGES.contains(&"validators.md"));
+    }
+
+    #[test]
+    fn the_ctx_default_gateway_is_the_documented_host() {
+        let root = workspace_root();
+        let gateway = read_ctx_default_gateway(&root).expect("ctx gateway const");
+        assert_eq!(gateway, "https://network.cortex.foundation");
+    }
+
+    /// The whole gate, against this repo. Docs drift is a test failure, not
+    /// something that waits for the xtask lane.
+    #[test]
+    fn gate_passes_on_this_workspace() {
+        super::run(&workspace_root()).expect("external-docs-check should pass");
+    }
+
+    fn workspace_root() -> std::path::PathBuf {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest
+            .parent()
+            .map_or_else(std::path::PathBuf::new, Path::to_path_buf)
     }
 
     #[test]

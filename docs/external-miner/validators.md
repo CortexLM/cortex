@@ -13,10 +13,17 @@ leaf claiming that id fails the trust-root check, which is the point.
 ## Job
 
 1. Pull `GET /v1/weights/latest` from the master gateway.
-   - Prod: `https://chain.joinbase.ai/v1/weights/latest`
+   - Public: `https://network.cortex.foundation/v1/weights/latest` (the legacy
+     `chain.joinbase.ai` name still answers and is what the prod compose
+     overlay pins today)
    - Staging / VPC: `$BASE_GATEWAY_ENDPOINT/v1/weights/latest` (compose default `http://10.116.0.2:8080`)
 2. Verify the sealed bundle: signatures, D24 completeness (every declared participant has a leaf), owner trust root on **local disk** (`config/challenges.toml`, `config/measurements.toml`), no forged leaves.
 3. `set_weights` on-chain.
+
+To eyeball what the gateway is currently serving, `ctx weights` prints the
+sealed flag, epoch, revision, and merkle root (install:
+[README](./README.md#1-install-ctx)). It is a read-only convenience — your
+validator still does the verification itself.
 
 If you skip verification, a bad gateway can publish fake weights. That is the job: consensus check on a sealed result, not a second eval farm.
 
@@ -44,7 +51,7 @@ Env: [`deploy/env/validator.env.example`](../../deploy/env/validator.env.example
 
 ```bash
 # required: BASE_ROLE=validator, BASE_NETUID, database URL, BASE_CHAIN_ENDPOINT
-# BASE_GATEWAY_ENDPOINT = master gateway (prod pin: https://chain.joinbase.ai)
+# BASE_GATEWAY_ENDPOINT = master gateway (public: https://network.cortex.foundation)
 # wallet: BASE_VALIDATOR_WALLET or BASE_VALIDATOR_MNEMONIC_FILE (for set_weights)
 
 ./deploy/scripts/materialize-env.sh

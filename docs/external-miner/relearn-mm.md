@@ -76,8 +76,13 @@ public split is informational.
 
 ## Submit
 
+There is nothing to submit while the challenge is off: `ctx challenges` does
+not list it, `ctx` refuses the id, and a leaf signed for it fails the
+trust-root check. The envelope below is the archived shape, kept so a
+re-enable ceremony has something to restore.
+
 ```bash
-curl -sS -X POST https://<gateway>/challenge/relearn-mm/v1/submissions \
+curl -sS -X POST https://network.cortex.foundation/challenge/relearn-mm/v1/submissions \
   -H 'content-type: application/json' \
   -H "X-Lium-Api-Key: $LIUM_API_KEY" \
   -d '{

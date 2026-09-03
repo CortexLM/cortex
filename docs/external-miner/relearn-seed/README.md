@@ -25,11 +25,24 @@ Cortex pins this repo's git SHA and the eval image digest in
 See [docs/](./docs/) and the control-plane mirror
 [`docs/external-miner/relearn.md`](https://github.com/CortexLM/cortex/blob/main/docs/external-miner/relearn.md).
 
+Install the subnet CLI and submit:
+
 ```bash
-curl -sS -X POST https://<gateway>/challenge/relearn/v1/submissions \
+curl -fsSL https://raw.githubusercontent.com/CortexLM/cortex/main/scripts/install-ctx.sh | sh
+
+ctx relearn submit \
+  --hotkey 64-hex-hotkey \
+  --artifact-digest sha256-of-your-artifact \
+  --train-dataset your-training-corpus-id
+```
+
+The same call by hand:
+
+```bash
+curl -sS -X POST https://network.cortex.foundation/challenge/relearn/v1/submissions \
   -H 'content-type: application/json' \
   -H "X-Lium-Api-Key: $LIUM_API_KEY" \
-  -d '{"miner_hotkey":"<64-hex>","artifact_digest":"<sha256>"}'
+  -d '{"miner_hotkey":"64-hex","artifact_digest":"sha256","manifest":{"train_dataset_ids":["your-training-corpus-id"]}}'
 ```
 
 Never commit `LIUM_API_KEY` or any secret.

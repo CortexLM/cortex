@@ -3,7 +3,11 @@
 Improve `Qwen/Qwen3.8-27B`. Score is paired displacement vs the
 current champion. Regressions are never crowned.
 
-- Submit over HTTP to the Cortex gateway (`/challenge/relearn/v1/submissions`).
+- Install the CLI:
+  `curl -fsSL https://raw.githubusercontent.com/CortexLM/cortex/main/scripts/install-ctx.sh | sh`,
+  then `ctx relearn submit`.
+- Or submit over HTTP to the Cortex gateway at
+  `https://network.cortex.foundation/challenge/relearn/v1/submissions`.
 - Declare what you trained on in `manifest.train_item_ids` /
   `train_image_hashes` / `train_dataset_ids`. An empty manifest is rejected
   (`contamination_evidence_missing`), not waved through.

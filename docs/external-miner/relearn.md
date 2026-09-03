@@ -10,15 +10,16 @@ grounded tool use. Long guide, eval image, and harness:
 [CortexLM/relearn](https://github.com/CortexLM/relearn).
 Cortex pin: [`config/relearn-pin.toml`](../../config/relearn-pin.toml).
 
+**Gateway:** `https://network.cortex.foundation`  
+**CLI:** `ctx relearn submit` (install: [README](./README.md#1-install-ctx))  
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 
 You post-train `Qwen/Qwen3.8-27B` (Apache-2.0, native VLM). There is no
 separate encoder-attach challenge and no SigLIP to glue on.
 
-Teacher is an HTTP API served from an operator local directory. The operator
-sets `RELEARN_TEACHER_API_URL`, `RELEARN_TEACHER_MODEL`,
-`RELEARN_TEACHER_API_KEY`, and `RELEARN_TEACHER_LOCAL_DIR` on the host. You
-do not.
+The teacher (`incoai/GLM-5.3-NVFP4`, wire id `glm-5.3`) is an HTTP API the
+operator runs on the eval host. You never configure it, never reach it, and
+never submit weights to it: it is judge-side only.
 
 ## How you are scored
 
@@ -40,37 +41,65 @@ public split, a perturbed rerun, known-answer canaries, general benches, or the
 shuffle control on a vision family the champion measured is rejected
 (`*_evidence_missing`) rather than passing the gate it did not take.
 
+## Before you submit
+
+```bash
+ctx relearn status
+```
+
+Read `can_score`. While it is `false` every submit answers **503**, nothing is
+stored, and no pod is rented. `eval_backend` tells you what would score the
+run: `lium` is a real eval on the pinned eval image, `sim` is the operator's
+offline harness (CI / local only) and is never a live verdict. `base_weights`
+reports whether the host has the base checkpoint primed.
+
 ## Submit
 
 ```bash
-curl -sS -X POST https://<gateway>/challenge/relearn/v1/submissions \
+export LIUM_API_KEY=...      # your key, if you want a live eval
+
+ctx relearn submit \
+  --hotkey 64-hex-hotkey \
+  --artifact-digest sha256-of-your-artifact \
+  --artifact-uri https://huggingface.co/you/your-model \
+  --train-id 1 --train-id 2 \
+  --train-dataset my-sft-mix-v3 \
+  --wait
+```
+
+`--train-id`, `--train-hash`, and `--train-dataset` are repeatable and become
+`manifest.train_item_ids`, `train_image_hashes`, and `train_dataset_ids`. At
+least one of them is required: `ctx` refuses an empty manifest locally rather
+than letting the contamination gate reject it after you have paid for a run.
+Pass a hand-written manifest with `--manifest-file manifest.json`.
+
+The same thing with `curl`:
+
+```bash
+curl -sS -X POST https://network.cortex.foundation/challenge/relearn/v1/submissions \
   -H 'content-type: application/json' \
   -H "X-Lium-Api-Key: $LIUM_API_KEY" \
   -d '{
-    "miner_hotkey": "<64-hex hotkey>",
-    "artifact_digest": "<sha256 of your artifact>",
+    "miner_hotkey": "64-hex hotkey",
+    "artifact_digest": "sha256 of your artifact",
     "artifact_uri": "optional-url",
     "manifest": {
       "train_item_ids": [1, 2, 3],
-      "train_image_hashes": ["<sha256 of each training image>"],
+      "train_image_hashes": ["sha256 of each training image"],
       "train_dataset_ids": ["my-sft-mix-v3"]
     }
   }'
 ```
 
-`manifest` is required evidence, not decoration. Declare the public item ids,
-image hashes, and dataset ids you trained on. All three arrays empty (or no
-`manifest` at all) is rejected — the contamination gate cannot clear a run it
-has nothing to check.
+## Read the verdict
 
-Poll `GET /challenge/relearn/v1/submissions/{id}`. Eligible runs sit at
-`awaiting_admin` until an operator promotes. You do not promote.
+```bash
+ctx relearn show rl_0123456789abcdef --wait
+```
 
-The response carries `eval_backend`. `lium` is a real eval on the pinned eval
-image; `sim` is the operator's offline harness (CI / local only) and is not a
-live verdict. `GET /challenge/relearn/v1/status` shows the same field plus
-`can_score` and `base_weights` (`primed` + which var, never a path), so you
-can tell before submitting whether the host will score at all. While
-`can_score` is `false`, submissions answer **503**.
+`--wait` polls until the submission stops moving. Eligible runs sit at
+`awaiting_admin` until an operator promotes; you do not promote, and a
+regression is never crowned. `rejected` carries the reason —
+[troubleshoot.md](./troubleshoot.md) maps each one to the fix.
 
 Never commit the Lium key. If something fails, see [troubleshoot.md](./troubleshoot.md).
