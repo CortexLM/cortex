@@ -1,0 +1,24 @@
+[package]
+name = "relearn-t2i-store"
+description = "In-memory Relearn T2I submissions, artifact manifests, sealed prompt holdout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+hex = "0.4"
+relearn-t2i-score = { path = "../relearn-t2i-score" }
+relearn-t2i-task = { path = "../relearn-t2i-task" }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+prism-competition = { path = "../prism-competition" }
+serde_json = "1"
+
+[lints]
+workspace = true

@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 use serde_json::Value;
 
 use keystore::{ss58_encode, BITTENSOR_SS58_PREFIX};
-use site_types::{coding_arena, design_frame, prism_frame};
+use site_types::{design_frame, prism_frame, relearn_frame};
 use site_types::{
     ActivityEvent, ActivitySeverity, Agent, Arena, ArenaSlug, LeaderboardRow, LossPoint,
     LossSeries, PrismTelemetry, PrismTelemetryPoint, PrismWindow, RulesGate, SealedPaths,
@@ -397,18 +397,27 @@ fn format_g2_score(v: f64) -> String {
     }
 }
 
-/// All three arenas (coding always paused).
+/// Relearn LLM card from `/v1/status` (or the static frame when down).
 #[must_use]
-pub fn list_arenas(
-    design_dash: Option<&Value>,
-    prism_status: Option<&Value>,
-    prism_subs: Option<&Value>,
-) -> Vec<Arena> {
-    vec![
-        coding_arena(),
-        design_arena_from_dashboard(design_dash),
-        prism_arena_from_live(prism_status, prism_subs),
-    ]
+pub fn relearn_arena_from_live(status: Option<&Value>) -> Arena {
+    hydrate_arena(relearn_frame(), status)
+}
+
+/// Fill an arena card's champion id from that challenge's `/v1/status`.
+///
+/// A down backend leaves the static frame in place rather than dropping the
+/// arena, so the site's emission column still accounts for every challenge.
+#[must_use]
+pub fn hydrate_arena(mut arena: Arena, status: Option<&Value>) -> Arena {
+    if let Some(s) = status {
+        if let Some(id) = s.get("champion_id").and_then(|v| v.as_str()) {
+            if !id.is_empty() {
+                id.clone_into(&mut arena.best_score);
+            }
+        }
+        arena.status = "live".into();
+    }
+    arena
 }
 
 fn format_elo(v: f64) -> String {

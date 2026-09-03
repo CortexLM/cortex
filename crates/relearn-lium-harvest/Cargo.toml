@@ -1,0 +1,26 @@
+[package]
+name = "relearn-lium-harvest"
+description = "Relearn live harvest: digest-pinned eval image on a Lium pod"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+harvest-pod = { path = "../harvest-pod" }
+prism-lium-types = { path = "../prism-lium-types" }
+relearn-challenge-task = { path = "../relearn-challenge-task" }
+relearn-eval = { path = "../relearn-eval" }
+relearn-score = { path = "../relearn-score" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

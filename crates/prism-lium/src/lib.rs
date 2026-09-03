@@ -37,7 +37,10 @@ pub use prism_lium_harness::{
     HARNESS_ABSENT, HARNESS_HARVEST_CMD, TRAIN_DONE_MARKER,
 };
 pub use sim::SimLiumBackend;
-pub use ssh::{parse_ssh_target, resolve_private_key, truncate_tail, SshTarget};
+pub use ssh::{
+    parse_ssh_target, resolve_private_key, ssh_exec, ssh_exec_allow_fail, ssh_exec_stdin,
+    truncate_tail, SshExecOutput, SshTarget,
+};
 // The data contract lives in `prism-lium-types` (per-crate LOC cap); it is
 // re-exported wholesale so `prism_lium::…` stays the single import path.
 pub use prism_lium_types::{

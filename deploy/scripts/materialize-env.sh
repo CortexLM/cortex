@@ -38,8 +38,8 @@ materialize_one() {
 }
 
 # Challenge env files carry BASE_DATABASE_URL (must match postgres.env).
-# Without them, compose refuses to start design/prism (no silent memory store).
-for svc in postgres validator gateway updater design-challenge prism-challenge design-egress-proxy; do
+# Without them, compose refuses to start challenges (required env_file).
+for svc in postgres validator gateway updater relearn-challenge relearn-t2i-challenge relearn-agent-challenge relearn-mm-challenge bounty-challenge; do
   materialize_one "$svc"
 done
 

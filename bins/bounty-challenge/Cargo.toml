@@ -1,0 +1,25 @@
+[package]
+name = "bounty-challenge-bin"
+description = "bounty-challenge operator binary (pair + reports on :8096)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "bounty-challenge"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+bounty-challenge = { path = "../../crates/bounty-challenge" }
+challenge-keys = { path = "../../crates/challenge-keys" }
+clap = { version = "4", features = ["derive", "env"] }
+telemetry = { path = "../../crates/telemetry" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+tracing = "0.1"
+
+[lints]
+workspace = true

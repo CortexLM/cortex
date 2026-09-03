@@ -5,15 +5,24 @@ Operator-facing map of the control plane. Normative byte contracts live in the f
 | Spec | Status | Role |
 |------|--------|------|
 | [`BUNDLE_SPEC.md`](./BUNDLE_SPEC.md) | **FROZEN** | Epoch bundle SCALE layout, merkle, aggregation, on-chain payload bounds |
-| [`DESIGN_CHALLENGE.md`](./DESIGN_CHALLENGE.md) | **FROZEN** | `design` challenge: harness sandbox, agentic review, admin winners, D24 leaves |
-| [`PRISM.md`](./PRISM.md) | live | `prism` Lium GPU recipe challenge (HTTP submit) |
+| [`DESIGN_CHALLENGE.md`](./DESIGN_CHALLENGE.md) | archived freeze | Retired `design` product (not live) |
+| [`PRISM.md`](./PRISM.md) | archived | Retired `prism` product (Lium rails reused by Relearn) |
+| [`RELEARN.md`](./RELEARN.md) | live | `relearn` post-training factory (HTTP submit; miners pay Lium) |
+| [`RELEARN-IMAGE.md`](./RELEARN-IMAGE.md) | live | `relearn-image` — Cosmos3 fine-tunes judged by Q-Judger (crates keep the `t2i` spelling) |
+| [`RELEARN-AGENT.md`](./RELEARN-AGENT.md) | live | `relearn-agent` — replayed tool traces on the same base checkpoint as `relearn` |
+| [`RELEARN-MM.md`](./RELEARN-MM.md) | **off** | `relearn-mm` — no trust-root row, no emission; `mm` compose profile only |
+| [`BOUNTY.md`](./BOUNTY.md) | live | `bounty` — paired bug reports |
 
 Do not restate those contracts here. Link them.
 
+Audiences (do not mix):
+
+- Miners: [`external-miner/README.md`](./external-miner/README.md) indexes all four challenges
+- Validators: [`external-miner/validators.md`](./external-miner/validators.md)
+
 Security claim and what it excludes: [`THREAT_MODEL.md`](./THREAT_MODEL.md).  
 Operator checklist: [`OPERATOR_SECURITY.md`](./OPERATOR_SECURITY.md).  
-Runbooks: [`runbooks/`](./runbooks/).  
-Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
+Runbooks: [`runbooks/`](./runbooks/).
 
 ---
 
@@ -23,7 +32,7 @@ Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
 - Gateway runs **only** as subnet owner (master). Startup asserts hotkey == on-chain `SubnetOwnerHotkey` or exits `2` before bind.
 - Validators **recompute** the weight vector from a signed, merkle-rooted epoch bundle. Challenge keys and measurements come from **owner-signed local files**, never from gateway HTTP.
 - CRV4 timelock commit-reveal on Bittensor testnet/mainnet as configured. Reveal is automatic on-chain.
-- Challenges accept miner work over **HTTP** (design Python harness sandbox; prism Lium GPU eval). No miner Phala/CVM path.
+- Live challenges accept miner work over **HTTP** (Relearn → Lium/sim eval; Bounty → pair + reports). Miners pay Lium when a key is present.
 
 ---
 
@@ -34,8 +43,10 @@ Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
                     │  Master host (compose profile master) │
                     │  postgres · gateway · validator ·     │
                     │  updater · socket-proxy ·             │
-                    │  prism-challenge · design-challenge · │
-                    │  design-egress-proxy                  │
+                    │  relearn-challenge ·                  │
+                    │  relearn-t2i-challenge (relearn-image)│
+                    │  relearn-agent-challenge ·            │
+                    │  bounty-challenge                     │
                     └───────────────┬─────────────────────┘
                                     │ TLS terminates in gateway (D20)
                                     │ /challenge/{id}/*  /v1/bundle/*
@@ -47,8 +58,10 @@ Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
                     └───────────────┬─────────────────────┘
                                     │ HTTP submit
                     ┌───────────────▼─────────────────────┐
-                    │  Miner clients (no TEE required)     │
-                    │  design harness / prism scripts       │
+                    │  Miner clients                       │
+                    │  relearn artifact digest + Lium BYOK  │
+                    │  image / agent artifact + manifest    │
+                    │  bounty pair + bug reports            │
                     └─────────────────────────────────────┘
 ```
 
@@ -56,9 +69,11 @@ Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
 |----------------|------|
 | `gateway` | Master-only: registry, reverse proxy, bundle seal/serve, sole TLS owner; mounts marketing [`SITE_API.md`](./SITE_API.md) (`GET /v1/site/*`) |
 | `validator` | Fetch/mirror bundle, verify, recompute, peer cross-check, CRV4 submit, dissent |
-| `design-challenge` | **Master-only:** sandbox harness runs, sanitize/viewer, scoring, sign leaves |
-| `design-egress-proxy` | **Master-only:** open sandbox egress (internal-target blocklist) + budgeted LLM path |
-| `prism-challenge` | **Master-only:** Lium (or sim) recipe eval, review gate, sign leaves |
+| `relearn-challenge` | **Master-only:** digest freeze, operator holdout unseal (commitment-checked), Lium/sim eval, contamination / public–holdout / canary / shuffle gates, operator promote, sign leaves |
+| `relearn-t2i-challenge` | **Master-only** (serves `relearn-image`): frozen prompt cells at pinned seeds, Q-Judger scoring, pillar / replay / contamination / capability-canary gates, sign leaves |
+| `relearn-agent-challenge` | **Master-only:** episode replay, trace grounding, tool-ablation and observation-shuffle arms, contamination / canary gates, sign leaves |
+| `relearn-mm-challenge` | **Off** (`mm` profile): text-intact rerun, vision + agentic holdout with a pixel-shuffle control. No trust-root row, so it emits nothing |
+| `bounty-challenge` | **Master-only:** internal pair/reports/adjudicate; **reads** CortexLM/backend public API for scoring; sign leaves |
 | `updater` | Digest-pinned rollouts via `docker-socket-proxy` (master) |
 | `trustroot` | Offline keygen / sign / verify for owner-signed TOML |
 | `bundle` | SCALE types, seal, verify (`PROTOCOL_VERSION`) |
@@ -95,7 +110,11 @@ Miner-facing docs (version-pinned): [`external-miner/`](./external-miner/).
 | `config/measurements.toml` + `.sig` | yes | every validator from **disk** |
 | Challenge / owner mini-secrets | **never** | challenge service / offline ceremony only |
 
-Current emission posture: `design = 0` bps, `prism = 10000` bps (100% prism; sum = 10000).
+Current emission posture: `relearn = 4000`, `relearn-image = 1500`,
+`relearn-agent = 1500`, `bounty = 3000` bps (sum 10000; operator can retune).
+`relearn-mm` has no row, so it earns 0 and a leaf claiming that id fails the
+trust-root check. Each live challenge signs leaves under its **own** key; no
+two rows share one.
 
 Gateway DB is **routing only**. It is never a source of challenge keys, emission shares, or measurements (D18, D23).
 

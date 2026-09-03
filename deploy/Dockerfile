@@ -12,8 +12,6 @@
 
 ARG DEBIAN_IMAGE=debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 ARG RUST_IMAGE=rust@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4
-# python:3.12.11-slim-bookworm (multi-arch index digest)
-ARG PYTHON_IMAGE=python@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
 ARG BUILD_FROM=source
 
 # -----------------------------------------------------------------------------
@@ -35,9 +33,6 @@ COPY bins ./bins
 COPY xtask ./xtask
 # Keep workspace metadata members that Docker context needs
 COPY config ./config
-# design-challenge embeds the published baseline agent as the agentic review
-# corpus anchor (include_str! in crates/design-challenge/src/orchestrator.rs).
-COPY docs/external-miner/examples/design-baseline ./docs/external-miner/examples/design-baseline
 # validator-bin/dcap turns on real Intel DCAP quote verification; without it the
 # validator parks every attestation instead of verifying it.
 RUN cargo build --release \
@@ -45,25 +40,28 @@ RUN cargo build --release \
       -p validator-bin \
       -p gateway-bin \
       -p updater-bin \
-      -p prism-challenge-bin \
-      -p design-challenge-bin \
-      -p design-egress-proxy-bin \
- && cargo build --release -p challenge-review-bin \
+      -p relearn-challenge-bin \
+      -p relearn-t2i-challenge-bin \
+      -p relearn-agent-challenge-bin \
+      -p relearn-mm-challenge-bin \
+      -p bounty-challenge-bin \
  && strip target/release/validator \
            target/release/gateway \
            target/release/updater \
-           target/release/prism-challenge \
-           target/release/design-challenge \
-           target/release/design-egress-proxy \
-           target/release/challenge-review \
+           target/release/relearn-challenge \
+           target/release/relearn-t2i-challenge \
+           target/release/relearn-agent-challenge \
+           target/release/relearn-mm-challenge \
+           target/release/bounty-challenge \
  && mkdir -p /out \
  && cp target/release/validator \
        target/release/gateway \
        target/release/updater \
-       target/release/prism-challenge \
-       target/release/design-challenge \
-       target/release/design-egress-proxy \
-       target/release/challenge-review /out/
+       target/release/relearn-challenge \
+       target/release/relearn-t2i-challenge \
+       target/release/relearn-agent-challenge \
+       target/release/relearn-mm-challenge \
+       target/release/bounty-challenge /out/
 
 # -----------------------------------------------------------------------------
 # Prebuilt path — copy host target/release artifacts (local verify only)
@@ -76,10 +74,11 @@ RUN apt-get update \
 COPY target/release/validator \
      target/release/gateway \
      target/release/updater \
-     target/release/prism-challenge \
-     target/release/design-challenge \
-     target/release/design-egress-proxy \
-     target/release/challenge-review \
+     target/release/relearn-challenge \
+     target/release/relearn-t2i-challenge \
+     target/release/relearn-agent-challenge \
+     target/release/relearn-mm-challenge \
+     target/release/bounty-challenge \
      /out/
 
 # -----------------------------------------------------------------------------
@@ -119,73 +118,57 @@ FROM runtime-base AS updater
 COPY --from=artifacts --chown=base:base /out/updater /usr/local/bin/updater
 ENTRYPOINT ["/usr/local/bin/updater"]
 
-FROM runtime-base AS prism-challenge
-# prism-lium drives pod exec over the `ssh` binary; runtime-base has none.
-# Pre-create the checkpoint park root as uid 65532 so a fresh named volume
-# inherits ownership (Docker copies image dir perms into empty volumes).
-# Without this, `base` cannot mkdir under /var/lib/prism → harvest fails with
-# `lium exec: mkdir: Permission denied` after a successful eval.
+FROM runtime-base AS relearn-challenge
+# Lium eval uses operator SSH; runtime-base has no ssh client.
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends openssh-client \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/lib/prism/artifacts \
-    && chown -R base:base /var/lib/prism
+    && mkdir -p /var/lib/relearn \
+    && chown -R base:base /var/lib/relearn
 USER base
-COPY --from=artifacts --chown=base:base /out/prism-challenge /usr/local/bin/prism-challenge
-ENTRYPOINT ["/usr/local/bin/prism-challenge"]
+COPY --from=artifacts --chown=base:base /out/relearn-challenge /usr/local/bin/relearn-challenge
+ENTRYPOINT ["/usr/local/bin/relearn-challenge"]
 
-FROM runtime-base AS design-challenge
-USER root
-# Headless Chromium for full-page design screenshots (DESIGN_CHROME_BIN).
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends chromium fonts-liberation \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/lib/design/staging \
-    && chown -R base:base /var/lib/design
-ENV DESIGN_CHROME_BIN=/usr/bin/chromium
-USER base
-COPY --from=artifacts --chown=base:base /out/design-challenge /usr/local/bin/design-challenge
-ENTRYPOINT ["/usr/local/bin/design-challenge"]
-
-FROM runtime-base AS design-egress-proxy
-COPY --from=artifacts --chown=base:base /out/design-egress-proxy /usr/local/bin/design-egress-proxy
-ENTRYPOINT ["/usr/local/bin/design-egress-proxy"]
-
-# -----------------------------------------------------------------------------
-# design-runtime — pinned Python for design-challenge sandboxes (install/run).
-# No challenge secrets; sandboxes reach egress only via design-sandbox-egress.
-# -----------------------------------------------------------------------------
-FROM ${PYTHON_IMAGE} AS design-runtime
+FROM runtime-base AS relearn-t2i-challenge
+# Cosmos3 generation and Q-Judger scoring both run on rented GPUs over SSH.
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates \
+    && apt-get install -y --no-install-recommends openssh-client \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 65532 base \
-    && useradd --system --uid 65532 --gid base --home-dir /home/base --create-home base \
-    && mkdir -p /work /out \
-    && chown -R base:base /work /out /home/base
+    && mkdir -p /var/lib/relearn-t2i \
+    && chown -R base:base /var/lib/relearn-t2i
 USER base
-WORKDIR /work
-# Harness entry is staged into /work by design-challenge; image only supplies Python.
-CMD ["python", "--version"]
+COPY --from=artifacts --chown=base:base /out/relearn-t2i-challenge /usr/local/bin/relearn-t2i-challenge
+ENTRYPOINT ["/usr/local/bin/relearn-t2i-challenge"]
 
-# -----------------------------------------------------------------------------
-# design-review — containerized anti-cheat review (challenge-agentic + AST).
-# design-challenge stages /work (submitted agent + _similar harness, read-only)
-# and /out (verdict) per run; the OpenRouter key arrives via container env.
-# Python is present so the sandboxed run_command tool can run AST probes.
-# -----------------------------------------------------------------------------
-FROM ${PYTHON_IMAGE} AS design-review
+FROM runtime-base AS relearn-agent-challenge
+# Episode replay and both ablation arms run on rented GPUs over SSH.
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates \
+    && apt-get install -y --no-install-recommends openssh-client \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 65532 base \
-    && useradd --system --uid 65532 --gid base --home-dir /home/base --create-home base \
-    && mkdir -p /work /out \
-    && chown -R base:base /work /out /home/base
+    && mkdir -p /var/lib/relearn-agent \
+    && chown -R base:base /var/lib/relearn-agent
 USER base
-WORKDIR /work
-COPY --from=artifacts --chown=base:base /out/challenge-review /usr/local/bin/challenge-review
-ENTRYPOINT ["/usr/local/bin/challenge-review"]
+COPY --from=artifacts --chown=base:base /out/relearn-agent-challenge /usr/local/bin/relearn-agent-challenge
+ENTRYPOINT ["/usr/local/bin/relearn-agent-challenge"]
+
+FROM runtime-base AS relearn-mm-challenge
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/lib/relearn-mm \
+    && chown -R base:base /var/lib/relearn-mm
+USER base
+COPY --from=artifacts --chown=base:base /out/relearn-mm-challenge /usr/local/bin/relearn-mm-challenge
+ENTRYPOINT ["/usr/local/bin/relearn-mm-challenge"]
+
+FROM runtime-base AS bounty-challenge
+USER root
+RUN mkdir -p /var/lib/bounty \
+    && chown -R base:base /var/lib/bounty
+USER base
+COPY --from=artifacts --chown=base:base /out/bounty-challenge /usr/local/bin/bounty-challenge
+ENTRYPOINT ["/usr/local/bin/bounty-challenge"]

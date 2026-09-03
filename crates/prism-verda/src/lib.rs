@@ -634,8 +634,16 @@ mod tests {
         assert!(require_digest("nginx:latest").is_err());
     }
 
+    /// `PRISM_VERDA_COMPUTE` is process-wide, so the two tests that depend on
+    /// it cannot run concurrently: without this they race and whichever reads
+    /// while the override is set picks `L40S` instead of a B200.
+    static COMPUTE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn pick_b200_then_fallback() {
+        let _guard = COMPUTE_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let rows = vec![
             json!({"name": "H100", "size": 1, "is_available": true}),
             json!({"name": "1x B200", "size": 1, "is_available": true}),
@@ -657,6 +665,9 @@ mod tests {
 
     #[test]
     fn pick_honors_compute_override() {
+        let _guard = COMPUTE_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let rows = vec![
             json!({"name": "B200", "size": 1, "is_available": true}),
             json!({"name": "L40S", "size": 1, "is_available": true}),

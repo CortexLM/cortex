@@ -70,20 +70,15 @@ jobs:
           - target: updater
             image_suffix: updater
             dockerfile: deploy/Dockerfile
-          - target: prism-challenge
-            image_suffix: prism-challenge
+          - target: relearn-challenge
+            image_suffix: relearn-challenge
+          - target: relearn-t2i-challenge
+            image_suffix: relearn-t2i-challenge
+          - target: relearn-agent-challenge
+            image_suffix: relearn-agent-challenge
             dockerfile: deploy/Dockerfile
-          - target: design-challenge
-            image_suffix: design-challenge
-            dockerfile: deploy/Dockerfile
-          - target: design-egress-proxy
-            image_suffix: design-egress-proxy
-            dockerfile: deploy/Dockerfile
-          - target: design-runtime
-            image_suffix: design-runtime
-            dockerfile: deploy/Dockerfile
-          - target: design-review
-            image_suffix: design-review
+          - target: bounty-challenge
+            image_suffix: bounty-challenge
             dockerfile: deploy/Dockerfile
           - target: ""
             image_suffix: base-attest-helper
@@ -285,11 +280,10 @@ jobs:
               "validator",
               "gateway",
               "updater",
-              "prism-challenge",
-              "design-challenge",
-              "design-egress-proxy",
-              "design-runtime",
-              "design-review",
+              "relearn-challenge",
+              "relearn-t2i-challenge",
+              "relearn-agent-challenge",
+              "bounty-challenge",
               "base-attest-helper",
           }
           assert set(images) == expected, (set(images), expected)
@@ -357,10 +351,10 @@ jobs:
           cp "$SRC" "deploy/digests/${SHA}.json"
           echo "Recorded digest manifest: deploy/digests/${SHA}.json"
           chmod +x deploy/scripts/promote.sh
-          # Pin services only (validator/gateway/updater/prism-challenge/design-challenge).
+          # Pin services only (validator/gateway/updater/the four challenges).
           # --skip-backup: this job records CI digests; Spaces/PG backup runs at
           # prod promote (deploy-prod.yml, fail-closed).
-          for svc in validator gateway updater prism-challenge design-challenge; do
+          for svc in validator gateway updater relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge; do
             IMAGE=$(python3 -c '
           import json, sys
           d = json.load(open(sys.argv[1]))
@@ -379,7 +373,7 @@ jobs:
           import json, sys
           p = json.load(open("deploy/pins/staging.json"))
           assert p["commit_sha"] == sys.argv[1], (p["commit_sha"], sys.argv[1])
-          for s in ("validator", "gateway", "updater", "prism-challenge", "design-challenge"):
+          for s in ("validator", "gateway", "updater", "relearn-challenge", "relearn-t2i-challenge", "relearn-agent-challenge", "bounty-challenge"):
               assert s in p["services"], s
               assert p["services"][s]["digest"].startswith("sha256:")
           print("staging pins ok", p["commit_sha"])
@@ -426,12 +420,10 @@ jobs:
             "base/gateway"
             "base/validator"
             "base/updater"
-            "base/prism-challenge"
-            "base/design-challenge"
-            "base/design-egress-proxy"
-            "base/design-runtime"
-            "base/design-review"
-            "base/prism-pod"
+            "base/relearn-challenge"
+            "base/relearn-t2i-challenge"
+            "base/relearn-agent-challenge"
+            "base/bounty-challenge"
           )
           ok=0
           # First list packages to Learn exact names (debug)

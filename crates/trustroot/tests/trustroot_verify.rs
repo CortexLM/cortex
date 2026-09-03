@@ -346,27 +346,69 @@ fn s9_repo_config_loads_when_present() {
     }
     let (ch, ms) = load_config_dir(&root, 0, 3).expect("committed config must verify");
     let primary = ch.primary().unwrap();
-    assert_eq!(primary.body.challenges.len(), 2);
-    // Emission 100% prism (2026-08-16): design 0 / prism 10000 (was 5000/5000).
-    let design = primary.body.get(b"design").expect("design row");
-    assert_eq!(design.emission_share_bps, 0);
-    assert_eq!(
-        encode_hex(&design.public_key),
-        "3e27f87d8330006a73174001120c3455f16b95fee098bb8c2bab9d5053840418"
-    );
-    let prism = primary.body.get(b"prism").expect("prism row");
-    assert_eq!(prism.emission_share_bps, BPS_DENOM);
-    assert_eq!(
-        encode_hex(&prism.public_key),
-        "bcd50bb830e050ed4b011dd8f1d2f126fdb42dc55b45ece30a7d5c8ceb3c5219"
-    );
-    assert_ne!(prism.public_key, design.public_key);
+    assert_eq!(primary.body.challenges.len(), 4);
+
+    // Four live challenges: Relearn, Relearn Image, Relearn Agent, Bounty.
+    let expected: [(&[u8], u16, &str); 4] = [
+        (
+            b"relearn",
+            4000,
+            "8ab577207bb6dfc770a850710824a098d53b1ee90abb92925bd0928937131674",
+        ),
+        (
+            b"relearn-image",
+            1500,
+            "923324e1df896b20c49c47f40dacbc4c53cab23e6cc5a1136529302b4c2da110",
+        ),
+        (
+            b"relearn-agent",
+            1500,
+            "220e489f8157e477730e2e3ee6ce51be0fcf8779575c486a70658a28d5a51841",
+        ),
+        (
+            b"bounty",
+            3000,
+            "d2ffbe70de7c052deafaba48b90544db4abc1133278c907f2018f457f34aac25",
+        ),
+    ];
+    for (id, bps, pk) in expected {
+        let row = primary
+            .body
+            .get(id)
+            .unwrap_or_else(|| panic!("{} row", String::from_utf8_lossy(id)));
+        assert_eq!(
+            row.emission_share_bps,
+            bps,
+            "{}",
+            String::from_utf8_lossy(id)
+        );
+        assert_eq!(encode_hex(&row.public_key), pk);
+    }
+
+    // Every challenge must sign under its own key, so no two rows may share one.
+    let mut keys: Vec<String> = primary
+        .body
+        .challenges
+        .iter()
+        .map(|c| encode_hex(&c.public_key))
+        .collect();
+    keys.sort();
+    let total = keys.len();
+    keys.dedup();
+    assert_eq!(keys.len(), total, "challenge public keys must be distinct");
+
+    // Off means absent: a challenge with no row has no emission and no leaf
+    // that can verify under this root.
+    for off in [&b"relearn-mm"[..], b"relearn-t2i", b"design", b"prism"] {
+        assert!(
+            primary.body.get(off).is_none(),
+            "{} must not be live",
+            String::from_utf8_lossy(off)
+        );
+    }
     let shares = primary.body.emission_shares();
-    assert_eq!(shares.len(), 2);
-    assert_eq!(shares[0].0, b"design");
-    assert_eq!(shares[0].1, 0);
-    assert_eq!(shares[1].0, b"prism");
-    assert_eq!(shares[1].1, BPS_DENOM);
+    assert_eq!(shares.len(), 4);
+    assert_eq!(shares.iter().map(|s| s.1).sum::<u16>(), BPS_DENOM);
     // base-agent CVM path removed — committed allowlist is empty (fail-closed).
     let entries = &ms.primary().unwrap().body.entries;
     assert!(

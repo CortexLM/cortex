@@ -1,5 +1,5 @@
 //! Fail if external miner docs drift from `bundle` `PROTOCOL_VERSION`,
-//! if design/prism HTTP miner paths are missing, or if `docs/THREAT_MODEL.md`
+//! if relearn HTTP miner paths are missing, or if `docs/THREAT_MODEL.md`
 //! D19 claim is not word-for-word vs plan pin.
 
 use std::fs;
@@ -11,31 +11,86 @@ const D19_VERBATIM: &str = "base guarantees *no equivocation between validators*
 /// Marker comment required in external miner docs.
 const BADGE_COMMENT_PREFIX: &str = "<!-- protocol_version:";
 
-/// Content pins required across `docs/external-miner/` (design + prism HTTP).
+/// Content pins required in `docs/external-miner/README.md`.
 const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
-    ("design_challenge", "design"),
-    ("prism_challenge", "prism"),
+    ("relearn_challenge", "relearn"),
+    ("relearn_image_challenge", "relearn-image"),
+    ("relearn_agent_challenge", "relearn-agent"),
+    ("relearn_mm_off", "relearn-mm"),
+    ("bounty_challenge", "bounty"),
     ("http_submit", "HTTP"),
-    ("design_spec_link", "DESIGN_CHALLENGE.md"),
-    ("prism_spec_link", "PRISM.md"),
-    ("no_phala_cvm", "no Phala/CVM"),
+    ("lium_byok", "X-Lium-Api-Key"),
+    ("lium_pay", "Miner pays Lium"),
     ("bundle_spec_link", "BUNDLE_SPEC.md"),
+    ("base_model", "Qwen/Qwen3.8-27B"),
+    ("teacher_nvfp4", "incoai/GLM-5.3-NVFP4"),
+    ("teacher_model", "glm-5.3"),
+    ("image_base_model", "nvidia/Cosmos3-Super-Text2Image"),
+    ("image_judge", "Qwen/Qwen-Image-Bench"),
+    ("image_flux_rejected", "Flux is rejected"),
+    ("agent_trace_scoring", "replayed tool traces"),
+    ("mm_encoder", "google/siglip2-so400m-patch14-384"),
+    // A live challenge that never says what it will not pay for teaches
+    // miners to find out by losing money.
+    ("private_holdout", "private holdout"),
+    ("off_score_gate", "off the number you are paid on"),
+    ("fail_closed", "fails closed"),
+    ("bounty_placeholder", "BOUNTY_CHAT_COMMAND"),
+    ("bounty_backend_url", "BOUNTY_BACKEND_PUBLIC_URL"),
+    ("bounty_backend_consumer", "CortexLM/backend"),
 ];
 
-/// Pins required in `docs/external-miner/prism.md` for recipe 2.1 `AutoModel`.
-const PRISM_AUTOMODEL_PINS: &[(&str, &str)] = &[
-    ("recipe_2_1_0", "2.1.0"),
-    ("automodel_base_member", "automodel.base"),
-    ("automodel_patch_member", "automodel.patch"),
-    ("live_pin_id", "automodel@v0.5.0"),
-    ("recipe_json_pin_id", "automodel_pin_id"),
-    ("diff_route", "/v1/submissions/{id}/diff"),
-    ("lium_byok", "X-Lium-Api-Key"),
-    ("verda_byok", "X-Verda-Client-Id"),
-    ("competition_id", "prism-v2.1"),
-    ("scoring_generation_21", "scoring_generation"),
-    ("new_competition", "new competition"),
+/// Per-page pins. A challenge product rule that is not in the miner's own guide
+/// is not a rule they will follow.
+const PAGE_PINS: &[(&str, &[&str])] = &[
+    (
+        "relearn-image.md",
+        &[
+            "nvidia/Cosmos3-Super-Text2Image",
+            "OpenMDW 1.1",
+            "Qwen/Qwen-Image-Bench",
+            "Flux is rejected",
+            "Q-Judger is the only judge",
+            // The gates a miner has to design for, in their own guide.
+            "Capability canary",
+            "contamination_evidence_missing",
+        ],
+    ),
+    (
+        "relearn-agent.md",
+        &[
+            "Qwen/Qwen3.8-27B",
+            "Trace replay",
+            "Tool ablation",
+            "Observation shuffle",
+            "without using the image or",
+            "contamination_evidence_missing",
+        ],
+    ),
+    (
+        "bounty.md",
+        &[
+            // Bounty pays on precision x severity, and the canary that can
+            // zero a miner is not in the number they see.
+            "severity",
+            "triage noise",
+            "informational",
+            "can_score",
+        ],
+    ),
+    (
+        "relearn-mm.md",
+        &[
+            "google/siglip2-so400m-patch14-384",
+            "Apache-2.0",
+            "zero on this challenge",
+            "shuffled",
+        ],
+    ),
 ];
+
+/// An Image page that names Flux as an allowed base is a product bug, not a typo.
+const T2I_FORBIDDEN_BASES: &[&str] = &["flux.1-dev", "flux.1-schnell", "flux.1-pro"];
 
 /// Substrings that must not appear as live miner guidance (removed path).
 const FORBIDDEN_LIVE_PATHS: &[&str] = &[
@@ -61,7 +116,7 @@ pub fn run(workspace_root: &Path) -> Result<(), String> {
 
     if failures.is_empty() {
         println!(
-            "external-docs-check OK (protocol_version={protocol_version}, design/prism HTTP, D19 verbatim match)"
+            "external-docs-check OK (protocol_version={protocol_version}, relearn + relearn-image + relearn-agent + bounty HTTP, D19 verbatim match)"
         );
         Ok(())
     } else {
@@ -133,8 +188,15 @@ fn check_external_miner_docs(
         }
     }
 
-    // Required pages for design/prism HTTP submit.
-    for required in ["design.md", "prism.md", "troubleshoot.md"] {
+    // Required pages for live HTTP submit.
+    for required in [
+        "relearn.md",
+        "relearn-image.md",
+        "relearn-agent.md",
+        "relearn-mm.md",
+        "bounty.md",
+        "troubleshoot.md",
+    ] {
         let path = dir.join(required);
         if !path.is_file() {
             failures.push(format!(
@@ -143,24 +205,31 @@ fn check_external_miner_docs(
         }
     }
 
-    let prism_md = dir.join("prism.md");
-    if prism_md.is_file() {
-        let prism_body = fs::read_to_string(&prism_md)
-            .map_err(|e| format!("read {}: {e}", prism_md.display()))?;
-        for (name, needle) in PRISM_AUTOMODEL_PINS {
-            if !prism_body.contains(needle) {
-                failures.push(format!(
-                    "docs/external-miner/prism.md missing AutoModel pin {name}: {needle:?}"
-                ));
+    for (page, pins) in PAGE_PINS {
+        let path = dir.join(page);
+        let Ok(body) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for needle in *pins {
+            if !body.contains(needle) {
+                failures.push(format!("docs/external-miner/{page} missing pin {needle:?}"));
             }
         }
-        // Stale plan wording — live pin ids are tag-shaped (`automodel@…`).
-        if prism_body.contains("automodel-<12hex>") {
-            failures.push(
-                "docs/external-miner/prism.md still mentions stale pin shape automodel-<12hex> \
-                 (live pin is automodel@v0.5.0)"
-                    .into(),
-            );
+    }
+
+    // The Image guide must reject Flux, never offer it as a base.
+    let t2i = dir.join("relearn-image.md");
+    if let Ok(body) = fs::read_to_string(&t2i) {
+        let lower = body.to_ascii_lowercase();
+        for banned in T2I_FORBIDDEN_BASES {
+            let mentioned_as_allowed = lower
+                .split('\n')
+                .any(|l| l.contains(banned) && !l.contains("reject") && !l.contains("refus"));
+            if mentioned_as_allowed {
+                failures.push(format!(
+                    "docs/external-miner/relearn-image.md mentions {banned:?} outside a rejection"
+                ));
+            }
         }
     }
 
@@ -190,7 +259,7 @@ fn check_external_miner_docs(
         for banned in FORBIDDEN_LIVE_PATHS {
             if lower.contains(&banned.to_ascii_lowercase()) {
                 failures.push(format!(
-                    "{} contains removed miner-path string {banned:?} (use design/prism HTTP only)",
+                    "{} contains removed miner-path string {banned:?} (use relearn HTTP only)",
                     path.strip_prefix(workspace_root).unwrap_or(&path).display()
                 ));
             }
@@ -327,25 +396,100 @@ mod tests {
     }
 
     #[test]
-    fn external_pins_cover_design_prism() {
+    fn external_pins_cover_relearn() {
         assert!(EXTERNAL_MINER_PINS
             .iter()
-            .any(|(n, _)| *n == "design_challenge"));
+            .any(|(n, _)| *n == "relearn_challenge"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
-            .any(|(n, _)| *n == "prism_challenge"));
+            .any(|(n, v)| *n == "base_model" && *v == "Qwen/Qwen3.8-27B"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
-            .any(|(n, v)| *n == "no_phala_cvm" && *v == "no Phala/CVM"));
+            .any(|(n, v)| *n == "teacher_nvfp4" && *v == "incoai/GLM-5.3-NVFP4"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "teacher_model" && *v == "glm-5.3"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "lium_pay" && *v == "Miner pays Lium"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, _)| *n == "bounty_challenge"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "bounty_backend_url" && *v == "BOUNTY_BACKEND_PUBLIC_URL"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "bounty_backend_consumer" && *v == "CortexLM/backend"));
     }
 
     #[test]
-    fn prism_automodel_pins_cover_recipe_2() {
-        assert!(PRISM_AUTOMODEL_PINS
+    fn external_pins_cover_the_four_live_ids() {
+        for (name, value) in [
+            ("relearn_challenge", "relearn"),
+            ("relearn_image_challenge", "relearn-image"),
+            ("relearn_agent_challenge", "relearn-agent"),
+            ("bounty_challenge", "bounty"),
+            ("image_base_model", "nvidia/Cosmos3-Super-Text2Image"),
+            ("image_judge", "Qwen/Qwen-Image-Bench"),
+            ("image_flux_rejected", "Flux is rejected"),
+            ("agent_trace_scoring", "replayed tool traces"),
+            ("mm_encoder", "google/siglip2-so400m-patch14-384"),
+        ] {
+            assert!(
+                EXTERNAL_MINER_PINS
+                    .iter()
+                    .any(|(n, v)| *n == name && *v == value),
+                "missing pin {name}"
+            );
+        }
+    }
+
+    /// A miner who cannot see what the gates are will find them by losing
+    /// money, so the index has to say them out loud.
+    #[test]
+    fn external_pins_name_the_incentive_rules() {
+        for name in ["private_holdout", "off_score_gate", "fail_closed"] {
+            assert!(
+                EXTERNAL_MINER_PINS.iter().any(|(n, _)| *n == name),
+                "missing pin {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn page_pins_hold_the_product_rules() {
+        let t2i = PAGE_PINS
             .iter()
-            .any(|(n, v)| *n == "live_pin_id" && *v == "automodel@v0.5.0"));
-        assert!(PRISM_AUTOMODEL_PINS
+            .find(|(p, _)| *p == "relearn-image.md")
+            .map(|(_, pins)| *pins)
+            .unwrap_or_default();
+        assert!(t2i.contains(&"Flux is rejected"));
+        assert!(t2i.contains(&"Q-Judger is the only judge"));
+        let mm = PAGE_PINS
             .iter()
-            .any(|(n, v)| *n == "automodel_patch_member" && *v == "automodel.patch"));
+            .find(|(p, _)| *p == "relearn-mm.md")
+            .map(|(_, pins)| *pins)
+            .unwrap_or_default();
+        assert!(mm.contains(&"zero on this challenge"));
+        assert!(mm.contains(&"shuffled"));
+
+        // The Agent page has to state the arms that separate it from a prompt
+        // benchmark, or the challenge reads as "relearn with extra words".
+        let agent = PAGE_PINS
+            .iter()
+            .find(|(p, _)| *p == "relearn-agent.md")
+            .map(|(_, pins)| *pins)
+            .unwrap_or_default();
+        for arm in ["Trace replay", "Tool ablation", "Observation shuffle"] {
+            assert!(agent.contains(&arm), "agent page must pin {arm:?}");
+        }
+    }
+
+    #[test]
+    fn t2i_forbidden_bases_name_the_flux_variants() {
+        assert!(T2I_FORBIDDEN_BASES.contains(&"flux.1-dev"));
+        assert!(T2I_FORBIDDEN_BASES.contains(&"flux.1-schnell"));
+        assert!(T2I_FORBIDDEN_BASES.contains(&"flux.1-pro"));
     }
 }

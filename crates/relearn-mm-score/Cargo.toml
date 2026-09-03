@@ -1,0 +1,17 @@
+[package]
+name = "relearn-mm-score"
+description = "Relearn Multimodal scoring: LLM-intact hard gate, vision holdout, pixel-shuffle check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+prism-competition = { path = "../prism-competition" }
+relearn-mm-task = { path = "../relearn-mm-task" }
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

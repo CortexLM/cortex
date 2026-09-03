@@ -23,6 +23,10 @@ pub struct Offer {
     /// Free GPUs on the host (`available_gpu_count`).
     #[serde(default)]
     pub available_gpu_count: Option<u32>,
+    /// Lium NCU-profiling hosts are whole-host only, even when
+    /// `min_gpu_count_for_rental` is 1.
+    #[serde(default)]
+    pub ncu_profiling_enabled: bool,
 }
 
 impl Default for Offer {
@@ -35,6 +39,7 @@ impl Default for Offer {
             provider: "lium".into(),
             min_gpu_count_for_rental: None,
             available_gpu_count: None,
+            ncu_profiling_enabled: false,
         }
     }
 }
@@ -148,9 +153,10 @@ impl Offer {
     /// listing `available_gpu_count` and `price_per_gpu`. Treat that as
     /// min=1 so a 1× pin can rent one card — never the whole 8-pack.
     /// Missing `available_gpu_count` means "do not infer split".
+    /// NCU-profiling hosts reject split even when min=1.
     #[must_use]
     pub fn allows_split_for(&self, wanted: u32) -> bool {
-        if wanted == 0 {
+        if self.ncu_profiling_enabled || wanted == 0 {
             return false;
         }
         let Some(avail) = self.available_gpu_count else {
@@ -163,30 +169,33 @@ impl Offer {
     }
 
     /// GPUs to send on `POST /executors/{id}/rent`.
+    ///
+    /// Split rows rent `requested`. Everything else — including NCU — is the
+    /// whole host. Never post `gpu_count=1` on a 2× NCU row.
     #[must_use]
     pub fn rent_count(&self, requested: u32) -> u32 {
         if self.allows_split_for(requested) {
             return requested.max(1);
         }
-        let effective = effective_gpu_count(self.gpu_count, &self.gpu_type);
-        if requested <= 1 {
-            1
-        } else {
-            effective.max(requested)
-        }
+        effective_gpu_count(self.gpu_count, &self.gpu_type).max(requested.max(1))
     }
 
     /// Whether this offer may be rented for `requested` GPUs.
     ///
     /// Accepts an exact-width host, a larger host when `requested > 1`, or a
     /// multi-GPU host that advertises (or omits-min) GPU splitting. A 1-GPU
-    /// pin never takes a non-split 8× pack. 8×5090 is never a silent fallback.
+    /// pin never takes a non-split 8× pack — except NCU, which is whole-host
+    /// only and is the live B200 champion path. 8×5090 is never a silent
+    /// fallback.
     #[must_use]
     pub fn matches_gpu_count(&self, requested: u32) -> bool {
         if self.allows_split_for(requested) {
             return true;
         }
         let effective = effective_gpu_count(self.gpu_count, &self.gpu_type);
+        if self.ncu_profiling_enabled {
+            return requested >= 1 && effective >= requested;
+        }
         if requested <= 1 {
             return effective == 1;
         }
@@ -207,6 +216,12 @@ pub struct InstanceSpec {
     pub gpu_count: u32,
     /// Optional image / template digest pin (integrity).
     pub image_digest: Option<String>,
+    /// Digest-pinned harvest image repo (no tag), e.g. `ghcr.io/cortexlm/relearn-eval`.
+    /// When set with `image_digest`, provision must rent that image — not prism-recipe-v10.
+    pub docker_image: Option<String>,
+    /// Lium template startup. Digest-pinned harvest must leave this unset:
+    /// the eval image `CMD ["serve"]` starts sshd. Never send prism-pod-entrypoint.
+    pub startup_commands: Option<String>,
     /// SSH public keys (required for real Lium rent).
     pub ssh_public_keys: Vec<String>,
     /// Optional Lium SSH key name for `ensure_ssh_key`.
@@ -219,6 +234,16 @@ pub struct InstanceSpec {
     pub template_name: Option<String>,
 }
 
+impl InstanceSpec {
+    /// Harvest rent: `docker_image` is set so provision must not use prism-recipe.
+    #[must_use]
+    pub fn digest_pinned_harvest(&self) -> bool {
+        self.docker_image
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+    }
+}
+
 impl Default for InstanceSpec {
     fn default() -> Self {
         Self {
@@ -227,6 +252,8 @@ impl Default for InstanceSpec {
             max_price_per_hour: DEFAULT_MAX_PRICE_PER_HOUR,
             gpu_count: DEFAULT_POD_GPU_COUNT,
             image_digest: None,
+            docker_image: None,
+            startup_commands: None,
             ssh_public_keys: vec![],
             ssh_key_name: Some("prism-mission-worker".into()),
             preferred_offer_id: None,
@@ -865,6 +892,46 @@ mod tests {
         assert!(v.bpb.is_finite() && v.bpb > 0.0);
         assert_eq!(v.tokens_seen, 1_048_576);
         assert!(v.telemetry.is_some());
+    }
+
+    #[test]
+    fn ncu_2x_b200_is_whole_host_for_one_gpu_pin() {
+        let o = Offer {
+            id: "4a36877c".into(),
+            gpu_type: "NVIDIA B200".into(),
+            gpu_count: 2,
+            price_per_hour: 5.5,
+            min_gpu_count_for_rental: Some(1),
+            available_gpu_count: Some(2),
+            ncu_profiling_enabled: true,
+            ..Offer::default()
+        };
+        assert!(!o.allows_split_for(1));
+        assert!(o.matches_gpu_count(1), "1-GPU pin must still take NCU B200");
+        assert_eq!(o.rent_count(1), 2);
+        let pref = GpuPreference::profile_b200();
+        let mut offers = vec![o];
+        pref.filter_sort_offers(&mut offers, 1);
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].id, "4a36877c");
+    }
+
+    #[test]
+    fn parse_live_ncu_2x_b200_is_whole_host_rent() {
+        let v = serde_json::json!({
+            "id": "4a36877c",
+            "machine_name": "NVIDIA B200",
+            "gpu_count": 2,
+            "available_gpu_count": 2,
+            "min_gpu_count_for_rental": 1,
+            "ncu_profiling_enabled": true,
+            "price_per_gpu": 5.5
+        });
+        let o = crate::parse_one_offer(&v).expect("offer");
+        assert!(o.ncu_profiling_enabled);
+        assert!(!o.allows_split_for(1));
+        assert!(o.matches_gpu_count(1));
+        assert_eq!(o.rent_count(1), 2);
     }
 
     #[test]

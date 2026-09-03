@@ -1,0 +1,26 @@
+[package]
+name = "bounty-challenge"
+description = "Bounty orchestrator: pair, reports, adjudicate, D24 emit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bundle = { path = "../bundle" }
+bounty-challenge-task = { path = "../bounty-challenge-task" }
+bounty-http = { path = "../bounty-http" }
+bounty-score = { path = "../bounty-score" }
+bounty-store = { path = "../bounty-store" }
+challenge-common = { path = "../challenge-common" }
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

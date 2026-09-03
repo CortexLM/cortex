@@ -8,15 +8,21 @@
 //! - `spec-check` — fail if `docs/BUNDLE_SPEC.md` is missing plan pins (a)–(l)
 //! - `design-check` — fail if `docs/DESIGN_CHALLENGE.md` is missing freeze pins
 //! - `external-docs-check` — fail if external miner docs `protocol_version` ≠ bundle, or D19 drifts
+//! - `relearn-t2i-holdout` — select a Relearn T2I holdout slice and print its commitment
+//! - `relearn-holdout` — select a Relearn holdout slice and print its commitment
+//! - `relearn-agent-holdout` — select a Relearn Agent episode set and print its commitment
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod agent_holdout;
 mod consensus_lint;
 mod design_check;
 mod external_docs_check;
 mod loc_cap;
 mod metadata_snapshot;
 mod natural_pack;
+mod relearn_holdout;
 mod spec_check;
+mod t2i_holdout;
 
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -86,6 +92,73 @@ enum Command {
     DesignCheck,
     /// Fail if external miner docs `protocol_version` differs from `bundle`, or `THREAT_MODEL` D19 drifts.
     ExternalDocsCheck,
+    /// Select a Relearn holdout slice and print its pin commitment.
+    ///
+    /// Item ids are never printed. Production salts stay off git. Refuses the
+    /// documented T2I/dev salt.
+    RelearnHoldout {
+        /// Operator catalog JSON (array of holdout items).
+        #[arg(long)]
+        catalog: Option<PathBuf>,
+        /// Selection salt. Never reuse the T2I/dev salt.
+        #[arg(long)]
+        salt: String,
+        /// Holdout item count.
+        #[arg(long, default_value_t = 120)]
+        size: usize,
+        /// Item ids published in the pin's public split (repeatable).
+        #[arg(long = "exclude")]
+        exclude: Vec<u32>,
+        /// Build a local-only synthetic catalog.
+        #[arg(long)]
+        synthetic: bool,
+        /// Write records here (outside the repo, mode 0600).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Select a Relearn Agent episode set and print its pin commitment.
+    ///
+    /// Episode ids and goals are never printed. Production salts stay off git.
+    RelearnAgentHoldout {
+        /// Operator catalogue JSON (array of episodes).
+        #[arg(long)]
+        catalog: Option<PathBuf>,
+        /// Selection salt. Never reuse another challenge's salt.
+        #[arg(long)]
+        salt: String,
+        /// Holdout episode count.
+        #[arg(long, default_value_t = 120)]
+        size: usize,
+        /// Episode ids published in the pin's public split (repeatable).
+        #[arg(long = "exclude")]
+        exclude: Vec<u32>,
+        /// Build a local-only synthetic catalogue.
+        #[arg(long)]
+        synthetic: bool,
+        /// Write episodes here (outside the repo, mode 0600).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Select a Relearn T2I holdout slice and print its pin commitment.
+    ///
+    /// Prompt ids are never printed. Production salts stay off git.
+    RelearnT2iHoldout {
+        /// Bench prompt file (`qwen_image_bench_hf_v0518.jsonl`).
+        #[arg(long)]
+        bench: PathBuf,
+        /// Selection salt.
+        #[arg(long)]
+        salt: String,
+        /// Holdout prompt count.
+        #[arg(long, default_value_t = 40)]
+        size: usize,
+        /// Prompt ids published in the pin's public split (repeatable).
+        #[arg(long = "exclude")]
+        exclude: Vec<u32>,
+        /// Write records here (outside the repo, mode 0600).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn workspace_root() -> Result<PathBuf, String> {
@@ -105,9 +178,20 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = match cli.command {
-        Command::LocCap => loc_cap::run(&root),
-        Command::ConsensusLint => consensus_lint::run(&root),
+    match dispatch(cli.command, &root) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("xtask error: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)] // one arm per subcommand; splitting hides the map
+fn dispatch(command: Command, root: &Path) -> Result<(), String> {
+    match command {
+        Command::LocCap => loc_cap::run(root),
+        Command::ConsensusLint => consensus_lint::run(root),
         Command::MetadataSnapshot {
             endpoint,
             netuid,
@@ -120,7 +204,7 @@ fn main() -> ExitCode {
                 out,
                 check,
             };
-            metadata_snapshot::run(&root, &args)
+            metadata_snapshot::run(root, &args)
         }
         Command::NaturalPack {
             out,
@@ -145,17 +229,53 @@ fn main() -> ExitCode {
                 offline,
                 check,
             };
-            natural_pack::run(&root, &args)
+            natural_pack::run(root, &args)
         }
-        Command::SpecCheck => spec_check::run(&root),
-        Command::DesignCheck => design_check::run(&root),
-        Command::ExternalDocsCheck => external_docs_check::run(&root),
-    };
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("xtask error: {err}");
-            ExitCode::FAILURE
-        }
+        Command::SpecCheck => spec_check::run(root),
+        Command::DesignCheck => design_check::run(root),
+        Command::ExternalDocsCheck => external_docs_check::run(root),
+        Command::RelearnHoldout {
+            catalog,
+            salt,
+            size,
+            exclude,
+            synthetic,
+            out,
+        } => relearn_holdout::run(&relearn_holdout::HoldoutArgs {
+            catalog,
+            salt,
+            size,
+            exclude,
+            synthetic,
+            out,
+        }),
+        Command::RelearnAgentHoldout {
+            catalog,
+            salt,
+            size,
+            exclude,
+            synthetic,
+            out,
+        } => agent_holdout::run(&agent_holdout::HoldoutArgs {
+            catalog,
+            salt,
+            size,
+            exclude,
+            synthetic,
+            out,
+        }),
+        Command::RelearnT2iHoldout {
+            bench,
+            salt,
+            size,
+            exclude,
+            out,
+        } => t2i_holdout::run(&t2i_holdout::HoldoutArgs {
+            bench,
+            salt,
+            size,
+            exclude,
+            out,
+        }),
     }
 }

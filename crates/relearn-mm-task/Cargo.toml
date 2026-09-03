@@ -1,0 +1,18 @@
+[package]
+name = "relearn-mm-task"
+description = "Relearn Multimodal challenge identity, permissive encoder pins, pin parsing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+relearn-challenge-task = { path = "../relearn-challenge-task" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.8"
+
+[lints]
+workspace = true

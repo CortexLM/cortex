@@ -1,0 +1,31 @@
+[package]
+name = "relearn-t2i-eval"
+description = "Relearn T2I eval loop: frozen cells, Q-Judger scoring, Lium rent, receipts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+hex = "0.4"
+prism-competition = { path = "../prism-competition" }
+prism-lium = { path = "../prism-lium" }
+prism-lium-types = { path = "../prism-lium-types" }
+relearn-t2i-judge = { path = "../relearn-t2i-judge" }
+relearn-t2i-score = { path = "../relearn-t2i-score" }
+relearn-t2i-store = { path = "../relearn-t2i-store" }
+relearn-t2i-task = { path = "../relearn-t2i-task" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

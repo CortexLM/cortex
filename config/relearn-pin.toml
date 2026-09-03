@@ -1,0 +1,74 @@
+# Cortex pin for the split CortexLM/relearn challenge repo.
+# Deploy = bump eval_image_digest + relearn_git_sha after relearn CI is green.
+# Never put secrets, teacher endpoints, or holdout items in this file.
+#
+# The holdout split is NOT in this file. Git carries only its commitment; the
+# records live in an operator file (`RELEARN_HOLDOUT_FILE`) and are checked
+# against the commitment at boot. Regenerate with:
+#
+#   cargo run -p xtask -- relearn-holdout --catalog <catalog.json> \
+#     --salt "$RELEARN_HOLDOUT_SALT" --size 120 --exclude <each public id> \
+#     --out /root/.base-secrets/relearn-holdout.json
+#
+# The commitment below is the CI / local one: a documented dev salt (see the
+# default in deploy/scripts/local-e2e.sh) over a synthetic catalog, so the
+# stack can boot without operator secrets. It is NOT the live seal.
+#
+# Production MUST rotate to a private salt AND a private catalog, replace the
+# commitment here, and re-sign the trust root (config/CEREMONY.md). Shipping a
+# documented salt over a public catalog would let miners reconstruct the
+# scored split.
+
+# Base miners post-train. Qwen/Qwen3.8-27B is Apache-2.0, public, native VLM.
+# Not Flash-Next. No SigLIP / encoder-attach product on this challenge.
+base_model = "Qwen/Qwen3.8-27B"
+# HTTP teacher wire id (full GLM-5.3, not Flash). Override with RELEARN_TEACHER_MODEL.
+teacher_model = "glm-5.3"
+# Weights id to download: full GLM-5.3 NVFP4 (~433 GiB, 97 files, license other).
+# Serve with vLLM from RELEARN_TEACHER_LOCAL_DIR. Never pass this repo id to vLLM.
+# Not LibertAIDAI/GLM-5.3-Flash-NVFP4. Never DFlash2 (CC BY-NC-ND).
+# Operator GPU shape (docs only, not a host): 2xB300 tensor-parallel 2.
+# If OOM, raise tp still on those 2 GPUs. Do not document an 8-GPU layout.
+teacher_nvfp4 = "incoai/GLM-5.3-NVFP4"
+teacher_backend = "http_api"
+eval_image = "ghcr.io/cortexlm/relearn-eval"
+# Digest-only, never a floating tag. This image implements the harvest
+# contract in docs/RELEARN.md § Eval image contract; the control-plane client
+# refuses any document not bound to this digest.
+#
+# Pinning the image is not the whole job: a live host also needs the harvest
+# wired and a champion baseline recorded (both operator state, see
+# deploy/env/relearn-challenge.env.example). Check GET /v1/status ->
+# can_score, live_harvest_wired, champion_baseline_recorded.
+#
+# EMPTY ON PURPOSE. Every digest built so far fails the harvest, and an empty
+# digest is the fail-closed state: submissions answer 503 "eval image digest
+# not pinned" instead of renting a B200 that cannot score. Do not guess a
+# digest here to make the 503 go away.
+#
+# The next pin needs a CortexLM/relearn image whose CUDA scoring layer ships
+# **vLLM and torchvision**. Do not re-pin or re-harvest any of these:
+#
+#   sha256:cbc4bbb8… (f3cfa69) exit 1, no EVAL_OK: no vLLM on the rented GPU
+#                     image, transformers fallback, then Qwen3VLVideoProcessor
+#                     crashed for want of torchvision
+#   sha256:201cc5d2… judge generation cap 32 / empty content
+#   sha256:303c6357… printed no RELEARN_EVAL_OK
+#   sha256:00839671… exit 127, no /usr/bin/relearn-eval
+#   sha256:86240d76… pre-CUDA
+eval_image_digest = ""
+relearn_git = "https://github.com/CortexLM/relearn"
+# CortexLM/relearn commit that built the digest above. Empty while unpinned:
+# f3cfa69 built cbc4bbb8, which never printed RELEARN_EVAL_OK.
+relearn_git_sha = ""
+
+# Public split ids (miners may train on these). Holdout selection must exclude
+# every one of them. The scored holdout records stay off git.
+public_ids = [
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+  11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+  21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+  31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+]
+holdout_commitment = "84aed1547520f39c325712822a3533dc384d2c0a8f152d8acc686b0b7a921065"
+holdout_size = 120

@@ -1,0 +1,19 @@
+[package]
+name = "bounty-challenge-task"
+description = "Bounty challenge identity, pairing challenge strings, domain tags"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+hex = "0.4"
+keystore = { path = "../keystore" }
+schnorrkel = { version = "0.11.5", default-features = false, features = ["std", "getrandom"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[lints]
+workspace = true

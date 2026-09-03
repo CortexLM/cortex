@@ -607,6 +607,84 @@ dependencies = [
 ]
 
 [[package]]
+name = "bounty-challenge"
+version = "0.1.0"
+dependencies = [
+ "bounty-challenge-task",
+ "bounty-http",
+ "bounty-score",
+ "bounty-store",
+ "bundle",
+ "challenge-common",
+ "hex",
+ "reqwest 0.12.28",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "bounty-challenge-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bounty-challenge",
+ "challenge-keys",
+ "clap",
+ "telemetry",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "bounty-challenge-task"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "keystore",
+ "schnorrkel",
+ "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "bounty-http"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bounty-challenge-task",
+ "bounty-score",
+ "bounty-store",
+ "hex",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "bounty-score"
+version = "0.1.0"
+dependencies = [
+ "bounty-challenge-task",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "bounty-store"
+version = "0.1.0"
+dependencies = [
+ "bounty-challenge-task",
+ "bounty-score",
+ "hex",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "bstr"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1009,6 +1087,16 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "cortex-bounty"
+version = "0.1.0"
+dependencies = [
+ "bounty-challenge-task",
+ "clap",
+ "hex",
+ "keystore",
+]
 
 [[package]]
 name = "cpubits"
@@ -2337,6 +2425,16 @@ name = "half"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b43ede17f21864e81be2fa654110bf1e793774238d86ef8555c37e6519c0403"
+
+[[package]]
+name = "harvest-pod"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "prism-lium",
+ "prism-lium-types",
+ "tokio",
+]
 
 [[package]]
 name = "hashbrown"
@@ -4510,6 +4608,488 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "relearn-agent-challenge"
+version = "0.1.0"
+dependencies = [
+ "bundle",
+ "challenge-common",
+ "crypto",
+ "hex",
+ "relearn-agent-eval",
+ "relearn-agent-http",
+ "relearn-agent-score",
+ "relearn-agent-store",
+ "relearn-agent-task",
+ "serde_json",
+]
+
+[[package]]
+name = "relearn-agent-challenge-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "challenge-keys",
+ "clap",
+ "harvest-pod",
+ "prism-lium",
+ "relearn-agent-challenge",
+ "relearn-agent-harvest",
+ "telemetry",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "relearn-agent-eval"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "prism-competition",
+ "prism-lium-types",
+ "relearn-agent-score",
+ "relearn-agent-store",
+ "relearn-agent-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "relearn-agent-harvest"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "harvest-pod",
+ "prism-lium-types",
+ "relearn-agent-eval",
+ "relearn-agent-score",
+ "relearn-agent-task",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "relearn-agent-http"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "hex",
+ "http-body-util",
+ "relearn-agent-eval",
+ "relearn-agent-score",
+ "relearn-agent-store",
+ "relearn-agent-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "relearn-agent-score"
+version = "0.1.0"
+dependencies = [
+ "prism-competition",
+ "relearn-agent-task",
+ "serde",
+]
+
+[[package]]
+name = "relearn-agent-store"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "prism-competition",
+ "relearn-agent-score",
+ "relearn-agent-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "relearn-agent-task"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
+name = "relearn-challenge"
+version = "0.1.0"
+dependencies = [
+ "bundle",
+ "challenge-common",
+ "crypto",
+ "hex",
+ "relearn-challenge-task",
+ "relearn-eval",
+ "relearn-http",
+ "relearn-score",
+ "relearn-store",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "relearn-challenge-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "challenge-keys",
+ "clap",
+ "prism-lium",
+ "relearn-challenge",
+ "relearn-eval",
+ "relearn-lium-harvest",
+ "relearn-store",
+ "telemetry",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "relearn-challenge-task"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "relearn-eval"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "prism-competition",
+ "prism-lium",
+ "prism-lium-types",
+ "relearn-challenge-task",
+ "relearn-score",
+ "relearn-store",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "relearn-http"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "hex",
+ "http-body-util",
+ "relearn-challenge-task",
+ "relearn-eval",
+ "relearn-score",
+ "relearn-store",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "relearn-lium-harvest"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "harvest-pod",
+ "prism-lium-types",
+ "relearn-challenge-task",
+ "relearn-eval",
+ "relearn-score",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "relearn-mm-challenge"
+version = "0.1.0"
+dependencies = [
+ "bundle",
+ "challenge-common",
+ "crypto",
+ "hex",
+ "relearn-mm-eval",
+ "relearn-mm-http",
+ "relearn-mm-score",
+ "relearn-mm-store",
+ "relearn-mm-task",
+ "serde",
+]
+
+[[package]]
+name = "relearn-mm-challenge-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "challenge-keys",
+ "clap",
+ "relearn-mm-challenge",
+ "relearn-mm-eval",
+ "relearn-mm-task",
+ "telemetry",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "relearn-mm-eval"
+version = "0.1.0"
+dependencies = [
+ "prism-competition",
+ "prism-lium",
+ "prism-lium-types",
+ "relearn-challenge-task",
+ "relearn-mm-score",
+ "relearn-mm-store",
+ "relearn-mm-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "relearn-mm-http"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "hex",
+ "http-body-util",
+ "relearn-mm-eval",
+ "relearn-mm-score",
+ "relearn-mm-store",
+ "relearn-mm-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "relearn-mm-score"
+version = "0.1.0"
+dependencies = [
+ "prism-competition",
+ "relearn-mm-task",
+ "serde",
+]
+
+[[package]]
+name = "relearn-mm-store"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "prism-competition",
+ "relearn-mm-score",
+ "relearn-mm-task",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "relearn-mm-task"
+version = "0.1.0"
+dependencies = [
+ "relearn-challenge-task",
+ "serde",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
+name = "relearn-score"
+version = "0.1.0"
+dependencies = [
+ "prism-competition",
+ "relearn-challenge-task",
+ "serde",
+]
+
+[[package]]
+name = "relearn-store"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "prism-competition",
+ "relearn-challenge-task",
+ "relearn-score",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "relearn-t2i-challenge"
+version = "0.1.0"
+dependencies = [
+ "bundle",
+ "challenge-common",
+ "crypto",
+ "hex",
+ "relearn-t2i-eval",
+ "relearn-t2i-http",
+ "relearn-t2i-score",
+ "relearn-t2i-store",
+ "relearn-t2i-task",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "relearn-t2i-challenge-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "challenge-keys",
+ "clap",
+ "harvest-pod",
+ "prism-lium",
+ "relearn-t2i-challenge",
+ "relearn-t2i-eval",
+ "relearn-t2i-harvest",
+ "relearn-t2i-task",
+ "telemetry",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "relearn-t2i-eval"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "prism-competition",
+ "prism-lium",
+ "prism-lium-types",
+ "relearn-t2i-judge",
+ "relearn-t2i-score",
+ "relearn-t2i-store",
+ "relearn-t2i-task",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "relearn-t2i-harvest"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "harvest-pod",
+ "prism-competition",
+ "prism-lium-types",
+ "relearn-t2i-eval",
+ "relearn-t2i-score",
+ "relearn-t2i-store",
+ "relearn-t2i-task",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "relearn-t2i-http"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "hex",
+ "http-body-util",
+ "prism-competition",
+ "relearn-t2i-eval",
+ "relearn-t2i-judge",
+ "relearn-t2i-score",
+ "relearn-t2i-store",
+ "relearn-t2i-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "relearn-t2i-judge"
+version = "0.1.0"
+dependencies = [
+ "relearn-t2i-task",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "relearn-t2i-score"
+version = "0.1.0"
+dependencies = [
+ "prism-competition",
+ "relearn-t2i-judge",
+ "relearn-t2i-task",
+ "serde",
+]
+
+[[package]]
+name = "relearn-t2i-store"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "prism-competition",
+ "relearn-t2i-score",
+ "relearn-t2i-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "relearn-t2i-task"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "toml",
+]
 
 [[package]]
 name = "reqwest"
@@ -7035,6 +7615,9 @@ dependencies = [
  "hex",
  "parity-scale-codec",
  "regex",
+ "relearn-agent-task",
+ "relearn-challenge-task",
+ "relearn-t2i-task",
  "reqwest 0.12.28",
  "scale-info",
  "serde",

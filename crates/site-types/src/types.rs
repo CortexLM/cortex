@@ -3,15 +3,26 @@
 use serde::{Deserialize, Serialize};
 
 /// Arena identifier.
+///
+/// The wire form of every live variant equals its trust-root `challenge_id`,
+/// because `apply_emission` matches emission shares by that string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArenaSlug {
     /// Coding (paused).
     Coding,
-    /// Design challenge.
+    /// Design challenge (retired).
     Design,
-    /// Prism challenge.
+    /// Prism challenge (retired).
     Prism,
+    /// Relearn post-training factory.
+    Relearn,
+    /// Relearn Image generation.
+    #[serde(rename = "relearn-image")]
+    RelearnImage,
+    /// Relearn Agent: replayed tool traces.
+    #[serde(rename = "relearn-agent")]
+    RelearnAgent,
 }
 
 impl ArenaSlug {
@@ -22,6 +33,9 @@ impl ArenaSlug {
             "coding" => Some(Self::Coding),
             "design" => Some(Self::Design),
             "prism" => Some(Self::Prism),
+            "relearn" => Some(Self::Relearn),
+            "relearn-image" => Some(Self::RelearnImage),
+            "relearn-agent" => Some(Self::RelearnAgent),
             _ => None,
         }
     }
@@ -33,6 +47,9 @@ impl ArenaSlug {
             Self::Coding => "coding",
             Self::Design => "design",
             Self::Prism => "prism",
+            Self::Relearn => "relearn",
+            Self::RelearnImage => "relearn-image",
+            Self::RelearnAgent => "relearn-agent",
         }
     }
 }
@@ -47,6 +64,8 @@ pub enum ScoringMethod {
     Elo,
     /// Prism spectral fusion / BPB.
     SpectralFusion,
+    /// Relearn paired displacement vs champion.
+    Displacement,
 }
 
 /// Reference chip on an arena card.

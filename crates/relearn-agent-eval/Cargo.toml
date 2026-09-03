@@ -1,0 +1,27 @@
+[package]
+name = "relearn-agent-eval"
+description = "Relearn Agent eval loop: episode replay, tool ablation, receipts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+prism-competition = { path = "../prism-competition" }
+prism-lium-types = { path = "../prism-lium-types" }
+relearn-agent-score = { path = "../relearn-agent-score" }
+relearn-agent-store = { path = "../relearn-agent-store" }
+relearn-agent-task = { path = "../relearn-agent-task" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

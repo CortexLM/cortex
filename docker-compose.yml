@@ -1,7 +1,9 @@
 # base control-plane stack
 #
-# Default: postgres + validator + updater + socket-proxy + prism-challenge
-# + design-challenge + design-egress-proxy.
+# Default: postgres + validator + updater + socket-proxy + the four live
+# challenges (relearn, relearn-image, relearn-agent, bounty).
+# relearn-mm is OFF: it has no trust-root row, so it is behind the `mm`
+# profile and never comes up on a default or master stack.
 # Master/owner host only:
 #   docker compose --profile master up -d
 # brings gateway as an additional service (D3).
@@ -181,14 +183,15 @@ services:
 
 
   # ---------------------------------------------------------------------------
-  # prism-challenge — operator PRISM challenge health + miner submit (:8092).
+  # relearn-challenge — Relearn LLM post-training factory (:8095).
+  # Miner pays Lium (BYOK). Control plane rents a digest-pinned eval image.
   # ---------------------------------------------------------------------------
-  prism-challenge:
-    image: prism-challenge:0.1.0
+  relearn-challenge:
+    image: relearn-challenge:0.1.0
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      target: prism-challenge
+      target: relearn-challenge
       args:
         BUILD_FROM: ${BASE_DOCKER_BUILD_FROM:-prebuilt}
     restart: unless-stopped
@@ -196,62 +199,34 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      BASE_CHALLENGE_BIND: 0.0.0.0:8092
+      BASE_CHALLENGE_BIND: 0.0.0.0:8095
       BASE_CHALLENGE_SK_FILE: /run/base/challenge_sk
-      # Real Lium is used whenever an API key is present. Set PRISM_FORCE_SIM=true
-      # to keep a deployment on the offline deterministic backend (no GPU spend).
-      PRISM_FORCE_SIM: "${PRISM_FORCE_SIM:-false}"
-      LIUM_API_KEY_FILE: /run/base/lium/api_key
-      LIUM_SSH_PRIVATE_KEY: /run/base/lium/ssh_ed25519
-      LIUM_SSH_PUBLIC_KEY_FILE: /run/base/lium/ssh_ed25519.pub
-      OPENROUTER_API_KEY_FILE: /run/base/openrouter/api_key
+      # Sim eval unless a miner BYOK key is presented. Never log LIUM_API_KEY.
+      RELEARN_FORCE_SIM: "${RELEARN_FORCE_SIM:-false}"
+      RELEARN_PIN_FILE: /etc/base/config/relearn-pin.toml
+      RELEARN_TEACHER_BACKEND: "${RELEARN_TEACHER_BACKEND:-http_api}"
+      RELEARN_TEACHER_API_URL: "${RELEARN_TEACHER_API_URL:-}"
+      RELEARN_TEACHER_MODEL: "${RELEARN_TEACHER_MODEL:-}"
+      RELEARN_TEACHER_LOCAL_DIR: "${RELEARN_TEACHER_LOCAL_DIR:-}"
+      RELEARN_HOLDOUT_FILE: /run/base/relearn/holdout.json
+      RELEARN_ADMIN_TOKENS_FILE: /run/base/relearn/admin_tokens
       BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
-      PRISM_MAX_CONCURRENT_EVALS: "${PRISM_MAX_CONCURRENT_EVALS:-8}"
-      # Pods need a while for sshd after RUNNING on the control plane.
-      PRISM_SSH_ATTEMPTS: "${PRISM_SSH_ATTEMPTS:-30}"
-      PRISM_SSH_RETRY_SECS: "${PRISM_SSH_RETRY_SECS:-10}"
-      PRISM_SSH_RUNNING_TIMEOUT_SECS: "${PRISM_SSH_RUNNING_TIMEOUT_SECS:-900}"
-      # Top-model GitHub publish (BaseIntelligence/prism top-model/): no-op
-      # when the token file is absent/empty.
-      PRISM_TOPMODEL_GITHUB_TOKEN_FILE: /run/base/github/token
-      # Top-model HuggingFace publish (BaseIntelligence/top-prism-architecture):
-      # no-op when the token file is absent/empty.
-      PRISM_TOPMODEL_HF_TOKEN_FILE: /run/base/huggingface/token
-      PRISM_TOPMODEL_HF_REPO: "${PRISM_TOPMODEL_HF_REPO:-BaseIntelligence/top-prism-architecture}"
-      # Require harvested checkpoint for top-model journal (set 0 for source-only).
-      PRISM_TOPMODEL_REQUIRE_WEIGHTS: "${PRISM_TOPMODEL_REQUIRE_WEIGHTS:-1}"
-      # Parked checkpoints harvested from Lium pods (master-local).
-      PRISM_ARTIFACT_DIR: /var/lib/prism/artifacts
-      # G1–G8 eval assets pack (optional; harness falls back to public_dev).
-      PRISM_EVAL_ASSETS_DIR: "${PRISM_EVAL_ASSETS_DIR:-}"
-      PRISM_FLOW: "${PRISM_FLOW:-v3}"
-      # Recipe 2.0 AutoModel pin checkout (deploy/scripts/stage-automodel-pin.sh).
-      # Required for live AutoModel intake; unset → pin unavailable (fail-closed).
-      PRISM_AUTOMODEL_PIN_DIR: "${PRISM_AUTOMODEL_PIN_DIR:-}"
-      # Operator bearer (retry + playground + gating + artifacts). Empty → 503.
-      PRISM_ADMIN_TOKENS_FILE: /run/base/prism/admin_tokens
     env_file:
-      # Required: BASE_DATABASE_URL (+ BASE_NETUID). Missing file → compose
-      # fails closed (binaries would otherwise fall back to in-memory store).
-      - path: ./deploy/env/prism-challenge.env
+      - path: ./deploy/env/relearn-challenge.env
         required: true
     volumes:
-      # prism signs with its OWN mini secret:
-      # the gateway verifies leaves against the trust root per-challenge key.
-      - ./deploy/secrets/prism_sk:/run/base/challenge_sk:ro
+      - ./config:/etc/base/config:ro
+      - ./deploy/secrets/relearn_sk:/run/base/challenge_sk:ro
       - ./deploy/secrets/lium:/run/base/lium:ro
-      - ./deploy/secrets/openrouter:/run/base/openrouter:ro
-      - ./deploy/secrets/github:/run/base/github:ro
-      - ./deploy/secrets/huggingface:/run/base/huggingface:ro
-      - ./deploy/secrets/prism:/run/base/prism:ro
-      - prism-artifacts:/var/lib/prism/artifacts
+      - ./deploy/secrets/relearn:/run/base/relearn:ro
+      - relearn-artifacts:/var/lib/relearn
     expose:
-      - "8092"
+      - "8095"
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "curl -fsS -m 5 http://127.0.0.1:8092/health || exit 1",
+          "curl -fsS -m 5 http://127.0.0.1:8095/health || exit 1",
         ]
       interval: 10s
       timeout: 3s
@@ -261,111 +236,208 @@ services:
       - base
 
   # ---------------------------------------------------------------------------
-  # design-egress-proxy — open Internet egress for sandboxes (install + run)
-  # with an internal-target blocklist (metadata / loopback / RFC1918 / CGNAT /
-  # control-plane names, enforced post-DNS-resolution) plus the budgeted
-  # OpenRouter chat path. Holds OPENROUTER key; never mount design_sk here.
-  # On base + internal design-sandbox-egress so sandboxes can reach it without
-  # direct internet.
+  # relearn-t2i-challenge — Relearn Image (`relearn-image`, :8097). Miners
+  # fine-tune the pinned Cosmos3 generator; Q-Judger scores frozen prompt
+  # cells. The service keeps the pre-launch `t2i` spelling (docs/NAMING.md);
+  # the challenge id on the wire is `relearn-image`. The holdout prompt records
+  # are an operator secret, mounted read-only from deploy/secrets.
   # ---------------------------------------------------------------------------
-  design-egress-proxy:
-    image: design-egress-proxy:0.1.0
+  relearn-t2i-challenge:
+    image: relearn-t2i-challenge:0.1.0
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      target: design-egress-proxy
-      args:
-        BUILD_FROM: ${BASE_DOCKER_BUILD_FROM:-prebuilt}
-    restart: unless-stopped
-    environment:
-      DESIGN_EGRESS_BIND: 0.0.0.0:8094
-      OPENROUTER_API_KEY_FILE: /run/base/openrouter/api_key
-      DESIGN_TOKEN_BUDGET: "${DESIGN_TOKEN_BUDGET:-8000}"
-      DESIGN_EGRESS_SIM: "${DESIGN_EGRESS_SIM:-false}"
-    env_file:
-      - path: ./deploy/env/design-egress-proxy.env
-        required: false
-    volumes:
-      - ./deploy/secrets/openrouter:/run/base/openrouter:ro
-    expose:
-      - "8094"
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "curl -fsS -m 5 http://127.0.0.1:8094/health || exit 1",
-        ]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 10s
-    networks:
-      - base
-      - design-sandbox-egress
-
-  # ---------------------------------------------------------------------------
-  # design-challenge — miner harness API + sandbox orchestrator (:8093).
-  # Docker ONLY via socket-proxy (DESIGN_DOCKER_BASE). No raw docker.sock.
-  # Sandbox LLM traffic goes through design-egress-proxy (no key in sandbox).
-  # Agentic anti-cheat on this service needs the OpenRouter key at the default
-  # DESIGN_AGENTIC_OPENROUTER_KEY_FILE path (never passed into miner sandboxes).
-  # ---------------------------------------------------------------------------
-  design-challenge:
-    image: design-challenge:0.1.0
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile
-      target: design-challenge
+      target: relearn-t2i-challenge
       args:
         BUILD_FROM: ${BASE_DOCKER_BUILD_FROM:-prebuilt}
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
-      socket-proxy:
-        condition: service_started
-      design-egress-proxy:
-        condition: service_healthy
     environment:
-      BASE_CHALLENGE_BIND: 0.0.0.0:8093
+      BASE_CHALLENGE_BIND: 0.0.0.0:8097
       BASE_CHALLENGE_SK_FILE: /run/base/challenge_sk
-      DESIGN_FORCE_SIM: "${DESIGN_FORCE_SIM:-false}"
-      DESIGN_DOCKER_BASE: http://socket-proxy:2375
-      # Host path must equal bind source below (daemon resolves binds on host).
-      DESIGN_STAGING_ROOT: ${BASE_STATE_DIR:-/var/lib/base}/design/staging
-      DESIGN_LLM_PROXY: http://design-egress-proxy:8094
-      # Screenshot Chromium (--no-sandbox, file://) must not reach control-plane
-      # targets on the shared `base` network: force all http(s) through the
-      # egress proxy blocklist (incl. loopback/metadata via <-loopback>).
-      DESIGN_SCREENSHOT_PROXY: http://design-egress-proxy:8094
-      DESIGN_ANNOTATOR_TOKENS_FILE: /run/base/design/annotator_tokens
-      DESIGN_AGENTIC_OPENROUTER_KEY_FILE: /run/base/openrouter/api_key
-      DESIGN_MAX_CONCURRENT: "${DESIGN_MAX_CONCURRENT:-2}"
-      DESIGN_INSTALL_TIMEOUT_SECS: "${DESIGN_INSTALL_TIMEOUT_SECS:-300}"
+      # Sim eval unless a judge endpoint is configured. Never log the key.
+      RELEARN_T2I_FORCE_SIM: "${RELEARN_T2I_FORCE_SIM:-false}"
+      RELEARN_T2I_PIN_FILE: /etc/base/config/relearn-t2i-pin.toml
+      RELEARN_T2I_JUDGE_BACKEND: "${RELEARN_T2I_JUDGE_BACKEND:-http_api}"
+      RELEARN_T2I_JUDGE_API_URL: "${RELEARN_T2I_JUDGE_API_URL:-}"
+      RELEARN_T2I_HOLDOUT_FILE: /run/base/relearn-t2i/holdout.json
+      RELEARN_T2I_ADMIN_TOKENS_FILE: /run/base/relearn-t2i/admin_tokens
+      # Base checkpoint measured by the pinned eval image. A live host refuses
+      # every submission until this exists (GET /v1/status).
+      RELEARN_T2I_BASE_CHAMPION_FILE: /run/base/relearn-t2i/base_champion.json
       BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
     env_file:
-      # Required: BASE_DATABASE_URL (+ BASE_NETUID). Missing file → compose
-      # fails closed (binaries would otherwise fall back to in-memory store).
-      - path: ./deploy/env/design-challenge.env
+      - path: ./deploy/env/relearn-t2i-challenge.env
         required: true
     volumes:
-      - ./deploy/secrets/design_sk:/run/base/challenge_sk:ro
-      - ./deploy/secrets/design:/run/base/design:ro
-      - ./deploy/secrets/openrouter:/run/base/openrouter:ro
-      - design-artifacts:/var/lib/design
-      - ${BASE_STATE_DIR:-/var/lib/base}/design/staging:${BASE_STATE_DIR:-/var/lib/base}/design/staging
+      - ./config:/etc/base/config:ro
+      - ./deploy/secrets/relearn_t2i_sk:/run/base/challenge_sk:ro
+      - ./deploy/secrets/lium:/run/base/lium:ro
+      - ./deploy/secrets/relearn-t2i:/run/base/relearn-t2i:ro
+      - relearn-t2i-artifacts:/var/lib/relearn-t2i
     expose:
-      - "8093"
+      - "8097"
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "curl -fsS -m 5 http://127.0.0.1:8093/health || exit 1",
+          "curl -fsS -m 5 http://127.0.0.1:8097/health || exit 1",
         ]
       interval: 10s
       timeout: 3s
       retries: 6
-      start_period: 15s
+      start_period: 10s
+    networks:
+      - base
+
+  # ---------------------------------------------------------------------------
+  # relearn-agent-challenge — Relearn Agent (:8099). Miners post-train the same
+  # Qwen3.8-27B checkpoint as `relearn` into an agent, and the eval replays the
+  # emitted tool traces: a model that answers without touching the tools or the
+  # observation fails the ablation arms. Episodes are an operator secret,
+  # mounted read-only from deploy/secrets.
+  # ---------------------------------------------------------------------------
+  relearn-agent-challenge:
+    image: relearn-agent-challenge:0.1.0
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: relearn-agent-challenge
+      args:
+        BUILD_FROM: ${BASE_DOCKER_BUILD_FROM:-prebuilt}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BASE_CHALLENGE_BIND: 0.0.0.0:8099
+      BASE_CHALLENGE_SK_FILE: /run/base/challenge_sk
+      # Sim eval unless the operator opts in. Never log LIUM_API_KEY.
+      RELEARN_AGENT_FORCE_SIM: "${RELEARN_AGENT_FORCE_SIM:-false}"
+      RELEARN_AGENT_PIN_FILE: /etc/base/config/relearn-agent-pin.toml
+      RELEARN_AGENT_HOLDOUT_FILE: /run/base/relearn-agent/episodes.json
+      RELEARN_AGENT_ADMIN_TOKENS_FILE: /run/base/relearn-agent/admin_tokens
+      RELEARN_AGENT_BASE_CHAMPION_FILE: /run/base/relearn-agent/base_champion.json
+      BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
+    env_file:
+      - path: ./deploy/env/relearn-agent-challenge.env
+        required: true
+    volumes:
+      - ./config:/etc/base/config:ro
+      - ./deploy/secrets/relearn_agent_sk:/run/base/challenge_sk:ro
+      - ./deploy/secrets/lium:/run/base/lium:ro
+      - ./deploy/secrets/relearn-agent:/run/base/relearn-agent:ro
+      - relearn-agent-artifacts:/var/lib/relearn-agent
+    expose:
+      - "8099"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS -m 5 http://127.0.0.1:8099/health || exit 1",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    networks:
+      - base
+
+  # ---------------------------------------------------------------------------
+  # relearn-mm-challenge — Relearn Multimodal (:8098). OFF: it has no row in
+  # config/challenges.toml, so it has no emission and no leaf of its can
+  # verify. Kept behind the `mm` profile so the code stays exercised and the
+  # challenge can be turned on with a trust-root ceremony rather than a
+  # rewrite. Never enable it on a prod host.
+  # ---------------------------------------------------------------------------
+  relearn-mm-challenge:
+    profiles: ["mm"]
+    image: relearn-mm-challenge:0.1.0
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: relearn-mm-challenge
+      args:
+        BUILD_FROM: ${BASE_DOCKER_BUILD_FROM:-prebuilt}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BASE_CHALLENGE_BIND: 0.0.0.0:8098
+      BASE_CHALLENGE_SK_FILE: /run/base/challenge_sk
+      RELEARN_MM_FORCE_SIM: "${RELEARN_MM_FORCE_SIM:-false}"
+      RELEARN_MM_PIN_FILE: /etc/base/config/relearn-mm-pin.toml
+      RELEARN_MM_CHAMPION_LM_HASH: "${RELEARN_MM_CHAMPION_LM_HASH:-}"
+      RELEARN_MM_ADMIN_TOKENS_FILE: /run/base/relearn-mm/admin_tokens
+      BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
+    env_file:
+      - path: ./deploy/env/relearn-mm-challenge.env
+        required: true
+    volumes:
+      - ./config:/etc/base/config:ro
+      - ./deploy/secrets/relearn_mm_sk:/run/base/challenge_sk:ro
+      - ./deploy/secrets/lium:/run/base/lium:ro
+      - ./deploy/secrets/relearn-mm:/run/base/relearn-mm:ro
+      - relearn-mm-artifacts:/var/lib/relearn-mm
+    expose:
+      - "8098"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS -m 5 http://127.0.0.1:8098/health || exit 1",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    networks:
+      - base
+
+  # bounty-challenge — bug-report challenge (:8096). Pair + reports; Chat inject env-only.
+  bounty-challenge:
+    image: bounty-challenge:0.1.0
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: bounty-challenge
+      args:
+        BUILD_FROM: ${BASE_DOCKER_BUILD_FROM:-prebuilt}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BASE_CHALLENGE_BIND: 0.0.0.0:8096
+      BASE_CHALLENGE_SK_FILE: /run/base/challenge_sk
+      BOUNTY_CHAT_COMMAND: "${BOUNTY_CHAT_COMMAND:-}"
+      BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"
+      BOUNTY_ADMIN_TOKENS_FILE: /run/base/bounty/admin_tokens
+      BOUNTY_SESSION_SECRET_FILE: /run/base/bounty/session_secret
+      BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
+    env_file:
+      - path: ./deploy/env/bounty-challenge.env
+        required: true
+    volumes:
+      - ./config:/etc/base/config:ro
+      - ./deploy/secrets/bounty_sk:/run/base/challenge_sk:ro
+      - ./deploy/secrets/lium:/run/base/lium:ro
+      - ./deploy/secrets/bounty:/run/base/bounty:ro
+    expose:
+      - "8096"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS -m 5 http://127.0.0.1:8096/health || exit 1",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
     networks:
       - base
 
@@ -373,7 +445,7 @@ services:
     image: tecnativa/docker-socket-proxy@sha256:9e4b9e7517a6b660f2cc903a19b257b1852d5b3344794e3ea334ff00ae677ac2
     restart: unless-stopped
     environment:
-      # Shared proxy: updater rolls + design-challenge sandbox. App-level
+      # Shared proxy: updater rolls. App-level
       # Allowlist::updater / Allowlist::verifier enforce method/path; tecnativa
       # CONTAINERS includes DELETE for sandbox cleanup. NETWORKS stays off —
       # design-sandbox-egress is pre-created by compose (NetworkMode by name).
@@ -413,17 +485,11 @@ volumes:
   base-pgdata:
   base-updater-state:
   base-validator-lkg:
-  design-artifacts:
-  prism-artifacts:
+  relearn-artifacts:
+  relearn-t2i-artifacts:
+  relearn-agent-artifacts:
+  relearn-mm-artifacts:
 
 networks:
   base:
     driver: bridge
-  # Sandbox containers attach here (NetworkMode); only egress member is
-  # design-egress-proxy. internal=true blocks direct internet from sandboxes.
-  # Pin the Docker name so NetworkMode "design-sandbox-egress" matches (no
-  # compose project prefix) — socket-proxy cannot create networks at runtime.
-  design-sandbox-egress:
-    name: design-sandbox-egress
-    driver: bridge
-    internal: true

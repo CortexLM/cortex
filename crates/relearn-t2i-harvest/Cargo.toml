@@ -1,0 +1,28 @@
+[package]
+name = "relearn-t2i-harvest"
+description = "Relearn Image live harvest: digest-pinned eval image on a Lium pod"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+harvest-pod = { path = "../harvest-pod" }
+prism-lium-types = { path = "../prism-lium-types" }
+relearn-t2i-eval = { path = "../relearn-t2i-eval" }
+relearn-t2i-score = { path = "../relearn-t2i-score" }
+relearn-t2i-store = { path = "../relearn-t2i-store" }
+relearn-t2i-task = { path = "../relearn-t2i-task" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+prism-competition = { path = "../prism-competition" }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

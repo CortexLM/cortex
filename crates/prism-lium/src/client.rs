@@ -15,10 +15,11 @@ use crate::ssh::{
 };
 use crate::{EvalJobBackend, HARNESS_LOG_RETAIN_BYTES, LIUM_API_BASE_URL, MIN_LIFETIME_HOURS};
 use prism_lium_harness::{
-    classify_log, detach_launch_cmd, eval_assets_dir, harness_env_pairs, harness_upload_tar,
-    is_template_rent_forbidden, listed_template_id, lium_template_create_body, parse_harness_probe,
-    parse_metrics_output, random_seed_hex, rentable_fallback_template_id, resolved_pod_image,
-    HarnessProgress, EVAL_ASSETS_POD_DIR, HARNESS_ABSENT, HARNESS_BOOTSTRAP, HARNESS_EXTRACT_CMD,
+    classify_log, detach_launch_cmd, digest_pinned_rent, eval_assets_dir, harness_env_pairs,
+    harness_upload_tar, harvest_not_rentable, is_template_rent_forbidden, listed_template_id,
+    lium_template_create_body, parse_harness_probe, parse_metrics_output, random_seed_hex,
+    rentable_fallback_template_id, resolved_pod_image, DigestPinnedRent, HarnessProgress,
+    EVAL_ASSETS_POD_DIR, HARNESS_ABSENT, HARNESS_BOOTSTRAP, HARNESS_EXTRACT_CMD,
     HARNESS_HARVEST_CMD, HARNESS_PROBE_CMD, RECIPES_TEMPLATE_STARTUP, TRAIN_DONE_MARKER,
 };
 use prism_lium_types::{
@@ -257,10 +258,7 @@ impl LiumClient {
         let v = self
             .request(reqwest::Method::GET, "/templates", None)
             .await?;
-        let templates = v
-            .as_array()
-            .cloned()
-            .unwrap_or_else(|| get_array(&v, &["templates"]));
+        let templates = listed_template_rows(&v);
         if let Some(id) = listed_template_id(&templates, name, docker_image, docker_credential_id)?
         {
             return Ok(id);
@@ -272,14 +270,7 @@ impl LiumClient {
             startup_commands,
             docker_credential_id,
         )?;
-        let created = self
-            .request(reqwest::Method::POST, "/templates", Some(&body))
-            .await?;
-        created
-            .get("id")
-            .and_then(|x| x.as_str())
-            .map(str::to_owned)
-            .ok_or_else(|| LiumError::Api("template create missing id".into()))
+        self.created_template_id(&body).await
     }
 
     async fn resolve_template_id(&self, spec: &InstanceSpec) -> Result<String, LiumError> {
@@ -287,6 +278,9 @@ impl LiumClient {
             if !id.is_empty() {
                 return Ok(id.clone());
             }
+        }
+        if let Some(plan) = digest_pinned_rent(spec)? {
+            return self.ensure_digest_template(&plan).await;
         }
         if let Ok(id) = std::env::var("PRISM_POD_TEMPLATE_ID") {
             let id = id.trim();
@@ -313,16 +307,34 @@ impl LiumClient {
         .await
     }
 
+    /// Create or reuse a template bound to the harvest pin. No public Prism fallback.
+    async fn ensure_digest_template(&self, plan: &DigestPinnedRent) -> Result<String, LiumError> {
+        let v = self
+            .request(reqwest::Method::GET, "/templates", None)
+            .await?;
+        if let Some(id) = plan.listed_id(&listed_template_rows(&v))? {
+            return Ok(id);
+        }
+        self.created_template_id(&plan.create_body()?).await
+    }
+
+    async fn created_template_id(&self, body: &Value) -> Result<String, LiumError> {
+        let created = self
+            .request(reqwest::Method::POST, "/templates", Some(body))
+            .await?;
+        created
+            .get("id")
+            .and_then(|x| x.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| LiumError::Api("template create missing id".into()))
+    }
+
     async fn fallback_rentable_template(&self, forbidden: &str) -> Option<String> {
         let v = self
             .request(reqwest::Method::GET, "/templates", None)
             .await
             .ok()?;
-        let t = v
-            .as_array()
-            .cloned()
-            .unwrap_or_else(|| get_array(&v, &["templates"]));
-        rentable_fallback_template_id(&t, Some(forbidden))
+        rentable_fallback_template_id(&listed_template_rows(&v), Some(forbidden))
     }
 
     /// Account balance (USD) when available.
@@ -709,6 +721,12 @@ impl LiumClient {
     }
 }
 
+fn listed_template_rows(v: &Value) -> Vec<Value> {
+    v.as_array()
+        .cloned()
+        .unwrap_or_else(|| get_array(v, &["templates"]))
+}
+
 fn sanitize_err(msg: &str, key: &str) -> String {
     if key.is_empty() {
         msg.to_owned()
@@ -755,7 +773,9 @@ impl EvalJobBackend for LiumClient {
             self.ensure_ssh_key(pk, Some(key_name)).await?;
         }
 
-        let mut offers = self.list_offers(Some(spec.max_price_per_hour)).await?;
+        // Do not drop over-price NCU hosts here — those must become
+        // `PriceExceeded`, not a silent `gpu_count=1` split.
+        let mut offers = self.list_offers(None).await?;
         let pref = GpuPreference::for_request(spec.gpu_count);
         pref.filter_sort_offers(&mut offers, spec.gpu_count);
         let candidates: Vec<Offer> = match &spec.preferred_offer_id {
@@ -783,14 +803,17 @@ impl EvalJobBackend for LiumClient {
         let mut swapped_forbidden_template = false;
 
         let mut last_err = String::from("no offer tried");
+        let mut ncu_over_price: Option<(f64, f64)> = None;
         'offers: for selected in &candidates {
             if selected.price_per_hour > spec.max_price_per_hour {
+                if selected.ncu_profiling_enabled {
+                    ncu_over_price = Some((selected.price_per_hour, spec.max_price_per_hour));
+                }
                 continue;
             }
             let effective =
                 prism_lium_types::effective_gpu_count(selected.gpu_count, &selected.gpu_type);
-            // Split hosts: requested width (1× B200 on an 8× node).
-            // Non-split: 1-GPU stays 1; else whole host. Never 8×5090 fallback.
+            // Split hosts: requested width. NCU / non-split: whole host.
             let rent_gpu_count = selected.rent_count(spec.gpu_count);
             if pref.matches_pin("RTX 5090") && rent_gpu_count >= 8 && spec.gpu_count < 8 {
                 return Err(LiumError::Api(format!(
@@ -862,6 +885,9 @@ impl EvalJobBackend for LiumClient {
                             return Err(LiumError::Api(last_err));
                         }
                         if !swapped_forbidden_template && is_template_rent_forbidden(&last_err) {
+                            if spec.digest_pinned_harvest() {
+                                return Err(harvest_not_rentable(&template_id, &last_err));
+                            }
                             if let Some(alt) = self.fallback_rentable_template(&template_id).await {
                                 warn!(
                                     from = %template_id,
@@ -880,6 +906,13 @@ impl EvalJobBackend for LiumClient {
         }
         self.reclaim_pods_named(&spec.name).await;
         if last_err == "no offer tried" {
+            if let Some((offer_price, max_price)) = ncu_over_price {
+                return Err(CostGuardrailError::PriceExceeded {
+                    offer_price,
+                    max_price,
+                }
+                .into());
+            }
             return Err(CostGuardrailError::NoCapacity.into());
         }
         Err(LiumError::Api(last_err))
@@ -966,7 +999,7 @@ mod tests {
     use super::*;
     use crate::ASSETS_ENV_LOCK;
     use prism_lium_harness::RECIPES_TEMPLATE_NAME;
-    use wiremock::matchers::{body_json, method, path};
+    use wiremock::matchers::{body_json, body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -978,6 +1011,8 @@ mod tests {
             max_price_per_hour: 1.0,
             gpu_count: 1,
             image_digest: None,
+            docker_image: None,
+            startup_commands: None,
             ssh_public_keys: vec!["ssh-ed25519 AAAA".into()],
             ssh_key_name: None,
             preferred_offer_id: None,
@@ -1000,6 +1035,8 @@ mod tests {
             max_price_per_hour: 1.0,
             gpu_count: 1,
             image_digest: None,
+            docker_image: None,
+            startup_commands: None,
             ssh_public_keys: vec![],
             ssh_key_name: None,
             preferred_offer_id: None,
@@ -1062,6 +1099,8 @@ mod tests {
             max_price_per_hour: 8.0,
             gpu_count: 1,
             image_digest: None,
+            docker_image: None,
+            startup_commands: None,
             ssh_public_keys: vec!["ssh-ed25519 AAAA".into()],
             ssh_key_name: None,
             preferred_offer_id: None,
@@ -1113,6 +1152,193 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(offers))
             .mount(server)
             .await;
+    }
+
+    fn harvest_provision_spec() -> InstanceSpec {
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        InstanceSpec {
+            docker_image: Some("ghcr.io/cortexlm/relearn-eval".into()),
+            image_digest: Some(digest),
+            template_name: Some("relearn-eval-abababababab".into()),
+            startup_commands: None,
+            ..provision_spec()
+        }
+    }
+
+    fn restore_env(key: &str, previous: Option<String>) {
+        match previous {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn provision_rents_digest_pinned_harvest_not_recipes() {
+        let _guard = ASSETS_ENV_LOCK.lock().unwrap();
+        let prev_tid = std::env::var("PRISM_POD_TEMPLATE_ID").ok();
+        let prev_ref = std::env::var("PRISM_POD_IMAGE_REF").ok();
+        std::env::set_var("PRISM_POD_TEMPLATE_ID", "prism-env-template");
+        // Invalid on purpose: resolved_pod_image() must not run on this path.
+        std::env::set_var("PRISM_POD_IMAGE_REF", "not-a-digest-ref");
+
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/templates"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": RECIPES_TEMPLATE_NAME, "id": "tmpl1"},
+                {"name": "prism-recipe-v10", "id": "recipes-v10"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/templates"))
+            .and(body_json(serde_json::json!({
+                "name": "relearn-eval-abababababab",
+                "docker_image": format!("ghcr.io/cortexlm/relearn-eval@{digest}"),
+                "internal_ports": [22],
+                "is_private": true,
+                "container_start_immediately": true
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "harvest-tmpl"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/ssh-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/ssh-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "k"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/executors"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "id": "pin-b200",
+                    "gpu_type": "NVIDIA B200",
+                    "gpu_count": 1,
+                    "price_per_hour": 5.5
+                }])),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/executors/pin-b200/rent"))
+            .and(body_json(serde_json::json!({
+                "pod_name": "x",
+                "user_public_key": ["ssh-ed25519 AAAA"],
+                "termination_hours": 1,
+                "gpu_count": 1,
+                "template_id": "harvest-tmpl"
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "pod-harvest"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/pods/pod-harvest"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": "pod-harvest", "status": "RUNNING"})),
+            )
+            .mount(&server)
+            .await;
+
+        let result = async {
+            let c = LiumClient::with_base_url("test-key", server.uri()).unwrap();
+            c.provision(&harvest_provision_spec()).await
+        }
+        .await;
+        restore_env("PRISM_POD_TEMPLATE_ID", prev_tid);
+        restore_env("PRISM_POD_IMAGE_REF", prev_ref);
+        let inst = result.expect("harvest pin must rent");
+        assert_eq!(inst.id, "pod-harvest");
+    }
+
+    #[tokio::test]
+    async fn digest_pinned_harvest_does_not_fallback_to_recipes() {
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/templates"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "prism-recipe-v10", "id": "recipes-v10", "is_private": false,
+                 "docker_image": "daturaai/pytorch"},
+                {"name": "Pytorch (Cuda + DinD)", "id": "345273fa-public",
+                 "is_private": false, "docker_image": "daturaai/pytorch"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/templates"))
+            .and(body_json(serde_json::json!({
+                "name": "relearn-eval-abababababab",
+                "docker_image": format!("ghcr.io/cortexlm/relearn-eval@{digest}"),
+                "internal_ports": [22],
+                "is_private": true,
+                "container_start_immediately": true
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "harvest-tmpl"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/ssh-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/ssh-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "k"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/executors"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "id": "pin-b200",
+                    "gpu_type": "NVIDIA B200",
+                    "gpu_count": 1,
+                    "price_per_hour": 5.5
+                }])),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/executors/pin-b200/rent"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "success": false,
+                "message": "You don't have permission to rent this template."
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        mount_rent_path(&server, "pin-b200", "pod-public").await;
+        Mock::given(method("GET"))
+            .and(path("/pods"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let c = LiumClient::with_base_url("test-key", server.uri()).unwrap();
+        let err = c
+            .provision(&harvest_provision_spec())
+            .await
+            .expect_err("must not swap onto a recipes image");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("will not fall back") && msg.contains("harvest"),
+            "{msg}"
+        );
     }
 
     #[tokio::test]
@@ -1309,10 +1535,91 @@ mod tests {
             ]),
         )
         .await;
-        mount_rent_path(&server, "eight-b200-idle", "pod-split-1").await;
+        Mock::given(method("POST"))
+            .and(path("/executors/eight-b200-idle/rent"))
+            .and(body_partial_json(serde_json::json!({"gpu_count": 1})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "pod-split-1"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/pods/pod-split-1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": "pod-split-1", "status": "RUNNING"})),
+            )
+            .mount(&server)
+            .await;
         let c = LiumClient::with_base_url("test-key", server.uri()).unwrap();
         let inst = c.provision(&provision_spec()).await.unwrap();
         assert_eq!(inst.id, "pod-split-1");
+    }
+
+    #[tokio::test]
+    async fn provision_rents_whole_host_on_ncu_2x_b200() {
+        let server = MockServer::start().await;
+        mount_common(
+            &server,
+            serde_json::json!([{
+                "id": "4a36877c",
+                "machine_name": "NVIDIA B200",
+                "gpu_count": 2,
+                "available_gpu_count": 2,
+                "min_gpu_count_for_rental": 1,
+                "ncu_profiling_enabled": true,
+                "price_per_gpu": 5.5
+            }]),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/executors/4a36877c/rent"))
+            .and(body_partial_json(serde_json::json!({"gpu_count": 2})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "pod-ncu"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/pods/pod-ncu"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": "pod-ncu", "status": "RUNNING"})),
+            )
+            .mount(&server)
+            .await;
+        let c = LiumClient::with_base_url("test-key", server.uri()).unwrap();
+        // HarvestLimits.gpu_count stays 1; rent_count upsizes NCU to 2.
+        let inst = c.provision(&provision_spec()).await.unwrap();
+        assert_eq!(inst.id, "pod-ncu");
+        assert_eq!(provision_spec().gpu_count, 1);
+    }
+
+    #[tokio::test]
+    async fn provision_ncu_over_price_is_named_error_not_split() {
+        let server = MockServer::start().await;
+        mount_common(
+            &server,
+            serde_json::json!([{
+                "id": "ncu-dear",
+                "machine_name": "NVIDIA B200",
+                "gpu_count": 2,
+                "available_gpu_count": 2,
+                "min_gpu_count_for_rental": 1,
+                "ncu_profiling_enabled": true,
+                "price_per_gpu": 9.0
+            }]),
+        )
+        .await;
+        let c = LiumClient::with_base_url("test-key", server.uri()).unwrap();
+        let err = c.provision(&provision_spec()).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LiumError::Cost(CostGuardrailError::PriceExceeded { .. })
+            ),
+            "got {err}"
+        );
     }
 
     #[tokio::test]

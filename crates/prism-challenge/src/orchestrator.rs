@@ -727,6 +727,8 @@ impl<C: ChainClient + Send> Orchestrator<C> {
                 max_price_per_hour: self.cfg.max_price_per_hour,
                 gpu_count: self.cfg.pod_gpu_count,
                 image_digest: self.cfg.image_digest.clone(),
+                docker_image: None,
+                startup_commands: None,
                 ssh_public_keys: self.cfg.ssh_public_keys.clone(),
                 ssh_key_name: Some("prism-mission-worker".into()),
                 preferred_offer_id: None,

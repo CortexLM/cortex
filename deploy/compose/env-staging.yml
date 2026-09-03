@@ -21,7 +21,7 @@ services:
       BASE_VALIDATOR_WALLET: base-validator
     volumes:
       - ./deploy/secrets/wallets:/run/base/wallets:ro
-      # Staging-only trust root: mirrors prod emission (design/prism 0/10000).
+      # Staging-only trust root: mirrors prod emission (relearn 10000).
       - ./config/challenges.staging.toml:/etc/base/config/challenges.toml:ro
       - ./config/challenges.staging.toml.sig:/etc/base/config/challenges.toml.sig:ro
       - base-validator-lkg:/var/lib/base
@@ -46,54 +46,38 @@ services:
       - ./deploy/secrets/wallets:/run/base/wallets:ro
       - ./deploy/secrets/gateway_admin_token:/run/secrets/gateway_admin_token:ro
       # The sealer must sign with the same staging trust root the validator
-      # verifies against (design/prism 0/10000), or /v1/weights/latest never
-      # shows design weight and the validator flags emission share mismatch (D23).
+      # verifies against (relearn 4000 + relearn-image 1500 + relearn-agent
+      # 1500 + bounty 3000), or /v1/weights/latest
+      # never shows challenge weight and the validator flags emission share mismatch (D23).
       - ./config/challenges.staging.toml:/etc/base/config/challenges.toml:ro
       - ./config/challenges.staging.toml.sig:/etc/base/config/challenges.toml.sig:ro
-  prism-challenge:
+  relearn-challenge:
     environment:
       BASE_CHAIN_ENDPOINT: "wss://test.chain.opentensor.ai:443"
       BASE_CHAIN_ENDPOINTS: "wss://test.chain.opentensor.ai:443,wss://test.finney.opentensor.ai:443"
-      # Compressed e2e proof: offline deterministic backend (no GPU spend) +
-      # tiny model / short train cap. A real Lium RTX 5090 run stays a
-      # follow-up validation (flip PRISM_FORCE_SIM to "false" and unset the
-      # PRISM_TEST_* knobs).
-      PRISM_FORCE_SIM: "true"
-      PRISM_TEST_TRAIN_MINUTES: "15"
-      PRISM_TEST_MAX_PARAMS: "2000000"
-      # v3 battery even under short-train knobs (tiny grids via default
-      # PRISM_TEST_* → tiny_caps; set CAPS=0 for full G1–G8 on real Lium).
-      PRISM_FLOW: "v3"
-      # Same pin path as prod when testing live AutoModel intake on staging
-      # (stage with deploy/scripts/stage-automodel-pin.sh). Sim/fixture pins
-      # still work when miners submit automodel@fixture-v1.
-      PRISM_AUTOMODEL_PIN_DIR: "/var/lib/prism/automodel-pin"
-      PRISM_PAYER_VAULT_DIR: "/var/lib/prism/payer-vault"
-      PRISM_PAYER_VAULT_KEY_FILE: "/run/secrets/prism_payer_vault_key"
-      PRISM_TOPMODEL_HF_TOKEN_FILE: "/run/base/huggingface/token"
-      PRISM_TOPMODEL_HF_REPO: "BaseIntelligence/top-prism-architecture"
-    volumes:
-      - /var/lib/prism/automodel-pin:/var/lib/prism/automodel-pin:ro
-      - /var/lib/prism/payer-vault:/var/lib/prism/payer-vault
-      - ./deploy/secrets/prism/payer_vault_key:/run/secrets/prism_payer_vault_key:ro
-      - ./deploy/secrets/huggingface:/run/base/huggingface:ro
-  design-challenge:
+      # Live path on droplets: sim is local-only (`env-local.yml`).
+      RELEARN_FORCE_SIM: "false"
+      RELEARN_TEACHER_BACKEND: "http_api"
+      RELEARN_TEACHER_API_URL: "${RELEARN_TEACHER_API_URL:-}"
+      RELEARN_TEACHER_MODEL: "${RELEARN_TEACHER_MODEL:-}"
+  relearn-t2i-challenge:
     environment:
       BASE_CHAIN_ENDPOINT: "wss://test.chain.opentensor.ai:443"
       BASE_CHAIN_ENDPOINTS: "wss://test.chain.opentensor.ai:443,wss://test.finney.opentensor.ai:443"
-      # Staging uses real Docker via socket-proxy. Host SimSandbox is fail-closed
-      # here (never set BASE_ALLOW_HOST_SIM / DESIGN_FORCE_SIM on droplets).
-      DESIGN_FORCE_SIM: "false"
-      # Same as prod: staging trust root is design = 0 bps.
-      DESIGN_SKIP_LEAF_EMIT: "1"
-      # Compressed lifecycle for the staging e2e: ~15-minute rounds (prod
-      # defaults stay 8640s / 1800s when these are unset).
-      DESIGN_ROUND_SECS: "900"
-      DESIGN_AGENT_RUN_TIMEOUT_SECS: "600"
-      # Containerized anti-cheat review (design-review one-shot image).
-      DESIGN_REVIEW_BACKEND: "docker"
-      DESIGN_REVIEW_IMAGE: "design-review:0.1.0"
-  design-egress-proxy:
+      # Live path on droplets: sim is local-only (`env-local.yml`).
+      RELEARN_T2I_FORCE_SIM: "false"
+      RELEARN_T2I_JUDGE_BACKEND: "http_api"
+      RELEARN_T2I_JUDGE_API_URL: "${RELEARN_T2I_JUDGE_API_URL:-}"
+  relearn-agent-challenge:
     environment:
-      # Real OpenRouter when deploy/secrets/openrouter/api_key is non-empty.
-      DESIGN_EGRESS_SIM: "false"
+      BASE_CHAIN_ENDPOINT: "wss://test.chain.opentensor.ai:443"
+      BASE_CHAIN_ENDPOINTS: "wss://test.chain.opentensor.ai:443,wss://test.finney.opentensor.ai:443"
+      # Live path on droplets: sim is local-only (`env-local.yml`).
+      RELEARN_AGENT_FORCE_SIM: "false"
+  bounty-challenge:
+    environment:
+      # CortexLM/backend public base. Empty → this host cannot score and
+      # POST /v1/reports answers 503. Never bake a host.
+      BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"
+      # Live path on droplets: the offline scorer is local-only.
+      BOUNTY_FORCE_SIM: "false"

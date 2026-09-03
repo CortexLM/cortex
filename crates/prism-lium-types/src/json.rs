@@ -52,7 +52,15 @@ pub fn parse_one_offer(item: &Value) -> Option<Offer> {
         provider: "lium".into(),
         min_gpu_count_for_rental: item.get("min_gpu_count_for_rental").and_then(as_u32),
         available_gpu_count: item.get("available_gpu_count").and_then(as_u32),
+        ncu_profiling_enabled: item
+            .get("ncu_profiling_enabled")
+            .and_then(as_bool)
+            .unwrap_or(false),
     })
+}
+
+fn as_bool(v: &Value) -> Option<bool> {
+    v.as_bool().or_else(|| v.as_u64().map(|n| n != 0))
 }
 
 fn as_u32(v: &Value) -> Option<u32> {

@@ -12,18 +12,56 @@ Offline, operator-only. Never commit secrets. Prefer `/root/.base-secrets/` (mod
 | `config/measurements.toml` | Measurement allowlist; empty = fail-closed (base-agent CVM path removed). |
 | `config/measurements.toml.sig` | Detached owner signature. |
 
-### Design challenge enablement (post agent/hypertraining removal)
+### Live challenges (Relearn + Relearn Image + Relearn Agent + Bounty)
 
-Current committed `challenges.toml` has **two** rows: `design` @ 5000 bps and
-`prism` @ 5000 bps (50/50; sum = 10000). The `design` public key was generated
-with the **dev throwaway** `challenge-design.age` under `~/.base-secrets/`.
-A future production owner/key ceremony may still:
+Current committed `challenges.toml` has **four** rows: `relearn` @ 4000,
+`relearn-image` @ 1500, `relearn-agent` @ 1500, and `bounty` @ 3000 bps
+(sum = 10000). Operator may retune shares; the sum must remain 10000, and no
+two rows may share a public key.
 
-1. Keygen a production `design_sk` (keep off-git; materialize as `deploy/secrets/design_sk`).
-2. Replace the `design` `public_key` row in `config/challenges.toml`.
-3. Optionally move bps between `prism` and `design` (sum must remain 10000).
+`relearn-mm` is **off**: it has no row, so it has no emission and no leaf
+signed by its key can verify. Turning it on later is a normal ceremony — add a
+row with its own key and move bps out of the other four.
+
+**Key reuse from the pre-launch layout.** `relearn-image` carries the public
+key that the pre-launch `relearn-t2i` row used, and `relearn-agent` carries the
+one `relearn-mm` used. Both are throwaway CI keys, and only one id is live per
+key, so nothing can cross-verify today. Production **must** still keygen a
+fresh secret per live challenge — a key shared between two ids would let one
+challenge's leaves verify as the other's the moment both are live.
+
+A production owner/key ceremony:
+
+1. Keygen production `relearn_sk` / `relearn_image_sk` / `relearn_agent_sk` /
+   `bounty_sk` (keep off-git; materialize under `deploy/secrets/`).
+2. Replace the matching `public_key` rows in `config/challenges.toml`.
+3. Optionally move bps between challenges (sum must remain 10000).
 4. Re-sign with the **production** owner key (`sign --kind challenges`).
 5. Verify under `config/owner.pubkey` (or the production owner pubkey after rotation).
+
+### Re-signing without the previous owner secret
+
+`config/owner.pubkey` is a throwaway CI key and its secret is not in git, so
+any edit to a signed body needs a **new** throwaway keypair. That is the
+supported CI path, not a workaround:
+
+```bash
+cargo run -p trustroot-bin -- keygen \
+  --out-pub /tmp/ceremony/owner.pubkey --out-secret /tmp/ceremony/owner.secret
+cp /tmp/ceremony/owner.pubkey config/owner.pubkey
+for f in challenges challenges.staging; do
+  cargo run -p trustroot-bin -- sign --key /tmp/ceremony/owner.secret \
+    --input "config/$f.toml" --kind challenges
+done
+cargo run -p trustroot-bin -- sign --key /tmp/ceremony/owner.secret \
+  --input config/measurements.toml --kind measurements
+```
+
+Every body has to be re-signed together: the three `.sig` files must all
+verify under the single committed `owner.pubkey`. The secret stays in `/tmp`
+(or `~/.base-secrets/`) and never enters the repo. A production rotation uses
+the offline owner key instead and follows
+[`../docs/runbooks/trust-root-rotation.md`](../docs/runbooks/trust-root-rotation.md).
 
 ## Secret layout (never git)
 

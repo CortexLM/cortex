@@ -31,7 +31,7 @@ REMOTE_DIR="${BASE_REMOTE_DIR:-/opt/base}"
 # bind source and the container's BASE_VERIFY_WORK_ROOT byte-for-byte.
 STATE_ROOT="${BASE_STATE_DIR:-/var/lib/base}"
 GHCR_PREFIX="${BASE_GHCR_PREFIX:-ghcr.io/baseintelligence/base}"
-PIN_SERVICES=(validator gateway updater prism-challenge design-challenge)
+PIN_SERVICES=(validator gateway updater relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge)
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 if [[ -n "${BASE_SSH_IDENTITY:-}" ]]; then
   SSH_OPTS+=(-i "$BASE_SSH_IDENTITY")
@@ -160,8 +160,8 @@ fi
 
 echo "remote-deploy: rsync tree"
 if [[ "$BUILD_FROM" == "prebuilt" ]]; then
-  for b in validator gateway updater prism-challenge design-challenge design-egress-proxy challenge-review; do
-    [[ -x "$ROOT/target/release/$b" ]] || die "missing prebuilt binary target/release/$b — run: cargo build --release --features validator-bin/dcap -p validator-bin -p gateway-bin -p updater-bin -p prism-challenge-bin -p design-challenge-bin -p design-egress-proxy-bin && cargo build --release -p challenge-review-bin"
+  for b in validator gateway updater relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge; do
+    [[ -x "$ROOT/target/release/$b" ]] || die "missing prebuilt binary target/release/$b — run: cargo build --release --features validator-bin/dcap -p validator-bin -p gateway-bin -p updater-bin -p relearn-challenge-bin -p relearn-t2i-challenge-bin -p relearn-agent-challenge-bin -p bounty-challenge-bin"
   done
 fi
 
@@ -182,50 +182,52 @@ rsync -az --delete \
   "$ROOT/" "$HOST:$REMOTE_DIR/"
 
 # Ensure secrets dirs exist (empty OK if not bootstrapped).
-# deploy/secrets/lium is bind-mounted by prism-challenge, so it must be a real
+# deploy/secrets/lium is bind-mounted by relearn-challenge, so it must be a real
 # directory with real files: compose would otherwise create directories where
 # the container expects files.
-# Same footgun for file mounts: if prism_sk / design_sk are missing, Docker
-# creates *directories* at those paths and the challenge bins fail with
+# Same footgun for file mounts: if relearn_sk is missing, Docker
+# creates *directories* at those paths and the challenge bin fails with
 # "Is a directory" / "secret file missing". Materialize empty files when
 # absent; if a directory already poisoned the path, replace it with a file.
 ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
-  '$REMOTE_DIR/deploy/secrets/openrouter' '$REMOTE_DIR/deploy/secrets/design' \
-  '$REMOTE_DIR/deploy/secrets/github' '$REMOTE_DIR/deploy/secrets/huggingface' \
+  '$REMOTE_DIR/deploy/secrets/relearn' \
+  '$REMOTE_DIR/deploy/secrets/relearn-t2i' \
+  '$REMOTE_DIR/deploy/secrets/relearn-agent' \
+  '$REMOTE_DIR/deploy/secrets/bounty' \
   '$REMOTE_DIR/deploy/secrets/wallets' \
   && chmod 700 '$REMOTE_DIR/deploy/secrets' '$REMOTE_DIR/deploy/secrets/lium' \
   && for f in api_key ssh_ed25519 ssh_ed25519.pub; do \
        [ -e '$REMOTE_DIR/deploy/secrets/lium/'\$f ] || : > '$REMOTE_DIR/deploy/secrets/lium/'\$f; \
      done \
-  && [ -e '$REMOTE_DIR/deploy/secrets/openrouter/api_key' ] || : > '$REMOTE_DIR/deploy/secrets/openrouter/api_key' \
-  && [ -e '$REMOTE_DIR/deploy/secrets/design/annotator_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/design/annotator_tokens' \
-  && [ -e '$REMOTE_DIR/deploy/secrets/github/token' ] || : > '$REMOTE_DIR/deploy/secrets/github/token' \
-  && [ -e '$REMOTE_DIR/deploy/secrets/huggingface/token' ] || : > '$REMOTE_DIR/deploy/secrets/huggingface/token' \
-  && for sk in prism_sk design_sk; do \
+  && [ -e '$REMOTE_DIR/deploy/secrets/relearn/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/relearn/admin_tokens' \
+  && [ -e '$REMOTE_DIR/deploy/secrets/relearn-t2i/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/relearn-t2i/admin_tokens' \
+  && [ -e '$REMOTE_DIR/deploy/secrets/relearn-agent/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/relearn-agent/admin_tokens' \
+  && [ -e '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' \
+  && [ -e '$REMOTE_DIR/deploy/secrets/bounty/session_secret' ] || : > '$REMOTE_DIR/deploy/secrets/bounty/session_secret' \
+  && for sk in relearn_sk relearn_t2i_sk relearn_agent_sk bounty_sk; do \
        p='$REMOTE_DIR/deploy/secrets/'\$sk; \
        if [ -d \"\$p\" ]; then rm -rf \"\$p\"; fi; \
        [ -e \"\$p\" ] || : > \"\$p\"; \
        chmod 400 \"\$p\"; chown 65532:65532 \"\$p\"; \
      done \
   && chmod 400 '$REMOTE_DIR/deploy/secrets/lium/'* \
-       '$REMOTE_DIR/deploy/secrets/openrouter/api_key' \
-       '$REMOTE_DIR/deploy/secrets/design/annotator_tokens' \
-       '$REMOTE_DIR/deploy/secrets/github/token' \
-       '$REMOTE_DIR/deploy/secrets/huggingface/token' \
+       '$REMOTE_DIR/deploy/secrets/relearn/admin_tokens' \
+       '$REMOTE_DIR/deploy/secrets/relearn-t2i/admin_tokens' \
+       '$REMOTE_DIR/deploy/secrets/relearn-agent/admin_tokens' \
+       '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' \
+       '$REMOTE_DIR/deploy/secrets/bounty/session_secret' \
   && chown -R 65532:65532 '$REMOTE_DIR/deploy/secrets/lium' \
-       '$REMOTE_DIR/deploy/secrets/openrouter' \
-       '$REMOTE_DIR/deploy/secrets/design' \
-       '$REMOTE_DIR/deploy/secrets/github' \
-       '$REMOTE_DIR/deploy/secrets/huggingface' \
+       '$REMOTE_DIR/deploy/secrets/relearn' \
+       '$REMOTE_DIR/deploy/secrets/relearn-t2i' \
+       '$REMOTE_DIR/deploy/secrets/relearn-agent' \
+       '$REMOTE_DIR/deploy/secrets/bounty' \
   && chmod -R a-w '$REMOTE_DIR/deploy/secrets/wallets' 2>/dev/null; \
   chown -R 65532:65532 '$REMOTE_DIR/deploy/secrets/wallets' 2>/dev/null; true"
 
-# Design sandbox staging root. The challenge container stages bind sources
-# here and hands them to the host's Docker daemon, which resolves bind sources
-# on the host filesystem, so the path must exist on the host with the container
-# uid as owner, or 'docker compose' would auto-create it root-owned and every
-# run would fail on staging I/O.
-ssh_h "install -d -m 0775 -o 65532 -g 65532 '$STATE_ROOT/design/staging'"
+# Relearn artifact staging (host paths for harvested receipts).
+for area in relearn relearn-t2i relearn-agent; do
+  ssh_h "install -d -m 0775 -o 65532 -g 65532 '$STATE_ROOT/\$area'"
+done
 
 
 # Materialize missing env from examples (dev-safe placeholders) if absent
@@ -262,21 +264,35 @@ case "$ENV" in
   prod)    COMPOSE_FILES+=(-f deploy/compose/env-prod.yml) ;;
 esac
 
-# Recipe 2.0 AutoModel pin: env-*/yml mounts /var/lib/prism/automodel-pin into
-# prism-challenge. Fail loud on master when the staged tree is missing so a
-# redeploy does not silently return code=pin to miners. Also pick up a
-# host-local overlay outside the rsync tree (survives --delete) when present.
+# Challenge pins are rsynced with the tree. Live Lium rent refuses until each
+# eval_image_digest is a real sha256 pin.
 if [[ "$ROLE" == "master" ]]; then
-  if ssh_h "test -d /var/lib/prism/automodel-pin/.git"; then
-    echo "remote-deploy: AutoModel pin present at /var/lib/prism/automodel-pin"
-  else
-    echo "remote-deploy: WARNING: AutoModel pin missing at /var/lib/prism/automodel-pin" >&2
-    echo "remote-deploy:   stage with: ./deploy/scripts/stage-automodel-pin.sh --dir /var/lib/prism/automodel-pin" >&2
-    echo "remote-deploy:   (Prism AutoModel intake fails closed with code=pin until staged)" >&2
+  for pin in relearn-pin.toml relearn-t2i-pin.toml relearn-agent-pin.toml; do
+    if ssh_h "test -f '$REMOTE_DIR/config/$pin'"; then
+      echo "remote-deploy: pin present at $REMOTE_DIR/config/$pin"
+    else
+      echo "remote-deploy: WARNING: pin missing at $REMOTE_DIR/config/$pin" >&2
+    fi
+  done
+  # Relearn T2I refuses submissions without a holdout file matching the pin's
+  # commitment. Warn loudly rather than letting the operator find out via 503s.
+  if ! ssh_h "test -s '$REMOTE_DIR/deploy/secrets/relearn-t2i/holdout.json'"; then
+    echo "remote-deploy: WARNING: relearn-t2i holdout records missing at" \
+      "$REMOTE_DIR/deploy/secrets/relearn-t2i/holdout.json;" \
+      "generate with: cargo run -p xtask -- relearn-t2i-holdout" >&2
   fi
-  if ssh_h "test -f /var/lib/prism/docker-compose.automodel-pin.yml"; then
-    COMPOSE_FILES+=(-f /var/lib/prism/docker-compose.automodel-pin.yml)
-    echo "remote-deploy: including host AutoModel pin overlay"
+  # Relearn LLM is the live challenge and its eval image is pinned, so these
+  # two files are the difference between scoring and 503 on every submission.
+  if ! ssh_h "test -s '$REMOTE_DIR/deploy/secrets/relearn/holdout.json'"; then
+    echo "remote-deploy: WARNING: relearn holdout records missing at" \
+      "$REMOTE_DIR/deploy/secrets/relearn/holdout.json;" \
+      "generate with: cargo run -p xtask -- relearn-holdout" >&2
+  fi
+  if ! ssh_h "test -s '$REMOTE_DIR/deploy/secrets/relearn/base-champion.json'"; then
+    echo "remote-deploy: WARNING: relearn champion baseline missing at" \
+      "$REMOTE_DIR/deploy/secrets/relearn/base-champion.json;" \
+      "every submission will 503 with 'no champion baseline recorded'" \
+      "(docs/RELEARN.md § Champion baseline)" >&2
   fi
 fi
 
@@ -292,9 +308,10 @@ if [[ "$BUILD_FROM" == "prebuilt" ]]; then
     "$ROOT/target/release/validator" \
     "$ROOT/target/release/gateway" \
     "$ROOT/target/release/updater" \
-    "$ROOT/target/release/prism-challenge" \
-    "$ROOT/target/release/design-challenge" \
-    "$ROOT/target/release/design-egress-proxy" \
+    "$ROOT/target/release/relearn-challenge" \
+    "$ROOT/target/release/relearn-t2i-challenge" \
+    "$ROOT/target/release/relearn-agent-challenge" \
+    "$ROOT/target/release/bounty-challenge" \
     "$HOST:$REMOTE_DIR/target/release/"
 fi
 
@@ -354,11 +371,10 @@ PY
     python3 - "\$DIGESTS_FILE" <<'PY' | while IFS=\$'\t' read -r service image digest tag; do
 import json, sys
 optional = {
-    "prism-challenge",
-    "design-challenge",
-    "design-egress-proxy",
-    "design-runtime",
-    "design-review",
+    "relearn-challenge",
+    "relearn-t2i-challenge",
+    "relearn-agent-challenge",
+    "bounty-challenge",
     "base-attest-helper",
 }
 data = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -382,40 +398,12 @@ PY
       pull_retag "\$ref" "\$tag"
     done
   else
-    echo "remote-deploy: no \$DIGESTS_FILE — skipping optional design/prism/attest-helper pulls"
-    echo "remote-deploy: (those images are only required for staging --build-from source)"
+    echo "remote-deploy: no \$DIGESTS_FILE — skipping optional attest-helper pull"
+    echo "remote-deploy: (that image is only required for staging --build-from source)"
   fi
-  # design-runtime is not a compose service; retag for sandbox pulls when present.
 else
   # Build service images from current tree (source) or prebuilt binaries.
   docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} build
-  # Sandbox runtime + anti-cheat review images are not compose services; build
-  # them explicitly. BUILD_FROM must match the compose build — without it these
-  # silently fell back to a source compile even on prebuilt deploys, so the
-  # review image could stay byte-identical (BuildKit cache) while the rest of
-  # the stack moved to new binaries. --iidfile + inspect prove the tag moved
-  # to the just-built image; a no-op build that leaves the tag on an old image
-  # must fail the deploy, not report success.
-  build_local_image() {
-    local target="\$1" tag="\$2" iid before after built
-    iid="\$(mktemp)"
-    before="\$(docker image inspect "\$tag" --format '{{.Id}}' 2>/dev/null || echo none)"
-    docker build -f deploy/Dockerfile --target "\$target" \
-      --build-arg BUILD_FROM="\$BUILD_FROM" \
-      --iidfile "\$iid" -t "\$tag" .
-    built="\$(cat "\$iid")"
-    rm -f "\$iid"
-    after="\$(docker image inspect "\$tag" --format '{{.Id}}')"
-    echo "remote-deploy: \$tag \$before -> \$after"
-    if [[ -z "\$built" || "\$after" != "\$built" ]]; then
-      echo "remote-deploy: ERROR: \$tag resolves to \$after but the build produced \$built — refusing to continue" >&2
-      exit 1
-    fi
-  }
-  # Sandbox runtime image (not a long-running compose service).
-  build_local_image design-runtime design-runtime:0.1.0
-  # Anti-cheat review image (one-shot containers spawned by design-challenge).
-  build_local_image design-review design-review:0.1.0
 fi
 
 # The updater can only pull from a registry. Enable it only when the desired
@@ -454,7 +442,8 @@ docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} \$UP_PROFILE "\${UP_ARGS[@
 # validator-host wallet for WeightsSetRateLimit / CRV4 commits.
 if [[ '$ROLE' == 'validator' ]]; then
   docker compose ${COMPOSE_FILES[*]} rm -sf \
-    prism-challenge design-challenge design-egress-proxy socket-proxy \
+    relearn-challenge relearn-t2i-challenge relearn-agent-challenge \
+    bounty-challenge socket-proxy \
     >/dev/null 2>&1 || true
 elif [[ '$ROLE' == 'master' ]]; then
   docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} rm -sf validator \
@@ -531,8 +520,10 @@ headers = {
     "Authorization": f"Bearer {token}",
 }
 backends = [
-    ("prism", "http://prism-challenge:8092"),
-    ("design", "http://design-challenge:8093"),
+    ("relearn", "http://relearn-challenge:8095"),
+    ("relearn-image", "http://relearn-t2i-challenge:8097"),
+    ("relearn-agent", "http://relearn-agent-challenge:8099"),
+    ("bounty", "http://bounty-challenge:8096"),
 ]
 failed = False
 for cid, url in backends:

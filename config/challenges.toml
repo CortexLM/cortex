@@ -1,20 +1,36 @@
 # Owner-signed challenges trust root (D18/D23/D24).
 # Signed with throwaway owner key (see owner.pubkey). Production rotation: CEREMONY.md.
 #
-# Emission: design = 0 bps, prism = 10000 bps (100% prism; rebalanced 2026-08-16 from
-# design 5000 / prism 5000 activated 2026-08-07). Same owner key + challenge keys;
-# a future production owner/key ceremony per CEREMONY.md remains pending).
+# Four live challenges. Emission: relearn = 4000, relearn-image = 1500,
+# relearn-agent = 1500, bounty = 3000 bps (sum 10000). Operator can retune;
+# the sum must stay 10000.
+#
+# `relearn-mm` (encoder-attach) is OFF: it has no row here, so it has no
+# emission and no leaf may verify under this root. Its code stays in the repo
+# behind the `mm` compose profile.
 version = 1
 introduced_epoch = 0
 
 [[challenges]]
-id = "design"
-public_key = "3e27f87d8330006a73174001120c3455f16b95fee098bb8c2bab9d5053840418"
-emission_share_bps = 0
+id = "relearn"
+public_key = "8ab577207bb6dfc770a850710824a098d53b1ee90abb92925bd0928937131674"
+emission_share_bps = 4000
 policy = "all_metagraph_hotkeys"
 
 [[challenges]]
-id = "prism"
-public_key = "bcd50bb830e050ed4b011dd8f1d2f126fdb42dc55b45ece30a7d5c8ceb3c5219"
-emission_share_bps = 10000
+id = "relearn-image"
+public_key = "923324e1df896b20c49c47f40dacbc4c53cab23e6cc5a1136529302b4c2da110"
+emission_share_bps = 1500
+policy = "all_metagraph_hotkeys"
+
+[[challenges]]
+id = "relearn-agent"
+public_key = "220e489f8157e477730e2e3ee6ce51be0fcf8779575c486a70658a28d5a51841"
+emission_share_bps = 1500
+policy = "all_metagraph_hotkeys"
+
+[[challenges]]
+id = "bounty"
+public_key = "d2ffbe70de7c052deafaba48b90544db4abc1133278c907f2018f457f34aac25"
+emission_share_bps = 3000
 policy = "all_metagraph_hotkeys"

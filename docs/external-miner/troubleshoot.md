@@ -2,47 +2,50 @@
 
 # External miner — troubleshoot (HTTP)
 
-**Path:** HTTP submit to **design** / **prism** only — **no Phala/CVM**
+**Path:** HTTP submit to **relearn**. Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 
-## Design
-
-| Symptom | Likely cause | What to check |
-|---------|--------------|---------------|
-| `400` on `POST /v1/harness` | Invalid bundle | `agent.py` defines `run`, `pyproject.toml` non-empty, size limits |
-| `409 schedule` "daily manual run quota exceeded" | Manual anti-spam cap (10/day) — round-loop auto-enqueue does **not** spend it | `GET /v1/quota/{hotkey}` → `manual.remaining`; wait until next UTC day |
-| Active harness but no runs this round | Rare race / restart before auto-enqueue; or eliminated cooldown | Wait for the round tick / ask ops `admin/rounds/current/requeue`; check `eliminated_until_round` |
-| `auto_retry` events, class `install` | Dep won't install (bad name/version, heavy source build) | Design: `GET /v1/runs/{id}/logs`; Prism: `GET /v1/submissions/{id}/logs?since=` |
-| `control_plane_restart` / `harness_detached` | Restart could not reattach (dead pod or unrecoverable BYOK seal) | If `pod_id` is null, **no Lium pod was rented** — do not hunt a pod. `POST /v1/submissions/{id}/retry` (or re-POST the same ZIP) with `X-Lium-Api-Key`. Healthy pods with a `pod_id` resume automatically. |
-| Run `failed` / Score 0 | Missing pages, timeout, crash | `GET /v1/runs/{id}/events`; ensure three required HTML pages |
-| External call refused (`403`) | Target is internal-blocklisted (metadata IP, loopback, RFC1918/VPC, control plane) | Call public endpoints only; egress is otherwise open |
-| Pages look empty in viewer | Sanitize stripped content | Scripts/`on*` handlers are removed; use static HTML/CSS |
-| Eliminated | Bottom 20% last round | Cooldown 4 rounds; leaves are still `Score(0)` |
-| `503` / ChallengeInternal | Operator infra | Retry later; not a miner signing issue |
-
-## Prism
+## Relearn
 
 | Symptom | Likely cause | What to check |
 |---------|--------------|---------------|
-| Rejected submit | Recipe contract | `GET /v1/recipe` (`automodel_pin_id` + caps); follow [`PRISM_RECIPE.md`](../PRISM_RECIPE.md) § 2.0 |
-| `400 unsupported_layout` | Legacy 1.x ZIP or missing AutoModel members | Ship `automodel.base` + `automodel.patch` (+ optional `prism.toml`). Two-script / source-tree / `arch_id` layouts are rejected on live 2.0 |
-| `400 recipe_version` | Payload implies recipe 1.x while live advertises ≥ 2.0 | Re-pack as AutoModel patch ZIP; do not send `architecture.py`/`training.py` |
-| Patch apply failure / conflict | Diff not against the live pin, or stale rebase | Checkout exact `automodel_git_commit` from `/v1/recipe`; regenerate `git diff <commit>`; ensure `automodel.base` == `automodel_pin_id` |
-| Wrong / unknown pin id | `automodel.base` ≠ recipe `automodel_pin_id` | Copy `automodel_pin_id` (live: `automodel@v0.5.0`) byte-identical from `/v1/recipe` |
-| Binary / path-escape / oversized patch | Fail-closed apply rules | Text-only unified diff; no path escape outside allowlisted roots; keep diff within intake budgets |
-| Tokenizer / hub errors on pod | No network; Hub download from miner code | Stay offline; use pin/harness tokenizer paths — do not `from_pretrained("<hub id>")` |
-| `CAP_EXCEEDED` / Score 0 | Model outside 850M–1B params | Terminal — widen or shrink; 215M packs fail the floor; not auto-retried |
-| Score 0 after review | `Copied` / high-confidence `Suspicious` (≥0.9, non-trope) | Similarity on **your delta**; rewrite unique hunks; tropes alone are not plagiarism |
-| `similar: true` on precheck | Would hit intake copy gate | Change the patch vs prior champions; starting from the operator pin is fine |
-| `429 precheck_quota_exceeded` | 3 prechecks/coldkey/UTC day used | Wait until next UTC day; rotating hotkeys does not reset |
-| `400 missing_lium_api_key` | Live path needs miner-funded Lium | Pass `X-Lium-Api-Key` (your Lium account); see [`prism.md`](prism.md) |
-| `409 not_failed` on `/retry` | Row is not `failed` (queued/running/scored) | `/retry` is only for failed rows. In-flight identical ZIP re-POST → `already-queued`. Failed infra: `/retry` or same-ZIP POST recovers the row |
-| `400 missing_lium_api_key` on `/retry` | Failed infra row needs another GPU rent | Send `X-Lium-Api-Key` (hotkey / Bearer alone is not enough) |
-| Stuck `Provisioning` | Lium market / underfunded key / no pin SKU | Check Lium balance; default pin is **2× RTX PRO 6000 Blackwell** (`PRISM_POD_GPU_COUNT=4` → 4×5090). Non-pin / 8×5090 rejected |
-| Idempotent replay | Same `submission_id` (pin id + patch bytes) | Expected — returns prior row |
+| `400` on `POST /v1/submissions` | Invalid hotkey or artifact digest | Both must be 64 hex chars |
+| `awaiting_admin` but no weights | Operator has not promoted | `POST /v1/admin/promote` is operator-only |
+| `rejected` with `Regression` | Challenger did not displace the champion | Improve the artifact; regressions are never crowned |
+| `rejected` with `PublicPrivateGap` | Overfit / contamination | Public-private gap exceeded the gate |
+| `rejected` with `Contamination` | Training metadata overlapped the holdout | Drop holdout ids / image hashes from `manifest.train_*` |
+| `rejected` with `ContaminationEvidenceMissing` | `manifest` declared nothing | Fill `manifest.train_item_ids` / `train_image_hashes` / `train_dataset_ids`. An empty manifest fails the gate instead of skipping it |
+| `rejected` with `CanaryRegression` | General-bench drop past ε | Off-path MMLU/MMMU canary; not in the visible score |
+| `rejected` with `IgnoresTheImage` | Pixel-shuffle control | Vision family scored the same on shuffled pixels |
+| `rejected` with `ShuffleEvidenceMissing` | The champion took the shuffle control on that vision family and this run did not | Not a text-only holdout: the family has images. Missing evidence fails the gate instead of skipping it |
+| `rejected` with `PerturbationEvidenceMissing` | No perturbed rerun in the eval document | Fail-closed, like an empty `manifest`. The brittleness floor is not skipped by omitting the series |
+| `rejected` with `BaseCanaryEvidenceMissing` | No known-answer canaries in the eval document | Fail-closed. The base-competence floor is not skipped by omitting the series |
+| `503` on submit | Holdout file missing or mismatched | Operator: `RELEARN_HOLDOUT_FILE` must match the pin commitment |
+| `503 eval image digest not pinned` | Host has no `sha256:` eval image and did not opt into sim | Expected on `relearn` right now: no `relearn-eval` image has scored on a rented pod yet, so the digest is deliberately empty and the subnet refuses rather than rent hardware that cannot score. Image and Agent digests are pinned (`relearn` PR #3), so a 503 there is an operator pin/file mismatch. `GET /v1/status` shows `can_score: false` |
+| `503 … no in-process sim` | Digest is pinned but the live harvest is not wired on that host | Operator issue; `/v1/status` shows `live_harvest_wired: false`. The control plane refuses to substitute sim numbers |
+| `503 backend: lium …` | The eval pod could not be rented, reached, or torn down | Transient. Retry; the run is not banked and no verdict was recorded |
+| `503 backend: RELEARN_TEACHER_API_URL not set …` | Operator has not configured the judge the eval image needs | Operator issue; `/v1/status` shows `can_score: false`. No pod was rented |
+| `503 backend: RELEARN_BASE_MODEL_DIR not set …` | Eval pod has no Qwen (image does not bake 27B) | Operator: first champion harvest sets `RELEARN_ALLOW_MODEL_DOWNLOAD=1` (forwarded into `teacher.env`). After Lium caches, pin `RELEARN_BASE_MODEL_DIR` to the **pod** path. `/v1/status` → `base_weights.primed`. No pod was rented |
+| `503 backend: RELEARN_T2I_JUDGE_API_URL not set …` | Operator has not configured Q-Judger for Image | Same as the teacher URL: `can_score: false`, no pod |
+| `rejected` with `Contamination` / `ContaminationEvidenceMissing` and no receipt | Training metadata overlapped the holdout, or `manifest` declared nothing | Expected. The host refuses **before** renting so junk cannot spend a pod |
+| `503 … did not print RELEARN_EVAL_OK; run.log tail: …` | The eval image ran and exited without scoring | The tail is the image's own log (truncated, secrets redacted). Usually an operator-side judge or model-loading failure, not your artifact |
+| `503 recorded baseline: …` | The eval image returned a document bound to another run, image, or holdout | Operator issue; a mismatched document is never accepted as a score |
+| `503 no champion baseline recorded` | The host has not measured the base model, so there is nothing to compare against | Operator issue; `/v1/status` shows `champion_baseline_recorded: false` and `can_score: false`. A champion harvest that exits 127 (binary not on the SSH PATH) leaves the baseline unrecorded — the image must ship `/usr/bin/relearn-eval` |
+| Repeated `503`, no submission id | Nothing was scored, so nothing was stored | Expected. A refused attempt is not a submission and does not consume anything |
+| `rejected` with `Canaries` | Catastrophic forgetting | Base-model canaries must stay ≥ 0.95 |
+| `eval_backend: "sim"` on your row | Operator set `RELEARN_FORCE_SIM=1` | CI / local only. Not a live verdict; prod and staging set it to `false` |
+| Teacher 4xx | Miner weights sent to the judge API | Teacher is judge-only; never the scored artifact |
 
-## Shared
+## Bounty
 
-- Wrong host: use gateway `/challenge/{id}/…` in staging/prod; direct `:2809x` only for local.
-- Auth: miner routes are hotkey-identified in the JSON body — do not send challenge keys.
-- Bundle axis: leaf bytes follow [`BUNDLE_SPEC.md`](../BUNDLE_SPEC.md) `protocol_version = 1` regardless of challenge scoring version.
-- If docs still mention agent-v1 CVM steps, they are stale — this tree is HTTP-only.
+| Symptom | Likely cause | What to check |
+|---------|--------------|---------------|
+| `403 terms_required` on `POST /v1/pair` | Terms not accepted | Pairing is blocking; accept the dedicated-account terms |
+| `401` on pair | Bad hotkey signature | Sign `cortex-bounty-v1\|{account_id}\|{nonce}\|{exp}` with that hotkey |
+| `401 invalid_session` on reports | Session claim expired or wrong | Re-run `cortex-bounty pair` and paste the new code in Chat |
+| `already_fixed_not_prod` | Bug already patched, not in prod | Ack only — no reward, no penalty |
+| `invalid_malicious` | Fabricated / does not exist | Penalty (burn toward uid 0) |
+| `duplicate` | Same fingerprint as a prior report (including already-closed ones) | No extra reward, no penalty. Whitespace-only edits of the same title+body still match |
+| `400 title_and_body_must_differ` / `body_lacks_distinct_evidence` | Title pasted as the body, or a repeated-token farm | Write a real report: distinct title, body, and repro |
+| Chat inject unknown | Guessing a slash command | The inject token is unguessable and comes from `BOUNTY_CHAT_COMMAND` |
+
+Never paste `LIUM_API_KEY`, challenge secrets, Chat inject tokens, or mnemonics into tickets or git.
