@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bundle::LocalTrustRoot;
-use chain::ChainClient;
+use chain::{ChainClient, ChainError, Metagraph};
 use dissent::{SubmissionIntent, SubmissionSource};
 use submit::{submit_intent, DrandClient, ReadyDrand, SubmitConfig, SubmitOutcome, SystemClock};
 use tracing::{info, warn};
@@ -95,14 +95,19 @@ pub fn intent_from_match(outcome: &ComparisonOutcome) -> Option<SubmissionIntent
 
 /// Submit Match vector via [`submit_intent`] with per-epoch dedupe.
 ///
-/// No-op when `submit` is `None`, outcome is not Match, or epoch already submitted.
-/// Submit errors are logged and do **not** mark the epoch (retry next tick).
+/// Submit only when `latest_sealed` is true, the outcome is Match, and the
+/// vector is not a pure burn to the registered owner / a `validator_permit`
+/// UID at the seal metagraph. Unsealed latest is never a submit path (LKG
+/// on disk is not used). Submit errors are logged and do **not** mark the
+/// epoch (retry next tick).
 pub fn maybe_submit_match<C, D>(
     outcome: &ComparisonOutcome,
     chain: &C,
     drand: &D,
     submit: Option<&CoordinationSubmitConfig>,
     dedupe: &EpochSubmitDedupe,
+    latest_sealed: bool,
+    metagraph_block: Option<u64>,
 ) where
     C: ChainClient + ?Sized,
     D: DrandClient + ?Sized,
@@ -110,6 +115,13 @@ pub fn maybe_submit_match<C, D>(
     let Some(cfg) = submit else {
         return;
     };
+    if !latest_sealed {
+        warn!(
+            event = "validator_latest_unsealed",
+            "submit skipped: /v1/weights/latest is unsealed; LKG is not a submit path"
+        );
+        return;
+    }
     let Some(intent) = intent_from_match(outcome) else {
         return;
     };
@@ -118,6 +130,14 @@ pub fn maybe_submit_match<C, D>(
             event = "validator_submit_deduped",
             epoch = intent.epoch,
             "submit skipped: epoch already submitted"
+        );
+        return;
+    }
+    if should_skip_owner_burn(&intent.vector, chain, metagraph_block) {
+        warn!(
+            event = "validator_submit_skipped_owner_burn",
+            epoch = intent.epoch,
+            "submit skipped: pure burn to SubnetOwnerHotkey or validator_permit UID"
         );
         return;
     }
@@ -215,9 +235,77 @@ pub fn maybe_submit_match<C, D>(
     }
 }
 
+/// True when one UID holds all non-zero mass and that UID is the subnet owner
+/// hotkey or holds `validator_permit` on the seal metagraph.
+#[must_use]
+pub(crate) fn is_burn_to_registered_owner(vector: &[(u16, u16)], mg: &Metagraph) -> bool {
+    let Some(uid) = unique_nonzero_uid(vector) else {
+        return false;
+    };
+    let i = usize::from(uid);
+    let Some(hotkey) = mg.hotkeys.get(i) else {
+        return false;
+    };
+    if !mg.owner_hotkey.is_empty() && hotkey == &mg.owner_hotkey {
+        return true;
+    }
+    mg.validator_permit.get(i).copied().unwrap_or(false)
+}
+
+fn unique_nonzero_uid(vector: &[(u16, u16)]) -> Option<u16> {
+    let mut found = None;
+    for (uid, weight) in vector {
+        if *weight == 0 {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(*uid);
+    }
+    found
+}
+
+fn seal_metagraph<C: ChainClient + ?Sized>(
+    chain: &C,
+    metagraph_block: Option<u64>,
+) -> Result<Metagraph, ChainError> {
+    if let Some(block) = metagraph_block {
+        if let Ok(hash) = chain.block_hash(block) {
+            if let Ok(mg) = chain.metagraph_at(&hash) {
+                return Ok(mg);
+            }
+        }
+    }
+    let tip = chain.current_block()?;
+    let hash = chain.block_hash(tip)?;
+    chain.metagraph_at(&hash)
+}
+
+fn should_skip_owner_burn<C: ChainClient + ?Sized>(
+    vector: &[(u16, u16)],
+    chain: &C,
+    metagraph_block: Option<u64>,
+) -> bool {
+    if unique_nonzero_uid(vector).is_none() {
+        return false;
+    }
+    match seal_metagraph(chain, metagraph_block) {
+        Ok(mg) => is_burn_to_registered_owner(vector, &mg),
+        Err(e) => {
+            warn!(
+                error = %e,
+                "submit skipped: cannot read seal metagraph for owner-burn check"
+            );
+            true
+        }
+    }
+}
+
 /// One coordination compare cycle: latest → bundle → `compare_bundle` → optional submit.
 ///
-/// Soft-ok when gateway missing, latest 404 (legacy), or unsealed burn fallback.
+/// Soft-ok when gateway missing, latest 404 (legacy), or unsealed burn fallback
+/// (unsealed is not a Match / submit path; LKG is not loaded).
 ///
 /// # Errors
 ///
@@ -278,9 +366,7 @@ where
         }
     }
     let Some(epoch) = latest.epoch.filter(|_| latest.is_sealed_bundle()) else {
-        return Ok(apply_unsealed_latest(
-            chain, trust, submit, dedupe, drand, lkg,
-        ));
+        return Ok(apply_unsealed_latest());
     };
     // Pressure / verify: sealed vector must stay near the live chain epoch.
     // A stuck real-seal (D24 incomplete) leaves `/v1/weights/latest` on an old
@@ -295,7 +381,7 @@ where
                     chain_epoch,
                     lag_epochs = lag,
                     metagraph_block = ?latest.metagraph_block,
-                    "pressure verify: sealed weights lag chain epoch; check design/prism emit + base-real-seal"
+                    "pressure verify: sealed weights lag chain epoch; live sources still design+prism sealed 2026-08-22; Relearn must replace those sources once ready. Do not treat design/prism as the target live set."
                 );
             }
         }
@@ -325,38 +411,26 @@ where
         }
         Err(e) => no_submission_from_fetch(e),
     };
-    record_compare_outcome(&outcome, chain, drand, submit, dedupe);
+    record_compare_outcome(
+        &outcome,
+        chain,
+        drand,
+        submit,
+        dedupe,
+        true,
+        latest.metagraph_block,
+    );
     Ok(Some(outcome))
 }
 
-/// Gateway serving the fail-closed burn (`sealed: false`): log, then Match the
-/// last independently verified seal so set-weights survives a master bounce.
-fn apply_unsealed_latest<C, D>(
-    chain: &C,
-    trust: &LocalTrustRoot,
-    submit: Option<&CoordinationSubmitConfig>,
-    dedupe: &EpochSubmitDedupe,
-    drand: &D,
-    lkg: &SealedBundleLkg,
-) -> Option<ComparisonOutcome>
-where
-    C: ChainClient,
-    D: DrandClient + ?Sized,
-{
+/// Gateway serving the fail-closed burn (`sealed: false`): log and do not
+/// Match, compare, or submit — including a persisted LKG seal.
+fn apply_unsealed_latest() -> Option<ComparisonOutcome> {
     warn!(
         event = "validator_latest_unsealed",
-        "gateway /v1/weights/latest is unsealed burn; trying persisted sealed bundle"
+        "gateway /v1/weights/latest is unsealed burn; not a Match/submit path"
     );
-    let Some(bytes) = lkg.load() else {
-        warn!(
-            event = "validator_lkg_missing",
-            "no persisted sealed bundle; cannot submit weights until gateway reseals"
-        );
-        return None;
-    };
-    let outcome = compare_bundle_bytes(&bytes, chain, trust);
-    record_compare_outcome(&outcome, chain, drand, submit, dedupe);
-    Some(outcome)
+    None
 }
 
 fn record_compare_outcome<C, D>(
@@ -365,6 +439,8 @@ fn record_compare_outcome<C, D>(
     drand: &D,
     submit: Option<&CoordinationSubmitConfig>,
     dedupe: &EpochSubmitDedupe,
+    latest_sealed: bool,
+    metagraph_block: Option<u64>,
 ) where
     C: ChainClient,
     D: DrandClient + ?Sized,
@@ -394,7 +470,15 @@ fn record_compare_outcome<C, D>(
                 gateway_vector_len = gateway_vector.len(),
                 "{line}"
             );
-            maybe_submit_match(outcome, chain, drand, submit, dedupe);
+            maybe_submit_match(
+                outcome,
+                chain,
+                drand,
+                submit,
+                dedupe,
+                latest_sealed,
+                metagraph_block,
+            );
         }
         ComparisonOutcome::VectorMismatch { epoch, .. } => {
             warn!(epoch, "coordination compare VectorMismatch");
@@ -748,8 +832,77 @@ mod tests {
     #[test]
     fn maybe_submit_match_timelocked_once_per_epoch() {
         let epoch = 88u64;
+        // UID 1 is a miner on FakeChain defaults (UID 0 is the owner hotkey).
         let outcome = ComparisonOutcome::Match {
             epoch,
+            local_vector: vec![(1, 65535)],
+            gateway_vector: vec![(1, 65535)],
+            vector_hash: [0x11; 32],
+            merkle_root: [0x22; 32],
+        };
+        let chain = FakeChain::new(FakeChainConfig {
+            current_block: 500,
+            commit_reveal_enabled: true,
+            ..FakeChainConfig::default()
+        });
+        let submit = CoordinationSubmitConfig {
+            netuid: 1,
+            hotkey: vec![0xBBu8; 32],
+            version_key: 3,
+            epoch_length: 360,
+        };
+        let dedupe = EpochSubmitDedupe::new();
+
+        maybe_submit_match(
+            &outcome,
+            &chain,
+            &ReadyDrand,
+            Some(&submit),
+            &dedupe,
+            true,
+            None,
+        );
+        let log = chain.call_log();
+        assert_eq!(log.len(), 1, "exactly one extrinsic after first Match");
+        match &log[0] {
+            ChainCall::SubmitTimelocked(sub) => {
+                assert_eq!(sub.mecid, 0);
+                assert_eq!(sub.payload.hotkey, vec![0xBBu8; 32]);
+                assert_eq!(sub.payload.version_key, 3);
+                assert_eq!(sub.payload.uids, vec![1]);
+                assert_eq!(sub.payload.values, vec![65535]);
+                assert!(
+                    chain.set_weights_log().is_empty(),
+                    "CR on → never set_weights"
+                );
+            }
+            other @ ChainCall::SetWeights(_) => {
+                panic!("expected SubmitTimelocked, got {other:?}")
+            }
+        }
+        assert!(dedupe.already_submitted(epoch));
+
+        // Second attempt: dedupe must suppress another extrinsic.
+        maybe_submit_match(
+            &outcome,
+            &chain,
+            &ReadyDrand,
+            Some(&submit),
+            &dedupe,
+            true,
+            None,
+        );
+        assert_eq!(
+            chain.call_log().len(),
+            1,
+            "dedupe: still one submit after second Match"
+        );
+    }
+
+    #[test]
+    fn maybe_submit_match_skips_owner_uid0_burn() {
+        let outcome = ComparisonOutcome::Match {
+            epoch: 88,
             local_vector: vec![(0, 65535)],
             gateway_vector: vec![(0, 65535)],
             vector_hash: [0x11; 32],
@@ -767,34 +920,59 @@ mod tests {
             epoch_length: 360,
         };
         let dedupe = EpochSubmitDedupe::new();
+        maybe_submit_match(
+            &outcome,
+            &chain,
+            &ReadyDrand,
+            Some(&submit),
+            &dedupe,
+            true,
+            None,
+        );
+        assert!(
+            chain.call_log().is_empty(),
+            "uid0=100% to owner+vali hotkey must not submit"
+        );
+        assert!(
+            !dedupe.already_submitted(88),
+            "owner-burn skip is not a successful submit"
+        );
+    }
 
-        maybe_submit_match(&outcome, &chain, &ReadyDrand, Some(&submit), &dedupe);
-        let log = chain.call_log();
-        assert_eq!(log.len(), 1, "exactly one extrinsic after first Match");
-        match &log[0] {
-            ChainCall::SubmitTimelocked(sub) => {
-                assert_eq!(sub.mecid, 0);
-                assert_eq!(sub.payload.hotkey, vec![0xBBu8; 32]);
-                assert_eq!(sub.payload.version_key, 3);
-                assert_eq!(sub.payload.uids, vec![0]);
-                assert_eq!(sub.payload.values, vec![65535]);
-                assert!(
-                    chain.set_weights_log().is_empty(),
-                    "CR on → never set_weights"
-                );
-            }
-            other @ ChainCall::SetWeights(_) => {
-                panic!("expected SubmitTimelocked, got {other:?}")
-            }
-        }
-        assert!(dedupe.already_submitted(epoch));
-
-        // Second attempt: dedupe must suppress another extrinsic.
-        maybe_submit_match(&outcome, &chain, &ReadyDrand, Some(&submit), &dedupe);
-        assert_eq!(
-            chain.call_log().len(),
-            1,
-            "dedupe: still one submit after second Match"
+    #[test]
+    fn maybe_submit_match_skips_validator_permit_pure_burn() {
+        let outcome = ComparisonOutcome::Match {
+            epoch: 9,
+            local_vector: vec![(1, 65535)],
+            gateway_vector: vec![(1, 65535)],
+            vector_hash: [0x11; 32],
+            merkle_root: [0x22; 32],
+        };
+        let chain = FakeChain::new(FakeChainConfig {
+            current_block: 500,
+            validator_permit: vec![false, true, false],
+            commit_reveal_enabled: true,
+            ..FakeChainConfig::default()
+        });
+        let submit = CoordinationSubmitConfig {
+            netuid: 1,
+            hotkey: vec![0xBBu8; 32],
+            version_key: 3,
+            epoch_length: 360,
+        };
+        let dedupe = EpochSubmitDedupe::new();
+        maybe_submit_match(
+            &outcome,
+            &chain,
+            &ReadyDrand,
+            Some(&submit),
+            &dedupe,
+            true,
+            None,
+        );
+        assert!(
+            chain.call_log().is_empty(),
+            "pure burn to a validator_permit UID must not submit"
         );
     }
 
@@ -809,8 +987,54 @@ mod tests {
         };
         let chain = FakeChain::with_defaults();
         let dedupe = EpochSubmitDedupe::new();
-        maybe_submit_match(&outcome, &chain, &ReadyDrand, None, &dedupe);
+        maybe_submit_match(&outcome, &chain, &ReadyDrand, None, &dedupe, true, None);
         assert!(chain.call_log().is_empty());
+    }
+
+    #[test]
+    fn maybe_submit_match_skips_when_latest_unsealed() {
+        let outcome = ComparisonOutcome::Match {
+            epoch: 88,
+            local_vector: vec![(1, 65535)],
+            gateway_vector: vec![(1, 65535)],
+            vector_hash: [0x11; 32],
+            merkle_root: [0x22; 32],
+        };
+        let chain = FakeChain::new(FakeChainConfig {
+            current_block: 500,
+            commit_reveal_enabled: true,
+            ..FakeChainConfig::default()
+        });
+        let submit = CoordinationSubmitConfig {
+            netuid: 1,
+            hotkey: vec![0xBBu8; 32],
+            version_key: 3,
+            epoch_length: 360,
+        };
+        let dedupe = EpochSubmitDedupe::new();
+        maybe_submit_match(
+            &outcome,
+            &chain,
+            &ReadyDrand,
+            Some(&submit),
+            &dedupe,
+            false,
+            None,
+        );
+        assert!(
+            chain.call_log().is_empty(),
+            "latest.sealed=false must not submit even with a miner Match vector"
+        );
+    }
+
+    #[test]
+    fn owner_burn_detects_uid0_owner_and_ignores_split_vectors() {
+        let chain = FakeChain::with_defaults();
+        let hash = chain.block_hash(chain.current_block().unwrap()).unwrap();
+        let mg = chain.metagraph_at(&hash).unwrap();
+        assert!(is_burn_to_registered_owner(&[(0, 65535)], &mg));
+        assert!(!is_burn_to_registered_owner(&[(1, 65535)], &mg));
+        assert!(!is_burn_to_registered_owner(&[(0, 32768), (1, 32767)], &mg));
     }
 
     #[tokio::test]
@@ -854,10 +1078,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tick_burn_after_restart_matches_lkg_and_submits() {
+    async fn tick_unsealed_latest_does_not_submit_lkg() {
         let epoch = 9_010_077u64;
-        let (sealed_client, chain, trust, merkle_root, _, bundle_bytes) =
-            sealed_match_fixture(epoch).await;
+        let (sealed_client, chain, trust, _, _, bundle_bytes) = sealed_match_fixture(epoch).await;
         let dir = std::env::temp_dir().join(format!(
             "base-lkg-tick-{}-{}-{}",
             std::process::id(),
@@ -914,7 +1137,6 @@ mod tests {
             version_key: 3,
             epoch_length: 360,
         };
-        // Process restart drops in-memory submit dedupe.
         let restart_dedupe = EpochSubmitDedupe::new();
         let out = coordination_compare_once_with_drand(
             &burn_client,
@@ -926,24 +1148,54 @@ mod tests {
             &lkg,
         )
         .await
-        .expect("ok")
-        .expect("lkg match");
+        .expect("ok");
+        assert!(
+            out.is_none(),
+            "unsealed latest must not Match or submit LKG"
+        );
+        assert!(
+            chain.call_log().is_empty(),
+            "unsealed latest + LKG on disk must not submit"
+        );
+        assert_eq!(
+            lkg.load().as_deref(),
+            Some(bundle_bytes.as_slice()),
+            "LKG file may remain on disk; submit path is still forbidden"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn tick_sealed_owner_burn_match_does_not_submit() {
+        let epoch = 9_010_078u64;
+        let (client, chain, trust, merkle_root, _, _) = sealed_match_fixture(epoch).await;
+        let submit = CoordinationSubmitConfig {
+            netuid: 1,
+            hotkey: vec![0xBBu8; 32],
+            version_key: 3,
+            epoch_length: 360,
+        };
+        let dedupe = EpochSubmitDedupe::new();
+        let out = coordination_compare_once(&client, &chain, &trust, Some(&submit), &dedupe)
+            .await
+            .expect("ok")
+            .expect("some");
         match out {
             ComparisonOutcome::Match {
                 epoch: e,
                 merkle_root: root,
+                local_vector,
                 ..
             } => {
                 assert_eq!(e, epoch);
                 assert_eq!(root, merkle_root);
+                assert_eq!(local_vector, vec![(0, 65535)]);
             }
-            other => panic!("expected LKG Match, got {other:?}"),
+            other => panic!("expected Match of owner-burn vector, got {other:?}"),
         }
-        assert_eq!(
-            chain.call_log().len(),
-            1,
-            "restart + burn latest must submit last verified weights"
+        assert!(
+            chain.call_log().is_empty(),
+            "sealed uid0=100% to owner must not submit"
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

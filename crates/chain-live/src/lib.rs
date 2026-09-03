@@ -23,8 +23,8 @@ pub use extrinsic::{
 pub use rpc::{LiveChainRpc, RuntimeVersion, StorageEntry};
 pub use storage::{
     decode_axon_info, decode_bool, decode_double_map_account_k2, decode_double_map_k2,
-    decode_hotkey, decode_metagraph, decode_u16, decode_u64, decode_vec_u64, decode_vec_vec_u8,
-    storage_double_map_key_u16_account, storage_double_map_key_u16_u16,
+    decode_hotkey, decode_metagraph, decode_u16, decode_u64, decode_vec_bool, decode_vec_u64,
+    decode_vec_vec_u8, storage_double_map_key_u16_account, storage_double_map_key_u16_u16,
     storage_double_map_prefix_u16, storage_key, storage_map_key_account_blake2,
     storage_map_key_identity, storage_map_key_twox64, storage_map_key_u16, ACCOUNT_ID_LEN,
 };
@@ -177,7 +177,23 @@ impl LiveChainClient {
         let keys = self.enumerate_hotkeys(netuid, at)?;
         let coldkeys = self.fetch_coldkeys_for_hotkeys(&keys, at)?;
         let owner = self.read_owner_hotkey(netuid, at)?;
-        Ok(storage::decode_metagraph(keys, coldkeys, owner, netuid))
+        let mut mg = storage::decode_metagraph(keys, coldkeys, owner, netuid);
+        mg.validator_permit = self.fetch_validator_permit(netuid, at);
+        Ok(mg)
+    }
+
+    /// Best-effort `ValidatorPermit(netuid)`. Missing or undecodable storage
+    /// is treated as no permits so a permit-map fault cannot drop the metagraph.
+    fn fetch_validator_permit(&self, netuid: u16, at: Option<&[u8; 32]>) -> Vec<bool> {
+        let key = storage::storage_map_key_u16(PALLET_SUBTENSOR, "ValidatorPermit", netuid);
+        let raw = match at {
+            Some(h) => self.rpc.state_get_storage_at(&key, h),
+            None => self.rpc.state_get_storage(&key),
+        };
+        match raw {
+            Ok(Some(bytes)) => storage::decode_vec_bool(&bytes).unwrap_or_default(),
+            Ok(None) | Err(_) => Vec::new(),
+        }
     }
 
     /// Bulk-read `SubtensorModule.Owner(hotkey) → coldkey` for every hotkey.

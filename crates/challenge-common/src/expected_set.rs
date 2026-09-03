@@ -242,6 +242,7 @@ mod tests {
                 validator_hk().to_vec(),
             ],
             owner_hotkey: owner_hk().to_vec(),
+            validator_permit: Vec::new(),
         }
     }
 

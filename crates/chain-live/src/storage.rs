@@ -247,5 +247,15 @@ pub fn decode_metagraph(
         hotkeys: keys,
         coldkeys,
         owner_hotkey: owner,
+        validator_permit: Vec::new(),
     }
+}
+
+/// Decode a SCALE-encoded `Vec<bool>` (`SubtensorModule.ValidatorPermit`).
+///
+/// # Errors
+/// Decode failure.
+pub fn decode_vec_bool(bytes: &[u8]) -> Result<Vec<bool>, ChainError> {
+    Vec::<bool>::decode(&mut &bytes[..])
+        .map_err(|e| ChainError::Other(format!("decode Vec<bool>: {e}")))
 }
