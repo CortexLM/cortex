@@ -165,13 +165,14 @@ pub fn backend_public_url() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// True when the operator explicitly opted into the offline scorer.
+/// Retired opt-in for the offline scorer, kept only so a host that still sets
+/// it can be told the knob is dead.
 ///
-/// Sim exists for CI and local development. It is never implicit: a host with
-/// no backend feed and no opt-in cannot turn reports into weight, and says so
-/// on `/v1/status` rather than accepting work it will never pay for.
+/// There is no local scorer any more. Adjudication happens in
+/// CortexLM/backend, so a host with no feed has nothing to score, and an
+/// offline stand-in would pay miners on numbers no validator can verify.
 #[must_use]
-pub fn force_sim() -> bool {
+pub fn legacy_sim_opt_in_present() -> bool {
     matches!(
         std::env::var("BOUNTY_FORCE_SIM")
             .unwrap_or_default()
@@ -187,18 +188,17 @@ pub fn force_sim() -> bool {
 pub enum ScoringBackend {
     /// Adjudications published by CortexLM/backend.
     BackendPublic,
-    /// Locally adjudicated reports only (CI / local development).
-    Sim,
-    /// Neither is configured: this host cannot produce weight.
+    /// No feed: this host cannot produce weight.
     Unconfigured,
 }
 
-/// Resolve the scoring backend for this host. Sim is never implicit.
+/// Resolve the scoring backend for this host.
+///
+/// The backend public feed is the only scorer. `BOUNTY_FORCE_SIM` cannot
+/// change this answer: an unset (or blank) `BOUNTY_BACKEND_PUBLIC_URL` is
+/// [`ScoringBackend::Unconfigured`], which 503s ingest and emits no leaf.
 #[must_use]
 pub fn resolve_scoring_backend() -> ScoringBackend {
-    if force_sim() {
-        return ScoringBackend::Sim;
-    }
     if backend_public_url().is_some() {
         ScoringBackend::BackendPublic
     } else {
@@ -439,16 +439,57 @@ mod tests {
 
     #[test]
     fn backend_public_url_env_only() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(backend_public_url().is_none());
     }
 
-    /// With no feed and no opt-in this host cannot turn a report into weight,
-    /// and must say so rather than quietly collecting unpaid work.
+    /// With no feed this host cannot turn a report into weight, and must say
+    /// so rather than quietly collecting unpaid work.
     #[test]
-    fn scoring_is_unconfigured_until_a_feed_or_an_explicit_opt_in() {
-        assert!(!force_sim());
+    fn scoring_is_unconfigured_until_a_feed_is_configured() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(!legacy_sim_opt_in_present());
         assert_eq!(resolve_scoring_backend(), ScoringBackend::Unconfigured);
     }
+
+    /// The old opt-in was an escape hatch: it let a host with no feed accept
+    /// bug reports and mint weight nobody adjudicated. Setting it now changes
+    /// nothing about what this host can score.
+    #[test]
+    fn the_retired_sim_opt_in_cannot_turn_scoring_back_on() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for value in ["1", "true", "yes"] {
+            std::env::set_var("BOUNTY_FORCE_SIM", value);
+            assert!(legacy_sim_opt_in_present());
+            assert_eq!(
+                resolve_scoring_backend(),
+                ScoringBackend::Unconfigured,
+                "BOUNTY_FORCE_SIM={value} must not resolve a scorer"
+            );
+        }
+        std::env::remove_var("BOUNTY_FORCE_SIM");
+    }
+
+    #[test]
+    fn a_configured_feed_is_the_only_scorer() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("BOUNTY_FORCE_SIM", "1");
+        std::env::set_var("BOUNTY_BACKEND_PUBLIC_URL", "http://127.0.0.1:9");
+        assert_eq!(resolve_scoring_backend(), ScoringBackend::BackendPublic);
+        std::env::remove_var("BOUNTY_BACKEND_PUBLIC_URL");
+        std::env::remove_var("BOUNTY_FORCE_SIM");
+    }
+
+    /// Process env is shared across threads in one test binary.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn terms_require_dedicated_account() {

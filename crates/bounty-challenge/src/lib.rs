@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 mod backend;
+mod emit;
 
 use bounty_challenge_task::{hotkey_hex, CHALLENGE_ID_BYTES, SCORE_MAX};
 use bounty_score::{
@@ -20,16 +21,16 @@ use bounty_store::MemoryStore;
 use bundle::{NoScoreReasonCode, ScoreOrAbsence};
 use challenge_common::{emit_signed_leaf_set, Hotkey, LeafEmitError};
 
-pub use backend::{
-    fetch_public_snapshot, public_path, snapshot_from_json, try_fetch_public_snapshot, BackendError,
-};
+pub use backend::{fetch_public_snapshot, public_path, snapshot_from_json, BackendError};
 pub use bounty_challenge_task::{
-    backend_public_url, chat_command_display, force_sim, resolve_scoring_backend, ScoringBackend,
-    CHALLENGE_ID, CHALLENGE_ID_BYTES as BOUNTY_ID_BYTES, CHAT_COMMAND_PLACEHOLDER,
+    backend_public_url, chat_command_display, legacy_sim_opt_in_present, resolve_scoring_backend,
+    ScoringBackend, CHALLENGE_ID, CHALLENGE_ID_BYTES as BOUNTY_ID_BYTES, CHAT_COMMAND_PLACEHOLDER,
     SCORE_MAX as BOUNTY_SCORE_MAX, SCORING_VERSION, TERMS_TEXT,
 };
 pub use bounty_http::{bounty_router, hash_admin_token, AppState};
 pub use bounty_store::MemoryStore as BountyStore;
+pub use challenge_common::{GatewayClient, GatewayClientConfig};
+pub use emit::{BountyEmitter, EmitError, EmitOutcome, DEFAULT_EMIT_POLL_SECS};
 
 /// Build a D24-complete score map.
 ///

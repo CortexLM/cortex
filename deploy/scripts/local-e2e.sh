@@ -731,6 +731,34 @@ probe_weights_latest() {
   log "weights seal smoke OK: GET /v1/weights/latest → 200"
 }
 
+# Bounty scores only from the CortexLM/backend public feed. Prove the boundary
+# by actually POSTing an ingest request instead of trusting /health:
+#
+#   no BOUNTY_BACKEND_PUBLIC_URL → 503 (fail-closed; there is no offline scorer)
+#   feed configured              → 401 invalid_session (ingest open, gate off)
+probe_bounty_fail_closed() {
+  local base="http://127.0.0.1:${BOUNTY_HOST_PORT}"
+  local status code body
+  status="$(curl -fsS -m 5 "${base}/v1/status" 2>/dev/null || true)"
+  if [[ -z "$status" ]]; then
+    log "warning: bounty /v1/status unavailable (skipping fail-closed probe)"
+    return 0
+  fi
+  log "bounty status: $status"
+  body='{"session":"not-a-session","title":"probe","body":"probe","repro_steps":"probe"}'
+  code="$(curl -sS -m 5 -o /tmp/local-e2e-bounty-report.json -w '%{http_code}' \
+    -X POST -H 'content-type: application/json' -d "$body" "${base}/v1/reports" || true)"
+  if echo "$status" | grep -q '"scoring_backend":"unconfigured"'; then
+    [[ "$code" == "503" ]] || die "bounty ingest answered HTTP $code with no backend feed (expected 503 fail-closed)"
+    grep -q 'scoring unconfigured' /tmp/local-e2e-bounty-report.json \
+      || die "bounty 503 did not name the missing backend feed"
+    log "bounty fail-closed OK: no feed → POST /v1/reports 503, leaves pay nobody"
+  else
+    [[ "$code" == "401" ]] || die "bounty ingest answered HTTP $code with a feed configured (expected 401 invalid_session)"
+    log "bounty ingest OK: feed configured → POST /v1/reports reaches session auth"
+  fi
+}
+
 print_summary() {
   local pub=""
   if [[ -f "$TUNNEL_ENV" ]]; then
@@ -746,6 +774,7 @@ Internal (compose network):
   relearn-image:      http://127.0.0.1:${RELEARN_T2I_HOST_PORT}/health
   relearn-agent:      http://127.0.0.1:${RELEARN_AGENT_HOST_PORT}/health
   bounty:             http://127.0.0.1:${BOUNTY_HOST_PORT}/health
+                      (scorer: GET /v1/status → scoring_backend, can_score)
 
 EOF
   if [[ -n "$pub" ]]; then
@@ -840,6 +869,7 @@ wait_all_health || die "health checks failed — see logs above"
 # Seal path is independent of tunnel / owner wallet; run before tunnel so a
 # tunnel flake cannot mask a weights regression.
 probe_weights_latest || die "weights seal smoke failed"
+probe_bounty_fail_closed
 
 if [[ "$DO_TUNNEL" -eq 1 ]]; then
   start_tunnel

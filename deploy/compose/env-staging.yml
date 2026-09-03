@@ -76,8 +76,9 @@ services:
       RELEARN_AGENT_FORCE_SIM: "false"
   bounty-challenge:
     environment:
-      # CortexLM/backend public base. Empty → this host cannot score and
-      # POST /v1/reports answers 503. Never bake a host.
+      BASE_CHAIN_ENDPOINT: "wss://test.chain.opentensor.ai:443"
+      BASE_CHAIN_ENDPOINTS: "wss://test.chain.opentensor.ai:443,wss://test.finney.opentensor.ai:443"
+      # CortexLM/backend public base. Empty → this host cannot score:
+      # POST /v1/reports answers 503 and every bounty leaf is an explicit
+      # no-score, so the 3000 bps share burns to uid 0. Never bake a host.
       BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"
-      # Live path on droplets: the offline scorer is local-only.
-      BOUNTY_FORCE_SIM: "false"

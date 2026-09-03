@@ -71,18 +71,80 @@ triage capacity the whole challenge runs on. Above `MAX_TRIAGE_NOISE_BPS` it is
 a hard zero, and because it is absent from the paid number a miner tuning
 precision cannot tune it away.
 
-## Fail-closed ingest
+## From a published row to a validator's weight
 
-Scoring needs the backend feed. `GET /v1/status` publishes `scoring_backend`
-(`backend_public` | `sim` | `unconfigured`), `force_sim`, and `can_score`.
+The backend feed is not a dashboard this subnet reads for colour — it is the
+scorer. Each tick the challenge service:
 
-With neither `BOUNTY_BACKEND_PUBLIC_URL` nor `BOUNTY_FORCE_SIM=1`, the host
-cannot turn a report into weight, and `POST /v1/reports` answers **503**
-without storing anything. Accepting reports there would take real work —
-finding a real bug — and pay nothing for it. `BOUNTY_FORCE_SIM=1` selects
-local adjudications only; it is CI/local, reported on `/v1/status`, and
-`deploy/scripts/assert-compose-matrix.sh` fails if a staging or prod overlay
-enables it.
+1. `GET {BOUNTY_BACKEND_PUBLIC_URL}/v1/bounty/public/leaderboard` + `/reports`,
+   re-read until two consecutive reads agree — the two routes are separate
+   GETs, and a publish landing between them would mix revisions
+2. derives `E` from the metagraph at `last_epoch_block` (`AllMetagraphHotkeys`)
+3. maps published rows onto one leaf per hotkey in `E` for the current subnet
+   epoch (champion → `Score`, net-malicious → `InvalidResponse`, everyone else
+   → `NotAttempted`); an unreadable feed pays nobody but still covers `E` with
+   `ChallengeInternal`
+4. `POST /v1/weights/raw` on the gateway, which seals what validators fetch
+
+Operator knobs: `BASE_CHALLENGE_GATEWAY_ENDPOINT`, `BASE_NETUID`,
+`BASE_CHAIN_ENDPOINT(S)`, `BOUNTY_EMIT_POLL_SECS` (default 120s). Re-emitting
+the current epoch is normal: the gateway supersedes on a changed digest and
+409s an identical one.
+
+## Fail-closed ingest and emission
+
+`GET /v1/status` publishes `scoring_backend` (`backend_public` |
+`unconfigured`), `backend_public_configured`, and `can_score`.
+
+Without `BOUNTY_BACKEND_PUBLIC_URL` — or when the feed is unreachable, 5xx,
+unparseable, or moving under the read — the host cannot turn a report into
+weight. Two things follow, and neither is a degraded mode:
+
+- `POST /v1/reports` answers **503** without storing anything. Accepting
+  reports there would take real work (finding a real bug) and pay nothing.
+- the emitter pays **nobody**: it covers `E` with
+  `NoScore(ChallengeInternal)` (`BUNDLE_SPEC` §3.3.1 — "challenge-side fault;
+  still must cover the participant"), so the 3000 bps burns to uid 0.
+
+Covering `E` is not a hedge, it is the difference between bounty failing and
+the subnet failing. Bounty holds a **paid** trust-root row, and D24 requires a
+leaf per participant for every paid challenge: leave `E` uncovered and
+`POST /v1/admin/seal` answers **409 incomplete_participant_set** for the whole
+bundle, so relearn's weights go unsealed too. The emitter therefore runs even
+on a host with no feed at all — it simply never pays.
+
+"Moving under the read" is in that list for the same reason. The feed is two
+routes, and a mixed pair is worse than no pair: every tally comes from
+`/reports`, so a stale half can under-count a miner's valid rows or drop it to
+`NotAttempted`, and `/leaderboard` decides the champion walk order — a verdict
+the backend never published either way. Each tick therefore re-reads the pair
+until two consecutive reads agree (bounded, so a settling feed is a retry
+rather than a lost epoch) and compares the *parsed* snapshot, so a field the
+public DTO does not model cannot make a still feed look like a moving one. A
+feed that never holds still is an error, and the paragraphs above apply. No
+backend change is needed for this; a published revision or ETag on both routes
+would let it collapse to a single round.
+
+A failed tick also tries not to take back a score. Once the process has scored
+an epoch, a feed outage inside that same epoch **holds** instead of superseding
+a champion's leaf with a burn; a backend hiccup does not get to decide the
+epoch. The watermark is in-process (the gateway has no read side for raw
+leaves), so a restart during an outage can still burn an epoch that had
+scores — the next successful tick supersedes it back. The bias is deliberate:
+burning pays nobody who was not already paid, while staying silent would 409
+the seal for every challenge.
+
+Only a missing `BASE_CHALLENGE_SK_FILE` stops emission entirely — a leaf the
+trust root rejects is not weight — and that case is logged as the 409 it will
+cause.
+
+**There is no offline scorer.** `BOUNTY_FORCE_SIM` is retired: it is ignored,
+warned about at boot, and `deploy/scripts/assert-compose-matrix.sh` fails if
+any compose file sets it. A local stand-in here would pay miners on
+adjudications no validator could reproduce, which is exactly what the sealed
+bundle exists to prevent. To exercise scoring locally, point
+`BOUNTY_BACKEND_PUBLIC_URL` at a stand-in backend that serves the two public
+routes.
 
 Ingest quotas, all per hotkey and all published on `/v1/status`: at most 5
 reports awaiting adjudication, one report per 60s, an 80-character body, a
