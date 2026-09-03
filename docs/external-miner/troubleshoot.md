@@ -20,7 +20,7 @@
 | `rejected` with `PerturbationEvidenceMissing` | No perturbed rerun in the eval document | Fail-closed, like an empty `manifest`. The brittleness floor is not skipped by omitting the series |
 | `rejected` with `BaseCanaryEvidenceMissing` | No known-answer canaries in the eval document | Fail-closed. The base-competence floor is not skipped by omitting the series |
 | `503` on submit | Holdout file missing or mismatched | Operator: `RELEARN_HOLDOUT_FILE` must match the pin commitment |
-| `503 eval image digest not pinned` | Host has no `sha256:` eval image and did not opt into sim | Expected on `relearn` right now: no `relearn-eval` image has scored on a rented pod yet, so the digest is deliberately empty and the subnet refuses rather than rent hardware that cannot score. Image and Agent digests are pinned (`relearn` PR #3), so a 503 there is an operator pin/file mismatch. `GET /v1/status` shows `can_score: false` |
+| `503 eval image digest not pinned` | Host has no `sha256:` eval image and did not opt into sim | Operator pin/file mismatch: `relearn-eval` is pinned (`sha256:4806db4b…`, `8ffbe8a`). Image and Agent digests are also pinned (`relearn` PR #3). `GET /v1/status` shows `can_score: false` |
 | `503 … no in-process sim` | Digest is pinned but the live harvest is not wired on that host | Operator issue; `/v1/status` shows `live_harvest_wired: false`. The control plane refuses to substitute sim numbers |
 | `503 backend: lium …` | The eval pod could not be rented, reached, or torn down | Transient. Retry; the run is not banked and no verdict was recorded |
 | `503 backend: RELEARN_TEACHER_API_URL not set …` | Operator has not configured the judge the eval image needs | Operator issue; `/v1/status` shows `can_score: false`. No pod was rented |

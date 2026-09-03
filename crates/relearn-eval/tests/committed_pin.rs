@@ -75,36 +75,34 @@ fn pin_says_its_commitment_is_not_the_live_seal() {
     );
 }
 
-/// Every digest built so far failed the live harvest, so the committed pin is
-/// empty and live scoring is refused. An empty digest is a 503 on submit — the
-/// fail-closed state — not a fallback to the sim harness.
+/// The committed pin is the CUDA scoring digest publish-eval-image proved
+/// on CortexLM/relearn@8ffbe8a (run 33730126042): harvest-PATH, import
+/// vllm/torchvision, and selftest against the pulled bytes. Not the slim
+/// contract image, and not any digest that already failed a live harvest.
 #[test]
-fn committed_pin_is_fail_closed_until_a_working_image_ships() {
+fn committed_pin_is_the_proven_runtime_eval_image() {
     let p = pin();
-    assert!(
-        p.eval_image_digest.is_empty(),
-        "no CortexLM/relearn image has printed RELEARN_EVAL_OK on a rented pod; \
-         an empty digest 503s, a guessed one rents a B200 that cannot score"
+    assert_eq!(
+        p.eval_image_digest,
+        "sha256:4806db4bd6650415c3705290117fd0190cd2a6d387cef871dd3d9ff1a8bb6d7e"
     );
-    assert!(!p.can_rent(), "an unpinned host must not rent");
-    assert!(
-        p.relearn_git_sha.is_empty(),
-        "no digest, no commit that built it"
+    assert!(p.can_rent(), "the proven CUDA scoring digest is rentable");
+    assert_eq!(
+        p.relearn_git_sha,
+        "8ffbe8a0481cc62c1e2d6ed80a2211befa98dd3f"
     );
 }
 
-/// What the committed pin actually does to a live host, not just what it says.
-/// The digest is the root cause, so it has to be the reported one.
+/// Pinning the image is not the whole job: a live host still needs a wired
+/// harvest. Sim stays opt-in.
 #[test]
-fn the_committed_pin_refuses_live_scoring_and_says_why() {
+fn the_committed_pin_still_needs_a_wired_harvest() {
     let err = relearn_eval::scoring_readiness(&pin(), relearn_eval::EvalBackend::Lium, None)
-        .expect_err("an unpinned host must not be ready to score");
+        .expect_err("a pinned host without a harvest must not be ready to score");
     assert!(
-        matches!(err, relearn_eval::EvalError::EvalImageUnpinned),
+        matches!(err, relearn_eval::EvalError::LiveHarvestUnavailable),
         "{err}"
     );
-    assert!(err.to_string().contains("eval image digest not pinned"));
-    // Sim is still opt-in only, so this is a 503 rather than a sim verdict.
     assert!(relearn_eval::scoring_readiness(&pin(), relearn_eval::EvalBackend::Sim, None).is_ok());
     assert!(!relearn_eval::force_sim(), "sim is never implicit");
 }

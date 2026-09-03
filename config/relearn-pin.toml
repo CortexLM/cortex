@@ -41,13 +41,13 @@ eval_image = "ghcr.io/cortexlm/relearn-eval"
 # deploy/env/relearn-challenge.env.example). Check GET /v1/status ->
 # can_score, live_harvest_wired, champion_baseline_recorded.
 #
-# EMPTY ON PURPOSE. Every digest built so far fails the harvest, and an empty
-# digest is the fail-closed state: submissions answer 503 "eval image digest
-# not pinned" instead of renting a B200 that cannot score. Do not guess a
-# digest here to make the 503 go away.
+# Proven CUDA scoring image from CortexLM/relearn publish-eval-image on
+# 8ffbe8a0481cc62c1e2d6ed80a2211befa98dd3f (run 33730126042). The runtime job
+# pulled this digest, ran the harvest-PATH check, and proved
+# `import vllm, torchvision` plus `relearn-eval selftest` on these bytes.
+# Not the slim contract image. A live host still needs harvest + champion.
 #
-# The next pin needs a CortexLM/relearn image whose CUDA scoring layer ships
-# **vLLM and torchvision**. Do not re-pin or re-harvest any of these:
+# Do not re-pin or re-harvest any of these:
 #
 #   sha256:cbc4bbb8… (f3cfa69) exit 1, no EVAL_OK: no vLLM on the rented GPU
 #                     image, transformers fallback, then Qwen3VLVideoProcessor
@@ -56,11 +56,10 @@ eval_image = "ghcr.io/cortexlm/relearn-eval"
 #   sha256:303c6357… printed no RELEARN_EVAL_OK
 #   sha256:00839671… exit 127, no /usr/bin/relearn-eval
 #   sha256:86240d76… pre-CUDA
-eval_image_digest = ""
+eval_image_digest = "sha256:4806db4bd6650415c3705290117fd0190cd2a6d387cef871dd3d9ff1a8bb6d7e"
 relearn_git = "https://github.com/CortexLM/relearn"
-# CortexLM/relearn commit that built the digest above. Empty while unpinned:
-# f3cfa69 built cbc4bbb8, which never printed RELEARN_EVAL_OK.
-relearn_git_sha = ""
+# CortexLM/relearn commit that built the digest above.
+relearn_git_sha = "8ffbe8a0481cc62c1e2d6ed80a2211befa98dd3f"
 
 # Public split ids (miners may train on these). Holdout selection must exclude
 # every one of them. The scored holdout records stay off git.
