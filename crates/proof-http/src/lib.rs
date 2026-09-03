@@ -187,9 +187,8 @@ async fn submit(
     if topic_id.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "topic_id is required"));
     }
-    let topic = match st.store.topic(&topic_id) {
-        Ok(t) => t,
-        Err(_) => return Err(err(StatusCode::BAD_REQUEST, "unknown topic")),
+    let Ok(topic) = st.store.topic(&topic_id) else {
+        return Err(err(StatusCode::BAD_REQUEST, "unknown topic"));
     };
     if !topic.is_open_at(st.epoch) {
         return Err(err(StatusCode::BAD_REQUEST, "topic is not open"));
@@ -226,7 +225,7 @@ async fn submit(
     let sealed = st
         .store
         .baseline(&topic_id)
-        .map_err(store_err)?
+        .map_err(|e| store_err(&e))?
         .ok_or_else(|| {
             err(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -241,6 +240,13 @@ async fn submit(
 
     let (declared, hits) = contamination_evidence(&body.manifest, &holdout);
     if !declared || !hits.is_empty() {
+        let failed = if declared {
+            vec![GateFail::Contamination]
+        } else {
+            vec![GateFail::EvidenceMissing {
+                field: "contamination_evidence".into(),
+            }]
+        };
         return persist_pre_eval_reject(
             &st,
             body,
@@ -249,13 +255,7 @@ async fn submit(
             artifact,
             nonce,
             submission_digest,
-            if declared {
-                vec![GateFail::Contamination]
-            } else {
-                vec![GateFail::EvidenceMissing {
-                    field: "contamination_evidence".into(),
-                }]
-            },
+            &failed,
         );
     }
 
@@ -294,6 +294,7 @@ async fn submit(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist_pre_eval_reject(
     st: &AppState,
     body: SubmitBody,
@@ -302,7 +303,7 @@ fn persist_pre_eval_reject(
     artifact: String,
     nonce: String,
     submission_digest: String,
-    failed: Vec<GateFail>,
+    failed: &[GateFail],
 ) -> Result<(StatusCode, Json<SubmitResp>), (StatusCode, Json<serde_json::Value>)> {
     let verdict = ProofVerdict {
         pass: false,
@@ -320,7 +321,7 @@ fn persist_pre_eval_reject(
             family: topic.metric.family,
         },
         harness: HarnessMetrics::default(),
-        failed: failed.clone(),
+        failed: failed.to_vec(),
         lattice: 0,
     };
     let row = st
@@ -445,15 +446,15 @@ async fn publish_topic(
         return Err(err(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
     doc.validate(&st.pin, &supported_custom())
-        .map_err(topic_err)?;
-    doc.verify_signature(&st.pin).map_err(topic_err)?;
+        .map_err(|e| topic_err(&e))?;
+    doc.verify_signature(&st.pin).map_err(|e| topic_err(&e))?;
     if doc.status == TopicStatus::Open && !doc.baseline.is_sealed() {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "an open topic must carry a sealed baseline",
         ));
     }
-    st.store.put_topic(doc.clone()).map_err(store_err)?;
+    st.store.put_topic(doc.clone()).map_err(|e| store_err(&e))?;
     Ok((StatusCode::CREATED, Json(doc)))
 }
 
@@ -479,11 +480,11 @@ fn err(code: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     (code, Json(serde_json::json!({ "error": msg })))
 }
 
-fn store_err(e: proof_store::StoreError) -> (StatusCode, Json<serde_json::Value>) {
+fn store_err(e: &proof_store::StoreError) -> (StatusCode, Json<serde_json::Value>) {
     err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
 }
 
-fn topic_err(e: TopicError) -> (StatusCode, Json<serde_json::Value>) {
+fn topic_err(e: &TopicError) -> (StatusCode, Json<serde_json::Value>) {
     let code = match e {
         TopicError::NoTopicKey => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::BAD_REQUEST,
@@ -660,7 +661,7 @@ mod tests {
         }
     }
 
-    async fn app_full(
+    fn app_full(
         token: &str,
         backend: EvalBackend,
         eval_digest: &str,
@@ -691,8 +692,8 @@ mod tests {
         })
     }
 
-    async fn app(token: &str) -> Router {
-        app_full(token, EvalBackend::Sim, "", None, true, true).await
+    fn app(token: &str) -> Router {
+        app_full(token, EvalBackend::Sim, "", None, true, true)
     }
 
     async fn json_req(
@@ -717,7 +718,7 @@ mod tests {
         (status, v)
     }
 
-    fn submit_body(label: &str, extra: serde_json::Value) -> serde_json::Value {
+    fn submit_body(label: &str, extra: &serde_json::Value) -> serde_json::Value {
         let mut v = serde_json::json!({
             "miner_hotkey": digest("miner-hotkey"),
             "artifact_digest": digest(label),
@@ -741,25 +742,12 @@ mod tests {
 
     #[tokio::test]
     async fn health_and_status_name_the_challenge() {
-        let (st, health) = json_req(
-            app("op").await,
-            "GET",
-            "/health",
-            serde_json::json!({}),
-            None,
-        )
-        .await;
+        let (st, health) = json_req(app("op"), "GET", "/health", serde_json::json!({}), None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(health["challenge_id"], "proof");
 
-        let (st, body) = json_req(
-            app("op").await,
-            "GET",
-            "/v1/status",
-            serde_json::json!({}),
-            None,
-        )
-        .await;
+        let (st, body) =
+            json_req(app("op"), "GET", "/v1/status", serde_json::json!({}), None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(body["eval_backend"], "sim");
         assert_eq!(body["can_score"], true, "{body}");
@@ -773,7 +761,7 @@ mod tests {
     #[tokio::test]
     async fn topics_are_public_documents_without_records() {
         let (st, list) = json_req(
-            app("op").await,
+            app("op"),
             "GET",
             "/v1/proof/topics",
             serde_json::json!({}),
@@ -788,7 +776,7 @@ mod tests {
         assert!(!dump.contains("content_sha256"), "{dump}");
 
         let (st, one) = json_req(
-            app("op").await,
+            app("op"),
             "GET",
             "/v1/proof/topics/dt-no-ib-v0",
             serde_json::json!({}),
@@ -801,12 +789,12 @@ mod tests {
 
     #[tokio::test]
     async fn submit_requires_an_open_topic_id() {
-        let app = app("op").await;
+        let app = app("op");
         let (st, body) = json_req(
             app.clone(),
             "POST",
             "/v1/submissions",
-            submit_body("x", serde_json::json!({ "topic_id": "" })),
+            submit_body("x", &serde_json::json!({ "topic_id": "" })),
             None,
         )
         .await;
@@ -816,7 +804,7 @@ mod tests {
             app,
             "POST",
             "/v1/submissions",
-            submit_body("x", serde_json::json!({ "topic_id": "unknown-v0" })),
+            submit_body("x", &serde_json::json!({ "topic_id": "unknown-v0" })),
             None,
         )
         .await;
@@ -826,12 +814,12 @@ mod tests {
     #[tokio::test]
     async fn architecture_must_match_the_proxy() {
         let (st, body) = json_req(
-            app("op").await,
+            app("op"),
             "POST",
             "/v1/submissions",
             submit_body(
                 "x",
-                serde_json::json!({ "architecture": "meta-llama/Llama-3-8B" }),
+                &serde_json::json!({ "architecture": "meta-llama/Llama-3-8B" }),
             ),
             None,
         )
@@ -850,10 +838,10 @@ mod tests {
         let digest = format!("sha256:{}", "ab".repeat(32));
 
         let (st, created) = json_req(
-            app_full("op", EvalBackend::Lium, &digest, Some(win), true, true).await,
+            app_full("op", EvalBackend::Lium, &digest, Some(win), true, true),
             "POST",
             "/v1/submissions",
-            submit_body("miner-strong-proof", serde_json::json!({})),
+            submit_body("miner-strong-proof", &serde_json::json!({})),
             None,
         )
         .await;
@@ -863,10 +851,10 @@ mod tests {
         assert_eq!(created["state"], "awaiting_admin");
 
         let (st, created) = json_req(
-            app_full("op", EvalBackend::Lium, &digest, Some(lose), true, true).await,
+            app_full("op", EvalBackend::Lium, &digest, Some(lose), true, true),
             "POST",
             "/v1/submissions",
-            submit_body("miner-unreproduced", serde_json::json!({})),
+            submit_body("miner-unreproduced", &serde_json::json!({})),
             None,
         )
         .await;
@@ -887,21 +875,18 @@ mod tests {
             Some(scorer.clone()),
             true,
             true,
-        )
-        .await;
+        );
         for manifest in [
             serde_json::json!({}),
             serde_json::json!({
                 "manifest": { "train_content_hashes": [dirty_hash] }
             }),
         ] {
-            let body = if manifest.as_object().is_some_and(|o| o.is_empty()) {
-                submit_body(
-                    "junk",
-                    serde_json::json!({ "manifest": { "train_dataset_ids": [] } }),
-                )
+            let empty_evidence = serde_json::json!({ "manifest": { "train_dataset_ids": [] } });
+            let body = if manifest.as_object().is_some_and(serde_json::Map::is_empty) {
+                submit_body("junk", &empty_evidence)
             } else {
-                submit_body("junk", manifest)
+                submit_body("junk", &manifest)
             };
             let (st, created) = json_req(app.clone(), "POST", "/v1/submissions", body, None).await;
             assert_eq!(st, StatusCode::CREATED, "{created}");
@@ -919,10 +904,10 @@ mod tests {
     #[tokio::test]
     async fn empty_digest_and_unwired_harvest_are_503() {
         let (st, body) = json_req(
-            app_full("op", EvalBackend::Lium, "", None, true, true).await,
+            app_full("op", EvalBackend::Lium, "", None, true, true),
             "POST",
             "/v1/submissions",
-            submit_body("x", serde_json::json!({})),
+            submit_body("x", &serde_json::json!({})),
             None,
         )
         .await;
@@ -940,11 +925,10 @@ mod tests {
                 None,
                 true,
                 true,
-            )
-            .await,
+            ),
             "POST",
             "/v1/submissions",
-            submit_body("x", serde_json::json!({})),
+            submit_body("x", &serde_json::json!({})),
             None,
         )
         .await;
@@ -957,7 +941,7 @@ mod tests {
 
     #[tokio::test]
     async fn refused_submissions_leave_no_rows() {
-        let unpinned = app_full("op", EvalBackend::Lium, "", None, true, true).await;
+        let unpinned = app_full("op", EvalBackend::Lium, "", None, true, true);
         let no_baseline = app_full(
             "op",
             EvalBackend::Lium,
@@ -965,9 +949,8 @@ mod tests {
             Some(Arc::new(StubScorer::win())),
             true,
             false,
-        )
-        .await;
-        let sealed = app_full("op", EvalBackend::Sim, "", None, false, false).await;
+        );
+        let sealed = app_full("op", EvalBackend::Sim, "", None, false, false);
 
         for (label, app) in [
             ("unpinned digest", unpinned),
@@ -979,7 +962,7 @@ mod tests {
                     app.clone(),
                     "POST",
                     "/v1/submissions",
-                    submit_body("spam", serde_json::json!({})),
+                    submit_body("spam", &serde_json::json!({})),
                     None,
                 )
                 .await;
@@ -1001,7 +984,7 @@ mod tests {
     #[tokio::test]
     async fn can_score_is_false_until_open_holdout_and_baseline() {
         let (st, body) = json_req(
-            app_full("op", EvalBackend::Sim, "", None, false, false).await,
+            app_full("op", EvalBackend::Sim, "", None, false, false),
             "GET",
             "/v1/status",
             serde_json::json!({}),
@@ -1020,8 +1003,7 @@ mod tests {
                 Some(Arc::new(StubScorer::win())),
                 true,
                 false,
-            )
-            .await,
+            ),
             "GET",
             "/v1/status",
             serde_json::json!({}),
@@ -1036,7 +1018,7 @@ mod tests {
     #[tokio::test]
     async fn admin_publish_requires_bearer_and_a_valid_signature() {
         let token = "op-test-token";
-        let app = app(token).await;
+        let app = app(token);
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
         let p = pin("");
         let (mut doc, _) = seal_topic(&p, unsigned_topic(&recs));
@@ -1068,7 +1050,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_custom_is_a_publish_400() {
         let token = "op";
-        let app = app(token).await;
+        let app = app(token);
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
         let p = pin("");
         let (mut doc, _) = seal_topic(&p, unsigned_topic(&recs));

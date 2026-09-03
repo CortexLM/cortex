@@ -262,6 +262,11 @@ pub struct TopicDocument {
     pub signature: String,
 }
 
+#[derive(Deserialize)]
+struct TopicListWrapper {
+    topics: Vec<TopicDocument>,
+}
+
 impl Default for TopicDocument {
     fn default() -> Self {
         Self {
@@ -618,11 +623,7 @@ impl TopicDocument {
         if let Ok(list) = serde_json::from_str::<Vec<Self>>(body) {
             return Ok(list);
         }
-        #[derive(Deserialize)]
-        struct Wrapper {
-            topics: Vec<TopicDocument>,
-        }
-        serde_json::from_str::<Wrapper>(body)
+        serde_json::from_str::<TopicListWrapper>(body)
             .map(|w| w.topics)
             .map_err(|e| TopicError::Parse(e.to_string()))
     }
@@ -743,7 +744,7 @@ impl TopicDocument {
 
 fn is_valid_id(id: &str) -> bool {
     let len = id.len();
-    if len < MIN_TOPIC_ID_LEN || len > MAX_TOPIC_ID_LEN {
+    if !(MIN_TOPIC_ID_LEN..=MAX_TOPIC_ID_LEN).contains(&len) {
         return false;
     }
     let mut chars = id.chars();

@@ -1373,11 +1373,11 @@ mod tests {
             .await;
     }
 
-    /// Coding plus the three Relearn challenges, in trust-root order.
+    /// Coding plus the live Relearn challenges and Proof, in listing order.
     ///
-    /// All three Relearn arenas are listed even when their backends are down,
-    /// so the emission column still sums to the trust root instead of showing
-    /// one challenge's slice as the whole subnet.
+    /// Live arenas are listed even when their backends are down, so the
+    /// emission column still sums to the trust root instead of showing one
+    /// challenge's slice as the whole subnet.
     fn assert_live_arena_list(v: &Value) {
         let slugs: Vec<&str> = v
             .as_array()
@@ -1389,12 +1389,20 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(
             slugs,
-            vec!["coding", "relearn", "relearn-image", "relearn-agent"],
+            vec![
+                "coding",
+                "relearn",
+                "relearn-image",
+                "relearn-agent",
+                "proof"
+            ],
             "{v}"
         );
         assert_eq!(v[1]["bestScoreLabel"], "DISPLACE");
         assert_eq!(v[2]["name"], "Relearn Image");
         assert_eq!(v[3]["name"], "Relearn Agent");
+        assert_eq!(v[4]["name"], "Proof");
+        assert_eq!(v[4]["scoring"], "reproduced");
     }
 
     #[tokio::test]

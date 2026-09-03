@@ -13,9 +13,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use proof_task::{
-    holdout_commitment, synthetic_holdout, HoldoutRecord, HoldoutSplit, HOLDOUT_SIZE, STRATUM_SIZE,
-};
+use proof_task::{holdout_commitment, synthetic_holdout, HoldoutRecord, HoldoutSplit};
 use sha2::{Digest, Sha256};
 
 /// Domain tag for Proof holdout selection. Distinct from the commitment domain.
@@ -67,7 +65,7 @@ pub fn run(args: &HoldoutArgs) -> Result<(), String> {
             "refusing another challenge's documented salt {salt:?}; use a private Proof salt"
         ));
     }
-    if args.size == 0 || args.size % HoldoutSplit::SCORED.len() != 0 {
+    if args.size == 0 || !args.size.is_multiple_of(HoldoutSplit::SCORED.len()) {
         return Err(format!(
             "--size must be a positive multiple of {} (got {})",
             HoldoutSplit::SCORED.len(),
@@ -174,6 +172,7 @@ fn rank(salt: &str, id: u32) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proof_task::{HOLDOUT_SIZE, STRATUM_SIZE};
 
     #[test]
     fn selection_is_deterministic_and_stratified() {

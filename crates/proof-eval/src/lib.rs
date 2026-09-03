@@ -7,9 +7,9 @@
 //! and refuses until it has both. Sim is reported on `/v1/status` and is
 //! never a fallback for an empty digest or a down agent.
 //!
-//! The agent never sees holdout records. The request it gets is claim + code
-//! + public split + constraints. Holdout NLL / throughput / pass are filled
-//! by the harness from the same image's measurement sidecar.
+//! The agent never sees holdout records. The request it gets is the claim, the
+//! code, the public split, and the constraints. Holdout NLL, throughput, and
+//! pass are filled by the harness from the same image's measurement sidecar.
 
 #![forbid(unsafe_code)]
 #![allow(
@@ -470,6 +470,7 @@ pub fn sim_document(
 pub const BASELINE_SKILL: f64 = 0.40;
 
 /// Score only after the submission digest is frozen and a topic is open.
+#[allow(clippy::too_many_arguments)]
 pub async fn eval_after_freeze(
     pin: &ProofPin,
     topic: &TopicDocument,

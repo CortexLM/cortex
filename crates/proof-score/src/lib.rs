@@ -61,6 +61,7 @@ pub enum ProofCheatCode {
 /// it: the agent never sees the holdout, so a number it invented is not a
 /// measurement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct AgentVerdict {
     /// clean | suspicious | reject.
     pub verdict: ProofKind,

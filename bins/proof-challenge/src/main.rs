@@ -1,8 +1,8 @@
 //! `proof-challenge` — master-only Proof service (port 8100).
 //!
-//! Miner HTTP submit → digest freeze → per-topic holdout unseal → RLM agent
-//! + harness → lattice. Miners pay Lium. Topics are operator-published signed
-//! documents, not a catalog in git.
+//! Miner HTTP submit, digest freeze, per-topic holdout unseal, then RLM agent
+//! and harness to lattice. Miners pay Lium. Topics are operator-published
+//! signed documents, not a catalog in git.
 //!
 //! Without `PROOF_FORCE_SIM=1` the host needs a `sha256:` eval-image pin, a
 //! wired harvest, at least one `open` topic with a verified holdout, and a

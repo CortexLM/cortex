@@ -166,7 +166,7 @@ mod tests {
         let leaves = emit_epoch(&sk(), 1, &e, &open, &per).expect("emit");
         match &leaves[&a].score_or_absence {
             ScoreOrAbsence::Score { value } => assert_eq!(*value, SCORE_MAX / 2),
-            other => panic!("{other:?}"),
+            ScoreOrAbsence::NoScore { .. } => panic!("expected a score"),
         }
     }
 
