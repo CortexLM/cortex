@@ -20,10 +20,11 @@ not run evals.
 
 | Challenge | id | What miners improve | Default emission |
 |-----------|-----|---------------------|------------------|
-| **Relearn** | `relearn` | Post-train `Qwen/Qwen3.8-27B` (native VLM) | 4000 bps |
-| **Relearn Image** | `relearn-image` | Fine-tune `nvidia/Cosmos3-Super-Text2Image`, judged by Q-Judger | 1500 bps |
-| **Relearn Agent** | `relearn-agent` | Post-train the same checkpoint into a tool-using agent, scored on replayed tool traces | 1500 bps |
+| **Relearn** | `relearn` | Post-train `Qwen/Qwen3.8-27B` (native VLM) | 3000 bps |
+| **Relearn Image** | `relearn-image` | Fine-tune `nvidia/Cosmos3-Super-Text2Image`, judged by Q-Judger | 1000 bps |
+| **Relearn Agent** | `relearn-agent` | Post-train the same checkpoint into a tool-using agent, scored on replayed tool traces | 1000 bps |
 | **Bounty** | `bounty` | File real bug reports against the subnet | 3000 bps |
+| **Proof** | `proof` | Reproducible experiments against operator-published research topics; digest-pinned RLM judge | 2000 bps |
 
 Encoder-attach Multimodal (`relearn-mm`) is **off**: no trust-root row, no
 emission.
@@ -49,6 +50,7 @@ not a second product.
 - **[How to mine — Relearn Image](docs/external-miner/relearn-image.md)**
 - **[How to mine — Relearn Agent](docs/external-miner/relearn-agent.md)**
 - **[How to mine — Bounty](docs/external-miner/bounty.md)**
+- **[How to mine — Proof](docs/external-miner/proof.md)**
 - **[How to validate](docs/external-miner/validators.md)**
 
 Apache License 2.0 — see [LICENSE](./LICENSE).

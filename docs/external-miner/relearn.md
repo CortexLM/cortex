@@ -2,9 +2,9 @@
 
 # Relearn — miners
 
-Challenge id is `relearn`. One of four live challenges; the others are
-[Relearn Image](./relearn-image.md), [Relearn Agent](./relearn-agent.md), and
-[Bounty](./bounty.md). Relearn Agent post-trains the **same** checkpoint, so
+Challenge id is `relearn`. One of five live challenges; the others are
+[Relearn Image](./relearn-image.md), [Relearn Agent](./relearn-agent.md),
+[Bounty](./bounty.md), and [Proof](./proof.md). Relearn Agent post-trains the **same** checkpoint, so
 read both before you pick: this page pays for answers, that one pays for
 grounded tool use. Long guide, eval image, and harness:
 [CortexLM/relearn](https://github.com/CortexLM/relearn).

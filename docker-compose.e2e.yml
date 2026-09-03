@@ -30,6 +30,12 @@ services:
     environment:
       BASE_CHALLENGE_BIND: 0.0.0.0:8099
       RELEARN_AGENT_FORCE_SIM: "true"
+  proof-challenge:
+    ports:
+      - "8100:8100"
+    environment:
+      BASE_CHALLENGE_BIND: 0.0.0.0:8100
+      PROOF_FORCE_SIM: "true"
   bounty-challenge:
     ports:
       - "8096:8096"

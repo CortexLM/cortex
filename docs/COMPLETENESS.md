@@ -59,7 +59,7 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Eval pin | **done** | `config/relearn-pin.toml` — `eval_image` `ghcr.io/cortexlm/relearn-eval`, digest `sha256:4806db4b…`, `relearn_git_sha` `8ffbe8a0…` ([`CortexLM/relearn`](https://github.com/CortexLM/relearn) `8ffbe8a`, [publish-eval-image run 33730126042](https://github.com/CortexLM/relearn/actions/runs/33730126042)). CUDA scoring image: harvest-PATH + `import vllm, torchvision` + selftest proved on the pulled digest. Not the slim contract image. Do not re-pin `cbc4bbb8…` / `201cc5d2…` / `303c6357…` / `00839671…` / `86240d76…`. A live host still 503s until harvest + champion baseline are recorded. |
 | Holdout | **done** | Commitment in git, records operator-side (`RELEARN_HOLDOUT_FILE`) and verified at boot. Mismatch → submissions 503. |
 | Teacher | **v0** | Weights `incoai/GLM-5.3-NVFP4` served from `RELEARN_TEACHER_LOCAL_DIR` (never pass the Hugging Face repo id to vLLM). HTTP wire `glm-5.3`. Missing `RELEARN_TEACHER_API_URL` → `can_score: false` and 503 before rent. Judge-only. |
-| Emission | **4000 bps** | Default share (sum across all four challenges is `10000`). |
+| Emission | **3000 bps** | Default share (sum across all five challenges is `10000`). |
 | Spec | live | [`RELEARN.md`](RELEARN.md). |
 
 ## relearn-t2i-challenge (`relearn-image`)
@@ -76,7 +76,7 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Holdout | **done** | Commitment in git, records operator-side (`RELEARN_T2I_HOLDOUT_FILE`) and verified at boot. Mismatch → submissions 503. |
 | Live harvest | **done** | `crates/relearn-t2i-harvest` over the shared `harvest-pod` transport; wired from `LIUM_API_KEY` + `LIUM_SSH_PUBLIC_KEY_FILE`, reported as `live_harvest_wired`. Missing `RELEARN_T2I_JUDGE_API_URL` → `can_score: false` and 503 before rent. Contaminated / empty-evidence manifests are rejected without a pod. |
 | Champion baseline | **done** | `RELEARN_T2I_BASE_CHAMPION_FILE` (verified against the pin) or the wired harvest. A live host never inherits sim numbers; without one every submission 503s. |
-| Emission | **1500 bps** | Default share. |
+| Emission | **1000 bps** | Default share. |
 | Spec | live | [`RELEARN-IMAGE.md`](RELEARN-IMAGE.md). |
 
 ## relearn-agent-challenge
@@ -90,7 +90,7 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Eval pin | **done** | `config/relearn-agent-pin.toml` — `eval_image_digest` `sha256:4db52b13…` + `relearn_git_sha` `54d3537f…` ([`CortexLM/relearn`](https://github.com/CortexLM/relearn) PR #3). Digest-only, no floating tag. |
 | Episodes | **done** | Commitment in git, episodes operator-side (`RELEARN_AGENT_HOLDOUT_FILE`) and verified at boot. An episode needing no tool call is refused at load. |
 | Live harvest | **done** | `crates/relearn-agent-harvest`; the request names the three required arms so a missing arm is the image's fault, not an ambiguity. Missing `RELEARN_TEACHER_API_URL` → `can_score: false` and 503 before rent. Contaminated / empty-evidence manifests are rejected without a pod. |
-| Emission | **1500 bps** | Default share. |
+| Emission | **1000 bps** | Default share. |
 | Spec | live | [`RELEARN-AGENT.md`](RELEARN-AGENT.md). |
 
 ## relearn-mm-challenge (off)
@@ -118,6 +118,21 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Compose / images | **done** | Default compose + `images.yml` target `bounty-challenge`. |
 | Emission | **3000 bps** | Default share; operator can retune (sum `10000`). |
 | Spec | live | [`BOUNTY.md`](BOUNTY.md). |
+
+## proof-challenge
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Challenge id | **done** | `proof` on the wire. Topics are operator-published signed documents; git carries no catalog. |
+| Crates (`crates/proof-*`) | **done** | task (signed topics, holdout commitments, global pin), score (per-topic lattice + mean), store, eval (RLM judge, fail-closed readiness), harvest, http, challenge. |
+| Binary (`bins/proof-challenge`) | **done** | HTTP API on `:8100`. |
+| Compose / images | **done** | Default compose + `images.yml` target `proof-challenge`. |
+| Eval pin | **v0** | `config/proof-pin.toml` — `eval_image` `ghcr.io/cortexlm/proof-eval`, `eval_image_digest` empty until first green proof-eval CI. Empty digest → live submits **503**. Do not invent a sha256. |
+| Topics | **done** | sr25519 under the `proof` trust-root key (`base-proof-topic-v1`). Admin `POST /v1/admin/proof/topics`. A topic must be sealed to `open`. |
+| Holdout | **done** | Per-topic operator file (`PROOF_HOLDOUT_FILE`). Commitment in the topic document, never in the pin. `xtask proof-holdout --topic-id`. |
+| Live harvest | **done** | `crates/proof-harvest` over `harvest-pod`; `PROOF_FORCE_SIM` is local-only. |
+| Emission | **2000 bps** | Split equally across currently `open` topics. Empty open set → `NoScore(ChallengeInternal)`. |
+| Spec | live | [`PROOF.md`](PROOF.md). |
 
 ## Infrastructure
 

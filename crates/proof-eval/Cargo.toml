@@ -1,0 +1,27 @@
+[package]
+name = "proof-eval"
+description = "Proof eval loop: digest-pinned RLM agent, harness metrics, fail-closed readiness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+prism-lium-types = { path = "../prism-lium-types" }
+proof-score = { path = "../proof-score" }
+proof-store = { path = "../proof-store" }
+proof-task = { path = "../proof-task" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

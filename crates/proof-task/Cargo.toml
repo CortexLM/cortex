@@ -1,0 +1,21 @@
+[package]
+name = "proof-task"
+description = "Proof challenge identity, signed topic documents, holdout commitments, and the global pin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+crypto = { path = "../crypto" }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+toml = "0.8"
+
+[lints]
+workspace = true

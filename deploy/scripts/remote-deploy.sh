@@ -31,7 +31,7 @@ REMOTE_DIR="${BASE_REMOTE_DIR:-/opt/base}"
 # bind source and the container's BASE_VERIFY_WORK_ROOT byte-for-byte.
 STATE_ROOT="${BASE_STATE_DIR:-/var/lib/base}"
 GHCR_PREFIX="${BASE_GHCR_PREFIX:-ghcr.io/baseintelligence/base}"
-PIN_SERVICES=(validator gateway updater relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge)
+PIN_SERVICES=(validator gateway updater relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge proof-challenge)
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 if [[ -n "${BASE_SSH_IDENTITY:-}" ]]; then
   SSH_OPTS+=(-i "$BASE_SSH_IDENTITY")
@@ -160,8 +160,8 @@ fi
 
 echo "remote-deploy: rsync tree"
 if [[ "$BUILD_FROM" == "prebuilt" ]]; then
-  for b in validator gateway updater relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge; do
-    [[ -x "$ROOT/target/release/$b" ]] || die "missing prebuilt binary target/release/$b — run: cargo build --release --features validator-bin/dcap -p validator-bin -p gateway-bin -p updater-bin -p relearn-challenge-bin -p relearn-t2i-challenge-bin -p relearn-agent-challenge-bin -p bounty-challenge-bin"
+  for b in validator gateway updater relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge proof-challenge; do
+    [[ -x "$ROOT/target/release/$b" ]] || die "missing prebuilt binary target/release/$b — run: cargo build --release --features validator-bin/dcap -p validator-bin -p gateway-bin -p updater-bin -p relearn-challenge-bin -p relearn-t2i-challenge-bin -p relearn-agent-challenge-bin -p bounty-challenge-bin -p proof-challenge-bin"
   done
 fi
 
@@ -194,6 +194,7 @@ ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
   '$REMOTE_DIR/deploy/secrets/relearn-t2i' \
   '$REMOTE_DIR/deploy/secrets/relearn-agent' \
   '$REMOTE_DIR/deploy/secrets/bounty' \
+  '$REMOTE_DIR/deploy/secrets/proof' \
   '$REMOTE_DIR/deploy/secrets/wallets' \
   && chmod 700 '$REMOTE_DIR/deploy/secrets' '$REMOTE_DIR/deploy/secrets/lium' \
   && for f in api_key ssh_ed25519 ssh_ed25519.pub; do \
@@ -204,7 +205,11 @@ ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
   && [ -e '$REMOTE_DIR/deploy/secrets/relearn-agent/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/relearn-agent/admin_tokens' \
   && [ -e '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' \
   && [ -e '$REMOTE_DIR/deploy/secrets/bounty/session_secret' ] || : > '$REMOTE_DIR/deploy/secrets/bounty/session_secret' \
-  && for sk in relearn_sk relearn_t2i_sk relearn_agent_sk bounty_sk; do \
+  && [ -e '$REMOTE_DIR/deploy/secrets/proof/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/proof/admin_tokens' \
+  && [ -e '$REMOTE_DIR/deploy/secrets/proof/topics.json' ] || echo '[]' > '$REMOTE_DIR/deploy/secrets/proof/topics.json' \
+  && [ -e '$REMOTE_DIR/deploy/secrets/proof/holdouts.json' ] || echo '{}' > '$REMOTE_DIR/deploy/secrets/proof/holdouts.json' \
+  && [ -e '$REMOTE_DIR/deploy/secrets/proof/baselines.json' ] || echo '{}' > '$REMOTE_DIR/deploy/secrets/proof/baselines.json' \
+  && for sk in relearn_sk relearn_t2i_sk relearn_agent_sk bounty_sk proof_sk; do \
        p='$REMOTE_DIR/deploy/secrets/'\$sk; \
        if [ -d \"\$p\" ]; then rm -rf \"\$p\"; fi; \
        [ -e \"\$p\" ] || : > \"\$p\"; \
@@ -216,16 +221,21 @@ ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
        '$REMOTE_DIR/deploy/secrets/relearn-agent/admin_tokens' \
        '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' \
        '$REMOTE_DIR/deploy/secrets/bounty/session_secret' \
+       '$REMOTE_DIR/deploy/secrets/proof/admin_tokens' \
+       '$REMOTE_DIR/deploy/secrets/proof/topics.json' \
+       '$REMOTE_DIR/deploy/secrets/proof/holdouts.json' \
+       '$REMOTE_DIR/deploy/secrets/proof/baselines.json' \
   && chown -R 65532:65532 '$REMOTE_DIR/deploy/secrets/lium' \
        '$REMOTE_DIR/deploy/secrets/relearn' \
        '$REMOTE_DIR/deploy/secrets/relearn-t2i' \
        '$REMOTE_DIR/deploy/secrets/relearn-agent' \
        '$REMOTE_DIR/deploy/secrets/bounty' \
+       '$REMOTE_DIR/deploy/secrets/proof' \
   && chmod -R a-w '$REMOTE_DIR/deploy/secrets/wallets' 2>/dev/null; \
   chown -R 65532:65532 '$REMOTE_DIR/deploy/secrets/wallets' 2>/dev/null; true"
 
 # Relearn artifact staging (host paths for harvested receipts).
-for area in relearn relearn-t2i relearn-agent; do
+for area in relearn relearn-t2i relearn-agent proof; do
   ssh_h "install -d -m 0775 -o 65532 -g 65532 '$STATE_ROOT/\$area'"
 done
 
@@ -267,7 +277,7 @@ esac
 # Challenge pins are rsynced with the tree. Live Lium rent refuses until each
 # eval_image_digest is a real sha256 pin.
 if [[ "$ROLE" == "master" ]]; then
-  for pin in relearn-pin.toml relearn-t2i-pin.toml relearn-agent-pin.toml; do
+  for pin in relearn-pin.toml relearn-t2i-pin.toml relearn-agent-pin.toml proof-pin.toml; do
     if ssh_h "test -f '$REMOTE_DIR/config/$pin'"; then
       echo "remote-deploy: pin present at $REMOTE_DIR/config/$pin"
     else
@@ -312,6 +322,7 @@ if [[ "$BUILD_FROM" == "prebuilt" ]]; then
     "$ROOT/target/release/relearn-t2i-challenge" \
     "$ROOT/target/release/relearn-agent-challenge" \
     "$ROOT/target/release/bounty-challenge" \
+    "$ROOT/target/release/proof-challenge" \
     "$HOST:$REMOTE_DIR/target/release/"
 fi
 
@@ -375,6 +386,7 @@ optional = {
     "relearn-t2i-challenge",
     "relearn-agent-challenge",
     "bounty-challenge",
+    "proof-challenge",
     "base-attest-helper",
 }
 data = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -524,6 +536,7 @@ backends = [
     ("relearn-image", "http://relearn-t2i-challenge:8097"),
     ("relearn-agent", "http://relearn-agent-challenge:8099"),
     ("bounty", "http://bounty-challenge:8096"),
+    ("proof", "http://proof-challenge:8100"),
 ]
 failed = False
 for cid, url in backends:

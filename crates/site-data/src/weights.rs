@@ -238,17 +238,18 @@ mod tests {
         // challenge really earns emission.
         let root = ChallengesBody {
             challenges: vec![
-                entry("relearn", 4000),
-                entry("relearn-image", 1500),
-                entry("relearn-agent", 1500),
+                entry("relearn", 3000),
+                entry("relearn-image", 1000),
+                entry("relearn-agent", 1000),
                 entry("bounty", 3000),
+                entry("proof", 2000),
             ],
         };
         let shares = configured_shares(Some(&root));
         let sum: f64 = shares.iter().map(|(_, v)| *v).sum();
         assert!((sum - 1.0).abs() < 1e-9, "shares sum to {sum}");
 
-        for slug in ["relearn", "relearn-image", "relearn-agent"] {
+        for slug in ["relearn", "relearn-image", "relearn-agent", "proof"] {
             let arena_slug = site_types::ArenaSlug::parse(slug)
                 .unwrap_or_else(|| panic!("{slug} must parse as an arena slug"));
             assert_eq!(arena_slug.as_str(), slug);

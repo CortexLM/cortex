@@ -1,0 +1,16 @@
+[package]
+name = "proof-score"
+description = "Proof scoring: agent verdict, metric families, pass rule, lattice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+proof-task = { path = "../proof-task" }
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

@@ -4326,6 +4326,126 @@ dependencies = [
 ]
 
 [[package]]
+name = "proof-challenge"
+version = "0.1.0"
+dependencies = [
+ "bundle",
+ "challenge-common",
+ "crypto",
+ "hex",
+ "proof-eval",
+ "proof-http",
+ "proof-score",
+ "proof-store",
+ "proof-task",
+ "serde_json",
+]
+
+[[package]]
+name = "proof-challenge-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "challenge-keys",
+ "clap",
+ "harvest-pod",
+ "prism-lium",
+ "proof-challenge",
+ "proof-eval",
+ "proof-harvest",
+ "proof-task",
+ "serde_json",
+ "telemetry",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "proof-eval"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "prism-lium-types",
+ "proof-score",
+ "proof-store",
+ "proof-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "proof-harvest"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "harvest-pod",
+ "prism-lium-types",
+ "proof-eval",
+ "proof-task",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "proof-http"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "crypto",
+ "hex",
+ "http-body-util",
+ "proof-eval",
+ "proof-score",
+ "proof-store",
+ "proof-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "proof-score"
+version = "0.1.0"
+dependencies = [
+ "proof-task",
+ "serde",
+]
+
+[[package]]
+name = "proof-store"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "proof-score",
+ "proof-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "proof-task"
+version = "0.1.0"
+dependencies = [
+ "crypto",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "proptest"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7623,6 +7743,7 @@ dependencies = [
  "frame-metadata",
  "hex",
  "parity-scale-codec",
+ "proof-task",
  "regex",
  "relearn-agent-task",
  "relearn-challenge-task",

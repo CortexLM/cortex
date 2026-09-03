@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::state::SiteState;
-use crate::upstream::{self, DESIGN, PRISM, RELEARN, RELEARN_AGENT, RELEARN_IMAGE};
+use crate::upstream::{self, DESIGN, PRISM, PROOF, RELEARN, RELEARN_AGENT, RELEARN_IMAGE};
 use site_data::map::{
     activity_from_lives, design_arena_from_dashboard, design_leaderboard, design_submission,
     enrich_leaderboard_uids, enrich_leaderboard_weights, enrich_submission_uids,
@@ -28,7 +28,7 @@ use site_prism::{
     prism_submission_detail_with_zone,
 };
 use site_types::page_slice;
-use site_types::{coding_arena, relearn_agent_frame, relearn_image_frame};
+use site_types::{coding_arena, proof_frame, relearn_agent_frame, relearn_image_frame};
 use site_types::{
     ArenaSlug, Governance, LandingSummary, MetricsEmission, MetricsPassRate, MetricsPopulation,
     NetworkMetrics, NetworkStats, RecipeEra, ResultsMatrix, Validator,
@@ -131,6 +131,10 @@ async fn fetch_relearn_agent_status(st: &SiteState) -> Option<Value> {
     upstream::get_json_opt(st, RELEARN_AGENT, "/v1/status").await
 }
 
+async fn fetch_proof_status(st: &SiteState) -> Option<Value> {
+    upstream::get_json_opt(st, PROOF, "/v1/status").await
+}
+
 /// Every live arena with trust-root emission shares applied.
 ///
 /// The three Relearn challenges are fetched together so the emission column
@@ -140,11 +144,13 @@ async fn live_arenas(st: &SiteState) -> Vec<site_types::Arena> {
     let relearn = fetch_relearn_status(st).await;
     let image = fetch_relearn_image_status(st).await;
     let agent = fetch_relearn_agent_status(st).await;
+    let proof = fetch_proof_status(st).await;
     let mut arenas = vec![
         coding_arena(),
         relearn_arena_from_live(relearn.as_ref()),
         hydrate_arena(relearn_image_frame(), image.as_ref()),
         hydrate_arena(relearn_agent_frame(), agent.as_ref()),
+        hydrate_arena(proof_frame(), proof.as_ref()),
     ];
     for arena in &mut arenas {
         apply_emission(st, arena);
@@ -344,6 +350,7 @@ async fn get_arena(State(st): State<SiteState>, Path(slug): Path<String>) -> Res
             relearn_agent_frame(),
             fetch_relearn_agent_status(&st).await.as_ref(),
         ),
+        ArenaSlug::Proof => hydrate_arena(proof_frame(), fetch_proof_status(&st).await.as_ref()),
     };
     apply_emission(&st, &mut arena);
     Json(arena).into_response()
@@ -607,7 +614,8 @@ async fn get_leaderboard(
         ArenaSlug::Coding
         | ArenaSlug::Relearn
         | ArenaSlug::RelearnImage
-        | ArenaSlug::RelearnAgent => Json(empty_leaderboard_json(page, page_size)).into_response(),
+        | ArenaSlug::RelearnAgent
+        | ArenaSlug::Proof => Json(empty_leaderboard_json(page, page_size)).into_response(),
     }
 }
 
@@ -627,7 +635,8 @@ async fn get_submissions(
         ArenaSlug::Coding
         | ArenaSlug::Relearn
         | ArenaSlug::RelearnImage
-        | ArenaSlug::RelearnAgent => {
+        | ArenaSlug::RelearnAgent
+        | ArenaSlug::Proof => {
             Json(page_slice::<crate::Submission>(&[], page, page_size)).into_response()
         }
         ArenaSlug::Design => {

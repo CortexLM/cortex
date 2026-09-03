@@ -32,5 +32,7 @@ services:
     profiles: ["never"]
   bounty-challenge:
     profiles: ["never"]
+  proof-challenge:
+    profiles: ["never"]
   socket-proxy:
     profiles: ["never"]

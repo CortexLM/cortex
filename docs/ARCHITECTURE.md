@@ -12,12 +12,13 @@ Operator-facing map of the control plane. Normative byte contracts live in the f
 | [`RELEARN-AGENT.md`](./RELEARN-AGENT.md) | live | `relearn-agent` — replayed tool traces on the same base checkpoint as `relearn` |
 | [`RELEARN-MM.md`](./RELEARN-MM.md) | **off** | `relearn-mm` — no trust-root row, no emission; `mm` compose profile only |
 | [`BOUNTY.md`](./BOUNTY.md) | live | `bounty` — paired bug reports |
+| [`PROOF.md`](./PROOF.md) | live | `proof` — operator-published research topics, digest-pinned RLM judge |
 
 Do not restate those contracts here. Link them.
 
 Audiences (do not mix):
 
-- Miners: [`external-miner/README.md`](./external-miner/README.md) indexes all four challenges
+- Miners: [`external-miner/README.md`](./external-miner/README.md) indexes all five challenges
 - Validators: [`external-miner/validators.md`](./external-miner/validators.md)
 
 Security claim and what it excludes: [`THREAT_MODEL.md`](./THREAT_MODEL.md).  
@@ -46,7 +47,8 @@ Runbooks: [`runbooks/`](./runbooks/).
                     │  relearn-challenge ·                  │
                     │  relearn-t2i-challenge (relearn-image)│
                     │  relearn-agent-challenge ·            │
-                    │  bounty-challenge                     │
+                    │  bounty-challenge ·                   │
+                    │  proof-challenge                      │
                     └───────────────┬─────────────────────┘
                                     │ TLS terminates in gateway (D20)
                                     │ /challenge/{id}/*  /v1/bundle/*
@@ -62,6 +64,7 @@ Runbooks: [`runbooks/`](./runbooks/).
                     │  relearn artifact digest + Lium BYOK  │
                     │  image / agent artifact + manifest    │
                     │  bounty pair + bug reports            │
+                    │  proof topic_id + experiment artifact │
                     └─────────────────────────────────────┘
 ```
 
@@ -74,6 +77,7 @@ Runbooks: [`runbooks/`](./runbooks/).
 | `relearn-agent-challenge` | **Master-only:** episode replay, trace grounding, tool-ablation and observation-shuffle arms, contamination / canary gates, sign leaves |
 | `relearn-mm-challenge` | **Off** (`mm` profile): text-intact rerun, vision + agentic holdout with a pixel-shuffle control. No trust-root row, so it emits nothing |
 | `bounty-challenge` | **Master-only:** internal pair/reports/adjudicate; **reads** CortexLM/backend public API for scoring and signs leaves from those rows. An unreadable feed pays nobody — `E` is covered with `ChallengeInternal`, share burns to uid 0 — rather than scoring offline |
+| `proof-challenge` | **Master-only:** operator-published signed topics, per-topic holdout unseal, digest-pinned RLM judge, mean-of-open-topics lattice, sign leaves |
 | `updater` | Digest-pinned rollouts via `docker-socket-proxy` (master) |
 | `trustroot` | Offline keygen / sign / verify for owner-signed TOML |
 | `bundle` | SCALE types, seal, verify (`PROTOCOL_VERSION`) |
