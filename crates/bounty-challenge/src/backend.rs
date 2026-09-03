@@ -14,10 +14,13 @@
 //! under-count a miner's valid rows or drop it to `NotAttempted`, while
 //! `/leaderboard` sets the champion walk order. The pair is therefore read
 //! until two consecutive reads agree, and a feed that never holds still is an
-//! error rather than a guess.
+//! error rather than a guess. Consecutive equals are not enough on their own:
+//! a host that always serves leaderboard A beside reports B would agree with
+//! itself. `valid_count` on each leaderboard row must match the `valid`
+//! reports for that hotkey, or the pair is refused.
 
 use bounty_challenge_task::backend_public_url;
-use bounty_score::{parse_leaderboard, parse_reports, PublicSnapshot};
+use bounty_score::{parse_leaderboard, parse_reports, snapshot_halves_agree, PublicSnapshot};
 use thiserror::Error;
 
 /// Fetch / parse errors. Never embed secrets or hosts from env into Display
@@ -37,6 +40,11 @@ pub enum BackendError {
     /// revision could be pinned.
     #[error("backend public feed changed under every read")]
     Inconsistent,
+    /// Leaderboard `valid_count` does not match the `valid` reports. A feed
+    /// that always serves one revision on `/leaderboard` and another on
+    /// `/reports` is stable under re-read and must still be refused.
+    #[error("backend public leaderboard and reports do not agree")]
+    Mismatched,
 }
 
 /// How many times one call re-reads the pair of routes looking for two
@@ -58,9 +66,10 @@ pub fn public_path(base: &str, tail: &str) -> String {
 /// # Errors
 /// [`BackendError::Unset`] when neither the argument nor the env carries a
 /// base URL, [`BackendError::Fetch`] on transport or non-2xx,
-/// [`BackendError::Json`] when a body does not match the public DTO, and
-/// [`BackendError::Inconsistent`] when the feed never held still long enough
-/// to read both routes at one revision.
+/// [`BackendError::Json`] when a body does not match the public DTO,
+/// [`BackendError::Mismatched`] when the two routes describe different
+/// publications, and [`BackendError::Inconsistent`] when the feed never held
+/// still long enough to read both routes at one revision.
 pub async fn fetch_public_snapshot(base: Option<&str>) -> Result<PublicSnapshot, BackendError> {
     let url = match base {
         Some(u) if !u.trim().is_empty() => u.trim().to_owned(),
@@ -74,7 +83,10 @@ pub async fn fetch_public_snapshot(base: Option<&str>) -> Result<PublicSnapshot,
     for _ in 1..MAX_PAIR_READS {
         let next = read_pair(&client, &url).await?;
         if next == prev {
-            return Ok(next);
+            if snapshot_halves_agree(&next) {
+                return Ok(next);
+            }
+            return Err(BackendError::Mismatched);
         }
         prev = next;
     }
