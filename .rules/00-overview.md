@@ -24,6 +24,7 @@ There is no `docs/` tree. The three doc surfaces are:
 | [`40-agents.md`](40-agents.md) | keeping `AGENTS.md` accurate in the same PR |
 | [`50-versioning.md`](50-versioning.md) | automatic versioning (command + CI gate) |
 | [`60-naming.md`](60-naming.md) | frozen `base` / `BASE_*` / domain-tag spellings |
+| [`70-secrets-mnemonics.md`](70-secrets-mnemonics.md) | BIP39 / `secretPhrase` never leave a 0600 file |
 
 [`contracts/`](contracts/README.md) holds the **frozen normative specs** —
 bundle bytes, the design challenge freeze, prism, the threat model, and the
@@ -51,7 +52,12 @@ cargo run -p xtask -- rules-check
 ```
 
 That gate fails if `docs/` comes back, if a `.rules/` file goes missing, if
-`AGENTS.md` / `README.md` stop pointing here, if the PR template drifts from
-the attestation CI requires, if `20-pre-prod-local.md` stops listing a command
-CI actually runs, or if any markdown link in these surfaces points at a file
-that does not exist.
+this overview stops naming a numbered file, if `AGENTS.md` / `README.md` stop
+pointing here, if `AGENTS.md` / `40-agents.md` /
+`contracts/THREAT_MODEL.md` stop linking
+[`70-secrets-mnemonics.md`](70-secrets-mnemonics.md), if a GitHub workflow
+uses `PROD_ROTATE_MNEMONIC` or any `secrets.*MNEMONIC*` transport, if
+`.dockerignore` / `.gitignore` drop `**/*mnemonic*`, if the PR template
+drifts from the attestation CI requires, if `20-pre-prod-local.md` stops
+listing a command CI actually runs, or if any markdown link in these surfaces
+points at a file that does not exist.

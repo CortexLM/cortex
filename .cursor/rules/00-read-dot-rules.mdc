@@ -14,6 +14,7 @@ Before you change anything in this repository, read **all** of `.rules/`:
 - `.rules/40-agents.md` — keeping `AGENTS.md` accurate in the same PR
 - `.rules/50-versioning.md` — automatic versioning
 - `.rules/60-naming.md` — frozen `base` / `BASE_*` / domain-tag spellings
+- `.rules/70-secrets-mnemonics.md` — BIP39 / `secretPhrase` never leave a 0600 file
 
 `.rules/contracts/` holds frozen, gate-pinned specs. Read the ones your change
 touches; never weaken a gate or rewrite incentive, scoring, or consensus

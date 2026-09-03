@@ -132,7 +132,9 @@ cargo run -q -p trustroot-bin -- verify \
 - `deploy/env/*.env` are mode `0600`; wallets and key files are `0400`, owner
   uid `65532`; the age identity is delivered out of band and never lives in
   Terraform state or cloud-init.
-- No secrets in the diff. Expect empty:
+- No secrets in the diff. Expect empty. BIP39 mnemonics and `secretPhrase`
+  must never appear in the tree, in argv, or in a `644` audit log —
+  [`.rules/70-secrets-mnemonics.md`](70-secrets-mnemonics.md).
 
 ```bash
 git grep -nEi 'dop_v1_|secretPhrase|BEGIN [A-Z ]*PRIVATE KEY' -- '*.md' '*.toml' '*.yml'

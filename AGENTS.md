@@ -2,8 +2,10 @@
 
 > **Read [`.rules/`](.rules/00-overview.md) first — all of it — before you open
 > a pull request or mark one ready.** It is the enforceable contract: hygiene,
-> the local pre-prod gates, the PR attestation, automatic versioning, and the
-> frozen `base` spellings. CI fails a PR whose body does not attest to it.
+> the local pre-prod gates, the PR attestation, automatic versioning, the
+> frozen `base` spellings, and
+> [mnemonic handling](.rules/70-secrets-mnemonics.md). CI fails a PR whose body
+> does not attest to it.
 
 Short contract for agents and operators. Prefer linking over restating.
 
@@ -36,6 +38,7 @@ Working branch: **`main`**. Prod ships from annotated tags `v*.*.*` cut on `main
 - Frozen specs ([`.rules/contracts/BUNDLE_SPEC.md`](.rules/contracts/BUNDLE_SPEC.md), [`.rules/contracts/DESIGN_CHALLENGE.md`](.rules/contracts/DESIGN_CHALLENGE.md)) are pinned by xtask. Do not weaken gates or rewrite incentive / scoring / consensus semantics.
 - `unsafe_code = forbid`. No `unwrap` / `expect` in non-test code.
 - Every PR bumps the workspace version ([`.rules/50-versioning.md`](.rules/50-versioning.md)) and carries the rules attestation ([`.rules/30-pr.md`](.rules/30-pr.md)).
+- **BIP39 mnemonics, `secretPhrase`, and raw hotkey / coldkey seeds never leave a mode-`0600` file.** Not in Chat, argv, GitHub Actions secrets, compose `environment:`, cloud-init, Terraform state, or a `644` agent `audit.jsonl`. `PROD_ROTATE_MNEMONIC` is banned. Keystore already refuses a mnemonic from a plain env var; that is not enough. See [`.rules/70-secrets-mnemonics.md`](.rules/70-secrets-mnemonics.md).
 
 ## Wallet / key roles (do not conflate)
 
@@ -46,6 +49,8 @@ Working branch: **`main`**. Prod ships from annotated tags `v*.*.*` cut on `main
 | `prism_sk` / `design_sk` | Challenge / smoke | Signed leaves (`POST /v1/weights/raw`); pubs must match trust root |
 | Gateway owner wallet + `BASE_GATEWAY_REQUIRE_OWNER` | Gateway | Master-only **identity** check (live/prod). **Not** required to seal or serve `/v1/weights/latest` |
 | Validator wallet | Validator | On-chain weight **submit** only — validators *fetch* sealed weights; they do not need a gateway wallet |
+
+Mnemonics for those roles are **path-only** (`BASE_GATEWAY_MNEMONIC_FILE`, `BASE_VALIDATOR_MNEMONIC_FILE`, mode `0600`). Never a GitHub Actions secret, never process argv. Wallet JSON that contains `secretPhrase` is the same secret. See [`.rules/70-secrets-mnemonics.md`](.rules/70-secrets-mnemonics.md).
 
 `GET /v1/weights/latest` is **fail-closed**: with no sealed bundle (or decode error) the gateway serves a **burn vector** (uid 0 = 100%, `sealed: false`) rather than 404. A missing gateway wallet is unrelated.
 
@@ -132,6 +137,7 @@ Full local list, including the challenge-submission and pre-prod checks: [`.rule
 | **Agent + PR contract (read first)** | [`.rules/00-overview.md`](.rules/00-overview.md) |
 | System map / process topology | [`README.md`](README.md) § Architecture |
 | Cortex vs leftover `base` names | [`.rules/60-naming.md`](.rules/60-naming.md) |
+| BIP39 / `secretPhrase` / audit.jsonl | [`.rules/70-secrets-mnemonics.md`](.rules/70-secrets-mnemonics.md) |
 | Local gates + full-subnet test before prod | [`.rules/20-pre-prod-local.md`](.rules/20-pre-prod-local.md) · [`deploy/AGENTS.md`](deploy/AGENTS.md) § Local testnet E2E · `./deploy/scripts/local-e2e.sh --help` |
 | Deploy / Compose / DO topology | [`deploy/README.md`](deploy/README.md) + [`deploy/AGENTS.md`](deploy/AGENTS.md) |
 | Versioning + release tags | [`.rules/50-versioning.md`](.rules/50-versioning.md) |
@@ -146,4 +152,5 @@ Full local list, including the challenge-submission and pre-prod checks: [`.rule
 - `deploy/secrets/**` (except documented `README.md` placeholders)
 - `deploy/terraform/*.tfstate*` / `terraform.tfvars` / local `.terraform/`
 - Age identities, wallets, `receipt_sk`, `*.pem` / `*.key` / `*.age`
+- BIP39 mnemonics, wallet JSON containing `secretPhrase`, or an agent `audit.jsonl` that captured either ([`.rules/70-secrets-mnemonics.md`](.rules/70-secrets-mnemonics.md))
 - A re-created `docs/` tree, or any doc surface outside `README.md`, `AGENTS.md`, `.rules/`, and `deploy/*.md`

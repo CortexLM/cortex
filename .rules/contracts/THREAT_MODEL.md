@@ -93,7 +93,7 @@ A malicious owner can authorize a dishonest challenge or a backdoored measuremen
 | Emission shares | Same trust root; gateway copy must match (D23) |
 | Participant completeness | Validator-derived expected set (D24) |
 | Miner code identity / liveness | TDX quote + D10 `report_data` + measurements allowlist |
-| Operator secrets | age-encrypted files, mode 0600, never cloud-init / TF state (R11) |
+| Operator secrets | age-encrypted files, mode 0600, never cloud-init / TF state (R11). BIP39 mnemonics and wallet JSON with `secretPhrase`: file path only, never argv / GHA secrets / a `644` audit log ([`70-secrets-mnemonics.md`](../70-secrets-mnemonics.md)) |
 | Host docker.sock | Only on `socket-proxy` with method allowlist |
 | Site origin (joinbase.ai cookies/session/DOM) vs miner HTML | Layered viewer sandbox (R13) |
 
@@ -119,6 +119,7 @@ A malicious owner can authorize a dishonest challenge or a backdoored measuremen
 | R4 | Zero emission possible | Extrinsic success + revealed weights match recompute is pass; emission is not |
 | R13 | Miner-generated design pages XSS-ing the joinbase.ai origin (cookie/session theft, phishing) when viewed | Four independent layers, each sufficient alone: (1) ammonia sanitize strips `<script>`/handlers before storage; (2) response CSP `sandbox` with **no** `allow-scripts`/`allow-same-origin` → opaque origin, scripts disabled, no cookie/storage access, `frame-ancestors` allowlist, never `Set-Cookie`; (3) gateway proxy re-applies the header floor and strips `Set-Cookie` on `/challenge/*/v1/view/*` (survives stale upstreams); (4) frontend embeds with `<iframe sandbox="">`. Browser-tested: injected `<script>` stays inert under each layer independently. Produced HTML is never served (screenshots-only). |
 | R14 | Screenshot Chromium inside design-challenge (`--no-sandbox`, `file://`) SSRF-ing control-plane targets on the `base` network (gateway admin, metadata `169.254.169.254`, socket-proxy, postgres) via missed script or static `http(s)` / CSS `url(...)` | Defense-in-depth: (1) sanitize neutralizes internal `href`/`src`; (2) Chromium forced through `design-egress-proxy` (`DESIGN_SCREENSHOT_PROXY` + `--proxy-bypass-list=<-loopback>`) with the same post-DNS blocklist as sandboxes; (3) capture-document CSP nonce + `navigate-to 'none'`. Host Sim (`BASE_ALLOW_HOST_SIM`) remains fail-closed on staging/prod. |
+| R15 | Owner hotkey mnemonic leak: agent writes the phrase into a `shell_command` recorded plaintext in `audit.jsonl` mode 644; or a GitHub Actions secret (`PROD_ROTATE_MNEMONIC`) used to SCP wallet JSON containing `secretPhrase` onto prod hosts. Keystore refusing mnemonics from env vars is not enough. | Fail-closed: never argv / echo / CI-secret / compose `environment:`; write only to a `umask 077` / mode `0600` file and pass the path (`BASE_*_MNEMONIC_FILE`); agent `audit.jsonl` is `0600` and redacts mnemonic / `secretPhrase`; `PROD_ROTATE_MNEMONIC` is banned. See [`70-secrets-mnemonics.md`](../70-secrets-mnemonics.md). |
 
 ---
 
@@ -127,4 +128,5 @@ A malicious owner can authorize a dishonest challenge or a backdoored measuremen
 - Never claim merkle is on-chain in the weight payload.
 - Never claim owner honesty or public third-party auditability of non-equivocation.
 - Never put secrets, tokens, mnemonics, or private keys in this tree.
+- Never paste a BIP39 mnemonic or `secretPhrase` into Chat, GitHub, CI, `docker inspect`, process argv, or agent audit logs. Wallet JSON that contains `secretPhrase` is the same secret. See [`70-secrets-mnemonics.md`](../70-secrets-mnemonics.md).
 - Miner docs must carry the same `protocol_version` badge as `bundle::PROTOCOL_VERSION` (CI-gated).

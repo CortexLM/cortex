@@ -252,6 +252,7 @@ annotated tags `vX.Y.Z` cut on `main`. Full rules:
 | Need | Path |
 |------|------|
 | Agent + PR contract (read first) | [`.rules/00-overview.md`](.rules/00-overview.md) |
+| BIP39 mnemonics / wallet JSON / audit logs | [`.rules/70-secrets-mnemonics.md`](.rules/70-secrets-mnemonics.md) |
 | Repo map, non-negotiables, verification duties | [`AGENTS.md`](AGENTS.md) |
 | Frozen specs, threat model, miner docs | [`.rules/contracts/README.md`](.rules/contracts/README.md) |
 | Deploy topology, promote/rollback, secrets | [`deploy/README.md`](deploy/README.md), [`deploy/AGENTS.md`](deploy/AGENTS.md) |
