@@ -288,6 +288,78 @@ pub fn pre_eval_contamination_verdict(ev: &ContaminationEvidence) -> Option<Prom
     })
 }
 
+/// Perturbation, base canaries, and the general-bench canary.
+///
+/// Missing evidence is a fail here, the same as the public split: a run that
+/// simply omits the series would otherwise walk past the gate, and omitting it
+/// is exactly what an overfit artifact wants.
+fn push_retention_gates(
+    champion: &SliceScores,
+    challenger: &SliceScores,
+    failed: &mut Vec<GateFail>,
+) {
+    match (
+        SliceScores::mean(&challenger.holdout),
+        SliceScores::mean(&challenger.perturbed),
+    ) {
+        (_, None) => failed.push(GateFail::PerturbationEvidenceMissing),
+        (Some(h), Some(p)) => {
+            if h - p > MAX_PERTURB_DROP + DEADZONE {
+                failed.push(GateFail::Perturbation);
+            }
+        }
+        (None, Some(_)) => {}
+    }
+
+    match SliceScores::mean(&challenger.canaries) {
+        None => failed.push(GateFail::BaseCanaryEvidenceMissing),
+        Some(c) => {
+            if c + DEADZONE < MIN_CANARY_ACCURACY {
+                failed.push(GateFail::Canaries);
+            }
+        }
+    }
+
+    match (
+        SliceScores::mean(&champion.general_canary),
+        SliceScores::mean(&challenger.general_canary),
+    ) {
+        (None, _) | (_, None) => failed.push(GateFail::CanaryEvidenceMissing),
+        (Some(champ_c), Some(chal_c)) => {
+            let drop = champ_c - chal_c;
+            if drop > CANARY_EPSILON + DEADZONE {
+                failed.push(GateFail::CanaryRegression {
+                    drop_bps: (drop * 10_000.0).round().max(0.0) as u64,
+                });
+            }
+        }
+    }
+}
+
+/// Pixel-shuffle control, one family at a time.
+///
+/// The champion is the reference for which families the holdout actually has
+/// images in. A challenger that skips a family the champion measured is not a
+/// text-only holdout, it is a run that declined the control.
+fn push_shuffle_gates(
+    champion: &SliceScores,
+    challenger: &SliceScores,
+    failed: &mut Vec<GateFail>,
+) {
+    for task in HoldoutTask::VISION {
+        match (
+            champion.vision_shuffle.get(&task),
+            challenger.vision_shuffle.get(&task),
+        ) {
+            (_, Some(ev)) if !ev.uses_the_image() => {
+                failed.push(GateFail::IgnoresTheImage { task });
+            }
+            (Some(_), None) => failed.push(GateFail::ShuffleEvidenceMissing { task }),
+            _ => {}
+        }
+    }
+}
+
 /// Judge challenger vs champion. Never returns `eligible` on a regression.
 ///
 /// The lattice is holdout-only. General-bench canary, public gap, shuffle, and
@@ -338,45 +410,7 @@ pub fn judge_challenger(champion: &SliceScores, challenger: &SliceScores) -> Pro
         (Some(_), None) => failed.push(GateFail::PairedRefusal),
     }
 
-    // Missing evidence is a fail, the same as the public split and the general
-    // canary: a run that simply omits the series would otherwise walk past the
-    // gate, and omitting it is exactly what an overfit artifact wants.
-    match (
-        SliceScores::mean(&challenger.holdout),
-        SliceScores::mean(&challenger.perturbed),
-    ) {
-        (_, None) => failed.push(GateFail::PerturbationEvidenceMissing),
-        (Some(h), Some(p)) => {
-            if h - p > MAX_PERTURB_DROP + DEADZONE {
-                failed.push(GateFail::Perturbation);
-            }
-        }
-        (None, Some(_)) => {}
-    }
-
-    match SliceScores::mean(&challenger.canaries) {
-        None => failed.push(GateFail::BaseCanaryEvidenceMissing),
-        Some(c) => {
-            if c + DEADZONE < MIN_CANARY_ACCURACY {
-                failed.push(GateFail::Canaries);
-            }
-        }
-    }
-
-    match (
-        SliceScores::mean(&champion.general_canary),
-        SliceScores::mean(&challenger.general_canary),
-    ) {
-        (None, _) | (_, None) => failed.push(GateFail::CanaryEvidenceMissing),
-        (Some(champ_c), Some(chal_c)) => {
-            let drop = champ_c - chal_c;
-            if drop > CANARY_EPSILON + DEADZONE {
-                failed.push(GateFail::CanaryRegression {
-                    drop_bps: (drop * 10_000.0).round().max(0.0) as u64,
-                });
-            }
-        }
-    }
+    push_retention_gates(champion, challenger, &mut failed);
 
     if challenger.agent_trace + DEADZONE < MIN_AGENT_TRACE {
         failed.push(GateFail::AgentTrace);
@@ -390,21 +424,7 @@ pub fn judge_challenger(champion: &SliceScores, challenger: &SliceScores) -> Pro
         failed.push(GateFail::ContaminationEvidenceMissing);
     }
 
-    // The champion is the reference for which families the holdout actually
-    // has images in. A challenger that skips a family the champion measured is
-    // not a text-only holdout, it is a run that declined the control.
-    for task in HoldoutTask::VISION {
-        match (
-            champion.vision_shuffle.get(&task),
-            challenger.vision_shuffle.get(&task),
-        ) {
-            (_, Some(ev)) if !ev.uses_the_image() => {
-                failed.push(GateFail::IgnoresTheImage { task });
-            }
-            (Some(_), None) => failed.push(GateFail::ShuffleEvidenceMissing { task }),
-            _ => {}
-        }
-    }
+    push_shuffle_gates(champion, challenger, &mut failed);
 
     failed.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
     failed.dedup();
@@ -687,7 +707,8 @@ mod tests {
             chal.vision_shuffle.remove(&task);
             let v = judge_challenger(&champ, &chal);
             assert!(
-                v.failed.contains(&GateFail::ShuffleEvidenceMissing { task }),
+                v.failed
+                    .contains(&GateFail::ShuffleEvidenceMissing { task }),
                 "family {task:?} must not be droppable, failed={:?}",
                 v.failed
             );
@@ -736,8 +757,11 @@ mod tests {
     /// Every one of these zeroes the lattice on its own.
     #[test]
     fn no_single_gate_can_be_dodged_by_dropping_its_evidence() {
+        /// Blanks one series out of an otherwise clean challenger.
+        type DropEvidence = fn(&mut SliceScores);
+
         let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
-        let drops: [(&str, fn(&mut SliceScores)); 6] = [
+        let drops: [(&str, DropEvidence); 6] = [
             ("public", |s| s.public = ExampleSeries::default()),
             ("perturbed", |s| s.perturbed = ExampleSeries::default()),
             ("canaries", |s| s.canaries = ExampleSeries::default()),

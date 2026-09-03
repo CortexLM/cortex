@@ -99,7 +99,10 @@ fn committed_pin_is_fail_closed_until_a_working_image_ships() {
 fn pin_names_the_digests_that_must_not_be_re_harvested() {
     let body = std::fs::read_to_string(pin_path()).expect("read pin");
     for (prefix, why) in [
-        ("cbc4bbb8", "no vLLM / torchvision on the CUDA scoring image"),
+        (
+            "cbc4bbb8",
+            "no vLLM / torchvision on the CUDA scoring image",
+        ),
         ("201cc5d2", "judge generation cap 32 / empty content"),
         ("303c6357", "printed no RELEARN_EVAL_OK"),
         ("00839671", "exit 127, no /usr/bin/relearn-eval"),
@@ -132,7 +135,13 @@ fn eval_image_is_digest_only() {
     assert!(hex
         .chars()
         .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
-    for dead in ["cbc4bbb80e", "201cc5d29c", "303c63573c", "0083967170", "86240d7617"] {
+    for dead in [
+        "cbc4bbb80e",
+        "201cc5d29c",
+        "303c63573c",
+        "0083967170",
+        "86240d7617",
+    ] {
         assert!(
             !p.eval_image_digest.contains(dead),
             "{dead} already failed the live harvest; it must never be re-pinned"

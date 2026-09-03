@@ -437,7 +437,9 @@ fn eval_err(e: &EvalError) -> (StatusCode, Json<serde_json::Value>) {
         // this host refusing to believe a run, not the miner's mistake. A 500
         // would tell them to stop retrying a submission that never scored.
         | EvalError::Integrity(_) => StatusCode::SERVICE_UNAVAILABLE,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+        // Named rather than a wildcard: a new failure mode has to be given a
+        // status deliberately, not inherit "the miner should stop retrying".
+        EvalError::TeacherMinerWeights => StatusCode::INTERNAL_SERVER_ERROR,
     };
     err(code, &e.to_string())
 }
@@ -585,9 +587,8 @@ mod tests {
                 Rig::Clean => {}
                 Rig::LeakyPublic => {
                     let hi = relearn_score::SliceScores::mean(&s.holdout).unwrap_or(0.5) + 0.30;
-                    s.public = ExampleSeries::from_pairs(
-                        (1..=40).map(|i| (format!("p{i}"), hi.min(1.0))),
-                    );
+                    s.public =
+                        ExampleSeries::from_pairs((1..=40).map(|i| (format!("p{i}"), hi.min(1.0))));
                 }
                 Rig::CanaryDrop => {
                     s.general_canary =
@@ -1438,7 +1439,10 @@ mod tests {
         assert_eq!(clean["eval_backend"], "lium", "{clean}");
         assert_eq!(clean["eligible"], true, "{clean}");
         assert_eq!(clean["state"], "awaiting_admin", "{clean}");
-        assert_eq!(clean_row["verdict"]["failed"].as_array().map(Vec::len), Some(0));
+        assert_eq!(
+            clean_row["verdict"]["failed"].as_array().map(Vec::len),
+            Some(0)
+        );
         assert!(
             clean_row["verdict"]["lattice"].as_u64().unwrap_or(0) > 0,
             "a clean live win must carry lattice: {clean_row}"
