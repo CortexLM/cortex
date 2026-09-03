@@ -469,6 +469,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -487,6 +488,7 @@ dependencies = [
  "sync_wrapper",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -610,16 +612,21 @@ dependencies = [
 name = "bounty-challenge"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "bounty-challenge-task",
  "bounty-http",
  "bounty-score",
  "bounty-store",
  "bundle",
+ "chain",
  "challenge-common",
  "hex",
  "reqwest 0.12.28",
+ "serde_json",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
+ "trustroot",
 ]
 
 [[package]]
@@ -628,6 +635,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "bounty-challenge",
+ "chain-live",
  "challenge-keys",
  "clap",
  "telemetry",
@@ -6601,6 +6609,7 @@ dependencies = [
  "tokio",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]

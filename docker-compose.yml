@@ -414,9 +414,14 @@ services:
       BASE_CHALLENGE_BIND: 0.0.0.0:8096
       BASE_CHALLENGE_SK_FILE: /run/base/challenge_sk
       BOUNTY_CHAT_COMMAND: "${BOUNTY_CHAT_COMMAND:-}"
+      # The only scorer. Empty → ingest 503s and every leaf is a burn.
       BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"
+      BOUNTY_EMIT_POLL_SECS: "${BOUNTY_EMIT_POLL_SECS:-120}"
       BOUNTY_ADMIN_TOKENS_FILE: /run/base/bounty/admin_tokens
       BOUNTY_SESSION_SECRET_FILE: /run/base/bounty/session_secret
+      # Emission posts signed leaves to the gateway that seals what validators
+      # fetch. `BASE_NETUID` (expected set `E`) comes from the env file and the
+      # chain endpoints from the env overlay.
       BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
     env_file:
       - path: ./deploy/env/bounty-challenge.env

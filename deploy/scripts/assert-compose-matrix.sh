@@ -135,13 +135,38 @@ for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
   if echo "$rendered" | grep -qE 'DESIGN_FORCE_SIM:[[:space:]]*["'\'']?(1|true|TRUE|yes)["'\'']?'; then
     fail "$env_file enables DESIGN_FORCE_SIM (retired; must not ship)"
   fi
-  for sim_var in RELEARN_FORCE_SIM RELEARN_T2I_FORCE_SIM RELEARN_AGENT_FORCE_SIM RELEARN_MM_FORCE_SIM BOUNTY_FORCE_SIM; do
+  for sim_var in RELEARN_FORCE_SIM RELEARN_T2I_FORCE_SIM RELEARN_AGENT_FORCE_SIM RELEARN_MM_FORCE_SIM; do
     if echo "$rendered" | grep -qE "${sim_var}:[[:space:]]*[\"']?(1|true|TRUE|yes)[\"']?"; then
       fail "$env_file enables $sim_var (sim is local-only; must not ship on droplets)"
     fi
   done
 done
 echo "OK: staging/prod do not enable host SimSandbox"
+
+# --- bounty has no offline scorer anywhere in the matrix ---
+# The backend public feed is the only thing that turns a bug report into
+# weight. A resurrected BOUNTY_FORCE_SIM in any overlay — including the local
+# one — would mean a host paying miners on adjudications no validator can
+# reproduce, so the knob must not come back at all.
+for compose_file in docker-compose.yml docker-compose.e2e.yml deploy/compose/*.yml; do
+  if grep -qE '^[[:space:]]*BOUNTY_FORCE_SIM' "$compose_file"; then
+    fail "$compose_file sets BOUNTY_FORCE_SIM (retired; bounty scores only from the backend feed)"
+  fi
+done
+for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
+  rendered=$(render \
+    -f docker-compose.yml \
+    -f deploy/compose/role-master.yml \
+    -f "$env_file" \
+    --profile master \
+    config)
+  echo "$rendered" | grep -q 'BOUNTY_BACKEND_PUBLIC_URL' \
+    || fail "$env_file does not pass BOUNTY_BACKEND_PUBLIC_URL to bounty-challenge"
+  if echo "$rendered" | grep -qE 'BOUNTY_BACKEND_PUBLIC_URL:[[:space:]]*["'\'']?https?://'; then
+    fail "$env_file bakes a bounty backend host (operators set it on the host)"
+  fi
+done
+echo "OK: bounty scores only from the backend public feed (no sim knob, no baked host)"
 
 # --- all four live challenges present in default; mm off; design/prism retired ---
 default_services=$(render \

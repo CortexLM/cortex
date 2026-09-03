@@ -112,6 +112,11 @@ not a public leaderboard.
 `BOUNTY_BACKEND_PUBLIC_URL` (operator env). Scoring uses `problem_found` +
 `justification` + `severity` + hotkey counts on those payloads.
 
+Those published rows are the whole path from a bug to weight: the challenge
+service fetches them each tick, signs one leaf per metagraph hotkey for the
+current epoch, and posts them to the gateway. Validators then verify the
+sealed bundle — they never read the bounty feed and never re-run your report.
+
 The published leaderboard is **informational**. Topping it is worth nothing on
 its own: only adjudicated, justified reports are scored, so a hotkey with a
 high `valid_count` and no adjudications is paid zero.
@@ -132,9 +137,13 @@ Over the pending cap or inside the interval returns `429`; too thin returns
 `400`. Neither is a penalty — nothing is recorded against you — but neither is
 a report either. `GET /challenge/bounty/v1/status` publishes the live numbers.
 
-If the host has no scoring backend configured, `POST /v1/reports` answers
-**503** rather than accepting work it could never pay for. Check
-`GET /challenge/bounty/v1/status` → `can_score` before you go hunting.
+The backend public feed is the **only** scorer. If the host cannot read it,
+`POST /v1/reports` answers **503** rather than accepting work it could never
+pay for, and that epoch pays nobody — every bounty leaf is an explicit
+no-score, so the share burns to uid 0. There is no offline stand-in, so a 503
+here is the honest answer rather than a temporary degradation you can submit
+through. Check `GET /challenge/bounty/v1/status` → `scoring_backend` and
+`can_score` before you go hunting.
 
 ## Scoring (precision × severity, not volume)
 
