@@ -76,7 +76,9 @@ precision cannot tune it away.
 The backend feed is not a dashboard this subnet reads for colour — it is the
 scorer. Each tick the challenge service:
 
-1. `GET {BOUNTY_BACKEND_PUBLIC_URL}/v1/bounty/public/leaderboard` + `/reports`
+1. `GET {BOUNTY_BACKEND_PUBLIC_URL}/v1/bounty/public/leaderboard` + `/reports`,
+   re-read until two consecutive reads agree — the two routes are separate
+   GETs, and a publish landing between them would mix revisions
 2. derives `E` from the metagraph at `last_epoch_block` (`AllMetagraphHotkeys`)
 3. maps published rows onto one leaf per hotkey in `E` for the current subnet
    epoch (champion → `Score`, net-malicious → `InvalidResponse`, everyone else
@@ -94,9 +96,9 @@ the current epoch is normal: the gateway supersedes on a changed digest and
 `GET /v1/status` publishes `scoring_backend` (`backend_public` |
 `unconfigured`), `backend_public_configured`, and `can_score`.
 
-Without `BOUNTY_BACKEND_PUBLIC_URL` — or when the feed is unreachable, 5xx, or
-unparseable — the host cannot turn a report into weight. Two things follow, and
-neither is a degraded mode:
+Without `BOUNTY_BACKEND_PUBLIC_URL` — or when the feed is unreachable, 5xx,
+unparseable, or moving under the read — the host cannot turn a report into
+weight. Two things follow, and neither is a degraded mode:
 
 - `POST /v1/reports` answers **503** without storing anything. Accepting
   reports there would take real work (finding a real bug) and pay nothing.
@@ -110,6 +112,18 @@ leaf per participant for every paid challenge: leave `E` uncovered and
 `POST /v1/admin/seal` answers **409 incomplete_participant_set** for the whole
 bundle, so relearn's weights go unsealed too. The emitter therefore runs even
 on a host with no feed at all — it simply never pays.
+
+"Moving under the read" is in that list for the same reason. The feed is two
+routes, and a mixed pair is worse than no pair: every tally comes from
+`/reports`, so a stale half can under-count a miner's valid rows or drop it to
+`NotAttempted`, and `/leaderboard` decides the champion walk order — a verdict
+the backend never published either way. Each tick therefore re-reads the pair
+until two consecutive reads agree (bounded, so a settling feed is a retry
+rather than a lost epoch) and compares the *parsed* snapshot, so a field the
+public DTO does not model cannot make a still feed look like a moving one. A
+feed that never holds still is an error, and the paragraphs above apply. No
+backend change is needed for this; a published revision or ETag on both routes
+would let it collapse to a single round.
 
 A failed tick also tries not to take back a score. Once the process has scored
 an epoch, a feed outage inside that same epoch **holds** instead of superseding

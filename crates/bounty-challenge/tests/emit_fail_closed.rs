@@ -12,6 +12,8 @@
 //!    D24 and takes every other challenge's seal down with it.
 //! 3. A feed outage inside an already-scored epoch does not take back the
 //!    scores the backend really did publish.
+//! 4. The leaderboard and the reports are separate GETs, so a snapshot is only
+//!    signed once the feed holds still across both of them.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -23,7 +25,10 @@ use std::sync::{Arc, Mutex};
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use bounty_challenge::{BountyEmitter, EmitOutcome, GatewayClient, GatewayClientConfig};
+use bounty_challenge::{
+    fetch_public_snapshot, BackendError, BountyEmitter, EmitOutcome, GatewayClient,
+    GatewayClientConfig,
+};
 use chain::{
     AxonInfo, ChainClient, ChainError, FakeChain, FakeChainConfig, Metagraph, WeightsTlockPayload,
 };
@@ -120,23 +125,28 @@ fn leaderboard_json() -> serde_json::Value {
     })
 }
 
+/// One justified, priced finding from `CHAMPION`.
+fn champion_valid_row(i: usize, problem: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": format!("valid-{i}"),
+        "hotkey": hex::encode(CHAMPION),
+        "status": "valid",
+        "severity": "major",
+        "problem_found": problem,
+        "adjudicator": "bounty-adjudicator@cortex",
+        "justification": "reproduced on master",
+        "adjudicated_at": "2026-08-30T00:00:00Z",
+        "created_at": "2026-08-29T00:00:00Z",
+    })
+}
+
 fn reports_json() -> serde_json::Value {
     let mut items = Vec::new();
     for (i, problem) in ["seal 500 on empty bundle", "proxy 502", "health flap"]
         .iter()
         .enumerate()
     {
-        items.push(serde_json::json!({
-            "id": format!("valid-{i}"),
-            "hotkey": hex::encode(CHAMPION),
-            "status": "valid",
-            "severity": "major",
-            "problem_found": problem,
-            "adjudicator": "bounty-adjudicator@cortex",
-            "justification": "reproduced on master",
-            "adjudicated_at": "2026-08-30T00:00:00Z",
-            "created_at": "2026-08-29T00:00:00Z",
-        }));
+        items.push(champion_valid_row(i, problem));
     }
     for i in 0..3 {
         items.push(serde_json::json!({
@@ -201,6 +211,43 @@ fn json_or_500(healthy: &AtomicBool, body: serde_json::Value) -> axum::response:
     } else {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
     }
+}
+
+/// Request counter + the request index after which the feed stops moving.
+type Shifting = (Arc<AtomicUsize>, usize);
+
+/// A backend that publishes a new revision on every request until it has
+/// served `freeze_after` of them, then holds still. Each revision credits
+/// `CHAMPION` one more valid finding, and the leaderboard row moves with it —
+/// so reading the two routes once apiece can only ever mix revisions.
+async fn spawn_shifting_backend(freeze_after: usize) -> String {
+    let state: Shifting = (Arc::new(AtomicUsize::new(0)), freeze_after);
+    let app = Router::new()
+        .route(
+            "/v1/bounty/public/leaderboard",
+            get(|State((served, freeze)): State<Shifting>| async move {
+                let rev = next_revision(&served, freeze);
+                Json(serde_json::json!({
+                    "items": [{ "hotkey": hex::encode(CHAMPION), "valid_count": 3 + rev }]
+                }))
+            }),
+        )
+        .route(
+            "/v1/bounty/public/reports",
+            get(|State((served, freeze)): State<Shifting>| async move {
+                let rev = next_revision(&served, freeze);
+                let items: Vec<_> = (0..=(3 + rev))
+                    .map(|i| champion_valid_row(i, &format!("regression {i}")))
+                    .collect();
+                Json(serde_json::json!({ "items": items }))
+            }),
+        )
+        .with_state(state);
+    serve(app).await
+}
+
+fn next_revision(served: &AtomicUsize, freeze_after: usize) -> usize {
+    served.fetch_add(1, Ordering::Relaxed).min(freeze_after)
 }
 
 async fn serve(app: Router) -> String {
@@ -380,6 +427,60 @@ async fn a_failing_backend_burns_until_it_recovers() {
             .unwrap_or_default()
             > 0,
         "the recovered tick must supersede the burn with the published score"
+    );
+}
+
+/// `/leaderboard` and `/reports` are separate GETs, so reading each once would
+/// let a publish landing between them be signed as a single snapshot. That is
+/// not cosmetic: every tally comes from `/reports`, so a stale half can
+/// under-count a miner's valid rows or drop it to `NotAttempted` — a verdict
+/// the backend never published — while `/leaderboard` decides the champion
+/// walk order. A feed that never holds still must therefore pay nobody rather
+/// than sign a revision it cannot pin.
+#[tokio::test]
+async fn a_feed_that_never_holds_still_is_never_signed_as_one_snapshot() {
+    let backend = spawn_shifting_backend(usize::MAX).await;
+    let (gateway, accepted) = spawn_gateway().await;
+    let em = emitter(Some(backend.clone()), &gateway);
+
+    let err = fetch_public_snapshot(Some(&backend))
+        .await
+        .expect_err("a moving feed cannot be pinned to one revision");
+    assert!(matches!(err, BackendError::Inconsistent), "{err}");
+
+    match em.tick().await.expect("burn covers E") {
+        EmitOutcome::Burned { reason, .. } => {
+            assert!(reason.contains("changed under every read"), "{reason}");
+        }
+        other => panic!("a torn feed must pay nobody: {other:?}"),
+    }
+    assert_burn_covers_e(&accepted);
+    assert_eq!(
+        em.scored_epoch(),
+        0,
+        "a snapshot that could not be pinned is not a score"
+    );
+}
+
+/// Re-reading is a retry, not a refusal: a feed that settles after a publish
+/// is scored at the revision it settled on, so ordinary backend activity does
+/// not cost miners an epoch.
+#[tokio::test]
+async fn a_feed_that_settles_is_scored_at_the_revision_it_settled_on() {
+    let backend = spawn_shifting_backend(1).await;
+    let (gateway, accepted) = spawn_gateway().await;
+    let em = emitter(Some(backend), &gateway);
+
+    assert!(matches!(
+        em.tick().await.expect("scored"),
+        EmitOutcome::Scored { paid: 1, .. }
+    ));
+    assert!(
+        leaf_for(&accepted, CHAMPION)["score_or_absence"]["score"]["value"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "the settled revision must pay the champion"
     );
 }
 
