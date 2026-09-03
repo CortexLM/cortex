@@ -270,6 +270,31 @@ async fn spawn_stable_torn_backend() -> String {
     serve(app).await
 }
 
+/// Matching `valid_count` with distinct envelope revisions: Greptile's stable
+/// torn case (leaderboard A, reports B) where a count-only check would pass.
+async fn spawn_stable_torn_revision_backend() -> String {
+    let app = Router::new()
+        .route(
+            "/v1/bounty/public/leaderboard",
+            get(|| async {
+                Json(serde_json::json!({
+                    "revision": "A",
+                    "items": [{ "hotkey": hex::encode(CHAMPION), "valid_count": 1 }]
+                }))
+            }),
+        )
+        .route(
+            "/v1/bounty/public/reports",
+            get(|| async {
+                Json(serde_json::json!({
+                    "revision": "B",
+                    "items": [champion_valid_row(0, "report-from-revision-B")]
+                }))
+            }),
+        );
+    serve(app).await
+}
+
 async fn serve(app: Router) -> String {
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -504,6 +529,25 @@ async fn a_stable_torn_pair_is_never_signed_as_one_snapshot() {
     }
     assert_burn_covers_e(&accepted);
     assert_eq!(em.scored_epoch(), 0);
+}
+
+/// Same `valid_count`, different envelope `revision`: the count check would
+/// accept this. Publication tokens must not.
+#[tokio::test]
+async fn mismatched_publication_tokens_are_never_signed_as_one_snapshot() {
+    let backend = spawn_stable_torn_revision_backend().await;
+    let (gateway, accepted) = spawn_gateway().await;
+    let em = emitter(Some(backend.clone()), &gateway);
+
+    let err = fetch_public_snapshot(Some(&backend))
+        .await
+        .expect_err("revision A beside revision B is not one snapshot");
+    assert!(matches!(err, BackendError::Mismatched), "{err}");
+    assert!(matches!(
+        em.tick().await.expect("burn covers E"),
+        EmitOutcome::Burned { .. }
+    ));
+    assert_burn_covers_e(&accepted);
 }
 
 /// Re-reading is a retry, not a refusal: a feed that settles after a publish
