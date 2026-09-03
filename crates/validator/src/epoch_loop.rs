@@ -6,7 +6,9 @@ use std::time::Duration;
 use bundle::LocalTrustRoot;
 use chain::{ChainClient, ChainError, Metagraph};
 use dissent::{SubmissionIntent, SubmissionSource};
-use submit::{submit_intent, DrandClient, ReadyDrand, SubmitConfig, SubmitOutcome, SystemClock};
+use submit::{
+    submit_intent, DrandClient, ReadyDrand, SubmitConfig, SubmitError, SubmitOutcome, SystemClock,
+};
 use tracing::{info, warn};
 
 use crate::coordination::{CoordinationClient, CoordinationError};
@@ -178,36 +180,44 @@ pub fn maybe_submit_match<C, D>(
         "Match → submit_intent"
     );
 
-    match submit_intent(&intent, chain, drand, &SystemClock, &submit_cfg) {
+    record_submit_outcome(
+        intent.epoch,
+        submit_intent(&intent, chain, drand, &SystemClock, &submit_cfg),
+        dedupe,
+    );
+}
+
+fn record_submit_outcome(
+    epoch: u64,
+    result: Result<SubmitOutcome, SubmitError>,
+    dedupe: &EpochSubmitDedupe,
+) {
+    match result {
         Ok(SubmitOutcome::SubmittedTimelocked {
             reveal_round,
             mecid,
         }) => {
             info!(
                 event = "validator_submit_timelocked",
-                epoch = intent.epoch,
-                reveal_round,
-                mecid,
-                "submit_timelocked ok"
+                epoch, reveal_round, mecid, "submit_timelocked ok"
             );
-            dedupe.mark_submitted(intent.epoch);
+            dedupe.mark_submitted(epoch);
         }
         Ok(SubmitOutcome::SubmittedSetWeights) => {
             info!(
                 event = "validator_submit_set_weights",
-                epoch = intent.epoch,
-                "set_weights ok (CR disabled)"
+                epoch, "set_weights ok (CR disabled)"
             );
-            dedupe.mark_submitted(intent.epoch);
+            dedupe.mark_submitted(epoch);
         }
-        Ok(SubmitOutcome::SkippedDrand { epoch }) => {
+        Ok(SubmitOutcome::SkippedDrand { epoch: skipped }) => {
             warn!(
                 event = "validator_submit_skipped_drand",
-                epoch,
+                epoch = skipped,
                 "drand unavailable through deadline; epoch skipped (no set_weights downgrade)"
             );
             // Intentional skip — do not retry forever within the same epoch.
-            dedupe.mark_submitted(epoch);
+            dedupe.mark_submitted(skipped);
         }
         Err(e) => {
             let msg = e.to_string();
@@ -218,15 +228,15 @@ pub fn maybe_submit_match<C, D>(
             if permanent {
                 warn!(
                     event = "validator_submit_error",
-                    epoch = intent.epoch,
+                    epoch,
                     error = %e,
                     "submit_intent failed permanently for epoch (deduped)"
                 );
-                dedupe.mark_submitted(intent.epoch);
+                dedupe.mark_submitted(epoch);
             } else {
                 warn!(
                     event = "validator_submit_error",
-                    epoch = intent.epoch,
+                    epoch,
                     error = %e,
                     "submit_intent failed (will retry next tick)"
                 );
