@@ -35,8 +35,8 @@ use serde::{Deserialize, Serialize};
 mod public;
 pub use public::{
     holdouts_from_reports, parse_leaderboard, parse_reports, rank_leaderboard, scorable,
-    score_plan_from_snapshot, LeaderboardRow, PublicReport, PublicScorePlan, PublicSnapshot,
-    PublicStatus,
+    score_plan_from_snapshot, snapshot_halves_agree, LeaderboardRow, PublicReport, PublicScorePlan,
+    PublicSnapshot, PublicStatus,
 };
 
 /// Credit applied to a valid unique reproducing bug, before severity weighting.

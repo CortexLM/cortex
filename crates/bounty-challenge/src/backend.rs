@@ -14,10 +14,13 @@
 //! under-count a miner's valid rows or drop it to `NotAttempted`, while
 //! `/leaderboard` sets the champion walk order. The pair is therefore read
 //! until two consecutive reads agree, and a feed that never holds still is an
-//! error rather than a guess.
+//! error rather than a guess. Consecutive equals are not enough on their own:
+//! a host that always serves leaderboard A beside reports B would agree with
+//! itself. `valid_count` on each leaderboard row must match the `valid`
+//! reports for that hotkey, or the pair is refused.
 
 use bounty_challenge_task::backend_public_url;
-use bounty_score::{parse_leaderboard, parse_reports, PublicSnapshot};
+use bounty_score::{parse_leaderboard, parse_reports, snapshot_halves_agree, PublicSnapshot};
 use thiserror::Error;
 
 /// Fetch / parse errors. Never embed secrets or hosts from env into Display
@@ -37,6 +40,11 @@ pub enum BackendError {
     /// revision could be pinned.
     #[error("backend public feed changed under every read")]
     Inconsistent,
+    /// Leaderboard `valid_count` does not match the `valid` reports. A feed
+    /// that always serves one revision on `/leaderboard` and another on
+    /// `/reports` is stable under re-read and must still be refused.
+    #[error("backend public leaderboard and reports do not agree")]
+    Mismatched,
 }
 
 /// How many times one call re-reads the pair of routes looking for two
@@ -58,9 +66,10 @@ pub fn public_path(base: &str, tail: &str) -> String {
 /// # Errors
 /// [`BackendError::Unset`] when neither the argument nor the env carries a
 /// base URL, [`BackendError::Fetch`] on transport or non-2xx,
-/// [`BackendError::Json`] when a body does not match the public DTO, and
-/// [`BackendError::Inconsistent`] when the feed never held still long enough
-/// to read both routes at one revision.
+/// [`BackendError::Json`] when a body does not match the public DTO,
+/// [`BackendError::Mismatched`] when the two routes describe different
+/// publications, and [`BackendError::Inconsistent`] when the feed never held
+/// still long enough to read both routes at one revision.
 pub async fn fetch_public_snapshot(base: Option<&str>) -> Result<PublicSnapshot, BackendError> {
     let url = match base {
         Some(u) if !u.trim().is_empty() => u.trim().to_owned(),
@@ -73,12 +82,50 @@ pub async fn fetch_public_snapshot(base: Option<&str>) -> Result<PublicSnapshot,
     let mut prev = read_pair(&client, &url).await?;
     for _ in 1..MAX_PAIR_READS {
         let next = read_pair(&client, &url).await?;
-        if next == prev {
-            return Ok(next);
+        if next.snap == prev.snap
+            && next.lb_token == prev.lb_token
+            && next.rp_token == prev.rp_token
+        {
+            if snapshot_halves_agree(&next.snap) && publication_tokens_agree(&next) {
+                return Ok(next.snap);
+            }
+            return Err(BackendError::Mismatched);
         }
         prev = next;
     }
     Err(BackendError::Inconsistent)
+}
+
+/// One GET-pair, plus any publication token the backend put on each route.
+struct PairRead {
+    snap: PublicSnapshot,
+    lb_token: Option<String>,
+    rp_token: Option<String>,
+}
+
+fn publication_tokens_agree(pair: &PairRead) -> bool {
+    match (&pair.lb_token, &pair.rp_token) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
+/// JSON envelope `revision` / `snapshot_id`, else HTTP ETag.
+fn publication_token(body: &str, etag: Option<String>) -> Option<String> {
+    envelope_token(body).or(etag)
+}
+
+fn envelope_token(raw: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    for key in ["revision", "snapshot_id", "etag"] {
+        if let Some(s) = v.get(key).and_then(serde_json::Value::as_str) {
+            let t = s.trim();
+            if !t.is_empty() {
+                return Some(t.to_owned());
+            }
+        }
+    }
+    None
 }
 
 /// Read both public routes once.
@@ -87,18 +134,25 @@ pub async fn fetch_public_snapshot(base: Option<&str>) -> Result<PublicSnapshot,
 /// consistency check at the granularity scoring actually uses: a field the
 /// public DTO does not model (a `generated_at` stamp, say) cannot make a
 /// stable feed look like a moving one.
-async fn read_pair(client: &reqwest::Client, base: &str) -> Result<PublicSnapshot, BackendError> {
-    let lb_text = get_text(client, &public_path(base, "leaderboard")).await?;
-    let rp_text = get_text(client, &public_path(base, "reports")).await?;
+async fn read_pair(client: &reqwest::Client, base: &str) -> Result<PairRead, BackendError> {
+    let (lb_text, lb_etag) = get_text(client, &public_path(base, "leaderboard")).await?;
+    let (rp_text, rp_etag) = get_text(client, &public_path(base, "reports")).await?;
     let leaderboard = parse_leaderboard(&lb_text).map_err(BackendError::Json)?;
     let reports = parse_reports(&rp_text).map_err(BackendError::Json)?;
-    Ok(PublicSnapshot {
-        leaderboard,
-        reports,
+    Ok(PairRead {
+        snap: PublicSnapshot {
+            leaderboard,
+            reports,
+        },
+        lb_token: publication_token(&lb_text, lb_etag),
+        rp_token: publication_token(&rp_text, rp_etag),
     })
 }
 
-async fn get_text(client: &reqwest::Client, url: &str) -> Result<String, BackendError> {
+async fn get_text(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<(String, Option<String>), BackendError> {
     let resp = client
         .get(url)
         .send()
@@ -107,7 +161,15 @@ async fn get_text(client: &reqwest::Client, url: &str) -> Result<String, Backend
     if !resp.status().is_success() {
         return Err(BackendError::Fetch);
     }
-    resp.text().await.map_err(|_| BackendError::Fetch)
+    let etag = resp
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+    let text = resp.text().await.map_err(|_| BackendError::Fetch)?;
+    Ok((text, etag))
 }
 
 /// Parse a snapshot from two JSON bodies (unit tests / mocks).

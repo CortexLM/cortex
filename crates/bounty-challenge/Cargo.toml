@@ -18,6 +18,7 @@ chain = { path = "../chain" }
 challenge-common = { path = "../challenge-common" }
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
 tracing = "0.1"

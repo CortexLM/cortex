@@ -106,6 +106,43 @@ pub fn scorable(report: &PublicReport) -> bool {
         && !report.justification.trim().is_empty()
 }
 
+/// True when `/leaderboard` and `/reports` describe the same publication.
+///
+/// Consecutive identical pair-reads only prove each route was still; they do
+/// not prove the two routes came from one backend publish. A host that always
+/// serves leaderboard revision A beside reports revision B would pass that
+/// check and sign a state the backend never published. `valid_count` on each
+/// leaderboard row must match the number of `valid` reports for that hotkey,
+/// and every hotkey with a `valid` report must appear on the leaderboard.
+#[must_use]
+pub fn snapshot_halves_agree(snap: &PublicSnapshot) -> bool {
+    let mut from_reports: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+    for r in &snap.reports {
+        if r.status != PublicStatus::Valid {
+            continue;
+        }
+        let Ok(bytes) = parse_hotkey(&r.hotkey) else {
+            return false;
+        };
+        *from_reports.entry(bytes).or_insert(0) += 1;
+    }
+    let mut from_lb: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+    for row in &snap.leaderboard {
+        let Ok(bytes) = parse_hotkey(&row.hotkey) else {
+            return false;
+        };
+        if from_lb.insert(bytes, row.valid_count).is_some() {
+            return false;
+        }
+    }
+    if from_reports.iter().any(|(k, n)| from_lb.get(k) != Some(n)) {
+        return false;
+    }
+    from_lb
+        .iter()
+        .all(|(k, n)| from_reports.get(k).copied().unwrap_or(0) == *n)
+}
+
 /// Parse a leaderboard list (`{ "items": [...] }` or a bare array).
 pub fn parse_leaderboard(raw: &str) -> Result<Vec<LeaderboardRow>, String> {
     parse_items(raw)
@@ -412,5 +449,75 @@ mod tests {
         let raw = r#"{"items":[{"hotkey":"a","valid_count":2}]}"#;
         let rows = parse_leaderboard(raw).expect("parse");
         assert_eq!(rows[0].valid_count, 2);
+    }
+
+    #[test]
+    fn matching_halves_agree() {
+        let reports: Vec<PublicReport> = (1..=3)
+            .map(|i| {
+                report(
+                    &i.to_string(),
+                    HK_A,
+                    PublicStatus::Valid,
+                    &format!("bug {i}"),
+                    "reproduced",
+                )
+            })
+            .collect();
+        let snap = PublicSnapshot {
+            leaderboard: vec![LeaderboardRow {
+                hotkey: HK_A.into(),
+                valid_count: 3,
+                weight: None,
+            }],
+            reports,
+        };
+        assert!(snapshot_halves_agree(&snap));
+    }
+
+    #[test]
+    fn a_zero_count_leaderboard_row_still_agrees() {
+        let reports: Vec<PublicReport> = (1..=3)
+            .map(|i| {
+                report(
+                    &i.to_string(),
+                    HK_A,
+                    PublicStatus::Valid,
+                    &format!("bug {i}"),
+                    "reproduced",
+                )
+            })
+            .collect();
+        let snap = PublicSnapshot {
+            leaderboard: vec![
+                LeaderboardRow {
+                    hotkey: HK_A.into(),
+                    valid_count: 3,
+                    weight: None,
+                },
+                LeaderboardRow {
+                    hotkey: HK_B.into(),
+                    valid_count: 0,
+                    weight: None,
+                },
+            ],
+            reports,
+        };
+        assert!(snapshot_halves_agree(&snap));
+    }
+
+    /// Leaderboard A + reports B, held still: the consecutive-read check
+    /// would accept this. Scoring must not.
+    #[test]
+    fn a_stable_torn_pair_does_not_agree() {
+        let snap = PublicSnapshot {
+            leaderboard: vec![LeaderboardRow {
+                hotkey: HK_A.into(),
+                valid_count: 3,
+                weight: None,
+            }],
+            reports: vec![report("1", HK_A, PublicStatus::Valid, "one", "reproduced")],
+        };
+        assert!(!snapshot_halves_agree(&snap));
     }
 }
