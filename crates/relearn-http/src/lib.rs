@@ -432,7 +432,11 @@ fn eval_err(e: &EvalError) -> (StatusCode, Json<serde_json::Value>) {
         | EvalError::EvalImageUnpinned
         | EvalError::LiveHarvestUnavailable
         | EvalError::Backend(_)
-        | EvalError::Baseline(_) => StatusCode::SERVICE_UNAVAILABLE,
+        | EvalError::Baseline(_)
+        // An unverified teardown or a receipt that fails the no-score gate is
+        // this host refusing to believe a run, not the miner's mistake. A 500
+        // would tell them to stop retrying a submission that never scored.
+        | EvalError::Integrity(_) => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     err(code, &e.to_string())

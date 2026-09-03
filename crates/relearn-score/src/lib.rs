@@ -169,8 +169,14 @@ pub enum GateFail {
     PublicEvidenceMissing,
     /// Perturbed holdout collapsed (brittle / overfit).
     Perturbation,
+    /// The perturbed rerun was missing, so the brittleness gate had nothing to
+    /// read (fail-closed; omitting the series is not a way past it).
+    PerturbationEvidenceMissing,
     /// Base-competence canaries failed.
     Canaries,
+    /// Known-answer canaries were missing, so the base-competence gate had
+    /// nothing to read (fail-closed).
+    BaseCanaryEvidenceMissing,
     /// General-bench canary regressed past [`CANARY_EPSILON`].
     CanaryRegression {
         /// Size of the drop in bps.
@@ -188,6 +194,12 @@ pub enum GateFail {
     /// Shuffling the image pixels barely changed the score.
     IgnoresTheImage {
         /// Family that ignored the pixels.
+        task: HoldoutTask,
+    },
+    /// The champion took the shuffle control on this family and the challenger
+    /// did not, so the gate had nothing to read (fail-closed).
+    ShuffleEvidenceMissing {
+        /// Family the challenger left unmeasured.
         task: HoldoutTask,
     },
     /// Paired test refused (slice mismatch / too thin).
@@ -322,18 +334,28 @@ pub fn judge_challenger(champion: &SliceScores, challenger: &SliceScores) -> Pro
         (Some(_), None) => failed.push(GateFail::PairedRefusal),
     }
 
-    if let (Some(h), Some(p)) = (
+    // Missing evidence is a fail, the same as the public split and the general
+    // canary: a run that simply omits the series would otherwise walk past the
+    // gate, and omitting it is exactly what an overfit artifact wants.
+    match (
         SliceScores::mean(&challenger.holdout),
         SliceScores::mean(&challenger.perturbed),
     ) {
-        if h - p > MAX_PERTURB_DROP + DEADZONE {
-            failed.push(GateFail::Perturbation);
+        (_, None) => failed.push(GateFail::PerturbationEvidenceMissing),
+        (Some(h), Some(p)) => {
+            if h - p > MAX_PERTURB_DROP + DEADZONE {
+                failed.push(GateFail::Perturbation);
+            }
         }
+        (None, Some(_)) => {}
     }
 
-    if let Some(c) = SliceScores::mean(&challenger.canaries) {
-        if c + DEADZONE < MIN_CANARY_ACCURACY {
-            failed.push(GateFail::Canaries);
+    match SliceScores::mean(&challenger.canaries) {
+        None => failed.push(GateFail::BaseCanaryEvidenceMissing),
+        Some(c) => {
+            if c + DEADZONE < MIN_CANARY_ACCURACY {
+                failed.push(GateFail::Canaries);
+            }
         }
     }
 
@@ -364,12 +386,19 @@ pub fn judge_challenger(champion: &SliceScores, challenger: &SliceScores) -> Pro
         failed.push(GateFail::ContaminationEvidenceMissing);
     }
 
+    // The champion is the reference for which families the holdout actually
+    // has images in. A challenger that skips a family the champion measured is
+    // not a text-only holdout, it is a run that declined the control.
     for task in HoldoutTask::VISION {
-        let Some(ev) = challenger.vision_shuffle.get(&task) else {
-            continue;
-        };
-        if !ev.uses_the_image() {
-            failed.push(GateFail::IgnoresTheImage { task });
+        match (
+            champion.vision_shuffle.get(&task),
+            challenger.vision_shuffle.get(&task),
+        ) {
+            (_, Some(ev)) if !ev.uses_the_image() => {
+                failed.push(GateFail::IgnoresTheImage { task });
+            }
+            (Some(_), None) => failed.push(GateFail::ShuffleEvidenceMissing { task }),
+            _ => {}
         }
     }
 
@@ -634,13 +663,95 @@ mod tests {
 
     #[test]
     fn text_only_holdout_does_not_require_shuffle() {
-        let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
+        let mut champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
         let mut chal = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+        champ.vision_shuffle.clear();
         chal.vision_shuffle.clear();
         assert!(
             judge_challenger(&champ, &chal).eligible,
             "no images ⇒ no shuffle gate"
         );
+    }
+
+    /// Dropping the family is not the same as there being no images in it: the
+    /// champion measured it, so the holdout has them and the control applies.
+    #[test]
+    fn a_challenger_cannot_skip_a_family_the_champion_measured() {
+        let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
+        for task in HoldoutTask::VISION {
+            let mut chal = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+            chal.vision_shuffle.remove(&task);
+            let v = judge_challenger(&champ, &chal);
+            assert!(
+                v.failed.contains(&GateFail::ShuffleEvidenceMissing { task }),
+                "family {task:?} must not be droppable, failed={:?}",
+                v.failed
+            );
+            assert!(!v.eligible);
+            assert_eq!(v.lattice, 0);
+        }
+    }
+
+    /// Both retention floors used to be `if let Some(..)`, so a run that shipped
+    /// no perturbed rerun and no known-answer canaries took neither gate.
+    #[test]
+    fn omitting_the_retention_series_is_fail_closed_not_a_skipped_gate() {
+        let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
+
+        let mut no_perturb = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+        no_perturb.perturbed = ExampleSeries::default();
+        let v = judge_challenger(&champ, &no_perturb);
+        assert!(
+            v.failed.contains(&GateFail::PerturbationEvidenceMissing),
+            "{:?}",
+            v.failed
+        );
+        assert!(!v.eligible);
+        assert_eq!(v.lattice, 0);
+
+        let mut no_canaries = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+        no_canaries.canaries = ExampleSeries::default();
+        let v = judge_challenger(&champ, &no_canaries);
+        assert!(
+            v.failed.contains(&GateFail::BaseCanaryEvidenceMissing),
+            "{:?}",
+            v.failed
+        );
+        assert!(!v.eligible);
+        assert_eq!(v.lattice, 0);
+
+        // A brittle run that *does* report the rerun still fails on the drop,
+        // so the new variant did not replace the floor it guards.
+        let brittle = slice(0.80, 0.80, 0.40, 0.99, 0.9);
+        let v = judge_challenger(&champ, &brittle);
+        assert!(v.failed.contains(&GateFail::Perturbation), "{:?}", v.failed);
+        assert!(!v.failed.contains(&GateFail::PerturbationEvidenceMissing));
+    }
+
+    /// The whole point of the gates: a run cannot pick which ones apply.
+    /// Every one of these zeroes the lattice on its own.
+    #[test]
+    fn no_single_gate_can_be_dodged_by_dropping_its_evidence() {
+        let champ = slice(0.50, 0.50, 0.49, 0.99, 0.9);
+        let drops: [(&str, fn(&mut SliceScores)); 6] = [
+            ("public", |s| s.public = ExampleSeries::default()),
+            ("perturbed", |s| s.perturbed = ExampleSeries::default()),
+            ("canaries", |s| s.canaries = ExampleSeries::default()),
+            ("general_canary", |s| {
+                s.general_canary = ExampleSeries::default();
+            }),
+            ("contamination", |s| {
+                s.contamination = ContaminationEvidence::default();
+            }),
+            ("vision_shuffle", |s| s.vision_shuffle.clear()),
+        ];
+        for (label, drop) in drops {
+            let mut chal = slice(0.80, 0.80, 0.79, 0.99, 0.9);
+            drop(&mut chal);
+            let v = judge_challenger(&champ, &chal);
+            assert!(!v.eligible, "{label} was droppable: {:?}", v.failed);
+            assert_eq!(v.lattice, 0, "{label}");
+        }
     }
 
     #[test]

@@ -266,11 +266,31 @@ impl BaselineMeasurement {
                 holdout.len()
             ));
         }
-        if self.general_canary.is_empty() {
-            return bad("no general-bench canary; every challenger would fail closed".into());
-        }
-        if self.public.is_empty() {
-            return bad("no public split; the memorization gap gate cannot run".into());
+        // Each of these is a gate the challenger is measured on by the same
+        // image. A champion missing one means the image does not emit it at
+        // all, so every challenger would fail closed for a reason the miner
+        // cannot act on. Refuse at boot, where the operator can fix it.
+        for (series, why) in [
+            (
+                &self.general_canary,
+                "no general-bench canary; every challenger would fail closed",
+            ),
+            (
+                &self.public,
+                "no public split; the memorization gap gate cannot run",
+            ),
+            (
+                &self.perturbed,
+                "no perturbed rerun; the brittleness gate cannot run",
+            ),
+            (
+                &self.canaries,
+                "no known-answer canaries; the base-competence gate cannot run",
+            ),
+        ] {
+            if series.is_empty() {
+                return bad(why.into());
+            }
         }
         if !self.agent_trace.is_finite() || !(0.0..=1.0).contains(&self.agent_trace) {
             return bad(format!("agent_trace {} outside [0, 1]", self.agent_trace));
@@ -1055,11 +1075,13 @@ mod tests {
     fn recorded_baseline_must_carry_the_series_the_gates_read() {
         let hold = recs(120);
         let pin = live_pin();
-        for break_it in [0_u8, 1, 2] {
+        for break_it in [0_u8, 1, 2, 3, 4] {
             let mut m = measurement(&pin, &hold);
             match break_it {
                 0 => m.general_canary.clear(),
                 1 => m.public.clear(),
+                2 => m.perturbed.clear(),
+                3 => m.canaries.clear(),
                 _ => m.agent_trace = 7.0,
             }
             assert!(
