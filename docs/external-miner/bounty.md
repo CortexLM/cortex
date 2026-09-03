@@ -108,7 +108,7 @@ curl -sS -X POST https://network.cortex.foundation/challenge/bounty/v1/reports \
 Then follow it:
 
 ```bash
-ctx bounty show bty_0123456789abcdef
+ctx bounty show by_0123456789abcdef
 ```
 
 That path is internal ingest, not a public leaderboard.
