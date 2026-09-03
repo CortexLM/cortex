@@ -93,6 +93,22 @@ fn committed_pin_is_fail_closed_until_a_working_image_ships() {
     );
 }
 
+/// What the committed pin actually does to a live host, not just what it says.
+/// The digest is the root cause, so it has to be the reported one.
+#[test]
+fn the_committed_pin_refuses_live_scoring_and_says_why() {
+    let err = relearn_eval::scoring_readiness(&pin(), relearn_eval::EvalBackend::Lium, None)
+        .expect_err("an unpinned host must not be ready to score");
+    assert!(
+        matches!(err, relearn_eval::EvalError::EvalImageUnpinned),
+        "{err}"
+    );
+    assert!(err.to_string().contains("eval image digest not pinned"));
+    // Sim is still opt-in only, so this is a 503 rather than a sim verdict.
+    assert!(relearn_eval::scoring_readiness(&pin(), relearn_eval::EvalBackend::Sim, None).is_ok());
+    assert!(!relearn_eval::force_sim(), "sim is never implicit");
+}
+
 /// Every digest that reached a pod and failed is named in the pin, with why.
 /// Re-pinning one of these is the failure mode this list exists to stop.
 #[test]
