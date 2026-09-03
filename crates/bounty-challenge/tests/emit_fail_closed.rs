@@ -236,7 +236,7 @@ async fn spawn_shifting_backend(freeze_after: usize) -> String {
             "/v1/bounty/public/reports",
             get(|State((served, freeze)): State<Shifting>| async move {
                 let rev = next_revision(&served, freeze);
-                let items: Vec<_> = (0..=(3 + rev))
+                let items: Vec<_> = (0..(3 + rev))
                     .map(|i| champion_valid_row(i, &format!("regression {i}")))
                     .collect();
                 Json(serde_json::json!({ "items": items }))
@@ -248,6 +248,26 @@ async fn spawn_shifting_backend(freeze_after: usize) -> String {
 
 fn next_revision(served: &AtomicUsize, freeze_after: usize) -> usize {
     served.fetch_add(1, Ordering::Relaxed).min(freeze_after)
+}
+
+/// Leaderboard always publishes three valids; reports always publishes one.
+/// The mixed pair is identical on every request, so consecutive re-reads
+/// agree — and must still be refused.
+async fn spawn_stable_torn_backend() -> String {
+    let app = Router::new()
+        .route(
+            "/v1/bounty/public/leaderboard",
+            get(|| async {
+                Json(serde_json::json!({
+                    "items": [{ "hotkey": hex::encode(CHAMPION), "valid_count": 3 }]
+                }))
+            }),
+        )
+        .route(
+            "/v1/bounty/public/reports",
+            get(|| async { Json(serde_json::json!({ "items": [champion_valid_row(0, "one")] })) }),
+        );
+    serve(app).await
 }
 
 async fn serve(app: Router) -> String {
@@ -460,6 +480,30 @@ async fn a_feed_that_never_holds_still_is_never_signed_as_one_snapshot() {
         0,
         "a snapshot that could not be pinned is not a score"
     );
+}
+
+/// A feed that always serves leaderboard revision A beside reports revision B
+/// is stable under consecutive re-reads. Signing it would pay from a state the
+/// backend never published atomically.
+#[tokio::test]
+async fn a_stable_torn_pair_is_never_signed_as_one_snapshot() {
+    let backend = spawn_stable_torn_backend().await;
+    let (gateway, accepted) = spawn_gateway().await;
+    let em = emitter(Some(backend.clone()), &gateway);
+
+    let err = fetch_public_snapshot(Some(&backend))
+        .await
+        .expect_err("leaderboard A + reports B is not one snapshot");
+    assert!(matches!(err, BackendError::Mismatched), "{err}");
+
+    match em.tick().await.expect("burn covers E") {
+        EmitOutcome::Burned { reason, .. } => {
+            assert!(reason.contains("do not agree"), "{reason}");
+        }
+        other => panic!("a stable torn feed must pay nobody: {other:?}"),
+    }
+    assert_burn_covers_e(&accepted);
+    assert_eq!(em.scored_epoch(), 0);
 }
 
 /// Re-reading is a retry, not a refusal: a feed that settles after a publish

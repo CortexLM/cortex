@@ -112,7 +112,7 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Crates (`crates/bounty-*`) | **done** | task (pairing), score (precision × severity, triage-noise canary off the lattice), store, http (fail-closed ingest + quotas), challenge (backend public **consumer** + fail-closed leaf emitter; the two public routes are re-read until they agree, so a mid-publish pair is never signed as one snapshot). |
+| Crates (`crates/bounty-*`) | **done** | task (pairing), score (precision × severity, triage-noise canary off the lattice), store, http (fail-closed ingest + quotas), challenge (backend public **consumer** + fail-closed leaf emitter; the two public routes are re-read until they agree, and `/leaderboard` `valid_count` must match the `valid` reports, so a mid-publish pair or a stable A+B mix is never signed as one snapshot). |
 | Binary (`bins/bounty-challenge`) | **done** | Internal HTTP on `:8096` plus the emitter (backend feed → exact-`E` leaves → gateway `POST /v1/weights/raw`, `BOUNTY_EMIT_POLL_SECS`). Does **not** serve `/v1/public/*`. No feed (or an unreadable one) pays nobody: `E` is covered with `NoScore(ChallengeInternal)` so D24 holds and the share burns to uid 0. A scored epoch is never downgraded to a burn mid-epoch. |
 | Miner CLI (`bins/cortex-bounty`) | **done** | `pair --hotkey`; Chat inject from `BOUNTY_CHAT_COMMAND`. |
 | Compose / images | **done** | Default compose + `images.yml` target `bounty-challenge`. |

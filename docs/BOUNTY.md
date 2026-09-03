@@ -120,10 +120,14 @@ routes, and a mixed pair is worse than no pair: every tally comes from
 the backend never published either way. Each tick therefore re-reads the pair
 until two consecutive reads agree (bounded, so a settling feed is a retry
 rather than a lost epoch) and compares the *parsed* snapshot, so a field the
-public DTO does not model cannot make a still feed look like a moving one. A
-feed that never holds still is an error, and the paragraphs above apply. No
-backend change is needed for this; a published revision or ETag on both routes
-would let it collapse to a single round.
+public DTO does not model cannot make a still feed look like a moving one. Two
+equal composites are still refused when `/leaderboard` `valid_count` does not
+match the `valid` rows on `/reports`: a feed that always serves revision A on
+one route and revision B on the other is stable under re-read and must not be
+signed. A feed that never holds still, or whose halves disagree, is an error,
+and the paragraphs above apply. No backend change is needed for this; a
+published revision or ETag on both routes would let the moving-feed check
+collapse to a single round.
 
 A failed tick also tries not to take back a score. Once the process has scored
 an epoch, a feed outage inside that same epoch **holds** instead of superseding
