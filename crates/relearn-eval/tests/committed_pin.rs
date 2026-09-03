@@ -75,38 +75,43 @@ fn pin_says_its_commitment_is_not_the_live_seal() {
     );
 }
 
-/// The eval image is pinned, so a live host may rent. `can_rent` is only the
-/// image half: the harvest and the champion baseline are still operator state.
+/// Every digest built so far failed the live harvest, so the committed pin is
+/// empty and live scoring is refused. An empty digest is a 503 on submit — the
+/// fail-closed state — not a fallback to the sim harness.
 #[test]
-fn committed_pin_allows_live_rent() {
+fn committed_pin_is_fail_closed_until_a_working_image_ships() {
     let p = pin();
-    assert!(p.can_rent(), "eval_image_digest must be a sha256 pin");
-    assert_eq!(
-        p.eval_image_digest,
-        "sha256:cbc4bbb80e421952696156a0ceb6d646448e421770ab01d8ad7be5dc989ae0f5"
-    );
-    assert_eq!(
-        p.relearn_git_sha,
-        "f3cfa69bb634a5d61984d836c23a3f9e22a47683"
-    );
-    assert_eq!(p.relearn_git_sha.len(), 40);
-    assert!(p.relearn_git_sha.chars().all(|c| c.is_ascii_hexdigit()));
     assert!(
-        !p.eval_image_digest.contains("201cc5d29c"),
-        "do not pin the digest whose judge used max_tokens 32 / content null"
+        p.eval_image_digest.is_empty(),
+        "no CortexLM/relearn image has printed RELEARN_EVAL_OK on a rented pod; \
+         an empty digest 503s, a guessed one rents a B200 that cannot score"
     );
+    assert!(!p.can_rent(), "an unpinned host must not rent");
     assert!(
-        !p.eval_image_digest.contains("86240d7617"),
-        "do not pin the pre-CUDA digest"
+        p.relearn_git_sha.is_empty(),
+        "no digest, no commit that built it"
     );
-    assert!(
-        !p.eval_image_digest.contains("0083967170"),
-        "do not pin the digest that exited 127 (no /usr/bin/relearn-eval)"
-    );
-    assert!(
-        !p.eval_image_digest.contains("303c63573c"),
-        "do not pin the digest that printed no RELEARN_EVAL_OK"
-    );
+}
+
+/// Every digest that reached a pod and failed is named in the pin, with why.
+/// Re-pinning one of these is the failure mode this list exists to stop.
+#[test]
+fn pin_names_the_digests_that_must_not_be_re_harvested() {
+    let body = std::fs::read_to_string(pin_path()).expect("read pin");
+    for (prefix, why) in [
+        ("cbc4bbb8", "no vLLM / torchvision on the CUDA scoring image"),
+        ("201cc5d2", "judge generation cap 32 / empty content"),
+        ("303c6357", "printed no RELEARN_EVAL_OK"),
+        ("00839671", "exit 127, no /usr/bin/relearn-eval"),
+        ("86240d76", "pre-CUDA"),
+    ] {
+        assert!(body.contains(prefix), "pin must warn off {prefix} ({why})");
+    }
+    // The next image has to fix the crash that killed cbc4bbb8, so the pin
+    // says what that is rather than leaving the next operator to rediscover it.
+    let lower = body.to_ascii_lowercase();
+    assert!(lower.contains("vllm"), "pin must name the missing runtime");
+    assert!(lower.contains("torchvision"), "{lower}");
 }
 
 /// A floating tag in a deploy path is how a "pinned" image silently changes
@@ -119,11 +124,20 @@ fn eval_image_is_digest_only() {
         !p.eval_image.contains(':'),
         "the tag belongs in eval_image_digest, not eval_image"
     );
+    if p.eval_image_digest.is_empty() {
+        return;
+    }
     let hex = p.eval_image_digest.trim_start_matches("sha256:");
     assert_eq!(hex.len(), 64);
     assert!(hex
         .chars()
         .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    for dead in ["cbc4bbb80e", "201cc5d29c", "303c63573c", "0083967170", "86240d7617"] {
+        assert!(
+            !p.eval_image_digest.contains(dead),
+            "{dead} already failed the live harvest; it must never be re-pinned"
+        );
+    }
 }
 
 #[test]
