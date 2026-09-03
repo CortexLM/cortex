@@ -21,8 +21,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use prism_competition::{
-    paired_test, Direction, ExampleSeries, PairedInput, PairedOutcome, PairedRefusal, DEADZONE,
+    paired_test, Direction, PairedInput, PairedOutcome, PairedRefusal, DEADZONE,
 };
+
+/// Re-exported: every measured field of [`SliceScores`] is one of these, so a
+/// crate that builds or inspects slices should not have to depend on Prism.
+pub use prism_competition::ExampleSeries;
 use relearn_challenge_task::{contamination, HoldoutItem, HoldoutTask, SCORE_MAX};
 use serde::{Deserialize, Serialize};
 

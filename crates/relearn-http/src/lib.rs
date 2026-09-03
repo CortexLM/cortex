@@ -462,6 +462,7 @@ mod tests {
         boot_base_champion, sim_slice_scores_at_skill, BaselineMeasurement, BASE_CHAMPION_ARTIFACT,
         BASE_CHAMPION_SKILL,
     };
+    use relearn_score::ExampleSeries;
     use tower::ServiceExt;
 
     fn digest(label: &str) -> String {
@@ -540,6 +541,65 @@ mod tests {
         }
         fn base_weights_primed(&self) -> bool {
             false
+        }
+    }
+
+    /// How the eval image's document is bent for one artifact.
+    ///
+    /// Each variant is a way a live run could arrive short of a gate. They are
+    /// applied to the same sim draw the champion was measured from, so the only
+    /// difference between a clean run and a rigged one is the gate under test.
+    #[derive(Clone, Copy)]
+    enum Rig {
+        /// Beats the champion and takes every gate.
+        Clean,
+        /// Public split far above the holdout: memorization.
+        LeakyPublic,
+        /// General-bench canary collapses vs the champion.
+        CanaryDrop,
+        /// Eval document omits the perturbed rerun.
+        NoPerturbed,
+        /// Eval document omits the known-answer canaries.
+        NoCanaries,
+        /// Eval document drops the shuffle control on one vision family.
+        NoShuffle(HoldoutTask),
+    }
+
+    /// Stand-in for the eval image that can bend one series at a time.
+    struct RiggedScorer {
+        skill: f64,
+        rigs: std::collections::BTreeMap<String, Rig>,
+    }
+
+    #[async_trait]
+    impl LiveScorer for RiggedScorer {
+        async fn score(
+            &self,
+            _pin: &RelearnPin,
+            _frozen: &str,
+            artifact: &str,
+            holdout: &[HoldoutItem],
+        ) -> Result<relearn_score::SliceScores, EvalError> {
+            let mut s = sim_slice_scores_at_skill(artifact, holdout, self.skill);
+            match self.rigs.get(artifact).copied().unwrap_or(Rig::Clean) {
+                Rig::Clean => {}
+                Rig::LeakyPublic => {
+                    let hi = relearn_score::SliceScores::mean(&s.holdout).unwrap_or(0.5) + 0.30;
+                    s.public = ExampleSeries::from_pairs(
+                        (1..=40).map(|i| (format!("p{i}"), hi.min(1.0))),
+                    );
+                }
+                Rig::CanaryDrop => {
+                    s.general_canary =
+                        ExampleSeries::from_pairs((0..40).map(|i| (format!("g{i}"), 0.40)));
+                }
+                Rig::NoPerturbed => s.perturbed = ExampleSeries::default(),
+                Rig::NoCanaries => s.canaries = ExampleSeries::default(),
+                Rig::NoShuffle(task) => {
+                    s.vision_shuffle.remove(&task);
+                }
+            }
+            Ok(s)
         }
     }
 
@@ -1286,6 +1346,243 @@ mod tests {
         assert_eq!(live["can_score"], false);
         assert_eq!(live["base_weights"]["primed"], false);
         assert!(!live.to_string().contains("/models"));
+    }
+
+    /// The whole live path in one run: a recorded champion turns `can_score`
+    /// on, a clean submission is actually scored and carries a lattice, and
+    /// every gate a live run could arrive short of zeroes it instead.
+    ///
+    /// Each rejection is checked for its *own* gate, so a run cannot pass by
+    /// failing closed everywhere: `gates=[]` with `eligible: false` would mean
+    /// the host rejected without deciding anything.
+    #[tokio::test]
+    async fn a_live_run_takes_every_gate_or_scores_zero() {
+        let token = "op-test-token";
+        let recs = holdout();
+        let vision = HoldoutTask::Captioning;
+        let art = |label: &str| digest(label);
+        let rigs = [
+            (art("leaky"), Rig::LeakyPublic),
+            (art("canary-drop"), Rig::CanaryDrop),
+            (art("no-perturbed"), Rig::NoPerturbed),
+            (art("no-canaries"), Rig::NoCanaries),
+            (art("no-shuffle"), Rig::NoShuffle(vision)),
+            (art("clean-live-adapter"), Rig::Clean),
+        ]
+        .into_iter()
+        .collect();
+        let app = app_full(
+            token,
+            true,
+            EvalBackend::Lium,
+            &format!("sha256:{}", "ab".repeat(32)),
+            Some(Arc::new(RiggedScorer {
+                // Above the recorded champion, so the holdout paired test is a
+                // win and the only thing left to decide is the gates.
+                skill: BASE_CHAMPION_SKILL + 0.35,
+                rigs,
+            })),
+            true,
+        )
+        .await;
+
+        // 1. Champion recorded ⇒ the host says it can score.
+        let (st, status) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(status["eval_backend"], "lium", "{status}");
+        assert_eq!(status["force_sim"], false, "{status}");
+        assert_eq!(status["holdout"]["loaded"], true, "{status}");
+        assert_eq!(status["live_harvest_wired"], true, "{status}");
+        assert_eq!(status["champion_baseline_recorded"], true, "{status}");
+        assert_eq!(status["can_score"], true, "{status}");
+
+        let submit = |artifact: String, manifest: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                let (st, created) = json_req(
+                    app.clone(),
+                    "POST",
+                    "/v1/submissions",
+                    serde_json::json!({
+                        "miner_hotkey": digest("miner-hotkey"),
+                        "artifact_digest": artifact,
+                        "manifest": manifest,
+                    }),
+                    None,
+                )
+                .await;
+                assert_eq!(st, StatusCode::CREATED, "{created}");
+                let id = created["id"].as_str().unwrap_or_default().to_owned();
+                let (st, row) = json_req(
+                    app,
+                    "GET",
+                    &format!("/v1/submissions/{id}"),
+                    serde_json::json!({}),
+                    None,
+                )
+                .await;
+                assert_eq!(st, StatusCode::OK, "{row}");
+                (created, row)
+            }
+        };
+
+        // 2. Clean submission is scored on the live backend and earns lattice.
+        let (clean, clean_row) = submit(art("clean-live-adapter"), declared_manifest()).await;
+        assert_eq!(clean["eval_backend"], "lium", "{clean}");
+        assert_eq!(clean["eligible"], true, "{clean}");
+        assert_eq!(clean["state"], "awaiting_admin", "{clean}");
+        assert_eq!(clean_row["verdict"]["failed"].as_array().map(Vec::len), Some(0));
+        assert!(
+            clean_row["verdict"]["lattice"].as_u64().unwrap_or(0) > 0,
+            "a clean live win must carry lattice: {clean_row}"
+        );
+        assert!(
+            clean_row["verdict"]["paired"]["displaces"]
+                .as_bool()
+                .unwrap_or(false),
+            "{clean_row}"
+        );
+
+        // 3. Every gate zeroes the run, each for its own reason.
+        let hold_id = recs[0].id;
+        let cases: Vec<(&str, String, serde_json::Value, &str)> = vec![
+            (
+                "contamination",
+                art("clean-live-adapter"),
+                serde_json::json!({ "train_item_ids": [hold_id] }),
+                "\"contamination\"",
+            ),
+            (
+                "undeclared manifest",
+                art("clean-live-adapter"),
+                serde_json::json!({}),
+                "contamination_evidence_missing",
+            ),
+            (
+                "public-holdout gap",
+                art("leaky"),
+                declared_manifest(),
+                "public_private_gap",
+            ),
+            (
+                "general-bench canary",
+                art("canary-drop"),
+                declared_manifest(),
+                "canary_regression",
+            ),
+            (
+                "no perturbed rerun",
+                art("no-perturbed"),
+                declared_manifest(),
+                "perturbation_evidence_missing",
+            ),
+            (
+                "no known-answer canaries",
+                art("no-canaries"),
+                declared_manifest(),
+                "base_canary_evidence_missing",
+            ),
+            (
+                "dropped shuffle family",
+                art("no-shuffle"),
+                declared_manifest(),
+                "shuffle_evidence_missing",
+            ),
+        ];
+        for (label, artifact, manifest, gate) in cases {
+            let (created, row) = submit(artifact, manifest).await;
+            assert_eq!(created["eligible"], false, "{label}: {created}");
+            assert_eq!(created["state"], "rejected", "{label}: {created}");
+            assert_eq!(
+                row["verdict"]["lattice"].as_u64(),
+                Some(0),
+                "{label} must score zero: {row}"
+            );
+            let failed = row["verdict"]["failed"].to_string();
+            assert!(
+                failed.contains(gate),
+                "{label} must name {gate}, got {failed}"
+            );
+        }
+
+        // 4. Only the clean run is promotable, and promoting it moves the
+        //    champion the next challenger is measured against.
+        let id = clean["id"].as_str().expect("id");
+        let (st, promoted) = json_req(
+            app,
+            "POST",
+            "/v1/admin/promote",
+            serde_json::json!({ "submission_id": id }),
+            Some(token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{promoted}");
+        assert_eq!(promoted["state"], "champion", "{promoted}");
+    }
+
+    /// A promoted champion has to become the bar. Otherwise every later
+    /// challenger only ever has to beat the base model, and the second miner
+    /// through the door is judged against a champion that is no longer there.
+    #[tokio::test]
+    async fn the_next_challenger_is_judged_against_the_promoted_champion() {
+        let token = "op-test-token";
+        let app = app_full(
+            token,
+            true,
+            EvalBackend::Lium,
+            &format!("sha256:{}", "ab".repeat(32)),
+            Some(Arc::new(StubScorer {
+                skill: BASE_CHAMPION_SKILL + 0.35,
+            })),
+            true,
+        )
+        .await;
+
+        let post = |artifact: String| {
+            let app = app.clone();
+            async move {
+                json_req(
+                    app,
+                    "POST",
+                    "/v1/submissions",
+                    serde_json::json!({
+                        "miner_hotkey": digest("miner-hotkey"),
+                        "artifact_digest": artifact,
+                        "manifest": declared_manifest(),
+                    }),
+                    None,
+                )
+                .await
+            }
+        };
+
+        let (_st, first) = post(digest("first-champion")).await;
+        assert_eq!(first["eligible"], true, "{first}");
+        let (st, promoted) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/promote",
+            serde_json::json!({ "submission_id": first["id"].as_str().unwrap_or_default() }),
+            Some(token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{promoted}");
+
+        // Same scorer, same skill: the second run ties the promoted champion
+        // rather than beating the base model it never faced.
+        let (_st, second) = post(digest("second-adapter")).await;
+        assert_eq!(
+            second["eligible"], false,
+            "a tie with the sitting champion is not a displacement: {second}"
+        );
+        assert_eq!(second["state"], "rejected", "{second}");
     }
 
     #[tokio::test]
