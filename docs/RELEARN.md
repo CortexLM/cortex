@@ -42,16 +42,17 @@ one of these holds:
 `live_harvest_wired`, and `champion_baseline_recorded`, and every submit row
 echoes `eval_backend`, so a sim run is never mistaken for a real verdict.
 
-`eval_image_digest` is **empty on purpose**. Every image built so far failed on
-a rented pod, most recently `sha256:cbc4bbb8…` (`f3cfa69`), which exited 1
-without printing `RELEARN_EVAL_OK`: the CUDA scoring layer shipped no vLLM, fell
-back to transformers, and then crashed because `Qwen3VLVideoProcessor` needs
-torchvision. The next pin waits on a `CortexLM/relearn` image that carries
-**vLLM and torchvision**. Do not guess a digest to clear the 503 — an unpinned
-host refuses for free, a wrongly pinned one rents a B200 that cannot score.
+`eval_image_digest` is pinned to the CUDA scoring image
+`sha256:4806db4bd6650415c3705290117fd0190cd2a6d387cef871dd3d9ff1a8bb6d7e`
+(`CortexLM/relearn` `8ffbe8a`,
+[publish-eval-image run 33730126042](https://github.com/CortexLM/relearn/actions/runs/33730126042)).
+The runtime job pulled that digest, ran the harvest-PATH check, and proved
+`import vllm, torchvision` plus `relearn-eval selftest` on those bytes. It is
+**not** the slim contract image. Do not re-pin `sha256:cbc4bbb8…` (`f3cfa69`)
+or the other named dead digests in `config/relearn-pin.toml`.
 
-Even once the image is pinned, a live host must still wire the harvest and
-record a champion baseline before `can_score` turns true; each has its own 503.
+A live host must still wire the harvest and record a champion baseline before
+`can_score` turns true; each has its own 503.
 
 A refusal is not a submission: nothing is persisted unless scoring produced a
 verdict, so a 503 leaves no row behind.
