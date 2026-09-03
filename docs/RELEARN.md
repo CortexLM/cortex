@@ -42,9 +42,16 @@ one of these holds:
 `live_harvest_wired`, and `champion_baseline_recorded`, and every submit row
 echoes `eval_backend`, so a sim run is never mistaken for a real verdict.
 
-`eval_image_digest` is pinned (`CortexLM/relearn` PR #2), so the image half is
-done. A live host must still wire the harvest and record a champion baseline
-before `can_score` turns true; each has its own 503.
+`eval_image_digest` is **empty on purpose**. Every image built so far failed on
+a rented pod, most recently `sha256:cbc4bbb8…` (`f3cfa69`), which exited 1
+without printing `RELEARN_EVAL_OK`: the CUDA scoring layer shipped no vLLM, fell
+back to transformers, and then crashed because `Qwen3VLVideoProcessor` needs
+torchvision. The next pin waits on a `CortexLM/relearn` image that carries
+**vLLM and torchvision**. Do not guess a digest to clear the 503 — an unpinned
+host refuses for free, a wrongly pinned one rents a B200 that cannot score.
+
+Even once the image is pinned, a live host must still wire the harvest and
+record a champion baseline before `can_score` turns true; each has its own 503.
 
 A refusal is not a submission: nothing is persisted unless scoring produced a
 verdict, so a 503 leaves no row behind.
@@ -85,10 +92,12 @@ that was never measured.
 }
 ```
 
-`holdout` must carry one entry per verified holdout item. `public` and
-`general_canary` must be non-empty: a champion the gates cannot read would
-reject every challenger for a reason the miner cannot act on, so that is
-refused at boot instead. The file is operator state — never commit it.
+`holdout` must carry one entry per verified holdout item. `public`,
+`perturbed`, `canaries`, and `general_canary` must all be non-empty: each is a
+gate the same image measures every challenger on, so a champion missing one
+means the image never emits it and every challenger would fail closed for a
+reason the miner cannot act on. That is refused at boot instead. The file is
+operator state — never commit it.
 
 ## Eval image contract
 
@@ -210,9 +219,12 @@ Promotion requires every gate:
 | Holdout displacement | Bootstrap paired test on the private split (the only series that may enter the lattice) |
 | Public–holdout gap | Public far above holdout signals memorization; empty public is fail-closed |
 | Contamination | Any holdout id / image hash in submitted training metadata rejects the run. An **undeclared** `manifest` is `contamination_evidence_missing`, not a pass: absence of evidence cannot clear the gate |
-| Pixel shuffle | Every vision family present in the holdout (caption / VQA / OCR / spatial) must drop ≥ `MIN_SHUFFLE_DROP` when pixels are shuffled |
+| Pixel shuffle | Every vision family present in the holdout (caption / VQA / OCR / spatial) must drop ≥ `MIN_SHUFFLE_DROP` when pixels are shuffled. A family the **champion** measured and the challenger did not is `shuffle_evidence_missing`, not a text-only holdout |
 | General-bench canary | MMLU / MMMU-style slice is **off** the visible score. Regression past `CANARY_EPSILON` vs the champion is a hard zero |
-| Perturbation / base canaries / agent-trace | Existing retention floors still apply |
+| Perturbation / base canaries / agent-trace | Existing retention floors still apply. Omitting the series does not skip the gate: no perturbed rerun is `perturbation_evidence_missing` and no known-answer canaries is `base_canary_evidence_missing` |
+
+Every gate that reads a series is fail-closed on that series being absent, so a
+run cannot choose which gates apply to it by shipping a thinner document.
 
 ```bash
 # Rotate the holdout (records never enter git). Never reuse the T2I/dev salt.

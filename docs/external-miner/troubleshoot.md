@@ -16,8 +16,11 @@
 | `rejected` with `ContaminationEvidenceMissing` | `manifest` declared nothing | Fill `manifest.train_item_ids` / `train_image_hashes` / `train_dataset_ids`. An empty manifest fails the gate instead of skipping it |
 | `rejected` with `CanaryRegression` | General-bench drop past ε | Off-path MMLU/MMMU canary; not in the visible score |
 | `rejected` with `IgnoresTheImage` | Pixel-shuffle control | Vision family scored the same on shuffled pixels |
+| `rejected` with `ShuffleEvidenceMissing` | The champion took the shuffle control on that vision family and this run did not | Not a text-only holdout: the family has images. Missing evidence fails the gate instead of skipping it |
+| `rejected` with `PerturbationEvidenceMissing` | No perturbed rerun in the eval document | Fail-closed, like an empty `manifest`. The brittleness floor is not skipped by omitting the series |
+| `rejected` with `BaseCanaryEvidenceMissing` | No known-answer canaries in the eval document | Fail-closed. The base-competence floor is not skipped by omitting the series |
 | `503` on submit | Holdout file missing or mismatched | Operator: `RELEARN_HOLDOUT_FILE` must match the pin commitment |
-| `503 eval image digest not pinned` | Host has no `sha256:` eval image and did not opt into sim | Image and Agent digests are already pinned (`relearn` PR #3). A 503 here is an operator pin/file mismatch, not a missing publish. `GET /v1/status` shows `can_score: false` |
+| `503 eval image digest not pinned` | Host has no `sha256:` eval image and did not opt into sim | Expected on `relearn` right now: no `relearn-eval` image has scored on a rented pod yet, so the digest is deliberately empty and the subnet refuses rather than rent hardware that cannot score. Image and Agent digests are pinned (`relearn` PR #3), so a 503 there is an operator pin/file mismatch. `GET /v1/status` shows `can_score: false` |
 | `503 … no in-process sim` | Digest is pinned but the live harvest is not wired on that host | Operator issue; `/v1/status` shows `live_harvest_wired: false`. The control plane refuses to substitute sim numbers |
 | `503 backend: lium …` | The eval pod could not be rented, reached, or torn down | Transient. Retry; the run is not banked and no verdict was recorded |
 | `503 backend: RELEARN_TEACHER_API_URL not set …` | Operator has not configured the judge the eval image needs | Operator issue; `/v1/status` shows `can_score: false`. No pod was rented |

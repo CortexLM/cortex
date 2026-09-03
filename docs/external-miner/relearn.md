@@ -33,6 +33,12 @@ The holdout commitment and size are published; the items are not.
 | **No contamination** | If a holdout item id or image hash shows up in `manifest.train_*`, the run is rejected. Submitting an **empty** `manifest` does not skip this gate — it fails it (`contamination_evidence_missing`), so declare what you trained on |
 | **Pixel shuffle** | Vision families (caption / VQA / OCR / spatial) must get worse when pixels are shuffled |
 | **General benches** | MMLU / MMMU-style canaries are **not** in the visible score. A drop past ε vs the champion zeros the run |
+| **Retention floors** | The perturbed rerun and the known-answer canaries still have to hold up |
+
+No gate can be skipped by leaving its evidence out. A run measured without a
+public split, a perturbed rerun, known-answer canaries, general benches, or the
+shuffle control on a vision family the champion measured is rejected
+(`*_evidence_missing`) rather than passing the gate it did not take.
 
 ## Submit
 
