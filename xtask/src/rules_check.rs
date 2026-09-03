@@ -9,6 +9,9 @@
 //! 4. The PR template carries the exact attestations `pr-check` requires.
 //! 5. `.rules/20-pre-prod-local.md` lists every command CI actually runs.
 //! 6. No markdown file links to a path that does not exist.
+//! 7. Numbered rules stay linked from the overview / entry points, and GitHub
+//!    workflows never transport a BIP39 mnemonic (`PROD_ROTATE_MNEMONIC` and
+//!    any `secrets.*MNEMONIC*` name are banned).
 
 use crate::pr_check::REQUIRED;
 use crate::CONTRACTS_DIR;
@@ -24,7 +27,24 @@ const RULES_FILES: &[&str] = &[
     "40-agents.md",
     "50-versioning.md",
     "60-naming.md",
+    "70-secrets-mnemonics.md",
 ];
+
+/// Entry points that must keep naming the mnemonic / wallet-JSON rule.
+const REQUIRED_RULE_POINTERS: &[(&str, &str)] = &[
+    ("AGENTS.md", "70-secrets-mnemonics.md"),
+    (".rules/40-agents.md", "70-secrets-mnemonics.md"),
+    (
+        ".rules/contracts/THREAT_MODEL.md",
+        "70-secrets-mnemonics.md",
+    ),
+];
+
+/// Banned GitHub Actions secret name used as a mnemonic transport.
+const BANNED_MNEMONIC_SECRET: &str = "PROD_ROTATE_MNEMONIC";
+
+/// Pin kept in both ignore files so mnemonic paths never enter git or images.
+const MNEMONIC_IGNORE_PIN: &str = "**/*mnemonic*";
 
 /// Frozen contracts relocated out of the deleted `docs/` tree.
 const CONTRACT_FILES: &[&str] = &[
@@ -93,6 +113,10 @@ pub fn run(root: &Path) -> Result<(), String> {
     check_pointer(root, "AGENTS.md", 25, &mut failures);
     check_pointer(root, "README.md", usize::MAX, &mut failures);
     check_cursor_rule(root, &mut failures);
+    check_overview_lists_every_rule(root, &mut failures);
+    check_required_rule_pointers(root, &mut failures);
+    check_mnemonic_ignore_pins(root, &mut failures);
+    check_banned_mnemonic_transport(root, &mut failures)?;
     check_pr_template(root, &mut failures);
     check_ci_commands(root, &mut failures)?;
     check_links(root, &mut failures)?;
@@ -145,6 +169,118 @@ fn check_pointer(root: &Path, rel: &str, within_lines: usize, failures: &mut Vec
     }
 }
 
+fn check_overview_lists_every_rule(root: &Path, failures: &mut Vec<String>) {
+    let rel = ".rules/00-overview.md";
+    let Ok(body) = fs::read_to_string(root.join(rel)) else {
+        return;
+    };
+    for name in RULES_FILES {
+        if !body.contains(name) {
+            failures.push(format!("{rel} must name numbered rule `{name}`"));
+        }
+    }
+}
+
+fn check_required_rule_pointers(root: &Path, failures: &mut Vec<String>) {
+    for (rel, needle) in REQUIRED_RULE_POINTERS {
+        let Ok(body) = fs::read_to_string(root.join(rel)) else {
+            failures.push(format!("{rel} is missing (must link `{needle}`)"));
+            continue;
+        };
+        if !body.contains(needle) {
+            failures.push(format!("{rel} must link numbered rule `{needle}`"));
+        }
+    }
+}
+
+fn check_mnemonic_ignore_pins(root: &Path, failures: &mut Vec<String>) {
+    for rel in [".dockerignore", ".gitignore"] {
+        let Ok(body) = fs::read_to_string(root.join(rel)) else {
+            failures.push(format!(
+                "{rel} is missing (must keep `{MNEMONIC_IGNORE_PIN}`)"
+            ));
+            continue;
+        };
+        if !body.contains(MNEMONIC_IGNORE_PIN) {
+            failures.push(format!("{rel} must keep `{MNEMONIC_IGNORE_PIN}`"));
+        }
+    }
+    let Ok(gitignore) = fs::read_to_string(root.join(".gitignore")) else {
+        return;
+    };
+    if !gitignore.contains("deploy/secrets/*") {
+        failures.push(String::from(
+            ".gitignore must keep `deploy/secrets/*` untracked (except documented README placeholders)",
+        ));
+    }
+    if !gitignore.contains("!.rules/70-secrets-mnemonics.md") {
+        failures.push(String::from(
+            ".gitignore must un-ignore `.rules/70-secrets-mnemonics.md` (documentation, not a secret file)",
+        ));
+    }
+}
+
+/// Scan GitHub workflow files for banned mnemonic transports.
+///
+/// # Errors
+///
+/// Returns an I/O error when `.github/workflows` cannot be read.
+fn check_banned_mnemonic_transport(root: &Path, failures: &mut Vec<String>) -> Result<(), String> {
+    let dir = root.join(".github/workflows");
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let entries = fs::read_dir(&dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("dir entry in {}: {e}", dir.display()))?;
+        let path = entry.path();
+        let is_yaml = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e == "yml" || e == "yaml");
+        if !is_yaml {
+            continue;
+        }
+        let body =
+            fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+        if body.contains(BANNED_MNEMONIC_SECRET) {
+            failures.push(format!(
+                "{} uses banned mnemonic transport `{BANNED_MNEMONIC_SECRET}`",
+                rel.display()
+            ));
+        }
+        if let Some(name) = github_mnemonic_secret_name(&body) {
+            if name != BANNED_MNEMONIC_SECRET {
+                failures.push(format!(
+                    "{} uses GitHub secret `{name}` as a mnemonic transport \
+                     (secrets.*MNEMONIC* is banned)",
+                    rel.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// First `secrets.NAME` in `body` whose name contains `MNEMONIC`.
+fn github_mnemonic_secret_name(body: &str) -> Option<String> {
+    const PREFIX: &str = "secrets.";
+    let mut rest = body;
+    while let Some(idx) = rest.find(PREFIX) {
+        let after = rest.get(idx.saturating_add(PREFIX.len())..)?;
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if name.to_ascii_uppercase().contains("MNEMONIC") {
+            return Some(name);
+        }
+        rest = after;
+    }
+    None
+}
+
 fn check_cursor_rule(root: &Path, failures: &mut Vec<String>) {
     let path = root.join(CURSOR_RULE);
     let Ok(body) = fs::read_to_string(&path) else {
@@ -157,6 +293,11 @@ fn check_cursor_rule(root: &Path, failures: &mut Vec<String>) {
     }
     if !body.contains(".rules/") {
         failures.push(format!("{CURSOR_RULE} must require reading `.rules/`"));
+    }
+    for name in RULES_FILES {
+        if !body.contains(name) {
+            failures.push(format!("{CURSOR_RULE} must list numbered rule `{name}`"));
+        }
     }
 }
 
@@ -345,6 +486,42 @@ mod tests {
         assert!(RULES_FILES
             .iter()
             .all(|f| Path::new(f).extension().is_some_and(|e| e == "md")));
+    }
+
+    #[test]
+    fn secrets_rule_is_required_reading_and_linked() {
+        assert!(
+            RULES_FILES.contains(&"70-secrets-mnemonics.md"),
+            "add 70-secrets-mnemonics.md to RULES_FILES"
+        );
+        let pointers: Vec<(&str, &str)> = REQUIRED_RULE_POINTERS.to_vec();
+        assert!(
+            pointers.contains(&("AGENTS.md", "70-secrets-mnemonics.md")),
+            "AGENTS.md must keep a pointer at the secrets rule"
+        );
+        assert!(pointers.contains(&(".rules/40-agents.md", "70-secrets-mnemonics.md")));
+        assert!(pointers.contains(&(
+            ".rules/contracts/THREAT_MODEL.md",
+            "70-secrets-mnemonics.md"
+        )));
+        assert_eq!(BANNED_MNEMONIC_SECRET, "PROD_ROTATE_MNEMONIC");
+        assert_eq!(MNEMONIC_IGNORE_PIN, "**/*mnemonic*");
+    }
+
+    #[test]
+    fn github_mnemonic_secret_name_flags_actions_secrets_only() {
+        assert_eq!(
+            github_mnemonic_secret_name("password: ${{ secrets.PROD_ROTATE_MNEMONIC }}"),
+            Some(String::from("PROD_ROTATE_MNEMONIC"))
+        );
+        assert_eq!(
+            github_mnemonic_secret_name("env: MNEMONIC_FILE=/run/base/x"),
+            None
+        );
+        assert_eq!(
+            github_mnemonic_secret_name("password: ${{ secrets.GITHUB_TOKEN }}"),
+            None
+        );
     }
 
     #[test]

@@ -17,6 +17,8 @@
 **/hotkey*
 **/*secret*
 **/*mnemonic*
+# The numbered rule about those secrets is documentation, not a secret file.
+!.rules/70-secrets-mnemonics.md
 
 # OS / editor
 .DS_Store

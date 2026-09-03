@@ -32,12 +32,18 @@ duty.
   images or cloud-init.
 - `BASE_*` env vars, deployed paths, GHCR package paths, and `base-*-v1`
   domain tags are frozen ([`60-naming.md`](60-naming.md)).
+- BIP39 mnemonics, `secretPhrase`, and raw hotkey / coldkey seeds never leave
+  a mode-`0600` file: not in argv, Chat, GitHub Actions secrets, compose
+  `environment:`, or a `644` agent `audit.jsonl`
+  ([`70-secrets-mnemonics.md`](70-secrets-mnemonics.md)).
 - `GET /v1/weights/latest` is fail-closed: a burn vector, never a 404.
 - `unsafe_code = forbid`; no `unwrap` / `expect` in non-test code.
 
 ## Machine check
 
 `cargo run -p xtask -- rules-check` fails if `AGENTS.md` stops pointing at
-`.rules/` in its first lines, or if any of its relative links dangle. It cannot
-tell you that a table is out of date — that part is your job, and it is the
-reason the PR attestation exists.
+`.rules/` in its first lines, if this file / `AGENTS.md` /
+`contracts/THREAT_MODEL.md` stop linking
+[`70-secrets-mnemonics.md`](70-secrets-mnemonics.md), or if any of its
+relative links dangle. It cannot tell you that a table is out of date — that
+part is your job, and it is the reason the PR attestation exists.
