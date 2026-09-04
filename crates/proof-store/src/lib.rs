@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use proof_score::{ProofVerdict, SealedBaseline};
+use proof_score::{MinerTopicRun, ProofVerdict, SealedBaseline};
 use proof_task::{verify_holdout, HoldoutError, HoldoutRecord, TopicDocument, TopicError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -128,7 +128,7 @@ struct Inner {
     topics: BTreeMap<String, TopicDocument>,
     holdouts: BTreeMap<String, Vec<HoldoutRecord>>,
     baselines: BTreeMap<String, SealedBaseline>,
-    scores: BTreeMap<String, BTreeMap<String, u64>>,
+    scores: BTreeMap<String, BTreeMap<String, MinerTopicRun>>,
 }
 
 impl MemoryStore {
@@ -260,29 +260,80 @@ impl MemoryStore {
         Ok(rows)
     }
 
-    /// Persist one topic lattice for a hotkey so emission can mean them.
+    /// Persist one topic attempt for a hotkey so emission can run WTA / discovery.
     pub fn record_topic_score(
         &self,
         hotkey: &str,
         topic_id: &str,
         lattice: u64,
     ) -> Result<(), StoreError> {
+        self.record_topic_run(
+            hotkey,
+            topic_id,
+            MinerTopicRun {
+                pass: lattice > 0,
+                primary: None,
+                artifact_digest: String::new(),
+                near_duplicate: false,
+            },
+        )
+    }
+
+    /// Persist the full attempt (primary + artifact) used by payout.
+    pub fn record_topic_run(
+        &self,
+        hotkey: &str,
+        topic_id: &str,
+        run: MinerTopicRun,
+    ) -> Result<(), StoreError> {
         self.lock()?
             .scores
             .entry(hotkey.to_owned())
             .or_default()
-            .insert(topic_id.to_owned(), lattice);
+            .insert(topic_id.to_owned(), run);
         Ok(())
     }
 
-    /// Per-topic lattices for one miner.
+    /// Per-topic lattices for one miner (binary SCORE_MAX/0 from `pass`).
     pub fn miner_scores(&self, hotkey: &str) -> Result<BTreeMap<String, u64>, StoreError> {
+        Ok(self
+            .lock()?
+            .scores
+            .get(hotkey)
+            .map(|m| {
+                m.iter()
+                    .map(|(k, r)| (k.clone(), if r.pass { proof_task::SCORE_MAX } else { 0 }))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Per-topic attempts for one miner.
+    pub fn miner_runs(&self, hotkey: &str) -> Result<BTreeMap<String, MinerTopicRun>, StoreError> {
         Ok(self.lock()?.scores.get(hotkey).cloned().unwrap_or_default())
     }
 
     /// Every hotkey that has any recorded topic score.
     pub fn scored_hotkeys(&self) -> Result<BTreeSet<String>, StoreError> {
         Ok(self.lock()?.scores.keys().cloned().collect())
+    }
+
+    /// Best accepted champion primary on a topic, if the operator crowned one.
+    pub fn champion_primary(&self, topic: &TopicDocument) -> Result<Option<f64>, StoreError> {
+        let g = self.lock()?;
+        let mut found = None;
+        for row in g.submissions.values() {
+            if row.topic_id != topic.id || row.state != SubmissionState::Champion {
+                continue;
+            }
+            let Some(v) = row.verdict.as_ref() else {
+                continue;
+            };
+            if v.pass {
+                found = proof_score::primary_from_harness(topic, &v.harness);
+            }
+        }
+        Ok(found)
     }
 }
 

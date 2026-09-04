@@ -348,16 +348,16 @@ fn s9_repo_config_loads_when_present() {
     let primary = ch.primary().unwrap();
     assert_eq!(primary.body.challenges.len(), 2);
 
-    // Two live challenges: Bounty 7000 bps, Proof 3000 bps (empty proof digest).
+    // Two live challenges: Bounty 2000 bps, Proof 8000 bps (Proof-weighted).
     let expected: [(&[u8], u16, &str); 2] = [
         (
             b"bounty",
-            7000,
+            2000,
             "743688a1e1b2848b309205706b4dcae54bffe4233a5d7018053471e1dce45c21",
         ),
         (
             b"proof",
-            3000,
+            8000,
             "3e7f70f09165e265ab89ab04a4fc91dc0531d54a100c538fb14c6f008421c375",
         ),
     ];

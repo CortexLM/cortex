@@ -30,7 +30,7 @@ pub const LIVE: [Challenge; 2] = [
         label: "Bounty",
         command: "bounty",
         entry: "ctx bounty pair, then ctx bounty report",
-        emission_bps: 7000,
+        emission_bps: 2000,
         work: "file real bug reports against the subnet",
         guide: "docs/external-miner/bounty.md",
     },
@@ -39,7 +39,7 @@ pub const LIVE: [Challenge; 2] = [
         label: "Proof",
         command: "proof",
         entry: "ctx proof submit",
-        emission_bps: 3000,
+        emission_bps: 8000,
         work: "reproduce an operator-published research topic against a sealed baseline",
         guide: "docs/external-miner/proof.md",
     },
@@ -109,9 +109,10 @@ pub fn print_challenges() {
     println!("`ctx relearn|image|agent` still talk to a local stack (`--gateway`);");
     println!("they are not live work.");
     println!();
-    println!("Bounty pays precision times severity. Proof pays the mean of per-topic");
-    println!("lattices over currently open ids; an empty eval digest cannot score.");
-    println!("Run 'ctx status' to see whether each host can score right now.");
+    println!("Bounty pays precision times severity. Proof pays WTA or discovery per open topic.");
+    println!(
+        "An empty eval digest cannot score. Run 'ctx status' to see whether a host can score."
+    );
 }
 
 /// Fetch `/v1/status` for one challenge.

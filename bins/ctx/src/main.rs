@@ -30,7 +30,7 @@ use proof::SubmitInput;
     about = "Cortex subnet CLI: challenge status, Proof submits, and Bounty reports",
     long_about = "ctx talks to the public Cortex gateway at https://network.cortex.foundation.
 
-Live challenges: bounty (7000 bps) and proof (3000 bps). relearn*, design, and
+Live challenges: bounty (2000 bps) and proof (8000 bps). relearn*, design, and
 prism are off and earn nothing. `ctx relearn|image|agent` still exist for a
 local stack; they are not live work.
 
@@ -192,6 +192,12 @@ struct ProofSubmitArgs {
     /// Architecture / proxy id baked by the pin.
     #[arg(long, value_name = "ID")]
     architecture: String,
+    /// What the recipe achieved (the RLM re-runs this claim).
+    #[arg(long, value_name = "TEXT")]
+    claim: String,
+    /// FLOPs spent reproducing the recipe. Must be ≤ the topic budget.
+    #[arg(long, value_name = "N")]
+    declared_flops: u64,
     /// Full manifest JSON file, used verbatim.
     #[arg(long, value_name = "PATH")]
     manifest_file: Option<PathBuf>,
@@ -246,6 +252,8 @@ async fn run_proof(client: &Client, cmd: ProofCmd, json: bool) -> Result<(), Str
                 artifact_digest: args.artifact_digest,
                 artifact_uri: args.artifact_uri,
                 architecture: args.architecture,
+                claim: args.claim,
+                declared_flops: args.declared_flops,
                 manifest_file: args.manifest_file,
                 train_hashes: args.train_hashes,
                 train_datasets: args.train_datasets,
@@ -413,8 +421,8 @@ mod tests {
             "{long_about}"
         );
         assert!(!long_about.contains("<gateway>"), "{long_about}");
-        assert!(long_about.contains("bounty (7000 bps)"));
-        assert!(long_about.contains("proof (3000 bps)"));
+        assert!(long_about.contains("bounty (2000 bps)"));
+        assert!(long_about.contains("proof (8000 bps)"));
     }
 
     #[test]

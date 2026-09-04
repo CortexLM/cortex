@@ -41,6 +41,18 @@ pub const MAX_TOPIC_ID_LEN: usize = 63;
 /// Longest legal problem statement.
 pub const MAX_STATEMENT_LEN: usize = 8_192;
 
+/// Longest legal English validation string (`score_on` / `accept_if` / `reject_if`).
+pub const MAX_VALIDATION_LEN: usize = 2_048;
+
+/// Basis-point denominator for topic payout shares (must sum to this).
+pub const BPS_DENOM: u16 = 10_000;
+
+/// Default discovery pass-floor share of a topic pool (30%).
+pub const DISCOVERY_PASS_FLOOR_SHARE_BPS: u16 = 3_000;
+
+/// Default discovery novelty-pool share of a topic pool (70%).
+pub const DISCOVERY_NOVELTY_POOL_SHARE_BPS: u16 = 7_000;
+
 /// The only v0 `nll`-family primary.
 pub const PRIMARY_HOLDOUT_NLL: &str = "holdout_nll";
 
@@ -95,6 +107,113 @@ pub enum MetricDirection {
     Min,
     /// Higher is better.
     Max,
+}
+
+/// How this topic's emission mass is split among miners who pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PayoutMode {
+    /// Winner-take-all: best primary among `pass=true` this epoch takes the
+    /// whole topic mass. Exact ties split equally. Non-winners get 0.
+    Wta,
+    /// Research reimbursement: a pass floor split equally among verified
+    /// passes, plus a novelty pool weighted by improvement over the sealed
+    /// baseline (and the current champion, if any).
+    #[default]
+    Discovery,
+}
+
+impl PayoutMode {
+    /// Wire name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Wta => "wta",
+            Self::Discovery => "discovery",
+        }
+    }
+}
+
+/// Human-readable English criteria the RLM and harness enforce.
+///
+/// These strings are signed with the rest of the topic. They do not replace
+/// the machine gates; they tell miners (and the judge) what to score and
+/// what a pass or reject means in English.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ValidationSpec {
+    /// What the harness measures, e.g. "holdout agent harness success rate vs sealed baseline".
+    pub score_on: String,
+    /// When a reproduced run is accepted.
+    pub accept_if: String,
+    /// When a run is rejected even if a number looks good.
+    pub reject_if: String,
+}
+
+impl Default for ValidationSpec {
+    fn default() -> Self {
+        Self::example()
+    }
+}
+
+impl ValidationSpec {
+    /// Fixture / default English. Operators should replace these with the
+    /// problem they are actually publishing; empty strings are a publish reject.
+    #[must_use]
+    pub fn example() -> Self {
+        Self {
+            score_on: "holdout metric vs sealed baseline".into(),
+            accept_if: "reproduced, no contamination, beat baseline by epsilon".into(),
+            reject_if: "unreproduced claim, FLOP over budget, harness short-circuit".into(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), TopicError> {
+        for (field, value) in [
+            ("score_on", self.score_on.as_str()),
+            ("accept_if", self.accept_if.as_str()),
+            ("reject_if", self.reject_if.as_str()),
+        ] {
+            let t = value.trim();
+            if t.is_empty() || t.chars().count() > MAX_VALIDATION_LEN {
+                return Err(TopicError::BadValidation { field });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Discovery-mode split of THIS topic's pool. Ignored when `payout_mode` is `wta`.
+///
+/// Shares are basis points of the topic pool and must sum to [`BPS_DENOM`].
+/// A topic may tighten a floor (raise the bar on novelty / reimbursement
+/// mix) but the two shares still have to cover the whole pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DiscoverySpec {
+    /// Share of the topic pool split equally among verified passes.
+    pub pass_floor_share_bps: u16,
+    /// Remainder, weighted by improvement delta vs the sealed baseline
+    /// (and vs a previous accepted champion, if any).
+    pub novelty_pool_share_bps: u16,
+}
+
+impl Default for DiscoverySpec {
+    fn default() -> Self {
+        Self {
+            pass_floor_share_bps: DISCOVERY_PASS_FLOOR_SHARE_BPS,
+            novelty_pool_share_bps: DISCOVERY_NOVELTY_POOL_SHARE_BPS,
+        }
+    }
+}
+
+impl DiscoverySpec {
+    /// Whether the two shares cover the whole pool.
+    #[must_use]
+    pub fn covers_pool(self) -> bool {
+        u32::from(self.pass_floor_share_bps) + u32::from(self.novelty_pool_share_bps)
+            == u32::from(BPS_DENOM)
+    }
 }
 
 /// The metric family and its family-specific knobs.
@@ -234,6 +353,12 @@ pub struct TopicDocument {
     pub id: String,
     /// Human problem text miners train against. Never holdout items.
     pub statement: String,
+    /// How this topic's emission mass is paid (`wta` or `discovery`).
+    pub payout_mode: PayoutMode,
+    /// English criteria the RLM + harness enforce. Signed with the rest.
+    pub validation: ValidationSpec,
+    /// Discovery-pool split. Ignored when [`PayoutMode::Wta`].
+    pub discovery: DiscoverySpec,
     /// Constraints the eval image enforces (it never trusts the claim).
     pub constraints: Constraints,
     /// Metric family and its knobs.
@@ -273,6 +398,9 @@ impl Default for TopicDocument {
             schema_version: TOPIC_SCHEMA_VERSION,
             id: String::new(),
             statement: String::new(),
+            payout_mode: PayoutMode::Discovery,
+            validation: ValidationSpec::example(),
+            discovery: DiscoverySpec::default(),
             constraints: Constraints::default(),
             metric: MetricSpec::default(),
             flops_budget: crate::FLOPS_BUDGET_MAX,
@@ -310,6 +438,20 @@ pub enum TopicError {
     /// Statement is empty or oversized.
     #[error("statement must be 1..={MAX_STATEMENT_LEN} chars")]
     BadStatement,
+    /// English validation field is empty or oversized.
+    #[error("validation.{field} must be 1..={MAX_VALIDATION_LEN} chars")]
+    BadValidation {
+        /// Which validation string.
+        field: &'static str,
+    },
+    /// Discovery shares do not cover the topic pool.
+    #[error(
+        "discovery pass_floor_share_bps + novelty_pool_share_bps must sum to {BPS_DENOM}, got {got}"
+    )]
+    BadDiscoveryShares {
+        /// Sum of the two shares.
+        got: u32,
+    },
     /// A metric name outside the family's allowlist.
     #[error("metric {name:?} is not valid for family {family:?}")]
     BadMetric {
@@ -648,6 +790,13 @@ impl TopicDocument {
         if statement.is_empty() || statement.chars().count() > MAX_STATEMENT_LEN {
             return Err(TopicError::BadStatement);
         }
+        self.validation.validate()?;
+        if self.payout_mode == PayoutMode::Discovery && !self.discovery.covers_pool() {
+            return Err(TopicError::BadDiscoveryShares {
+                got: u32::from(self.discovery.pass_floor_share_bps)
+                    + u32::from(self.discovery.novelty_pool_share_bps),
+            });
+        }
         self.metric.validate(pin, supported_custom)?;
         if self.flops_budget == 0 || self.flops_budget > pin.flops_budget_max {
             return Err(TopicError::BadFlopsBudget {
@@ -805,6 +954,12 @@ mod tests {
                         all-reduce over a fast fabric; inter-rank bandwidth is capped at \
                         12.5 Gbit/s."
                 .into(),
+            payout_mode: PayoutMode::Wta,
+            validation: ValidationSpec {
+                score_on: "tokens_per_sec vs sealed comms reference under the fabric cap".into(),
+                accept_if: "reproduced under FLOP/wall budget; quality floor held; beat reference by epsilon_rel".into(),
+                reject_if: "unreproduced claim; fabric cheat; FLOP or wall over budget".into(),
+            },
             constraints: Constraints {
                 no_infiniband: true,
                 no_nvlink: true,
@@ -890,6 +1045,8 @@ mod tests {
         for field in [
             "\"id\"",
             "\"statement\"",
+            "\"payout_mode\"",
+            "\"validation\"",
             "\"metric\"",
             "\"baseline\"",
             "\"holdout_commitment\"",
@@ -1081,6 +1238,50 @@ mod tests {
         ));
         doc.validate(&p, &["bits_per_joule"])
             .expect("implemented custom metric");
+
+        let mut harness = nll_topic();
+        harness.metric = MetricSpec {
+            family: MetricFamily::Custom,
+            primary: "success_rate".into(),
+            direction: MetricDirection::Max,
+            unit: "rate".into(),
+            epsilon_rel: 0.05,
+            quality_floor_nll: 0.0,
+            wall_budget_s: 0,
+            custom_id: crate::CUSTOM_HARNESS_SUCCESS_RATE.into(),
+        };
+        harness
+            .validate(&p, &[crate::CUSTOM_HARNESS_SUCCESS_RATE])
+            .expect("listed custom stub is publishable");
+    }
+
+    #[test]
+    fn payout_mode_and_validation_are_signed_and_discovery_must_cover_the_pool() {
+        let p = pin();
+        let mut doc = nll_topic();
+        assert_eq!(doc.payout_mode, PayoutMode::Discovery);
+        doc.validate(&p, &[]).expect("default discovery");
+
+        doc.discovery.pass_floor_share_bps = 2_000;
+        doc.discovery.novelty_pool_share_bps = 7_000;
+        assert!(matches!(
+            doc.validate(&p, &[]),
+            Err(TopicError::BadDiscoveryShares { got: 9_000 })
+        ));
+
+        let mut wta = dt_no_ib();
+        wta.payout_mode = PayoutMode::Wta;
+        wta.discovery.pass_floor_share_bps = 1;
+        wta.discovery.novelty_pool_share_bps = 1;
+        wta.validate(&p, &[])
+            .expect("wta ignores discovery share arithmetic");
+
+        let mut empty = nll_topic();
+        empty.validation.score_on.clear();
+        assert!(matches!(
+            empty.validate(&p, &[]),
+            Err(TopicError::BadValidation { field: "score_on" })
+        ));
     }
 
     #[test]

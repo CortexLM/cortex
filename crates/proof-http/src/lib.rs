@@ -31,7 +31,10 @@ use proof_eval::{
     contamination_evidence, eval_after_freeze, force_sim, scoring_readiness, supported_custom,
     EvalBackend, EvalError, LiveScorer,
 };
-use proof_score::{judge_topic, AgentVerdict, GateFail, HarnessMetrics, ProofKind, ProofVerdict};
+use proof_score::{
+    judge_topic, primary_from_harness, AgentVerdict, GateFail, HarnessMetrics, MinerTopicRun,
+    ProofKind, ProofVerdict,
+};
 use proof_store::{
     freeze_submission_digest, ArtifactManifest, MemoryStore, Submission, SubmissionState,
 };
@@ -344,7 +347,16 @@ fn persist_pre_eval_reject(
             detail: Some(format!("gates={failed:?}")),
         })
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
-    let _ = st.store.record_topic_score(&row.miner_hotkey, &topic.id, 0);
+    let _ = st.store.record_topic_run(
+        &row.miner_hotkey,
+        &topic.id,
+        MinerTopicRun {
+            pass: false,
+            primary: None,
+            artifact_digest: row.artifact_digest.clone(),
+            near_duplicate: false,
+        },
+    );
     Ok((
         StatusCode::CREATED,
         Json(SubmitResp {
@@ -372,7 +384,12 @@ fn persist_scored(
 ) -> Result<(StatusCode, Json<SubmitResp>), (StatusCode, Json<serde_json::Value>)> {
     let topic_id = body.topic_id.trim().to_owned();
     let pass = verdict.pass;
-    let lattice = verdict.lattice;
+    let primary = st
+        .store
+        .topic(&topic_id)
+        .ok()
+        .and_then(|t| primary_from_harness(&t, &verdict.harness));
+    let artifact_digest = artifact.clone();
     let detail = if pass {
         None
     } else {
@@ -402,9 +419,16 @@ fn persist_scored(
             detail,
         })
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
-    let _ = st
-        .store
-        .record_topic_score(&row.miner_hotkey, &topic_id, lattice);
+    let _ = st.store.record_topic_run(
+        &row.miner_hotkey,
+        &topic_id,
+        MinerTopicRun {
+            pass,
+            primary,
+            artifact_digest,
+            near_duplicate: false,
+        },
+    );
     Ok((
         StatusCode::CREATED,
         Json(SubmitResp {
@@ -560,6 +584,7 @@ mod tests {
         TopicDocument {
             id: "dt-no-ib-v0".into(),
             statement: "No IB/NVLink; 12.5 Gbit/s cap; beat sealed comms baseline.".into(),
+            payout_mode: proof_task::PayoutMode::Wta,
             constraints: Constraints {
                 no_infiniband: true,
                 no_nvlink: true,
@@ -1071,5 +1096,44 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("custom metric"));
+    }
+
+    #[tokio::test]
+    async fn harness_success_rate_is_a_listed_custom_and_publishes() {
+        let token = "op";
+        let app = app(token);
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let p = pin("");
+        let (mut doc, _) = seal_topic(&p, unsigned_topic(&recs));
+        doc.id = "agent-harness-improve-v0".into();
+        doc.payout_mode = proof_task::PayoutMode::Discovery;
+        doc.validation = proof_task::ValidationSpec {
+            score_on: "Holdout harness success rate (and secondary latency) vs sealed baseline"
+                .into(),
+            accept_if: "Reproduced under FLOP/wall budget; no contamination; success rate >= baseline + epsilon".into(),
+            reject_if: "Unreproduced claim; eval short-circuit; FLOP over budget; near-duplicate of an accepted artifact".into(),
+        };
+        doc.metric = MetricSpec {
+            family: MetricFamily::Custom,
+            primary: "success_rate".into(),
+            direction: MetricDirection::Max,
+            unit: "rate".into(),
+            epsilon_rel: 0.05,
+            quality_floor_nll: 0.0,
+            wall_budget_s: 0,
+            custom_id: proof_task::CUSTOM_HARNESS_SUCCESS_RATE.into(),
+        };
+        doc.signature = doc.sign_with(&sk()).expect("sign");
+        let (st, body) = json_req(
+            app,
+            "POST",
+            "/v1/admin/proof/topics",
+            serde_json::to_value(&doc).expect("json"),
+            Some(token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        assert_eq!(body["id"], "agent-harness-improve-v0");
+        assert_eq!(body["payout_mode"], "discovery");
     }
 }

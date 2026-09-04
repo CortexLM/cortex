@@ -41,10 +41,11 @@ pub use holdout::{
 };
 pub use pin::{PinError, ProofPin};
 pub use topic::{
-    default_adamw, topic_signing_payload, Baseline, Constraints, MetricDirection, MetricFamily,
-    MetricSpec, TopicDocument, TopicError, TopicStatus, MAX_STATEMENT_LEN, MAX_TOPIC_ID_LEN,
-    METRIC_STEP_LATENCY_MS, METRIC_TOKENS_PER_SEC, MIN_TOPIC_ID_LEN, PRIMARY_HOLDOUT_NLL,
-    TOPIC_SCHEMA_VERSION,
+    default_adamw, topic_signing_payload, Baseline, Constraints, DiscoverySpec, MetricDirection,
+    MetricFamily, MetricSpec, PayoutMode, TopicDocument, TopicError, TopicStatus, ValidationSpec,
+    BPS_DENOM, DISCOVERY_NOVELTY_POOL_SHARE_BPS, DISCOVERY_PASS_FLOOR_SHARE_BPS, MAX_STATEMENT_LEN,
+    MAX_TOPIC_ID_LEN, MAX_VALIDATION_LEN, METRIC_STEP_LATENCY_MS, METRIC_TOKENS_PER_SEC,
+    MIN_TOPIC_ID_LEN, PRIMARY_HOLDOUT_NLL, TOPIC_SCHEMA_VERSION,
 };
 
 /// Normative challenge id (trust-root / leaf `challenge_id` string).
@@ -94,6 +95,17 @@ pub const EVAL_IMAGE: &str = "ghcr.io/cortexlm/proof-eval";
 
 /// Public docs pointer until a dedicated Proof miner repo ships.
 pub const PROOF_GIT_URL: &str = "https://github.com/CortexLM/relearn";
+
+/// Custom metric id for the agent-harness success-rate topic. Listed so an
+/// operator can publish the document; the eval image fail-closes until a
+/// real harness fills `custom_value`.
+pub const CUSTOM_HARNESS_SUCCESS_RATE: &str = "harness_success_rate";
+
+/// Proof challenge emission share (basis points of the subnet).
+pub const PROOF_EMISSION_BPS: u16 = 8_000;
+
+/// Bounty challenge emission share (basis points of the subnet).
+pub const BOUNTY_EMISSION_BPS: u16 = 2_000;
 
 /// Largest FLOP budget any topic may declare.
 pub const FLOPS_BUDGET_MAX: u64 = 2_000_000_000_000_000_000;
@@ -174,5 +186,12 @@ mod tests {
         assert!((EPSILON_TOPIC_MAX_REGRESS_MIN - 0.05).abs() < 1e-12);
         assert!((EPSILON_THROUGHPUT_REL_MIN - 0.05).abs() < 1e-12);
         assert!((QUALITY_FLOOR_NLL_MAX - 0.02).abs() < 1e-12);
+        assert_eq!(PROOF_EMISSION_BPS, 8_000);
+        assert_eq!(BOUNTY_EMISSION_BPS, 2_000);
+        assert_eq!(
+            u32::from(PROOF_EMISSION_BPS) + u32::from(BOUNTY_EMISSION_BPS),
+            10_000
+        );
+        assert_eq!(CUSTOM_HARNESS_SUCCESS_RATE, "harness_success_rate");
     }
 }

@@ -112,7 +112,7 @@ weight. Two things follow, and neither is a degraded mode:
   reports there would take real work (finding a real bug) and pay nothing.
 - the emitter pays **nobody**: it covers `E` with
   `NoScore(ChallengeInternal)` (`BUNDLE_SPEC` §3.3.1 — "challenge-side fault;
-  still must cover the participant"), so the 7000 bps burns to uid 0.
+  still must cover the participant"), so the 2000 bps burns to uid 0.
 
 Covering `E` is not a hedge, it is the difference between bounty failing and
 the subnet failing. Bounty holds a **paid** trust-root row, and D24 requires a

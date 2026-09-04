@@ -27,8 +27,8 @@ const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("ctx_cli", "ctx"),
     ("gateway_host", "network.cortex.foundation"),
     ("two_live", "Two live challenges"),
-    ("emission_bounty", "7000 bps"),
-    ("emission_proof", "3000 bps"),
+    ("emission_bounty", "2000 bps"),
+    ("emission_proof", "8000 bps"),
     // Off ids must still be named so miners do not treat leftover pages as live.
     ("relearn_off", "relearn"),
     ("relearn_image_off", "relearn-image"),
@@ -111,8 +111,11 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
             "operator-published",
             "contamination_evidence_missing",
             "eval_image_digest",
-            "mean of per-topic",
+            "sum of per-topic",
             "12.5 Gbit/s",
+            "declared_flops",
+            "claim",
+            "payout_mode",
         ],
     ),
     (
@@ -600,8 +603,8 @@ mod tests {
             ("proof_challenge", "proof"),
             ("proof_dynamic_topics", "operator-published"),
             ("two_live", "Two live challenges"),
-            ("emission_bounty", "7000 bps"),
-            ("emission_proof", "3000 bps"),
+            ("emission_bounty", "2000 bps"),
+            ("emission_proof", "8000 bps"),
             ("relearn_off", "relearn"),
             ("relearn_image_off", "relearn-image"),
             ("relearn_agent_off", "relearn-agent"),
@@ -663,7 +666,9 @@ mod tests {
             .unwrap_or_default();
         assert!(proof.contains(&"topic_id"));
         assert!(proof.contains(&"operator-published"));
-        assert!(proof.contains(&"mean of per-topic"));
+        assert!(proof.contains(&"sum of per-topic"));
+        assert!(proof.contains(&"declared_flops"));
+        assert!(proof.contains(&"claim"));
     }
 
     #[test]

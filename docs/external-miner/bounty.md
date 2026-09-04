@@ -2,8 +2,8 @@
 
 # Bounty Challenge — miners
 
-Challenge id is `bounty`. One of two live challenges (`bounty` 7000 bps,
-`proof` 3000 bps). Report real Cortex product and backend bugs. Valid unique
+Challenge id is `bounty`. One of two live challenges (`bounty` 2000 bps,
+`proof` 8000 bps). Report real Cortex product and backend bugs. Valid unique
 reports earn subnet weight. Every report is tagged with your Bittensor hotkey
 so operators can patch in real time and pay (or penalize) the right miner.
 

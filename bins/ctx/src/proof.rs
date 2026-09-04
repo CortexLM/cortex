@@ -27,6 +27,10 @@ pub struct SubmitInput {
     pub artifact_uri: Option<String>,
     /// Architecture / proxy id baked by the pin.
     pub architecture: String,
+    /// Public claim the RLM re-runs (what you say the recipe achieved).
+    pub claim: String,
+    /// FLOPs you spent. Must be ≤ the topic budget.
+    pub declared_flops: u64,
     /// Complete manifest JSON, used verbatim when present.
     pub manifest_file: Option<PathBuf>,
     /// Shard content hashes your training mix touched.
@@ -50,12 +54,18 @@ pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Res
     if architecture.is_empty() {
         return Err("architecture is required (must match the proxy the pin bakes)".into());
     }
+    let claim = input.claim.trim();
+    if claim.is_empty() {
+        return Err("claim is required (what the recipe achieved)".into());
+    }
     let manifest = build_manifest(input)?;
     let mut body = json!({
         "miner_hotkey": hotkey,
         "topic_id": topic_id,
         "artifact_digest": digest,
         "architecture": architecture,
+        "claim": claim,
+        "declared_flops": input.declared_flops,
         "manifest": manifest,
     });
     if let Some(uri) = &input.artifact_uri {
@@ -127,10 +137,11 @@ pub async fn topics(client: &Client, json_out: bool) -> Result<(), String> {
                         .unwrap_or(&Value::Null),
                 );
                 let status = compact(t.get("status").unwrap_or(&Value::Null));
-                println!("  {id}  status={status}");
+                let mode = compact(t.get("payout_mode").unwrap_or(&Value::Null));
+                println!("  {id}  status={status}  payout={mode}");
             }
             println!();
-            println!("Holdout records are never listed here. A skipped topic scores 0.");
+            println!("Holdout records are never listed. WTA: winner takes the topic. Discovery: floor + novelty.");
         }
         None => println!("{}", compact(&reply.body)),
     }
@@ -225,6 +236,8 @@ fn normalize_hex64(s: &str, field: &str) -> Result<String, String> {
 
 fn print_fields(body: &Value) {
     for field in [
+        "claim",
+        "declared_flops",
         "id",
         "topic_id",
         "state",
@@ -261,13 +274,17 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_dataset_is_enough() {
+    fn claim_and_declared_flops_are_required_on_the_wire_shape() {
         let input = SubmitInput {
             train_datasets: vec!["my-mix-v0".into()],
+            claim: "beat baseline".into(),
+            declared_flops: 1,
             ..SubmitInput::default()
         };
         let m = build_manifest(&input).expect("declared");
         assert_eq!(m["train_dataset_ids"][0], "my-mix-v0");
+        assert_eq!(input.claim, "beat baseline");
+        assert_eq!(input.declared_flops, 1);
     }
 
     #[test]
