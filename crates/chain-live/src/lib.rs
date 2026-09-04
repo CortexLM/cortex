@@ -177,23 +177,42 @@ impl LiveChainClient {
         let keys = self.enumerate_hotkeys(netuid, at)?;
         let coldkeys = self.fetch_coldkeys_for_hotkeys(&keys, at)?;
         let owner = self.read_owner_hotkey(netuid, at)?;
+        let permits = self.fetch_validator_permit(netuid, at)?;
+        // An empty or short map is indistinguishable from "no UID is a
+        // validator", which would let a pure burn/vector through. Length must
+        // match hotkeys so missing flags cannot be treated as `false`.
+        if permits.len() != keys.len() {
+            return Err(ChainError::Other(format!(
+                "{PALLET_SUBTENSOR}.ValidatorPermit({netuid}) has {} flags for {} hotkeys — \
+                 fail-closed, refusing empty or short permit map",
+                permits.len(),
+                keys.len()
+            )));
+        }
         let mut mg = storage::decode_metagraph(keys, coldkeys, owner, netuid);
-        mg.validator_permit = self.fetch_validator_permit(netuid, at);
+        mg.validator_permit = permits;
         Ok(mg)
     }
 
-    /// Best-effort `ValidatorPermit(netuid)`. Missing or undecodable storage
-    /// is treated as no permits so a permit-map fault cannot drop the metagraph.
-    fn fetch_validator_permit(&self, netuid: u16, at: Option<&[u8; 32]>) -> Vec<bool> {
+    /// `ValidatorPermit(netuid)`. Fetch or SCALE-decode failure is an error —
+    /// never an empty vec that would look like "not permitted".
+    fn fetch_validator_permit(
+        &self,
+        netuid: u16,
+        at: Option<&[u8; 32]>,
+    ) -> Result<Vec<bool>, ChainError> {
         let key = storage::storage_map_key_u16(PALLET_SUBTENSOR, "ValidatorPermit", netuid);
         let raw = match at {
-            Some(h) => self.rpc.state_get_storage_at(&key, h),
-            None => self.rpc.state_get_storage(&key),
+            Some(h) => self.rpc.state_get_storage_at(&key, h)?,
+            None => self.rpc.state_get_storage(&key)?,
         };
-        match raw {
-            Ok(Some(bytes)) => storage::decode_vec_bool(&bytes).unwrap_or_default(),
-            Ok(None) | Err(_) => Vec::new(),
-        }
+        let bytes = raw.ok_or_else(|| {
+            ChainError::Other(format!(
+                "{PALLET_SUBTENSOR}.ValidatorPermit({netuid}) missing — fail-closed, \
+                 refusing empty permit map"
+            ))
+        })?;
+        storage::decode_vec_bool(&bytes)
     }
 
     /// Bulk-read `SubtensorModule.Owner(hotkey) → coldkey` for every hotkey.

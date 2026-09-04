@@ -17,6 +17,20 @@ pub const DEFAULT_GATEWAY: &str = "https://network.cortex.foundation";
 /// Per-request timeout. Submits rent nothing synchronously, so this is short.
 const TIMEOUT_SECS: u64 = 60;
 
+/// Clear fail-closed message when a miner key would go out over cleartext HTTP.
+const KEYED_HTTP_REFUSAL: &str =
+    "refusing to send X-Lium-Api-Key over http:// — keyed calls require an https:// gateway";
+
+fn is_https_url(url: &str) -> bool {
+    url.get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+}
+
+fn is_http_url(url: &str) -> bool {
+    url.get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+}
+
 /// One gateway reply: HTTP status plus a decoded JSON body.
 pub struct Reply {
     /// HTTP status code.
@@ -51,21 +65,32 @@ pub struct Client {
 
 impl Client {
     /// Build a client for one gateway base URL.
+    ///
+    /// A Lium API key is attached only on `https://`. `http://` plus a key is
+    /// refused so the header never goes out in cleartext. Redirects are never
+    /// followed, so a 302 to `http://` cannot resend `X-Lium-Api-Key`.
     pub fn new(gateway: &str, lium_key: Option<String>) -> Result<Self, String> {
         let base = gateway.trim().trim_end_matches('/').to_owned();
-        if !(base.starts_with("https://") || base.starts_with("http://")) {
+        if !(is_https_url(&base) || is_http_url(&base)) {
             return Err(format!(
                 "gateway must be an http(s) URL, got {base:?} (default is {DEFAULT_GATEWAY})"
             ));
         }
+        let lium_key = lium_key.filter(|k| !k.trim().is_empty());
+        if lium_key.is_some() && !is_https_url(&base) {
+            return Err(KEYED_HTTP_REFUSAL.to_owned());
+        }
+        // Default reqwest policy resends headers (including X-Lium-Api-Key) to
+        // any Location, including http://. Never auto-follow.
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(TIMEOUT_SECS))
             .user_agent(concat!("ctx/", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("http client: {e}"))?;
         Ok(Self {
             base,
-            lium_key: lium_key.filter(|k| !k.trim().is_empty()),
+            lium_key,
             http,
         })
     }
@@ -92,7 +117,12 @@ impl Client {
 
     async fn send(&self, req: reqwest::RequestBuilder) -> Result<Reply, String> {
         // Miner BYOK. Accepted and never logged by the challenge services, and
-        // never printed by this CLI.
+        // never printed by this CLI. HTTPS is required whenever a key is set
+        // (`Client::new` already refuses http + key); this guard is fail-closed
+        // if a future constructor forgets that check.
+        if self.lium_key.is_some() && !is_https_url(&self.base) {
+            return Err(KEYED_HTTP_REFUSAL.to_owned());
+        }
         let req = match &self.lium_key {
             Some(key) => req.header("X-Lium-Api-Key", key),
             None => req,
@@ -152,6 +182,46 @@ mod tests {
     }
 
     #[test]
+    fn http_gateway_without_key_is_allowed() {
+        let c = Client::new("http://127.0.0.1:8090", None).expect("http without key");
+        assert_eq!(c.gateway(), "http://127.0.0.1:8090");
+        assert!(c.lium_key.is_none());
+    }
+
+    #[test]
+    fn http_gateway_with_lium_key_is_refused() {
+        let Err(err) = Client::new("http://127.0.0.1:8090", Some("sk-test-key".into())) else {
+            panic!("http + key must fail closed");
+        };
+        assert!(
+            err.contains("https://"),
+            "error must name https as the requirement: {err}"
+        );
+        assert!(
+            err.contains("X-Lium-Api-Key") || err.contains("http://"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("sk-test-key"),
+            "must not echo the API key: {err}"
+        );
+    }
+
+    #[test]
+    fn http_scheme_is_matched_case_insensitively() {
+        let Err(err) = Client::new("HTTP://127.0.0.1:8090", Some("sk-test-key".into())) else {
+            panic!("HTTP:// + key must fail closed");
+        };
+        assert!(!err.contains("sk-test-key"), "must not echo the API key");
+    }
+
+    #[test]
+    fn https_gateway_accepts_lium_key() {
+        let c = Client::new(DEFAULT_GATEWAY, Some("sk-test-key".into())).expect("https + key");
+        assert!(c.lium_key.is_some());
+    }
+
+    #[test]
     fn challenge_paths_are_proxy_paths() {
         assert_eq!(
             challenge_path("proof", "/v1/status"),
@@ -167,5 +237,38 @@ mod tests {
         };
         assert!(!r.ok());
         assert_eq!(r.message(), "scoring unconfigured");
+    }
+
+    /// A 302 to a second origin must not be followed. Auto-follow would resend
+    /// `X-Lium-Api-Key` to whatever `Location` the gateway returns, including
+    /// `http://`. Keyed clients require `https://` (not locally mockable here);
+    /// the no-redirect policy is the same builder used for keyed calls.
+    #[tokio::test]
+    async fn does_not_follow_redirect_to_http_target() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let target = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("leaked"))
+            .expect(0)
+            .mount(&target)
+            .await;
+
+        let source = MockServer::start().await;
+        let location = format!("{}/leaked", target.uri());
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", location))
+            .mount(&source)
+            .await;
+
+        let c = Client::new(&source.uri(), None).expect("http without key");
+        let reply = c.get("/v1/weights/latest").await.expect("response");
+        assert_eq!(
+            reply.status, 302,
+            "must surface the 302 instead of following it"
+        );
+        drop(source);
+        drop(target);
     }
 }
