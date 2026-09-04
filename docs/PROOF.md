@@ -1,17 +1,20 @@
 # Proof challenge
 
 Live challenge id: **`proof`**. Emission **8000 bps** (80% of the subnet;
-bounty is 2000). This 20%/80% lock is independent of eval digest. Proof still
-answers **503** on submit until `eval_image_digest` is pinned. Do not invent
-a sha256. Sum across the two live rows stays 10000. Port **8100** (local
-probe **28100**).
+bounty is 2000). This 20%/80% lock is independent of eval digest. Eval
+digest `sha256:78b614a1…` is pinned (`ghcr.io/cortexlm/proof-eval`, baked
+proxy `Qwen/Qwen3.8-0.6B`). Live submits still **503** until harvest is
+wired, a baseline is sealed, and ≥1 topic is open. Do not invent a sha256.
+Sum across the two live rows stays 10000. Port **8100** (local probe
+**28100**).
 
 Proof is the research-problem challenge. The unit of work is an
 **operator-published signed topic**, not a prompt and not an episode. Git
 carries global floors in [`config/proof-pin.toml`](../config/proof-pin.toml)
 and no topic catalog. Miners submit against `topic_id`. The RLM judge lives
-in a digest-pinned eval image (`ghcr.io/cortexlm/proof-eval`). Empty
-`eval_image_digest` is the pre-launch state: live submits answer **503**.
+in a digest-pinned eval image (`ghcr.io/cortexlm/proof-eval`). The digest
+is pinned; live submits still answer **503** until harvest + sealed
+baseline + an open topic are on the host.
 
 ## Product rules (do not weaken)
 
@@ -67,9 +70,10 @@ commitment matches records the host will unseal.
 4. `POST /v1/admin/proof/topics` with the signed document and the operator
    bearer. `GET /v1/proof/topics` lists open ids (never holdout records).
 
-Ship order: control plane (this) → proof-eval image + digest pin (separate)
-→ holdout/baseline files on the host → open topics. `proxy_model` may stay
-empty until the image exists. Empty digest stays 503.
+Ship order: control plane (payout schema) → proof-eval image + digest pin
+(this pin) → holdout/baseline files on the host → open topics. Operator
+path: [`deploy/scripts/proof-operator-path.sh`](../deploy/scripts/proof-operator-path.sh).
+Empty digest stays 503 (never invent a sha256).
 
 ## Metric families
 
@@ -84,8 +88,10 @@ Holdout: 120 records, stratified 24 each across `web_ood`, `code_ood`,
 off-score and never in the 120.
 
 Ceremony: `cargo run -p xtask -- proof-holdout --topic-id <id> …` and
-`cargo run -p xtask -- proof-topic --input … --secret …`. Trust-root keygen
-is the throwaway owner path in [`config/CEREMONY.md`](../config/CEREMONY.md).
+`cargo run -p xtask -- proof-topic --input … --secret …`. Operator path:
+[`deploy/scripts/proof-operator-path.sh`](../deploy/scripts/proof-operator-path.sh).
+Trust-root keygen is the throwaway owner path in
+[`config/CEREMONY.md`](../config/CEREMONY.md).
 
 ## HTTP
 
@@ -109,8 +115,8 @@ Miner-facing: [`external-miner/proof.md`](./external-miner/proof.md).
 
 ### `dt-no-ib-v0` — throughput **wta**
 
-Operator **example**, not in the pin and not published until the eval image
-exists. Throughput family, no InfiniBand / NVLink / NCCL fast fabric,
+Operator **example**, not in the pin and not published until the operator
+seals a baseline on the pinned image. Throughput family, no InfiniBand / NVLink / NCCL fast fabric,
 12.5 Gbit/s cap, beat sealed AdamW/comms reference, 2e18 FLOPs. Winner
 takes the topic.
 
