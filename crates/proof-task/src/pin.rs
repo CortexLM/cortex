@@ -1,18 +1,22 @@
-//! Global Proof pin: eval image digest, proxy default, and the floors a topic
-//! may tighten but never loosen.
+//! Global Proof pin: eval image digest, inference ceilings, and the floors a
+//! topic may tighten but never loosen.
 //!
-//! There is **no topic catalog here**. Problems are operator-published signed
-//! documents ([`crate::TopicDocument`]); git carries only what every topic is
-//! measured against: which image may score, which key may publish, and how
-//! generous a topic is allowed to be.
+//! There is **no topic catalog here** and **no live InferenceOffer**. Problems
+//! are operator-published signed documents ([`crate::TopicDocument`]); the
+//! master's provider lives in operator state. Git carries only what every
+//! topic is measured against: which image may score, which key may publish,
+//! which inference modes/token ceilings are legal, and how generous a topic
+//! is allowed to be. No secrets.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    BASE_MODEL_FAMILY, CHALLENGE_ID, EPSILON_NLL_MIN, EPSILON_THROUGHPUT_REL_MIN,
-    EPSILON_TOPIC_MAX_REGRESS_MIN, EVAL_IMAGE, FLOPS_BUDGET_MAX, HOLDOUT_SIZE, PROOF_GIT_URL,
-    QUALITY_FLOOR_NLL_MAX, SCORING_VERSION, STRATUM_SIZE,
+    InferenceMode, ALLOWED_MODES, BASE_MODEL_FAMILY, CHALLENGE_ID, EPSILON_NLL_MIN,
+    EPSILON_THROUGHPUT_REL_MIN, EPSILON_TOPIC_MAX_REGRESS_MIN, EVAL_IMAGE, FLOPS_BUDGET_MAX,
+    HOLDOUT_SIZE, INFERENCE_CONFIG_SCHEMA_VERSION, INFERENCE_OFFER_COMMITMENT_ALG,
+    MAX_INPUT_TOKENS_CEILING, MAX_OUTPUT_TOKENS_CEILING, PROOF_GIT_URL, QUALITY_FLOOR_NLL_MAX,
+    SCORING_VERSION, STRATUM_SIZE,
 };
 
 /// `config/proof-pin.toml`.
@@ -23,20 +27,24 @@ pub struct ProofPin {
     pub challenge_id: String,
     /// Must equal [`SCORING_VERSION`].
     pub scoring_version: u16,
-    /// Family lock for the proxy the eval image bakes.
+    /// Research family name. Not an architecture lock and not an HF bake.
     pub base_model_family: String,
-    /// Default RLM judge id baked into the pinned image. Empty until it exists.
-    ///
-    /// This is the eval-image judge that scores miner submissions, not a
-    /// miner training proxy. A topic may name its own proxy, but only one
-    /// the image contains.
+    /// Deprecated HF proxy id. Must stay empty — Proof does not bake weights.
+    #[serde(default)]
     pub proxy_model: String,
-    /// Every proxy the pinned image bakes. Empty until the image exists.
-    ///
-    /// This is what makes a topic's `proxy_model` override checkable: the
-    /// control plane cannot look inside the image, so the pin declares its
-    /// contents and a topic naming anything else is a publish reject.
+    /// Deprecated HF proxy list. Must stay empty.
+    #[serde(default)]
     pub proxy_models: Vec<String>,
+    /// Inference config schema (`1`).
+    pub inference_config_schema_version: u32,
+    /// Modes a topic / offer may name. Subset of chat, completions, embeddings.
+    pub allowed_modes: Vec<InferenceMode>,
+    /// Largest input cap a topic or offer may declare.
+    pub max_input_tokens_ceiling: u32,
+    /// Largest output cap a topic or offer may declare.
+    pub max_output_tokens_ceiling: u32,
+    /// Hash algorithm for `config_commitment` (`sha256`).
+    pub inference_offer_commitment_alg: String,
     /// Eval image reference (no floating tag in prod).
     pub eval_image: String,
     /// `sha256:…` digest. Empty until the first green proof-eval CI image.
@@ -71,6 +79,11 @@ impl Default for ProofPin {
             base_model_family: BASE_MODEL_FAMILY.into(),
             proxy_model: String::new(),
             proxy_models: Vec::new(),
+            inference_config_schema_version: INFERENCE_CONFIG_SCHEMA_VERSION,
+            allowed_modes: ALLOWED_MODES.to_vec(),
+            max_input_tokens_ceiling: MAX_INPUT_TOKENS_CEILING,
+            max_output_tokens_ceiling: MAX_OUTPUT_TOKENS_CEILING,
+            inference_offer_commitment_alg: INFERENCE_OFFER_COMMITMENT_ALG.into(),
             eval_image: EVAL_IMAGE.into(),
             eval_image_digest: String::new(),
             proof_git: PROOF_GIT_URL.into(),
@@ -117,17 +130,46 @@ pub enum PinError {
         /// The only image that may score.
         want: &'static str,
     },
-    /// The proxy is outside the locked family.
-    #[error("proxy_model {got:?} is not in the {want:?} family")]
-    ProxyOutsideFamily {
+    /// The research family name drifted.
+    #[error("base_model_family {got:?} is not {want:?}")]
+    WrongFamily {
         /// What the pin said.
         got: String,
-        /// Locked family prefix.
+        /// Locked family name.
         want: &'static str,
     },
-    /// The default proxy is not one the image is declared to contain.
-    #[error("proxy_model {0:?} is not listed in proxy_models")]
-    DefaultProxyNotBaked(String),
+    /// A non-empty HF proxy would reintroduce a bake lock.
+    #[error("proxy_model / proxy_models must stay empty (no HF bake)")]
+    DeprecatedProxyBake,
+    /// Inference schema version drift.
+    #[error("inference_config_schema_version {got}, this build reads {want}")]
+    WrongInferenceSchema {
+        /// What the pin said.
+        got: u32,
+        /// What this build reads.
+        want: u32,
+    },
+    /// Commitment algorithm is not sha256.
+    #[error("inference_offer_commitment_alg {got:?} is not {want:?}")]
+    WrongCommitmentAlg {
+        /// What the pin said.
+        got: String,
+        /// Locked algorithm.
+        want: &'static str,
+    },
+    /// `allowed_modes` is empty or names something this build does not score.
+    #[error("allowed_modes must be a non-empty subset of chat, completions, embeddings")]
+    BadAllowedModes,
+    /// A token ceiling was raised above the crate lock, or is zero.
+    #[error("{field} = {got} must be 1..={ceiling}")]
+    TokenCeiling {
+        /// Which ceiling.
+        field: &'static str,
+        /// Pin value.
+        got: u32,
+        /// Crate lock.
+        ceiling: u32,
+    },
     /// The topic key is not a 64-hex sr25519 public key.
     #[error("topic_pubkey must be 64 hex chars (the challenges.toml `proof` row key)")]
     BadTopicPubkey,
@@ -198,27 +240,12 @@ impl ProofPin {
             });
         }
         if self.base_model_family.trim() != BASE_MODEL_FAMILY {
-            return Err(PinError::ProxyOutsideFamily {
+            return Err(PinError::WrongFamily {
                 got: self.base_model_family.clone(),
                 want: BASE_MODEL_FAMILY,
             });
         }
-        // Empty is legal (no published image yet); a named proxy must be in
-        // the locked family, so a pin bump cannot quietly move the challenge
-        // onto another model.
-        let proxy = self.proxy_model.trim();
-        for named in std::iter::once(proxy).chain(self.proxy_models.iter().map(String::as_str)) {
-            let named = named.trim();
-            if !named.is_empty() && !named.starts_with(BASE_MODEL_FAMILY) {
-                return Err(PinError::ProxyOutsideFamily {
-                    got: named.to_owned(),
-                    want: BASE_MODEL_FAMILY,
-                });
-            }
-        }
-        if !proxy.is_empty() && !self.proxy_models.is_empty() && !self.bakes_proxy(proxy) {
-            return Err(PinError::DefaultProxyNotBaked(self.proxy_model.clone()));
-        }
+        self.validate_inference()?;
         if !is_hex64(&self.topic_pubkey) {
             return Err(PinError::BadTopicPubkey);
         }
@@ -270,6 +297,57 @@ impl ProofPin {
         Ok(())
     }
 
+    fn validate_inference(&self) -> Result<(), PinError> {
+        if !self.proxy_model.trim().is_empty()
+            || self.proxy_models.iter().any(|m| !m.trim().is_empty())
+        {
+            return Err(PinError::DeprecatedProxyBake);
+        }
+        if self.inference_config_schema_version != INFERENCE_CONFIG_SCHEMA_VERSION {
+            return Err(PinError::WrongInferenceSchema {
+                got: self.inference_config_schema_version,
+                want: INFERENCE_CONFIG_SCHEMA_VERSION,
+            });
+        }
+        if self.inference_offer_commitment_alg.trim() != INFERENCE_OFFER_COMMITMENT_ALG {
+            return Err(PinError::WrongCommitmentAlg {
+                got: self.inference_offer_commitment_alg.clone(),
+                want: INFERENCE_OFFER_COMMITMENT_ALG,
+            });
+        }
+        if self.allowed_modes.is_empty() {
+            return Err(PinError::BadAllowedModes);
+        }
+        let mut seen = Vec::new();
+        for mode in &self.allowed_modes {
+            if seen.contains(mode) || !ALLOWED_MODES.contains(mode) {
+                return Err(PinError::BadAllowedModes);
+            }
+            seen.push(*mode);
+        }
+        for (field, got, ceiling) in [
+            (
+                "max_input_tokens_ceiling",
+                self.max_input_tokens_ceiling,
+                MAX_INPUT_TOKENS_CEILING,
+            ),
+            (
+                "max_output_tokens_ceiling",
+                self.max_output_tokens_ceiling,
+                MAX_OUTPUT_TOKENS_CEILING,
+            ),
+        ] {
+            if got == 0 || got > ceiling {
+                return Err(PinError::TokenCeiling {
+                    field,
+                    got,
+                    ceiling,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// True when a live rent is allowed (real digest pin present).
     ///
     /// An empty digest is the normal pre-launch state and the reason submits
@@ -287,24 +365,10 @@ impl ProofPin {
         <[u8; 32]>::try_from(raw).ok()
     }
 
-    /// Whether the pinned image is declared to contain `proxy`.
+    /// Whether `mode` is in this pin's allowlist.
     #[must_use]
-    pub fn bakes_proxy(&self, proxy: &str) -> bool {
-        let want = proxy.trim();
-        if want.is_empty() {
-            return false;
-        }
-        self.proxy_models.iter().any(|m| m.trim() == want) || self.proxy_model.trim() == want
-    }
-
-    /// Proxy a topic will actually train: the topic's override, else the pin's.
-    #[must_use]
-    pub fn proxy_for(&self, topic_proxy: Option<&str>) -> String {
-        topic_proxy
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| self.proxy_model.trim())
-            .to_owned()
+    pub fn allows_mode(&self, mode: InferenceMode) -> bool {
+        self.allowed_modes.contains(&mode)
     }
 }
 
@@ -341,6 +405,11 @@ mod tests {
 challenge_id = "proof"
 scoring_version = 1
 base_model_family = "{BASE_MODEL_FAMILY}"
+inference_config_schema_version = 1
+allowed_modes = ["chat", "completions", "embeddings"]
+max_input_tokens_ceiling = 32768
+max_output_tokens_ceiling = 8192
+inference_offer_commitment_alg = "sha256"
 eval_image = "{EVAL_IMAGE}"
 eval_image_digest = ""
 topic_pubkey = "{}"
@@ -355,7 +424,10 @@ stratum_size = 24
         let p = ProofPin::from_toml(&body).expect("parse");
         p.validate().expect("validates");
         assert_eq!(p.flops_budget_max, 2_000_000_000_000_000_000);
+        assert_eq!(p.max_input_tokens_ceiling, 32_768);
         assert_eq!(p.topic_pubkey_bytes().expect("key"), [0xcd; 32]);
+        assert!(p.proxy_model.is_empty());
+        assert!(p.proxy_models.is_empty());
     }
 
     #[test]
@@ -398,15 +470,42 @@ stratum_size = 24
     }
 
     #[test]
-    fn a_proxy_outside_the_locked_family_is_refused() {
+    fn a_named_hf_proxy_bake_is_refused() {
         let mut p = pin();
-        p.proxy_model = "meta-llama/Llama-3-8B".into();
+        p.proxy_model = "Qwen/Qwen3.8-0.6B".into();
+        assert!(matches!(p.validate(), Err(PinError::DeprecatedProxyBake)));
+        p.proxy_model.clear();
+        p.proxy_models = vec!["Qwen/Qwen3-0.6B".into()];
+        assert!(matches!(p.validate(), Err(PinError::DeprecatedProxyBake)));
+        p.proxy_models.clear();
+        p.validate().expect("empty deprecated fields");
+    }
+
+    #[test]
+    fn inference_schema_and_ceilings_are_locked() {
+        let mut p = pin();
+        p.inference_config_schema_version = 2;
         assert!(matches!(
             p.validate(),
-            Err(PinError::ProxyOutsideFamily { .. })
+            Err(PinError::WrongInferenceSchema { .. })
         ));
-        p.proxy_model = format!("{BASE_MODEL_FAMILY}-1.5B");
-        p.validate().expect("in-family proxy");
+        p = pin();
+        p.inference_offer_commitment_alg = "blake3".into();
+        assert!(matches!(
+            p.validate(),
+            Err(PinError::WrongCommitmentAlg { .. })
+        ));
+        p = pin();
+        p.allowed_modes.clear();
+        assert!(matches!(p.validate(), Err(PinError::BadAllowedModes)));
+        p = pin();
+        p.max_input_tokens_ceiling = MAX_INPUT_TOKENS_CEILING + 1;
+        assert!(matches!(p.validate(), Err(PinError::TokenCeiling { .. })));
+        p = pin();
+        p.allowed_modes = vec![InferenceMode::Chat];
+        p.validate().expect("subset is a tighten");
+        assert!(p.allows_mode(InferenceMode::Chat));
+        assert!(!p.allows_mode(InferenceMode::Embeddings));
     }
 
     #[test]
@@ -442,18 +541,19 @@ stratum_size = 24
     }
 
     #[test]
-    fn proxy_for_prefers_the_topic_override() {
-        let mut p = pin();
-        p.proxy_model = format!("{BASE_MODEL_FAMILY}-1.5B");
-        assert_eq!(p.proxy_for(None), format!("{BASE_MODEL_FAMILY}-1.5B"));
+    fn default_pin_has_the_locked_inference_schema() {
+        let p = pin();
         assert_eq!(
-            p.proxy_for(Some("   ")),
-            format!("{BASE_MODEL_FAMILY}-1.5B")
+            p.inference_config_schema_version,
+            INFERENCE_CONFIG_SCHEMA_VERSION
         );
         assert_eq!(
-            p.proxy_for(Some("Qwen/Qwen3.8-0.6B")),
-            "Qwen/Qwen3.8-0.6B".to_owned()
+            p.inference_offer_commitment_alg,
+            INFERENCE_OFFER_COMMITMENT_ALG
         );
+        assert_eq!(p.allowed_modes.as_slice(), ALLOWED_MODES.as_slice());
+        assert_eq!(p.max_input_tokens_ceiling, MAX_INPUT_TOKENS_CEILING);
+        assert_eq!(p.max_output_tokens_ceiling, MAX_OUTPUT_TOKENS_CEILING);
     }
 
     #[test]

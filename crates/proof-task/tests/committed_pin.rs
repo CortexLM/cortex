@@ -5,7 +5,11 @@
 
 use std::path::{Path, PathBuf};
 
-use proof_task::{ProofPin, CHALLENGE_ID, EVAL_IMAGE, HOLDOUT_SIZE, STRATUM_SIZE};
+use proof_task::{
+    ProofPin, ALLOWED_MODES, CHALLENGE_ID, EVAL_IMAGE, HOLDOUT_SIZE,
+    INFERENCE_CONFIG_SCHEMA_VERSION, INFERENCE_OFFER_COMMITMENT_ALG, MAX_INPUT_TOKENS_CEILING,
+    MAX_OUTPUT_TOKENS_CEILING, STRATUM_SIZE,
+};
 
 fn pin_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -70,10 +74,21 @@ fn committed_pin_is_proof_with_a_real_eval_digest() {
         "{digest}"
     );
     assert!(p.can_rent(), "pinned digest must be rentable");
-    assert_eq!(p.proxy_model, "Qwen/Qwen3.8-0.6B");
-    assert!(p.bakes_proxy("Qwen/Qwen3.8-0.6B"));
     assert_eq!(p.holdout_size, HOLDOUT_SIZE);
     assert_eq!(p.stratum_size, STRATUM_SIZE);
+    assert!(p.proxy_model.trim().is_empty(), "no HF proxy bake");
+    assert!(p.proxy_models.is_empty(), "no HF proxy bake list");
+    assert_eq!(
+        p.inference_config_schema_version,
+        INFERENCE_CONFIG_SCHEMA_VERSION
+    );
+    assert_eq!(
+        p.inference_offer_commitment_alg,
+        INFERENCE_OFFER_COMMITMENT_ALG
+    );
+    assert_eq!(p.allowed_modes.as_slice(), ALLOWED_MODES.as_slice());
+    assert_eq!(p.max_input_tokens_ceiling, MAX_INPUT_TOKENS_CEILING);
+    assert_eq!(p.max_output_tokens_ceiling, MAX_OUTPUT_TOKENS_CEILING);
 }
 
 #[test]
@@ -87,13 +102,15 @@ fn pin_carries_no_endpoint_secret_or_topic_catalog() {
     for banned in [
         "api_key",
         "bearer",
-        "_token",
+        "admin_token",
         "mnemonic",
         "https://api.",
         "modal",
         "[[topics",
         "holdout_records",
         "content_sha256",
+        "qwen/qwen3-0.6b",
+        "qwen/qwen3.8-0.6b",
     ] {
         assert!(!lower.contains(banned), "pin mentions {banned:?}");
     }

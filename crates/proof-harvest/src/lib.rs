@@ -7,7 +7,11 @@
 //! a score. There is no sim fallback.
 
 #![forbid(unsafe_code)]
-#![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::doc_markdown,
+    clippy::too_many_arguments
+)]
 
 use std::sync::Arc;
 
@@ -15,7 +19,7 @@ use async_trait::async_trait;
 use harvest_pod::{harvest_template_name, EvalPod, PodProgram};
 use prism_lium_types::InstanceSpec;
 use proof_eval::{EvalError, LiveScorer, ProofEvalDocument, PROOF_METRICS_SCHEMA};
-use proof_task::{HoldoutRecord, ProofPin, TopicDocument, CHALLENGE_ID};
+use proof_task::{HoldoutRecord, InferenceOffer, ProofPin, TopicDocument, CHALLENGE_ID};
 use serde::{Deserialize, Serialize};
 
 /// Prefix the eval image prints before its metrics document.
@@ -57,8 +61,22 @@ pub struct HarvestRequest {
     pub topic_id: String,
     /// Metric family wire name.
     pub family: String,
-    /// RLM judge id the image must use (eval-image InferenceOffer, not a miner training proxy).
-    pub proxy_model: String,
+    /// Live offer id the image must call.
+    pub inference_offer_id: String,
+    /// Provider kind wire name.
+    pub provider_kind: String,
+    /// Provider origin (operator state; not a public status field).
+    pub base_url: String,
+    /// Serving mode.
+    pub mode: String,
+    /// Provider model id (not an HF bake).
+    pub model_ref: String,
+    /// Input token cap for this run (min of offer and topic).
+    pub max_input_tokens: u32,
+    /// Output token cap for this run.
+    pub max_output_tokens: u32,
+    /// Offer config commitment.
+    pub config_commitment: String,
     /// Eval image digest, so the image can stamp its own provenance.
     pub eval_image_digest: String,
     /// Commitment the records below must hash to.
@@ -141,6 +159,7 @@ impl LiveScorer for LiumProofHarvest {
         &self,
         pin: &ProofPin,
         topic: &TopicDocument,
+        offer: &InferenceOffer,
         frozen_digest: &str,
         artifact_digest: &str,
         holdout: &[HoldoutRecord],
@@ -153,6 +172,17 @@ impl LiveScorer for LiumProofHarvest {
             return Err(EvalError::HoldoutSealed);
         }
         self.ready()?;
+        offer
+            .serves_topic(topic)
+            .map_err(|e| EvalError::InferenceOffer(e.to_string()))?;
+        let max_in = topic
+            .inference
+            .max_input_tokens
+            .min(offer.config.max_input_tokens);
+        let max_out = topic
+            .inference
+            .max_output_tokens
+            .min(offer.config.max_output_tokens);
         let request = HarvestRequest {
             schema_version: PROOF_METRICS_SCHEMA,
             challenge_id: CHALLENGE_ID.to_owned(),
@@ -160,7 +190,14 @@ impl LiveScorer for LiumProofHarvest {
             artifact_digest: artifact_digest.to_owned(),
             topic_id: topic.id.clone(),
             family: topic.metric.family.as_str().to_owned(),
-            proxy_model: pin.proxy_for(topic.proxy_model.as_deref()),
+            inference_offer_id: offer.offer_id.clone(),
+            provider_kind: offer.provider.kind.as_str().to_owned(),
+            base_url: offer.provider.base_url.clone(),
+            mode: offer.config.mode.as_str().to_owned(),
+            model_ref: offer.config.model_ref.clone(),
+            max_input_tokens: max_in,
+            max_output_tokens: max_out,
+            config_commitment: offer.config_commitment.clone(),
             eval_image_digest: pin.eval_image_digest.clone(),
             holdout_commitment: topic.holdout_commitment.clone(),
             constraints: topic.constraints,
@@ -253,7 +290,14 @@ mod tests {
             artifact_digest: "a".into(),
             topic_id: topic.id.clone(),
             family: topic.metric.family.as_str().into(),
-            proxy_model: "Qwen/Qwen3.8-0.6B".into(),
+            inference_offer_id: "master-v0".into(),
+            provider_kind: "openai_compatible".into(),
+            base_url: "http://127.0.0.1:8000/v1".into(),
+            mode: "chat".into(),
+            model_ref: "master-proxy-v0".into(),
+            max_input_tokens: 4_096,
+            max_output_tokens: 256,
+            config_commitment: "ab".repeat(32),
             eval_image_digest: String::new(),
             holdout_commitment: topic.holdout_commitment.clone(),
             constraints: topic.constraints,
@@ -266,5 +310,9 @@ mod tests {
         assert_eq!(v["constraints"]["max_inter_node_gbps"], 12.5);
         assert_eq!(v["constraints"]["no_infiniband"], true);
         assert_eq!(v["challenge_id"], "proof");
+        assert_eq!(v["provider_kind"], "openai_compatible");
+        assert_eq!(v["mode"], "chat");
+        assert!(v.get("proxy_model").is_none());
+        assert!(v.get("api_key").is_none());
     }
 }

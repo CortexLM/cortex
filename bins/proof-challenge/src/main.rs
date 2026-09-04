@@ -20,7 +20,8 @@ use clap::Parser;
 use prism_lium::LiumClient;
 use proof_challenge::{
     hash_admin_token, parse_holdout_file, proof_router, AppState, BaselineMeasurement, EvalBackend,
-    LiveScorer, MemoryStore, ProofPin, TopicDocument, CHALLENGE_ID, SCORING_VERSION,
+    InferenceOffer, LiveScorer, MemoryStore, ProofPin, TopicDocument, CHALLENGE_ID,
+    SCORING_VERSION,
 };
 use proof_eval::supported_custom;
 use proof_harvest::{HarvestLimits, LiumProofHarvest};
@@ -64,6 +65,12 @@ struct Cli {
     /// Sealed baseline measurements (JSON map keyed by topic id).
     #[arg(long, env = "PROOF_BASELINE_FILE")]
     baseline_file: Option<PathBuf>,
+    /// Live `InferenceOffer` JSON. Operator state; never a git pin. Missing/closed → 503.
+    #[arg(long, env = "PROOF_INFERENCE_OFFER_FILE")]
+    inference_offer_file: Option<PathBuf>,
+    /// Provider API key file. Never logged, never on `/v1/status`.
+    #[arg(long, env = "PROOF_INFERENCE_API_KEY_FILE")]
+    inference_api_key_file: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -110,6 +117,26 @@ fn run(cli: &Cli) -> Result<(), String> {
         Ok(n) => tracing::info!(topics = n, "sealed baselines recorded"),
         Err(e) => tracing::warn!("baselines unavailable ({e}); submissions will 503 until fixed"),
     }
+    let offer = match load_offer(&pin, cli.inference_offer_file.as_deref()) {
+        Ok(o) => {
+            tracing::info!(offer_id = %o.offer_id, status = ?o.status, "inference offer loaded");
+            Some(o)
+        }
+        Err(e) => {
+            tracing::warn!("inference offer unavailable ({e}); submissions will 503 until fixed");
+            None
+        }
+    };
+    if let Some(p) = cli.inference_api_key_file.as_deref() {
+        match std::fs::read_to_string(p) {
+            Ok(s) if !s.trim().is_empty() => {
+                tracing::info!("inference api key file present (contents not logged)");
+            }
+            _ => tracing::warn!(
+                "PROOF_INFERENCE_API_KEY_FILE set but unreadable; eval image auth will fail closed"
+            ),
+        }
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -133,6 +160,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         pin,
         backend,
         live_scorer,
+        offer,
         admin_hashes: Arc::new(load_admin_hashes(cli.admin_tokens_file.as_deref())),
         epoch: 0,
     };
@@ -285,6 +313,14 @@ fn record_one_baseline(
         .set_baseline(&topic.id, meas.into_sealed())
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn load_offer(pin: &ProofPin, path: Option<&Path>) -> Result<InferenceOffer, String> {
+    let p = path.ok_or("PROOF_INFERENCE_OFFER_FILE not set")?;
+    let body = std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?;
+    let offer = InferenceOffer::from_json(&body).map_err(|e| e.to_string())?;
+    offer.validate(pin).map_err(|e| e.to_string())?;
+    Ok(offer)
 }
 
 fn load_admin_hashes(path: Option<&Path>) -> Vec<String> {

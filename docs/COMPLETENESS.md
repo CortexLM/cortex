@@ -74,7 +74,8 @@ specs (`DESIGN_CHALLENGE.md`, `PRISM.md`) remain for `xtask` gates. Leftover
 | Binary (`bins/proof-challenge`) | **done** | HTTP API on `:8100`. |
 | Miner CLI (`bins/ctx`) | **done** | `ctx proof submit|show|status|topics`. Unpinned digest / unwired harvest / no open topic → 503. |
 | Compose / images | **done** | Default compose + `images.yml` target `proof-challenge`. |
-| Eval pin | **done** | `config/proof-pin.toml` — `eval_image` `ghcr.io/cortexlm/proof-eval`, digest `sha256:78b614a1…` (publish-proof-eval-image run 33892650063, commit `51f937c7`). Baked RLM judge `Qwen/Qwen3.8-0.6B` (evaluates miner submissions; not a miner training proxy). Empty digest is gone; live submits still **503** until harvest is wired, a baseline is sealed, and ≥1 topic is open. Do not re-pin a guessed sha256. |
+| Eval pin | **done** | `config/proof-pin.toml` — `eval_image` `ghcr.io/cortexlm/proof-eval`, digest `sha256:78b614a1…` (publish-proof-eval-image run 33892650063, commit `51f937c7`). No HF bake; `proxy_model` stays empty. Live submits still **503** until harvest is wired, a baseline is sealed, and ≥1 topic is open. Do not re-pin a guessed sha256. |
+| Inference offer | **v0** | Pin carries schema v1, allowed modes, token ceilings, `sha256` commitment alg. Live `InferenceOffer` is operator state (`PROOF_INFERENCE_OFFER_FILE`). Missing/closed → `can_score=false` / 503. |
 | Topics | **done** | sr25519 under the `proof` trust-root key (`base-proof-topic-v1`). Admin `POST /v1/admin/proof/topics`. A topic must be sealed to `open`. |
 | Holdout | **done** | Per-topic operator file (`PROOF_HOLDOUT_FILE`). Commitment in the topic document, never in the pin. `xtask proof-holdout --topic-id`. |
 | Live harvest | **done** | `crates/proof-harvest` over `harvest-pod`; `PROOF_FORCE_SIM` is local-only. |

@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{canonical_json, ProofPin, TOPIC_DOMAIN};
+use crate::{canonical_json, ProofPin, TopicInference, TOPIC_DOMAIN};
 
 /// Only accepted `schema_version`.
 pub const TOPIC_SCHEMA_VERSION: u32 = 1;
@@ -367,10 +367,12 @@ pub struct TopicDocument {
     pub flops_budget: u64,
     /// Absolute NLL a challenger must win by (`nll` family primary gate).
     pub epsilon_nll: f64,
-    /// Largest per-split NLL regression tolerated on any scored stratum.
+    /// Per-split NLL regression gate.
     pub epsilon_topic_max_regress: f64,
-    /// Proxy override. `None` means the pin default.
+    /// Deprecated HF proxy override. Must stay empty.
     pub proxy_model: Option<String>,
+    /// Inference constraints this topic tightens against the pin.
+    pub inference: TopicInference,
     /// Sealed baseline recipe plus its two seal hashes.
     pub baseline: Baseline,
     /// Commitment over this topic's holdout records.
@@ -407,6 +409,7 @@ impl Default for TopicDocument {
             epsilon_nll: crate::EPSILON_NLL_MIN,
             epsilon_topic_max_regress: crate::EPSILON_TOPIC_MAX_REGRESS_MIN,
             proxy_model: None,
+            inference: TopicInference::default(),
             baseline: default_adamw(crate::FLOPS_BUDGET_MAX),
             holdout_commitment: String::new(),
             holdout_size: crate::HOLDOUT_SIZE,
@@ -533,9 +536,25 @@ pub enum TopicError {
         /// Pin value.
         want: usize,
     },
-    /// A proxy the pinned eval image does not contain.
-    #[error("proxy_model {0:?} is not baked into the pinned eval image")]
-    ProxyNotBaked(String),
+    /// A proxy bake lock — retired; miners bind a live InferenceOffer.
+    #[error("proxy_model is deprecated; use inference and a live InferenceOffer")]
+    DeprecatedProxyModel,
+    /// Inference mode not in the pin allowlist.
+    #[error("inference.mode {0:?} is not in the pin allowed_modes")]
+    InferenceModeNotAllowed(crate::InferenceMode),
+    /// Topic token cap is zero or above the pin ceiling.
+    #[error("inference.{field} = {got} must be 1..={ceiling}")]
+    InferenceCeiling {
+        /// Which cap.
+        field: &'static str,
+        /// Topic value.
+        got: u32,
+        /// Pin ceiling.
+        ceiling: u32,
+    },
+    /// `require_offer_commitment` is not 64 hex.
+    #[error("inference.require_offer_commitment must be 64 hex chars")]
+    BadOfferCommitment,
     /// The validity window is inverted.
     #[error("valid_until_epoch {until} is before valid_from_epoch {from}")]
     BadWindow {
@@ -817,8 +836,36 @@ impl TopicDocument {
             }
         }
         if let Some(proxy) = self.proxy_model.as_deref().map(str::trim) {
-            if proxy.is_empty() || !pin.bakes_proxy(proxy) {
-                return Err(TopicError::ProxyNotBaked(proxy.to_owned()));
+            if !proxy.is_empty() {
+                return Err(TopicError::DeprecatedProxyModel);
+            }
+        }
+        if !pin.allows_mode(self.inference.mode) {
+            return Err(TopicError::InferenceModeNotAllowed(self.inference.mode));
+        }
+        for (field, got, ceiling) in [
+            (
+                "max_input_tokens",
+                self.inference.max_input_tokens,
+                pin.max_input_tokens_ceiling,
+            ),
+            (
+                "max_output_tokens",
+                self.inference.max_output_tokens,
+                pin.max_output_tokens_ceiling,
+            ),
+        ] {
+            if got == 0 || got > ceiling {
+                return Err(TopicError::InferenceCeiling {
+                    field,
+                    got,
+                    ceiling,
+                });
+            }
+        }
+        if let Some(need) = self.inference.require_offer_commitment.as_deref() {
+            if !is_hex64(need) {
+                return Err(TopicError::BadOfferCommitment);
             }
         }
         self.baseline.validate(&self.metric, self.flops_budget)?;
@@ -914,8 +961,6 @@ mod tests {
     fn pin() -> ProofPin {
         ProofPin {
             topic_pubkey: hex::encode(crypto::public_key_from_mini_secret(&sk()).expect("pk")),
-            proxy_model: "Qwen/Qwen3.8-0.6B".into(),
-            proxy_models: vec!["Qwen/Qwen3.8-0.6B".into(), "Qwen/Qwen3.8-1.7B".into()],
             ..ProofPin::default()
         }
     }
@@ -1050,6 +1095,7 @@ mod tests {
             "\"metric\"",
             "\"baseline\"",
             "\"holdout_commitment\"",
+            "\"inference\"",
             "\"status\"",
         ] {
             assert!(payload.contains(field), "missing {field} in {payload}");
@@ -1322,15 +1368,43 @@ mod tests {
     }
 
     #[test]
-    fn a_proxy_the_image_does_not_bake_is_refused() {
+    fn a_deprecated_proxy_model_is_refused() {
         let p = pin();
         let mut doc = nll_topic();
-        doc.proxy_model = Some("Qwen/Qwen3.8-1.7B".into());
-        doc.validate(&p, &[]).expect("a baked proxy is fine");
-        doc.proxy_model = Some("Qwen/Qwen3.8-27B".into());
+        doc.proxy_model = Some("Qwen/Qwen3.8-0.6B".into());
         assert!(matches!(
             doc.validate(&p, &[]),
-            Err(TopicError::ProxyNotBaked(_))
+            Err(TopicError::DeprecatedProxyModel)
+        ));
+    }
+
+    #[test]
+    fn topic_inference_may_tighten_but_never_loosen_ceilings() {
+        let p = pin();
+        let mut tight = nll_topic();
+        tight.inference.max_input_tokens = 4_096;
+        tight.inference.max_output_tokens = 256;
+        tight.validate(&p, &[]).expect("tighter is fine");
+
+        let mut loose = nll_topic();
+        loose.inference.max_input_tokens = crate::MAX_INPUT_TOKENS_CEILING + 1;
+        assert!(matches!(
+            loose.validate(&p, &[]),
+            Err(TopicError::InferenceCeiling { .. })
+        ));
+
+        let mut subset = pin();
+        subset.allowed_modes = vec![crate::InferenceMode::Completions];
+        assert!(matches!(
+            nll_topic().validate(&subset, &[]),
+            Err(TopicError::InferenceModeNotAllowed(_))
+        ));
+
+        let mut bad = nll_topic();
+        bad.inference.require_offer_commitment = Some("zz".into());
+        assert!(matches!(
+            bad.validate(&p, &[]),
+            Err(TopicError::BadOfferCommitment)
         ));
     }
 

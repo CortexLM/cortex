@@ -172,9 +172,12 @@ struct ProofSubmitArgs {
     /// Optional locator for the artifact (git url, object URL).
     #[arg(long, value_name = "URL")]
     artifact_uri: Option<String>,
-    /// Architecture / proxy id baked by the pin.
+    /// Live `InferenceOffer` id from `GET /v1/status`.
     #[arg(long, value_name = "ID")]
-    architecture: String,
+    inference_offer_id: String,
+    /// `config_commitment` of that open offer (64 hex).
+    #[arg(long, value_name = "SHA256")]
+    config_commitment: String,
     /// What the recipe achieved (the RLM re-runs this claim).
     #[arg(long, value_name = "TEXT")]
     claim: String,
@@ -231,7 +234,8 @@ async fn run_proof(client: &Client, cmd: ProofCmd, json: bool) -> Result<(), Str
                 topic_id: args.topic_id,
                 artifact_digest: args.artifact_digest,
                 artifact_uri: args.artifact_uri,
-                architecture: args.architecture,
+                inference_offer_id: args.inference_offer_id,
+                config_commitment: args.config_commitment,
                 claim: args.claim,
                 declared_flops: args.declared_flops,
                 manifest_file: args.manifest_file,

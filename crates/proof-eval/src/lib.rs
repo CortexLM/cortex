@@ -17,7 +17,8 @@
     clippy::doc_markdown,
     clippy::module_name_repetitions,
     clippy::cast_precision_loss,
-    clippy::must_use_candidate
+    clippy::must_use_candidate,
+    clippy::too_many_arguments
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,8 +28,8 @@ use prism_lium_types::{EvalReceipt, NoScoreGate};
 use proof_score::{AgentVerdict, HarnessMetrics, ProofCheatCode, ProofKind, SealedBaseline};
 use proof_store::ArtifactManifest;
 use proof_task::{
-    canonical_json, contamination, HoldoutRecord, HoldoutSplit, MetricFamily, ProofPin,
-    TopicDocument, BASELINE_DOMAIN,
+    canonical_json, contamination, require_open_offer, HoldoutRecord, HoldoutSplit, InferenceOffer,
+    MetricFamily, OfferError, ProofPin, TopicDocument, BASELINE_DOMAIN,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -93,6 +94,15 @@ pub enum EvalError {
     /// The operator-recorded baseline does not match the topic/pin.
     #[error("recorded baseline: {0}")]
     Baseline(String),
+    /// No live InferenceOffer on this host.
+    #[error("inference offer missing; refuse scoring")]
+    InferenceOfferMissing,
+    /// Live InferenceOffer is closed.
+    #[error("inference offer is closed; refuse scoring")]
+    InferenceOfferClosed,
+    /// Live InferenceOffer failed pin validation.
+    #[error("inference offer: {0}")]
+    InferenceOffer(String),
 }
 
 /// Schema version of the metrics+verdict document the eval image emits.
@@ -200,10 +210,12 @@ impl ProofEvalDocument {
 #[async_trait]
 pub trait LiveScorer: Send + Sync {
     /// Score one artifact on one topic's verified holdout.
+    #[allow(clippy::too_many_arguments)]
     async fn score(
         &self,
         pin: &ProofPin,
         topic: &TopicDocument,
+        offer: &InferenceOffer,
         frozen_digest: &str,
         artifact_digest: &str,
         holdout: &[HoldoutRecord],
@@ -336,16 +348,26 @@ pub fn metrics_commitment(
     hex::encode(h.finalize())
 }
 
+fn map_offer_err(e: OfferError) -> EvalError {
+    match e {
+        OfferError::Missing => EvalError::InferenceOfferMissing,
+        OfferError::Closed => EvalError::InferenceOfferClosed,
+        other => EvalError::InferenceOffer(other.to_string()),
+    }
+}
+
 /// Whether this host can produce a verdict at all.
 pub fn scoring_readiness(
     pin: &ProofPin,
     backend: EvalBackend,
     live: Option<&dyn LiveScorer>,
     has_open_sealed_topic: bool,
+    offer: Option<&InferenceOffer>,
 ) -> Result<(), EvalError> {
     if !has_open_sealed_topic {
         return Err(EvalError::NoOpenTopic);
     }
+    require_open_offer(offer, pin).map_err(map_offer_err)?;
     match backend {
         EvalBackend::Sim => Ok(()),
         EvalBackend::Lium => {
@@ -477,6 +499,7 @@ pub const BASELINE_SKILL: f64 = 0.40;
 pub async fn eval_after_freeze(
     pin: &ProofPin,
     topic: &TopicDocument,
+    offer: &InferenceOffer,
     frozen_digest: &str,
     artifact_digest: &str,
     holdout: &[HoldoutRecord],
@@ -487,7 +510,7 @@ pub async fn eval_after_freeze(
     if frozen_digest.trim().is_empty() || holdout.is_empty() {
         return Err(EvalError::HoldoutSealed);
     }
-    scoring_readiness(pin, backend, live, true)?;
+    scoring_readiness(pin, backend, live, true, Some(offer))?;
     let doc = match backend {
         EvalBackend::Sim => {
             let skill = unit(&[artifact_digest, "skill"], 0);
@@ -496,7 +519,15 @@ pub async fn eval_after_freeze(
         EvalBackend::Lium => {
             let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
             scorer
-                .score(pin, topic, frozen_digest, artifact_digest, holdout, claim)
+                .score(
+                    pin,
+                    topic,
+                    offer,
+                    frozen_digest,
+                    artifact_digest,
+                    holdout,
+                    claim,
+                )
                 .await?
         }
     };
@@ -544,8 +575,9 @@ pub fn parse_agent_verdict(body: &str) -> Result<AgentVerdict, EvalError> {
 #[cfg(test)]
 mod tests {
     use proof_task::{
-        default_adamw, holdout_commitment, synthetic_holdout, TopicDocument, TopicStatus,
-        FLOPS_BUDGET_MAX, STRATUM_SIZE,
+        default_adamw, holdout_commitment, inference_config_commitment, synthetic_holdout,
+        InferenceConfig, InferenceMode, InferenceOffer, InferenceProvider, InferenceProviderKind,
+        OfferStatus, TopicDocument, TopicStatus, FLOPS_BUDGET_MAX, STRATUM_SIZE,
     };
 
     use super::*;
@@ -555,6 +587,28 @@ mod tests {
             eval_image_digest: digest.to_owned(),
             topic_pubkey: "ab".repeat(32),
             ..ProofPin::default()
+        }
+    }
+
+    fn offer() -> InferenceOffer {
+        let config = InferenceConfig {
+            mode: InferenceMode::Chat,
+            model_ref: "master-proxy-v0".into(),
+            max_input_tokens: 32_768,
+            max_output_tokens: 8_192,
+            temperature: Some(0.0),
+            top_p: None,
+            timeout_ms: None,
+        };
+        InferenceOffer {
+            offer_id: "master-v0".into(),
+            provider: InferenceProvider {
+                kind: InferenceProviderKind::OpenaiCompatible,
+                base_url: "http://127.0.0.1:8000/v1".into(),
+            },
+            config_commitment: inference_config_commitment(&config),
+            config,
+            status: OfferStatus::Open,
         }
     }
 
@@ -583,6 +637,7 @@ mod tests {
             &self,
             pin: &ProofPin,
             topic: &TopicDocument,
+            _offer: &InferenceOffer,
             frozen: &str,
             artifact: &str,
             _holdout: &[HoldoutRecord],
@@ -612,6 +667,7 @@ mod tests {
         let unpinned = eval_after_freeze(
             &pin(""),
             &t,
+            &offer(),
             "d",
             "art",
             &recs,
@@ -629,6 +685,7 @@ mod tests {
         let unwired = eval_after_freeze(
             &pin(&format!("sha256:{}", "ab".repeat(32))),
             &t,
+            &offer(),
             "d",
             "art",
             &recs,
@@ -652,6 +709,7 @@ mod tests {
         let out = eval_after_freeze(
             &p,
             &t,
+            &offer(),
             "digest-a",
             "art",
             &recs,
@@ -691,17 +749,29 @@ mod tests {
     #[test]
     fn readiness_names_the_root_cause() {
         let live = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let o = offer();
         assert!(matches!(
-            scoring_readiness(&live, EvalBackend::Sim, None, false),
+            scoring_readiness(&live, EvalBackend::Sim, None, false, Some(&o)),
             Err(EvalError::NoOpenTopic)
         ));
-        scoring_readiness(&ProofPin::default(), EvalBackend::Sim, None, true).expect("sim");
+        scoring_readiness(&ProofPin::default(), EvalBackend::Sim, None, true, Some(&o))
+            .expect("sim");
         assert!(matches!(
-            scoring_readiness(&ProofPin::default(), EvalBackend::Lium, None, true),
+            scoring_readiness(&ProofPin::default(), EvalBackend::Sim, None, true, None),
+            Err(EvalError::InferenceOfferMissing)
+        ));
+        assert!(matches!(
+            scoring_readiness(
+                &ProofPin::default(),
+                EvalBackend::Lium,
+                None,
+                true,
+                Some(&o)
+            ),
             Err(EvalError::EvalImageUnpinned)
         ));
         assert!(matches!(
-            scoring_readiness(&live, EvalBackend::Lium, None, true),
+            scoring_readiness(&live, EvalBackend::Lium, None, true, Some(&o)),
             Err(EvalError::LiveHarvestUnavailable)
         ));
         scoring_readiness(
@@ -709,6 +779,7 @@ mod tests {
             EvalBackend::Lium,
             Some(&Harvest { reproduced: true }),
             true,
+            Some(&o),
         )
         .expect("ready");
     }

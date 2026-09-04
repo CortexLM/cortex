@@ -38,6 +38,10 @@ the public split, and the harness fills holdout NLL / throughput. Holdout
 records stay sealed until after your submission digest is frozen. You never
 see them.
 
+`GET /challenge/proof/v1/status` also shows the public `inference_offer`
+(id, kind, mode, model_ref, token caps, commitment, status). It never leaks
+holdout records, teacher hosts, origins, or keys.
+
 Muon, token superposition, and “decentralized training without InfiniBand”
 are *examples* of solutions or of topics — they are not the product.
 
@@ -155,7 +159,8 @@ ctx proof submit \
   --artifact-digest <sha256 of the recipe> \
   --claim "beat sealed baseline holdout NLL by 0.04 at 1.2e18 FLOPs" \
   --declared-flops 1500000000000000000 \
-  --architecture Qwen/Qwen3.8-0.6B \
+  --inference-offer-id <open offer id> \
+  --config-commitment <64-hex config_commitment> \
   --train-dataset my-mix-v0
 ```
 
@@ -174,7 +179,8 @@ curl -sS -X POST https://network.cortex.foundation/challenge/proof/v1/submission
     "artifact_digest": "<sha256 of the recipe>",
     "claim": "beat sealed baseline holdout NLL by 0.04 at 1.2e18 FLOPs",
     "declared_flops": 1500000000000000000,
-    "architecture": "Qwen/Qwen3.8-0.6B",
+    "inference_offer_id": "<open offer id>",
+    "config_commitment": "<64-hex config_commitment>",
     "manifest": {
       "train_content_hashes": [],
       "train_dataset_ids": ["my-mix-v0"]
@@ -184,6 +190,10 @@ curl -sS -X POST https://network.cortex.foundation/challenge/proof/v1/submission
 
 `claim` and `declared_flops` are **required**. The control plane scores a
 claim against public numbers and checks FLOPs against the topic budget.
+
+Poll `GET /challenge/proof/v1/submissions/{id}`. While `can_score` is
+`false` (empty digest, missing/closed inference offer, no open sealed
+topic), submissions answer **503**.
 
 ### Required POST JSON
 

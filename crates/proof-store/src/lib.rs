@@ -73,8 +73,15 @@ pub struct Submission {
     pub claim: String,
     /// Declared FLOP budget (must be ≤ topic).
     pub declared_flops: u64,
-    /// Architecture id; must equal the topic/pin proxy.
+    /// Deprecated HF architecture id. Ignored; miners bind an InferenceOffer.
+    #[serde(default)]
     pub architecture: String,
+    /// Live offer id this run bound.
+    #[serde(default)]
+    pub inference_offer_id: String,
+    /// Config commitment this run bound.
+    #[serde(default)]
+    pub config_commitment: String,
     /// Declared training fingerprints.
     #[serde(default)]
     pub manifest: ArtifactManifest,

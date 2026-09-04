@@ -1,7 +1,7 @@
 # Cortex pin for the Proof challenge (`proof`).
 # Global floors only — there is no topic catalog here. Problems are
 # operator-published signed documents; git never carries holdout records,
-# teacher hosts, or a live topic list.
+# teacher hosts, live InferenceOffer origins, or a live topic list.
 #
 # Deploy = bump eval_image_digest after proof-eval CI is green. Empty digest
 # is the pre-launch state: live submits answer 503. Do not invent a sha256.
@@ -23,6 +23,13 @@
 #   epsilon_topic_max_regress_min = 0.05
 #   epsilon_throughput_rel_min    = 0.05
 #   quality_floor_nll_max         = 0.02
+#   max_input_tokens_ceiling      = 32768
+#   max_output_tokens_ceiling     = 8192
+#
+# Inference: the pin is architecture (ceilings + allowed modes). The live
+# InferenceOffer is operator state (`PROOF_INFERENCE_OFFER_FILE`), never git.
+# `proxy_model` / `proxy_models` are deprecated and must stay empty — Proof
+# does not bake HuggingFace weights into proof-eval.
 #
 # Holdout size / stratum size are the measurement harness (5 scored splits × 24),
 # not the problem list.
@@ -30,9 +37,13 @@
 challenge_id = "proof"
 scoring_version = 1
 base_model_family = "Qwen/Qwen3.8"
-# Baked into ghcr.io/cortexlm/proof-eval@sha256:78b614a1… (see baked_proxies.json).
-proxy_model = "Qwen/Qwen3.8-0.6B"
-proxy_models = ["Qwen/Qwen3.8-0.6B"]
+proxy_model = ""
+proxy_models = []
+inference_config_schema_version = 1
+allowed_modes = ["chat", "completions", "embeddings"]
+max_input_tokens_ceiling = 32768
+max_output_tokens_ceiling = 8192
+inference_offer_commitment_alg = "sha256"
 eval_image = "ghcr.io/cortexlm/proof-eval"
 eval_image_digest = "sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009"
 proof_git = "https://github.com/CortexLM/cortex"

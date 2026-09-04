@@ -256,6 +256,8 @@ services:
       PROOF_HOLDOUT_FILE: /run/base/proof/holdouts.json
       PROOF_BASELINE_FILE: /run/base/proof/baselines.json
       PROOF_ADMIN_TOKENS_FILE: /run/base/proof/admin_tokens
+      PROOF_INFERENCE_OFFER_FILE: /run/base/proof/inference_offer.json
+      PROOF_INFERENCE_API_KEY_FILE: /run/base/proof/inference_api_key
       BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
     env_file:
       - path: ./deploy/env/proof-challenge.env

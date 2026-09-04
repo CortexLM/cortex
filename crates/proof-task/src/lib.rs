@@ -29,6 +29,7 @@
 
 mod canonical;
 mod holdout;
+mod inference;
 mod pin;
 mod topic;
 
@@ -36,6 +37,12 @@ pub use canonical::canonical_json;
 pub use holdout::{
     contamination, holdout_commitment, synthetic_holdout, verify_holdout, HoldoutError,
     HoldoutRecord, HoldoutSplit, LONGCTX_MAX_TOKENS, LONGCTX_MIN_TOKENS,
+};
+pub use inference::{
+    inference_config_commitment, require_open_offer, InferenceConfig, InferenceMode,
+    InferenceOffer, InferenceProvider, InferenceProviderKind, OfferError, OfferStatus,
+    PublicInferenceOffer, TopicInference, ALLOWED_MODES, INFERENCE_CONFIG_SCHEMA_VERSION,
+    INFERENCE_OFFER_COMMITMENT_ALG, MAX_INPUT_TOKENS_CEILING, MAX_OUTPUT_TOKENS_CEILING,
 };
 pub use pin::{PinError, ProofPin};
 pub use topic::{
@@ -80,11 +87,8 @@ pub const TOPIC_DOMAIN: crypto::DomainTag = crypto::DomainTag::new(b"base-proof-
 /// Integer score lattice max (same scale as every other challenge).
 pub const SCORE_MAX: u64 = 1_000_000;
 
-/// Base model family the proxy must belong to (same family as `relearn`).
-///
-/// Family lock for the RLM judge the eval image bakes. The exact judge id
-/// lives in [`ProofPin::proxy_model`] and must be a model the pinned image
-/// contains. This is not a miner training proxy.
+/// Research family name (documentation). This is **not** an architecture lock
+/// and **not** an HF bake: miners bind to a live [`InferenceOffer`].
 pub const BASE_MODEL_FAMILY: &str = "Qwen/Qwen3.8";
 
 /// Eval image repository (digest-pinned; never a floating tag in prod).
@@ -190,5 +194,10 @@ mod tests {
             10_000
         );
         assert_eq!(CUSTOM_HARNESS_SUCCESS_RATE, "harness_success_rate");
+        assert_eq!(INFERENCE_CONFIG_SCHEMA_VERSION, 1);
+        assert_eq!(INFERENCE_OFFER_COMMITMENT_ALG, "sha256");
+        assert_eq!(MAX_INPUT_TOKENS_CEILING, LONGCTX_MAX_TOKENS);
+        assert_eq!(MAX_OUTPUT_TOKENS_CEILING, 8_192);
+        assert_eq!(ALLOWED_MODES.len(), 3);
     }
 }

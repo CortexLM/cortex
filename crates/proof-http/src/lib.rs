@@ -16,7 +16,8 @@
     clippy::missing_errors_doc,
     clippy::doc_markdown,
     clippy::must_use_candidate,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::too_many_arguments
 )]
 
 use std::sync::Arc;
@@ -39,7 +40,8 @@ use proof_store::{
     freeze_submission_digest, ArtifactManifest, MemoryStore, Submission, SubmissionState,
 };
 use proof_task::{
-    ProofPin, TopicDocument, TopicError, TopicStatus, CHALLENGE_ID, SCORE_MAX, SCORING_VERSION,
+    InferenceOffer, OfferError, ProofPin, TopicDocument, TopicError, TopicStatus, CHALLENGE_ID,
+    SCORE_MAX, SCORING_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -56,6 +58,8 @@ pub struct AppState {
     /// Harvest handle for the digest-pinned eval image. `None` on a live host
     /// means nothing can score, so submissions refuse.
     pub live_scorer: Option<Arc<dyn LiveScorer>>,
+    /// Live InferenceOffer (operator state). Missing/closed → can_score false.
+    pub offer: Option<InferenceOffer>,
     /// Operator bearer hashes (sha256 hex). Empty → admin 503.
     pub admin_hashes: Arc<Vec<String>>,
     /// Chain epoch used for topic windows. v0 hosts pass 0.
@@ -69,7 +73,14 @@ impl AppState {
 
     fn can_score(&self) -> bool {
         let open = self.store.any_open_scorable(self.epoch).unwrap_or(false);
-        scoring_readiness(&self.pin, self.backend, self.live(), open).is_ok()
+        scoring_readiness(
+            &self.pin,
+            self.backend,
+            self.live(),
+            open,
+            self.offer.as_ref(),
+        )
+        .is_ok()
     }
 }
 
@@ -103,7 +114,7 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         "score_max": SCORE_MAX,
         "eval_image": st.pin.eval_image,
         "eval_image_digest": st.pin.eval_image_digest,
-        "proxy_model": st.pin.proxy_model,
+        "inference_offer": st.offer.as_ref().map(InferenceOffer::public_view),
         "eval_backend": st.backend,
         "force_sim": force_sim(),
         "can_score": st.can_score(),
@@ -143,6 +154,10 @@ struct SubmitBody {
     topic_id: String,
     #[serde(default)]
     architecture: String,
+    #[serde(default)]
+    inference_offer_id: String,
+    #[serde(default)]
+    config_commitment: String,
     #[serde(default)]
     manifest: ArtifactManifest,
 }
@@ -196,17 +211,6 @@ async fn submit(
     if !topic.is_open_at(st.epoch) {
         return Err(err(StatusCode::BAD_REQUEST, "topic is not open"));
     }
-
-    let want_proxy = st.pin.proxy_for(topic.proxy_model.as_deref());
-    if want_proxy.is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "proxy not baked"));
-    }
-    if body.architecture.trim() != want_proxy {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "architecture is not the topic/pin proxy",
-        ));
-    }
     if body.declared_flops > topic.flops_budget {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -222,8 +226,17 @@ async fn submit(
         st.backend,
         st.live(),
         st.store.any_open_scorable(st.epoch).unwrap_or(false),
+        st.offer.as_ref(),
     )
     .map_err(|e| eval_err(&e))?;
+    let Some(offer) = st.offer.as_ref() else {
+        return Err(eval_err(&EvalError::InferenceOfferMissing));
+    };
+
+    offer
+        .bind_miner(&body.inference_offer_id, &body.config_commitment)
+        .map_err(|e| offer_err(&e))?;
+    offer.serves_topic(&topic).map_err(|e| offer_err(&e))?;
 
     let sealed = st
         .store
@@ -265,6 +278,7 @@ async fn submit(
     let eval = eval_after_freeze(
         &st.pin,
         &topic,
+        offer,
         &submission_digest,
         &artifact,
         &holdout,
@@ -338,6 +352,8 @@ fn persist_pre_eval_reject(
             claim: body.claim,
             declared_flops: body.declared_flops,
             architecture: body.architecture,
+            inference_offer_id: body.inference_offer_id,
+            config_commitment: body.config_commitment,
             manifest: body.manifest,
             nonce,
             submission_digest,
@@ -406,6 +422,8 @@ fn persist_scored(
             claim: body.claim,
             declared_flops: body.declared_flops,
             architecture: body.architecture,
+            inference_offer_id: body.inference_offer_id,
+            config_commitment: body.config_commitment,
             manifest: body.manifest,
             nonce,
             submission_digest,
@@ -516,6 +534,14 @@ fn topic_err(e: &TopicError) -> (StatusCode, Json<serde_json::Value>) {
     err(code, &e.to_string())
 }
 
+fn offer_err(e: &OfferError) -> (StatusCode, Json<serde_json::Value>) {
+    let code = match e {
+        OfferError::Stale => StatusCode::BAD_REQUEST,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    err(code, &e.to_string())
+}
+
 fn eval_err(e: &EvalError) -> (StatusCode, Json<serde_json::Value>) {
     let code = match e {
         EvalError::Integrity(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -542,9 +568,11 @@ mod tests {
     use http_body_util::BodyExt;
     use proof_eval::{sim_document, BaselineMeasurement, BASELINE_SKILL};
     use proof_task::{
-        default_adamw, holdout_commitment, synthetic_holdout, Constraints, MetricDirection,
-        MetricFamily, MetricSpec, TopicDocument, TopicStatus, FLOPS_BUDGET_MAX, HOLDOUT_SIZE,
-        METRIC_TOKENS_PER_SEC, STRATUM_SIZE,
+        default_adamw, holdout_commitment, inference_config_commitment, synthetic_holdout,
+        Constraints, InferenceConfig, InferenceMode, InferenceOffer, InferenceProvider,
+        InferenceProviderKind, MetricDirection, MetricFamily, MetricSpec, OfferStatus,
+        TopicDocument, TopicStatus, FLOPS_BUDGET_MAX, HOLDOUT_SIZE, METRIC_TOKENS_PER_SEC,
+        STRATUM_SIZE,
     };
     use tower::ServiceExt;
 
@@ -570,9 +598,29 @@ mod tests {
         ProofPin {
             eval_image_digest: digest.to_owned(),
             topic_pubkey: pk_hex(),
-            proxy_model: "Qwen/Qwen3.8-0.6B".into(),
-            proxy_models: vec!["Qwen/Qwen3.8-0.6B".into()],
             ..ProofPin::default()
+        }
+    }
+
+    fn offer() -> InferenceOffer {
+        let config = InferenceConfig {
+            mode: InferenceMode::Chat,
+            model_ref: "master-proxy-v0".into(),
+            max_input_tokens: 32_768,
+            max_output_tokens: 8_192,
+            temperature: Some(0.0),
+            top_p: None,
+            timeout_ms: None,
+        };
+        InferenceOffer {
+            offer_id: "master-v0".into(),
+            provider: InferenceProvider {
+                kind: InferenceProviderKind::OpenaiCompatible,
+                base_url: "http://127.0.0.1:8000/v1".into(),
+            },
+            config_commitment: inference_config_commitment(&config),
+            config,
+            status: OfferStatus::Open,
         }
     }
 
@@ -662,6 +710,7 @@ mod tests {
             &self,
             pin: &ProofPin,
             topic: &TopicDocument,
+            _offer: &InferenceOffer,
             frozen: &str,
             artifact: &str,
             _holdout: &[proof_task::HoldoutRecord],
@@ -693,6 +742,7 @@ mod tests {
         live: Option<Arc<dyn LiveScorer>>,
         load: bool,
         baseline: bool,
+        with_offer: bool,
     ) -> Router {
         let p = pin(eval_digest);
         let store = MemoryStore::new();
@@ -712,13 +762,14 @@ mod tests {
             pin: p,
             backend,
             live_scorer: live,
+            offer: with_offer.then(offer),
             admin_hashes: Arc::new(vec![hash_admin_token(token)]),
             epoch: 0,
         })
     }
 
     fn app(token: &str) -> Router {
-        app_full(token, EvalBackend::Sim, "", None, true, true)
+        app_full(token, EvalBackend::Sim, "", None, true, true, true)
     }
 
     async fn json_req(
@@ -750,7 +801,8 @@ mod tests {
             "claim": "beats the sealed reference under the cap",
             "declared_flops": FLOPS_BUDGET_MAX / 2,
             "topic_id": "dt-no-ib-v0",
-            "architecture": "Qwen/Qwen3.8-0.6B",
+            "inference_offer_id": offer().offer_id,
+            "config_commitment": offer().config_commitment,
             "manifest": {
                 "train_dataset_ids": ["public-pretrain-v0"]
             },
@@ -781,6 +833,11 @@ mod tests {
         let dump = body.to_string();
         assert!(!dump.contains("synthetic-dev"), "{dump}");
         assert!(!dump.contains("holdout_nll"));
+        assert_eq!(body["inference_offer"]["offer_id"], "master-v0");
+        assert_eq!(body["inference_offer"]["status"], "open");
+        assert!(!dump.contains("8000"), "{dump}");
+        assert!(!dump.contains("base_url"), "{dump}");
+        assert!(!dump.contains("api_key"), "{dump}");
     }
 
     #[tokio::test]
@@ -837,14 +894,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn architecture_must_match_the_proxy() {
+    async fn miner_must_bind_the_open_offer() {
         let (st, body) = json_req(
             app("op"),
             "POST",
             "/v1/submissions",
             submit_body(
                 "x",
-                &serde_json::json!({ "architecture": "meta-llama/Llama-3-8B" }),
+                &serde_json::json!({ "inference_offer_id": "stale-v0" }),
             ),
             None,
         )
@@ -853,7 +910,7 @@ mod tests {
         assert!(body["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("architecture"));
+            .contains("inference_offer_id"));
     }
 
     #[tokio::test]
@@ -863,7 +920,15 @@ mod tests {
         let digest = format!("sha256:{}", "ab".repeat(32));
 
         let (st, created) = json_req(
-            app_full("op", EvalBackend::Lium, &digest, Some(win), true, true),
+            app_full(
+                "op",
+                EvalBackend::Lium,
+                &digest,
+                Some(win),
+                true,
+                true,
+                true,
+            ),
             "POST",
             "/v1/submissions",
             submit_body("miner-strong-proof", &serde_json::json!({})),
@@ -876,7 +941,15 @@ mod tests {
         assert_eq!(created["state"], "awaiting_admin");
 
         let (st, created) = json_req(
-            app_full("op", EvalBackend::Lium, &digest, Some(lose), true, true),
+            app_full(
+                "op",
+                EvalBackend::Lium,
+                &digest,
+                Some(lose),
+                true,
+                true,
+                true,
+            ),
             "POST",
             "/v1/submissions",
             submit_body("miner-unreproduced", &serde_json::json!({})),
@@ -898,6 +971,7 @@ mod tests {
             EvalBackend::Lium,
             &format!("sha256:{}", "ab".repeat(32)),
             Some(scorer.clone()),
+            true,
             true,
             true,
         );
@@ -929,7 +1003,7 @@ mod tests {
     #[tokio::test]
     async fn empty_digest_and_unwired_harvest_are_503() {
         let (st, body) = json_req(
-            app_full("op", EvalBackend::Lium, "", None, true, true),
+            app_full("op", EvalBackend::Lium, "", None, true, true, true),
             "POST",
             "/v1/submissions",
             submit_body("x", &serde_json::json!({})),
@@ -950,6 +1024,7 @@ mod tests {
                 None,
                 true,
                 true,
+                true,
             ),
             "POST",
             "/v1/submissions",
@@ -966,7 +1041,7 @@ mod tests {
 
     #[tokio::test]
     async fn refused_submissions_leave_no_rows() {
-        let unpinned = app_full("op", EvalBackend::Lium, "", None, true, true);
+        let unpinned = app_full("op", EvalBackend::Lium, "", None, true, true, true);
         let no_baseline = app_full(
             "op",
             EvalBackend::Lium,
@@ -974,8 +1049,9 @@ mod tests {
             Some(Arc::new(StubScorer::win())),
             true,
             false,
+            true,
         );
-        let sealed = app_full("op", EvalBackend::Sim, "", None, false, false);
+        let sealed = app_full("op", EvalBackend::Sim, "", None, false, false, true);
 
         for (label, app) in [
             ("unpinned digest", unpinned),
@@ -1009,7 +1085,7 @@ mod tests {
     #[tokio::test]
     async fn can_score_is_false_until_open_holdout_and_baseline() {
         let (st, body) = json_req(
-            app_full("op", EvalBackend::Sim, "", None, false, false),
+            app_full("op", EvalBackend::Sim, "", None, false, false, true),
             "GET",
             "/v1/status",
             serde_json::json!({}),
@@ -1028,6 +1104,7 @@ mod tests {
                 Some(Arc::new(StubScorer::win())),
                 true,
                 false,
+                true,
             ),
             "GET",
             "/v1/status",
@@ -1038,6 +1115,35 @@ mod tests {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(body["live_harvest_wired"], true);
         assert_eq!(body["can_score"], false, "{body}");
+    }
+
+    #[tokio::test]
+    async fn missing_or_closed_offer_is_503() {
+        let (st, body) = json_req(
+            app_full("op", EvalBackend::Sim, "", None, true, true, false),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["can_score"], false, "{body}");
+        assert!(body["inference_offer"].is_null(), "{body}");
+
+        let (st, body) = json_req(
+            app_full("op", EvalBackend::Sim, "", None, true, true, false),
+            "POST",
+            "/v1/submissions",
+            submit_body("x", &serde_json::json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("inference offer"));
     }
 
     #[tokio::test]
