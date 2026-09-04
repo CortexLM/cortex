@@ -167,7 +167,7 @@ Ladder: CI → GHCR digests → `deploy/pins/staging.json` (committed by `images
 1. Staging healthy on the exact commit you will tag; `deploy/pins/staging.json` `commit_sha` matches that SHA.
 2. Digests recorded / promoted for services you will ship (`promote.sh`, `verify-task-43.sh` locally if needed).
 3. Age identity + env ages present on both prod hosts; wallets hotkeys under `deploy/secrets/wallets/` (0400 / 65532).
-4. Mainnet owner wallet placed; set `BASE_GATEWAY_REQUIRE_OWNER=1` when ready (ops gap until then — see [`docs/COMPLETENESS.md`](../docs/COMPLETENESS.md)).
+4. Mainnet owner wallet on disk matches SubnetOwnerHotkey; `env-prod.yml` sets `BASE_GATEWAY_REQUIRE_OWNER=1` (`gateway_admin_token` required). Recreate the gateway on droplets after compose changes.
 5. Cut `vX.Y.Z` on `main`, push tag; pass `deploy-prod` preflight + `environment: production` reviewers.
 6. Smoke `/healthz` on both prod hosts; confirm `evil-gateway` absent.
 
