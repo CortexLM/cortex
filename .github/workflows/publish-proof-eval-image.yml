@@ -1,0 +1,180 @@
+name: publish-proof-eval-image
+
+# Publishes ghcr.io/cortexlm/proof-eval and prints the pushed sha256 digest.
+# That digest is what the control plane pins in config/proof-pin.toml as
+# eval_image_digest; a tag is never the pin. Do not invent a sha256.
+#
+# Two images, two Dockerfiles:
+#
+#   :<sha>            scoring — CUDA base + torch. Pin this, and only after
+#                     this job has pulled THAT digest and run the harvest-PATH
+#                     check + selftest against it.
+#   :<sha>-contract   slim contract only. Fast, cannot score, not the pin.
+
+on:
+  push:
+    branches: ["main", "cursor/**"]
+    paths:
+      - "eval/**"
+      - ".github/workflows/publish-proof-eval-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-proof-eval-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: resolve the image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/proof-eval" >> "${GITHUB_ENV}"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build and push the contract image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: eval/Dockerfile
+          push: true
+          provenance: false
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}-contract
+          build-args: |
+            WITH_RUNTIME=0
+            PROOF_GIT_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=proof-eval-contract
+          cache-to: type=gha,mode=max,scope=proof-eval-contract
+      - name: report
+        run: |
+          {
+            echo "### proof-eval (contract only)"
+            echo
+            echo '```'
+            echo "image  = \"${IMAGE}\""
+            echo "digest = \"${{ steps.push.outputs.digest }}\""
+            echo '```'
+            echo
+            echo "Contract layer only: slim, no model runtime, so it refuses to score."
+            echo "Do not pin this digest."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: resolve the image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/proof-eval" >> "${GITHUB_ENV}"
+      - name: free disk for the CUDA base and runtime wheels
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache /usr/local/share/boost \
+                      /opt/hostedtoolcache/CodeQL /usr/local/lib/node_modules \
+                      /usr/share/swift /opt/az || true
+          df -h /
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build and push the scoring image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: eval/Dockerfile.scoring
+          push: true
+          provenance: false
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+          build-args: |
+            WITH_RUNTIME=1
+            PROOF_GIT_SHA=${{ github.sha }}
+      - name: pull the published digest and prove it can score
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -eu
+          case "${DIGEST}" in
+            sha256:*) ;;
+            *) echo "no sha256 digest was published"; exit 1 ;;
+          esac
+          ref="${IMAGE}@${DIGEST}"
+          docker pull "${ref}"
+          docker run --rm --entrypoint /bin/sh "${ref}" -c \
+            'test -f /usr/bin/proof-eval && test -x /usr/bin/proof-eval && env -i PATH=/usr/bin:/bin /usr/bin/proof-eval --help'
+          docker run --rm --entrypoint /bin/sh "${ref}" -c \
+            'test ! -L /usr/bin/proof-eval'
+          docker run --rm --entrypoint /bin/sh "${ref}" -c \
+            'env -i PATH=/usr/bin:/bin /usr/bin/proof-eval score --help'
+          docker run --rm --entrypoint /opt/proof-eval-venv/bin/python "${ref}" \
+            -c 'import torch, transformers'
+          docker run --rm --entrypoint /bin/sh "${ref}" -c \
+            'test -f /opt/proof-eval/baked_proxies.json && grep -q "Qwen/Qwen3.8-0.6B" /opt/proof-eval/baked_proxies.json'
+          docker run --rm --entrypoint /bin/sh "${ref}" -c \
+            'env -i PATH=/usr/bin:/bin HOME=/root PROOF_SELFTEST_REQUIRE_RUNTIME=1 /usr/bin/proof-eval selftest'
+      - name: publicize the GHCR package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          enc=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "proof-eval")
+          code=$(curl -sS -o /tmp/vis.json -w "%{http_code}" \
+            -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/orgs/${OWNER}/packages/container/${enc}/visibility" \
+            -d '{"visibility":"public"}' || true)
+          echo "pkg=proof-eval http=${code} body=$(head -c 200 /tmp/vis.json || true)"
+      - name: report the digest to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -eu
+          case "${DIGEST}" in
+            sha256:*) ;;
+            *) echo "no sha256 digest was published"; exit 1 ;;
+          esac
+          {
+            echo "### proof-eval (scoring image, CUDA base)"
+            echo
+            echo "Pulled this digest after push, ran the harvest-PATH check,"
+            echo "proved \`import torch, transformers\`, baked proxy Qwen/Qwen3.8-0.6B,"
+            echo "and ran \`proof-eval selftest\` (fabric 12.5 Gbit/s / no IB-NVLink-NCCL)."
+            echo "Paste into the control plane's \`config/proof-pin.toml\`:"
+            echo
+            echo '```toml'
+            echo "eval_image = \"${IMAGE}\""
+            echo "eval_image_digest = \"${DIGEST}\""
+            echo "proxy_model = \"Qwen/Qwen3.8-0.6B\""
+            echo "proxy_models = [\"Qwen/Qwen3.8-0.6B\"]"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "eval_image_digest = \"${DIGEST}\""
+          echo "${DIGEST}" > /tmp/proof-eval.digest
+      - name: upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-eval-digest
+          path: /tmp/proof-eval.digest
+          if-no-files-found: error

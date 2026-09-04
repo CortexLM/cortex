@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proof-eval"
+version = "1.0.0"
+description = "Proof live eval image: score a recipe on the holdout the control plane delivers, under topic fabric constraints."
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = []
+
+[project.optional-dependencies]
+runtime = [
+  "torch>=2.4",
+  "transformers>=4.44",
+  "accelerate>=0.33",
+  "safetensors>=0.4",
+  "numpy>=1.26",
+]
+dev = ["pytest>=8"]
+
+[project.scripts]
+proof-eval = "proof_eval.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+proof_eval = ["baked_proxies.json"]

@@ -1,0 +1,29 @@
+#!/bin/sh
+# Regular file installed at /usr/bin/proof-eval.
+#
+# Harvest SSHes in with PATH=/usr/bin:/bin and runs this under `timeout`.
+# A shebang that names a missing interpreter is the same 127 as a missing
+# file, so this file is /bin/sh and execs a python that can import the package.
+set -eu
+
+try() {
+    py=$1
+    shift
+    [ -n "${py}" ] || return 1
+    [ -x "${py}" ] || return 1
+    "${py}" -c "import proof_eval" >/dev/null 2>&1 || return 1
+    exec "${py}" -m proof_eval "$@"
+}
+
+try /opt/proof-eval-venv/bin/python "$@" \
+    || try /usr/bin/python3 "$@" \
+    || try /usr/local/bin/python3 "$@" \
+    || try /opt/conda/bin/python "$@" \
+    || try /opt/conda/bin/python3 "$@" \
+    || try "$(command -v python3 2>/dev/null || true)" "$@" \
+    || try "$(command -v python 2>/dev/null || true)" "$@" \
+    || {
+        echo "proof-eval: no python that can import proof_eval" >&2
+        echo "PATH=${PATH-}" >&2
+        exit 127
+    }
