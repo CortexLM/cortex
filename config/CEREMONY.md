@@ -12,16 +12,16 @@ Offline, operator-only. Never commit secrets. Prefer `/root/.base-secrets/` (mod
 | `config/measurements.toml` | Measurement allowlist; empty = fail-closed (base-agent CVM path removed). |
 | `config/measurements.toml.sig` | Detached owner signature. |
 
-### Live challenges (Relearn + Relearn Image + Relearn Agent + Bounty)
+### Live challenges (Relearn + Relearn Image + Relearn Agent + Bounty + Proof)
 
-Current committed `challenges.toml` has **four** rows: `relearn` @ 4000,
-`relearn-image` @ 1500, `relearn-agent` @ 1500, and `bounty` @ 3000 bps
-(sum = 10000). Operator may retune shares; the sum must remain 10000, and no
-two rows may share a public key.
+Current committed `challenges.toml` has **five** rows: `relearn` @ 3000,
+`relearn-image` @ 1000, `relearn-agent` @ 1000, `bounty` @ 3000, and
+`proof` @ 2000 bps (sum = 10000). Operator may retune shares; the sum must
+remain 10000, and no two rows may share a public key.
 
 `relearn-mm` is **off**: it has no row, so it has no emission and no leaf
 signed by its key can verify. Turning it on later is a normal ceremony — add a
-row with its own key and move bps out of the other four.
+row with its own key and move bps out of the other five.
 
 **Key reuse from the pre-launch layout.** `relearn-image` carries the public
 key that the pre-launch `relearn-t2i` row used, and `relearn-agent` carries the
@@ -33,7 +33,7 @@ challenge's leaves verify as the other's the moment both are live.
 A production owner/key ceremony:
 
 1. Keygen production `relearn_sk` / `relearn_image_sk` / `relearn_agent_sk` /
-   `bounty_sk` (keep off-git; materialize under `deploy/secrets/`).
+   `bounty_sk` / `proof_sk` (keep off-git; materialize under `deploy/secrets/`).
 2. Replace the matching `public_key` rows in `config/challenges.toml`.
 3. Optionally move bps between challenges (sum must remain 10000).
 4. Re-sign with the **production** owner key (`sign --kind challenges`).

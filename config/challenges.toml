@@ -1,9 +1,9 @@
 # Owner-signed challenges trust root (D18/D23/D24).
 # Signed with throwaway owner key (see owner.pubkey). Production rotation: CEREMONY.md.
 #
-# Four live challenges. Emission: relearn = 4000, relearn-image = 1500,
-# relearn-agent = 1500, bounty = 3000 bps (sum 10000). Operator can retune;
-# the sum must stay 10000.
+# Five live challenges. Emission: relearn = 3000, relearn-image = 1000,
+# relearn-agent = 1000, bounty = 3000, proof = 2000 bps (sum 10000).
+# Operator can retune; the sum must stay 10000.
 #
 # `relearn-mm` (encoder-attach) is OFF: it has no row here, so it has no
 # emission and no leaf may verify under this root. Its code stays in the repo
@@ -14,23 +14,29 @@ introduced_epoch = 0
 [[challenges]]
 id = "relearn"
 public_key = "8ab577207bb6dfc770a850710824a098d53b1ee90abb92925bd0928937131674"
-emission_share_bps = 4000
+emission_share_bps = 3000
 policy = "all_metagraph_hotkeys"
 
 [[challenges]]
 id = "relearn-image"
 public_key = "923324e1df896b20c49c47f40dacbc4c53cab23e6cc5a1136529302b4c2da110"
-emission_share_bps = 1500
+emission_share_bps = 1000
 policy = "all_metagraph_hotkeys"
 
 [[challenges]]
 id = "relearn-agent"
 public_key = "220e489f8157e477730e2e3ee6ce51be0fcf8779575c486a70658a28d5a51841"
-emission_share_bps = 1500
+emission_share_bps = 1000
 policy = "all_metagraph_hotkeys"
 
 [[challenges]]
 id = "bounty"
 public_key = "d2ffbe70de7c052deafaba48b90544db4abc1133278c907f2018f457f34aac25"
 emission_share_bps = 3000
+policy = "all_metagraph_hotkeys"
+
+[[challenges]]
+id = "proof"
+public_key = "3ea26595735ffa8e1d6c5eb339acb3618d6a5c99cd32c9e9c09e4526ffd7841e"
+emission_share_bps = 2000
 policy = "all_metagraph_hotkeys"

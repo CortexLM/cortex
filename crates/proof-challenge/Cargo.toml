@@ -1,0 +1,26 @@
+[package]
+name = "proof-challenge"
+description = "Proof orchestrator: signed topics, eval, D24 emit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bundle = { path = "../bundle" }
+challenge-common = { path = "../challenge-common" }
+hex = "0.4"
+proof-eval = { path = "../proof-eval" }
+proof-http = { path = "../proof-http" }
+proof-score = { path = "../proof-score" }
+proof-store = { path = "../proof-store" }
+proof-task = { path = "../proof-task" }
+serde_json = "1"
+
+[dev-dependencies]
+crypto = { path = "../crypto" }
+
+[lints]
+workspace = true

@@ -18,6 +18,8 @@ const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("relearn_agent_challenge", "relearn-agent"),
     ("relearn_mm_off", "relearn-mm"),
     ("bounty_challenge", "bounty"),
+    ("proof_challenge", "proof"),
+    ("proof_dynamic_topics", "operator-published"),
     ("http_submit", "HTTP"),
     ("lium_byok", "X-Lium-Api-Key"),
     ("lium_pay", "Miner pays Lium"),
@@ -79,6 +81,17 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "proof.md",
+        &[
+            "topic_id",
+            "operator-published",
+            "contamination_evidence_missing",
+            "eval_image_digest",
+            "mean of per-topic",
+            "12.5 Gbit/s",
+        ],
+    ),
+    (
         "relearn-mm.md",
         &[
             "google/siglip2-so400m-patch14-384",
@@ -116,7 +129,7 @@ pub fn run(workspace_root: &Path) -> Result<(), String> {
 
     if failures.is_empty() {
         println!(
-            "external-docs-check OK (protocol_version={protocol_version}, relearn + relearn-image + relearn-agent + bounty HTTP, D19 verbatim match)"
+            "external-docs-check OK (protocol_version={protocol_version}, relearn + relearn-image + relearn-agent + bounty + proof HTTP, D19 verbatim match)"
         );
         Ok(())
     } else {
@@ -195,6 +208,7 @@ fn check_external_miner_docs(
         "relearn-agent.md",
         "relearn-mm.md",
         "bounty.md",
+        "proof.md",
         "troubleshoot.md",
     ] {
         let path = dir.join(required);
@@ -424,12 +438,14 @@ mod tests {
     }
 
     #[test]
-    fn external_pins_cover_the_four_live_ids() {
+    fn external_pins_cover_the_five_live_ids() {
         for (name, value) in [
             ("relearn_challenge", "relearn"),
             ("relearn_image_challenge", "relearn-image"),
             ("relearn_agent_challenge", "relearn-agent"),
             ("bounty_challenge", "bounty"),
+            ("proof_challenge", "proof"),
+            ("proof_dynamic_topics", "operator-published"),
             ("image_base_model", "nvidia/Cosmos3-Super-Text2Image"),
             ("image_judge", "Qwen/Qwen-Image-Bench"),
             ("image_flux_rejected", "Flux is rejected"),
@@ -484,6 +500,15 @@ mod tests {
         for arm in ["Trace replay", "Tool ablation", "Observation shuffle"] {
             assert!(agent.contains(&arm), "agent page must pin {arm:?}");
         }
+
+        let proof = PAGE_PINS
+            .iter()
+            .find(|(p, _)| *p == "proof.md")
+            .map(|(_, pins)| *pins)
+            .unwrap_or_default();
+        assert!(proof.contains(&"topic_id"));
+        assert!(proof.contains(&"operator-published"));
+        assert!(proof.contains(&"mean of per-topic"));
     }
 
     #[test]

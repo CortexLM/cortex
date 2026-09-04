@@ -45,6 +45,7 @@ RUN cargo build --release \
       -p relearn-agent-challenge-bin \
       -p relearn-mm-challenge-bin \
       -p bounty-challenge-bin \
+      -p proof-challenge-bin \
  && strip target/release/validator \
            target/release/gateway \
            target/release/updater \
@@ -53,6 +54,7 @@ RUN cargo build --release \
            target/release/relearn-agent-challenge \
            target/release/relearn-mm-challenge \
            target/release/bounty-challenge \
+           target/release/proof-challenge \
  && mkdir -p /out \
  && cp target/release/validator \
        target/release/gateway \
@@ -61,7 +63,8 @@ RUN cargo build --release \
        target/release/relearn-t2i-challenge \
        target/release/relearn-agent-challenge \
        target/release/relearn-mm-challenge \
-       target/release/bounty-challenge /out/
+       target/release/bounty-challenge \
+       target/release/proof-challenge /out/
 
 # -----------------------------------------------------------------------------
 # Prebuilt path — copy host target/release artifacts (local verify only)
@@ -79,6 +82,7 @@ COPY target/release/validator \
      target/release/relearn-agent-challenge \
      target/release/relearn-mm-challenge \
      target/release/bounty-challenge \
+     target/release/proof-challenge \
      /out/
 
 # -----------------------------------------------------------------------------
@@ -172,3 +176,15 @@ RUN mkdir -p /var/lib/bounty \
 USER base
 COPY --from=artifacts --chown=base:base /out/bounty-challenge /usr/local/bin/bounty-challenge
 ENTRYPOINT ["/usr/local/bin/bounty-challenge"]
+
+FROM runtime-base AS proof-challenge
+# RLM judge + harness run on rented GPUs over SSH.
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/lib/proof \
+    && chown -R base:base /var/lib/proof
+USER base
+COPY --from=artifacts --chown=base:base /out/proof-challenge /usr/local/bin/proof-challenge
+ENTRYPOINT ["/usr/local/bin/proof-challenge"]

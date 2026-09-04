@@ -1,0 +1,41 @@
+# Cortex pin for the Proof challenge (`proof`).
+# Global floors only — there is no topic catalog here. Problems are
+# operator-published signed documents; git never carries holdout records,
+# teacher hosts, or a live topic list.
+#
+# Deploy = bump eval_image_digest after proof-eval CI is green. Empty digest
+# is the pre-launch state: live submits answer 503. Do not invent a sha256.
+#
+# Topic documents are signed by the `proof` row key in config/challenges.toml
+# (sr25519, domain `base-proof-topic-v1`). `topic_pubkey` must match that row.
+# The committed key is the throwaway CI row from CEREMONY.md — not the live seal.
+#
+# Floors a topic may tighten, never loosen:
+#   flops_budget_max              = 2e18
+#   epsilon_nll_min               = 0.02
+#   epsilon_topic_max_regress_min = 0.05
+#   epsilon_throughput_rel_min    = 0.05
+#   quality_floor_nll_max         = 0.02
+#
+# Holdout size / stratum size are the measurement harness (5 scored splits × 24),
+# not the problem list.
+
+challenge_id = "proof"
+scoring_version = 1
+base_model_family = "Qwen/Qwen3.8"
+# Empty until the eval image exists. A topic naming a proxy the image does
+# not bake is a publish 400.
+proxy_model = ""
+proxy_models = []
+eval_image = "ghcr.io/cortexlm/proof-eval"
+eval_image_digest = ""
+proof_git = "https://github.com/CortexLM/relearn"
+proof_git_sha = ""
+topic_pubkey = "3ea26595735ffa8e1d6c5eb339acb3618d6a5c99cd32c9e9c09e4526ffd7841e"
+flops_budget_max = 2000000000000000000
+epsilon_nll_min = 0.02
+epsilon_topic_max_regress_min = 0.05
+epsilon_throughput_rel_min = 0.05
+quality_floor_nll_max = 0.02
+holdout_size = 120
+stratum_size = 24

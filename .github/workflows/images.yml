@@ -80,6 +80,9 @@ jobs:
           - target: bounty-challenge
             image_suffix: bounty-challenge
             dockerfile: deploy/Dockerfile
+          - target: proof-challenge
+            image_suffix: proof-challenge
+            dockerfile: deploy/Dockerfile
           - target: ""
             image_suffix: base-attest-helper
             dockerfile: deploy/attest-helper/Dockerfile
@@ -284,6 +287,7 @@ jobs:
               "relearn-t2i-challenge",
               "relearn-agent-challenge",
               "bounty-challenge",
+              "proof-challenge",
               "base-attest-helper",
           }
           assert set(images) == expected, (set(images), expected)
@@ -354,7 +358,7 @@ jobs:
           # Pin services only (validator/gateway/updater/the four challenges).
           # --skip-backup: this job records CI digests; Spaces/PG backup runs at
           # prod promote (deploy-prod.yml, fail-closed).
-          for svc in validator gateway updater relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge; do
+          for svc in validator gateway updater relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge proof-challenge; do
             IMAGE=$(python3 -c '
           import json, sys
           d = json.load(open(sys.argv[1]))
@@ -373,7 +377,7 @@ jobs:
           import json, sys
           p = json.load(open("deploy/pins/staging.json"))
           assert p["commit_sha"] == sys.argv[1], (p["commit_sha"], sys.argv[1])
-          for s in ("validator", "gateway", "updater", "relearn-challenge", "relearn-t2i-challenge", "relearn-agent-challenge", "bounty-challenge"):
+          for s in ("validator", "gateway", "updater", "relearn-challenge", "relearn-t2i-challenge", "relearn-agent-challenge", "bounty-challenge", "proof-challenge"):
               assert s in p["services"], s
               assert p["services"][s]["digest"].startswith("sha256:")
           print("staging pins ok", p["commit_sha"])
@@ -424,6 +428,7 @@ jobs:
             "base/relearn-t2i-challenge"
             "base/relearn-agent-challenge"
             "base/bounty-challenge"
+            "base/proof-challenge"
           )
           ok=0
           # First list packages to Learn exact names (debug)

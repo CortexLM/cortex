@@ -11,6 +11,8 @@
 //! - `relearn-t2i-holdout` — select a Relearn T2I holdout slice and print its commitment
 //! - `relearn-holdout` — select a Relearn holdout slice and print its commitment
 //! - `relearn-agent-holdout` — select a Relearn Agent episode set and print its commitment
+//! - `proof-holdout` — select a Proof per-topic holdout set and print its commitment
+//! - `proof-topic` — sign a Proof topic document with the `proof` row key
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod agent_holdout;
@@ -20,6 +22,8 @@ mod external_docs_check;
 mod loc_cap;
 mod metadata_snapshot;
 mod natural_pack;
+mod proof_holdout;
+mod proof_topic;
 mod relearn_holdout;
 mod spec_check;
 mod t2i_holdout;
@@ -159,6 +163,45 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Select a Proof per-topic holdout set and print its commitment.
+    ///
+    /// Records are never printed. Production salts stay off git. Refuses
+    /// other challenges' documented salts and writes under config/ or docs/.
+    ProofHoldout {
+        /// Topic id these records will be scored under.
+        #[arg(long)]
+        topic_id: String,
+        /// Operator catalog JSON (array of holdout records).
+        #[arg(long)]
+        catalog: Option<PathBuf>,
+        /// Selection salt. Never reuse another challenge's salt.
+        #[arg(long)]
+        salt: String,
+        /// Holdout record count (must stay stratified).
+        #[arg(long, default_value_t = 120)]
+        size: usize,
+        /// Record ids to exclude (repeatable).
+        #[arg(long = "exclude")]
+        exclude: Vec<u32>,
+        /// Build a local-only synthetic catalog.
+        #[arg(long)]
+        synthetic: bool,
+        /// Write records here (outside the repo, mode 0600).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Sign a Proof topic document with the `proof` row mini-secret.
+    ProofTopic {
+        /// Unsigned (or previously signed) topic JSON.
+        #[arg(long)]
+        input: PathBuf,
+        /// Mini-secret file (raw 32 bytes or hex). Never commit.
+        #[arg(long)]
+        secret: PathBuf,
+        /// Write signed JSON here (outside the repo). Stdout when omitted.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn workspace_root() -> Result<PathBuf, String> {
@@ -277,5 +320,25 @@ fn dispatch(command: Command, root: &Path) -> Result<(), String> {
             exclude,
             out,
         }),
+        Command::ProofHoldout {
+            topic_id,
+            catalog,
+            salt,
+            size,
+            exclude,
+            synthetic,
+            out,
+        } => proof_holdout::run(&proof_holdout::HoldoutArgs {
+            topic_id,
+            catalog,
+            salt,
+            size,
+            exclude,
+            synthetic,
+            out,
+        }),
+        Command::ProofTopic { input, secret, out } => {
+            proof_topic::run(&proof_topic::TopicArgs { input, secret, out })
+        }
     }
 }

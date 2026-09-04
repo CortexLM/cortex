@@ -6,8 +6,8 @@ Relearn, Relearn Image, and Relearn Agent scoring are centralized (master +
 Lium). Bounty adjudication is operator-side on master. You still run a
 validator.
 
-Live ids and emission: `relearn` 4000 bps, `relearn-image` 1500,
-`relearn-agent` 1500, `bounty` 3000. `relearn-mm` has no row and earns 0 — a
+Live ids and emission: `relearn` 3000 bps, `relearn-image` 1000,
+`relearn-agent` 1000, `bounty` 3000, `proof` 2000. `relearn-mm` has no row and earns 0 — a
 leaf claiming that id fails the trust-root check, which is the point.
 
 ## Job

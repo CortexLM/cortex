@@ -202,3 +202,38 @@ pub fn relearn_frame() -> Arena {
         seconds_remaining: None,
     }
 }
+
+/// Proof arena frame; counters filled by caller from live status.
+#[must_use]
+pub fn proof_frame() -> Arena {
+    Arena {
+        slug: ArenaSlug::Proof,
+        name: "Proof".into(),
+        tagline: "Research problems as data: miners beat a sealed baseline on operator-published topics; a digest-pinned RLM judge re-runs the recipe.".into(),
+        description: "Submit a reproducible experiment against an open topic_id. Topics are signed research problems — not a catalog in git. Score is the mean of per-topic lattices over currently open ids. The eval image is digest-pinned; an empty digest cannot score.".into(),
+        status: "live".into(),
+        scoring: ScoringMethod::Reproduced,
+        mechanism: vec![
+            "Miners pay Lium (BYOK)".into(),
+            "Operator-published signed topics".into(),
+            "Digest-pinned RLM judge + harness floors".into(),
+            "Mean lattice over open topics; skipped topic is 0".into(),
+        ],
+        agents: 0,
+        best_score: "—".into(),
+        best_score_label: "LATTICE".into(),
+        emission_share: 1.0,
+        weight: 1.0,
+        rewards_per_day: 0.0,
+        references: vec![ProjectReference {
+            name: "Proof".into(),
+            repo: "CortexLM/cortex".into(),
+            repo_url: "https://github.com/CortexLM/cortex".into(),
+        }],
+        source_url: "https://network.cortex.foundation".into(),
+        plate: "/plates/relearn.svg".into(),
+        round_id: None,
+        round_ends_at: None,
+        seconds_remaining: None,
+    }
+}

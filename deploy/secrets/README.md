@@ -3,7 +3,7 @@
 Containers run as `base` (uid **65532**). Host secret files MUST be:
 
 ```bash
-for f in gateway_sk relearn_sk relearn_t2i_sk relearn_agent_sk bounty_sk; do
+for f in gateway_sk relearn_sk relearn_t2i_sk relearn_agent_sk bounty_sk proof_sk; do
   chown 65532:65532 "deploy/secrets/$f"
   chmod 0400 "deploy/secrets/$f"
 done
@@ -21,6 +21,7 @@ Bind-mounts use the file inode; directory mode 0700 is OK.
 | `relearn_t2i_sk` | relearn-t2i-challenge | Relearn Image (`relearn-image`) leaf mini-secret; pub must match `config/challenges.toml` |
 | `relearn_agent_sk` | relearn-agent-challenge | Relearn Agent leaf mini-secret; pub must match `config/challenges.toml` |
 | `bounty_sk` | bounty-challenge | Bounty leaf mini-secret; pub must match `config/challenges.toml` |
+| `proof_sk` | proof-challenge | Proof leaf + topic-document mini-secret; pub must match `config/challenges.toml` |
 | `prism_sk` / `design_sk` | retired products | Do not mount on the live compose path |
 
 ```bash
@@ -44,6 +45,10 @@ Local dummy for development: decrypt with age:
 | `relearn-agent/episodes.json` | relearn-agent-challenge | Frozen holdout **recorded traces** (goal, tool schemas, steps with arguments/observations, final answer). **Never commit.** Verified at boot against `holdout_commitment` in `config/relearn-agent-pin.toml`. Mode **0400**, uid **65532** |
 | `relearn-agent/base_champion.json` | relearn-agent-challenge | Base checkpoint measured by the pinned agent eval image, including the trace-replay and ablation arms. **Never commit.** Mode **0400**, uid **65532** |
 | `relearn-agent/admin_tokens` | relearn-agent-challenge | One operator bearer per line for `POST /v1/admin/promote` |
+| `proof/topics.json` | proof-challenge | Signed topic documents (JSON array). **Never commit secrets**; the documents themselves are operator-published. Mode **0400**, uid **65532** |
+| `proof/holdouts.json` | proof-challenge | Per-topic holdout records (array or map keyed by `topic_id`). **Never commit.** Verified at boot against each topic's `holdout_commitment`. Mode **0400**, uid **65532** |
+| `proof/baselines.json` | proof-challenge | Sealed baseline measurements keyed by topic id. **Never commit.** Mode **0400**, uid **65532** |
+| `proof/admin_tokens` | proof-challenge | One operator bearer per line for `POST /v1/admin/proof/topics` |
 
 Regenerate the Relearn holdout with a **private** salt (never the T2I/dev salt
 and never a salt that is committed to git):

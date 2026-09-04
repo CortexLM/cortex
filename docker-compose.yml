@@ -1,7 +1,7 @@
 # base control-plane stack
 #
-# Default: postgres + validator + updater + socket-proxy + the four live
-# challenges (relearn, relearn-image, relearn-agent, bounty).
+# Default: postgres + validator + updater + socket-proxy + the five live
+# challenges (relearn, relearn-image, relearn-agent, bounty, proof).
 # relearn-mm is OFF: it has no trust-root row, so it is behind the `mm`
 # profile and never comes up on a default or master stack.
 # Master/owner host only:
@@ -446,6 +446,59 @@ services:
     networks:
       - base
 
+  # ---------------------------------------------------------------------------
+  # proof-challenge — Proof (:8100). Miners submit a reproducible experiment
+  # against an operator-published topic_id. The RLM judge lives in a
+  # digest-pinned eval image; empty digest → every submit 503. Topics are
+  # signed documents, not a catalog in git.
+  # ---------------------------------------------------------------------------
+  proof-challenge:
+    image: proof-challenge:0.1.0
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: proof-challenge
+      args:
+        BUILD_FROM: ${BASE_DOCKER_BUILD_FROM:-prebuilt}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BASE_CHALLENGE_BIND: 0.0.0.0:8100
+      BASE_CHALLENGE_SK_FILE: /run/base/challenge_sk
+      # Sim eval unless the operator opts in. Never log LIUM_API_KEY.
+      PROOF_FORCE_SIM: "${PROOF_FORCE_SIM:-false}"
+      PROOF_PIN_FILE: /etc/base/config/proof-pin.toml
+      PROOF_TOPICS_FILE: /run/base/proof/topics.json
+      PROOF_HOLDOUT_FILE: /run/base/proof/holdouts.json
+      PROOF_BASELINE_FILE: /run/base/proof/baselines.json
+      PROOF_ADMIN_TOKENS_FILE: /run/base/proof/admin_tokens
+      BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
+    env_file:
+      - path: ./deploy/env/proof-challenge.env
+        required: true
+    volumes:
+      - ./config:/etc/base/config:ro
+      - ./deploy/secrets/proof_sk:/run/base/challenge_sk:ro
+      - ./deploy/secrets/lium:/run/base/lium:ro
+      - ./deploy/secrets/proof:/run/base/proof:ro
+      - proof-artifacts:/var/lib/proof
+    expose:
+      - "8100"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS -m 5 http://127.0.0.1:8100/health || exit 1",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    networks:
+      - base
+
   socket-proxy:
     image: tecnativa/docker-socket-proxy@sha256:9e4b9e7517a6b660f2cc903a19b257b1852d5b3344794e3ea334ff00ae677ac2
     restart: unless-stopped
@@ -494,6 +547,7 @@ volumes:
   relearn-t2i-artifacts:
   relearn-agent-artifacts:
   relearn-mm-artifacts:
+  proof-artifacts:
 
 networks:
   base:

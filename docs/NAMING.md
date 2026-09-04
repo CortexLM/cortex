@@ -32,6 +32,7 @@ hashed into the trust root. A crate or service name is not.
 | Relearn Image | `relearn-image` | `relearn-t2i-*`, `relearn-t2i-challenge`, `RELEARN_T2I_*` |
 | Relearn Agent | `relearn-agent` | `relearn-agent-*`, `relearn-agent-challenge`, `RELEARN_AGENT_*` |
 | Bounty | `bounty` | `bounty-*`, `bounty-challenge`, `BOUNTY_*` |
+| Proof | `proof` | `proof-*`, `proof-challenge`, `PROOF_*` |
 
 Relearn Image keeps the pre-launch `t2i` spelling in its crates, service, env
 prefix, pin filename, and deployed paths. That is not laziness: its

@@ -14,6 +14,8 @@ pub const RELEARN: &str = "relearn";
 pub const RELEARN_IMAGE: &str = "relearn-image";
 /// Relearn Agent: replayed tool traces.
 pub const RELEARN_AGENT: &str = "relearn-agent";
+/// Proof: operator-published research topics.
+pub const PROOF: &str = "proof";
 
 /// Upstream fetch error.
 #[derive(Debug)]

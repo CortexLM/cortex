@@ -1,0 +1,31 @@
+[package]
+name = "proof-http"
+description = "Proof HTTP surface: topics, submit, status, admin publish"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+hex = "0.4"
+proof-eval = { path = "../proof-eval" }
+proof-score = { path = "../proof-score" }
+proof-store = { path = "../proof-store" }
+proof-task = { path = "../proof-task" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
+
+[dev-dependencies]
+async-trait = "0.1"
+crypto = { path = "../crypto" }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync"] }
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

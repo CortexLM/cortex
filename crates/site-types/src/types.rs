@@ -23,6 +23,8 @@ pub enum ArenaSlug {
     /// Relearn Agent: replayed tool traces.
     #[serde(rename = "relearn-agent")]
     RelearnAgent,
+    /// Proof: operator-published research topics.
+    Proof,
 }
 
 impl ArenaSlug {
@@ -36,6 +38,7 @@ impl ArenaSlug {
             "relearn" => Some(Self::Relearn),
             "relearn-image" => Some(Self::RelearnImage),
             "relearn-agent" => Some(Self::RelearnAgent),
+            "proof" => Some(Self::Proof),
             _ => None,
         }
     }
@@ -50,6 +53,7 @@ impl ArenaSlug {
             Self::Relearn => "relearn",
             Self::RelearnImage => "relearn-image",
             Self::RelearnAgent => "relearn-agent",
+            Self::Proof => "proof",
         }
     }
 }
@@ -66,6 +70,8 @@ pub enum ScoringMethod {
     SpectralFusion,
     /// Relearn paired displacement vs champion.
     Displacement,
+    /// Proof reproduced experiment vs sealed baseline.
+    Reproduced,
 }
 
 /// Reference chip on an arena card.
