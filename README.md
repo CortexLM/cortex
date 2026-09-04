@@ -22,7 +22,7 @@ not run evals.
 
 | Challenge | id | What miners improve | Default emission |
 |-----------|-----|---------------------|------------------|
-| **Bounty** | `bounty` | File real bug reports against the subnet | 2000 bps |
+| **Bounty** | `bounty` | Bug hunters report defects across cortex.foundation and Cortex applications (product surfaces) so continuous production service stays low-defect for clients | 2000 bps |
 | **Proof** | `proof` | Reproducible experiments (claim + code + FLOPs) against operator-published research topics; digest-pinned RLM judge | 8000 bps |
 
 Live emission is **bounty 2000 / proof 8000** (20/80). The sum is 10000.
