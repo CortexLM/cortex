@@ -12,11 +12,10 @@ and it is **not** waiting on a digest retune to 5000/5000.
 **Pin:** [`config/proof-pin.toml`](../../config/proof-pin.toml)  
 **Eval image:** `ghcr.io/cortexlm/proof-eval@sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009`
 
-You submit **claim + code + FLOPs + artifact**. The control plane's RLM
-judge (inside a digest-pinned `proof-eval` image) scores that submission.
-The judge's inference backend is **master-owned operator state**. You do
-not train against it, you do not call it, and you do not bind an offer id
-on submit. It does not bake HuggingFace weights.
+You submit **claim + code + FLOPs + artifact** against a topic. You do
+not bind an offer id. The digest-pinned `proof-eval` image (harvest boots
+it) calls the master's `InferenceOffer` as the RLM **judge** backend.
+No baked Qwen; architecture is not an HF id check.
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 

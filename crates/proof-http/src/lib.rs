@@ -173,6 +173,7 @@ struct SubmitBody {
     declared_flops: u64,
     #[serde(default)]
     topic_id: String,
+    /// Optional miner label. Not compared to an HF id (that check is retired).
     #[serde(default)]
     architecture: String,
     #[serde(default)]

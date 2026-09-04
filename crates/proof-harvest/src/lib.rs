@@ -2,9 +2,10 @@
 //!
 //! The RLM agent and the metric harness live inside the image. This crate
 //! boots that image on a Lium pod, hands it the run request (including the
-//! topic constraints the image must enforce — e.g. a 12.5 Gbit/s cap), reads
-//! back the metrics document, and tears the pod down. Nothing here computes
-//! a score. There is no sim fallback.
+//! live `InferenceOffer` judge backend and the topic constraints the image
+//! must enforce — e.g. a 12.5 Gbit/s cap), reads back the metrics document,
+//! and tears the pod down. Nothing here computes a score. Miners do not bind
+//! or train against the offer. There is no sim fallback.
 
 #![forbid(unsafe_code)]
 #![allow(

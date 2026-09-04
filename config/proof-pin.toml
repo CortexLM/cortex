@@ -26,16 +26,14 @@
 #   max_input_tokens_ceiling      = 32768
 #   max_output_tokens_ceiling     = 8192
 #
-# Inference: the pin carries complete **RLM judge** defaults (provider,
-# URL-or-secret-backed, model id, mode, token caps) plus ceilings a topic may
-# never exceed. A topic's signed `inference{…}` may override / tighten those
-# judge defaults. Empty `model` or empty `base_url` is pre-launch fail-closed
-# (like an empty digest), not a boot reject — fill via pin bump, topic
-# override, `PROOF_INFERENCE_BASE_URL` / `_FILE`, or the live InferenceOffer
-# origin. The live offer (`PROOF_INFERENCE_OFFER_FILE`) is operator state for
-# the eval image's judge backend (open/closed). Miners do not bind it.
-# `proxy_model` / `proxy_models` stay empty — Proof does not bake HuggingFace
-# weights into proof-eval.
+# Inference: pin ceilings / modes / commitment bound the **judge** offer that
+# digest-pinned proof-eval / harvest call. A topic's signed `inference{…}` may
+# override / tighten those judge defaults. Optional topic field
+# `require_judge_offer_commitment` is not a miner bind. Empty `model` or empty
+# `base_url` is pre-launch fail-closed (like an empty digest), not a boot
+# reject. The live offer (`PROOF_INFERENCE_OFFER_FILE`) is operator state
+# (open/closed). Miners do not bind it. No baked Qwen; `proxy_model` /
+# `proxy_models` stay empty. Missing/closed/judge down → 503.
 #
 # Holdout size / stratum size are the measurement harness (5 scored splits × 24),
 # not the problem list.

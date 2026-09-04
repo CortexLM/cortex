@@ -23,23 +23,27 @@ baseline + an open topic are on the host.
   without InfiniBand” are *example solutions or example topics*, never a
   frozen catalog in git.
 - A topic may tighten a floor, never loosen it. Floors live in the pin.
-- The RLM **judge** is a master-owned inference backend, not an HF bake and
-  not a miner training proxy. Miners submit **claim + code + FLOPs + artifact**
-  against a topic. The digest-pinned eval image calls the live
-  `InferenceOffer` (`PROOF_INFERENCE_OFFER_FILE`) to reproduce / cheat-check /
-  score. The pin carries complete `[inference]` **judge** defaults (`provider`,
-  `base_url` empty = secret-backed, `model`, `mode`, `max_input_tokens`,
-  `max_output_tokens`) plus schema v1, `allowed_modes`, token ceilings, and
-  `inference_offer_commitment_alg = sha256`. A topic's signed `inference{…}`
-  may **override** provider/model/mode/URL and may **only tighten** token caps
-  vs those pin defaults. Optional `require_judge_offer_commitment` (64-hex)
-  pins the live judge offer's `config_commitment` — mismatch → **503**. It is
-  not a miner submit field. Missing or misconfigured judge resolve → publish
-  **400** (open topic) / score **503**. Empty pin `model` / `base_url` is
-  pre-launch fail-closed (like an empty digest). Fill via pin bump, topic
-  publish, `PROOF_INFERENCE_BASE_URL` / `_FILE`, or the live offer origin.
-  Missing/closed offer → `can_score=false` → **503**. Auth is
-  `PROOF_INFERENCE_API_KEY_FILE` — never git. `proxy_model` stays empty.
+- The RLM **judge** lives in a digest-pinned `proof-eval` image. Harvest
+  boots that image and both call the live master `InferenceOffer` as the
+  **judge backend** (not a miner training proxy, not an HF bake). Miners
+  do **not** bind submit to an `offer_id` as a train target; they still
+  post **claim + code + FLOPs + artifact** against a topic. No baked Qwen;
+  architecture ≠ HF id stays retired. Pin ceilings / modes / commitment
+  bound the **judge** offer; missing / closed / judge down → **503**. Topic
+  optional field: `require_judge_offer_commitment` (not a miner-facing
+  bind). The pin also carries complete `[inference]` judge defaults
+  (`provider`, `base_url` empty = secret-backed, `model`, `mode`,
+  `max_input_tokens`, `max_output_tokens`) plus schema v1, `allowed_modes`,
+  token ceilings, and `inference_offer_commitment_alg = sha256`. A topic's
+  signed `inference{…}` may **override** provider/model/mode/URL and may
+  **only tighten** token caps vs those pin defaults.
+  `require_judge_offer_commitment` (64-hex) pins the live judge offer's
+  `config_commitment` — mismatch → **503**. Missing or misconfigured judge
+  resolve → publish **400** (open topic) / score **503**. Empty pin `model`
+  / `base_url` is pre-launch fail-closed (like an empty digest). Fill via
+  pin bump, topic publish, `PROOF_INFERENCE_BASE_URL` / `_FILE`, or the live
+  offer origin. Auth is `PROOF_INFERENCE_API_KEY_FILE` — never git.
+  `proxy_model` stays empty.
 - A baseline must be sealed (`script_sha256` + `metrics_commitment`) to
   open. Nobody is paid for beating a number nobody measured.
 - 8000 bps is split equally across currently `open` topics. Each topic then

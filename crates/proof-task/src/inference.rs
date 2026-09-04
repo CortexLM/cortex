@@ -1,10 +1,9 @@
 //! Master-owned RLM **judge** backend: pin defaults in git, topic tighten,
 //! live InferenceOffer off git.
 //!
-//! The digest-pinned eval image calls this provider to reproduce / cheat-check
-//! / score a miner submission. Miners submit claim + code + FLOPs + artifact
-//! against a topic; they do **not** train on or bind this offer. Secrets never
-//! enter the pin, the topic, or `/v1/status`. No HuggingFace weight bake.
+//! The digest-pinned eval image (and harvest, which boots it) call this
+//! provider as the RLM **judge** backend. Miners submit claim + code + FLOPs +
+//! artifact against a topic; they do **not** bind this offer. No baked Qwen.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -172,6 +171,8 @@ impl PinInference {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct TopicInference {
+    /// Optional 64-hex pin of the live judge offer `config_commitment`.
+    /// Not a miner-facing bind.
     pub require_judge_offer_commitment: Option<String>,
     pub provider: Option<InferenceProviderKind>,
     pub base_url: Option<String>,

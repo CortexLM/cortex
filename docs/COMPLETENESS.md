@@ -74,8 +74,13 @@ specs (`DESIGN_CHALLENGE.md`, `PRISM.md`) remain for `xtask` gates. Leftover
 | Binary (`bins/proof-challenge`) | **done** | HTTP API on `:8100`. |
 | Miner CLI (`bins/ctx`) | **done** | `ctx proof submit|show|status|topics`. Unpinned digest / unwired harvest / no open topic → 503. |
 | Compose / images | **done** | Default compose + `images.yml` target `proof-challenge`. |
+<<<<<<< HEAD
 | Eval pin | **done** | `config/proof-pin.toml` — `eval_image` `ghcr.io/cortexlm/proof-eval`, digest `sha256:78b614a1…` (publish-proof-eval-image run 33892650063, commit `51f937c7`). No HF bake; `proxy_model` stays empty. Live submits still **503** until harvest is wired, a baseline is sealed, and ≥1 topic is open. Do not re-pin a guessed sha256. |
 | Inference offer | **v0** | RLM **judge** backend. Pin `[inference]` defaults (provider, secret-backed URL, model, mode, token caps) plus schema v1 / ceilings. Topic admin publish may override / tighten judge ceilings. Live `InferenceOffer` is operator state (`PROOF_INFERENCE_OFFER_FILE`) consumed by proof-eval — not a miner training proxy. Missing/closed/incomplete → `can_score=false` / 503. No HF bake. |
+=======
+| Eval pin | **v0** | `config/proof-pin.toml` — `eval_image` `ghcr.io/cortexlm/proof-eval`, `eval_image_digest` empty until first green proof-eval CI. Empty digest → live submits **503**. Do not invent a sha256. No HF weight bake; `proxy_model` stays empty. |
+| Inference offer | **v0** | Digest-pinned RLM **judge** backend (`proof-eval` / harvest call it). Pin `[inference]` defaults plus schema v1 / ceilings / modes / commitment. Topic `require_judge_offer_commitment` is optional and not a miner bind. Live `InferenceOffer` is operator state. Missing/closed/judge down → `can_score=false` / 503. No baked Qwen; architecture ≠ HF stays retired. |
+>>>>>>> b27590ea (docs(proof): lock InferenceOffer as RLM judge backend)
 | Topics | **done** | sr25519 under the `proof` trust-root key (`base-proof-topic-v1`). Admin `POST /v1/admin/proof/topics`. A topic must be sealed to `open`. |
 | Holdout | **done** | Per-topic operator file (`PROOF_HOLDOUT_FILE`). Commitment in the topic document, never in the pin. `xtask proof-holdout --topic-id`. |
 | Live harvest | **done** | `crates/proof-harvest` over `harvest-pod`; `PROOF_FORCE_SIM` is local-only. |
