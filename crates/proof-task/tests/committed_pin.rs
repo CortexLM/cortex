@@ -51,7 +51,7 @@ fn proof_row_pubkey() -> String {
 }
 
 #[test]
-fn committed_pin_is_proof_with_empty_eval_digest() {
+fn committed_pin_is_proof_with_a_real_eval_digest() {
     let p = pin();
     assert_eq!(p.challenge_id, CHALLENGE_ID);
     assert_eq!(p.eval_image, EVAL_IMAGE);
@@ -59,11 +59,19 @@ fn committed_pin_is_proof_with_empty_eval_digest() {
         !p.eval_image.contains(':'),
         "the tag belongs in eval_image_digest, not eval_image"
     );
+    let digest = p.eval_image_digest.trim();
     assert!(
-        p.eval_image_digest.trim().is_empty(),
-        "do not invent a sha256; empty digest is the pre-launch 503"
+        digest.starts_with("sha256:") && digest.len() == 71,
+        "committed digest must be a real sha256 pin, not invented or empty: {digest:?}"
     );
-    assert!(!p.can_rent(), "empty digest cannot rent");
+    let hex = digest.trim_start_matches("sha256:");
+    assert!(
+        hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()),
+        "{digest}"
+    );
+    assert!(p.can_rent(), "pinned digest must be rentable");
+    assert_eq!(p.proxy_model, "Qwen/Qwen3.8-0.6B");
+    assert!(p.bakes_proxy("Qwen/Qwen3.8-0.6B"));
     assert_eq!(p.holdout_size, HOLDOUT_SIZE);
     assert_eq!(p.stratum_size, STRATUM_SIZE);
 }

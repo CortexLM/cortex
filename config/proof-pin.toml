@@ -5,6 +5,12 @@
 #
 # Deploy = bump eval_image_digest after proof-eval CI is green. Empty digest
 # is the pre-launch state: live submits answer 503. Do not invent a sha256.
+# proxy_model must be an id the image actually bakes (see proxy_models).
+#
+# Scoring image published by .github/workflows/publish-proof-eval-image.yml
+# run 33892650063 (commit 51f937c7818f0eb1e3ed1412972de98b6994952b).
+# Pulled that digest after push; harvest-PATH + selftest + baked proxy
+# Qwen/Qwen3.8-0.6B + 12.5 Gbit/s fabric enforcement proved on those bytes.
 #
 # Topic documents are signed by the `proof` row key in config/challenges.toml
 # (sr25519, domain `base-proof-topic-v1`). `topic_pubkey` must match that row.
@@ -24,14 +30,13 @@
 challenge_id = "proof"
 scoring_version = 1
 base_model_family = "Qwen/Qwen3.8"
-# Empty until the eval image exists. A topic naming a proxy the image does
-# not bake is a publish 400.
-proxy_model = ""
-proxy_models = []
+# Baked into ghcr.io/cortexlm/proof-eval@sha256:78b614a1… (see baked_proxies.json).
+proxy_model = "Qwen/Qwen3.8-0.6B"
+proxy_models = ["Qwen/Qwen3.8-0.6B"]
 eval_image = "ghcr.io/cortexlm/proof-eval"
-eval_image_digest = ""
-proof_git = "https://github.com/CortexLM/relearn"
-proof_git_sha = ""
+eval_image_digest = "sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009"
+proof_git = "https://github.com/CortexLM/cortex"
+proof_git_sha = "51f937c7818f0eb1e3ed1412972de98b6994952b"
 topic_pubkey = "3e7f70f09165e265ab89ab04a4fc91dc0531d54a100c538fb14c6f008421c375"
 flops_budget_max = 2000000000000000000
 epsilon_nll_min = 0.02

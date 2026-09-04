@@ -1,0 +1,90 @@
+# syntax=docker/dockerfile:1.7
+#
+# Scoring image. This is the digest the control plane pins.
+#
+# CUDA Ubuntu base — the live pod is a GPU machine. `/usr/bin/proof-eval` is
+# a regular file (COPY), not a symlink. The image bakes proxy id
+# Qwen/Qwen3.8-0.6B (see /opt/proof-eval/baked_proxies.json) and enforces
+# the 12.5 Gbit/s / no-IB / no-NVLink / no-NCCL-fast-fabric cap.
+#
+#   docker build -f eval/Dockerfile.scoring -t proof-eval:scoring .
+#
+# No secret, holdout item, teacher endpoint, or Modal reference is baked in.
+# Weights are primed on the pod (`PROOF_PROXY_MODEL_DIR` /
+# `PROOF_ALLOW_MODEL_DOWNLOAD=1`); the pin declares which proxy ids the
+# image will load.
+
+ARG BASE_IMAGE=nvidia/cuda:12.8.1-runtime-ubuntu24.04@sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867
+FROM ${BASE_IMAGE}
+
+ARG WITH_RUNTIME=1
+ARG TORCH_INDEX_URL=""
+ARG PROOF_GIT_SHA="unknown"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    TRANSFORMERS_VERBOSITY=error \
+    TOKENIZERS_PARALLELISM=false \
+    PROOF_GIT_SHA=${PROOF_GIT_SHA} \
+    PROOF_SELFTEST_REQUIRE_RUNTIME=1
+
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates curl openssh-server iproute2 \
+        python3 python3-pip python3-venv; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tini \
+        || curl -fsSL -o /usr/bin/tini \
+            https://github.com/krallin/tini/releases/download/v0.19.0/tini-amd64; \
+    if [ ! -x /usr/bin/tini ]; then \
+        install -m 0755 "$(command -v tini)" /usr/bin/tini; \
+    fi; \
+    chmod 0755 /usr/bin/tini; \
+    rm -rf /var/lib/apt/lists/*; \
+    mkdir -p /run/sshd /root/.ssh /opt/proof-eval/baselines; \
+    chmod 700 /root/.ssh; \
+    test -x /usr/bin/python3; \
+    test -x /usr/bin/tini
+
+WORKDIR /opt/proof-eval
+COPY eval/pyproject.toml ./
+COPY eval/src ./src
+COPY eval/baselines ./baselines
+COPY eval/install-cli.sh /tmp/install-cli.sh
+COPY eval/bin/proof-eval /tmp/proof-eval-launcher
+COPY eval/src/proof_eval/baked_proxies.json /opt/proof-eval/baked_proxies.json
+COPY eval/baselines/adamw.py /opt/proof-eval/baselines/adamw.py
+
+RUN set -eux; \
+    python3 -m venv /opt/proof-eval-venv; \
+    pip_cmd="/opt/proof-eval-venv/bin/pip"; \
+    "${pip_cmd}" install --upgrade pip; \
+    if [ -n "${TORCH_INDEX_URL}" ]; then \
+        "${pip_cmd}" install --extra-index-url "${TORCH_INDEX_URL}" ".[runtime]"; \
+    elif [ "${WITH_RUNTIME}" = "1" ]; then \
+        "${pip_cmd}" install ".[runtime]"; \
+    else \
+        "${pip_cmd}" install "."; \
+    fi; \
+    /opt/proof-eval-venv/bin/python -c 'import torch; import transformers'; \
+    sh /tmp/install-cli.sh; \
+    rm -f /tmp/install-cli.sh /tmp/proof-eval-launcher
+
+COPY eval/bin/proof-eval /usr/bin/proof-eval
+COPY eval/entrypoint.sh /usr/bin/proof-eval-entrypoint
+RUN set -eux; \
+    chmod 0755 /usr/bin/proof-eval /usr/bin/proof-eval-entrypoint; \
+    test -f /usr/bin/proof-eval; \
+    test ! -L /usr/bin/proof-eval; \
+    test -x /usr/bin/proof-eval; \
+    env -i PATH=/usr/bin:/bin /usr/bin/proof-eval --help >/dev/null; \
+    env -i PATH=/usr/bin:/bin /usr/bin/proof-eval score --help >/dev/null; \
+    env -i PATH=/usr/bin:/bin HOME=/root PROOF_SELFTEST_REQUIRE_RUNTIME=1 \
+        /usr/bin/proof-eval selftest
+
+WORKDIR /tmp/proof_eval
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/bin/proof-eval-entrypoint"]
+CMD ["serve"]

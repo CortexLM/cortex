@@ -127,13 +127,13 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Challenge id | **done** | `proof` on the wire. Topics are operator-published signed documents; git carries no catalog. |
 | Crates (`crates/proof-*`) | **done** | task (signed topics, holdout commitments, global pin, `payout_mode` / English `validation`), score (per-topic pass + WTA/discovery sum), store, eval (RLM judge, fail-closed readiness), harvest, http, challenge. |
 | Binary (`bins/proof-challenge`) | **done** | HTTP API on `:8100`. |
-| Miner CLI (`bins/ctx`) | **done** | `ctx proof submit|show|status|topics`. Empty `eval_image_digest` → 503. |
+| Miner CLI (`bins/ctx`) | **done** | `ctx proof submit|show|status|topics`. Unpinned digest / unwired harvest / no open topic → 503. |
 | Compose / images | **done** | Default compose + `images.yml` target `proof-challenge`. |
-| Eval pin | **v0** | `config/proof-pin.toml` — `eval_image` `ghcr.io/cortexlm/proof-eval`, `eval_image_digest` empty until first green proof-eval CI. Empty digest → live submits **503**. Do not invent a sha256. |
+| Eval pin | **done** | `config/proof-pin.toml` — `eval_image` `ghcr.io/cortexlm/proof-eval`, digest `sha256:78b614a1…` (publish-proof-eval-image run 33892650063, commit `51f937c7`). Baked proxy `Qwen/Qwen3.8-0.6B`. Empty digest is gone; live submits still **503** until harvest is wired, a baseline is sealed, and ≥1 topic is open. Do not re-pin a guessed sha256. |
 | Topics | **done** | sr25519 under the `proof` trust-root key (`base-proof-topic-v1`). Admin `POST /v1/admin/proof/topics`. A topic must be sealed to `open`. |
 | Holdout | **done** | Per-topic operator file (`PROOF_HOLDOUT_FILE`). Commitment in the topic document, never in the pin. `xtask proof-holdout --topic-id`. |
 | Live harvest | **done** | `crates/proof-harvest` over `harvest-pod`; `PROOF_FORCE_SIM` is local-only. |
-| Emission | **8000 bps** | Proof-weighted 20%/80% regardless of digest. Empty `eval_image_digest` → 503. Split equally across currently `open` topics, then `wta` or `discovery`. Empty open set → `NoScore(ChallengeInternal)`. |
+| Emission | **8000 bps** | Proof-weighted 20%/80% regardless of digest. Unwired harvest / unsealed baseline / empty open set → 503 / `NoScore(ChallengeInternal)`. Split equally across currently `open` topics, then `wta` or `discovery`. Empty digest still 503s (never invent a sha256). |
 | Spec | live | [`PROOF.md`](PROOF.md). |
 
 ## Infrastructure
