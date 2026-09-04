@@ -145,7 +145,7 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 | Terraform droplets | done | 4 of 4: staging master, staging validator, prod master, prod validator. |
 | Staging master | done | Migrated to `/opt/base` CI-managed; old `/opt/gbase` stack torn down. |
 | Staging validator | done | Redeployed from same commit; `bundle gateway signature invalid` resolved. |
-| Prod master | pending | Droplet up, awaiting the mainnet owner wallet and the first `v*.*.*` tag. |
+| Prod master | done | Droplet up. Mainnet owner wallet on disk matches SubnetOwnerHotkey; `env-prod.yml` sets `BASE_GATEWAY_REQUIRE_OWNER=1` (`gateway_admin_token` required). Recreate the gateway on droplets after that compose change. First `v*.*.*` tag still outstanding (pin placeholders in Known gaps). |
 | `deploy-staging.yml` | done | Auto on CI green; `--build-from source` for fast iteration; fail-closed health gate. |
 | `deploy-prod.yml` | done | Tag-based (`v*.*.*`); preflight (CI green + `origin/main` staging pins `commit_sha`); fail-closed Spaces backup; `promote.sh --confirm-prod`; `--build-from registry` (GHCR digest pull, no Rust compile on droplet). |
 | `images.yml` pin ladder | done | After GHCR push: write `deploy/digests/<sha>.json`, `promote.sh --env staging` for pin services, commit/push so prod preflight can match. |
