@@ -253,9 +253,12 @@ pub fn is_admin_path(rest: &str) -> bool {
 }
 
 /// Report bodies are operator-local. POST submit stays on the miner path.
+///
+/// HEAD is a read: Axum would otherwise map it onto the GET handler and leak
+/// status/headers (and whether a row exists) through the public gateway.
 #[must_use]
 pub fn is_blocked_report_read(method: &Method, rest: &str) -> bool {
-    if *method != Method::GET {
+    if *method == Method::POST {
         return false;
     }
     let rest_norm = normalize_proxy_path(rest);
@@ -331,10 +334,14 @@ mod tests {
     #[test]
     fn report_reads_are_blocked_from_gateway_but_submit_is_not() {
         assert!(is_blocked_report_read(&Method::GET, "v1/reports"));
+        assert!(is_blocked_report_read(&Method::HEAD, "v1/reports"));
+        assert!(is_blocked_report_read(&Method::HEAD, "v1/reports/by_1"));
         assert!(is_blocked_report_read(&Method::GET, "v1/reports/by_1"));
         assert!(is_blocked_report_read(&Method::GET, "v1/./reports/by_1"));
+        assert!(is_blocked_report_read(&Method::OPTIONS, "v1/reports"));
         assert!(!is_blocked_report_read(&Method::POST, "v1/reports"));
         assert!(!is_blocked_report_read(&Method::GET, "v1/status"));
+        assert!(!is_blocked_report_read(&Method::HEAD, "v1/status"));
         assert!(!is_blocked_report_read(&Method::GET, "v1/pair"));
     }
 

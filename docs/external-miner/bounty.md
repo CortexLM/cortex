@@ -109,7 +109,7 @@ curl -sS -X POST https://network.cortex.foundation/challenge/bounty/v1/reports \
 The POST reply already carries `id`, `state`, `miner_hotkey`, and
 `fingerprint`. Report bodies (repro, account, hotkey) stay on the operator
 host: `GET /v1/reports` requires the same operator bearer as adjudicate, and
-the public gateway returns 403 on those reads (POST submit stays open).
+the public gateway returns 403 on GET/HEAD of those paths (POST submit stays open).
 `ctx bounty show` does not fetch them.
 
 **Public consumers** (leaderboard and published reports) hit
