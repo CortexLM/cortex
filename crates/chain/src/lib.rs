@@ -70,7 +70,8 @@ pub struct Metagraph {
     /// Owner hotkey for the subnet (may equal first neuron or a dedicated owner).
     pub owner_hotkey: Vec<u8>,
     /// `SubtensorModule.ValidatorPermit` flags, UID-aligned with [`Self::hotkeys`].
-    /// Empty when the backend did not resolve permits (treated as all `false`).
+    /// Live backends fail closed on a missing or undecodable map rather than
+    /// substituting empty/`false` (which would allow a pure vector through).
     pub validator_permit: Vec<bool>,
 }
 

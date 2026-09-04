@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::{
     commit_timelocked_call, decode_axon_info, decode_bool, decode_double_map_account_k2,
-    decode_double_map_k2, decode_hotkey, decode_metagraph, decode_u16, decode_u64,
+    decode_double_map_k2, decode_hotkey, decode_metagraph, decode_u16, decode_u64, decode_vec_bool,
     decode_vec_vec_u8, serve_axon_call, set_weights_call, storage_double_map_key_u16_account,
     storage_double_map_key_u16_u16, storage_double_map_prefix_u16, storage_key,
     storage_map_key_twox64, storage_map_key_u16, ChainClient, ChainError, Era, LiveChainClient,
@@ -104,6 +104,18 @@ fn decode_u16_known_vector() {
 fn decode_bool_true_false() {
     assert!(decode_bool(&[0x01]).unwrap());
     assert!(!decode_bool(&[0x00]).unwrap());
+}
+
+#[test]
+fn decode_vec_bool_known_vector() {
+    let flags = vec![true, false, true];
+    assert_eq!(decode_vec_bool(&flags.encode()).unwrap(), flags);
+}
+
+#[test]
+fn decode_vec_bool_rejects_truncated() {
+    // Compact(2) with no bool bytes — decode must fail, not become empty.
+    assert!(decode_vec_bool(&[0x08]).is_err());
 }
 
 #[test]
@@ -651,6 +663,20 @@ async fn mock_metagraph_at() {
         .mount(&server)
         .await;
 
+    let permit_key_hex = validator_permit_key_hex(1);
+    let permit_hex = format!("0x{}", hex::encode(vec![false, true].encode()));
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({
+            "method": "state_getStorage",
+            "params": [permit_key_hex]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": permit_hex
+        })))
+        .mount(&server)
+        .await;
+
     let uri = server.uri();
     let mg = tokio::task::spawn_blocking(move || {
         let client = LiveChainClient::connect(&uri)?;
@@ -667,10 +693,46 @@ async fn mock_metagraph_at() {
     // Owner mock returns Keys-shaped changes; unmatched Owner keys stay zero.
     assert_eq!(mg.coldkeys.len(), 2);
     assert_eq!(mg.owner_hotkey, vec![0xCC; 32]);
+    assert_eq!(mg.validator_permit, vec![false, true]);
 }
 
-/// Mount the bulk `Keys` + `SubnetOwnerHotkey` responses used by `metagraph_at`.
+/// Mount the bulk `Keys` + `SubnetOwnerHotkey` + `ValidatorPermit` responses used by `metagraph_at`.
 async fn mount_metagraph_mocks(server: &MockServer, keys_paged_times: u64) {
+    mount_metagraph_keys_and_owner(server, keys_paged_times).await;
+    mount_validator_permit_ok(server, &[false, true], keys_paged_times).await;
+}
+
+fn validator_permit_key_hex(netuid: u16) -> String {
+    format!(
+        "0x{}",
+        hex::encode(storage_map_key_u16(
+            "SubtensorModule",
+            "ValidatorPermit",
+            netuid
+        ))
+    )
+}
+
+async fn mount_validator_permit_ok(server: &MockServer, flags: &[bool], times: u64) {
+    let key_hex = validator_permit_key_hex(1);
+    let value_hex = format!("0x{}", hex::encode(flags.to_vec().encode()));
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({
+            "method": "state_getStorage",
+            "params": [key_hex]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": value_hex
+        })))
+        .expect(times)
+        .mount(server)
+        .await;
+}
+
+/// Keys + owner only — used by permit fail-closed tests that supply their own
+/// `ValidatorPermit` mock (or omit it to prove a missing map cannot succeed).
+async fn mount_metagraph_keys_and_owner(server: &MockServer, keys_paged_times: u64) {
     let uid0_key = storage_double_map_key_u16_u16("SubtensorModule", "Keys", 1, 0);
     let uid1_key = storage_double_map_key_u16_u16("SubtensorModule", "Keys", 1, 1);
     let uid0_hex = format!("0x{}", hex::encode(&uid0_key));
@@ -686,7 +748,6 @@ async fn mount_metagraph_mocks(server: &MockServer, keys_paged_times: u64) {
         .mount(server)
         .await;
 
-    // Two batched reads per refresh: Keys values, then Owner(hotkey) coldkeys.
     Mock::given(method("POST"))
         .and(body_partial_json(json!({"method": "state_queryStorageAt"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -782,6 +843,110 @@ async fn metagraph_cache_singleflight_under_concurrency() {
     })
     .await
     .expect("spawn_blocking");
+}
+
+async fn metagraph_at_err(uri: String) -> ChainError {
+    tokio::task::spawn_blocking(move || {
+        let client = LiveChainClient::connect(&uri).expect("connect");
+        client
+            .metagraph_at(&[0_u8; 32])
+            .expect_err("must fail closed")
+    })
+    .await
+    .expect("spawn_blocking")
+}
+
+#[tokio::test]
+async fn metagraph_fails_closed_when_validator_permit_missing() {
+    let server = MockServer::start().await;
+    mount_metagraph_keys_and_owner(&server, 1).await;
+    let key_hex = validator_permit_key_hex(1);
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({
+            "method": "state_getStorage",
+            "params": [key_hex]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": null
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let err = metagraph_at_err(server.uri()).await;
+    let msg = err.to_string();
+    assert!(
+        msg.contains("ValidatorPermit") && msg.contains("fail-closed"),
+        "missing permit must fail closed, got {msg}"
+    );
+}
+
+#[tokio::test]
+async fn metagraph_fails_closed_when_validator_permit_rpc_errors() {
+    let server = MockServer::start().await;
+    mount_metagraph_keys_and_owner(&server, 1).await;
+    let key_hex = validator_permit_key_hex(1);
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({
+            "method": "state_getStorage",
+            "params": [key_hex]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "error": {"code": -32000, "message": "storage unavailable"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let err = metagraph_at_err(server.uri()).await;
+    let msg = err.to_string();
+    assert!(
+        msg.contains("state_getStorage") || msg.contains("storage unavailable"),
+        "rpc error must fail closed, got {msg}"
+    );
+}
+
+#[tokio::test]
+async fn metagraph_fails_closed_when_validator_permit_undecodable() {
+    let server = MockServer::start().await;
+    mount_metagraph_keys_and_owner(&server, 1).await;
+    let key_hex = validator_permit_key_hex(1);
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({
+            "method": "state_getStorage",
+            "params": [key_hex]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": "0x08"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let err = metagraph_at_err(server.uri()).await;
+    let msg = err.to_string();
+    assert!(
+        msg.contains("decode Vec<bool>"),
+        "decode error must fail closed, got {msg}"
+    );
+}
+
+#[tokio::test]
+async fn metagraph_fails_closed_when_validator_permit_empty_for_hotkeys() {
+    let server = MockServer::start().await;
+    mount_metagraph_keys_and_owner(&server, 1).await;
+    // Compact(0) — a successful decode of "no permits" that must not submit.
+    mount_validator_permit_ok(&server, &[], 1).await;
+
+    let err = metagraph_at_err(server.uri()).await;
+    let msg = err.to_string();
+    assert!(
+        msg.contains("fail-closed") && msg.contains("hotkeys"),
+        "empty permit map must fail closed, got {msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------
