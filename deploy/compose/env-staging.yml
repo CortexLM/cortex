@@ -1,9 +1,5 @@
 # Staging environment — Bittensor testnet (Finney), netuid 541.
 #
-# Netuid 541 is owned on testnet by the `base-owner` hotkey
-# (5CfjVGG7DaagMUuABNnqQJygLV2xtn3AQ7LnPeFoc5gVK9xo), so the gateway's
-# subnet-owner check passes here for real.
-#
 # Cleartext/IP e2e (no TLS).
 services:
   validator:
@@ -34,8 +30,11 @@ services:
       BASE_DOMAIN: staging.api.joinbase.ai
       BT_WALLETS_PATH: /run/base/wallets
       BASE_GATEWAY_WALLET: base-owner
-      # We do own netuid 541 on testnet, so the owner check can be strict here.
-      BASE_GATEWAY_REQUIRE_OWNER: "1"
+      # Staging netuid 541 SubnetOwnerHotkey does not match the mainnet owner
+      # wallet (5ExuWpCM…); keep REQUIRE_OWNER=0 until a dedicated netuid-541
+      # owner wallet is installed under deploy/secrets/wallets. Do not install
+      # mainnet owner as a fake 541 owner.
+      BASE_GATEWAY_REQUIRE_OWNER: "0"
       # Required with REQUIRE_OWNER=1 — gates /v1/admin/*.
       BASE_GATEWAY_ADMIN_TOKEN_FILE: /run/secrets/gateway_admin_token
     # Serve the public hostname without forcing clients onto :8080.

@@ -40,7 +40,7 @@ Honest per-component status as of `main` HEAD. Updated as phases land.
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Master check (`SubnetOwnerHotkey`) | done | Read from the live chain. Advisory by default; `BASE_GATEWAY_REQUIRE_OWNER=1` makes it fail-closed (set in staging). |
+| Master check (`SubnetOwnerHotkey`) | done | Read from the live chain. Advisory by default; `BASE_GATEWAY_REQUIRE_OWNER=1` makes it fail-closed. Staging stays at `0` until a dedicated netuid-541 owner wallet is installed (do not install the mainnet owner as a fake 541 owner). |
 | Registry + proxy | done | |
 | Bundle seal (`POST /v1/weights/raw` → `GET /v1/weights/latest`) | done | Unsealed: fail-closed burn (`sealed: false`, uid 0 = 100%) instead of 404. |
 | Chain backend | done | Live only. `fake_owner` was removed from `bins/gateway`. |

@@ -160,7 +160,7 @@ rm -f deploy/env/local-tunnel.env
 - `assert-compose-matrix.sh` still validates staging/prod role×env; local overlay must not introduce `fake_owner` / `BASE_CHAIN_BACKEND`.
 - `docker-compose.e2e.yml` (`fake_owner`) is legacy cleartext harness — not the testnet path.
 - Agent-v1 / Phala CVM miner overlays are removed; miners submit over HTTP (see [`../external-miner/`](../external-miner/)).
-- `env-staging` sets `BASE_GATEWAY_REQUIRE_OWNER=1`; `env-local` overrides via `LOCAL_REQUIRE_OWNER` (smoke defaults to `0`).
+- `env-staging` sets `BASE_GATEWAY_REQUIRE_OWNER=0` (541 SubnetOwnerHotkey ≠ mainnet owner wallet; dedicated 541 wallet not installed). `env-local` overrides via `LOCAL_REQUIRE_OWNER` (smoke defaults to `0`; `--live` sets `1`).
 - Host probe ports default to `2808x` (not role-master `1808x`) to avoid staging SSH tunnels.
 - `BASE_DOCKER_BUILD_FROM=prebuilt` copies host `target/release/*` into a Debian bookworm image. Binaries built on a newer glibc host (e.g. needing `GLIBC_2.39`) will crash in-container — use `BASE_DOCKER_BUILD_FROM=source` or rebuild on bookworm. `local-e2e.sh` may treat prism/design health as soft-fail so gateway+validator smoke can still complete while deploy-wiring finishes.
 - Rebuild gateway/validator from **current** `main` before `--live`: stale `target/release/gateway` may still contain the removed `fake_owner` path and will not exercise real testnet owner checks.
