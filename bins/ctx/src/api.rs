@@ -67,7 +67,8 @@ impl Client {
     /// Build a client for one gateway base URL.
     ///
     /// A Lium API key is attached only on `https://`. `http://` plus a key is
-    /// refused so the header never goes out in cleartext.
+    /// refused so the header never goes out in cleartext. Redirects are never
+    /// followed, so a 302 to `http://` cannot resend `X-Lium-Api-Key`.
     pub fn new(gateway: &str, lium_key: Option<String>) -> Result<Self, String> {
         let base = gateway.trim().trim_end_matches('/').to_owned();
         if !(is_https_url(&base) || is_http_url(&base)) {
@@ -79,9 +80,12 @@ impl Client {
         if lium_key.is_some() && !is_https_url(&base) {
             return Err(KEYED_HTTP_REFUSAL.to_owned());
         }
+        // Default reqwest policy resends headers (including X-Lium-Api-Key) to
+        // any Location, including http://. Never auto-follow.
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(TIMEOUT_SECS))
             .user_agent(concat!("ctx/", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("http client: {e}"))?;
         Ok(Self {
@@ -233,5 +237,38 @@ mod tests {
         };
         assert!(!r.ok());
         assert_eq!(r.message(), "scoring unconfigured");
+    }
+
+    /// A 302 to a second origin must not be followed. Auto-follow would resend
+    /// `X-Lium-Api-Key` to whatever `Location` the gateway returns, including
+    /// `http://`. Keyed clients require `https://` (not locally mockable here);
+    /// the no-redirect policy is the same builder used for keyed calls.
+    #[tokio::test]
+    async fn does_not_follow_redirect_to_http_target() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let target = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("leaked"))
+            .expect(0)
+            .mount(&target)
+            .await;
+
+        let source = MockServer::start().await;
+        let location = format!("{}/leaked", target.uri());
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", location))
+            .mount(&source)
+            .await;
+
+        let c = Client::new(&source.uri(), None).expect("http without key");
+        let reply = c.get("/v1/weights/latest").await.expect("response");
+        assert_eq!(
+            reply.status, 302,
+            "must surface the 302 instead of following it"
+        );
+        drop(source);
+        drop(target);
     }
 }
