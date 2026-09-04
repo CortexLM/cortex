@@ -18,8 +18,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use harvest_pod::{harvest_template_name, EvalPod, PodProgram};
 use prism_lium_types::InstanceSpec;
-use proof_eval::{EvalError, LiveScorer, ProofEvalDocument, PROOF_METRICS_SCHEMA};
-use proof_task::{HoldoutRecord, InferenceOffer, ProofPin, TopicDocument, CHALLENGE_ID};
+use proof_eval::{
+    secret_backed_base_url, EvalError, LiveScorer, ProofEvalDocument, PROOF_METRICS_SCHEMA,
+};
+use proof_task::{
+    resolve_inference, HoldoutRecord, InferenceOffer, ProofPin, TopicDocument, CHALLENGE_ID,
+};
 use serde::{Deserialize, Serialize};
 
 /// Prefix the eval image prints before its metrics document.
@@ -61,11 +65,11 @@ pub struct HarvestRequest {
     pub topic_id: String,
     /// Metric family wire name.
     pub family: String,
-    /// Live offer id the image must call.
+    /// Live judge offer id the eval image must call.
     pub inference_offer_id: String,
     /// Provider kind wire name.
     pub provider_kind: String,
-    /// Provider origin (operator state; not a public status field).
+    /// Judge origin (operator state; not a public status field).
     pub base_url: String,
     /// Serving mode.
     pub mode: String,
@@ -75,7 +79,7 @@ pub struct HarvestRequest {
     pub max_input_tokens: u32,
     /// Output token cap for this run.
     pub max_output_tokens: u32,
-    /// Offer config commitment.
+    /// Judge config commitment.
     pub config_commitment: String,
     /// Eval image digest, so the image can stamp its own provenance.
     pub eval_image_digest: String,
@@ -173,14 +177,21 @@ impl LiveScorer for LiumProofHarvest {
         }
         self.ready()?;
         offer
-            .serves_topic(topic)
+            .serves_topic(pin, topic)
             .map_err(|e| EvalError::InferenceOffer(e.to_string()))?;
-        let max_in = topic
-            .inference
-            .max_input_tokens
-            .min(offer.config.max_input_tokens);
-        let max_out = topic
-            .inference
+        let resolved = resolve_inference(
+            pin,
+            Some(&topic.inference),
+            secret_backed_base_url().as_deref(),
+            Some(offer),
+        );
+        if !resolved.ready_to_score() {
+            return Err(EvalError::InferenceOffer(
+                proof_task::OfferError::Incomplete.to_string(),
+            ));
+        }
+        let max_in = resolved.max_input_tokens.min(offer.config.max_input_tokens);
+        let max_out = resolved
             .max_output_tokens
             .min(offer.config.max_output_tokens);
         let request = HarvestRequest {
@@ -191,10 +202,10 @@ impl LiveScorer for LiumProofHarvest {
             topic_id: topic.id.clone(),
             family: topic.metric.family.as_str().to_owned(),
             inference_offer_id: offer.offer_id.clone(),
-            provider_kind: offer.provider.kind.as_str().to_owned(),
-            base_url: offer.provider.base_url.clone(),
-            mode: offer.config.mode.as_str().to_owned(),
-            model_ref: offer.config.model_ref.clone(),
+            provider_kind: resolved.provider.as_str().to_owned(),
+            base_url: resolved.base_url.clone(),
+            mode: resolved.mode.as_str().to_owned(),
+            model_ref: resolved.model.clone(),
             max_input_tokens: max_in,
             max_output_tokens: max_out,
             config_commitment: offer.config_commitment.clone(),

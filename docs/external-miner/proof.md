@@ -10,10 +10,13 @@ and it is **not** waiting on a digest retune to 5000/5000.
 **CLI:** `ctx proof topics`, then `ctx proof submit` (install:
 [README](./README.md))  
 **Pin:** [`config/proof-pin.toml`](../../config/proof-pin.toml)  
-**Eval image:** `ghcr.io/cortexlm/proof-eval@sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009`  
-**RLM judge (eval-image InferenceOffer):** `Qwen/Qwen3.8-0.6B` — this is the
-judge agent baked into the eval image that evaluates miner submissions. It is
-**not** a model miners train against.
+**Eval image:** `ghcr.io/cortexlm/proof-eval@sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009`
+
+You submit **claim + code + FLOPs + artifact**. The control plane's RLM
+judge (inside a digest-pinned `proof-eval` image) scores that submission.
+The judge's inference backend is **master-owned operator state**. You do
+not train against it, you do not call it, and you do not bind an offer id
+on submit. It does not bake HuggingFace weights.
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 
@@ -38,9 +41,12 @@ the public split, and the harness fills holdout NLL / throughput. Holdout
 records stay sealed until after your submission digest is frozen. You never
 see them.
 
-`GET /challenge/proof/v1/status` also shows the public `inference_offer`
-(id, kind, mode, model_ref, token caps, commitment, status). It never leaks
-holdout records, teacher hosts, origins, or keys.
+`GET /challenge/proof/v1/status` shows `can_score`, `eval_backend`,
+`force_sim`, `live_harvest_wired`, `baseline_sealed`, public pin `inference`
+judge defaults (provider, model, mode, token caps — never the origin), and
+the public RLM judge `inference_offer` (id, kind, mode, model_ref, token
+caps, commitment, status). It never leaks holdout records, teacher hosts,
+origins, or keys.
 
 Muon, token superposition, and “decentralized training without InfiniBand”
 are *examples* of solutions or of topics — they are not the product.
@@ -61,8 +67,9 @@ curl -sS https://network.cortex.foundation/challenge/proof/v1/status
 
 `GET /challenge/proof/v1/status` shows `can_score`, `eval_backend`,
 `force_sim`, `live_harvest_wired`, `baseline_sealed`, `eval_image_digest`,
-`proxy_model`, and `open_topics`. It never leaks holdout records or teacher
-hosts.
+public pin `inference` (no origin), public RLM judge `inference_offer`, and
+`open_topics`. It never leaks holdout records, teacher hosts, origins, or
+keys.
 
 `can_score: false` means submits **503**. Nothing is stored and nothing is
 rented.
@@ -70,7 +77,7 @@ rented.
 | Status field | What it means |
 |--------------|----------------|
 | `eval_image_digest` | Must be a `sha256:…` pin (live pin is `sha256:78b614a1…`). Empty → **503** |
-| `proxy_model` | Id of the RLM judge agent baked into the eval image (not a miner training proxy). Live pin: `Qwen/Qwen3.8-0.6B`. Submit `architecture` must match |
+| `inference_offer` | Public RLM **judge** backend (id, kind, mode, model_ref, token caps, commitment, status). Missing/closed/misconfigured → **503**. You do not pass an offer id |
 | `open_topics` empty | No currently `open` signed topic with a sealed baseline → **503** |
 | `baseline_sealed: false` | An open topic without `script_sha256` + `metrics_commitment` → **503** |
 | `live_harvest_wired: false` | Live RLM harvest is not connected → **503** |
@@ -150,7 +157,7 @@ code against the public split and checks the claim against those public
 numbers. A claim the code cannot support is `unreproduced_claim` / reject.
 
 ```bash
-ctx proof status          # can_score, proxy_model, eval_image_digest
+ctx proof status          # can_score, inference_offer, eval_image_digest
 ctx proof topics          # pick an open topic_id; read flops_budget + payout_mode
 
 ctx proof submit \
@@ -159,8 +166,6 @@ ctx proof submit \
   --artifact-digest <sha256 of the recipe> \
   --claim "beat sealed baseline holdout NLL by 0.04 at 1.2e18 FLOPs" \
   --declared-flops 1500000000000000000 \
-  --inference-offer-id <open offer id> \
-  --config-commitment <64-hex config_commitment> \
   --train-dataset my-mix-v0
 ```
 
@@ -179,8 +184,6 @@ curl -sS -X POST https://network.cortex.foundation/challenge/proof/v1/submission
     "artifact_digest": "<sha256 of the recipe>",
     "claim": "beat sealed baseline holdout NLL by 0.04 at 1.2e18 FLOPs",
     "declared_flops": 1500000000000000000,
-    "inference_offer_id": "<open offer id>",
-    "config_commitment": "<64-hex config_commitment>",
     "manifest": {
       "train_content_hashes": [],
       "train_dataset_ids": ["my-mix-v0"]
@@ -192,8 +195,8 @@ curl -sS -X POST https://network.cortex.foundation/challenge/proof/v1/submission
 claim against public numbers and checks FLOPs against the topic budget.
 
 Poll `GET /challenge/proof/v1/submissions/{id}`. While `can_score` is
-`false` (empty digest, missing/closed inference offer, no open sealed
-topic), submissions answer **503**.
+`false` (empty digest, missing/closed RLM judge backend, incomplete pin+topic
+judge config, no open sealed topic), submissions answer **503**.
 
 ### Required POST JSON
 
@@ -206,7 +209,6 @@ topic), submissions answer **503**.
 | `artifact_digest` | yes | SHA-256 hex of the recipe bytes |
 | `claim` | yes | Non-empty string: NL of what improved |
 | `declared_flops` | yes | `u64`, must be `≤ topic.flops_budget` |
-| `architecture` | yes | Must equal the baked RLM judge id (`Qwen/Qwen3.8-0.6B`) |
 | `manifest.train_content_hashes` | yes (array) | Shard hashes you trained on (may be `[]` if you declare dataset ids) |
 | `manifest.train_dataset_ids` | yes (array) | Corpus ids you trained on (may be `[]` if you declare hashes) |
 | `artifact_uri` | no | Locator for the same bytes as `artifact_digest` |
@@ -243,8 +245,6 @@ Refusals (**400** / **503**) do **not** persist a submission row.
 | **400** `topic_id is required` | Missing `topic_id` | no | no |
 | **400** `unknown topic` | `topic_id` not published | no | no |
 | **400** `topic is not open` | Draft / closed / outside epoch window | no | no |
-| **400** `architecture is not the topic/pin proxy` | `architecture` ≠ baked proxy | no | no |
-| **400** `proxy not baked` | Pin `proxy_model` empty | no | no |
 | **400** `declared_flops exceeds the topic budget` | `declared_flops > topic.flops_budget` | no | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not 64 hex | no | no |
 | **503** empty `eval_image_digest` | Digest not pinned | no | no |

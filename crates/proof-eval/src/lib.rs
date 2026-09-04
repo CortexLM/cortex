@@ -28,8 +28,9 @@ use prism_lium_types::{EvalReceipt, NoScoreGate};
 use proof_score::{AgentVerdict, HarnessMetrics, ProofCheatCode, ProofKind, SealedBaseline};
 use proof_store::ArtifactManifest;
 use proof_task::{
-    canonical_json, contamination, require_open_offer, HoldoutRecord, HoldoutSplit, InferenceOffer,
-    MetricFamily, OfferError, ProofPin, TopicDocument, BASELINE_DOMAIN,
+    canonical_json, contamination, require_open_offer, resolve_inference, HoldoutRecord,
+    HoldoutSplit, InferenceOffer, MetricFamily, OfferError, ProofPin, TopicDocument,
+    BASELINE_DOMAIN,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -94,7 +95,7 @@ pub enum EvalError {
     /// The operator-recorded baseline does not match the topic/pin.
     #[error("recorded baseline: {0}")]
     Baseline(String),
-    /// No live InferenceOffer on this host.
+    /// No live RLM judge InferenceOffer on this host.
     #[error("inference offer missing; refuse scoring")]
     InferenceOfferMissing,
     /// Live InferenceOffer is closed.
@@ -380,6 +381,21 @@ pub fn scoring_readiness(
     }
 }
 
+/// `PROOF_INFERENCE_BASE_URL`, else first non-empty line of `PROOF_INFERENCE_BASE_URL_FILE`.
+pub fn secret_backed_base_url() -> Option<String> {
+    let env = std::env::var("PROOF_INFERENCE_BASE_URL")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
+    if env.is_some() {
+        return env;
+    }
+    std::fs::read_to_string(std::env::var("PROOF_INFERENCE_BASE_URL_FILE").ok()?)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
 /// One finished eval.
 #[derive(Debug, Clone)]
 pub struct EvalOutcome {
@@ -511,6 +527,17 @@ pub async fn eval_after_freeze(
         return Err(EvalError::HoldoutSealed);
     }
     scoring_readiness(pin, backend, live, true, Some(offer))?;
+    let resolved = resolve_inference(
+        pin,
+        Some(&topic.inference),
+        secret_backed_base_url().as_deref(),
+        Some(offer),
+    );
+    if !resolved.ready_to_score() {
+        return Err(EvalError::InferenceOffer(
+            OfferError::Incomplete.to_string(),
+        ));
+    }
     let doc = match backend {
         EvalBackend::Sim => {
             let skill = unit(&[artifact_digest, "skill"], 0);
@@ -583,11 +610,13 @@ mod tests {
     use super::*;
 
     fn pin(digest: &str) -> ProofPin {
-        ProofPin {
+        let mut p = ProofPin {
             eval_image_digest: digest.to_owned(),
             topic_pubkey: "ab".repeat(32),
             ..ProofPin::default()
-        }
+        };
+        p.inference.model = "master-proxy-v0".into();
+        p
     }
 
     fn offer() -> InferenceOffer {

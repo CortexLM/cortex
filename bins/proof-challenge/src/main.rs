@@ -65,7 +65,7 @@ struct Cli {
     /// Sealed baseline measurements (JSON map keyed by topic id).
     #[arg(long, env = "PROOF_BASELINE_FILE")]
     baseline_file: Option<PathBuf>,
-    /// Live `InferenceOffer` JSON. Operator state; never a git pin. Missing/closed → 503.
+    /// Live RLM judge `InferenceOffer` JSON. Operator state; never a git pin. Missing/closed → 503.
     #[arg(long, env = "PROOF_INFERENCE_OFFER_FILE")]
     inference_offer_file: Option<PathBuf>,
     /// Provider API key file. Never logged, never on `/v1/status`.

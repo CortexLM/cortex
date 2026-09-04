@@ -3,20 +3,20 @@
 //!
 //! There is **no topic catalog here** and **no live InferenceOffer**. Problems
 //! are operator-published signed documents ([`crate::TopicDocument`]); the
-//! master's provider lives in operator state. Git carries only what every
-//! topic is measured against: which image may score, which key may publish,
-//! which inference modes/token ceilings are legal, and how generous a topic
-//! is allowed to be. No secrets.
+//! master's **RLM judge** backend lives in operator state. Git carries only
+//! what every topic is measured against: which image may score, which key may
+//! publish, which judge modes/token ceilings are legal, and how generous a
+//! topic is allowed to be. No secrets.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    InferenceMode, ALLOWED_MODES, BASE_MODEL_FAMILY, CHALLENGE_ID, EPSILON_NLL_MIN,
-    EPSILON_THROUGHPUT_REL_MIN, EPSILON_TOPIC_MAX_REGRESS_MIN, EVAL_IMAGE, FLOPS_BUDGET_MAX,
-    HOLDOUT_SIZE, INFERENCE_CONFIG_SCHEMA_VERSION, INFERENCE_OFFER_COMMITMENT_ALG,
-    MAX_INPUT_TOKENS_CEILING, MAX_OUTPUT_TOKENS_CEILING, PROOF_GIT_URL, QUALITY_FLOOR_NLL_MAX,
-    SCORING_VERSION, STRATUM_SIZE,
+    is_hex64, is_http_origin, InferenceMode, PinInference, ALLOWED_MODES, BASE_MODEL_FAMILY,
+    CHALLENGE_ID, EPSILON_NLL_MIN, EPSILON_THROUGHPUT_REL_MIN, EPSILON_TOPIC_MAX_REGRESS_MIN,
+    EVAL_IMAGE, FLOPS_BUDGET_MAX, HOLDOUT_SIZE, INFERENCE_CONFIG_SCHEMA_VERSION,
+    INFERENCE_OFFER_COMMITMENT_ALG, MAX_INPUT_TOKENS_CEILING, MAX_OUTPUT_TOKENS_CEILING,
+    PROOF_GIT_URL, QUALITY_FLOOR_NLL_MAX, SCORING_VERSION, STRATUM_SIZE,
 };
 
 /// `config/proof-pin.toml`.
@@ -45,6 +45,8 @@ pub struct ProofPin {
     pub max_output_tokens_ceiling: u32,
     /// Hash algorithm for `config_commitment` (`sha256`).
     pub inference_offer_commitment_alg: String,
+    /// Complete provider defaults. Empty model/url is pre-launch fail-closed.
+    pub inference: PinInference,
     /// Eval image reference (no floating tag in prod).
     pub eval_image: String,
     /// `sha256:…` digest. Empty until the first green proof-eval CI image.
@@ -84,6 +86,7 @@ impl Default for ProofPin {
             max_input_tokens_ceiling: MAX_INPUT_TOKENS_CEILING,
             max_output_tokens_ceiling: MAX_OUTPUT_TOKENS_CEILING,
             inference_offer_commitment_alg: INFERENCE_OFFER_COMMITMENT_ALG.into(),
+            inference: PinInference::default(),
             eval_image: EVAL_IMAGE.into(),
             eval_image_digest: String::new(),
             proof_git: PROOF_GIT_URL.into(),
@@ -161,15 +164,11 @@ pub enum PinError {
     #[error("allowed_modes must be a non-empty subset of chat, completions, embeddings")]
     BadAllowedModes,
     /// A token ceiling was raised above the crate lock, or is zero.
-    #[error("{field} = {got} must be 1..={ceiling}")]
-    TokenCeiling {
-        /// Which ceiling.
-        field: &'static str,
-        /// Pin value.
-        got: u32,
-        /// Crate lock.
-        ceiling: u32,
-    },
+    #[error("{0} = {1} must be 1..={2}")]
+    TokenCeiling(&'static str, u32, u32),
+    /// `[inference].base_url` is set but is not an http(s) origin.
+    #[error("inference.base_url must be empty (secret-backed) or an http(s) origin")]
+    BadInferenceUrl,
     /// The topic key is not a 64-hex sr25519 public key.
     #[error("topic_pubkey must be 64 hex chars (the challenges.toml `proof` row key)")]
     BadTopicPubkey,
@@ -325,6 +324,10 @@ impl ProofPin {
             }
             seen.push(*mode);
         }
+        if !self.allows_mode(self.inference.mode) {
+            return Err(PinError::BadAllowedModes);
+        }
+        let inf = &self.inference;
         for (field, got, ceiling) in [
             (
                 "max_input_tokens_ceiling",
@@ -336,14 +339,25 @@ impl ProofPin {
                 self.max_output_tokens_ceiling,
                 MAX_OUTPUT_TOKENS_CEILING,
             ),
+            (
+                "inference.max_input_tokens",
+                inf.max_input_tokens,
+                self.max_input_tokens_ceiling,
+            ),
+            (
+                "inference.max_output_tokens",
+                inf.max_output_tokens,
+                self.max_output_tokens_ceiling,
+            ),
         ] {
             if got == 0 || got > ceiling {
-                return Err(PinError::TokenCeiling {
-                    field,
-                    got,
-                    ceiling,
-                });
+                return Err(PinError::TokenCeiling(field, got, ceiling));
             }
+        }
+        if (!inf.base_url.trim().is_empty() && !is_http_origin(&inf.base_url))
+            || inf.model.len() > 256
+        {
+            return Err(PinError::BadInferenceUrl);
         }
         Ok(())
     }
@@ -352,29 +366,21 @@ impl ProofPin {
     ///
     /// An empty digest is the normal pre-launch state and the reason submits
     /// answer `503`. There is no sim fallback on this challenge.
-    #[must_use]
     pub fn can_rent(&self) -> bool {
         let d = self.eval_image_digest.trim();
         d.starts_with("sha256:") && d.len() >= 71
     }
 
     /// Topic-signing public key bytes, when the pin carries a well-formed one.
-    #[must_use]
     pub fn topic_pubkey_bytes(&self) -> Option<[u8; 32]> {
         let raw = hex::decode(self.topic_pubkey.trim()).ok()?;
         <[u8; 32]>::try_from(raw).ok()
     }
 
     /// Whether `mode` is in this pin's allowlist.
-    #[must_use]
     pub fn allows_mode(&self, mode: InferenceMode) -> bool {
         self.allowed_modes.contains(&mode)
     }
-}
-
-fn is_hex64(s: &str) -> bool {
-    let t = s.trim();
-    t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -500,12 +506,18 @@ stratum_size = 24
         assert!(matches!(p.validate(), Err(PinError::BadAllowedModes)));
         p = pin();
         p.max_input_tokens_ceiling = MAX_INPUT_TOKENS_CEILING + 1;
-        assert!(matches!(p.validate(), Err(PinError::TokenCeiling { .. })));
+        assert!(matches!(p.validate(), Err(PinError::TokenCeiling(..))));
         p = pin();
         p.allowed_modes = vec![InferenceMode::Chat];
         p.validate().expect("subset is a tighten");
         assert!(p.allows_mode(InferenceMode::Chat));
         assert!(!p.allows_mode(InferenceMode::Embeddings));
+        p = pin();
+        p.inference.base_url = "not-a-url".into();
+        assert!(matches!(p.validate(), Err(PinError::BadInferenceUrl)));
+        p = pin();
+        p.inference.base_url = "https://example.invalid/v1".into();
+        p.validate().expect("public origin may live in the pin");
     }
 
     #[test]
@@ -554,6 +566,15 @@ stratum_size = 24
         assert_eq!(p.allowed_modes.as_slice(), ALLOWED_MODES.as_slice());
         assert_eq!(p.max_input_tokens_ceiling, MAX_INPUT_TOKENS_CEILING);
         assert_eq!(p.max_output_tokens_ceiling, MAX_OUTPUT_TOKENS_CEILING);
+        assert_eq!(
+            p.inference.provider,
+            crate::InferenceProviderKind::OpenaiCompatible
+        );
+        assert!(p.inference.base_url.is_empty());
+        assert!(p.inference.model.is_empty());
+        assert_eq!(p.inference.mode, InferenceMode::Chat);
+        assert_eq!(p.inference.max_input_tokens, MAX_INPUT_TOKENS_CEILING);
+        assert_eq!(p.inference.max_output_tokens, MAX_OUTPUT_TOKENS_CEILING);
     }
 
     #[test]

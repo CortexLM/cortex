@@ -26,10 +26,16 @@
 #   max_input_tokens_ceiling      = 32768
 #   max_output_tokens_ceiling     = 8192
 #
-# Inference: the pin is architecture (ceilings + allowed modes). The live
-# InferenceOffer is operator state (`PROOF_INFERENCE_OFFER_FILE`), never git.
-# `proxy_model` / `proxy_models` are deprecated and must stay empty — Proof
-# does not bake HuggingFace weights into proof-eval.
+# Inference: the pin carries complete **RLM judge** defaults (provider,
+# URL-or-secret-backed, model id, mode, token caps) plus ceilings a topic may
+# never exceed. A topic's signed `inference{…}` may override / tighten those
+# judge defaults. Empty `model` or empty `base_url` is pre-launch fail-closed
+# (like an empty digest), not a boot reject — fill via pin bump, topic
+# override, `PROOF_INFERENCE_BASE_URL` / `_FILE`, or the live InferenceOffer
+# origin. The live offer (`PROOF_INFERENCE_OFFER_FILE`) is operator state for
+# the eval image's judge backend (open/closed). Miners do not bind it.
+# `proxy_model` / `proxy_models` stay empty — Proof does not bake HuggingFace
+# weights into proof-eval.
 #
 # Holdout size / stratum size are the measurement harness (5 scored splits × 24),
 # not the problem list.
@@ -56,3 +62,11 @@ epsilon_throughput_rel_min = 0.05
 quality_floor_nll_max = 0.02
 holdout_size = 120
 stratum_size = 24
+
+[inference]
+provider = "openai_compatible"
+base_url = ""
+model = ""
+mode = "chat"
+max_input_tokens = 32768
+max_output_tokens = 8192

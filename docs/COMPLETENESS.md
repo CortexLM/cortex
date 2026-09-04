@@ -75,7 +75,7 @@ specs (`DESIGN_CHALLENGE.md`, `PRISM.md`) remain for `xtask` gates. Leftover
 | Miner CLI (`bins/ctx`) | **done** | `ctx proof submit|show|status|topics`. Unpinned digest / unwired harvest / no open topic → 503. |
 | Compose / images | **done** | Default compose + `images.yml` target `proof-challenge`. |
 | Eval pin | **done** | `config/proof-pin.toml` — `eval_image` `ghcr.io/cortexlm/proof-eval`, digest `sha256:78b614a1…` (publish-proof-eval-image run 33892650063, commit `51f937c7`). No HF bake; `proxy_model` stays empty. Live submits still **503** until harvest is wired, a baseline is sealed, and ≥1 topic is open. Do not re-pin a guessed sha256. |
-| Inference offer | **v0** | Pin carries schema v1, allowed modes, token ceilings, `sha256` commitment alg. Live `InferenceOffer` is operator state (`PROOF_INFERENCE_OFFER_FILE`). Missing/closed → `can_score=false` / 503. |
+| Inference offer | **v0** | RLM **judge** backend. Pin `[inference]` defaults (provider, secret-backed URL, model, mode, token caps) plus schema v1 / ceilings. Topic admin publish may override / tighten judge ceilings. Live `InferenceOffer` is operator state (`PROOF_INFERENCE_OFFER_FILE`) consumed by proof-eval — not a miner training proxy. Missing/closed/incomplete → `can_score=false` / 503. No HF bake. |
 | Topics | **done** | sr25519 under the `proof` trust-root key (`base-proof-topic-v1`). Admin `POST /v1/admin/proof/topics`. A topic must be sealed to `open`. |
 | Holdout | **done** | Per-topic operator file (`PROOF_HOLDOUT_FILE`). Commitment in the topic document, never in the pin. `xtask proof-holdout --topic-id`. |
 | Live harvest | **done** | `crates/proof-harvest` over `harvest-pod`; `PROOF_FORCE_SIM` is local-only. |
@@ -112,7 +112,7 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 | Component | Status | Notes |
 |-----------|--------|-------|
 | bounty HTTP / adjudicate | **done** | Internal ingest: `POST /v1/pair` (sr25519) + `POST /v1/reports`; operator bearer on `GET /v1/reports` and `POST /v1/admin/adjudicate`. Scoring **fetches** CortexLM/backend `GET /v1/bounty/public/leaderboard` + `/reports` and emits signed leaves from those rows. Unset / unreachable / unparseable `BOUNTY_BACKEND_PUBLIC_URL` → `can_score: false`, reports **503**, and an all-`NoScore(ChallengeInternal)` leaf set that pays nobody while keeping D24. `BOUNTY_FORCE_SIM` is retired and ignored. |
-| proof HTTP / topics | **done** | Operator-published signed topics; `POST /v1/submissions` with `topic_id`. Empty digest / unwired harvest / unsealed baseline / empty open set → **503**. Architecture must match the baked RLM judge id. Contamination / empty manifest persist **rejected** without rent. |
+| proof HTTP / topics | **done** | Operator-published signed topics; `POST /v1/submissions` with `topic_id`. Empty digest / unwired harvest / unsealed baseline / empty open set / missing RLM judge offer → **503**. Architecture ≠ HF is retired. Contamination / empty manifest persist **rejected** without rent. |
 | Proof Lium harvest | **done** (fail-closed) | `crates/proof-harvest` over `harvest-pod` + leftover `prism-lium*` client. Live rent refuses without a `sha256:` eval digest; `PROOF_FORCE_SIM` is CI/local only; miner BYOK never logged. |
 | Retired challenge products | **removed** | `relearn*`, `design`, `prism` crates/bins/compose gone. Frozen specs remain. SQL migrations for historical tables stay applied. |
 | Phala / agent-v1 miner path | removed | External miners use HTTP submit only ([`external-miner/`](external-miner/)). |

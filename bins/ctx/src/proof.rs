@@ -25,10 +25,6 @@ pub struct SubmitInput {
     pub artifact_digest: String,
     /// Optional locator for the artifact.
     pub artifact_uri: Option<String>,
-    /// Open `InferenceOffer` id (`GET /v1/status`).
-    pub inference_offer_id: String,
-    /// Open offer `config_commitment` (64 hex).
-    pub config_commitment: String,
     /// Public claim the RLM re-runs (what you say the recipe achieved).
     pub claim: String,
     /// FLOPs you spent. Must be ≤ the topic budget.
@@ -52,11 +48,6 @@ pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Res
     if topic_id.is_empty() {
         return Err("topic-id is required (ctx proof topics lists currently open ids)".into());
     }
-    let offer_id = input.inference_offer_id.trim();
-    if offer_id.is_empty() {
-        return Err("inference-offer-id is required (GET /v1/status → inference_offer)".into());
-    }
-    let commitment = normalize_hex64(&input.config_commitment, "config-commitment")?;
     let claim = input.claim.trim();
     if claim.is_empty() {
         return Err("claim is required (what the recipe achieved)".into());
@@ -66,8 +57,6 @@ pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Res
         "miner_hotkey": hotkey,
         "topic_id": topic_id,
         "artifact_digest": digest,
-        "inference_offer_id": offer_id,
-        "config_commitment": commitment,
         "claim": claim,
         "declared_flops": input.declared_flops,
         "manifest": manifest,
@@ -261,7 +250,7 @@ fn explain_failure(status: u16, message: &str) -> String {
         400 => format!("refused ({message}). Nothing was stored and nothing was rented."),
         503 => format!(
             "HTTP 503: {message}\n  The host cannot score right now (empty eval digest, \
-             missing/closed inference offer, no open topics, or an unsealed baseline). \
+             missing/closed RLM judge backend, no open topics, or an unsealed baseline). \
              Nothing was stored, nothing was rented."
         ),
         other => format!("HTTP {other}: {message}"),

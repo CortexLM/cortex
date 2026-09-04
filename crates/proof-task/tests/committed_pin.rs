@@ -89,11 +89,42 @@ fn committed_pin_is_proof_with_a_real_eval_digest() {
     assert_eq!(p.allowed_modes.as_slice(), ALLOWED_MODES.as_slice());
     assert_eq!(p.max_input_tokens_ceiling, MAX_INPUT_TOKENS_CEILING);
     assert_eq!(p.max_output_tokens_ceiling, MAX_OUTPUT_TOKENS_CEILING);
+    assert_eq!(
+        p.inference.provider,
+        proof_task::InferenceProviderKind::OpenaiCompatible
+    );
+    assert!(
+        p.inference.base_url.trim().is_empty(),
+        "url is secret-backed"
+    );
+    assert!(
+        p.inference.model.trim().is_empty(),
+        "empty model is pre-launch 503"
+    );
+    assert_eq!(p.inference.mode, proof_task::InferenceMode::Chat);
+    assert_eq!(p.inference.max_input_tokens, MAX_INPUT_TOKENS_CEILING);
+    assert_eq!(p.inference.max_output_tokens, MAX_OUTPUT_TOKENS_CEILING);
 }
 
 #[test]
 fn topic_pubkey_matches_the_trust_root_proof_row() {
     assert_eq!(pin().topic_pubkey.to_ascii_lowercase(), proof_row_pubkey());
+}
+
+#[test]
+fn pin_carries_complete_inference_defaults_table() {
+    let text = body();
+    assert!(text.contains("[inference]"), "pin must declare [inference]");
+    for key in [
+        "provider",
+        "base_url",
+        "model",
+        "mode",
+        "max_input_tokens",
+        "max_output_tokens",
+    ] {
+        assert!(text.contains(key), "pin [inference] must name {key}");
+    }
 }
 
 #[test]

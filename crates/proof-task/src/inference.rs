@@ -1,12 +1,15 @@
-//! Master-owned inference provider: pin ceilings in git, live offer off git.
+//! Master-owned RLM **judge** backend: pin defaults in git, topic tighten,
+//! live InferenceOffer off git.
 //!
-//! The eval image calls this provider. It does **not** bake HuggingFace
-//! weights. Secrets never enter the pin, the topic, or `/v1/status`.
+//! The digest-pinned eval image calls this provider to reproduce / cheat-check
+//! / score a miner submission. Miners submit claim + code + FLOPs + artifact
+//! against a topic; they do **not** train on or bind this offer. Secrets never
+//! enter the pin, the topic, or `/v1/status`. No HuggingFace weight bake.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{canonical_json, ProofPin, TopicDocument};
+use crate::{canonical_json, is_hex64, is_http_origin, ProofPin, TopicDocument, TopicError};
 
 /// Pin `inference_config_schema_version`.
 pub const INFERENCE_CONFIG_SCHEMA_VERSION: u32 = 1;
@@ -40,8 +43,6 @@ pub enum InferenceMode {
 }
 
 impl InferenceMode {
-    /// Wire name.
-    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Chat => "chat",
@@ -64,8 +65,6 @@ pub enum InferenceProviderKind {
 }
 
 impl InferenceProviderKind {
-    /// Wire name.
-    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::OpenaiCompatible => "openai_compatible",
@@ -79,7 +78,7 @@ impl InferenceProviderKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OfferStatus {
-    /// Accepts binds; required for `can_score`.
+    /// Judge backend is live; required for `can_score`.
     Open,
     /// Host cannot score.
     Closed,
@@ -122,7 +121,7 @@ pub struct InferenceConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InferenceOffer {
-    /// Immutable slug miners bind to.
+    /// Immutable slug identifying this judge backend.
     pub offer_id: String,
     /// Provider kind + origin.
     pub provider: InferenceProvider,
@@ -134,50 +133,136 @@ pub struct InferenceOffer {
     pub status: OfferStatus,
 }
 
-/// Fields `/v1/status` may emit. No origin, no key, no file path.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct PublicInferenceOffer {
-    /// Offer slug.
-    pub offer_id: String,
-    /// Provider kind only.
-    pub provider_kind: InferenceProviderKind,
-    /// Mode.
+/// Pin `[inference]` defaults. Empty `model` / `base_url` is pre-launch
+/// fail-closed (like an empty digest), not a boot reject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PinInference {
+    pub provider: InferenceProviderKind,
+    pub base_url: String,
+    pub model: String,
     pub mode: InferenceMode,
-    /// Provider model id.
-    pub model_ref: String,
-    /// Offer input cap.
     pub max_input_tokens: u32,
-    /// Offer output cap.
-    pub max_output_tokens: u32,
-    /// Config commitment.
-    pub config_commitment: String,
-    /// Lifecycle.
-    pub status: OfferStatus,
-}
-
-/// Topic-side inference constraints. Tighten pin ceilings; never loosen.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct TopicInference {
-    /// When set, the live offer's commitment must equal this hex.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub require_offer_commitment: Option<String>,
-    /// Mode this topic is scored under.
-    pub mode: InferenceMode,
-    /// Topic input cap (`<=` pin ceiling).
-    pub max_input_tokens: u32,
-    /// Topic output cap (`<=` pin ceiling).
     pub max_output_tokens: u32,
 }
 
-impl Default for TopicInference {
+impl Default for PinInference {
     fn default() -> Self {
         Self {
-            require_offer_commitment: None,
+            provider: InferenceProviderKind::OpenaiCompatible,
+            base_url: String::new(),
+            model: String::new(),
             mode: InferenceMode::Chat,
             max_input_tokens: MAX_INPUT_TOKENS_CEILING,
             max_output_tokens: MAX_OUTPUT_TOKENS_CEILING,
         }
+    }
+}
+
+impl PinInference {
+    pub fn ready_to_score(&self) -> bool {
+        !self.model.trim().is_empty()
+            && self.max_input_tokens > 0
+            && self.max_output_tokens > 0
+            && is_http_origin(&self.base_url)
+    }
+}
+
+/// Topic override. Omitted fields inherit the pin; tokens may only tighten.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TopicInference {
+    pub require_offer_commitment: Option<String>,
+    pub provider: Option<InferenceProviderKind>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub mode: Option<InferenceMode>,
+    pub max_input_tokens: Option<u32>,
+    pub max_output_tokens: Option<u32>,
+}
+
+/// Topic over pin, then secret-backed / live-offer URL.
+pub fn resolve_inference(
+    pin: &ProofPin,
+    topic: Option<&TopicInference>,
+    secret_url: Option<&str>,
+    offer: Option<&InferenceOffer>,
+) -> PinInference {
+    let d = &pin.inference;
+    let urls = [
+        topic.and_then(|t| t.base_url.as_deref()).unwrap_or(""),
+        d.base_url.as_str(),
+        secret_url.unwrap_or(""),
+        offer.map_or("", |o| o.provider.base_url.as_str()),
+    ];
+    PinInference {
+        provider: topic.and_then(|t| t.provider).unwrap_or(d.provider),
+        base_url: urls
+            .into_iter()
+            .find(|u| is_http_origin(u))
+            .unwrap_or("")
+            .to_owned(),
+        model: topic
+            .and_then(|t| t.model.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(d.model.trim())
+            .to_owned(),
+        mode: topic.and_then(|t| t.mode).unwrap_or(d.mode),
+        max_input_tokens: topic
+            .and_then(|t| t.max_input_tokens)
+            .unwrap_or(d.max_input_tokens),
+        max_output_tokens: topic
+            .and_then(|t| t.max_output_tokens)
+            .unwrap_or(d.max_output_tokens),
+    }
+}
+
+impl TopicInference {
+    /// Pin allowlist, token tighten-only, and usable override shape.
+    ///
+    /// # Errors
+    ///
+    /// [`TopicError::InferenceModeNotAllowed`], [`TopicError::InferenceCeiling`],
+    /// [`TopicError::IncompleteInference`], or [`TopicError::BadOfferCommitment`].
+    pub fn validate(&self, pin: &ProofPin) -> Result<(), TopicError> {
+        if let Some(mode) = self.mode {
+            if !pin.allows_mode(mode) {
+                return Err(TopicError::InferenceModeNotAllowed(mode));
+            }
+        }
+        let pin_in = pin
+            .inference
+            .max_input_tokens
+            .min(pin.max_input_tokens_ceiling);
+        let pin_out = pin
+            .inference
+            .max_output_tokens
+            .min(pin.max_output_tokens_ceiling);
+        for (field, got, ceiling) in [
+            ("max_input_tokens", self.max_input_tokens, pin_in),
+            ("max_output_tokens", self.max_output_tokens, pin_out),
+        ] {
+            if let Some(got) = got {
+                if got == 0 || got > ceiling {
+                    return Err(TopicError::InferenceCeiling(field, got, ceiling));
+                }
+            }
+        }
+        if self.base_url.as_deref().is_some_and(|u| !is_http_origin(u))
+            || self
+                .model
+                .as_deref()
+                .is_some_and(|m| m.trim().is_empty() || m.len() > 256)
+        {
+            return Err(TopicError::IncompleteInference);
+        }
+        if let Some(need) = self.require_offer_commitment.as_deref() {
+            if !is_hex64(need) {
+                return Err(TopicError::BadOfferCommitment);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -197,15 +282,8 @@ pub enum OfferError {
     #[error("config.model_ref is required")]
     BadModelRef,
     /// Token cap is zero or above the pin ceiling.
-    #[error("config.{field} = {got} must be 1..={ceiling}")]
-    BadTokenCap {
-        /// Which cap.
-        field: &'static str,
-        /// Offer value.
-        got: u32,
-        /// Pin ceiling.
-        ceiling: u32,
-    },
+    #[error("config.{0} = {1} must be 1..={2}")]
+    BadTokenCap(&'static str, u32, u32),
     /// Sampling knob is non-finite or out of range.
     #[error("config.{0} is not a usable sampling value")]
     BadSampling(&'static str),
@@ -221,29 +299,22 @@ pub enum OfferError {
     /// Offer is present but closed.
     #[error("inference offer is closed; refuse scoring")]
     Closed,
-    /// Miner bind does not match the open offer.
-    #[error("inference_offer_id / config_commitment is not the open offer")]
-    Stale,
     /// Open offer cannot serve this topic.
     #[error("open inference offer cannot serve topic inference constraints")]
     CannotServeTopic,
-}
-
-fn is_hex64(s: &str) -> bool {
-    let t = s.trim();
-    t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit())
+    /// Resolved pin+topic config is missing model or http(s) origin.
+    #[error("resolved inference config is incomplete; refuse scoring")]
+    Incomplete,
 }
 
 fn is_secret_key(k: &str) -> bool {
     let l = k.to_ascii_lowercase();
-    l.contains("secret")
-        || l.contains("password")
-        || l.contains("authorization")
-        || l.contains("bearer")
+    ["secret", "password", "authorization", "bearer"]
+        .iter()
+        .any(|n| l.contains(n))
         || l.ends_with("api_key")
         || l.ends_with("_token")
         || l == "token"
-        || l == "api_key"
 }
 
 fn strip_secrets(value: serde_json::Value) -> serde_json::Value {
@@ -266,7 +337,6 @@ fn strip_secrets(value: serde_json::Value) -> serde_json::Value {
 }
 
 /// `sha256` hex of canonical JSON of `config` with secret keys stripped.
-#[must_use]
 pub fn inference_config_commitment(config: &InferenceConfig) -> String {
     let value = serde_json::to_value(config).unwrap_or(serde_json::Value::Null);
     let body = canonical_json(&strip_secrets(value));
@@ -291,15 +361,10 @@ impl InferenceOffer {
     ///
     /// See [`OfferError`]. A closed-but-valid offer is legal to load.
     pub fn validate(&self, pin: &ProofPin) -> Result<(), OfferError> {
-        if !is_offer_id(&self.offer_id) {
+        if !crate::is_slug(&self.offer_id) {
             return Err(OfferError::BadId(self.offer_id.clone()));
         }
-        let url = self.provider.base_url.trim();
-        if url.len() < 8
-            || !(url.starts_with("http://") || url.starts_with("https://"))
-            || url.contains('\n')
-            || url.contains(' ')
-        {
+        if !is_http_origin(self.provider.base_url.trim()) {
             return Err(OfferError::BadBaseUrl);
         }
         if self.config.model_ref.trim().is_empty() || self.config.model_ref.len() > 256 {
@@ -308,34 +373,29 @@ impl InferenceOffer {
         if !pin.allows_mode(self.config.mode) {
             return Err(OfferError::ModeNotAllowed(self.config.mode));
         }
+        let cfg = &self.config;
         for (field, got, ceiling) in [
             (
                 "max_input_tokens",
-                self.config.max_input_tokens,
+                cfg.max_input_tokens,
                 pin.max_input_tokens_ceiling,
             ),
             (
                 "max_output_tokens",
-                self.config.max_output_tokens,
+                cfg.max_output_tokens,
                 pin.max_output_tokens_ceiling,
             ),
         ] {
             if got == 0 || got > ceiling {
-                return Err(OfferError::BadTokenCap {
-                    field,
-                    got,
-                    ceiling,
-                });
+                return Err(OfferError::BadTokenCap(field, got, ceiling));
             }
         }
-        if let Some(t) = self.config.temperature {
-            if !t.is_finite() || !(0.0..=2.0).contains(&t) {
-                return Err(OfferError::BadSampling("temperature"));
-            }
-        }
-        if let Some(p) = self.config.top_p {
-            if !p.is_finite() || !(0.0..=1.0).contains(&p) {
-                return Err(OfferError::BadSampling("top_p"));
+        for (name, v, hi) in [
+            ("temperature", cfg.temperature, 2.0),
+            ("top_p", cfg.top_p, 1.0),
+        ] {
+            if v.is_some_and(|x| !x.is_finite() || !(0.0..=hi).contains(&x)) {
+                return Err(OfferError::BadSampling(name));
             }
         }
         let want = inference_config_commitment(&self.config);
@@ -346,64 +406,45 @@ impl InferenceOffer {
         Ok(())
     }
 
-    /// Whether this offer can accept binds.
-    #[must_use]
+    /// Whether this judge backend is open for scoring.
     pub fn is_open(&self) -> bool {
         self.status == OfferStatus::Open
     }
 
     /// Public status payload (no origin, no secrets).
-    #[must_use]
-    pub fn public_view(&self) -> PublicInferenceOffer {
-        PublicInferenceOffer {
-            offer_id: self.offer_id.clone(),
-            provider_kind: self.provider.kind,
-            mode: self.config.mode,
-            model_ref: self.config.model_ref.clone(),
-            max_input_tokens: self.config.max_input_tokens,
-            max_output_tokens: self.config.max_output_tokens,
-            config_commitment: self.config_commitment.clone(),
-            status: self.status,
-        }
+    pub fn public_view(&self) -> serde_json::Value {
+        serde_json::json!({
+            "offer_id": self.offer_id,
+            "provider_kind": self.provider.kind,
+            "mode": self.config.mode,
+            "model_ref": self.config.model_ref,
+            "max_input_tokens": self.config.max_input_tokens,
+            "max_output_tokens": self.config.max_output_tokens,
+            "config_commitment": self.config_commitment,
+            "status": self.status,
+        })
     }
 
-    /// Miner bind: both fields must match this open offer.
-    ///
-    /// # Errors
-    ///
-    /// [`OfferError::Stale`] on mismatch. Closed is [`OfferError::Closed`].
-    pub fn bind_miner(&self, offer_id: &str, commitment: &str) -> Result<(), OfferError> {
-        if !self.is_open() {
-            return Err(OfferError::Closed);
-        }
-        if offer_id.trim() != self.offer_id
-            || !commitment
-                .trim()
-                .eq_ignore_ascii_case(&self.config_commitment)
-        {
-            return Err(OfferError::Stale);
-        }
-        Ok(())
-    }
-
-    /// Whether this open offer can score `topic` (mode + token floors).
+    /// Whether this open judge offer can score `topic` (resolved pin+topic vs offer).
     ///
     /// # Errors
     ///
     /// [`OfferError::Closed`] or [`OfferError::CannotServeTopic`].
-    pub fn serves_topic(&self, topic: &TopicDocument) -> Result<(), OfferError> {
+    pub fn serves_topic(&self, pin: &ProofPin, topic: &TopicDocument) -> Result<(), OfferError> {
         if !self.is_open() {
             return Err(OfferError::Closed);
         }
-        let inf = &topic.inference;
-        if self.config.mode != inf.mode
-            || self.config.max_input_tokens < inf.max_input_tokens
-            || self.config.max_output_tokens < inf.max_output_tokens
+        let r = resolve_inference(pin, Some(&topic.inference), None, Some(self));
+        if self.provider.kind != r.provider
+            || self.config.mode != r.mode
+            || self.config.max_input_tokens < r.max_input_tokens
+            || self.config.max_output_tokens < r.max_output_tokens
+            || (!r.model.is_empty() && r.model != self.config.model_ref)
         {
             return Err(OfferError::CannotServeTopic);
         }
-        if let Some(need) = inf.require_offer_commitment.as_deref().map(str::trim) {
-            if !need.eq_ignore_ascii_case(&self.config_commitment) {
+        if let Some(need) = topic.inference.require_offer_commitment.as_deref() {
+            if !need.trim().eq_ignore_ascii_case(&self.config_commitment) {
                 return Err(OfferError::CannotServeTopic);
             }
         }
@@ -426,19 +467,6 @@ pub fn require_open_offer<'a>(
         return Err(OfferError::Closed);
     }
     Ok(offer)
-}
-
-fn is_offer_id(id: &str) -> bool {
-    let len = id.len();
-    if !(2..=63).contains(&len) {
-        return false;
-    }
-    let mut chars = id.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_lowercase() || first.is_ascii_digit())
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 #[cfg(test)]
@@ -534,14 +562,14 @@ mod tests {
         o.config_commitment = inference_config_commitment(&o.config);
         assert!(matches!(
             o.validate(&pin()),
-            Err(OfferError::BadTokenCap { .. })
+            Err(OfferError::BadTokenCap(..))
         ));
         o = offer();
         o.config.max_output_tokens = 0;
         o.config_commitment = inference_config_commitment(&o.config);
         assert!(matches!(
             o.validate(&pin()),
-            Err(OfferError::BadTokenCap { .. })
+            Err(OfferError::BadTokenCap(..))
         ));
     }
 
@@ -568,37 +596,69 @@ mod tests {
     }
 
     #[test]
-    fn miner_bind_is_exact_and_stale_is_named() {
-        let o = offer();
-        o.bind_miner("master-v0", &o.config_commitment)
-            .expect("match");
+    fn open_offer_must_cover_the_topic() {
+        let mut topic = TopicDocument::default();
+        topic.inference.mode = Some(InferenceMode::Chat);
+        topic.inference.max_input_tokens = Some(4_096);
+        topic.inference.max_output_tokens = Some(256);
+        offer().serves_topic(&pin(), &topic).expect("covers");
+        topic.inference.mode = Some(InferenceMode::Embeddings);
         assert!(matches!(
-            o.bind_miner("other-v0", &o.config_commitment),
-            Err(OfferError::Stale)
+            offer().serves_topic(&pin(), &topic),
+            Err(OfferError::CannotServeTopic)
         ));
+        topic.inference.mode = Some(InferenceMode::Chat);
+        topic.inference.require_offer_commitment = Some("ab".repeat(32));
         assert!(matches!(
-            o.bind_miner("master-v0", &"ab".repeat(32)),
-            Err(OfferError::Stale)
+            offer().serves_topic(&pin(), &topic),
+            Err(OfferError::CannotServeTopic)
         ));
     }
 
     #[test]
-    fn open_offer_must_cover_the_topic() {
-        let mut topic = TopicDocument::default();
-        topic.inference.mode = InferenceMode::Chat;
-        topic.inference.max_input_tokens = 4_096;
-        topic.inference.max_output_tokens = 256;
-        offer().serves_topic(&topic).expect("covers");
-        topic.inference.mode = InferenceMode::Embeddings;
+    fn pin_defaults_resolve_and_topic_may_override_or_tighten() {
+        let mut p = pin();
+        p.inference.model = "pin-model".into();
+        p.inference.max_input_tokens = 4_096;
+        p.inference.max_output_tokens = 512;
+        let inherited = resolve_inference(&p, None, None, None);
+        assert_eq!(inherited.model, "pin-model");
+        assert_eq!(inherited.mode, InferenceMode::Chat);
+        assert_eq!(inherited.max_input_tokens, 4_096);
+        assert!(!inherited.ready_to_score());
+        let mut topic = TopicInference {
+            model: Some("topic-model".into()),
+            max_input_tokens: Some(2_048),
+            max_output_tokens: Some(128),
+            ..TopicInference::default()
+        };
+        let over = resolve_inference(&p, Some(&topic), None, Some(&offer()));
+        assert_eq!(over.model, "topic-model");
+        assert_eq!(over.max_input_tokens, 2_048);
+        assert_eq!(over.base_url, "http://127.0.0.1:8000/v1");
+        assert!(over.ready_to_score());
+        topic.max_input_tokens = Some(8_192);
         assert!(matches!(
-            offer().serves_topic(&topic),
-            Err(OfferError::CannotServeTopic)
+            topic.validate(&p),
+            Err(crate::TopicError::InferenceCeiling(..))
         ));
-        topic.inference.mode = InferenceMode::Chat;
-        topic.inference.require_offer_commitment = Some("ab".repeat(32));
+    }
+
+    #[test]
+    fn missing_model_or_origin_is_incomplete() {
+        let p = pin();
+        assert!(p.inference.model.is_empty());
+        let r = resolve_inference(&p, None, None, Some(&offer()));
+        assert!(r.model.trim().is_empty());
+        let mut t = TopicInference {
+            model: Some("live-model".into()),
+            ..TopicInference::default()
+        };
+        assert!(resolve_inference(&p, Some(&t), None, Some(&offer())).ready_to_score());
+        t.base_url = Some("ftp://nope".into());
         assert!(matches!(
-            offer().serves_topic(&topic),
-            Err(OfferError::CannotServeTopic)
+            t.validate(&p),
+            Err(crate::TopicError::IncompleteInference)
         ));
     }
 

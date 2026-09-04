@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::HOLDOUT_DOMAIN;
+use crate::{is_hex64, HOLDOUT_DOMAIN};
 
 /// Smallest packed sequence length a `longctx` record may carry.
 pub const LONGCTX_MIN_TOKENS: u32 = 8_192;
@@ -48,7 +48,6 @@ pub enum HoldoutSplit {
 }
 
 impl HoldoutSplit {
-    /// Splits that enter the paid metric, in stable order.
     pub const SCORED: [Self; 5] = [
         Self::WebOod,
         Self::CodeOod,
@@ -57,8 +56,6 @@ impl HoldoutSplit {
         Self::MultilingualOod,
     ];
 
-    /// Wire name.
-    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::WebOod => "web_ood",
@@ -70,8 +67,6 @@ impl HoldoutSplit {
         }
     }
 
-    /// Whether this stratum may contribute to the paid metric.
-    #[must_use]
     pub const fn is_scored(self) -> bool {
         !matches!(self, Self::CanaryOffpath)
     }
@@ -93,17 +88,10 @@ pub struct HoldoutRecord {
 }
 
 impl HoldoutRecord {
-    /// Canonical fingerprint used by the contamination gate.
-    #[must_use]
     pub fn fingerprint(&self) -> String {
         format!("shard:{}", self.content_sha256.to_ascii_lowercase())
     }
 
-    /// A minimal valid record, for CI and local catalogs.
-    ///
-    /// Production must use a private catalog: a documented generator over a
-    /// public corpus would let a miner rebuild the scored shards.
-    #[must_use]
     pub fn synthetic(id: u32, split: HoldoutSplit) -> Self {
         let mut h = Sha256::new();
         h.update(b"proof-synthetic-shard-v1");
@@ -194,7 +182,6 @@ fn field(h: &mut Sha256, value: &str) {
 /// Domain-separated, id-sorted, length-prefixed, and covering every field the
 /// harness reads — stratum and token count included, so a "verified" holdout
 /// cannot be re-labelled to move records between strata after the fact.
-#[must_use]
 pub fn holdout_commitment(records: &[HoldoutRecord]) -> String {
     let mut sorted: Vec<&HoldoutRecord> = records.iter().collect();
     sorted.sort_by_key(|r| r.id);
@@ -216,11 +203,6 @@ pub fn holdout_commitment(records: &[HoldoutRecord]) -> String {
     hex::encode(h.finalize())
 }
 
-fn hex64(s: &str) -> bool {
-    let t = s.trim();
-    t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit())
-}
-
 fn validate(records: &[HoldoutRecord]) -> Result<(), HoldoutError> {
     if records.is_empty() {
         return Err(HoldoutError::Empty);
@@ -234,7 +216,7 @@ fn validate(records: &[HoldoutRecord]) -> Result<(), HoldoutError> {
         if r.dataset_id.trim().is_empty() {
             return Err(HoldoutError::EmptyDataset(r.id));
         }
-        if !hex64(&r.content_sha256) {
+        if !is_hex64(&r.content_sha256) {
             return Err(HoldoutError::MalformedHash(r.id));
         }
         if r.token_count == 0 {
@@ -315,7 +297,6 @@ pub fn verify_holdout(
 /// Matching is on shard content hashes and corpus ids, because those are the
 /// two things a miner can honestly declare and the two things that make a
 /// holdout NLL meaningless if they overlap.
-#[must_use]
 pub fn contamination(
     declared_content_hashes: &BTreeSet<String>,
     declared_dataset_ids: &BTreeSet<String>,
@@ -343,7 +324,6 @@ pub fn contamination(
 }
 
 /// A stratified synthetic holdout of `per_split * 5` records (CI / local only).
-#[must_use]
 pub fn synthetic_holdout(per_split: usize, first_id: u32) -> Vec<HoldoutRecord> {
     let mut out = Vec::new();
     let mut id = first_id;

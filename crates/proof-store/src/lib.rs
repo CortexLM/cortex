@@ -73,13 +73,13 @@ pub struct Submission {
     pub claim: String,
     /// Declared FLOP budget (must be ≤ topic).
     pub declared_flops: u64,
-    /// Deprecated HF architecture id. Ignored; miners bind an InferenceOffer.
+    /// Deprecated HF architecture id. Ignored; not an architecture lock.
     #[serde(default)]
     pub architecture: String,
-    /// Live offer id this run bound.
+    /// RLM judge offer id that scored this run (host stamp, not a miner bind).
     #[serde(default)]
     pub inference_offer_id: String,
-    /// Config commitment this run bound.
+    /// Judge `config_commitment` stamped from the host offer.
     #[serde(default)]
     pub config_commitment: String,
     /// Declared training fingerprints.

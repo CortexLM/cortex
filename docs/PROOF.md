@@ -23,13 +23,21 @@ baseline + an open topic are on the host.
   without InfiniBand” are *example solutions or example topics*, never a
   frozen catalog in git.
 - A topic may tighten a floor, never loosen it. Floors live in the pin.
-- Inference is a **master-owned provider**, not an HF bake. The pin carries
-  `inference_config_schema_version = 1`, `allowed_modes`, token ceilings, and
-  `inference_offer_commitment_alg = sha256`. The live `InferenceOffer`
-  (`PROOF_INFERENCE_OFFER_FILE`) is operator state: `offer_id`,
-  `provider.kind` (`openai_compatible` | `vllm` | `custom`), secret-free
-  `config`, `config_commitment`, `status`. Missing/closed → `can_score=false`
-  → **503**. Auth is `PROOF_INFERENCE_API_KEY_FILE` on the droplet — never git.
+- The RLM **judge** is a master-owned inference backend, not an HF bake and
+  not a miner training proxy. Miners submit **claim + code + FLOPs + artifact**
+  against a topic. The digest-pinned eval image calls the live
+  `InferenceOffer` (`PROOF_INFERENCE_OFFER_FILE`) to reproduce / cheat-check /
+  score. The pin carries complete `[inference]` **judge** defaults (`provider`,
+  `base_url` empty = secret-backed, `model`, `mode`, `max_input_tokens`,
+  `max_output_tokens`) plus schema v1, `allowed_modes`, token ceilings, and
+  `inference_offer_commitment_alg = sha256`. A topic's signed `inference{…}`
+  may **override** provider/model/mode/URL and may **only tighten** token caps
+  vs those pin defaults. Missing or misconfigured judge resolve → publish
+  **400** (open topic) / score **503**. Empty pin `model` / `base_url` is
+  pre-launch fail-closed (like an empty digest). Fill via pin bump, topic
+  publish, `PROOF_INFERENCE_BASE_URL` / `_FILE`, or the live offer origin.
+  Missing/closed offer → `can_score=false` → **503**. Auth is
+  `PROOF_INFERENCE_API_KEY_FILE` — never git. `proxy_model` stays empty.
 - A baseline must be sealed (`script_sha256` + `metrics_commitment`) to
   open. Nobody is paid for beating a number nobody measured.
 - 8000 bps is split equally across currently `open` topics. Each topic then
@@ -104,14 +112,15 @@ Trust-root keygen is the throwaway owner path in
 ## HTTP
 
 - `GET /health`, `GET /v1/status` — `can_score`, `eval_backend`, `force_sim`,
-  `live_harvest_wired`, `baseline_sealed`, public `inference_offer`. Never leak
-  origins, keys, or holdout records.
+  `live_harvest_wired`, `baseline_sealed`, public pin `inference` judge
+  defaults (no origin), public `inference_offer` (RLM judge backend). Never
+  leak origins, keys, or holdout records.
 - `GET /v1/proof/topics`, `GET /v1/proof/topics/{id}`
 - `POST /v1/admin/proof/topics` — operator bearer; verify sig/schema/floors/seal before `open`
 - `POST /v1/submissions` **requires** `topic_id`. Missing/unknown/not-open →
-  **400**. Stale `inference_offer_id` / `config_commitment` → **400**. Zero
-  open / unsealed baseline / empty digest / missing or closed inference
-  offer / agent down → **503**. Refusals must **not** persist rows.
+  **400**. Miners do **not** bind the judge offer. Zero open / unsealed
+  baseline / empty digest / missing or closed RLM judge backend / agent down
+  → **503**. Refusals must **not** persist rows.
 - Submit fields miners must send: `claim` (what the recipe achieved),
   `declared_flops` (≤ topic budget), `artifact_digest` of a **reproducible
   train/eval recipe** (code under budget, not weights-only), plus `manifest`.
@@ -158,8 +167,10 @@ takes the topic.
   },
   "flops_budget": 2000000000000000000,
   "inference": {
+    "provider": "openai_compatible",
+    "model": "master-proxy-v0",
     "mode": "chat",
-    "max_input_tokens": 32768,
+    "max_input_tokens": 4096,
     "max_output_tokens": 2048
   },
   "status": "draft"
@@ -188,10 +199,14 @@ this document publishes; scoring fail-closes until the harness exists.
 ```
 
 These JSON bodies are documentation. Publishing requires a holdout
-commitment, a sealed baseline (to open), an inference block that does not
-loosen pin ceilings, and an sr25519 signature under the `proof` trust-root
-key.
+commitment, a sealed baseline, a signed `inference{…}` that does not loosen
+pin **judge** defaults, and an sr25519 signature under the `proof`
+trust-root key. Omitted inference fields inherit the pin; `open` requires a
+complete resolved judge config (provider + model + mode + tokens). Empty pin
+model with no topic `model` is **400** at publish.
 
-`GET /v1/status` exposes `inference_offer` **public fields only** (`offer_id`,
-`provider_kind`, `mode`, `model_ref`, token caps, `config_commitment`,
-`status`). It never leaks `base_url`, API keys, or file paths.
+`GET /v1/status` exposes pin `inference` public judge defaults (`provider`,
+`model`, `mode`, token caps) and `inference_offer` **public fields only**
+(`offer_id`, `provider_kind`, `mode`, `model_ref`, token caps,
+`config_commitment`, `status`). It never leaks `base_url`, API keys, or file
+paths. Miners do not call this backend.

@@ -19,7 +19,6 @@ use serde_json::Value;
 ///
 /// Sorted keys, no whitespace. `Value`'s map is already ordered, but the sort
 /// is explicit so the rule does not depend on a serde_json feature flag.
-#[must_use]
 pub fn canonical_json(value: &Value) -> String {
     match value {
         Value::Null => "null".into(),
