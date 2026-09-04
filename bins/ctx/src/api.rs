@@ -186,8 +186,9 @@ mod tests {
 
     #[test]
     fn http_gateway_with_lium_key_is_refused() {
-        let err = Client::new("http://127.0.0.1:8090", Some("sk-test-key".into()))
-            .expect_err("http + key must fail closed");
+        let Err(err) = Client::new("http://127.0.0.1:8090", Some("sk-test-key".into())) else {
+            panic!("http + key must fail closed");
+        };
         assert!(
             err.contains("https://"),
             "error must name https as the requirement: {err}"
@@ -204,8 +205,9 @@ mod tests {
 
     #[test]
     fn http_scheme_is_matched_case_insensitively() {
-        let err = Client::new("HTTP://127.0.0.1:8090", Some("sk-test-key".into()))
-            .expect_err("HTTP:// + key must fail closed");
+        let Err(err) = Client::new("HTTP://127.0.0.1:8090", Some("sk-test-key".into())) else {
+            panic!("HTTP:// + key must fail closed");
+        };
         assert!(!err.contains("sk-test-key"), "must not echo the API key");
     }
 
