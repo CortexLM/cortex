@@ -106,13 +106,11 @@ curl -sS -X POST https://network.cortex.foundation/challenge/bounty/v1/reports \
   }'
 ```
 
-Then follow it:
-
-```bash
-ctx bounty show by_0123456789abcdef
-```
-
-That path is internal ingest, not a public leaderboard.
+The POST reply already carries `id`, `state`, `miner_hotkey`, and
+`fingerprint`. Report bodies (repro, account, hotkey) stay on the operator
+host: `GET /v1/reports` requires the same operator bearer as adjudicate, and
+the public gateway returns 403 on those reads (POST submit stays open).
+`ctx bounty show` does not fetch them.
 
 **Public consumers** (leaderboard and published reports) hit
 **CortexLM/backend** — not this subnet. Cortex **reads**

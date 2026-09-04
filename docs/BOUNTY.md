@@ -14,6 +14,14 @@ Chat can bind a hotkey. Scoring maps hotkey → lattice from published
 backend rows that carry `problem_found`, `justification`, and — for a
 creditable `valid` — a `severity`.
 
+`GET /v1/reports` and `GET /v1/reports/{id}` are operator-local: same bearer
+as `POST /v1/admin/adjudicate`. Empty admin hashes → **503**
+`auth_unconfigured`. Missing/wrong bearer → **401** and no report body /
+repro / account / hotkey. The public gateway returns **403** on those GET
+reads (POST submit stays on the miner path). Public consumers still hit
+CortexLM/backend; this is defense in depth on the ingest list, not a public
+board.
+
 | Field | Value |
 |-------|--------|
 | `challenge_id` | `bounty` |

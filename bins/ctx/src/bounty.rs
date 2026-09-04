@@ -175,11 +175,6 @@ pub async fn report(
             println!("  {field}: {}", compact(v));
         }
     }
-    if let Some(id) = reply.body.get("id").and_then(Value::as_str) {
-        println!();
-        println!("Follow it with:");
-        println!("  ctx bounty show {id}");
-    }
     println!();
     println!("Pay is precision times severity: an operator adjudication with a severity");
     println!("is what earns weight, and duplicates or re-files of already-fixed issues");
@@ -187,23 +182,29 @@ pub async fn report(
     Ok(())
 }
 
-/// Show one filed report.
-pub async fn show(client: &Client, id: &str, json_out: bool) -> Result<(), String> {
-    let path = challenge_path(BOUNTY, &format!("/v1/reports/{id}"));
-    let reply = client.get(&path).await?;
+/// Report bodies stay on the operator host. POST already returned id/state.
+pub fn show(id: &str, json_out: bool) -> Result<(), String> {
+    let msg = report_read_operator_local(id);
     if json_out {
-        println!("{}", reply.body);
-        return Ok(());
+        println!(
+            "{}",
+            json!({
+                "error": "report_reads_operator_local",
+                "id": id,
+                "message": msg,
+            })
+        );
     }
-    if !reply.ok() {
-        return Err(explain(reply.status, &reply.message()));
-    }
-    for field in ["id", "state", "miner_hotkey", "title", "severity"] {
-        if let Some(v) = reply.body.get(field) {
-            println!("{field}: {}", compact(v));
-        }
-    }
-    Ok(())
+    Err(msg)
+}
+
+fn report_read_operator_local(id: &str) -> String {
+    format!(
+        "report {id} is operator-local: GET /v1/reports is bearer-gated on the \
+         challenge host and blocked on the public gateway (POST submit stays open). \
+         The file reply already carried id, state, and fingerprint. Public scoring \
+         is the CortexLM/backend feed, not this ingest list."
+    )
 }
 
 /// Print the live bounty quotas and whether this host can score.
@@ -449,6 +450,15 @@ mod tests {
         let e503 = explain(503, "scoring unconfigured");
         assert!(e503.contains("Nothing was stored"), "{e503}");
         assert!(!e503.contains("BOUNTY_"), "{e503}");
+    }
+
+    #[test]
+    fn show_does_not_read_reports_over_the_public_gateway() {
+        let err = show("by_1", false).expect_err("operator-local");
+        assert!(err.contains("operator-local"), "{err}");
+        assert!(err.contains("by_1"), "{err}");
+        assert!(err.contains("POST submit stays open"), "{err}");
+        assert!(!err.contains("BOUNTY_"), "{err}");
     }
 
     #[test]
