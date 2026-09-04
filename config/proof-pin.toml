@@ -8,7 +8,8 @@
 #
 # Topic documents are signed by the `proof` row key in config/challenges.toml
 # (sr25519, domain `base-proof-topic-v1`). `topic_pubkey` must match that row.
-# The committed key is the throwaway CI row from CEREMONY.md — not the live seal.
+# See CEREMONY.md. This is the proof row topic key, not the live seal
+# (gateway bundle-seal key is gateway_sk, off-git).
 #
 # Floors a topic may tighten, never loosen:
 #   flops_budget_max              = 2e18
@@ -31,7 +32,7 @@ eval_image = "ghcr.io/cortexlm/proof-eval"
 eval_image_digest = ""
 proof_git = "https://github.com/CortexLM/relearn"
 proof_git_sha = ""
-topic_pubkey = "3ea26595735ffa8e1d6c5eb339acb3618d6a5c99cd32c9e9c09e4526ffd7841e"
+topic_pubkey = "3e7f70f09165e265ab89ab04a4fc91dc0531d54a100c538fb14c6f008421c375"
 flops_budget_max = 2000000000000000000
 epsilon_nll_min = 0.02
 epsilon_topic_max_regress_min = 0.05

@@ -353,12 +353,12 @@ fn s9_repo_config_loads_when_present() {
         (
             b"bounty",
             7000,
-            "d2ffbe70de7c052deafaba48b90544db4abc1133278c907f2018f457f34aac25",
+            "743688a1e1b2848b309205706b4dcae54bffe4233a5d7018053471e1dce45c21",
         ),
         (
             b"proof",
             3000,
-            "3ea26595735ffa8e1d6c5eb339acb3618d6a5c99cd32c9e9c09e4526ffd7841e",
+            "3e7f70f09165e265ab89ab04a4fc91dc0531d54a100c538fb14c6f008421c375",
         ),
     ];
     for (id, bps, pk) in expected {
