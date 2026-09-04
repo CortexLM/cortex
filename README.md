@@ -8,7 +8,9 @@
 [![License](https://img.shields.io/github/license/CortexLM/cortex)](https://github.com/CortexLM/cortex/blob/main/LICENSE)
 [![Bittensor](https://img.shields.io/badge/Bittensor-subnet-black.svg)](https://bittensor.com/)
 
-![Cortex Banner](assets/banner.jpg)
+<a href="whitepaper.pdf">Whitepaper</a>
+
+<img src="assets/banner.jpg" width="720" alt="Cortex Banner">
 
 </div>
 
