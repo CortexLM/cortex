@@ -21,14 +21,14 @@ not run evals.
 | Challenge | id | What miners improve | Default emission |
 |-----------|-----|---------------------|------------------|
 | **Bounty** | `bounty` | File real bug reports against the subnet | 2000 bps |
-| **Proof** | `proof` | Reproducible experiments against operator-published research topics; digest-pinned RLM judge | 8000 bps |
+| **Proof** | `proof` | Reproducible experiments (claim + code + FLOPs) against operator-published research topics; digest-pinned RLM judge | 8000 bps |
 
-Proof's `eval_image_digest` is empty (submits **503**). Emission is locked at
-2000/8000 (20%/80%) regardless of digest. Do not invent a sha256. The sum is
-10000. Neither share is a leftover
-Relearn / Prism / Design inheritance. `relearn`,
-`relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and `prism` are
-**off**: no trust-root row, no emission.
+Live emission is **bounty 2000 / proof 8000** (20/80). The sum is 10000.
+Proof's eval image is pinned at
+`ghcr.io/cortexlm/proof-eval@sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009`.
+An empty digest would still **503**. `relearn`, `relearn-image`,
+`relearn-agent`, `relearn-mm`, `design`, and `prism` are **off**: no
+trust-root row, no emission.
 
 Bounty pays precision times severity; an unpriced `valid` row is not
 creditable, and the triage-noise ratio stays off the visible score. Proof
