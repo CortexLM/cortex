@@ -145,7 +145,7 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 | Terraform droplets | done | 4 of 4: staging master, staging validator, prod master, prod validator. |
 | Staging master | done | Migrated to `/opt/base` CI-managed; old `/opt/gbase` stack torn down. |
 | Staging validator | done | Redeployed from same commit; `bundle gateway signature invalid` resolved. |
-| Prod master | done | Droplet up. Mainnet owner wallet on disk matches SubnetOwnerHotkey; `env-prod.yml` sets `BASE_GATEWAY_REQUIRE_OWNER=1` (`gateway_admin_token` required). Recreate the gateway on droplets after that compose change. First `v*.*.*` tag still outstanding (pin placeholders in Known gaps). |
+| Prod master | done | Droplet up. Mainnet owner wallet on disk matches SubnetOwnerHotkey; `env-prod.yml` sets `BASE_GATEWAY_REQUIRE_OWNER=1` (`gateway_admin_token` required). Recreate the gateway on droplets after that compose change. |
 | `deploy-staging.yml` | done | Auto on CI green; `--build-from source` for fast iteration; fail-closed health gate. |
 | `deploy-prod.yml` | done | Tag-based (`v*.*.*`); preflight (CI green + `origin/main` staging pins `commit_sha`); fail-closed Spaces backup; `promote.sh --confirm-prod`; `--build-from registry` (GHCR digest pull, no Rust compile on droplet). |
 | `images.yml` pin ladder | done | After GHCR push: write `deploy/digests/<sha>.json`, `promote.sh --env staging` for pin services, commit/push so prod preflight can match. |
@@ -204,7 +204,6 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 | Bounty scoring backend | The CortexLM/backend public feed is the only scorer. Without a readable `BOUNTY_BACKEND_PUBLIC_URL`, `POST /v1/reports` answers **503** rather than collecting bug-hunting work the host could never pay for, and the emitter pays nobody — it covers `E` with `ChallengeInternal` so the 7000 bps burns to uid 0 without 409ing every other challenge's seal. `BOUNTY_FORCE_SIM` is retired: a local scorer here would pay on adjudications no validator could reproduce. |
 | Relearn public repo | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) exists; `relearn_git_sha` `8ffbe8a0…` is pinned with `eval_image_digest` `sha256:4806db4b…`. Seed mirror: `docs/external-miner/relearn-seed/`. |
 | Staging owner check (netuid 541) | `REQUIRE_OWNER=0` until a dedicated 541 owner wallet. Disk mainnet `5ExuWpCM…` ≠ 541 SubnetOwnerHotkey. Do not install the mainnet owner as a fake 541 owner. |
-| Prod pin placeholders | `deploy/pins/prod.json` still ships zero-digests until the first successful promote; registry mode rejects placeholders. |
 | Spaces backup secrets | First prod promote is fail-closed without `BASE_BACKUP_ENDPOINT` + `SPACES_ACCESS_KEY_ID` / `SPACES_SECRET_ACCESS_KEY` (or AWS_* fallbacks) in GitHub. |
 | GitHub `production` environment | Enable required reviewers (and branch protection on `main` as desired) before relying on tag-driven prod; workflow already sets `environment: production`. |
 | TLS ACME | Ports 80/443 open on the firewall; gateway TLS termination not shipped yet. |
