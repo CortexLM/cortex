@@ -41,5 +41,7 @@ Install `ctx` from [README](./README.md). Proof miners pay Lium
 
 `relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and
 `prism` have no trust-root row. Submitting to them earns nothing.
+`ctx relearn|image|agent` still talk to a local stack (`--gateway`); they are
+not live work.
 
 Never paste `LIUM_API_KEY`, challenge secrets, or mnemonics into tickets or git.

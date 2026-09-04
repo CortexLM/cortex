@@ -81,6 +81,18 @@ Promotion needs all of this, not just a higher total:
 The manifest is the license attestation. `base` and `base_license` must name the
 pinned checkpoint; anything else is a `400`.
 
+The CLI still speaks this challenge for a local stack (`ctx image submit
+--gateway …`). It is **not** live work.
+
+```bash
+ctx image submit \
+  --hotkey <64-hex hotkey> \
+  --artifact-digest <sha256 of your artifact> \
+  --train-dataset your-training-corpus-id
+```
+
+The same thing with `curl`:
+
 ```bash
 curl -sS -X POST https://network.cortex.foundation/challenge/relearn-image/v1/submissions \
   -H 'content-type: application/json' \
