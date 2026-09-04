@@ -65,8 +65,7 @@ mod tests {
         let csp = h
             .iter()
             .find(|(k, _)| *k == "Content-Security-Policy")
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("");
+            .map_or("", |(_, v)| v.as_str());
         assert!(csp.starts_with("sandbox;"));
         assert!(!csp.contains("allow-scripts"));
     }
