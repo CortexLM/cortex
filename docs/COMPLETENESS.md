@@ -40,7 +40,7 @@ Honest per-component status as of `main` HEAD. Updated as phases land.
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Master check (`SubnetOwnerHotkey`) | done | Read from the live chain. Advisory by default; `BASE_GATEWAY_REQUIRE_OWNER=1` makes it fail-closed. Staging stays at `0` until a dedicated netuid-541 owner wallet is installed (do not install the mainnet owner as a fake 541 owner). |
+| Master check (`SubnetOwnerHotkey`) | done | Read from the live chain. Prod: `BASE_GATEWAY_REQUIRE_OWNER=1` fail-closed (wallet matches SubnetOwnerHotkey; `gateway_admin_token` required). Staging: `REQUIRE_OWNER=0` advisory until a dedicated netuid-541 owner wallet (disk mainnet `5ExuWpCM…` ≠ 541 SubnetOwnerHotkey). Do not install the mainnet owner as a fake 541 owner. Local smoke defaults to advisory. |
 | Registry + proxy | done | |
 | Bundle seal (`POST /v1/weights/raw` → `GET /v1/weights/latest`) | done | Unsealed: fail-closed burn (`sealed: false`, uid 0 = 100%) instead of 404. |
 | Chain backend | done | Live only. `fake_owner` was removed from `bins/gateway`. |
@@ -203,6 +203,7 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 | Bounty severity on the backend feed | Scoring credits a `valid` row only when the backend publishes a `severity`. Until CortexLM/backend emits it, valid rows land as `valid_unpriced`, no miner can be crowned, and the share burns. Fail-closed by design: an unpriced bug cannot be paid for. |
 | Bounty scoring backend | The CortexLM/backend public feed is the only scorer. Without a readable `BOUNTY_BACKEND_PUBLIC_URL`, `POST /v1/reports` answers **503** rather than collecting bug-hunting work the host could never pay for, and the emitter pays nobody — it covers `E` with `ChallengeInternal` so the 7000 bps burns to uid 0 without 409ing every other challenge's seal. `BOUNTY_FORCE_SIM` is retired: a local scorer here would pay on adjudications no validator could reproduce. |
 | Relearn public repo | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) exists; `relearn_git_sha` `8ffbe8a0…` is pinned with `eval_image_digest` `sha256:4806db4b…`. Seed mirror: `docs/external-miner/relearn-seed/`. |
+| Staging owner check (netuid 541) | `REQUIRE_OWNER=0` until a dedicated 541 owner wallet. Disk mainnet `5ExuWpCM…` ≠ 541 SubnetOwnerHotkey. Do not install the mainnet owner as a fake 541 owner. |
 | Prod pin placeholders | `deploy/pins/prod.json` still ships zero-digests until the first successful promote; registry mode rejects placeholders. |
 | Spaces backup secrets | First prod promote is fail-closed without `BASE_BACKUP_ENDPOINT` + `SPACES_ACCESS_KEY_ID` / `SPACES_SECRET_ACCESS_KEY` (or AWS_* fallbacks) in GitHub. |
 | GitHub `production` environment | Enable required reviewers (and branch protection on `main` as desired) before relying on tag-driven prod; workflow already sets `environment: production`. |
