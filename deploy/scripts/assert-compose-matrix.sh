@@ -67,25 +67,22 @@ services=$(render \
 if ! echo "$services" | grep -qx "gateway"; then
   fail "master role does not render gateway (must)"
 fi
-for required in relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge proof-challenge socket-proxy; do
+for required in bounty-challenge proof-challenge socket-proxy; do
   if ! echo "$services" | grep -qx "$required"; then
     fail "master role does not render $required (must)"
   fi
 done
-for retired in design-challenge design-egress-proxy prism-challenge; do
+for retired in design-challenge design-egress-proxy prism-challenge \
+               relearn-challenge relearn-t2i-challenge relearn-agent-challenge \
+               relearn-mm-challenge; do
   if echo "$services" | grep -qx "$retired"; then
-    fail "master role still renders retired $retired"
+    fail "master role still renders retired/off $retired"
   fi
 done
-# relearn-mm has no trust-root row, so a master host that brings it up would
-# run a challenge whose leaves can never verify.
-if echo "$services" | grep -qx "relearn-mm-challenge"; then
-  fail "master role renders relearn-mm-challenge (no trust-root row; must not)"
-fi
 if echo "$services" | grep -qx "validator"; then
   fail "master role renders validator (dual submitter; must not — use validator host)"
 fi
-echo "OK: master role renders gateway and challenge services (no validator)"
+echo "OK: master role renders gateway, bounty, proof (no validator, no relearn*)"
 
 # --- evil-gateway not in default or master ---
 services=$(render \
@@ -168,28 +165,32 @@ for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
 done
 echo "OK: bounty scores only from the backend public feed (no sim knob, no baked host)"
 
-# --- all five live challenges present in default; mm off; design/prism retired ---
+# --- two live challenges present in default; relearn*/design/prism retired ---
 default_services=$(render \
   -f docker-compose.yml \
   config --services)
-for required in relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge proof-challenge; do
+for required in bounty-challenge proof-challenge; do
   if ! echo "$default_services" | grep -qx "$required"; then
     fail "$required not in default compose"
   fi
 done
-for retired in prism-challenge design-challenge design-egress-proxy; do
+for retired in prism-challenge design-challenge design-egress-proxy \
+               relearn-challenge relearn-t2i-challenge relearn-agent-challenge \
+               relearn-mm-challenge; do
   if echo "$default_services" | grep -qx "$retired"; then
-    fail "retired $retired still in default compose"
+    fail "retired/off $retired still in default compose"
   fi
 done
-if echo "$default_services" | grep -qx "relearn-mm-challenge"; then
-  fail "relearn-mm-challenge renders by default (emission 0, must stay behind the mm profile)"
-fi
-# The profile still has to work, or "off" would mean "deleted".
+# The profiles still have to work, or "off" would mean "deleted".
 mm_services=$(render -f docker-compose.yml --profile mm config --services)
 echo "$mm_services" | grep -qx "relearn-mm-challenge" \
   || fail "the mm profile does not render relearn-mm-challenge"
-echo "OK: relearn, relearn-image, relearn-agent, bounty, proof in default compose; mm profile-gated; design/prism retired"
+relearn_services=$(render -f docker-compose.yml --profile relearn config --services)
+for required in relearn-challenge relearn-t2i-challenge relearn-agent-challenge; do
+  echo "$relearn_services" | grep -qx "$required" \
+    || fail "the relearn profile does not render $required"
+done
+echo "OK: bounty + proof in default compose; relearn/mm profile-gated; design/prism retired"
 
 # --- no fake chain backend survives anywhere in the matrix ---
 for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
@@ -254,13 +255,16 @@ echo "$local_services" | grep -qx "gateway" \
   || fail "env-local master stack does not render gateway"
 echo "$local_services" | grep -qx "validator" \
   || fail "env-local master stack does not render co-located validator"
-for required in relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge proof-challenge; do
+for required in bounty-challenge proof-challenge; do
   echo "$local_services" | grep -qx "$required" \
     || fail "env-local master stack does not render $required"
 done
-for probe in 28095:relearn-challenge 28096:bounty-challenge \
-             28097:relearn-t2i-challenge 28099:relearn-agent-challenge \
-             28100:proof-challenge; do
+for off in relearn-challenge relearn-t2i-challenge relearn-agent-challenge relearn-mm-challenge; do
+  if echo "$local_services" | grep -qx "$off"; then
+    fail "env-local master stack renders off $off (must stay behind a profile)"
+  fi
+done
+for probe in 28096:bounty-challenge 28100:proof-challenge; do
   port=${probe%%:*}
   svc=${probe#*:}
   echo "$local_rendered" | grep -qE "published: \"?${port}\"?" \
@@ -277,6 +281,6 @@ for banned in agent-challenge hypertraining-challenge miner-agent miner-socket-p
     fail "removed service still in default compose: $banned"
   fi
 done
-echo "OK: env-local preserves testnet/541; live challenges on 28095-28097, 28099, and 28100; removed agent/hypertraining/miner services"
+echo "OK: env-local preserves testnet/541; live challenges on 28096 and 28100; removed agent/hypertraining/miner services"
 
 echo "assert-compose-matrix: all checks passed"

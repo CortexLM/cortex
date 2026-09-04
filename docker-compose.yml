@@ -1,9 +1,9 @@
 # base control-plane stack
 #
-# Default: postgres + validator + updater + socket-proxy + the five live
-# challenges (relearn, relearn-image, relearn-agent, bounty, proof).
-# relearn-mm is OFF: it has no trust-root row, so it is behind the `mm`
-# profile and never comes up on a default or master stack.
+# Default: postgres + validator + updater + socket-proxy + the two live
+# challenges (bounty, proof). relearn* are OFF: they have no trust-root row,
+# so they sit behind the `relearn` / `mm` profiles and never come up on a
+# default or master stack. Design and Prism stay retired.
 # Master/owner host only:
 #   docker compose --profile master up -d
 # brings gateway as an additional service (D3).
@@ -184,9 +184,13 @@ services:
 
   # ---------------------------------------------------------------------------
   # relearn-challenge — Relearn LLM post-training factory (:8095).
-  # Miner pays Lium (BYOK). Control plane rents a digest-pinned eval image.
+  # OFF: no trust-root row, so it has no emission and no leaf of its can
+  # verify. Kept behind the `relearn` profile so the code stays exercised
+  # and the challenge can be turned on with a trust-root ceremony rather
+  # than a rewrite. Never enable it on a prod host.
   # ---------------------------------------------------------------------------
   relearn-challenge:
+    profiles: ["relearn"]
     image: relearn-challenge:0.1.0
     build:
       context: .
@@ -236,13 +240,12 @@ services:
       - base
 
   # ---------------------------------------------------------------------------
-  # relearn-t2i-challenge — Relearn Image (`relearn-image`, :8097). Miners
-  # fine-tune the pinned Cosmos3 generator; Q-Judger scores frozen prompt
-  # cells. The service keeps the pre-launch `t2i` spelling (docs/NAMING.md);
-  # the challenge id on the wire is `relearn-image`. The holdout prompt records
-  # are an operator secret, mounted read-only from deploy/secrets.
+  # relearn-t2i-challenge — Relearn Image (`relearn-image`, :8097). OFF: no
+  # trust-root row. Kept behind the `relearn` profile. Never enable on prod.
+  # The service keeps the pre-launch `t2i` spelling (docs/NAMING.md).
   # ---------------------------------------------------------------------------
   relearn-t2i-challenge:
+    profiles: ["relearn"]
     image: relearn-t2i-challenge:0.1.0
     build:
       context: .
@@ -293,13 +296,11 @@ services:
       - base
 
   # ---------------------------------------------------------------------------
-  # relearn-agent-challenge — Relearn Agent (:8099). Miners post-train the same
-  # Qwen3.8-27B checkpoint as `relearn` into an agent, and the eval replays the
-  # emitted tool traces: a model that answers without touching the tools or the
-  # observation fails the ablation arms. Episodes are an operator secret,
-  # mounted read-only from deploy/secrets.
+  # relearn-agent-challenge — Relearn Agent (:8099). OFF: no trust-root row.
+  # Kept behind the `relearn` profile. Never enable on prod.
   # ---------------------------------------------------------------------------
   relearn-agent-challenge:
+    profiles: ["relearn"]
     image: relearn-agent-challenge:0.1.0
     build:
       context: .

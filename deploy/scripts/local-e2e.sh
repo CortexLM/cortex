@@ -82,8 +82,8 @@ Prerequisites:
   - deploy/env/*.env via materialize-env.sh (examples OK for smoke)
   - For --live: base-owner wallet under deploy/secrets/wallets/ (btcli layout)
   - For --live on-chain weight submit: base-validator wallet
-  - Secret files: gateway_sk (seal), relearn_sk (challenge leaf sigs).
-    Smoke prefers ~/.base-secrets/challenge-relearn.sk when pubs match trust root;
+  - Secret files: gateway_sk (seal), bounty_sk / proof_sk (challenge leaf sigs).
+    Smoke prefers ~/.base-secrets/challenge-bounty.sk when pubs match trust root;
     otherwise mints and rebuilds the local trust root. Gateway wallet is NOT
     required to serve sealed weights.
 
@@ -99,7 +99,7 @@ Wallet roles:
   - Gateway owner wallet / REQUIRE_OWNER: master-only identity check (live).
     Not required for POST /v1/weights/raw, admin seal, or GET /v1/weights/latest.
   - gateway_sk: mini-secret for bundle seal signatures (required for seal).
-  - relearn_sk: challenge leaf signatures (must match trust root pubs).
+  - bounty_sk / proof_sk: challenge leaf signatures (must match trust root pubs).
   - Validator wallet: on-chain weight submit only (not weights/latest serving).
 
 EOF
@@ -219,9 +219,7 @@ start_tunnel() {
 ensure_env_files() {
   # Challenge env files are required by compose (BASE_DATABASE_URL → Postgres).
   if [[ ! -f deploy/env/postgres.env || ! -f deploy/env/gateway.env \
-    || ! -f deploy/env/validator.env || ! -f deploy/env/relearn-challenge.env \
-    || ! -f deploy/env/relearn-t2i-challenge.env \
-    || ! -f deploy/env/relearn-agent-challenge.env \
+    || ! -f deploy/env/validator.env \
     || ! -f deploy/env/bounty-challenge.env \
     || ! -f deploy/env/proof-challenge.env ]]; then
     log "materializing deploy/env/*.env from examples"
@@ -232,8 +230,7 @@ ensure_env_files() {
   local url
   url="$(database_url_from_postgres_env)"
   for f in deploy/env/gateway.env deploy/env/validator.env \
-    deploy/env/relearn-challenge.env deploy/env/relearn-t2i-challenge.env \
-    deploy/env/relearn-agent-challenge.env deploy/env/bounty-challenge.env \
+    deploy/env/bounty-challenge.env \
     deploy/env/proof-challenge.env; do
     if grep -q '^BASE_DATABASE_URL=' "$f" 2>/dev/null; then
       sed -i "s|^BASE_DATABASE_URL=.*|BASE_DATABASE_URL=${url}|" "$f"
@@ -347,46 +344,32 @@ PY
 ensure_secrets() {
   ensure_secret_file deploy/secrets/gateway_sk "gateway seal mini-secret"
   ensure_challenge_sk_aligned \
-    deploy/secrets/relearn_sk relearn \
-    "${BASE_SECRETS_DIR}/challenge-relearn.sk"
-  ensure_challenge_sk_aligned \
-    deploy/secrets/relearn_t2i_sk relearn-t2i \
-    "${BASE_SECRETS_DIR}/challenge-relearn-t2i.sk"
-  ensure_challenge_sk_aligned \
-    deploy/secrets/relearn_agent_sk relearn-agent \
-    "${BASE_SECRETS_DIR}/challenge-relearn-agent.sk"
-  ensure_challenge_sk_aligned \
     deploy/secrets/bounty_sk bounty \
     "${BASE_SECRETS_DIR}/challenge-bounty.sk"
   ensure_challenge_sk_aligned \
     deploy/secrets/proof_sk proof \
     "${BASE_SECRETS_DIR}/challenge-proof.sk"
-  mkdir -p deploy/secrets/lium deploy/secrets/relearn \
-    deploy/secrets/relearn-t2i deploy/secrets/relearn-agent deploy/secrets/bounty \
-    deploy/secrets/proof
+  mkdir -p deploy/secrets/lium deploy/secrets/bounty deploy/secrets/proof
   # Touch placeholders so compose bind-mounts stay files/dirs of the right kind.
   [[ -e deploy/secrets/lium/api_key ]] || : >deploy/secrets/lium/api_key
   [[ -e deploy/secrets/lium/ssh_ed25519 ]] || : >deploy/secrets/lium/ssh_ed25519
   [[ -e deploy/secrets/lium/ssh_ed25519.pub ]] || : >deploy/secrets/lium/ssh_ed25519.pub
-  for area in relearn relearn-t2i relearn-agent bounty proof; do
+  for area in bounty proof; do
     [[ -e "deploy/secrets/$area/admin_tokens" ]] || : >"deploy/secrets/$area/admin_tokens"
   done
   [[ -e deploy/secrets/proof/topics.json ]] || echo '[]' >deploy/secrets/proof/topics.json
   [[ -e deploy/secrets/proof/holdouts.json ]] || echo '{}' >deploy/secrets/proof/holdouts.json
   [[ -e deploy/secrets/proof/baselines.json ]] || echo '{}' >deploy/secrets/proof/baselines.json
   [[ -e deploy/secrets/bounty/session_secret ]] || dd if=/dev/urandom bs=32 count=1 status=none of=deploy/secrets/bounty/session_secret
-  # Relearn T2I refuses submissions without holdout records matching the pin
-  # commitment. Local smoke materializes them from the documented dev salt.
-  ensure_relearn_holdout
-  ensure_t2i_holdout
   local guarded=(deploy/secrets/bounty/session_secret)
-  for area in relearn relearn-t2i relearn-agent bounty proof; do
+  for area in bounty proof; do
     guarded+=("deploy/secrets/$area/admin_tokens")
   done
-  [[ -e deploy/secrets/relearn/holdout.json ]] \
-    && guarded+=(deploy/secrets/relearn/holdout.json)
-  [[ -e deploy/secrets/relearn-t2i/holdout.json ]] \
-    && guarded+=(deploy/secrets/relearn-t2i/holdout.json)
+  guarded+=(
+    deploy/secrets/proof/topics.json
+    deploy/secrets/proof/holdouts.json
+    deploy/secrets/proof/baselines.json
+  )
   chown 65532:65532 "${guarded[@]}" 2>/dev/null || true
   chmod 0400 "${guarded[@]}" 2>/dev/null || true
 }
@@ -470,10 +453,7 @@ ensure_local_trust_root() {
   mkdir -p "$dir"
   export BASE_TRUST_ROOT_DIR=/etc/base/config
 
-  local relearn_pk t2i_pk agent_pk bounty_pk proof_pk
-  relearn_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/relearn_sk")"
-  t2i_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/relearn_t2i_sk")"
-  agent_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/relearn_agent_sk")"
+  local bounty_pk proof_pk
   bounty_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/bounty_sk")"
   proof_pk="$(pubkey_hex_from_sk_file "$ROOT/deploy/secrets/proof_sk")"
 
@@ -481,17 +461,14 @@ ensure_local_trust_root() {
   if [[ ! -f "$dir/challenges.toml" || ! -f "$dir/challenges.toml.sig" || ! -f "$dir/owner.pubkey" ]]; then
     need_rebuild=1
   else
-    python3 - "$dir/challenges.toml" "$relearn_pk" "$t2i_pk" "$agent_pk" "$bounty_pk" "$proof_pk" <<'PY' || need_rebuild=1
+    python3 - "$dir/challenges.toml" "$bounty_pk" "$proof_pk" <<'PY' || need_rebuild=1
 import sys, tomllib
 from pathlib import Path
 doc = tomllib.loads(Path(sys.argv[1]).read_text())
 rows = {c["id"]: c.get("public_key", "").lower() for c in doc.get("challenges", [])}
 want = {
-    "relearn": sys.argv[2].lower(),
-    "relearn-image": sys.argv[3].lower(),
-    "relearn-agent": sys.argv[4].lower(),
-    "bounty": sys.argv[5].lower(),
-    "proof": sys.argv[6].lower(),
+    "bounty": sys.argv[2].lower(),
+    "proof": sys.argv[3].lower(),
 }
 sys.exit(0 if rows == want else 1)
 PY
@@ -518,17 +495,14 @@ PY
       --out-secret "$dir/owner.age" \
       --age-recipient "$recip"
   fi
-  python3 - "$dir/challenges.toml" "$relearn_pk" "$t2i_pk" "$agent_pk" "$bounty_pk" "$proof_pk" <<'PY2'
+  python3 - "$dir/challenges.toml" "$bounty_pk" "$proof_pk" <<'PY2'
 import pathlib, sys
 
 # Mirrors config/challenges.toml. Shares must sum to 10000 or the validator
-# flags an emission-share mismatch (D23).
+# flags an emission-share mismatch (D23). Bounty 7000 + proof 3000.
 rows = [
-    ("relearn", sys.argv[2], 3000),
-    ("relearn-image", sys.argv[3], 1000),
-    ("relearn-agent", sys.argv[4], 1000),
-    ("bounty", sys.argv[5], 3000),
-    ("proof", sys.argv[6], 2000),
+    ("bounty", sys.argv[2], 7000),
+    ("proof", sys.argv[3], 3000),
 ]
 text = "version = 1\nintroduced_epoch = 0\n"
 for cid, pk, bps in rows:
@@ -694,12 +668,6 @@ wait_all_health() {
   local soft_wait=30
   local saved="$WAIT_SECS"
   WAIT_SECS="$soft_wait"
-  wait_health relearn-challenge "http://127.0.0.1:${RELEARN_HOST_PORT}/health" || \
-    log "warning: relearn not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
-  wait_health relearn-t2i-challenge "http://127.0.0.1:${RELEARN_T2I_HOST_PORT}/health" || \
-    log "warning: relearn-image not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
-  wait_health relearn-agent-challenge "http://127.0.0.1:${RELEARN_AGENT_HOST_PORT}/health" || \
-    log "warning: relearn-agent not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
   wait_health bounty-challenge "http://127.0.0.1:${BOUNTY_HOST_PORT}/health" || \
     log "warning: bounty not healthy (continuing; try BASE_DOCKER_BUILD_FROM=source)"
   wait_health proof-challenge "http://127.0.0.1:${PROOF_HOST_PORT}/health" || \
@@ -708,7 +676,7 @@ wait_all_health() {
 }
 
 # Prove seal→serve without a gateway owner wallet: signed leaves + admin seal +
-# GET /v1/weights/latest must be 200. Uses relearn_sk + gateway_sk only.
+# GET /v1/weights/latest must be 200. Uses bounty_sk + gateway_sk only.
 probe_weights_latest() {
   if [[ "$DO_WEIGHTS_SMOKE" -ne 1 ]]; then
     log "skipping weights seal smoke (--no-weights-smoke)"
@@ -732,8 +700,8 @@ probe_weights_latest() {
   log "running weights-smoke (leaf submit → admin/seal → weights/latest)"
   ./target/release/weights-smoke \
     --gateway "$gw" \
-    --challenge-sk "$ROOT/deploy/secrets/relearn_sk" \
-    --challenge-id relearn \
+    --challenge-sk "$ROOT/deploy/secrets/bounty_sk" \
+    --challenge-id bounty \
     --netuid "$netuid" \
     --chain-endpoint "$endpoint" \
     | tee /tmp/local-e2e-weights-latest.json \

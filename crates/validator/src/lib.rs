@@ -5,8 +5,8 @@
 //! Task 29: bundle fetch, verify against **local** trust root, independent
 //! aggregate, dual final-vector comparison (`Match` / `VectorMismatch` /
 //! `InputInvalid` / `NoSubmission`). Fetch/verify never substitutes another
-//! epoch. Extrinsic submit is task 33; the coordination loop may persist a
-//! verified seal for burn-fallback resubmit after a gateway restart.
+//! epoch. Extrinsic submit is task 33; a verified seal may be persisted on
+//! disk (`BASE_VALIDATOR_LKG_PATH`) but unsealed latest is not a submit path.
 //! Task 30: verified-bundle mirror store, `GET /v1/bundle/root/{root}`, peer
 //! fetch by root when the gateway is unreachable (content-addressed).
 //! Task 31: peer root cross-check — `GET /v1/consensus/root/{epoch}` signed

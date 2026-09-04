@@ -1,0 +1,142 @@
+name: release-ctx
+
+# Builds the miner CLI for every platform miners actually run and attaches the
+# archives (plus SHA256SUMS.txt) to the GitHub Release for the tag.
+# scripts/install-ctx.sh downloads from that release and verifies the checksum,
+# so a release without the sums file installs nothing.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach assets to"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ctx ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            musl: true
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            musl: true
+          - name: darwin-amd64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+          - name: darwin-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - name: windows-amd64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # `ring` needs a C toolchain, and the musl targets are what make the
+      # Linux archives run on any distro without a glibc floor.
+      - name: Install musl toolchain
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build -p ctx --release --locked --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: matrix.name != 'windows-amd64'
+        run: |
+          set -euo pipefail
+          install -m 0755 "target/${{ matrix.target }}/release/ctx" ctx
+          tar -czf "ctx-${{ matrix.name }}.tar.gz" ctx
+          rm ctx
+
+      - name: Package (windows)
+        if: matrix.name == 'windows-amd64'
+        shell: pwsh
+        run: |
+          Copy-Item "target/${{ matrix.target }}/release/ctx.exe" ctx.exe
+          Compress-Archive -Path ctx.exe -DestinationPath "ctx-${{ matrix.name }}.zip"
+          Remove-Item ctx.exe
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctx-${{ matrix.name }}
+          path: |
+            ctx-${{ matrix.name }}.tar.gz
+            ctx-${{ matrix.name }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: attach assets
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ctx-*
+          merge-multiple: true
+          path: dist
+
+      # The install script fails closed without this file, so generate it from
+      # the archives that were actually built rather than from a static list.
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -1
+          sha256sum ctx-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          # Keep hand-written release notes; only add the install block.
+          append_body: true
+          body: |
+            Cortex subnet CLI (`ctx`) for ${{ inputs.tag || github.ref_name }}.
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/CortexLM/cortex/main/scripts/install-ctx.sh | sh
+            ctx challenges
+            ctx status
+            ```
+
+            Default gateway: https://network.cortex.foundation

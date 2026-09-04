@@ -346,33 +346,18 @@ fn s9_repo_config_loads_when_present() {
     }
     let (ch, ms) = load_config_dir(&root, 0, 3).expect("committed config must verify");
     let primary = ch.primary().unwrap();
-    assert_eq!(primary.body.challenges.len(), 5);
+    assert_eq!(primary.body.challenges.len(), 2);
 
-    // Five live challenges: Relearn, Relearn Image, Relearn Agent, Bounty, Proof.
-    let expected: [(&[u8], u16, &str); 5] = [
-        (
-            b"relearn",
-            3000,
-            "8ab577207bb6dfc770a850710824a098d53b1ee90abb92925bd0928937131674",
-        ),
-        (
-            b"relearn-image",
-            1000,
-            "923324e1df896b20c49c47f40dacbc4c53cab23e6cc5a1136529302b4c2da110",
-        ),
-        (
-            b"relearn-agent",
-            1000,
-            "220e489f8157e477730e2e3ee6ce51be0fcf8779575c486a70658a28d5a51841",
-        ),
+    // Two live challenges: Bounty 7000 bps, Proof 3000 bps (empty proof digest).
+    let expected: [(&[u8], u16, &str); 2] = [
         (
             b"bounty",
-            3000,
+            7000,
             "d2ffbe70de7c052deafaba48b90544db4abc1133278c907f2018f457f34aac25",
         ),
         (
             b"proof",
-            2000,
+            3000,
             "3ea26595735ffa8e1d6c5eb339acb3618d6a5c99cd32c9e9c09e4526ffd7841e",
         ),
     ];
@@ -404,7 +389,15 @@ fn s9_repo_config_loads_when_present() {
 
     // Off means absent: a challenge with no row has no emission and no leaf
     // that can verify under this root.
-    for off in [&b"relearn-mm"[..], b"relearn-t2i", b"design", b"prism"] {
+    for off in [
+        &b"relearn"[..],
+        b"relearn-image",
+        b"relearn-agent",
+        b"relearn-mm",
+        b"relearn-t2i",
+        b"design",
+        b"prism",
+    ] {
         assert!(
             primary.body.get(off).is_none(),
             "{} must not be live",
@@ -412,7 +405,7 @@ fn s9_repo_config_loads_when_present() {
         );
     }
     let shares = primary.body.emission_shares();
-    assert_eq!(shares.len(), 5);
+    assert_eq!(shares.len(), 2);
     assert_eq!(shares.iter().map(|s| s.1).sum::<u16>(), BPS_DENOM);
     // base-agent CVM path removed — committed allowlist is empty (fail-closed).
     let entries = &ms.primary().unwrap().body.entries;

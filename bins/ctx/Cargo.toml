@@ -1,0 +1,25 @@
+[package]
+name = "ctx"
+description = "Cortex subnet CLI: Proof submits and Bounty pairing for miners"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "ctx"
+path = "src/main.rs"
+
+[dependencies]
+bounty-challenge-task = { path = "../../crates/bounty-challenge-task" }
+clap = { version = "4", features = ["derive", "env"] }
+hex = "0.4"
+keystore = { path = "../../crates/keystore" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

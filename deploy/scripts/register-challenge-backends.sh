@@ -13,10 +13,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
 GATEWAY_URL="${GATEWAY_URL:-http://127.0.0.1:8080}"
-RELEARN_URL="${RELEARN_BACKEND_URL:-http://relearn-challenge:8095}"
-# Service names keep the pre-launch spelling; the ids are the live ones.
-RELEARN_IMAGE_URL="${RELEARN_IMAGE_BACKEND_URL:-http://relearn-t2i-challenge:8097}"
-RELEARN_AGENT_URL="${RELEARN_AGENT_BACKEND_URL:-http://relearn-agent-challenge:8099}"
 BOUNTY_URL="${BOUNTY_BACKEND_URL:-http://bounty-challenge:8096}"
 PROOF_URL="${PROOF_BACKEND_URL:-http://proof-challenge:8100}"
 COMPOSE_MODE=0
@@ -25,9 +21,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --compose) COMPOSE_MODE=1; shift ;;
     --gateway-url) GATEWAY_URL="$2"; shift 2 ;;
-    --relearn-url) RELEARN_URL="$2"; shift 2 ;;
-    --relearn-image-url) RELEARN_IMAGE_URL="$2"; shift 2 ;;
-    --relearn-agent-url) RELEARN_AGENT_URL="$2"; shift 2 ;;
     --bounty-url) BOUNTY_URL="$2"; shift 2 ;;
     --proof-url) PROOF_URL="$2"; shift 2 ;;
     -h|--help)
@@ -90,13 +83,10 @@ register_one() {
   esac
 }
 
-register_one relearn "$RELEARN_URL"
-register_one relearn-image "$RELEARN_IMAGE_URL"
-register_one relearn-agent "$RELEARN_AGENT_URL"
 register_one bounty "$BOUNTY_URL"
 register_one proof "$PROOF_URL"
 
-for challenge_id in relearn relearn-image relearn-agent bounty proof; do
+for challenge_id in bounty proof; do
   if [[ "$COMPOSE_MODE" -eq 1 ]]; then
     docker compose -f docker-compose.yml -f deploy/compose/role-master.yml \
       exec -T gateway curl -fsS -m 5 \
@@ -105,4 +95,4 @@ for challenge_id in relearn relearn-image relearn-agent bounty proof; do
     curl -fsS -m 5 "${GATEWAY_URL%/}/challenge/${challenge_id}/health" >/dev/null
   fi
 done
-echo "challenge proxy health: ok (relearn, relearn-image, relearn-agent, bounty, proof)"
+echo "challenge proxy health: ok (bounty, proof)"

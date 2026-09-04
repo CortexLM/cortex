@@ -46,8 +46,7 @@ services:
       - ./deploy/secrets/wallets:/run/base/wallets:ro
       - ./deploy/secrets/gateway_admin_token:/run/secrets/gateway_admin_token:ro
       # The sealer must sign with the same staging trust root the validator
-      # verifies against (relearn 3000 + relearn-image 1000 + relearn-agent
-      # 1000 + bounty 3000 + proof 2000), or /v1/weights/latest
+      # verifies against (bounty 7000 + proof 3000), or /v1/weights/latest
       # never shows challenge weight and the validator flags emission share mismatch (D23).
       - ./config/challenges.staging.toml:/etc/base/config/challenges.toml:ro
       - ./config/challenges.staging.toml.sig:/etc/base/config/challenges.toml.sig:ro
@@ -86,5 +85,5 @@ services:
       BASE_CHAIN_ENDPOINTS: "wss://test.chain.opentensor.ai:443,wss://test.finney.opentensor.ai:443"
       # CortexLM/backend public base. Empty → this host cannot score:
       # POST /v1/reports answers 503 and every bounty leaf is an explicit
-      # no-score, so the 3000 bps share burns to uid 0. Never bake a host.
+      # no-score, so the 7000 bps share burns to uid 0. Never bake a host.
       BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"

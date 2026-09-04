@@ -1,7 +1,10 @@
 # Proof challenge
 
-Live challenge id: **`proof`**. Emission **2000 bps** (operator-tunable; sum
-across the five live rows stays 10000). Port **8100** (local probe **28100**).
+Live challenge id: **`proof`**. Emission **3000 bps** while
+`eval_image_digest` is empty (live submits **503**). Retune to 5000/5000
+with `bounty` in the same ceremony that pins a non-empty proof-eval digest.
+Sum across the two live rows stays 10000. Port **8100** (local probe
+**28100**).
 
 Proof is the research-problem challenge. The unit of work is an
 **operator-published signed topic**, not a prompt and not an episode. Git
@@ -19,7 +22,7 @@ Do not invent a sha256.
 - A topic may tighten a floor, never loosen it. Floors live in the pin.
 - A baseline must be sealed (`script_sha256` + `metrics_commitment`) to
   open. Nobody is paid for beating a number nobody measured.
-- 2000 bps is split equally across currently `open` topics. Miner score =
+- 3000 bps is split equally across currently `open` topics. Miner score =
   **mean of per-topic lattices**. Skipped topic = 0. Empty open set →
   `NoScore(ChallengeInternal)`, not a paid 0.
 - `custom` metric family: unknown id is **400 at publish**, **503 at score**.

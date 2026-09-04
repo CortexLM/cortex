@@ -10,8 +10,8 @@ mod paginate;
 mod types;
 
 pub use frames::{
-    coding_arena, design_frame, prism_frame, proof_frame, relearn_agent_frame, relearn_frame,
-    relearn_image_frame,
+    bounty_frame, coding_arena, design_frame, prism_frame, proof_frame, relearn_agent_frame,
+    relearn_frame, relearn_image_frame,
 };
 pub use paginate::page_slice;
 pub use types::*;

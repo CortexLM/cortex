@@ -26,7 +26,7 @@ See [docs/](./docs/) and the control-plane mirror
 [`docs/external-miner/relearn.md`](https://github.com/CortexLM/cortex/blob/main/docs/external-miner/relearn.md).
 
 ```bash
-curl -sS -X POST https://<gateway>/challenge/relearn/v1/submissions \
+curl -sS -X POST https://network.cortex.foundation/challenge/relearn/v1/submissions \
   -H 'content-type: application/json' \
   -H "X-Lium-Api-Key: $LIUM_API_KEY" \
   -d '{"miner_hotkey":"<64-hex>","artifact_digest":"<sha256>"}'

@@ -31,7 +31,7 @@ REMOTE_DIR="${BASE_REMOTE_DIR:-/opt/base}"
 # bind source and the container's BASE_VERIFY_WORK_ROOT byte-for-byte.
 STATE_ROOT="${BASE_STATE_DIR:-/var/lib/base}"
 GHCR_PREFIX="${BASE_GHCR_PREFIX:-ghcr.io/baseintelligence/base}"
-PIN_SERVICES=(validator gateway updater relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge proof-challenge)
+PIN_SERVICES=(validator gateway updater bounty-challenge proof-challenge)
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 if [[ -n "${BASE_SSH_IDENTITY:-}" ]]; then
   SSH_OPTS+=(-i "$BASE_SSH_IDENTITY")
@@ -160,8 +160,8 @@ fi
 
 echo "remote-deploy: rsync tree"
 if [[ "$BUILD_FROM" == "prebuilt" ]]; then
-  for b in validator gateway updater relearn-challenge relearn-t2i-challenge relearn-agent-challenge bounty-challenge proof-challenge; do
-    [[ -x "$ROOT/target/release/$b" ]] || die "missing prebuilt binary target/release/$b — run: cargo build --release --features validator-bin/dcap -p validator-bin -p gateway-bin -p updater-bin -p relearn-challenge-bin -p relearn-t2i-challenge-bin -p relearn-agent-challenge-bin -p bounty-challenge-bin -p proof-challenge-bin"
+  for b in validator gateway updater bounty-challenge proof-challenge; do
+    [[ -x "$ROOT/target/release/$b" ]] || die "missing prebuilt binary target/release/$b — run: cargo build --release --features validator-bin/dcap -p validator-bin -p gateway-bin -p updater-bin -p bounty-challenge-bin -p proof-challenge-bin"
   done
 fi
 
@@ -318,9 +318,6 @@ if [[ "$BUILD_FROM" == "prebuilt" ]]; then
     "$ROOT/target/release/validator" \
     "$ROOT/target/release/gateway" \
     "$ROOT/target/release/updater" \
-    "$ROOT/target/release/relearn-challenge" \
-    "$ROOT/target/release/relearn-t2i-challenge" \
-    "$ROOT/target/release/relearn-agent-challenge" \
     "$ROOT/target/release/bounty-challenge" \
     "$ROOT/target/release/proof-challenge" \
     "$HOST:$REMOTE_DIR/target/release/"
@@ -455,11 +452,15 @@ docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} \$UP_PROFILE "\${UP_ARGS[@
 if [[ '$ROLE' == 'validator' ]]; then
   docker compose ${COMPOSE_FILES[*]} rm -sf \
     relearn-challenge relearn-t2i-challenge relearn-agent-challenge \
-    bounty-challenge socket-proxy \
+    relearn-mm-challenge bounty-challenge proof-challenge socket-proxy \
     >/dev/null 2>&1 || true
 elif [[ '$ROLE' == 'master' ]]; then
   docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} rm -sf validator \
     >/dev/null 2>&1 || true
+  # Stale relearn* containers from before this lock must not keep serving.
+  docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} rm -sf \
+    relearn-challenge relearn-t2i-challenge relearn-agent-challenge \
+    relearn-mm-challenge >/dev/null 2>&1 || true
 fi
 docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} \$UP_PROFILE ps
 # Local health probes via published tunnels if present, else container exec.
@@ -532,9 +533,6 @@ headers = {
     "Authorization": f"Bearer {token}",
 }
 backends = [
-    ("relearn", "http://relearn-challenge:8095"),
-    ("relearn-image", "http://relearn-t2i-challenge:8097"),
-    ("relearn-agent", "http://relearn-agent-challenge:8099"),
     ("bounty", "http://bounty-challenge:8096"),
     ("proof", "http://proof-challenge:8100"),
 ]
@@ -576,10 +574,10 @@ PY
   fi
   route_ok=0
   for attempt in \$(seq 1 15); do
-    prism_code=\$(curl -sS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/challenge/prism/health 2>/dev/null || echo 000)
-    design_code=\$(curl -sS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/challenge/design/health 2>/dev/null || echo 000)
-    echo "remote-deploy: challenge routing probe prism=\$prism_code design=\$design_code (attempt \$attempt)"
-    if [[ "\$prism_code" == "200" && "\$design_code" == "200" ]]; then
+    bounty_code=\$(curl -sS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/challenge/bounty/health 2>/dev/null || echo 000)
+    proof_code=\$(curl -sS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/challenge/proof/health 2>/dev/null || echo 000)
+    echo "remote-deploy: challenge routing probe bounty=\$bounty_code proof=\$proof_code (attempt \$attempt)"
+    if [[ "\$bounty_code" == "200" && "\$proof_code" == "200" ]]; then
       route_ok=1
       break
     fi

@@ -1,4 +1,4 @@
-# Relearn Image (live challenge)
+# Relearn Image (OFF — no trust-root row)
 
 Control-plane notes. Miners start at [`external-miner/relearn-image.md`](./external-miner/relearn-image.md).
 Validators start at [`external-miner/validators.md`](./external-miner/validators.md).

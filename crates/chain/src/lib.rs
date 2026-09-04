@@ -69,6 +69,9 @@ pub struct Metagraph {
     pub coldkeys: Vec<Vec<u8>>,
     /// Owner hotkey for the subnet (may equal first neuron or a dedicated owner).
     pub owner_hotkey: Vec<u8>,
+    /// `SubtensorModule.ValidatorPermit` flags, UID-aligned with [`Self::hotkeys`].
+    /// Empty when the backend did not resolve permits (treated as all `false`).
+    pub validator_permit: Vec<bool>,
 }
 
 /// `SubtensorModule.Axons(netuid, hotkey)` value — a miner's published endpoint.
@@ -412,6 +415,9 @@ pub struct FakeChainConfig {
     /// neuron is treated as self-owned (coldkey == hotkey) so tests that do
     /// not care about shared coldkeys keep unique owners.
     pub coldkeys: Vec<Vec<u8>>,
+    /// Optional `ValidatorPermit` flags, UID-aligned with [`Self::hotkeys`].
+    /// Empty → no permits (every UID is treated as a miner).
+    pub validator_permit: Vec<bool>,
     /// Published axons as `(hotkey, info)`; hotkeys absent here have never served.
     pub axons: Vec<(Vec<u8>, AxonInfo)>,
     /// Number of subsequent weight submits that should return [`ChainError::RateLimited`].
@@ -435,6 +441,7 @@ impl Default for FakeChainConfig {
             owner_hotkey: vec![0xA1; 32],
             hotkeys: vec![vec![0xA1; 32], vec![0xB2; 32], vec![0xC3; 32]],
             coldkeys: Vec::new(),
+            validator_permit: Vec::new(),
             axons: Vec::new(),
             rate_limit_fails_remaining: 0,
         }
@@ -570,6 +577,7 @@ impl ChainClient for FakeChain {
             hotkeys: self.cfg.hotkeys.clone(),
             coldkeys,
             owner_hotkey: self.cfg.owner_hotkey.clone(),
+            validator_permit: self.cfg.validator_permit.clone(),
         })
     }
 

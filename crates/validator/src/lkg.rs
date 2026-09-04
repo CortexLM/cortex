@@ -1,5 +1,6 @@
-//! Last sealed bundle on disk so a validator restart (or a gateway burn
-//! fallback after master bounce) can still Match and submit weights.
+//! Last sealed bundle on disk. Persisted on sealed Match for operator
+//! inspection; unsealed `/v1/weights/latest` is **not** a submit path and
+//! must not load this file for set-weights.
 
 use std::fs;
 use std::io::Write;
