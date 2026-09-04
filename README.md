@@ -39,8 +39,30 @@ Missing evidence fails closed rather than passing.
 Some env vars and host paths still spell `BASE_*`. That is leftover naming,
 not a second product.
 
-- **[How to mine — Bounty](docs/external-miner/bounty.md)**
-- **[How to mine — Proof](docs/external-miner/proof.md)**
-- **[How to validate](docs/external-miner/validators.md)**
+## Mine
+
+Miners and validators talk to one public gateway:
+**`https://network.cortex.foundation`**. Install the subnet CLI:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CortexLM/cortex/main/scripts/install-ctx.sh | sh
+
+ctx challenges   # the two live challenges and what they pay for
+ctx status       # can each challenge score right now, and is the epoch sealed
+```
+
+`ctx` ([`bins/ctx`](bins/ctx)) submits to the two live challenges and handles
+Bounty pairing. `ctx relearn|image|agent` still exist for a local stack;
+those challenges are **off** and earn nothing. `curl` works against the same
+routes.
+
+| Challenge | Start with | Guide |
+|-----------|-----------|-------|
+| Bounty | `ctx bounty pair` | **[How to mine — Bounty](docs/external-miner/bounty.md)** |
+| Proof | `ctx proof submit` | **[How to mine — Proof](docs/external-miner/proof.md)** |
+
+Start at **[docs/external-miner/](docs/external-miner/README.md)** for the
+A→Z, and **[How to validate](docs/external-miner/validators.md)** if you run a
+validator.
 
 Apache License 2.0 — see [LICENSE](./LICENSE).

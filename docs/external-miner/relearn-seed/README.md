@@ -26,6 +26,13 @@ See [docs/](./docs/) and the control-plane mirror
 [`docs/external-miner/relearn.md`](https://github.com/CortexLM/cortex/blob/main/docs/external-miner/relearn.md).
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/CortexLM/cortex/main/scripts/install-ctx.sh | sh
+ctx --help
+```
+
+This challenge is **off**. Live work is Bounty and Proof.
+
+```bash
 curl -sS -X POST https://network.cortex.foundation/challenge/relearn/v1/submissions \
   -H 'content-type: application/json' \
   -H "X-Lium-Api-Key: $LIUM_API_KEY" \

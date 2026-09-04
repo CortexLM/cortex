@@ -10,6 +10,7 @@
 mod api;
 mod bounty;
 mod catalog;
+mod off;
 mod proof;
 
 use std::path::PathBuf;
@@ -30,7 +31,8 @@ use proof::SubmitInput;
     long_about = "ctx talks to the public Cortex gateway at https://network.cortex.foundation.
 
 Live challenges: bounty (7000 bps) and proof (3000 bps). relearn*, design, and
-prism are off and earn nothing.
+prism are off and earn nothing. `ctx relearn|image|agent` still exist for a
+local stack; they are not live work.
 
 Start with 'ctx challenges' for what each one pays for, then 'ctx status' to
 see whether a host can score right now. A challenge that cannot score answers
@@ -77,6 +79,21 @@ enum Cmd {
     Bounty {
         #[command(subcommand)]
         cmd: BountyCmd,
+    },
+    /// Relearn (off): no emission. Local-stack submit only.
+    Relearn {
+        #[command(subcommand)]
+        cmd: off::OffCmd,
+    },
+    /// Relearn Image (off): no emission. Local-stack submit only.
+    Image {
+        #[command(subcommand)]
+        cmd: off::ImageCmd,
+    },
+    /// Relearn Agent (off): no emission. Local-stack submit only.
+    Agent {
+        #[command(subcommand)]
+        cmd: off::OffCmd,
     },
 }
 
@@ -214,6 +231,9 @@ async fn run(cli: Cli) -> Result<(), String> {
         Cmd::Weights => catalog::print_weights(&client, cli.json).await,
         Cmd::Proof { cmd } => run_proof(&client, cmd, cli.json).await,
         Cmd::Bounty { cmd } => run_bounty(&client, cmd, cli.json).await,
+        Cmd::Relearn { cmd } => off::run(&client, "relearn", cmd, cli.json).await,
+        Cmd::Image { cmd } => off::run_image(&client, cmd, cli.json).await,
+        Cmd::Agent { cmd } => off::run(&client, "relearn-agent", cmd, cli.json).await,
     }
 }
 
@@ -323,10 +343,43 @@ mod tests {
     }
 
     #[test]
-    fn relearn_commands_are_not_on_the_cli() {
-        assert!(Cli::try_parse_from(["ctx", "relearn", "status"]).is_err());
-        assert!(Cli::try_parse_from(["ctx", "image", "status"]).is_err());
-        assert!(Cli::try_parse_from(["ctx", "agent", "status"]).is_err());
+    fn off_commands_parse_but_are_not_live() {
+        assert!(Cli::try_parse_from(["ctx", "relearn", "status"]).is_ok());
+        assert!(Cli::try_parse_from(["ctx", "image", "prompts"]).is_ok());
+        assert!(Cli::try_parse_from(["ctx", "agent", "status"]).is_ok());
+        assert!(Cli::try_parse_from(["ctx", "relearn", "prompts"]).is_err());
+        assert!(catalog::find("relearn").is_none());
+        assert_eq!(
+            catalog::find_off("relearn").map(|c| c.emission_bps),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn off_submit_parses_repeatable_manifest_flags() {
+        let cli = Cli::try_parse_from([
+            "ctx",
+            "relearn",
+            "submit",
+            "--hotkey",
+            &"ab".repeat(32),
+            "--artifact-digest",
+            &"cd".repeat(32),
+            "--train-id",
+            "1",
+            "--train-dataset",
+            "my-mix",
+        ])
+        .expect("parse");
+        match cli.cmd {
+            Cmd::Relearn {
+                cmd: off::OffCmd::Submit(args),
+            } => {
+                assert_eq!(args.train_ids, vec![1]);
+                assert_eq!(args.train_datasets, vec!["my-mix".to_owned()]);
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
     }
 
     #[test]

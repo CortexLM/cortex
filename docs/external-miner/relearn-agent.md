@@ -62,6 +62,18 @@ model here.
 
 ## Submit
 
+The CLI still speaks this challenge for a local stack (`ctx agent submit
+--gateway …`). It is **not** live work.
+
+```bash
+ctx agent submit \
+  --hotkey <64-hex hotkey> \
+  --artifact-digest <sha256 of your artifact> \
+  --train-dataset your-training-environment-id
+```
+
+The same thing with `curl`:
+
 ```bash
 curl -sS -X POST https://network.cortex.foundation/challenge/relearn-agent/v1/submissions \
   -H 'content-type: application/json' \
