@@ -88,20 +88,20 @@ pub fn population_rows(arenas: &[Arena]) -> Vec<Value> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use site_types::{design_frame, prism_frame};
+    use site_types::{bounty_frame, proof_frame};
 
     #[test]
     fn population_ratio_normalises_to_max() {
-        let mut design = design_frame();
-        design.agents = 4;
-        let mut prism = prism_frame();
-        prism.agents = 8;
-        prism.emission_share = 0.5;
-        let rows = population_rows(&[design, prism]);
+        let mut bounty = bounty_frame();
+        bounty.agents = 4;
+        let mut proof = proof_frame();
+        proof.agents = 8;
+        proof.emission_share = 0.8;
+        let rows = population_rows(&[bounty, proof]);
         assert_eq!(rows[1]["agents"], 8);
         assert!((rows[0]["ratio"].as_f64().unwrap() - 0.5).abs() < f64::EPSILON);
         assert!((rows[1]["ratio"].as_f64().unwrap() - 1.0).abs() < f64::EPSILON);
-        let shares = emission_shares(&[prism_frame()]);
-        assert_eq!(shares[0]["arena"], "prism");
+        let shares = emission_shares(&[proof_frame()]);
+        assert_eq!(shares[0]["arena"], "proof");
     }
 }

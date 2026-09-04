@@ -40,29 +40,17 @@ RUN cargo build --release \
       -p validator-bin \
       -p gateway-bin \
       -p updater-bin \
-      -p relearn-challenge-bin \
-      -p relearn-t2i-challenge-bin \
-      -p relearn-agent-challenge-bin \
-      -p relearn-mm-challenge-bin \
       -p bounty-challenge-bin \
       -p proof-challenge-bin \
  && strip target/release/validator \
            target/release/gateway \
            target/release/updater \
-           target/release/relearn-challenge \
-           target/release/relearn-t2i-challenge \
-           target/release/relearn-agent-challenge \
-           target/release/relearn-mm-challenge \
            target/release/bounty-challenge \
            target/release/proof-challenge \
  && mkdir -p /out \
  && cp target/release/validator \
        target/release/gateway \
        target/release/updater \
-       target/release/relearn-challenge \
-       target/release/relearn-t2i-challenge \
-       target/release/relearn-agent-challenge \
-       target/release/relearn-mm-challenge \
        target/release/bounty-challenge \
        target/release/proof-challenge /out/
 
@@ -77,10 +65,6 @@ RUN apt-get update \
 COPY target/release/validator \
      target/release/gateway \
      target/release/updater \
-     target/release/relearn-challenge \
-     target/release/relearn-t2i-challenge \
-     target/release/relearn-agent-challenge \
-     target/release/relearn-mm-challenge \
      target/release/bounty-challenge \
      target/release/proof-challenge \
      /out/
@@ -121,53 +105,6 @@ ENTRYPOINT ["/usr/local/bin/gateway"]
 FROM runtime-base AS updater
 COPY --from=artifacts --chown=base:base /out/updater /usr/local/bin/updater
 ENTRYPOINT ["/usr/local/bin/updater"]
-
-FROM runtime-base AS relearn-challenge
-# Lium eval uses operator SSH; runtime-base has no ssh client.
-USER root
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssh-client \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/lib/relearn \
-    && chown -R base:base /var/lib/relearn
-USER base
-COPY --from=artifacts --chown=base:base /out/relearn-challenge /usr/local/bin/relearn-challenge
-ENTRYPOINT ["/usr/local/bin/relearn-challenge"]
-
-FROM runtime-base AS relearn-t2i-challenge
-# Cosmos3 generation and Q-Judger scoring both run on rented GPUs over SSH.
-USER root
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssh-client \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/lib/relearn-t2i \
-    && chown -R base:base /var/lib/relearn-t2i
-USER base
-COPY --from=artifacts --chown=base:base /out/relearn-t2i-challenge /usr/local/bin/relearn-t2i-challenge
-ENTRYPOINT ["/usr/local/bin/relearn-t2i-challenge"]
-
-FROM runtime-base AS relearn-agent-challenge
-# Episode replay and both ablation arms run on rented GPUs over SSH.
-USER root
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssh-client \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/lib/relearn-agent \
-    && chown -R base:base /var/lib/relearn-agent
-USER base
-COPY --from=artifacts --chown=base:base /out/relearn-agent-challenge /usr/local/bin/relearn-agent-challenge
-ENTRYPOINT ["/usr/local/bin/relearn-agent-challenge"]
-
-FROM runtime-base AS relearn-mm-challenge
-USER root
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssh-client \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/lib/relearn-mm \
-    && chown -R base:base /var/lib/relearn-mm
-USER base
-COPY --from=artifacts --chown=base:base /out/relearn-mm-challenge /usr/local/bin/relearn-mm-challenge
-ENTRYPOINT ["/usr/local/bin/relearn-mm-challenge"]
 
 FROM runtime-base AS bounty-challenge
 USER root

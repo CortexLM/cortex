@@ -27,10 +27,8 @@ jobs:
             "base/gateway"
             "base/validator"
             "base/updater"
-            "base/relearn-challenge"
-            "base/relearn-t2i-challenge"
-            "base/relearn-mm-challenge"
             "base/bounty-challenge"
+            "base/proof-challenge"
           )
           ok=0
           # First list packages to Learn exact names (debug)

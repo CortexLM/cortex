@@ -35,12 +35,10 @@ Compose always runs a digest-pinned `postgres` service (`base-pgdata` volume, he
 
 | Data | Store |
 |------|--------|
-| Relearn submissions (v0) | **in-memory** (`relearn-store`); Postgres can replace without changing HTTP |
 | Gateway raw weight leaves + sealed bundles | **Postgres** (`raw_weight_snapshot`, `epoch_bundle`, …) |
 | Validator attestations (when DB configured) | **Postgres** |
-| Design sandbox staging files | volume `${BASE_STATE_DIR}/design/staging` + `design-artifacts` |
 | Gateway challenge **backend registry** | **in-memory** — re-seed after gateway restart (`remote-deploy.sh` does this on master) |
-| site-api (`GET /v1/site/*`) | no DB — proxies challenge upstreams via gateway |
+| site-api (`GET /v1/site/*`) | no DB — proxies bounty/proof upstreams via gateway |
 | Unit/integration tests | may construct `Memory*Store` directly; omit `BASE_DATABASE_URL` only there |
 
 Migrations (`crates/db/migrations`) run on boot in gateway when `BASE_DATABASE_URL` is set. Compose requires `deploy/env/bounty-challenge.env` and `deploy/env/proof-challenge.env` so live challenges cannot silently boot without operator config.

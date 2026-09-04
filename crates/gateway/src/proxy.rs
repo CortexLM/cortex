@@ -282,7 +282,7 @@ pub fn is_view_png_path(path: &str) -> bool {
 
 /// Re-apply the viewer header floor at the last serving layer (defense in
 /// depth). Non-PNG paths get the full HTML lockdown (CSP `sandbox`, CORP
-/// same-origin). PNG screenshots get [`design_sanitize::screenshot_headers`]
+/// same-origin). PNG screenshots get [`crate::view_headers::screenshot_headers`]
 /// (`CORP: cross-origin`) so joinbase.ai can load them with a direct absolute
 /// URL and avoid proxying image bytes through Vercel. `Set-Cookie` is always
 /// stripped.
@@ -294,9 +294,9 @@ fn apply_view_lockdown(resp: &mut Response, frame_ancestors: &str, view_path: &s
         headers.remove(header::CONTENT_SECURITY_POLICY);
         headers.remove(HeaderName::from_static("cross-origin-opener-policy"));
         headers.remove(HeaderName::from_static("permissions-policy"));
-        design_sanitize::screenshot_headers()
+        crate::view_headers::screenshot_headers()
     } else {
-        design_sanitize::viewer_headers(frame_ancestors)
+        crate::view_headers::viewer_headers(frame_ancestors)
     };
     for (k, v) in floor {
         if let (Ok(name), Ok(val)) = (HeaderName::try_from(k), HeaderValue::try_from(v.as_str())) {

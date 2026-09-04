@@ -12,24 +12,6 @@ services:
       - "8089:8080"
     environment:
       BASE_ROLE: validator
-  relearn-challenge:
-    ports:
-      - "8095:8095"
-    environment:
-      BASE_CHALLENGE_BIND: 0.0.0.0:8095
-      RELEARN_FORCE_SIM: "true"
-  relearn-t2i-challenge:
-    ports:
-      - "8097:8097"
-    environment:
-      BASE_CHALLENGE_BIND: 0.0.0.0:8097
-      RELEARN_T2I_FORCE_SIM: "true"
-  relearn-agent-challenge:
-    ports:
-      - "8099:8099"
-    environment:
-      BASE_CHALLENGE_BIND: 0.0.0.0:8099
-      RELEARN_AGENT_FORCE_SIM: "true"
   proof-challenge:
     ports:
       - "8100:8100"

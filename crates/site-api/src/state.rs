@@ -17,7 +17,7 @@ pub type LatestSeal = Arc<dyn Fn() -> Option<(Vec<u8>, SealRecord)> + Send + Syn
 /// Site aggregator state (registry + HTTP client + optional chain).
 #[derive(Clone)]
 pub struct SiteState {
-    /// Backend registry (design / prism).
+    /// Backend registry (bounty / proof).
     pub registry: Arc<Registry>,
     /// Outbound client for challenge backends.
     pub client: reqwest::Client,

@@ -11,7 +11,9 @@ and it is **not** waiting on a digest retune to 5000/5000.
 [README](./README.md))  
 **Pin:** [`config/proof-pin.toml`](../../config/proof-pin.toml)  
 **Eval image:** `ghcr.io/cortexlm/proof-eval@sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009`  
-**Architecture / proxy:** `Qwen/Qwen3.8-0.6B`
+**RLM judge (eval-image InferenceOffer):** `Qwen/Qwen3.8-0.6B` — this is the
+judge agent baked into the eval image that evaluates miner submissions. It is
+**not** a model miners train against.
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 
@@ -64,7 +66,7 @@ rented.
 | Status field | What it means |
 |--------------|----------------|
 | `eval_image_digest` | Must be a `sha256:…` pin (live pin is `sha256:78b614a1…`). Empty → **503** |
-| `proxy_model` | Architecture string you must send. Live pin: `Qwen/Qwen3.8-0.6B` |
+| `proxy_model` | Id of the RLM judge agent baked into the eval image (not a miner training proxy). Live pin: `Qwen/Qwen3.8-0.6B`. Submit `architecture` must match |
 | `open_topics` empty | No currently `open` signed topic with a sealed baseline → **503** |
 | `baseline_sealed: false` | An open topic without `script_sha256` + `metrics_commitment` → **503** |
 | `live_harvest_wired: false` | Live RLM harvest is not connected → **503** |
@@ -194,7 +196,7 @@ claim against public numbers and checks FLOPs against the topic budget.
 | `artifact_digest` | yes | SHA-256 hex of the recipe bytes |
 | `claim` | yes | Non-empty string: NL of what improved |
 | `declared_flops` | yes | `u64`, must be `≤ topic.flops_budget` |
-| `architecture` | yes | Must equal the baked proxy (`Qwen/Qwen3.8-0.6B`) |
+| `architecture` | yes | Must equal the baked RLM judge id (`Qwen/Qwen3.8-0.6B`) |
 | `manifest.train_content_hashes` | yes (array) | Shard hashes you trained on (may be `[]` if you declare dataset ids) |
 | `manifest.train_dataset_ids` | yes (array) | Corpus ids you trained on (may be `[]` if you declare hashes) |
 | `artifact_uri` | no | Locator for the same bytes as `artifact_digest` |

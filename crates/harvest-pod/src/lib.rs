@@ -36,7 +36,7 @@ const SSH_SHORT_TIMEOUT_SECS: u64 = 120;
 /// What one challenge's eval image is called and what it prints.
 ///
 /// The entrypoint and sidecar name are part of the image contract, documented
-/// per challenge (for example `docs/RELEARN.md` § Eval image contract).
+/// per challenge (for example `docs/PROOF.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PodProgram {
     /// Directory the request and metrics sidecar live in, on the pod.

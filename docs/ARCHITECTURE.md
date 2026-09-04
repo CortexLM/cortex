@@ -6,11 +6,7 @@ Operator-facing map of the control plane. Normative byte contracts live in the f
 |------|--------|------|
 | [`BUNDLE_SPEC.md`](./BUNDLE_SPEC.md) | **FROZEN** | Epoch bundle SCALE layout, merkle, aggregation, on-chain payload bounds |
 | [`DESIGN_CHALLENGE.md`](./DESIGN_CHALLENGE.md) | archived freeze | Retired `design` product (not live) |
-| [`PRISM.md`](./PRISM.md) | archived | Retired `prism` product (Lium rails reused by Relearn) |
-| [`RELEARN.md`](./RELEARN.md) | **off** | Retired `relearn` product (HTTP submit; no trust-root row) |
-| [`RELEARN-IMAGE.md`](./RELEARN-IMAGE.md) | **off** | Retired `relearn-image` — Cosmos3 fine-tunes judged by Q-Judger (crates keep the `t2i` spelling) |
-| [`RELEARN-AGENT.md`](./RELEARN-AGENT.md) | **off** | Retired `relearn-agent` — replayed tool traces on the same base checkpoint as `relearn` |
-| [`RELEARN-MM.md`](./RELEARN-MM.md) | **off** | `relearn-mm` — no trust-root row, no emission; `mm` compose profile only |
+| [`PRISM.md`](./PRISM.md) | archived | Retired `prism` product (Lium rails reused by Proof harvest) |
 | [`BOUNTY.md`](./BOUNTY.md) | live | `bounty` — paired bug reports |
 | [`PROOF.md`](./PROOF.md) | live | `proof` — operator-published research topics, digest-pinned RLM judge |
 
@@ -46,7 +42,6 @@ Runbooks: [`runbooks/`](./runbooks/).
                     │  updater · socket-proxy ·             │
                     │  bounty-challenge ·                   │
                     │  proof-challenge                      │
-                    │  (relearn* behind profile `relearn`)  │
                     └───────────────┬─────────────────────┘
                                     │ TLS terminates in gateway (D20)
                                     │ /challenge/{id}/*  /v1/bundle/*
@@ -68,10 +63,6 @@ Runbooks: [`runbooks/`](./runbooks/).
 |----------------|------|
 | `gateway` | Master-only: registry, reverse proxy, bundle seal/serve, sole TLS owner; mounts marketing [`SITE_API.md`](./SITE_API.md) (`GET /v1/site/*`) |
 | `validator` | Fetch/mirror bundle, verify, recompute, peer cross-check, CRV4 submit, dissent |
-| `relearn-challenge` | **Off** (`relearn` profile): digest freeze, operator holdout unseal, Lium/sim eval. No trust-root row |
-| `relearn-t2i-challenge` | **Off** (`relearn` profile; serves `relearn-image`): frozen prompt cells, Q-Judger scoring. No trust-root row |
-| `relearn-agent-challenge` | **Off** (`relearn` profile): episode replay, ablation arms. No trust-root row |
-| `relearn-mm-challenge` | **Off** (`mm` profile): text-intact rerun, vision + agentic holdout with a pixel-shuffle control. No trust-root row, so it emits nothing |
 | `bounty-challenge` | **Master-only:** internal pair/reports/adjudicate; **reads** CortexLM/backend public API for scoring and signs leaves from those rows. An unreadable feed pays nobody — `E` is covered with `ChallengeInternal`, share burns to uid 0 — rather than scoring offline |
 | `proof-challenge` | **Master-only:** operator-published signed topics, per-topic holdout unseal, digest-pinned RLM judge, mean-of-open-topics lattice, sign leaves |
 | `updater` | Digest-pinned rollouts via `docker-socket-proxy` (master) |
@@ -112,16 +103,17 @@ Runbooks: [`runbooks/`](./runbooks/).
 
 Current emission posture: `bounty = 2000`, `proof = 8000` bps (sum 10000).
 Proof-weighted 20%/80% regardless of eval digest. Proof's eval digest is
-empty (submits 503); do not invent a sha256. `relearn`, `relearn-image`,
-`relearn-agent`, `relearn-mm`, `design`, and `prism` have no row, so they earn
-0 and a leaf claiming those ids fails the trust-root check. Each live
-challenge signs leaves under its **own** key; no two rows share one.
+pinned (`sha256:78b614a1…`); live submits still 503 until harvest is wired,
+a baseline is sealed, and ≥1 topic is open. Do not invent a sha256.
+`relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and
+`prism` have no row (product code removed), so they earn 0 and a leaf
+claiming those ids fails the trust-root check. Each live challenge signs
+leaves under its **own** key; no two rows share one.
 
 Gateway DB is **routing only**. It is never a source of challenge keys, emission shares, or measurements (D18, D23).
 
 Ceremony: [`config/CEREMONY.md`](../config/CEREMONY.md).  
-Rotation: [`runbooks/trust-root-rotation.md`](./runbooks/trust-root-rotation.md) (D21).  
-Design emission unlock: [`runbooks/design-enable-and-emission.md`](./runbooks/design-enable-and-emission.md).
+Rotation: [`runbooks/trust-root-rotation.md`](./runbooks/trust-root-rotation.md) (D21).
 
 ---
 
@@ -131,7 +123,6 @@ Design emission unlock: [`runbooks/design-enable-and-emission.md`](./runbooks/de
 |---------|----------|
 | default | postgres, validator, updater, socket-proxy, bounty-challenge, proof-challenge |
 | `master` | + gateway (owner host only); live challenges stay on master |
-| `relearn` | + relearn / relearn-t2i / relearn-agent (off; no trust-root row) |
 | `role-validator` overlay | disables gateway, updater, challenges, socket-proxy |
 | `evil-gateway` | **test-only** adversarial harness (task 48). Never prod. |
 
@@ -159,6 +150,5 @@ See D19 in [`THREAT_MODEL.md`](./THREAT_MODEL.md). Short form:
 | [`runbooks/trust-root-rotation.md`](./runbooks/trust-root-rotation.md) | D21 dual-accept |
 | [`runbooks/promote-rollback-restore.md`](./runbooks/promote-rollback-restore.md) | Digest promote, rollback, `pg_dump` |
 | [`runbooks/gateway-failover.md`](./runbooks/gateway-failover.md) | Manual failover (R9) |
-| [`runbooks/design-enable-and-emission.md`](./runbooks/design-enable-and-emission.md) | Design keygen + emission |
 | [`external-miner/README.md`](./external-miner/README.md) | Miner HTTP path + `protocol_version` badge |
 | [`../README.md`](../README.md) | Repo bootstrap |

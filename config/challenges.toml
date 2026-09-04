@@ -9,8 +9,8 @@
 #
 # `relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and
 # `prism` are OFF: they have no row here, so they have no emission and no
-# leaf may verify under this root. Relearn* code stays in the repo behind
-# the `relearn` / `mm` compose profiles.
+# leaf may verify under this root. Their product code is removed from this
+# repo (historical miner stubs stay under docs/external-miner/).
 version = 1
 introduced_epoch = 0
 

@@ -7,7 +7,7 @@ body:
       value: |
         Use this for defects in **this** repo (gateway, validator, challenges, deploy).
         Security issues: do **not** file here — see [SECURITY.md](../SECURITY.md).
-        Miner-facing public repo is [CortexLM/relearn](https://github.com/CortexLM/relearn).
+        Miner-facing docs live in this repo under `docs/external-miner/`.
   - type: textarea
     id: summary
     attributes:
@@ -22,8 +22,8 @@ body:
       options:
         - gateway
         - validator
-        - relearn-challenge
         - bounty-challenge
+        - proof-challenge
         - deploy / compose
         - docs
         - other

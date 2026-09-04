@@ -182,17 +182,14 @@ rsync -az --delete \
   "$ROOT/" "$HOST:$REMOTE_DIR/"
 
 # Ensure secrets dirs exist (empty OK if not bootstrapped).
-# deploy/secrets/lium is bind-mounted by relearn-challenge, so it must be a real
+# deploy/secrets/lium is bind-mounted by proof-challenge, so it must be a real
 # directory with real files: compose would otherwise create directories where
 # the container expects files.
-# Same footgun for file mounts: if relearn_sk is missing, Docker
+# Same footgun for file mounts: if bounty_sk/proof_sk is missing, Docker
 # creates *directories* at those paths and the challenge bin fails with
 # "Is a directory" / "secret file missing". Materialize empty files when
 # absent; if a directory already poisoned the path, replace it with a file.
 ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
-  '$REMOTE_DIR/deploy/secrets/relearn' \
-  '$REMOTE_DIR/deploy/secrets/relearn-t2i' \
-  '$REMOTE_DIR/deploy/secrets/relearn-agent' \
   '$REMOTE_DIR/deploy/secrets/bounty' \
   '$REMOTE_DIR/deploy/secrets/proof' \
   '$REMOTE_DIR/deploy/secrets/wallets' \
@@ -200,25 +197,19 @@ ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
   && for f in api_key ssh_ed25519 ssh_ed25519.pub; do \
        [ -e '$REMOTE_DIR/deploy/secrets/lium/'\$f ] || : > '$REMOTE_DIR/deploy/secrets/lium/'\$f; \
      done \
-  && [ -e '$REMOTE_DIR/deploy/secrets/relearn/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/relearn/admin_tokens' \
-  && [ -e '$REMOTE_DIR/deploy/secrets/relearn-t2i/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/relearn-t2i/admin_tokens' \
-  && [ -e '$REMOTE_DIR/deploy/secrets/relearn-agent/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/relearn-agent/admin_tokens' \
   && [ -e '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' \
   && [ -e '$REMOTE_DIR/deploy/secrets/bounty/session_secret' ] || : > '$REMOTE_DIR/deploy/secrets/bounty/session_secret' \
   && [ -e '$REMOTE_DIR/deploy/secrets/proof/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/proof/admin_tokens' \
   && [ -e '$REMOTE_DIR/deploy/secrets/proof/topics.json' ] || echo '[]' > '$REMOTE_DIR/deploy/secrets/proof/topics.json' \
   && [ -e '$REMOTE_DIR/deploy/secrets/proof/holdouts.json' ] || echo '{}' > '$REMOTE_DIR/deploy/secrets/proof/holdouts.json' \
   && [ -e '$REMOTE_DIR/deploy/secrets/proof/baselines.json' ] || echo '{}' > '$REMOTE_DIR/deploy/secrets/proof/baselines.json' \
-  && for sk in relearn_sk relearn_t2i_sk relearn_agent_sk bounty_sk proof_sk; do \
+  && for sk in bounty_sk proof_sk; do \
        p='$REMOTE_DIR/deploy/secrets/'\$sk; \
        if [ -d \"\$p\" ]; then rm -rf \"\$p\"; fi; \
        [ -e \"\$p\" ] || : > \"\$p\"; \
        chmod 400 \"\$p\"; chown 65532:65532 \"\$p\"; \
      done \
   && chmod 400 '$REMOTE_DIR/deploy/secrets/lium/'* \
-       '$REMOTE_DIR/deploy/secrets/relearn/admin_tokens' \
-       '$REMOTE_DIR/deploy/secrets/relearn-t2i/admin_tokens' \
-       '$REMOTE_DIR/deploy/secrets/relearn-agent/admin_tokens' \
        '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' \
        '$REMOTE_DIR/deploy/secrets/bounty/session_secret' \
        '$REMOTE_DIR/deploy/secrets/proof/admin_tokens' \
@@ -226,18 +217,13 @@ ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
        '$REMOTE_DIR/deploy/secrets/proof/holdouts.json' \
        '$REMOTE_DIR/deploy/secrets/proof/baselines.json' \
   && chown -R 65532:65532 '$REMOTE_DIR/deploy/secrets/lium' \
-       '$REMOTE_DIR/deploy/secrets/relearn' \
-       '$REMOTE_DIR/deploy/secrets/relearn-t2i' \
-       '$REMOTE_DIR/deploy/secrets/relearn-agent' \
        '$REMOTE_DIR/deploy/secrets/bounty' \
        '$REMOTE_DIR/deploy/secrets/proof' \
   && chmod -R a-w '$REMOTE_DIR/deploy/secrets/wallets' 2>/dev/null; \
   chown -R 65532:65532 '$REMOTE_DIR/deploy/secrets/wallets' 2>/dev/null; true"
 
-# Relearn artifact staging (host paths for harvested receipts).
-for area in relearn relearn-t2i relearn-agent proof; do
-  ssh_h "install -d -m 0775 -o 65532 -g 65532 '$STATE_ROOT/\$area'"
-done
+# Proof artifact staging (host paths for harvested receipts).
+ssh_h "install -d -m 0775 -o 65532 -g 65532 '$STATE_ROOT/proof'"
 
 
 # Materialize missing env from examples (dev-safe placeholders) if absent
@@ -277,32 +263,10 @@ esac
 # Challenge pins are rsynced with the tree. Live Lium rent refuses until each
 # eval_image_digest is a real sha256 pin.
 if [[ "$ROLE" == "master" ]]; then
-  for pin in relearn-pin.toml relearn-t2i-pin.toml relearn-agent-pin.toml proof-pin.toml; do
-    if ssh_h "test -f '$REMOTE_DIR/config/$pin'"; then
-      echo "remote-deploy: pin present at $REMOTE_DIR/config/$pin"
-    else
-      echo "remote-deploy: WARNING: pin missing at $REMOTE_DIR/config/$pin" >&2
-    fi
-  done
-  # Relearn T2I refuses submissions without a holdout file matching the pin's
-  # commitment. Warn loudly rather than letting the operator find out via 503s.
-  if ! ssh_h "test -s '$REMOTE_DIR/deploy/secrets/relearn-t2i/holdout.json'"; then
-    echo "remote-deploy: WARNING: relearn-t2i holdout records missing at" \
-      "$REMOTE_DIR/deploy/secrets/relearn-t2i/holdout.json;" \
-      "generate with: cargo run -p xtask -- relearn-t2i-holdout" >&2
-  fi
-  # Relearn LLM is the live challenge and its eval image is pinned, so these
-  # two files are the difference between scoring and 503 on every submission.
-  if ! ssh_h "test -s '$REMOTE_DIR/deploy/secrets/relearn/holdout.json'"; then
-    echo "remote-deploy: WARNING: relearn holdout records missing at" \
-      "$REMOTE_DIR/deploy/secrets/relearn/holdout.json;" \
-      "generate with: cargo run -p xtask -- relearn-holdout" >&2
-  fi
-  if ! ssh_h "test -s '$REMOTE_DIR/deploy/secrets/relearn/base-champion.json'"; then
-    echo "remote-deploy: WARNING: relearn champion baseline missing at" \
-      "$REMOTE_DIR/deploy/secrets/relearn/base-champion.json;" \
-      "every submission will 503 with 'no champion baseline recorded'" \
-      "(docs/RELEARN.md § Champion baseline)" >&2
+  if ssh_h "test -f '$REMOTE_DIR/config/proof-pin.toml'"; then
+    echo "remote-deploy: pin present at $REMOTE_DIR/config/proof-pin.toml"
+  else
+    echo "remote-deploy: WARNING: pin missing at $REMOTE_DIR/config/proof-pin.toml" >&2
   fi
 fi
 
@@ -379,9 +343,6 @@ PY
     python3 - "\$DIGESTS_FILE" <<'PY' | while IFS=\$'\t' read -r service image digest tag; do
 import json, sys
 optional = {
-    "relearn-challenge",
-    "relearn-t2i-challenge",
-    "relearn-agent-challenge",
     "bounty-challenge",
     "proof-challenge",
     "base-attest-helper",
@@ -451,16 +412,16 @@ docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} \$UP_PROFILE "\${UP_ARGS[@
 # validator-host wallet for WeightsSetRateLimit / CRV4 commits.
 if [[ '$ROLE' == 'validator' ]]; then
   docker compose ${COMPOSE_FILES[*]} rm -sf \
-    relearn-challenge relearn-t2i-challenge relearn-agent-challenge \
-    relearn-mm-challenge bounty-challenge proof-challenge socket-proxy \
+    bounty-challenge proof-challenge socket-proxy \
     >/dev/null 2>&1 || true
 elif [[ '$ROLE' == 'master' ]]; then
   docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} rm -sf validator \
     >/dev/null 2>&1 || true
-  # Stale relearn* containers from before this lock must not keep serving.
+  # Stale retired-challenge containers must not keep serving.
   docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} rm -sf \
     relearn-challenge relearn-t2i-challenge relearn-agent-challenge \
-    relearn-mm-challenge >/dev/null 2>&1 || true
+    relearn-mm-challenge design-challenge prism-challenge \
+    >/dev/null 2>&1 || true
 fi
 docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} \$UP_PROFILE ps
 # Local health probes via published tunnels if present, else container exec.

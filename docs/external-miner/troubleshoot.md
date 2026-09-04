@@ -33,7 +33,7 @@ Install `ctx` from [README](./README.md). Proof miners pay Lium
 | Symptom | Likely cause | What to check |
 |---------|--------------|---------------|
 | `400` missing / unknown / not-open `topic_id` | Topic is not currently open | `ctx proof topics`. The refusal is not a submission |
-| `400` architecture / `proxy not baked` | Proxy is not the one the pin bakes | Copy `proxy_model` from `ctx proof status` |
+| `400` architecture / `proxy not baked` | `architecture` is not the RLM judge id the pin bakes | Copy `proxy_model` from `ctx proof status`. That id is the eval-image judge, not a miner training proxy |
 | `400` `declared_flops exceeds the topic budget` | `declared_flops > topic.flops_budget` | Cap declared FLOPs at the open topic's budget |
 | `400` invalid hotkey / `artifact_digest` | Not 64 hex | Both must be 64 hex characters |
 | `rejected` with `contamination_evidence_missing` | Empty `manifest` | Declare `train_content_hashes` or `train_dataset_ids` |

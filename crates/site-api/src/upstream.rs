@@ -6,14 +6,6 @@ use serde_json::Value;
 use crate::state::SiteState;
 
 /// Challenge ids registered on the gateway.
-pub const DESIGN: &str = "design";
-pub const PRISM: &str = "prism";
-/// Relearn post-training factory.
-pub const RELEARN: &str = "relearn";
-/// Relearn Image generation.
-pub const RELEARN_IMAGE: &str = "relearn-image";
-/// Relearn Agent: replayed tool traces.
-pub const RELEARN_AGENT: &str = "relearn-agent";
 /// Proof: operator-published research topics.
 pub const PROOF: &str = "proof";
 /// Bounty: paired bug reports.

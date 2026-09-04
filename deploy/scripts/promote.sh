@@ -55,7 +55,7 @@ done
 
 [[ -n "$ENV_NAME" ]] || die "--env staging|prod required"
 case "$ENV_NAME" in staging|prod) ;; *) die "env must be staging|prod" ;; esac
-case "$SERVICE" in validator|gateway|updater|relearn-challenge|relearn-t2i-challenge|relearn-agent-challenge|bounty-challenge|proof-challenge) ;; *) die "service must be validator|gateway|updater|relearn-challenge|relearn-t2i-challenge|relearn-agent-challenge|bounty-challenge|proof-challenge" ;; esac
+case "$SERVICE" in validator|gateway|updater|bounty-challenge|proof-challenge) ;; *) die "service must be validator|gateway|updater|bounty-challenge|proof-challenge" ;; esac
 
 PIN_PATH="$(pin_path_for_env "$ROOT" "$ENV_NAME")"
 PROD_PATH="$(prod_pin_path "$ROOT")"

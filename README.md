@@ -52,9 +52,7 @@ ctx status       # can each challenge score right now, and is the epoch sealed
 ```
 
 `ctx` ([`bins/ctx`](bins/ctx)) submits to the two live challenges and handles
-Bounty pairing. `ctx relearn|image|agent` still exist for a local stack;
-those challenges are **off** and earn nothing. `curl` works against the same
-routes.
+Bounty pairing. `curl` works against the same routes.
 
 | Challenge | Start with | Guide |
 |-----------|-----------|-------|

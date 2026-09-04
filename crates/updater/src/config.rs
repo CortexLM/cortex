@@ -11,8 +11,8 @@ pub const ROLLABLE_SERVICES: &[&str] = &[
     "validator",
     "gateway",
     "updater",
-    "prism-challenge",
-    "design-challenge",
+    "bounty-challenge",
+    "proof-challenge",
 ];
 
 /// Runtime configuration for one updater target.
@@ -107,19 +107,21 @@ mod tests {
     use super::{is_rollable_service, ROLLABLE_SERVICES};
 
     #[test]
-    fn rollable_services_include_prism_and_design() {
+    fn rollable_services_include_live_challenges() {
         assert_eq!(
             ROLLABLE_SERVICES,
             &[
                 "validator",
                 "gateway",
                 "updater",
-                "prism-challenge",
-                "design-challenge"
+                "bounty-challenge",
+                "proof-challenge"
             ]
         );
-        assert!(is_rollable_service("prism-challenge"));
-        assert!(is_rollable_service("design-challenge"));
+        assert!(is_rollable_service("bounty-challenge"));
+        assert!(is_rollable_service("proof-challenge"));
+        assert!(!is_rollable_service("prism-challenge"));
+        assert!(!is_rollable_service("design-challenge"));
         assert!(!is_rollable_service("agent-challenge"));
         assert!(!is_rollable_service("design-egress-proxy"));
     }

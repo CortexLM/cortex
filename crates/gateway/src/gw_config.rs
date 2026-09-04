@@ -29,7 +29,7 @@ pub mod keys {
     pub const GATEWAY_SK_FILE: &str = "BASE_GATEWAY_SK_FILE";
     /// `frame-ancestors` allowlist for the viewer lockdown CSP the gateway
     /// re-applies to `/challenge/*/v1/view/*` responses (defense in depth).
-    /// Defaults to [`design_sanitize::default_frame_ancestors`].
+    /// Defaults to [`crate::view_headers::default_frame_ancestors`].
     pub const VIEW_FRAME_ANCESTORS: &str = "BASE_GATEWAY_VIEW_FRAME_ANCESTORS";
 
     pub use crate::tls::keys as tls;
