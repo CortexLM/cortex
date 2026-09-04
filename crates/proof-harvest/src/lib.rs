@@ -57,7 +57,7 @@ pub struct HarvestRequest {
     pub topic_id: String,
     /// Metric family wire name.
     pub family: String,
-    /// Proxy the image must train.
+    /// RLM judge id the image must use (eval-image InferenceOffer, not a miner training proxy).
     pub proxy_model: String,
     /// Eval image digest, so the image can stamp its own provenance.
     pub eval_image_digest: String,

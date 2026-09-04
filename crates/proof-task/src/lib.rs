@@ -8,12 +8,10 @@
 //! receipt domain   = b"base-proof-receipt-v1"
 //! ```
 //!
-//! Distinct from `relearn` / `relearn-image` / `relearn-agent` / `bounty` so
-//! leaf digests never collide.
+//! Distinct from other challenge ids (`bounty`, and historical `relearn*` /
+//! `design` / `prism`) so leaf digests never collide.
 //!
-//! What makes this challenge different from the other four is that **the
-//! problem itself is data**. A `relearn` item is a prompt and a `relearn-agent`
-//! item is an episode, both frozen in one pin. A Proof unit of work is a
+//! The **problem itself is data**. A Proof unit of work is a
 //! [`TopicDocument`]: an operator-published research problem — statement,
 //! machine-checkable constraints, a metric family, a FLOP/wall budget, a
 //! *sealed* baseline recipe, and a holdout commitment — signed by the same key
@@ -84,17 +82,16 @@ pub const SCORE_MAX: u64 = 1_000_000;
 
 /// Base model family the proxy must belong to (same family as `relearn`).
 ///
-/// Proof does **not** post-train the 27B checkpoint: the eval image bakes a
-/// proxy small enough that the sealed baseline and the miner recipe both
-/// finish inside the harvest SLA on one B200. The exact proxy id lives in
-/// [`ProofPin::proxy_model`] and must be a model the pinned image contains.
+/// Family lock for the RLM judge the eval image bakes. The exact judge id
+/// lives in [`ProofPin::proxy_model`] and must be a model the pinned image
+/// contains. This is not a miner training proxy.
 pub const BASE_MODEL_FAMILY: &str = "Qwen/Qwen3.8";
 
 /// Eval image repository (digest-pinned; never a floating tag in prod).
 pub const EVAL_IMAGE: &str = "ghcr.io/cortexlm/proof-eval";
 
-/// Public docs pointer until a dedicated Proof miner repo ships.
-pub const PROOF_GIT_URL: &str = "https://github.com/CortexLM/relearn";
+/// Public docs pointer (this control-plane repo).
+pub const PROOF_GIT_URL: &str = "https://github.com/CortexLM/cortex";
 
 /// Custom metric id for the agent-harness success-rate topic. Listed so an
 /// operator can publish the document; the eval image fail-closes until a

@@ -1,8 +1,7 @@
-//! Postgres store for PRISM submissions (production path).
+//! Postgres store for leftover PRISM harvest submission rows.
 //!
-//! Implements the challenge-side trait in `prism_challenge::store` without
-//! creating a dependency cycle: `db` does not know `prism_challenge`; the
-//! challenge crate provides thin adapters around these plain rows.
+//! Applied migrations keep these tables. Proof's Lium harvest stack still
+//! reads them via `prism-store`; there is no live `prism-challenge` crate.
 
 use serde_json::Value;
 use sqlx::PgPool;
