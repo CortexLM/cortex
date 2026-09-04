@@ -148,7 +148,7 @@ enum BountyCmd {
         #[arg(long, value_name = "CLAIM")]
         session: Option<String>,
     },
-    /// Show one filed report.
+    /// Report bodies are operator-local (not on the public gateway).
     Show {
         /// Report id returned by report.
         id: String,
@@ -280,7 +280,7 @@ async fn run_bounty(client: &Client, cmd: BountyCmd, json: bool) -> Result<(), S
             )
             .await
         }
-        BountyCmd::Show { id } => bounty::show(client, &id, json).await,
+        BountyCmd::Show { id } => bounty::show(&id, json),
         BountyCmd::Status => bounty::status(client, json).await,
     }
 }

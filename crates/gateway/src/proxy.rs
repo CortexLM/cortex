@@ -64,6 +64,7 @@ async fn proxy_inner(
     query: Option<String>,
     req: Request,
 ) -> Response {
+    let method = req.method().clone();
     if is_admin_path(&rest) {
         return (
             StatusCode::FORBIDDEN,
@@ -71,8 +72,13 @@ async fn proxy_inner(
         )
             .into_response();
     }
-
-    let method = req.method().clone();
+    if is_blocked_report_read(&method, &rest) {
+        return (
+            StatusCode::FORBIDDEN,
+            "report reads are not exposed via gateway; use master-local challenge port",
+        )
+            .into_response();
+    }
     let headers = req.headers().clone();
     let body = match axum::body::to_bytes(req.into_body(), 16 * 1024 * 1024).await {
         Ok(b) => b,
@@ -246,6 +252,16 @@ pub fn is_admin_path(rest: &str) -> bool {
     rest_norm.starts_with("v1/admin/") || rest_norm == "v1/admin"
 }
 
+/// Report bodies are operator-local. POST submit stays on the miner path.
+#[must_use]
+pub fn is_blocked_report_read(method: &Method, rest: &str) -> bool {
+    if *method != Method::GET {
+        return false;
+    }
+    let rest_norm = normalize_proxy_path(rest);
+    rest_norm == "v1/reports" || rest_norm.starts_with("v1/reports/")
+}
+
 /// Miner-controlled viewer paths (`/challenge/{id}/v1/view/{run}/{page}`).
 #[must_use]
 pub fn is_view_path(rest: &str) -> bool {
@@ -310,6 +326,16 @@ mod tests {
         assert!(is_admin_path("/v1/admin/rounds/1/candidates"));
         assert!(!is_admin_path("v1/harness"));
         assert!(!is_admin_path("v1/runs/abc"));
+    }
+
+    #[test]
+    fn report_reads_are_blocked_from_gateway_but_submit_is_not() {
+        assert!(is_blocked_report_read(&Method::GET, "v1/reports"));
+        assert!(is_blocked_report_read(&Method::GET, "v1/reports/by_1"));
+        assert!(is_blocked_report_read(&Method::GET, "v1/./reports/by_1"));
+        assert!(!is_blocked_report_read(&Method::POST, "v1/reports"));
+        assert!(!is_blocked_report_read(&Method::GET, "v1/status"));
+        assert!(!is_blocked_report_read(&Method::GET, "v1/pair"));
     }
 
     #[test]
