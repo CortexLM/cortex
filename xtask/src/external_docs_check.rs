@@ -116,6 +116,7 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
             "declared_flops",
             "claim",
             "payout_mode",
+            "discovery",
         ],
     ),
     (
@@ -669,6 +670,8 @@ mod tests {
         assert!(proof.contains(&"sum of per-topic"));
         assert!(proof.contains(&"declared_flops"));
         assert!(proof.contains(&"claim"));
+        assert!(proof.contains(&"payout_mode"));
+        assert!(proof.contains(&"discovery"));
     }
 
     #[test]

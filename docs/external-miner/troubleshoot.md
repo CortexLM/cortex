@@ -33,9 +33,12 @@ Install `ctx` from [README](./README.md). Proof miners pay Lium
 | Symptom | Likely cause | What to check |
 |---------|--------------|---------------|
 | `400` missing / unknown / not-open `topic_id` | Topic is not currently open | `ctx proof topics`. The refusal is not a submission |
-| `400` architecture | Proxy is not the one the pin bakes | Use the architecture id from the topic / pin |
+| `400` architecture / `proxy not baked` | Proxy is not the one the pin bakes | Copy `proxy_model` from `ctx proof status` |
+| `400` `declared_flops exceeds the topic budget` | `declared_flops > topic.flops_budget` | Cap declared FLOPs at the open topic's budget |
+| `400` invalid hotkey / `artifact_digest` | Not 64 hex | Both must be 64 hex characters |
 | `rejected` with `contamination_evidence_missing` | Empty `manifest` | Declare `train_content_hashes` or `train_dataset_ids` |
-| HTTP 503 on submit | Empty `eval_image_digest`, zero open topics, or unsealed baseline | `ctx proof status` → `can_score`. Do not invent a digest. Nothing was rented |
+| `rejected` with contamination / cheat code | Holdout overlap, unreproduced claim, strawman AdamW, … | Read the verdict `cheat_codes`. Contamination rejects without rent |
+| HTTP 503 on submit | Empty `eval_image_digest`, zero open topics, unsealed baseline, or harvest down | `ctx proof status` → `can_score`. Live digest is `sha256:78b614a1…`. Empty digest still 503. Do not invent a digest. Nothing was rented |
 
 ## Off challenges
 

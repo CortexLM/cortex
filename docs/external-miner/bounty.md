@@ -2,14 +2,20 @@
 
 # Bounty Challenge — miners
 
-Challenge id is `bounty`. One of two live challenges (`bounty` 2000 bps,
-`proof` 8000 bps). Report real Cortex product and backend bugs. Valid unique
-reports earn subnet weight. Every report is tagged with your Bittensor hotkey
-so operators can patch in real time and pay (or penalize) the right miner.
+Challenge id is `bounty`. One of two live challenges (`bounty` **2000 bps**,
+`proof` **8000 bps**, 20/80). Report real Cortex product and backend bugs. Valid
+unique reports earn subnet weight. Every report is tagged with your Bittensor
+hotkey so operators can patch in real time and pay (or penalize) the right miner.
 
 **Gateway:** `https://network.cortex.foundation`  
-**CLI:** `ctx bounty pair`, then `ctx bounty report` (install:
-[README](./README.md))
+**CLI:** `ctx bounty status`, then `ctx bounty pair`, then `ctx bounty report`
+(install: [README](./README.md))
+
+From zero:
+
+1. `ctx bounty status` — only file reports when `can_score` is yes
+2. `ctx bounty pair --hotkey your-ss58-hotkey --account-id your-chat-account-id --wallet-name your-wallet --accept-terms`
+3. `ctx bounty report --title "…" --body-file report.md --repro-file repro.md`
 
 Validators do **not** re-run your reports. They verify the sealed weight
 bundle. Ingest goes through the gateway:
