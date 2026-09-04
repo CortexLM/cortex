@@ -172,7 +172,7 @@ impl PinInference {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct TopicInference {
-    pub require_offer_commitment: Option<String>,
+    pub require_judge_offer_commitment: Option<String>,
     pub provider: Option<InferenceProviderKind>,
     pub base_url: Option<String>,
     pub model: Option<String>,
@@ -257,7 +257,7 @@ impl TopicInference {
         {
             return Err(TopicError::IncompleteInference);
         }
-        if let Some(need) = self.require_offer_commitment.as_deref() {
+        if let Some(need) = self.require_judge_offer_commitment.as_deref() {
             if !is_hex64(need) {
                 return Err(TopicError::BadOfferCommitment);
             }
@@ -443,7 +443,7 @@ impl InferenceOffer {
         {
             return Err(OfferError::CannotServeTopic);
         }
-        if let Some(need) = topic.inference.require_offer_commitment.as_deref() {
+        if let Some(need) = topic.inference.require_judge_offer_commitment.as_deref() {
             if !need.trim().eq_ignore_ascii_case(&self.config_commitment) {
                 return Err(OfferError::CannotServeTopic);
             }
@@ -608,7 +608,7 @@ mod tests {
             Err(OfferError::CannotServeTopic)
         ));
         topic.inference.mode = Some(InferenceMode::Chat);
-        topic.inference.require_offer_commitment = Some("ab".repeat(32));
+        topic.inference.require_judge_offer_commitment = Some("ab".repeat(32));
         assert!(matches!(
             offer().serves_topic(&pin(), &topic),
             Err(OfferError::CannotServeTopic)

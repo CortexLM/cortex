@@ -32,7 +32,9 @@ baseline + an open topic are on the host.
   `max_output_tokens`) plus schema v1, `allowed_modes`, token ceilings, and
   `inference_offer_commitment_alg = sha256`. A topic's signed `inference{…}`
   may **override** provider/model/mode/URL and may **only tighten** token caps
-  vs those pin defaults. Missing or misconfigured judge resolve → publish
+  vs those pin defaults. Optional `require_judge_offer_commitment` (64-hex)
+  pins the live judge offer's `config_commitment` — mismatch → **503**. It is
+  not a miner submit field. Missing or misconfigured judge resolve → publish
   **400** (open topic) / score **503**. Empty pin `model` / `base_url` is
   pre-launch fail-closed (like an empty digest). Fill via pin bump, topic
   publish, `PROOF_INFERENCE_BASE_URL` / `_FILE`, or the live offer origin.

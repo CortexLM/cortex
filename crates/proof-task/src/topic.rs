@@ -541,8 +541,8 @@ pub enum TopicError {
     /// Topic token cap is zero or above the pin inference default / ceiling.
     #[error("inference.{0} = {1} must be 1..={2}")]
     InferenceCeiling(&'static str, u32, u32),
-    /// `require_offer_commitment` is not 64 hex.
-    #[error("inference.require_offer_commitment must be 64 hex chars")]
+    /// `require_judge_offer_commitment` is not 64 hex.
+    #[error("inference.require_judge_offer_commitment must be 64 hex chars")]
     BadOfferCommitment,
     /// Open topic resolved to an incomplete provider config, or an override is unusable.
     #[error("inference is incomplete or misconfigured (provider, model, mode, tokens, origin)")]
@@ -1365,7 +1365,7 @@ mod tests {
         ));
 
         let mut bad = nll_topic();
-        bad.inference.require_offer_commitment = Some("zz".into());
+        bad.inference.require_judge_offer_commitment = Some("zz".into());
         assert!(matches!(
             bad.validate(&p, &[]),
             Err(TopicError::BadOfferCommitment)
