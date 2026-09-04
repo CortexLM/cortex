@@ -37,12 +37,12 @@ struct Args {
     #[arg(
         long,
         env = "BASE_CHALLENGE_SK_FILE",
-        default_value = "deploy/secrets/prism_sk"
+        default_value = "deploy/secrets/bounty_sk"
     )]
     challenge_sk: PathBuf,
 
     /// Challenge id (must match trust root; emission > 0).
-    #[arg(long, default_value = "prism")]
+    #[arg(long, default_value = "bounty")]
     challenge_id: String,
 
     /// Chain endpoint for metagraph hotkeys.
@@ -90,6 +90,11 @@ struct Args {
     /// File containing the admin bearer token (single line).
     #[arg(long, env = "BASE_GATEWAY_ADMIN_TOKEN_FILE")]
     admin_token_file: Option<PathBuf>,
+
+    /// Submit leaves only; do not `POST /v1/admin/seal`. Use when covering
+    /// a second paid challenge (`proof`) before the seal that needs both.
+    #[arg(long)]
+    skip_seal: bool,
 }
 
 #[tokio::main]
@@ -339,6 +344,10 @@ async fn run() -> Result<(), String> {
     );
 
     let admin_token = load_admin_token(&args)?;
+    if args.skip_seal {
+        eprintln!("weights-smoke: skip seal (leaves posted)");
+        return Ok(());
+    }
     admin_seal_and_check_latest(
         &args.gateway,
         epoch,

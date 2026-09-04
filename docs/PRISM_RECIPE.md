@@ -1,3 +1,7 @@
+This documents leftover `prism-recipe` / AutoModel harvest crates still used
+by Proof's Lium stack. There is **no live Prism challenge** (`prism-challenge`
+compose and `:28092` are gone). Do not treat this as a miner-facing product.
+
 # PRISM recipe v2.1.0 — AutoModel + attested 4-GPU training
 
 **Live contract:** recipe **`2.1.0`**, competition **`prism-v2.1`**

@@ -10,13 +10,14 @@
 # WeightsSetRateLimit, well inside the pruning window).
 #
 # Runs on the prod master only. No secrets are stored in this file; the
-# challenge mini-secrets stay at $BASE_CHALLENGE_SK_FILE / $BASE_DESIGN_SK_FILE
+# challenge mini-secrets stay at $BASE_BOUNTY_SK_FILE / $BASE_PROOF_SK_FILE
 # (mode 0400).
 #
-# D24 (exact-E): only challenges with emission_share_bps > 0 must have a
-# complete leaf set. Extra leaves for a 0-bps challenge (design today) are
-# IncompleteParticipantSet. Trust root is prism = 10000 / design = 0, so this
-# script emits prism NoScore only. All-NoScore still aggregates to uid-0 burn.
+# D24 (exact-E): every challenge with emission_share_bps > 0 must have a
+# complete leaf set. Live trust root is bounty = 2000 / proof = 8000, so this
+# script emits bounty then proof NoScore, then seals. All-NoScore still
+# aggregates to uid-0 burn. A paid challenge with no leaves 409s the seal
+# for every challenge.
 set -euo pipefail
 
 BASE_HOME="${BASE_HOME:-/opt/base}"
@@ -25,8 +26,8 @@ NETUID="${BASE_NETUID:-100}"
 # Ordered failover list wins; weights-smoke passes it straight to
 # chain-live, which cools a rate-limited endpoint and tries the next.
 CHAIN="${BASE_CHAIN_ENDPOINTS:-${BASE_CHAIN_ENDPOINT:-wss://entrypoint-finney.opentensor.ai:443}}"
-SK="${BASE_CHALLENGE_SK_FILE:-${BASE_HOME}/deploy/secrets/prism_sk}"
-DESIGN_SK="${BASE_DESIGN_SK_FILE:-${BASE_HOME}/deploy/secrets/design_sk}"
+BOUNTY_SK="${BASE_BOUNTY_SK_FILE:-${BASE_HOME}/deploy/secrets/bounty_sk}"
+PROOF_SK="${BASE_PROOF_SK_FILE:-${BASE_HOME}/deploy/secrets/proof_sk}"
 BIN="${WEIGHTS_SMOKE_BIN:-${BASE_HOME}/bin/weights-smoke}"
 LOG="${BURN_SEAL_LOG:-/var/log/base-burn-seal.log}"
 LOCK="${BURN_SEAL_LOCK:-/run/base-burn-seal.lock}"
@@ -42,10 +43,17 @@ if ! flock -n 9; then
   exit 0
 fi
 
+smoke() {
+  local challenge_id="$1" sk="$2"
+  shift 2
+  "${BIN}" --gateway "${GATEWAY}" --burn --netuid "${NETUID}" \
+    --chain-endpoint "${CHAIN}" --challenge-id "${challenge_id}" \
+    --challenge-sk "${sk}" "$@"
+}
+
 {
-  echo "$(date -Is) seal start gateway=${GATEWAY} netuid=${NETUID} challenge=prism"
-  if out="$("${BIN}" --gateway "${GATEWAY}" --burn --netuid "${NETUID}" \
-      --chain-endpoint "${CHAIN}" --challenge-id prism --challenge-sk "${SK}" 2>&1)"; then
+  echo "$(date -Is) seal start gateway=${GATEWAY} netuid=${NETUID} challenges=bounty,proof"
+  if out="$( { smoke bounty "${BOUNTY_SK}" --skip-seal && smoke proof "${PROOF_SK}"; } 2>&1 )"; then
     echo "${out}" | grep -E 'seal ok|latest OK' || echo "${out}" | tail -3
     echo "$(date -Is) seal ok"
   else

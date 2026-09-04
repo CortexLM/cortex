@@ -4,15 +4,15 @@
 # challenge.
 #
 # Tip reseal: `POST /v1/admin/seal` rebuilds from current leaves. When the tip
-# is already sealed but leaves tip-superseded (design/prism re-emit), a new
+# is already sealed but leaves tip-superseded (bounty/proof re-emit), a new
 # `epoch_bundle.revision` is appended. Identical merkle/vector → no-op 200.
 #
-# Why a walk-back: design historically emitted only in a tight late-tempo
-# window and could skip alternate epochs (end-of-epoch relabel race). Waiting
-# solely on *current* epoch then 409s forever while `/v1/weights/latest` stays
-# pinned on an older real seal (burn seals cannot outrank it). Trying current,
-# then current-1 … recovers the newest sealable epoch. Walk-back remains for
-# incomplete D24; tip reseal success on current stops the walk (expected).
+# Why a walk-back: a live challenge can miss an epoch while the other still
+# posts. Waiting solely on *current* epoch then 409s forever while
+# `/v1/weights/latest` stays pinned on an older real seal (burn seals cannot
+# outrank it). Trying current, then current-1 … recovers the newest sealable
+# epoch. Walk-back remains for incomplete D24; tip reseal success on current
+# stops the walk (expected).
 #
 # block_b pins the bundle metagraph to that epoch's start block
 # (LastEpochBlock − k×tempo) so D24 participant matching holds.

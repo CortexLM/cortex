@@ -7,7 +7,7 @@ End-to-end testnet 541 procedure on the 2-host staging pair.
 - Staging master (`base-staging`, 68.183.23.51 / 10.116.0.2) running master role
 - Staging validator (`base-staging-validator`, 142.93.197.253 / 10.116.0.4) running validator role
 - Both deployed from the same `main` commit via `deploy-staging.yml` or manual `remote-deploy.sh`
-- `deploy/secrets/challenge_sk` and `deploy/secrets/gateway_sk` present on master (mode 0400, uid 65532)
+- `deploy/secrets/bounty_sk`, `deploy/secrets/proof_sk`, and `deploy/secrets/gateway_sk` present on master (mode 0400, uid 65532)
 - `deploy/env/*.env` materialized on both hosts (mode 0600)
 
 ## Verify staging master
@@ -16,9 +16,9 @@ End-to-end testnet 541 procedure on the 2-host staging pair.
 ssh root@68.183.23.51
 cd /opt/base
 docker compose -f docker-compose.yml -f deploy/compose/role-master.yml -f deploy/compose/env-staging.yml --profile master ps
-# All services Up, postgres + validator healthy
-curl -fsS http://127.0.0.1:18080/healthz   # validator tunnel
-curl -fsS http://127.0.0.1:18090/healthz   # agent-challenge tunnel
+# All services Up, postgres healthy; gateway + bounty-challenge + proof-challenge on master
+curl -fsS http://127.0.0.1:18080/healthz   # validator tunnel (if co-located; droplet master has no validator)
+curl -fsS http://127.0.0.1:8080/healthz    # gateway
 ```
 
 ## Verify staging validator
@@ -27,7 +27,7 @@ curl -fsS http://127.0.0.1:18090/healthz   # agent-challenge tunnel
 ssh root@142.93.197.253
 cd /opt/base
 docker compose -f docker-compose.yml -f deploy/compose/role-validator.yml -f deploy/compose/env-staging.yml ps
-# validator + agent-challenge + postgres + socket-proxy Up (no gateway)
+# validator + postgres + socket-proxy Up (no gateway, no challenge exec)
 docker logs $(docker ps -q --filter name=validator) 2>&1 | tail -20
 # Look for: "Match epoch=" lines (bundle signature valid → coordination loop healthy)
 ```
@@ -41,10 +41,8 @@ If validator logs show `bundle gateway signature invalid`:
 
 ```bash
 ssh root@68.183.23.51
-curl -fsS http://127.0.0.1:18081/healthz   # gateway tunnel (if using master-net compose)
-# Or in-container:
-docker exec $(docker ps -q --filter name=gateway) curl -fsS http://127.0.0.1:8080/v1/weights/latest
-# Returns SCALE-encoded sealed bundle
+curl -fsS http://127.0.0.1:8080/v1/weights/latest
+# JSON: sealed true after a real seal; burn fallback is sealed:false (uid0=100%) — do not submit that
 ```
 
 ## Register challenge backends (required after gateway restart)
@@ -63,26 +61,27 @@ TOKEN=$(tr -d '[:space:]' </opt/base/deploy/secrets/gateway_admin_token)
 curl -fsS -X POST http://127.0.0.1:8080/v1/admin/backends \
   -H 'content-type: application/json' \
   -H "Authorization: Bearer ${TOKEN}" \
-  -d '{"challenge_id":"prism","base_url":"http://prism-challenge:8092","weight":1}'
+  -d '{"challenge_id":"bounty","base_url":"http://bounty-challenge:8096","weight":1}'
 curl -fsS -X POST http://127.0.0.1:8080/v1/admin/backends \
   -H 'content-type: application/json' \
   -H "Authorization: Bearer ${TOKEN}" \
-  -d '{"challenge_id":"design","base_url":"http://design-challenge:8093","weight":1}'
+  -d '{"challenge_id":"proof","base_url":"http://proof-challenge:8100","weight":1}'
 unset TOKEN
-curl -fsS http://staging.api.joinbase.ai/challenge/prism/health
-curl -fsS http://staging.api.joinbase.ai/challenge/design/health
+curl -fsS http://staging.api.joinbase.ai/challenge/bounty/health
+curl -fsS http://staging.api.joinbase.ai/challenge/proof/health
 ```
 
 Public staging API: cleartext **`http://staging.api.joinbase.ai`** (`/healthz`,
-`/challenge/{prism|design}/v1/...`). Challenge liveness is `/health` (not `/healthz`).
+`/challenge/{bounty|proof}/v1/...`). Challenge liveness is `/health` (not `/healthz`).
 
 ## Verify challenge identities
 
 ```bash
 ssh root@68.183.23.51
-docker exec $(docker ps -q --filter name=prism-challenge) /usr/local/bin/prism-challenge identity
-# Prints: challenge_id=prism scoring_version=2 public_key=...
-docker exec $(docker ps -q --filter name=design-challenge) /usr/local/bin/design-challenge identity
+curl -fsS http://127.0.0.1:8080/challenge/bounty/v1/status
+# JSON includes challenge_id=bounty, can_score, scoring_backend
+curl -fsS http://127.0.0.1:8080/challenge/proof/v1/status
+# JSON includes challenge_id=proof, can_score, proxy_model (RLM judge id)
 ```
 
 ## Testnet chain (read-only smoke)
@@ -116,6 +115,6 @@ git checkout <good-sha>
 
 ## Known limitations (see docs/COMPLETENESS.md)
 
-- `FakeChain` is the default backend; `BASE_CHAIN_BACKEND=live` switches to `chain-live` (Phase 6).
-- `agent-challenge` epoch dispatch is opt-in via `BASE_CHALLENGE_DISPATCH=1` (Phase 7).
+- `FakeChain` is the default backend; `BASE_CHAIN_BACKEND=live` switches to `chain-live`.
 - CRV4 tlock encryption is implemented (`tle` / Drand Quicknet); when commit-reveal is off, `set_weights` is used instead.
+- Proof live submits stay **503** until harvest is wired, a baseline is sealed, and ≥1 topic is open.

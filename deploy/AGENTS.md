@@ -49,23 +49,17 @@ Bounty scores **only** from the CortexLM/backend public feed. Set `BOUNTY_BACKEN
 
 With no readable feed the host answers **503** on `POST /v1/reports` and pays nobody: it covers `E` with `NoScore(ChallengeInternal)`, so the 2000 bps burns to uid 0 while D24 still holds (leaving `E` uncovered would 409 the seal for *every* challenge, since bounty holds a paid trust-root row). `BOUNTY_FORCE_SIM` is retired and ignored; `assert-compose-matrix.sh` fails if any compose file reintroduces it. Verify with `./deploy/scripts/local-e2e.sh --smoke` (it POSTs ingest and asserts 503 without a feed, 401 with one) or by hand: `GET /challenge/bounty/v1/status` → `scoring_backend`, `can_score`. Details: [`docs/BOUNTY.md`](../docs/BOUNTY.md).
 
-## Prism Lium GPU profiles (do not mix)
+## Proof harvest (Lium)
 
-Default 1B train SKU is **2× NVIDIA RTX PRO 6000 Blackwell Server Edition**
-(`PRISM_POD_GPU_COUNT=2`, needles `RTX PRO 6000` / `Blackwell Server`).
-Second profile: **4× RTX 5090** (`PRISM_POD_GPU_COUNT=4`). Override needles
-with `PRISM_POD_GPU_NAME`. Never fall through to 8×5090. Prefer an
-unsplittable full-host 6000 rent when Lium will not split. Do **not** flip
-live `:28092` scoring/emission when changing pod width. Details:
-[`docs/PRISM.md`](../docs/PRISM.md), [`docs/runbooks/prism-enable-lium-and-emission.md`](../docs/runbooks/prism-enable-lium-and-emission.md).
+Proof scores on a digest-pinned eval image. Miners pay Lium (BYOK
+`LIUM_API_KEY`). Leftover `prism-*` crates are that harvest stack, not a live
+Prism challenge. Do **not** reintroduce `prism-challenge` compose or
+`:28092`. Details: [`docs/PROOF.md`](../docs/PROOF.md).
 
-Verify rows (local master stack):
-
-```bash
-docker compose -f docker-compose.yml exec -T postgres \
-  sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
-  "SELECT COUNT(*) FROM design_harness; SELECT COUNT(*) FROM prism_submission;"'
-```
+`PROOF_FORCE_SIM` is CI/local only (`assert-compose-matrix.sh` fails if a
+droplet overlay sets it). Live submits stay fail-closed until harvest is
+wired, a baseline is sealed, and ≥1 topic is open. Do not invent an eval
+digest.
 
 ## Local testnet E2E
 

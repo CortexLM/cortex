@@ -16,7 +16,7 @@ Staging droplet procedure (different path): [`staging-testnet-e2e.md`](staging-t
 | Compose master + staging overlays | yes | `role-master` + `env-staging` + `env-local` |
 | Live chain connect (testnet 541) | yes | Needs egress to `wss://test.finney.opentensor.ai:443` |
 | Gateway `/healthz` | yes | Gateway always uses live chain (no fake backend) |
-| Sealed `/v1/weights/latest` | yes | **`--smoke`** runs `weights-smoke` (leaves + admin seal). Needs `prism_sk` + `gateway_sk`, **not** a gateway owner wallet |
+| Sealed `/v1/weights/latest` | yes | **`--smoke`** runs `weights-smoke` (leaves + admin seal). Needs `bounty_sk` + `gateway_sk`, **not** a gateway owner wallet |
 | Ephemeral public URL | yes | cloudflared quick tunnel → host `:8080` |
 | Owner fail-closed (`REQUIRE_OWNER=1`) | yes | **`--live`** needs `base-owner` wallet files |
 | On-chain weight submit / epoch dispatch | yes | Needs **validator** wallet + real `challenge_sk` matching trust root |
@@ -33,7 +33,7 @@ Staging droplet procedure (different path): [`staging-testnet-e2e.md`](staging-t
 
 | Mode | Required |
 |------|----------|
-| `--smoke` | `gateway_sk` (seal) + `prism_sk` / `design_sk` with pubs matching the local trust root. Prefers `~/.base-secrets/challenge-*.sk` when they match `config/challenges.toml`; otherwise mints and rebuilds `.local/trust-root`. Public-only `BASE_GATEWAY_HOTKEY` is enough (advisory owner check). **No gateway owner wallet.** |
+| `--smoke` | `gateway_sk` (seal) + `bounty_sk` / `proof_sk` with pubs matching the local trust root. Prefers `~/.base-secrets/challenge-*.sk` when they match `config/challenges.toml`; otherwise mints and rebuilds `.local/trust-root`. Public-only `BASE_GATEWAY_HOTKEY` is enough (advisory owner check). **No gateway owner wallet.** |
 | `--live` | `deploy/secrets/wallets/base-owner` (btcli layout; must be on-chain owner of netuid 541). Prefer real seal/challenge secrets matching `config/`. Validator wallet for **on-chain** weight submit. |
 
 Never commit wallets or `deploy/env/*.env` / `deploy/env/local-tunnel.env`.
@@ -72,7 +72,8 @@ chmod -R u=rX,go= deploy/secrets/wallets
 # Re-run seal smoke against an already-up gateway
 cargo run -q --release -p weights-smoke -- \
   --gateway http://127.0.0.1:8080 \
-  --challenge-sk deploy/secrets/prism_sk
+  --challenge-sk deploy/secrets/bounty_sk \
+  --challenge-id bounty
 
 # Teardown
 ./deploy/scripts/local-e2e.sh --down
@@ -104,8 +105,8 @@ staging SSH tunnels on `18080`/`18090`. Override with `LOCAL_*_HOST_PORT`.
 | gateway | `http://127.0.0.1:8080/healthz` |
 | sealed weights | `http://127.0.0.1:8080/v1/weights/latest` (200 burn `sealed:false` before smoke; `sealed:true` after) |
 | validator | `http://127.0.0.1:28080/healthz` |
-| prism | `http://127.0.0.1:28092/health` |
-| design | `http://127.0.0.1:28093/health` |
+| bounty | `http://127.0.0.1:28096/health` |
+| proof | `http://127.0.0.1:28100/health` |
 
 Look for validator coordination (`Match epoch=`) and, when a signing key is loaded,
 `Match → submit_intent` / `submit_timelocked ok` (or `set_weights ok` if CR is off):
@@ -162,6 +163,6 @@ rm -f deploy/env/local-tunnel.env
 - Agent-v1 / Phala CVM miner overlays are removed; miners submit over HTTP (see [`../external-miner/`](../external-miner/)).
 - `env-staging` sets `BASE_GATEWAY_REQUIRE_OWNER=0` (541 SubnetOwnerHotkey ≠ mainnet owner wallet; dedicated 541 wallet not installed). `env-local` overrides via `LOCAL_REQUIRE_OWNER` (smoke defaults to `0`; `--live` sets `1`).
 - Host probe ports default to `2808x` (not role-master `1808x`) to avoid staging SSH tunnels.
-- `BASE_DOCKER_BUILD_FROM=prebuilt` copies host `target/release/*` into a Debian bookworm image. Binaries built on a newer glibc host (e.g. needing `GLIBC_2.39`) will crash in-container — use `BASE_DOCKER_BUILD_FROM=source` or rebuild on bookworm. `local-e2e.sh` may treat prism/design health as soft-fail so gateway+validator smoke can still complete while deploy-wiring finishes.
+- `BASE_DOCKER_BUILD_FROM=prebuilt` copies host `target/release/*` into a Debian bookworm image. Binaries built on a newer glibc host (e.g. needing `GLIBC_2.39`) will crash in-container — use `BASE_DOCKER_BUILD_FROM=source` or rebuild on bookworm. `local-e2e.sh` may treat bounty/proof health as soft-fail so gateway+validator smoke can still complete while deploy-wiring finishes.
 - Rebuild gateway/validator from **current** `main` before `--live`: stale `target/release/gateway` may still contain the removed `fake_owner` path and will not exercise real testnet owner checks.
 - If the host runs a system named tunnel (`/etc/cloudflared/config.yml`), `local-e2e.sh` passes a dedicated `--config` under `.local/` so the named-tunnel catch-all cannot 404 the quick URL.
