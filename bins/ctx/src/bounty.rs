@@ -242,7 +242,7 @@ pub async fn status(client: &Client, json_out: bool) -> Result<(), String> {
         println!();
         println!("The adjudication feed is the only scorer. While it is unreadable this");
         println!("host answers 503 on every report and pays nobody for that epoch — the");
-        println!("7000 bps burns instead of being paid on numbers nobody adjudicated.");
+        println!("2000 bps burns instead of being paid on numbers nobody adjudicated.");
     }
     Ok(())
 }

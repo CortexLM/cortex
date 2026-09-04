@@ -110,9 +110,9 @@ Runbooks: [`runbooks/`](./runbooks/).
 | `config/measurements.toml` + `.sig` | yes | every validator from **disk** |
 | Challenge / owner mini-secrets | **never** | challenge service / offline ceremony only |
 
-Current emission posture: `bounty = 7000`, `proof = 3000` bps (sum 10000).
-Proof's eval digest is empty, so an equal 5000/5000 split would leave half
-the subnet unpayable. `relearn`, `relearn-image`,
+Current emission posture: `bounty = 2000`, `proof = 8000` bps (sum 10000).
+Proof-weighted 20%/80% regardless of eval digest. Proof's eval digest is
+empty (submits 503); do not invent a sha256. `relearn`, `relearn-image`,
 `relearn-agent`, `relearn-mm`, `design`, and `prism` have no row, so they earn
 0 and a leaf claiming those ids fails the trust-root check. Each live
 challenge signs leaves under its **own** key; no two rows share one.

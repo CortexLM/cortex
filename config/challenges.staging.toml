@@ -10,11 +10,11 @@ introduced_epoch = 0
 [[challenges]]
 id = "bounty"
 public_key = "743688a1e1b2848b309205706b4dcae54bffe4233a5d7018053471e1dce45c21"
-emission_share_bps = 7000
+emission_share_bps = 2000
 policy = "all_metagraph_hotkeys"
 
 [[challenges]]
 id = "proof"
 public_key = "3e7f70f09165e265ab89ab04a4fc91dc0531d54a100c538fb14c6f008421c375"
-emission_share_bps = 3000
+emission_share_bps = 8000
 policy = "all_metagraph_hotkeys"

@@ -14,13 +14,12 @@ Offline, operator-only. Never commit secrets. Prefer `/root/.base-secrets/` (mod
 
 ### Live challenges (Bounty + Proof)
 
-Current committed `challenges.toml` has **two** rows: `bounty` @ 7000 and
-`proof` @ 3000 bps (sum = 10000). Proof's `eval_image_digest` is empty
-(live submits **503**), so an equal 5000/5000 split would leave half the
-subnet unpayable. Retune to 5000/5000 in the **same** ceremony that pins a
-non-empty proof-eval digest. Neither share is a leftover Relearn / Prism /
-Design inheritance. Operator may retune shares; the sum must remain 10000,
-and no two rows may share a public key.
+Current committed `challenges.toml` has **two** rows: `bounty` @ 2000 and
+`proof` @ 8000 bps (sum = 10000). This is a Proof-weighted 20%/80% lock
+regardless of eval digest. Proof's `eval_image_digest` is empty (live
+submits **503**); do not invent a sha256. Neither share is a leftover Relearn
+/ Prism / Design inheritance. Operator may retune shares; the sum must
+remain 10000, and no two rows may share a public key.
 
 `relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and
 `prism` are **off**: they have no row, so they have no emission and no leaf

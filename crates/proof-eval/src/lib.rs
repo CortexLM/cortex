@@ -98,12 +98,15 @@ pub enum EvalError {
 /// Schema version of the metrics+verdict document the eval image emits.
 pub const PROOF_METRICS_SCHEMA: u32 = 1;
 
-/// Custom metric ids this control-plane build can score. Empty on purpose:
-/// v0 only ships `nll` and `throughput`. An unknown custom id is 400 at
-/// publish and 503 at score.
+/// Custom metric ids this control-plane build can score.
+///
+/// `harness_success_rate` is listed so an operator can publish the agent-harness
+/// topic. The real GPU harness is not in this image yet: scoring fail-closes
+/// (`EvidenceMissing` on `custom_value`) until that sidecar exists. Do not
+/// invent a success rate.
 #[must_use]
 pub fn supported_custom() -> Vec<&'static str> {
-    Vec::new()
+    vec![proof_task::CUSTOM_HARNESS_SUCCESS_RATE]
 }
 
 /// The document `proof-eval` must print for one scored artifact.
@@ -721,5 +724,14 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, metrics_commitment(&splits, 3.1, Some(100.0), None, None));
         assert_eq!(a.len(), 64);
+    }
+
+    #[test]
+    fn harness_success_rate_is_listed_and_sim_does_not_invent_a_value() {
+        assert!(supported_custom().contains(&proof_task::CUSTOM_HARNESS_SUCCESS_RATE));
+        let t = topic();
+        let pin = pin("");
+        let doc = sim_document(&pin, &t, "f", "art", 1.0, true);
+        assert!(doc.harness.custom_value.is_none());
     }
 }

@@ -12,7 +12,7 @@
 //! - `relearn-holdout` — select a Relearn holdout slice and print its commitment
 //! - `relearn-agent-holdout` — select a Relearn Agent episode set and print its commitment
 //! - `proof-holdout` — select a Proof per-topic holdout set and print its commitment
-//! - `proof-topic` — sign a Proof topic document with the `proof` row key
+//! - `proof-topic` — sign a Proof YAML/JSON topic draft (fills holdout + signature)
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod agent_holdout;
@@ -192,7 +192,7 @@ enum Command {
     },
     /// Sign a Proof topic document with the `proof` row mini-secret.
     ProofTopic {
-        /// Unsigned (or previously signed) topic JSON.
+        /// Unsigned YAML or JSON draft (`statement`, `validation`, `payout_mode`, …).
         #[arg(long)]
         input: PathBuf,
         /// Mini-secret file (raw 32 bytes or hex). Never commit.
@@ -201,6 +201,12 @@ enum Command {
         /// Write signed JSON here (outside the repo). Stdout when omitted.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Holdout records JSON. Used to fill `holdout_commitment` when the draft omitted it.
+        #[arg(long)]
+        holdout: Option<PathBuf>,
+        /// Fill a synthetic holdout commitment (local/dev only).
+        #[arg(long)]
+        synthetic: bool,
     },
 }
 
@@ -337,8 +343,18 @@ fn dispatch(command: Command, root: &Path) -> Result<(), String> {
             synthetic,
             out,
         }),
-        Command::ProofTopic { input, secret, out } => {
-            proof_topic::run(&proof_topic::TopicArgs { input, secret, out })
-        }
+        Command::ProofTopic {
+            input,
+            secret,
+            out,
+            holdout,
+            synthetic,
+        } => proof_topic::run(&proof_topic::TopicArgs {
+            input,
+            secret,
+            out,
+            holdout,
+            synthetic,
+        }),
     }
 }

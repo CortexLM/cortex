@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bundle::{NoScoreReasonCode, ScoreOrAbsence};
 use challenge_common::{emit_signed_leaf_set, Hotkey, LeafEmitError};
-use proof_score::mean_lattice;
+use proof_score::{payout_lattices, MinerTopicRun, SealedBaseline};
 use proof_task::{CHALLENGE_ID_BYTES, SCORE_MAX};
 
 pub use proof_eval::{
@@ -26,29 +26,48 @@ pub use proof_task::{
     CHALLENGE_ID_BYTES as PROOF_ID_BYTES, SCORE_MAX as PROOF_SCORE_MAX, SCORING_VERSION,
 };
 
-/// Build a D24-complete score map: each expected hotkey is either a mean
-/// lattice over currently open topics, or an explicit `NoScore`.
+/// Build a D24-complete score map: each expected hotkey is a **sum** of
+/// WTA/discovery topic masses, or an explicit `NoScore`.
+///
+/// Empty open set → `NoScore(ChallengeInternal)` (host problem, not a paid 0).
 pub fn emission_scores(
     expected: &BTreeSet<Hotkey>,
-    open_ids: &[String],
-    per_miner: &BTreeMap<Hotkey, BTreeMap<String, u64>>,
+    topics: &[TopicDocument],
+    sealed: &BTreeMap<String, SealedBaseline>,
+    champion_primary: &BTreeMap<String, f64>,
+    per_miner: &BTreeMap<Hotkey, BTreeMap<String, MinerTopicRun>>,
 ) -> BTreeMap<Hotkey, ScoreOrAbsence> {
+    if topics.is_empty() {
+        return expected
+            .iter()
+            .map(|h| {
+                (
+                    *h,
+                    ScoreOrAbsence::NoScore {
+                        reason: NoScoreReasonCode::ChallengeInternal,
+                    },
+                )
+            })
+            .collect();
+    }
+    let mut hex_runs: BTreeMap<String, BTreeMap<String, MinerTopicRun>> = BTreeMap::new();
+    for (h, runs) in per_miner {
+        hex_runs.insert(hex::encode(h), runs.clone());
+    }
+    let paid = payout_lattices(topics, sealed, champion_primary, &hex_runs);
     expected
         .iter()
         .map(|h| {
-            let s = if open_ids.is_empty() {
-                ScoreOrAbsence::NoScore {
-                    reason: NoScoreReasonCode::ChallengeInternal,
-                }
+            let value = paid
+                .get(&hex::encode(h))
+                .copied()
+                .unwrap_or(0)
+                .min(SCORE_MAX);
+            let s = if value > 0 {
+                ScoreOrAbsence::Score { value }
             } else {
-                let lattices = per_miner.get(h).cloned().unwrap_or_default();
-                let value = mean_lattice(&lattices, open_ids).min(SCORE_MAX);
-                if value > 0 {
-                    ScoreOrAbsence::Score { value }
-                } else {
-                    ScoreOrAbsence::NoScore {
-                        reason: NoScoreReasonCode::NotAttempted,
-                    }
+                ScoreOrAbsence::NoScore {
+                    reason: NoScoreReasonCode::NotAttempted,
                 }
             };
             (*h, s)
@@ -61,14 +80,29 @@ pub fn emit_epoch(
     secret: &[u8; 32],
     epoch: u64,
     expected: &BTreeSet<Hotkey>,
-    open_ids: &[String],
-    per_miner: &BTreeMap<Hotkey, BTreeMap<String, u64>>,
+    topics: &[TopicDocument],
+    sealed: &BTreeMap<String, SealedBaseline>,
+    champion_primary: &BTreeMap<String, f64>,
+    per_miner: &BTreeMap<Hotkey, BTreeMap<String, MinerTopicRun>>,
 ) -> Result<BTreeMap<Hotkey, bundle::LeafV1>, LeafEmitError> {
-    let scores = emission_scores(expected, open_ids, per_miner);
+    let scores = emission_scores(expected, topics, sealed, champion_primary, per_miner);
     emit_signed_leaf_set(secret, CHALLENGE_ID_BYTES, epoch, expected, &scores)
 }
 
-/// Per-miner topic lattices currently in the store.
+/// Per-miner topic attempts currently in the store.
+pub fn store_runs(store: &MemoryStore) -> BTreeMap<String, BTreeMap<String, MinerTopicRun>> {
+    let mut out = BTreeMap::new();
+    if let Ok(keys) = store.scored_hotkeys() {
+        for k in keys {
+            if let Ok(m) = store.miner_runs(&k) {
+                out.insert(k, m);
+            }
+        }
+    }
+    out
+}
+
+/// Per-miner topic lattices currently in the store (binary pass map).
 pub fn store_scores(store: &MemoryStore) -> BTreeMap<String, BTreeMap<String, u64>> {
     let mut out = BTreeMap::new();
     if let Ok(keys) = store.scored_hotkeys() {
@@ -114,6 +148,11 @@ pub fn parse_holdout_file(body: &str, topic_id: &str) -> Result<Vec<HoldoutRecor
 mod tests {
     use challenge_common::public_key_from_secret;
     use crypto::KEY_LEN;
+    use proof_score::MinerTopicRun;
+    use proof_task::{
+        default_adamw, holdout_commitment, synthetic_holdout, PayoutMode, TopicDocument,
+        TopicStatus, FLOPS_BUDGET_MAX, METRIC_TOKENS_PER_SEC,
+    };
 
     use super::*;
 
@@ -123,20 +162,63 @@ mod tests {
         s
     }
 
+    fn sealed() -> proof_task::Baseline {
+        let mut b = default_adamw(FLOPS_BUDGET_MAX);
+        b.script_sha256 = "11".repeat(32);
+        b.metrics_commitment = "22".repeat(32);
+        b
+    }
+
+    fn discovery_topic(id: &str) -> TopicDocument {
+        TopicDocument {
+            id: id.into(),
+            statement: "Beat sealed AdamW.".into(),
+            payout_mode: PayoutMode::Discovery,
+            baseline: sealed(),
+            holdout_commitment: holdout_commitment(&synthetic_holdout(24, 1)),
+            status: TopicStatus::Open,
+            ..TopicDocument::default()
+        }
+    }
+
+    fn wta_topic(id: &str) -> TopicDocument {
+        let mut t = discovery_topic(id);
+        t.payout_mode = PayoutMode::Wta;
+        t.metric.family = proof_task::MetricFamily::Throughput;
+        t.metric.primary = METRIC_TOKENS_PER_SEC.into();
+        t.metric.direction = proof_task::MetricDirection::Max;
+        t.metric.epsilon_rel = 0.05;
+        t.metric.quality_floor_nll = 0.02;
+        t.metric.wall_budget_s = 14_400;
+        t
+    }
+
+    fn pass(primary: f64, digest: &str) -> MinerTopicRun {
+        MinerTopicRun {
+            pass: true,
+            primary: Some(primary),
+            artifact_digest: digest.into(),
+            near_duplicate: false,
+        }
+    }
+
     #[test]
-    fn d24_covers_every_hotkey_and_means_open_topics() {
+    fn d24_covers_every_hotkey_and_sums_open_topics() {
         let a = [1u8; 32];
         let b = [2u8; 32];
         let e: BTreeSet<Hotkey> = [a, b].into_iter().collect();
-        let open = vec!["dt-no-ib-v0".into(), "adamw-beater-v0".into()];
+        let topics = vec![wta_topic("dt-no-ib-v0"), discovery_topic("adamw-beater-v0")];
         let mut per = BTreeMap::new();
         per.insert(a, {
             let mut m = BTreeMap::new();
-            m.insert("dt-no-ib-v0".into(), SCORE_MAX);
-            m.insert("adamw-beater-v0".into(), SCORE_MAX);
+            m.insert("dt-no-ib-v0".into(), pass(200.0, "d1"));
+            m.insert("adamw-beater-v0".into(), pass(2.5, "d2"));
             m
         });
-        let leaves = emit_epoch(&sk(), 9, &e, &open, &per).expect("emit");
+        let mut sealed = BTreeMap::new();
+        sealed.insert("adamw-beater-v0".into(), proof_score::flat_nll(3.0));
+        let leaves =
+            emit_epoch(&sk(), 9, &e, &topics, &sealed, &BTreeMap::new(), &per).expect("emit");
         assert_eq!(leaves.len(), 2);
         assert!(matches!(
             leaves[&a].score_or_absence,
@@ -153,17 +235,26 @@ mod tests {
     }
 
     #[test]
-    fn skipped_open_topic_pulls_the_mean_down() {
+    fn skipped_open_topic_contributes_zero_to_the_sum() {
         let a = [1u8; 32];
         let e: BTreeSet<Hotkey> = [a].into_iter().collect();
-        let open = vec!["dt-no-ib-v0".into(), "other-v0".into()];
+        let topics = vec![wta_topic("dt-no-ib-v0"), wta_topic("other-v0")];
         let mut per = BTreeMap::new();
         per.insert(a, {
             let mut m = BTreeMap::new();
-            m.insert("dt-no-ib-v0".into(), SCORE_MAX);
+            m.insert("dt-no-ib-v0".into(), pass(200.0, "d1"));
             m
         });
-        let leaves = emit_epoch(&sk(), 1, &e, &open, &per).expect("emit");
+        let leaves = emit_epoch(
+            &sk(),
+            1,
+            &e,
+            &topics,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &per,
+        )
+        .expect("emit");
         match &leaves[&a].score_or_absence {
             ScoreOrAbsence::Score { value } => assert_eq!(*value, SCORE_MAX / 2),
             ScoreOrAbsence::NoScore { .. } => panic!("expected a score"),
@@ -174,7 +265,16 @@ mod tests {
     fn no_open_topics_is_challenge_internal_not_a_zero() {
         let a = [1u8; 32];
         let e: BTreeSet<Hotkey> = [a].into_iter().collect();
-        let leaves = emit_epoch(&sk(), 1, &e, &[], &BTreeMap::new()).expect("emit");
+        let leaves = emit_epoch(
+            &sk(),
+            1,
+            &e,
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .expect("emit");
         assert!(matches!(
             leaves[&a].score_or_absence,
             ScoreOrAbsence::NoScore {

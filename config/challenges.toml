@@ -1,12 +1,11 @@
 # Owner-signed challenges trust root (D18/D23/D24).
 # Signed with throwaway owner key (see owner.pubkey). Production rotation: CEREMONY.md.
 #
-# Two live challenges. Emission: bounty = 7000, proof = 3000 bps (sum 10000).
-# Proof's eval_image_digest is empty (submits 503), so an equal 5000/5000
-# split would leave half the subnet unpayable. Retune to 5000/5000 in the
-# same ceremony that pins a non-empty proof-eval digest. Neither share is a
-# leftover Relearn / Prism / Design inheritance. Operator can retune; sum
-# must stay 10000.
+# Two live challenges. Emission: bounty = 2000, proof = 8000 bps (sum 10000).
+# Proof-weighted: 20%/80%, locked regardless of eval digest. Proof still
+# answers 503 on submit until a digest is pinned — do not invent a sha256.
+# Neither share is a leftover Relearn / Prism / Design inheritance. Operator
+# can retune; sum must stay 10000.
 #
 # `relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and
 # `prism` are OFF: they have no row here, so they have no emission and no
@@ -18,11 +17,11 @@ introduced_epoch = 0
 [[challenges]]
 id = "bounty"
 public_key = "743688a1e1b2848b309205706b4dcae54bffe4233a5d7018053471e1dce45c21"
-emission_share_bps = 7000
+emission_share_bps = 2000
 policy = "all_metagraph_hotkeys"
 
 [[challenges]]
 id = "proof"
 public_key = "3e7f70f09165e265ab89ab04a4fc91dc0531d54a100c538fb14c6f008421c375"
-emission_share_bps = 3000
+emission_share_bps = 8000
 policy = "all_metagraph_hotkeys"

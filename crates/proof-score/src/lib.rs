@@ -16,6 +16,13 @@
     clippy::cast_sign_loss
 )]
 
+mod payout;
+
+pub use payout::{
+    payout_lattices, primary_from_harness, primary_metric, sealed_primary, topic_masses,
+    topic_share_bps, MinerTopicRun, PrimaryExtras, PROOF_SHARE_BPS,
+};
+
 use std::collections::BTreeMap;
 
 use proof_task::{
@@ -445,11 +452,13 @@ pub fn judge_topic(
     }
 }
 
-/// Mean of per-topic lattices over currently open topics.
+/// Sum of per-topic lattices over currently open topics, capped at [`SCORE_MAX`].
 ///
-/// A skipped topic contributes 0, so covering every open problem is what
-/// earns the full challenge share. An empty open set is a host problem (503),
-/// not a miner score of 0 — callers must not emit this as a paid leaf.
+/// Paid emission uses [`payout_lattices`] (WTA / discovery). This helper is
+/// the binary fallback: each topic is 0 or [`SCORE_MAX`], then averaged so a
+/// skipped open topic still pulls the miner down. An empty open set is a host
+/// problem (503), not a miner score of 0 — callers must not emit this as a paid
+/// leaf.
 #[must_use]
 pub fn mean_lattice(per_topic: &BTreeMap<String, u64>, open_ids: &[String]) -> u64 {
     if open_ids.is_empty() {
@@ -462,16 +471,6 @@ pub fn mean_lattice(per_topic: &BTreeMap<String, u64>, open_ids: &[String]) -> u
         ));
     }
     u64::try_from(sum / u128::from(open_ids.len() as u64)).unwrap_or(0)
-}
-
-/// Equal split of the challenge's emission share (currently 3000 bps) across
-/// `n` open topics.
-#[must_use]
-pub fn topic_share_bps(n: usize) -> u16 {
-    if n == 0 {
-        return 0;
-    }
-    u16::try_from(3_000_u32 / u32::try_from(n).unwrap_or(u32::MAX)).unwrap_or(0)
 }
 
 /// Empty split map with one slot per scored stratum (tests / sim).
@@ -715,14 +714,40 @@ mod tests {
     }
 
     #[test]
+    fn harness_success_rate_is_listed_and_fail_closes_without_a_harness_value() {
+        let mut topic = nll_topic();
+        topic.metric.family = MetricFamily::Custom;
+        topic.metric.custom_id = proof_task::CUSTOM_HARNESS_SUCCESS_RATE.into();
+        topic.metric.primary = "success_rate".into();
+        topic.metric.direction = MetricDirection::Max;
+        topic.metric.epsilon_rel = 0.05;
+        let mut harness = nll_harness(1.0);
+        harness.custom_value = None;
+        let v = judge_topic(
+            &topic,
+            &clean_agent(&topic.id, MetricFamily::Custom, 1),
+            &harness,
+            &flat_nll(3.0),
+            &[],
+            &[proof_task::CUSTOM_HARNESS_SUCCESS_RATE],
+        );
+        assert!(v
+            .failed
+            .iter()
+            .any(|f| matches!(f, GateFail::EvidenceMissing { field } if field == "custom_value")));
+        assert_eq!(v.lattice, 0);
+    }
+
+    #[test]
     fn skipped_open_topics_pull_the_mean_to_zero() {
         let mut scores = BTreeMap::new();
         scores.insert("dt-no-ib-v0".into(), SCORE_MAX);
         let open = ["dt-no-ib-v0".into(), "other-v0".into()];
         assert_eq!(mean_lattice(&scores, &open), SCORE_MAX / 2);
         assert_eq!(mean_lattice(&scores, &[]), 0);
-        assert_eq!(topic_share_bps(2), 1500);
+        assert_eq!(topic_share_bps(2), 4_000);
         assert_eq!(topic_share_bps(0), 0);
+        assert_eq!(PROOF_SHARE_BPS, 8_000);
     }
 
     #[test]
