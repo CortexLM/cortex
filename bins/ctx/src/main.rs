@@ -29,7 +29,7 @@ use proof::SubmitInput;
     about = "Cortex subnet CLI: challenge status, Proof submits, and Bounty reports",
     long_about = "ctx talks to the public Cortex gateway at https://network.cortex.foundation.
 
-Live challenges: bounty (5000 bps) and proof (5000 bps). relearn*, design, and
+Live challenges: bounty (7000 bps) and proof (3000 bps). relearn*, design, and
 prism are off and earn nothing.
 
 Start with 'ctx challenges' for what each one pays for, then 'ctx status' to
@@ -360,8 +360,8 @@ mod tests {
             "{long_about}"
         );
         assert!(!long_about.contains("<gateway>"), "{long_about}");
-        assert!(long_about.contains("bounty (5000 bps)"));
-        assert!(long_about.contains("proof (5000 bps)"));
+        assert!(long_about.contains("bounty (7000 bps)"));
+        assert!(long_about.contains("proof (3000 bps)"));
     }
 
     #[test]

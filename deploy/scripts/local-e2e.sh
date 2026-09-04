@@ -499,10 +499,10 @@ PY
 import pathlib, sys
 
 # Mirrors config/challenges.toml. Shares must sum to 10000 or the validator
-# flags an emission-share mismatch (D23). Equal split: bounty + proof.
+# flags an emission-share mismatch (D23). Bounty 7000 + proof 3000.
 rows = [
-    ("bounty", sys.argv[2], 5000),
-    ("proof", sys.argv[3], 5000),
+    ("bounty", sys.argv[2], 7000),
+    ("proof", sys.argv[3], 3000),
 ]
 text = "version = 1\nintroduced_epoch = 0\n"
 for cid, pk, bps in rows:

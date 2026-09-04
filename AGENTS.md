@@ -2,7 +2,7 @@
 
 Short contract for agents and operators. Prefer linking over restating runbooks.
 
-**Product:** Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) — Bittensor subnet control plane. **Two live challenges:** `bounty` (5000 bps) and `proof` (5000 bps). Equal split: both are paid products on subnet 100; the sum is 10000. `relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and `prism` are **off** — no trust-root row, so they have no emission and no leaf may verify. Relearn* code stays behind the `relearn` / `mm` compose profiles. Proof scores operator-published research topics (dynamic `topic_id`, digest-pinned RLM judge); empty `eval_image_digest` → 503 (do not invent a sha256). Naming split (Cortex vs leftover `base` / `BASE_*`): [`docs/NAMING.md`](docs/NAMING.md).
+**Product:** Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) — Bittensor subnet control plane. **Two live challenges:** `bounty` (7000 bps) and `proof` (3000 bps). Proof's `eval_image_digest` is empty (submits 503), so 7000/3000 keeps most emission payable; retune to 5000/5000 in the same ceremony that pins a non-empty proof-eval digest. Sum is 10000. `relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and `prism` are **off** — no trust-root row, so they have no emission and no leaf may verify. Relearn* code stays behind the `relearn` / `mm` compose profiles. Proof scores operator-published research topics (dynamic `topic_id`, digest-pinned RLM judge); empty `eval_image_digest` → 503 (do not invent a sha256). Naming split (Cortex vs leftover `base` / `BASE_*`): [`docs/NAMING.md`](docs/NAMING.md).
 
 PRs require a [Greptile](https://greptile.com) review (`.greptile/`). If the bot is silent, comment `@greptileai review`.
 

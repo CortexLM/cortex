@@ -117,7 +117,7 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Binary (`bins/bounty-challenge`) | **done** | Internal HTTP on `:8096` plus the emitter (backend feed → exact-`E` leaves → gateway `POST /v1/weights/raw`, `BOUNTY_EMIT_POLL_SECS`). Does **not** serve `/v1/public/*`. No feed (or an unreadable one) pays nobody: `E` is covered with `NoScore(ChallengeInternal)` so D24 holds and the share burns to uid 0. A scored epoch is never downgraded to a burn mid-epoch. |
 | Miner CLI (`bins/ctx`) | **done** | `ctx bounty pair|report|show|status`. `bins/cortex-bounty` deprecates to `ctx bounty pair`. |
 | Compose / images | **done** | Default compose + `images.yml` target `bounty-challenge`. |
-| Emission | **5000 bps** | Equal split with `proof` (sum `10000`). |
+| Emission | **7000 bps** | Payable share while Proof's eval digest is empty (sum `10000`). |
 | Spec | live | [`BOUNTY.md`](BOUNTY.md). |
 
 ## proof-challenge
@@ -133,7 +133,7 @@ Removed as **live products**. Shared rails (`prism-lium*`, `prism-competition` p
 | Topics | **done** | sr25519 under the `proof` trust-root key (`base-proof-topic-v1`). Admin `POST /v1/admin/proof/topics`. A topic must be sealed to `open`. |
 | Holdout | **done** | Per-topic operator file (`PROOF_HOLDOUT_FILE`). Commitment in the topic document, never in the pin. `xtask proof-holdout --topic-id`. |
 | Live harvest | **done** | `crates/proof-harvest` over `harvest-pod`; `PROOF_FORCE_SIM` is local-only. |
-| Emission | **5000 bps** | Equal split with `bounty`. Split equally across currently `open` topics. Empty open set → `NoScore(ChallengeInternal)`. |
+| Emission | **3000 bps** | Empty `eval_image_digest` → 503; do not give this row 5000 until a digest is pinned. Split equally across currently `open` topics. Empty open set → `NoScore(ChallengeInternal)`. |
 | Spec | live | [`PROOF.md`](PROOF.md). |
 
 ## Infrastructure
@@ -201,7 +201,7 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 | Relearn teacher / judge keys on rented pods | `RELEARN_TEACHER_API_KEY` and `RELEARN_T2I_JUDGE_API_KEY` are forwarded into the pod when set, because a Lium `InstanceSpec` carries no env and the image judges over HTTP. Delivered over stdin (never a command line) and scrubbed after the run. A missing URL refuses **before** rent. A miner-controlled pod could still spend the operator's quota — scope and rate-limit those credentials, or leave them unset when the pod reaches the API without auth. |
 | Relearn champion baseline | Live hosts need an operator-recorded measurement (`RELEARN_BASE_CHAMPION_FILE`, verified against the pin's `eval_image_digest` + `holdout_commitment`). Unset means `champion_baseline_recorded: false` and every submission 503s before the gates. Sim hosts seed the sim baseline. |
 | Bounty severity on the backend feed | Scoring credits a `valid` row only when the backend publishes a `severity`. Until CortexLM/backend emits it, valid rows land as `valid_unpriced`, no miner can be crowned, and the share burns. Fail-closed by design: an unpriced bug cannot be paid for. |
-| Bounty scoring backend | The CortexLM/backend public feed is the only scorer. Without a readable `BOUNTY_BACKEND_PUBLIC_URL`, `POST /v1/reports` answers **503** rather than collecting bug-hunting work the host could never pay for, and the emitter pays nobody — it covers `E` with `ChallengeInternal` so the 5000 bps burns to uid 0 without 409ing every other challenge's seal. `BOUNTY_FORCE_SIM` is retired: a local scorer here would pay on adjudications no validator could reproduce. |
+| Bounty scoring backend | The CortexLM/backend public feed is the only scorer. Without a readable `BOUNTY_BACKEND_PUBLIC_URL`, `POST /v1/reports` answers **503** rather than collecting bug-hunting work the host could never pay for, and the emitter pays nobody — it covers `E` with `ChallengeInternal` so the 7000 bps burns to uid 0 without 409ing every other challenge's seal. `BOUNTY_FORCE_SIM` is retired: a local scorer here would pay on adjudications no validator could reproduce. |
 | Relearn public repo | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) exists; `relearn_git_sha` `8ffbe8a0…` is pinned with `eval_image_digest` `sha256:4806db4b…`. Seed mirror: `docs/external-miner/relearn-seed/`. |
 | Mainnet (netuid 100) | Owner wallet not yet on this machine, so prod runs with `BASE_GATEWAY_REQUIRE_OWNER=0`. |
 | Prod pin placeholders | `deploy/pins/prod.json` still ships zero-digests until the first successful promote; registry mode rejects placeholders. |

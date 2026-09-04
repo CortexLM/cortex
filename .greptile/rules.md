@@ -1,8 +1,9 @@
 # Cortex review rules
 
 This is a Bittensor subnet control plane (`CortexLM/cortex`), not an app-platform
-or SOC2 checklist. Two **live** challenge ids: `bounty` (5000 bps) and
-`proof` (5000). Equal split; sum is 10000. `relearn`, `relearn-image`,
+or SOC2 checklist. Two **live** challenge ids: `bounty` (7000 bps) and
+`proof` (3000). Proof's eval digest is empty (503), so an equal 5000/5000
+split would leave half the subnet unpayable. Sum is 10000. `relearn`, `relearn-image`,
 `relearn-agent`, `relearn-mm`, `design`, and `prism` are **off** (no trust-root
 row). Relearn* code stays behind the `relearn` / `mm` compose profiles.
 

@@ -1767,7 +1767,7 @@ mod tests {
         };
         let st = st.with_weights(
             Arc::new(ChallengesBody {
-                challenges: vec![entry("bounty", 5000), entry("proof", 5000)],
+                challenges: vec![entry("bounty", 7000), entry("proof", 3000)],
             }),
             Arc::new(|| None),
         );
@@ -1776,9 +1776,9 @@ mod tests {
         let (s, v) = call(app.clone(), "/v1/site/arenas").await;
         assert_eq!(s, StatusCode::OK, "{v}");
         assert_eq!(v[1]["slug"], "bounty");
-        assert_eq!(v[1]["emissionShare"], 0.5);
+        assert_eq!(v[1]["emissionShare"], 0.7);
         assert_eq!(v[2]["slug"], "proof");
-        assert_eq!(v[2]["emissionShare"], 0.5);
+        assert_eq!(v[2]["emissionShare"], 0.3);
         // Unsealed: effective weights stay 0.
         assert_eq!(v[1]["weight"], 0.0);
         assert_eq!(v[2]["weight"], 0.0);
@@ -1788,9 +1788,9 @@ mod tests {
         assert_eq!(v["sealed"], false);
         assert_eq!(v["burnShare"], 1.0);
         assert_eq!(v["emissionShares"][0]["arena"], "bounty");
-        assert_eq!(v["emissionShares"][0]["share"], 0.5);
+        assert_eq!(v["emissionShares"][0]["share"], 0.7);
         assert_eq!(v["emissionShares"][1]["arena"], "proof");
-        assert_eq!(v["emissionShares"][1]["share"], 0.5);
+        assert_eq!(v["emissionShares"][1]["share"], 0.3);
         assert!(v["hotkeyWeights"].as_array().unwrap().is_empty());
     }
 

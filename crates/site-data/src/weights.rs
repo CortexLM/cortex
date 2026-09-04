@@ -237,7 +237,7 @@ mod tests {
         // not the challenge id would silently show a 0 % share while that
         // challenge really earns emission.
         let root = ChallengesBody {
-            challenges: vec![entry("bounty", 5000), entry("proof", 5000)],
+            challenges: vec![entry("bounty", 7000), entry("proof", 3000)],
         };
         let shares = configured_shares(Some(&root));
         let sum: f64 = shares.iter().map(|(_, v)| *v).sum();

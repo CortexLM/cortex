@@ -464,14 +464,14 @@ pub fn mean_lattice(per_topic: &BTreeMap<String, u64>, open_ids: &[String]) -> u
     u64::try_from(sum / u128::from(open_ids.len() as u64)).unwrap_or(0)
 }
 
-/// Equal split of the challenge's emission share (currently 5000 bps) across
+/// Equal split of the challenge's emission share (currently 3000 bps) across
 /// `n` open topics.
 #[must_use]
 pub fn topic_share_bps(n: usize) -> u16 {
     if n == 0 {
         return 0;
     }
-    u16::try_from(5_000_u32 / u32::try_from(n).unwrap_or(u32::MAX)).unwrap_or(0)
+    u16::try_from(3_000_u32 / u32::try_from(n).unwrap_or(u32::MAX)).unwrap_or(0)
 }
 
 /// Empty split map with one slot per scored stratum (tests / sim).
@@ -721,7 +721,7 @@ mod tests {
         let open = ["dt-no-ib-v0".into(), "other-v0".into()];
         assert_eq!(mean_lattice(&scores, &open), SCORE_MAX / 2);
         assert_eq!(mean_lattice(&scores, &[]), 0);
-        assert_eq!(topic_share_bps(2), 2500);
+        assert_eq!(topic_share_bps(2), 1500);
         assert_eq!(topic_share_bps(0), 0);
     }
 

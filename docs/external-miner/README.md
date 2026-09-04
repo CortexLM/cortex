@@ -31,7 +31,7 @@ Default gateway is [https://network.cortex.foundation](https://network.cortex.fo
 | Bounty | `bounty` | [bounty.md](./bounty.md) | Real bug reports. Pair with `ctx bounty pair`, then `ctx bounty report`. Cortex reads CortexLM/backend for scoring |
 | Proof | `proof` | [proof.md](./proof.md) | Reproducible experiments against **operator-published** topics. Digest-pinned RLM judge. Empty eval digest → 503 |
 
-Emission: `bounty` 5000 bps, `proof` 5000 bps (sum 10000). Off challenges have
+Emission: `bounty` 7000 bps, `proof` 3000 bps (sum 10000). Off challenges have
 no row and earn 0.
 Bundle bytes: [`BUNDLE_SPEC.md`](../BUNDLE_SPEC.md).
 

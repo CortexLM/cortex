@@ -2,8 +2,8 @@
 
 # Proof — miners
 
-Challenge id is `proof`. One of two live challenges (`bounty` 5000 bps,
-`proof` 5000 bps). Topics are
+Challenge id is `proof`. One of two live challenges (`bounty` 7000 bps,
+`proof` 3000 bps). Topics are
 **operator-published** research problems, not a frozen catalog in git.
 You `POST` with a `topic_id` against whatever is currently `open`. Muon,
 token superposition, and “decentralized training without InfiniBand” are

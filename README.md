@@ -20,11 +20,13 @@ not run evals.
 
 | Challenge | id | What miners improve | Default emission |
 |-----------|-----|---------------------|------------------|
-| **Bounty** | `bounty` | File real bug reports against the subnet | 5000 bps |
-| **Proof** | `proof` | Reproducible experiments against operator-published research topics; digest-pinned RLM judge | 5000 bps |
+| **Bounty** | `bounty` | File real bug reports against the subnet | 7000 bps |
+| **Proof** | `proof` | Reproducible experiments against operator-published research topics; digest-pinned RLM judge | 3000 bps |
 
-Equal split: both are paid products on subnet 100; the sum is 10000. Neither
-inherits a leftover Relearn / Prism / Design share. `relearn`,
+Proof's `eval_image_digest` is empty (submits **503**), so 7000/3000 keeps
+most emission payable. Retune to 5000/5000 in the same ceremony that pins a
+non-empty proof-eval digest. The sum is 10000. Neither share is a leftover
+Relearn / Prism / Design inheritance. `relearn`,
 `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and `prism` are
 **off**: no trust-root row, no emission.
 
