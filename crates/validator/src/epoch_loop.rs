@@ -391,7 +391,7 @@ where
                     chain_epoch,
                     lag_epochs = lag,
                     metagraph_block = ?latest.metagraph_block,
-                    "pressure verify: sealed weights lag chain epoch; live sources still design+prism sealed 2026-08-22; Relearn must replace those sources once ready. Do not treat design/prism as the target live set."
+                    "pressure verify: sealed weights lag chain epoch"
                 );
             }
         }

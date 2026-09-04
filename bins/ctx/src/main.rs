@@ -82,7 +82,7 @@ enum Cmd {
 
 #[derive(Debug, Subcommand)]
 enum ProofCmd {
-    /// Submit an artifact digest against an open topic_id.
+    /// Submit an artifact digest against an open `topic_id`.
     Submit(Box<ProofSubmitArgs>),
     /// Show one submission.
     Show {

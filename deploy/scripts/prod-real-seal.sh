@@ -158,7 +158,7 @@ fi
   done
 
   if [[ "${sealed}" -ne 1 ]]; then
-    echo "$(date -Is) seal walk exhausted: no complete D24 set in last ${WALK_BACK} epochs (latest remains stale until design+prism emit)"
+    echo "$(date -Is) seal walk exhausted: no complete D24 set in last ${WALK_BACK} epochs (latest remains stale until bounty+proof emit)"
     exit 1
   fi
 } >>"${LOG}" 2>&1

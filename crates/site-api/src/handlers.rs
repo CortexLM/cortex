@@ -1377,7 +1377,7 @@ mod tests {
             .await;
     }
 
-    /// Coding plus the live Relearn challenges and Proof, in listing order.
+    /// Coding plus the two live challenges (Bounty, Proof), in listing order.
     ///
     /// Live arenas are listed even when their backends are down, so the
     /// emission column still sums to the trust root instead of showing one
@@ -1391,22 +1391,11 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default();
-        assert_eq!(
-            slugs,
-            vec![
-                "coding",
-                "relearn",
-                "relearn-image",
-                "relearn-agent",
-                "proof"
-            ],
-            "{v}"
-        );
-        assert_eq!(v[1]["bestScoreLabel"], "DISPLACE");
-        assert_eq!(v[2]["name"], "Relearn Image");
-        assert_eq!(v[3]["name"], "Relearn Agent");
-        assert_eq!(v[4]["name"], "Proof");
-        assert_eq!(v[4]["scoring"], "reproduced");
+        assert_eq!(slugs, vec!["coding", "bounty", "proof"], "{v}");
+        assert_eq!(v[1]["name"], "Bounty");
+        assert_eq!(v[1]["scoring"], "precision-severity");
+        assert_eq!(v[2]["name"], "Proof");
+        assert_eq!(v[2]["scoring"], "reproduced");
     }
 
     #[tokio::test]
@@ -1778,7 +1767,7 @@ mod tests {
         };
         let st = st.with_weights(
             Arc::new(ChallengesBody {
-                challenges: vec![entry("relearn", 10_000)],
+                challenges: vec![entry("bounty", 5000), entry("proof", 5000)],
             }),
             Arc::new(|| None),
         );
@@ -1786,17 +1775,22 @@ mod tests {
 
         let (s, v) = call(app.clone(), "/v1/site/arenas").await;
         assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v[1]["slug"], "relearn");
-        assert_eq!(v[1]["emissionShare"], 1.0);
+        assert_eq!(v[1]["slug"], "bounty");
+        assert_eq!(v[1]["emissionShare"], 0.5);
+        assert_eq!(v[2]["slug"], "proof");
+        assert_eq!(v[2]["emissionShare"], 0.5);
         // Unsealed: effective weights stay 0.
         assert_eq!(v[1]["weight"], 0.0);
+        assert_eq!(v[2]["weight"], 0.0);
 
         let (s, v) = call(app.clone(), "/v1/site/weights").await;
         assert_eq!(s, StatusCode::OK, "{v}");
         assert_eq!(v["sealed"], false);
         assert_eq!(v["burnShare"], 1.0);
-        assert_eq!(v["emissionShares"][0]["arena"], "relearn");
-        assert_eq!(v["emissionShares"][0]["share"], 1.0);
+        assert_eq!(v["emissionShares"][0]["arena"], "bounty");
+        assert_eq!(v["emissionShares"][0]["share"], 0.5);
+        assert_eq!(v["emissionShares"][1]["arena"], "proof");
+        assert_eq!(v["emissionShares"][1]["share"], 0.5);
         assert!(v["hotkeyWeights"].as_array().unwrap().is_empty());
     }
 
