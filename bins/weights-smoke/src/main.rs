@@ -95,6 +95,11 @@ struct Args {
     /// a second paid challenge (`proof`) before the seal that needs both.
     #[arg(long)]
     skip_seal: bool,
+
+    /// Print `tip epoch` on stdout and exit. Burn-seal pins both paid
+    /// challenges to that pair so a block between leaf posts cannot split D24.
+    #[arg(long)]
+    print_meta: bool,
 }
 
 #[tokio::main]
@@ -282,8 +287,17 @@ fn load_expected_csv(path: &std::path::Path, tip: u64) -> Result<TipMeta, String
     Ok(TipMeta { tip, expected })
 }
 
+fn smoke_epoch(tip: u64, explicit: Option<u64>) -> u64 {
+    explicit.unwrap_or(8_000_000 + tip % 1_000_000)
+}
+
 async fn run() -> Result<(), String> {
     let args = Args::parse();
+    if args.print_meta {
+        let TipMeta { tip, .. } = load_tip_meta(&args)?;
+        println!("{} {}", tip, smoke_epoch(tip, args.epoch));
+        return Ok(());
+    }
     let sk = load_challenge_secret(&args.challenge_sk).map_err(|e| e.to_string())?;
     let pk = public_key_from_secret(&sk).map_err(|e| e.to_string())?;
     eprintln!(
@@ -301,7 +315,7 @@ async fn run() -> Result<(), String> {
     } else {
         load_tip_meta(&args)?
     };
-    let epoch = args.epoch.unwrap_or(8_000_000 + tip % 1_000_000);
+    let epoch = smoke_epoch(tip, args.epoch);
     eprintln!(
         "weights-smoke: tip={tip} epoch={epoch} participants={}",
         expected.len()

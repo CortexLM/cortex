@@ -51,9 +51,31 @@ smoke() {
     --challenge-sk "${sk}" "$@"
 }
 
+# One chain-tip read for every paid challenge. Two sequential default-epoch
+# calls can straddle a block: bounty leaves land on epoch N, proof seals N+1
+# without bounty, and D24 409s the emergency burn.
+pin_epoch() {
+  local meta tip epoch
+  meta="$("${BIN}" --print-meta --netuid "${NETUID}" --chain-endpoint "${CHAIN}")"
+  read -r tip epoch <<<"${meta}"
+  if [[ -z "${tip}" || -z "${epoch}" || "${tip}" == *[!0-9]* || "${epoch}" == *[!0-9]* ]]; then
+    echo "weights-smoke --print-meta produced unusable meta: ${meta}" >&2
+    return 1
+  fi
+  echo "${tip} ${epoch}"
+}
+
 {
   echo "$(date -Is) seal start gateway=${GATEWAY} netuid=${NETUID} challenges=bounty,proof"
-  if out="$( { smoke bounty "${BOUNTY_SK}" --skip-seal && smoke proof "${PROOF_SK}"; } 2>&1 )"; then
+  if out="$( {
+    set -e
+    pinned="$(pin_epoch)"
+    tip="${pinned%% *}"
+    epoch="${pinned##* }"
+    echo "pinned tip=${tip} epoch=${epoch}"
+    smoke bounty "${BOUNTY_SK}" --skip-seal --epoch "${epoch}" --block-b "${tip}"
+    smoke proof "${PROOF_SK}" --epoch "${epoch}" --block-b "${tip}"
+  } 2>&1 )"; then
     echo "${out}" | grep -E 'seal ok|latest OK' || echo "${out}" | tail -3
     echo "$(date -Is) seal ok"
   else
