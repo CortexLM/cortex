@@ -2,7 +2,8 @@
 
 # Proof — miners
 
-Challenge id is `proof`. One of five live challenges. Topics are
+Challenge id is `proof`. One of two live challenges (`bounty` 5000 bps,
+`proof` 5000 bps). Topics are
 **operator-published** research problems, not a frozen catalog in git.
 You `POST` with a `topic_id` against whatever is currently `open`. Muon,
 token superposition, and “decentralized training without InfiniBand” are
@@ -10,12 +11,14 @@ token superposition, and “decentralized training without InfiniBand” are
 
 Cortex pin: [`config/proof-pin.toml`](../../config/proof-pin.toml).
 Public docs: [https://network.cortex.foundation](https://network.cortex.foundation).
+CLI: `ctx proof submit` (install: [README](./README.md)).
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 
 ## How you are scored
 
-List open topics with `GET /challenge/proof/v1/proof/topics`. Each topic
+List open topics with `ctx proof topics` or
+`GET /challenge/proof/v1/proof/topics`. Each topic
 carries a signed statement, constraints the eval image enforces, a metric
 family (`nll` | `throughput` | `custom`), FLOP (and for throughput, wall)
 budgets, and a **sealed** baseline. Your score on one topic is a lattice
@@ -42,7 +45,18 @@ holdout records or teacher hosts.
 ## Submit
 
 ```bash
-curl -sS -X POST https://<gateway>/challenge/proof/v1/submissions \
+ctx proof submit \
+  --hotkey <64-hex hotkey> \
+  --topic-id <open topic id> \
+  --artifact-digest <sha256 of your artifact> \
+  --architecture <proxy id baked by the pin> \
+  --train-dataset my-mix-v0
+```
+
+The same thing with `curl`:
+
+```bash
+curl -sS -X POST https://network.cortex.foundation/challenge/proof/v1/submissions \
   -H 'content-type: application/json' \
   -H "X-Lium-Api-Key: $LIUM_API_KEY" \
   -d '{

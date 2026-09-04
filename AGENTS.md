@@ -2,7 +2,7 @@
 
 Short contract for agents and operators. Prefer linking over restating runbooks.
 
-**Product:** Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) — Bittensor subnet control plane. **Five live challenges:** `relearn` (3000 bps), `relearn-image` (1000), `relearn-agent` (1000), `bounty` (3000), `proof` (2000). Encoder-attach Multimodal (`relearn-mm`) is **off** — no trust-root row, `mm` compose profile only. `relearn` and `relearn-agent` post-train the **same** base `Qwen/Qwen3.8-27B` (teacher `incoai/GLM-5.3-NVFP4` from `RELEARN_TEACHER_LOCAL_DIR`); Agent is a separate challenge scored on replayed tool traces, not a rename of `relearn`. Proof scores operator-published research topics (dynamic `topic_id`, digest-pinned RLM judge); it is not a rename of `relearn`. Relearn eval images live in [`CortexLM/relearn`](https://github.com/CortexLM/relearn). Naming split (Cortex vs leftover `base` / `BASE_*`, and `relearn-image` vs the `relearn-t2i-*` crates): [`docs/NAMING.md`](docs/NAMING.md).
+**Product:** Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) — Bittensor subnet control plane. **Two live challenges:** `bounty` (5000 bps) and `proof` (5000 bps). Equal split: both are paid products on subnet 100; the sum is 10000. `relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and `prism` are **off** — no trust-root row, so they have no emission and no leaf may verify. Relearn* code stays behind the `relearn` / `mm` compose profiles. Proof scores operator-published research topics (dynamic `topic_id`, digest-pinned RLM judge); empty `eval_image_digest` → 503 (do not invent a sha256). Naming split (Cortex vs leftover `base` / `BASE_*`): [`docs/NAMING.md`](docs/NAMING.md).
 
 PRs require a [Greptile](https://greptile.com) review (`.greptile/`). If the bot is silent, comment `@greptileai review`.
 
@@ -36,9 +36,6 @@ Working branch: **`main`**. Prod ships from annotated tags `v*.*.*` cut on `main
 |-----|-----|------------|
 | `gateway_sk` | Gateway | Bundle **seal** signatures (`POST /v1/admin/seal`) |
 | `gateway_admin_token` | Gateway + seal scripts | Bearer for **`/v1/admin/*`** (seal, backends, attest-grant). **Required** when `BASE_GATEWAY_REQUIRE_OWNER=1` |
-| `relearn_sk` | Relearn / smoke | Signed leaves (`POST /v1/weights/raw`); pub must match trust root |
-| `relearn_t2i_sk` | Relearn Image | Signed `relearn-image` leaves; pub must match trust root |
-| `relearn_agent_sk` | Relearn Agent | Signed `relearn-agent` leaves; pub must match trust root |
 | `bounty_sk` | Bounty / smoke | Signed bounty leaves; pub must match trust root |
 | `proof_sk` | Proof / smoke | Signed `proof` leaves and topic documents; pub must match trust root |
 | Gateway owner wallet + `BASE_GATEWAY_REQUIRE_OWNER` | Gateway | Master-only **identity** check (live/prod). **Not** required to seal or serve `/v1/weights/latest` |
@@ -48,17 +45,14 @@ Working branch: **`main`**. Prod ships from annotated tags `v*.*.*` cut on `main
 
 ## Challenge public docs (miner-facing repos)
 
-Each live challenge has a **separate public GitHub repo** for miners. Those repos must contain **only** human miner documentation plus example / test harness code — **never** control-plane, gateway, validator, or orchestrator source. Public repos use a `docs/` layout (hero README + banner under `assets/`).
+Each live challenge has miner docs in this repo. Public repos (when they exist) must contain **only** human miner documentation plus example / test harness code — **never** control-plane, gateway, validator, or orchestrator source.
 
-| Challenge | Public repo | Role |
+| Challenge | Public docs | Role |
 |-----------|-------------|------|
-| Relearn | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) | Eval image, harness, generators, teacher, miner docs |
-| Relearn Image | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) | Cosmos3 fine-tune harness + Q-Judger runner; in-repo pointer [`docs/external-miner/relearn-image.md`](docs/external-miner/relearn-image.md) |
-| Relearn Agent | [`CortexLM/relearn`](https://github.com/CortexLM/relearn) | Episode environment, trace replay, ablation arms; in-repo pointer [`docs/external-miner/relearn-agent.md`](docs/external-miner/relearn-agent.md) |
 | Bounty | this repo [`docs/external-miner/bounty.md`](docs/external-miner/bounty.md) | Miner pairing + report path; subnet **reads** CortexLM/backend public API (does not serve one) |
 | Proof | this repo [`docs/external-miner/proof.md`](docs/external-miner/proof.md) | Dynamic operator-published topics + digest-pinned RLM judge |
 
-This control-plane repo is `CortexLM/cortex`. Short miner pointers: [`docs/external-miner/relearn.md`](docs/external-miner/relearn.md), [`docs/external-miner/relearn-image.md`](docs/external-miner/relearn-image.md), [`docs/external-miner/relearn-agent.md`](docs/external-miner/relearn-agent.md), [`docs/external-miner/bounty.md`](docs/external-miner/bounty.md), [`docs/external-miner/proof.md`](docs/external-miner/proof.md). Historical frozen specs (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`) stay archived; they are not live products. Do not send miners to Design or Prism docs.
+This control-plane repo is `CortexLM/cortex`. Off/archived miner pointers stay under [`docs/external-miner/`](docs/external-miner/) (`relearn.md`, `relearn-image.md`, `relearn-agent.md`, `relearn-mm.md`) so historical links do not 404; they are not live products. Frozen specs (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`) stay archived. Do not send miners to Design, Prism, or Relearn docs as live work.
 
 **When a challenge product or public API changes**, agents **must** update:
 
@@ -73,18 +67,14 @@ When verifying a challenge (local-e2e, staging, or focused tests), **simulate a 
 
 1. Happy-path harness / intake POST (or equivalent) through the challenge service on master.
 2. Edge / failure probes: bad harness, sanitize reject, quota, wrong routes/auth.
-3. **Relearn — submit:** `POST /v1/submissions` with a 64-hex hotkey + artifact digest (optional `X-Lium-Api-Key`). Poll `GET /v1/submissions/{id}` until `awaiting_admin` or `rejected`. Holdout must stay sealed until the digest freezes. A regression must not become champion.
-4. **Relearn — promote:** with operator bearer (`deploy/secrets/relearn/admin_tokens`), `POST /v1/admin/promote` only for an eligible paired win.
-5. **Relearn Image — submit:** `POST /v1/submissions` with a manifest naming the pinned Cosmos3 base and OpenMDW 1.1. A Flux-family base must be a `400`, not a low score. `GET /v1/prompts` must publish the public split's frozen strings **and** seeds, and must never leak a holdout id. Probe contamination (declare a scored prompt id) and a pillar collapse; both must reject.
-6. **Relearn Agent — submit:** `POST /v1/submissions` with a declared training manifest. An empty manifest must fail `contamination_evidence_missing`, not pass. A run whose tool-ablation or observation-shuffle arm is missing, or whose ablation drop is under the floor, must yield lattice `0` — a model that answers without the tools is not an agent.
-7. **Bounty — pair + report:** `cortex-bounty pair --hotkey <ss58> --account-id <id>`, then `POST /v1/pair` (terms + signature) and `POST /v1/reports`. Operator bearer `POST /v1/admin/adjudicate` (`valid` / `already_fixed_not_prod` / `invalid_malicious` / `duplicate`). Scoring **reads** CortexLM/backend public JSON (`BOUNTY_BACKEND_PUBLIC_URL`); do not serve `/v1/public/*` from this repo.
-8. **Bounty — fail-closed scorer:** the CortexLM/backend public feed is the only scorer. With no readable `BOUNTY_BACKEND_PUBLIC_URL`, `POST /v1/reports` must answer **503** and the emitter must pay **nobody** — it still covers `E` with `NoScore(ChallengeInternal)`, because a paid challenge with no leaves 409s the seal for every challenge. `BOUNTY_FORCE_SIM` is retired — do not reintroduce an offline bounty scorer. See [`docs/BOUNTY.md`](docs/BOUNTY.md).
-9. **Proof — submit:** `POST /v1/submissions` with a `topic_id`. Missing / unknown / not-open → **400** (no row). Architecture ≠ the baked proxy → **400**. Empty `eval_image_digest`, zero open topics, or an unsealed baseline → **503**. Contamination / empty manifest persist **rejected** without rent. `GET /v1/proof/topics` must never leak holdout records.
-10. Leaf emission → `POST /v1/weights/raw` → seal → `GET /v1/weights/latest` with **`sealed: true`** (burn fallback alone is not a real seal).
+3. **Bounty — pair + report:** `ctx bounty pair --hotkey <ss58> --account-id <id> --accept-terms`, then `POST /v1/pair` (terms + signature) and `POST /v1/reports`. Operator bearer `POST /v1/admin/adjudicate` (`valid` / `already_fixed_not_prod` / `invalid_malicious` / `duplicate`). Scoring **reads** CortexLM/backend public JSON (`BOUNTY_BACKEND_PUBLIC_URL`); do not serve `/v1/public/*` from this repo.
+4. **Bounty — fail-closed scorer:** the CortexLM/backend public feed is the only scorer. With no readable `BOUNTY_BACKEND_PUBLIC_URL`, `POST /v1/reports` must answer **503** and the emitter must pay **nobody** — it still covers `E` with `NoScore(ChallengeInternal)`, because a paid challenge with no leaves 409s the seal for every challenge. `BOUNTY_FORCE_SIM` is retired — do not reintroduce an offline bounty scorer. See [`docs/BOUNTY.md`](docs/BOUNTY.md).
+5. **Proof — submit:** `POST /v1/submissions` with a `topic_id`. Missing / unknown / not-open → **400** (no row). Architecture ≠ the baked proxy → **400**. Empty `eval_image_digest`, zero open topics, or an unsealed baseline → **503**. Contamination / empty manifest persist **rejected** without rent. `GET /v1/proof/topics` must never leak holdout records.
+6. Leaf emission → `POST /v1/weights/raw` → seal → `GET /v1/weights/latest` with **`sealed: true`** (burn fallback alone is not a real seal).
 
-**Never host Sim in staging/prod** for live scoring. `RELEARN_FORCE_SIM=1`, `RELEARN_T2I_FORCE_SIM=1`, `RELEARN_MM_FORCE_SIM=1`, and `PROOF_FORCE_SIM=1` are CI/local opt-in only (`deploy/scripts/assert-compose-matrix.sh` fails if a droplet overlay sets one). Live rent requires a digest pin in the matching `config/*-pin.toml` plus miner BYOK (`LIUM_API_KEY` / `X-Lium-Api-Key`). Never log or commit that key.
+**Never host Sim in staging/prod** for live scoring. `PROOF_FORCE_SIM=1` is CI/local opt-in only (`deploy/scripts/assert-compose-matrix.sh` fails if a droplet overlay sets one). Live Proof rent requires a digest pin in `config/proof-pin.toml` plus miner BYOK (`LIUM_API_KEY` / `X-Lium-Api-Key`). Never log or commit that key. Do not invent `eval_image_digest`.
 
-**Relearn Image product rules (do not weaken):** the generator seed is `nvidia/Cosmos3-Super-Text2Image` under OpenMDW 1.1; Flux-family bases are refused; Q-Judger (`Qwen/Qwen-Image-Bench`) is the only judge and its card-fixed inference parameters are part of the contract; eval prompts are frozen in the pin so no miner brings its own upsampler to the scored split; the holdout lives in git only as a commitment. **Relearn Agent product rules (do not weaken):** the unit of work is an episode (goal + tool environment), not a prompt; trace replay, tool ablation, and observation shuffle are all mandatory arms and a missing arm fails closed; the capability canary stays off the visible score. **Bounty product rules:** pay is precision x severity, an unpriced `valid` row is not creditable, and the triage-noise ratio stays off the visible score. **Proof product rules (do not weaken):** topics are operator-published signed documents, not a git catalog; a topic may tighten a floor never loosen it; a baseline must be sealed to open; the paid score is the mean of per-topic lattices over currently `open` ids; empty open set / empty eval digest fails closed (`503`); `custom` unknown ids refuse at publish.
+**Bounty product rules:** pay is precision x severity, an unpriced `valid` row is not creditable, and the triage-noise ratio stays off the visible score. **Proof product rules (do not weaken):** topics are operator-published signed documents, not a git catalog; a topic may tighten a floor never loosen it; a baseline must be sealed to open; the paid score is the mean of per-topic lattices over currently `open` ids; empty open set / empty eval digest fails closed (`503`); `custom` unknown ids refuse at publish.
 
 Local smoke automates the weights seal step via `weights-smoke` inside `./deploy/scripts/local-e2e.sh --smoke` (see [`deploy/AGENTS.md`](deploy/AGENTS.md) and [`docs/runbooks/local-testnet-e2e.md`](docs/runbooks/local-testnet-e2e.md)).
 
@@ -129,7 +119,7 @@ Match CI (`.github/workflows/ci.yml`):
 | Doc authority vs evidence | [`docs/AGENTS.md`](docs/AGENTS.md) |
 | Component status | [`docs/COMPLETENESS.md`](docs/COMPLETENESS.md) |
 | Frozen contracts | [`docs/BUNDLE_SPEC.md`](docs/BUNDLE_SPEC.md), [`docs/DESIGN_CHALLENGE.md`](docs/DESIGN_CHALLENGE.md), [`docs/PRISM.md`](docs/PRISM.md) |
-| Relearn miners | [`docs/external-miner/relearn.md`](docs/external-miner/relearn.md), [`relearn-image.md`](docs/external-miner/relearn-image.md), [`relearn-agent.md`](docs/external-miner/relearn-agent.md) · long guide: [CortexLM/relearn](https://github.com/CortexLM/relearn) |
+| Bounty miners | [`docs/external-miner/bounty.md`](docs/external-miner/bounty.md) · operator spec: [`docs/BOUNTY.md`](docs/BOUNTY.md) |
 | Proof miners | [`docs/external-miner/proof.md`](docs/external-miner/proof.md) · operator spec: [`docs/PROOF.md`](docs/PROOF.md) |
 | Validators | [`docs/external-miner/validators.md`](docs/external-miner/validators.md) |
 | Threat / operator checklist | [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md), [`docs/OPERATOR_SECURITY.md`](docs/OPERATOR_SECURITY.md) |

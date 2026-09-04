@@ -19,7 +19,7 @@ creditable `valid` — a `severity`.
 | `challenge_id` | `bounty` |
 | `challenge_scoring_version` | `1` |
 | Port | `8096` (local host `28096`) |
-| Emission | `3000` bps |
+| Emission | `5000` bps |
 
 ## Why this challenge is not gated like the Relearn ones
 
@@ -104,13 +104,13 @@ weight. Two things follow, and neither is a degraded mode:
   reports there would take real work (finding a real bug) and pay nothing.
 - the emitter pays **nobody**: it covers `E` with
   `NoScore(ChallengeInternal)` (`BUNDLE_SPEC` §3.3.1 — "challenge-side fault;
-  still must cover the participant"), so the 3000 bps burns to uid 0.
+  still must cover the participant"), so the 5000 bps burns to uid 0.
 
 Covering `E` is not a hedge, it is the difference between bounty failing and
 the subnet failing. Bounty holds a **paid** trust-root row, and D24 requires a
 leaf per participant for every paid challenge: leave `E` uncovered and
 `POST /v1/admin/seal` answers **409 incomplete_participant_set** for the whole
-bundle, so relearn's weights go unsealed too. The emitter therefore runs even
+bundle, so proof's weights go unsealed too. The emitter therefore runs even
 on a host with no feed at all — it simply never pays.
 
 "Moving under the read" is in that list for the same reason. The feed is two

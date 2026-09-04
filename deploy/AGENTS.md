@@ -43,13 +43,13 @@ Compose always runs a digest-pinned `postgres` service (`base-pgdata` volume, he
 | site-api (`GET /v1/site/*`) | no DB — proxies challenge upstreams via gateway |
 | Unit/integration tests | may construct `Memory*Store` directly; omit `BASE_DATABASE_URL` only there |
 
-Migrations (`crates/db/migrations`) run on boot in gateway when `BASE_DATABASE_URL` is set. Compose requires `deploy/env/relearn-challenge.env` and `deploy/env/bounty-challenge.env` so live challenges cannot silently boot without operator config.
+Migrations (`crates/db/migrations`) run on boot in gateway when `BASE_DATABASE_URL` is set. Compose requires `deploy/env/bounty-challenge.env` and `deploy/env/proof-challenge.env` so live challenges cannot silently boot without operator config.
 
 ## Bounty scorer (host-set, fail-closed)
 
 Bounty scores **only** from the CortexLM/backend public feed. Set `BOUNTY_BACKEND_PUBLIC_URL` on the host (`deploy/env/bounty-challenge.env`; never bake a hostname into git). The service fetches `/v1/bounty/public/leaderboard` + `/reports`, signs an exact-`E` leaf set every `BOUNTY_EMIT_POLL_SECS` (default 120), and posts to the master gateway — validators only ever verify the sealed bundle.
 
-With no readable feed the host answers **503** on `POST /v1/reports` and pays nobody: it covers `E` with `NoScore(ChallengeInternal)`, so the 3000 bps burns to uid 0 while D24 still holds (leaving `E` uncovered would 409 the seal for *every* challenge, since bounty holds a paid trust-root row). `BOUNTY_FORCE_SIM` is retired and ignored; `assert-compose-matrix.sh` fails if any compose file reintroduces it. Verify with `./deploy/scripts/local-e2e.sh --smoke` (it POSTs ingest and asserts 503 without a feed, 401 with one) or by hand: `GET /challenge/bounty/v1/status` → `scoring_backend`, `can_score`. Details: [`docs/BOUNTY.md`](../docs/BOUNTY.md).
+With no readable feed the host answers **503** on `POST /v1/reports` and pays nobody: it covers `E` with `NoScore(ChallengeInternal)`, so the 5000 bps burns to uid 0 while D24 still holds (leaving `E` uncovered would 409 the seal for *every* challenge, since bounty holds a paid trust-root row). `BOUNTY_FORCE_SIM` is retired and ignored; `assert-compose-matrix.sh` fails if any compose file reintroduces it. Verify with `./deploy/scripts/local-e2e.sh --smoke` (it POSTs ingest and asserts 503 without a feed, 401 with one) or by hand: `GET /challenge/bounty/v1/status` → `scoring_backend`, `can_score`. Details: [`docs/BOUNTY.md`](../docs/BOUNTY.md).
 
 ## Prism Lium GPU profiles (do not mix)
 
@@ -86,12 +86,12 @@ Full procedure: [`docs/runbooks/local-testnet-e2e.md`](../docs/runbooks/local-te
 | Docker, Compose v2 | yes | yes |
 | `cloudflared` (or `--no-tunnel`) | yes | yes |
 | `deploy/env/*.env` (examples OK) | yes | yes |
-| `gateway_sk` (seal) + `prism_sk` / `design_sk` (leaf sigs; pubs ↔ trust root) | yes (prefer `~/.base-secrets/challenge-*.sk`) | real preferred |
+| `gateway_sk` (seal) + `bounty_sk` / `proof_sk` (leaf sigs; pubs ↔ trust root) | yes (prefer `~/.base-secrets/challenge-*.sk`) | real preferred |
 | `deploy/secrets/wallets/base-owner` | **no** (not needed for `/v1/weights/latest`) | **yes** (netuid 541 owner) |
 | `base-validator` wallet | **no** (fetch-only) | for on-chain weight submit |
 | Fresh `target/release/{gateway,validator,…}` (or `BASE_DOCKER_BUILD_FROM=source`) | recommended | **required** for real chain |
 
-**Weights seal smoke (default on `--smoke`):** after healthz, `local-e2e.sh` runs `weights-smoke` — signed relearn leaves for the live metagraph → `POST /v1/admin/seal` → assert `GET /v1/weights/latest` is **200** with **`sealed: true`**. Skip with `--no-weights-smoke`. Pre-seal, latest is **200 burn** (`sealed: false`, uid 0 = 100%) — never 404; that is unrelated to a missing gateway owner wallet. Prefer `--burn` on mainnet when sealing without real challenge scores (all `NoScore` → uid 0).
+**Weights seal smoke (default on `--smoke`):** after healthz, `local-e2e.sh` runs `weights-smoke` — signed bounty leaves for the live metagraph → `POST /v1/admin/seal` → assert `GET /v1/weights/latest` is **200** with **`sealed: true`**. Skip with `--no-weights-smoke`. Pre-seal, latest is **200 burn** (`sealed: false`, uid 0 = 100%) — never 404; that is unrelated to a missing gateway owner wallet. Prefer `--burn` on mainnet when sealing without real challenge scores (all `NoScore` → uid 0).
 
 **Interim prod burn seal (retired while prism auto-emits):** `weights-smoke --burn` posts all-`NoScore` at a **block-scale** epoch. That hid the live Prism 2.1 WTA winner (chain epoch ~24k) because `/v1/weights/latest` had no chain-scale bundle to prefer. Keep the script for emergency burn-only windows; **do not** enable `base-burn-seal.timer` when Prism is emitting scores. `remote-deploy` on master enables real-seal and disables the burn timer.
 

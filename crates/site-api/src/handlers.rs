@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::state::SiteState;
-use crate::upstream::{self, DESIGN, PRISM, PROOF, RELEARN, RELEARN_AGENT, RELEARN_IMAGE};
+use crate::upstream::{self, BOUNTY, DESIGN, PRISM, PROOF, RELEARN, RELEARN_AGENT, RELEARN_IMAGE};
 use site_data::map::{
     activity_from_lives, design_arena_from_dashboard, design_leaderboard, design_submission,
     enrich_leaderboard_uids, enrich_leaderboard_weights, enrich_submission_uids,
@@ -28,7 +28,9 @@ use site_prism::{
     prism_submission_detail_with_zone,
 };
 use site_types::page_slice;
-use site_types::{coding_arena, proof_frame, relearn_agent_frame, relearn_image_frame};
+use site_types::{
+    bounty_frame, coding_arena, proof_frame, relearn_agent_frame, relearn_image_frame,
+};
 use site_types::{
     ArenaSlug, Governance, LandingSummary, MetricsEmission, MetricsPassRate, MetricsPopulation,
     NetworkMetrics, NetworkStats, RecipeEra, ResultsMatrix, Validator,
@@ -135,21 +137,20 @@ async fn fetch_proof_status(st: &SiteState) -> Option<Value> {
     upstream::get_json_opt(st, PROOF, "/v1/status").await
 }
 
+async fn fetch_bounty_status(st: &SiteState) -> Option<Value> {
+    upstream::get_json_opt(st, BOUNTY, "/v1/status").await
+}
+
 /// Every live arena with trust-root emission shares applied.
 ///
-/// The three Relearn challenges are fetched together so the emission column
-/// sums to the trust root rather than showing one challenge's slice as the
-/// whole subnet.
+/// Bounty and Proof are the only paid challenges; Relearn* / Design / Prism
+/// stay off the landing list so the emission column sums to the trust root.
 async fn live_arenas(st: &SiteState) -> Vec<site_types::Arena> {
-    let relearn = fetch_relearn_status(st).await;
-    let image = fetch_relearn_image_status(st).await;
-    let agent = fetch_relearn_agent_status(st).await;
+    let bounty = fetch_bounty_status(st).await;
     let proof = fetch_proof_status(st).await;
     let mut arenas = vec![
         coding_arena(),
-        relearn_arena_from_live(relearn.as_ref()),
-        hydrate_arena(relearn_image_frame(), image.as_ref()),
-        hydrate_arena(relearn_agent_frame(), agent.as_ref()),
+        hydrate_arena(bounty_frame(), bounty.as_ref()),
         hydrate_arena(proof_frame(), proof.as_ref()),
     ];
     for arena in &mut arenas {
@@ -267,13 +268,13 @@ fn decorate_submissions(st: &SiteState, rows: &mut [crate::Submission]) {
 
 async fn network_stats(st: &SiteState) -> NetworkStats {
     let (block, chain_epoch, validators) = chain_snapshot(st);
-    let relearn = fetch_relearn_status(st).await;
+    let proof = fetch_proof_status(st).await;
     let arenas = live_arenas(st).await;
     let agents: u32 = arenas.iter().map(|a| a.agents).sum();
     let tao_price = site_data::price::tao_price_usd(&st.client, &st.tao_price).await;
     let arena_count = u32::try_from(arenas.len()).unwrap_or(0);
     NetworkStats {
-        epoch: epoch_from_lives(None, relearn.as_ref(), chain_epoch),
+        epoch: epoch_from_lives(None, proof.as_ref(), chain_epoch),
         agents,
         validators: u32::try_from(validators.len()).unwrap_or(0),
         arenas: arena_count,
@@ -341,6 +342,7 @@ async fn get_arena(State(st): State<SiteState>, Path(slug): Path<String>) -> Res
             let subs = fetch_prism_subs(&st, 200).await;
             prism_arena_from_live(status.as_ref(), subs.as_ref())
         }
+        ArenaSlug::Bounty => hydrate_arena(bounty_frame(), fetch_bounty_status(&st).await.as_ref()),
         ArenaSlug::Relearn => relearn_arena_from_live(fetch_relearn_status(&st).await.as_ref()),
         ArenaSlug::RelearnImage => hydrate_arena(
             relearn_image_frame(),
@@ -612,6 +614,7 @@ async fn get_leaderboard(
         // non-champion row is an explicit NoScore (D24), so a paged list of
         // them would be a page of zeroes.
         ArenaSlug::Coding
+        | ArenaSlug::Bounty
         | ArenaSlug::Relearn
         | ArenaSlug::RelearnImage
         | ArenaSlug::RelearnAgent
@@ -633,6 +636,7 @@ async fn get_submissions(
     let needle = q.q.as_deref();
     match slug {
         ArenaSlug::Coding
+        | ArenaSlug::Bounty
         | ArenaSlug::Relearn
         | ArenaSlug::RelearnImage
         | ArenaSlug::RelearnAgent

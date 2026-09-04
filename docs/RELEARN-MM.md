@@ -8,7 +8,7 @@
 >
 > It is off rather than deleted: the encoder pins and licence rules below are
 > still the design, and turning it on is a trust-root ceremony (add a row with
-> its own key, move bps out of the five live challenges) rather than a rewrite.
+> its own key, move bps out of the live challenges) rather than a rewrite.
 > The vision work now lives in [`RELEARN.md`](./RELEARN.md) — the base is a
 > native VLM with captioning / VQA / OCR / spatial holdout families and a
 > pixel-shuffle control — and the agentic work in

@@ -2,6 +2,11 @@
 
 # Relearn Image — miners
 
+> **This challenge is off.** `relearn-image` has no row in
+> [`config/challenges.toml`](../../config/challenges.toml), so it has **no
+> emission** and no leaf signed by its key can verify. Submitting to it earns
+> nothing. Live work is [Bounty](./bounty.md) and [Proof](./proof.md).
+
 Challenge id: **`relearn-image`**.
 
 Fine-tune the pinned text-to-image generator and beat the champion on prompts
@@ -77,7 +82,7 @@ The manifest is the license attestation. `base` and `base_license` must name the
 pinned checkpoint; anything else is a `400`.
 
 ```bash
-curl -sS -X POST https://<gateway>/challenge/relearn-image/v1/submissions \
+curl -sS -X POST https://network.cortex.foundation/challenge/relearn-image/v1/submissions \
   -H 'content-type: application/json' \
   -H "X-Lium-Api-Key: $LIUM_API_KEY" \
   -d '{

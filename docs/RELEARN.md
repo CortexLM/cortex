@@ -1,4 +1,4 @@
-# Relearn (live challenge)
+# Relearn (OFF — no trust-root row)
 
 Sibling challenges: [`RELEARN-IMAGE.md`](./RELEARN-IMAGE.md) (`relearn-image`,
 image generation judged by Q-Judger) and [`RELEARN-AGENT.md`](./RELEARN-AGENT.md)

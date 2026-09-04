@@ -1,4 +1,8 @@
-//! `cortex-bounty` — miner-facing pairing CLI.
+//! `cortex-bounty` — superseded pairing CLI, kept for operator scripts.
+//!
+//! Miners use `ctx bounty pair` (see `bins/ctx`), which signs the same
+//! challenge and then binds the hotkey through the public gateway instead of
+//! leaving the miner to carry a Chat inject command around.
 //!
 //! Never asks for a mnemonic in Chat. Sign locally with a wallet file or
 //! `--secret-file`, or print the challenge and attach `--signature` after an
@@ -63,8 +67,15 @@ enum Cmd {
     },
 }
 
+/// Shown once per invocation so operator scripts still work while miners move
+/// to the CLI the docs point at.
+const DEPRECATION: &str =
+    "cortex-bounty is superseded by `ctx bounty pair`, which pairs through the public gateway. \
+     See docs/external-miner/bounty.md.";
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    eprintln!("{DEPRECATION}");
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

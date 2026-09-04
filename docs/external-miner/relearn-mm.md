@@ -5,11 +5,7 @@
 > **This challenge is off.** `relearn-mm` has no row in
 > [`config/challenges.toml`](../../config/challenges.toml), so it has **no
 > emission** and no leaf signed by its key can verify. Submitting to it earns
-> nothing. The vision work miners came here for now lives in
-> [Relearn](./relearn.md) — `Qwen/Qwen3.8-27B` is a native VLM and the holdout
-> already carries captioning, VQA, OCR, and spatial families with a
-> pixel-shuffle control. The agentic side lives in
-> [Relearn Agent](./relearn-agent.md).
+> nothing. Live work is [Bounty](./bounty.md) and [Proof](./proof.md).
 >
 > The page stays for the archived encoder pins and the licence rules, which
 > still apply if the challenge is turned back on with a trust-root ceremony.
@@ -77,7 +73,7 @@ public split is informational.
 ## Submit
 
 ```bash
-curl -sS -X POST https://<gateway>/challenge/relearn-mm/v1/submissions \
+curl -sS -X POST https://network.cortex.foundation/challenge/relearn-mm/v1/submissions \
   -H 'content-type: application/json' \
   -H "X-Lium-Api-Key: $LIUM_API_KEY" \
   -d '{

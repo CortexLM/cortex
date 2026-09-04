@@ -16,6 +16,8 @@ pub const RELEARN_IMAGE: &str = "relearn-image";
 pub const RELEARN_AGENT: &str = "relearn-agent";
 /// Proof: operator-published research topics.
 pub const PROOF: &str = "proof";
+/// Bounty: paired bug reports.
+pub const BOUNTY: &str = "bounty";
 
 /// Upstream fetch error.
 #[derive(Debug)]

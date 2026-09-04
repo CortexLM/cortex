@@ -1,4 +1,4 @@
-# Relearn Agent (live challenge)
+# Relearn Agent (OFF — no trust-root row)
 
 Control-plane notes. Miners start at [`external-miner/relearn-agent.md`](./external-miner/relearn-agent.md).
 Validators start at [`external-miner/validators.md`](./external-miner/validators.md).

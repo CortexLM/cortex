@@ -2,11 +2,13 @@
 
 # Relearn — miners
 
-Challenge id is `relearn`. One of five live challenges; the others are
-[Relearn Image](./relearn-image.md), [Relearn Agent](./relearn-agent.md),
-[Bounty](./bounty.md), and [Proof](./proof.md). Relearn Agent post-trains the **same** checkpoint, so
-read both before you pick: this page pays for answers, that one pays for
-grounded tool use. Long guide, eval image, and harness:
+> **This challenge is off.** `relearn` has no row in
+> [`config/challenges.toml`](../../config/challenges.toml), so it has **no
+> emission** and no leaf signed by its key can verify. Submitting to it earns
+> nothing. Live work is [Bounty](./bounty.md) and [Proof](./proof.md).
+
+Challenge id is `relearn`. Off; the live challenges are
+[Bounty](./bounty.md) and [Proof](./proof.md). Long guide, eval image, and harness:
 [CortexLM/relearn](https://github.com/CortexLM/relearn).
 Cortex pin: [`config/relearn-pin.toml`](../../config/relearn-pin.toml).
 
@@ -43,7 +45,7 @@ shuffle control on a vision family the champion measured is rejected
 ## Submit
 
 ```bash
-curl -sS -X POST https://<gateway>/challenge/relearn/v1/submissions \
+curl -sS -X POST https://network.cortex.foundation/challenge/relearn/v1/submissions \
   -H 'content-type: application/json' \
   -H "X-Lium-Api-Key: $LIUM_API_KEY" \
   -d '{

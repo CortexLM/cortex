@@ -15,7 +15,9 @@ pub enum ArenaSlug {
     Design,
     /// Prism challenge (retired).
     Prism,
-    /// Relearn post-training factory.
+    /// Bounty: paired bug reports.
+    Bounty,
+    /// Relearn post-training factory (off).
     Relearn,
     /// Relearn Image generation.
     #[serde(rename = "relearn-image")]
@@ -35,6 +37,7 @@ impl ArenaSlug {
             "coding" => Some(Self::Coding),
             "design" => Some(Self::Design),
             "prism" => Some(Self::Prism),
+            "bounty" => Some(Self::Bounty),
             "relearn" => Some(Self::Relearn),
             "relearn-image" => Some(Self::RelearnImage),
             "relearn-agent" => Some(Self::RelearnAgent),
@@ -50,6 +53,7 @@ impl ArenaSlug {
             Self::Coding => "coding",
             Self::Design => "design",
             Self::Prism => "prism",
+            Self::Bounty => "bounty",
             Self::Relearn => "relearn",
             Self::RelearnImage => "relearn-image",
             Self::RelearnAgent => "relearn-agent",
@@ -72,6 +76,8 @@ pub enum ScoringMethod {
     Displacement,
     /// Proof reproduced experiment vs sealed baseline.
     Reproduced,
+    /// Bounty precision × severity.
+    PrecisionSeverity,
 }
 
 /// Reference chip on an arena card.

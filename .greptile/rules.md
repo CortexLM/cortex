@@ -1,10 +1,10 @@
 # Cortex review rules
 
 This is a Bittensor subnet control plane (`CortexLM/cortex`), not an app-platform
-or SOC2 checklist. Five **live** challenge ids: `relearn` (3000 bps),
-`relearn-image` (1000; crates keep the `relearn-t2i-*` spelling),
-`relearn-agent` (1000), `bounty` (3000), `proof` (2000). `relearn-mm` is **off** (no trust-root
-row, `mm` compose profile only).
+or SOC2 checklist. Two **live** challenge ids: `bounty` (5000 bps) and
+`proof` (5000). Equal split; sum is 10000. `relearn`, `relearn-image`,
+`relearn-agent`, `relearn-mm`, `design`, and `prism` are **off** (no trust-root
+row). Relearn* code stays behind the `relearn` / `mm` compose profiles.
 
 - **Fail-closed.** Missing holdout file, commitment mismatch, unpinned eval
   digest, or unset teacher → refuse / 503. Never score the public split as a

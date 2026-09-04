@@ -1,5 +1,5 @@
 //! Fail if external miner docs drift from `bundle` `PROTOCOL_VERSION`,
-//! if relearn HTTP miner paths are missing, or if `docs/THREAT_MODEL.md`
+//! if live HTTP miner paths are missing, or if `docs/THREAT_MODEL.md`
 //! D19 claim is not word-for-word vs plan pin.
 
 use std::fs;
@@ -13,10 +13,6 @@ const BADGE_COMMENT_PREFIX: &str = "<!-- protocol_version:";
 
 /// Content pins required in `docs/external-miner/README.md`.
 const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
-    ("relearn_challenge", "relearn"),
-    ("relearn_image_challenge", "relearn-image"),
-    ("relearn_agent_challenge", "relearn-agent"),
-    ("relearn_mm_off", "relearn-mm"),
     ("bounty_challenge", "bounty"),
     ("proof_challenge", "proof"),
     ("proof_dynamic_topics", "operator-published"),
@@ -24,22 +20,19 @@ const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("lium_byok", "X-Lium-Api-Key"),
     ("lium_pay", "Miner pays Lium"),
     ("bundle_spec_link", "BUNDLE_SPEC.md"),
-    ("base_model", "Qwen/Qwen3.8-27B"),
-    ("teacher_nvfp4", "incoai/GLM-5.3-NVFP4"),
-    ("teacher_model", "glm-5.3"),
-    ("image_base_model", "nvidia/Cosmos3-Super-Text2Image"),
-    ("image_judge", "Qwen/Qwen-Image-Bench"),
-    ("image_flux_rejected", "Flux is rejected"),
-    ("agent_trace_scoring", "replayed tool traces"),
-    ("mm_encoder", "google/siglip2-so400m-patch14-384"),
-    // A live challenge that never says what it will not pay for teaches
-    // miners to find out by losing money.
-    ("private_holdout", "private holdout"),
+    ("private_holdout", "private per-topic holdout"),
     ("off_score_gate", "off the number you are paid on"),
     ("fail_closed", "fails closed"),
-    ("bounty_placeholder", "BOUNTY_CHAT_COMMAND"),
-    ("bounty_backend_url", "BOUNTY_BACKEND_PUBLIC_URL"),
     ("bounty_backend_consumer", "CortexLM/backend"),
+    ("ctx_cli", "ctx"),
+    ("gateway_host", "network.cortex.foundation"),
+    ("two_live", "Two live challenges"),
+    ("emission_equal", "5000 bps"),
+    // Off ids must still be named so miners do not treat leftover pages as live.
+    ("relearn_off", "relearn"),
+    ("relearn_image_off", "relearn-image"),
+    ("relearn_agent_off", "relearn-agent"),
+    ("relearn_mm_off", "relearn-mm"),
 ];
 
 /// Per-page pins. A challenge product rule that is not in the miner's own guide
@@ -129,7 +122,7 @@ pub fn run(workspace_root: &Path) -> Result<(), String> {
 
     if failures.is_empty() {
         println!(
-            "external-docs-check OK (protocol_version={protocol_version}, relearn + relearn-image + relearn-agent + bounty + proof HTTP, D19 verbatim match)"
+            "external-docs-check OK (protocol_version={protocol_version}, bounty + proof HTTP, D19 verbatim match)"
         );
         Ok(())
     } else {
@@ -273,7 +266,7 @@ fn check_external_miner_docs(
         for banned in FORBIDDEN_LIVE_PATHS {
             if lower.contains(&banned.to_ascii_lowercase()) {
                 failures.push(format!(
-                    "{} contains removed miner-path string {banned:?} (use relearn HTTP only)",
+                    "{} contains removed miner-path string {banned:?} (use HTTP submit only)",
                     path.strip_prefix(workspace_root).unwrap_or(&path).display()
                 ));
             }
@@ -410,47 +403,36 @@ mod tests {
     }
 
     #[test]
-    fn external_pins_cover_relearn() {
-        assert!(EXTERNAL_MINER_PINS
-            .iter()
-            .any(|(n, _)| *n == "relearn_challenge"));
-        assert!(EXTERNAL_MINER_PINS
-            .iter()
-            .any(|(n, v)| *n == "base_model" && *v == "Qwen/Qwen3.8-27B"));
-        assert!(EXTERNAL_MINER_PINS
-            .iter()
-            .any(|(n, v)| *n == "teacher_nvfp4" && *v == "incoai/GLM-5.3-NVFP4"));
-        assert!(EXTERNAL_MINER_PINS
-            .iter()
-            .any(|(n, v)| *n == "teacher_model" && *v == "glm-5.3"));
-        assert!(EXTERNAL_MINER_PINS
-            .iter()
-            .any(|(n, v)| *n == "lium_pay" && *v == "Miner pays Lium"));
+    fn external_pins_cover_live_and_off() {
         assert!(EXTERNAL_MINER_PINS
             .iter()
             .any(|(n, _)| *n == "bounty_challenge"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
-            .any(|(n, v)| *n == "bounty_backend_url" && *v == "BOUNTY_BACKEND_PUBLIC_URL"));
+            .any(|(n, v)| *n == "lium_pay" && *v == "Miner pays Lium"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
             .any(|(n, v)| *n == "bounty_backend_consumer" && *v == "CortexLM/backend"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "ctx_cli" && *v == "ctx"));
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "gateway_host" && *v == "network.cortex.foundation"));
     }
 
     #[test]
-    fn external_pins_cover_the_five_live_ids() {
+    fn external_pins_cover_the_two_live_ids() {
         for (name, value) in [
-            ("relearn_challenge", "relearn"),
-            ("relearn_image_challenge", "relearn-image"),
-            ("relearn_agent_challenge", "relearn-agent"),
             ("bounty_challenge", "bounty"),
             ("proof_challenge", "proof"),
             ("proof_dynamic_topics", "operator-published"),
-            ("image_base_model", "nvidia/Cosmos3-Super-Text2Image"),
-            ("image_judge", "Qwen/Qwen-Image-Bench"),
-            ("image_flux_rejected", "Flux is rejected"),
-            ("agent_trace_scoring", "replayed tool traces"),
-            ("mm_encoder", "google/siglip2-so400m-patch14-384"),
+            ("two_live", "Two live challenges"),
+            ("emission_equal", "5000 bps"),
+            ("relearn_off", "relearn"),
+            ("relearn_image_off", "relearn-image"),
+            ("relearn_agent_off", "relearn-agent"),
+            ("relearn_mm_off", "relearn-mm"),
         ] {
             assert!(
                 EXTERNAL_MINER_PINS

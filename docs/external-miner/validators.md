@@ -2,13 +2,13 @@
 
 # Validators
 
-Relearn, Relearn Image, and Relearn Agent scoring are centralized (master +
-Lium). Bounty adjudication is operator-side on master. You still run a
-validator.
+Bounty scoring reads CortexLM/backend on master. Proof scoring is centralized
+(master + digest-pinned RLM judge). You still run a validator.
 
-Live ids and emission: `relearn` 3000 bps, `relearn-image` 1000,
-`relearn-agent` 1000, `bounty` 3000, `proof` 2000. `relearn-mm` has no row and earns 0 — a
-leaf claiming that id fails the trust-root check, which is the point.
+Live ids and emission: `bounty` 5000 bps, `proof` 5000 bps (sum 10000).
+`relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and
+`prism` have no row and earn 0 — a leaf claiming those ids fails the
+trust-root check, which is the point.
 
 ## Job
 
@@ -26,13 +26,13 @@ Unsealed or decode-error latest is a **burn vector** (`sealed: false`, uid 0 = 1
 
 - Run evals
 - Rent Lium
-- Promote champions on any Relearn challenge (`POST /v1/admin/promote` is master / operator)
+- Promote champions (`POST /v1/admin/promote` is master / operator; Relearn is off)
 - Adjudicate Bounty reports (`POST /challenge/bounty/v1/admin/adjudicate`)
 - Read the Bounty public feed. Bounty adjudications live in CortexLM/backend;
   the challenge service on master fetches them and signs leaves, and you verify
   the sealed bundle like any other challenge. An epoch where that host could
   not read the feed still carries a full bounty leaf set — every leaf a
-  `NoScore`, reason `ChallengeInternal` (6) — so D24 holds and the 3000 bps
+  `NoScore`, reason `ChallengeInternal` (6) — so D24 holds and the 5000 bps
   burns to uid 0. That is fail-closed working, not a bundle to dissent on.
 
 ## Run

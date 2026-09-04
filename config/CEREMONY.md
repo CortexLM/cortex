@@ -12,28 +12,24 @@ Offline, operator-only. Never commit secrets. Prefer `/root/.base-secrets/` (mod
 | `config/measurements.toml` | Measurement allowlist; empty = fail-closed (base-agent CVM path removed). |
 | `config/measurements.toml.sig` | Detached owner signature. |
 
-### Live challenges (Relearn + Relearn Image + Relearn Agent + Bounty + Proof)
+### Live challenges (Bounty + Proof)
 
-Current committed `challenges.toml` has **five** rows: `relearn` @ 3000,
-`relearn-image` @ 1000, `relearn-agent` @ 1000, `bounty` @ 3000, and
-`proof` @ 2000 bps (sum = 10000). Operator may retune shares; the sum must
-remain 10000, and no two rows may share a public key.
+Current committed `challenges.toml` has **two** rows: `bounty` @ 5000 and
+`proof` @ 5000 bps (sum = 10000). Equal split is the ceremony choice for
+subnet 100: both are paid products, and neither inherits a leftover Relearn /
+Prism / Design share. Operator may retune shares; the sum must remain 10000,
+and no two rows may share a public key.
 
-`relearn-mm` is **off**: it has no row, so it has no emission and no leaf
-signed by its key can verify. Turning it on later is a normal ceremony — add a
-row with its own key and move bps out of the other five.
-
-**Key reuse from the pre-launch layout.** `relearn-image` carries the public
-key that the pre-launch `relearn-t2i` row used, and `relearn-agent` carries the
-one `relearn-mm` used. Both are throwaway CI keys, and only one id is live per
-key, so nothing can cross-verify today. Production **must** still keygen a
-fresh secret per live challenge — a key shared between two ids would let one
-challenge's leaves verify as the other's the moment both are live.
+`relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and
+`prism` are **off**: they have no row, so they have no emission and no leaf
+signed by their keys can verify. Relearn* code stays in the repo behind the
+`relearn` / `mm` compose profiles. Turning one on later is a normal ceremony —
+add a row with its own key and move bps out of the live two.
 
 A production owner/key ceremony:
 
-1. Keygen production `relearn_sk` / `relearn_image_sk` / `relearn_agent_sk` /
-   `bounty_sk` / `proof_sk` (keep off-git; materialize under `deploy/secrets/`).
+1. Keygen production `bounty_sk` / `proof_sk` (keep off-git; materialize under
+   `deploy/secrets/`).
 2. Replace the matching `public_key` rows in `config/challenges.toml`.
 3. Optionally move bps between challenges (sum must remain 10000).
 4. Re-sign with the **production** owner key (`sign --kind challenges`).
