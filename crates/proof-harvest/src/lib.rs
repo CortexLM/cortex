@@ -2,20 +2,29 @@
 //!
 //! The RLM agent and the metric harness live inside the image. This crate
 //! boots that image on a Lium pod, hands it the run request (including the
-//! topic constraints the image must enforce — e.g. a 12.5 Gbit/s cap), reads
-//! back the metrics document, and tears the pod down. Nothing here computes
-//! a score. There is no sim fallback.
+//! live `InferenceOffer` judge backend and the topic constraints the image
+//! must enforce — e.g. a 12.5 Gbit/s cap), reads back the metrics document,
+//! and tears the pod down. Nothing here computes a score. Miners do not bind
+//! or train against the offer. There is no sim fallback.
 
 #![forbid(unsafe_code)]
-#![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::doc_markdown,
+    clippy::too_many_arguments
+)]
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use harvest_pod::{harvest_template_name, EvalPod, PodProgram};
 use prism_lium_types::InstanceSpec;
-use proof_eval::{EvalError, LiveScorer, ProofEvalDocument, PROOF_METRICS_SCHEMA};
-use proof_task::{HoldoutRecord, ProofPin, TopicDocument, CHALLENGE_ID};
+use proof_eval::{
+    secret_backed_base_url, EvalError, LiveScorer, ProofEvalDocument, PROOF_METRICS_SCHEMA,
+};
+use proof_task::{
+    resolve_inference, HoldoutRecord, InferenceOffer, ProofPin, TopicDocument, CHALLENGE_ID,
+};
 use serde::{Deserialize, Serialize};
 
 /// Prefix the eval image prints before its metrics document.
@@ -57,8 +66,22 @@ pub struct HarvestRequest {
     pub topic_id: String,
     /// Metric family wire name.
     pub family: String,
-    /// RLM judge id the image must use (eval-image InferenceOffer, not a miner training proxy).
-    pub proxy_model: String,
+    /// Live judge offer id the eval image must call.
+    pub inference_offer_id: String,
+    /// Provider kind wire name.
+    pub provider_kind: String,
+    /// Judge origin (operator state; not a public status field).
+    pub base_url: String,
+    /// Serving mode.
+    pub mode: String,
+    /// Provider model id (not an HF bake).
+    pub model_ref: String,
+    /// Input token cap for this run (min of offer and topic).
+    pub max_input_tokens: u32,
+    /// Output token cap for this run.
+    pub max_output_tokens: u32,
+    /// Judge config commitment.
+    pub config_commitment: String,
     /// Eval image digest, so the image can stamp its own provenance.
     pub eval_image_digest: String,
     /// Commitment the records below must hash to.
@@ -96,11 +119,25 @@ impl Default for HarvestLimits {
     }
 }
 
+/// Env file staged as `teacher.env` and sourced by the eval image.
+///
+/// The key never enters [`HarvestRequest`] or `/v1/status`. Values are
+/// single-quoted so a special character cannot break `set -a` sourcing.
+pub fn judge_teacher_env(api_key: &str) -> Result<Vec<u8>, EvalError> {
+    let key = api_key.trim();
+    if key.is_empty() || key.contains('\n') || key.contains('\r') || key.contains('\0') {
+        return Err(EvalError::InferenceAuthMissing);
+    }
+    let escaped = key.replace('\'', "'\\''");
+    Ok(format!("OPENAI_API_KEY='{escaped}'\nPROOF_INFERENCE_API_KEY='{escaped}'\n").into_bytes())
+}
+
 /// [`LiveScorer`] over a digest-pinned eval image on a Lium pod.
 pub struct LiumProofHarvest {
     pod: Arc<dyn EvalPod>,
     limits: HarvestLimits,
     ssh_public_keys: Vec<String>,
+    judge_api_key: Option<String>,
 }
 
 impl LiumProofHarvest {
@@ -111,7 +148,20 @@ impl LiumProofHarvest {
             pod,
             limits,
             ssh_public_keys,
+            judge_api_key: None,
         }
+    }
+
+    /// Inject the judge API key staged into `teacher.env` on the pod.
+    ///
+    /// Empty / whitespace is treated as missing (fail-closed on a live run).
+    #[must_use]
+    pub fn with_judge_api_key(mut self, key: Option<String>) -> Self {
+        self.judge_api_key = key.and_then(|s| {
+            let t = s.trim().to_owned();
+            (!t.is_empty()).then_some(t)
+        });
+        self
     }
 
     fn spec(&self, pin: &ProofPin, frozen_digest: &str) -> InstanceSpec {
@@ -141,6 +191,7 @@ impl LiveScorer for LiumProofHarvest {
         &self,
         pin: &ProofPin,
         topic: &TopicDocument,
+        offer: &InferenceOffer,
         frozen_digest: &str,
         artifact_digest: &str,
         holdout: &[HoldoutRecord],
@@ -153,6 +204,30 @@ impl LiveScorer for LiumProofHarvest {
             return Err(EvalError::HoldoutSealed);
         }
         self.ready()?;
+        offer
+            .serves_topic(pin, topic)
+            .map_err(|e| EvalError::InferenceOffer(e.to_string()))?;
+        let resolved = resolve_inference(
+            pin,
+            Some(&topic.inference),
+            secret_backed_base_url().as_deref(),
+            Some(offer),
+        );
+        if !resolved.ready_to_score() {
+            return Err(EvalError::InferenceOffer(
+                proof_task::OfferError::Incomplete.to_string(),
+            ));
+        }
+        if resolved.base_url.trim() != offer.provider.base_url.trim() {
+            return Err(EvalError::InferenceOffer(
+                proof_task::OfferError::OriginMismatch.to_string(),
+            ));
+        }
+        let env = judge_teacher_env(self.judge_api_key.as_deref().unwrap_or(""))?;
+        let max_in = resolved.max_input_tokens.min(offer.config.max_input_tokens);
+        let max_out = resolved
+            .max_output_tokens
+            .min(offer.config.max_output_tokens);
         let request = HarvestRequest {
             schema_version: PROOF_METRICS_SCHEMA,
             challenge_id: CHALLENGE_ID.to_owned(),
@@ -160,7 +235,14 @@ impl LiveScorer for LiumProofHarvest {
             artifact_digest: artifact_digest.to_owned(),
             topic_id: topic.id.clone(),
             family: topic.metric.family.as_str().to_owned(),
-            proxy_model: pin.proxy_for(topic.proxy_model.as_deref()),
+            inference_offer_id: offer.offer_id.clone(),
+            provider_kind: resolved.provider.as_str().to_owned(),
+            base_url: resolved.base_url.clone(),
+            mode: resolved.mode.as_str().to_owned(),
+            model_ref: resolved.model.clone(),
+            max_input_tokens: max_in,
+            max_output_tokens: max_out,
+            config_commitment: offer.config_commitment.clone(),
             eval_image_digest: pin.eval_image_digest.clone(),
             holdout_commitment: topic.holdout_commitment.clone(),
             constraints: topic.constraints,
@@ -177,7 +259,7 @@ impl LiveScorer for LiumProofHarvest {
             .boot(&self.spec(pin, frozen_digest))
             .await
             .map_err(EvalError::Backend)?;
-        let run = self.pod.run(&instance, &body, &[]).await;
+        let run = self.pod.run(&instance, &body, &env).await;
         let shutdown = self.pod.shutdown(&instance).await;
         match shutdown {
             Ok(true) => {}
@@ -253,7 +335,14 @@ mod tests {
             artifact_digest: "a".into(),
             topic_id: topic.id.clone(),
             family: topic.metric.family.as_str().into(),
-            proxy_model: "Qwen/Qwen3.8-0.6B".into(),
+            inference_offer_id: "master-v0".into(),
+            provider_kind: "openai_compatible".into(),
+            base_url: "http://127.0.0.1:8000/v1".into(),
+            mode: "chat".into(),
+            model_ref: "master-proxy-v0".into(),
+            max_input_tokens: 4_096,
+            max_output_tokens: 256,
+            config_commitment: "ab".repeat(32),
             eval_image_digest: String::new(),
             holdout_commitment: topic.holdout_commitment.clone(),
             constraints: topic.constraints,
@@ -266,5 +355,208 @@ mod tests {
         assert_eq!(v["constraints"]["max_inter_node_gbps"], 12.5);
         assert_eq!(v["constraints"]["no_infiniband"], true);
         assert_eq!(v["challenge_id"], "proof");
+        assert_eq!(v["provider_kind"], "openai_compatible");
+        assert_eq!(v["mode"], "chat");
+        assert!(v.get("proxy_model").is_none());
+        assert!(v.get("api_key").is_none());
+    }
+
+    #[test]
+    fn teacher_env_carries_the_judge_key_and_never_the_request() {
+        let env = judge_teacher_env("sk-live-not-a-real-secret").expect("env");
+        let text = String::from_utf8(env).expect("utf8");
+        assert!(text.contains("OPENAI_API_KEY='sk-live-not-a-real-secret'"));
+        assert!(text.contains("PROOF_INFERENCE_API_KEY='sk-live-not-a-real-secret'"));
+        assert!(judge_teacher_env("").is_err());
+        assert!(judge_teacher_env("has\nnewline").is_err());
+        let quoted = judge_teacher_env("o'reilly").expect("quote");
+        assert_eq!(
+            String::from_utf8(quoted).expect("utf8"),
+            "OPENAI_API_KEY='o'\\''reilly'\nPROOF_INFERENCE_API_KEY='o'\\''reilly'\n"
+        );
+    }
+
+    struct CapturePod {
+        env: std::sync::Mutex<Vec<u8>>,
+        request: std::sync::Mutex<Vec<u8>>,
+        booted: std::sync::Mutex<bool>,
+    }
+
+    impl CapturePod {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                env: std::sync::Mutex::new(Vec::new()),
+                request: std::sync::Mutex::new(Vec::new()),
+                booted: std::sync::Mutex::new(false),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl EvalPod for CapturePod {
+        async fn boot(&self, _spec: &InstanceSpec) -> Result<String, String> {
+            *self.booted.lock().expect("boot") = true;
+            Ok("pod-1".into())
+        }
+
+        async fn run(
+            &self,
+            _instance_id: &str,
+            request: &[u8],
+            env_file: &[u8],
+        ) -> Result<String, String> {
+            *self.request.lock().expect("req") = request.to_vec();
+            *self.env.lock().expect("env") = env_file.to_vec();
+            Err("captured".into())
+        }
+
+        async fn shutdown(&self, _instance_id: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    fn harvest_pin() -> ProofPin {
+        let mut p = ProofPin {
+            eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
+            topic_pubkey: "ab".repeat(32),
+            ..ProofPin::default()
+        };
+        p.inference.model = "master-proxy-v0".into();
+        p
+    }
+
+    fn harvest_offer() -> InferenceOffer {
+        let config = proof_task::InferenceConfig {
+            mode: proof_task::InferenceMode::Chat,
+            model_ref: "master-proxy-v0".into(),
+            max_input_tokens: 32_768,
+            max_output_tokens: 8_192,
+            temperature: Some(0.0),
+            top_p: None,
+            timeout_ms: None,
+        };
+        InferenceOffer {
+            offer_id: "master-v0".into(),
+            provider: proof_task::InferenceProvider {
+                kind: proof_task::InferenceProviderKind::OpenaiCompatible,
+                base_url: "http://127.0.0.1:8000/v1".into(),
+            },
+            config_commitment: proof_task::inference_config_commitment(
+                &config,
+                "http://127.0.0.1:8000/v1",
+            ),
+            config,
+            status: proof_task::OfferStatus::Open,
+        }
+    }
+
+    fn harvest_topic(recs: &[proof_task::HoldoutRecord]) -> TopicDocument {
+        let mut b = default_adamw(proof_task::FLOPS_BUDGET_MAX);
+        b.script_sha256 = "11".repeat(32);
+        b.metrics_commitment = "22".repeat(32);
+        TopicDocument {
+            id: "dt-no-ib-v0".into(),
+            holdout_commitment: holdout_commitment(recs),
+            baseline: b,
+            status: proof_task::TopicStatus::Open,
+            ..TopicDocument::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn harvest_stages_teacher_env_and_never_puts_the_key_on_the_request() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let topic = harvest_topic(&recs);
+        let pod = CapturePod::new();
+        let harvest = LiumProofHarvest::new(
+            pod.clone(),
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAtest proof".into()],
+        )
+        .with_judge_api_key(Some("sk-live-not-a-real-secret".into()));
+        let err = harvest
+            .score(
+                &harvest_pin(),
+                &topic,
+                &harvest_offer(),
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err("capture");
+        assert!(matches!(err, EvalError::Backend(_)), "{err}");
+        assert!(*pod.booted.lock().expect("booted"));
+        let env = String::from_utf8(pod.env.lock().expect("env").clone()).expect("utf8");
+        assert!(
+            env.contains("OPENAI_API_KEY='sk-live-not-a-real-secret'"),
+            "{env}"
+        );
+        assert!(
+            env.contains("PROOF_INFERENCE_API_KEY='sk-live-not-a-real-secret'"),
+            "{env}"
+        );
+        let req: serde_json::Value =
+            serde_json::from_slice(&pod.request.lock().expect("req")).expect("json");
+        assert!(req.get("api_key").is_none(), "{req}");
+        let dump = req.to_string();
+        assert!(!dump.contains("sk-live"), "{dump}");
+        assert_eq!(req["base_url"], "http://127.0.0.1:8000/v1");
+    }
+
+    #[tokio::test]
+    async fn harvest_without_judge_key_does_not_boot() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let topic = harvest_topic(&recs);
+        let pod = CapturePod::new();
+        let harvest = LiumProofHarvest::new(
+            pod.clone(),
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAtest proof".into()],
+        );
+        let err = harvest
+            .score(
+                &harvest_pin(),
+                &topic,
+                &harvest_offer(),
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err("no key");
+        assert!(matches!(err, EvalError::InferenceAuthMissing), "{err}");
+        assert!(!*pod.booted.lock().expect("booted"));
+    }
+
+    #[tokio::test]
+    async fn harvest_refuses_a_spoofed_topic_origin_before_boot() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let mut topic = harvest_topic(&recs);
+        topic.inference.max_input_tokens = Some(4_096);
+        topic.inference.base_url = Some("http://evil.example/v1".into());
+        let pod = CapturePod::new();
+        let harvest = LiumProofHarvest::new(
+            pod.clone(),
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAtest proof".into()],
+        )
+        .with_judge_api_key(Some("sk-live-not-a-real-secret".into()));
+        let err = harvest
+            .score(
+                &harvest_pin(),
+                &topic,
+                &harvest_offer(),
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err("spoof");
+        assert!(err.to_string().contains("committed judge origin"), "{err}");
+        assert!(!*pod.booted.lock().expect("booted"));
     }
 }

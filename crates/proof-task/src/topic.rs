@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{canonical_json, ProofPin, TOPIC_DOMAIN};
+use crate::{canonical_json, is_hex64, ProofPin, TopicInference, TOPIC_DOMAIN};
 
 /// Only accepted `schema_version`.
 pub const TOPIC_SCHEMA_VERSION: u32 = 1;
@@ -88,8 +88,6 @@ pub enum MetricFamily {
 }
 
 impl MetricFamily {
-    /// Wire name.
-    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Nll => "nll",
@@ -297,7 +295,6 @@ impl Default for Baseline {
 }
 
 /// The locked AdamW recipe. A topic's `adamw` baseline must be exactly this.
-#[must_use]
 pub fn default_adamw(flops_budget: u64) -> Baseline {
     Baseline {
         optimizer: "adamw".into(),
@@ -319,7 +316,6 @@ pub fn default_adamw(flops_budget: u64) -> Baseline {
 
 impl Baseline {
     /// Whether both seal hashes are present and well formed.
-    #[must_use]
     pub fn is_sealed(&self) -> bool {
         is_hex64(&self.script_sha256) && is_hex64(&self.metrics_commitment)
     }
@@ -367,10 +363,12 @@ pub struct TopicDocument {
     pub flops_budget: u64,
     /// Absolute NLL a challenger must win by (`nll` family primary gate).
     pub epsilon_nll: f64,
-    /// Largest per-split NLL regression tolerated on any scored stratum.
+    /// Per-split NLL regression gate.
     pub epsilon_topic_max_regress: f64,
-    /// Proxy override. `None` means the pin default.
+    /// Deprecated HF proxy override. Must stay empty.
     pub proxy_model: Option<String>,
+    /// Inference constraints this topic tightens against the pin.
+    pub inference: TopicInference,
     /// Sealed baseline recipe plus its two seal hashes.
     pub baseline: Baseline,
     /// Commitment over this topic's holdout records.
@@ -407,6 +405,7 @@ impl Default for TopicDocument {
             epsilon_nll: crate::EPSILON_NLL_MIN,
             epsilon_topic_max_regress: crate::EPSILON_TOPIC_MAX_REGRESS_MIN,
             proxy_model: None,
+            inference: TopicInference::default(),
             baseline: default_adamw(crate::FLOPS_BUDGET_MAX),
             holdout_commitment: String::new(),
             holdout_size: crate::HOLDOUT_SIZE,
@@ -533,9 +532,21 @@ pub enum TopicError {
         /// Pin value.
         want: usize,
     },
-    /// A proxy the pinned eval image does not contain.
-    #[error("proxy_model {0:?} is not baked into the pinned eval image")]
-    ProxyNotBaked(String),
+    /// A proxy bake lock — retired; the RLM judge uses a live InferenceOffer.
+    #[error("proxy_model is deprecated; the RLM judge uses inference + a live InferenceOffer")]
+    DeprecatedProxyModel,
+    /// Inference mode not in the pin allowlist.
+    #[error("inference.mode {0:?} is not in the pin allowed_modes")]
+    InferenceModeNotAllowed(crate::InferenceMode),
+    /// Topic token cap is zero or above the pin inference default / ceiling.
+    #[error("inference.{0} = {1} must be 1..={2}")]
+    InferenceCeiling(&'static str, u32, u32),
+    /// `require_judge_offer_commitment` is not 64 hex.
+    #[error("inference.require_judge_offer_commitment must be 64 hex chars")]
+    BadOfferCommitment,
+    /// Open topic resolved to an incomplete provider config, or an override is unusable.
+    #[error("inference is incomplete or misconfigured (provider, model, mode, tokens, origin)")]
+    IncompleteInference,
     /// The validity window is inverted.
     #[error("valid_until_epoch {until} is before valid_from_epoch {from}")]
     BadWindow {
@@ -556,11 +567,6 @@ pub enum TopicError {
     /// Canonical JSON could not be built.
     #[error("canonicalize topic: {0}")]
     Canonicalize(String),
-}
-
-fn is_hex64(s: &str) -> bool {
-    let t = s.trim();
-    t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn approx(a: f64, b: f64) -> bool {
@@ -783,7 +789,7 @@ impl TopicDocument {
                 want: TOPIC_SCHEMA_VERSION,
             });
         }
-        if !is_valid_id(&self.id) {
+        if !crate::is_slug(&self.id) {
             return Err(TopicError::BadId(self.id.clone()));
         }
         let statement = self.statement.trim();
@@ -817,9 +823,14 @@ impl TopicDocument {
             }
         }
         if let Some(proxy) = self.proxy_model.as_deref().map(str::trim) {
-            if proxy.is_empty() || !pin.bakes_proxy(proxy) {
-                return Err(TopicError::ProxyNotBaked(proxy.to_owned()));
+            if !proxy.is_empty() {
+                return Err(TopicError::DeprecatedProxyModel);
             }
+        }
+        self.inference.validate(pin)?;
+        let model = crate::resolve_inference(pin, Some(&self.inference), None, None).model;
+        if self.status == TopicStatus::Open && model.trim().is_empty() {
+            return Err(TopicError::IncompleteInference);
         }
         self.baseline.validate(&self.metric, self.flops_budget)?;
         if !is_hex64(&self.holdout_commitment) {
@@ -877,7 +888,6 @@ impl TopicDocument {
     }
 
     /// Whether this topic accepts submissions and earns emission at `epoch`.
-    #[must_use]
     pub fn is_open_at(&self, epoch: u64) -> bool {
         self.status == TopicStatus::Open
             && epoch >= self.valid_from_epoch
@@ -885,25 +895,9 @@ impl TopicDocument {
     }
 
     /// Slice id bound into this topic's measurements.
-    #[must_use]
     pub fn slice_id(&self) -> String {
         format!("{}-{}", crate::HOLDOUT_SLICE_PREFIX, self.id)
     }
-}
-
-fn is_valid_id(id: &str) -> bool {
-    let len = id.len();
-    if !(MIN_TOPIC_ID_LEN..=MAX_TOPIC_ID_LEN).contains(&len) {
-        return false;
-    }
-    let mut chars = id.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 #[cfg(test)]
@@ -912,12 +906,12 @@ mod tests {
     use crate::{holdout_commitment, synthetic_holdout, STRATUM_SIZE};
 
     fn pin() -> ProofPin {
-        ProofPin {
+        let mut p = ProofPin {
             topic_pubkey: hex::encode(crypto::public_key_from_mini_secret(&sk()).expect("pk")),
-            proxy_model: "Qwen/Qwen3.8-0.6B".into(),
-            proxy_models: vec!["Qwen/Qwen3.8-0.6B".into(), "Qwen/Qwen3.8-1.7B".into()],
             ..ProofPin::default()
-        }
+        };
+        p.inference.model = "master-proxy-v0".into();
+        p
     }
 
     fn sk() -> [u8; 32] {
@@ -1050,6 +1044,7 @@ mod tests {
             "\"metric\"",
             "\"baseline\"",
             "\"holdout_commitment\"",
+            "\"inference\"",
             "\"status\"",
         ] {
             assert!(payload.contains(field), "missing {field} in {payload}");
@@ -1322,16 +1317,77 @@ mod tests {
     }
 
     #[test]
-    fn a_proxy_the_image_does_not_bake_is_refused() {
+    fn a_deprecated_proxy_model_is_refused() {
         let p = pin();
         let mut doc = nll_topic();
-        doc.proxy_model = Some("Qwen/Qwen3.8-1.7B".into());
-        doc.validate(&p, &[]).expect("a baked proxy is fine");
-        doc.proxy_model = Some("Qwen/Qwen3.8-27B".into());
+        doc.proxy_model = Some("Qwen/Qwen3.8-0.6B".into());
         assert!(matches!(
             doc.validate(&p, &[]),
-            Err(TopicError::ProxyNotBaked(_))
+            Err(TopicError::DeprecatedProxyModel)
         ));
+    }
+
+    #[test]
+    fn topic_inference_may_tighten_but_never_loosen_pin_defaults() {
+        let p = pin();
+        let mut tight = nll_topic();
+        tight.inference.max_input_tokens = Some(4_096);
+        tight.inference.max_output_tokens = Some(256);
+        tight.validate(&p, &[]).expect("tighter is fine");
+
+        let mut loose = nll_topic();
+        loose.inference.max_input_tokens = Some(crate::MAX_INPUT_TOKENS_CEILING + 1);
+        assert!(matches!(
+            loose.validate(&p, &[]),
+            Err(TopicError::InferenceCeiling(..))
+        ));
+
+        let mut vs_pin = nll_topic();
+        let mut tight_pin = p.clone();
+        tight_pin.inference.max_input_tokens = 4_096;
+        vs_pin.inference.max_input_tokens = Some(8_192);
+        assert!(matches!(
+            vs_pin.validate(&tight_pin, &[]),
+            Err(TopicError::InferenceCeiling(..))
+        ));
+        vs_pin.inference.max_input_tokens = None;
+        vs_pin
+            .validate(&tight_pin, &[])
+            .expect("inherit pin default");
+
+        let mut subset = pin();
+        subset.allowed_modes = vec![crate::InferenceMode::Completions];
+        let mut completions = nll_topic();
+        completions.inference.mode = Some(crate::InferenceMode::Chat);
+        assert!(matches!(
+            completions.validate(&subset, &[]),
+            Err(TopicError::InferenceModeNotAllowed(_))
+        ));
+
+        let mut bad = nll_topic();
+        bad.inference.require_judge_offer_commitment = Some("zz".into());
+        assert!(matches!(
+            bad.validate(&p, &[]),
+            Err(TopicError::BadOfferCommitment)
+        ));
+    }
+
+    #[test]
+    fn an_open_topic_without_a_model_is_incomplete() {
+        let mut p = pin();
+        p.inference.model.clear();
+        assert!(matches!(
+            nll_topic().validate(&p, &[]),
+            Err(TopicError::IncompleteInference)
+        ));
+        let mut filled = nll_topic();
+        filled.inference.model = Some("topic-model".into());
+        filled
+            .validate(&p, &[])
+            .expect("topic override fills model");
+        filled.status = crate::TopicStatus::Draft;
+        filled.inference.model = None;
+        filled.validate(&p, &[]).expect("draft may omit model");
     }
 
     #[test]

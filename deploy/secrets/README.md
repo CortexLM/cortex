@@ -35,6 +35,9 @@ chmod 0400 deploy/secrets/gateway_admin_token
 | `proof/holdouts.json` | proof-challenge | Per-topic holdout records (array or map keyed by `topic_id`). **Never commit.** Verified at boot against each topic's `holdout_commitment`. Mode **0400**, uid **65532** |
 | `proof/baselines.json` | proof-challenge | Sealed baseline measurements keyed by topic id. **Never commit.** Mode **0400**, uid **65532** |
 | `proof/admin_tokens` | proof-challenge | One operator bearer per line for `POST /v1/admin/proof/topics` |
+| `proof/inference_offer.json` | proof-challenge | Live RLM judge `InferenceOffer` (provider kind, origin, mode, model_ref, token caps, `config_commitment`, status). Consumed by proof-eval; **not** a miner training proxy. **Never commit.** Missing/closed → `can_score=false` / 503. Mode **0400**, uid **65532** |
+| `proof/inference_api_key` | proof-challenge | Provider API key for the eval image. **Never commit, never log.** Mode **0400**, uid **65532** |
+| `proof/inference_base_url` | proof-challenge | Optional secret-backed origin (`PROOF_INFERENCE_BASE_URL_FILE`) when pin `[inference].base_url` and the topic omit one. **Never commit, never log.** Mode **0400**, uid **65532** |
 | `bounty/admin_tokens` | bounty-challenge | Operator bearer for `POST /v1/admin/adjudicate` |
 | `bounty/session_secret` | bounty-challenge | Pairing session HMAC secret |
 

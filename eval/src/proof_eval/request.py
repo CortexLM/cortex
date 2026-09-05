@@ -8,10 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .contract import ContractError, DEFAULT_PROXY, PROOF_METRICS_SCHEMA
+from .contract import ContractError, PROOF_METRICS_SCHEMA
 
 CHALLENGE_ID = "proof"
 HOLDOUT_DOMAIN = b"base-proof-holdout-v1"
+
+
+def _is_http_origin(url: str) -> bool:
+    u = url.strip()
+    return u.startswith("http://") or u.startswith("https://")
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,14 @@ class HarvestRequest:
     artifact_digest: str
     topic_id: str
     family: str
+    inference_offer_id: str
+    provider_kind: str
+    base_url: str
+    mode: str
+    model_ref: str
+    max_input_tokens: int
+    max_output_tokens: int
+    config_commitment: str
     proxy_model: str
     eval_image_digest: str
     holdout_commitment: str
@@ -71,15 +84,33 @@ class HarvestRequest:
         artifact = str(raw.get("artifact_digest", "")).strip()
         topic = str(raw.get("topic_id", "")).strip()
         family = str(raw.get("family", "")).strip()
-        proxy = str(raw.get("proxy_model", "")).strip() or DEFAULT_PROXY
+        if "api_key" in raw or "openai_api_key" in raw:
+            raise ContractError("api_key must not appear in request.json; use teacher.env")
+        offer_id = str(raw.get("inference_offer_id", "")).strip()
+        provider_kind = str(raw.get("provider_kind", "")).strip()
+        base_url = str(raw.get("base_url", "")).strip()
+        mode = str(raw.get("mode", "")).strip() or "chat"
+        model_ref = str(raw.get("model_ref", "")).strip()
+        commitment = str(raw.get("config_commitment", "")).strip()
+        if not offer_id:
+            raise ContractError("inference_offer_id is required")
+        if not _is_http_origin(base_url):
+            raise ContractError("base_url must be an http(s) origin")
+        if not model_ref:
+            raise ContractError("model_ref is required")
+        if len(commitment) != 64 or any(c not in "0123456789abcdefABCDEF" for c in commitment):
+            raise ContractError("config_commitment must be 64 hex chars")
+        proxy = str(raw.get("proxy_model", "")).strip()
         digest = str(raw.get("eval_image_digest", "")).strip()
-        commitment = str(raw.get("holdout_commitment", "")).strip()
+        holdout_commit = str(raw.get("holdout_commitment", "")).strip()
         claim = str(raw.get("claim", "")).strip()
         if not submission or not artifact or not topic:
             raise ContractError("submission_digest, artifact_digest, and topic_id are required")
         if not digest.startswith("sha256:") or len(digest) < 71:
             raise ContractError("eval_image_digest is not a sha256 pin")
-        if len(commitment) != 64 or any(c not in "0123456789abcdefABCDEF" for c in commitment):
+        if len(holdout_commit) != 64 or any(
+            c not in "0123456789abcdefABCDEF" for c in holdout_commit
+        ):
             raise ContractError("holdout_commitment must be 64 hex chars")
         if not claim:
             raise ContractError("claim is required (recipe, not weights alone)")
@@ -93,9 +124,17 @@ class HarvestRequest:
             artifact_digest=artifact,
             topic_id=topic,
             family=family,
+            inference_offer_id=offer_id,
+            provider_kind=provider_kind or "openai_compatible",
+            base_url=base_url,
+            mode=mode,
+            model_ref=model_ref,
+            max_input_tokens=int(raw.get("max_input_tokens") or 0),
+            max_output_tokens=int(raw.get("max_output_tokens") or 0),
+            config_commitment=commitment,
             proxy_model=proxy,
             eval_image_digest=digest,
-            holdout_commitment=commitment,
+            holdout_commitment=holdout_commit,
             constraints=Constraints.from_dict(raw.get("constraints") or {}),
             flops_budget=int(raw.get("flops_budget") or 0),
             wall_budget_s=int(raw.get("wall_budget_s") or 0),
@@ -103,7 +142,7 @@ class HarvestRequest:
             holdout=holdout,
         )
         got = holdout_commitment(req.holdout)
-        if got.lower() != commitment.lower():
+        if got.lower() != holdout_commit.lower():
             raise ContractError("holdout records do not hash to holdout_commitment")
         return req
 

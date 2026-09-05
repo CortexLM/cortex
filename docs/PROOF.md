@@ -2,10 +2,10 @@
 
 Live challenge id: **`proof`**. Emission **8000 bps** (80% of the subnet;
 bounty is 2000). This 20%/80% lock is independent of eval digest. Eval
-digest `sha256:78b614a1…` is pinned (`ghcr.io/cortexlm/proof-eval`, baked
-RLM judge `Qwen/Qwen3.8-0.6B` — evaluates miner submissions; **not** a miner
-training proxy). Live submits still **503** until harvest is
-wired, a baseline is sealed, and ≥1 topic is open. Do not invent a sha256.
+digest `sha256:78b614a1…` is pinned (`ghcr.io/cortexlm/proof-eval`). The
+RLM judge backend is the live `InferenceOffer` (not a baked HF proxy). Live
+submits still **503** until harvest is wired, a baseline is sealed, and ≥1
+topic is open. Do not invent a sha256.
 Sum across the two live rows stays 10000. Port **8100** (local probe
 **28100**).
 
@@ -23,6 +23,29 @@ baseline + an open topic are on the host.
   without InfiniBand” are *example solutions or example topics*, never a
   frozen catalog in git.
 - A topic may tighten a floor, never loosen it. Floors live in the pin.
+- The RLM **judge** lives in a digest-pinned `proof-eval` image. Harvest
+  boots that image and both call the live master `InferenceOffer` as the
+  **judge backend** (not a miner training proxy, not an HF bake). Miners
+  do **not** bind submit to an `offer_id` as a train target; they still
+  post **claim + code + FLOPs + artifact** against a topic. No baked Qwen;
+  architecture ≠ HF id stays retired. Pin ceilings / modes / commitment
+  bound the **judge** offer; missing / closed / judge down → **503**. Topic
+  optional field: `require_judge_offer_commitment` (not a miner-facing
+  bind). The pin also carries complete `[inference]` judge defaults
+  (`provider`, `base_url` empty = secret-backed, `model`, `mode`,
+  `max_input_tokens`, `max_output_tokens`) plus schema v1, `allowed_modes`,
+  token ceilings, and `inference_offer_commitment_alg = sha256`. A topic's
+  signed `inference{…}` may **override** provider/model/mode and may **only
+  tighten** token caps vs those pin defaults. It must **not** redirect
+  origin: `config_commitment` hashes config knobs **and** `provider.base_url`;
+  a topic that spoofs `inference.base_url` fails closed (**503**) before
+  lattice. `require_judge_offer_commitment` (64-hex) pins the live judge
+  offer's `config_commitment` — mismatch → **503**. Missing or misconfigured
+  judge resolve → publish **400** (open topic) / score **503**. Empty pin
+  `model` / `base_url` is pre-launch fail-closed (like an empty digest).
+  Auth is `PROOF_INFERENCE_API_KEY_FILE`, staged into the harvest pod as
+  `teacher.env` (`OPENAI_API_KEY`) — never git, never `/v1/status`. Missing
+  key on a live open offer → **503**. `proxy_model` stays empty.
 - A baseline must be sealed (`script_sha256` + `metrics_commitment`) to
   open. Nobody is paid for beating a number nobody measured.
 - 8000 bps is split equally across currently `open` topics. Each topic then
@@ -97,12 +120,15 @@ Trust-root keygen is the throwaway owner path in
 ## HTTP
 
 - `GET /health`, `GET /v1/status` — `can_score`, `eval_backend`, `force_sim`,
-  `live_harvest_wired`, `baseline_sealed`. Never leak endpoints or records.
+  `live_harvest_wired`, `baseline_sealed`, public pin `inference` judge
+  defaults (no origin), public `inference_offer` (RLM judge backend). Never
+  leak origins, keys, or holdout records.
 - `GET /v1/proof/topics`, `GET /v1/proof/topics/{id}`
 - `POST /v1/admin/proof/topics` — operator bearer; verify sig/schema/floors/seal before `open`
 - `POST /v1/submissions` **requires** `topic_id`. Missing/unknown/not-open →
-  **400**. Architecture ≠ proxy → **400**. Zero open / unsealed baseline /
-  empty digest / agent down → **503**. Refusals must **not** persist rows.
+  **400**. Miners do **not** bind the judge offer. Zero open / unsealed
+  baseline / empty digest / missing or closed RLM judge backend / agent down
+  → **503**. Refusals must **not** persist rows.
 - Submit fields miners must send: `claim` (what the recipe achieved),
   `declared_flops` (≤ topic budget), `artifact_digest` of a **reproducible
   train/eval recipe** (code under budget, not weights-only), plus `manifest`.
@@ -148,6 +174,13 @@ takes the topic.
     "wall_budget_s": 14400
   },
   "flops_budget": 2000000000000000000,
+  "inference": {
+    "provider": "openai_compatible",
+    "model": "master-proxy-v0",
+    "mode": "chat",
+    "max_input_tokens": 4096,
+    "max_output_tokens": 2048
+  },
   "status": "draft"
 }
 ```
@@ -174,5 +207,14 @@ this document publishes; scoring fail-closes until the harness exists.
 ```
 
 These JSON bodies are documentation. Publishing requires a holdout
-commitment, a sealed baseline (to open), and an sr25519 signature under the
-`proof` trust-root key.
+commitment, a sealed baseline, a signed `inference{…}` that does not loosen
+pin **judge** defaults, and an sr25519 signature under the `proof`
+trust-root key. Omitted inference fields inherit the pin; `open` requires a
+complete resolved judge config (provider + model + mode + tokens). Empty pin
+model with no topic `model` is **400** at publish.
+
+`GET /v1/status` exposes pin `inference` public judge defaults (`provider`,
+`model`, `mode`, token caps) and `inference_offer` **public fields only**
+(`offer_id`, `provider_kind`, `mode`, `model_ref`, token caps,
+`config_commitment`, `status`). It never leaks `base_url`, API keys, or file
+paths. Miners do not call this backend.

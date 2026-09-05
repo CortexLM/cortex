@@ -22,8 +22,9 @@ pub use proof_eval::{
 pub use proof_http::{hash_admin_token, proof_router, AppState};
 pub use proof_store::{ArtifactManifest, MemoryStore};
 pub use proof_task::{
-    HoldoutRecord, ProofPin, TopicDocument, BASE_MODEL_FAMILY, CHALLENGE_ID,
-    CHALLENGE_ID_BYTES as PROOF_ID_BYTES, SCORE_MAX as PROOF_SCORE_MAX, SCORING_VERSION,
+    HoldoutRecord, InferenceOffer, OfferError, ProofPin, TopicDocument, BASE_MODEL_FAMILY,
+    CHALLENGE_ID, CHALLENGE_ID_BYTES as PROOF_ID_BYTES, SCORE_MAX as PROOF_SCORE_MAX,
+    SCORING_VERSION,
 };
 
 /// Build a D24-complete score map: each expected hotkey is a **sum** of
