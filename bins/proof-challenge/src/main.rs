@@ -127,15 +127,15 @@ fn run(cli: &Cli) -> Result<(), String> {
             None
         }
     };
-    if let Some(p) = cli.inference_api_key_file.as_deref() {
-        match std::fs::read_to_string(p) {
-            Ok(s) if !s.trim().is_empty() => {
-                tracing::info!("inference api key file present (contents not logged)");
-            }
-            _ => tracing::warn!(
-                "PROOF_INFERENCE_API_KEY_FILE set but unreadable; eval image auth will fail closed"
-            ),
+    let judge_api_key = load_inference_api_key(cli.inference_api_key_file.as_deref());
+    match (&offer, &judge_api_key) {
+        (Some(o), Some(_)) if o.is_open() => {
+            tracing::info!("inference api key file present (contents not logged)");
         }
+        (Some(o), None) if o.is_open() => tracing::warn!(
+            "open InferenceOffer needs PROOF_INFERENCE_API_KEY_FILE; live submits will 503"
+        ),
+        _ => {}
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -143,7 +143,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    let live_scorer = build_live_scorer(backend, cli.eval_timeout_secs);
+    let live_scorer = build_live_scorer(backend, cli.eval_timeout_secs, judge_api_key.clone());
     match backend {
         EvalBackend::Lium if live_scorer.is_some() => {
             tracing::info!("live harvest wired: digest-pinned proof-eval image on Lium");
@@ -161,13 +161,18 @@ fn run(cli: &Cli) -> Result<(), String> {
         backend,
         live_scorer,
         offer,
+        judge_api_key,
         admin_hashes: Arc::new(load_admin_hashes(cli.admin_tokens_file.as_deref())),
         epoch: 0,
     };
     rt.block_on(serve(cli.bind, state))
 }
 
-fn build_live_scorer(backend: EvalBackend, run_timeout_secs: u64) -> Option<Arc<dyn LiveScorer>> {
+fn build_live_scorer(
+    backend: EvalBackend,
+    run_timeout_secs: u64,
+    judge_api_key: Option<String>,
+) -> Option<Arc<dyn LiveScorer>> {
     if backend != EvalBackend::Lium {
         return None;
     }
@@ -201,11 +206,18 @@ fn build_live_scorer(backend: EvalBackend, run_timeout_secs: u64) -> Option<Arc<
         run_timeout_secs,
         proof_harvest::PROGRAM,
     ));
-    Some(Arc::new(LiumProofHarvest::new(
-        pod,
-        HarvestLimits::default(),
-        vec![ssh_pub],
-    )))
+    Some(Arc::new(
+        LiumProofHarvest::new(pod, HarvestLimits::default(), vec![ssh_pub])
+            .with_judge_api_key(judge_api_key),
+    ))
+}
+
+fn load_inference_api_key(path: Option<&Path>) -> Option<String> {
+    let p = path?;
+    std::fs::read_to_string(p)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
 }
 
 fn load_ssh_public_key() -> Option<String> {
@@ -385,24 +397,48 @@ mod tests {
         std::env::set_var("LIUM_SSH_PUBLIC_KEY_FILE", &pubkey);
 
         assert!(
-            build_live_scorer(EvalBackend::Lium, 900).is_some(),
+            build_live_scorer(EvalBackend::Lium, 900, None).is_some(),
             "Lium boot must wire the digest-pinned harvest"
         );
         assert!(
-            build_live_scorer(EvalBackend::Sim, 900).is_none(),
+            build_live_scorer(EvalBackend::Sim, 900, None).is_none(),
             "sim scores in-process; a Lium harvest there would spend money"
         );
 
         std::env::remove_var("LIUM_API_KEY");
-        assert!(build_live_scorer(EvalBackend::Lium, 900).is_none());
+        assert!(build_live_scorer(EvalBackend::Lium, 900, None).is_none());
         std::env::set_var("LIUM_API_KEY", "   ");
-        assert!(build_live_scorer(EvalBackend::Lium, 900).is_none());
+        assert!(build_live_scorer(EvalBackend::Lium, 900, None).is_none());
 
         std::env::set_var("LIUM_API_KEY", "test-key-not-a-real-secret");
         std::env::set_var("LIUM_SSH_PUBLIC_KEY_FILE", "/nonexistent/id.pub");
-        assert!(build_live_scorer(EvalBackend::Lium, 900).is_none());
+        assert!(build_live_scorer(EvalBackend::Lium, 900, None).is_none());
         std::env::remove_var("LIUM_API_KEY");
         std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
+    }
+
+    #[test]
+    fn inference_api_key_file_is_read_not_existence_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "proof-key-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let missing = dir.join("nope");
+        assert!(load_inference_api_key(Some(&missing)).is_none());
+        let empty = dir.join("empty");
+        std::fs::write(&empty, "  \n").expect("write");
+        assert!(load_inference_api_key(Some(&empty)).is_none());
+        let present = dir.join("key");
+        std::fs::write(&present, " sk-live-not-a-real-secret \n").expect("write");
+        assert_eq!(
+            load_inference_api_key(Some(&present)).as_deref(),
+            Some("sk-live-not-a-real-secret")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn stub_ssh_pubkey(tag: &str) -> PathBuf {

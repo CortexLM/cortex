@@ -3499,7 +3499,18 @@ dependencies = [
  "proof-task",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
+]
+
+[[package]]
+name = "proof-holdout"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -3549,6 +3560,7 @@ version = "0.1.0"
 dependencies = [
  "crypto",
  "hex",
+ "proof-holdout",
  "serde",
  "serde_json",
  "sha2 0.10.9",

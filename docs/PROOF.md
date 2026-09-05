@@ -2,10 +2,10 @@
 
 Live challenge id: **`proof`**. Emission **8000 bps** (80% of the subnet;
 bounty is 2000). This 20%/80% lock is independent of eval digest. Eval
-digest `sha256:78b614a1…` is pinned (`ghcr.io/cortexlm/proof-eval`, baked
-RLM judge `Qwen/Qwen3.8-0.6B` — evaluates miner submissions; **not** a miner
-training proxy). Live submits still **503** until harvest is
-wired, a baseline is sealed, and ≥1 topic is open. Do not invent a sha256.
+digest `sha256:78b614a1…` is pinned (`ghcr.io/cortexlm/proof-eval`). The
+RLM judge backend is the live `InferenceOffer` (not a baked HF proxy). Live
+submits still **503** until harvest is wired, a baseline is sealed, and ≥1
+topic is open. Do not invent a sha256.
 Sum across the two live rows stays 10000. Port **8100** (local probe
 **28100**).
 
@@ -35,15 +35,17 @@ baseline + an open topic are on the host.
   (`provider`, `base_url` empty = secret-backed, `model`, `mode`,
   `max_input_tokens`, `max_output_tokens`) plus schema v1, `allowed_modes`,
   token ceilings, and `inference_offer_commitment_alg = sha256`. A topic's
-  signed `inference{…}` may **override** provider/model/mode/URL and may
-  **only tighten** token caps vs those pin defaults.
-  `require_judge_offer_commitment` (64-hex) pins the live judge offer's
-  `config_commitment` — mismatch → **503**. Missing or misconfigured judge
-  resolve → publish **400** (open topic) / score **503**. Empty pin `model`
-  / `base_url` is pre-launch fail-closed (like an empty digest). Fill via
-  pin bump, topic publish, `PROOF_INFERENCE_BASE_URL` / `_FILE`, or the live
-  offer origin. Auth is `PROOF_INFERENCE_API_KEY_FILE` — never git.
-  `proxy_model` stays empty.
+  signed `inference{…}` may **override** provider/model/mode and may **only
+  tighten** token caps vs those pin defaults. It must **not** redirect
+  origin: `config_commitment` hashes config knobs **and** `provider.base_url`;
+  a topic that spoofs `inference.base_url` fails closed (**503**) before
+  lattice. `require_judge_offer_commitment` (64-hex) pins the live judge
+  offer's `config_commitment` — mismatch → **503**. Missing or misconfigured
+  judge resolve → publish **400** (open topic) / score **503**. Empty pin
+  `model` / `base_url` is pre-launch fail-closed (like an empty digest).
+  Auth is `PROOF_INFERENCE_API_KEY_FILE`, staged into the harvest pod as
+  `teacher.env` (`OPENAI_API_KEY`) — never git, never `/v1/status`. Missing
+  key on a live open offer → **503**. `proxy_model` stays empty.
 - A baseline must be sealed (`script_sha256` + `metrics_commitment`) to
   open. Nobody is paid for beating a number nobody measured.
 - 8000 bps is split equally across currently `open` topics. Each topic then

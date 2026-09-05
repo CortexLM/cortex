@@ -32,16 +32,11 @@
 )]
 
 mod canonical;
-mod holdout;
 mod inference;
 mod pin;
 mod topic;
 
 pub use canonical::canonical_json;
-pub use holdout::{
-    contamination, holdout_commitment, synthetic_holdout, verify_holdout, HoldoutError,
-    HoldoutRecord, HoldoutSplit, LONGCTX_MAX_TOKENS, LONGCTX_MIN_TOKENS,
-};
 pub use inference::{
     inference_config_commitment, require_open_offer, resolve_inference, InferenceConfig,
     InferenceMode, InferenceOffer, InferenceProvider, InferenceProviderKind, OfferError,
@@ -49,6 +44,11 @@ pub use inference::{
     INFERENCE_OFFER_COMMITMENT_ALG, MAX_INPUT_TOKENS_CEILING, MAX_OUTPUT_TOKENS_CEILING,
 };
 pub use pin::{PinError, ProofPin};
+pub use proof_holdout::{
+    contamination, holdout_commitment, synthetic_holdout, verify_holdout, HoldoutError,
+    HoldoutRecord, HoldoutSplit, HOLDOUT_DOMAIN, HOLDOUT_SIZE, LONGCTX_MAX_TOKENS,
+    LONGCTX_MIN_TOKENS, STRATUM_SIZE,
+};
 pub use topic::{
     default_adamw, topic_signing_payload, Baseline, Constraints, DiscoverySpec, MetricDirection,
     MetricFamily, MetricSpec, PayoutMode, TopicDocument, TopicError, TopicStatus, ValidationSpec,
@@ -68,9 +68,6 @@ pub const SCORING_VERSION: u16 = 1;
 
 /// Domain tag for task id digests.
 pub const TASK_ID_DOMAIN: &[u8] = b"base-proof-task-id-v1";
-
-/// Domain tag for per-topic holdout commitments.
-pub const HOLDOUT_DOMAIN: &[u8] = b"base-proof-holdout-v1";
 
 /// Domain tag for eval-receipt digests.
 pub const RECEIPT_DOMAIN: &[u8] = b"base-proof-receipt-v1";
@@ -126,12 +123,6 @@ pub const EPSILON_THROUGHPUT_REL_MIN: f64 = 0.05;
 
 /// Quality floor a throughput topic must keep: speed is not free.
 pub const QUALITY_FLOOR_NLL_MAX: f64 = 0.02;
-
-/// Holdout records per topic.
-pub const HOLDOUT_SIZE: usize = 120;
-
-/// Records per scored split (`HOLDOUT_SIZE / scored splits`).
-pub const STRATUM_SIZE: usize = 24;
 
 /// Slice id prefix bound into per-topic measurements.
 pub const HOLDOUT_SLICE_PREFIX: &str = "proof-holdout";

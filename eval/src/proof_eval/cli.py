@@ -28,6 +28,7 @@ from .contract import (
     marker_line,
 )
 from .fabric import selftest as fabric_selftest
+from .judge import require_judge
 from .request import read_request
 from .agent import inspect
 from .harness import measure, require_runtime
@@ -101,7 +102,7 @@ def _selftest() -> int:
 
 def _score(request_path: Path, out: Path, *, baseline: bool) -> int:
     request = read_request(request_path)
-    require_baked(request.proxy_model)
+    require_judge(request)
     from .fabric import enforce
 
     enforce(request.constraints)

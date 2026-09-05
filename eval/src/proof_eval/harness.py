@@ -57,7 +57,9 @@ def measure(request: HarvestRequest, artifact_dir: str | None) -> dict[str, Any]
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    proxy = request.proxy_model
+    proxy = (request.proxy_model or request.model_ref or "").strip()
+    if not (artifact_dir or proxy):
+        raise ContractError("no model to measure")
     try:
         tok = AutoTokenizer.from_pretrained(proxy, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(

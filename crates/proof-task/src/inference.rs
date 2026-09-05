@@ -126,7 +126,7 @@ pub struct InferenceOffer {
     pub provider: InferenceProvider,
     /// Secret-free config.
     pub config: InferenceConfig,
-    /// `sha256` hex of canonical JSON of [`InferenceConfig`].
+    /// `sha256` hex of canonical JSON of config knobs **plus** `provider.base_url`.
     pub config_commitment: String,
     /// `open` | `closed`.
     pub status: OfferStatus,
@@ -182,7 +182,9 @@ pub struct TopicInference {
     pub max_output_tokens: Option<u32>,
 }
 
-/// Topic over pin, then secret-backed / live-offer URL.
+/// Topic may tighten tokens / name model+mode. **Origin is the committed
+/// offer URL** — pin, secret, and topic cannot redirect the RLM after
+/// `serves_topic`.
 pub fn resolve_inference(
     pin: &ProofPin,
     topic: Option<&TopicInference>,
@@ -190,19 +192,20 @@ pub fn resolve_inference(
     offer: Option<&InferenceOffer>,
 ) -> PinInference {
     let d = &pin.inference;
-    let urls = [
-        topic.and_then(|t| t.base_url.as_deref()).unwrap_or(""),
-        d.base_url.as_str(),
-        secret_url.unwrap_or(""),
-        offer.map_or("", |o| o.provider.base_url.as_str()),
-    ];
+    let offer_url = offer.map_or("", |o| o.provider.base_url.as_str());
+    let fallback = [d.base_url.as_str(), secret_url.unwrap_or("")]
+        .into_iter()
+        .find(|u| is_http_origin(u))
+        .unwrap_or("");
+    let base_url = if is_http_origin(offer_url) {
+        offer_url
+    } else {
+        fallback
+    }
+    .to_owned();
     PinInference {
         provider: topic.and_then(|t| t.provider).unwrap_or(d.provider),
-        base_url: urls
-            .into_iter()
-            .find(|u| is_http_origin(u))
-            .unwrap_or("")
-            .to_owned(),
+        base_url,
         model: topic
             .and_then(|t| t.model.as_deref())
             .map(str::trim)
@@ -291,9 +294,12 @@ pub enum OfferError {
     /// Mode not in the pin allowlist.
     #[error("config.mode {0:?} is not in the pin allowed_modes")]
     ModeNotAllowed(InferenceMode),
-    /// Declared commitment is not 64 hex or does not match the config.
-    #[error("config_commitment does not match sha256(canonical config)")]
+    /// Declared commitment is not 64 hex or does not match config+origin.
+    #[error("config_commitment does not match sha256(canonical config+origin)")]
     CommitmentMismatch,
+    /// Topic `inference.base_url` is not the committed judge origin.
+    #[error("topic inference.base_url does not match the committed judge origin")]
+    OriginMismatch,
     /// No offer loaded on this host.
     #[error("inference offer missing; refuse scoring")]
     Missing,
@@ -308,39 +314,37 @@ pub enum OfferError {
     Incomplete,
 }
 
-fn is_secret_key(k: &str) -> bool {
-    let l = k.to_ascii_lowercase();
-    ["secret", "password", "authorization", "bearer"]
-        .iter()
-        .any(|n| l.contains(n))
-        || l.ends_with("api_key")
-        || l.ends_with("_token")
-        || l == "token"
+#[derive(Serialize)]
+struct CommitmentMaterial<'a> {
+    base_url: &'a str,
+    max_input_tokens: u32,
+    max_output_tokens: u32,
+    mode: InferenceMode,
+    model_ref: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
 }
 
-fn strip_secrets(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut out = serde_json::Map::new();
-            for (k, v) in map {
-                if is_secret_key(&k) {
-                    continue;
-                }
-                out.insert(k, strip_secrets(v));
-            }
-            serde_json::Value::Object(out)
-        }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.into_iter().map(strip_secrets).collect())
-        }
-        other => other,
-    }
-}
-
-/// `sha256` hex of canonical JSON of `config` with secret keys stripped.
-pub fn inference_config_commitment(config: &InferenceConfig) -> String {
-    let value = serde_json::to_value(config).unwrap_or(serde_json::Value::Null);
-    let body = canonical_json(&strip_secrets(value));
+/// `sha256` hex of canonical JSON of config knobs **and** the judge origin.
+///
+/// Secrets never enter this digest. Public `/v1/status` still omits `base_url`.
+pub fn inference_config_commitment(config: &InferenceConfig, origin: &str) -> String {
+    let material = CommitmentMaterial {
+        base_url: origin.trim(),
+        max_input_tokens: config.max_input_tokens,
+        max_output_tokens: config.max_output_tokens,
+        mode: config.mode,
+        model_ref: config.model_ref.trim(),
+        temperature: config.temperature,
+        timeout_ms: config.timeout_ms,
+        top_p: config.top_p,
+    };
+    let value = serde_json::to_value(&material).unwrap_or(serde_json::Value::Null);
+    let body = canonical_json(&value);
     let mut h = Sha256::new();
     h.update(body.as_bytes());
     hex::encode(h.finalize())
@@ -399,7 +403,7 @@ impl InferenceOffer {
                 return Err(OfferError::BadSampling(name));
             }
         }
-        let want = inference_config_commitment(&self.config);
+        let want = inference_config_commitment(&self.config, &self.provider.base_url);
         if !is_hex64(&self.config_commitment) || !self.config_commitment.eq_ignore_ascii_case(&want)
         {
             return Err(OfferError::CommitmentMismatch);
@@ -428,14 +432,32 @@ impl InferenceOffer {
 
     /// Whether this open judge offer can score `topic` (resolved pin+topic vs offer).
     ///
+    /// Origin is bound: a topic that spoofs `inference.base_url` fails closed
+    /// before lattice ([`OfferError::OriginMismatch`]).
+    ///
     /// # Errors
     ///
-    /// [`OfferError::Closed`] or [`OfferError::CannotServeTopic`].
+    /// [`OfferError::Closed`], [`OfferError::OriginMismatch`], or
+    /// [`OfferError::CannotServeTopic`].
     pub fn serves_topic(&self, pin: &ProofPin, topic: &TopicDocument) -> Result<(), OfferError> {
         if !self.is_open() {
             return Err(OfferError::Closed);
         }
+        if let Some(url) = topic
+            .inference
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if url != self.provider.base_url.trim() {
+                return Err(OfferError::OriginMismatch);
+            }
+        }
         let r = resolve_inference(pin, Some(&topic.inference), None, Some(self));
+        if r.base_url.trim() != self.provider.base_url.trim() {
+            return Err(OfferError::OriginMismatch);
+        }
         if self.provider.kind != r.provider
             || self.config.mode != r.mode
             || self.config.max_input_tokens < r.max_input_tokens
@@ -501,7 +523,7 @@ mod tests {
                 kind: InferenceProviderKind::OpenaiCompatible,
                 base_url: "http://127.0.0.1:8000/v1".into(),
             },
-            config_commitment: inference_config_commitment(&config),
+            config_commitment: inference_config_commitment(&config, "http://127.0.0.1:8000/v1"),
             config,
             status: OfferStatus::Open,
         }
@@ -516,15 +538,15 @@ mod tests {
     }
 
     #[test]
-    fn commitment_is_stable_and_ignores_secret_keys() {
-        let a = inference_config_commitment(&config());
-        let b = inference_config_commitment(&config());
+    fn commitment_is_stable_and_binds_origin() {
+        let a = inference_config_commitment(&config(), "http://127.0.0.1:8000/v1");
+        let b = inference_config_commitment(&config(), "http://127.0.0.1:8000/v1");
         assert_eq!(a, b);
         assert_eq!(a.len(), 64);
-        let mut sneaky = serde_json::to_value(config()).expect("json");
-        sneaky["api_key"] = serde_json::json!("should-not-hash");
-        let stripped = strip_secrets(sneaky);
-        assert!(stripped.get("api_key").is_none());
+        assert_ne!(
+            a,
+            inference_config_commitment(&config(), "http://evil.example/v1")
+        );
     }
 
     #[test]
@@ -552,7 +574,7 @@ mod tests {
         assert!(matches!(o.validate(&pin()), Err(OfferError::BadBaseUrl)));
         o = offer();
         o.config.model_ref = String::new();
-        o.config_commitment = inference_config_commitment(&o.config);
+        o.config_commitment = inference_config_commitment(&o.config, &o.provider.base_url);
         assert!(matches!(o.validate(&pin()), Err(OfferError::BadModelRef)));
     }
 
@@ -560,14 +582,14 @@ mod tests {
     fn token_caps_cannot_loosen_the_pin() {
         let mut o = offer();
         o.config.max_input_tokens = MAX_INPUT_TOKENS_CEILING + 1;
-        o.config_commitment = inference_config_commitment(&o.config);
+        o.config_commitment = inference_config_commitment(&o.config, &o.provider.base_url);
         assert!(matches!(
             o.validate(&pin()),
             Err(OfferError::BadTokenCap(..))
         ));
         o = offer();
         o.config.max_output_tokens = 0;
-        o.config_commitment = inference_config_commitment(&o.config);
+        o.config_commitment = inference_config_commitment(&o.config, &o.provider.base_url);
         assert!(matches!(
             o.validate(&pin()),
             Err(OfferError::BadTokenCap(..))
@@ -617,6 +639,29 @@ mod tests {
     }
 
     #[test]
+    fn spoofed_topic_origin_is_commitment_mismatch() {
+        let mut topic = TopicDocument::default();
+        topic.inference.mode = Some(InferenceMode::Chat);
+        topic.inference.max_input_tokens = Some(4_096);
+        topic.inference.max_output_tokens = Some(256);
+        offer()
+            .serves_topic(&pin(), &topic)
+            .expect("token tighten ok");
+        topic.inference.base_url = Some("http://evil.example/v1".into());
+        assert!(
+            matches!(
+                offer().serves_topic(&pin(), &topic),
+                Err(OfferError::OriginMismatch)
+            ),
+            "a topic that only tightens tokens but spoofs origin must fail closed"
+        );
+        topic.inference.base_url = Some("http://127.0.0.1:8000/v1".into());
+        offer()
+            .serves_topic(&pin(), &topic)
+            .expect("matching origin is not a spoof");
+    }
+
+    #[test]
     fn pin_defaults_resolve_and_topic_may_override_or_tighten() {
         let mut p = pin();
         p.inference.model = "pin-model".into();
@@ -637,6 +682,12 @@ mod tests {
         assert_eq!(over.model, "topic-model");
         assert_eq!(over.max_input_tokens, 2_048);
         assert_eq!(over.base_url, "http://127.0.0.1:8000/v1");
+        topic.base_url = Some("http://evil.example/v1".into());
+        let redirected = resolve_inference(&p, Some(&topic), None, Some(&offer()));
+        assert_eq!(
+            redirected.base_url, "http://127.0.0.1:8000/v1",
+            "topic URL must not redirect the committed judge origin"
+        );
         assert!(over.ready_to_score());
         topic.max_input_tokens = Some(8_192);
         assert!(matches!(

@@ -60,6 +60,8 @@ pub struct AppState {
     pub live_scorer: Option<Arc<dyn LiveScorer>>,
     /// Live RLM judge backend (operator state). Missing/closed → can_score false.
     pub offer: Option<InferenceOffer>,
+    /// Judge API key from `PROOF_INFERENCE_API_KEY_FILE`. Never on `/v1/status`.
+    pub judge_api_key: Option<String>,
     /// Operator bearer hashes (sha256 hex). Empty → admin 503.
     pub admin_hashes: Arc<Vec<String>>,
     /// Chain epoch used for topic windows. v0 hosts pass 0.
@@ -79,6 +81,7 @@ impl AppState {
             self.live(),
             open,
             self.offer.as_ref(),
+            self.judge_api_key.as_deref(),
         )
         .is_err()
         {
@@ -245,6 +248,7 @@ async fn submit(
         st.live(),
         st.store.any_open_scorable(st.epoch).unwrap_or(false),
         st.offer.as_ref(),
+        st.judge_api_key.as_deref(),
     )
     .map_err(|e| eval_err(&e))?;
     let Some(offer) = st.offer.as_ref() else {
@@ -310,6 +314,7 @@ async fn submit(
         &body.claim,
         st.backend,
         st.live(),
+        st.judge_api_key.as_deref(),
     )
     .await
     .map_err(|e| eval_err(&e))?;
@@ -657,7 +662,7 @@ mod tests {
                 kind: InferenceProviderKind::OpenaiCompatible,
                 base_url: "http://127.0.0.1:8000/v1".into(),
             },
-            config_commitment: inference_config_commitment(&config),
+            config_commitment: inference_config_commitment(&config, "http://127.0.0.1:8000/v1"),
             config,
             status: OfferStatus::Open,
         }
@@ -796,12 +801,17 @@ mod tests {
                     .expect("baseline");
             }
         }
+        let judge_api_key =
+            (backend == EvalBackend::Lium && live.is_some()).then(|| "test-judge-key".to_owned());
         proof_router(AppState {
             store,
             pin: p,
             backend,
             live_scorer: live,
             offer: with_offer.then(offer),
+            // Lium + a wired harvest is the live path: a missing key is the
+            // Testeur blocker. Sim does not call the judge, so it stays None.
+            judge_api_key,
             admin_hashes: Arc::new(vec![hash_admin_token(token)]),
             epoch: 0,
         })
@@ -878,6 +888,7 @@ mod tests {
         assert!(!dump.contains("8000"), "{dump}");
         assert!(!dump.contains("base_url"), "{dump}");
         assert!(!dump.contains("api_key"), "{dump}");
+        assert!(!dump.contains("evil.example"), "{dump}");
     }
 
     #[tokio::test]
@@ -1261,5 +1272,131 @@ mod tests {
         assert_eq!(st, StatusCode::CREATED, "{body}");
         assert_eq!(body["id"], "agent-harness-improve-v0");
         assert_eq!(body["payout_mode"], "discovery");
+    }
+
+    fn app_lium_missing_judge_key() -> Router {
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let store = MemoryStore::new();
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (topic, meas) = seal_topic(&p, unsigned_topic(&recs));
+        store.put_topic(topic.clone()).expect("topic");
+        store.load_holdout(&topic.id, recs).expect("holdout");
+        store
+            .set_baseline(&topic.id, meas.into_sealed())
+            .expect("baseline");
+        proof_router(AppState {
+            store,
+            pin: p,
+            backend: EvalBackend::Lium,
+            live_scorer: Some(Arc::new(StubScorer::win())),
+            offer: Some(offer()),
+            judge_api_key: None,
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            epoch: 0,
+        })
+    }
+
+    #[tokio::test]
+    async fn lium_without_judge_api_key_cannot_score() {
+        let (st, body) = json_req(
+            app_lium_missing_judge_key(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["live_harvest_wired"], true);
+        assert_eq!(body["can_score"], false, "{body}");
+        let dump = body.to_string();
+        assert!(!dump.contains("api_key"), "{dump}");
+
+        let (st, body) = json_req(
+            app_lium_missing_judge_key(),
+            "POST",
+            "/v1/submissions",
+            submit_body("no-key", &serde_json::json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("API key"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lium_with_judge_api_key_can_score_and_status_omits_the_secret() {
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let (st, body) = json_req(
+            app_full(
+                "op",
+                EvalBackend::Lium,
+                &digest,
+                Some(Arc::new(StubScorer::win())),
+                true,
+                true,
+                true,
+            ),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["can_score"], true, "{body}");
+        let dump = body.to_string();
+        assert!(!dump.contains("api_key"), "{dump}");
+        assert!(!dump.contains("test-judge-key"), "{dump}");
+        assert!(!dump.contains("base_url"), "{dump}");
+        assert!(!dump.contains("8000"), "{dump}");
+    }
+
+    #[tokio::test]
+    async fn spoofed_topic_origin_is_503() {
+        let p = pin("");
+        let store = MemoryStore::new();
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (mut topic, meas) = seal_topic(&p, unsigned_topic(&recs));
+        topic.inference.max_input_tokens = Some(4_096);
+        topic.inference.base_url = Some("http://evil.example/v1".into());
+        topic.signature = topic.sign_with(&sk()).expect("sign");
+        store.put_topic(topic.clone()).expect("topic");
+        store.load_holdout(&topic.id, recs).expect("holdout");
+        store
+            .set_baseline(&topic.id, meas.into_sealed())
+            .expect("baseline");
+        let app = proof_router(AppState {
+            store,
+            pin: p,
+            backend: EvalBackend::Sim,
+            live_scorer: None,
+            offer: Some(offer()),
+            judge_api_key: None,
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            epoch: 0,
+        });
+        let (st, body) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body("spoof", &serde_json::json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("committed judge origin"),
+            "{body}"
+        );
     }
 }

@@ -119,11 +119,25 @@ impl Default for HarvestLimits {
     }
 }
 
+/// Env file staged as `teacher.env` and sourced by the eval image.
+///
+/// The key never enters [`HarvestRequest`] or `/v1/status`. Values are
+/// single-quoted so a special character cannot break `set -a` sourcing.
+pub fn judge_teacher_env(api_key: &str) -> Result<Vec<u8>, EvalError> {
+    let key = api_key.trim();
+    if key.is_empty() || key.contains('\n') || key.contains('\r') || key.contains('\0') {
+        return Err(EvalError::InferenceAuthMissing);
+    }
+    let escaped = key.replace('\'', "'\\''");
+    Ok(format!("OPENAI_API_KEY='{escaped}'\nPROOF_INFERENCE_API_KEY='{escaped}'\n").into_bytes())
+}
+
 /// [`LiveScorer`] over a digest-pinned eval image on a Lium pod.
 pub struct LiumProofHarvest {
     pod: Arc<dyn EvalPod>,
     limits: HarvestLimits,
     ssh_public_keys: Vec<String>,
+    judge_api_key: Option<String>,
 }
 
 impl LiumProofHarvest {
@@ -134,7 +148,20 @@ impl LiumProofHarvest {
             pod,
             limits,
             ssh_public_keys,
+            judge_api_key: None,
         }
+    }
+
+    /// Inject the judge API key staged into `teacher.env` on the pod.
+    ///
+    /// Empty / whitespace is treated as missing (fail-closed on a live run).
+    #[must_use]
+    pub fn with_judge_api_key(mut self, key: Option<String>) -> Self {
+        self.judge_api_key = key.and_then(|s| {
+            let t = s.trim().to_owned();
+            (!t.is_empty()).then_some(t)
+        });
+        self
     }
 
     fn spec(&self, pin: &ProofPin, frozen_digest: &str) -> InstanceSpec {
@@ -191,6 +218,12 @@ impl LiveScorer for LiumProofHarvest {
                 proof_task::OfferError::Incomplete.to_string(),
             ));
         }
+        if resolved.base_url.trim() != offer.provider.base_url.trim() {
+            return Err(EvalError::InferenceOffer(
+                proof_task::OfferError::OriginMismatch.to_string(),
+            ));
+        }
+        let env = judge_teacher_env(self.judge_api_key.as_deref().unwrap_or(""))?;
         let max_in = resolved.max_input_tokens.min(offer.config.max_input_tokens);
         let max_out = resolved
             .max_output_tokens
@@ -226,7 +259,7 @@ impl LiveScorer for LiumProofHarvest {
             .boot(&self.spec(pin, frozen_digest))
             .await
             .map_err(EvalError::Backend)?;
-        let run = self.pod.run(&instance, &body, &[]).await;
+        let run = self.pod.run(&instance, &body, &env).await;
         let shutdown = self.pod.shutdown(&instance).await;
         match shutdown {
             Ok(true) => {}
@@ -326,5 +359,204 @@ mod tests {
         assert_eq!(v["mode"], "chat");
         assert!(v.get("proxy_model").is_none());
         assert!(v.get("api_key").is_none());
+    }
+
+    #[test]
+    fn teacher_env_carries_the_judge_key_and_never_the_request() {
+        let env = judge_teacher_env("sk-live-not-a-real-secret").expect("env");
+        let text = String::from_utf8(env).expect("utf8");
+        assert!(text.contains("OPENAI_API_KEY='sk-live-not-a-real-secret'"));
+        assert!(text.contains("PROOF_INFERENCE_API_KEY='sk-live-not-a-real-secret'"));
+        assert!(judge_teacher_env("").is_err());
+        assert!(judge_teacher_env("has\nnewline").is_err());
+        let quoted = judge_teacher_env("o'reilly").expect("quote");
+        assert_eq!(
+            String::from_utf8(quoted).expect("utf8"),
+            "OPENAI_API_KEY='o'\\''reilly'\nPROOF_INFERENCE_API_KEY='o'\\''reilly'\n"
+        );
+    }
+
+    struct CapturePod {
+        env: std::sync::Mutex<Vec<u8>>,
+        request: std::sync::Mutex<Vec<u8>>,
+        booted: std::sync::Mutex<bool>,
+    }
+
+    impl CapturePod {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                env: std::sync::Mutex::new(Vec::new()),
+                request: std::sync::Mutex::new(Vec::new()),
+                booted: std::sync::Mutex::new(false),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl EvalPod for CapturePod {
+        async fn boot(&self, _spec: &InstanceSpec) -> Result<String, String> {
+            *self.booted.lock().expect("boot") = true;
+            Ok("pod-1".into())
+        }
+
+        async fn run(
+            &self,
+            _instance_id: &str,
+            request: &[u8],
+            env_file: &[u8],
+        ) -> Result<String, String> {
+            *self.request.lock().expect("req") = request.to_vec();
+            *self.env.lock().expect("env") = env_file.to_vec();
+            Err("captured".into())
+        }
+
+        async fn shutdown(&self, _instance_id: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    fn harvest_pin() -> ProofPin {
+        let mut p = ProofPin {
+            eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
+            topic_pubkey: "ab".repeat(32),
+            ..ProofPin::default()
+        };
+        p.inference.model = "master-proxy-v0".into();
+        p
+    }
+
+    fn harvest_offer() -> InferenceOffer {
+        let config = proof_task::InferenceConfig {
+            mode: proof_task::InferenceMode::Chat,
+            model_ref: "master-proxy-v0".into(),
+            max_input_tokens: 32_768,
+            max_output_tokens: 8_192,
+            temperature: Some(0.0),
+            top_p: None,
+            timeout_ms: None,
+        };
+        InferenceOffer {
+            offer_id: "master-v0".into(),
+            provider: proof_task::InferenceProvider {
+                kind: proof_task::InferenceProviderKind::OpenaiCompatible,
+                base_url: "http://127.0.0.1:8000/v1".into(),
+            },
+            config_commitment: proof_task::inference_config_commitment(
+                &config,
+                "http://127.0.0.1:8000/v1",
+            ),
+            config,
+            status: proof_task::OfferStatus::Open,
+        }
+    }
+
+    fn harvest_topic(recs: &[proof_task::HoldoutRecord]) -> TopicDocument {
+        let mut b = default_adamw(proof_task::FLOPS_BUDGET_MAX);
+        b.script_sha256 = "11".repeat(32);
+        b.metrics_commitment = "22".repeat(32);
+        TopicDocument {
+            id: "dt-no-ib-v0".into(),
+            holdout_commitment: holdout_commitment(recs),
+            baseline: b,
+            status: proof_task::TopicStatus::Open,
+            ..TopicDocument::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn harvest_stages_teacher_env_and_never_puts_the_key_on_the_request() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let topic = harvest_topic(&recs);
+        let pod = CapturePod::new();
+        let harvest = LiumProofHarvest::new(
+            pod.clone(),
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAtest proof".into()],
+        )
+        .with_judge_api_key(Some("sk-live-not-a-real-secret".into()));
+        let err = harvest
+            .score(
+                &harvest_pin(),
+                &topic,
+                &harvest_offer(),
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err("capture");
+        assert!(matches!(err, EvalError::Backend(_)), "{err}");
+        assert!(*pod.booted.lock().expect("booted"));
+        let env = String::from_utf8(pod.env.lock().expect("env").clone()).expect("utf8");
+        assert!(
+            env.contains("OPENAI_API_KEY='sk-live-not-a-real-secret'"),
+            "{env}"
+        );
+        assert!(
+            env.contains("PROOF_INFERENCE_API_KEY='sk-live-not-a-real-secret'"),
+            "{env}"
+        );
+        let req: serde_json::Value =
+            serde_json::from_slice(&pod.request.lock().expect("req")).expect("json");
+        assert!(req.get("api_key").is_none(), "{req}");
+        let dump = req.to_string();
+        assert!(!dump.contains("sk-live"), "{dump}");
+        assert_eq!(req["base_url"], "http://127.0.0.1:8000/v1");
+    }
+
+    #[tokio::test]
+    async fn harvest_without_judge_key_does_not_boot() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let topic = harvest_topic(&recs);
+        let pod = CapturePod::new();
+        let harvest = LiumProofHarvest::new(
+            pod.clone(),
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAtest proof".into()],
+        );
+        let err = harvest
+            .score(
+                &harvest_pin(),
+                &topic,
+                &harvest_offer(),
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err("no key");
+        assert!(matches!(err, EvalError::InferenceAuthMissing), "{err}");
+        assert!(!*pod.booted.lock().expect("booted"));
+    }
+
+    #[tokio::test]
+    async fn harvest_refuses_a_spoofed_topic_origin_before_boot() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let mut topic = harvest_topic(&recs);
+        topic.inference.max_input_tokens = Some(4_096);
+        topic.inference.base_url = Some("http://evil.example/v1".into());
+        let pod = CapturePod::new();
+        let harvest = LiumProofHarvest::new(
+            pod.clone(),
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAtest proof".into()],
+        )
+        .with_judge_api_key(Some("sk-live-not-a-real-secret".into()));
+        let err = harvest
+            .score(
+                &harvest_pin(),
+                &topic,
+                &harvest_offer(),
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err("spoof");
+        assert!(err.to_string().contains("committed judge origin"), "{err}");
+        assert!(!*pod.booted.lock().expect("booted"));
     }
 }

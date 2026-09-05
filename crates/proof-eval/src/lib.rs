@@ -104,6 +104,9 @@ pub enum EvalError {
     /// Live InferenceOffer failed pin validation.
     #[error("inference offer: {0}")]
     InferenceOffer(String),
+    /// Live open judge offer needs auth and the key file is missing/unreadable.
+    #[error("inference API key missing; refuse scoring")]
+    InferenceAuthMissing,
 }
 
 /// Schema version of the metrics+verdict document the eval image emits.
@@ -364,6 +367,7 @@ pub fn scoring_readiness(
     live: Option<&dyn LiveScorer>,
     has_open_sealed_topic: bool,
     offer: Option<&InferenceOffer>,
+    judge_api_key: Option<&str>,
 ) -> Result<(), EvalError> {
     if !has_open_sealed_topic {
         return Err(EvalError::NoOpenTopic);
@@ -376,8 +380,22 @@ pub fn scoring_readiness(
                 return Err(EvalError::EvalImageUnpinned);
             }
             let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
-            scorer.ready()
+            scorer.ready()?;
+            judge_api_key_ready(judge_api_key)
         }
+    }
+}
+
+/// Live Lium scoring needs a readable non-empty judge API key.
+///
+/// # Errors
+///
+/// [`EvalError::InferenceAuthMissing`] when the key is absent.
+pub fn judge_api_key_ready(judge_api_key: Option<&str>) -> Result<(), EvalError> {
+    if judge_api_key.map(str::trim).is_some_and(|s| !s.is_empty()) {
+        Ok(())
+    } else {
+        Err(EvalError::InferenceAuthMissing)
     }
 }
 
@@ -522,11 +540,15 @@ pub async fn eval_after_freeze(
     claim: &str,
     backend: EvalBackend,
     live: Option<&dyn LiveScorer>,
+    judge_api_key: Option<&str>,
 ) -> Result<EvalOutcome, EvalError> {
     if frozen_digest.trim().is_empty() || holdout.is_empty() {
         return Err(EvalError::HoldoutSealed);
     }
-    scoring_readiness(pin, backend, live, true, Some(offer))?;
+    scoring_readiness(pin, backend, live, true, Some(offer), judge_api_key)?;
+    offer
+        .serves_topic(pin, topic)
+        .map_err(|e| EvalError::InferenceOffer(e.to_string()))?;
     let resolved = resolve_inference(
         pin,
         Some(&topic.inference),
@@ -536,6 +558,11 @@ pub async fn eval_after_freeze(
     if !resolved.ready_to_score() {
         return Err(EvalError::InferenceOffer(
             OfferError::Incomplete.to_string(),
+        ));
+    }
+    if resolved.base_url.trim() != offer.provider.base_url.trim() {
+        return Err(EvalError::InferenceOffer(
+            OfferError::OriginMismatch.to_string(),
         ));
     }
     let doc = match backend {
@@ -635,7 +662,7 @@ mod tests {
                 kind: InferenceProviderKind::OpenaiCompatible,
                 base_url: "http://127.0.0.1:8000/v1".into(),
             },
-            config_commitment: inference_config_commitment(&config),
+            config_commitment: inference_config_commitment(&config, "http://127.0.0.1:8000/v1"),
             config,
             status: OfferStatus::Open,
         }
@@ -703,6 +730,7 @@ mod tests {
             "claim",
             EvalBackend::Lium,
             None,
+            None,
         )
         .await
         .expect_err("no digest");
@@ -720,6 +748,7 @@ mod tests {
             &recs,
             "claim",
             EvalBackend::Lium,
+            None,
             None,
         )
         .await
@@ -745,6 +774,7 @@ mod tests {
             "claim",
             EvalBackend::Lium,
             Some(&Harvest { reproduced: true }),
+            Some("test-judge-key"),
         )
         .await
         .expect("live");
@@ -780,13 +810,27 @@ mod tests {
         let live = pin(&format!("sha256:{}", "ab".repeat(32)));
         let o = offer();
         assert!(matches!(
-            scoring_readiness(&live, EvalBackend::Sim, None, false, Some(&o)),
+            scoring_readiness(&live, EvalBackend::Sim, None, false, Some(&o), None),
             Err(EvalError::NoOpenTopic)
         ));
-        scoring_readiness(&ProofPin::default(), EvalBackend::Sim, None, true, Some(&o))
-            .expect("sim");
+        scoring_readiness(
+            &ProofPin::default(),
+            EvalBackend::Sim,
+            None,
+            true,
+            Some(&o),
+            None,
+        )
+        .expect("sim");
         assert!(matches!(
-            scoring_readiness(&ProofPin::default(), EvalBackend::Sim, None, true, None),
+            scoring_readiness(
+                &ProofPin::default(),
+                EvalBackend::Sim,
+                None,
+                true,
+                None,
+                None
+            ),
             Err(EvalError::InferenceOfferMissing)
         ));
         assert!(matches!(
@@ -795,12 +839,13 @@ mod tests {
                 EvalBackend::Lium,
                 None,
                 true,
-                Some(&o)
+                Some(&o),
+                None,
             ),
             Err(EvalError::EvalImageUnpinned)
         ));
         assert!(matches!(
-            scoring_readiness(&live, EvalBackend::Lium, None, true, Some(&o)),
+            scoring_readiness(&live, EvalBackend::Lium, None, true, Some(&o), None),
             Err(EvalError::LiveHarvestUnavailable)
         ));
         scoring_readiness(
@@ -809,8 +854,20 @@ mod tests {
             Some(&Harvest { reproduced: true }),
             true,
             Some(&o),
+            Some("test-judge-key"),
         )
         .expect("ready");
+        assert!(matches!(
+            scoring_readiness(
+                &live,
+                EvalBackend::Lium,
+                Some(&Harvest { reproduced: true }),
+                true,
+                Some(&o),
+                None,
+            ),
+            Err(EvalError::InferenceAuthMissing)
+        ));
     }
 
     #[test]

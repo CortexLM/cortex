@@ -5,12 +5,13 @@
 #
 # Deploy = bump eval_image_digest after proof-eval CI is green. Empty digest
 # is the pre-launch state: live submits answer 503. Do not invent a sha256.
-# proxy_model must be an id the image actually bakes (see proxy_models).
+# `proxy_model` / `proxy_models` stay empty — no HF bake. The RLM judge is
+# the live InferenceOffer, not a model id compiled into the image.
 #
 # Scoring image published by .github/workflows/publish-proof-eval-image.yml
 # run 33892650063 (commit 51f937c7818f0eb1e3ed1412972de98b6994952b).
-# Pulled that digest after push; harvest-PATH + selftest + baked proxy
-# Qwen/Qwen3.8-0.6B + 12.5 Gbit/s fabric enforcement proved on those bytes.
+# Pulled that digest after push; harvest-PATH + selftest + 12.5 Gbit/s
+# fabric enforcement proved on those bytes.
 #
 # Topic documents are signed by the `proof` row key in config/challenges.toml
 # (sr25519, domain `base-proof-topic-v1`). `topic_pubkey` must match that row.

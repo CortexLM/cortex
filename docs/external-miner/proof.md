@@ -250,6 +250,7 @@ Refusals (**400** / **503**) do **not** persist a submission row.
 | **503** zero open sealed topics | Nothing to score against | no | no |
 | **503** unsealed baseline | Topic open without both seal hashes | no | no |
 | **503** live harvest down / unparseable agent verdict | Host cannot judge | no | no |
+| **503** missing / closed RLM judge backend | Live `InferenceOffer` not scoring | no | no |
 | **201** `rejected` + `contamination_evidence_missing` | Empty manifest | **yes** (rejected) | **no** |
 | **201** `rejected` + contamination | Holdout shard / corpus id in `manifest` | **yes** (rejected) | **no** |
 

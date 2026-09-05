@@ -14,13 +14,31 @@
 //! that visible. [`HoldoutSplit::CanaryOffpath`] never enters the 120 and
 //! never enters the score.
 
+#![allow(
+    clippy::doc_markdown,
+    clippy::module_name_repetitions,
+    clippy::must_use_candidate
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{is_hex64, HOLDOUT_DOMAIN};
+/// Domain tag for per-topic holdout commitments.
+pub const HOLDOUT_DOMAIN: &[u8] = b"base-proof-holdout-v1";
+
+/// Holdout records per topic.
+pub const HOLDOUT_SIZE: usize = 120;
+
+/// Records per scored split (`HOLDOUT_SIZE / scored splits`).
+pub const STRATUM_SIZE: usize = 24;
+
+fn is_hex64(s: &str) -> bool {
+    let t = s.trim();
+    t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit())
+}
 
 /// Smallest packed sequence length a `longctx` record may carry.
 pub const LONGCTX_MIN_TOKENS: u32 = 8_192;
@@ -339,7 +357,6 @@ pub fn synthetic_holdout(per_split: usize, first_id: u32) -> Vec<HoldoutRecord> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{HOLDOUT_SIZE, STRATUM_SIZE};
 
     fn holdout() -> Vec<HoldoutRecord> {
         synthetic_holdout(STRATUM_SIZE, 1_000)
