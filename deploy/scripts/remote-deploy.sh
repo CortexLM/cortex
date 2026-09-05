@@ -186,9 +186,11 @@ rsync -az --delete \
 # directory with real files: compose would otherwise create directories where
 # the container expects files.
 # Same footgun for file mounts: if bounty_sk/proof_sk is missing, Docker
-# creates *directories* at those paths and the challenge bin fails with
-# "Is a directory" / "secret file missing". Materialize empty files when
-# absent; if a directory already poisoned the path, replace it with a file.
+# creates *directories* at those paths. Materialize empty files when absent
+# (the bins warn and still serve /health; they must not exit 1). If a
+# directory already poisoned the path, replace it with a file.
+# session_secret must be non-empty bytes — an empty placeholder used to
+# crash bounty-challenge at boot. Fill from urandom when missing or 0-length.
 ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
   '$REMOTE_DIR/deploy/secrets/bounty' \
   '$REMOTE_DIR/deploy/secrets/proof' \
@@ -198,7 +200,9 @@ ssh_h "mkdir -p '$REMOTE_DIR/deploy/env' '$REMOTE_DIR/deploy/secrets/lium' \
        [ -e '$REMOTE_DIR/deploy/secrets/lium/'\$f ] || : > '$REMOTE_DIR/deploy/secrets/lium/'\$f; \
      done \
   && [ -e '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/bounty/admin_tokens' \
-  && [ -e '$REMOTE_DIR/deploy/secrets/bounty/session_secret' ] || : > '$REMOTE_DIR/deploy/secrets/bounty/session_secret' \
+  && if [ ! -s '$REMOTE_DIR/deploy/secrets/bounty/session_secret' ]; then \
+       dd if=/dev/urandom bs=32 count=1 status=none of='$REMOTE_DIR/deploy/secrets/bounty/session_secret'; \
+     fi \
   && [ -e '$REMOTE_DIR/deploy/secrets/proof/admin_tokens' ] || : > '$REMOTE_DIR/deploy/secrets/proof/admin_tokens' \
   && [ -e '$REMOTE_DIR/deploy/secrets/proof/topics.json' ] || echo '[]' > '$REMOTE_DIR/deploy/secrets/proof/topics.json' \
   && [ -e '$REMOTE_DIR/deploy/secrets/proof/holdouts.json' ] || echo '{}' > '$REMOTE_DIR/deploy/secrets/proof/holdouts.json' \
