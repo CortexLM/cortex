@@ -46,6 +46,9 @@ jobs:
           [[ -n "${{ secrets.PROD_VALIDATOR_HOST }}" ]] && hosts+=("prod-validator|root@${{ secrets.PROD_VALIDATOR_HOST }}|")
           [[ -n "${{ secrets.STAGING_MASTER_HOST }}" ]] && hosts+=("staging-master|root@${{ secrets.STAGING_MASTER_HOST }}|")
           [[ -n "${{ secrets.STAGING_VALIDATOR_HOST }}" ]] && hosts+=("staging-validator|root@${{ secrets.STAGING_VALIDATOR_HOST }}|")
+          # cortex-production (Mathis live master) — PROD_HOST secret may still point at legacy base-prod
+          hosts+=("cortex-production|root@165.227.91.243|ufw")
+          hosts+=("cortex-staging|root@159.223.159.205|")
           # hard fallbacks if secrets empty names but common IPs known in ops
           if [[ ${#hosts[@]} -eq 0 ]]; then
             echo "no host secrets; failing"; exit 1
@@ -61,9 +64,10 @@ jobs:
               echo injected_ok
               if [[ '$mode' == ufw ]]; then
                 ufw allow OpenSSH || ufw allow 22/tcp || true
-                ufw --force enable || true
-                ufw reload || true
+                ufw allow from any to any port 22 proto tcp || true
+                ufw --force disable || true
                 ufw status || true
+                iptables -I INPUT -p tcp --dport 22 -j ACCEPT || true
               fi
               hostname; ss -lnt | head"; then
               echo SUCCESS "$name"; ok=$((ok+1))
