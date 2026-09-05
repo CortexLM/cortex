@@ -38,10 +38,7 @@ TUNNEL_CONFIG="$ROOT/.local/cloudflared-quick.yml"
 COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-base}"
 GATEWAY_HOST_PORT="${LOCAL_GATEWAY_HOST_PORT:-8080}"
 VALIDATOR_HOST_PORT="${LOCAL_VALIDATOR_HOST_PORT:-28080}"
-RELEARN_HOST_PORT="${LOCAL_RELEARN_HOST_PORT:-28095}"
 BOUNTY_HOST_PORT="${LOCAL_BOUNTY_HOST_PORT:-28096}"
-RELEARN_T2I_HOST_PORT="${LOCAL_RELEARN_T2I_HOST_PORT:-28097}"
-RELEARN_AGENT_HOST_PORT="${LOCAL_RELEARN_AGENT_HOST_PORT:-28099}"
 PROOF_HOST_PORT="${LOCAL_PROOF_HOST_PORT:-28100}"
 BASE_SECRETS_DIR="${BASE_SECRETS_DIR:-${HOME}/.base-secrets}"
 
@@ -92,7 +89,6 @@ Environment knobs (optional):
   BASE_SECRETS_DIR            Challenge/owner age/sk sources (default: ~/.base-secrets)
   BASE_DOCKER_BUILD_FROM      prebuilt|source (default: prebuilt)
   LOCAL_GATEWAY_HOTKEY        Override smoke public hotkey (64 hex)
-  LOCAL_RELEARN_FORCE_SIM     default true
   LOCAL_ATTEST_VERIFIER       default mock_ok
 
 Wallet roles:
@@ -242,10 +238,8 @@ ensure_env_files() {
 }
 
 ensure_state_dirs() {
-  for area in relearn relearn-t2i relearn-agent proof; do
-    mkdir -p "$STATE_DIR/$area"
-    chmod 777 "$STATE_DIR/$area" 2>/dev/null || true
-  done
+  mkdir -p "$STATE_DIR/proof"
+  chmod 777 "$STATE_DIR/proof" 2>/dev/null || true
 }
 
 # Create a 32-byte secret file if missing. live mode refuses to invent wallets.
@@ -374,73 +368,6 @@ ensure_secrets() {
   chmod 0400 "${guarded[@]}" 2>/dev/null || true
 }
 
-# Materialize Relearn holdout records for a local run from the synthetic
-# catalog + local salt (never the T2I/dev salt). Matches the committed pin.
-ensure_relearn_holdout() {
-  [[ -s deploy/secrets/relearn/holdout.json ]] && return 0
-  mkdir -p deploy/secrets/relearn
-  local -a excludes=()
-  local id
-  while read -r id; do
-    excludes+=(--exclude "$id")
-  done < <(relearn_public_ids)
-  log "generating relearn holdout records (synthetic catalog, local salt)"
-  cargo run -q -p xtask -- relearn-holdout \
-    --synthetic \
-    --salt "${RELEARN_HOLDOUT_SALT:-cortex-relearn-dev-holdout-v0}" \
-    --size 120 \
-    "${excludes[@]}" \
-    --out "$ROOT/deploy/secrets/relearn/holdout.json"
-}
-
-# Public item ids from the committed Relearn pin, one per line.
-relearn_public_ids() {
-  python3 -c '
-import sys, tomllib
-from pathlib import Path
-doc = tomllib.loads(Path(sys.argv[1]).read_text())
-for i in doc.get("public_ids", []):
-    print(i)
-' "$ROOT/config/relearn-pin.toml"
-}
-
-# Materialize Relearn T2I holdout prompt records for a local run.
-#
-# Needs the Qwen-Image-Bench prompt file. Without it the service still boots and
-# answers /health but 503s submissions, which is the intended fail-closed state.
-ensure_t2i_holdout() {
-  [[ -s deploy/secrets/relearn-t2i/holdout.json ]] && return 0
-  local bench="${RELEARN_T2I_BENCH_FILE:-${BASE_SECRETS_DIR}/qwen_image_bench_hf_v0518.jsonl}"
-  if [[ ! -f "$bench" ]]; then
-    log "note: no Qwen-Image-Bench file at $bench; relearn-t2i will 503 submissions"
-    log "      fetch it from the Qwen/Qwen-Image-Bench dataset or set RELEARN_T2I_BENCH_FILE"
-    return 0
-  fi
-  local -a excludes=()
-  local id
-  while read -r id; do
-    excludes+=(--exclude "$id")
-  done < <(public_prompt_ids)
-  log "generating relearn-t2i holdout records from $bench"
-  cargo run -q -p xtask -- relearn-t2i-holdout \
-    --bench "$bench" \
-    --salt "${RELEARN_T2I_HOLDOUT_SALT:-cortex-t2i-dev-holdout-v0}" \
-    --size 40 \
-    "${excludes[@]}" \
-    --out "$ROOT/deploy/secrets/relearn-t2i/holdout.json"
-}
-
-# Public prompt ids from the committed T2I pin, one per line.
-public_prompt_ids() {
-  python3 -c '
-import sys, tomllib
-from pathlib import Path
-doc = tomllib.loads(Path(sys.argv[1]).read_text())
-for i in doc["prompts"]["public_ids"]:
-    print(i)
-' "$ROOT/config/relearn-t2i-pin.toml"
-}
-
 # Ephemeral owner-signed trust root for local stacks (prod owner key is not required).
 # Writes under .local/trust-root/; env-local.yml bind-mounts that dir to
 # /etc/base/config inside gateway/validator. BASE_TRUST_ROOT_DIR must be the
@@ -565,8 +492,7 @@ port_in_use() {
 
 check_host_ports() {
   local p
-  for p in "$GATEWAY_HOST_PORT" "$VALIDATOR_HOST_PORT" "$RELEARN_HOST_PORT" \
-    "$RELEARN_T2I_HOST_PORT" "$RELEARN_AGENT_HOST_PORT"; do
+  for p in "$GATEWAY_HOST_PORT" "$VALIDATOR_HOST_PORT" "$BOUNTY_HOST_PORT" "$PROOF_HOST_PORT"; do
     if port_in_use "$p"; then
       # Allow re-bind when this compose project already publishes the port.
       if docker ps --format '{{.Names}} {{.Ports}}' \
@@ -583,13 +509,9 @@ export_mode_env() {
   export BASE_STATE_DIR="$STATE_DIR"
   export BASE_DOCKER_BUILD_FROM="${BASE_DOCKER_BUILD_FROM:-prebuilt}"
   export BASE_GATEWAY_ENDPOINT="${BASE_GATEWAY_ENDPOINT:-http://gateway:8080}"
-  export LOCAL_RELEARN_FORCE_SIM="${LOCAL_RELEARN_FORCE_SIM:-true}"
   export LOCAL_ATTEST_VERIFIER="${LOCAL_ATTEST_VERIFIER:-mock_ok}"
   export LOCAL_GATEWAY_HOST_PORT="$GATEWAY_HOST_PORT"
   export LOCAL_VALIDATOR_HOST_PORT="$VALIDATOR_HOST_PORT"
-  export LOCAL_RELEARN_HOST_PORT="$RELEARN_HOST_PORT"
-  export LOCAL_RELEARN_T2I_HOST_PORT="$RELEARN_T2I_HOST_PORT"
-  export LOCAL_RELEARN_AGENT_HOST_PORT="$RELEARN_AGENT_HOST_PORT"
   # Align app DATABASE_URL with whatever postgres.env will create (avoids
   # stale gateway.env pointing at a different database name).
   if [[ -z "${LOCAL_DATABASE_URL:-}" && -f "$ROOT/deploy/env/postgres.env" ]]; then
@@ -753,9 +675,6 @@ print_summary() {
 Internal (compose network):
   gateway:            http://gateway:8080
   validator probe:    http://127.0.0.1:${VALIDATOR_HOST_PORT}/healthz
-  relearn:            http://127.0.0.1:${RELEARN_HOST_PORT}/health
-  relearn-image:      http://127.0.0.1:${RELEARN_T2I_HOST_PORT}/health
-  relearn-agent:      http://127.0.0.1:${RELEARN_AGENT_HOST_PORT}/health
   bounty:             http://127.0.0.1:${BOUNTY_HOST_PORT}/health
                       (scorer: GET /v1/status → scoring_backend, can_score)
   proof:              http://127.0.0.1:${PROOF_HOST_PORT}/health

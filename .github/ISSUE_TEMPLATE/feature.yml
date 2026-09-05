@@ -27,7 +27,7 @@ body:
     attributes:
       label: Area
       options:
-        - challenge (design / prism)
+        - challenge (bounty / proof)
         - gateway / weights
         - validator / chain
         - deploy / ops

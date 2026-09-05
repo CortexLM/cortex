@@ -25,10 +25,11 @@ pub struct ProofPin {
     pub scoring_version: u16,
     /// Family lock for the proxy the eval image bakes.
     pub base_model_family: String,
-    /// Default proxy id baked into the pinned image. Empty until it exists.
+    /// Default RLM judge id baked into the pinned image. Empty until it exists.
     ///
-    /// A topic may name its own proxy, but only one the image contains, so
-    /// this stays the single source of "what the image can actually train".
+    /// This is the eval-image judge that scores miner submissions, not a
+    /// miner training proxy. A topic may name its own proxy, but only one
+    /// the image contains.
     pub proxy_model: String,
     /// Every proxy the pinned image bakes. Empty until the image exists.
     ///

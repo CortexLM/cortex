@@ -181,16 +181,18 @@ for retired in prism-challenge design-challenge design-egress-proxy \
     fail "retired/off $retired still in default compose"
   fi
 done
-# The profiles still have to work, or "off" would mean "deleted".
-mm_services=$(render -f docker-compose.yml --profile mm config --services)
-echo "$mm_services" | grep -qx "relearn-mm-challenge" \
-  || fail "the mm profile does not render relearn-mm-challenge"
-relearn_services=$(render -f docker-compose.yml --profile relearn config --services)
-for required in relearn-challenge relearn-t2i-challenge relearn-agent-challenge; do
-  echo "$relearn_services" | grep -qx "$required" \
-    || fail "the relearn profile does not render $required"
+# Retired challenges must not exist even when leftover profiles are selected.
+for profile in relearn mm; do
+  profile_services=$(render -f docker-compose.yml --profile "$profile" config --services)
+  for retired in prism-challenge design-challenge design-egress-proxy \
+                 relearn-challenge relearn-t2i-challenge relearn-agent-challenge \
+                 relearn-mm-challenge; do
+    if echo "$profile_services" | grep -qx "$retired"; then
+      fail "retired $retired still renders under --profile $profile"
+    fi
+  done
 done
-echo "OK: bounty + proof in default compose; relearn/mm profile-gated; design/prism retired"
+echo "OK: bounty + proof in default compose; relearn*/design/prism code removed"
 
 # --- no fake chain backend survives anywhere in the matrix ---
 for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
@@ -261,7 +263,7 @@ for required in bounty-challenge proof-challenge; do
 done
 for off in relearn-challenge relearn-t2i-challenge relearn-agent-challenge relearn-mm-challenge; do
   if echo "$local_services" | grep -qx "$off"; then
-    fail "env-local master stack renders off $off (must stay behind a profile)"
+    fail "env-local master stack still renders removed $off"
   fi
 done
 for probe in 28096:bounty-challenge 28100:proof-challenge; do

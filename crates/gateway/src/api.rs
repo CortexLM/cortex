@@ -97,7 +97,7 @@ impl GatewayState {
             seal_netuid,
             chain,
             view_frame_ancestors: std::env::var(crate::gw_config::keys::VIEW_FRAME_ANCESTORS)
-                .unwrap_or_else(|_| design_sanitize::default_frame_ancestors().to_owned()),
+                .unwrap_or_else(|_| crate::view_headers::default_frame_ancestors().to_owned()),
         })
     }
 

@@ -61,33 +61,6 @@ services:
       - ./.local/trust-root:/etc/base/config:ro
       - base-validator-lkg:/var/lib/base
 
-  relearn-challenge:
-    ports:
-      - "127.0.0.1:${LOCAL_RELEARN_HOST_PORT:-28095}:8095"
-    environment:
-      BASE_DATABASE_URL: ${LOCAL_DATABASE_URL:-postgres://base:base_dev_only_change_me@postgres:5432/base}
-      # No Lium spend on a laptop unless operator opts in.
-      RELEARN_FORCE_SIM: "${LOCAL_RELEARN_FORCE_SIM:-true}"
-      BASE_SUBMISSION_GATING: "${LOCAL_SUBMISSION_GATING:-0}"
-
-  relearn-t2i-challenge:
-    ports:
-      - "127.0.0.1:${LOCAL_RELEARN_T2I_HOST_PORT:-28097}:8097"
-    environment:
-      BASE_DATABASE_URL: ${LOCAL_DATABASE_URL:-postgres://base:base_dev_only_change_me@postgres:5432/base}
-      # No Lium spend and no Q-Judger endpoint on a laptop unless opted in.
-      RELEARN_T2I_FORCE_SIM: "${LOCAL_RELEARN_T2I_FORCE_SIM:-true}"
-      BASE_SUBMISSION_GATING: "${LOCAL_SUBMISSION_GATING:-0}"
-
-  relearn-agent-challenge:
-    ports:
-      - "127.0.0.1:${LOCAL_RELEARN_AGENT_HOST_PORT:-28099}:8099"
-    environment:
-      BASE_DATABASE_URL: ${LOCAL_DATABASE_URL:-postgres://base:base_dev_only_change_me@postgres:5432/base}
-      # No Lium spend on a laptop unless operator opts in.
-      RELEARN_AGENT_FORCE_SIM: "${LOCAL_RELEARN_AGENT_FORCE_SIM:-true}"
-      BASE_SUBMISSION_GATING: "${LOCAL_SUBMISSION_GATING:-0}"
-
   proof-challenge:
     ports:
       - "127.0.0.1:${LOCAL_PROOF_HOST_PORT:-28100}:8100"
@@ -95,18 +68,6 @@ services:
       BASE_DATABASE_URL: ${LOCAL_DATABASE_URL:-postgres://base:base_dev_only_change_me@postgres:5432/base}
       # No Lium spend on a laptop unless operator opts in.
       PROOF_FORCE_SIM: "${LOCAL_PROOF_FORCE_SIM:-true}"
-      BASE_SUBMISSION_GATING: "${LOCAL_SUBMISSION_GATING:-0}"
-
-  # relearn-mm stays behind the `mm` profile, so this only takes effect when an
-  # operator asks for it explicitly. It never renders on the default stack.
-  relearn-mm-challenge:
-    ports:
-      - "127.0.0.1:${LOCAL_RELEARN_MM_HOST_PORT:-28098}:8098"
-    environment:
-      BASE_DATABASE_URL: ${LOCAL_DATABASE_URL:-postgres://base:base_dev_only_change_me@postgres:5432/base}
-      RELEARN_MM_FORCE_SIM: "${LOCAL_RELEARN_MM_FORCE_SIM:-true}"
-      RELEARN_MM_CHAMPION_LM_HASH: "${RELEARN_MM_CHAMPION_LM_HASH:-}"
-      BASE_SUBMISSION_GATING: "${LOCAL_SUBMISSION_GATING:-0}"
 
   bounty-challenge:
     ports:

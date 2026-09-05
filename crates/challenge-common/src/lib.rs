@@ -1,4 +1,4 @@
-//! Shared challenge helpers used by prism (and temporarily agent-v1).
+//! Shared challenge helpers used by bounty and proof.
 //!
 //! - Sealed expected set `E` at `block_B` (I7 / D24)
 //! - Exact-E signed leaf emission

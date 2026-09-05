@@ -1,9 +1,8 @@
 # base control-plane stack
 #
 # Default: postgres + validator + updater + socket-proxy + the two live
-# challenges (bounty, proof). relearn* are OFF: they have no trust-root row,
-# so they sit behind the `relearn` / `mm` profiles and never come up on a
-# default or master stack. Design and Prism stay retired.
+# challenges (bounty, proof). relearn*, design, and prism are gone — they
+# have no trust-root row and no remaining compose services.
 # Master/owner host only:
 #   docker compose --profile master up -d
 # brings gateway as an additional service (D3).
@@ -180,224 +179,6 @@ services:
       - base
     # Talks to Docker Engine only through socket-proxy (allowlisted).
 
-
-
-  # ---------------------------------------------------------------------------
-  # relearn-challenge — Relearn LLM post-training factory (:8095).
-  # OFF: no trust-root row, so it has no emission and no leaf of its can
-  # verify. Kept behind the `relearn` profile so the code stays exercised
-  # and the challenge can be turned on with a trust-root ceremony rather
-  # than a rewrite. Never enable it on a prod host.
-  # ---------------------------------------------------------------------------
-  relearn-challenge:
-    profiles: ["relearn"]
-    image: relearn-challenge:0.1.0
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile
-      target: relearn-challenge
-      args:
-        BUILD_FROM: ${BASE_DOCKER_BUILD_FROM:-prebuilt}
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      BASE_CHALLENGE_BIND: 0.0.0.0:8095
-      BASE_CHALLENGE_SK_FILE: /run/base/challenge_sk
-      # Sim eval unless a miner BYOK key is presented. Never log LIUM_API_KEY.
-      RELEARN_FORCE_SIM: "${RELEARN_FORCE_SIM:-false}"
-      RELEARN_PIN_FILE: /etc/base/config/relearn-pin.toml
-      RELEARN_TEACHER_BACKEND: "${RELEARN_TEACHER_BACKEND:-http_api}"
-      RELEARN_TEACHER_API_URL: "${RELEARN_TEACHER_API_URL:-}"
-      RELEARN_TEACHER_MODEL: "${RELEARN_TEACHER_MODEL:-}"
-      RELEARN_TEACHER_LOCAL_DIR: "${RELEARN_TEACHER_LOCAL_DIR:-}"
-      RELEARN_HOLDOUT_FILE: /run/base/relearn/holdout.json
-      RELEARN_ADMIN_TOKENS_FILE: /run/base/relearn/admin_tokens
-      BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
-    env_file:
-      - path: ./deploy/env/relearn-challenge.env
-        required: true
-    volumes:
-      - ./config:/etc/base/config:ro
-      - ./deploy/secrets/relearn_sk:/run/base/challenge_sk:ro
-      - ./deploy/secrets/lium:/run/base/lium:ro
-      - ./deploy/secrets/relearn:/run/base/relearn:ro
-      - relearn-artifacts:/var/lib/relearn
-    expose:
-      - "8095"
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "curl -fsS -m 5 http://127.0.0.1:8095/health || exit 1",
-        ]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 10s
-    networks:
-      - base
-
-  # ---------------------------------------------------------------------------
-  # relearn-t2i-challenge — Relearn Image (`relearn-image`, :8097). OFF: no
-  # trust-root row. Kept behind the `relearn` profile. Never enable on prod.
-  # The service keeps the pre-launch `t2i` spelling (docs/NAMING.md).
-  # ---------------------------------------------------------------------------
-  relearn-t2i-challenge:
-    profiles: ["relearn"]
-    image: relearn-t2i-challenge:0.1.0
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile
-      target: relearn-t2i-challenge
-      args:
-        BUILD_FROM: ${BASE_DOCKER_BUILD_FROM:-prebuilt}
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      BASE_CHALLENGE_BIND: 0.0.0.0:8097
-      BASE_CHALLENGE_SK_FILE: /run/base/challenge_sk
-      # Sim eval unless a judge endpoint is configured. Never log the key.
-      RELEARN_T2I_FORCE_SIM: "${RELEARN_T2I_FORCE_SIM:-false}"
-      RELEARN_T2I_PIN_FILE: /etc/base/config/relearn-t2i-pin.toml
-      RELEARN_T2I_JUDGE_BACKEND: "${RELEARN_T2I_JUDGE_BACKEND:-http_api}"
-      RELEARN_T2I_JUDGE_API_URL: "${RELEARN_T2I_JUDGE_API_URL:-}"
-      RELEARN_T2I_HOLDOUT_FILE: /run/base/relearn-t2i/holdout.json
-      RELEARN_T2I_ADMIN_TOKENS_FILE: /run/base/relearn-t2i/admin_tokens
-      # Base checkpoint measured by the pinned eval image. A live host refuses
-      # every submission until this exists (GET /v1/status).
-      RELEARN_T2I_BASE_CHAMPION_FILE: /run/base/relearn-t2i/base_champion.json
-      BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
-    env_file:
-      - path: ./deploy/env/relearn-t2i-challenge.env
-        required: true
-    volumes:
-      - ./config:/etc/base/config:ro
-      - ./deploy/secrets/relearn_t2i_sk:/run/base/challenge_sk:ro
-      - ./deploy/secrets/lium:/run/base/lium:ro
-      - ./deploy/secrets/relearn-t2i:/run/base/relearn-t2i:ro
-      - relearn-t2i-artifacts:/var/lib/relearn-t2i
-    expose:
-      - "8097"
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "curl -fsS -m 5 http://127.0.0.1:8097/health || exit 1",
-        ]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 10s
-    networks:
-      - base
-
-  # ---------------------------------------------------------------------------
-  # relearn-agent-challenge — Relearn Agent (:8099). OFF: no trust-root row.
-  # Kept behind the `relearn` profile. Never enable on prod.
-  # ---------------------------------------------------------------------------
-  relearn-agent-challenge:
-    profiles: ["relearn"]
-    image: relearn-agent-challenge:0.1.0
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile
-      target: relearn-agent-challenge
-      args:
-        BUILD_FROM: ${BASE_DOCKER_BUILD_FROM:-prebuilt}
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      BASE_CHALLENGE_BIND: 0.0.0.0:8099
-      BASE_CHALLENGE_SK_FILE: /run/base/challenge_sk
-      # Sim eval unless the operator opts in. Never log LIUM_API_KEY.
-      RELEARN_AGENT_FORCE_SIM: "${RELEARN_AGENT_FORCE_SIM:-false}"
-      RELEARN_AGENT_PIN_FILE: /etc/base/config/relearn-agent-pin.toml
-      RELEARN_AGENT_HOLDOUT_FILE: /run/base/relearn-agent/episodes.json
-      RELEARN_AGENT_ADMIN_TOKENS_FILE: /run/base/relearn-agent/admin_tokens
-      RELEARN_AGENT_BASE_CHAMPION_FILE: /run/base/relearn-agent/base_champion.json
-      BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
-    env_file:
-      - path: ./deploy/env/relearn-agent-challenge.env
-        required: true
-    volumes:
-      - ./config:/etc/base/config:ro
-      - ./deploy/secrets/relearn_agent_sk:/run/base/challenge_sk:ro
-      - ./deploy/secrets/lium:/run/base/lium:ro
-      - ./deploy/secrets/relearn-agent:/run/base/relearn-agent:ro
-      - relearn-agent-artifacts:/var/lib/relearn-agent
-    expose:
-      - "8099"
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "curl -fsS -m 5 http://127.0.0.1:8099/health || exit 1",
-        ]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 10s
-    networks:
-      - base
-
-  # ---------------------------------------------------------------------------
-  # relearn-mm-challenge — Relearn Multimodal (:8098). OFF: it has no row in
-  # config/challenges.toml, so it has no emission and no leaf of its can
-  # verify. Kept behind the `mm` profile so the code stays exercised and the
-  # challenge can be turned on with a trust-root ceremony rather than a
-  # rewrite. Never enable it on a prod host.
-  # ---------------------------------------------------------------------------
-  relearn-mm-challenge:
-    profiles: ["mm"]
-    image: relearn-mm-challenge:0.1.0
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile
-      target: relearn-mm-challenge
-      args:
-        BUILD_FROM: ${BASE_DOCKER_BUILD_FROM:-prebuilt}
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      BASE_CHALLENGE_BIND: 0.0.0.0:8098
-      BASE_CHALLENGE_SK_FILE: /run/base/challenge_sk
-      RELEARN_MM_FORCE_SIM: "${RELEARN_MM_FORCE_SIM:-false}"
-      RELEARN_MM_PIN_FILE: /etc/base/config/relearn-mm-pin.toml
-      RELEARN_MM_CHAMPION_LM_HASH: "${RELEARN_MM_CHAMPION_LM_HASH:-}"
-      RELEARN_MM_ADMIN_TOKENS_FILE: /run/base/relearn-mm/admin_tokens
-      BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
-    env_file:
-      - path: ./deploy/env/relearn-mm-challenge.env
-        required: true
-    volumes:
-      - ./config:/etc/base/config:ro
-      - ./deploy/secrets/relearn_mm_sk:/run/base/challenge_sk:ro
-      - ./deploy/secrets/lium:/run/base/lium:ro
-      - ./deploy/secrets/relearn-mm:/run/base/relearn-mm:ro
-      - relearn-mm-artifacts:/var/lib/relearn-mm
-    expose:
-      - "8098"
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "curl -fsS -m 5 http://127.0.0.1:8098/health || exit 1",
-        ]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 10s
-    networks:
-      - base
-
   # bounty-challenge — bug-report challenge (:8096). Pair + reports; Chat inject env-only.
   bounty-challenge:
     image: bounty-challenge:0.1.0
@@ -506,8 +287,7 @@ services:
     environment:
       # Shared proxy: updater rolls. App-level
       # Allowlist::updater / Allowlist::verifier enforce method/path; tecnativa
-      # CONTAINERS includes DELETE for sandbox cleanup. NETWORKS stays off —
-      # design-sandbox-egress is pre-created by compose (NetworkMode by name).
+      # CONTAINERS includes DELETE for sandbox cleanup. NETWORKS stays off.
       CONTAINERS: "1"
       IMAGES: "1"
       POST: "1"
@@ -544,10 +324,6 @@ volumes:
   base-pgdata:
   base-updater-state:
   base-validator-lkg:
-  relearn-artifacts:
-  relearn-t2i-artifacts:
-  relearn-agent-artifacts:
-  relearn-mm-artifacts:
   proof-artifacts:
 
 networks:

@@ -45,52 +45,10 @@ pub const LIVE: [Challenge; 2] = [
     },
 ];
 
-/// Off challenges. Commands exist for a local stack; they earn nothing.
-pub const OFF: [Challenge; 3] = [
-    Challenge {
-        id: "relearn",
-        label: "Relearn",
-        command: "relearn",
-        entry: "ctx relearn submit (off: no emission)",
-        emission_bps: 0,
-        work: "post-train Qwen/Qwen3.8-27B",
-        guide: "docs/external-miner/relearn.md",
-    },
-    Challenge {
-        id: "relearn-image",
-        label: "Relearn Image",
-        command: "image",
-        entry: "ctx image submit (off: no emission)",
-        emission_bps: 0,
-        work: "fine-tune nvidia/Cosmos3-Super-Text2Image, judged by Q-Judger",
-        guide: "docs/external-miner/relearn-image.md",
-    },
-    Challenge {
-        id: "relearn-agent",
-        label: "Relearn Agent",
-        command: "agent",
-        entry: "ctx agent submit (off: no emission)",
-        emission_bps: 0,
-        work: "post-train the same checkpoint into a tool-using agent",
-        guide: "docs/external-miner/relearn-agent.md",
-    },
-];
-
 /// Resolve a live challenge by id or by its `ctx` subcommand name.
 #[must_use]
 pub fn find(name: &str) -> Option<&'static Challenge> {
     LIVE.iter().find(|c| c.id == name || c.command == name)
-}
-
-/// Resolve an off challenge. Never used for emission or `ctx challenges`.
-#[must_use]
-pub fn find_off(name: &str) -> Option<&'static Challenge> {
-    OFF.iter()
-        .find(|c| c.id == name || c.command == name)
-        .or_else(|| match name {
-            "relearn-t2i" | "t2i" => find_off("relearn-image"),
-            _ => None,
-        })
 }
 
 /// Print the live challenge table.
@@ -105,9 +63,7 @@ pub fn print_challenges() {
         println!();
     }
     println!("relearn, relearn-image, relearn-agent, relearn-mm, design, and prism");
-    println!("are off: no trust-root row, no emission. Submitting to them earns nothing.");
-    println!("`ctx relearn|image|agent` still talk to a local stack (`--gateway`);");
-    println!("they are not live work.");
+    println!("are off: no trust-root row, no emission, no remaining ctx commands.");
     println!();
     println!("Bounty pays precision times severity. Proof pays WTA or discovery per open topic.");
     println!(
@@ -131,15 +87,9 @@ pub async fn fetch_status(client: &Client, challenge_id: &str) -> Result<Value, 
 pub async fn print_status(client: &Client, only: Option<&str>, json: bool) -> Result<(), String> {
     if let Some(want) = only {
         if find(want).is_none() {
-            if let Some(off) = find_off(want) {
-                return Err(format!(
-                    "{} is off: no trust-root row, no emission. Live ids: bounty, proof. \
-                     Use `ctx {} status` against a local stack.",
-                    off.id, off.command
-                ));
-            }
             return Err(format!(
-                "unknown challenge {want:?}. Live ids: bounty, proof."
+                "unknown challenge {want:?}. Live ids: bounty, proof. \
+                 relearn*, design, and prism are off and have no ctx commands."
             ));
         }
     }
@@ -288,10 +238,6 @@ mod tests {
         ] {
             assert!(find(off).is_none(), "{off} must not be live");
         }
-        assert_eq!(find_off("relearn").map(|c| c.emission_bps), Some(0));
-        assert_eq!(find_off("image").map(|c| c.id), Some("relearn-image"));
-        assert_eq!(find_off("t2i").map(|c| c.id), Some("relearn-image"));
-        assert!(find_off("relearn-mm").is_none());
     }
 
     #[test]

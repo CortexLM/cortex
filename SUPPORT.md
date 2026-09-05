@@ -18,10 +18,10 @@ repo. Mentions of maintainers go through GitHub and
 
 ## What this repo is (and is not)
 
-- **Is:** Cortex Rust workspace — gateway, validator, design/prism
+- **Is:** Cortex Rust workspace — gateway, validator, bounty and proof
   challenges, deploy matrix.
-- **Is not:** a miner SDK rewrite, a protocol fork, or the public
-  design-challenge / prism documentation repos.
+- **Is not:** a miner SDK rewrite, a protocol fork, or a live Relearn /
+  Design / Prism product.
 
 If you are about to rename `BASE_*` or a `base-*-v1` domain tag, stop and
 read [docs/NAMING.md](docs/NAMING.md).

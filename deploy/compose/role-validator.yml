@@ -22,14 +22,6 @@ services:
   # Challenges + Docker sock proxy are master-only.
   # Validators fetch sealed weights from the master gateway; they do not run
   # miner code or hold challenge mini-secrets.
-  relearn-challenge:
-    profiles: ["never"]
-  relearn-t2i-challenge:
-    profiles: ["never"]
-  relearn-agent-challenge:
-    profiles: ["never"]
-  relearn-mm-challenge:
-    profiles: ["never"]
   bounty-challenge:
     profiles: ["never"]
   proof-challenge:

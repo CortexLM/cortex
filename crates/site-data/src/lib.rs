@@ -1,5 +1,5 @@
 //! Live data adapters behind `site-api`: TAO/USD quote cache, sealed weight
-//! vector projection, metrics frames, and honest design/prism → site mappers.
+//! vector projection, metrics frames, and honest bounty/proof → site mappers.
 //! Pure functions / explicit handles so the HTTP crate stays a thin router.
 
 #![forbid(unsafe_code)]

@@ -17,7 +17,7 @@ services:
       BASE_VALIDATOR_WALLET: base-validator
     volumes:
       - ./deploy/secrets/wallets:/run/base/wallets:ro
-      # Staging-only trust root: mirrors prod emission (relearn 10000).
+      # Staging-only trust root: bounty 2000 + proof 8000.
       - ./config/challenges.staging.toml:/etc/base/config/challenges.toml:ro
       - ./config/challenges.staging.toml.sig:/etc/base/config/challenges.toml.sig:ro
       - base-validator-lkg:/var/lib/base
@@ -49,29 +49,6 @@ services:
       # never shows challenge weight and the validator flags emission share mismatch (D23).
       - ./config/challenges.staging.toml:/etc/base/config/challenges.toml:ro
       - ./config/challenges.staging.toml.sig:/etc/base/config/challenges.toml.sig:ro
-  relearn-challenge:
-    environment:
-      BASE_CHAIN_ENDPOINT: "wss://test.chain.opentensor.ai:443"
-      BASE_CHAIN_ENDPOINTS: "wss://test.chain.opentensor.ai:443,wss://test.finney.opentensor.ai:443"
-      # Live path on droplets: sim is local-only (`env-local.yml`).
-      RELEARN_FORCE_SIM: "false"
-      RELEARN_TEACHER_BACKEND: "http_api"
-      RELEARN_TEACHER_API_URL: "${RELEARN_TEACHER_API_URL:-}"
-      RELEARN_TEACHER_MODEL: "${RELEARN_TEACHER_MODEL:-}"
-  relearn-t2i-challenge:
-    environment:
-      BASE_CHAIN_ENDPOINT: "wss://test.chain.opentensor.ai:443"
-      BASE_CHAIN_ENDPOINTS: "wss://test.chain.opentensor.ai:443,wss://test.finney.opentensor.ai:443"
-      # Live path on droplets: sim is local-only (`env-local.yml`).
-      RELEARN_T2I_FORCE_SIM: "false"
-      RELEARN_T2I_JUDGE_BACKEND: "http_api"
-      RELEARN_T2I_JUDGE_API_URL: "${RELEARN_T2I_JUDGE_API_URL:-}"
-  relearn-agent-challenge:
-    environment:
-      BASE_CHAIN_ENDPOINT: "wss://test.chain.opentensor.ai:443"
-      BASE_CHAIN_ENDPOINTS: "wss://test.chain.opentensor.ai:443,wss://test.finney.opentensor.ai:443"
-      # Live path on droplets: sim is local-only (`env-local.yml`).
-      RELEARN_AGENT_FORCE_SIM: "false"
   proof-challenge:
     environment:
       BASE_CHAIN_ENDPOINT: "wss://test.chain.opentensor.ai:443"
@@ -84,5 +61,5 @@ services:
       BASE_CHAIN_ENDPOINTS: "wss://test.chain.opentensor.ai:443,wss://test.finney.opentensor.ai:443"
       # CortexLM/backend public base. Empty → this host cannot score:
       # POST /v1/reports answers 503 and every bounty leaf is an explicit
-      # no-score, so the 7000 bps share burns to uid 0. Never bake a host.
+      # no-score, so the 2000 bps share burns to uid 0. Never bake a host.
       BOUNTY_BACKEND_PUBLIC_URL: "${BOUNTY_BACKEND_PUBLIC_URL:-}"

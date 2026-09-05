@@ -3,7 +3,8 @@
 Live challenge id: **`proof`**. Emission **8000 bps** (80% of the subnet;
 bounty is 2000). This 20%/80% lock is independent of eval digest. Eval
 digest `sha256:78b614a1…` is pinned (`ghcr.io/cortexlm/proof-eval`, baked
-proxy `Qwen/Qwen3.8-0.6B`). Live submits still **503** until harvest is
+RLM judge `Qwen/Qwen3.8-0.6B` — evaluates miner submissions; **not** a miner
+training proxy). Live submits still **503** until harvest is
 wired, a baseline is sealed, and ≥1 topic is open. Do not invent a sha256.
 Sum across the two live rows stays 10000. Port **8100** (local probe
 **28100**).

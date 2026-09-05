@@ -1,7 +1,7 @@
 //! Marketing site aggregator: `GET /v1/site/*` (camelCase) over challenge backends.
 //!
-//! Reads only. Resolves design/prism upstreams via the gateway registry (same
-//! pick path as `/challenge/{id}/*`). Never invents scores or duel fixtures.
+//! Reads only. Resolves bounty/proof upstreams via the gateway registry (same
+//! pick path as `/challenge/{id}/*`). Never invents scores.
 //!
 //! Contract: frontend `BaseApi` / `types.ts`. Coding arena is paused.
 

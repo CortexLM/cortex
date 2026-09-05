@@ -4,20 +4,10 @@
   "previous": {
     "commit_sha": "46b13efefd6bbbf30ea9955e524da7a596411984",
     "services": {
-      "design-challenge": {
-        "digest": "sha256:9a0c46f308b23b2c4955e451adcfbab9fac257a7fa3bd75017ec33a738df9b40",
-        "image": "ghcr.io/baseintelligence/base/design-challenge@sha256:9a0c46f308b23b2c4955e451adcfbab9fac257a7fa3bd75017ec33a738df9b40",
-        "repository": "ghcr.io/baseintelligence/base/design-challenge"
-      },
       "gateway": {
         "digest": "sha256:7101dd4a902c0a5c2b472170917fdf170a707b264519bee2abbc23520cfd4798",
         "image": "ghcr.io/cortexlm/cortex/gateway@sha256:7101dd4a902c0a5c2b472170917fdf170a707b264519bee2abbc23520cfd4798",
         "repository": "ghcr.io/cortexlm/cortex/gateway"
-      },
-      "prism-challenge": {
-        "digest": "sha256:552be24c2d01de5869e4b43f8ae3cd67fb673023f4d63965ecfc48f2b775e8d9",
-        "image": "ghcr.io/cortexlm/cortex/prism-challenge@sha256:552be24c2d01de5869e4b43f8ae3cd67fb673023f4d63965ecfc48f2b775e8d9",
-        "repository": "ghcr.io/cortexlm/cortex/prism-challenge"
       },
       "updater": {
         "digest": "sha256:454d2091b16b67f123970e8fb5cbe71c9518a8707026e8df1b22f735ff4b3f75",
@@ -33,20 +23,10 @@
     "updated_at": "2026-08-29T07:23:15Z"
   },
   "services": {
-    "design-challenge": {
-      "digest": "sha256:c135b0b76c7893b1b1012baa730a098f554fd1d9f7069bf4493122fcd617612f",
-      "image": "ghcr.io/cortexlm/cortex/design-challenge@sha256:c135b0b76c7893b1b1012baa730a098f554fd1d9f7069bf4493122fcd617612f",
-      "repository": "ghcr.io/cortexlm/cortex/design-challenge"
-    },
     "gateway": {
       "digest": "sha256:7101dd4a902c0a5c2b472170917fdf170a707b264519bee2abbc23520cfd4798",
       "image": "ghcr.io/cortexlm/cortex/gateway@sha256:7101dd4a902c0a5c2b472170917fdf170a707b264519bee2abbc23520cfd4798",
       "repository": "ghcr.io/cortexlm/cortex/gateway"
-    },
-    "prism-challenge": {
-      "digest": "sha256:552be24c2d01de5869e4b43f8ae3cd67fb673023f4d63965ecfc48f2b775e8d9",
-      "image": "ghcr.io/cortexlm/cortex/prism-challenge@sha256:552be24c2d01de5869e4b43f8ae3cd67fb673023f4d63965ecfc48f2b775e8d9",
-      "repository": "ghcr.io/cortexlm/cortex/prism-challenge"
     },
     "updater": {
       "digest": "sha256:454d2091b16b67f123970e8fb5cbe71c9518a8707026e8df1b22f735ff4b3f75",

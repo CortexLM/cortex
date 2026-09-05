@@ -19,6 +19,7 @@ mod app;
 mod proxy;
 mod sealer;
 mod tls;
+mod view_headers;
 mod weights;
 
 use std::process::ExitCode;

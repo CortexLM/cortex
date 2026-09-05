@@ -70,28 +70,20 @@ const MINER_FORBIDDEN_ENV: &[&str] = &[
 /// is not a rule they will follow.
 const PAGE_PINS: &[(&str, &[&str])] = &[
     (
+        "relearn.md",
+        &["This challenge is off", "no emission", "Bounty", "Proof"],
+    ),
+    (
         "relearn-image.md",
-        &[
-            "nvidia/Cosmos3-Super-Text2Image",
-            "OpenMDW 1.1",
-            "Qwen/Qwen-Image-Bench",
-            "Flux is rejected",
-            "Q-Judger is the only judge",
-            // The gates a miner has to design for, in their own guide.
-            "Capability canary",
-            "contamination_evidence_missing",
-        ],
+        &["This challenge is off", "no emission", "relearn-image"],
     ),
     (
         "relearn-agent.md",
-        &[
-            "Qwen/Qwen3.8-27B",
-            "Trace replay",
-            "Tool ablation",
-            "Observation shuffle",
-            "without using the image or",
-            "contamination_evidence_missing",
-        ],
+        &["This challenge is off", "no emission", "relearn-agent"],
+    ),
+    (
+        "relearn-mm.md",
+        &["This challenge is off", "no emission", "relearn-mm"],
     ),
     (
         "bounty.md",
@@ -117,15 +109,6 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
             "claim",
             "payout_mode",
             "discovery",
-        ],
-    ),
-    (
-        "relearn-mm.md",
-        &[
-            "google/siglip2-so400m-patch14-384",
-            "Apache-2.0",
-            "zero on this challenge",
-            "shuffled",
         ],
     ),
 ];
@@ -634,30 +617,22 @@ mod tests {
 
     #[test]
     fn page_pins_hold_the_product_rules() {
-        let t2i = PAGE_PINS
-            .iter()
-            .find(|(p, _)| *p == "relearn-image.md")
-            .map(|(_, pins)| *pins)
-            .unwrap_or_default();
-        assert!(t2i.contains(&"Flux is rejected"));
-        assert!(t2i.contains(&"Q-Judger is the only judge"));
-        let mm = PAGE_PINS
-            .iter()
-            .find(|(p, _)| *p == "relearn-mm.md")
-            .map(|(_, pins)| *pins)
-            .unwrap_or_default();
-        assert!(mm.contains(&"zero on this challenge"));
-        assert!(mm.contains(&"shuffled"));
-
-        // The Agent page has to state the arms that separate it from a prompt
-        // benchmark, or the challenge reads as "relearn with extra words".
-        let agent = PAGE_PINS
-            .iter()
-            .find(|(p, _)| *p == "relearn-agent.md")
-            .map(|(_, pins)| *pins)
-            .unwrap_or_default();
-        for arm in ["Trace replay", "Tool ablation", "Observation shuffle"] {
-            assert!(agent.contains(&arm), "agent page must pin {arm:?}");
+        for off in [
+            "relearn.md",
+            "relearn-image.md",
+            "relearn-agent.md",
+            "relearn-mm.md",
+        ] {
+            let pins = PAGE_PINS
+                .iter()
+                .find(|(p, _)| *p == off)
+                .map(|(_, pins)| *pins)
+                .unwrap_or_default();
+            assert!(
+                pins.contains(&"This challenge is off"),
+                "{off} must stay an off stub"
+            );
+            assert!(pins.contains(&"no emission"), "{off} must say no emission");
         }
 
         let proof = PAGE_PINS

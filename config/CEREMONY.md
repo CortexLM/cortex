@@ -23,9 +23,9 @@ remain 10000, and no two rows may share a public key.
 
 `relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and
 `prism` are **off**: they have no row, so they have no emission and no leaf
-signed by their keys can verify. Relearn* code stays in the repo behind the
-`relearn` / `mm` compose profiles. Turning one on later is a normal ceremony —
-add a row with its own key and move bps out of the live two.
+signed by their keys can verify. Product code for those ids is removed.
+Turning one on later is a new ceremony — add a row with its own key and
+move bps out of the live two.
 
 A production owner/key ceremony:
 

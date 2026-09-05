@@ -26,24 +26,23 @@ The same rule applies inside the challenge tree. A challenge id is a **wire**
 identifier: it is signed into every leaf, routed at `/challenge/{id}/…`, and
 hashed into the trust root. A crate or service name is not.
 
+Live products (trust-root rows, compose services, miner docs):
+
 | Product | Challenge id (wire) | Crates / service / env prefix |
 |---------|--------------------|-------------------------------|
-| Relearn | `relearn` | `relearn-*`, `relearn-challenge`, `RELEARN_*` |
-| Relearn Image | `relearn-image` | `relearn-t2i-*`, `relearn-t2i-challenge`, `RELEARN_T2I_*` |
-| Relearn Agent | `relearn-agent` | `relearn-agent-*`, `relearn-agent-challenge`, `RELEARN_AGENT_*` |
 | Bounty | `bounty` | `bounty-*`, `bounty-challenge`, `BOUNTY_*` |
 | Proof | `proof` | `proof-*`, `proof-challenge`, `PROOF_*` |
 
-Relearn Image keeps the pre-launch `t2i` spelling in its crates, service, env
-prefix, pin filename, and deployed paths. That is not laziness: its
-`base-relearn-t2i-*` domain tags are hashed into the committed
-`holdout_commitment`, so renaming them would invalidate the pin and every
-operator holdout file generated against it. Same reasoning as `BASE_*` above —
-rename the product, freeze the identifiers that are measured.
+`relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and
+`prism` are **removed as products**: no challenge bins, no compose
+services, no emission. Those historical wire ids still have no trust-root
+row, so no leaf may verify under them. Do not reintroduce the product
+crates or profiles. Historical miner stubs stay under
+[`docs/external-miner/`](external-miner/) so old links do not 404.
 
-`relearn-mm` is off and has no row in `config/challenges.toml`. Its crates and
-its `mm`-profile compose service still exist; nothing routes or signs under
-that id.
+Leftover `prism-*` crate names are the **Lium harvest stack** used by Proof
+(`harvest-pod`, `prism-lium*`, `prism-store*`, `prism-recipe`, …), not a
+live Prism challenge.
 
 ## Environment variables
 
@@ -107,16 +106,24 @@ not the product name.
 
 ## Public miner repos (other GitHub repositories)
 
-Live miner docs: [`CortexLM/relearn`](https://github.com/CortexLM/relearn).
-Short pointer in this repo: [`docs/external-miner/relearn.md`](external-miner/relearn.md).
-Design and Prism public repos are historical, not live miner paths.
+Live miner docs live in this repo:
+
+- Bounty: [`docs/external-miner/bounty.md`](external-miner/bounty.md)
+- Proof: [`docs/external-miner/proof.md`](external-miner/proof.md)
+
+Off/archived pointers (`relearn.md`, `relearn-image.md`, `relearn-agent.md`,
+`relearn-mm.md`) stay so historical links do not 404. They are not live
+products. Frozen specs (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`) stay
+archived; do not send miners there as live work.
 
 ## Postgres
 
-`design_rating` is a **live table** (see `crates/design-db`,
-`crates/design-store-pg`). It is unrelated to the removed unused crate
-`crates/design-rating`. Do not drop the table or its accessors as part of
-branding work.
+Applied SQL migrations are append-only. Tables created for retired
+challenges (for example `design_rating` in
+`crates/db/migrations/0006_design_challenge.sql`) stay in Postgres. Do not
+drop them as part of product cleanup or branding work. Accessors in
+deleted design crates are gone; do not reintroduce those crates to “use”
+the table.
 
 ## Historical docs
 

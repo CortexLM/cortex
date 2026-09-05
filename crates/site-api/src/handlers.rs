@@ -1,39 +1,21 @@
 //! Axum handlers for `GET /v1/site/*`.
 
-use std::collections::HashMap;
-
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use futures::future::join_all;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::state::SiteState;
-use crate::upstream::{self, BOUNTY, DESIGN, PRISM, PROOF, RELEARN, RELEARN_AGENT, RELEARN_IMAGE};
-use site_data::map::{
-    activity_from_lives, design_arena_from_dashboard, design_leaderboard, design_submission,
-    enrich_leaderboard_uids, enrich_leaderboard_weights, enrich_submission_uids,
-    is_prism_champion_submission, leaderboard_matches_query, prism_arena_from_live,
-    prism_bpb_leaderboard, prism_submission, prism_telemetry, prism_window,
-    submission_matches_query, uid_index_from_hotkeys,
-};
-use site_data::map::{hydrate_arena, relearn_arena_from_live};
-use site_prism::{
-    enrich_leaderboard_row_from_detail_with_zone, enrich_submission_from_detail_with_zone,
-    fill_v21_run_from_live, infer_recipe_era, infer_recipe_era_with_live, map_benchmarks,
-    payload_is_v21_contest, pin_id_from_payload, prism_reference_baselines,
-    prism_submission_detail_with_zone,
-};
+use crate::upstream::{self, BOUNTY, PROOF};
+use site_data::map::{activity_from_lives, hydrate_arena};
 use site_types::page_slice;
 use site_types::{
-    bounty_frame, coding_arena, proof_frame, relearn_agent_frame, relearn_image_frame,
-};
-use site_types::{
-    ArenaSlug, Governance, LandingSummary, MetricsEmission, MetricsPassRate, MetricsPopulation,
-    NetworkMetrics, NetworkStats, RecipeEra, ResultsMatrix, Validator,
+    bounty_frame, coding_arena, proof_frame, ArenaSlug, Governance, LandingSummary,
+    MetricsEmission, MetricsPassRate, MetricsPopulation, NetworkMetrics, NetworkStats,
+    ResultsMatrix, Validator,
 };
 
 /// Mount marketing site routes under `/v1/site`.
@@ -45,31 +27,9 @@ pub fn site_router(state: SiteState) -> Router {
         .route("/v1/site/arenas/{slug}", get(get_arena))
         .route("/v1/site/arenas/{slug}/leaderboard", get(get_leaderboard))
         .route("/v1/site/arenas/{slug}/submissions", get(get_submissions))
-        .route("/v1/site/arenas/design/duels", get(get_duels))
         .route(
             "/v1/site/arenas/coding/results-matrix",
             get(get_results_matrix),
-        )
-        .route("/v1/site/arenas/prism/window", get(get_prism_window))
-        .route(
-            "/v1/site/arenas/prism/references",
-            get(get_prism_references),
-        )
-        .route(
-            "/v1/site/arenas/prism/submissions/{id}",
-            get(get_prism_submission_detail),
-        )
-        .route(
-            "/v1/site/arenas/prism/submissions/{id}/telemetry",
-            get(get_prism_submission_telemetry),
-        )
-        .route(
-            "/v1/site/arenas/prism/submissions/{id}/events",
-            get(get_prism_submission_events),
-        )
-        .route(
-            "/v1/site/arenas/prism/submissions/{id}/logs",
-            get(get_prism_submission_logs),
         )
         .route("/v1/site/validators", get(get_validators))
         .route("/v1/site/weights", get(get_site_weights))
@@ -87,9 +47,6 @@ struct PageQuery {
     status: Option<String>,
     /// Hotkey / handle / prompt substring filter (SS58 or hex).
     q: Option<String>,
-    /// Prism submissions only: `all` (default) includes in-flight / failed;
-    /// `champions` keeps Score>0 gallery rows.
-    scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,26 +70,6 @@ fn now_iso() -> String {
     site_data::map::ms_to_iso(ms)
 }
 
-async fn fetch_design_dash(st: &SiteState) -> Option<Value> {
-    upstream::get_json_opt(st, DESIGN, "/v1/dashboard").await
-}
-
-async fn fetch_prism_status(st: &SiteState) -> Option<Value> {
-    upstream::get_json_opt(st, PRISM, "/v1/status").await
-}
-
-async fn fetch_relearn_status(st: &SiteState) -> Option<Value> {
-    upstream::get_json_opt(st, RELEARN, "/v1/status").await
-}
-
-async fn fetch_relearn_image_status(st: &SiteState) -> Option<Value> {
-    upstream::get_json_opt(st, RELEARN_IMAGE, "/v1/status").await
-}
-
-async fn fetch_relearn_agent_status(st: &SiteState) -> Option<Value> {
-    upstream::get_json_opt(st, RELEARN_AGENT, "/v1/status").await
-}
-
 async fn fetch_proof_status(st: &SiteState) -> Option<Value> {
     upstream::get_json_opt(st, PROOF, "/v1/status").await
 }
@@ -143,8 +80,8 @@ async fn fetch_bounty_status(st: &SiteState) -> Option<Value> {
 
 /// Every live arena with trust-root emission shares applied.
 ///
-/// Bounty and Proof are the only paid challenges; Relearn* / Design / Prism
-/// stay off the landing list so the emission column sums to the trust root.
+/// Bounty and Proof are the only paid challenges. Coding stays on the list as
+/// paused so the emission column still sums to the trust root.
 async fn live_arenas(st: &SiteState) -> Vec<site_types::Arena> {
     let bounty = fetch_bounty_status(st).await;
     let proof = fetch_proof_status(st).await;
@@ -159,23 +96,15 @@ async fn live_arenas(st: &SiteState) -> Vec<site_types::Arena> {
     arenas
 }
 
-async fn fetch_prism_subs(st: &SiteState, limit: u32) -> Option<Value> {
-    upstream::get_json_opt(st, PRISM, &format!("/v1/submissions?limit={limit}")).await
-}
-
-async fn fetch_prism_recipe(st: &SiteState) -> Option<Value> {
-    upstream::get_json_opt(st, PRISM, "/v1/recipe").await
-}
-
-fn epoch_from_lives(design: Option<&Value>, prism: Option<&Value>, chain_epoch: u64) -> u64 {
+fn epoch_from_lives(bounty: Option<&Value>, proof: Option<&Value>, chain_epoch: u64) -> u64 {
     // Challenge payloads report 0 when their own chain read never hydrated —
     // treat 0 as "unknown" so the chain-derived epoch wins.
-    design
+    bounty
         .and_then(|d| d.get("epoch"))
         .and_then(Value::as_u64)
         .filter(|e| *e > 0)
         .or_else(|| {
-            prism
+            proof
                 .and_then(|p| p.get("epoch"))
                 .and_then(Value::as_u64)
                 .filter(|e| *e > 0)
@@ -220,61 +149,16 @@ fn hex_hotkey(bytes: &[u8]) -> String {
     s
 }
 
-/// Current metagraph hotkey → UID index (hex + SS58). Empty when chain is down.
-fn metagraph_uid_index(st: &SiteState) -> HashMap<String, u16> {
-    let Some(chain) = st.chain.as_ref() else {
-        return HashMap::new();
-    };
-    let block = chain.current_block().unwrap_or(0);
-    let Ok(hash) = chain.block_hash(block) else {
-        return HashMap::new();
-    };
-    let Ok(mg) = chain.metagraph_at(&hash) else {
-        return HashMap::new();
-    };
-    uid_index_from_hotkeys(&mg.hotkeys)
-}
-
-/// Sealed hotkey → normalised weight share (SS58 keys from the bundle).
-fn sealed_weight_index(st: &SiteState) -> HashMap<String, f64> {
-    site_data::weights::sealed_view(st.latest_sealed_bundle())
-        .map(|view| view.hotkeys.into_iter().collect())
-        .unwrap_or_default()
-}
-
-/// Enrich leaderboard rows with on-chain UID + sealed weight / TAO/day.
-fn decorate_leaderboard(st: &SiteState, rows: &mut [crate::LeaderboardRow]) {
-    let uids = metagraph_uid_index(st);
-    if !uids.is_empty() {
-        enrich_leaderboard_uids(rows, &uids);
-    }
-    let weights = sealed_weight_index(st);
-    if !weights.is_empty() {
-        // `emission_per_day` is not yet hydrated from chain; pass 0 so we still
-        // surface `weight` and leave `taoPerDay` unset until the rate is known.
-        // Clients may also compute `weight × emissionPerDay` from /v1/weights/latest
-        // once network stats publish a non-zero emission.
-        enrich_leaderboard_weights(rows, &weights, 0.0);
-    }
-}
-
-/// Enrich submission agents with on-chain UID.
-fn decorate_submissions(st: &SiteState, rows: &mut [crate::Submission]) {
-    let uids = metagraph_uid_index(st);
-    if !uids.is_empty() {
-        enrich_submission_uids(rows, &uids);
-    }
-}
-
 async fn network_stats(st: &SiteState) -> NetworkStats {
     let (block, chain_epoch, validators) = chain_snapshot(st);
+    let bounty = fetch_bounty_status(st).await;
     let proof = fetch_proof_status(st).await;
     let arenas = live_arenas(st).await;
     let agents: u32 = arenas.iter().map(|a| a.agents).sum();
     let tao_price = site_data::price::tao_price_usd(&st.client, &st.tao_price).await;
     let arena_count = u32::try_from(arenas.len()).unwrap_or(0);
     NetworkStats {
-        epoch: epoch_from_lives(None, proof.as_ref(), chain_epoch),
+        epoch: epoch_from_lives(bounty.as_ref(), proof.as_ref(), chain_epoch),
         agents,
         validators: u32::try_from(validators.len()).unwrap_or(0),
         arenas: arena_count,
@@ -302,27 +186,12 @@ async fn get_network(State(st): State<SiteState>) -> impl IntoResponse {
 }
 
 async fn get_landing(State(st): State<SiteState>) -> impl IntoResponse {
-    let design = fetch_design_dash(&st).await;
-    let prism_subs = fetch_prism_subs(&st, 200).await;
     let stats = network_stats(&st).await;
     let arenas = live_arenas(&st).await;
-    let design_runs = design
-        .as_ref()
-        .and_then(|d| d.get("recent_runs"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let prism_rows = prism_subs
-        .as_ref()
-        .and_then(|d| d.get("submissions"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let activity = activity_from_lives(design.as_ref(), &design_runs, &prism_rows, 10);
     Json(LandingSummary {
         stats,
         arenas,
-        activity,
+        activity: activity_from_lives(10),
     })
 }
 
@@ -336,22 +205,7 @@ async fn get_arena(State(st): State<SiteState>, Path(slug): Path<String>) -> Res
     };
     let mut arena = match slug {
         ArenaSlug::Coding => coding_arena(),
-        ArenaSlug::Design => design_arena_from_dashboard(fetch_design_dash(&st).await.as_ref()),
-        ArenaSlug::Prism => {
-            let status = fetch_prism_status(&st).await;
-            let subs = fetch_prism_subs(&st, 200).await;
-            prism_arena_from_live(status.as_ref(), subs.as_ref())
-        }
         ArenaSlug::Bounty => hydrate_arena(bounty_frame(), fetch_bounty_status(&st).await.as_ref()),
-        ArenaSlug::Relearn => relearn_arena_from_live(fetch_relearn_status(&st).await.as_ref()),
-        ArenaSlug::RelearnImage => hydrate_arena(
-            relearn_image_frame(),
-            fetch_relearn_image_status(&st).await.as_ref(),
-        ),
-        ArenaSlug::RelearnAgent => hydrate_arena(
-            relearn_agent_frame(),
-            fetch_relearn_agent_status(&st).await.as_ref(),
-        ),
         ArenaSlug::Proof => hydrate_arena(proof_frame(), fetch_proof_status(&st).await.as_ref()),
     };
     apply_emission(&st, &mut arena);
@@ -371,424 +225,24 @@ fn empty_leaderboard_json(page: u32, page_size: u32) -> Value {
     })
 }
 
-async fn design_leaderboard_json(
-    st: &SiteState,
-    page: u32,
-    page_size: u32,
-    q: Option<&str>,
-) -> Value {
-    let dash = fetch_design_dash(st).await;
-    let round_id = dash
-        .as_ref()
-        .and_then(|d| d.pointer("/leaderboard/current_round"))
-        .and_then(Value::as_u64)
-        .or_else(|| {
-            dash.as_ref()
-                .and_then(|d| d.pointer("/round/round_id"))
-                .and_then(Value::as_u64)
-        });
-    let lb = if let Some(rid) = round_id {
-        upstream::get_json_opt(st, DESIGN, &format!("/v1/rounds/{rid}/leaderboard")).await
-    } else {
-        None
-    };
-    let ratings = lb
-        .as_ref()
-        .and_then(|v| v.get("ratings"))
-        .and_then(Value::as_array)
-        .cloned()
-        .or_else(|| {
-            dash.as_ref()
-                .and_then(|d| d.pointer("/leaderboard/ratings"))
-                .and_then(Value::as_array)
-                .cloned()
-        })
-        .unwrap_or_default();
-    let previous = dash
-        .as_ref()
-        .and_then(|d| d.pointer("/leaderboard/previous_ratings"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let previous_round = dash
-        .as_ref()
-        .and_then(|d| d.pointer("/leaderboard/previous_round"))
-        .and_then(Value::as_u64)
-        .or_else(|| round_id.map(|r| r.saturating_sub(1)));
-    let epoch = dash
-        .as_ref()
-        .and_then(|d| d.get("epoch"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    // Mid-round before admin winners: current ratings are empty. Surface the
-    // previous round's standings so the marketing board is not blank.
-    let (board_ratings, board_previous, board_round_id) =
-        if ratings.is_empty() && !previous.is_empty() {
-            (previous.as_slice(), &[][..], previous_round)
-        } else {
-            (ratings.as_slice(), previous.as_slice(), round_id)
-        };
-    let mut rows = design_leaderboard(board_ratings, board_previous, epoch);
-    decorate_leaderboard(st, &mut rows);
-    if let Some(needle) = q.filter(|s| !s.trim().is_empty()) {
-        rows.retain(|r| leaderboard_matches_query(r, needle));
-    }
-    let page_out = page_slice(&rows, page, page_size);
-    let seconds_remaining = dash
-        .as_ref()
-        .and_then(|d| d.pointer("/round/seconds_remaining"))
-        .and_then(Value::as_u64);
-    let round_ends_at = dash
-        .as_ref()
-        .and_then(|d| d.pointer("/round/closes_at_secs"))
-        .and_then(Value::as_u64)
-        .map(|s| site_data::map::ms_to_iso(s.saturating_mul(1000)));
-    json!({
-        "items": page_out.items,
-        "page": page_out.page,
-        "pageSize": page_out.page_size,
-        "total": page_out.total,
-        "pageCount": page_out.page_count,
-        "epoch": epoch,
-        "roundId": board_round_id,
-        "roundEndsAt": round_ends_at,
-        "secondsRemaining": seconds_remaining,
-        "updatedAt": now_iso(),
-    })
-}
-
-async fn prism_leaderboard_json(
-    st: &SiteState,
-    page: u32,
-    page_size: u32,
-    q: Option<&str>,
-) -> Value {
-    let status = fetch_prism_status(st).await;
-    let epoch = status
-        .as_ref()
-        .and_then(|s| s.get("epoch").and_then(Value::as_u64))
-        .unwrap_or(0);
-    let raw = fetch_prism_subs(st, 500).await;
-    let rows = raw
-        .as_ref()
-        .and_then(|v| v.get("submissions"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut board = prism_bpb_leaderboard(&rows, epoch);
-    // Fan out detail for top champions so era / G1–G8 / G2 benches fill in.
-    let mut ids: Vec<String> = board
-        .iter()
-        .filter_map(|r| r.submission_id.clone())
-        .collect();
-    ids.truncate(PRISM_CHAMPION_DETAIL_FANOUT);
-    let details = fetch_prism_details(st, &ids).await;
-    let live_recipe = fetch_prism_recipe(st)
-        .await
-        .as_ref()
-        .and_then(|r| r.get("version"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let list_by_id: HashMap<&str, &Value> = rows
-        .iter()
-        .filter_map(|row| row.get("id").and_then(Value::as_str).map(|id| (id, row)))
-        .collect();
-    for row in &mut board {
-        let list = row
-            .submission_id
-            .as_deref()
-            .and_then(|id| list_by_id.get(id).copied());
-        let detail = row
-            .submission_id
-            .as_deref()
-            .and_then(|id| details.get(id).map(|fan| &fan.detail));
-        if let Some(id) = row.submission_id.as_ref() {
-            if let Some(fan) = details.get(id) {
-                enrich_leaderboard_row_from_detail_with_zone(row, &fan.detail, fan.zone_a.as_ref());
-            }
-        }
-        // Rank only on contest stamps (recipe 2.1.x / prism-v2.1 / gen 21).
-        // Pin + live recipe 2.1 must not promote a closed 2.0 harvest.
-        if list.is_some_and(payload_is_v21_contest) || detail.is_some_and(payload_is_v21_contest) {
-            row.recipe_era = Some(RecipeEra::V21);
-            row.run.weight_eligible = Some(true);
-        } else if let Some(detail) = detail {
-            row.recipe_era = Some(infer_recipe_era(detail));
-            if row.run.weight_eligible.is_none() {
-                row.run.weight_eligible = Some(false);
-            }
-        } else {
-            row.recipe_era = Some(RecipeEra::Legacy);
-        }
-    }
-    // Public board is the live v2.1 contest only. Empty + burn is honest.
-    board.retain(|r| r.recipe_era == Some(RecipeEra::V21));
-    decorate_leaderboard(st, &mut board);
-    if let Some(needle) = q.filter(|s| !s.trim().is_empty()) {
-        board.retain(|r| leaderboard_matches_query(r, needle));
-    }
-    let page_out = page_slice(&board, page, page_size);
-    json!({
-        "items": page_out.items,
-        "page": page_out.page,
-        "pageSize": page_out.page_size,
-        "total": page_out.total,
-        "pageCount": page_out.page_count,
-        "epoch": epoch,
-        "metric": "score",
-        "competitionId": "prism-v2.1",
-        "scoringGeneration": 21,
-        "recipeVersion": live_recipe.as_deref().unwrap_or("2.1.0"),
-        "waitingForFirst": page_out.total == 0,
-        "updatedAt": now_iso(),
-    })
-}
-
-/// Detail fan-out payload (+ optional Zone-A metrics when detail lacks G2 benches).
-struct PrismDetailFanout {
-    detail: Value,
-    zone_a: Option<Value>,
-}
-
-/// Fetch bounded challenge detail payloads keyed by submission id.
-async fn fetch_prism_details(st: &SiteState, ids: &[String]) -> HashMap<String, PrismDetailFanout> {
-    let futs = ids.iter().filter(|id| !id.is_empty()).map(|id| {
-        let st = st.clone();
-        let id = id.clone();
-        async move {
-            let mut detail =
-                upstream::get_json_opt(&st, PRISM, &format!("/v1/submissions/{id}")).await?;
-            // Optional /diff for pin_id when detail alone lacks era signals.
-            if pin_id_from_payload(&detail).is_none() {
-                if let Some(diff) =
-                    upstream::get_json_opt(&st, PRISM, &format!("/v1/submissions/{id}/diff")).await
-                {
-                    if let Some(pin) = diff.get("pin_id").and_then(Value::as_str) {
-                        if let Some(obj) = detail.as_object_mut() {
-                            obj.insert("pin_id".into(), json!(pin));
-                        }
-                    }
-                }
-            }
-            let zone_a = fetch_prism_zone_a_if_needed(&st, &id, &detail).await;
-            Some((id, PrismDetailFanout { detail, zone_a }))
-        }
-    });
-    join_all(futs).await.into_iter().flatten().collect()
-}
-
-/// When detail metrics omit public G2 benches, pull Zone-A rows from the eval store.
-async fn fetch_prism_zone_a_if_needed(st: &SiteState, id: &str, detail: &Value) -> Option<Value> {
-    let root = detail.get("submission").unwrap_or(detail);
-    let benches = map_benchmarks(root.get("metrics").filter(|m| !m.is_null()));
-    if !benches.is_empty() {
-        return None;
-    }
-    if let Some(battery_metrics) = root.pointer("/metrics/battery/metrics") {
-        if !map_benchmarks(Some(battery_metrics)).is_empty() {
-            return None;
-        }
-    }
-    upstream::get_json_opt(st, PRISM, &format!("/v1/submissions/{id}/metrics?zone=a")).await
-}
-
-async fn get_leaderboard(
-    State(st): State<SiteState>,
-    Path(slug): Path<String>,
-    Query(q): Query<PageQuery>,
-) -> Response {
-    let Some(slug) = ArenaSlug::parse(&slug) else {
+async fn get_leaderboard(Path(slug): Path<String>, Query(q): Query<PageQuery>) -> Response {
+    let Some(_) = ArenaSlug::parse(&slug) else {
         return json_err(StatusCode::NOT_FOUND, "not_found", "unknown arena");
     };
     let page = q.page.unwrap_or(1);
     let page_size = q.page_size.unwrap_or(24);
-    let needle = q.q.as_deref();
-    match slug {
-        ArenaSlug::Design => {
-            Json(design_leaderboard_json(&st, page, page_size, needle).await).into_response()
-        }
-        ArenaSlug::Prism => {
-            Json(prism_leaderboard_json(&st, page, page_size, needle).await).into_response()
-        }
-        // Relearn challenges publish a champion, not a leaderboard: every
-        // non-champion row is an explicit NoScore (D24), so a paged list of
-        // them would be a page of zeroes.
-        ArenaSlug::Coding
-        | ArenaSlug::Bounty
-        | ArenaSlug::Relearn
-        | ArenaSlug::RelearnImage
-        | ArenaSlug::RelearnAgent
-        | ArenaSlug::Proof => Json(empty_leaderboard_json(page, page_size)).into_response(),
-    }
+    let _ = (q.status.as_deref(), q.q.as_deref());
+    Json(empty_leaderboard_json(page, page_size)).into_response()
 }
 
-async fn get_submissions(
-    State(st): State<SiteState>,
-    Path(slug): Path<String>,
-    Query(q): Query<PageQuery>,
-) -> Response {
-    let Some(slug) = ArenaSlug::parse(&slug) else {
+async fn get_submissions(Path(slug): Path<String>, Query(q): Query<PageQuery>) -> Response {
+    let Some(_) = ArenaSlug::parse(&slug) else {
         return json_err(StatusCode::NOT_FOUND, "not_found", "unknown arena");
     };
     let page = q.page.unwrap_or(1);
     let page_size = q.page_size.unwrap_or(24);
-    let status_filter = q.status.as_deref();
-    let needle = q.q.as_deref();
-    match slug {
-        ArenaSlug::Coding
-        | ArenaSlug::Bounty
-        | ArenaSlug::Relearn
-        | ArenaSlug::RelearnImage
-        | ArenaSlug::RelearnAgent
-        | ArenaSlug::Proof => {
-            Json(page_slice::<crate::Submission>(&[], page, page_size)).into_response()
-        }
-        ArenaSlug::Design => {
-            design_submissions_page(&st, page, page_size, status_filter, needle).await
-        }
-        ArenaSlug::Prism => {
-            let raw = fetch_prism_subs(&st, 500).await;
-            let rows = raw
-                .as_ref()
-                .and_then(|v| v.get("submissions"))
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            // Default `scope=all` so the FE can show pending/running; leaderboard
-            // stays champions-only. Opt into the scored gallery with champions.
-            let scope = q
-                .scope
-                .as_deref()
-                .unwrap_or("all")
-                .trim()
-                .to_ascii_lowercase();
-            let champions_only = matches!(scope.as_str(), "champions" | "champion");
-            let mut paired: Vec<(crate::Submission, &Value)> = rows
-                .iter()
-                .filter(|r| !champions_only || is_prism_champion_submission(r))
-                .filter_map(|r| prism_submission(r).map(|s| (s, r)))
-                .collect();
-            // Prefer in-flight + recent rows for detail fan-out (era / benches).
-            let mut ids: Vec<String> = paired.iter().map(|(s, _)| s.id.clone()).collect();
-            ids.truncate(PRISM_CHAMPION_DETAIL_FANOUT);
-            let details = fetch_prism_details(&st, &ids).await;
-            let recipe_json = fetch_prism_recipe(&st).await;
-            let live = recipe_json
-                .as_ref()
-                .and_then(|r| r.get("version"))
-                .and_then(Value::as_str);
-            for (item, raw) in &mut paired {
-                if let Some(fan) = details.get(&item.id) {
-                    enrich_submission_from_detail_with_zone(item, &fan.detail, fan.zone_a.as_ref());
-                    let harvested = infer_recipe_era_with_live(&fan.detail, None);
-                    let era = infer_recipe_era_with_live(&fan.detail, live);
-                    item.recipe_era = Some(era);
-                    // Live-recipe fallback only — keep harvest/gate eligibility intact.
-                    if era == RecipeEra::V21 && harvested != RecipeEra::V21 {
-                        item.run.weight_eligible = Some(true);
-                    }
-                    fill_v21_run_from_live(&mut item.run, recipe_json.as_ref(), era);
-                } else {
-                    let era = infer_recipe_era_with_live(raw, live);
-                    item.recipe_era = Some(era);
-                    item.run.weight_eligible = Some(era == RecipeEra::V21);
-                    fill_v21_run_from_live(&mut item.run, recipe_json.as_ref(), era);
-                }
-            }
-            let mut items: Vec<_> = paired.into_iter().map(|(s, _)| s).collect();
-            decorate_submissions(&st, &mut items);
-            if let Some(st_f) = status_filter {
-                items.retain(|s| match st_f {
-                    "scored" => s.status == crate::SubmissionStatus::Scored,
-                    "pending" => s.status == crate::SubmissionStatus::Pending,
-                    "failed" => s.status == crate::SubmissionStatus::Failed,
-                    "queued" | "running" | "terminated" => s.stage.eq_ignore_ascii_case(st_f),
-                    _ => true,
-                });
-            }
-            if let Some(n) = needle.filter(|s| !s.trim().is_empty()) {
-                items.retain(|s| submission_matches_query(s, n));
-            }
-            Json(page_slice(&items, page, page_size)).into_response()
-        }
-    }
-}
-
-async fn design_submissions_page(
-    st: &SiteState,
-    page: u32,
-    page_size: u32,
-    status_filter: Option<&str>,
-    q: Option<&str>,
-) -> Response {
-    let dash = fetch_design_dash(st).await;
-    let epoch = dash
-        .as_ref()
-        .and_then(|d| d.get("epoch"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let runs = dash
-        .as_ref()
-        .and_then(|d| d.get("recent_runs"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-
-    // Resolve miner hotkeys via harness lookup (cached).
-    let mut harness_cache: HashMap<String, String> = HashMap::new();
-    let mut items = Vec::new();
-    for run in &runs {
-        let hid = run
-            .get("harness_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-        let miner = if hid.is_empty() {
-            "—".into()
-        } else if let Some(m) = harness_cache.get(&hid) {
-            m.clone()
-        } else {
-            let h = upstream::get_json_opt(st, DESIGN, &format!("/v1/harness/{hid}")).await;
-            let m = h
-                .and_then(|v| {
-                    v.get("miner_hotkey")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .unwrap_or_else(|| "—".into());
-            harness_cache.insert(hid, m.clone());
-            m
-        };
-        let run_id = run.get("id").and_then(Value::as_str).unwrap_or("");
-        // Refresh stage from run detail for in-flight + terminal rows.
-        let detail = if run_id.is_empty() {
-            None
-        } else {
-            upstream::get_json_opt(st, DESIGN, &format!("/v1/runs/{run_id}")).await
-        };
-        if let Some(sub) = design_submission(run, &miner, detail.as_ref(), epoch) {
-            items.push(sub);
-        }
-    }
-    decorate_submissions(st, &mut items);
-    if let Some(st_f) = status_filter {
-        items.retain(|s| match st_f {
-            "scored" => s.status == crate::SubmissionStatus::Scored,
-            "pending" => s.status == crate::SubmissionStatus::Pending,
-            "failed" => s.status == crate::SubmissionStatus::Failed,
-            _ => true,
-        });
-    }
-    if let Some(n) = q.filter(|s| !s.trim().is_empty()) {
-        items.retain(|s| submission_matches_query(s, n));
-    }
-    Json(page_slice(&items, page, page_size)).into_response()
-}
-
-/// Design duels: always empty — product model is admin winners, not fabricated matchups.
-async fn get_duels(Query(q): Query<LimitQuery>) -> impl IntoResponse {
-    let _ = q.limit;
-    Json(Vec::<Value>::new())
+    let _ = (q.status.as_deref(), q.q.as_deref());
+    Json(page_slice::<crate::Submission>(&[], page, page_size)).into_response()
 }
 
 async fn get_results_matrix() -> impl IntoResponse {
@@ -797,198 +251,6 @@ async fn get_results_matrix() -> impl IntoResponse {
         tasks: Vec::new(),
         rows: Vec::new(),
     })
-}
-
-/// Max per-submission detail fetches the window fans out for loss curves.
-const PRISM_WINDOW_TELEMETRY_FANOUT: usize = 8;
-
-/// Max champion detail fetches for board/list era + benchmark columns.
-const PRISM_CHAMPION_DETAIL_FANOUT: usize = 24;
-
-async fn get_prism_window(State(st): State<SiteState>) -> impl IntoResponse {
-    let recipe = fetch_prism_recipe(&st).await;
-    let status = fetch_prism_status(&st).await;
-    let subs = fetch_prism_subs(&st, 200).await;
-    let rows = subs
-        .as_ref()
-        .and_then(|v| v.get("submissions"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    // Fan out to submission details for the best terminal runs so the window
-    // renders real loss curves; bounded, and every miss falls back to the
-    // single-point bpb curve in `prism_window`.
-    let mut ids: Vec<(f64, String)> = rows
-        .iter()
-        .filter(|r| r.get("status").and_then(Value::as_str) == Some("terminated"))
-        .filter_map(|r| {
-            Some((
-                r.get("bpb").and_then(Value::as_f64)?,
-                r.get("id")?.as_str()?.to_owned(),
-            ))
-        })
-        .collect();
-    ids.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    ids.truncate(PRISM_WINDOW_TELEMETRY_FANOUT);
-    let mut telemetry = HashMap::new();
-    let mut v21_ids = std::collections::HashSet::new();
-    for row in &rows {
-        if payload_is_v21_contest(row) {
-            if let Some(id) = row.get("id").and_then(Value::as_str) {
-                v21_ids.insert(id.to_owned());
-            }
-        }
-    }
-    for (_, id) in ids {
-        if let Some(detail) =
-            upstream::get_json_opt(&st, PRISM, &format!("/v1/submissions/{id}")).await
-        {
-            if payload_is_v21_contest(&detail) {
-                v21_ids.insert(id.clone());
-            }
-            if let Some(t) = prism_telemetry(&detail) {
-                telemetry.insert(id, t);
-            }
-        }
-    }
-    let v21_rows: Vec<Value> = rows
-        .into_iter()
-        .filter(|r| {
-            r.get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| v21_ids.contains(id))
-                || payload_is_v21_contest(r)
-        })
-        .collect();
-    Json(prism_window(
-        recipe.as_ref(),
-        status.as_ref(),
-        &v21_rows,
-        &telemetry,
-    ))
-}
-
-/// Full telemetry for one prism submission (loss series + gradient stats).
-async fn get_prism_submission_telemetry(
-    State(st): State<SiteState>,
-    Path(id): Path<String>,
-) -> Response {
-    let detail = upstream::get_json_opt(&st, PRISM, &format!("/v1/submissions/{id}")).await;
-    match detail.as_ref().and_then(prism_telemetry) {
-        Some(t) => Json(t).into_response(),
-        None => json_err(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "unknown prism submission",
-        ),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct SinceQuery {
-    since: Option<u64>,
-}
-
-/// Safe subset of Prism stage events (no secrets).
-async fn get_prism_submission_events(
-    State(st): State<SiteState>,
-    Path(id): Path<String>,
-) -> Response {
-    match upstream::get_json_opt(&st, PRISM, &format!("/v1/submissions/{id}/events")).await {
-        Some(v) => Json(v).into_response(),
-        None => json_err(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "unknown prism submission",
-        ),
-    }
-}
-
-/// Harness log tail proxy (`?since=` cursor) — camelCase marketing subset.
-async fn get_prism_submission_logs(
-    State(st): State<SiteState>,
-    Path(id): Path<String>,
-    Query(q): Query<SinceQuery>,
-) -> Response {
-    let since = q.since.unwrap_or(0);
-    match upstream::get_json_opt(
-        &st,
-        PRISM,
-        &format!("/v1/submissions/{id}/logs?since={since}"),
-    )
-    .await
-    {
-        Some(v) => {
-            let logs = v
-                .get("logs")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|line| {
-                    Some(json!({
-                        "seq": line.get("seq")?.as_u64()?,
-                        "atMs": line.get("at_ms")?.as_u64()?,
-                        "line": line.get("line")?.as_str()?,
-                    }))
-                })
-                .collect::<Vec<_>>();
-            Json(json!({
-                "submissionId": v.get("submission_id").and_then(Value::as_str).unwrap_or(&id),
-                "logs": logs,
-                "nextSince": v.get("next_since").and_then(Value::as_u64).unwrap_or(since),
-                "pollHintMs": v.get("poll_hint_ms").and_then(Value::as_u64).unwrap_or(0),
-                "live": v.get("live").and_then(Value::as_bool).unwrap_or(false),
-            }))
-            .into_response()
-        }
-        None => json_err(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "unknown prism submission",
-        ),
-    }
-}
-
-/// Public Prism submission detail (era, eval groups, benches, telemetry).
-async fn get_prism_submission_detail(
-    State(st): State<SiteState>,
-    Path(id): Path<String>,
-) -> Response {
-    let Some(mut detail) =
-        upstream::get_json_opt(&st, PRISM, &format!("/v1/submissions/{id}")).await
-    else {
-        return json_err(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "unknown prism submission",
-        );
-    };
-    if pin_id_from_payload(&detail).is_none() {
-        if let Some(diff) =
-            upstream::get_json_opt(&st, PRISM, &format!("/v1/submissions/{id}/diff")).await
-        {
-            if let Some(pin) = diff.get("pin_id").and_then(Value::as_str) {
-                if let Some(obj) = detail.as_object_mut() {
-                    obj.insert("pin_id".into(), json!(pin));
-                }
-            }
-        }
-    }
-    let zone_a = fetch_prism_zone_a_if_needed(&st, &id, &detail).await;
-    match prism_submission_detail_with_zone(&detail, zone_a.as_ref()) {
-        Some(d) => Json(d).into_response(),
-        None => json_err(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "unknown prism submission",
-        ),
-    }
-}
-
-/// Frozen public GPT-2 literature baselines (not miner submissions).
-async fn get_prism_references() -> impl IntoResponse {
-    Json(prism_reference_baselines())
 }
 
 async fn get_validators(
@@ -1009,31 +271,9 @@ async fn get_site_weights(State(st): State<SiteState>) -> impl IntoResponse {
     ))
 }
 
-async fn get_activity(
-    State(st): State<SiteState>,
-    Query(q): Query<LimitQuery>,
-) -> impl IntoResponse {
+async fn get_activity(Query(q): Query<LimitQuery>) -> impl IntoResponse {
     let limit = q.limit.unwrap_or(10).min(100) as usize;
-    let design = fetch_design_dash(&st).await;
-    let prism_subs = fetch_prism_subs(&st, 200).await;
-    let design_runs = design
-        .as_ref()
-        .and_then(|d| d.get("recent_runs"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let prism_rows = prism_subs
-        .as_ref()
-        .and_then(|d| d.get("submissions"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    Json(activity_from_lives(
-        design.as_ref(),
-        &design_runs,
-        &prism_rows,
-        limit,
-    ))
+    Json(activity_from_lives(limit))
 }
 
 async fn get_metrics(
@@ -1042,10 +282,10 @@ async fn get_metrics(
 ) -> impl IntoResponse {
     let range = q.range.unwrap_or_else(|| "30".into());
     let (block, chain_epoch, validators) = chain_snapshot(&st);
-    let design = fetch_design_dash(&st).await;
-    let prism = fetch_prism_status(&st).await;
+    let bounty = fetch_bounty_status(&st).await;
+    let proof = fetch_proof_status(&st).await;
     let arenas = live_arenas(&st).await;
-    let epoch = epoch_from_lives(design.as_ref(), prism.as_ref(), chain_epoch);
+    let epoch = epoch_from_lives(bounty.as_ref(), proof.as_ref(), chain_epoch);
     let agents: u32 = arenas.iter().map(|a| a.agents).sum();
     let tao_price = site_data::price::tao_price_usd(&st.client, &st.tao_price).await;
     let weights =
@@ -1104,20 +344,20 @@ mod tests {
     use super::*;
 
     async fn setup() -> (MockServer, MockServer, SiteState) {
-        let design = MockServer::start().await;
-        let prism = MockServer::start().await;
+        let bounty = MockServer::start().await;
+        let proof = MockServer::start().await;
         let registry = Registry::shared(RegistryConfig::default());
         registry
             .create(&CreateBackend {
-                challenge_id: "design".into(),
-                base_url: design.uri(),
+                challenge_id: "bounty".into(),
+                base_url: bounty.uri(),
                 weight: 1,
             })
             .unwrap();
         registry
             .create(&CreateBackend {
-                challenge_id: "prism".into(),
-                base_url: prism.uri(),
+                challenge_id: "proof".into(),
+                base_url: proof.uri(),
                 weight: 1,
             })
             .unwrap();
@@ -1126,7 +366,7 @@ mod tests {
             .build()
             .unwrap();
         let st = SiteState::new(registry, client, None, 541);
-        (design, prism, st)
+        (bounty, proof, st)
     }
 
     async fn call(app: axum::Router, path: &str) -> (StatusCode, Value) {
@@ -1140,248 +380,26 @@ mod tests {
         (status, v)
     }
 
-    async fn mount_site_mocks(design: &MockServer, prism: &MockServer) {
-        mount_design_site_mocks(design).await;
-        mount_prism_list_mocks(prism).await;
-        mount_prism_detail_mock(prism).await;
-        // Re-mount the list after per-id stubs so later GETs (`?limit=`) still
-        // hit the collection (wiremock first-match can steal `/v1/submissions*`).
-        mount_prism_list_collection(prism).await;
-    }
-
-    async fn mount_design_site_mocks(design: &MockServer) {
-        Mock::given(method("GET"))
-            .and(path("/v1/dashboard"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "epoch": 3,
-                "leaderboard": {
-                    "current_round": 9,
-                    "ratings": [{"miner_hotkey":"aa","rating":1300,"wins":1,"losses":0}],
-                    "previous_ratings": []
-                },
-                "round": {
-                    "round_id": 9,
-                    "closes_at_secs": 1_700_000_100_u64,
-                    "seconds_remaining": 120
-                },
-                "recent_runs": [{
-                    "id": "run1",
-                    "status": "scored",
-                    "round_id": 9,
-                    "harness_id": "h1",
-                    "prompt_id": "p1",
-                    "error_detail": null,
-                    "updated_at_ms": 1_700_000_000_000_u64
-                }]
-            })))
-            .mount(design)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/harness/h1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "h1",
-                "miner_hotkey": "aa".repeat(32)
-            })))
-            .mount(design)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/runs/run1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "run1",
-                "status": "scored",
-                "final_score": {"score": 1000},
-                "prompt_title": "SaaS PR review",
-                "prompt": "Build a three-page marketing site for a SaaS PR review tool.",
-                "pages": [
-                    {"path": "index.html", "bytes": 128, "raw_sha256": "aa"},
-                    {"path": "index.png", "bytes": 4096, "raw_sha256": "bb"}
-                ],
-                "screenshot_url": "/challenge/design/v1/view/run1/index.png"
-            })))
-            .mount(design)
-            .await;
-    }
-
-    async fn mount_prism_list_mocks(prism: &MockServer) {
+    async fn mount_status(bounty: &MockServer, proof: &MockServer) {
         Mock::given(method("GET"))
             .and(path("/v1/status"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "epoch": 3,
-                "backend": "sim"
+                "champion_id": "bounty-champ"
             })))
-            .mount(prism)
+            .mount(bounty)
             .await;
         Mock::given(method("GET"))
-            .and(path("/v1/recipe"))
+            .and(path("/v1/status"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "version": "2.1.0",
-                "competition_id": "prism-v2.1",
-                "scoring_generation": 21,
-                "dataset_ref": "HuggingFaceFW/fineweb-edu@sample/10BT",
-                "max_params": 1_000_000_000_u64,
-                "train_hours_cap": 4.0
+                "epoch": 4,
+                "champion_id": "proof-champ"
             })))
-            .mount(prism)
-            .await;
-        mount_prism_list_collection(prism).await;
-    }
-
-    async fn mount_prism_list_collection(prism: &MockServer) {
-        Mock::given(method("GET"))
-            .and(path("/v1/submissions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "submissions": [{
-                    "id": "sub1",
-                    "miner_hotkey": "bb".repeat(32),
-                    "epoch": 3,
-                    "status": "terminated",
-                    "label": "base",
-                    "bpb": 1.25,
-                    "n_params": 12_000_000_u64,
-                    "score": {"kind":"score","value": 900},
-                    "created_at_ms": 1_700_000_000_000_u64,
-                    "updated_at_ms": 1_700_000_000_000_u64
-                }, {
-                    "id": "sub-old20",
-                    "miner_hotkey": "dd".repeat(32),
-                    "epoch": 2,
-                    "status": "terminated",
-                    "label": "old-2.0",
-                    "bpb": 0.9,
-                    "n_params": 350_000_000_u64,
-                    "score": {"kind":"score","value": 800},
-                    "created_at_ms": 1_700_000_000_000_u64,
-                    "updated_at_ms": 1_700_000_000_000_u64
-                }, {
-                    "id": "sub-running",
-                    "miner_hotkey": "cc".repeat(32),
-                    "epoch": 3,
-                    "status": "running",
-                    "label": "inflight",
-                    "created_at_ms": 1_700_000_100_000_u64,
-                    "updated_at_ms": 1_700_000_100_000_u64
-                }]
-            })))
-            .mount(prism)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/submissions/sub-running"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "submission": {
-                    "id": "sub-running",
-                    "miner_hotkey": "cc".repeat(32),
-                    "epoch": 3,
-                    "status": "running",
-                    "label": "inflight",
-                    "architecture_sha256": "aa".repeat(32),
-                    "training_sha256": "bb".repeat(32),
-                    "created_at_ms": 1_700_000_100_000_u64,
-                    "updated_at_ms": 1_700_000_100_000_u64
-                },
-                "events": []
-            })))
-            .mount(prism)
-            .await;
-    }
-
-    async fn mount_prism_detail_mock(prism: &MockServer) {
-        Mock::given(method("GET"))
-            .and(path("/v1/submissions/sub1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "submission": {
-                    "id": "sub1",
-                    "miner_hotkey": "bb".repeat(32),
-                    "epoch": 3,
-                    "status": "terminated",
-                    "label": "base",
-                    "bpb": 1.25,
-                    "n_params": 12_000_000_u64,
-                    "score": {"kind":"score","value": 900},
-                    "metrics": {
-                        "recipe": "2.1.0",
-                        "competition_id": "prism-v2.1",
-                        "scoring_generation": 21,
-                        "bpb": 1.25,
-                        "tokens_seen": 2048,
-                        "org.g7.throughput_toks_s": {"value": 1200.0},
-                        "org.diag.mfu_achieved": {"value": 0.23},
-                        "org.diag.flops_attested": {"value": 1.5e18},
-                        "bits_per_byte": {"value": 0.88},
-                        "wall_clock_seconds": 12.0,
-                        "gpu_type": "SIM",
-                        "n_params": 12_000_000_u64,
-                        "val_rows": 256,
-                        "org.g2.hellaswag_acc": {"value": 0.31},
-                        "org.g2.piqa_acc": {"value": 0.62},
-                        "telemetry": {
-                            "finish_reason": "finish_evaluation",
-                            "report_count": 5,
-                            "loss_series": [
-                                {"step": 1, "loss": 3.9, "grad_norm": 1.0, "at_secs": 2.0},
-                                {"step": 2, "loss": 3.1, "grad_norm": 0.5, "at_secs": 4.0},
-                                {"step": 3, "loss": 2.5, "grad_norm": 0.33, "at_secs": 6.0}
-                            ]
-                        }
-                    },
-                    "eval": {
-                        "status": "scored",
-                        "composite": 0.55,
-                        "scoring_mode": "shadow",
-                        "gates": {
-                            "complete": true, "g3_ok": true, "g8_ok": true,
-                            "budgets_ok": true, "ci_ok": true
-                        },
-                        "groups": [
-                            {"group":"g1","g":0.8},
-                            {"group":"g2","g":0.4}
-                        ]
-                    }
-                },
-                "events": []
-            })))
-            .mount(prism)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/submissions/sub1/diff"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "submission_id": "sub1",
-                "pin_id": "automodel@v0.5.0",
-                "patch": "diff --git a/x b/x\n",
-                "diffstat": {"files": [{"path":"x","added":1,"deleted":0,"class":"arch"}],
-                             "total_added": 1, "total_deleted": 0}
-            })))
-            .mount(prism)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/submissions/sub-old20"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "submission": {
-                    "id": "sub-old20",
-                    "miner_hotkey": "dd".repeat(32),
-                    "epoch": 2,
-                    "status": "terminated",
-                    "label": "old-2.0",
-                    "bpb": 0.9,
-                    "n_params": 350_000_000_u64,
-                    "score": {"kind":"score","value": 800},
-                    "created_at_ms": 1_700_000_000_000_u64,
-                    "metrics": {
-                        "recipe": "2.0.0",
-                        "bpb": 0.9,
-                        "org.g2.hellaswag_acc": {"value": 0.99}
-                    }
-                },
-                "events": []
-            })))
-            .mount(prism)
+            .mount(proof)
             .await;
     }
 
     /// Coding plus the two live challenges (Bounty, Proof), in listing order.
-    ///
-    /// Live arenas are listed even when their backends are down, so the
-    /// emission column still sums to the trust root instead of showing one
-    /// challenge's slice as the whole subnet.
     fn assert_live_arena_list(v: &Value) {
         let slugs: Vec<&str> = v
             .as_array()
@@ -1399,366 +417,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn arenas_and_design_submissions_from_mocks() {
-        let (design, prism, st) = setup().await;
-        mount_site_mocks(&design, &prism).await;
+    async fn arenas_list_live_challenges_and_retired_slugs_404() {
+        let (bounty, proof, st) = setup().await;
+        mount_status(&bounty, &proof).await;
         let app = site_router(st);
 
         let (s, v) = call(app.clone(), "/v1/site/arenas").await;
         assert_eq!(s, StatusCode::OK, "{v}");
         assert_live_arena_list(&v);
+        assert_eq!(v[1]["bestScore"], "bounty-champ");
+        assert_eq!(v[2]["bestScore"], "proof-champ");
 
-        let (s, v) = call(app.clone(), "/v1/site/arenas/design/submissions").await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v["items"][0]["stage"], "scored");
-        assert_eq!(v["items"][0]["score"], 1000.0);
-        // The full prompt brief is the public run label, not "design run <id>".
-        assert_eq!(
-            v["items"][0]["title"],
-            "Build a three-page marketing site for a SaaS PR review tool."
-        );
-        assert_eq!(v["items"][0]["promptTitle"], "SaaS PR review");
-        // Screenshots-only viewer: no html `url` key, only `screenshotUrl`.
-        assert!(v["items"][0].get("url").is_none());
-        assert_eq!(
-            v["items"][0]["screenshotUrl"],
-            "/challenge/design/v1/view/run1/index.png"
-        );
-
-        let (s, v) = call(app.clone(), "/v1/site/arenas/design/duels").await;
-        assert_eq!(s, StatusCode::OK);
-        assert!(v.as_array().unwrap().is_empty());
-
-        let (s, v) = call(app.clone(), "/v1/site/arenas/prism/submissions").await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v["items"][0]["stage"], "terminated");
-        assert_eq!(v["items"][0]["bpb"], 1.25);
-        assert_eq!(v["items"][0]["paramsM"], 12.0);
-        let expected_hk = keystore::ss58_encode(&[0xbb; 32], keystore::BITTENSOR_SS58_PREFIX);
-        assert_eq!(v["items"][0]["agent"]["hotkey"], expected_hk);
-        assert_eq!(
-            v["items"][0]["agent"]["operator"],
-            format!(
-                "{}…{}",
-                &expected_hk[..8],
-                &expected_hk[expected_hk.len() - 4..]
-            )
-        );
-
-        let (s, v) = call(app.clone(), "/v1/site/arenas/prism/leaderboard").await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v["metric"], "score");
-        // Lattice score in `elo`; measured bpb stays secondary.
-        assert_eq!(v["items"][0]["elo"], 900.0);
-        assert_eq!(v["items"][0]["bpb"], 1.25);
-        assert_eq!(v["items"][0]["paramsM"], 12.0);
-
-        let (s, v) = call(
-            app.clone(),
-            "/v1/site/arenas/prism/submissions/sub1/telemetry",
-        )
-        .await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v["submissionId"], "sub1");
-        assert_eq!(v["finishReason"], "finish_evaluation");
-        assert_eq!(v["reportCount"], 5);
-        assert_eq!(v["nParams"], 12_000_000_u64);
-        let pts = v["points"].as_array().unwrap();
-        assert_eq!(pts.len(), 3);
-        assert_eq!(pts[0]["step"], 1);
-        assert_eq!(pts[1]["gradNorm"], 0.5);
-
-        let (s, v) = call(
-            app.clone(),
-            "/v1/site/arenas/prism/submissions/nope/telemetry",
-        )
-        .await;
-        assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+        for slug in [
+            "design",
+            "prism",
+            "relearn",
+            "relearn-image",
+            "relearn-agent",
+        ] {
+            let (s, v) = call(app.clone(), &format!("/v1/site/arenas/{slug}")).await;
+            assert_eq!(s, StatusCode::NOT_FOUND, "{slug}: {v}");
+            let (s, v) = call(app.clone(), &format!("/v1/site/arenas/{slug}/leaderboard")).await;
+            assert_eq!(s, StatusCode::NOT_FOUND, "{slug} leaderboard: {v}");
+            let (s, v) = call(app.clone(), &format!("/v1/site/arenas/{slug}/submissions")).await;
+            assert_eq!(s, StatusCode::NOT_FOUND, "{slug} submissions: {v}");
+        }
 
         let (s, v) = call(app.clone(), "/v1/site/arenas/coding/submissions").await;
-        assert_eq!(s, StatusCode::OK);
+        assert_eq!(s, StatusCode::OK, "{v}");
         assert_eq!(v["total"], 0);
 
-        // Hotkey / prompt search (`?q=`) filters design submissions.
-        let expected_hk = keystore::ss58_encode(&[0xaa; 32], keystore::BITTENSOR_SS58_PREFIX);
-        let (s, v) = call(
-            app.clone(),
-            &format!("/v1/site/arenas/design/submissions?q={}", &expected_hk[..8]),
-        )
-        .await;
+        let (s, v) = call(app.clone(), "/v1/site/arenas/bounty/leaderboard").await;
         assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v["total"], 1, "{v}");
-        let (s, v) = call(app.clone(), "/v1/site/arenas/design/submissions?q=nope-xyz").await;
+        assert_eq!(v["total"], 0);
+
+        let (s, v) = call(app.clone(), "/v1/site/arenas/proof/submissions").await;
         assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v["total"], 0, "{v}");
+        assert_eq!(v["total"], 0);
+
+        let (s, v) = call(app.clone(), "/v1/site/arenas/design/duels").await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+        let (s, v) = call(app.clone(), "/v1/site/arenas/prism/window").await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
 
         let (s, v) = call(app, "/v1/site/activity?limit=8").await;
         assert_eq!(s, StatusCode::OK, "{v}");
-        let msgs: Vec<&str> = v
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|e| e.get("message").and_then(Value::as_str))
-            .collect();
-        assert!(
-            msgs.iter()
-                .any(|m| m.contains("Design evaluated") || m.contains("winner")),
-            "{msgs:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn prism_detail_references_and_era_enrichment() {
-        let (design, prism, st) = setup().await;
-        mount_site_mocks(&design, &prism).await;
-        let app = site_router(st);
-
-        let (s, v) = call(app.clone(), "/v1/site/arenas/prism/submissions").await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(
-            v["total"], 3,
-            "default scope=all includes in-flight + closed 2.0: {v}"
-        );
-        assert_eq!(v["items"][0]["recipeEra"], "v21");
-        assert_eq!(v["items"][0]["pinId"], "automodel@v0.5.0");
-        assert_eq!(v["items"][0]["weightEligible"], true);
-        assert_eq!(v["items"][0]["gatesComplete"], true);
-        assert_eq!(v["items"][0]["competitionId"], "prism-v2.1");
-        assert_eq!(v["items"][0]["tokens"], 2048.0);
-        assert_eq!(v["items"][0]["tokensPerSec"], 1200.0);
-        assert_eq!(v["items"][0]["mfu"], 0.23);
-        assert_eq!(v["items"][0]["benchmarks"]["hellaswag"], 0.31);
-        assert_eq!(v["items"][0]["evalGroups"].as_array().unwrap().len(), 2);
-        assert_eq!(v["items"][1]["id"], "sub-old20");
-        assert_eq!(v["items"][1]["recipeEra"], "automodel");
-        assert_eq!(v["items"][1]["weightEligible"], false);
-        assert_eq!(v["items"][2]["id"], "sub-running");
-        assert_eq!(v["items"][2]["status"], "pending");
-        assert_eq!(v["items"][2]["stage"], "running");
-        assert_eq!(
-            v["items"][2]["recipeEra"], "v21",
-            "live recipe 2.1.x labels unlabeled in-flight as v2.1: {v}"
-        );
-        assert_eq!(v["items"][2]["weightEligible"], true);
-        assert_eq!(v["items"][2]["competitionId"], "prism-v2.1");
-        assert_eq!(v["items"][2]["scoringGeneration"], 21);
-        assert_eq!(v["items"][2]["recipeVersion"], "2.1.0");
-
-        let (s, v) = call(
-            app.clone(),
-            "/v1/site/arenas/prism/submissions?status=running",
-        )
-        .await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v["total"], 1, "status=running filters by stage: {v}");
-        assert_eq!(v["items"][0]["id"], "sub-running");
-
-        // scope=champions keeps Score>0 gallery; default scope=all includes in-flight.
-        let (s, v) = call(
-            app.clone(),
-            "/v1/site/arenas/prism/submissions?scope=champions",
-        )
-        .await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(
-            v["total"], 2,
-            "scope=champions should keep Score>0 rows (v21 + closed 2.0): {v}"
-        );
-
-        let (s, v) = call(app.clone(), "/v1/site/arenas/prism/leaderboard").await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v["competitionId"], "prism-v2.1");
-        assert_eq!(v["scoringGeneration"], 21);
-        assert_eq!(v["waitingForFirst"], false);
-        assert_eq!(v["total"], 1, "closed 2.0 champion must not rank: {v}");
-        assert_eq!(v["items"][0]["submissionId"], "sub1");
-        assert_eq!(v["items"][0]["recipeEra"], "v21");
-        assert_eq!(v["items"][0]["weightEligible"], true);
-        assert_eq!(v["items"][0]["benchmarks"]["piqa"], 0.62);
-
-        let (s, v) = call(app.clone(), "/v1/site/arenas/prism/submissions/sub1").await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v["id"], "sub1");
-        assert_eq!(v["recipeEra"], "v21");
-        assert_eq!(v["pinId"], "automodel@v0.5.0");
-        assert_eq!(v["eval"]["status"], "scored");
-        assert_eq!(v["eval"]["groups"].as_array().unwrap().len(), 2);
-        assert_eq!(v["telemetry"]["reportCount"], 5);
-        assert!(v.get("patch").is_none());
-
-        let (s, v) = call(app.clone(), "/v1/site/arenas/prism/references").await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v.as_array().unwrap().len(), 2);
-        assert_eq!(v[0]["id"], "gpt2-large-774m");
-        assert_eq!(v[1]["id"], "gpt2-small-124m");
-        assert_eq!(v[0]["paramsM"], 774.0);
-        assert!((v[1]["paramsM"].as_f64().unwrap() - 124.4).abs() < 1e-9);
-        assert!(v[0]["bpb"].as_f64().unwrap() > 1.0);
-        assert!(v[1]["bpb"].as_f64().unwrap() > 1.0);
-        assert!(v[0]["disclaimer"]
-            .as_str()
-            .unwrap()
-            .contains("Prism-protocol"));
-        assert!(v[1]["disclaimer"]
-            .as_str()
-            .unwrap()
-            .contains("Prism-protocol"));
-
-        let (s, v) = call(app, "/v1/site/arenas/prism/submissions/nope").await;
-        assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
-    }
-
-    #[tokio::test]
-    async fn prism_leaderboard_excludes_pin_only_2_0_when_live_recipe_is_v21() {
-        let (design, prism, st) = setup().await;
-        mount_design_site_mocks(&design).await;
-        mount_prism_list_mocks(&prism).await;
-        Mock::given(method("GET"))
-            .and(path("/v1/submissions/sub-pin20"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "submission": {
-                    "id": "sub-pin20",
-                    "miner_hotkey": "ee".repeat(32),
-                    "epoch": 2,
-                    "status": "terminated",
-                    "label": "pin-only-2.0",
-                    "bpb": 0.7,
-                    "n_params": 350_000_000_u64,
-                    "score": {"kind":"score","value": 990},
-                    "pin_id": "automodel@v0.5.0",
-                    "metrics": { "bpb": 0.7 }
-                },
-                "events": []
-            })))
-            .mount(&prism)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/submissions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "submissions": [{
-                    "id": "sub-pin20",
-                    "miner_hotkey": "ee".repeat(32),
-                    "status": "terminated",
-                    "bpb": 0.7,
-                    "n_params": 350_000_000_u64,
-                    "score": {"kind":"score","value": 990}
-                }]
-            })))
-            .mount(&prism)
-            .await;
-        let app = site_router(st);
-        let (s, v) = call(app, "/v1/site/arenas/prism/leaderboard").await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v["waitingForFirst"], true, "{v}");
-        assert_eq!(
-            v["total"], 0,
-            "pin-only 2.0 must not rank under live 2.1: {v}"
-        );
-        assert_eq!(v["competitionId"], "prism-v2.1");
-        assert_eq!(v["scoringGeneration"], 21);
-    }
-
-    #[tokio::test]
-    async fn design_submissions_exclude_runs_without_screenshots() {
-        let (design, _prism, st) = setup().await;
-        // One scored run with a captured screenshot, one failed run that never
-        // produced pages (dead view link before the screenshots-only viewer).
-        Mock::given(method("GET"))
-            .and(path("/v1/dashboard"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "epoch": 3,
-                "leaderboard": {"current_round": 9, "ratings": [], "previous_ratings": []},
-                "round": {"round_id": 9, "closes_at_secs": 1_700_000_100_u64, "seconds_remaining": 120},
-                "recent_runs": [
-                    {"id": "ok1", "status": "scored", "round_id": 9, "harness_id": "h1", "prompt_id": "p1", "error_detail": null, "updated_at_ms": 1_700_000_000_000_u64},
-                    {"id": "bad1", "status": "failed", "round_id": 9, "harness_id": "h1", "prompt_id": "p1", "error_detail": "agent crashed", "updated_at_ms": 1_700_000_001_000_u64}
-                ]
-            })))
-            .mount(&design)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/harness/h1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "h1",
-                "miner_hotkey": "aa".repeat(32)
-            })))
-            .mount(&design)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/runs/ok1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "ok1",
-                "status": "scored",
-                "final_score": {"score": 1000},
-                "pages": [{"path": "index.png", "bytes": 4096, "raw_sha256": "bb"}],
-                "screenshot_url": "/challenge/design/v1/view/ok1/index.png"
-            })))
-            .mount(&design)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/runs/bad1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "bad1",
-                "status": "failed",
-                "error_detail": "agent crashed",
-                "pages": []
-            })))
-            .mount(&design)
-            .await;
-        let app = site_router(st);
-
-        let (s, v) = call(app, "/v1/site/arenas/design/submissions").await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v["total"], 1, "{v}");
-        let items = v["items"].as_array().unwrap();
-        assert_eq!(items.len(), 1, "{v}");
-        assert_eq!(items[0]["id"], "ok1");
-        assert!(items[0].get("url").is_none());
-        assert_eq!(
-            items[0]["screenshotUrl"],
-            "/challenge/design/v1/view/ok1/index.png"
-        );
-    }
-
-    #[tokio::test]
-    async fn design_leaderboard_falls_back_to_previous_round() {
-        let (design, _prism, st) = setup().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/dashboard"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "epoch": 3,
-                "leaderboard": {
-                    "current_round": 9,
-                    "previous_round": 8,
-                    "ratings": [],
-                    "previous_ratings": [
-                        {"miner_hotkey": "aa".repeat(32), "rating": 250, "wins": 1, "losses": 0}
-                    ]
-                },
-                "round": {
-                    "round_id": 9,
-                    "closes_at_secs": 1_700_000_100_u64,
-                    "seconds_remaining": 120
-                },
-                "recent_runs": []
-            })))
-            .mount(&design)
-            .await;
-        let app = site_router(st);
-
-        let (s, v) = call(app, "/v1/site/arenas/design/leaderboard").await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v["total"], 1, "{v}");
-        assert_eq!(v["roundId"], 8, "{v}");
-        assert_eq!(v["items"][0]["elo"], 250.0);
+        assert!(v.as_array().unwrap().is_empty(), "{v}");
     }
 
     #[tokio::test]
     async fn arenas_carry_trust_root_shares_and_weights_endpoint() {
         use std::sync::Arc;
         use trustroot::{ChallengeEntry, ChallengesBody, ParticipantPolicy};
-        let (design, prism, st) = setup().await;
-        mount_site_mocks(&design, &prism).await;
+        let (bounty, proof, st) = setup().await;
+        mount_status(&bounty, &proof).await;
         let entry = |id: &str, bps: u16| ChallengeEntry {
             id: id.as_bytes().to_vec(),
             public_key: [7u8; 32],
@@ -1779,7 +491,6 @@ mod tests {
         assert_eq!(v[1]["emissionShare"], 0.2);
         assert_eq!(v[2]["slug"], "proof");
         assert_eq!(v[2]["emissionShare"], 0.8);
-        // Unsealed: effective weights stay 0.
         assert_eq!(v[1]["weight"], 0.0);
         assert_eq!(v[2]["weight"], 0.0);
 
@@ -1792,75 +503,5 @@ mod tests {
         assert_eq!(v["emissionShares"][1]["arena"], "proof");
         assert_eq!(v["emissionShares"][1]["share"], 0.8);
         assert!(v["hotkeyWeights"].as_array().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn prism_window_uses_recipe_and_bpb() {
-        let (_design, prism, st) = setup().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/recipe"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "version": "2.1.0",
-                "dataset_ref": "ds@pin",
-                "pin_hex": "abc"
-            })))
-            .mount(&prism)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/status"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "backend": "sim", "epoch": 1
-            })))
-            .mount(&prism)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/submissions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "submissions": [
-                    {"id":"x1","status":"terminated","bpb":2.0,"label":"a","metrics":{"recipe":"2.1.0"}},
-                    {"id":"x2","status":"terminated","bpb":1.0,"label":"b","metrics":{"recipe":"2.1.0"}}
-                ]
-            })))
-            .mount(&prism)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/submissions/x2"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "submission": {
-                    "id": "x2",
-                    "bpb": 1.0,
-                    "metrics": {
-                        "recipe": "2.1.0",
-                        "competition_id": "prism-v2.1",
-                        "bpb": 1.0,
-                        "n_params": 12_000_000_u64,
-                        "telemetry": {
-                            "finish_reason": "finish_evaluation",
-                            "report_count": 2,
-                            "loss_series": [
-                                {"step": 1, "loss": 4.0},
-                                {"step": 2, "loss": 2.0}
-                            ]
-                        }
-                    }
-                },
-                "events": []
-            })))
-            .mount(&prism)
-            .await;
-        let app = site_router(st);
-        let (s, v) = call(app, "/v1/site/arenas/prism/window").await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!(v["dataset"], "ds@pin");
-        assert_eq!(v["series"].as_array().unwrap().len(), 2);
-        assert_eq!(v["series"][0]["finalLoss"], 1.0);
-        // x2 has a detail payload → real curve + params; x1 (no detail mock)
-        // falls back to the single-point bpb curve at the axis end.
-        assert_eq!(v["series"][0]["points"].as_array().unwrap().len(), 2);
-        assert_eq!(v["series"][0]["params"], 12.0);
-        assert_eq!(v["series"][0]["submissionId"], "x2");
-        assert_eq!(v["tokenBudget"], 0);
-        assert_eq!(v["series"][1]["points"].as_array().unwrap().len(), 1);
-        assert_eq!(v["series"][1]["points"][0]["step"], 2);
     }
 }
