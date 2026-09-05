@@ -1,0 +1,85 @@
+name: ops-box-ssh-access
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ops-box-ssh-access
+  cancel-in-progress: false
+
+jobs:
+  inject:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SSH key
+        run: |
+          set -euo pipefail
+          KEY="${{ secrets.PROD_SSH_KEY || secrets.STAGING_SSH_KEY }}"
+          test -n "$KEY" || { echo "missing PROD_SSH_KEY/STAGING_SSH_KEY"; exit 1; }
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_ed25519
+          chmod 600 ~/.ssh/deploy_ed25519
+          echo "StrictHostKeyChecking accept-new" > ~/.ssh/config
+
+      - name: Open firewall for runner
+        id: fw
+        uses: ./.github/actions/do-firewall
+        with:
+          action: open
+          token: ${{ secrets.DIGITALOCEAN_TOKEN }}
+
+      - name: Inject box pubkey + ufw on hosts
+        env:
+          BOX_PUB: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKqDZSYE3t7O+bP80+wOcCLSbsAqzWiERBVqPSmMOsIi box@cursor"
+        run: |
+          set -euo pipefail
+          ID="$HOME/.ssh/deploy_ed25519"
+          ssh_cmd() { ssh -i "$ID" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 "$@"; }
+          hosts=()
+          [[ -n "${{ secrets.PROD_HOST }}" ]] && hosts+=("prod-master|root@${{ secrets.PROD_HOST }}|ufw")
+          [[ -n "${{ secrets.PROD_VALIDATOR_HOST }}" ]] && hosts+=("prod-validator|root@${{ secrets.PROD_VALIDATOR_HOST }}|")
+          [[ -n "${{ secrets.STAGING_MASTER_HOST }}" ]] && hosts+=("staging-master|root@${{ secrets.STAGING_MASTER_HOST }}|")
+          [[ -n "${{ secrets.STAGING_VALIDATOR_HOST }}" ]] && hosts+=("staging-validator|root@${{ secrets.STAGING_VALIDATOR_HOST }}|")
+          # hard fallbacks if secrets empty names but common IPs known in ops
+          if [[ ${#hosts[@]} -eq 0 ]]; then
+            echo "no host secrets; failing"; exit 1
+          fi
+          ok=0
+          for entry in "${hosts[@]}"; do
+            name="${entry%%|*}"; rest="${entry#*|}"; target="${rest%%|*}"; mode="${rest##*|}"
+            echo "::group::$name $target"
+            if ssh_cmd "$target" "set -euo pipefail
+              mkdir -p /root/.ssh; chmod 700 /root/.ssh
+              touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys
+              grep -qxF '$BOX_PUB' /root/.ssh/authorized_keys || echo '$BOX_PUB' >> /root/.ssh/authorized_keys
+              echo injected_ok
+              if [[ '$mode' == ufw ]]; then
+                ufw allow OpenSSH || ufw allow 22/tcp || true
+                ufw --force enable || true
+                ufw reload || true
+                ufw status || true
+              fi
+              hostname; ss -lnt | head"; then
+              echo SUCCESS "$name"; ok=$((ok+1))
+            else
+              echo FAIL "$name"
+            fi
+            echo "::endgroup::"
+          done
+          echo "ok_hosts=$ok"
+          test "$ok" -gt 0
+
+      - name: Close firewall
+        if: always() && steps.fw.outputs.ip != ''
+        uses: ./.github/actions/do-firewall
+        with:
+          action: close
+          token: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          ip: ${{ steps.fw.outputs.ip }}
+          firewall-id: ${{ steps.fw.outputs.firewall-id }}
