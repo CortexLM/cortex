@@ -39,7 +39,7 @@ chmod 0400 deploy/secrets/gateway_admin_token
 | `proof/inference_api_key` | proof-challenge | Provider API key for the eval image. **Never commit, never log.** Mode **0400**, uid **65532** |
 | `proof/inference_base_url` | proof-challenge | Optional secret-backed origin (`PROOF_INFERENCE_BASE_URL_FILE`) when pin `[inference].base_url` and the topic omit one. **Never commit, never log.** Mode **0400**, uid **65532** |
 | `bounty/admin_tokens` | bounty-challenge | Operator bearer for `POST /v1/admin/adjudicate` |
-| `bounty/session_secret` | bounty-challenge | Pairing session HMAC secret |
+| `bounty/session_secret` | bounty-challenge | Pairing session HMAC secret. Empty/missing no longer crashes boot (`/health` stays up; pairing will not survive restart). `remote-deploy.sh` fills a 32-byte value from urandom when the file is missing or 0-length. |
 
 ## Other
 

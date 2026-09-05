@@ -87,7 +87,15 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli) -> Result<(), String> {
     if let Some(p) = &cli.challenge_sk_file {
-        let _sk = load_challenge_secret(p).map_err(|e| format!("challenge sk: {e}"))?;
+        if let Err(e) = load_challenge_secret(p) {
+            // Compose always sets BASE_CHALLENGE_SK_FILE; remote-deploy may
+            // materialize an empty placeholder so Docker does not create a
+            // directory. Missing/invalid key must not take /health down.
+            tracing::warn!(
+                "challenge sk: {e}; leaf signing unavailable until BASE_CHALLENGE_SK_FILE is a \
+                 32-byte mini-secret (or 64 hex chars)"
+            );
+        }
     }
     let pin = load_pin(cli.pin_file.as_deref())?;
     let backend = if cli.force_sim {
@@ -448,4 +456,51 @@ mod tests {
     }
 
     static LIUM_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Compose always points `PROOF_PIN_FILE` at the committed pin. Empty
+    /// `[inference].model` / `base_url` is pre-launch fail-closed (503), not a
+    /// boot reject — same as an empty eval digest.
+    #[test]
+    fn committed_pin_boots_with_empty_inference_model() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/proof-pin.toml");
+        let pin = load_pin(Some(&path)).expect("committed pin must boot");
+        assert!(
+            pin.inference.model.trim().is_empty(),
+            "empty model is pre-launch 503"
+        );
+        assert!(
+            pin.inference.base_url.trim().is_empty(),
+            "url is secret-backed"
+        );
+        assert!(pin.proxy_model.trim().is_empty());
+    }
+
+    /// Compose sets `PROOF_INFERENCE_OFFER_FILE`. A missing/closed offer is
+    /// `can_score=false` / submit 503 — it must not `exit 1`.
+    #[test]
+    fn compose_inference_offer_env_parses_and_a_missing_file_is_not_a_boot_error() {
+        let _guard = OFFER_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(
+            "PROOF_INFERENCE_OFFER_FILE",
+            "/run/base/proof/inference_offer.json",
+        );
+        let cli = Cli::try_parse_from(["proof-challenge"])
+            .unwrap_or_else(|e| panic!("PROOF_INFERENCE_OFFER_FILE broke parsing: {e}"));
+        assert_eq!(
+            cli.inference_offer_file.as_deref(),
+            Some(Path::new("/run/base/proof/inference_offer.json"))
+        );
+        let pin = load_pin(None).expect("default pin");
+        let err = load_offer(&pin, cli.inference_offer_file.as_deref())
+            .expect_err("missing offer is unavailable, not a panic");
+        assert!(
+            err.contains("read") || err.contains("PROOF_INFERENCE_OFFER_FILE"),
+            "{err}"
+        );
+        std::env::remove_var("PROOF_INFERENCE_OFFER_FILE");
+    }
+
+    static OFFER_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

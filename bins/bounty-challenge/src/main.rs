@@ -93,10 +93,7 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> Result<(), String> {
-    let sk = match &cli.challenge_sk_file {
-        Some(p) => Some(load_challenge_secret(p).map_err(|e| format!("challenge sk: {e}"))?),
-        None => None,
-    };
+    let sk = load_optional_sk(cli.challenge_sk_file.as_deref());
     let admin_hashes = load_admin_hashes(cli.admin_tokens_file.as_deref());
     let session_secret = load_session_secret(cli.session_secret_file.as_deref())?;
     // The CLI flag and the env var are the same knob; `resolve_scoring_backend`
@@ -193,6 +190,23 @@ fn build_emitter(
     ))))
 }
 
+fn load_optional_sk(path: Option<&std::path::Path>) -> Option<[u8; 32]> {
+    let p = path?;
+    match load_challenge_secret(p) {
+        Ok(k) => Some(k),
+        Err(e) => {
+            // Compose always sets BASE_CHALLENGE_SK_FILE; remote-deploy may
+            // materialize an empty placeholder so Docker does not create a
+            // directory. That must not take /health down.
+            tracing::warn!(
+                "challenge sk: {e}; bounty cannot sign leaves, so nothing will be emitted \
+                 and POST /v1/admin/seal will answer 409 while bounty holds a paid trust-root row"
+            );
+            None
+        }
+    }
+}
+
 fn load_admin_hashes(path: Option<&std::path::Path>) -> Vec<String> {
     let Some(p) = path else {
         return Vec::new();
@@ -209,13 +223,20 @@ fn load_admin_hashes(path: Option<&std::path::Path>) -> Vec<String> {
 
 fn load_session_secret(path: Option<&std::path::Path>) -> Result<Vec<u8>, String> {
     if let Some(p) = path {
-        let bytes = std::fs::read(p).map_err(|e| format!("session secret: {e}"))?;
-        if bytes.is_empty() {
-            return Err("session secret file is empty".into());
+        match std::fs::read(p) {
+            Ok(bytes) if !bytes.is_empty() => return Ok(bytes),
+            Ok(_) => tracing::warn!(
+                "BOUNTY_SESSION_SECRET_FILE is empty; using an ephemeral secret \
+                 (pairing sessions will not survive restart)"
+            ),
+            Err(e) => tracing::warn!(
+                "session secret: {e}; using an ephemeral secret \
+                 (pairing sessions will not survive restart)"
+            ),
         }
-        return Ok(bytes);
     }
-    // Dev / CI: ephemeral secret. Production should set BOUNTY_SESSION_SECRET_FILE.
+    // Dev / CI / empty host placeholder. Production should persist a
+    // non-empty BOUNTY_SESSION_SECRET_FILE so pairing survives restart.
     let mut out = vec![0u8; 32];
     getrandom_fill(&mut out)?;
     Ok(out)
@@ -296,5 +317,55 @@ mod tests {
         assert!(legacy_sim_opt_in_present());
         assert_eq!(resolve_scoring_backend(), ScoringBackend::Unconfigured);
         std::env::remove_var("BOUNTY_FORCE_SIM");
+    }
+
+    /// Compose always sets `BASE_CHALLENGE_SK_FILE`. remote-deploy may leave an
+    /// empty placeholder so Docker does not create a directory at that path.
+    /// That must not exit 1 — `/health` has to come up so routing smoke works.
+    #[test]
+    fn an_empty_or_missing_challenge_sk_file_does_not_abort_boot() {
+        let dir = std::env::temp_dir().join(format!(
+            "bounty-sk-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let empty = dir.join("sk");
+        std::fs::write(&empty, []).expect("write");
+        assert!(load_optional_sk(Some(&empty)).is_none());
+        assert!(load_optional_sk(Some(&dir.join("missing"))).is_none());
+        assert!(load_optional_sk(None).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Same placeholder footgun for `BOUNTY_SESSION_SECRET_FILE`: empty or
+    /// missing must yield an ephemeral secret so pair HMAC still has bytes.
+    #[test]
+    fn an_empty_or_missing_session_secret_file_falls_back_to_ephemeral() {
+        let dir = std::env::temp_dir().join(format!(
+            "bounty-sess-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let empty = dir.join("session_secret");
+        std::fs::write(&empty, []).expect("write");
+        let a = load_session_secret(Some(&empty)).expect("empty file");
+        let b = load_session_secret(Some(&dir.join("missing"))).expect("missing file");
+        let c = load_session_secret(None).expect("unset");
+        assert_eq!(a.len(), 32);
+        assert_eq!(b.len(), 32);
+        assert_eq!(c.len(), 32);
+        let present = dir.join("real");
+        std::fs::write(&present, b"persisted-session-secret").expect("write");
+        assert_eq!(
+            load_session_secret(Some(&present)).expect("present"),
+            b"persisted-session-secret"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
