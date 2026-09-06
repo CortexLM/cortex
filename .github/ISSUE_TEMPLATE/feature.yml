@@ -1,5 +1,5 @@
 name: Feature request
-description: Propose a change to the Cortex control plane
+description: Propose an improvement to the Cortex research network
 labels: ["enhancement"]
 body:
   - type: markdown

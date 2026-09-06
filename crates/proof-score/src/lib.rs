@@ -452,27 +452,6 @@ pub fn judge_topic(
     }
 }
 
-/// Sum of per-topic lattices over currently open topics, capped at [`SCORE_MAX`].
-///
-/// Paid emission uses [`payout_lattices`] (WTA / discovery). This helper is
-/// the binary fallback: each topic is 0 or [`SCORE_MAX`], then averaged so a
-/// skipped open topic still pulls the miner down. An empty open set is a host
-/// problem (503), not a miner score of 0 — callers must not emit this as a paid
-/// leaf.
-#[must_use]
-pub fn mean_lattice(per_topic: &BTreeMap<String, u64>, open_ids: &[String]) -> u64 {
-    if open_ids.is_empty() {
-        return 0;
-    }
-    let mut sum: u128 = 0;
-    for id in open_ids {
-        sum = sum.saturating_add(u128::from(
-            per_topic.get(id).copied().unwrap_or(0).min(SCORE_MAX),
-        ));
-    }
-    u64::try_from(sum / u128::from(open_ids.len() as u64)).unwrap_or(0)
-}
-
 /// Empty split map with one slot per scored stratum (tests / sim).
 #[must_use]
 pub fn empty_splits() -> BTreeMap<String, f64> {
@@ -739,12 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn skipped_open_topics_pull_the_mean_to_zero() {
-        let mut scores = BTreeMap::new();
-        scores.insert("dt-no-ib-v0".into(), SCORE_MAX);
-        let open = ["dt-no-ib-v0".into(), "other-v0".into()];
-        assert_eq!(mean_lattice(&scores, &open), SCORE_MAX / 2);
-        assert_eq!(mean_lattice(&scores, &[]), 0);
+    fn topic_shares_split_the_proof_allocation() {
         assert_eq!(topic_share_bps(2), 4_000);
         assert_eq!(topic_share_bps(0), 0);
         assert_eq!(PROOF_SHARE_BPS, 8_000);

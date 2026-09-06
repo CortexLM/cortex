@@ -334,7 +334,6 @@ pub async fn ssh_exec_stdin(
 /// Successful SSH run output.
 #[derive(Debug, Clone)]
 pub struct SshExecOutput {
-    #[allow(dead_code)]
     pub returncode: i32,
     pub stdout: String,
     pub stderr: String,

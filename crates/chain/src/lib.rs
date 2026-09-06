@@ -1,4 +1,4 @@
-//! Chain client abstraction for base validators/miners.
+//! Chain client abstraction for Cortex validators and miners.
 //!
 //! # Commit-reveal (CRV4)
 //!
@@ -21,8 +21,7 @@
 //! # Implementations
 //!
 //! - [`FakeChain`] — deterministic in-memory (required for unit tests).
-//! - [`NotImplementedChain`] — stub returning [`ChainError::NotImplemented`] (SDK/live later).
-//! - [`LiveRpcChain`] (feature `live`) — minimal JSON-RPC for `current_block` / headers.
+//! - `chain_live::LiveChainClient` in the `chain-live` crate — production reads and signed submissions.
 
 #![forbid(unsafe_code)]
 
@@ -172,11 +171,6 @@ pub enum ChainError {
         /// Human-readable alternate path.
         alternate: &'static str,
     },
-    /// Operation not wired yet (live SDK / RPC).
-    NotImplemented {
-        /// What was requested.
-        what: &'static str,
-    },
     /// Weights rate limit hit; caller should retry.
     RateLimited {
         /// Optional retry-after hint in blocks.
@@ -199,9 +193,6 @@ impl fmt::Display for ChainError {
                     f,
                     "commit-reveal disabled; use alternate path `{alternate}` (see metadata/testnet.lock call_indices.set_weights)"
                 )
-            }
-            Self::NotImplemented { what } => {
-                write!(f, "chain client not implemented: {what}")
             }
             Self::RateLimited { retry_after_blocks } => match retry_after_blocks {
                 Some(n) => write!(f, "weights rate limited; retry after {n} blocks"),
@@ -698,327 +689,6 @@ impl ChainClient for FakeChain {
 }
 
 // ---------------------------------------------------------------------------
-// Stub / live
-// ---------------------------------------------------------------------------
-
-/// Placeholder client until a full SDK-backed impl lands.
-///
-/// TODO(task-13-followup): wire bittensor-core or expand [`LiveRpcChain`] beyond tip reads.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NotImplementedChain;
-
-impl ChainClient for NotImplementedChain {
-    fn current_block(&self) -> Result<u64, ChainError> {
-        Err(ChainError::NotImplemented {
-            what: "current_block",
-        })
-    }
-
-    fn block_hash(&self, _n: u64) -> Result<[u8; 32], ChainError> {
-        Err(ChainError::NotImplemented { what: "block_hash" })
-    }
-
-    fn metagraph_at(&self, _block_hash: &[u8; 32]) -> Result<Metagraph, ChainError> {
-        Err(ChainError::NotImplemented {
-            what: "metagraph_at",
-        })
-    }
-
-    fn subnet_owner_hotkey(&self, _netuid: u16) -> Result<Vec<u8>, ChainError> {
-        Err(ChainError::NotImplemented {
-            what: "subnet_owner_hotkey",
-        })
-    }
-
-    fn axon(&self, _netuid: u16, _hotkey: &[u8]) -> Result<Option<AxonInfo>, ChainError> {
-        Err(ChainError::NotImplemented { what: "axon" })
-    }
-
-    fn axons(&self, _netuid: u16) -> Result<Vec<(Vec<u8>, AxonInfo)>, ChainError> {
-        Err(ChainError::NotImplemented { what: "axons" })
-    }
-
-    fn commit_reveal_enabled(&self, _netuid: u16) -> Result<bool, ChainError> {
-        Err(ChainError::NotImplemented {
-            what: "commit_reveal_enabled",
-        })
-    }
-
-    fn commit_reveal_version(&self, _netuid: u16) -> Result<u16, ChainError> {
-        Err(ChainError::NotImplemented {
-            what: "commit_reveal_version",
-        })
-    }
-
-    fn tempo(&self, _netuid: u16) -> Result<u64, ChainError> {
-        Err(ChainError::NotImplemented { what: "tempo" })
-    }
-
-    fn reveal_period_epochs(&self, _netuid: u16) -> Result<u64, ChainError> {
-        Err(ChainError::NotImplemented {
-            what: "reveal_period_epochs",
-        })
-    }
-
-    fn block_time(&self) -> Result<u64, ChainError> {
-        Err(ChainError::NotImplemented { what: "block_time" })
-    }
-
-    fn last_epoch_block(&self, _netuid: u16) -> Result<u64, ChainError> {
-        Err(ChainError::NotImplemented {
-            what: "last_epoch_block",
-        })
-    }
-
-    fn pending_epoch_at(&self, _netuid: u16) -> Result<u64, ChainError> {
-        Err(ChainError::NotImplemented {
-            what: "pending_epoch_at",
-        })
-    }
-
-    fn subnet_epoch_index(&self, _netuid: u16) -> Result<u64, ChainError> {
-        Err(ChainError::NotImplemented {
-            what: "subnet_epoch_index",
-        })
-    }
-
-    fn blocks_since_last_step(&self, _netuid: u16) -> Result<u64, ChainError> {
-        Err(ChainError::NotImplemented {
-            what: "blocks_since_last_step",
-        })
-    }
-
-    fn submit_timelocked_weights(
-        &self,
-        _mecid: u8,
-        _payload: WeightsTlockPayload,
-        _reveal_round: u64,
-    ) -> Result<(), ChainError> {
-        Err(ChainError::NotImplemented {
-            what: "submit_timelocked_weights",
-        })
-    }
-
-    fn set_weights(
-        &self,
-        _netuid: u16,
-        _uids: Vec<u16>,
-        _values: Vec<u16>,
-        _version_key: u64,
-    ) -> Result<(), ChainError> {
-        Err(ChainError::NotImplemented {
-            what: "set_weights",
-        })
-    }
-}
-
-#[cfg(feature = "live")]
-mod live {
-    use super::{AxonInfo, ChainClient, ChainError, Metagraph, WeightsTlockPayload};
-    use serde_json::{json, Value};
-
-    /// Finney testnet default (same as `metadata/testnet.lock` / config).
-    pub const DEFAULT_TESTNET_ENDPOINT: &str = "wss://test.finney.opentensor.ai:443";
-
-    /// Minimal HTTPS JSON-RPC chain client (no bittensor-core).
-    ///
-    /// Fully implements only tip/`current_block` and `block_hash` for smoke tests;
-    /// other methods return [`ChainError::NotImplemented`] until expanded.
-    #[derive(Debug)]
-    pub struct LiveRpcChain {
-        http: reqwest::blocking::Client,
-        endpoint: String,
-    }
-
-    impl LiveRpcChain {
-        /// Connect using `wss://` or `https://` endpoint (WSS rewritten to HTTPS).
-        ///
-        /// # Errors
-        ///
-        /// HTTP client build failure.
-        pub fn connect(endpoint: &str) -> Result<Self, ChainError> {
-            let http = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .map_err(|e| ChainError::Other(format!("http client: {e}")))?;
-            Ok(Self {
-                http,
-                endpoint: http_endpoint(endpoint),
-            })
-        }
-
-        fn rpc(&self, method: &str, params: Value) -> Result<Value, ChainError> {
-            let body = json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": method,
-                "params": params,
-            });
-            let resp = self
-                .http
-                .post(&self.endpoint)
-                .json(&body)
-                .send()
-                .map_err(|e| ChainError::Other(format!("rpc send: {e}")))?;
-            let v: Value = resp
-                .json()
-                .map_err(|e| ChainError::Other(format!("rpc json: {e}")))?;
-            if let Some(err) = v.get("error") {
-                return Err(ChainError::Other(format!("rpc error: {err}")));
-            }
-            v.get("result")
-                .cloned()
-                .ok_or_else(|| ChainError::Other("rpc missing result".into()))
-        }
-    }
-
-    fn http_endpoint(endpoint: &str) -> String {
-        if let Some(rest) = endpoint.strip_prefix("wss://") {
-            format!("https://{rest}")
-        } else if let Some(rest) = endpoint.strip_prefix("ws://") {
-            format!("http://{rest}")
-        } else {
-            endpoint.to_owned()
-        }
-    }
-
-    fn parse_hex_u64(hex_num: &str) -> Result<u64, ChainError> {
-        let s = hex_num.strip_prefix("0x").unwrap_or(hex_num);
-        u64::from_str_radix(s, 16).map_err(|e| ChainError::Other(format!("bad hex u64: {e}")))
-    }
-
-    impl ChainClient for LiveRpcChain {
-        fn current_block(&self) -> Result<u64, ChainError> {
-            let header = self.rpc("chain_getHeader", json!([]))?;
-            let num = header
-                .get("number")
-                .and_then(Value::as_str)
-                .ok_or_else(|| ChainError::Other("header.number missing".into()))?;
-            parse_hex_u64(num)
-        }
-
-        fn block_hash(&self, n: u64) -> Result<[u8; 32], ChainError> {
-            let hex_n = format!("0x{n:x}");
-            let result = self.rpc("chain_getBlockHash", json!([hex_n]))?;
-            let s = result
-                .as_str()
-                .ok_or_else(|| ChainError::Other("block hash not string".into()))?;
-            let s = s.strip_prefix("0x").unwrap_or(s);
-            if s.len() != 64 {
-                return Err(ChainError::Other(format!(
-                    "expected 32-byte hash, got len {}",
-                    s.len() / 2
-                )));
-            }
-            let mut out = [0_u8; 32];
-            for i in 0..32 {
-                out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
-                    .map_err(|e| ChainError::Other(format!("hex: {e}")))?;
-            }
-            Ok(out)
-        }
-
-        fn metagraph_at(&self, _block_hash: &[u8; 32]) -> Result<Metagraph, ChainError> {
-            Err(ChainError::NotImplemented {
-                what: "live metagraph_at",
-            })
-        }
-
-        fn subnet_owner_hotkey(&self, _netuid: u16) -> Result<Vec<u8>, ChainError> {
-            Err(ChainError::NotImplemented {
-                what: "live subnet_owner_hotkey",
-            })
-        }
-
-        fn axon(&self, _netuid: u16, _hotkey: &[u8]) -> Result<Option<AxonInfo>, ChainError> {
-            Err(ChainError::NotImplemented { what: "live axon" })
-        }
-
-        fn axons(&self, _netuid: u16) -> Result<Vec<(Vec<u8>, AxonInfo)>, ChainError> {
-            Err(ChainError::NotImplemented { what: "live axons" })
-        }
-
-        fn commit_reveal_enabled(&self, _netuid: u16) -> Result<bool, ChainError> {
-            Err(ChainError::NotImplemented {
-                what: "live commit_reveal_enabled",
-            })
-        }
-
-        fn commit_reveal_version(&self, _netuid: u16) -> Result<u16, ChainError> {
-            Err(ChainError::NotImplemented {
-                what: "live commit_reveal_version",
-            })
-        }
-
-        fn tempo(&self, _netuid: u16) -> Result<u64, ChainError> {
-            Err(ChainError::NotImplemented { what: "live tempo" })
-        }
-
-        fn reveal_period_epochs(&self, _netuid: u16) -> Result<u64, ChainError> {
-            Err(ChainError::NotImplemented {
-                what: "live reveal_period_epochs",
-            })
-        }
-
-        fn block_time(&self) -> Result<u64, ChainError> {
-            Err(ChainError::NotImplemented {
-                what: "live block_time",
-            })
-        }
-
-        fn last_epoch_block(&self, _netuid: u16) -> Result<u64, ChainError> {
-            Err(ChainError::NotImplemented {
-                what: "live last_epoch_block",
-            })
-        }
-
-        fn pending_epoch_at(&self, _netuid: u16) -> Result<u64, ChainError> {
-            Err(ChainError::NotImplemented {
-                what: "live pending_epoch_at",
-            })
-        }
-
-        fn subnet_epoch_index(&self, _netuid: u16) -> Result<u64, ChainError> {
-            Err(ChainError::NotImplemented {
-                what: "live subnet_epoch_index",
-            })
-        }
-
-        fn blocks_since_last_step(&self, _netuid: u16) -> Result<u64, ChainError> {
-            Err(ChainError::NotImplemented {
-                what: "live blocks_since_last_step",
-            })
-        }
-
-        fn submit_timelocked_weights(
-            &self,
-            _mecid: u8,
-            _payload: WeightsTlockPayload,
-            _reveal_round: u64,
-        ) -> Result<(), ChainError> {
-            Err(ChainError::NotImplemented {
-                what: "live submit_timelocked_weights",
-            })
-        }
-
-        fn set_weights(
-            &self,
-            _netuid: u16,
-            _uids: Vec<u16>,
-            _values: Vec<u16>,
-            _version_key: u64,
-        ) -> Result<(), ChainError> {
-            Err(ChainError::NotImplemented {
-                what: "live set_weights",
-            })
-        }
-    }
-}
-
-#[cfg(feature = "live")]
-pub use live::{LiveRpcChain, DEFAULT_TESTNET_ENDPOINT};
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1177,14 +847,6 @@ mod tests {
             chain.block_hash(tip + 1),
             Err(ChainError::UnknownBlock { .. })
         ));
-    }
-
-    #[test]
-    fn s3_not_implemented_stub_errors_clearly() {
-        let c = NotImplementedChain;
-        let err = c.current_block().expect_err("stub");
-        assert!(matches!(err, ChainError::NotImplemented { .. }));
-        assert!(err.to_string().contains("not implemented"));
     }
 
     #[test]
@@ -1352,27 +1014,5 @@ mod tests {
             .submit_timelocked_weights(0, p, 1)
             .expect("third succeeds");
         assert_eq!(chain.submissions().len(), 1);
-    }
-
-    /// Live testnet smoke: `current_block() > 0`.
-    ///
-    /// Run with:
-    /// `cargo test -p chain --features live testnet_current_block -- --ignored --nocapture`
-    #[test]
-    #[ignore = "requires network access to finney testnet"]
-    fn testnet_current_block_positive() {
-        #[cfg(feature = "live")]
-        {
-            let client = LiveRpcChain::connect(DEFAULT_TESTNET_ENDPOINT).expect("connect testnet");
-            let n = client.current_block().expect("current_block");
-            assert!(n > 0, "expected tip > 0, got {n}");
-        }
-        #[cfg(not(feature = "live"))]
-        {
-            panic!(
-                "enable --features live to run testnet_current_block_positive against {}",
-                "wss://test.finney.opentensor.ai:443"
-            );
-        }
     }
 }

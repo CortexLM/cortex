@@ -39,6 +39,7 @@ Compose always runs a digest-pinned `postgres` service (`base-pgdata` volume, he
 | Validator attestations (when DB configured) | **Postgres** |
 | Gateway challenge **backend registry** | **in-memory** — re-seed after gateway restart (`remote-deploy.sh` does this on master) |
 | site-api (`GET /v1/site/*`) | no DB — proxies bounty/proof upstreams via gateway |
+| Proof submissions + scores | **in-memory** — the current service uses `MemoryStore`; Postgres in Compose does not make these durable |
 | Unit/integration tests | may construct `Memory*Store` directly; omit `BASE_DATABASE_URL` only there |
 
 Migrations (`crates/db/migrations`) run on boot in gateway when `BASE_DATABASE_URL` is set. Compose requires `deploy/env/bounty-challenge.env` and `deploy/env/proof-challenge.env` so live challenges cannot silently boot without operator config.
@@ -60,6 +61,11 @@ Prism challenge. Do **not** reintroduce `prism-challenge` compose or
 droplet overlay sets it). Live submits stay fail-closed until harvest is
 wired, a baseline is sealed, and ≥1 topic is open. Do not invent an eval
 digest.
+
+Current Proof judging and emission are incomplete: the Python judge uses static
+checks and an acknowledgement request, and the binary does not drive its
+leaf-signing helpers. Deployment configuration cannot fill these implementation
+gaps. See [`docs/WHITEPAPER.md`](../docs/WHITEPAPER.md).
 
 ## Local testnet E2E
 
@@ -85,7 +91,7 @@ Full procedure: [`docs/runbooks/local-testnet-e2e.md`](../docs/runbooks/local-te
 
 **Weights seal smoke (default on `--smoke`):** after healthz, `local-e2e.sh` runs `weights-smoke` — signed bounty leaves for the live metagraph → `POST /v1/admin/seal` → assert `GET /v1/weights/latest` is **200** with **`sealed: true`**. Skip with `--no-weights-smoke`. Pre-seal, latest is **200 burn** (`sealed: false`, uid 0 = 100%) — never 404; that is unrelated to a missing gateway owner wallet. Prefer `--burn` on mainnet when sealing without real challenge scores (all `NoScore` → uid 0).
 
-**Interim prod burn seal (retired while prism auto-emits):** `weights-smoke --burn` posts all-`NoScore` at a **block-scale** epoch. That hid the live Prism 2.1 WTA winner (chain epoch ~24k) because `/v1/weights/latest` had no chain-scale bundle to prefer. Keep the script for emergency burn-only windows; **do not** enable `base-burn-seal.timer` when Prism is emitting scores. `remote-deploy` on master enables real-seal and disables the burn timer.
+**Emergency burn seal:** `weights-smoke --burn` posts all-`NoScore` at a **block-scale** epoch. Keep the script for explicitly approved burn-only windows; **do not** enable `base-burn-seal.timer` alongside real challenge scores. `remote-deploy` on master enables real-seal and disables the burn timer. Historical Prism behavior is not a reason to restore that retired product.
 
 Historical install (burn-only, no live scores):
 
@@ -105,7 +111,7 @@ cargo run -q --release -p weights-smoke -- \
 
 A seal older than ~256 blocks can never be verified by the validator (public RPC prunes state) — if `GET /v1/weights/latest` shows `metagraph_block` lagging tip by thousands of blocks, check `systemctl status base-burn-seal.timer` and `/var/log/base-burn-seal.log` on the master.
 
-**Real-epoch sealer (default on master):** `base-real-seal.timer` (every **2 min**) drives [`scripts/prod-real-seal.sh`](scripts/prod-real-seal.sh), which walks **current … current−N** chain epochs (`REAL_SEAL_WALK_BACK`, default 16) with `block_b = LastEpochBlock − k×tempo`. Tip reseal is expected: when prism tip-supersedes leaves mid-epoch, seal rebuilds and appends `epoch_bundle.revision` so `/v1/weights/latest` tracks the WTA winner; identical merkle/vector is a no-op 200. Seal strips 0-bps challenge leftovers (design today) so they cannot 409 D24. The gateway prefers chain-scale bundles over the reserved smoke range (`>= 8_000_000`). Install / `remote-deploy` does this:
+**Real-epoch sealer (default on master):** `base-real-seal.timer` (every **2 min**) drives [`scripts/prod-real-seal.sh`](scripts/prod-real-seal.sh), which walks **current … current−N** chain epochs (`REAL_SEAL_WALK_BACK`, default 16) with `block_b = LastEpochBlock − k×tempo`. Tip reseal is expected: when a challenge supersedes leaves mid-epoch, seal rebuilds and appends `epoch_bundle.revision`; identical merkle/vector is a no-op 200. The gateway excludes non-paying challenge leaves and prefers chain-scale bundles over the reserved smoke range (`>= 8_000_000`). The sealer does not generate missing Proof leaves. Install / `remote-deploy` does this:
 
 ```bash
 install -m 0755 deploy/scripts/prod-real-seal.sh /opt/base/deploy/scripts/prod-real-seal.sh
@@ -133,7 +139,7 @@ Validator logs should show `Match epoch=` then `Match → submit_intent` / `subm
 
 **Legacy Python agents (mainnet):** `validator-5gzi` (`95.133.252.120`) may point `master_url` / `weights_url` / `registry_url` at `https://chain.joinbase.ai` with **`submit_on_chain_enabled: false`**. Coordination shims live in `gateway-compat` (`/v1/validators/*`, `/v1/registry`, empty assignments). `GET /v1/weights/latest` refreshes `computed_at` / `expires_at` at serve time so Python pydantic clients accept sealed vectors older than 720s. Do **not** start `base-weight-submitter-5gzi` on `validator-root` unless CR ownership is moved off Rust.
 
-**Challenge verification:** on **master** only (validator has **no challenge exec**). Simulate submissions end-to-end — submit **baseline** + submit **cheat**, poll `/v1/runs/{id}` + `/events` + `/logs`, probe edges (bad harness, sanitize, quota, routes), then **admin winners** (`GET/POST /v1/admin/rounds/{id}/…` with bearer from `deploy/secrets/design/annotator_tokens`) and confirm leaf → seal → `GET /v1/weights/latest` **`sealed: true`**. **Never host Sim in staging/prod** (`BASE_ALLOW_HOST_SIM` / host `SimSandbox` are CI/local only). Healthz alone is insufficient.
+**Challenge verification:** on **master** only (validator has **no challenge exec**). Bounty: pair, report, probe quota/auth/fail-closed paths, then verify feed-driven leaves. Proof: submit against a signed `topic_id`, probe rejected and unavailable-evaluation paths, and distinguish library tests from the unwired live emitter. Verify leaf → seal → `GET /v1/weights/latest` **`sealed: true`** where the full path is available. Follow the root [verification contract](../AGENTS.md#challenge-verification-mandatory-path-coverage); do not use retired Design run/winner endpoints. **Never host Sim in staging/prod** (`BASE_ALLOW_HOST_SIM` / host `SimSandbox` are CI/local only). Healthz alone is insufficient.
 
 Tunnel writes gitignored `deploy/env/local-tunnel.env` (`BASE_GATEWAY_PUBLIC_URL`). Co-located validator stays on `http://gateway:8080`; external clients use the tunnel URL. Host probe ports default to `2808x` (avoid staging SSH on `1808x`).
 

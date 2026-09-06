@@ -2,6 +2,15 @@
 
 # How to mine
 
+Cortex aims to reward reproducible research that can improve shared methods,
+rather than only selecting a finished model. New to the project? Read the
+[overview](../OVERVIEW.md).
+
+**Before spending compute on Proof:** review the
+[implementation limits](../WHITEPAPER.md#proposal-versus-current-code). The judge
+is partial, submission state is in memory, and automatic Proof reward emission
+is not wired into the service. A ready status is not an end-to-end payment guarantee.
+
 **Bundle `protocol_version`:** `1`  
 **Miner pays Lium** (`LIUM_API_KEY` / `X-Lium-Api-Key`) on Proof.
 
@@ -62,6 +71,6 @@ https://network.cortex.foundation/challenge/proof/...
 Never put mnemonics or challenge signing keys in miner clients.
 Read `LIUM_API_KEY` from the environment. Do not commit it.
 
-Control-plane PRs on `CortexLM/cortex` need a Greptile review before merge
+Network software PRs on `CortexLM/cortex` need a Greptile review before merge
 (`.greptile/`; comment `@greptileai review` if the bot is silent). That is
 an operator gate, not a miner submit step.

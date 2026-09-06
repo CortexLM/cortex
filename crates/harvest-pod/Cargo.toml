@@ -13,8 +13,5 @@ async-trait = "0.1"
 prism-lium = { path = "../prism-lium" }
 prism-lium-types = { path = "../prism-lium-types" }
 
-[dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
-
 [lints]
 workspace = true

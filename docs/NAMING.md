@@ -3,6 +3,13 @@
 **Product name:** Cortex  
 **Org / repo:** [`CortexLM/cortex`](https://github.com/CortexLM/cortex)
 
+**Positioning:** an autonomous research network. Describe the purpose first:
+reproducible findings that can improve shared research methods, not only isolated
+model checkpoints. Rust and Python are implementation choices. “Control plane”
+may describe a technical coordination component, but is not the product's name
+or value proposition. Keep the whitepaper's intended synthesis loop separate
+from [current capabilities](WHITEPAPER.md).
+
 This repo used to ship as “BASE” / `BaseIntelligence/base`. Human-facing
 docs and GitHub metadata now say Cortex. A large set of **wire, deploy, and
 crypto identifiers still spell `base` / `BASE_*`**. Changing those forks the

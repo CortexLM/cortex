@@ -8,6 +8,7 @@ How to treat documentation in this repo.
 |------|-------|----------|
 | **Normative** | `ARCHITECTURE.md`, `NAMING.md`, frozen specs (`BUNDLE_SPEC.md`, `DESIGN_CHALLENGE.md`, `PRISM.md`, …), `THREAT_MODEL.md`, `OPERATOR_SECURITY.md`, `COMPLETENESS.md`, `runbooks/`, `external-miner/` | Source of truth for contracts, ops, naming, and status |
 | **Non-normative** | `evidence/`, `spikes/` | Historical ops notes / experiments. **Do not** implement against them as spec; **do not** delete in cleanup passes without an explicit ops decision |
+| **Explanatory** | `README.md`, `OVERVIEW.md`, `WHITEPAPER.md`, `CLEANUP.md`, `../whitepaper.pdf` | Navigation, product rationale, proposal-to-code comparison, and cleanup evidence; not replacements for current contracts |
 
 When a spike or evidence report conflicts with a frozen spec or runbook, the normative doc wins.
 
@@ -27,7 +28,8 @@ Repo-wide agent contract: [`../AGENTS.md`](../AGENTS.md).
 
 ## Challenge public miner repos
 
-Public miner docs live **outside** this monorepo (examples + human guides only — no control-plane code):
+Current miner guides live in this monorepo. Separate public miner repositories,
+when present, contain examples and human guides only, not network service code:
 
 | Challenge | Repo |
 |-----------|------|

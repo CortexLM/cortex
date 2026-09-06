@@ -1,7 +1,5 @@
 //! `OpenRouter` chat client (master-side; pod never sees a key).
 
-use std::path::PathBuf;
-
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 
@@ -296,13 +294,6 @@ impl ReviewBackend for OpenRouterClient {
         let answer = self.chat(&prompt).await?;
         parse_similarity(&answer)
     }
-}
-
-/// Default key path (documented for deployments).
-#[must_use]
-#[allow(dead_code)] // used by operators reading the crate public surface
-pub fn default_key_path() -> PathBuf {
-    PathBuf::from("/run/base/openrouter/api_key")
 }
 
 #[cfg(test)]

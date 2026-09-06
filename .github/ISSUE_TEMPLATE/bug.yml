@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in the Cortex control plane is wrong
+description: Report a problem in the Cortex research network software
 labels: ["bug"]
 body:
   - type: markdown

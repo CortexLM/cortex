@@ -1,5 +1,18 @@
 # Proof challenge
 
+Proof is Cortex's research contribution path: the intended output is a
+reproducible finding that others can reuse, not just a finished model checkpoint.
+Read the [overview](OVERVIEW.md) for the purpose and the
+[whitepaper comparison](WHITEPAPER.md) for the proposed shared-research loop.
+
+**Implementation limits:** the Python judge currently performs an authenticated
+acknowledgement request and static checks, not the paper's autonomous investigation
+and arbitrary recipe reproduction. The service stores submissions in memory and
+does not run an automatic reward-leaf emitter. Payout/signing helpers exist, but
+readiness checks alone do not establish a complete research-to-payment path.
+The rules below describe the current interfaces and scoring functions, not a
+claim that these gaps are closed.
+
 Live challenge id: **`proof`**. Emission **8000 bps** (80% of the subnet;
 bounty is 2000). This 20%/80% lock is independent of eval digest. Eval
 digest `sha256:78b614a1…` is pinned (`ghcr.io/cortexlm/proof-eval`). The
@@ -70,7 +83,7 @@ baseline + an open topic are on the host.
   droplet overlays.
 - No Modal. No secrets, hosts, holdout records, or teacher endpoints in git.
 
-## How Mathis injects a challenge (English)
+## Publish a research topic
 
 1. Write a YAML or JSON draft with `id`, English `statement`, `payout_mode`
    (`wta` | `discovery`), `validation.{score_on,accept_if,reject_if}`, and

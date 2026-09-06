@@ -21,7 +21,6 @@ sqlx = { version = "0.8", default-features = false, features = [
     "postgres",
     "json",
 ] }
-thiserror = "2"
 tracing = "0.1"
 
 [dev-dependencies]

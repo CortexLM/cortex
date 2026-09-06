@@ -1,7 +1,9 @@
 # Contributing to Cortex
 
-This is the Rust control-plane monorepo for the Cortex Bittensor subnet
-([`CortexLM/cortex`](https://github.com/CortexLM/cortex)).
+This repository implements Cortex, an autonomous research network on Bittensor.
+Start with the [overview](docs/OVERVIEW.md) and
+[whitepaper comparison](docs/WHITEPAPER.md) for the purpose and current limits.
+Network services use Rust; the research evaluation image uses Python.
 
 ## Before you start
 
@@ -33,7 +35,13 @@ cargo run -p xtask -- consensus-lint
 cargo run -p xtask -- spec-check
 cargo run -p xtask -- design-check
 cargo run -p xtask -- external-docs-check
+cargo clippy -p validator-bin --features dcap --all-targets -- -D warnings
+bash deploy/scripts/assert-compose-matrix.sh
 ```
+
+For changes to the Python evaluation image, install its development dependencies
+in an isolated environment and run `python -m pytest eval/tests` from the repo
+root. GPU/runtime validation is separate from these contract tests.
 
 Local subnet stack (Docker Compose, secrets via age): see
 [deploy/README.md](deploy/README.md) and

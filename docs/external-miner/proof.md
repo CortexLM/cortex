@@ -2,9 +2,15 @@
 
 # Proof — miners
 
-Challenge id is `proof`. One of two live challenges (`bounty` **2000 bps**,
-`proof` **8000 bps**, 20/80). That split is live now. It is **not** 7000/3000,
-and it is **not** waiting on a digest retune to 5000/5000.
+Challenge id is `proof`. The two configured challenges are `bounty`
+(**2000 bps**) and `proof` (**8000 bps**), a 20/80 allocation.
+
+**Implementation warning:** Proof's Python judge is partial, submission records
+are in memory, and the service does not yet drive automatic reward-leaf emission.
+Do not spend compute on the assumption that `can_score` proves the complete
+research-to-payment path. Read the
+[paper-to-code comparison](../WHITEPAPER.md#proposal-versus-current-code) and
+confirm deployment support with the operator first.
 
 **Gateway:** [https://network.cortex.foundation](https://network.cortex.foundation)  
 **CLI:** `ctx proof topics`, then `ctx proof submit` (install:
@@ -33,12 +39,12 @@ time). You submit **against that `topic_id`**:
 2. a **code artifact** (reproducible recipe — code + lockfile / entrypoint)
 3. **declared FLOPs** (must be `≤ topic.flops_budget`)
 
-The artifact is a recipe the digest-pinned RLM judge can re-run under the
-topic's FLOP / wall budget. **A weight dump alone is not an artifact.** The
-judge never trusts your numbers: it re-runs the code, compares the claim to
-the public split, and the harness fills holdout NLL / throughput. Holdout
-records stay sealed until after your submission digest is frozen. You never
-see them.
+The artifact contract requires a recipe reproducible under the topic's FLOP /
+wall budget. **A weight dump alone is not an artifact.** The intended judge
+re-runs that recipe and a separate harness measures holdout loss or throughput.
+The current Python image does not yet implement arbitrary recipe reproduction;
+its static checks and model measurements are only part of that design.
+Holdout records are not included in public topic responses.
 
 `GET /challenge/proof/v1/status` shows `can_score`, `eval_backend`,
 `force_sim`, `live_harvest_wired`, `baseline_sealed`, public pin `inference`
@@ -51,8 +57,8 @@ Muon, token superposition, and “decentralized training without InfiniBand”
 are *examples* of solutions or of topics — they are not the product.
 
 Pass gates (reproduced, no contamination, under budget, beat epsilon) are
-fail-closed. What you are **paid** after a pass depends on the topic's
-`payout_mode`. Your paid score is the **sum of per-topic** masses over
+fail-closed. The implemented **payout calculation** after a pass depends on the
+topic's `payout_mode`. The score is the **sum of per-topic** masses over
 currently `open` ids, not a mean of binary lattices. A skipped topic is 0 on
 that topic. Zero open topics → the host cannot score (`503`), not a paid 0.
 

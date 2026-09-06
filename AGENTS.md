@@ -1,8 +1,10 @@
-# AGENTS.md — Cortex control plane
+# AGENTS.md — Cortex research network
 
 Short contract for agents and operators. Prefer linking over restating runbooks.
 
-**Product:** Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) — Bittensor subnet control plane. **Two live challenges:** `bounty` (2000 bps) and `proof` (8000 bps). Proof-weighted 20%/80% lock regardless of eval digest. Proof eval digest is pinned (`ghcr.io/cortexlm/proof-eval@sha256:78b614a1…`, RLM judge via digest-pinned `InferenceOffer`); live submits still 503 until harvest is wired, a baseline is sealed, and ≥1 topic is open. Empty digest stays fail-closed (do not invent a sha256). Sum is 10000. `relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and `prism` are **removed as products** — no trust-root row, no compose services, no emission, and no leaf may verify. Historical miner stubs stay under [`docs/external-miner/`](docs/external-miner/) so old links do not 404. Frozen specs (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`) remain for xtask gates. Leftover `prism-*` crates are the **Lium harvest stack** used by Proof, not a live Prism challenge. Proof scores operator-published research topics (dynamic `topic_id`, digest-pinned RLM judge, `wta` or `discovery` payout). Naming split (Cortex vs leftover `base` / `BASE_*`): [`docs/NAMING.md`](docs/NAMING.md).
+**Product:** Cortex ([`CortexLM/cortex`](https://github.com/CortexLM/cortex)) — an autonomous research network on Bittensor. **Two live challenge ids:** `bounty` (2000 bps) and `proof` (8000 bps). Proof-weighted 20%/80% lock regardless of eval digest. Proof eval digest is pinned (`ghcr.io/cortexlm/proof-eval@sha256:78b614a1…`, RLM judge via digest-pinned `InferenceOffer`); live submits still 503 until harvest is wired, a baseline is sealed, and ≥1 topic is open. Empty digest stays fail-closed (do not invent a sha256). Sum is 10000. `relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and `prism` are **removed as products** — no trust-root row, no compose services, no emission, and no leaf may verify. Historical miner stubs stay under [`docs/external-miner/`](docs/external-miner/) so old links do not 404. Frozen specs (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`) remain for xtask gates. Leftover `prism-*` crates are the **Lium harvest stack** used by Proof, not a live Prism challenge. Proof scores operator-published research topics (dynamic `topic_id`, digest-pinned RLM judge, `wta` or `discovery` payout). Naming split (Cortex vs leftover `base` / `BASE_*`): [`docs/NAMING.md`](docs/NAMING.md).
+
+**Vision vs implementation:** start with [`docs/OVERVIEW.md`](docs/OVERVIEW.md) and the [`whitepaper comparison`](docs/WHITEPAPER.md). Do not describe the proposed synthesiser, recursive research judge, durable research corpus, or automatic Proof emission as complete. Current Python judging is partial; Proof uses in-memory submission state and its binary does not drive the payout/emission helpers. A pinned image and `can_score` are not proof of scientific reproduction or end-to-end payment.
 
 PRs require a [Greptile](https://greptile.com) review (`.greptile/`). If the bot is silent, comment `@greptileai review`.
 
@@ -52,7 +54,7 @@ Each live challenge has miner docs in this repo. Public repos (when they exist) 
 | Bounty | this repo [`docs/external-miner/bounty.md`](docs/external-miner/bounty.md) | Miner pairing + report path; subnet **reads** CortexLM/backend public API (does not serve one) |
 | Proof | this repo [`docs/external-miner/proof.md`](docs/external-miner/proof.md) | Dynamic operator-published topics + digest-pinned RLM judge |
 
-This control-plane repo is `CortexLM/cortex`. Off/archived miner pointers stay under [`docs/external-miner/`](docs/external-miner/) (`relearn.md`, `relearn-image.md`, `relearn-agent.md`, `relearn-mm.md`) so historical links do not 404; they are not live products. Frozen specs (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`) stay archived. Do not send miners to Design, Prism, or Relearn docs as live work.
+This network implementation repo is `CortexLM/cortex`. Off/archived miner pointers stay under [`docs/external-miner/`](docs/external-miner/) (`relearn.md`, `relearn-image.md`, `relearn-agent.md`, `relearn-mm.md`) so historical links do not 404; they are not live products. Frozen specs (`docs/DESIGN_CHALLENGE.md`, `docs/PRISM.md`) stay archived. Do not send miners to Design, Prism, or Relearn docs as live work.
 
 **When a challenge product or public API changes**, agents **must** update:
 
@@ -112,6 +114,7 @@ Match CI (`.github/workflows/ci.yml`):
 
 | Need | Start here |
 |------|------------|
+| Purpose, research reuse, and proposal vs implementation | [`docs/OVERVIEW.md`](docs/OVERVIEW.md), [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) |
 | System map / process topology | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | Cortex vs leftover `base` names | [`docs/NAMING.md`](docs/NAMING.md) |
 | Deploy / Compose / DO topology | [`deploy/README.md`](deploy/README.md) + [`deploy/AGENTS.md`](deploy/AGENTS.md) |

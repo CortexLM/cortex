@@ -1,17 +1,27 @@
 # Cortex deploy (compose)
 
+Operator reference for Cortex's autonomous research network. For the product
+purpose and current research limits, start with the
+[overview](../docs/OVERVIEW.md). This guide describes deployment, not evidence
+that the complete Proof research loop is ready.
+
 ## Services
 
 | Service | Profile | Image |
 |---------|---------|--------|
 | `postgres` | default | `postgres@sha256:33f9…` (16) |
 | `validator` | default | build `deploy/Dockerfile` target `validator` |
-| `updater` | default | build target `updater` |
+| `updater` | optional **`auto-update`** | build target `updater` |
 | `socket-proxy` | default | `tecnativa/docker-socket-proxy@sha256:9e4b…` |
 | `gateway` | **`master`** | build target `gateway` |
+| `bounty-challenge` | default; disabled on validator hosts | build target `bounty-challenge` |
+| `proof-challenge` | default; disabled on validator hosts | build target `proof-challenge` |
 
-Default `docker compose up -d` starts **4** services and does **not** start gateway.
-Owner host: `docker compose --profile master up -d` starts **5**.
+The base Compose file has **5 default services**, without gateway or updater.
+Adding `--profile master` adds the gateway. Operator hosts must also use the role
+overlays: `role-master.yml` disables the validator, and `role-validator.yml`
+keeps only Postgres and the validator. A co-located validator is for local E2E,
+not a second production weight submitter.
 
 ## Hard rules
 
@@ -22,34 +32,20 @@ Owner host: `docker compose --profile master up -d` starts **5**.
 
 ## Quick start (local)
 
-```bash
-# 1) Release binaries (or set BASE_DOCKER_BUILD_FROM=source for full in-Docker rustc 1.96)
-cargo build --release -p validator-bin -p gateway-bin -p updater-bin
-
-# 2) Env files at 0600
-./deploy/scripts/materialize-env.sh
-
-# 3) Build service images + start default stack
-export BASE_DOCKER_BUILD_FROM=prebuilt
-docker compose build
-docker compose up -d
-docker compose ps
-
-# 4) Master profile (gateway)
-docker compose --profile master up -d
-```
-
-### Full local testnet E2E (recommended)
-
 Master + gateway + validator + challenges on **testnet 541**, with an ephemeral
 cloudflared public URL for the gateway. Procedure:
 [`docs/runbooks/local-testnet-e2e.md`](../docs/runbooks/local-testnet-e2e.md).
 
 ```bash
 ./deploy/scripts/local-e2e.sh --help
+./deploy/scripts/materialize-env.sh
 ./deploy/scripts/local-e2e.sh --dry-run
 ./deploy/scripts/local-e2e.sh --smoke    # or --live when wallets are present
 ```
+
+Follow the runbook's build and key prerequisites before `--smoke`. Health checks
+alone do not validate scoring; simulate submissions and verify a real sealed
+bundle. See [the challenge verification contract](../AGENTS.md#challenge-verification-mandatory-path-coverage).
 
 ## Age secrets (production)
 
@@ -66,12 +62,14 @@ export AGE_IDENTITY=/etc/base/age-identity.txt
 
 | Host | Droplet | VPC IP | Role | Hotkey | Gateway |
 |------|---------|--------|------|--------|---------|
-| staging master | `base-staging` (`68.183.23.51`) | 10.116.0.2 | owner control plane | **yes** (`BASE_GATEWAY_HOTKEY`) | **yes** (`--profile master`) — public API **`staging.api.joinbase.ai`** (`BASE_DOMAIN`, cleartext `:80`/`:8080`) |
+| staging master | `base-staging` (`68.183.23.51`) | 10.116.0.2 | network master | **yes** (`BASE_GATEWAY_HOTKEY`) | **yes** (`--profile master`) — public API **`staging.api.joinbase.ai`** (`BASE_DOMAIN`, cleartext `:80`/`:8080`) |
 | staging validator | `base-staging-validator` | 10.116.0.4 | normal validator | **no** | **no** — uses master gateway over VPC `:8080` |
+| prod master | `base-prod` | 10.116.0.3 | network master | yes | yes |
+| prod validator | `base-prod-validator` | 10.116.0.5 (assigned) | normal validator | **no** | **no** — uses prod master gateway over VPC `:8080` |
 
 DNS (operator): `staging.api.joinbase.ai` **A** → staging master public IPv4 (`STAGING_MASTER_HOST` / `68.183.23.51`).
-| prod master | `base-prod` | 10.116.0.3 | owner control plane | yes | yes |
-| prod validator | `base-prod-validator` | 10.116.0.5 (assigned) | normal validator | **no** | **no** — uses prod master gateway over VPC `:8080` |
+The hotkey column refers to gateway owner identity. Validators need their own
+wallet to submit weights; they do not need the owner's key.
 
 Deploy (manual or via CI):
 
@@ -115,7 +113,7 @@ combination. Verify locally: `./deploy/scripts/assert-compose-matrix.sh`.
 
 ### Auto CI deploy
 
-- `.github/workflows/deploy-staging.yml` — after successful `ci` on `main` (and manual dispatch)
+- `.github/workflows/ci.yml` — auto-deploy staging after its `ci` job succeeds on `main`; `deploy-staging.yml` is the manual lane
 - `.github/workflows/deploy-prod.yml` — on push of `v*.*.*` tags from `main` (and manual dispatch with SHA)
 
 **Prod release flow (tag-based):**
@@ -145,14 +143,14 @@ Required GitHub secrets:
 | `SPACES_SECRET_ACCESS_KEY` | Spaces secret (fallback: `AWS_SECRET_ACCESS_KEY`) |
 | `BASE_BACKUP_BUCKET` | optional, default `base-backups` |
 
-> **Not AWS EKS.** Control plane stays Docker Compose on DigitalOcean droplets (existing design). A separate DOKS cluster on this account (`basecrawl-prod-nyc3`) is unrelated and must not host base.
+> **Not AWS EKS.** Network services stay on Docker Compose on DigitalOcean droplets. A separate DOKS cluster on this account (`basecrawl-prod-nyc3`) is unrelated and must not host Cortex.
 
 
 ## Infrastructure (DigitalOcean)
 
-Terraform lives in [`terraform/`](./terraform/): two `s-8vcpu-16gb-amd` droplets
-(`base-staging`, `base-prod`) in `nyc1` (nyc3 has no 8vCPU/16GB slug on this account) plus a firewall (SSH from operator IP
-only; 80/443 open). Cloud-init installs Docker + Compose only.
+Terraform lives in [`terraform/`](./terraform/): staging and production master
+and validator droplets, plus the firewall. See the four-host topology above and
+the Terraform inputs for sizes. Cloud-init installs Docker + Compose only.
 
 Age delivery helpers:
 

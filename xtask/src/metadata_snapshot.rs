@@ -380,12 +380,9 @@ struct PalletView {
     constants: Vec<ConstantView>,
 }
 
-#[allow(dead_code)]
 struct StorageView {
     name: String,
     hashers: Vec<String>,
-    key_types: Vec<u32>, // kept for future typed decode
-    value_type: u32,
     default_bytes: Vec<u8>,
 }
 
@@ -412,11 +409,7 @@ fn from_v15(m: RuntimeMetadataV15) -> MetaView {
         .map(|p| {
             let (storage_prefix, storage) = match p.storage {
                 Some(s) => {
-                    let entries = s
-                        .entries
-                        .into_iter()
-                        .map(|e| storage_from_entry(e, &types))
-                        .collect();
+                    let entries = s.entries.into_iter().map(storage_from_entry).collect();
                     (Some(s.prefix), entries)
                 }
                 None => (None, Vec::new()),
@@ -450,11 +443,7 @@ fn from_v14(m: frame_metadata::v14::RuntimeMetadataV14) -> MetaView {
         .map(|p| {
             let (storage_prefix, storage) = match p.storage {
                 Some(s) => {
-                    let entries = s
-                        .entries
-                        .into_iter()
-                        .map(|e| storage_from_entry_v14(e, &types))
-                        .collect();
+                    let entries = s.entries.into_iter().map(storage_from_entry).collect();
                     (Some(s.prefix), entries)
                 }
                 None => (None, Vec::new()),
@@ -480,75 +469,16 @@ fn from_v14(m: frame_metadata::v14::RuntimeMetadataV14) -> MetaView {
     MetaView { pallets, types }
 }
 
-fn storage_from_entry(
-    e: frame_metadata::v15::StorageEntryMetadata<PortableForm>,
-    types: &PortableRegistry,
-) -> StorageView {
-    let (hashers, key_types, value_type) = match e.ty {
-        StorageEntryType::Plain(ty) => (vec![], vec![], ty.id),
-        StorageEntryType::Map {
-            hashers,
-            key,
-            value,
-        } => {
-            let hasher_names = hashers.iter().map(|h| format!("{h:?}")).collect();
-            // key may be a tuple of N types matching N hashers
-            let key_types = flatten_key_types(key.id, hashers.len(), types);
-            (hasher_names, key_types, value.id)
-        }
+fn storage_from_entry(e: frame_metadata::v15::StorageEntryMetadata<PortableForm>) -> StorageView {
+    let hashers = match e.ty {
+        StorageEntryType::Plain(_) => Vec::new(),
+        StorageEntryType::Map { hashers, .. } => hashers.iter().map(|h| format!("{h:?}")).collect(),
     };
     StorageView {
         name: e.name,
         hashers,
-        key_types,
-        value_type,
         default_bytes: e.default,
     }
-}
-
-fn storage_from_entry_v14(
-    e: frame_metadata::v14::StorageEntryMetadata<PortableForm>,
-    types: &PortableRegistry,
-) -> StorageView {
-    use frame_metadata::v14::StorageEntryType as T;
-    let (hashers, key_types, value_type) = match e.ty {
-        T::Plain(ty) => (vec![], vec![], ty.id),
-        T::Map {
-            hashers,
-            key,
-            value,
-        } => {
-            let hasher_names = hashers.iter().map(|h| format!("{h:?}")).collect();
-            let key_types = flatten_key_types(key.id, hashers.len(), types);
-            (hasher_names, key_types, value.id)
-        }
-    };
-    StorageView {
-        name: e.name,
-        hashers,
-        key_types,
-        value_type,
-        default_bytes: e.default,
-    }
-}
-
-fn flatten_key_types(key_id: u32, n_hashers: usize, types: &PortableRegistry) -> Vec<u32> {
-    if n_hashers <= 1 {
-        return vec![key_id];
-    }
-    if let Some(ty) = types.resolve(key_id) {
-        if let TypeDef::Tuple(t) = &ty.type_def {
-            if t.fields.len() == n_hashers {
-                return t.fields.iter().map(|f| f.id).collect();
-            }
-        }
-        if let TypeDef::Composite(c) = &ty.type_def {
-            if c.fields.len() == n_hashers {
-                return c.fields.iter().map(|f| f.ty.id).collect();
-            }
-        }
-    }
-    vec![key_id]
 }
 
 fn find_pallet<'a>(meta: &'a MetaView, name: &str) -> Result<&'a PalletView, String> {
@@ -967,6 +897,46 @@ fn normalize_json(text: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_view_keeps_map_hashers_and_value_query_default() {
+        // v15 re-exports v14 storage entries, so both metadata versions
+        // must use the same projection without changing hasher order.
+        use frame_metadata::v14::{StorageEntryMetadata, StorageEntryModifier, StorageHasher};
+
+        let entry = StorageEntryMetadata::<PortableForm> {
+            name: "CommitRevealWeightsVersion".into(),
+            modifier: StorageEntryModifier::Default,
+            ty: StorageEntryType::Map {
+                hashers: vec![StorageHasher::Twox64Concat, StorageHasher::Identity],
+                key: 1_u32.into(),
+                value: 2_u32.into(),
+            },
+            default: 4_u16.encode(),
+            docs: Vec::new(),
+        };
+        let view = storage_from_entry(entry);
+        assert_eq!(view.name, "CommitRevealWeightsVersion");
+        assert_eq!(view.hashers, ["Twox64Concat", "Identity"]);
+        assert_eq!(decode_u16(&view.default_bytes), Some(4));
+    }
+
+    #[test]
+    fn storage_view_plain_entry_has_no_hashers() {
+        use frame_metadata::v15::{StorageEntryMetadata, StorageEntryModifier};
+
+        let entry = StorageEntryMetadata::<PortableForm> {
+            name: "Value".into(),
+            modifier: StorageEntryModifier::Default,
+            ty: StorageEntryType::Plain(1_u32.into()),
+            default: vec![0],
+            docs: Vec::new(),
+        };
+        let view = storage_from_entry(entry);
+        assert_eq!(view.name, "Value");
+        assert!(view.hashers.is_empty());
+        assert_eq!(view.default_bytes, [0]);
+    }
 
     fn sample_lock() -> Lockfile {
         Lockfile {

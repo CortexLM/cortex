@@ -1,6 +1,6 @@
 # Cortex review rules
 
-This is a Bittensor subnet control plane (`CortexLM/cortex`), not an app-platform
+This implements an autonomous research network on Bittensor (`CortexLM/cortex`), not an app-platform
 or SOC2 checklist. Two **live** challenge ids: `bounty` (2000 bps) and
 `proof` (8000). Proof-weighted 20%/80% regardless of eval digest. Proof's
 eval digest is pinned (`ghcr.io/cortexlm/proof-eval@sha256:78b614a1…`); do not invent a different sha256. Empty digest stays fail-closed (503). Sum is 10000. `relearn`, `relearn-image`,
@@ -8,6 +8,9 @@ eval digest is pinned (`ghcr.io/cortexlm/proof-eval@sha256:78b614a1…`); do not
 row, no compose services). Historical miner stubs stay under `docs/external-miner/`. Frozen
 specs remain for xtask gates. Leftover `prism-*` crates are the Lium harvest stack used by Proof.
 
+- **Distinguish vision from implementation.** `docs/WHITEPAPER.md` maps the
+  proposal to code. Do not market unfinished judging, research persistence,
+  synthesis, or Proof emission as deployed capabilities.
 - **Fail-closed.** Missing holdout file, commitment mismatch, unpinned eval
   digest, or unset judge credentials → refuse / 503. Never score the public split as a
   substitute. `*_FORCE_SIM` is CI/local only and must be the *only* way to
