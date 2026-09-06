@@ -1,6 +1,11 @@
 # Cortex completeness matrix
 
-Honest per-component status as of `main` HEAD. Updated as phases land.
+Per-component implementation status. Updated as phases land. This is not a fresh
+production-health check; infrastructure entries record the documented operator
+baseline, not observations made by reading this repository.
+
+For new readers: [overview](OVERVIEW.md). For the difference between the
+whitepaper's research vision and current code: [implementation comparison](WHITEPAPER.md).
 
 ## Legend
 
@@ -9,7 +14,7 @@ Honest per-component status as of `main` HEAD. Updated as phases land.
 | **done** | Implemented, tested, wired into a running binary. |
 | **sim** | Code exists and passes tests, but the running binary uses a simulated backend, not live data. |
 | **lib-only** | Library crate is complete; no binary drives it in production. |
-| **stub** | Trait method returns `NotImplemented`; placeholder for future wiring. |
+| **partial** | Some behavior exists, but the advertised end-to-end mechanism is incomplete. |
 | **test-only** | Compiled and exercised by tests; deliberately unreachable from any shipped binary. |
 | **missing** | No code, no compose service, no CI image. |
 
@@ -19,9 +24,7 @@ Honest per-component status as of `main` HEAD. Updated as phases land.
 |-----------|--------|-------|
 | `ChainClient` trait | done | 14 methods, full trait surface. |
 | `FakeChain` | test-only | Deterministic in-memory. No longer reachable from any binary; used by unit and adversarial tests. |
-| `NotImplementedChain` | stub | Every method returns `Err(NotImplemented)`. |
-| `LiveRpcChain` (feature `live` on older chain helpers) | stub | Legacy stub surface: `current_block` + `block_hash` only; metagraph / weight submit paths `NotImplemented`. **Not** the production backend. |
-| `chain-live` crate (`LiveChainClient`) | **done** | Production chain client: full JSON-RPC reads (`Identity` hasher, `Keys` double-map enumeration, `ValueQuery` defaults) + sr25519 signed `set_weights` / `commit_timelocked_mechanism_weights`. The **only** backend in `bins/validator` and `bins/gateway`; both fail fast if the chain is unreachable. Four `#[ignore]` tests read live testnet 541. Do not confuse with stub `LiveRpcChain` above. |
+| `chain-live` crate (`LiveChainClient`) | **done** | Production chain client: full JSON-RPC reads (`Identity` hasher, `Keys` double-map enumeration, `ValueQuery` defaults) + sr25519 signed `set_weights` / `commit_timelocked_mechanism_weights`. The **only** backend in `bins/validator` and `bins/gateway`; both fail fast if the chain is unreachable. Four `#[ignore]` tests read live testnet 541. Obsolete alternative stubs were removed; see [cleanup scope](CLEANUP.md). |
 | `BASE_CHAIN_ENDPOINT` / `BASE_CHAIN_ENDPOINTS` | done | Read by `config::Config`; consumed by `chain-live::LiveChainClient::connect`. The plural var is an ordered comma-separated failover list (wins over the singular); a rate-limited (HTTP 429 / `-32005`) or unreachable endpoint cools 60s and the call tries the next in order. |
 | CRV4 tlock encryption | **done** | Drand Quicknet TLE via git-pinned `tle` (same rev as subtensor / `bittensor_drand`); `LiveChainClient::submit_timelocked_weights` encrypts SCALE `WeightsTlockPayload` before signing. Fail-closed on encrypt error — never downgrades to `set_weights` while CR is enabled. |
 
@@ -70,7 +73,7 @@ specs (`DESIGN_CHALLENGE.md`, `PRISM.md`) remain for `xtask` gates. Leftover
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Challenge id | **done** | `proof` on the wire. Topics are operator-published signed documents; git carries no catalog. |
-| Crates (`crates/proof-*`) | **done** | task (signed topics, holdout commitments, global pin, `payout_mode` / English `validation`), score (per-topic pass + WTA/discovery sum), store, eval (RLM judge, fail-closed readiness), harvest, http, challenge. |
+| Crates (`crates/proof-*`) | **partial** | Signed topics, holdout commitments, global pin, per-topic pass + WTA/discovery payout, in-memory store, readiness checks, harvest, and HTTP exist. They do not constitute the full autonomous research loop. |
 | Binary (`bins/proof-challenge`) | **done** | HTTP API on `:8100`. |
 | Miner CLI (`bins/ctx`) | **done** | `ctx proof submit|show|status|topics`. Unpinned digest / unwired harvest / no open topic → 503. |
 | Compose / images | **done** | Default compose + `images.yml` target `proof-challenge`. |
@@ -79,7 +82,11 @@ specs (`DESIGN_CHALLENGE.md`, `PRISM.md`) remain for `xtask` gates. Leftover
 | Topics | **done** | sr25519 under the `proof` trust-root key (`base-proof-topic-v1`). Admin `POST /v1/admin/proof/topics`. A topic must be sealed to `open`. |
 | Holdout | **done** | Per-topic operator file (`PROOF_HOLDOUT_FILE`). Commitment in the topic document, never in the pin. `xtask proof-holdout --topic-id`. |
 | Live harvest | **done** | `crates/proof-harvest` over `harvest-pod`; `PROOF_FORCE_SIM` is local-only. |
-| Emission | **8000 bps** | Proof-weighted 20%/80% regardless of digest. Unwired harvest / unsealed baseline / empty open set → 503 / `NoScore(ChallengeInternal)`. Split equally across currently `open` topics, then `wta` or `discovery`. Empty digest still 503s (never invent a sha256). |
+| Configured allocation | **8000 bps** | Proof-weighted 20%/80% regardless of digest. Payout splits equally across currently `open` topics, then `wta` or `discovery`. Empty digest / missing evaluation prerequisites still fail closed. |
+| Automatic emission | **lib-only** | `proof-challenge::emit_epoch` signs payout leaves, but `bins/proof-challenge` does not call it or run an emission loop; the HTTP state starts at epoch `0`. Do not infer payments from `can_score`. |
+| Autonomous research judge | **partial** | Python `judge.py` requests an acknowledgement, while `agent.py` uses static text checks. General recipe reproduction and the paper's recursive investigation are not implemented. |
+| Research persistence | **missing** | The service uses `MemoryStore`; submissions and scores are lost on restart. Public HTTP records are not a durable artifact archive. |
+| Synthesis / shared-stack adoption | **missing** | The second agent and verified adoption loop described in whitepaper §7 are not implemented. |
 | Spec | live | [`PROOF.md`](PROOF.md). |
 
 ## Infrastructure
@@ -121,6 +128,8 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 
 | Gap | Impact |
 |-----|--------|
+| Proof research-to-payment path | Partial Python judging, in-memory results, epoch `0` HTTP state, and no automatic emitter prevent treating the current service as the full whitepaper mechanism. See [the source comparison](WHITEPAPER.md#proposal-versus-current-code). |
+| Proof scoring vs whitepaper | Current code uses equal topic masses, one primary metric, exact WTA ties, and digest duplicate checks. The paper's multi-metric frontier, method-descriptor novelty, and synthesiser are proposals, not shipped guarantees. |
 | DCAP verify holds the attest mutex | A cold Intel PCS fetch (up to 20 s) serialises attestation submissions. |
 | DCAP error classification | Matches on `anyhow` message text; re-run `cargo test -p attest-policy --features dcap` after any `dcap-qvl` bump. |
 | Bounty severity on the backend feed | Scoring credits a `valid` row only when the backend publishes a `severity`. Until CortexLM/backend emits it, valid rows land as `valid_unpriced`, no miner can be crowned, and the share burns. Fail-closed by design: an unpriced bug cannot be paid for. |

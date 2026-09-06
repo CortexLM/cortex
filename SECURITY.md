@@ -21,7 +21,7 @@ Please include:
 
 ## Scope
 
-In scope: this control-plane repo — gateway, validator, challenge services,
+In scope: this network implementation repo — gateway, validator, challenge services,
 deploy compose/scripts as documented, and the sealed-weight path.
 
 Out of scope for this document: miner-submitted harnesses (untrusted by

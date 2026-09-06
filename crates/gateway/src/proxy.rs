@@ -6,7 +6,7 @@
 
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
@@ -218,13 +218,6 @@ async fn forward(
     ForwardResult::Ok(response)
 }
 
-/// Build upstream URL including the original request query string.
-#[must_use]
-#[allow(dead_code)]
-pub fn upstream_uri(base: &str, rest: &str, original: &Uri) -> String {
-    upstream_url(base, rest, original.query())
-}
-
 /// Collapse `.` / empty / `..` segments the same way `url`/`reqwest` will before
 /// the upstream request — used so gateway gates cannot be skipped via `v1/./admin`.
 #[must_use]
@@ -317,10 +310,15 @@ mod tests {
     }
 
     #[test]
-    fn upstream_uri_joins_path_and_query() {
-        let u: Uri = "http://gw/challenge/c1/v1/score?x=1".parse().unwrap();
-        let out = upstream_uri("http://127.0.0.1:9", "v1/score", &u);
-        assert_eq!(out, "http://127.0.0.1:9/v1/score?x=1");
+    fn upstream_url_joins_path_and_query() {
+        assert_eq!(
+            upstream_url("http://127.0.0.1:9", "v1/score", Some("x=1")),
+            "http://127.0.0.1:9/v1/score?x=1"
+        );
+        assert_eq!(
+            upstream_url("http://127.0.0.1:9/", "/v1/score", None),
+            "http://127.0.0.1:9/v1/score"
+        );
     }
 
     #[test]

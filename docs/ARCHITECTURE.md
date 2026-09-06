@@ -1,6 +1,9 @@
 # Cortex architecture
 
-Operator-facing map of the control plane. Normative byte contracts live in the frozen specs:
+Technical map of Cortex's autonomous research network. For the purpose and
+research-reuse model, start with the [overview](OVERVIEW.md). The
+[whitepaper comparison](WHITEPAPER.md) distinguishes proposed mechanisms from
+current implementation. Normative byte contracts live in the frozen specs:
 
 | Spec | Status | Role |
 |------|--------|------|
@@ -25,8 +28,8 @@ Runbooks: [`runbooks/`](./runbooks/).
 
 ## 1. Goals
 
-- Lighter Rust control plane than the prior Python stack.
-- Gateway runs **only** as subnet owner (master). Startup asserts hotkey == on-chain `SubnetOwnerHotkey` or exits `2` before bind.
+- Coordinate reproducible research and bug reports, evaluate evidence, and verify reward allocation.
+- Gateway runs on the **master** host. With `BASE_GATEWAY_REQUIRE_OWNER=1`, startup asserts hotkey == on-chain `SubnetOwnerHotkey` or exits `2` before bind; advisory local/staging configuration is distinct.
 - Validators **recompute** the weight vector from a signed, merkle-rooted epoch bundle. Challenge keys and measurements come from **owner-signed local files**, never from gateway HTTP.
 - CRV4 timelock commit-reveal on Bittensor testnet/mainnet as configured. Reveal is automatic on-chain.
 - Live challenges accept miner work over **HTTP** (Bounty → pair + reports; Proof → topic_id + artifact). Proof miners pay Lium when a key is present.
@@ -36,40 +39,38 @@ Runbooks: [`runbooks/`](./runbooks/).
 ## 2. Process topology
 
 ```text
-                    ┌─────────────────────────────────────┐
-                    │  Master host (compose profile master) │
-                    │  postgres · gateway · validator ·     │
-                    │  updater · socket-proxy ·             │
-                    │  bounty-challenge ·                   │
-                    │  proof-challenge                      │
-                    └───────────────┬─────────────────────┘
-                                    │ TLS terminates in gateway (D20)
-                                    │ /challenge/{id}/*  /v1/bundle/*
-                    ┌───────────────▼─────────────────────┐
-                    │  Other validator hosts (no gateway,   │
-                    │  no challenge services / socket-proxy)│
-                    │  validator · local trust roots        │
-                    │  peer root exchange (HTTPS + hotkey)  │
-                    └───────────────┬─────────────────────┘
-                                    │ HTTP submit
-                    ┌───────────────▼─────────────────────┐
-                    │  Miner clients                       │
-                    │  bounty pair + bug reports            │
-                    │  proof topic_id + experiment artifact │
-                    └─────────────────────────────────────┘
+Miner clients
+  │ HTTP: Bounty pair/reports or Proof topic/experiment
+  ▼
+Master host (role-master overlay + master profile)
+  gateway · postgres · socket-proxy
+  bounty-challenge · proof-challenge
+  │                    │
+  │                    └─ Proof harvest → Lium evaluation pod
+  │ signed bundles
+  ▼
+Validator host (role-validator overlay)
+  validator · postgres · local owner-signed trust roots
+  │ peer cross-checks; no challenge execution
+  ▼
+Bittensor: verified reward weights
 ```
+
+The master overlay disables the co-located validator; local E2E may explicitly
+enable one. `updater` is an optional `auto-update` profile. TLS currently
+terminates in the host reverse proxy, not in the gateway process.
 
 | Binary / crate | Role |
 |----------------|------|
-| `gateway` | Master-only: registry, reverse proxy, bundle seal/serve, sole TLS owner; mounts marketing [`SITE_API.md`](./SITE_API.md) (`GET /v1/site/*`) |
+| `gateway` | Master-only: registry, reverse proxy, bundle seal/serve; mounts public website [`SITE_API.md`](./SITE_API.md) (`GET /v1/site/*`) |
 | `validator` | Fetch/mirror bundle, verify, recompute, peer cross-check, CRV4 submit, dissent |
 | `bounty-challenge` | **Master-only:** internal pair/reports/adjudicate; **reads** CortexLM/backend public API for scoring and signs leaves from those rows. An unreadable feed pays nobody — `E` is covered with `ChallengeInternal`, share burns to uid 0 — rather than scoring offline |
-| `proof-challenge` | **Master-only:** operator-published signed topics, per-topic holdout unseal, digest-pinned RLM judge, mean-of-open-topics lattice, sign leaves |
+| `proof-challenge` | **Master-only:** signed topics, holdout loading, evaluation orchestration. Library payout is a sum of WTA/discovery topic masses; the binary has no automatic leaf-emission loop yet |
 | `updater` | Digest-pinned rollouts via `docker-socket-proxy` (master) |
 | `trustroot` | Offline keygen / sign / verify for owner-signed TOML |
 | `bundle` | SCALE types, seal, verify (`PROTOCOL_VERSION`) |
 | `aggregate` | Integer aggregation (Hamilton house 65535) |
-| `chain` | Chain client trait + SDK wiring |
+| `chain` / `chain-live` | Shared chain trait + deterministic test backend / production JSON-RPC client and signed weight submission |
 | `trustroot` (lib) | Load local signed challenges/measurements; dual-accept rotation |
 | `base-attest-*` | Parse / replay / policy for TDX quotes (bundle measurement pin) |
 | `crosscheck` / `dissent` | Peer roots and three-outcome policy |
@@ -79,6 +80,10 @@ Runbooks: [`runbooks/`](./runbooks/).
 ---
 
 ## 3. Data flow (one epoch)
+
+This is the bundle pipeline. Bounty drives its emitter; Proof's corresponding
+payout/signing helpers still need service wiring. See
+[implementation status](COMPLETENESS.md#proof-challenge).
 
 1. **Pin.** Gateway (or seal path) pins `block_hash` / metagraph root at epoch boundary.
 2. **Leaves.** Challenge backends produce challenge-signed `Score` or `NoScore` leaves for the **validator-derived** expected set (D24). Tip epochs may **supersede** a leaf when the signed `payload_digest` changes for the same `(challenge, epoch, miner)`; identical digests stay idempotent.
@@ -110,7 +115,9 @@ a baseline is sealed, and ≥1 topic is open. Do not invent a sha256.
 claiming those ids fails the trust-root check. Each live challenge signs
 leaves under its **own** key; no two rows share one.
 
-Gateway DB is **routing only**. It is never a source of challenge keys, emission shares, or measurements (D18, D23).
+The gateway database persists raw weights and sealed bundles; backend routing
+remains in memory. Neither is **trust authority**: challenge keys, emission
+shares, and measurements come from the owner-signed local files (D18, D23).
 
 Ceremony: [`config/CEREMONY.md`](../config/CEREMONY.md).  
 Rotation: [`runbooks/trust-root-rotation.md`](./runbooks/trust-root-rotation.md) (D21).
@@ -121,9 +128,11 @@ Rotation: [`runbooks/trust-root-rotation.md`](./runbooks/trust-root-rotation.md)
 
 | Profile | Services |
 |---------|----------|
-| default | postgres, validator, updater, socket-proxy, bounty-challenge, proof-challenge |
-| `master` | + gateway (owner host only); live challenges stay on master |
-| `role-validator` overlay | disables gateway, updater, challenges, socket-proxy |
+| default | postgres, validator, socket-proxy, bounty-challenge, proof-challenge |
+| `master` | adds gateway; use the master role overlay on operator hosts |
+| `role-master` overlay | disables validator; challenges stay on master |
+| `role-validator` overlay | disables gateway, updater, challenges, socket-proxy; keeps postgres and validator |
+| `auto-update` | optional updater; not part of the default stack |
 | `evil-gateway` | **test-only** adversarial harness (task 48). Never prod. |
 
 See [`deploy/README.md`](../deploy/README.md) and root [`docker-compose.yml`](../docker-compose.yml).
@@ -138,6 +147,8 @@ See D19 in [`THREAT_MODEL.md`](./THREAT_MODEL.md). Short form:
 - Owner honesty is out of scope (owner signs roots and runs gateway).
 - Non-equivocation is **peer-consensus + local evidence**, not a public on-chain `(epoch → bundle_root)` anchor.
 - Gateway HA is **not** claimed (R9): restart policy + manual failover only.
+- A complete autonomous research judge, durable shared research collection, and
+  synthesis/adoption loop are **not** implemented. See [the paper-to-code comparison](WHITEPAPER.md).
 
 ---
 

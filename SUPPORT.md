@@ -4,7 +4,7 @@
 
 | Kind | Where |
 |------|--------|
-| Bug in this control plane | [GitHub issue — bug](https://github.com/CortexLM/cortex/issues/new?template=bug.yml) |
+| Bug in the network software | [GitHub issue — bug](https://github.com/CortexLM/cortex/issues/new?template=bug.yml) |
 | Feature or docs change | [GitHub issue — feature](https://github.com/CortexLM/cortex/issues/new?template=feature.yml) |
 | Miner submit / scoring questions | [docs/external-miner/](docs/external-miner/) and the public miner repos linked there |
 | Operator deploy | [deploy/README.md](deploy/README.md), [docs/runbooks/](docs/runbooks/) |
@@ -18,8 +18,10 @@ repo. Mentions of maintainers go through GitHub and
 
 ## What this repo is (and is not)
 
-- **Is:** Cortex Rust workspace — gateway, validator, bounty and proof
-  challenges, deploy matrix.
+- **Is:** the implementation of Cortex's autonomous research network: gateway,
+  validators, Bounty and Proof services, research evaluation, and deployment tools.
+- **Start here:** [overview](docs/OVERVIEW.md) for the purpose;
+  [implementation status](docs/COMPLETENESS.md) for current limits.
 - **Is not:** a miner SDK rewrite, a protocol fork, or a live Relearn /
   Design / Prism product.
 

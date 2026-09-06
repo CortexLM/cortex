@@ -1,6 +1,6 @@
 # Bounty Challenge (live challenge)
 
-Control-plane notes. Miners start at [`external-miner/bounty.md`](./external-miner/bounty.md).
+Operator reference. Miners start at [`external-miner/bounty.md`](./external-miner/bounty.md).
 Validators start at [`external-miner/validators.md`](./external-miner/validators.md).
 
 **Public transparency lives in CortexLM/backend.** This subnet **reads**
@@ -27,11 +27,11 @@ board.
 | `challenge_id` | `bounty` |
 | `challenge_scoring_version` | `1` |
 | Port | `8096` (local host `28096`) |
-| Emission | `7000` bps |
+| Emission | `2000` bps (20%; Proof has the other 80%) |
 
-## Why this challenge is not gated like the Relearn ones
+## Why bug reports need different evaluation
 
-The LLM challenges defend a private holdout against a model that memorised it.
+Proof's research evaluation protects private holdouts against memorization.
 Bounty has no model and no holdout to memorise; its scarce resource is
 **adjudication**, and its failure modes are volume plays against a human or
 agent triage queue. Copying the LLM gate stack here would gate the wrong thing.
