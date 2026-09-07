@@ -58,19 +58,15 @@ pub fn force_sim() -> bool {
     )
 }
 
-/// True when sim should emit a passing StubWin vector against the sealed baseline.
+/// True when this host opted into sim (`PROOF_FORCE_SIM`).
 ///
-/// Staging/dev only. The Lium path never reads this. Requires [`EvalBackend::Sim`]
-/// (itself `PROOF_FORCE_SIM`) plus `PROOF_SIM_STUB_WIN=1`.
+/// Under [`EvalBackend::Sim`] a sealed baseline scores with
+/// [`sim_win_document`] (harness relative to the seal). Skill-only
+/// [`sim_document`] cannot beat a real ~0.29 NLL seal. The Lium path never
+/// uses either helper. `PROOF_SIM_STUB_WIN` is a leftover no-op.
 #[must_use]
 pub fn sim_stub_win() -> bool {
-    matches!(
-        std::env::var("PROOF_SIM_STUB_WIN")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes"
-    )
+    force_sim()
 }
 
 /// Resolve the scoring backend for this host. Sim is never implicit.
@@ -559,8 +555,8 @@ fn beat(baseline: f64, direction: MetricDirection, epsilon: f64) -> f64 {
 /// Sim harness **relative to `sealed`**, not a higher [`sim_document`] skill.
 ///
 /// Clears quality_floor (NLL ≤ sealed + floor), split_regress, and the
-/// primary epsilon. Only used when [`sim_stub_win`] is on. Never called
-/// from the Lium path.
+/// primary epsilon. Used for every [`EvalBackend::Sim`] score that has a
+/// sealed baseline. Never called from the Lium path.
 #[must_use]
 pub fn sim_win_document(
     pin: &ProofPin,
@@ -675,15 +671,13 @@ pub async fn eval_after_freeze(
         ));
     }
     let doc = match backend {
-        EvalBackend::Sim if sim_stub_win() => {
-            let sealed = sealed.ok_or_else(|| {
-                EvalError::Baseline("PROOF_SIM_STUB_WIN needs a sealed baseline".into())
-            })?;
-            sim_win_document(pin, topic, frozen_digest, artifact_digest, sealed)
-        }
         EvalBackend::Sim => {
-            let skill = unit(&[artifact_digest, "skill"], 0);
-            sim_document(pin, topic, frozen_digest, artifact_digest, skill, true)
+            if let Some(sealed) = sealed {
+                sim_win_document(pin, topic, frozen_digest, artifact_digest, sealed)
+            } else {
+                let skill = unit(&[artifact_digest, "skill"], 0);
+                sim_document(pin, topic, frozen_digest, artifact_digest, skill, true)
+            }
         }
         EvalBackend::Lium => {
             let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
@@ -1036,8 +1030,6 @@ mod tests {
         t
     }
 
-    static STUB_WIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn stub_win_clears_quality_floor_against_a_tight_sealed_baseline() {
         let pin = pin("");
@@ -1070,12 +1062,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn stub_win_is_ignored_on_the_lium_path() {
-        let _g = STUB_WIN
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var("PROOF_SIM_STUB_WIN", "1");
         let t = throughput_topic();
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
         let p = pin(&format!("sha256:{}", "ab".repeat(32)));
@@ -1094,7 +1081,6 @@ mod tests {
         )
         .await
         .expect("live");
-        std::env::remove_var("PROOF_SIM_STUB_WIN");
         assert_eq!(out.backend, EvalBackend::Lium);
         assert_eq!(out.receipt.provider, "lium");
         assert!(out.harness.holdout_nll > 1.0, "must not emit stub-win NLL");

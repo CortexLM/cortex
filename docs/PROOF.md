@@ -150,7 +150,11 @@ baseline + an open topic are on the host.
   publish that topic; scoring fail-closes until the real harness fills
   `custom_value`.
 - `PROOF_FORCE_SIM` is CI/local opt-in only. Never a fallback. Forbidden on
-  droplet overlays.
+  droplet overlays. Under sim, a sealed topic scores with harness numbers
+  relative to the seal (`sim_win_document`); skill-only `sim_document`
+  cannot beat a real ~0.29 NLL baseline. `PROOF_SIM_STUB_WIN` is a leftover
+  no-op. Resealing staging to `BASELINE_SKILL=0.40` (NLL ≈ 2.94) is an
+  operator lane, not this binary.
 - No Modal. No secrets, hosts, holdout records, or teacher endpoints in git.
 
 ## Publish a research topic

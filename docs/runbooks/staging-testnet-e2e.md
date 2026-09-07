@@ -118,7 +118,7 @@ git checkout <good-sha>
 - `FakeChain` is the default backend; `BASE_CHAIN_BACKEND=live` switches to `chain-live`.
 - CRV4 tlock encryption is implemented (`tle` / Drand Quicknet); when commit-reveal is off, `set_weights` is used instead.
 - Proof live (Lium) submits stay **503** until harvest is wired, a baseline is sealed, and ≥1 topic is open.
-- When staging is opted into **sim** (`PROOF_FORCE_SIM=true` on the host, not in `env-staging.yml`), submit → score is the contract in [`proof-submit-e2e.md`](proof-submit-e2e.md). Topic ids in that window: `dt-no-ib-v0`, `muon-vs-adamw-10m-v0`. For `state=awaiting_admin` against a real ~0.29 NLL seal, also set `PROOF_SIM_STUB_WIN=true` (host env only). Skill-only sim cannot beat that floor. Do not `set_weights`. Do not POST if `eval_backend` is `lium` and `can_score` is true.
+- When staging is opted into **sim** (`PROOF_FORCE_SIM=true` on the host, not in `env-staging.yml`), submit → score is the contract in [`proof-submit-e2e.md`](proof-submit-e2e.md). Topic ids in that window: `dt-no-ib-v0`, `muon-vs-adamw-10m-v0`. **Option A (code):** a sealed topic under `force_sim` emits a sealed-relative harness (deploy the binary; do not edit host files). **Option B (Développeur):** reseal to `BASELINE_SKILL=0.40` (NLL ≈ 2.94) and resign topics. Do not race those lanes. Do not `set_weights`. Do not POST if `eval_backend` is `lium` and `can_score` is true.
 
 ```bash
 # From a machine that can reach the staging gateway (no SSH required).

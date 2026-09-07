@@ -11,31 +11,23 @@ Staging (operator-ready at time of writing): `can_score=true`,
 `openrouter-glm53flash-v0`, open topics `dt-no-ib-v0` and
 `muon-vs-adamw-10m-v0`.
 
-### StubWin (required for `awaiting_admin` on a real seal)
+### Ownership: StubWin (A) vs reseal (B)
 
-Default `sim_document` uses `nll = (3.10 - 0.40 * skill).max(1.0)`. Even
-skill=1.0 stays at NLL ≥ 1.0. A CPU-sealed staging baseline of ~0.29 then
-always trips `quality_floor`. Test `StubScorer::win` only passes because
-those baselines are also sim-derived (`BASELINE_SKILL=0.40`).
+Skill-only `sim_document` uses `nll = (3.10 - 0.40 * skill).max(1.0)`.
+Even skill=1.0 stays at NLL ≥ 1.0, so a CPU-sealed ~0.29 baseline always
+trips `quality_floor`. Two ways to reach `awaiting_admin` — **do not race**:
 
-`PROOF_SIM_STUB_WIN=1` (and `PROOF_FORCE_SIM=true` so `eval_backend=sim`)
-emits harness numbers **relative to the sealed vector**: NLL ≤ sealed +
-quality floor, no split regress, primary beat by `epsilon_rel + 0.01`.
-The Lium path never reads this env.
+| Option | Owner | What |
+|--------|--------|------|
+| **A (lasting)** | this PR / code | Under `PROOF_FORCE_SIM` (`eval_backend=sim`), a sealed topic scores with harness numbers **relative to the sealed vector** (`sim_win_document`). No extra host env. Lium never takes this path. |
+| **B (ops)** | Développeur | Reseal staging baselines to sim-compatible `BASELINE_SKILL=0.40` (NLL ≈ 2.94), resign topics, retest submit→`awaiting_admin` on staging only. |
 
-Enable on the **staging host env file** (not `env-staging.yml` — compose
-overlays stay sim-off; `assert-compose-matrix.sh` fails if they set this):
+Do **not** reseal or edit staging host files from the code lane. Deploy A;
+Développeur runs B if they want a skill-only host. Prefer A.
 
-```bash
-# deploy/env/proof-challenge.env on cortex-staging (never commit)
-PROOF_FORCE_SIM=true
-PROOF_SIM_STUB_WIN=true
-# restart proof-challenge, then:
-curl -sS "$BASE/v1/status"
-# expect eval_backend=sim, force_sim=true, sim_stub_win=true
-```
-
-Local compose (`env-local.yml`) defaults `LOCAL_PROOF_SIM_STUB_WIN=true`.
+Local compose (`env-local.yml`) defaults `LOCAL_PROOF_FORCE_SIM=true`.
+`PROOF_SIM_STUB_WIN` is a leftover no-op. Droplet overlays stay sim-off
+(`assert-compose-matrix.sh`).
 
 ## Commands (in-repo, CI-safe)
 
@@ -206,12 +198,12 @@ A 2xx/4xx/5xx with an empty `{}` and no `id` / no `error` is a **fail**.
 
 ## Local compose (disposable)
 
-`env-local.yml` defaults `LOCAL_PROOF_FORCE_SIM=true` and
-`LOCAL_PROOF_SIM_STUB_WIN=true`. Droplet overlays (`env-staging.yml` /
-`env-prod.yml`) must keep both `PROOF_FORCE_SIM` and `PROOF_SIM_STUB_WIN`
-false; `assert-compose-matrix.sh` fails if they do not. A **host** may set
-them in `deploy/env/proof-challenge.env` on staging for this test window —
-that is operator state, not a git overlay.
+`env-local.yml` defaults `LOCAL_PROOF_FORCE_SIM=true`. Droplet overlays
+(`env-staging.yml` / `env-prod.yml`) must keep `PROOF_FORCE_SIM` (and the
+leftover `PROOF_SIM_STUB_WIN`) false; `assert-compose-matrix.sh` fails if
+they do not. A staging **host** may already have `PROOF_FORCE_SIM=true`
+in `deploy/env/proof-challenge.env` — that is operator state, not a git
+overlay. Do not reseal from this lane.
 
 ```bash
 ./deploy/scripts/materialize-env.sh
@@ -266,12 +258,13 @@ Receipts: `"provider":"sim"`. Agent: `clean` / `reproduced`. No rent.
 `staging.api.joinbase.ai` still answers `eval_backend=lium` /
 `can_score=false` / empty topics — do not POST there.
 
-To reach `awaiting_admin` on this host: deploy this branch, set
-`PROOF_SIM_STUB_WIN=true` next to `PROOF_FORCE_SIM=true` in the host
-`deploy/env/proof-challenge.env`, restart `proof-challenge`, confirm
-`sim_stub_win=true` on status, then re-run `--probe`. Admin adjudicate
-needs the host bearer at `/opt/base/deploy/secrets/proof/admin_tokens`
-(do not log). No `set_weights`.
+To reach `awaiting_admin` on this host (**option A**): deploy this branch
+(no host-file edit, no reseal). Status then reports `sim_stub_win=true`
+whenever `eval_backend=sim`. Re-run `--probe`. **Option B** (reseal to
+`BASELINE_SKILL=0.40` / NLL ≈ 2.94 and resign topics) is Développeur-only
+— do not reseal from this lane. Admin adjudicate needs the host bearer at
+`/opt/base/deploy/secrets/proof/admin_tokens` (do not log). No
+`set_weights`.
 
 ## Related
 

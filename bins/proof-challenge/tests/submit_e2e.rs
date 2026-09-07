@@ -276,7 +276,6 @@ impl Host {
             .arg("--inference-offer-file")
             .arg(dir.join("offer.json"))
             .env("PROOF_FORCE_SIM", "true")
-            .env("PROOF_SIM_STUB_WIN", "true")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

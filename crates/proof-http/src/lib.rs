@@ -30,7 +30,7 @@ use axum::{Json, Router};
 
 use proof_eval::{
     contamination_evidence, eval_after_freeze, force_sim, scoring_readiness,
-    secret_backed_base_url, sim_stub_win, supported_custom, EvalBackend, EvalError, LiveScorer,
+    secret_backed_base_url, supported_custom, EvalBackend, EvalError, LiveScorer,
 };
 use proof_score::{
     judge_topic, primary_from_harness, AgentVerdict, GateFail, HarnessMetrics, MinerTopicRun,
@@ -141,7 +141,7 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         },
         "eval_backend": st.backend,
         "force_sim": force_sim(),
-        "sim_stub_win": st.backend == EvalBackend::Sim && sim_stub_win(),
+        "sim_stub_win": st.backend == EvalBackend::Sim,
         "can_score": st.can_score(),
         "live_harvest_wired": st.live_scorer.is_some(),
         "baseline_sealed": baseline_sealed,
@@ -919,7 +919,7 @@ mod tests {
             json_req(app("op"), "GET", "/v1/status", serde_json::json!({}), None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(body["eval_backend"], "sim");
-        assert_eq!(body["sim_stub_win"], false, "{body}");
+        assert_eq!(body["sim_stub_win"], true, "{body}");
         assert_eq!(body["can_score"], true, "{body}");
         assert_eq!(body["baseline_sealed"], true, "{body}");
         assert_eq!(body["open_topics"][0], "dt-no-ib-v0");
@@ -1677,28 +1677,8 @@ mod tests {
         })
     }
 
-    static STUB_WIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn sim_stub_win_submit_reaches_awaiting_admin() {
-        let _g = STUB_WIN
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::remove_var("PROOF_SIM_STUB_WIN");
-        let (st, created) = json_req(
-            app_tight_sim(),
-            "POST",
-            "/v1/submissions",
-            submit_body("tight-reject", &serde_json::json!({})),
-            None,
-        )
-        .await;
-        assert_eq!(st, StatusCode::CREATED, "{created}");
-        assert_eq!(created["state"], "rejected", "{created}");
-        assert_eq!(created["eligible"], false, "{created}");
-
-        std::env::set_var("PROOF_SIM_STUB_WIN", "1");
         let app = app_tight_sim();
         let (st, status) = json_req(
             app.clone(),
@@ -1720,7 +1700,6 @@ mod tests {
             None,
         )
         .await;
-        std::env::remove_var("PROOF_SIM_STUB_WIN");
         assert_eq!(st, StatusCode::CREATED, "{created}");
         assert_eq!(created["state"], "awaiting_admin", "{created}");
         assert_eq!(created["eligible"], true, "{created}");

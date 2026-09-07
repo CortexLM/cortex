@@ -123,7 +123,7 @@ async fn live_host_submit_scores_or_fails_closed() {
         .filter(|id| listed.iter().any(|got| got == *id))
         .collect();
     if topic_ids.is_empty() {
-        topic_ids.push(listed.first().map(String::as_str).unwrap_or("dt-no-ib-v0"));
+        topic_ids.push(listed.first().map_or("dt-no-ib-v0", String::as_str));
     }
 
     for topic_id in topic_ids {
