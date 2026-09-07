@@ -5,6 +5,7 @@
 
 use proof_score::MinerTopicRun;
 use proof_store::{durable::DurableJournal, MemoryStore, Submission, SubmissionState};
+use sha2::{Digest, Sha256};
 
 fn submission(id: &str, hotkey: &str, topic: &str) -> Submission {
     Submission {
@@ -20,7 +21,7 @@ fn submission(id: &str, hotkey: &str, topic: &str) -> Submission {
         config_commitment: "c".repeat(64),
         manifest: proof_store::ArtifactManifest::default(),
         nonce: "n".into(),
-        submission_digest: "d".repeat(64),
+        submission_digest: hex::encode(Sha256::digest(format!("{id}|{hotkey}|{topic}").as_bytes())),
         state: SubmissionState::AwaitingAdmin,
         receipt_json: None,
         verdict: None,
@@ -179,6 +180,12 @@ async fn multi_instance_atomicity_identity_and_cancellation() {
         .with_journal(DurableJournal::new(database.app_pool().await.unwrap()))
         .await
         .unwrap();
+    assert_eq!(reload.list_durable().await.unwrap().len(), 3);
+    let again = a
+        .finish_durable(submission("", "cancelled", "topic"), run())
+        .await
+        .unwrap();
+    assert_eq!(again.id, id);
     assert_eq!(reload.list_durable().await.unwrap().len(), 3);
     pool.close().await;
     assert!(a.get_durable(&id).await.is_err());

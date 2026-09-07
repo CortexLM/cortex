@@ -210,8 +210,13 @@ async fn open_store(path: Option<&Path>) -> Result<MemoryStore, String> {
                 .with_journal(proof_store::durable::DurableJournal::new(pool))
                 .await
                 .map_err(|_| "store database is not migrated or lacks restricted privileges")?;
-            let reloaded = store.list().map_or(0, |rows| rows.len());
-            tracing::info!(submissions = reloaded, "durable store journal attached");
+            let reloaded = store.list_durable().await.map_err(|_| {
+                "store journal snapshot failed; refuse to boot on a silent empty reload"
+            })?;
+            tracing::info!(
+                submissions = reloaded.len(),
+                "durable store journal attached"
+            );
             store
         }
     })

@@ -4,11 +4,13 @@
 #![forbid(unsafe_code)]
 
 mod corpus;
+mod flops;
 mod publication;
 mod science;
 mod store;
 
 pub use corpus::*;
+pub use flops::{flop_total, ComputeOp, ComputeTrace};
 pub use publication::*;
 pub use science::*;
 pub use store::*;

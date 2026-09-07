@@ -1,5 +1,6 @@
-"""Locked AdamW recipe the image seals.
+"""Locked AdamW *parameter* recipe the image seals.
 
+This file is a dict, not executable training, and is not training-evidence.
 script_sha256 on an open topic must be SHA-256 of these exact bytes.
 A topic that claims `optimizer = adamw` with a different script is a
 strawman and a publish reject on the control plane.

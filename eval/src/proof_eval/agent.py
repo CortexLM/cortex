@@ -18,7 +18,7 @@ _NVLINK = re.compile(r"\b(nvlink|cudaIpc|CU_DEVICE_P2P)\b", re.I)
 _FAST = re.compile(r"\b(ncclNetIb|NCCL_IB_DISABLE\s*=\s*0|ncclNvls)\b", re.I)
 
 
-def inspect(request: HarvestRequest, recipe_text: str) -> dict[str, Any]:
+def fabric_cheats(request: HarvestRequest, recipe_text: str) -> list[str]:
     cheats: list[str] = []
     hay = f"{request.claim}\n{recipe_text}"
     c: Constraints = request.constraints
@@ -28,7 +28,13 @@ def inspect(request: HarvestRequest, recipe_text: str) -> dict[str, Any]:
         cheats.append("other")
     if c.no_nccl_fast_fabric and _FAST.search(hay):
         cheats.append("other")
-    # ponytail: static checks only; add agent reproduction with verified compute evidence.
+    return cheats
+
+
+def inspect(request: HarvestRequest, recipe_text: str) -> dict[str, Any]:
+    cheats = fabric_cheats(request, recipe_text)
+    # Static text cannot authorize a pass. Verified traces + training evidence
+    # are assembled in the CLI after measurement, never invented here.
     if not cheats:
         raise ContractError("agent reproduction and verified FLOP evidence are unavailable")
     return {

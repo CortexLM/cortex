@@ -7,13 +7,27 @@ Read the [overview](OVERVIEW.md) for the purpose and the
 
 **Implementation limits:** the Python judge currently performs an authenticated
 acknowledgement request and static checks, not the paper's autonomous investigation
-and arbitrary recipe reproduction. Clean static inspection now raises `ContractError`
-without agent reproduction and verified FLOP evidence; forbidden fabric rejects.
-The CLI gates before judge/model calls and produces no successful metrics.
-Agent-led accounting is not implemented: the agent must determine experiment-appropriate accounting, retain reproducible evidence, and have that evidence verified by the controller. Neither a universal formula nor an arbitrary model assertion is sufficient.
-The default v1 store is in memory. The optional SQL journal now passes fresh workspace durability tests (2/2) after fixing embedded-migration tracking. Async writes persist SQL before memory and reject NaN/infinity. Production durability remains unproven: cross-process ID collisions/upserts, separate submission/score transactions, synchronous bypass and cancellation-induced memory lag remain.
-The v1 service does not run an automatic reward-leaf emitter. Payout/signing helpers exist, but
-readiness checks alone do not establish a complete research-to-payment path.
+and arbitrary recipe reproduction. Forbidden fabric still rejects before measure
+or judge. `proof-eval score` still refuses success unless a controller-supplied
+training-evidence file carries a retained compute trace whose FLOPs independently
+recompute; miner-declared numbers and `eval/baselines/adamw.py` (a parameter lock,
+not executable training) are not that envelope. Holdout measurement now records a
+listed-op trace (`mm` / `addmm` / `bmm` / math SDPA only). Unlisted compute-shaped
+ops refuse rather than undercount. `torch.profiler` / `FlopCounterMode` are not
+the source of truth. A one-matmul fixture does not attest every recipe.
+`artifact_fingerprint` hashes file bytes, not the directory path.
+The default v1 store is in memory. The optional SQL journal snapshots with
+`snapshot_durable()` on every `emit_epoch_from_store` and on HTTP list/get;
+sync readers refuse in journal mode instead of returning empty maps. Sequence
+ids and a unique frozen `submission_digest` are in migrations **0031–0032**.
+0031 on this checkpoint already creates `proof_submission_id_seq` — do not
+replay it on an already-migrated env. Still untested: network loss during
+COMMIT. Concurrent `proof_topic_run` updates remain last-writer-wins.
+The v1 binary still does not run an automatic reward-leaf emitter. Payout
+helpers exist, but readiness checks alone do not establish a complete
+research-to-payment path. Journal rows are JSON, not artifact blobs:
+`proof-measure` caps observer tars at 64 MiB; `proof-research` retained
+artifacts cap at 16 MiB total / 1 MiB each.
 The rules below describe the current interfaces and scoring functions, not a
 claim that these gaps are closed.
 

@@ -15,8 +15,9 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast
 
+from proof_eval.compute_trace import verify_trace
 from proof_eval.contract import ContractError
-from proof_eval.harness import SCORED_SPLITS, measure
+from proof_eval.harness import SCORED_SPLITS, artifact_fingerprint, measure
 
 
 class HarnessTest(unittest.TestCase):
@@ -75,6 +76,21 @@ class HarnessTest(unittest.TestCase):
         self.assertGreater(result["tokens_per_sec"], 0)
         self.assertNotIn("clean", result)
         self.assertNotIn("reproduced", result)
+        self.assertEqual(result["artifact_fingerprint"], artifact_fingerprint(self.artifact))
+        self.assertEqual(verify_trace(result["compute_trace"]), result["eval_flops"])
+        self.assertGreater(result["eval_flops"], 0)
+
+    def test_fingerprint_hashes_bytes_not_path(self):
+        first = artifact_fingerprint(self.artifact)
+        other = self.root / "copy"
+        other.mkdir()
+        for path in self.artifact.iterdir():
+            (other / path.name).write_bytes(path.read_bytes())
+        self.assertEqual(first, artifact_fingerprint(other))
+        (other / "model.safetensors").write_bytes(
+            (other / "model.safetensors").read_bytes() + b"\x00"
+        )
+        self.assertNotEqual(first, artifact_fingerprint(other))
 
     def test_no_proxy_fallback(self):
         with self.assertRaisesRegex(ContractError, "local data-only"):

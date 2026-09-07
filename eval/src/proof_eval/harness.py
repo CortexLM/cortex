@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .compute_trace import collect_trace, verify_trace
 from .contract import ContractError
 from .request import HarvestRequest
 
@@ -71,7 +72,40 @@ def _artifact_path(artifact_dir: str | None) -> Path:
             raise ContractError("local safetensors weights are required")
     except (OSError, ValueError, TypeError, AttributeError) as exc:
         raise ContractError(f"invalid artifact: {exc}") from exc
+    # Content hashes, never the directory path. Re-read each shard.
+    artifact_fingerprint(root)
     return root
+
+
+def artifact_fingerprint(root: Path) -> str:
+    """SHA-256 of sorted (name, file-bytes-digest) pairs. Path is not hashed."""
+    digest = hashlib.sha256()
+    hashed: dict[str, str] = {}
+    try:
+        for path in sorted(root.iterdir(), key=lambda item: item.name):
+            if path.is_symlink() or not path.is_file():
+                raise ContractError("artifact entries must be regular files, not links/directories")
+            body = path.read_bytes()
+            if not body:
+                raise ContractError(f"empty artifact file: {path.name}")
+            shard = hashlib.sha256(body).hexdigest()
+            hashed[path.name] = shard
+            digest.update(path.name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(bytes.fromhex(shard))
+        index = root / "model.safetensors.index.json"
+        if index.is_file():
+            weights = json.loads(index.read_text()).get("weight_map")
+            if not isinstance(weights, dict) or not weights:
+                raise ContractError("missing safetensors weight_map")
+            for shard in weights.values():
+                if not isinstance(shard, str) or shard not in hashed:
+                    raise ContractError("safetensors shard was not hashed")
+        elif "model.safetensors" not in hashed:
+            raise ContractError("local safetensors weights are required")
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise ContractError(f"invalid artifact: {exc}") from exc
+    return digest.hexdigest()
 
 
 def require_runtime() -> None:
@@ -115,6 +149,7 @@ def measure(request: HarvestRequest, artifact_dir: str | None) -> dict[str, Any]
     forbidden here: they would be a sim fallback inside the live image.
     """
     artifact = _artifact_path(artifact_dir)
+    fingerprint = artifact_fingerprint(artifact)
     texts = []
     for rec in request.holdout:
         split = rec.get("split") or rec.get("task")
@@ -150,7 +185,7 @@ def measure(request: HarvestRequest, artifact_dir: str | None) -> dict[str, Any]
     import time
 
     t0 = time.perf_counter()
-    with torch.no_grad():
+    with collect_trace() as trace, torch.no_grad():
         for split, text in texts:
             enc = tok(text, return_tensors="pt", truncation=True, max_length=1024)
             enc = {k: v.to(device) for k, v in enc.items()}
@@ -163,6 +198,8 @@ def measure(request: HarvestRequest, artifact_dir: str | None) -> dict[str, Any]
             split_nll[split].append(nll)
             nlls.append(nll)
             tokens += int(enc["input_ids"].numel())
+    eval_trace = trace.to_dict()
+    eval_flops = verify_trace(eval_trace)
     wall = time.perf_counter() - t0
     if not math.isfinite(wall) or wall <= 0:
         raise ContractError("invalid measurement duration")
@@ -184,5 +221,7 @@ def measure(request: HarvestRequest, artifact_dir: str | None) -> dict[str, Any]
         "wall_s": int(wall) if request.family == "throughput" else None,
         "custom_value": None,
         "canary_nll": None,
-        "artifact_fingerprint": hashlib.sha256(str(artifact).encode()).hexdigest()[:16],
+        "artifact_fingerprint": fingerprint,
+        "compute_trace": eval_trace,
+        "eval_flops": eval_flops,
     }
