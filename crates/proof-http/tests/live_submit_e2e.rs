@@ -117,50 +117,54 @@ async fn live_host_submit_scores_or_fails_closed() {
         return;
     }
 
-    let topic_id = STAGING_TOPICS
+    let mut topic_ids: Vec<&str> = STAGING_TOPICS
         .iter()
         .copied()
-        .find(|id| listed.iter().any(|got| got == *id))
-        .or_else(|| listed.first().map(String::as_str))
-        .unwrap_or("dt-no-ib-v0");
+        .filter(|id| listed.iter().any(|got| got == *id))
+        .collect();
+    if topic_ids.is_empty() {
+        topic_ids.push(listed.first().map(String::as_str).unwrap_or("dt-no-ib-v0"));
+    }
 
-    let (st, created) = post(
-        &client,
-        &format!("{base}/v1/submissions"),
-        &serde_json::json!({
-            "miner_hotkey": hex64("e2e-hotkey"),
-            "artifact_digest": hex64(&format!("e2e-artifact-{topic_id}")),
-            "claim": "e2e sim submit against an open topic",
-            "declared_flops": 1,
-            "topic_id": topic_id,
-            "manifest": { "train_dataset_ids": ["e2e-mix-v0"] }
-        }),
-    )
-    .await;
-    assert!(
-        st == 201 || st == 400 || st == 503,
-        "unexpected {st} {created}"
-    );
-    if st == 201 {
+    for topic_id in topic_ids {
+        let (st, created) = post(
+            &client,
+            &format!("{base}/v1/submissions"),
+            &serde_json::json!({
+                "miner_hotkey": hex64("e2e-hotkey"),
+                "artifact_digest": hex64(&format!("e2e-artifact-{topic_id}")),
+                "claim": "e2e sim submit against an open topic",
+                "declared_flops": 1,
+                "topic_id": topic_id,
+                "manifest": { "train_dataset_ids": ["e2e-mix-v0"] }
+            }),
+        )
+        .await;
         assert!(
-            created["id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("pf_")),
-            "silent empty create: {created}"
+            st == 201 || st == 400 || st == 503,
+            "unexpected {st} {created}"
         );
-        assert_eq!(created["topic_id"], topic_id);
-        assert!(created["eval_backend"].is_string(), "{created}");
-        let id = created["id"].as_str().expect("id");
-        let (gst, row) = get(&client, &format!("{base}/v1/submissions/{id}")).await;
-        assert_eq!(gst, 200, "{row}");
-        assert!(
-            row["verdict"].is_object() || row["state"] == "rejected",
-            "{row}"
-        );
-    } else {
-        assert!(
-            created["error"].as_str().is_some_and(|e| !e.is_empty()),
-            "silent empty fail-closed: HTTP {st} {created}"
-        );
+        if st == 201 {
+            assert!(
+                created["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("pf_")),
+                "silent empty create: {created}"
+            );
+            assert_eq!(created["topic_id"], topic_id);
+            assert!(created["eval_backend"].is_string(), "{created}");
+            let id = created["id"].as_str().expect("id");
+            let (gst, row) = get(&client, &format!("{base}/v1/submissions/{id}")).await;
+            assert_eq!(gst, 200, "{row}");
+            assert!(
+                row["verdict"].is_object() || row["state"] == "rejected",
+                "{row}"
+            );
+        } else {
+            assert!(
+                created["error"].as_str().is_some_and(|e| !e.is_empty()),
+                "silent empty fail-closed: HTTP {st} {created}"
+            );
+        }
     }
 }

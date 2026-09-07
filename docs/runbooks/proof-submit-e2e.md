@@ -65,9 +65,11 @@ Do **not** point this at `https://network.cortex.foundation` or
 # Auto-detect first healthy origin among loopback + documented staging URLs:
 ./deploy/scripts/proof-submit-e2e.sh --probe
 
-# Or pin the origin (no trailing slash):
+# Or pin the origin (no trailing slash). Prefer the droplet IP on :80 —
+# staging.api.joinbase.ai has historically answered a stale Lium/fail-closed
+# instance while 159.223.159.205/challenge/proof is the ready sim host.
 PROOF_E2E_BASE=http://127.0.0.1:28100 ./deploy/scripts/proof-submit-e2e.sh --probe
-PROOF_E2E_BASE=http://staging.api.joinbase.ai/challenge/proof \
+PROOF_E2E_BASE=http://159.223.159.205/challenge/proof \
   ./deploy/scripts/proof-submit-e2e.sh --probe
 
 # Same contract as a Rust test (skip if unset):
@@ -79,8 +81,11 @@ The probe **skips POST** when `eval_backend=lium` and `can_score=true`
 
 ### Exact curl (Proof)
 
-Gateway prefix on staging is `/challenge/proof`. Direct service is `:8100`
-(local overlay `:28100`).
+Gateway prefix on staging is `/challenge/proof` (reachable on the droplet
+at `http://159.223.159.205/challenge/proof`; host-local
+`http://127.0.0.1:8080/challenge/proof/...`). Direct service is `:8100`
+(local overlay `:28100`). Do not POST to `staging.api.joinbase.ai` while
+it still reports `eval_backend=lium`.
 
 ```bash
 BASE="${PROOF_E2E_BASE:-http://127.0.0.1:28100}"   # or …/challenge/proof

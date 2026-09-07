@@ -57,8 +57,9 @@ probe_proof() {
     for cand in \
       http://127.0.0.1:28100 \
       http://127.0.0.1:8100 \
-      http://159.223.159.205:8100 \
+      http://159.223.159.205/challenge/proof \
       http://159.223.159.205:8080/challenge/proof \
+      http://159.223.159.205:8100 \
       http://staging.api.joinbase.ai/challenge/proof
     do
       if curl -fsS -m 3 "$cand/health" >/dev/null 2>&1; then
@@ -111,43 +112,51 @@ probe_proof() {
     return 0
   fi
 
-  local topic="${PROOF_E2E_TOPIC:-}"
-  if [[ -z "$topic" ]]; then
+  local topics_to_hit=()
+  if [[ -n "${PROOF_E2E_TOPIC:-}" ]]; then
+    topics_to_hit=("$PROOF_E2E_TOPIC")
+  else
     for id in "${STAGING_TOPICS[@]}"; do
-      echo "$topics" | grep -q "\"$id\"" && topic="$id" && break
+      echo "$topics" | grep -q "\"$id\"" && topics_to_hit+=("$id")
     done
-    topic="${topic:-dt-no-ib-v0}"
+    if [[ ${#topics_to_hit[@]} -eq 0 ]]; then
+      topics_to_hit=(dt-no-ib-v0)
+    fi
   fi
 
-  local hex
-  hex="$(printf '%s' "e2e-$topic-$RANDOM" | sha256sum | awk '{print $1}')"
-  code="$(curl -sS -m 20 -o /tmp/proof-e2e-submit.json -w '%{http_code}' \
-    -X POST -H 'content-type: application/json' \
-    -d "{\"miner_hotkey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"artifact_digest\":\"$hex\",\"claim\":\"e2e sim submit against $topic\",\"declared_flops\":1,\"topic_id\":\"$topic\",\"manifest\":{\"train_dataset_ids\":[\"e2e-mix-v0\"]}}" \
-    "$base/v1/submissions")"
-  body="$(cat /tmp/proof-e2e-submit.json)"
-  LOG "POST /v1/submissions topic_id=$topic → HTTP $code $body"
-  case "$code" in
-    201)
-      echo "$body" | grep -q '"id":"pf_' || { RED "201 missing pf_ id"; return 1; }
-      echo "$body" | grep -q "\"topic_id\":\"$topic\"" || { RED "201 topic_id mismatch"; return 1; }
-      local sid
-      sid="$(echo "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')"
-      local row
-      row="$(curl -fsS -m 8 "$base/v1/submissions/$sid")"
-      LOG "GET /v1/submissions/$sid → $row"
-      echo "$row" | grep -q '"verdict"' || { RED "scored row missing verdict"; return 1; }
-      GRN "PASS  --probe $base submit→score HTTP 201 topic=$topic"
-      ;;
-    400|503)
-      echo "$body" | grep -q '"error"' || { RED "HTTP $code silent empty"; return 1; }
-      GRN "PASS  --probe $base fail-closed HTTP $code (explicit error)"
-      ;;
-    *)
-      RED "unexpected HTTP $code (want 201/400/503, never silent empty)"
-      return 1
-      ;;
-  esac
+  local topic hex sid row any_scored=0
+  for topic in "${topics_to_hit[@]}"; do
+    hex="$(printf '%s' "e2e-$topic-$RANDOM-$$" | sha256sum | awk '{print $1}')"
+    code="$(curl -sS -m 20 -o /tmp/proof-e2e-submit.json -w '%{http_code}' \
+      -X POST -H 'content-type: application/json' \
+      -d "{\"miner_hotkey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"artifact_digest\":\"$hex\",\"claim\":\"e2e sim submit against $topic\",\"declared_flops\":1,\"topic_id\":\"$topic\",\"manifest\":{\"train_dataset_ids\":[\"e2e-mix-v0\"]}}" \
+      "$base/v1/submissions")"
+    body="$(cat /tmp/proof-e2e-submit.json)"
+    LOG "POST /v1/submissions topic_id=$topic → HTTP $code $body"
+    case "$code" in
+      201)
+        echo "$body" | grep -q '"id":"pf_' || { RED "201 missing pf_ id"; return 1; }
+        echo "$body" | grep -q "\"topic_id\":\"$topic\"" || { RED "201 topic_id mismatch"; return 1; }
+        sid="$(echo "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')"
+        row="$(curl -fsS -m 8 "$base/v1/submissions/$sid")"
+        LOG "GET /v1/submissions/$sid → $row"
+        echo "$row" | grep -q '"verdict"' || { RED "scored row missing verdict"; return 1; }
+        any_scored=1
+        GRN "PASS  --probe $base submit→score HTTP 201 topic=$topic"
+        ;;
+      400|503)
+        echo "$body" | grep -q '"error"' || { RED "HTTP $code silent empty"; return 1; }
+        GRN "PASS  --probe $base fail-closed HTTP $code topic=$topic (explicit error)"
+        ;;
+      *)
+        RED "unexpected HTTP $code topic=$topic (want 201/400/503, never silent empty)"
+        return 1
+        ;;
+    esac
+  done
+  if [[ "$any_scored" == "1" ]]; then
+    GRN "PASS  --probe $base scored ${#topics_to_hit[@]} topic(s)"
+  fi
 }
 
 probe_bounty() {
