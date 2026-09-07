@@ -121,8 +121,11 @@ git checkout <good-sha>
 - When staging is opted into **sim** (`PROOF_FORCE_SIM=true` on the host, not in `env-staging.yml`), submit → score is the contract in [`proof-submit-e2e.md`](proof-submit-e2e.md). Topic ids in that window: `dt-no-ib-v0`, `muon-vs-adamw-10m-v0`. For `state=awaiting_admin` against a real ~0.29 NLL seal, also set `PROOF_SIM_STUB_WIN=true` (host env only). Skill-only sim cannot beat that floor. Do not `set_weights`. Do not POST if `eval_backend` is `lium` and `can_score` is true.
 
 ```bash
-# From a machine that can reach the staging gateway (no SSH required):
-PROOF_E2E_BASE=http://staging.api.joinbase.ai/challenge/proof \
-  ./deploy/scripts/proof-submit-e2e.sh --probe --bounty
+# From a machine that can reach the staging gateway (no SSH required).
+# Prefer the droplet IP: staging.api.joinbase.ai has answered a stale
+# Lium/fail-closed instance while 159.223.159.205 is the ready sim host.
+PROOF_E2E_BASE=http://159.223.159.205/challenge/proof \
+  ./deploy/scripts/proof-submit-e2e.sh --probe
+# Host-local: http://127.0.0.1:8080/challenge/proof
 # Direct service if published: http://<staging-master>:8100
 ```
