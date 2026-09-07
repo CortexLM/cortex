@@ -14,16 +14,15 @@ Staging (operator-ready at time of writing): `can_score=true`,
 ### Ownership: StubWin (A) vs reseal (B)
 
 Skill-only `sim_document` uses `nll = (3.10 - 0.40 * skill).max(1.0)`.
-Even skill=1.0 stays at NLL ≥ 1.0, so a CPU-sealed ~0.29 baseline always
-trips `quality_floor`. Two ways to reach `awaiting_admin` — **do not race**:
+Even skill=1.0 (and `StubScorer::win` skill=0.95) stays at NLL ≥ 1.0, so
+a CPU-sealed ~0.29 baseline always trips `quality_floor`. Prefer **A**.
 
 | Option | Owner | What |
 |--------|--------|------|
-| **A (lasting)** | this PR / code | Under `PROOF_FORCE_SIM` (`eval_backend=sim`), a sealed topic scores with harness numbers **relative to the sealed vector** (`sim_win_document`). No extra host env. Lium never takes this path. |
-| **B (ops)** | Développeur | Reseal staging baselines to sim-compatible `BASELINE_SKILL=0.40` (NLL ≈ 2.94), resign topics, retest submit→`awaiting_admin` on staging only. |
+| **A (lasting)** | this PR / code | Under `PROOF_FORCE_SIM`, a sealed topic emits harness numbers relative to the seal: holdout ≤ baseline+floor, splits ≤ baseline+`epsilon_topic_max_regress`, `tokens_per_sec` ≥ ref×(1+`epsilon_rel`). No extra host env. Lium never takes this path. |
+| **B (ops, paused)** | Développeur | Reseal staging to `BASELINE_SKILL=0.40` (NLL ≈ 2.94), resign topics, retest. **Paused** — Mathis redirected that lane to prod RLM E2E (1× GPU). |
 
-Do **not** reseal or edit staging host files from the code lane. Deploy A;
-Développeur runs B if they want a skill-only host. Prefer A.
+Do **not** reseal or edit staging host files from the code lane. Deploy A.
 
 Local compose (`env-local.yml`) defaults `LOCAL_PROOF_FORCE_SIM=true`.
 `PROOF_SIM_STUB_WIN` is a leftover no-op. Droplet overlays stay sim-off

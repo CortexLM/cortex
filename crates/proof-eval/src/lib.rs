@@ -554,9 +554,11 @@ fn beat(baseline: f64, direction: MetricDirection, epsilon: f64) -> f64 {
 
 /// Sim harness **relative to `sealed`**, not a higher [`sim_document`] skill.
 ///
-/// Clears quality_floor (NLL ≤ sealed + floor), split_regress, and the
-/// primary epsilon. Used for every [`EvalBackend::Sim`] score that has a
-/// sealed baseline. Never called from the Lium path.
+/// Inequalities (option A): holdout NLL ≤ baseline + quality floor, each
+/// scored split ≤ baseline + `epsilon_topic_max_regress`, and
+/// `tokens_per_sec` ≥ ref × (1 + `epsilon_rel`) when that is the primary.
+/// Used for every [`EvalBackend::Sim`] score that has a sealed baseline.
+/// Never called from the Lium path.
 #[must_use]
 pub fn sim_win_document(
     pin: &ProofPin,
@@ -1035,30 +1037,98 @@ mod tests {
         let pin = pin("");
         let t = throughput_topic();
         let sealed = tight_sealed();
+        let floor = sealed.holdout_nll + t.metric.quality_floor_nll;
+        let stub_win_skill = sim_document(&pin, &t, "f", "art", 0.95, true);
         let max_skill = sim_document(&pin, &t, "f", "art", 1.0, true);
         assert!(
             max_skill.harness.holdout_nll >= 1.0,
             "skill=1.0 must not dip below the sim NLL floor: {}",
             max_skill.harness.holdout_nll
         );
-        let reject =
-            proof_score::judge_topic(&t, &max_skill.agent, &max_skill.harness, &sealed, &[], &[]);
-        assert!(!reject.pass, "{reject:?}");
         assert!(
-            reject
-                .failed
-                .iter()
-                .any(|g| matches!(g, proof_score::GateFail::QualityFloor { .. })),
-            "{reject:?}"
+            stub_win_skill.harness.holdout_nll >= 1.0,
+            "StubScorer::win skill=0.95 is still NLL≥1.0: {}",
+            stub_win_skill.harness.holdout_nll
         );
+        for skill_doc in [&stub_win_skill, &max_skill] {
+            let reject = proof_score::judge_topic(
+                &t,
+                &skill_doc.agent,
+                &skill_doc.harness,
+                &sealed,
+                &[],
+                &[],
+            );
+            assert!(!reject.pass, "{reject:?}");
+            assert!(
+                reject
+                    .failed
+                    .iter()
+                    .any(|g| matches!(g, proof_score::GateFail::QualityFloor { .. })),
+                "{reject:?}"
+            );
+        }
 
         let win = sim_win_document(&pin, &t, "f", "art", &sealed);
         assert_eq!(win.agent.rationale, "sim stub win");
-        assert!((win.harness.holdout_nll - 0.29).abs() < 1e-9);
-        assert!(win.harness.tokens_per_sec.unwrap() >= 80.0 * 1.06);
+        assert!(
+            win.harness.holdout_nll <= floor,
+            "holdout {} > baseline+floor {}",
+            win.harness.holdout_nll,
+            floor
+        );
+        for s in HoldoutSplit::SCORED {
+            let h = win.harness.split_nll[s.as_str()];
+            let b = sealed.split_nll[s.as_str()];
+            assert!(
+                h <= b + t.epsilon_topic_max_regress,
+                "split {} {h} > {b}+eps",
+                s.as_str()
+            );
+        }
+        let tps = win.harness.tokens_per_sec.expect("tps");
+        let ref_tps = sealed.tokens_per_sec.expect("ref tps");
+        assert!(
+            tps >= ref_tps * (1.0 + t.metric.epsilon_rel),
+            "tps {tps} < ref*(1+eps) {}",
+            ref_tps * (1.0 + t.metric.epsilon_rel)
+        );
         let verdict = proof_score::judge_topic(&t, &win.agent, &win.harness, &sealed, &[], &[]);
         assert!(verdict.pass, "{verdict:?}");
         assert!(verdict.failed.is_empty(), "{verdict:?}");
+    }
+
+    #[tokio::test]
+    async fn sim_plus_sealed_uses_relative_harness() {
+        let t = throughput_topic();
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let p = pin("");
+        let sealed = tight_sealed();
+        let out = eval_after_freeze(
+            &p,
+            &t,
+            &offer(),
+            "digest-a",
+            "art",
+            &recs,
+            "claim",
+            EvalBackend::Sim,
+            None,
+            None,
+            Some(&sealed),
+        )
+        .await
+        .expect("sim");
+        assert_eq!(out.backend, EvalBackend::Sim);
+        assert_eq!(out.receipt.provider, "sim");
+        assert_eq!(out.agent.rationale, "sim stub win");
+        assert!(out.harness.holdout_nll <= sealed.holdout_nll + t.metric.quality_floor_nll);
+        assert!(
+            out.harness.tokens_per_sec.expect("tps")
+                >= sealed.tokens_per_sec.expect("ref") * (1.0 + t.metric.epsilon_rel)
+        );
+        let verdict = proof_score::judge_topic(&t, &out.agent, &out.harness, &sealed, &[], &[]);
+        assert!(verdict.pass, "{verdict:?}");
     }
 
     #[tokio::test]
