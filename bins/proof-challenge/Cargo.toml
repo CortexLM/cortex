@@ -31,5 +31,12 @@ telemetry = { path = "../../crates/telemetry" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
 tracing = "0.1"
 
+[dev-dependencies]
+crypto = { path = "../../crates/crypto" }
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "process", "time"] }
+
 [lints]
 workspace = true

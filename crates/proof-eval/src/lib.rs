@@ -29,8 +29,8 @@ use proof_score::{AgentVerdict, HarnessMetrics, ProofCheatCode, ProofKind, Seale
 use proof_store::ArtifactManifest;
 use proof_task::{
     canonical_json, contamination, require_open_offer, resolve_inference, HoldoutRecord,
-    HoldoutSplit, InferenceOffer, MetricFamily, OfferError, ProofPin, TopicDocument,
-    BASELINE_DOMAIN,
+    HoldoutSplit, InferenceOffer, MetricDirection, MetricFamily, OfferError, ProofPin,
+    TopicDocument, BASELINE_DOMAIN,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -51,6 +51,21 @@ pub enum EvalBackend {
 pub fn force_sim() -> bool {
     matches!(
         std::env::var("PROOF_FORCE_SIM")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
+/// True when sim should emit a passing StubWin vector against the sealed baseline.
+///
+/// Staging/dev only. The Lium path never reads this. Requires [`EvalBackend::Sim`]
+/// (itself `PROOF_FORCE_SIM`) plus `PROOF_SIM_STUB_WIN=1`.
+#[must_use]
+pub fn sim_stub_win() -> bool {
+    matches!(
+        std::env::var("PROOF_SIM_STUB_WIN")
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str(),
@@ -462,6 +477,11 @@ fn unit(parts: &[&str], index: u32) -> f64 {
 }
 
 /// Deterministic sim scores. Only used when the host opted into sim.
+///
+/// Holdout NLL is `(3.10 - 0.40 * skill).max(1.0)`. Skill=1.0 still yields
+/// NLL ≥ 1.0, so this **cannot** clear `quality_floor` against a real sealed
+/// baseline near 0.29. Test wins against sim-derived baselines
+/// ([`BASELINE_SKILL`]) do not apply on staging. Use [`sim_win_document`].
 #[must_use]
 pub fn sim_document(
     pin: &ProofPin,
@@ -528,6 +548,94 @@ pub fn sim_document(
 /// Skill of the sealed AdamW / comms reference in sim (so a strong miner wins).
 pub const BASELINE_SKILL: f64 = 0.40;
 
+fn beat(baseline: f64, direction: MetricDirection, epsilon: f64) -> f64 {
+    let margin = 0.01;
+    match direction {
+        MetricDirection::Max => baseline * (1.0 + epsilon + margin),
+        MetricDirection::Min => (baseline * (1.0 - epsilon - margin)).max(0.0),
+    }
+}
+
+/// Sim harness **relative to `sealed`**, not a higher [`sim_document`] skill.
+///
+/// Clears quality_floor (NLL ≤ sealed + floor), split_regress, and the
+/// primary epsilon. Only used when [`sim_stub_win`] is on. Never called
+/// from the Lium path.
+#[must_use]
+pub fn sim_win_document(
+    pin: &ProofPin,
+    topic: &TopicDocument,
+    frozen: &str,
+    artifact: &str,
+    sealed: &SealedBaseline,
+) -> ProofEvalDocument {
+    let nll_eps = topic.epsilon_nll.max(0.01);
+    let holdout = match topic.metric.family {
+        MetricFamily::Nll => (sealed.holdout_nll - nll_eps).max(0.0),
+        _ => sealed.holdout_nll,
+    };
+    let mut split = BTreeMap::new();
+    for s in HoldoutSplit::SCORED {
+        let b = sealed.split_nll.get(s.as_str()).copied().unwrap_or(holdout);
+        let v = match topic.metric.family {
+            MetricFamily::Nll => (b - nll_eps).max(0.0),
+            _ => b,
+        };
+        split.insert(s.as_str().to_owned(), v);
+    }
+    let tps = match topic.metric.primary.as_str() {
+        proof_task::METRIC_TOKENS_PER_SEC => Some(beat(
+            sealed.tokens_per_sec.unwrap_or(100.0),
+            topic.metric.direction,
+            topic.metric.epsilon_rel,
+        )),
+        _ => sealed.tokens_per_sec,
+    };
+    let latency = match topic.metric.primary.as_str() {
+        proof_task::METRIC_STEP_LATENCY_MS => Some(beat(
+            sealed.step_latency_ms.unwrap_or(100.0),
+            topic.metric.direction,
+            topic.metric.epsilon_rel,
+        )),
+        _ => sealed.step_latency_ms,
+    };
+    let custom = sealed
+        .custom_value
+        .map(|b| beat(b, topic.metric.direction, topic.metric.epsilon_rel));
+    ProofEvalDocument {
+        schema_version: PROOF_METRICS_SCHEMA,
+        submission_digest: frozen.to_owned(),
+        artifact_digest: artifact.to_owned(),
+        topic_id: topic.id.clone(),
+        eval_image_digest: pin.eval_image_digest.clone(),
+        holdout_commitment: topic.holdout_commitment.clone(),
+        agent: AgentVerdict {
+            verdict: ProofKind::Clean,
+            reproduced: true,
+            claim_holds_public: true,
+            contamination: false,
+            canary_hit: false,
+            flops_used: topic.flops_budget / 2,
+            flops_budget: topic.flops_budget,
+            cheat_codes: Vec::new(),
+            rationale: "sim stub win".into(),
+            topic_id: topic.id.clone(),
+            family: topic.metric.family,
+        },
+        harness: HarnessMetrics {
+            holdout_nll: holdout,
+            split_nll: split,
+            public_nll: Some(holdout),
+            tokens_per_sec: tps,
+            step_latency_ms: latency,
+            wall_s: (topic.metric.family == MetricFamily::Throughput)
+                .then_some(topic.metric.wall_budget_s / 2),
+            custom_value: custom,
+            canary_nll: None,
+        },
+    }
+}
+
 /// Score only after the submission digest is frozen and a topic is open.
 #[allow(clippy::too_many_arguments)]
 pub async fn eval_after_freeze(
@@ -541,6 +649,7 @@ pub async fn eval_after_freeze(
     backend: EvalBackend,
     live: Option<&dyn LiveScorer>,
     judge_api_key: Option<&str>,
+    sealed: Option<&SealedBaseline>,
 ) -> Result<EvalOutcome, EvalError> {
     if frozen_digest.trim().is_empty() || holdout.is_empty() {
         return Err(EvalError::HoldoutSealed);
@@ -566,6 +675,12 @@ pub async fn eval_after_freeze(
         ));
     }
     let doc = match backend {
+        EvalBackend::Sim if sim_stub_win() => {
+            let sealed = sealed.ok_or_else(|| {
+                EvalError::Baseline("PROOF_SIM_STUB_WIN needs a sealed baseline".into())
+            })?;
+            sim_win_document(pin, topic, frozen_digest, artifact_digest, sealed)
+        }
         EvalBackend::Sim => {
             let skill = unit(&[artifact_digest, "skill"], 0);
             sim_document(pin, topic, frozen_digest, artifact_digest, skill, true)
@@ -731,6 +846,7 @@ mod tests {
             EvalBackend::Lium,
             None,
             None,
+            None,
         )
         .await
         .expect_err("no digest");
@@ -748,6 +864,7 @@ mod tests {
             &recs,
             "claim",
             EvalBackend::Lium,
+            None,
             None,
             None,
         )
@@ -775,6 +892,7 @@ mod tests {
             EvalBackend::Lium,
             Some(&Harvest { reproduced: true }),
             Some("test-judge-key"),
+            None,
         )
         .await
         .expect("live");
@@ -890,5 +1008,95 @@ mod tests {
         let pin = pin("");
         let doc = sim_document(&pin, &t, "f", "art", 1.0, true);
         assert!(doc.harness.custom_value.is_none());
+    }
+
+    fn tight_sealed() -> SealedBaseline {
+        let mut split = BTreeMap::new();
+        for s in HoldoutSplit::SCORED {
+            split.insert(s.as_str().to_owned(), 0.29);
+        }
+        SealedBaseline {
+            holdout_nll: 0.29,
+            split_nll: split,
+            tokens_per_sec: Some(80.0),
+            step_latency_ms: None,
+            custom_value: None,
+        }
+    }
+
+    fn throughput_topic() -> TopicDocument {
+        let mut t = topic();
+        t.id = "dt-no-ib-v0".into();
+        t.metric.family = MetricFamily::Throughput;
+        t.metric.primary = proof_task::METRIC_TOKENS_PER_SEC.into();
+        t.metric.direction = MetricDirection::Max;
+        t.metric.epsilon_rel = 0.05;
+        t.metric.quality_floor_nll = 0.02;
+        t.metric.wall_budget_s = 14_400;
+        t
+    }
+
+    static STUB_WIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn stub_win_clears_quality_floor_against_a_tight_sealed_baseline() {
+        let pin = pin("");
+        let t = throughput_topic();
+        let sealed = tight_sealed();
+        let max_skill = sim_document(&pin, &t, "f", "art", 1.0, true);
+        assert!(
+            max_skill.harness.holdout_nll >= 1.0,
+            "skill=1.0 must not dip below the sim NLL floor: {}",
+            max_skill.harness.holdout_nll
+        );
+        let reject =
+            proof_score::judge_topic(&t, &max_skill.agent, &max_skill.harness, &sealed, &[], &[]);
+        assert!(!reject.pass, "{reject:?}");
+        assert!(
+            reject
+                .failed
+                .iter()
+                .any(|g| matches!(g, proof_score::GateFail::QualityFloor { .. })),
+            "{reject:?}"
+        );
+
+        let win = sim_win_document(&pin, &t, "f", "art", &sealed);
+        assert_eq!(win.agent.rationale, "sim stub win");
+        assert!((win.harness.holdout_nll - 0.29).abs() < 1e-9);
+        assert!(win.harness.tokens_per_sec.unwrap() >= 80.0 * 1.06);
+        let verdict = proof_score::judge_topic(&t, &win.agent, &win.harness, &sealed, &[], &[]);
+        assert!(verdict.pass, "{verdict:?}");
+        assert!(verdict.failed.is_empty(), "{verdict:?}");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn stub_win_is_ignored_on_the_lium_path() {
+        let _g = STUB_WIN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("PROOF_SIM_STUB_WIN", "1");
+        let t = throughput_topic();
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let out = eval_after_freeze(
+            &p,
+            &t,
+            &offer(),
+            "digest-a",
+            "art",
+            &recs,
+            "claim",
+            EvalBackend::Lium,
+            Some(&Harvest { reproduced: true }),
+            Some("test-judge-key"),
+            Some(&tight_sealed()),
+        )
+        .await
+        .expect("live");
+        std::env::remove_var("PROOF_SIM_STUB_WIN");
+        assert_eq!(out.backend, EvalBackend::Lium);
+        assert_eq!(out.receipt.provider, "lium");
+        assert!(out.harness.holdout_nll > 1.0, "must not emit stub-win NLL");
     }
 }

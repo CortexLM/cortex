@@ -268,6 +268,12 @@ takes the topic.
 }
 ```
 
+### `muon-vs-adamw-10m-v0` — NLL **wta**
+
+Operator **example**, not in the pin. Beat sealed AdamW holdout NLL with Muon
+at ~10M params under the same FLOP budget. Staging may publish this id next
+to `dt-no-ib-v0`; miners still discover it from `GET /v1/proof/topics`.
+
 ### `agent-harness-improve-v0` — custom **discovery**
 
 Operator POST, not in git. `custom_id = harness_success_rate` is listed so
