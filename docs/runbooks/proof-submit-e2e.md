@@ -139,9 +139,11 @@ ctx --gateway http://127.0.0.1:8080 proof submit \
 ctx --gateway http://127.0.0.1:8080 proof show <id>
 ```
 
-On staging, replace the gateway with the public staging API (cleartext
-`http://staging.api.joinbase.ai` when that name resolves). Do not send
-`X-Lium-Api-Key` over `http://` — `ctx` refuses keyed cleartext.
+On staging, talk to the droplet gateway
+(`http://159.223.159.205`, host-local `http://127.0.0.1:8080`). Do not
+use `http://staging.api.joinbase.ai` while it still reports
+`eval_backend=lium`. Do not send `X-Lium-Api-Key` over `http://` —
+`ctx` refuses keyed cleartext.
 
 Second topic (same body, different id):
 
@@ -238,13 +240,38 @@ running host is Lium + `can_score`.
 
 | Step | Command | Result |
 |------|---------|--------|
-| In-process Sim submit | `cargo test -p proof-http sim_submit` | |
-| StubWin → awaiting_admin | `cargo test -p proof-http sim_stub_win_submit_reaches_awaiting_admin` | |
-| Sealed-relative win (0.29 NLL) | `cargo test -p proof-eval stub_win_clears_quality_floor` | |
-| Both staging topic ids | `cargo test -p proof-http sim_submit_accepts_staging_topic_ids` | |
-| Process-level `--force-sim` | `cargo test -p proof-challenge-bin --test submit_e2e` | |
-| Live probe | `./deploy/scripts/proof-submit-e2e.sh --probe` | |
-| Bounty | `./deploy/scripts/proof-submit-e2e.sh --bounty` | |
+| In-process Sim submit | `cargo test -p proof-http sim_submit` | PASS (in-repo) |
+| StubWin → awaiting_admin | `cargo test -p proof-http sim_stub_win_submit_reaches_awaiting_admin` | PASS (in-repo) |
+| Sealed-relative win (0.29 NLL) | `cargo test -p proof-eval stub_win_clears_quality_floor` | PASS (in-repo) |
+| Both staging topic ids | `cargo test -p proof-http sim_submit_accepts_staging_topic_ids` | PASS (in-repo) |
+| Process-level `--force-sim` | `cargo test -p proof-challenge-bin --test submit_e2e` | PASS (in-repo) |
+| Live probe | `PROOF_E2E_BASE=http://159.223.159.205/challenge/proof ./deploy/scripts/proof-submit-e2e.sh --probe` | PASS 201×2 `rejected` (see below) |
+| Live Rust | `PROOF_E2E_BASE=http://159.223.159.205/challenge/proof cargo test -p proof-http --test live_submit_e2e` | PASS |
+
+### Live staging 2026-09-07 (sim, no Lium, no merge)
+
+Origin: `http://159.223.159.205/challenge/proof` (`eval_backend=sim`,
+`force_sim=true`, `can_score=true`, `baseline_sealed=true`, offer
+`openrouter-glm53flash-v0` open). Status has **no** `sim_stub_win` field
+— host binary predates this PR / env is unset.
+
+| topic | HTTP | id | state | eligible | gates |
+|-------|------|----|-------|----------|-------|
+| (empty) | 400 | — | — | — | `topic_id is required` |
+| `not-a-real-topic` | 400 | — | — | — | `unknown topic` |
+| `dt-no-ib-v0` | 201 | `pf_0000000000000002` | `rejected` | false | QualityFloor holdout 2.827 vs baseline 0.291 floor 0.02; split_regress; ThroughputMiss 113.9 vs 213.4 |
+| `muon-vs-adamw-10m-v0` | 201 | `pf_0000000000000003` | `rejected` | false | NllMiss holdout 3.042 vs baseline 0.344 ε 0.02; split_regress |
+
+Receipts: `"provider":"sim"`. Agent: `clean` / `reproduced`. No rent.
+`staging.api.joinbase.ai` still answers `eval_backend=lium` /
+`can_score=false` / empty topics — do not POST there.
+
+To reach `awaiting_admin` on this host: deploy this branch, set
+`PROOF_SIM_STUB_WIN=true` next to `PROOF_FORCE_SIM=true` in the host
+`deploy/env/proof-challenge.env`, restart `proof-challenge`, confirm
+`sim_stub_win=true` on status, then re-run `--probe`. Admin adjudicate
+needs the host bearer at `/opt/base/deploy/secrets/proof/admin_tokens`
+(do not log). No `set_weights`.
 
 ## Related
 
