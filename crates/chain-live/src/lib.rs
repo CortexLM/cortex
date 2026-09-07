@@ -7,10 +7,13 @@
 #![forbid(unsafe_code)]
 
 mod extrinsic;
+mod finalized;
 mod rpc;
 mod storage;
 mod tlock;
 
+#[cfg(test)]
+mod finalized_tests;
 #[cfg(test)]
 mod tests;
 
@@ -20,6 +23,7 @@ pub use extrinsic::{
     commit_timelocked_call, derive_public_key, serve_axon_call, set_weights_call, Era,
     ServeAxonParams,
 };
+pub use finalized::FinalizedSnapshot;
 pub use rpc::{LiveChainRpc, RuntimeVersion, StorageEntry};
 pub use storage::{
     decode_axon_info, decode_bool, decode_double_map_account_k2, decode_double_map_k2,

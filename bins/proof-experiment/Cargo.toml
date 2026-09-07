@@ -1,0 +1,45 @@
+[package]
+name = "proof-experiment-bin"
+description = "Opt-in experiment worker service on explicitly local Docker capacity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "proof-experiment"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+chain-live = { path = "../../crates/chain-live" }
+challenge-common = { path = "../../crates/challenge-common" }
+challenge-keys = { path = "../../crates/challenge-keys" }
+clap = { version = "4", features = ["derive", "env"] }
+db = { path = "../../crates/db" }
+hex = "0.4"
+proof-executor = { path = "../../crates/proof-executor" }
+proof-local-provider = { path = "../../crates/proof-local-provider" }
+proof-publication = { path = "../../crates/proof-publication" }
+proof-research = { path = "../../crates/proof-research" }
+proof-measure = { path = "../../crates/proof-measure" }
+proof-task = { path = "../../crates/proof-task" }
+proof-worker = { path = "../../crates/proof-worker" }
+rustix = { version = "1", features = ["process", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "process", "time"] }
+
+[dev-dependencies]
+axum = "0.8"
+challenge-keys = { path = "../../crates/challenge-keys" }
+db = { path = "../../crates/db", features = ["testing"] }
+hex = "0.4"
+rustix = { version = "1", features = ["process"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"] }
+tempfile = "3"
+
+[lints]
+workspace = true

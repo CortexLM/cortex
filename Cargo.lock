@@ -1896,6 +1896,7 @@ dependencies = [
  "config",
  "db",
  "gateway",
+ "gateway-proof",
  "gateway-store-pg",
  "telemetry",
  "tokio",
@@ -1935,6 +1936,37 @@ dependencies = [
  "thiserror 2.0.19",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "gateway-proof"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bundle",
+ "chain",
+ "chain-live",
+ "challenge-common",
+ "db",
+ "gateway",
+ "gateway-store-pg",
+ "hex",
+ "http-body-util",
+ "parity-scale-codec",
+ "proof-autonomy",
+ "proof-publication",
+ "proof-research",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror 2.0.19",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+ "validator",
+ "validator-sync",
+ "weights-api",
 ]
 
 [[package]]
@@ -3417,6 +3449,146 @@ dependencies = [
 ]
 
 [[package]]
+name = "proof-atlas-bin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chain-live",
+ "challenge-common",
+ "challenge-keys",
+ "clap",
+ "db",
+ "hex",
+ "proof-atlas-worker",
+ "proof-autonomy",
+ "proof-research",
+ "proof-rounds",
+ "proof-runtime",
+ "proof-task",
+ "proof-worker",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "proof-atlas-worker"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bundle",
+ "chain",
+ "chain-live",
+ "challenge-common",
+ "crypto",
+ "db",
+ "gateway",
+ "gateway-proof",
+ "hex",
+ "http-body-util",
+ "parity-scale-codec",
+ "proof-autonomy",
+ "proof-autonomy-pg",
+ "proof-eval",
+ "proof-publication",
+ "proof-research",
+ "proof-rounds",
+ "proof-runtime",
+ "proof-score",
+ "proof-task",
+ "proof-worker",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tower",
+ "uuid",
+ "validator",
+ "validator-sync",
+]
+
+[[package]]
+name = "proof-autonomy"
+version = "0.1.0"
+dependencies = [
+ "aggregate",
+ "bundle",
+ "challenge-common",
+ "crypto",
+ "hex",
+ "proof-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "uuid",
+]
+
+[[package]]
+name = "proof-autonomy-http"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "challenge-common",
+ "crypto",
+ "db",
+ "hex",
+ "http-body-util",
+ "proof-autonomy",
+ "proof-autonomy-pg",
+ "proof-broker",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tower",
+ "uuid",
+]
+
+[[package]]
+name = "proof-autonomy-pg"
+version = "0.1.0"
+dependencies = [
+ "challenge-common",
+ "crypto",
+ "db",
+ "hex",
+ "proof-autonomy",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "proof-broker"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "challenge-common",
+ "crypto",
+ "db",
+ "hex",
+ "proof-autonomy",
+ "proof-autonomy-pg",
+ "serde",
+ "sqlx",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "proof-challenge"
 version = "0.1.0"
 dependencies = [
@@ -3439,11 +3611,15 @@ dependencies = [
  "axum",
  "challenge-keys",
  "clap",
+ "db",
  "harvest-pod",
  "prism-lium",
+ "proof-autonomy-http",
+ "proof-autonomy-pg",
  "proof-challenge",
  "proof-eval",
  "proof-harvest",
+ "proof-store",
  "proof-task",
  "serde_json",
  "telemetry",
@@ -3465,6 +3641,61 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "proof-executor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chain-live",
+ "challenge-common",
+ "crypto",
+ "db",
+ "docker-engine",
+ "hex",
+ "proof-autonomy",
+ "proof-autonomy-pg",
+ "proof-eval",
+ "proof-measure",
+ "proof-research",
+ "proof-runtime",
+ "proof-score",
+ "proof-task",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "proof-experiment-bin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chain-live",
+ "challenge-common",
+ "challenge-keys",
+ "clap",
+ "db",
+ "hex",
+ "proof-executor",
+ "proof-local-provider",
+ "proof-measure",
+ "proof-publication",
+ "proof-research",
+ "proof-task",
+ "proof-worker",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
  "tokio",
 ]
 
@@ -3500,6 +3731,7 @@ dependencies = [
  "async-trait",
  "axum",
  "crypto",
+ "db",
  "hex",
  "http-body-util",
  "proof-eval",
@@ -3514,6 +3746,167 @@ dependencies = [
 ]
 
 [[package]]
+name = "proof-local-provider"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "challenge-common",
+ "crypto",
+ "db",
+ "hex",
+ "proof-autonomy",
+ "proof-autonomy-pg",
+ "proof-broker",
+ "proof-executor",
+ "proof-research",
+ "proof-runtime",
+ "proof-task",
+ "proof-worker",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "proof-measure"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "proof-autonomy",
+ "proof-eval",
+ "proof-harvest",
+ "proof-research",
+ "proof-score",
+ "proof-store",
+ "proof-task",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "proof-publication"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bundle",
+ "challenge-common",
+ "crypto",
+ "hex",
+ "parity-scale-codec",
+ "proof-autonomy",
+ "proof-research",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "proof-research"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chain",
+ "chain-live",
+ "challenge-common",
+ "crypto",
+ "db",
+ "gateway",
+ "gateway-proof",
+ "hex",
+ "proof-autonomy",
+ "proof-autonomy-pg",
+ "proof-eval",
+ "proof-publication",
+ "proof-score",
+ "proof-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
+ "validator-sync",
+]
+
+[[package]]
+name = "proof-rounds"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bundle",
+ "chain",
+ "chain-live",
+ "challenge-common",
+ "crypto",
+ "db",
+ "gateway",
+ "hex",
+ "http-body-util",
+ "parity-scale-codec",
+ "proof-autonomy",
+ "proof-autonomy-pg",
+ "proof-eval",
+ "proof-publication",
+ "proof-research",
+ "proof-runtime",
+ "proof-score",
+ "proof-task",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "telemetry",
+ "thiserror 2.0.19",
+ "tokio",
+ "tower",
+ "trustroot",
+ "uuid",
+ "validator",
+ "validator-sync",
+]
+
+[[package]]
+name = "proof-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "challenge-common",
+ "crypto",
+ "db",
+ "hex",
+ "http-body-util",
+ "proof-autonomy",
+ "proof-autonomy-pg",
+ "proof-eval",
+ "proof-research",
+ "proof-score",
+ "proof-task",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tower",
+ "uuid",
+]
+
+[[package]]
 name = "proof-score"
 version = "0.1.0"
 dependencies = [
@@ -3525,12 +3918,16 @@ dependencies = [
 name = "proof-store"
 version = "0.1.0"
 dependencies = [
+ "db",
  "hex",
  "proof-score",
  "proof-task",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
+ "sqlx",
  "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]
@@ -3545,6 +3942,54 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.19",
  "toml",
+]
+
+[[package]]
+name = "proof-wandb"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "hex",
+ "md-5",
+ "proof-autonomy",
+ "proof-research",
+ "proof-task",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "proof-worker"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "challenge-common",
+ "crypto",
+ "db",
+ "futures",
+ "hex",
+ "proof-autonomy",
+ "proof-autonomy-pg",
+ "proof-broker",
+ "proof-research",
+ "proof-runtime",
+ "proof-task",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -46,6 +46,7 @@ whitepaper's research vision and current code: [implementation comparison](WHITE
 | Master check (`SubnetOwnerHotkey`) | done | Read from the live chain. Prod: `BASE_GATEWAY_REQUIRE_OWNER=1` fail-closed (wallet matches SubnetOwnerHotkey; `gateway_admin_token` required). Staging: `REQUIRE_OWNER=0` advisory until a dedicated netuid-541 owner wallet (disk mainnet `5ExuWpCM…` ≠ 541 SubnetOwnerHotkey). Do not install the mainnet owner as a fake 541 owner. Local smoke defaults to advisory. |
 | Registry + proxy | done | |
 | Bundle seal (`POST /v1/weights/raw` → `GET /v1/weights/latest`) | done | Unsealed: fail-closed burn (`sealed: false`, uid 0 = 100%) instead of 404. |
+| Proof v2 round receiver | **partial, opt-in** | `proof-publication` / `gateway-proof` implement full-batch signed `POST /v2/weights/proof/rounds` and exact receipt plus byte readback via `GET /v2/weights/proof/rounds/{round}`; 409 is not success. Sticky `BASE_GATEWAY_PROOF_V2=1` / `BASE_GATEWAY_PROOF_ANCHOR_BLOCK` activation blocks legacy Proof ingress and stale seals. Existing explicit sealing only; local tests do not establish a deployed receiver or live publication. |
 | Chain backend | done | Live only. `fake_owner` was removed from `bins/gateway`. |
 
 ## Retired products (removed)
@@ -83,11 +84,44 @@ specs (`DESIGN_CHALLENGE.md`, `PRISM.md`) remain for `xtask` gates. Leftover
 | Holdout | **done** | Per-topic operator file (`PROOF_HOLDOUT_FILE`). Commitment in the topic document, never in the pin. `xtask proof-holdout --topic-id`. |
 | Live harvest | **done** | `crates/proof-harvest` over `harvest-pod`; `PROOF_FORCE_SIM` is local-only. |
 | Configured allocation | **8000 bps** | Proof-weighted 20%/80% regardless of digest. Payout splits equally across currently `open` topics, then `wta` or `discovery`. Empty digest / missing evaluation prerequisites still fail closed. |
-| Automatic emission | **lib-only** | `proof-challenge::emit_epoch` signs payout leaves, but `bins/proof-challenge` does not call it or run an emission loop; the HTTP state starts at epoch `0`. Do not infer payments from `can_score`. |
-| Autonomous research judge | **partial** | Python `judge.py` requests an acknowledgement, while `agent.py` uses static text checks. General recipe reproduction and the paper's recursive investigation are not implemented. |
-| Research persistence | **missing** | The service uses `MemoryStore`; submissions and scores are lost on restart. Public HTTP records are not a durable artifact archive. |
+| V1 automatic emission | **lib-only** | `proof-challenge::emit_epoch` signs payout leaves, but `bins/proof-challenge` does not call it or run an emission loop; the HTTP state starts at epoch `0`. Do not infer payments from `can_score`. |
+| Autonomous research judge | **partial** | Python `judge.py` requests an acknowledgement; clean static inspection now raises `ContractError` absent agent reproduction and verified FLOP evidence, and forbidden fabric rejects. CLI gates before judge/model calls with no successful metrics. General reproduction and agent-led accounting are not implemented; accounting must fit the experiment with retained reproducible evidence verified by the controller, not a universal formula or model assertion. |
+| V1 research persistence | **partial, unproven** | The default v1 store is in memory. The optional SQL journal now passes fresh workspace durability tests (2/2) after fixing embedded-migration tracking. Async writes persist SQL before memory and reject NaN/infinity. Production durability remains unproven: cross-process ID collisions/upserts, separate submission/score transactions, synchronous bypass and cancellation-induced memory lag remain. Public HTTP records are not a durable artifact archive. |
+| Atlas experiment persistence / API | **partial, opt-in API** | [`proof-autonomy-pg`](../crates/proof-autonomy-pg/README.md) persists commands, consent/nonces, quotas, revisions, fences, resources and observations. Canonical shared migrations are **0020–0028**; `db::test_pool` matches append-only runtime events and column grants. Restricted DB configuration enables v2 routes in `proof-challenge`, not experiment startup. |
+| Experiment worker | **partial, library** | `proof-worker` implements independent model-free cleanup, strict adoption, quote refresh and durable run identity. Same-fence repeat invocation is refused; the original DB runtime deadline is enforced even if an agent ignores stop. Shutdown aborts lease acquisition and drops suspended operation/heartbeat futures before DB bookkeeping. No strict live Lium, credential or quote adapter is wired. |
+| V2 local execution / retained science | **partial, local tests** | `proof-executor` runs paired actual CPU scripts in digest-pinned Docker, retaining stdout/stderr/exit/wall and failures. `proof-measure` adds a trusted observer (optionally wired in `proof-experiment`; `DockerObserver`: pinned image, no network by default, read-only rootfs, read-only holdout bind, bounded logs, per-run anti-replay); `collect` still returns `UnobservedMeasurements` whenever FLOPs are unmeasured, and the default `NoObserver` fails closed with zero runs dispatched. Only a test observer image is exercised: the real `proof-eval` image reports no independent FLOPs. Optional `JudgeEgress` demonstrated a synthetic probe with a real completion and four sampled blocked escapes, not universal isolation or science. The eval helper supports explicit `PROOF_JUDGE_PROXY=1` without Authorization only for the exact alias `http://proof-judge:8080/v1` and `chat/completions`; direct mode still requires a key; arbitrary allowed payloads and artifact code mean proxy confidentiality/integrity are not proven. `proof-research` admission tests use synthetic observations; v1 in-memory records are not migrated. The stock W&B SDK stays unusable (v0.28.0 runtime/environment telemetry exceeds the seven-field allowlist); `proof-wandb` uploads the allowlisted record over direct GraphQL but is wired into no binary and has never contacted W&B. |
+| Private headless runtime | **partial, scoped tests** | Shared `HeadlessProcess` drives the real `CortexRuntime` with host-only config, attempt sockets and original identity/deadline/budget journal. Seventeen supervision tests pass: inherited pipes, leader exit, five-second TERM→KILL grace, future-drop/reaper behavior and `setsid` escape. Optional `headless.pid_namespace` (`unshare --pid --kill-child`) kills escaped descendants; PID containment only. One authorized Astra/kernel/controller synthetic test passed (7.23 s), not science/cost evidence; it is ignored and requires `CORTEX_TEST_HEADLESS_MODEL_CONFIG`. HTTPS by default; literal loopback HTTP requires `allowLoopbackHttp: true`, private `apiKeyFile`, no Factory fallback. |
+| Finalized Atlas rounds / scheduler | **partial, local tests** | `proof-rounds` freezes 360-block inputs/history and signed-byte outboxes; `proof-atlas-worker` schedules/reconciles rounds. Thirteen isolated scheduler tests passed, plus cancellation coverage preventing a blocking RPC completion after shutdown from freezing a new round. Canonical DB migrations passed. The ignored headless-delivery regression below covers the connected local path; deployed publication/admin-seal coordination and payment remain unverified. |
+| Atlas service (`bins/proof-atlas`) | **partial, opt-in binary** | `PROOF_ATLAS_CONFIG_FILE` / `--config` selects private operator configuration; raw/hex signer must match the pin. Private-file/signer/restricted-DB checks and three startup/shutdown regressions passed, including SIGTERM while waiting for finality; blocking RPC initialization uses `spawn_blocking`. `--check` does not initialize/validate TS model/provider config, image presence, network/chain/gateway compatibility or deployment. Normal mode starts only the scheduler/publisher, never rental, sealer or chain submit; see the [operator contract](runbooks/proof-autonomy-local.md#separate-atlas-operator-contract). |
 | Synthesis / shared-stack adoption | **missing** | The second agent and verified adoption loop described in whitepaper §7 are not implemented. |
 | Spec | live | [`PROOF.md`](PROOF.md). |
+
+Verification scope: the executor work reported 13 tests including explicitly run
+ignored integrations; the scheduler and supervision counts above are separate.
+The explicitly ignored
+[`headless_delivery.rs`](../crates/proof-atlas-worker/tests/headless_delivery.rs)
+passed real scheduler/Postgres → unmodified `CortexRuntime`/Docker Python →
+private controller decision → strict HTTP gateway/exact readback → production
+`seal_epoch` → real served router/independent Python vector `[0.4, 0.4, 0.2]`.
+Lost-ack recovery replays identical signed bytes without model rerun. Chain,
+science and inference are synthetic; this test calls the seal helper directly,
+not the operator admin seal HTTP route.
+
+The separate authorized synthetic model test was bounded to 4 calls, 2048 output tokens/call and 120 s.
+Its temporary 100 USD/million-token rates were assumed accounting rates, not
+verified tariffs or measured charges. The earlier full-workspace checkpoint passed
+**1260 tests across 138 binaries** (24 ignored by default), strict Clippy,
+formatting and doctests. Separately selected executor/headless integrations and
+**123 RLM/runtime tests** passed. Audit and five xtask gates passed, with audit
+warnings retained. A later routine checkpoint passed **1304 tests across 151 binaries**
+(30 ignored). The final workspace checkpoint passed **1304 tests across 151
+executables, 0 failed, 31 ignored**. Separately selected ignored tests passed:
+durability **2**, local Docker **14**, synthetic connected `headless_delivery`
+**1**, and live-Astra egress **2**. Python **31** and proxy adversarial **3** passed.
+Final workspace Clippy, formatting, doctests and five xtask gates passed;
+`cargo deny` passed with warnings. The task database was stopped.
+The public candidate is not a production repin and predates
+the latest proxy-helper corrections. See the [validation boundary](runbooks/proof-autonomy-local.md#local-verification).
 
 ## Infrastructure
 
@@ -129,6 +163,7 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 | Gap | Impact |
 |-----|--------|
 | Proof research-to-payment path | Partial Python judging, in-memory results, epoch `0` HTTP state, and no automatic emitter prevent treating the current service as the full whitepaper mechanism. See [the source comparison](WHITEPAPER.md#proposal-versus-current-code). |
+| Proof v2 integration | Workers, optional observer wiring in `proof-experiment`, local execution and publication components exist, not verified science. One split-GPU rent returned **400**; one whole-host **$0.25/hr** pod remained `PENDING` before termination. Two DELETEs returned **200**; GET returned **404** and the list was empty after **6 s**, with balance unchanged. This does not establish side-effect-free refusals generally, client-id support or its absence, stopped running-pod billing, a whole-hour tariff, or expiry enforcement. Existing `prism-lium` custom templates accept `docker_image=repo@digest`; a null separate digest field does not make digest pinning impossible. Live custom-image enforcement remains untested. No deployed receiver/live publication or end-to-end payment is claimed; default Proof/Bounty allocation remains 8000/2000 bps. |
 | Proof scoring vs whitepaper | Current code uses equal topic masses, one primary metric, exact WTA ties, and digest duplicate checks. The paper's multi-metric frontier, method-descriptor novelty, and synthesiser are proposals, not shipped guarantees. |
 | DCAP verify holds the attest mutex | A cold Intel PCS fetch (up to 20 s) serialises attestation submissions. |
 | DCAP error classification | Matches on `anyhow` message text; re-run `cargo test -p attest-policy --features dcap` after any `dcap-qvl` bump. |

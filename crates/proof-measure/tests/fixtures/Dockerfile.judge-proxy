@@ -1,0 +1,16 @@
+# Judge-only egress proxy image. Stdlib-only so nothing is fetched at build or
+# run time. It is the sole peer of the scoring container on an `internal`
+# network and forwards to exactly one upstream origin, holding the API key the
+# scoring container is never given.
+FROM python:3.12-slim
+LABEL cortex.proof.judge-proxy="1"
+COPY judge-proxy.py /usr/bin/judge-proxy
+# The controller stages the judge key into this directory through the archive
+# API before start. It is part of the image (not a tmpfs), because tmpfs mounts
+# do not exist until the container runs. It is never baked with a secret.
+RUN chmod 0555 /usr/bin/judge-proxy \
+ && mkdir -p /run/proof \
+ && chown 65534:65534 /run/proof \
+ && chmod 0700 /run/proof
+USER 65534:65534
+ENTRYPOINT ["/usr/local/bin/python", "-I", "/usr/bin/judge-proxy"]

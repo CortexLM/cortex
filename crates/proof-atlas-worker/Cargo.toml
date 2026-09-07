@@ -1,0 +1,50 @@
+[package]
+name = "proof-atlas-worker"
+description = "Finalized contiguous Atlas scheduling and fenced runtime supervision"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+chain-live = { path = "../chain-live" }
+challenge-common = { path = "../challenge-common" }
+hex = "0.4"
+proof-autonomy = { path = "../proof-autonomy" }
+proof-research = { path = "../proof-research" }
+proof-rounds = { path = "../proof-rounds" }
+proof-runtime = { path = "../proof-runtime" }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+axum = "0.8"
+bundle = { path = "../bundle" }
+chain = { path = "../chain" }
+crypto = { path = "../crypto" }
+db = { path = "../db", features = ["testing"] }
+gateway = { path = "../gateway" }
+gateway-proof = { path = "../gateway-proof" }
+http-body-util = "0.1"
+parity-scale-codec = "3.7"
+proof-autonomy-pg = { path = "../proof-autonomy-pg" }
+proof-eval = { path = "../proof-eval" }
+proof-publication = { path = "../proof-publication" }
+proof-score = { path = "../proof-score" }
+proof-task = { path = "../proof-task" }
+proof-worker = { path = "../proof-worker" }
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
+validator = { path = "../validator" }
+validator-sync = { path = "../validator-sync" }
+
+[lints]
+workspace = true

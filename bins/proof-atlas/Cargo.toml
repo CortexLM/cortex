@@ -1,0 +1,42 @@
+[package]
+name = "proof-atlas-bin"
+description = "Opt-in finalized Atlas controller and headless runtime service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "proof-atlas"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+chain-live = { path = "../../crates/chain-live" }
+challenge-common = { path = "../../crates/challenge-common" }
+challenge-keys = { path = "../../crates/challenge-keys" }
+clap = { version = "4", features = ["derive", "env"] }
+db = { path = "../../crates/db" }
+hex = "0.4"
+proof-autonomy = { path = "../../crates/proof-autonomy" }
+proof-atlas-worker = { path = "../../crates/proof-atlas-worker" }
+proof-research = { path = "../../crates/proof-research" }
+proof-rounds = { path = "../../crates/proof-rounds" }
+proof-runtime = { path = "../../crates/proof-runtime" }
+proof-task = { path = "../../crates/proof-task" }
+proof-worker = { path = "../../crates/proof-worker" }
+rustix = { version = "1", features = ["process", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "process", "time"] }
+
+[dev-dependencies]
+axum = "0.8"
+db = { path = "../../crates/db", features = ["testing"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"] }
+tempfile = "3"
+
+[lints]
+workspace = true

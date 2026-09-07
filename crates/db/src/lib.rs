@@ -36,8 +36,34 @@ pub use store::{
 };
 
 /// Tables that the application role may insert into but never update.
-pub const APPEND_ONLY_TABLES: &[&str] =
-    &["raw_weight_snapshot", "epoch_bundle", "peer_root_statement"];
+pub const APPEND_ONLY_TABLES: &[&str] = &[
+    "raw_weight_snapshot",
+    "epoch_bundle",
+    "peer_root_statement",
+    "proof_machine_quote",
+    "proof_quote_consent",
+    "proof_action_nonce",
+    "proof_experiment_event",
+    "proof_provider_observation",
+    "proof_deletion_observation",
+    "proof_scientific_recipe",
+    "proof_scientific_evidence",
+    "proof_evidence_artifact",
+    "proof_agent_report",
+    "proof_atlas_round",
+    "proof_atlas_decision",
+    "gateway_proof_config",
+    "gateway_proof_round",
+    "gateway_proof_seal",
+    "proof_execution_target",
+    "proof_execution_script",
+    "proof_execution_observation",
+    "proof_execution_artifact",
+    "proof_runtime_event",
+    "proof_atlas_runtime_event",
+    "proof_local_event",
+    "gateway_proof_evidence",
+];
 
 /// Application DB role created by migrations (no UPDATE on append-only tables).
 pub const APP_ROLE: &str = "base_app";
@@ -272,6 +298,7 @@ pub async fn test_pool() -> Result<TestPool, DbError> {
 ///
 /// Connection, schema creation, grant, or migrate failures.
 #[cfg(feature = "testing")]
+#[allow(clippy::too_many_lines)]
 pub async fn test_pool_with_url(owner_url: &str) -> Result<TestPool, DbError> {
     let schema = format!("base_test_{}", Uuid::new_v4().simple());
     let base = connect_with(owner_url, 5).await?;
@@ -297,11 +324,28 @@ pub async fn test_pool_with_url(owner_url: &str) -> Result<TestPool, DbError> {
         .connect_with(opts)
         .await?;
 
-    sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
-        .execute(&pool)
+    // Concurrent `IF NOT EXISTS` still races on a fresh cluster (unique
+    // violation on pg_extension); an advisory lock inside one transaction
+    // serializes the callers.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('pgcrypto'))")
+        .execute(&mut *tx)
         .await?;
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
 
     migrate(&pool).await?;
+
+    // The production SECURITY DEFINER function pins public. Pin its test copy
+    // to the generated schema too, never to another test's or public's tables.
+    let pin_function = format!(
+        "ALTER FUNCTION {schema}.upsert_raw_weight_tip(\
+         uuid, text, bigint, text, text, bigint, text, bytea, bytea, bytea, bytea) \
+         SET search_path TO {schema}, pg_temp"
+    );
+    sqlx::query(&pin_function).execute(&pool).await?;
 
     let grant_schema = format!("GRANT USAGE ON SCHEMA {schema} TO {APP_ROLE}");
     sqlx::query(&grant_schema).execute(&pool).await?;
@@ -315,6 +359,56 @@ pub async fn test_pool_with_url(owner_url: &str) -> Result<TestPool, DbError> {
         let grant_ai = format!("GRANT SELECT, INSERT ON TABLE {schema}.{table} TO {APP_ROLE}");
         sqlx::query(&grant_ai).execute(&pool).await?;
     }
+    sqlx::query(
+        "REVOKE DELETE ON TABLE proof_miner_account, proof_experiment, \
+         proof_controller_lease, proof_service_intent, proof_publication FROM base_app",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query("REVOKE UPDATE, DELETE ON proof_resource FROM base_app")
+        .execute(&pool)
+        .await?;
+    sqlx::query("GRANT UPDATE (status, deletion_id) ON proof_resource TO base_app")
+        .execute(&pool)
+        .await?;
+    sqlx::query("REVOKE UPDATE ON proof_publication FROM base_app")
+        .execute(&pool)
+        .await?;
+    sqlx::query("GRANT UPDATE (fence, expires_at, delivered, confirmed_digest) ON proof_publication TO base_app")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "REVOKE UPDATE, DELETE ON proof_atlas_lease, proof_atlas_publication FROM base_app",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("GRANT UPDATE (owner, fence, expires_at) ON proof_atlas_lease TO base_app")
+        .execute(&pool)
+        .await?;
+    sqlx::query("GRANT UPDATE (fence, expires_at, delivered, confirmed_digest) ON proof_atlas_publication TO base_app")
+        .execute(&pool).await?;
+    sqlx::query(
+        "REVOKE UPDATE, DELETE ON proof_execution_intent, proof_work_schedule, proof_runtime_run, proof_atlas_runtime FROM base_app",
+    ).execute(&pool).await?;
+    sqlx::query("GRANT UPDATE (state) ON proof_execution_intent TO base_app")
+        .execute(&pool)
+        .await?;
+    sqlx::query("GRANT UPDATE (next_wake, revision) ON proof_work_schedule TO base_app")
+        .execute(&pool)
+        .await?;
+    sqlx::query("GRANT UPDATE (phase, controller_fence) ON proof_runtime_run TO base_app")
+        .execute(&pool)
+        .await?;
+    sqlx::query("GRANT UPDATE (phase, controller_fence) ON proof_atlas_runtime TO base_app")
+        .execute(&pool)
+        .await?;
+    sqlx::query("REVOKE UPDATE, DELETE ON proof_local_slot FROM base_app")
+        .execute(&pool)
+        .await?;
+    sqlx::query("GRANT UPDATE (intent_id, resource_id) ON proof_local_slot TO base_app")
+        .execute(&pool)
+        .await?;
 
     Ok(TestPool {
         pool,
@@ -393,7 +487,34 @@ mod unit_tests {
     fn append_only_table_list_is_exact() {
         assert_eq!(
             APPEND_ONLY_TABLES,
-            &["raw_weight_snapshot", "epoch_bundle", "peer_root_statement"]
+            &[
+                "raw_weight_snapshot",
+                "epoch_bundle",
+                "peer_root_statement",
+                "proof_machine_quote",
+                "proof_quote_consent",
+                "proof_action_nonce",
+                "proof_experiment_event",
+                "proof_provider_observation",
+                "proof_deletion_observation",
+                "proof_scientific_recipe",
+                "proof_scientific_evidence",
+                "proof_evidence_artifact",
+                "proof_agent_report",
+                "proof_atlas_round",
+                "proof_atlas_decision",
+                "gateway_proof_config",
+                "gateway_proof_round",
+                "gateway_proof_seal",
+                "proof_execution_target",
+                "proof_execution_script",
+                "proof_execution_observation",
+                "proof_execution_artifact",
+                "proof_runtime_event",
+                "proof_atlas_runtime_event",
+                "proof_local_event",
+                "gateway_proof_evidence",
+            ]
         );
     }
 

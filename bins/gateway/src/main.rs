@@ -53,9 +53,10 @@ async fn main() -> ExitCode {
     client.set_netuid(config.netuid);
     // Same live client backs the master-only check and the epoch seal: the
     // sealed metagraph root must come from the chain we actually talked to.
-    let chain: gateway::SharedChain = Arc::new(client);
+    let client = Arc::new(client);
+    let chain: gateway::SharedChain = client.clone();
 
-    let stores = match resolve_stores().await {
+    let (stores, proof_router) = match resolve_stores(client, config.netuid).await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("gateway: {e}");
@@ -72,6 +73,10 @@ async fn main() -> ExitCode {
             eprintln!("gateway: {e}");
             return ExitCode::from(1);
         }
+    };
+    let extra = match (extra, proof_router) {
+        (Some(a), Some(b)) => Some(a.merge(b)),
+        (a, b) => a.or(b),
     };
 
     run_with(config, chain, stores, extra).await
@@ -102,16 +107,30 @@ async fn resolve_attest_grant_router(
 ///
 /// A configured but unreachable database is fatal: falling back to memory would
 /// silently drop every raw weight and sealed bundle on restart.
-async fn resolve_stores() -> Result<Stores, String> {
+async fn resolve_stores(
+    chain: Arc<chain_live::LiveChainClient>,
+    netuid: u16,
+) -> Result<(Stores, Option<axum::Router>), String> {
+    let v2 = match std::env::var("BASE_GATEWAY_PROOF_V2").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0") => false,
+        Ok("1") => true,
+        _ => return Err("BASE_GATEWAY_PROOF_V2 must be 0 or 1".into()),
+    };
     let base = config::load().map_err(|e| e.to_string())?;
     let Some(url) = resolve_database_url(&base)? else {
+        if v2 {
+            return Err("Proof v2 requires durable PostgreSQL stores".into());
+        }
         tracing::warn!(
             event = "gateway_store_memory",
             "no database configured; raw weights and sealed bundles are not persisted"
         );
         return Ok((
-            Arc::new(MemoryRawWeightStore::new()),
-            Arc::new(MemoryBundleStore::new()),
+            (
+                Arc::new(MemoryRawWeightStore::new()),
+                Arc::new(MemoryBundleStore::new()),
+            ),
+            None,
         ));
     };
     let pool = db::connect(&url)
@@ -120,13 +139,44 @@ async fn resolve_stores() -> Result<Stores, String> {
     db::migrate(&pool)
         .await
         .map_err(|e| format!("database migrate failed: {e}"))?;
+    if !v2
+        && gateway_proof::Receiver::is_enabled(&pool)
+            .await
+            .map_err(|e| e.to_string())?
+    {
+        return Err("Proof v2 is durably active; refusing a legacy gateway restart".into());
+    }
     pool.close().await;
+    if v2 {
+        let anchor_block = std::env::var("BASE_GATEWAY_PROOF_ANCHOR_BLOCK")
+            .map_err(|_| "Proof v2 requires BASE_GATEWAY_PROOF_ANCHOR_BLOCK")?
+            .parse::<u64>()
+            .map_err(|_| "invalid Proof round anchor")?;
+        let (challenges, _) = gateway::load_production_trust_root(3).map_err(|e| e.to_string())?;
+        let proof_public_key = challenges
+            .get(b"proof")
+            .ok_or("Proof key is missing")?
+            .public_key;
+        let receiver = gateway_proof::Receiver::connect(
+            &url,
+            chain.clone(),
+            chain,
+            gateway_proof::Config {
+                netuid,
+                anchor_block,
+                proof_public_key,
+            },
+            (*challenges).clone(),
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok((receiver.stores(), Some(receiver.router())));
+    }
     let stores = gateway_store_pg::stores(&url)?;
     tracing::info!(
         event = "gateway_store_postgres",
         "raw weights and sealed bundles persist to postgres"
     );
-    Ok(stores)
+    Ok((stores, None))
 }
 
 fn resolve_database_url(cfg: &config::Config) -> Result<Option<String>, String> {

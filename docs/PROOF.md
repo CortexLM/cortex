@@ -7,11 +7,67 @@ Read the [overview](OVERVIEW.md) for the purpose and the
 
 **Implementation limits:** the Python judge currently performs an authenticated
 acknowledgement request and static checks, not the paper's autonomous investigation
-and arbitrary recipe reproduction. The service stores submissions in memory and
-does not run an automatic reward-leaf emitter. Payout/signing helpers exist, but
+and arbitrary recipe reproduction. Clean static inspection now raises `ContractError`
+without agent reproduction and verified FLOP evidence; forbidden fabric rejects.
+The CLI gates before judge/model calls and produces no successful metrics.
+Agent-led accounting is not implemented: the agent must determine experiment-appropriate accounting, retain reproducible evidence, and have that evidence verified by the controller. Neither a universal formula nor an arbitrary model assertion is sufficient.
+The default v1 store is in memory. The optional SQL journal now passes fresh workspace durability tests (2/2) after fixing embedded-migration tracking. Async writes persist SQL before memory and reject NaN/infinity. Production durability remains unproven: cross-process ID collisions/upserts, separate submission/score transactions, synchronous bypass and cancellation-induced memory lag remain.
+The v1 service does not run an automatic reward-leaf emitter. Payout/signing helpers exist, but
 readiness checks alone do not establish a complete research-to-payment path.
 The rules below describe the current interfaces and scoring functions, not a
 claim that these gaps are closed.
+
+The separate [Atlas orchestration path](../crates/proof-autonomy-pg/README.md)
+persists experiment commands, consent, controller ownership, resources and cleanup
+in Postgres using canonical migrations **0020–0028**. `proof-challenge` can
+explicitly mount its signed v2 API with `PROOF_AUTONOMY_DATABASE_URL_FILE`, but
+starts no experiment worker. The `proof-worker` library implements quote refresh,
+strict resource adoption, durable runtime identity/deadlines, same-fence
+invocation refusal and an independent cleanup lane. It enforces the original DB
+runtime deadline even if an agent ignores stop; shutdown aborts lease acquisition
+and drops suspended operation/heartbeat futures before DB bookkeeping. Live strict Lium,
+credential and quote adapters remain unwired. One split-GPU rent returned **400**; one whole-host **$0.25/hr** pod remained `PENDING` before termination. Two DELETEs returned **200**; GET returned **404** and the list was empty after **6 s**, with balance unchanged. This does not establish side-effect-free refusals generally, client-id support or its absence, stopped running-pod billing, a whole-hour tariff, or expiry enforcement. Existing `prism-lium` custom templates accept `docker_image=repo@digest`; a null separate digest field does not make digest pinning impossible. Live custom-image enforcement remains untested. See the
+[measured semantics](runbooks/proof-autonomy-local.md#measured-lium-api-semantics-live-probe-2026-09-07).
+
+The local Docker executor runs actual paired CPU scripts and retains outputs,
+exit status, wall time and failures. Metrics and FLOPs come only from a trusted
+observer (`proof-measure`), optionally wired in `proof-experiment`, that runs a
+pinned evaluation image with no network by default,
+a read-only rootfs and a read-only holdout bind; `collect` still fails closed
+with `UnobservedMeasurements` whenever FLOPs are unmeasured, and the default
+`NoObserver` never produces science. Only a test observer image has been
+exercised: the real `proof-eval` image does not yet report independent FLOPs,
+and optional judge egress has only demonstrated a synthetic probe with a real
+completion and four sampled blocked escapes. The eval helper supports explicit `PROOF_JUDGE_PROXY=1` without Authorization only for the exact alias `http://proof-judge:8080/v1` and `chat/completions`; direct mode still requires a key. The proxy does not yet prove confidentiality or integrity:
+allowed arbitrary payloads and artifact code remain risks.
+The shared headless launcher drives the real `CortexRuntime`; one authorized
+Astra → isolated Python → private controller synthetic IPC test passed, not a
+reproduction or verified-cost test. W&B v0.28.0 automatic runtime/environment
+telemetry exceeds the seven-field public allowlist, so the stock SDK stays
+unusable; `proof-wandb` uploads the allowlisted record over direct GraphQL
+instead, but it is wired into no binary and has never contacted W&B.
+
+The separate `proof-atlas` binary is opt-in via `PROOF_ATLAS_CONFIG_FILE` /
+`--config`, with a bounded `--check` mode. It can run the finalized-round
+scheduler/publisher, never experiments, rentals, sealing or chain submission.
+The strict round receiver and exact-receipt plus byte-readback transport are
+implemented and tested locally; no deployed receiver or live round publication
+is established. The ignored headless-delivery regression passed the real scheduler /
+Postgres → unmodified `CortexRuntime`/Docker Python → private decision → strict
+HTTP publication/readback → production `seal_epoch` → served router/independent
+Python vector `[0.4, 0.4, 0.2]` path, including lost-ack byte replay without model
+rerun. Chain/science/inference are synthetic; the admin seal HTTP route is not
+covered by that direct-helper test.
+
+Three binary startup/shutdown regressions passed, including SIGTERM while
+waiting for finality; Atlas cancellation prevents a late blocking RPC result
+from freezing a round after shutdown. Seventeen process-supervision tests passed;
+the optional `headless.pid_namespace` closes `setsid` escapes by running the
+launcher as PID 1 of a private PID namespace (PID containment only).
+See the [operator contract and verification limits](runbooks/proof-autonomy-local.md),
+including what `--check` does not validate and the complete local validation checkpoint.
+Existing v1 submission/scoring and the Proof/Bounty **8000/2000 bps** split are
+unchanged.
 
 Live challenge id: **`proof`**. Emission **8000 bps** (80% of the subnet;
 bounty is 2000). This 20%/80% lock is independent of eval digest. Eval

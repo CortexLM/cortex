@@ -1,0 +1,39 @@
+[package]
+name = "proof-executor"
+description = "Durable fail-closed scientific execution on isolated local Docker targets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+chain-live = { path = "../chain-live" }
+docker-engine = { path = "../docker-engine" }
+proof-autonomy = { path = "../proof-autonomy" }
+proof-autonomy-pg = { path = "../proof-autonomy-pg" }
+proof-measure = { path = "../proof-measure" }
+proof-research = { path = "../proof-research" }
+proof-runtime = { path = "../proof-runtime" }
+proof-score = { path = "../proof-score" }
+proof-task = { path = "../proof-task" }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "json", "uuid"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "time", "sync"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+challenge-common = { path = "../challenge-common" }
+crypto = { path = "../crypto" }
+db = { path = "../db", features = ["testing"] }
+hex = "0.4"
+proof-eval = { path = "../proof-eval" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

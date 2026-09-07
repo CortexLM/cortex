@@ -1,0 +1,3 @@
+- Added a private-file-configured headless Cortex launcher with durable restart fencing, bounded JSON status, and isolated recursive-kernel cleanup.
+- Required controller-persisted run identity, absolute deadline, and explicit resume mode, while allowing fenced controller-socket replacement and opt-in literal-loopback HTTP proxies.
+- Fixed headless workers reporting successful model completions as failures when automatic compaction only warned that a session was too short.

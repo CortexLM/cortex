@@ -102,7 +102,6 @@ def _selftest() -> int:
 
 def _score(request_path: Path, out: Path, *, baseline: bool) -> int:
     request = read_request(request_path)
-    require_judge(request)
     from .fabric import enforce
 
     enforce(request.constraints)
@@ -110,12 +109,18 @@ def _score(request_path: Path, out: Path, *, baseline: bool) -> int:
     if Path(ADAMW_SCRIPT).is_file():
         recipe = f"{recipe}\n{Path(ADAMW_SCRIPT).read_text(encoding='utf-8')}"
     agent = inspect(request, recipe)
+    if not agent["reproduced"]:
+        raise ContractError(agent["rationale"])
+    require_judge(request)
     artifact_dir = os.environ.get("PROOF_ARTIFACT_DIR") or os.environ.get("PROOF_PROXY_MODEL_DIR")
     if baseline:
         artifact_dir = os.environ.get("PROOF_PROXY_MODEL_DIR") or artifact_dir
     harness = measure(request, artifact_dir)
-    if "artifact_fingerprint" in harness:
-        harness = {k: v for k, v in harness.items() if k != "artifact_fingerprint"}
+    harness = {
+        k: v
+        for k, v in harness.items()
+        if k != "artifact_fingerprint"
+    }
     document = {
         "schema_version": PROOF_METRICS_SCHEMA,
         "submission_digest": request.submission_digest,

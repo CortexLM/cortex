@@ -1,0 +1,37 @@
+[package]
+name = "proof-local-provider"
+description = "Durable local CPU slot provider and quote source for the opt-in proof-experiment service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+proof-autonomy = { path = "../proof-autonomy" }
+proof-autonomy-pg = { path = "../proof-autonomy-pg" }
+proof-broker = { path = "../proof-broker" }
+proof-worker = { path = "../proof-worker" }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid"] }
+thiserror = "2"
+tokio = { version = "1", features = ["time"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+challenge-common = { path = "../challenge-common" }
+crypto = { path = "../crypto" }
+db = { path = "../db", features = ["testing"] }
+hex = "0.4"
+proof-executor = { path = "../proof-executor" }
+proof-research = { path = "../proof-research" }
+proof-runtime = { path = "../proof-runtime" }
+proof-task = { path = "../proof-task" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

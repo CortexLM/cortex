@@ -1,0 +1,43 @@
+[package]
+name = "gateway-proof"
+description = "Transactional round-aware Proof receiver and pinned gateway seals"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+axum = "0.8"
+bundle = { path = "../bundle" }
+chain = { path = "../chain" }
+chain-live = { path = "../chain-live" }
+challenge-common = { path = "../challenge-common" }
+db = { path = "../db" }
+gateway = { path = "../gateway" }
+gateway-store-pg = { path = "../gateway-store-pg" }
+hex = "0.4"
+parity-scale-codec = { version = "3.7", default-features = false, features = ["derive"] }
+proof-autonomy = { path = "../proof-autonomy" }
+proof-publication = { path = "../proof-publication" }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+tracing = "0.1"
+uuid = "1"
+weights-api = { path = "../weights-api" }
+
+[dev-dependencies]
+db = { path = "../db", features = ["testing"] }
+http-body-util = "0.1"
+proof-research = { path = "../proof-research" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
+validator = { path = "../validator" }
+validator-sync = { path = "../validator-sync" }
+
+[lints]
+workspace = true

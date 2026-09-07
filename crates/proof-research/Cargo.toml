@@ -1,0 +1,41 @@
+[package]
+name = "proof-research"
+description = "Retained scientific evidence and controlled Proof publication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+hex = "0.4"
+proof-autonomy = { path = "../proof-autonomy" }
+proof-autonomy-pg = { path = "../proof-autonomy-pg" }
+proof-eval = { path = "../proof-eval" }
+proof-score = { path = "../proof-score" }
+proof-task = { path = "../proof-task" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "json", "macros"] }
+thiserror = "2"
+tokio = { version = "1", features = ["time"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+axum = "0.8"
+chain = { path = "../chain" }
+chain-live = { path = "../chain-live" }
+challenge-common = { path = "../challenge-common" }
+crypto = { path = "../crypto" }
+db = { path = "../db", features = ["testing"] }
+gateway = { path = "../gateway" }
+gateway-proof = { path = "../gateway-proof" }
+proof-publication = { path = "../proof-publication" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+validator-sync = { path = "../validator-sync" }
+
+[lints]
+workspace = true

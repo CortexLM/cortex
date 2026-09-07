@@ -344,6 +344,30 @@ impl LiveChainRpc {
         self.rpc("chain_getHeader", &json!([]))
     }
 
+    /// Read the number of the finalized head, never the best/optimistic head.
+    ///
+    /// # Errors
+    /// Missing/malformed finality or header response, or transport failure.
+    pub fn finalized_height(&self) -> Result<u64, ChainError> {
+        let hash = self.rpc("chain_getFinalizedHead", &json!([]))?;
+        let hash = hash
+            .as_str()
+            .filter(|h| {
+                h.len() == 66
+                    && h.starts_with("0x")
+                    && h[2..].bytes().all(|b| b.is_ascii_hexdigit())
+            })
+            .ok_or_else(|| ChainError::Other("invalid finalized hash".into()))?;
+        let header = self.rpc("chain_getHeader", &json!([hash]))?;
+        let number = header
+            .get("number")
+            .and_then(Value::as_str)
+            .and_then(|n| n.strip_prefix("0x"))
+            .ok_or_else(|| ChainError::Other("invalid finalized header".into()))?;
+        u64::from_str_radix(number, 16)
+            .map_err(|_| ChainError::Other("invalid finalized height".into()))
+    }
+
     /// `author_submitExtrinsic` — fire-and-forget over HTTPS JSON-RPC.
     ///
     /// Prefer this over `author_submitAndWatchExtrinsic`, which requires a

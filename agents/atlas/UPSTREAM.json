@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/PrimeIntellect-ai/prime-agent",
+  "commit": "915c78f42c248b08238dd27fcd4bcab32c60beab",
+  "tree": "36b9dcf832a25527280a7dd9b6dc66d2abc82924",
+  "version": "0.9.3",
+  "license": "MIT",
+  "import": "Complete git archive, without nested Git metadata",
+  "cortex_profile": "atlas-proof-v1"
+}

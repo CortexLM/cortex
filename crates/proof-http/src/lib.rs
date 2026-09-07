@@ -301,7 +301,8 @@ async fn submit(
             nonce,
             submission_digest,
             &failed,
-        );
+        )
+        .await;
     }
 
     let eval = eval_after_freeze(
@@ -339,10 +340,11 @@ async fn submit(
         receipt_json,
         eval.backend,
     )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
-fn persist_pre_eval_reject(
+async fn persist_pre_eval_reject(
     st: &AppState,
     body: SubmitBody,
     topic: &TopicDocument,
@@ -371,46 +373,46 @@ fn persist_pre_eval_reject(
         failed: failed.to_vec(),
         lattice: 0,
     };
+    let artifact_run = artifact.clone();
     let row = st
         .store
-        .insert(Submission {
-            id: String::new(),
-            topic_id: topic.id.clone(),
-            miner_hotkey: hotkey,
-            artifact_digest: artifact,
-            artifact_uri: body.artifact_uri,
-            claim: body.claim,
-            declared_flops: body.declared_flops,
-            architecture: body.architecture,
-            inference_offer_id: st
-                .offer
-                .as_ref()
-                .map(|o| o.offer_id.clone())
-                .unwrap_or_default(),
-            config_commitment: st
-                .offer
-                .as_ref()
-                .map(|o| o.config_commitment.clone())
-                .unwrap_or_default(),
-            manifest: body.manifest,
-            nonce,
-            submission_digest,
-            state: SubmissionState::Rejected,
-            receipt_json: None,
-            verdict: Some(verdict),
-            detail: Some(format!("gates={failed:?}")),
-        })
+        .finish_durable(
+            Submission {
+                id: String::new(),
+                topic_id: topic.id.clone(),
+                miner_hotkey: hotkey,
+                artifact_digest: artifact,
+                artifact_uri: body.artifact_uri,
+                claim: body.claim,
+                declared_flops: body.declared_flops,
+                architecture: body.architecture,
+                inference_offer_id: st
+                    .offer
+                    .as_ref()
+                    .map(|o| o.offer_id.clone())
+                    .unwrap_or_default(),
+                config_commitment: st
+                    .offer
+                    .as_ref()
+                    .map(|o| o.config_commitment.clone())
+                    .unwrap_or_default(),
+                manifest: body.manifest,
+                nonce,
+                submission_digest,
+                state: SubmissionState::Rejected,
+                receipt_json: None,
+                verdict: Some(verdict),
+                detail: Some(format!("gates={failed:?}")),
+            },
+            MinerTopicRun {
+                pass: false,
+                primary: None,
+                artifact_digest: artifact_run,
+                near_duplicate: false,
+            },
+        )
+        .await
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
-    let _ = st.store.record_topic_run(
-        &row.miner_hotkey,
-        &topic.id,
-        MinerTopicRun {
-            pass: false,
-            primary: None,
-            artifact_digest: row.artifact_digest.clone(),
-            near_duplicate: false,
-        },
-    );
     Ok((
         StatusCode::CREATED,
         Json(SubmitResp {
@@ -425,7 +427,7 @@ fn persist_pre_eval_reject(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn persist_scored(
+async fn persist_scored(
     st: &AppState,
     body: SubmitBody,
     hotkey: String,
@@ -451,48 +453,47 @@ fn persist_scored(
     };
     let row = st
         .store
-        .insert(Submission {
-            id: String::new(),
-            topic_id: topic_id.clone(),
-            miner_hotkey: hotkey,
-            artifact_digest: artifact,
-            artifact_uri: body.artifact_uri,
-            claim: body.claim,
-            declared_flops: body.declared_flops,
-            architecture: body.architecture,
-            inference_offer_id: st
-                .offer
-                .as_ref()
-                .map(|o| o.offer_id.clone())
-                .unwrap_or_default(),
-            config_commitment: st
-                .offer
-                .as_ref()
-                .map(|o| o.config_commitment.clone())
-                .unwrap_or_default(),
-            manifest: body.manifest,
-            nonce,
-            submission_digest,
-            state: if pass {
-                SubmissionState::AwaitingAdmin
-            } else {
-                SubmissionState::Rejected
+        .finish_durable(
+            Submission {
+                id: String::new(),
+                topic_id: topic_id.clone(),
+                miner_hotkey: hotkey,
+                artifact_digest: artifact,
+                artifact_uri: body.artifact_uri,
+                claim: body.claim,
+                declared_flops: body.declared_flops,
+                architecture: body.architecture,
+                inference_offer_id: st
+                    .offer
+                    .as_ref()
+                    .map(|o| o.offer_id.clone())
+                    .unwrap_or_default(),
+                config_commitment: st
+                    .offer
+                    .as_ref()
+                    .map(|o| o.config_commitment.clone())
+                    .unwrap_or_default(),
+                manifest: body.manifest,
+                nonce,
+                submission_digest,
+                state: if pass {
+                    SubmissionState::AwaitingAdmin
+                } else {
+                    SubmissionState::Rejected
+                },
+                receipt_json: Some(receipt_json),
+                verdict: Some(verdict),
+                detail,
             },
-            receipt_json: Some(receipt_json),
-            verdict: Some(verdict),
-            detail,
-        })
+            MinerTopicRun {
+                pass,
+                primary,
+                artifact_digest,
+                near_duplicate: false,
+            },
+        )
+        .await
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
-    let _ = st.store.record_topic_run(
-        &row.miner_hotkey,
-        &topic_id,
-        MinerTopicRun {
-            pass,
-            primary,
-            artifact_digest,
-            near_duplicate: false,
-        },
-    );
     Ok((
         StatusCode::CREATED,
         Json(SubmitResp {
@@ -506,19 +507,25 @@ fn persist_scored(
     ))
 }
 
-async fn list_subs(State(st): State<AppState>) -> impl IntoResponse {
-    let rows = st.store.list().unwrap_or_default();
-    Json(serde_json::json!({ "items": rows }))
+async fn list_subs(
+    State(st): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let rows = st
+        .store
+        .list_durable()
+        .await
+        .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "store"))?;
+    Ok(Json(serde_json::json!({ "items": rows })))
 }
 
 async fn get_sub(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let row = st
-        .store
-        .get(&id)
-        .map_err(|_| err(StatusCode::NOT_FOUND, "not_found"))?;
+    let row = st.store.get_durable(&id).await.map_err(|e| match e {
+        proof_store::StoreError::NotFound(_) => err(StatusCode::NOT_FOUND, "not_found"),
+        _ => err(StatusCode::SERVICE_UNAVAILABLE, "store"),
+    })?;
     Ok(Json(row))
 }
 
@@ -1400,3 +1407,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod durability_tests;

@@ -1,0 +1,4 @@
+- Added isolated Cortex experiment and Atlas reward profiles with explicit broker capabilities, recursive sessions, and shared tree budgets.
+- Added strict durable recovery and tested controller crash takeover without renewing quotas or deadlines.
+- Added verified recursive cleanup with pending-deletion reconciliation, retained research findings, and accurate interrupted-child reporting.
+- Disabled inherited harness memory and session-command interpretation for Cortex research sessions.

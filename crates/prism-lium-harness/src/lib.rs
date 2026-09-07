@@ -316,18 +316,22 @@ pub fn digest_pinned_rent(spec: &InstanceSpec) -> Result<Option<DigestPinnedRent
 
 fn listed_image_matches_pin(tmpl: &serde_json::Value, repository: &str, digest: &str) -> bool {
     let Some(listed_image) = tmpl.get("docker_image").and_then(|x| x.as_str()) else {
-        return true;
+        return false;
     };
     let (repo, at_digest) = listed_image
         .rsplit_once('@')
         .map_or((listed_image, None), |(repo, d)| (repo, Some(d)));
-    if repo != repository {
+    if repo != repository || digest_hex(digest).is_err() {
         return false;
     }
-    match at_digest.or_else(|| tmpl.get("docker_image_digest").and_then(|x| x.as_str())) {
-        None => true,
-        Some(listed) => listed == digest,
-    }
+    let separate_digest = match tmpl.get("docker_image_digest") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => Some(value.as_str()),
+        Some(_) => return false,
+    };
+    (at_digest.is_some() || separate_digest.is_some())
+        && at_digest.is_none_or(|listed| listed == digest)
+        && separate_digest.is_none_or(|listed| listed == digest)
 }
 
 /// Exact name + pin match only. Never falls through to a public Prism template.
@@ -868,6 +872,72 @@ mod tests {
             &format!("sha256:{}", "cd".repeat(32)),
         );
         assert!(wrong.is_err(), "{wrong:?}");
+    }
+
+    #[test]
+    fn listed_digest_template_requires_exact_unambiguous_metadata() {
+        let repository = "ghcr.io/cortexlm/relearn-eval";
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let pinned = format!("{repository}@{digest}");
+        let wrong = format!("sha256:{}", "cd".repeat(32));
+        // None omits the field; JSON null models an explicitly absent value.
+        for (image, image_ok, inline) in [
+            (None, false, false),
+            (Some(serde_json::json!(null)), false, false),
+            (Some(serde_json::json!(42)), false, false),
+            (Some(serde_json::json!("")), false, false),
+            (Some(serde_json::json!("daturaai/pytorch")), false, false),
+            (Some(serde_json::json!(repository)), true, false),
+            (Some(serde_json::json!(pinned)), true, true),
+            (
+                Some(serde_json::json!(format!("{repository}@{wrong}"))),
+                false,
+                true,
+            ),
+            (
+                Some(serde_json::json!(format!("{repository}@"))),
+                false,
+                true,
+            ),
+            (
+                Some(serde_json::json!(format!("other/image@{digest}"))),
+                false,
+                true,
+            ),
+        ] {
+            for (separate, absent, exact) in [
+                (None, true, false),
+                (Some(serde_json::json!(null)), true, false),
+                (Some(serde_json::json!(digest)), false, true),
+                (Some(serde_json::json!(wrong)), false, false),
+                (Some(serde_json::json!("")), false, false),
+                (Some(serde_json::json!("sha256:ab")), false, false),
+                (Some(serde_json::json!(42)), false, false),
+                (Some(serde_json::json!({})), false, false),
+            ] {
+                let mut row = serde_json::json!({"name": "pinned", "id": "harvest"});
+                if let Some(value) = &image {
+                    row["docker_image"] = value.clone();
+                }
+                if let Some(value) = separate {
+                    row["docker_image_digest"] = value;
+                }
+                let result = listed_digest_template_id(
+                    std::slice::from_ref(&row),
+                    "pinned",
+                    repository,
+                    &digest,
+                );
+                if image_ok && (exact || (inline && absent)) {
+                    assert_eq!(result.unwrap().as_deref(), Some("harvest"), "{row}");
+                } else {
+                    assert!(
+                        matches!(result, Err(prism_lium_types::LiumError::Integrity(_))),
+                        "{row}: {result:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 
 import pytest
 
 from proof_eval.baked import baked_proxies, require_baked
+from proof_eval.agent import inspect
+from proof_eval.cli import EXIT_REFUSED, main
 from proof_eval.contract import DEFAULT_PROXY, METRICS_MARKER, OK_MARKER
+from proof_eval.contract import ContractError
 from proof_eval.fabric import DT_NO_IB_GBPS, enforce
 from proof_eval.judge import call_judge, load_judge_api_key, require_judge
 from proof_eval.request import Constraints, HarvestRequest, canonical_json, holdout_commitment
@@ -115,7 +120,7 @@ def test_request_requires_judge_origin_and_ignores_no_hf_default() -> None:
     with pytest.raises(Exception, match="http"):
         HarvestRequest.from_dict(_raw(base_url="ftp://evil"))
     with pytest.raises(Exception, match="api_key"):
-        HarvestRequest.from_dict(_raw(api_key="sk-should-never-be-here"))
+        HarvestRequest.from_dict(_raw(api_key="test-request-key"))
 
 
 def test_judge_key_comes_from_env_not_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,6 +152,7 @@ class _Judge(BaseHTTPRequestHandler):
 
 
 def test_judge_sends_bearer_from_teacher_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PROOF_JUDGE_PROXY", raising=False)
     server = HTTPServer(("127.0.0.1", 0), _Judge)
     port = server.server_address[1]
     thread = Thread(target=server.serve_forever, daemon=True)
@@ -154,18 +160,19 @@ def test_judge_sends_bearer_from_teacher_env(monkeypatch: pytest.MonkeyPatch) ->
     try:
         raw = _raw(base_url=f"http://127.0.0.1:{port}/v1")
         req = HarvestRequest.from_dict(raw)
-        monkeypatch.setenv("PROOF_INFERENCE_API_KEY", "sk-live-not-a-real-secret")
+        monkeypatch.setenv("PROOF_INFERENCE_API_KEY", "test-judge-key")
         require_judge(req)
-        assert _Judge.last_auth == "Bearer sk-live-not-a-real-secret"
+        assert _Judge.last_auth == "Bearer test-judge-key"
         assert _Judge.last_path.endswith("/chat/completions")
         body = json.loads(_Judge.last_body.decode())
         assert body["model"] == "master-proxy-v0"
-        assert "sk-live" not in json.dumps(body)
+        assert "test-judge-key" not in json.dumps(body)
     finally:
         server.shutdown()
 
 
 def test_judge_refuses_without_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PROOF_JUDGE_PROXY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("PROOF_INFERENCE_API_KEY", raising=False)
     req = HarvestRequest.from_dict(_raw())
@@ -173,3 +180,89 @@ def test_judge_refuses_without_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
         require_judge(req)
     with pytest.raises(Exception, match="API key"):
         call_judge(req, "   ")
+
+@pytest.mark.parametrize("mode,suffix", [("chat", "/chat/completions"), ("completions", "/completions")])
+@pytest.mark.parametrize("full_endpoint", [False, True])
+def test_judge_proxy_omits_auth(
+    monkeypatch: pytest.MonkeyPatch, mode: str, suffix: str, full_endpoint: bool
+) -> None:
+    monkeypatch.setenv("PROOF_JUDGE_PROXY", "1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("PROOF_INFERENCE_API_KEY", raising=False)
+    calls = []
+
+    def urlopen(req, *, timeout):
+        calls.append(req)
+        assert req.full_url == "http://proof-judge:8080/v1" + suffix
+        assert req.get_header("Authorization") is None
+        assert timeout == 60.0
+        return BytesIO(b'{}')
+
+    monkeypatch.setattr("proof_eval.judge.urllib.request.urlopen", urlopen)
+    req = HarvestRequest.from_dict(_raw(
+        mode=mode, base_url="http://proof-judge:8080/v1" + (suffix if full_endpoint else "")
+    ))
+    require_judge(req)
+    call_judge(req, "must-not-reach-proxy")
+    assert len(calls) == 2
+
+@pytest.mark.parametrize("base_url", [
+    "http://127.0.0.1:8000/v1",
+    "http://evil.example/v1",
+    "http://proof-judge:8080.evil.example/v1",
+    "http://user:password@proof-judge:8080/v1",
+    "http://proof-judge:8080/v1?query=1",
+    "http://proof-judge:8080/v1#fragment",
+    "http://proof-judge:8080/v1/",
+    "https://proof-judge:8080/v1",
+    "http://proof-judge:8081/v1",
+    "http://proof-judge:8080/v1/completions",
+    "http://proof-judge:8080/v1/embeddings",
+])
+def test_judge_proxy_refuses_other_urls(monkeypatch: pytest.MonkeyPatch, base_url: str) -> None:
+    monkeypatch.setenv("PROOF_JUDGE_PROXY", "1")
+    monkeypatch.setenv("PROOF_INFERENCE_API_KEY", "must-not-leak")
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("disallowed proxy URL must not make a request")
+
+    monkeypatch.setattr("proof_eval.judge.urllib.request.urlopen", unexpected)
+    req = HarvestRequest.from_dict(_raw(base_url=base_url))
+    with pytest.raises(ContractError, match="proxy URL"):
+        require_judge(req)
+
+@pytest.mark.parametrize("proxy_mode", ["", "0", "true"])
+def test_judge_proxy_requires_explicit_mode(monkeypatch: pytest.MonkeyPatch, proxy_mode: str) -> None:
+    monkeypatch.setenv("PROOF_JUDGE_PROXY", proxy_mode)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("PROOF_INFERENCE_API_KEY", raising=False)
+    with pytest.raises(ContractError, match="API key"):
+        require_judge(HarvestRequest.from_dict(_raw(base_url="http://proof-judge:8080/v1")))
+
+def test_static_checks_cannot_authorize_scoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def unexpected(*args: object) -> None:
+        raise AssertionError("unverified reproduction must not call the judge or model")
+
+    monkeypatch.setattr("proof_eval.cli.require_judge", unexpected)
+    monkeypatch.setattr("proof_eval.cli.measure", unexpected)
+    for command in ("score", "baseline"):
+        for forbidden in (False, True):
+            raw = _raw(
+                claim="uses InfiniBand" if forbidden else "beats the reference",
+                constraints={"no_infiniband": True},
+            )
+            request = tmp_path / "request.json"
+            out = tmp_path / "metrics.json"
+            request.write_text(json.dumps(raw), encoding="utf-8")
+            assert main([command, "--request", str(request), "--out", str(out)]) == EXIT_REFUSED
+            captured = capsys.readouterr()
+            assert "refused:" in captured.err
+            assert OK_MARKER not in captured.out
+            assert METRICS_MARKER not in captured.out
+            assert not out.exists()
+            assert not out.with_suffix(".json.partial").exists()
+    rejected = inspect(HarvestRequest.from_dict(raw), "uses InfiniBand")
+    assert rejected["reproduced"] is False
+    assert rejected["flops_used"] == 0

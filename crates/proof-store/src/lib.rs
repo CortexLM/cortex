@@ -14,6 +14,8 @@
     clippy::must_use_candidate
 )]
 
+pub mod durable;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
@@ -105,6 +107,9 @@ pub enum StoreError {
     /// Lock poisoned.
     #[error("store lock poisoned")]
     Poison,
+    /// Durable journal unavailable; the caller must not acknowledge the write.
+    #[error("durable store backend unavailable")]
+    Backend,
     /// Unknown submission.
     #[error("unknown submission {0}")]
     NotFound(String),
@@ -126,6 +131,11 @@ pub enum StoreError {
 #[derive(Clone, Default)]
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
+    // Serializes volatile compound mutations; Postgres serializes durable writes.
+    writes: Arc<tokio::sync::Mutex<()>>,
+    /// Write-through journal. `None` keeps the historical volatile behaviour
+    /// for tests; a configured service sets it so scored runs survive restart.
+    journal: Option<durable::DurableJournal>,
 }
 
 #[derive(Default)]
@@ -143,6 +153,71 @@ impl MemoryStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach a durable journal and reload everything it retained, so a
+    /// restart resumes with the submissions and scores it had already accepted.
+    ///
+    /// # Errors
+    /// Journal unavailable or a retained row no longer decodes.
+    pub async fn with_journal(
+        mut self,
+        journal: durable::DurableJournal,
+    ) -> Result<Self, StoreError> {
+        // Probe availability; durable reads never use the process cache.
+        journal.snapshot().await?;
+        self.journal = Some(journal);
+        Ok(self)
+    }
+
+    /// Independent, read-consistent payout snapshot. Refresh once per emission.
+    pub async fn snapshot_durable(&self) -> Result<Self, StoreError> {
+        let Some(journal) = &self.journal else {
+            return Ok(self.clone());
+        };
+        let (submissions, runs) = journal.snapshot().await?;
+        let g = self.lock()?;
+        let mut inner = Inner {
+            topics: g.topics.clone(),
+            holdouts: g.holdouts.clone(),
+            baselines: g.baselines.clone(),
+            ..Inner::default()
+        };
+        for row in submissions {
+            inner.submissions.insert(row.id.clone(), row);
+        }
+        for (hotkey, topic, run) in runs {
+            inner.scores.entry(hotkey).or_default().insert(topic, run);
+        }
+        Ok(Self {
+            inner: Arc::new(Mutex::new(inner)),
+            ..Self::default()
+        })
+    }
+
+    fn volatile_only(&self) -> Result<(), StoreError> {
+        if self.journal.is_some() {
+            return Err(StoreError::Illegal(
+                "durable store requires async API or fresh snapshot".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Current committed submission, including commits from other instances.
+    pub async fn get_durable(&self, id: &str) -> Result<Submission, StoreError> {
+        self.snapshot_durable().await?.get(id)
+    }
+
+    /// Current committed submissions, newest first.
+    pub async fn list_durable(&self) -> Result<Vec<Submission>, StoreError> {
+        self.snapshot_durable().await?.list()
+    }
+
+    /// Rows the journal must persist before the caller acknowledges a write.
+    #[must_use]
+    pub fn journal(&self) -> Option<&durable::DurableJournal> {
+        self.journal.as_ref()
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>, StoreError> {
@@ -240,18 +315,117 @@ impl MemoryStore {
 
     /// Insert a scored submission in its final state.
     pub fn insert(&self, mut row: Submission) -> Result<Submission, StoreError> {
+        self.volatile_only()?;
         let mut g = self.lock()?;
-        if row.id.is_empty() {
-            let n = g.next;
-            g.next = g.next.saturating_add(1);
-            row.id = format!("pf_{n:016x}");
-        }
+        Self::allocate(&mut g, &mut row)?;
         g.submissions.insert(row.id.clone(), row.clone());
         Ok(row)
     }
 
+    fn allocate(g: &mut Inner, row: &mut Submission) -> Result<(), StoreError> {
+        if row.id.is_empty() {
+            loop {
+                let n = g.next;
+                g.next = n
+                    .checked_add(1)
+                    .ok_or_else(|| StoreError::Illegal("submission ids exhausted".into()))?;
+                row.id = format!("pf_{n:016x}");
+                if !g.submissions.contains_key(&row.id) {
+                    break;
+                }
+            }
+        } else if g.submissions.contains_key(&row.id) {
+            return Err(StoreError::Illegal("duplicate submission id".into()));
+        }
+        Ok(())
+    }
+
+    /// Legacy unscored insert, refused with a journal; use `finish_durable`.
+    ///
+    /// # Errors
+    /// Lock poisoned or the journal rejected the write.
+    pub async fn insert_durable(&self, row: Submission) -> Result<Submission, StoreError> {
+        let _write = self.writes.lock().await;
+        self.volatile_only()?;
+        self.insert(row)
+    }
+
+    /// Commit a final submission and its payout run together.
+    pub async fn finish_durable(
+        &self,
+        row: Submission,
+        run: MinerTopicRun,
+    ) -> Result<Submission, StoreError> {
+        self.commit_final(row, run, false).await
+    }
+
+    /// Update terminal fields without changing the original frozen identity.
+    pub async fn update_durable(
+        &self,
+        row: Submission,
+        run: MinerTopicRun,
+    ) -> Result<Submission, StoreError> {
+        self.commit_final(row, run, true).await
+    }
+
+    async fn commit_final(
+        &self,
+        row: Submission,
+        run: MinerTopicRun,
+        update: bool,
+    ) -> Result<Submission, StoreError> {
+        if let Some(journal) = &self.journal {
+            return journal.commit(row, &run, update).await;
+        }
+        let _write = self.writes.lock().await;
+        if run.primary.is_some_and(|v| !v.is_finite())
+            || run.artifact_digest != row.artifact_digest
+            || row.verdict.as_ref().is_some_and(|v| v.pass != run.pass)
+        {
+            return Err(StoreError::Illegal("invalid topic run".into()));
+        }
+        if update {
+            let old = self.get(&row.id)?;
+            let identity = |value: &Submission| -> Result<serde_json::Value, StoreError> {
+                let mut value = serde_json::to_value(value).map_err(|_| StoreError::Backend)?;
+                if let Some(object) = value.as_object_mut() {
+                    for key in ["state", "receipt_json", "verdict", "detail"] {
+                        object.remove(key);
+                    }
+                }
+                Ok(value)
+            };
+            if identity(&old)? != identity(&row)? {
+                return Err(StoreError::Illegal("immutable identity mismatch".into()));
+            }
+        }
+        let mut g = self.lock()?;
+        let mut row = row;
+        if !update {
+            Self::allocate(&mut g, &mut row)?;
+        }
+        g.scores
+            .entry(row.miner_hotkey.clone())
+            .or_default()
+            .insert(row.topic_id.clone(), run);
+        g.submissions.insert(row.id.clone(), row.clone());
+        Ok(row)
+    }
+
+    /// Standalone score writes are forbidden with a journal: use finish/update.
+    pub async fn record_topic_run_durable(
+        &self,
+        hotkey: &str,
+        topic_id: &str,
+        run: MinerTopicRun,
+    ) -> Result<(), StoreError> {
+        let _write = self.writes.lock().await;
+        self.record_topic_run(hotkey, topic_id, run)
+    }
+
     /// Fetch one row.
     pub fn get(&self, id: &str) -> Result<Submission, StoreError> {
+        self.volatile_only()?;
         self.lock()?
             .submissions
             .get(id)
@@ -261,6 +435,7 @@ impl MemoryStore {
 
     /// List newest-first.
     pub fn list(&self) -> Result<Vec<Submission>, StoreError> {
+        self.volatile_only()?;
         let g = self.lock()?;
         let mut rows: Vec<_> = g.submissions.values().cloned().collect();
         rows.sort_by(|a, b| b.id.cmp(&a.id));
@@ -293,6 +468,10 @@ impl MemoryStore {
         topic_id: &str,
         run: MinerTopicRun,
     ) -> Result<(), StoreError> {
+        self.volatile_only()?;
+        if run.primary.is_some_and(|v| !v.is_finite()) {
+            return Err(StoreError::Illegal("non-finite primary".into()));
+        }
         self.lock()?
             .scores
             .entry(hotkey.to_owned())
@@ -303,6 +482,7 @@ impl MemoryStore {
 
     /// Per-topic lattices for one miner (binary SCORE_MAX/0 from `pass`).
     pub fn miner_scores(&self, hotkey: &str) -> Result<BTreeMap<String, u64>, StoreError> {
+        self.volatile_only()?;
         Ok(self
             .lock()?
             .scores
@@ -317,16 +497,19 @@ impl MemoryStore {
 
     /// Per-topic attempts for one miner.
     pub fn miner_runs(&self, hotkey: &str) -> Result<BTreeMap<String, MinerTopicRun>, StoreError> {
+        self.volatile_only()?;
         Ok(self.lock()?.scores.get(hotkey).cloned().unwrap_or_default())
     }
 
     /// Every hotkey that has any recorded topic score.
     pub fn scored_hotkeys(&self) -> Result<BTreeSet<String>, StoreError> {
+        self.volatile_only()?;
         Ok(self.lock()?.scores.keys().cloned().collect())
     }
 
     /// Best accepted champion primary on a topic, if the operator crowned one.
     pub fn champion_primary(&self, topic: &TopicDocument) -> Result<Option<f64>, StoreError> {
+        self.volatile_only()?;
         let g = self.lock()?;
         let mut found = None;
         for row in g.submissions.values() {

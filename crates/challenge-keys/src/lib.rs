@@ -30,14 +30,23 @@ pub enum ChallengeKeyError {
 /// See [`ChallengeKeyError`].
 pub fn load_challenge_secret(path: &Path) -> Result<[u8; KEY_LEN], ChallengeKeyError> {
     let raw = fs::read(path)?;
+    parse_challenge_secret(&raw)
+}
+
+/// Parse an already securely read mini-secret without reopening its source.
+///
+/// # Errors
+///
+/// See [`ChallengeKeyError`].
+pub fn parse_challenge_secret(raw: &[u8]) -> Result<[u8; KEY_LEN], ChallengeKeyError> {
     if raw.len() == KEY_LEN {
         let mut out = [0u8; KEY_LEN];
-        out.copy_from_slice(&raw);
+        out.copy_from_slice(raw);
         // Validate expandable.
         secret_from_bytes(&out).map_err(|_| ChallengeKeyError::InvalidSecret)?;
         return Ok(out);
     }
-    let text = std::str::from_utf8(&raw).map_err(|e| ChallengeKeyError::Hex(e.to_string()))?;
+    let text = std::str::from_utf8(raw).map_err(|e| ChallengeKeyError::Hex(e.to_string()))?;
     let trimmed = text.trim();
     let hex_s = trimmed
         .strip_prefix("0x")
@@ -61,4 +70,22 @@ pub fn load_challenge_secret(path: &Path) -> Result<[u8; KEY_LEN], ChallengeKeyE
 pub fn public_key_from_secret(secret: &[u8; KEY_LEN]) -> Result<[u8; KEY_LEN], ChallengeKeyError> {
     let sk = secret_from_bytes(secret).map_err(|_| ChallengeKeyError::InvalidSecret)?;
     Ok(sk.to_public().to_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn parses_binary_and_hex_without_reopening_a_path() {
+        let raw = [0xff; KEY_LEN];
+        assert_eq!(parse_challenge_secret(&raw).unwrap(), raw);
+        for text in [hex::encode(raw), format!(" \n0x{} \n", hex::encode(raw))] {
+            assert_eq!(parse_challenge_secret(text.as_bytes()).unwrap(), raw);
+        }
+        assert!(parse_challenge_secret(b"").is_err());
+        assert!(parse_challenge_secret(&[0xff; KEY_LEN + 1]).is_err());
+        assert!(parse_challenge_secret(b"invalid").is_err());
+    }
 }

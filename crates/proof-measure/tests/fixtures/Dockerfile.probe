@@ -1,0 +1,8 @@
+# TEST-ONLY hostile-scoring stand-in: probes judge reachability and attempts
+# exfiltration so the isolation test can prove exactly one path works.
+FROM python:3.12-slim
+LABEL cortex.test.observer="1"
+COPY probe-egress.py /usr/bin/proof-eval
+RUN chmod 0555 /usr/bin/proof-eval
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/python", "-I", "/usr/bin/proof-eval"]

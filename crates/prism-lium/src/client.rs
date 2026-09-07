@@ -247,6 +247,13 @@ impl LiumClient {
             .await
     }
 
+    async fn templates(&self) -> Result<Vec<Value>, LiumError> {
+        let v = self
+            .request(reqwest::Method::GET, "/templates", None)
+            .await?;
+        Ok(listed_template_rows(&v))
+    }
+
     pub async fn ensure_template(
         &self,
         name: &str,
@@ -255,10 +262,7 @@ impl LiumClient {
         startup_commands: Option<&str>,
         docker_credential_id: Option<&str>,
     ) -> Result<String, LiumError> {
-        let v = self
-            .request(reqwest::Method::GET, "/templates", None)
-            .await?;
-        let templates = listed_template_rows(&v);
+        let templates = self.templates().await?;
         if let Some(id) = listed_template_id(&templates, name, docker_image, docker_credential_id)?
         {
             return Ok(id);
@@ -274,13 +278,13 @@ impl LiumClient {
     }
 
     async fn resolve_template_id(&self, spec: &InstanceSpec) -> Result<String, LiumError> {
-        if let Some(id) = &spec.template_id {
-            if !id.is_empty() {
-                return Ok(id.clone());
-            }
-        }
         if let Some(plan) = digest_pinned_rent(spec)? {
-            return self.ensure_digest_template(&plan).await;
+            return self
+                .ensure_digest_template(&plan, spec.template_id.as_deref())
+                .await;
+        }
+        if let Some(id) = spec.template_id.as_ref().filter(|id| !id.is_empty()) {
+            return Ok(id.clone());
         }
         if let Ok(id) = std::env::var("PRISM_POD_TEMPLATE_ID") {
             let id = id.trim();
@@ -308,14 +312,27 @@ impl LiumClient {
     }
 
     /// Create or reuse a template bound to the harvest pin. No public Prism fallback.
-    async fn ensure_digest_template(&self, plan: &DigestPinnedRent) -> Result<String, LiumError> {
-        let v = self
-            .request(reqwest::Method::GET, "/templates", None)
-            .await?;
-        if let Some(id) = plan.listed_id(&listed_template_rows(&v))? {
-            return Ok(id);
+    async fn ensure_digest_template(
+        &self,
+        plan: &DigestPinnedRent,
+        requested: Option<&str>,
+    ) -> Result<String, LiumError> {
+        let id = if let Some(id) = requested {
+            id.to_owned()
+        } else {
+            if let Some(id) = plan.listed_id(&self.templates().await?)? {
+                return Ok(id);
+            }
+            self.created_template_id(&plan.create_body()?).await?
+        };
+        let mut rows = self.templates().await?;
+        rows.retain(|row| row.get("id").and_then(Value::as_str) == Some(id.as_str()));
+        if id.trim().is_empty() || plan.listed_id(&rows)?.as_deref() != Some(id.as_str()) {
+            return Err(LiumError::Integrity(
+                "harvest template id missing exact pin readback".into(),
+            ));
         }
-        self.created_template_id(&plan.create_body()?).await
+        Ok(id)
     }
 
     async fn created_template_id(&self, body: &Value) -> Result<String, LiumError> {
@@ -330,11 +347,7 @@ impl LiumClient {
     }
 
     async fn fallback_rentable_template(&self, forbidden: &str) -> Option<String> {
-        let v = self
-            .request(reqwest::Method::GET, "/templates", None)
-            .await
-            .ok()?;
-        rentable_fallback_template_id(&listed_template_rows(&v), Some(forbidden))
+        rentable_fallback_template_id(&self.templates().await.ok()?, Some(forbidden))
     }
 
     /// Account balance (USD) when available.
@@ -1165,6 +1178,94 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn harvest_template_readback_requires_same_id_and_exact_pin() {
+        let spec = harvest_provision_spec();
+        let plan = digest_pinned_rent(&spec).unwrap().unwrap();
+        let good = serde_json::json!({"id": "created", "name": plan.template_name,
+            "docker_image": plan.docker_image_ref()});
+        let mut conflict = good.clone();
+        conflict["docker_image_digest"] = serde_json::json!(format!("sha256:{}", "cd".repeat(32)));
+        let mut missing = good.clone();
+        missing.as_object_mut().unwrap().remove("docker_image");
+        let mut other = good.clone();
+        other["id"] = serde_json::json!("other");
+        for explicit in [false, true] {
+            for (id, rows, valid) in [
+                ("created", serde_json::json!([good]), true),
+                ("created", serde_json::json!([conflict]), false),
+                ("created", serde_json::json!([missing]), false),
+                ("created", serde_json::json!([other]), false),
+                ("created", serde_json::json!([]), false),
+                ("", serde_json::json!([good]), false),
+                (" ", serde_json::json!([good]), false),
+            ] {
+                let server = MockServer::start().await;
+                if !explicit {
+                    Mock::given(method("GET"))
+                        .and(path("/templates"))
+                        .respond_with(
+                            ResponseTemplate::new(200).set_body_json(serde_json::json!([])),
+                        )
+                        .up_to_n_times(1)
+                        .expect(1)
+                        .mount(&server)
+                        .await;
+                }
+                Mock::given(method("POST"))
+                    .and(path("/templates"))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": id})),
+                    )
+                    .expect(u64::from(!explicit))
+                    .mount(&server)
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path("/templates"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(rows))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let client = LiumClient::with_base_url("test-key", server.uri()).unwrap();
+                let mut request = spec.clone();
+                request.template_id = explicit.then(|| id.to_owned());
+                let result = client.resolve_template_id(&request).await;
+                assert_eq!(
+                    result.is_ok(),
+                    valid,
+                    "explicit={explicit}, id={id:?}: {result:?}"
+                );
+                if valid {
+                    assert_eq!(result.unwrap(), "created");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_harvest_template_cannot_bypass_plan_validation() {
+        let client = LiumClient::with_base_url("test-key", "http://127.0.0.1:1").unwrap();
+        let mut spec = harvest_provision_spec();
+        spec.template_id = Some("unverified".into());
+        for digest in [None, Some("sha256:bad".into())] {
+            spec.image_digest = digest;
+            assert!(matches!(
+                client.resolve_template_id(&spec).await,
+                Err(LiumError::Integrity(_))
+            ));
+        }
+        assert_eq!(
+            client
+                .resolve_template_id(&InstanceSpec {
+                    template_id: Some("legacy".into()),
+                    ..provision_spec()
+                })
+                .await
+                .unwrap(),
+            "legacy"
+        );
+    }
+
     fn restore_env(key: &str, previous: Option<String>) {
         match previous {
             Some(value) => std::env::set_var(key, value),
@@ -1190,6 +1291,17 @@ mod tests {
                 {"name": RECIPES_TEMPLATE_NAME, "id": "tmpl1"},
                 {"name": "prism-recipe-v10", "id": "recipes-v10"}
             ])))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/templates"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "name": "relearn-eval-abababababab", "id": "harvest-tmpl",
+                    "docker_image": format!("ghcr.io/cortexlm/relearn-eval@{digest}")
+                }])),
+            )
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -1275,6 +1387,17 @@ mod tests {
                 {"name": "Pytorch (Cuda + DinD)", "id": "345273fa-public",
                  "is_private": false, "docker_image": "daturaai/pytorch"}
             ])))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/templates"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "name": "relearn-eval-abababababab", "id": "harvest-tmpl",
+                    "docker_image": format!("ghcr.io/cortexlm/relearn-eval@{digest}")
+                }])),
+            )
             .mount(&server)
             .await;
         Mock::given(method("POST"))

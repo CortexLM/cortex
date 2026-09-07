@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .contract import ContractError
 from .request import Constraints, HarvestRequest
 
 _IB = re.compile(r"\b(infiniband|ibv_|rdma_cm|mlx5|ib_send)\b", re.I)
@@ -27,21 +28,19 @@ def inspect(request: HarvestRequest, recipe_text: str) -> dict[str, Any]:
         cheats.append("other")
     if c.no_nccl_fast_fabric and _FAST.search(hay):
         cheats.append("other")
-    reproduced = not cheats
+    # ponytail: static checks only; add agent reproduction with verified compute evidence.
+    if not cheats:
+        raise ContractError("agent reproduction and verified FLOP evidence are unavailable")
     return {
-        "verdict": "clean" if reproduced else "reject",
-        "reproduced": reproduced,
-        "claim_holds_public": reproduced,
+        "verdict": "reject",
+        "reproduced": False,
+        "claim_holds_public": False,
         "contamination": False,
         "canary_hit": False,
         "flops_used": 0,
         "flops_budget": request.flops_budget,
         "cheat_codes": cheats,
-        "rationale": (
-            "recipe reproduced under the topic fabric constraints"
-            if reproduced
-            else "recipe references a forbidden fast path (IB / NVLink / NCCL)"
-        ),
+        "rationale": "recipe references a forbidden fast path (IB / NVLink / NCCL)",
         "topic_id": request.topic_id,
         "family": request.family or "nll",
     }

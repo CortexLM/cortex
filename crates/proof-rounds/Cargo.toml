@@ -1,0 +1,48 @@
+[package]
+name = "proof-rounds"
+description = "Durable finalized Atlas rounds and immutable Proof leaf publication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+bundle = { path = "../bundle" }
+chain = { path = "../chain" }
+chain-live = { path = "../chain-live" }
+challenge-common = { path = "../challenge-common" }
+hex = "0.4"
+parity-scale-codec = { version = "3.7", default-features = false, features = ["derive"] }
+proof-autonomy = { path = "../proof-autonomy" }
+proof-publication = { path = "../proof-publication" }
+proof-research = { path = "../proof-research" }
+proof-runtime = { path = "../proof-runtime" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "json", "uuid"] }
+thiserror = "2"
+tokio = { version = "1", features = ["time"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+axum = "0.8"
+crypto = { path = "../crypto" }
+db = { path = "../db", features = ["testing"] }
+gateway = { path = "../gateway" }
+http-body-util = "0.1"
+proof-autonomy-pg = { path = "../proof-autonomy-pg" }
+proof-eval = { path = "../proof-eval" }
+proof-score = { path = "../proof-score" }
+proof-task = { path = "../proof-task" }
+telemetry = { path = "../telemetry" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
+trustroot = { path = "../trustroot" }
+validator = { path = "../validator" }
+validator-sync = { path = "../validator-sync" }
+
+[lints]
+workspace = true

@@ -71,6 +71,15 @@ struct Cli {
     /// Provider API key file. Never logged, never on `/v1/status`.
     #[arg(long, env = "PROOF_INFERENCE_API_KEY_FILE")]
     inference_api_key_file: Option<PathBuf>,
+    /// Opt in to durable v2 commands using a restricted `base_app` URL file.
+    /// Does not enable a provider, autonomous scoring or simulated fallback.
+    #[arg(long, env = "PROOF_AUTONOMY_DATABASE_URL_FILE")]
+    autonomy_database_url_file: Option<PathBuf>,
+    /// Durable submission/score journal using a restricted `base_app` URL file.
+    /// Without it the service keeps submissions and scores in memory only, so a
+    /// restart discards every scored run.
+    #[arg(long, env = "PROOF_STORE_DATABASE_URL_FILE")]
+    store_database_url_file: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -112,7 +121,12 @@ fn run(cli: &Cli) -> Result<(), String> {
         );
     }
 
-    let store = MemoryStore::new();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let store = rt.block_on(open_store(cli.store_database_url_file.as_deref()))?;
     match load_topics(&store, &pin, cli.topics_file.as_deref()) {
         Ok(n) => tracing::info!(topics = n, "signed topics loaded"),
         Err(e) => tracing::warn!("topics unavailable ({e}); submissions will 400/503 until fixed"),
@@ -146,11 +160,6 @@ fn run(cli: &Cli) -> Result<(), String> {
         _ => {}
     }
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
-
     let live_scorer = build_live_scorer(backend, cli.eval_timeout_secs, judge_api_key.clone());
     match backend {
         EvalBackend::Lium if live_scorer.is_some() => {
@@ -173,7 +182,39 @@ fn run(cli: &Cli) -> Result<(), String> {
         admin_hashes: Arc::new(load_admin_hashes(cli.admin_tokens_file.as_deref())),
         epoch: 0,
     };
-    rt.block_on(serve(cli.bind, state))
+    rt.block_on(serve(
+        cli.bind,
+        state,
+        cli.autonomy_database_url_file.as_deref(),
+    ))
+}
+
+/// Attach the durable journal when configured. Without it the service keeps
+/// submissions and scores in memory only, so a restart discards scored runs.
+async fn open_store(path: Option<&Path>) -> Result<MemoryStore, String> {
+    Ok(match path {
+        None => {
+            tracing::warn!(
+                "no PROOF_STORE_DATABASE_URL_FILE: submissions and scores are in memory \
+                 only and will be lost on restart"
+            );
+            MemoryStore::new()
+        }
+        Some(path) => {
+            let url =
+                std::fs::read_to_string(path).map_err(|_| "cannot read store database URL file")?;
+            let pool = db::connect(url.trim())
+                .await
+                .map_err(|_| "cannot connect store database")?;
+            let store = MemoryStore::new()
+                .with_journal(proof_store::durable::DurableJournal::new(pool))
+                .await
+                .map_err(|_| "store database is not migrated or lacks restricted privileges")?;
+            let reloaded = store.list().map_or(0, |rows| rows.len());
+            tracing::info!(submissions = reloaded, "durable store journal attached");
+            store
+        }
+    })
 }
 
 fn build_live_scorer(
@@ -357,8 +398,23 @@ fn load_admin_hashes(path: Option<&Path>) -> Vec<String> {
         .collect()
 }
 
-async fn serve(bind: SocketAddr, state: AppState) -> Result<(), String> {
-    let app = proof_router(state);
+async fn serve(
+    bind: SocketAddr,
+    state: AppState,
+    autonomy_url_file: Option<&Path>,
+) -> Result<(), String> {
+    let mut app = proof_router(state);
+    if let Some(path) = autonomy_url_file {
+        let url =
+            std::fs::read_to_string(path).map_err(|_| "cannot read autonomy database URL file")?;
+        let pool = db::connect(url.trim())
+            .await
+            .map_err(|_| "cannot connect autonomy database")?;
+        let routes = proof_autonomy_http::router(proof_autonomy_pg::PgStore::new(pool))
+            .await
+            .map_err(|_| "autonomy database is not migrated or lacks restricted privileges")?;
+        app = app.merge(routes);
+    }
     let listener = TcpListener::bind(bind)
         .await
         .map_err(|e| format!("bind {bind}: {e}"))?;
@@ -441,10 +497,10 @@ mod tests {
         std::fs::write(&empty, "  \n").expect("write");
         assert!(load_inference_api_key(Some(&empty)).is_none());
         let present = dir.join("key");
-        std::fs::write(&present, " sk-live-not-a-real-secret \n").expect("write");
+        std::fs::write(&present, " test-judge-key \n").expect("write");
         assert_eq!(
             load_inference_api_key(Some(&present)).as_deref(),
-            Some("sk-live-not-a-real-secret")
+            Some("test-judge-key")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

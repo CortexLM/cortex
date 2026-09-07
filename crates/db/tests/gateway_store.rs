@@ -60,6 +60,50 @@ fn score_row<'a>(
 }
 
 #[tokio::test]
+async fn test_schemas_isolate_security_definer_writes() {
+    if !database_url_present() {
+        return;
+    }
+    let first = test_pool().await.expect("first schema");
+    let second = test_pool().await.expect("second schema");
+    let (digest, sig, nonce) = (digest32(), sig64(), nonce32());
+    for (tp, payload) in [
+        (&first, b"first".as_slice()),
+        (&second, b"second".as_slice()),
+    ] {
+        let app = tp.app_pool().await.expect("app");
+        insert_raw_weight(
+            &app,
+            &score_row(
+                Uuid::new_v4(),
+                "c1",
+                7,
+                "same-miner",
+                payload,
+                &digest,
+                &sig,
+                &nonce,
+            ),
+        )
+        .await
+        .expect("isolated function");
+    }
+    for (tp, payload) in [
+        (&first, b"first".as_slice()),
+        (&second, b"second".as_slice()),
+    ] {
+        let row = get_raw_weight(tp.pool(), "c1", 7, "same-miner")
+            .await
+            .expect("read")
+            .expect("stored");
+        assert_eq!(row.payload, payload);
+        assert_eq!(count_raw_weights(tp.pool()).await.expect("count"), 1);
+    }
+    first.drop_schema().await.expect("drop first");
+    second.drop_schema().await.expect("drop second");
+}
+
+#[tokio::test]
 async fn s1_raw_weight_round_trip() {
     if !database_url_present() {
         return;

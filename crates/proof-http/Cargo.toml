@@ -21,6 +21,7 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 
 [dev-dependencies]
+db = { path = "../db", features = ["testing"] }
 async-trait = "0.1"
 crypto = { path = "../crypto" }
 http-body-util = "0.1"

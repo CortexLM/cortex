@@ -1,8 +1,8 @@
 """Call the live InferenceOffer as the RLM judge backend.
 
-Auth comes from harvest-pod `teacher.env` (`OPENAI_API_KEY` /
-`PROOF_INFERENCE_API_KEY`). The key is never read from request.json and
-must never be logged.
+Direct auth comes from harvest-pod `teacher.env` (`OPENAI_API_KEY` /
+`PROOF_INFERENCE_API_KEY`). Controller-enabled proxy mode keeps the key in
+the proxy alone. The key is never read from request.json or logged.
 """
 
 from __future__ import annotations
@@ -61,14 +61,26 @@ def _payload(request: HarvestRequest) -> dict[str, Any]:
 
 
 def call_judge(request: HarvestRequest, api_key: str, *, timeout_s: float = 60.0) -> None:
-    """POST an authenticated judge request. Fail closed on missing auth or HTTP error."""
+    """POST through the controller proxy or with direct auth; fail closed."""
+    proxy = os.environ.get("PROOF_JUDGE_PROXY") == "1"
+    if proxy and (
+        request.mode not in ("chat", "completions")
+        or request.base_url not in (
+            "http://proof-judge:8080/v1",
+            "http://proof-judge:8080/v1" + (
+                "/completions" if request.mode == "completions" else "/chat/completions"
+            ),
+        )
+    ):
+        raise ContractError("judge proxy URL or mode not permitted; refuse scoring")
     key = api_key.strip()
-    if not key:
+    if not proxy and not key:
         raise ContractError("inference API key missing; refuse scoring")
     url = judge_url(request.base_url, request.mode)
     body = json.dumps(_payload(request), separators=(",", ":")).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
-    req.add_header("Authorization", f"Bearer {key}")
+    if not proxy:
+        req.add_header("Authorization", f"Bearer {key}")
     req.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
@@ -85,4 +97,4 @@ def call_judge(request: HarvestRequest, api_key: str, *, timeout_s: float = 60.0
 
 
 def require_judge(request: HarvestRequest) -> None:
-    call_judge(request, load_judge_api_key())
+    call_judge(request, "" if os.environ.get("PROOF_JUDGE_PROXY") == "1" else load_judge_api_key())

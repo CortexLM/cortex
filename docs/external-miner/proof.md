@@ -5,12 +5,53 @@
 Challenge id is `proof`. The two configured challenges are `bounty`
 (**2000 bps**) and `proof` (**8000 bps**), a 20/80 allocation.
 
-**Implementation warning:** Proof's Python judge is partial, submission records
-are in memory, and the service does not yet drive automatic reward-leaf emission.
+**Implementation warning:** Proof's v1 Python judge is partial. The default v1 store is in memory. The optional SQL journal now passes fresh workspace durability tests (2/2) after fixing embedded-migration tracking. Async writes persist SQL before memory and reject NaN/infinity. Production durability remains unproven: cross-process ID collisions/upserts, separate submission/score transactions, synchronous bypass and cancellation-induced memory lag remain.
+The service does not yet drive automatic reward-leaf emission. Clean static
+inspection raises `ContractError` absent agent reproduction and verified FLOP
+evidence; forbidden fabric rejects. CLI gates before judge/model calls and
+produces no successful metrics. Agent-led accounting is not implemented: the agent must determine experiment-appropriate accounting, retain reproducible evidence, and have that evidence verified by the controller. Neither a universal formula nor an arbitrary model assertion is sufficient.
 Do not spend compute on the assumption that `can_score` proves the complete
 research-to-payment path. Read the
 [paper-to-code comparison](../WHITEPAPER.md#proposal-versus-current-code) and
 confirm deployment support with the operator first.
+
+**Experimental v2 commands:** the service now has a separately enabled,
+signed experiment/consent/cancellation API. It is not enabled by default and
+starts no experiment worker or automatic payment. Accepting a command or consent
+is not evidence that a rental or experiment ran. Do not send Lium credentials
+to these routes. See the [v2 integration contract](../runbooks/proof-autonomy-local.md)
+for signature envelopes, quotas and cancellation semantics. The `ctx proof`
+commands below still use v1.
+
+V2 worker orchestration and an independent cleanup lane now exist, but strict
+live Lium/credential/quote adapters are not wired. Required request-id, expiry,
+cost and billing guarantees have not been established; that does not prove
+the provider lacks them. Cancellation still cannot certify stopped billing.
+
+Local pinned-Docker execution now runs actual paired CPU scripts and retains
+output/failures. A trusted observer and optional judge egress are wired into
+`proof-experiment`, but only test-image observations are demonstrated; the real
+eval image lacks independent FLOP evidence. `collect` fails closed with
+`UnobservedMeasurements` when unmeasured. A synthetic egress probe obtained a
+real completion and blocked four sampled escapes, not actual science or proven
+confidentiality/integrity. The eval helper supports explicit `PROOF_JUDGE_PROXY=1` without Authorization only for the exact alias `http://proof-judge:8080/v1` and `chat/completions`; direct mode still requires a key;
+allowed arbitrary payloads and artifact code remain risks. A real
+authorized model → isolated Python → private controller test passed using a
+synthetic request; it proves neither reproduction nor actual cost. W&B is not
+safely wired: automatic SDK runtime/environment telemetry exceeds the public
+allowlist.
+
+A separate operator-enabled Atlas scheduler/publisher and strict round receiver
+exist, but no receiver deployment or live publication is established. Atlas does
+not rent, seal or submit chain weights; a publication receipt is not payment.
+An explicitly ignored local regression passed the real scheduler/Postgres →
+runtime/Docker Python → private decision → strict gateway publication/readback →
+production seal helper → served-vector path. A lost acknowledgement replays
+identical signed bytes without rerunning the model. Science, chain and inference
+are synthetic; it does not test the operator admin seal HTTP route or establish
+payment. V2 decay validation preserves prior age and ownership,
+including zero-credit omissions. None of this changes the v1 topic payout rules
+below or the Proof/Bounty **8000/2000 bps** split.
 
 **Gateway:** [https://network.cortex.foundation](https://network.cortex.foundation)  
 **CLI:** `ctx proof topics`, then `ctx proof submit` (install:

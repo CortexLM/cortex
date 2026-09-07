@@ -29,6 +29,23 @@ pub type SharedBundleStore = Arc<dyn BundleStore>;
 
 /// Persisted sealed epoch bundles.
 pub trait BundleStore: Send + Sync {
+    /// Optional transactional round-aware sealer. `None` preserves legacy v1.
+    fn seal_override(
+        &self,
+        _challenges: &ChallengesBody,
+        _params: &SealParams,
+    ) -> Option<Result<EpochBundleV1, SealError>> {
+        None
+    }
+    /// Coherent latest bytes and provenance; strict stores override with one query.
+    fn latest_sealed(&self) -> Option<(Vec<u8>, SealRecord)> {
+        let epoch = self.latest_epoch()?;
+        Some((self.get_by_epoch(epoch)?, self.seal_record(epoch)?))
+    }
+    /// Optional mandatory v2 block pin for an epoch; `None` uses the legacy tip.
+    fn pinned_block(&self, _epoch: u64) -> Option<Result<u64, SealError>> {
+        None
+    }
     /// Insert or return existing sealed bytes for `epoch` (idempotent).
     fn put_if_absent(&self, epoch: u64, bytes: Vec<u8>) -> Vec<u8>;
     /// Append a new seal revision for `epoch` (tip reseal). Returns stored bytes.
@@ -168,6 +185,9 @@ pub fn seal_epoch(
     bundles: &dyn BundleStore,
     params: &SealParams,
 ) -> Result<EpochBundleV1, SealError> {
+    if let Some(result) = bundles.seal_override(challenges, params) {
+        return result;
+    }
     let leaves = rows_to_leaves(&weights.list_for_epoch(params.epoch))?;
     let trust = LocalTrustRoot {
         challenges: challenges.clone(),
@@ -263,12 +283,7 @@ async fn get_bundle_by_root(
 }
 
 async fn get_weights_latest(State(st): State<GatewayState>) -> Response {
-    let sealed = st.bundles.latest_epoch().and_then(|epoch| {
-        Some((
-            st.bundles.get_by_epoch(epoch)?,
-            st.bundles.seal_record(epoch)?,
-        ))
-    });
+    let sealed = st.bundles.latest_sealed();
     let Some((bytes, seal)) = sealed else {
         // Fail-closed: never 404 — serve uid-0 burn until a real seal exists.
         return (StatusCode::OK, Json(build_burn_fallback(st.seal_netuid))).into_response();
@@ -371,16 +386,19 @@ async fn post_admin_seal(State(st): State<GatewayState>, Json(req): Json<SealReq
         }
     };
     let netuid = req.netuid.unwrap_or(st.seal_netuid);
-    // No `block_b` means "seal at the chain tip"; a stale constant would pin the
-    // metagraph to a block the caller never chose.
+    // V2 must use the current publication's boundary; v1 still defaults to tip.
     let block_b = match req.block_b {
         Some(b) => b,
-        None => match st.chain.current_block() {
+        None => match st.bundles.pinned_block(req.epoch).unwrap_or_else(|| {
+            st.chain
+                .current_block()
+                .map_err(|e| SealError::Bundle(e.to_string()))
+        }) {
             Ok(b) => b,
             Err(e) => {
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({ "error": format!("chain tip unavailable: {e}") })),
+                    Json(serde_json::json!({ "error": format!("seal block unavailable: {e}") })),
                 )
                     .into_response();
             }
