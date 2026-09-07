@@ -107,6 +107,12 @@ pub enum EvalError {
     /// Live open judge offer needs auth and the key file is missing/unreadable.
     #[error("inference API key missing; refuse scoring")]
     InferenceAuthMissing,
+    /// Live score needs operator-staged local measurement weights (no HF bake).
+    #[error("PROOF_PROXY_MODEL_DIR missing or empty; refuse live scoring (no HF bake)")]
+    ProxyModelMissing,
+    /// Live score needs operator-staged holdout shard bytes.
+    #[error("PROOF_HOLDOUT_STORE missing or incomplete; refuse scoring")]
+    HoldoutStoreMissing,
 }
 
 /// Schema version of the metrics+verdict document the eval image emits.

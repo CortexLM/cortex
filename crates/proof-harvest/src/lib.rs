@@ -14,10 +14,14 @@
     clippy::too_many_arguments
 )]
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use harvest_pod::{harvest_template_name, truncate_tail, EvalPod, PodProgram};
+use harvest_pod::{
+    harvest_template_name, truncate_tail, EvalPod, PodProgram, RunExtras, HOLDOUT_DIR, PROXY_DIR,
+};
 use prism_lium_types::InstanceSpec;
 use proof_eval::{
     secret_backed_base_url, EvalError, LiveScorer, ProofEvalDocument, PROOF_METRICS_SCHEMA,
@@ -126,13 +130,85 @@ impl Default for HarvestLimits {
 ///
 /// The key never enters [`HarvestRequest`] or `/v1/status`. Values are
 /// single-quoted so a special character cannot break `set -a` sourcing.
+/// Live score also pins the pod-local measurement dir and holdout store
+/// (operator-staged trees; not Hugging Face ids).
 pub fn judge_teacher_env(api_key: &str) -> Result<Vec<u8>, EvalError> {
     let key = api_key.trim();
     if key.is_empty() || key.contains('\n') || key.contains('\r') || key.contains('\0') {
         return Err(EvalError::InferenceAuthMissing);
     }
     let escaped = key.replace('\'', "'\\''");
-    Ok(format!("OPENAI_API_KEY='{escaped}'\nPROOF_INFERENCE_API_KEY='{escaped}'\n").into_bytes())
+    Ok(format!(
+        "OPENAI_API_KEY='{escaped}'\nPROOF_INFERENCE_API_KEY='{escaped}'\n\
+         PROOF_PROXY_MODEL_DIR='{POD_WORKDIR}/{PROXY_DIR}'\n\
+         PROOF_HOLDOUT_STORE='{POD_WORKDIR}/{HOLDOUT_DIR}'\n"
+    )
+    .into_bytes())
+}
+
+/// Pack operator-staged holdout shard bytes for the pod.
+///
+/// Each record must already exist as `store/<content_sha256>`. Missing
+/// bytes are a refuse, not invented text.
+pub fn pack_holdout_tar(store: &Path, holdout: &[HoldoutRecord]) -> Result<Vec<u8>, EvalError> {
+    if !store.is_dir() {
+        return Err(EvalError::HoldoutStoreMissing);
+    }
+    let mut names = Vec::with_capacity(holdout.len());
+    for rec in holdout {
+        let digest = rec.content_sha256.to_ascii_lowercase();
+        if digest.len() != 64 || digest.chars().any(|c| !c.is_ascii_hexdigit()) {
+            return Err(EvalError::HoldoutStoreMissing);
+        }
+        let path = store.join(&digest);
+        if !path.is_file() {
+            return Err(EvalError::HoldoutStoreMissing);
+        }
+        names.push(digest);
+    }
+    tar_named_files(store, &names).map_err(|_| EvalError::HoldoutStoreMissing)
+}
+
+/// Pack operator-provided local measurement weights (no HF bake).
+pub fn pack_proxy_tar(dir: &Path) -> Result<Vec<u8>, EvalError> {
+    if !dir.is_dir() {
+        return Err(EvalError::ProxyModelMissing);
+    }
+    let mut entries = std::fs::read_dir(dir).map_err(|_| EvalError::ProxyModelMissing)?;
+    match entries.next() {
+        Some(Ok(_)) => {}
+        Some(Err(_)) | None => return Err(EvalError::ProxyModelMissing),
+    }
+    tar_directory(dir).map_err(|_| EvalError::ProxyModelMissing)
+}
+
+fn tar_named_files(dir: &Path, names: &[String]) -> Result<Vec<u8>, String> {
+    if names.is_empty() {
+        return Err("no holdout shards to pack".into());
+    }
+    let mut cmd = Command::new("tar");
+    cmd.arg("-C").arg(dir).arg("-cf").arg("-");
+    for name in names {
+        cmd.arg(name);
+    }
+    run_tar(cmd)
+}
+
+fn tar_directory(dir: &Path) -> Result<Vec<u8>, String> {
+    let mut cmd = Command::new("tar");
+    cmd.arg("-C").arg(dir).arg("-cf").arg("-").arg(".");
+    run_tar(cmd)
+}
+
+fn run_tar(mut cmd: Command) -> Result<Vec<u8>, String> {
+    let out = cmd.output().map_err(|e| format!("tar: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("tar exit {}", out.status));
+    }
+    if out.stdout.is_empty() {
+        return Err("tar produced no archive".into());
+    }
+    Ok(out.stdout)
 }
 
 /// [`LiveScorer`] over a digest-pinned eval image on a Lium pod.
@@ -141,6 +217,11 @@ pub struct LiumProofHarvest {
     limits: HarvestLimits,
     ssh_public_keys: Vec<String>,
     judge_api_key: Option<String>,
+    /// Host directory of local measurement weights. Staged onto the pod as
+    /// [`PROOF_PROXY_MODEL_DIR`]. Missing → refuse (no HF bake).
+    proxy_model_dir: Option<PathBuf>,
+    /// Host directory of holdout shard files named `<content_sha256>`.
+    holdout_store: Option<PathBuf>,
 }
 
 impl LiumProofHarvest {
@@ -152,6 +233,8 @@ impl LiumProofHarvest {
             limits,
             ssh_public_keys,
             judge_api_key: None,
+            proxy_model_dir: None,
+            holdout_store: None,
         }
     }
 
@@ -165,6 +248,35 @@ impl LiumProofHarvest {
             (!t.is_empty()).then_some(t)
         });
         self
+    }
+
+    /// Host path to local measurement weights (no HF bake / download).
+    #[must_use]
+    pub fn with_proxy_model_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.proxy_model_dir = dir.filter(|p| !p.as_os_str().is_empty());
+        self
+    }
+
+    /// Host path to holdout shard bytes (`<content_sha256>` files).
+    #[must_use]
+    pub fn with_holdout_store(mut self, dir: Option<PathBuf>) -> Self {
+        self.holdout_store = dir.filter(|p| !p.as_os_str().is_empty());
+        self
+    }
+
+    fn live_extras(&self, holdout: &[HoldoutRecord]) -> Result<RunExtras, EvalError> {
+        let proxy = self
+            .proxy_model_dir
+            .as_deref()
+            .ok_or(EvalError::ProxyModelMissing)?;
+        let store = self
+            .holdout_store
+            .as_deref()
+            .ok_or(EvalError::HoldoutStoreMissing)?;
+        Ok(RunExtras {
+            holdout_tar: pack_holdout_tar(store, holdout)?,
+            proxy_tar: pack_proxy_tar(proxy)?,
+        })
     }
 
     fn spec(&self, pin: &ProofPin, frozen_digest: &str) -> InstanceSpec {
@@ -227,6 +339,7 @@ impl LiveScorer for LiumProofHarvest {
             ));
         }
         let env = judge_teacher_env(self.judge_api_key.as_deref().unwrap_or(""))?;
+        let extras = self.live_extras(holdout)?;
         let max_in = resolved.max_input_tokens.min(offer.config.max_input_tokens);
         let max_out = resolved
             .max_output_tokens
@@ -262,7 +375,7 @@ impl LiveScorer for LiumProofHarvest {
             .boot(&self.spec(pin, frozen_digest))
             .await
             .map_err(EvalError::Backend)?;
-        let run = self.pod.run(&instance, &body, &env).await;
+        let run = self.pod.run(&instance, &body, &env, &extras).await;
         let shutdown = self.pod.shutdown(&instance).await;
         match shutdown {
             Ok(true) => {}
@@ -298,6 +411,14 @@ impl LiveScorer for LiumProofHarvest {
             return Err(EvalError::Backend(
                 "no master SSH public key; the eval pod would be unreachable".into(),
             ));
+        }
+        match self.proxy_model_dir.as_deref() {
+            Some(dir) if dir.is_dir() => {}
+            _ => return Err(EvalError::ProxyModelMissing),
+        }
+        match self.holdout_store.as_deref() {
+            Some(dir) if dir.is_dir() => {}
+            _ => return Err(EvalError::HoldoutStoreMissing),
         }
         Ok(())
     }
@@ -378,15 +499,17 @@ mod tests {
         assert!(judge_teacher_env("").is_err());
         assert!(judge_teacher_env("has\nnewline").is_err());
         let quoted = judge_teacher_env("o'reilly").expect("quote");
-        assert_eq!(
-            String::from_utf8(quoted).expect("utf8"),
-            "OPENAI_API_KEY='o'\\''reilly'\nPROOF_INFERENCE_API_KEY='o'\\''reilly'\n"
-        );
+        let quoted = String::from_utf8(quoted).expect("utf8");
+        assert!(quoted.contains("OPENAI_API_KEY='o'\\''reilly'"));
+        assert!(quoted.contains("PROOF_INFERENCE_API_KEY='o'\\''reilly'"));
+        assert!(quoted.contains("PROOF_PROXY_MODEL_DIR='/tmp/proof_eval/proxy'"));
+        assert!(quoted.contains("PROOF_HOLDOUT_STORE='/tmp/proof_eval/holdout'"));
     }
 
     struct CapturePod {
         env: std::sync::Mutex<Vec<u8>>,
         request: std::sync::Mutex<Vec<u8>>,
+        extras: std::sync::Mutex<RunExtras>,
         booted: std::sync::Mutex<bool>,
     }
 
@@ -395,6 +518,7 @@ mod tests {
             Arc::new(Self {
                 env: std::sync::Mutex::new(Vec::new()),
                 request: std::sync::Mutex::new(Vec::new()),
+                extras: std::sync::Mutex::new(RunExtras::default()),
                 booted: std::sync::Mutex::new(false),
             })
         }
@@ -412,9 +536,11 @@ mod tests {
             _instance_id: &str,
             request: &[u8],
             env_file: &[u8],
+            extras: &RunExtras,
         ) -> Result<String, String> {
             *self.request.lock().expect("req") = request.to_vec();
             *self.env.lock().expect("env") = env_file.to_vec();
+            *self.extras.lock().expect("extras") = extras.clone();
             Err("captured".into())
         }
 
@@ -471,17 +597,56 @@ mod tests {
         }
     }
 
+    fn live_asset_dirs(recs: &[proof_task::HoldoutRecord]) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "proof-harvest-assets-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let proxy = root.join("proxy");
+        let store = root.join("holdout");
+        std::fs::create_dir_all(&proxy).expect("proxy");
+        std::fs::create_dir_all(&store).expect("store");
+        std::fs::write(
+            proxy.join("config.json"),
+            b"{\"architectures\":[\"test\"]}\n",
+        )
+        .expect("proxy file");
+        for rec in recs {
+            std::fs::write(
+                store.join(rec.content_sha256.to_ascii_lowercase()),
+                format!("shard-{}\n", rec.id),
+            )
+            .expect("shard");
+        }
+        (proxy, store)
+    }
+
+    fn harvest_with_assets(
+        pod: Arc<CapturePod>,
+        recs: &[proof_task::HoldoutRecord],
+        key: Option<String>,
+    ) -> LiumProofHarvest {
+        let (proxy, store) = live_asset_dirs(recs);
+        LiumProofHarvest::new(
+            pod,
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAtest proof".into()],
+        )
+        .with_judge_api_key(key)
+        .with_proxy_model_dir(Some(proxy))
+        .with_holdout_store(Some(store))
+    }
+
     #[tokio::test]
     async fn harvest_stages_teacher_env_and_never_puts_the_key_on_the_request() {
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
         let topic = harvest_topic(&recs);
         let pod = CapturePod::new();
-        let harvest = LiumProofHarvest::new(
-            pod.clone(),
-            HarvestLimits::default(),
-            vec!["ssh-ed25519 AAAAtest proof".into()],
-        )
-        .with_judge_api_key(Some("sk-live-not-a-real-secret".into()));
+        let harvest =
+            harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()));
         let err = harvest
             .score(
                 &harvest_pin(),
@@ -505,6 +670,20 @@ mod tests {
             env.contains("PROOF_INFERENCE_API_KEY='sk-live-not-a-real-secret'"),
             "{env}"
         );
+        assert!(
+            env.contains("PROOF_PROXY_MODEL_DIR='/tmp/proof_eval/proxy'"),
+            "{env}"
+        );
+        assert!(
+            env.contains("PROOF_HOLDOUT_STORE='/tmp/proof_eval/holdout'"),
+            "{env}"
+        );
+        let extras = pod.extras.lock().expect("extras").clone();
+        assert!(
+            !extras.holdout_tar.is_empty(),
+            "holdout shards must be staged"
+        );
+        assert!(!extras.proxy_tar.is_empty(), "proxy weights must be staged");
         let req: serde_json::Value =
             serde_json::from_slice(&pod.request.lock().expect("req")).expect("json");
         assert!(req.get("api_key").is_none(), "{req}");
@@ -518,11 +697,7 @@ mod tests {
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
         let topic = harvest_topic(&recs);
         let pod = CapturePod::new();
-        let harvest = LiumProofHarvest::new(
-            pod.clone(),
-            HarvestLimits::default(),
-            vec!["ssh-ed25519 AAAAtest proof".into()],
-        );
+        let harvest = harvest_with_assets(pod.clone(), &recs, None);
         let err = harvest
             .score(
                 &harvest_pin(),
@@ -540,11 +715,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn harvest_refuses_a_spoofed_topic_origin_before_boot() {
+    async fn harvest_without_proxy_dir_does_not_boot() {
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
-        let mut topic = harvest_topic(&recs);
-        topic.inference.max_input_tokens = Some(4_096);
-        topic.inference.base_url = Some("http://evil.example/v1".into());
+        let topic = harvest_topic(&recs);
         let pod = CapturePod::new();
         let harvest = LiumProofHarvest::new(
             pod.clone(),
@@ -552,6 +725,83 @@ mod tests {
             vec!["ssh-ed25519 AAAAtest proof".into()],
         )
         .with_judge_api_key(Some("sk-live-not-a-real-secret".into()));
+        let err = harvest
+            .score(
+                &harvest_pin(),
+                &topic,
+                &harvest_offer(),
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err("no proxy");
+        assert!(matches!(err, EvalError::ProxyModelMissing), "{err}");
+        assert!(!*pod.booted.lock().expect("booted"));
+    }
+
+    #[test]
+    fn pack_holdout_tar_refuses_a_missing_shard() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let empty =
+            std::env::temp_dir().join(format!("proof-empty-holdout-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).expect("dir");
+        assert!(matches!(
+            pack_holdout_tar(&empty, &recs),
+            Err(EvalError::HoldoutStoreMissing)
+        ));
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn pack_proxy_tar_refuses_a_missing_dir() {
+        assert!(matches!(
+            pack_proxy_tar(Path::new("/no/such/proof-proxy-model")),
+            Err(EvalError::ProxyModelMissing)
+        ));
+    }
+
+    #[test]
+    fn pack_helpers_succeed_on_operator_staged_trees() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (proxy, store) = live_asset_dirs(&recs);
+        let holdout = pack_holdout_tar(&store, &recs).expect("holdout tar");
+        let weights = pack_proxy_tar(&proxy).expect("proxy tar");
+        assert!(!holdout.is_empty());
+        assert!(!weights.is_empty());
+        let listed = Command::new("tar")
+            .args(["-tf", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child
+                    .stdin
+                    .as_mut()
+                    .expect("stdin")
+                    .write_all(&holdout)
+                    .expect("write");
+                child.wait_with_output()
+            })
+            .expect("tar -tf");
+        let listing = String::from_utf8_lossy(&listed.stdout);
+        assert!(
+            listing.contains(&recs[0].content_sha256.to_ascii_lowercase()),
+            "{listing}"
+        );
+    }
+
+    #[tokio::test]
+    async fn harvest_refuses_a_spoofed_topic_origin_before_boot() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let mut topic = harvest_topic(&recs);
+        topic.inference.max_input_tokens = Some(4_096);
+        topic.inference.base_url = Some("http://evil.example/v1".into());
+        let pod = CapturePod::new();
+        let harvest =
+            harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()));
         let err = harvest
             .score(
                 &harvest_pin(),
@@ -604,6 +854,7 @@ mod tests {
             _instance_id: &str,
             _request: &[u8],
             _env_file: &[u8],
+            _extras: &RunExtras,
         ) -> Result<String, String> {
             Ok(self.stdout.clone())
         }
@@ -617,13 +868,16 @@ mod tests {
     async fn harvest_refuses_stdout_without_ok_marker() {
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
         let topic = harvest_topic(&recs);
+        let (proxy, store) = live_asset_dirs(&recs);
         let pod = StdoutPod::new("refused: no model: Qwen/Qwen3.8-0.6B\nexit=2\n");
         let harvest = LiumProofHarvest::new(
             pod.clone(),
             HarvestLimits::default(),
             vec!["ssh-ed25519 AAAAtest proof".into()],
         )
-        .with_judge_api_key(Some("sk-live-not-a-real-secret".into()));
+        .with_judge_api_key(Some("sk-live-not-a-real-secret".into()))
+        .with_proxy_model_dir(Some(proxy))
+        .with_holdout_store(Some(store));
         let err = harvest
             .score(
                 &harvest_pin(),

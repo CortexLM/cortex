@@ -59,6 +59,13 @@ baseline + an open topic are on the host.
   Auth is `PROOF_INFERENCE_API_KEY_FILE`, staged into the harvest pod as
   `teacher.env` (`OPENAI_API_KEY`) — never git, never `/v1/status`. Missing
   key on a live open offer → **503**. `proxy_model` stays empty.
+  Live score has **no HF bake**: harvest must stage operator-provided
+  local weights (`PROOF_PROXY_MODEL_DIR`) and holdout shard bytes
+  (`PROOF_HOLDOUT_STORE/<content_sha256>`). The pinned image does not
+  contain `/opt/proof-eval/holdout` or a valid default proxy id. Missing
+  either → `can_score=false` / submit **503** (do not rent). After this
+  source fix, republish `proof-eval` and re-pin the new digest before the
+  next 1× GPU rent — do not invent a sha256.
 - A baseline must be sealed (`script_sha256` + `metrics_commitment`) to
   open. Nobody is paid for beating a number nobody measured.
 - 8000 bps is split equally across currently `open` topics. Each topic then
