@@ -924,7 +924,7 @@ mod tests {
         let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
             return Vec::new();
         };
-        entries
+        let mut paths: Vec<PathBuf> = entries
             .filter_map(Result::ok)
             .map(|e| e.path())
             .filter(|p| {
@@ -934,7 +934,22 @@ mod tests {
                     && p.extension()
                         .is_some_and(|ext| ext.eq_ignore_ascii_case("tar"))
             })
-            .collect()
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    fn assert_live_extras_holdout_refuse_leaves_no_proxy_tar(
+        harvest: &LiumProofHarvest,
+        holdout: &[HoldoutRecord],
+    ) {
+        let before = leftover_proxy_tars();
+        match harvest.live_extras(holdout) {
+            Ok(_) => panic!("holdout refuse"),
+            Err(err) => assert!(matches!(err, EvalError::HoldoutStoreMissing), "{err}"),
+        }
+        let after = leftover_proxy_tars();
+        assert_eq!(after, before, "proxy tar leaked: {after:?}");
     }
 
     #[tokio::test]
@@ -970,6 +985,24 @@ mod tests {
         assert!(!*pod.booted.lock().expect("booted"));
         let after = leftover_proxy_tars();
         assert_eq!(after, before, "proxy tar leaked: {after:?}");
+    }
+
+    #[test]
+    fn live_extras_holdout_refuse_does_not_leak_a_proxy_tar() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (proxy, store) = live_asset_dirs(&recs);
+        let harvest = harvest_for_ready(proxy.clone(), store.clone());
+        let mut missing = recs.clone();
+        missing[0].content_sha256 = "ab".repeat(32);
+        assert_live_extras_holdout_refuse_leaves_no_proxy_tar(&harvest, &missing);
+
+        std::fs::write(
+            store.join(recs[0].content_sha256.to_ascii_lowercase()),
+            b"not-the-catalogued-shard\n",
+        )
+        .expect("tamper");
+        let harvest = harvest_for_ready(proxy, store);
+        assert_live_extras_holdout_refuse_leaves_no_proxy_tar(&harvest, &recs);
     }
 
     #[test]
