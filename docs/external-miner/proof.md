@@ -341,11 +341,19 @@ Primary: `metric.primary` (`max` or `min`, as the topic says). Win:
 beat the sealed value by `metric.epsilon_rel` relative
 (`primary >= sealed * (1 + epsilon_rel)` for `max`). The metric is computed
 by the runner registered on the host under `metric.custom_id`; nothing
-about it is compiled into the network. If the topic sets
-`constraints.firecracker_required`, your code runs only inside a Firecracker
-guest under the topic's own VM; if it sets `constraints.model_pin`, every
-paid call must name exactly that model; `task_slice` / `params` are opaque
-runner inputs the topic defines.
+about it is compiled into the network. The topic's RLM runs in its own
+Firecracker microVM on a dedicated KVM host, and **your code runs in a
+separate ("sister") Firecracker guest beside it that has no network
+interface**: the RLM fetches your artefact from `artifact_uri`, inspects it,
+and ships the bytes into the sister over vsock. Plan for an offline run —
+nothing your code does at run time can reach the internet, the RLM, or the
+host. The host (not the RLM) stamps `sandboxed` on your report from the
+guest it booted, and the `flops_used` your verdict carries is what that
+guest measured. If the topic sets `constraints.firecracker_required`, a run
+that did not happen in that sister guest is not evidence; if it sets
+`constraints.model_pin`, every paid call must name exactly that model;
+`task_slice` / `params` are opaque runner inputs the topic defines (they are
+exported to your run's environment).
 
 **Anti-cheat checklist — every rule in the topic's `checklist` (current
 version) must pass before a single paid inference call is made.** Read the

@@ -145,12 +145,15 @@ baseline + an open topic are on the host.
   database. Every rule of the current version is ticked with evidence
   **before any paid inference**; one red, missing, duplicated, or
   evidence-less item is a persisted reject with no spend.
-- The RLM runs **inside a VM attributed to its topic**, reached only through
-  the orchestrator boundary (`TopicVmOrchestrator`). Miner code runs in a
-  Firecracker guest under that VM when the topic says
-  `constraints.firecracker_required`. The control plane never runs RLM
-  logic and never hands the VM a host path or a secret; an unwired
-  orchestrator is a **503**, not a host-local fallback.
+- The RLM runs **inside a Firecracker microVM attributed to its topic** on a
+  dedicated KVM host, reached only through the orchestrator boundary
+  (`TopicVmOrchestrator` → `FirecrackerOrchestrator` → `proof-vm-orchestrator`
+  agent). Miner code runs in a **sister** Firecracker guest with no network
+  beside that VM; the host, not the RLM, stamps `sandboxed` and the
+  guest-measured `flops_used` on the report. The control plane never runs
+  RLM logic and never hands the VM a host path or a secret; an unwired
+  orchestrator, a missing bearer file, or an unpinned RLM image is a
+  **503**, not a host-local fallback.
 - `PROOF_FORCE_SIM` is CI/local opt-in only. Never a fallback. Forbidden on
   droplet overlays. Under sim, a sealed topic scores with harness numbers
   relative to the seal (`sim_win_document`); skill-only `sim_document`
@@ -401,12 +404,41 @@ resumes from the persisted state.
 
 `TopicVmOrchestrator` (create / attach / run / teardown-or-retain) is the only
 way RLM work happens. `VmJob`s carry public data (signed topic, digests,
-rule set, request) — never a host path, a key, or a judge origin. The shipped
-orchestrator is `UnwiredVmOrchestrator` (refuses, names
-`PROOF_VM_ORCHESTRATOR_URL` / `PROOF_VM_ORCHESTRATOR_TOKEN_FILE`;
-`PROOF_RLM_VM_IMAGE_DIGEST` pins the RLM VM image). The generic
-`VmBackedRunner` turns inspect / evaluate into VM jobs; registering it under
-a `custom_id` is an operator / RLM action. The Lium harvest for
+rule set, request) — never a host path, a key, or a judge origin. Two
+orchestrators exist: `UnwiredVmOrchestrator` (the default; refuses, names
+`PROOF_VM_ORCHESTRATOR_URL` / `PROOF_VM_ORCHESTRATOR_TOKEN_FILE`) and the
+live `FirecrackerOrchestrator` (`crates/proof-vm-fc`), a thin HTTPS client of
+the `proof-vm-orchestrator` agent on a **dedicated KVM host** (never the
+control-plane droplet, never a Lium pod, never nested). The host prefers it
+when `PROOF_VM_ORCHESTRATOR_URL` (https; plain http only on loopback) and
+`PROOF_VM_ORCHESTRATOR_TOKEN_FILE` are set; the bearer is a file re-read per
+request and never logged; `PROOF_RLM_VM_IMAGE_DIGEST` pins the RLM VM rootfs
+(4 vCPU / 8192 MiB by default; unpinned = `ready()` fails, 503 naming the
+var). On the KVM host, jailer boots **one Firecracker RLM microVM per
+`topic_id`** from that digest (re-hashed before boot), hands it jobs over
+vsock, stages the owner key material from the host's own directory (the
+control plane only probes its copy for presence), and gives it an nftables
+egress allowlist (empty = no egress). Every paid run (`Baseline`,
+`Evaluate`) that the RLM asks for happens in a **sister** Firecracker guest
+with **no network**: the RLM ships the artefact bytes it already inspected
+over vsock, the host boots the sister from its own pinned image, holds it to
+the topic deadline, destroys it, and writes the `SisterAttestation`. The
+agent then **stamps** the report: `sandboxed` is `true` only when a sister
+ran, `flops_used` is the sister guest's measurement — an RLM cannot claim a
+sandbox the host did not boot, and a sister that measured nothing yields no
+usage (503, never a substituted number). Hard binds on both sides: a job
+must name the VM's topic (envelope **and** job) or the agent answers 409; the
+client refuses a job for another topic before any request, checks every
+echo, refuses a created VM on another digest, and refuses a
+`firecracker_required` run that came back without the sister attestation.
+Teardown honours the topic's `retain` policy (default **destroy**; `retain`
+keeps the jail for audit). Deploy: `deploy/systemd/proof-vm-orchestrator.service`,
+runbook [`runbooks/proof-vm-orchestrator.md`](runbooks/proof-vm-orchestrator.md).
+CI runs the fake hypervisor only; no GitHub runner ever boots Firecracker.
+The generic `VmBackedRunner` turns inspect / evaluate into VM jobs;
+registering it under a `custom_id` is an operator action
+(`PROOF_VM_RUNNER_CUSTOM_IDS`, comma-separated; unset = empty registry). The
+Lium harvest for
 `nll` / `throughput` and the live `1x` `EvalExecutorOffer` (`proof-executor`)
 govern the harvest rent; on the custom path each run request records the
 resolved executor plan's deadline (tighter of topic and plan) and

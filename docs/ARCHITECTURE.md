@@ -46,7 +46,10 @@ Master host (role-master overlay + master profile)
   gateway · postgres · socket-proxy
   bounty-challenge · proof-challenge
   │                    │
-  │                    └─ Proof harvest → Lium evaluation pod
+  │                    ├─ Proof harvest → Lium evaluation pod (nll / throughput)
+  │                    └─ HTTPS + bearer file → dedicated KVM host (custom topics)
+  │                         proof-vm-orchestrator: jailer/Firecracker RLM VM per topic,
+  │                         sister Firecracker guest (no network) per miner run
   │ signed bundles
   ▼
 Validator host (role-validator overlay)
@@ -66,6 +69,7 @@ terminates in the host reverse proxy, not in the gateway process.
 | `validator` | Fetch/mirror bundle, verify, recompute, peer cross-check, CRV4 submit, dissent |
 | `bounty-challenge` | **Master-only:** internal pair/reports/adjudicate; **reads** CortexLM/backend public API for scoring and signs leaves from those rows. An unreadable feed pays nobody — `E` is covered with `ChallengeInternal`, share burns to uid 0 — rather than scoring offline |
 | `proof-challenge` | **Master-only:** signed topics, holdout loading, evaluation orchestration. Library payout is a sum of WTA/discovery topic masses; the binary has no automatic leaf-emission loop yet |
+| `proof-vm-orchestrator` | **Dedicated KVM host only** (never a droplet, never Lium): Firecracker + jailer agent behind HTTPS + a bearer file. One RLM microVM per Proof topic from the digest the control plane pins, sister miner guest with no network per paid run, host-stamped `sandboxed` / `flops_used`. Client side is `proof-vm-fc::FirecrackerOrchestrator`; runbook [`runbooks/proof-vm-orchestrator.md`](runbooks/proof-vm-orchestrator.md) |
 | `updater` | Digest-pinned rollouts via `docker-socket-proxy` (master) |
 | `trustroot` | Offline keygen / sign / verify for owner-signed TOML |
 | `bundle` | SCALE types, seal, verify (`PROTOCOL_VERSION`) |
