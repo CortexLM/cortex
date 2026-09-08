@@ -815,13 +815,14 @@ impl EvalJobBackend for LiumClient {
                 prism_lium_types::effective_gpu_count(selected.gpu_count, &selected.gpu_type);
             // Split hosts: requested width. NCU / non-split: whole host.
             let rent_gpu_count = selected.rent_count(spec.gpu_count);
-            // Proof harvest default is 1× (`HarvestLimits.gpu_count`). Never POST
-            // an 8× B200 whole-host / NCU upsell, and keep the 5090 8× abort.
+            // Never POST more GPUs than requested (Proof harvest default 1×).
+            // Skip this candidate — a later split 8× B200 can still rent 1×.
             if rent_gpu_count > spec.gpu_count {
-                return Err(LiumError::Api(format!(
+                last_err = format!(
                     "abort: refusing {rent_gpu_count}× {} rent (requested {}; no whole-host upsell)",
                     selected.gpu_type, spec.gpu_count
-                )));
+                );
+                continue 'offers;
             }
             loop {
                 info!(
@@ -1628,6 +1629,70 @@ mod tests {
                 && (err.to_string().contains("8×") || err.to_string().contains("8x")),
             "got {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn provision_skips_ncu_upsell_and_rents_split_1x() {
+        let server = MockServer::start().await;
+        mount_common(
+            &server,
+            serde_json::json!([
+                {
+                    "id": "ncu-2x",
+                    "machine_name": "NVIDIA B200",
+                    "gpu_count": 2,
+                    "available_gpu_count": 2,
+                    "min_gpu_count_for_rental": 1,
+                    "ncu_profiling_enabled": true,
+                    "price_per_gpu": 5.5
+                },
+                {
+                    "id": "eight-b200-idle",
+                    "machine_name": "NVIDIA B200",
+                    "gpu_count": 8,
+                    "available_gpu_count": 8,
+                    "price_per_gpu": 6.52
+                }
+            ]),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/executors/ncu-2x/rent"))
+            .and(body_partial_json(serde_json::json!({"gpu_count": 2})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "pod-ncu"})),
+            )
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/executors/eight-b200-idle/rent"))
+            .and(body_partial_json(serde_json::json!({"gpu_count": 8})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "pod-8x"})),
+            )
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/executors/eight-b200-idle/rent"))
+            .and(body_partial_json(serde_json::json!({"gpu_count": 1})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "pod-split-1"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/pods/pod-split-1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": "pod-split-1", "status": "RUNNING"})),
+            )
+            .mount(&server)
+            .await;
+        let c = LiumClient::with_base_url("test-key", server.uri()).unwrap();
+        let inst = c.provision(&provision_spec()).await.unwrap();
+        assert_eq!(inst.id, "pod-split-1");
     }
 
     #[tokio::test]
