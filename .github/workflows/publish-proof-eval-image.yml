@@ -127,6 +127,8 @@ jobs:
             'env -i PATH=/usr/bin:/bin /usr/bin/proof-eval score --help'
           docker run --rm --entrypoint /bin/sh "${ref}" -c \
             'test -x /usr/bin/gcc && test -x /usr/bin/g++ && test "$CC" = gcc && test "$CXX" = g++'
+          docker run --rm --entrypoint /bin/sh "${ref}" -c \
+            'inc=$(/opt/proof-eval-venv/bin/python -c "import sysconfig; print(sysconfig.get_path(\"include\"))"); test -f "$inc/Python.h" && echo "#include <Python.h>" | gcc -E -I"$inc" - >/dev/null'
           docker run --rm --entrypoint /opt/proof-eval-venv/bin/python "${ref}" \
             -c 'import torch, transformers'
           docker run --rm --entrypoint /opt/proof-eval-venv/bin/python "${ref}" \
@@ -161,8 +163,9 @@ jobs:
             echo "### proof-eval (scoring image, CUDA base)"
             echo
             echo "Pulled this digest after push, ran the harvest-PATH check,"
-            echo "proved \`import torch, transformers\`, empty baked_proxies (no HF bake),"
-            echo "and ran \`proof-eval selftest\` (fabric 12.5 Gbit/s / no IB-NVLink-NCCL)."
+            echo "proved gcc/g++ + \`Python.h\` (Triton driver.c), \`import torch, transformers\`,"
+            echo "empty baked_proxies (no HF bake), and ran \`proof-eval selftest\`"
+            echo "(fabric 12.5 Gbit/s / no IB-NVLink-NCCL)."
             echo "Live score requires harvest-staged \`PROOF_PROXY_MODEL_DIR\` +"
             echo "\`PROOF_HOLDOUT_STORE\`. Paste into the control plane's"
             echo "\`config/proof-pin.toml\` (keep proxy_model empty):"
