@@ -132,7 +132,7 @@ for env_file in deploy/compose/env-staging.yml deploy/compose/env-prod.yml; do
   if echo "$rendered" | grep -qE 'DESIGN_FORCE_SIM:[[:space:]]*["'\'']?(1|true|TRUE|yes)["'\'']?'; then
     fail "$env_file enables DESIGN_FORCE_SIM (retired; must not ship)"
   fi
-  for sim_var in RELEARN_FORCE_SIM RELEARN_T2I_FORCE_SIM RELEARN_AGENT_FORCE_SIM RELEARN_MM_FORCE_SIM PROOF_FORCE_SIM; do
+  for sim_var in RELEARN_FORCE_SIM RELEARN_T2I_FORCE_SIM RELEARN_AGENT_FORCE_SIM RELEARN_MM_FORCE_SIM PROOF_FORCE_SIM PROOF_SIM_STUB_WIN; do
     if echo "$rendered" | grep -qE "${sim_var}:[[:space:]]*[\"']?(1|true|TRUE|yes)[\"']?"; then
       fail "$env_file enables $sim_var (sim is local-only; must not ship on droplets)"
     fi

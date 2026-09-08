@@ -141,6 +141,7 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         },
         "eval_backend": st.backend,
         "force_sim": force_sim(),
+        "sim_stub_win": st.backend == EvalBackend::Sim,
         "can_score": st.can_score(),
         "live_harvest_wired": st.live_scorer.is_some(),
         "baseline_sealed": baseline_sealed,
@@ -315,6 +316,7 @@ async fn submit(
         st.backend,
         st.live(),
         st.judge_api_key.as_deref(),
+        Some(&sealed),
     )
     .await
     .map_err(|e| eval_err(&e))?;
@@ -611,10 +613,10 @@ mod tests {
     use proof_eval::{sim_document, BaselineMeasurement, BASELINE_SKILL};
     use proof_task::{
         default_adamw, holdout_commitment, inference_config_commitment, synthetic_holdout,
-        Constraints, InferenceConfig, InferenceMode, InferenceOffer, InferenceProvider,
-        InferenceProviderKind, MetricDirection, MetricFamily, MetricSpec, OfferStatus,
-        TopicDocument, TopicStatus, FLOPS_BUDGET_MAX, HOLDOUT_SIZE, METRIC_TOKENS_PER_SEC,
-        STRATUM_SIZE,
+        Constraints, HoldoutSplit, InferenceConfig, InferenceMode, InferenceOffer,
+        InferenceProvider, InferenceProviderKind, MetricDirection, MetricFamily, MetricSpec,
+        OfferStatus, TopicDocument, TopicStatus, FLOPS_BUDGET_MAX, HOLDOUT_SIZE,
+        METRIC_TOKENS_PER_SEC, STRATUM_SIZE,
     };
     use tower::ServiceExt;
 
@@ -647,6 +649,15 @@ mod tests {
     }
 
     fn offer() -> InferenceOffer {
+        named_offer("master-v0")
+    }
+
+    /// Staging sim offer id (operator-published; miners do not bind it).
+    fn staging_offer() -> InferenceOffer {
+        named_offer("openrouter-glm53flash-v0")
+    }
+
+    fn named_offer(offer_id: &str) -> InferenceOffer {
         let config = InferenceConfig {
             mode: InferenceMode::Chat,
             model_ref: "master-proxy-v0".into(),
@@ -657,7 +668,7 @@ mod tests {
             timeout_ms: None,
         };
         InferenceOffer {
-            offer_id: "master-v0".into(),
+            offer_id: offer_id.into(),
             provider: InferenceProvider {
                 kind: InferenceProviderKind::OpenaiCompatible,
                 base_url: "http://127.0.0.1:8000/v1".into(),
@@ -691,6 +702,33 @@ mod tests {
                 epsilon_rel: 0.05,
                 quality_floor_nll: 0.02,
                 wall_budget_s: 14_400,
+                custom_id: String::new(),
+            },
+            baseline,
+            holdout_commitment: holdout_commitment(recs),
+            holdout_size: HOLDOUT_SIZE,
+            status: TopicStatus::Open,
+            ..TopicDocument::default()
+        }
+    }
+
+    fn unsigned_muon_topic(recs: &[proof_task::HoldoutRecord]) -> TopicDocument {
+        let mut baseline = default_adamw(FLOPS_BUDGET_MAX);
+        baseline.script_sha256 = "11".repeat(32);
+        TopicDocument {
+            id: "muon-vs-adamw-10m-v0".into(),
+            statement:
+                "Beat sealed AdamW holdout NLL with Muon at ~10M params under the same FLOP budget."
+                    .into(),
+            payout_mode: proof_task::PayoutMode::Wta,
+            metric: MetricSpec {
+                family: MetricFamily::Nll,
+                primary: proof_task::PRIMARY_HOLDOUT_NLL.into(),
+                direction: MetricDirection::Min,
+                unit: "nll".into(),
+                epsilon_rel: 0.0,
+                quality_floor_nll: 0.0,
+                wall_budget_s: 0,
                 custom_id: String::new(),
             },
             baseline,
@@ -874,6 +912,7 @@ mod tests {
             json_req(app("op"), "GET", "/v1/status", serde_json::json!({}), None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(body["eval_backend"], "sim");
+        assert_eq!(body["sim_stub_win"], true, "{body}");
         assert_eq!(body["can_score"], true, "{body}");
         assert_eq!(body["baseline_sealed"], true, "{body}");
         assert_eq!(body["open_topics"][0], "dt-no-ib-v0");
@@ -1398,5 +1437,278 @@ mod tests {
                 .contains("committed judge origin"),
             "{body}"
         );
+    }
+
+    fn app_staging_sim() -> Router {
+        let p = pin("");
+        let store = MemoryStore::new();
+        for draft in [unsigned_topic(&[]), unsigned_muon_topic(&[])] {
+            let recs = synthetic_holdout(STRATUM_SIZE, 1);
+            let (topic, meas) = seal_topic(&p, draft);
+            store.put_topic(topic.clone()).expect("topic");
+            store.load_holdout(&topic.id, recs).expect("holdout");
+            store
+                .set_baseline(&topic.id, meas.into_sealed())
+                .expect("baseline");
+        }
+        proof_router(AppState {
+            store,
+            pin: p,
+            backend: EvalBackend::Sim,
+            live_scorer: None,
+            offer: Some(staging_offer()),
+            judge_api_key: None,
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            epoch: 0,
+        })
+    }
+
+    fn assert_scored_row(created: &serde_json::Value, topic_id: &str) {
+        assert!(
+            created["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("pf_")),
+            "silent empty id: {created}"
+        );
+        assert_eq!(created["topic_id"], topic_id, "{created}");
+        assert_eq!(created["eval_backend"], "sim", "{created}");
+        let state = created["state"].as_str().unwrap_or_default();
+        assert!(
+            state == "awaiting_admin" || state == "rejected",
+            "non-terminal or empty state: {created}"
+        );
+        assert!(created["eligible"].is_boolean(), "{created}");
+        assert!(
+            created["submission_digest"]
+                .as_str()
+                .is_some_and(|d| d.len() == 64),
+            "{created}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sim_submit_scores_claim_artifact_and_flops() {
+        let app = app("op");
+        let body = submit_body(
+            "staging-e2e-artifact",
+            &serde_json::json!({
+                "claim": "beats the sealed reference under the cap",
+                "declared_flops": 1_000_000_000_000u64,
+            }),
+        );
+        let (st, created) = json_req(app.clone(), "POST", "/v1/submissions", body, None).await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_scored_row(&created, "dt-no-ib-v0");
+
+        let id = created["id"].as_str().expect("id");
+        let (st, row) = json_req(
+            app,
+            "GET",
+            &format!("/v1/submissions/{id}"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{row}");
+        assert_eq!(row["id"], id);
+        assert_eq!(row["topic_id"], "dt-no-ib-v0");
+        assert_eq!(row["declared_flops"], 1_000_000_000_000u64);
+        assert_eq!(row["claim"], "beats the sealed reference under the cap");
+        assert!(row["verdict"].is_object(), "judge path missing: {row}");
+        assert!(row["verdict"]["agent"].is_object(), "{row}");
+        assert!(
+            row["verdict"]["harness"]["holdout_nll"].is_number(),
+            "{row}"
+        );
+        assert!(row["verdict"]["lattice"].is_number(), "{row}");
+        assert!(
+            row["verdict"]["agent"]["rationale"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "notation missing: {row}"
+        );
+        let receipt = row["receipt_json"].as_str().unwrap_or_default();
+        assert!(receipt.contains("sim"), "sim receipt missing: {row}");
+        let dump = row.to_string();
+        assert!(!dump.contains("content_sha256"), "{dump}");
+        assert!(!dump.contains("api_key"), "{dump}");
+    }
+
+    #[tokio::test]
+    async fn sim_submit_accepts_staging_topic_ids() {
+        let app = app_staging_sim();
+        let (st, status) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(status["can_score"], true, "{status}");
+        assert_eq!(status["eval_backend"], "sim", "{status}");
+        assert_eq!(status["baseline_sealed"], true, "{status}");
+        assert_eq!(
+            status["inference_offer"]["offer_id"],
+            "openrouter-glm53flash-v0"
+        );
+        let open = status["open_topics"].as_array().expect("open_topics");
+        let ids: Vec<&str> = open.iter().filter_map(|v| v.as_str()).collect();
+        assert!(ids.contains(&"dt-no-ib-v0"), "{status}");
+        assert!(ids.contains(&"muon-vs-adamw-10m-v0"), "{status}");
+
+        let (st, list) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/proof/topics",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let dump = list.to_string();
+        assert!(!dump.contains("content_sha256"), "{dump}");
+        assert!(!dump.contains("synthetic-dev"), "{dump}");
+
+        for topic_id in ["dt-no-ib-v0", "muon-vs-adamw-10m-v0"] {
+            let (st, created) = json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                submit_body(
+                    topic_id,
+                    &serde_json::json!({
+                        "topic_id": topic_id,
+                        "declared_flops": 42u64,
+                    }),
+                ),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{topic_id}: {created}");
+            assert_scored_row(&created, topic_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn sim_submit_fail_closed_reasons_are_explicit() {
+        let app = app_staging_sim();
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            submit_body("x", &serde_json::json!({ "topic_id": "" })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "topic_id is required");
+
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            submit_body("x", &serde_json::json!({ "topic_id": "not-a-live-topic" })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "unknown topic");
+
+        let (st, body) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body("x", &serde_json::json!({ "declared_flops": u64::MAX })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("declared_flops"),
+            "{body}"
+        );
+    }
+
+    fn tight_sealed() -> proof_score::SealedBaseline {
+        let mut split = std::collections::BTreeMap::new();
+        for s in HoldoutSplit::SCORED {
+            split.insert(s.as_str().to_owned(), 0.29);
+        }
+        proof_score::SealedBaseline {
+            holdout_nll: 0.29,
+            split_nll: split,
+            tokens_per_sec: Some(80.0),
+            step_latency_ms: None,
+            custom_value: None,
+        }
+    }
+
+    fn app_tight_sim() -> Router {
+        let p = pin("");
+        let store = MemoryStore::new();
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (topic, _) = seal_topic(&p, unsigned_topic(&recs));
+        store.put_topic(topic.clone()).expect("topic");
+        store.load_holdout(&topic.id, recs).expect("holdout");
+        store
+            .set_baseline(&topic.id, tight_sealed())
+            .expect("baseline");
+        proof_router(AppState {
+            store,
+            pin: p,
+            backend: EvalBackend::Sim,
+            live_scorer: None,
+            offer: Some(staging_offer()),
+            judge_api_key: None,
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            epoch: 0,
+        })
+    }
+
+    #[tokio::test]
+    async fn sim_stub_win_submit_reaches_awaiting_admin() {
+        let app = app_tight_sim();
+        let (st, status) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(status["eval_backend"], "sim");
+        assert_eq!(status["sim_stub_win"], true, "{status}");
+
+        let (st, created) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            submit_body("tight-win", &serde_json::json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_eq!(created["state"], "awaiting_admin", "{created}");
+        assert_eq!(created["eligible"], true, "{created}");
+        assert_eq!(created["eval_backend"], "sim");
+        let id = created["id"].as_str().expect("id");
+        let (st, row) = json_req(
+            app,
+            "GET",
+            &format!("/v1/submissions/{id}"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{row}");
+        assert_eq!(row["verdict"]["pass"], true, "{row}");
+        assert_eq!(row["verdict"]["agent"]["rationale"], "sim stub win");
+        assert_eq!(row["verdict"]["failed"].as_array().map(Vec::len), Some(0));
     }
 }
