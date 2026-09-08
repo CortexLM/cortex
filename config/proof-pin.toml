@@ -36,6 +36,22 @@
 # (open/closed). Miners do not bind it. No baked Qwen; `proxy_model` /
 # `proxy_models` stay empty. Missing/closed/judge down → 503.
 #
+# Eval executor: the machine the digest-pinned proof-eval image is rented on.
+# These are ceilings on the live `EvalExecutorOffer` (operator state,
+# `PROOF_EVAL_EXECUTOR_OFFER_FILE`, rotated via POST /v1/admin/proof/executor)
+# — a sibling of the RLM judge InferenceOffer, never the same document.
+# `gpu_class = "1x"` is the only shape harvest may rent (rent_gpu_count ≠ 1
+# aborts before the rent). An offer may declare a shorter proof deadline than
+# `max_proof_deadline_s_ceiling`, never longer; a topic may tighten it again
+# (`eval_executor.max_proof_deadline_s`) and may pin the live offer's
+# `config_commitment` (`eval_executor.require_offer_commitment`). No per-topic
+# machine id. The offer's `lium_template_id` is always the digest-scoped
+# template name (`proof-eval-<12 hex of the digest>`, resolved bound to
+# eval_image@digest); a raw Lium template UUID is refused under any allowlist.
+# `allowed_lium_template_prefixes` is optional; when set, the name must also
+# carry one of the prefixes. Missing / closed / shape ≠ 1x → can_score=false
+# → 503.
+#
 # Holdout size / stratum size are the measurement harness (5 scored splits × 24),
 # not the problem list.
 
@@ -49,6 +65,11 @@ allowed_modes = ["chat", "completions", "embeddings"]
 max_input_tokens_ceiling = 32768
 max_output_tokens_ceiling = 8192
 inference_offer_commitment_alg = "sha256"
+eval_executor_schema_version = 1
+gpu_class = "1x"
+max_proof_deadline_s_ceiling = 7200
+allowed_lium_template_prefixes = ["proof-eval-"]
+eval_executor_commitment_alg = "sha256"
 eval_image = "ghcr.io/cortexlm/proof-eval"
 eval_image_digest = "sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009"
 proof_git = "https://github.com/CortexLM/cortex"

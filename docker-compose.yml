@@ -262,6 +262,9 @@ services:
       PROOF_ADMIN_TOKENS_FILE: /run/base/proof/admin_tokens
       PROOF_INFERENCE_OFFER_FILE: /run/base/proof/inference_offer.json
       PROOF_INFERENCE_API_KEY_FILE: /run/base/proof/inference_api_key
+      # Live 1x EvalExecutorOffer (Lium template + proof deadline). Operator
+      # state, no secret; missing/closed → can_score=false / submit 503.
+      PROOF_EVAL_EXECUTOR_OFFER_FILE: /run/base/proof/eval_executor_offer.json
       BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
     env_file:
       - path: ./deploy/env/proof-challenge.env

@@ -232,6 +232,9 @@ pub struct InstanceSpec {
     pub template_id: Option<String>,
     /// Optional template name to ensure/resolve (e.g. prism-mission-e2e).
     pub template_name: Option<String>,
+    /// Refuse any offer whose rent would not be exactly `gpu_count` GPUs (no
+    /// whole-host / NCU upsizing). The Proof `1x` executor sets this.
+    pub exact_gpu_count: bool,
 }
 
 impl InstanceSpec {
@@ -241,6 +244,13 @@ impl InstanceSpec {
         self.docker_image
             .as_deref()
             .is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// Whether `rent_gpu_count` (what `POST /executors/{id}/rent` would send)
+    /// is legal for this spec. Only an exact-width spec refuses upsizing.
+    #[must_use]
+    pub fn accepts_rent_count(&self, rent_gpu_count: u32) -> bool {
+        !self.exact_gpu_count || rent_gpu_count == self.gpu_count
     }
 }
 
@@ -259,6 +269,7 @@ impl Default for InstanceSpec {
             preferred_offer_id: None,
             template_id: None,
             template_name: Some("prism-mission-e2e".into()),
+            exact_gpu_count: false,
         }
     }
 }
@@ -914,6 +925,44 @@ mod tests {
         pref.filter_sort_offers(&mut offers, 1);
         assert_eq!(offers.len(), 1);
         assert_eq!(offers[0].id, "4a36877c");
+    }
+
+    /// The Proof `1x` executor never upsizes: an NCU B200 that would rent
+    /// two cards is refused, an idle 8× that splits to one is fine.
+    #[test]
+    fn exact_gpu_count_refuses_whole_host_upsizing() {
+        let ncu = Offer {
+            id: "4a36877c".into(),
+            gpu_type: "NVIDIA B200".into(),
+            gpu_count: 2,
+            price_per_hour: 5.5,
+            min_gpu_count_for_rental: Some(1),
+            available_gpu_count: Some(2),
+            ncu_profiling_enabled: true,
+            ..Offer::default()
+        };
+        let idle8 = Offer {
+            id: "idle".into(),
+            gpu_type: "NVIDIA B200".into(),
+            gpu_count: 8,
+            price_per_hour: 5.85,
+            available_gpu_count: Some(8),
+            ..Offer::default()
+        };
+        let exact = InstanceSpec {
+            gpu_count: 1,
+            exact_gpu_count: true,
+            ..InstanceSpec::default()
+        };
+        let loose = InstanceSpec {
+            gpu_count: 1,
+            ..InstanceSpec::default()
+        };
+        assert!(!InstanceSpec::default().exact_gpu_count);
+        assert!(!exact.accepts_rent_count(ncu.rent_count(1)));
+        assert!(exact.accepts_rent_count(idle8.rent_count(1)));
+        assert!(loose.accepts_rent_count(ncu.rent_count(1)));
+        assert!(loose.accepts_rent_count(idle8.rent_count(1)));
     }
 
     #[test]

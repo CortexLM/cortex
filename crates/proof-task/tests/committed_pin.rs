@@ -6,9 +6,10 @@
 use std::path::{Path, PathBuf};
 
 use proof_task::{
-    ProofPin, ALLOWED_MODES, CHALLENGE_ID, EVAL_IMAGE, HOLDOUT_SIZE,
-    INFERENCE_CONFIG_SCHEMA_VERSION, INFERENCE_OFFER_COMMITMENT_ALG, MAX_INPUT_TOKENS_CEILING,
-    MAX_OUTPUT_TOKENS_CEILING, STRATUM_SIZE,
+    ProofPin, ALLOWED_MODES, CHALLENGE_ID, EVAL_EXECUTOR_COMMITMENT_ALG, EVAL_EXECUTOR_GPU_CLASS,
+    EVAL_EXECUTOR_SCHEMA_VERSION, EVAL_IMAGE, HOLDOUT_SIZE, INFERENCE_CONFIG_SCHEMA_VERSION,
+    INFERENCE_OFFER_COMMITMENT_ALG, MAX_INPUT_TOKENS_CEILING, MAX_OUTPUT_TOKENS_CEILING,
+    MAX_PROOF_DEADLINE_S_CEILING, STRATUM_SIZE,
 };
 
 fn pin_path() -> PathBuf {
@@ -104,6 +105,38 @@ fn committed_pin_is_proof_with_a_real_eval_digest() {
     assert_eq!(p.inference.mode, proof_task::InferenceMode::Chat);
     assert_eq!(p.inference.max_input_tokens, MAX_INPUT_TOKENS_CEILING);
     assert_eq!(p.inference.max_output_tokens, MAX_OUTPUT_TOKENS_CEILING);
+}
+
+/// The executor ceilings are the 2026-09-08 lock: schema 1, `1x` only,
+/// two-hour deadline ceiling, sha256 commitment, and a `proof-eval-` template
+/// allowlist that matches the digest-scoped harvest template name.
+#[test]
+fn committed_pin_locks_the_one_gpu_executor_ceilings() {
+    let p = pin();
+    assert_eq!(p.eval_executor_schema_version, EVAL_EXECUTOR_SCHEMA_VERSION);
+    assert_eq!(p.gpu_class, EVAL_EXECUTOR_GPU_CLASS);
+    assert_eq!(p.gpu_class, "1x");
+    assert_eq!(p.max_proof_deadline_s_ceiling, MAX_PROOF_DEADLINE_S_CEILING);
+    assert_eq!(p.max_proof_deadline_s_ceiling, 7_200);
+    assert_eq!(p.eval_executor_commitment_alg, EVAL_EXECUTOR_COMMITMENT_ALG);
+    assert_eq!(p.allowed_lium_template_prefixes, vec!["proof-eval-"]);
+    let digest_hex = p.eval_image_digest.trim_start_matches("sha256:");
+    assert!(p.allows_template(&format!("proof-eval-{}", &digest_hex[..12])));
+    assert!(!p.allows_template("prism-recipe-v10"));
+    let text = body();
+    for key in [
+        "eval_executor_schema_version",
+        "gpu_class",
+        "max_proof_deadline_s_ceiling",
+        "allowed_lium_template_prefixes",
+        "eval_executor_commitment_alg",
+    ] {
+        assert!(text.contains(key), "pin must name {key}");
+    }
+    assert!(
+        !text.contains("machine_id") && !text.contains("lium_template_id ="),
+        "the pin carries ceilings, never a live executor offer"
+    );
 }
 
 #[test]

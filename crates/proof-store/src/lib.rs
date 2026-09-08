@@ -82,6 +82,16 @@ pub struct Submission {
     /// Judge `config_commitment` stamped from the host offer.
     #[serde(default)]
     pub config_commitment: String,
+    /// Live `EvalExecutorOffer` id the run was rented on (host stamp; empty
+    /// on sim, which rents nothing).
+    #[serde(default)]
+    pub executor_offer_id: String,
+    /// Commitment of the executor configuration a live run was actually held
+    /// to (template, `1x`, effective deadline, digest) — the offer's
+    /// `config_commitment` when nothing tightened or overrode it, and the
+    /// offer's when no run happened (pre-eval reject).
+    #[serde(default)]
+    pub executor_commitment: String,
     /// Declared training fingerprints.
     #[serde(default)]
     pub manifest: ArtifactManifest,

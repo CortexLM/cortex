@@ -13,6 +13,7 @@ bundle = { path = "../bundle" }
 challenge-common = { path = "../challenge-common" }
 hex = "0.4"
 proof-eval = { path = "../proof-eval" }
+proof-executor = { path = "../proof-executor" }
 proof-http = { path = "../proof-http" }
 proof-score = { path = "../proof-score" }
 proof-store = { path = "../proof-store" }

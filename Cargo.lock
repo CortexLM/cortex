@@ -3426,6 +3426,7 @@ dependencies = [
  "crypto",
  "hex",
  "proof-eval",
+ "proof-executor",
  "proof-http",
  "proof-score",
  "proof-store",
@@ -3463,6 +3464,7 @@ dependencies = [
  "async-trait",
  "hex",
  "prism-lium-types",
+ "proof-executor",
  "proof-score",
  "proof-store",
  "proof-task",
@@ -3474,6 +3476,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "proof-executor"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "proof-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "proof-harvest"
 version = "0.1.0"
 dependencies = [
@@ -3482,6 +3496,7 @@ dependencies = [
  "hex",
  "prism-lium-types",
  "proof-eval",
+ "proof-executor",
  "proof-task",
  "serde",
  "serde_json",
@@ -3510,6 +3525,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "proof-eval",
+ "proof-executor",
  "proof-score",
  "proof-store",
  "proof-task",
@@ -6118,6 +6134,7 @@ dependencies = [
  "frame-metadata",
  "hex",
  "parity-scale-codec",
+ "proof-executor",
  "proof-task",
  "regex",
  "reqwest 0.12.28",

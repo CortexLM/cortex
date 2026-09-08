@@ -80,14 +80,30 @@ cargo run -p xtask -- proof-topic \\
 #   -H 'content-type: application/json' \\
 #   --data-binary @${SECRETS}/topics.json
 
-# 6. Point the host at the operator files (never in git):
+# 6. Build the live 1x EvalExecutorOffer (Lium template + proof deadline;
+#    no secret inside, still never in git). The pin refuses any other shape.
+cargo run -p xtask -- proof-executor-offer \\
+  --offer-id lium-1x-v0 \\
+  --max-proof-deadline-s 7200 \\
+  --out '${SECRETS}/eval_executor_offer.json'
+# Rotate or close live without a restart:
+# curl -sS -X POST "\$PROOF_BASE/v1/admin/proof/executor" \\
+#   -H "authorization: Bearer \$PROOF_ADMIN_TOKEN" \\
+#   -H 'content-type: application/json' \\
+#   --data-binary @${SECRETS}/eval_executor_offer.json
+
+# 7. Point the host at the operator files (never in git):
 #   PROOF_TOPICS_FILE=${SECRETS}/topics.json
 #   PROOF_HOLDOUT_FILE=${SECRETS}/holdouts.json
 #   PROOF_BASELINE_FILE=${SECRETS}/baselines.json
+#   PROOF_EVAL_EXECUTOR_OFFER_FILE=${SECRETS}/eval_executor_offer.json
 #   LIUM_API_KEY=…  LIUM_SSH_PUBLIC_KEY_FILE=…
 # Restart proof-challenge, then:
-#   curl -sS "\$PROOF_BASE/v1/status" | jq '{can_score,eval_image_digest,open_topics,live_harvest_wired,baseline_sealed}'
+#   curl -sS "\$PROOF_BASE/v1/status" | jq '{can_score,eval_image_digest,open_topics,live_harvest_wired,baseline_sealed,eval_executor}'
+#   curl -sS "\$PROOF_BASE/v1/proof/executor" | jq '{ready,reason}'
 
 # can_score is true only with: real digest + harvest wired + open topic +
-# sealed baseline + verified holdout. Empty digest stays 503.
+# sealed baseline + verified holdout + open 1x executor offer. Empty digest
+# stays 503. Harvest rents exactly 1 GPU on the offer template and cuts the
+# run at max_proof_deadline_s (503 + stdout_tail).
 EOF

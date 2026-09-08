@@ -19,9 +19,9 @@ use challenge_keys::load_challenge_secret;
 use clap::Parser;
 use prism_lium::LiumClient;
 use proof_challenge::{
-    hash_admin_token, parse_holdout_file, proof_router, AppState, BaselineMeasurement, EvalBackend,
-    InferenceOffer, LiveScorer, MemoryStore, ProofPin, TopicDocument, CHALLENGE_ID,
-    SCORING_VERSION,
+    executor_slot, hash_admin_token, parse_holdout_file, proof_router, AppState,
+    BaselineMeasurement, EvalBackend, EvalExecutorOffer, HarvestOverrides, InferenceOffer,
+    LiveScorer, MemoryStore, ProofPin, TopicDocument, CHALLENGE_ID, SCORING_VERSION,
 };
 use proof_eval::supported_custom;
 use proof_harvest::{HarvestLimits, LiumProofHarvest};
@@ -59,8 +59,14 @@ struct Cli {
     /// Operator holdout records (JSON array or map keyed by topic id). Never in git.
     #[arg(long, env = "PROOF_HOLDOUT_FILE")]
     holdout_file: Option<PathBuf>,
-    /// Seconds the eval image gets to score one artifact on the pod.
-    #[arg(long, env = "PROOF_EVAL_TIMEOUT_SECS", default_value_t = 5400)]
+    /// Fallback seconds the eval image gets when no executor deadline was
+    /// resolved. A resolved `max_proof_deadline_s` is the pod timeout and is
+    /// never clamped by this value; the default equals the pin ceiling.
+    #[arg(
+        long,
+        env = "PROOF_EVAL_TIMEOUT_SECS",
+        default_value_t = proof_task::MAX_PROOF_DEADLINE_S_CEILING
+    )]
     eval_timeout_secs: u64,
     /// Sealed baseline measurements (JSON map keyed by topic id).
     #[arg(long, env = "PROOF_BASELINE_FILE")]
@@ -71,6 +77,11 @@ struct Cli {
     /// Provider API key file. Never logged, never on `/v1/status`.
     #[arg(long, env = "PROOF_INFERENCE_API_KEY_FILE")]
     inference_api_key_file: Option<PathBuf>,
+    /// Live `1x` `EvalExecutorOffer` JSON (Lium template + proof deadline).
+    /// Operator state; never a git pin. Rotated at runtime via
+    /// `POST /v1/admin/proof/executor`. Missing/closed/shape ≠ 1x → 503.
+    #[arg(long, env = "PROOF_EVAL_EXECUTOR_OFFER_FILE")]
+    eval_executor_offer_file: Option<PathBuf>,
     /// Local measurement weights staged onto the eval pod (no HF bake).
     #[arg(long, env = "PROOF_PROXY_MODEL_DIR")]
     proxy_model_dir: Option<PathBuf>,
@@ -151,6 +162,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         ),
         _ => {}
     }
+    let executor = boot_executor(&pin, backend, cli.eval_executor_offer_file.as_deref());
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -181,6 +193,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         backend,
         live_scorer,
         offer,
+        executor: executor_slot(executor),
         judge_api_key,
         admin_hashes: Arc::new(load_admin_hashes(cli.admin_tokens_file.as_deref())),
         epoch: 0,
@@ -359,6 +372,54 @@ fn load_offer(pin: &ProofPin, path: Option<&Path>) -> Result<InferenceOffer, Str
     Ok(offer)
 }
 
+/// Load the live executor offer and log the harvest hot-swap state. Neither
+/// is a boot error: the Lium path answers 503 until an open `1x` offer is on
+/// the host (file or `POST /v1/admin/proof/executor`).
+fn boot_executor(
+    pin: &ProofPin,
+    backend: EvalBackend,
+    path: Option<&Path>,
+) -> Option<EvalExecutorOffer> {
+    match HarvestOverrides::from_env() {
+        Ok(o) if !o.is_empty() => {
+            tracing::info!(?o, "PROOF_HARVEST_* override set; pin ceilings still bind");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("{e}; every live harvest will refuse until it is fixed"),
+    }
+    match load_executor(pin, path) {
+        Ok(x) => {
+            tracing::info!(
+                offer_id = %x.offer_id,
+                lium_template_id = %x.lium_template_id,
+                machine_shape = %x.machine_shape,
+                max_proof_deadline_s = x.max_proof_deadline_s,
+                status = ?x.status,
+                "eval executor offer loaded"
+            );
+            Some(x)
+        }
+        Err(e) => {
+            if backend == EvalBackend::Lium {
+                tracing::warn!(
+                    "eval executor offer unavailable ({e}); live submits will 503 until \
+                     PROOF_EVAL_EXECUTOR_OFFER_FILE holds an open 1x offer or one is posted \
+                     to /v1/admin/proof/executor"
+                );
+            }
+            None
+        }
+    }
+}
+
+fn load_executor(pin: &ProofPin, path: Option<&Path>) -> Result<EvalExecutorOffer, String> {
+    let p = path.ok_or("PROOF_EVAL_EXECUTOR_OFFER_FILE not set")?;
+    let body = std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?;
+    let offer = EvalExecutorOffer::from_json(&body).map_err(|e| e.to_string())?;
+    offer.validate(pin).map_err(|e| e.to_string())?;
+    Ok(offer)
+}
+
 fn load_admin_hashes(path: Option<&Path>) -> Vec<String> {
     let Some(p) = path else {
         return Vec::new();
@@ -519,4 +580,76 @@ mod tests {
     }
 
     static OFFER_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Compose sets `PROOF_EVAL_EXECUTOR_OFFER_FILE`. Missing / unparseable /
+    /// non-`1x` is `can_score=false` / submit 503 — never `exit 1`. A valid
+    /// `1x` offer on the committed pin's digest-scoped template loads.
+    #[test]
+    fn compose_executor_offer_env_parses_and_bad_files_are_not_boot_errors() {
+        let _guard = OFFER_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(
+            "PROOF_EVAL_EXECUTOR_OFFER_FILE",
+            "/run/base/proof/eval_executor_offer.json",
+        );
+        let cli = Cli::try_parse_from(["proof-challenge"])
+            .unwrap_or_else(|e| panic!("PROOF_EVAL_EXECUTOR_OFFER_FILE broke parsing: {e}"));
+        assert_eq!(
+            cli.eval_executor_offer_file.as_deref(),
+            Some(Path::new("/run/base/proof/eval_executor_offer.json"))
+        );
+        std::env::remove_var("PROOF_EVAL_EXECUTOR_OFFER_FILE");
+
+        let pin_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/proof-pin.toml");
+        let pin = load_pin(Some(&pin_path)).expect("committed pin");
+        let missing = load_executor(&pin, Some(Path::new("/nonexistent/executor.json")))
+            .expect_err("missing file is unavailable, not a panic");
+        assert!(missing.contains("read"), "{missing}");
+        assert!(load_executor(&pin, None)
+            .expect_err("unset")
+            .contains("PROOF_EVAL_EXECUTOR_OFFER_FILE"));
+
+        let dir = std::env::temp_dir().join(format!(
+            "proof-executor-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let hex = pin.eval_image_digest.trim_start_matches("sha256:");
+        let mut good = EvalExecutorOffer {
+            offer_id: "lium-1x-v0".into(),
+            lium_template_id: format!("proof-eval-{}", &hex[..12]),
+            machine_shape: "1x".into(),
+            max_proof_deadline_s: 7_200,
+            eval_image_digest: pin.eval_image_digest.clone(),
+            config_commitment: String::new(),
+            status: proof_challenge::OfferStatus::Open,
+        };
+        good.config_commitment = good.expected_commitment();
+        let good_path = dir.join("good.json");
+        std::fs::write(&good_path, serde_json::to_vec(&good).expect("json")).expect("write");
+        let loaded = load_executor(&pin, Some(&good_path)).expect("valid 1x offer loads");
+        assert_eq!(loaded, good);
+
+        let mut wide = good.clone();
+        wide.machine_shape = "8x".into();
+        wide.config_commitment = wide.expected_commitment();
+        let wide_path = dir.join("wide.json");
+        std::fs::write(&wide_path, serde_json::to_vec(&wide).expect("json")).expect("write");
+        let err = load_executor(&pin, Some(&wide_path)).expect_err("8x is refused");
+        assert!(err.contains("machine_shape"), "{err}");
+
+        let junk_path = dir.join("junk.json");
+        std::fs::write(
+            &junk_path,
+            b"{\"offer_id\":\"x\",\"lium_api_key\":\"nope\"}",
+        )
+        .expect("write");
+        let err = load_executor(&pin, Some(&junk_path)).expect_err("unknown key");
+        assert!(err.contains("lium_api_key"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

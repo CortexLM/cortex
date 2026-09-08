@@ -164,6 +164,7 @@ async fn live_rent_ssh_eval_terminate() {
             // Exercise digest-only `PRISM_POD_IMAGE_REF` resolution, not a
             // historical provider-side template.
             template_name: None,
+            exact_gpu_count: false,
         };
         let mut att = serde_json::json!({
             "offer_id": offer.id,

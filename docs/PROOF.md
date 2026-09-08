@@ -66,6 +66,56 @@ baseline + an open topic are on the host.
   either → `can_score=false` / submit **503** (do not rent). After this
   source fix, republish `proof-eval` and re-pin the new digest before the
   next 1× GPU rent — do not invent a sha256.
+- **Where** the image runs is the live `EvalExecutorOffer` — a sibling of
+  the judge `InferenceOffer`, never the same document. The pin carries only
+  ceilings: `eval_executor_schema_version = 1`, `gpu_class = "1x"`,
+  `max_proof_deadline_s_ceiling = 7200`, optional
+  `allowed_lium_template_prefixes` (`["proof-eval-"]`, the digest-scoped
+  harvest template name `proof-eval-<12 hex>`), and
+  `eval_executor_commitment_alg = sha256`. The live offer
+  (`PROOF_EVAL_EXECUTOR_OFFER_FILE`; `POST /v1/admin/proof/executor` to
+  rotate or close) names `offer_id`, `lium_template_id`, `machine_shape`,
+  `max_proof_deadline_s` (≤ ceiling), `eval_image_digest` (must equal the pin
+  when non-empty), `config_commitment` = sha256 of the canonical public knobs,
+  and `status`. `lium_template_id` is the **digest-scoped template name**
+  (it must carry the pinned digest's 12-hex prefix); harvest resolves it
+  through the digest-bound resolver, which reuses a listed template only when
+  its image is `eval_image@digest` and otherwise creates one bound to it. A
+  raw Lium template UUID is **refused** (offer or override, under any
+  allowlist) because the provider would rent it verbatim with no image
+  check; a pin with no digest binds no executor at all. Every field is
+  public: `GET /v1/status` (`eval_executor`, pin `executor`) and
+  `GET /v1/proof/executor` show it whole. Missing / closed /
+  `machine_shape ≠ 1x` → `can_score=false` → **503** on the Lium path (sim
+  rents nothing and does not consult it). Harvest rents exactly that
+  template at exactly `1x` — a rent that would upsize to a whole host
+  (`rent_gpu_count ≠ 1`) aborts before the rent — and holds the run to the
+  resolved deadline: the deadline **is** the pod-side `timeout` (never
+  clamped below it by the host's `PROOF_EVAL_TIMEOUT_SECS` fallback, whose
+  default equals the ceiling) and the harvest wait is deadline + grace. A run
+  the wrapper cut (`exit=124`, or `137` after the full budget) is a **503**
+  carrying the pod's `stdout_tail`, never a zero; a `137` before the deadline
+  is reported as an external SIGKILL (e.g. OOM), not as the deadline. A
+  topic may only tighten: `eval_executor.max_proof_deadline_s` (shorter) and
+  `eval_executor.require_offer_commitment` (64-hex pin of the live offer,
+  not a miner bind). There is **no per-topic `machine_id`** (publish
+  reject). Operator hot-swap without a rebuild: `PROOF_HARVEST_TEMPLATE_ID`
+  / `PROOF_HARVEST_GPU_COUNT` / `PROOF_HARVEST_DEADLINE_SECS` replace the
+  offer's values; the pin ceilings still bind, an unparseable or
+  out-of-ceiling value refuses the rent rather than clamping, and a topic
+  that pins `require_offer_commitment` **refuses** any override that changes
+  the template or deadline (it approved the offer's configuration, not the
+  operator's). The run request and the scored row stamp the commitment of
+  the configuration that actually ran (`executor_commitment`) next to the
+  offer's (`executor_offer_commitment` on the request); they differ only when
+  a topic tighten or an override changed the offer's knobs. Ceremony:
+  `cargo run -p xtask -- proof-executor-offer --offer-id <slug> --max-proof-deadline-s <s> --out <off-git path>`.
+  Isolation: the control-plane host runs neither the eval image nor the RLM
+  judge; the harvest is the **only** path to the rented GPU, and the executor
+  offer names a remote machine class, never a host process. The contract is
+  challenge-agnostic — no topic ids, benchmark names, or model names are
+  compiled in; the rent plan carries the topic id only as scope for a
+  topic-scoped attach.
 - A baseline must be sealed (`script_sha256` + `metrics_commitment`) to
   open. Nobody is paid for beating a number nobody measured.
 - 8000 bps is split equally across currently `open` topics. Each topic then
@@ -145,14 +195,24 @@ Trust-root keygen is the throwaway owner path in
 
 - `GET /health`, `GET /v1/status` — `can_score`, `eval_backend`, `force_sim`,
   `live_harvest_wired`, `baseline_sealed`, public pin `inference` judge
-  defaults (no origin), public `inference_offer` (RLM judge backend). Never
-  leak origins, keys, or holdout records.
+  defaults (no origin), public `inference_offer` (RLM judge backend), public
+  `eval_executor` (live `1x` executor offer) and pin `executor` ceilings.
+  Never leak origins, keys, or holdout records.
 - `GET /v1/proof/topics`, `GET /v1/proof/topics/{id}`
+- `GET /v1/proof/executor` — always **200**: `eval_executor` (public offer or
+  `null`), `ready`, `reason` when not ready, and the pin ceilings.
 - `POST /v1/admin/proof/topics` — operator bearer; verify sig/schema/floors/seal before `open`
+- `POST /v1/admin/proof/executor` — operator bearer; body is the offer
+  document. Pin-validated (**400** keeps the previous offer); `status: closed`
+  takes the executor down live. In-memory until restart, like submissions —
+  update `PROOF_EVAL_EXECUTOR_OFFER_FILE` to persist.
 - `POST /v1/submissions` **requires** `topic_id`. Missing/unknown/not-open →
-  **400**. Miners do **not** bind the judge offer. Zero open / unsealed
-  baseline / empty digest / missing or closed RLM judge backend / agent down
-  → **503**. Refusals must **not** persist rows.
+  **400**. Miners do **not** bind the judge offer or the executor offer. Zero
+  open / unsealed baseline / empty digest / missing or closed RLM judge
+  backend / missing, closed, or non-`1x` executor / agent down / run cut at
+  the proof deadline → **503**. Refusals must **not** persist rows. Scored
+  rows stamp `executor_offer_id` + `executor_commitment` next to the judge
+  `inference_offer_id` + `config_commitment`.
 - Submit fields miners must send: `claim` (what the recipe achieved),
   `declared_flops` (≤ topic budget), `artifact_digest` of a **reproducible
   train/eval recipe** (code under budget, not weights-only), plus `manifest`.
@@ -248,3 +308,10 @@ model with no topic `model` is **400** at publish.
 (`offer_id`, `provider_kind`, `mode`, `model_ref`, token caps,
 `config_commitment`, `status`). It never leaks `base_url`, API keys, or file
 paths. Miners do not call this backend.
+
+It also exposes `eval_executor` (`offer_id`, `lium_template_id`,
+`machine_shape`, `gpu_count`, `max_proof_deadline_s`, `eval_image_digest`,
+`config_commitment`, `status`) and the pin `executor` ceilings
+(`gpu_class`, `max_proof_deadline_s_ceiling`, `allowed_lium_template_prefixes`,
+`schema_version`, `commitment_alg`). The executor offer holds no secret, so it
+is shown whole. Miners do not rent it and do not pass it.

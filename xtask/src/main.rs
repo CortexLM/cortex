@@ -10,6 +10,7 @@
 //! - `external-docs-check` — fail if external miner docs `protocol_version` ≠ bundle, or D19 drifts
 //! - `proof-holdout` — select a Proof per-topic holdout set and print its commitment
 //! - `proof-topic` — sign a Proof YAML/JSON topic draft (fills holdout + signature)
+//! - `proof-executor-offer` — build + validate a Proof `1x` `EvalExecutorOffer` (computes the commitment)
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod consensus_lint;
@@ -18,6 +19,7 @@ mod external_docs_check;
 mod loc_cap;
 mod metadata_snapshot;
 mod natural_pack;
+mod proof_executor_offer;
 mod proof_holdout;
 mod proof_topic;
 mod spec_check;
@@ -135,6 +137,36 @@ enum Command {
         #[arg(long)]
         synthetic: bool,
     },
+    /// Build and validate a Proof `1x` `EvalExecutorOffer` (computes `config_commitment`).
+    ///
+    /// Operator state for `PROOF_EVAL_EXECUTOR_OFFER_FILE` / `POST /v1/admin/proof/executor`.
+    /// Never written under a tracked path; never carries a secret.
+    ProofExecutorOffer {
+        /// Pin the offer must validate against.
+        #[arg(long, default_value = "config/proof-pin.toml")]
+        pin: PathBuf,
+        /// Immutable slug for this executor.
+        #[arg(long)]
+        offer_id: String,
+        /// Lium template id or digest-scoped template name. Defaults to `proof-eval-<12 hex>` of the pin digest.
+        #[arg(long)]
+        template_id: Option<String>,
+        /// Machine shape (must be the pin `gpu_class`, `1x`).
+        #[arg(long, default_value = "1x")]
+        machine_shape: String,
+        /// Proof deadline in seconds (`<=` pin `max_proof_deadline_s_ceiling`).
+        #[arg(long)]
+        max_proof_deadline_s: u64,
+        /// Leave `eval_image_digest` empty instead of binding the pin digest.
+        #[arg(long)]
+        unbound_digest: bool,
+        /// Publish `status: closed`.
+        #[arg(long)]
+        closed: bool,
+        /// Write the JSON here (outside the repo). Stdout when omitted.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn workspace_root() -> Result<PathBuf, String> {
@@ -239,6 +271,30 @@ fn dispatch(command: Command, root: &Path) -> Result<(), String> {
             out,
             holdout,
             synthetic,
+        }),
+        Command::ProofExecutorOffer {
+            pin,
+            offer_id,
+            template_id,
+            machine_shape,
+            max_proof_deadline_s,
+            unbound_digest,
+            closed,
+            out,
+        } => proof_executor_offer::run(&proof_executor_offer::ExecutorOfferArgs {
+            repo_root: root.to_path_buf(),
+            pin: if pin.is_absolute() {
+                pin
+            } else {
+                root.join(pin)
+            },
+            offer_id,
+            template_id,
+            machine_shape,
+            max_proof_deadline_s,
+            bind_digest: !unbound_digest,
+            closed,
+            out,
         }),
     }
 }
