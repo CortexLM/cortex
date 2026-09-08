@@ -12,9 +12,15 @@
 //! | run | `POST /v1/vms/{vm_id}/jobs` | request `topic_id` **and** the job's own topic must equal the VM's |
 //! | teardown | `DELETE /v1/vms/{vm_id}` | request `topic_id` must equal the VM's; destroy or retain |
 //!
+//! "Running" means the hypervisor confirms the process is alive: a VM that
+//! died outside a teardown is reaped per its retain policy, recorded as
+//! `crashed`, and its topic may create a fresh one.
+//!
 //! The agent never mounts a host path into a guest, never receives a key
 //! from the control plane, and stamps `sandboxed` / `flops_used` on paid
-//! outputs from the sister guest **it** booted ([`stamp_output`]). The
+//! outputs from the sister guest **it** booted ([`stamp_output`]) — and only
+//! after `proof_vm_proto::bind_evidence` confirmed the attestation and the
+//! report name that job's topic, submission, and artefact. The
 //! [`Hypervisor`] behind it is Firecracker + jailer in production
 //! (`proof-fc-host`) and [`fixtures::FakeHypervisor`] in every test — no
 //! test here or in CI boots a VM.
@@ -394,6 +400,218 @@ mod tests {
             run.report.verify(&req),
             Err(proof_rlm::ReportError::NotSandboxed)
         ));
+    }
+
+    /// Sister evidence is bound to the job it was produced for. A hypervisor
+    /// (or a compromised guest behind it) that presents the attestation of
+    /// artefact A for a paid job on artefact B gets a 502 and nothing is
+    /// stamped; so does a report that names another submission than the job.
+    #[tokio::test]
+    async fn replayed_sister_evidence_for_another_artifact_is_refused() {
+        let hv = FakeHypervisor::new(0.8);
+        let (app, _) = app(hv.clone(), "replay");
+        let rec = create(&app).await;
+        let a = request();
+        let mut b = request();
+        b.submission_digest = "submission-b".into();
+        b.artifact_digest = "ba".repeat(32);
+        let evaluate = |req: &proof_rlm::CustomRunRequest| {
+            serde_json::to_value(RunJobRequest {
+                topic_id: req.topic_id.clone(),
+                job: VmJob::Evaluate {
+                    request: req.clone(),
+                    checklist_digest: token_for(req).checklist_digest().to_owned(),
+                    rules_version: 1,
+                },
+            })
+            .expect("json")
+        };
+        hv.set_sister_replay(Some(proof_vm_proto::EvidenceBinding::new(
+            &a.topic_id,
+            &a.submission_digest,
+            &a.artifact_digest,
+        )));
+        let (status, err): (StatusCode, ErrorBody) = call(
+            &app,
+            "POST",
+            &paths::vm_jobs(&rec.handle.vm_id),
+            Some(TOKEN),
+            Some(evaluate(&b)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err.code, ErrorCode::EvidenceMismatch);
+        assert!(err.error.contains("submission_digest"), "{}", err.error);
+        assert!(err.error.contains("submission-b"), "{}", err.error);
+
+        hv.set_sister_replay(None);
+        hv.set_rlm_report_submission(Some("submission-c"));
+        let (status, err): (StatusCode, ErrorBody) = call(
+            &app,
+            "POST",
+            &paths::vm_jobs(&rec.handle.vm_id),
+            Some(TOKEN),
+            Some(evaluate(&b)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err.code, ErrorCode::EvidenceMismatch);
+        assert!(err.error.starts_with("report names"), "{}", err.error);
+
+        hv.set_rlm_report_submission(None);
+        let (status, out): (StatusCode, RunJobResponse) = call(
+            &app,
+            "POST",
+            &paths::vm_jobs(&rec.handle.vm_id),
+            Some(TOKEN),
+            Some(evaluate(&b)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let sister = out.sister.expect("honest sister");
+        assert_eq!(sister.submission_digest, "submission-b");
+        assert_eq!(sister.artifact_digest, "ba".repeat(32));
+        assert_eq!(sister.topic_id, b.topic_id);
+        let VmJobOutput::Evaluated(run) = out.output else {
+            panic!("shape");
+        };
+        assert!(run.report.sandboxed);
+        run.report.verify(&b).expect("bound to b");
+    }
+
+    /// A VM whose process exits outside a teardown is not advertised as
+    /// running: attach is 404, a job on it is 404 (no dispatch), the host is
+    /// asked to release it per the retain policy, and the topic may create a
+    /// fresh VM instead of being blocked by the dead one.
+    #[tokio::test]
+    async fn a_dead_vm_is_reaped_and_its_topic_can_recreate() {
+        let hv = FakeHypervisor::new(0.8);
+        let (app, state) = app(hv.clone(), "dead");
+        let rec = create(&app).await;
+        assert_eq!(state.running().await.len(), 1);
+        hv.kill(&rec.handle.vm_id);
+
+        let (status, err): (StatusCode, ErrorBody) = call(
+            &app,
+            "GET",
+            &paths::vm_by_topic("topic-a"),
+            Some(TOKEN),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "a dead vm is not attachable");
+        assert_eq!(err.code, ErrorCode::NotFound);
+        assert_eq!(
+            hv.teardowns(),
+            vec![(rec.handle.vm_id.clone(), RetainPolicy::Destroy)],
+            "reaped once, per the record's retain policy"
+        );
+        assert!(state.running().await.is_empty());
+
+        let req = request();
+        let (status, err): (StatusCode, ErrorBody) = call(
+            &app,
+            "POST",
+            &paths::vm_jobs(&rec.handle.vm_id),
+            Some(TOKEN),
+            Some(
+                serde_json::to_value(RunJobRequest {
+                    topic_id: req.topic_id.clone(),
+                    job: VmJob::Archive {
+                        topic_id: req.topic_id.clone(),
+                    },
+                })
+                .expect("json"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(err.error.contains("Crashed"), "{}", err.error);
+        assert!(hv.jobs().is_empty(), "no job reaches a dead vm");
+
+        let fresh = create(&app).await;
+        assert_ne!(fresh.handle.vm_id, rec.handle.vm_id);
+        assert_eq!(fresh.state, VmState::Running);
+        assert_eq!(hv.boots().len(), 2);
+        let (status, attached): (StatusCode, VmRecord) = call(
+            &app,
+            "GET",
+            &paths::vm_by_topic("topic-a"),
+            Some(TOKEN),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(attached, fresh);
+        assert_eq!(hv.teardowns().len(), 1, "the fresh vm is not reaped");
+
+        // Teardown of the crashed record is idempotent and confirmed.
+        let (status, down): (StatusCode, TeardownResponse) = call(
+            &app,
+            "DELETE",
+            &paths::vm(&rec.handle.vm_id),
+            Some(TOKEN),
+            Some(
+                serde_json::to_value(TeardownRequest {
+                    topic_id: "topic-a".into(),
+                    policy: RetainPolicy::Destroy,
+                })
+                .expect("json"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(down.state, VmState::Crashed);
+        assert!(down.confirmed);
+        assert_eq!(hv.teardowns().len(), 1, "not released twice");
+    }
+
+    /// The process dies while a job is in flight: the job fails, the VM is
+    /// reaped on the way out (the job holds the lock), and the next create
+    /// for the topic boots a fresh VM without a 409. Health sweeps too.
+    #[tokio::test]
+    async fn a_vm_that_dies_under_a_job_is_reaped_by_that_job() {
+        let hv = FakeHypervisor::new(0.8);
+        let (app, state) = app(hv.clone(), "dies-under-job");
+        let rec = create(&app).await;
+        hv.set_dies_under_job(true);
+        let req = request();
+        let (status, err): (StatusCode, ErrorBody) = call(
+            &app,
+            "POST",
+            &paths::vm_jobs(&rec.handle.vm_id),
+            Some(TOKEN),
+            Some(
+                serde_json::to_value(RunJobRequest {
+                    topic_id: req.topic_id.clone(),
+                    job: VmJob::Archive {
+                        topic_id: req.topic_id.clone(),
+                    },
+                })
+                .expect("json"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err.code, ErrorCode::Backend);
+        assert_eq!(hv.jobs().len(), 1, "the job was dispatched and failed");
+        assert_eq!(
+            hv.teardowns(),
+            vec![(rec.handle.vm_id.clone(), RetainPolicy::Destroy)],
+            "reaped by the failing job"
+        );
+        assert!(state.running().await.is_empty());
+        let fresh = create(&app).await;
+        assert_eq!(fresh.handle.topic_id, "topic-a");
+        let (_, health): (StatusCode, AgentHealth) =
+            call(&app, "GET", paths::HEALTH, Some(TOKEN), None).await;
+        assert_eq!(health.vms, 2, "the crashed record stays for audit");
+        hv.kill(&fresh.handle.vm_id);
+        let (_, health): (StatusCode, AgentHealth) =
+            call(&app, "GET", paths::HEALTH, Some(TOKEN), None).await;
+        assert_eq!(health.vms, 2);
+        assert_eq!(hv.teardowns().len(), 2, "health sweeps the dead too");
+        assert!(state.running().await.is_empty());
     }
 
     #[tokio::test]

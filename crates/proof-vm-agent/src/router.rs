@@ -1,5 +1,11 @@
 //! The agent's HTTP surface: create / attach / run / teardown, bearer-gated,
 //! with the topic ↔ VM bind enforced on every call that names a VM.
+//!
+//! A `Running` record is only advertised while the hypervisor confirms the
+//! VM's process is alive: attach, create, run, and health probe it first, and
+//! a VM whose process exited outside a teardown is **reaped** — released per
+//! its retain policy and recorded as [`VmState::Crashed`] — so its topic can
+//! get a fresh VM instead of being blocked by a dead one.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,10 +19,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use proof_rlm::{RetainPolicy, VmHandle};
 use proof_vm_proto::{
-    paths, AgentHealth, CreateVmRequest, ErrorBody, ErrorCode, RunJobRequest, RunJobResponse,
-    TeardownRequest, TeardownResponse, VmRecord, VmState, API_VERSION,
+    bind_evidence, paths, AgentHealth, CreateVmRequest, ErrorBody, ErrorCode, RunJobRequest,
+    RunJobResponse, TeardownRequest, TeardownResponse, VmRecord, VmState, API_VERSION,
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
 use crate::auth::BearerAuth;
 use crate::hypervisor::{BootedVm, HvError, Hypervisor};
@@ -48,7 +54,10 @@ impl From<HvError> for AgentError {
         let code = match e {
             HvError::NotReady(_) | HvError::Image(_) => ErrorCode::NotReady,
             HvError::Spec(_) => ErrorCode::BadSpec,
-            HvError::Guest(_) | HvError::Backend(_) | HvError::Deadline(_) => ErrorCode::Backend,
+            HvError::Guest(_)
+            | HvError::Backend(_)
+            | HvError::Deadline(_)
+            | HvError::Cancelled(_) => ErrorCode::Backend,
         };
         Self::new(code, e.to_string())
     }
@@ -105,16 +114,32 @@ impl AgentState {
         }
     }
 
-    /// Running VMs, by id.
+    /// VMs that are running **and** whose process is alive right now. Dead
+    /// ones found on the way are reaped.
     pub async fn running(&self) -> Vec<VmRecord> {
-        self.inner
+        self.sweep().await
+    }
+
+    /// Probe every `Running` record; reap the dead. Returns the live ones.
+    pub async fn sweep(&self) -> Vec<VmRecord> {
+        let ids: Vec<String> = self
+            .inner
             .vms
             .read()
             .await
             .values()
             .filter(|e| e.record.state == VmState::Running)
-            .map(|e| e.record.clone())
-            .collect()
+            .map(|e| e.record.handle.vm_id.clone())
+            .collect();
+        let mut live = Vec::new();
+        for id in ids {
+            if let Some(rec) = self.probe(&id).await {
+                if rec.state == VmState::Running {
+                    live.push(rec);
+                }
+            }
+        }
+        live
     }
 
     fn mint_vm_id(&self, topic_id: &str) -> String {
@@ -132,6 +157,79 @@ impl AgentState {
             .get(vm_id)
             .ok_or_else(|| AgentError::new(ErrorCode::NotFound, format!("no vm {vm_id}")))?;
         Ok((e.record.clone(), e.booted.clone(), e.lock.clone()))
+    }
+
+    /// The record for `vm_id` as it truly stands: a `Running` record whose
+    /// process is gone is reaped first (when no job holds the VM) and is
+    /// never reported as running. `None` when there is no such VM.
+    async fn probe(&self, vm_id: &str) -> Option<VmRecord> {
+        let (record, booted, lock) = self.entry(vm_id).await.ok()?;
+        if record.state != VmState::Running || self.inner.hypervisor.alive(&booted).await {
+            return Some(record);
+        }
+        match lock.try_lock_owned() {
+            Ok(guard) => Some(self.reap(&record, &booted, guard).await),
+            // A job is in flight on the dead VM: it fails on its own and reaps
+            // on its way out. Meanwhile the VM is not running for anyone.
+            Err(_) => Some(VmRecord {
+                state: VmState::Crashed,
+                ..record
+            }),
+        }
+    }
+
+    /// Release a dead VM's host resources per its retain policy and record
+    /// it as crashed. The caller holds the VM's job lock so no job races the
+    /// teardown.
+    async fn reap(
+        &self,
+        record: &VmRecord,
+        booted: &BootedVm,
+        _job: OwnedMutexGuard<()>,
+    ) -> VmRecord {
+        let vm_id = &record.handle.vm_id;
+        tracing::warn!(
+            %vm_id, topic_id = %record.handle.topic_id, retain = ?record.retain,
+            "topic vm process exited outside teardown; reaping"
+        );
+        match self.inner.hypervisor.teardown(booted, record.retain).await {
+            Ok(true) => {}
+            Ok(false) => tracing::error!(%vm_id, "reap: host did not confirm the release"),
+            Err(e) => tracing::error!(%vm_id, "reap: {e}"),
+        }
+        let mut vms = self.inner.vms.write().await;
+        match vms.get_mut(vm_id.as_str()) {
+            Some(e) if e.record.state == VmState::Running => {
+                e.record.state = VmState::Crashed;
+                e.record.clone()
+            }
+            Some(e) => e.record.clone(),
+            None => VmRecord {
+                state: VmState::Crashed,
+                ..record.clone()
+            },
+        }
+    }
+
+    /// The running, alive VM bound to `topic_id`, if any.
+    async fn live_vm_for(&self, topic_id: &str) -> Option<VmRecord> {
+        let candidates: Vec<String> = self
+            .inner
+            .vms
+            .read()
+            .await
+            .values()
+            .filter(|e| e.record.handle.topic_id == topic_id && e.record.state == VmState::Running)
+            .map(|e| e.record.handle.vm_id.clone())
+            .collect();
+        for id in candidates {
+            if let Some(rec) = self.probe(&id).await {
+                if rec.state == VmState::Running {
+                    return Some(rec);
+                }
+            }
+        }
+        None
     }
 }
 
@@ -165,6 +263,8 @@ async fn health(State(state): State<AgentState>) -> Json<AgentHealth> {
         Ok(()) => (true, String::new()),
         Err(e) => (false, e.to_string()),
     };
+    // Health is also where an idle host notices a VM that died in the meantime.
+    state.sweep().await;
     Json(AgentHealth {
         api_version: API_VERSION,
         ready,
@@ -184,16 +284,13 @@ async fn create_vm(
     state.inner.hypervisor.ready()?;
     // Serialise creates: the topic ↔ VM check and the insert must be one step.
     let _create = state.inner.create_lock.lock().await;
-    if let Some(existing) =
-        state.inner.vms.read().await.values().find(|e| {
-            e.record.handle.topic_id == spec.topic_id && e.record.state == VmState::Running
-        })
-    {
+    // A dead VM is reaped here and does not count: the topic gets a fresh one.
+    if let Some(existing) = state.live_vm_for(&spec.topic_id).await {
         return Err(AgentError::new(
             ErrorCode::AlreadyExists,
             format!(
                 "topic {:?} already has vm {}",
-                spec.topic_id, existing.record.handle.vm_id
+                spec.topic_id, existing.handle.vm_id
             ),
         ));
     }
@@ -233,20 +330,19 @@ async fn attach(
     State(state): State<AgentState>,
     Path(topic_id): Path<String>,
 ) -> Result<Json<VmRecord>, AgentError> {
-    state
-        .inner
-        .vms
-        .read()
-        .await
-        .values()
-        .find(|e| e.record.handle.topic_id == topic_id && e.record.state == VmState::Running)
-        .map(|e| Json(e.record.clone()))
-        .ok_or_else(|| {
-            AgentError::new(
-                ErrorCode::NotFound,
-                format!("no running vm for topic {topic_id:?}"),
-            )
-        })
+    state.live_vm_for(&topic_id).await.map(Json).ok_or_else(|| {
+        AgentError::new(
+            ErrorCode::NotFound,
+            format!("no running vm for topic {topic_id:?}"),
+        )
+    })
+}
+
+fn not_running(vm_id: &str, state: VmState) -> AgentError {
+    AgentError::new(
+        ErrorCode::NotFound,
+        format!("vm {vm_id} is {state:?}, not running"),
+    )
 }
 
 async fn run_job(
@@ -256,26 +352,41 @@ async fn run_job(
 ) -> Result<Json<RunJobResponse>, AgentError> {
     let (record, booted, lock) = state.entry(&vm_id).await?;
     if record.state != VmState::Running {
-        return Err(AgentError::new(
-            ErrorCode::NotFound,
-            format!("vm {vm_id} is {:?}, not running", record.state),
-        ));
+        return Err(not_running(&vm_id, record.state));
     }
     bind(&record, &body.topic_id, "the request")?;
     bind(&record, body.job.topic_id(), "the job")?;
-    let _guard = lock
+    let guard = lock
         .try_lock_owned()
         .map_err(|_| AgentError::new(ErrorCode::Busy, format!("vm {vm_id} is running a job")))?;
-    let outcome = state.inner.hypervisor.run_job(&booted, &body.job).await?;
+    if !state.inner.hypervisor.alive(&booted).await {
+        let reaped = state.reap(&record, &booted, guard).await;
+        return Err(not_running(&vm_id, reaped.state));
+    }
+    let outcome = match state.inner.hypervisor.run_job(&booted, &body.job).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // A guest that died under the job is reaped now, while we hold it.
+            if !state.inner.hypervisor.alive(&booted).await {
+                state.reap(&record, &booted, guard).await;
+            }
+            return Err(e.into());
+        }
+    };
     if !output_matches(&body.job, &outcome.output) {
         return Err(AgentError::new(
             ErrorCode::WrongOutput,
             "guest answered with another output shape",
         ));
     }
+    // Evidence for one job never stamps another: the attestation and the
+    // report must name this job's topic, submission, and artefact.
+    bind_evidence(&body.job, &outcome.output, outcome.sister.as_ref())
+        .map_err(|e| AgentError::new(ErrorCode::EvidenceMismatch, e.to_string()))?;
     if let Some(s) = &outcome.sister {
         tracing::info!(
-            %vm_id, sister = %s.sister_vm_id, sandboxed = s.sandboxed,
+            %vm_id, sister = %s.sister_vm_id, submission = %s.submission_digest,
+            artifact = %s.artifact_digest, sandboxed = s.sandboxed,
             flops_used = ?s.flops_used, wall_ms = s.wall_ms, "sister guest run attested"
         );
     }
@@ -321,7 +432,7 @@ async fn teardown(
             VmState::Destroyed => {
                 vms.remove(&vm_id);
             }
-            VmState::Retained | VmState::Running => {
+            VmState::Retained | VmState::Running | VmState::Crashed => {
                 if let Some(e) = vms.get_mut(&vm_id) {
                     e.record.state = end;
                 }

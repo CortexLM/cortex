@@ -31,6 +31,10 @@ pub enum HvError {
     /// The job's deadline passed before the guest answered.
     #[error("job deadline of {0}s passed")]
     Deadline(u64),
+    /// The work was cancelled by the host (the job it served ended first).
+    /// Whatever it had booted is already torn down.
+    #[error("cancelled: {0}")]
+    Cancelled(String),
 }
 
 /// One booted topic VM as the backend tracks it.
@@ -67,13 +71,22 @@ pub trait Hypervisor: Send + Sync {
     fn ready(&self) -> Result<(), HvError>;
 
     /// Boot the RLM VM for `spec` under `vm_id`, verify the image digest
-    /// first, wait for the guest agent, stage owner key material.
+    /// first, wait for the guest agent, stage owner key material. A boot that
+    /// fails at any step leaves nothing behind on the host.
     async fn boot(&self, vm_id: &str, spec: &TopicVmSpec) -> Result<BootedVm, HvError>;
 
+    /// Whether the VM's process is still running. The agent asks before it
+    /// advertises a VM as running or hands it a job; a VM whose process is
+    /// gone is reaped (per its retain policy) and its topic may get a fresh
+    /// one. A VM this backend never booted, or already tore down, is not alive.
+    async fn alive(&self, vm: &BootedVm) -> bool;
+
     /// Run one job inside the VM, booting a sister guest if the RLM asks.
+    /// Any sister the job did not finish with is destroyed before this
+    /// returns; the attestation names the job's identities.
     async fn run_job(&self, vm: &BootedVm, job: &VmJob) -> Result<JobOutcome, HvError>;
 
     /// Stop the VM; keep its scratch under `Retain`. `Ok(true)` only when the
-    /// requested end state was reached.
+    /// requested end state was reached. Also how a dead VM is reaped.
     async fn teardown(&self, vm: &BootedVm, policy: RetainPolicy) -> Result<bool, HvError>;
 }

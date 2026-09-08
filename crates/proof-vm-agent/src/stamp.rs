@@ -59,9 +59,13 @@ mod tests {
     use proof_rlm::RunOutcome;
 
     fn sister(sandboxed: bool, flops: Option<u64>) -> SisterAttestation {
+        let req = request();
         SisterAttestation {
             sister_vm_id: "topic-a-0001-s1".into(),
             image_digest: format!("sha256:{}", "dd".repeat(32)),
+            topic_id: req.topic_id,
+            submission_digest: req.submission_digest,
+            artifact_digest: req.artifact_digest,
             sandboxed,
             network: "none".into(),
             flops_used: flops,

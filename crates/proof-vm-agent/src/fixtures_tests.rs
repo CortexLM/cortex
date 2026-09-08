@@ -10,6 +10,7 @@
     clippy::unwrap_used
 )]
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,7 +24,7 @@ use proof_rlm::{
     ArtifactFile, Checklist, CustomRunRequest, InspectOutcome, LogFile, RetainPolicy, RunOutcome,
     TopicVmSpec, VmJob, VmJobOutput,
 };
-use proof_vm_proto::SisterAttestation;
+use proof_vm_proto::{EvidenceBinding, SisterAttestation};
 
 use crate::auth::BearerAuth;
 use crate::hypervisor::{BootedVm, HvError, Hypervisor, JobOutcome};
@@ -44,11 +45,20 @@ pub struct FakeHypervisor {
     sister: AtomicBool,
     /// What that sister measures.
     sister_flops: Mutex<Option<u64>>,
+    /// Identities the sister attests instead of the job's (a compromised
+    /// guest replaying evidence from another run). `None` = honest.
+    sister_replay: Mutex<Option<EvidenceBinding>>,
     /// What the RLM writes into its own report before the host stamps it.
     rlm_claims_sandboxed: AtomicBool,
     rlm_flops: Mutex<Option<u64>>,
+    /// Submission digest the RLM writes into the report instead of the job's.
+    rlm_report_submission: Mutex<Option<String>>,
     proposed: Mutex<Vec<ChecklistRule>>,
     job_delay: Mutex<Option<Duration>>,
+    /// VMs whose process "exited" outside a teardown.
+    dead: Mutex<BTreeSet<String>>,
+    /// The VM process exits while the next job runs.
+    dies_under_job: AtomicBool,
     boots: Mutex<Vec<BootedVm>>,
     jobs: Mutex<Vec<(String, VmJob)>>,
     teardowns: Mutex<Vec<(String, RetainPolicy)>>,
@@ -63,13 +73,17 @@ impl FakeHypervisor {
             red: Mutex::new(None),
             sister: AtomicBool::new(true),
             sister_flops: Mutex::new(Some(1)),
+            sister_replay: Mutex::new(None),
             rlm_claims_sandboxed: AtomicBool::new(false),
             rlm_flops: Mutex::new(Some(999_999)),
+            rlm_report_submission: Mutex::new(None),
             proposed: Mutex::new(vec![ChecklistRule {
                 id: "rlm_rule".into(),
                 text: "a rule the fake rlm wrote".into(),
             }]),
             job_delay: Mutex::new(None),
+            dead: Mutex::new(BTreeSet::new()),
+            dies_under_job: AtomicBool::new(false),
             boots: Mutex::new(Vec::new()),
             jobs: Mutex::new(Vec::new()),
             teardowns: Mutex::new(Vec::new()),
@@ -102,6 +116,12 @@ impl FakeHypervisor {
         *self.sister_flops.lock().unwrap() = v;
     }
 
+    /// Attest the sister for `binding`'s identities instead of the job's —
+    /// what a compromised guest replaying another run's evidence looks like.
+    pub fn set_sister_replay(&self, binding: Option<EvidenceBinding>) {
+        *self.sister_replay.lock().unwrap() = binding;
+    }
+
     /// What the RLM claims before the host corrects it.
     pub fn set_rlm_claims_sandboxed(&self, v: bool) {
         self.rlm_claims_sandboxed.store(v, Ordering::SeqCst);
@@ -111,6 +131,11 @@ impl FakeHypervisor {
         *self.rlm_flops.lock().unwrap() = v;
     }
 
+    /// Make the RLM's report name this submission instead of the job's.
+    pub fn set_rlm_report_submission(&self, digest: Option<&str>) {
+        *self.rlm_report_submission.lock().unwrap() = digest.map(str::to_owned);
+    }
+
     pub fn set_proposed(&self, rules: Vec<ChecklistRule>) {
         *self.proposed.lock().unwrap() = rules;
     }
@@ -118,6 +143,16 @@ impl FakeHypervisor {
     /// Make every job take this long (to exercise `Busy`).
     pub fn set_job_delay(&self, d: Option<Duration>) {
         *self.job_delay.lock().unwrap() = d;
+    }
+
+    /// Simulate the VM process exiting outside a teardown.
+    pub fn kill(&self, vm_id: &str) {
+        self.dead.lock().unwrap().insert(vm_id.to_owned());
+    }
+
+    /// Make the VM process exit while the next job runs (the job fails).
+    pub fn set_dies_under_job(&self, v: bool) {
+        self.dies_under_job.store(v, Ordering::SeqCst);
     }
 
     pub fn boots(&self) -> Vec<BootedVm> {
@@ -136,6 +171,9 @@ impl FakeHypervisor {
         let mut r = report_for(req, *self.primary.lock().unwrap());
         r.sandboxed = self.rlm_claims_sandboxed.load(Ordering::SeqCst);
         r.flops_used = *self.rlm_flops.lock().unwrap();
+        if let Some(other) = self.rlm_report_submission.lock().unwrap().clone() {
+            r.submission_digest = other;
+        }
         r
     }
 
@@ -143,9 +181,20 @@ impl FakeHypervisor {
         if !self.sister.load(Ordering::SeqCst) {
             return None;
         }
+        let binding = self
+            .sister_replay
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| {
+                EvidenceBinding::new(&req.topic_id, &req.submission_digest, &req.artifact_digest)
+            });
         Some(SisterAttestation {
             sister_vm_id: format!("{}-s{}", vm.vm_id, req.submission_digest.len()),
             image_digest: miner_image_digest(),
+            topic_id: binding.topic_id,
+            submission_digest: binding.submission_digest,
+            artifact_digest: binding.artifact_digest,
             sandboxed: true,
             network: "none".into(),
             flops_used: *self.sister_flops.lock().unwrap(),
@@ -182,6 +231,22 @@ impl Hypervisor for FakeHypervisor {
         Ok(vm)
     }
 
+    async fn alive(&self, vm: &BootedVm) -> bool {
+        let booted = self
+            .boots
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|b| b.vm_id == vm.vm_id);
+        let torn = self
+            .teardowns
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, _)| *id == vm.vm_id);
+        booted && !torn && !self.dead.lock().unwrap().contains(&vm.vm_id)
+    }
+
     async fn run_job(&self, vm: &BootedVm, job: &VmJob) -> Result<JobOutcome, HvError> {
         self.jobs
             .lock()
@@ -190,6 +255,15 @@ impl Hypervisor for FakeHypervisor {
         let delay = *self.job_delay.lock().unwrap();
         if let Some(d) = delay {
             tokio::time::sleep(d).await;
+        }
+        if self.dies_under_job.swap(false, Ordering::SeqCst) {
+            self.dead.lock().unwrap().insert(vm.vm_id.clone());
+        }
+        if self.dead.lock().unwrap().contains(&vm.vm_id) {
+            return Err(HvError::Guest(format!(
+                "vm {} process exited under the job",
+                vm.vm_id
+            )));
         }
         Ok(match job {
             VmJob::ProposeRules { .. } => JobOutcome {
