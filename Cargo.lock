@@ -6134,6 +6134,7 @@ dependencies = [
  "frame-metadata",
  "hex",
  "parity-scale-codec",
+ "proof-executor",
  "proof-task",
  "regex",
  "reqwest 0.12.28",
