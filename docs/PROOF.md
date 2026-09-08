@@ -386,9 +386,15 @@ open ⇄ evaluating → promoting → open … → closed`. `owner_presend` is a
 `awaiting_owner_keys` probes `PROOF_RLM_OWNER_INFERENCE_KEY_FILE` for
 presence only. `TopicSetup` drives the ceremony over the VM boundary
 (provision → RLM `ProposeRules` → rules vN in DB → `Baseline` job →
-measurement in DB) and `mark_sealed` moves `baselining → open` after the
-operator seals `custom_value` and re-signs. A re-run resumes from the
-persisted state.
+measurement in DB; a baseline measured over the topic `flops_budget` or
+without a measurement is refused) and `mark_sealed` moves `baselining →
+open` after the operator seals `custom_value` and re-signs. `mark_sealed`
+is fail-closed: the document must be `status: open`, validate as an open
+topic on this host (sealed baseline, registered `custom_id`, tighten-only
+floors), verify under the pin's topic key, and the sealed
+`BaselineMeasurement` must bind to it **and** carry the `custom_value` the
+RLM measured — otherwise nothing moves and no version is stored. A re-run
+resumes from the persisted state.
 
 ### Isolation boundary
 
@@ -404,7 +410,13 @@ a `custom_id` is an operator / RLM action. The Lium harvest for
 govern the harvest rent; on the custom path each run request records the
 resolved executor plan's deadline (tighter of topic and plan) and
 `config_commitment` as provenance, and the row stamps `executor_commitment`
-like every other scored row.
+like every other scored row. The run request also carries the miner's
+`artifact_uri` (the runner fetches it inside the VM and checks
+`artifact_digest`) and the topic's `flops_budget`; the runner's report must
+carry its measured `flops_used`, which becomes the verdict's usage — a
+report without one is not evidence (**503**, no row), and a measurement over
+budget is a persisted reject (`flops_over_budget`). The miner's
+`declared_flops` is never the enforced figure.
 
 ### Runner registry
 
@@ -426,6 +438,14 @@ Every scored row leaves `$PROOF_ARTEFACT_ROOT/{topic_id}/{submission_id}.zip`
 pass with a green checklist whose primary beats the bar (sealed value or
 reigning best) by `epsilon_rel`, direction-aware, persists as `champion`,
 gets a promotion row (with the displaced best), and moves the pointer.
+Runs of one topic are serialised by a **lease** held from scoring until the
+row is persisted, so the promotion is decided against the store's current
+best (never a bar computed before an earlier crown) and written under the
+same lease with a compare-and-swap on the best pointer: a crown whose
+previous best moved, or that is not strictly better than the incumbent, is
+refused (`promotion_refused` in the lifecycle, manifest `promoted: false`).
+A run whose row never lands releases its lease after
+`DEFAULT_LEASE_TTL` (5 min).
 
 `GET /v1/status` exposes pin `inference` public judge defaults (`provider`,
 `model`, `mode`, token caps) and `inference_offer` **public fields only**

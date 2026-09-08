@@ -289,7 +289,7 @@ and the constraints, and must emit:
 | `claim_holds_public` | bool | Public-split numbers match the claim |
 | `contamination` | bool | Holdout fingerprints in the recipe / data |
 | `canary_hit` | bool | Off-score. Recorded, never a fail by itself |
-| `flops_used` / `flops_budget` | u64 | Observed vs the topic budget |
+| `flops_used` / `flops_budget` | u64 | Measured by the judge / runner vs the topic budget. Your `declared_flops` is a declaration, never the enforced figure; on custom topics the runner's measurement is the verdict's usage, and over budget is `flops_over_budget` |
 | `cheat_codes` | list | See below |
 | `rationale` | string | Audit text (truncated) |
 | `topic_id` / `family` | echo | Must match the submission |
@@ -350,10 +350,18 @@ duplicated, or evidence-less item is a persisted `rejected` row with no
 spend. The rules may be re-versioned by the topic's RLM; the version you were
 ticked against is recorded with your row.
 
+Send `artifact_uri` with your `artifact_digest`: the runner fetches the
+bytes from it inside the topic VM and checks the digest, so a submission the
+runner cannot retrieve cannot be inspected. The runner also measures your
+run's FLOPs; that measurement (not `declared_flops`) is what the verdict
+carries against the topic budget.
+
 A clean pass that beats the current best (sealed value or reigning best) by
 `epsilon_rel` is promoted automatically: the row is `champion` and the
 operator archive keeps your artefact, `report.json`, and `checklist.json`
-under `{topic_id}/{submission_id}.zip`.
+under `{topic_id}/{submission_id}.zip`. Runs on one topic are scored and
+crowned one at a time against the best at that moment, so a run that is not
+strictly better than the reigning champion never replaces it.
 
 If the topic's `custom_id` is not in `registered_custom`, the topic is
 `open` but not in `scorable_topics`, and submits answer **503** (`no
