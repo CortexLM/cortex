@@ -17,6 +17,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -263,13 +264,24 @@ pub fn pack_holdout_tar(store: &Path, holdout: &[HoldoutRecord]) -> Result<Vec<u
 /// The archive is written to disk so live score can stream it to SSH
 /// instead of buffering the model in control-plane memory.
 pub fn pack_proxy_tar(dir: &Path) -> Result<PathBuf, EvalError> {
+    pack_proxy_tar_to(dir, &std::env::temp_dir())
+}
+
+fn next_proxy_tar_path(dest_dir: &Path) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    dest_dir.join(format!(
+        "proof-proxy-{}-{nanos}-{seq}.tar",
+        std::process::id()
+    ))
+}
+
+fn pack_proxy_tar_to(dir: &Path, dest_dir: &Path) -> Result<PathBuf, EvalError> {
     proxy_archive_usable(dir)?;
-    let dest = {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        std::env::temp_dir().join(format!("proof-proxy-{}-{nanos}.tar", std::process::id()))
-    };
+    let dest = next_proxy_tar_path(dest_dir);
     let status = Command::new("tar")
         .arg("-C")
         .arg(dir)
@@ -336,6 +348,11 @@ pub struct LiumProofHarvest {
     proxy_model_dir: Option<PathBuf>,
     /// Host directory of holdout shard files named `<content_sha256>`.
     holdout_store: Option<PathBuf>,
+    /// Host directory that receives the staged `proof-proxy-*.tar`.
+    ///
+    /// Defaults to the process temp dir. Tests override this so leftover
+    /// scans do not race sibling unit tests that share `/tmp`.
+    proxy_tar_dir: PathBuf,
 }
 
 impl LiumProofHarvest {
@@ -349,6 +366,7 @@ impl LiumProofHarvest {
             judge_api_key: None,
             proxy_model_dir: None,
             holdout_store: None,
+            proxy_tar_dir: std::env::temp_dir(),
         }
     }
 
@@ -378,6 +396,16 @@ impl LiumProofHarvest {
         self
     }
 
+    /// Host directory for the staged proxy tar (`proof-proxy-*.tar`).
+    #[cfg(test)]
+    #[must_use]
+    fn with_proxy_tar_dir(mut self, dir: PathBuf) -> Self {
+        if !dir.as_os_str().is_empty() {
+            self.proxy_tar_dir = dir;
+        }
+        self
+    }
+
     fn live_extras(
         &self,
         holdout: &[HoldoutRecord],
@@ -393,7 +421,7 @@ impl LiumProofHarvest {
         // Holdout first: a missing/mismatched shard must not leave a
         // model-sized proxy tar on the control plane.
         let holdout_tar = pack_holdout_tar(store, holdout)?;
-        let proxy_path = pack_proxy_tar(proxy)?;
+        let proxy_path = pack_proxy_tar_to(proxy, &self.proxy_tar_dir)?;
         let guard = ProxyTarGuard(Some(proxy_path.clone()));
         Ok((
             RunExtras {
@@ -919,9 +947,8 @@ mod tests {
         assert!(!*pod.booted.lock().expect("booted"));
     }
 
-    fn leftover_proxy_tars() -> Vec<PathBuf> {
-        let prefix = format!("proof-proxy-{}-", std::process::id());
-        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+    fn leftover_proxy_tars(dir: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
             return Vec::new();
         };
         let mut paths: Vec<PathBuf> = entries
@@ -930,25 +957,30 @@ mod tests {
             .filter(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with(&prefix))
-                    && p.extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("tar"))
+                    .is_some_and(|n| n.starts_with("proof-proxy-") && n.ends_with(".tar"))
             })
             .collect();
         paths.sort();
         paths
     }
 
+    fn proxy_tar_staging(proxy: &Path) -> PathBuf {
+        let dir = proxy.parent().expect("root").join("proxy-tars");
+        std::fs::create_dir_all(&dir).expect("staging");
+        dir
+    }
+
     fn assert_live_extras_holdout_refuse_leaves_no_proxy_tar(
         harvest: &LiumProofHarvest,
         holdout: &[HoldoutRecord],
+        staging: &Path,
     ) {
-        let before = leftover_proxy_tars();
+        let before = leftover_proxy_tars(staging);
         match harvest.live_extras(holdout) {
             Ok(_) => panic!("holdout refuse"),
             Err(err) => assert!(matches!(err, EvalError::HoldoutStoreMissing), "{err}"),
         }
-        let after = leftover_proxy_tars();
+        let after = leftover_proxy_tars(staging);
         assert_eq!(after, before, "proxy tar leaked: {after:?}");
     }
 
@@ -956,6 +988,7 @@ mod tests {
     async fn missing_holdout_shard_does_not_leak_a_proxy_tar() {
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
         let (proxy, store) = live_asset_dirs(&recs);
+        let staging = proxy_tar_staging(&proxy);
         let pod = CapturePod::new();
         let harvest = LiumProofHarvest::new(
             pod.clone(),
@@ -964,11 +997,12 @@ mod tests {
         )
         .with_judge_api_key(Some("sk-live-not-a-real-secret".into()))
         .with_proxy_model_dir(Some(proxy))
-        .with_holdout_store(Some(store));
+        .with_holdout_store(Some(store))
+        .with_proxy_tar_dir(staging.clone());
         harvest.ready().expect("store is usable");
         let mut missing = recs.clone();
         missing[0].content_sha256 = "ab".repeat(32);
-        let before = leftover_proxy_tars();
+        let before = leftover_proxy_tars(&staging);
         let err = harvest
             .score(
                 &harvest_pin(),
@@ -983,7 +1017,7 @@ mod tests {
             .expect_err("missing shard");
         assert!(matches!(err, EvalError::HoldoutStoreMissing), "{err}");
         assert!(!*pod.booted.lock().expect("booted"));
-        let after = leftover_proxy_tars();
+        let after = leftover_proxy_tars(&staging);
         assert_eq!(after, before, "proxy tar leaked: {after:?}");
     }
 
@@ -991,18 +1025,36 @@ mod tests {
     fn live_extras_holdout_refuse_does_not_leak_a_proxy_tar() {
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
         let (proxy, store) = live_asset_dirs(&recs);
-        let harvest = harvest_for_ready(proxy.clone(), store.clone());
+        let staging = proxy_tar_staging(&proxy);
+        let harvest =
+            harvest_for_ready(proxy.clone(), store.clone()).with_proxy_tar_dir(staging.clone());
         let mut missing = recs.clone();
         missing[0].content_sha256 = "ab".repeat(32);
-        assert_live_extras_holdout_refuse_leaves_no_proxy_tar(&harvest, &missing);
+        assert_live_extras_holdout_refuse_leaves_no_proxy_tar(&harvest, &missing, &staging);
 
         std::fs::write(
             store.join(recs[0].content_sha256.to_ascii_lowercase()),
             b"not-the-catalogued-shard\n",
         )
         .expect("tamper");
-        let harvest = harvest_for_ready(proxy, store);
-        assert_live_extras_holdout_refuse_leaves_no_proxy_tar(&harvest, &recs);
+        let harvest = harvest_for_ready(proxy, store).with_proxy_tar_dir(staging.clone());
+        assert_live_extras_holdout_refuse_leaves_no_proxy_tar(&harvest, &recs, &staging);
+    }
+
+    #[test]
+    fn live_extras_guard_deletes_the_proxy_tar_in_the_configured_dir() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (proxy, store) = live_asset_dirs(&recs);
+        let staging = proxy_tar_staging(&proxy);
+        let harvest = harvest_for_ready(proxy, store).with_proxy_tar_dir(staging.clone());
+        {
+            let (extras, _guard) = harvest.live_extras(&recs).expect("extras");
+            let path = extras.proxy_tar_path.expect("path");
+            assert!(path.starts_with(&staging), "{path:?}");
+            assert!(path.is_file(), "{path:?}");
+            assert_eq!(leftover_proxy_tars(&staging).len(), 1);
+        }
+        assert_eq!(leftover_proxy_tars(&staging), Vec::<PathBuf>::new());
     }
 
     #[test]
