@@ -3426,6 +3426,7 @@ dependencies = [
  "crypto",
  "hex",
  "proof-eval",
+ "proof-executor",
  "proof-http",
  "proof-score",
  "proof-store",

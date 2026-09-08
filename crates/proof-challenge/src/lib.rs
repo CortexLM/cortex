@@ -19,7 +19,11 @@ pub use proof_eval::{
     force_sim, resolve_eval_backend, scoring_readiness, sim_stub_win, supported_custom,
     BaselineMeasurement, EvalBackend, LiveScorer,
 };
-pub use proof_http::{hash_admin_token, proof_router, AppState};
+pub use proof_executor::{
+    EvalExecutorOffer, ExecutorOfferError, HarvestOverrides, OfferStatus,
+    EVAL_EXECUTOR_OFFER_FILE_ENV,
+};
+pub use proof_http::{executor_slot, hash_admin_token, proof_router, AppState, ExecutorSlot};
 pub use proof_store::{ArtifactManifest, MemoryStore};
 pub use proof_task::{
     HoldoutRecord, InferenceOffer, OfferError, ProofPin, TopicDocument, BASE_MODEL_FAMILY,
