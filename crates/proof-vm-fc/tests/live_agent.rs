@@ -181,6 +181,15 @@ async fn a_wrong_bearer_or_a_dead_agent_is_a_backend_refusal_without_the_token()
         .expect_err("agent down is not None");
     assert!(matches!(err, VmError::Backend(_)), "{err}");
     assert!(err.to_string().contains("unreachable"), "{err}");
+    // The text reaches a miner as a 503: the route, never the agent's address.
+    assert!(
+        err.to_string().contains("/v1/vms/by-topic/topic-a"),
+        "{err}"
+    );
+    assert!(
+        !err.to_string().contains(&dead.addr.port().to_string()),
+        "agent url leaked: {err}"
+    );
 }
 
 #[tokio::test]
