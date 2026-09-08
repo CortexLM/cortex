@@ -88,6 +88,8 @@ rented.
 | `inference_offer` | Public RLM **judge** backend (id, kind, mode, model_ref, token caps, commitment, status). Missing/closed/misconfigured → **503**. You do not pass an offer id |
 | `eval_executor` | Public `1x` **executor**: the Lium machine class your recipe is re-run on (`lium_template_id`, `machine_shape`, `max_proof_deadline_s`, commitment, status). Your recipe must finish inside `max_proof_deadline_s` (≤ pin ceiling 7200 s; a topic may name a shorter one) on **one** GPU — the host never rents more. Missing/closed/any shape but `1x` → **503**. You do not pass or rent it |
 | `open_topics` empty | No currently `open` signed topic with a sealed baseline → **503** |
+| `scorable_topics` | Open topics whose scorer is wired on this host. An open topic **not** listed here (a `custom` topic whose runner is not registered or not wired) answers **503** |
+| `registered_custom` | Custom metric ids with a registered runner. Nothing is compiled in; ids come from signed topics |
 | `baseline_sealed: false` | An open topic without `script_sha256` + `metrics_commitment` → **503** |
 | `live_harvest_wired: false` | Live RLM harvest is not connected → **503** |
 
@@ -109,8 +111,10 @@ Each topic is a signed document. Read at least:
 |-------|------------------------|
 | `id` | The `topic_id` you submit against |
 | `statement` | The research problem in English |
-| `constraints` | Fabric / comms caps the eval image enforces (it never trusts the claim) |
-| `metric.family` | `nll` \| `throughput` \| `custom` |
+| `constraints` | Fabric / comms caps the eval image enforces (it never trusts the claim). Custom topics may add `firecracker_required`, `model_pin`, an opaque `task_slice`, and `params` |
+| `checklist` | Anti-cheat rules `[{id, text}]` the topic's RLM ticks over your artefact **before any paid inference** |
+| `eval_executor` | Executor commitment (`require_offer_commitment`, tighten-only `max_proof_deadline_s`) |
+| `metric.family` | `nll` \| `throughput` \| `custom` (`metric.custom_id` names the metric; it is topic data) |
 | `flops_budget` | Hard cap. `declared_flops` must be `≤` this |
 | `epsilon_nll` / `epsilon_topic_max_regress` / throughput knobs | Pass-rule epsilons. A topic may **tighten** a pin floor, never loosen it |
 | `payout_mode` | `wta` or `discovery` |
@@ -237,8 +241,8 @@ curl -sS https://network.cortex.foundation/challenge/proof/v1/submissions/<id>
 | `state` | Meaning |
 |---------|---------|
 | `awaiting_admin` | Clean pass; mass recorded. Operator audit is informational. |
-| `rejected` | Gates failed (contamination, unreproduced claim, NLL miss, …). No rent on pre-eval rejects. |
-| `champion` | Optional operator promote. Proof pays on pass, not on a crown. |
+| `rejected` | Gates failed (contamination, unreproduced claim, NLL miss, red anti-cheat checklist, …). No rent and no paid inference on pre-eval rejects. |
+| `champion` | Promoted: operator crown, or automatic on custom topics when a pass beats the current best by `epsilon_rel` with a green checklist. Proof pays on pass, not on a crown. |
 
 Poll `GET /challenge/proof/v1/submissions/{id}` for the verdict envelope
 below. While `can_score` is `false`, the POST itself answers **503** and
@@ -263,11 +267,14 @@ Refusals (**400** / **503**) do **not** persist a submission row.
 | **503** missing / closed RLM judge backend | Live `InferenceOffer` not scoring | no | no |
 | **503** missing / closed / non-`1x` executor | Live `eval_executor` cannot rent the `1x` machine | no | no |
 | **503** `proof deadline … exceeded` | Your recipe did not finish inside `max_proof_deadline_s`; the body carries the run's `stdout_tail` | no | no (pod torn down) |
+| **503** `custom metric … has no registered runner` / `not wired` | The topic's `custom_id` has no runner on this host, or its topic VM is not configured | no | no |
 | **201** `rejected` + `contamination_evidence_missing` | Empty manifest | **yes** (rejected) | **no** |
 | **201** `rejected` + contamination | Holdout shard / corpus id in `manifest` | **yes** (rejected) | **no** |
+| **201** `rejected` + `anti-cheat checklist red` | A topic rule failed on your artefact | **yes** (rejected) | **no** (no paid inference) |
 
 Contamination (including empty evidence) is a **reject, no rent**. It is
-not a 400 and not a 503.
+not a 400 and not a 503. A red anti-cheat checklist is the same shape: a
+persisted reject with no spend.
 
 ## Agent verdict (RLM judge)
 
@@ -323,6 +330,34 @@ Primary: `tokens_per_sec` (max) or `step_latency_ms` (min). Requires
 Quality floor: `holdout_nll <= sealed_nll + quality_floor_nll` (pin max
 0.02). Speed is not free. The eval image enforces comms (for example
 **12.5 Gbit/s**); it does not trust the claim.
+
+### `custom` family (topic-minted metrics)
+
+Primary: `metric.primary` (`max` or `min`, as the topic says). Win:
+beat the sealed value by `metric.epsilon_rel` relative
+(`primary >= sealed * (1 + epsilon_rel)` for `max`). The metric is computed
+by the runner registered on the host under `metric.custom_id`; nothing
+about it is compiled into the network. If the topic sets
+`constraints.firecracker_required`, your code runs only inside a Firecracker
+guest under the topic's own VM; if it sets `constraints.model_pin`, every
+paid call must name exactly that model; `task_slice` / `params` are opaque
+runner inputs the topic defines.
+
+**Anti-cheat checklist — every rule in the topic's `checklist` (current
+version) must pass before a single paid inference call is made.** Read the
+rule texts in `ctx proof topics`; they are the contract. One red, missing,
+duplicated, or evidence-less item is a persisted `rejected` row with no
+spend. The rules may be re-versioned by the topic's RLM; the version you were
+ticked against is recorded with your row.
+
+A clean pass that beats the current best (sealed value or reigning best) by
+`epsilon_rel` is promoted automatically: the row is `champion` and the
+operator archive keeps your artefact, `report.json`, and `checklist.json`
+under `{topic_id}/{submission_id}.zip`.
+
+If the topic's `custom_id` is not in `registered_custom`, the topic is
+`open` but not in `scorable_topics`, and submits answer **503** (`no
+registered runner`). Nothing is stored and nothing is spent.
 
 ### Paid mass
 

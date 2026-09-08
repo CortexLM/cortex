@@ -265,6 +265,9 @@ services:
       # Live 1x EvalExecutorOffer (Lium template + proof deadline). Operator
       # state, no secret; missing/closed → can_score=false / submit 503.
       PROOF_EVAL_EXECUTOR_OFFER_FILE: /run/base/proof/eval_executor_offer.json
+      # RLM artefact zips ({topic_id}/{submission_id}.zip, best.json,
+      # events.jsonl) on the persistent proof-artifacts volume.
+      PROOF_ARTEFACT_ROOT: /var/lib/proof/artefacts
       BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
     env_file:
       - path: ./deploy/env/proof-challenge.env

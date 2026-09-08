@@ -31,7 +31,8 @@
 //! Persistence (`proof-rlm-store`), the artefact store, and the
 //! `LiveScorer` glue (`proof-rlm-scorer`) live next door. The topic schema
 //! (constraints, `eval_executor`, checklist vector, custom id shape) lives
-//! in `proof-task`; the live `EvalExecutorOffer` is owned elsewhere.
+//! in `proof-task`; the live `EvalExecutorOffer` lives in `proof-executor`
+//! and a run request records the resolved plan's deadline and commitment.
 
 #![forbid(unsafe_code)]
 #![allow(

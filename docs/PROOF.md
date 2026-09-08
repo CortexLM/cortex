@@ -132,10 +132,25 @@ baseline + an open topic are on the host.
 - Global miner proof score = **sum** of per-topic masses, not a mean of
   binary lattices. Skipped topic = 0 on that topic. Empty open set →
   `NoScore(ChallengeInternal)`, not a paid 0.
-- `custom` metric family: unknown id is **400 at publish**, **503 at score**.
-  v0 `supported_custom()` lists `harness_success_rate` so the operator can
-  publish that topic; scoring fail-closes until the real harness fills
-  `custom_value`.
+- `custom` metric family: the `custom_id` is **topic data**
+  (`[a-z0-9][a-z0-9_-]{1,63}`). There is no compiled-in list of metrics.
+  Any well-formed id may **draft**; a custom topic may **open** only when a
+  runner is registered under its id on the host (`400` otherwise), and the
+  runner registry is **empty by default** — an unregistered or unwired id is
+  **503 at score**, never a harvest fallback. No benchmark, model, rule
+  list, or repository is compiled into this repository; the first live
+  topic is a signed document its RLM sets up, not a code branch.
+- Anti-cheat rules are a **vector carried by the signed topic**
+  (`checklist: [{id, text}]`), re-versioned by the topic's RLM into the
+  database. Every rule of the current version is ticked with evidence
+  **before any paid inference**; one red, missing, duplicated, or
+  evidence-less item is a persisted reject with no spend.
+- The RLM runs **inside a VM attributed to its topic**, reached only through
+  the orchestrator boundary (`TopicVmOrchestrator`). Miner code runs in a
+  Firecracker guest under that VM when the topic says
+  `constraints.firecracker_required`. The control plane never runs RLM
+  logic and never hands the VM a host path or a secret; an unwired
+  orchestrator is a **503**, not a host-local fallback.
 - `PROOF_FORCE_SIM` is CI/local opt-in only. Never a fallback. Forbidden on
   droplet overlays. Under sim, a sealed topic scores with harness numbers
   relative to the seal (`sim_win_document`); skill-only `sim_document`
@@ -179,7 +194,7 @@ Empty digest stays 503 (never invent a sha256).
 |--------|---------|-----|
 | `nll` | `holdout_nll` (min) | Beat sealed AdamW by `epsilon_nll >= 0.02`. Per-split NLL regress `<= epsilon_topic_max_regress >= 0.05` |
 | `throughput` | `tokens_per_sec` (max) or `step_latency_ms` (min) | Requires `flops_budget` **and** `wall_budget_s`. `epsilon_rel >= 0.05`. Quality floor: `holdout_nll <= sealed_nll + quality_floor_nll` (≤ pin 0.02). Eval image enforces comms (e.g. 12.5 Gbit/s); it does not trust the claim |
-| `custom` | named inside `proof-eval` | Unknown id refuses. `harness_success_rate` is listed and fail-closes until the harness exists |
+| `custom` | `custom_id` minted by the topic | `primary` (topic name, `max` or `min`), `epsilon_rel > 0` relative to the sealed value. Scored by the runner registered under `custom_id` (empty registry by default → **503**); the checklist gate runs first |
 
 Holdout: 120 records, stratified 24 each across `web_ood`, `code_ood`,
 `math_ood`, `longctx` (8k–32k), `multilingual_ood`. `canary_offpath` is
@@ -194,10 +209,12 @@ Trust-root keygen is the throwaway owner path in
 ## HTTP
 
 - `GET /health`, `GET /v1/status` — `can_score`, `eval_backend`, `force_sim`,
-  `live_harvest_wired`, `baseline_sealed`, public pin `inference` judge
-  defaults (no origin), public `inference_offer` (RLM judge backend), public
-  `eval_executor` (live `1x` executor offer) and pin `executor` ceilings.
-  Never leak origins, keys, or holdout records.
+  `live_harvest_wired`, `baseline_sealed`, `open_topics`, `scorable_topics`
+  (open topics whose scorer is wired on this host; `can_score` is true when
+  it is non-empty), `registered_custom` (custom ids with a runner), public
+  pin `inference` judge defaults (no origin), public `inference_offer` (RLM
+  judge backend), public `eval_executor` (live `1x` executor offer) and pin
+  `executor` ceilings. Never leak origins, keys, or holdout records.
 - `GET /v1/proof/topics`, `GET /v1/proof/topics/{id}`
 - `GET /v1/proof/executor` — always **200**: `eval_executor` (public offer or
   `null`), `ready`, `reason` when not ready, and the pin ceilings.
@@ -210,9 +227,13 @@ Trust-root keygen is the throwaway owner path in
   **400**. Miners do **not** bind the judge offer or the executor offer. Zero
   open / unsealed baseline / empty digest / missing or closed RLM judge
   backend / missing, closed, or non-`1x` executor / agent down / run cut at
-  the proof deadline → **503**. Refusals must **not** persist rows. Scored
-  rows stamp `executor_offer_id` + `executor_commitment` next to the judge
+  the proof deadline / no registered or wired runner for the topic's
+  `custom_id` → **503**. Refusals must **not** persist rows. Scored rows
+  stamp `executor_offer_id` + `executor_commitment` next to the judge
   `inference_offer_id` + `config_commitment`.
+- A pass that the family scorer crowns (custom: green checklist and
+  `primary >= bar * (1 + epsilon_rel)` direction-aware, bar = sealed value or
+  reigning best) persists as `champion`; other passes stay `awaiting_admin`.
 - Submit fields miners must send: `claim` (what the recipe achieved),
   `declared_flops` (≤ topic budget), `artifact_digest` of a **reproducible
   train/eval recipe** (code under budget, not weights-only), plus `manifest`.
@@ -277,8 +298,10 @@ to `dt-no-ib-v0`; miners still discover it from `GET /v1/proof/topics`.
 
 ### `agent-harness-improve-v0` — custom **discovery**
 
-Operator POST, not in git. `custom_id = harness_success_rate` is listed so
-this document publishes; scoring fail-closes until the harness exists.
+Operator POST, not in git. The `custom_id` is the topic's own name for its
+metric; nothing in this repository knows it. The document drafts as-is and
+may open once a runner is registered under that id on the host (until then
+an `open` publish is **400** and the registry is empty by default).
 
 ```json
 {
@@ -291,6 +314,12 @@ this document publishes; scoring fail-closes until the harness exists.
     "reject_if": "Unreproduced claim; eval short-circuit; FLOP over budget; near-duplicate of an accepted artifact"
   },
   "metric": { "family": "custom", "custom_id": "harness_success_rate", "primary": "success_rate", "direction": "max", "epsilon_rel": 0.05 },
+  "constraints": { "firecracker_required": true, "model_pin": "vendor/model", "task_slice": "operator-label", "params": {} },
+  "checklist": [
+    { "id": "same_seed", "text": "every paid call uses the topic baseline seed" },
+    { "id": "no_eval_short_circuit", "text": "the evaluator and the metric path are untouched" }
+  ],
+  "eval_executor": { "require_offer_commitment": null, "max_proof_deadline_s": 3600 },
   "flops_budget": 2000000000000000000,
   "status": "draft"
 }
@@ -301,7 +330,102 @@ commitment, a sealed baseline, a signed `inference{…}` that does not loosen
 pin **judge** defaults, and an sr25519 signature under the `proof`
 trust-root key. Omitted inference fields inherit the pin; `open` requires a
 complete resolved judge config (provider + model + mode + tokens). Empty pin
-model with no topic `model` is **400** at publish.
+model with no topic `model` is **400** at publish. The signing payload is
+the whole document, but the generic `constraints.*` knobs, `checklist`, and
+`eval_executor` are omitted from it when unset, so a topic that sets none of
+them signs to the exact bytes it signed before they existed and older
+signatures keep verifying.
+
+## Dynamic agentic engine (RLM)
+
+Proof is a **dynamic agentic challenge system**. Every research problem is a
+signed topic; each topic's RLM (research lifecycle manager) runs **inside a
+VM attributed to that topic**, where it writes the anti-cheat rules, runs the
+baseline, inspects and runs miner submissions, and promotes the best
+artefact. The binary is the orchestrator: schema, DB, isolation boundary,
+artefact store, runner registry. Nothing about a challenge — no benchmark,
+metric, model, rule list, or repository — is compiled in. Crates:
+`proof-rlm` (core), `proof-rlm-store` (Postgres / memory), `proof-rlm-scorer`
+(`LiveScorer` + artefacts + setup driver), `proof-canon` (canonical JSON +
+id shapes shared with `proof-task`).
+
+### Topic-carried, generic bindings (signed)
+
+| Field | Meaning |
+|-------|---------|
+| `metric.custom_id` | Topic-minted metric id, `[a-z0-9][a-z0-9_-]{1,63}`. Draft with any; open needs a registered runner |
+| `constraints.firecracker_required` | Miner code runs only inside a Firecracker guest under the topic VM |
+| `constraints.model_pin` | `vendor/model[:tag]` every paid call must name (shape-checked only) |
+| `constraints.task_slice` | Opaque label the runner interprets; the control plane does not |
+| `constraints.params` | ≤32 opaque `slug → printable` runner params |
+| `checklist` | ≤64 `{id, text}` anti-cheat rules (unique slug ids), version 1 of the rule set |
+| `eval_executor.require_offer_commitment` | 64-hex pin against the live `1x` `EvalExecutorOffer` (`proof-executor`) |
+| `eval_executor.max_proof_deadline_s` | Tighten-only against pin `max_proof_deadline_s_ceiling` (7200 s; the live offer may be shorter) |
+
+### Rules → DB, not logs
+
+Rule sets are versioned per topic in `proof_rule_version` (migration
+`0020_proof_rlm.sql`): v1 is the signed vector, later versions are what the
+RLM writes (`source = rlm`) or the operator edits. A checklist binds to a
+rule version **and** its digest, so it cannot be replayed against edited
+rules; it is green only when every rule of that version is ticked with
+evidence and passes. Every checklist (red or green), every lifecycle
+transition, the baseline measurement, artefact metadata, and every promotion
+event land in the DB (`proof_checklist`, `proof_lifecycle_event`,
+`proof_baseline_measurement`, `proof_artefact`, `proof_promotion_event`,
+`proof_topic_version`). Tables are append-only for `base_app`; "current
+best" is the newest promotion row. `BASE_DATABASE_URL` selects Postgres; a
+configured-but-unreachable database is fatal, an unset one falls back to the
+in-memory store with a warning.
+
+### Lifecycle
+
+`draft → owner_presend → awaiting_owner_keys → provisioning → baselining →
+open ⇄ evaluating → promoting → open … → closed`. `owner_presend` is an
+`askUser`-style hook (no hook = cannot advance; decline = back to draft);
+`awaiting_owner_keys` probes `PROOF_RLM_OWNER_INFERENCE_KEY_FILE` for
+presence only. `TopicSetup` drives the ceremony over the VM boundary
+(provision → RLM `ProposeRules` → rules vN in DB → `Baseline` job →
+measurement in DB) and `mark_sealed` moves `baselining → open` after the
+operator seals `custom_value` and re-signs. A re-run resumes from the
+persisted state.
+
+### Isolation boundary
+
+`TopicVmOrchestrator` (create / attach / run / teardown-or-retain) is the only
+way RLM work happens. `VmJob`s carry public data (signed topic, digests,
+rule set, request) — never a host path, a key, or a judge origin. The shipped
+orchestrator is `UnwiredVmOrchestrator` (refuses, names
+`PROOF_VM_ORCHESTRATOR_URL` / `PROOF_VM_ORCHESTRATOR_TOKEN_FILE`;
+`PROOF_RLM_VM_IMAGE_DIGEST` pins the RLM VM image). The generic
+`VmBackedRunner` turns inspect / evaluate into VM jobs; registering it under
+a `custom_id` is an operator / RLM action. The Lium harvest for
+`nll` / `throughput` and the live `1x` `EvalExecutorOffer` (`proof-executor`)
+govern the harvest rent; on the custom path each run request records the
+resolved executor plan's deadline (tighter of topic and plan) and
+`config_commitment` as provenance, and the row stamps `executor_commitment`
+like every other scored row.
+
+### Runner registry
+
+`custom_id → CustomRunner`, **empty by default**. `GET /v1/status` lists
+`registered_custom`. An open custom topic whose id is not registered (or
+whose runner reports its backend unwired) is open but not in
+`scorable_topics`; a submit is **503** with the root cause and no row.
+Publishing an `open` custom topic without a registered runner is **400**;
+the same document drafts fine.
+
+### Artefacts and promotion
+
+Every scored row leaves `$PROOF_ARTEFACT_ROOT/{topic_id}/{submission_id}.zip`
+(`manifest.json`, `artifact/`, `report.json`, `checklist.json`,
+`baseline_ref.json`, `logs/`; a red-checklist reject ships no report), plus
+`best.json` (current best pointer) and `events.jsonl` (public `scored` /
+`promoted` events). Default root `/artefacts`; compose sets
+`/var/lib/proof/artefacts` on the `proof-artifacts` volume. **Promote:** a
+pass with a green checklist whose primary beats the bar (sealed value or
+reigning best) by `epsilon_rel`, direction-aware, persists as `champion`,
+gets a promotion row (with the displaced best), and moves the pointer.
 
 `GET /v1/status` exposes pin `inference` public judge defaults (`provider`,
 `model`, `mode`, token caps) and `inference_offer` **public fields only**
