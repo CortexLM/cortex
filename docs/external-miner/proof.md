@@ -88,10 +88,10 @@ rented.
 | `inference_offer` | Public RLM **judge** backend (id, kind, mode, model_ref, token caps, commitment, status). Missing/closed/misconfigured → **503**. You do not pass an offer id |
 | `eval_executor` | Public `1x` **executor**: the Lium machine class your recipe is re-run on (`lium_template_id`, `machine_shape`, `max_proof_deadline_s`, commitment, status). Your recipe must finish inside `max_proof_deadline_s` (≤ pin ceiling 7200 s; a topic may name a shorter one) on **one** GPU — the host never rents more. Missing/closed/any shape but `1x` → **503**. You do not pass or rent it |
 | `open_topics` empty | No currently `open` signed topic with a sealed baseline → **503** |
-| `scorable_topics` | Open topics whose scorer is wired on this host. An open topic **not** listed here (a `custom` topic whose runner is not registered or not wired) answers **503** |
+| `scorable_topics` | Open topics whose family's scorer is wired on this host. An open topic **not** listed here (a `custom` topic whose runner is not registered or not wired; an `nll` / `throughput` topic on a host whose Lium harvest is not wired) answers **503** |
 | `registered_custom` | Custom metric ids with a registered runner. Nothing is compiled in; ids come from signed topics |
 | `baseline_sealed: false` | An open topic without `script_sha256` + `metrics_commitment` → **503** |
-| `live_harvest_wired: false` | Live RLM harvest is not connected → **503** |
+| `live_harvest_wired: false` | No live scorer is connected — neither the Lium harvest (`nll` / `throughput`) nor a topic-VM runner (`custom`) → **503** for everything. `true` does not by itself make every open topic scorable: check `scorable_topics` |
 
 ## 1. List open topics
 
