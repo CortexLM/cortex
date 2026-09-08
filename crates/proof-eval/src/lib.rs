@@ -295,7 +295,9 @@ pub trait LiveScorer: Send + Sync {
     /// rent ([`Self::plan`]) the image is run under. Both are host state.
     /// `artifact_uri` is the miner-supplied locator of the bytes behind
     /// `artifact_digest` (the runner fetches and digest-checks them); the
-    /// digest alone is not enough to retrieve an artefact.
+    /// digest alone is not enough to retrieve an artefact. `declared_flops`
+    /// is the miner's declaration (already `<=` the topic budget at intake):
+    /// a scorer that measures usage must fail a run that exceeds it.
     #[allow(clippy::too_many_arguments)]
     async fn score(
         &self,
@@ -306,6 +308,7 @@ pub trait LiveScorer: Send + Sync {
         frozen_digest: &str,
         artifact_digest: &str,
         artifact_uri: Option<&str>,
+        declared_flops: u64,
         holdout: &[HoldoutRecord],
         claim: &str,
     ) -> Result<ProofEvalDocument, EvalError>;
@@ -421,6 +424,7 @@ impl LiveScorer for FamilyMux {
         frozen_digest: &str,
         artifact_digest: &str,
         artifact_uri: Option<&str>,
+        declared_flops: u64,
         holdout: &[HoldoutRecord],
         claim: &str,
     ) -> Result<ProofEvalDocument, EvalError> {
@@ -433,6 +437,7 @@ impl LiveScorer for FamilyMux {
                 frozen_digest,
                 artifact_digest,
                 artifact_uri,
+                declared_flops,
                 holdout,
                 claim,
             )
@@ -892,8 +897,9 @@ pub fn sim_win_document(
 
 /// Score only after the submission digest is frozen and a topic is open.
 ///
-/// `artifact_uri` travels to the live scorer untouched: it is the miner's
-/// locator for the bytes behind `artifact_digest`, never trusted beyond that.
+/// `artifact_uri` and `declared_flops` travel to the live scorer untouched:
+/// the miner's locator for the bytes behind `artifact_digest` (never trusted
+/// beyond that) and the miner's FLOP declaration the measured run is held to.
 #[allow(clippy::too_many_arguments)]
 pub async fn eval_after_freeze(
     pin: &ProofPin,
@@ -903,6 +909,7 @@ pub async fn eval_after_freeze(
     frozen_digest: &str,
     artifact_digest: &str,
     artifact_uri: Option<&str>,
+    declared_flops: u64,
     holdout: &[HoldoutRecord],
     claim: &str,
     backend: EvalBackend,
@@ -972,6 +979,7 @@ pub async fn eval_after_freeze(
                     frozen_digest,
                     artifact_digest,
                     artifact_uri,
+                    declared_flops,
                     holdout,
                     claim,
                 )
@@ -1111,6 +1119,7 @@ mod tests {
             frozen: &str,
             artifact: &str,
             _artifact_uri: Option<&str>,
+            _declared_flops: u64,
             _holdout: &[HoldoutRecord],
             _claim: &str,
         ) -> Result<ProofEvalDocument, EvalError> {
@@ -1143,6 +1152,7 @@ mod tests {
             "d",
             "art",
             None,
+            1,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -1165,6 +1175,7 @@ mod tests {
             "d",
             "art",
             None,
+            1,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -1193,6 +1204,7 @@ mod tests {
             "digest-a",
             "art",
             None,
+            1,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -1399,6 +1411,7 @@ mod tests {
             "digest-a",
             "art",
             None,
+            1,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -1422,6 +1435,7 @@ mod tests {
             "digest-a",
             "art",
             None,
+            1,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -1482,6 +1496,7 @@ mod tests {
             _frozen: &str,
             _artifact: &str,
             _artifact_uri: Option<&str>,
+            _declared_flops: u64,
             _holdout: &[HoldoutRecord],
             _claim: &str,
         ) -> Result<ProofEvalDocument, EvalError> {
@@ -1586,6 +1601,7 @@ mod tests {
                 "d",
                 "a",
                 None,
+                1,
                 &recs,
                 "c",
             )
@@ -1707,6 +1723,7 @@ mod tests {
             "digest-a",
             "art",
             None,
+            1,
             &recs,
             "claim",
             EvalBackend::Sim,
@@ -1742,6 +1759,7 @@ mod tests {
             "digest-a",
             "art",
             None,
+            1,
             &recs,
             "claim",
             EvalBackend::Lium,

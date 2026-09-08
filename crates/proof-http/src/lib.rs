@@ -432,6 +432,7 @@ async fn submit(
         &submission_digest,
         &artifact,
         artifact_uri,
+        body.declared_flops,
         &holdout,
         &body.claim,
         st.backend,
@@ -991,6 +992,7 @@ mod tests {
             frozen: &str,
             artifact: &str,
             _artifact_uri: Option<&str>,
+            _declared_flops: u64,
             _holdout: &[proof_task::HoldoutRecord],
             _claim: &str,
         ) -> Result<proof_eval::ProofEvalDocument, EvalError> {
@@ -1877,6 +1879,7 @@ mod tests {
             frozen: &str,
             artifact: &str,
             artifact_uri: Option<&str>,
+            declared_flops: u64,
             holdout: &[proof_task::HoldoutRecord],
             claim: &str,
         ) -> Result<proof_eval::ProofEvalDocument, EvalError> {
@@ -1897,6 +1900,7 @@ mod tests {
                     frozen,
                     artifact,
                     artifact_uri,
+                    declared_flops,
                     holdout,
                     claim,
                 )

@@ -414,12 +414,14 @@ resolved executor plan's deadline (tighter of topic and plan) and
 like every other scored row. The run request also carries the miner's
 `artifact_uri` (the runner fetches it inside the VM and checks
 `artifact_digest`; a custom submission without one is a **400** at intake,
-no row, and the scorer refuses a request without it) and the topic's
-`flops_budget`; the runner's report must
-carry its measured `flops_used`, which becomes the verdict's usage — a
-report without one is not evidence (**503**, no row), and a measurement over
-budget is a persisted reject (`flops_over_budget`). The miner's
-`declared_flops` is never the enforced figure.
+no row, and the scorer refuses a request without it), the topic's
+`flops_budget`, and the miner's `declared_flops` (the runner may enforce it
+as a hard cap). The runner's report must carry its measured `flops_used`,
+which becomes the verdict's usage — a report without one is not evidence
+(**503**, no row); a measurement over the budget (`flops_over_budget`) or
+over the miner's declaration (`flops_under_declared`) is a persisted reject.
+The miner's `declared_flops` is never the enforced usage figure; it is the
+cap the measurement is held to.
 
 ### Runner registry
 

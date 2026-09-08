@@ -253,6 +253,7 @@ impl TopicSetup {
             &format!("baseline-{}", rules.digest()),
             &topic.baseline.script_sha256,
             None,
+            topic.flops_budget,
             "operator baseline",
         )
         .map_err(|e| SetupError::Vm(VmError::Backend(e.to_string())))?;

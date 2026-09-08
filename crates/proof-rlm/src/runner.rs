@@ -79,6 +79,10 @@ pub struct CustomRunRequest {
     /// FLOPs one run may spend (the topic's signed `flops_budget`). The report
     /// must carry its measured usage against this figure.
     pub flops_budget: u64,
+    /// FLOPs the miner declared for this run (`<= flops_budget` at intake).
+    /// The runner may enforce it as a hard cap inside the VM; a measurement
+    /// above it is an under-declaration the host rejects.
+    pub declared_flops: u64,
     /// Topic constraints (sandbox flag, model pin, opaque slice / params).
     pub constraints: Constraints,
     /// Rule version the checklist must tick.
@@ -137,6 +141,7 @@ impl CustomRunRequest {
         submission_digest: &str,
         artifact_digest: &str,
         artifact_uri: Option<&str>,
+        declared_flops: u64,
         claim: &str,
     ) -> Result<Self, RunnerError> {
         if topic.metric.family != MetricFamily::Custom {
@@ -157,6 +162,7 @@ impl CustomRunRequest {
                 .map(str::to_owned),
             claim: claim.to_owned(),
             flops_budget: topic.flops_budget,
+            declared_flops,
             constraints: topic.constraints.clone(),
             rules_version: rules.version,
             rules_digest: rules.digest(),
@@ -471,6 +477,7 @@ mod tests {
             req.flops_budget, t.flops_budget,
             "budget travels to the runner"
         );
+        assert_eq!(req.declared_flops, 1, "the miner's declaration travels too");
         assert_eq!(
             req.artifact_uri.as_deref(),
             Some("https://example.invalid/artifact.zip"),
@@ -489,7 +496,7 @@ mod tests {
         let mut plain = t;
         plain.metric.family = MetricFamily::Nll;
         assert!(matches!(
-            CustomRunRequest::from_topic(&plain, &pin(), &offer(), &rules(), "d", "a", None, ""),
+            CustomRunRequest::from_topic(&plain, &pin(), &offer(), &rules(), "d", "a", None, 1, ""),
             Err(RunnerError::NotCustom(_))
         ));
         let bound = request().with_executor_plan(900, "ab".repeat(32).as_str());
@@ -504,7 +511,7 @@ mod tests {
         let mut tight = topic();
         tight.eval_executor.max_proof_deadline_s = Some(600);
         let req =
-            CustomRunRequest::from_topic(&tight, &pin(), &offer(), &rules(), "d", "a", None, "")
+            CustomRunRequest::from_topic(&tight, &pin(), &offer(), &rules(), "d", "a", None, 1, "")
                 .expect("request");
         assert_eq!(req.sandbox.deadline_s, 600);
         let blank = CustomRunRequest::from_topic(
@@ -515,6 +522,7 @@ mod tests {
             "d",
             "a",
             Some("  "),
+            1,
             "",
         )
         .expect("request");

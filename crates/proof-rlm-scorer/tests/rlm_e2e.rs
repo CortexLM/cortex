@@ -7,10 +7,11 @@
 //! Covers: an unregistered `custom_id` is a 503 with no row; a custom
 //! submission without an artefact locator is a 400 with no row; a green
 //! checklist scores and is crowned against the sealed value, with the
-//! miner's artefact locator reaching the runner and the runner's measured
-//! FLOPs in the verdict; a red checklist is a persisted reject with **zero**
-//! paid runs; a later pass below the best stays `awaiting_admin`; an
-//! over-budget measurement is a persisted reject and a missing one is a 503;
+//! miner's artefact locator and declaration reaching the runner and the
+//! runner's measured FLOPs in the verdict; a red checklist is a persisted
+//! reject with **zero** paid runs; a later pass below the best stays
+//! `awaiting_admin`; a measurement over the budget or over the miner's
+//! declaration is a persisted reject and a missing one is a 503;
 //! every scored row leaves its zip, the crown leaves `best.json` + a
 //! promotion row, and the store holds rules v1, every checklist, and the
 //! lifecycle. Runs hold their topic lease until persisted, so a worse run
@@ -72,6 +73,7 @@ impl LiveScorer for IdleHarvest {
         _frozen: &str,
         _artifact: &str,
         _artifact_uri: Option<&str>,
+        _declared_flops: u64,
         _holdout: &[HoldoutRecord],
         _claim: &str,
     ) -> Result<ProofEvalDocument, EvalError> {
@@ -210,18 +212,22 @@ fn locator(label: &str) -> String {
     format!("https://example.invalid/artefacts/{label}.zip")
 }
 
-/// A custom-topic submission; the locator is required on custom topics, so
-/// every body carries one.
-fn submit_body(topic_id: &str, label: &str) -> serde_json::Value {
+/// A custom-topic submission declaring `declared_flops`; the locator is
+/// required on custom topics, so every body carries one.
+fn submit_declaring(topic_id: &str, label: &str, declared_flops: u64) -> serde_json::Value {
     serde_json::json!({
         "miner_hotkey": digest("miner"),
         "artifact_digest": digest(label),
         "artifact_uri": locator(label),
         "claim": "placeholder claim",
-        "declared_flops": 1u64,
+        "declared_flops": declared_flops,
         "topic_id": topic_id,
         "manifest": { "train_dataset_ids": ["placeholder-corpus"] },
     })
+}
+
+fn submit_body(topic_id: &str, label: &str) -> serde_json::Value {
+    submit_declaring(topic_id, label, 1)
 }
 
 fn zip_names(path: &std::path::Path) -> Vec<String> {
@@ -333,7 +339,8 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
     assert!(orchestrator.jobs().is_empty(), "no job without a locator");
 
     // 1. Green checklist, primary 0.70 > 0.50 * 1.02: scored and crowned.
-    //    The miner's artefact locator travels to the runner with the digest.
+    //    The miner's artefact locator and declaration travel to the runner
+    //    with the digest.
     let uri = locator("artifact-a");
     let (st, created) = json_req(
         app.clone(),
@@ -365,6 +372,7 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
         );
         assert_eq!(req.artifact_digest, digest("artifact-a"));
         assert_eq!(req.flops_budget, topic.flops_budget);
+        assert_eq!(req.declared_flops, 1, "the miner's declaration is the cap");
     }
 
     let (_, row) = json_req(
@@ -517,7 +525,8 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
 
 /// The signed budget binds the runner's measurement, not the miner's
 /// declaration: a run measured over budget is a persisted reject even with a
-/// winning primary, and a report with no measurement is refused with no row.
+/// winning primary, so is one measured over what the miner declared, and a
+/// report with no measurement is refused with no row.
 #[tokio::test]
 async fn an_over_budget_or_unmeasured_run_never_passes() {
     let Stack {
@@ -530,12 +539,13 @@ async fn an_over_budget_or_unmeasured_run_never_passes() {
     let tid = topic.id.clone();
     let budget = topic.flops_budget;
 
+    // Declared the whole budget, measured one over it.
     orchestrator.set_flops_used(Some(budget + 1));
     let (st, created) = json_req(
         app.clone(),
         "POST",
         "/v1/submissions",
-        submit_body(&tid, "artifact-over"),
+        submit_declaring(&tid, "artifact-over", budget),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "{created}");
@@ -568,6 +578,38 @@ async fn an_over_budget_or_unmeasured_run_never_passes() {
     assert!(rlm_store.best(&tid).await.unwrap().is_none());
     assert!(root.join(&tid).join(format!("{id}.zip")).is_file());
 
+    // Within budget but over what the miner declared (1): under-declared,
+    // persisted reject, the declaration is the cap the miner committed to.
+    orchestrator.set_flops_used(Some(2));
+    let (st, created) = json_req(
+        app.clone(),
+        "POST",
+        "/v1/submissions",
+        submit_body(&tid, "artifact-under-declared"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{created}");
+    assert_eq!(created["state"], "rejected", "{created}");
+    let id = created["id"].as_str().unwrap().to_owned();
+    let (_, row) = json_req(
+        app.clone(),
+        "GET",
+        &format!("/v1/submissions/{id}"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(row["verdict"]["pass"], false, "{row}");
+    assert_eq!(row["verdict"]["agent"]["flops_used"], 2u64, "{row}");
+    assert_eq!(row["declared_flops"], 1u64, "{row}");
+    let codes = row["verdict"]["agent"]["cheat_codes"].to_string();
+    assert!(codes.contains("flops_under_declared"), "{codes}");
+    assert!(!codes.contains("flops_over_budget"), "{codes}");
+    assert!(row["verdict"]["agent"]["rationale"]
+        .as_str()
+        .unwrap()
+        .contains("over the miner's declared_flops 1"));
+    assert!(rlm_store.best(&tid).await.unwrap().is_none());
+
     // No measurement at all: not evidence, 503, no row.
     orchestrator.set_flops_used(None);
     let (st, body) = json_req(
@@ -586,11 +628,11 @@ async fn an_over_budget_or_unmeasured_run_never_passes() {
         "{body}"
     );
     let (_, list) = json_req(app.clone(), "GET", "/v1/submissions", serde_json::json!({})).await;
-    assert_eq!(list["items"].as_array().unwrap().len(), 1, "{list}");
+    assert_eq!(list["items"].as_array().unwrap().len(), 2, "{list}");
     assert_eq!(
         paid_runs(&orchestrator),
-        2,
-        "both runs were paid; neither passed"
+        3,
+        "every run was paid; none passed"
     );
     let lc = rlm_store.lifecycle(&tid).await.unwrap().unwrap();
     assert_eq!(
@@ -599,13 +641,13 @@ async fn an_over_budget_or_unmeasured_run_never_passes() {
         "a refusal closes the verdict phase"
     );
 
-    // Back within budget the same topic scores again.
+    // Measured exactly the budget the miner declared: scores and is crowned.
     orchestrator.set_flops_used(Some(budget));
     let (st, created) = json_req(
         app,
         "POST",
         "/v1/submissions",
-        submit_body(&tid, "artifact-at-budget"),
+        submit_declaring(&tid, "artifact-at-budget", budget),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "{created}");
@@ -663,6 +705,7 @@ async fn score(d: &Direct, label: &str) -> Result<ProofEvalDocument, EvalError> 
             &format!("digest-{label}"),
             &digest(label),
             Some(&locator(label)),
+            d.topic.flops_budget,
             &[],
             "placeholder claim",
         )
@@ -687,6 +730,7 @@ async fn a_worse_run_never_displaces_the_champion_under_the_topic_lease() {
     let scorer_b = d.scorer.clone();
     let (pin_b, topic_b, plan_b) = (d.pin.clone(), d.topic.clone(), d.plan.clone());
     let mut task_b = tokio::spawn(async move {
+        let budget = topic_b.flops_budget;
         scorer_b
             .score(
                 &pin_b,
@@ -696,6 +740,7 @@ async fn a_worse_run_never_displaces_the_champion_under_the_topic_lease() {
                 "digest-b",
                 &digest("b"),
                 Some(&locator("b")),
+                budget,
                 &[],
                 "placeholder claim",
             )

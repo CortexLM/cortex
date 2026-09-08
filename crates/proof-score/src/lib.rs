@@ -50,6 +50,8 @@ pub enum ProofCheatCode {
     UnreproducedClaim,
     /// The run spent more FLOPs than the topic budget.
     FlopsOverBudget,
+    /// The run spent more FLOPs than the miner declared for it.
+    FlopsUnderDeclared,
     /// Compared against a weaker/different AdamW than the sealed recipe.
     StrawmanAdamw,
     /// Optimizer named Muon/TSP (etc.) but the code is AdamW.

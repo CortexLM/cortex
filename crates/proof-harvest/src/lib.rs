@@ -661,9 +661,11 @@ impl LiveScorer for LiumProofHarvest {
         plan: &ExecutorPlan,
         frozen_digest: &str,
         artifact_digest: &str,
-        // The digest-pinned image fetches by digest from the artifact store;
-        // the miner locator is a custom-family concern.
+        // The digest-pinned image fetches by digest from the artifact store
+        // and its agent observes usage against the topic budget; the miner
+        // locator and declaration are custom-family concerns.
         _artifact_uri: Option<&str>,
+        _declared_flops: u64,
         holdout: &[HoldoutRecord],
         claim: &str,
     ) -> Result<ProofEvalDocument, EvalError> {
@@ -778,7 +780,7 @@ mod tests {
         let plan = harvest.plan(pin, topic, executor)?;
         harvest
             .score(
-                pin, topic, offer, &plan, frozen, artifact, None, holdout, claim,
+                pin, topic, offer, &plan, frozen, artifact, None, 1, holdout, claim,
             )
             .await
     }

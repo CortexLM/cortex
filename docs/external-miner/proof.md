@@ -292,7 +292,7 @@ and the constraints, and must emit:
 | `claim_holds_public` | bool | Public-split numbers match the claim |
 | `contamination` | bool | Holdout fingerprints in the recipe / data |
 | `canary_hit` | bool | Off-score. Recorded, never a fail by itself |
-| `flops_used` / `flops_budget` | u64 | Measured by the judge / runner vs the topic budget. Your `declared_flops` is a declaration, never the enforced figure; on custom topics the runner's measurement is the verdict's usage, and over budget is `flops_over_budget` |
+| `flops_used` / `flops_budget` | u64 | Measured by the judge / runner vs the topic budget. Your `declared_flops` is never the enforced usage figure; on custom topics the runner's measurement is the verdict's usage, over budget is `flops_over_budget`, and over your own declaration is `flops_under_declared` |
 | `cheat_codes` | list | See below |
 | `rationale` | string | Audit text (truncated) |
 | `topic_id` / `family` | echo | Must match the submission |
@@ -308,6 +308,7 @@ a win:
 |------|---------|
 | `unreproduced_claim` | Could not re-run the claimed recipe to the claimed result |
 | `flops_over_budget` | Run spent more FLOPs than the topic budget |
+| `flops_under_declared` | Run spent more FLOPs than your `declared_flops` (custom topics: the runner's measurement is held to your declaration) |
 | `strawman_adamw` | Compared against a weaker / different AdamW than the sealed recipe |
 | `fake_optimizer` | Optimizer named Muon / TSP (etc.) but the code is AdamW |
 | `contamination` | Training data overlapped the holdout |
@@ -356,8 +357,10 @@ ticked against is recorded with your row.
 `artifact_uri` is required: the runner fetches the bytes from it inside the
 topic VM and checks the digest, so a submission the runner cannot retrieve is
 a **400** with no row. The runner also measures your run's FLOPs; that
-measurement (not `declared_flops`) is what the verdict carries against the
-topic budget.
+measurement (not `declared_flops`) is what the verdict carries, and it must
+stay within both the topic budget (`flops_over_budget`) and your own
+`declared_flops` (`flops_under_declared`) — declare what you will use, up to
+the budget. The runner may enforce your declaration as a hard cap.
 
 A clean pass that beats the current best (sealed value or reigning best) by
 `epsilon_rel` is promoted automatically: the row is `champion` and the

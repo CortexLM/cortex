@@ -125,6 +125,7 @@ pub fn request() -> CustomRunRequest {
         "digest-a",
         &"ab".repeat(32),
         Some("https://example.invalid/artifact.zip"),
+        1,
         "placeholder claim",
     )
     .expect("request")

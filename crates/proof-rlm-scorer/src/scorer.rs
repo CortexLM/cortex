@@ -11,8 +11,8 @@
 //! 4. red → **reject document, no paid inference**;
 //! 5. green → [`SpendToken`] → **evaluate** (the only paid step) → report →
 //!    `custom_value = primary_value`, `flops_used` = the runner's
-//!    measurement (a report without one is not evidence; over budget is a
-//!    reject the judge fails on);
+//!    measurement (a report without one is not evidence; over the topic
+//!    budget or over the miner's declaration is a reject the judge fails on);
 //! 6. on persist: artefact zip + metadata row + public event; on promotion:
 //!    promotion row, `best.json`, lifecycle `promoting → open`.
 //!
@@ -27,6 +27,7 @@
 //! [`SpendToken`]: proof_rlm::SpendToken
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -404,8 +405,9 @@ impl RlmScorer {
     }
 
     /// Verdict for a verified paid run: the runner's measured FLOPs are the
-    /// verdict's usage, and a measurement over the topic budget is a reject
-    /// (the judge's `FlopsOverBudget` gate then fails the row).
+    /// verdict's usage. A measurement over the topic budget
+    /// (`FlopsOverBudget`) or over what the miner declared
+    /// (`FlopsUnderDeclared`) is a reject the judge then fails the row on.
     fn paid_verdict(
         topic: &TopicDocument,
         req: &CustomRunRequest,
@@ -415,29 +417,36 @@ impl RlmScorer {
         let flops_used = report
             .flops_used_for(req)
             .map_err(|e| EvalError::NoVerdict(e.to_string()))?;
-        let measured = format!(
+        let mut rationale = format!(
             "{}: {} = {:.6}; checklist green (rules v{rules_version}); sandboxed={}; flops_used={flops_used}",
             req.custom_id, req.primary, report.primary_value, report.sandboxed
         );
+        let mut cheats = Vec::new();
         if flops_used > req.flops_budget {
-            return Ok(Self::agent(
-                topic,
-                ProofKind::Reject,
-                true,
-                report.claim_holds,
-                flops_used,
-                vec![ProofCheatCode::FlopsOverBudget],
-                format!("{measured}; over the topic budget {}", req.flops_budget),
-            ));
+            cheats.push(ProofCheatCode::FlopsOverBudget);
+            let _ = write!(rationale, "; over the topic budget {}", req.flops_budget);
         }
+        if flops_used > req.declared_flops {
+            cheats.push(ProofCheatCode::FlopsUnderDeclared);
+            let _ = write!(
+                rationale,
+                "; over the miner's declared_flops {}",
+                req.declared_flops
+            );
+        }
+        let kind = if cheats.is_empty() {
+            ProofKind::Clean
+        } else {
+            ProofKind::Reject
+        };
         Ok(Self::agent(
             topic,
-            ProofKind::Clean,
+            kind,
             true,
             report.claim_holds,
             flops_used,
-            Vec::new(),
-            measured,
+            cheats,
+            rationale,
         ))
     }
 
@@ -451,6 +460,7 @@ impl RlmScorer {
         frozen_digest: &str,
         artifact_digest: &str,
         artifact_uri: Option<&str>,
+        declared_flops: u64,
         claim: &str,
     ) -> Result<ProofEvalDocument, EvalError> {
         let custom_id = topic.metric.custom_id.trim().to_owned();
@@ -476,6 +486,7 @@ impl RlmScorer {
             frozen_digest,
             artifact_digest,
             Some(artifact_uri),
+            declared_flops,
             claim,
         )
         .map_err(|e| map_runner(&custom_id, e))?
@@ -689,6 +700,7 @@ impl LiveScorer for RlmScorer {
         frozen_digest: &str,
         artifact_digest: &str,
         artifact_uri: Option<&str>,
+        declared_flops: u64,
         _holdout: &[HoldoutRecord],
         claim: &str,
     ) -> Result<ProofEvalDocument, EvalError> {
@@ -707,6 +719,7 @@ impl LiveScorer for RlmScorer {
                 frozen_digest,
                 artifact_digest,
                 artifact_uri,
+                declared_flops,
                 claim,
             )
             .await;
