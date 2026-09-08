@@ -957,7 +957,9 @@ mod tests {
             .filter(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("proof-proxy-") && n.ends_with(".tar"))
+                    .is_some_and(|n| n.starts_with("proof-proxy-"))
+                    && p.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("tar"))
             })
             .collect();
         paths.sort();
