@@ -45,10 +45,12 @@
 # `max_proof_deadline_s_ceiling`, never longer; a topic may tighten it again
 # (`eval_executor.max_proof_deadline_s`) and may pin the live offer's
 # `config_commitment` (`eval_executor.require_offer_commitment`). No per-topic
-# machine id. `allowed_lium_template_prefixes` is optional; when set, the
-# offer's `lium_template_id` must carry one of the prefixes (the digest-scoped
-# harvest template is `proof-eval-<12 hex of the digest>`). Missing / closed /
-# shape ≠ 1x → can_score=false → 503.
+# machine id. The offer's `lium_template_id` is always the digest-scoped
+# template name (`proof-eval-<12 hex of the digest>`, resolved bound to
+# eval_image@digest); a raw Lium template UUID is refused under any allowlist.
+# `allowed_lium_template_prefixes` is optional; when set, the name must also
+# carry one of the prefixes. Missing / closed / shape ≠ 1x → can_score=false
+# → 503.
 #
 # Holdout size / stratum size are the measurement harness (5 scored splits × 24),
 # not the problem list.

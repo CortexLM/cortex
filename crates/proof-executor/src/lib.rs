@@ -54,10 +54,13 @@ pub const MAX_TEMPLATE_ID_LEN: usize = 128;
 pub struct EvalExecutorOffer {
     /// Immutable slug identifying this executor.
     pub offer_id: String,
-    /// Lium template the harvest rents. Either the digest-scoped template
-    /// name (`proof-eval-<12 hex of the digest>`, resolved or created bound
-    /// to `repo@digest`) or a raw Lium template UUID. The pin's
-    /// `allowed_lium_template_prefixes` decides which forms are legal.
+    /// Digest-scoped Lium template **name** the harvest rents
+    /// (`proof-eval-<12 hex of the pinned digest>` or a longer name that
+    /// carries that prefix). The harvest resolves it through the digest-bound
+    /// template resolver, which only reuses a listed template whose image is
+    /// `eval_image@digest` and otherwise creates one bound to it. A raw Lium
+    /// template UUID is **refused**: it would be rented verbatim with no way
+    /// to bind it to the pinned image.
     pub lium_template_id: String,
     /// Machine class. Must equal the pin `gpu_class` (`1x`).
     pub machine_shape: String,
@@ -89,6 +92,16 @@ pub enum ExecutorOfferError {
     /// `lium_template_id` is outside the pin allowlist.
     #[error("lium_template_id {0:?} is not under the pin allowed_lium_template_prefixes")]
     TemplateNotAllowed(String),
+    /// `lium_template_id` is a raw Lium template UUID, which cannot be bound
+    /// to the pinned image; name the digest-scoped template instead.
+    #[error(
+        "lium_template_id {0:?} is a raw Lium template id; use the digest-scoped template name \
+         (repo@digest bound) so the rent cannot escape the pinned image"
+    )]
+    RawTemplateId(String),
+    /// The pin has no eval image digest, so no template can be bound to it.
+    #[error("pin has no eval_image_digest; nothing to bind an executor template to")]
+    UnpinnedDigest,
     /// A digest-scoped template name does not name the pinned digest.
     #[error("lium_template_id {0:?} does not carry the pinned eval image digest prefix {1}")]
     TemplateDigestMismatch(String, String),
@@ -162,8 +175,9 @@ pub fn shape_gpu_count(shape: &str) -> Option<u32> {
     (n >= 1).then_some(n)
 }
 
-/// `8-4-4-4-12` lowercase/uppercase hex: a raw Lium template id rather than a
-/// digest-scoped template name.
+/// `8-4-4-4-12` hex: a raw Lium template id rather than a digest-scoped
+/// template name. Such ids are refused everywhere an executor template is
+/// accepted — nothing can verify what image they run.
 pub fn is_lium_template_uuid(id: &str) -> bool {
     let t = id.trim();
     t.len() == 36
@@ -173,26 +187,42 @@ pub fn is_lium_template_uuid(id: &str) -> bool {
         })
 }
 
-/// Template identifier shape, pin allowlist, and (for a digest-scoped name)
-/// the pinned digest prefix.
+/// The 12-hex digest prefix every executor template name must carry.
+///
+/// # Errors
+///
+/// [`ExecutorOfferError::UnpinnedDigest`] when the pin cannot rent (no
+/// `sha256:` digest): there is no image to bind a template to.
+pub fn pinned_digest_prefix(pin: &ProofPin) -> Result<&str, ExecutorOfferError> {
+    if !pin.can_rent() {
+        return Err(ExecutorOfferError::UnpinnedDigest);
+    }
+    let hex = pin.eval_image_digest.trim().trim_start_matches("sha256:");
+    hex.get(..12).ok_or(ExecutorOfferError::UnpinnedDigest)
+}
+
+/// Fail-closed template check: printable shape, **not** a raw Lium UUID,
+/// carries the pinned digest prefix (so the digest-bound resolver can only
+/// reuse or create a template whose image is `eval_image@digest`), and
+/// inside the pin allowlist when one is set.
 pub fn check_template_id(pin: &ProofPin, template_id: &str) -> Result<(), ExecutorOfferError> {
     let id = template_id.trim();
     if id.is_empty() || id.len() > MAX_TEMPLATE_ID_LEN || !id.bytes().all(|b| b.is_ascii_graphic())
     {
         return Err(ExecutorOfferError::BadTemplateId);
     }
+    if is_lium_template_uuid(id) {
+        return Err(ExecutorOfferError::RawTemplateId(id.to_owned()));
+    }
+    let prefix = pinned_digest_prefix(pin)?;
+    if !id.contains(prefix) {
+        return Err(ExecutorOfferError::TemplateDigestMismatch(
+            id.to_owned(),
+            prefix.to_owned(),
+        ));
+    }
     if !pin.allows_template(id) {
         return Err(ExecutorOfferError::TemplateNotAllowed(id.to_owned()));
-    }
-    if !is_lium_template_uuid(id) && pin.can_rent() {
-        let hex = pin.eval_image_digest.trim().trim_start_matches("sha256:");
-        let prefix = hex.get(..12).unwrap_or(hex);
-        if !id.contains(prefix) {
-            return Err(ExecutorOfferError::TemplateDigestMismatch(
-                id.to_owned(),
-                prefix.to_owned(),
-            ));
-        }
     }
     Ok(())
 }
@@ -508,13 +538,17 @@ mod tests {
     fn template_id_obeys_the_pin_allowlist_and_the_pinned_digest() {
         let p = pin();
         assert!(matches!(
-            offer_for("prism-recipe-v10", 600, &p).validate(&p),
-            Err(ExecutorOfferError::TemplateNotAllowed(_))
-        ));
-        assert!(matches!(
             offer_for("proof-eval-000000000000", 600, &p).validate(&p),
             Err(ExecutorOfferError::TemplateDigestMismatch(..))
         ));
+        // Carries the digest prefix but not an allowlisted prefix.
+        assert!(matches!(
+            offer_for("other-78b614a1f51c", 600, &p).validate(&p),
+            Err(ExecutorOfferError::TemplateNotAllowed(_))
+        ));
+        offer_for("proof-eval-78b614a1f51c-b200", 600, &p)
+            .validate(&p)
+            .expect("a longer digest-scoped name is fine");
         for bad in [
             "",
             "has space",
@@ -529,29 +563,69 @@ mod tests {
                 "{bad:?}"
             );
         }
-        // A raw Lium UUID is legal only when the pin allowlist admits it.
+        let mut open = p.clone();
+        open.allowed_lium_template_prefixes.clear();
+        offer_for("any-name-78b614a1f51c", 600, &open)
+            .validate(&open)
+            .expect("empty allowlist still requires the digest-scoped name");
+    }
+
+    /// A raw Lium template UUID is rented verbatim by the provider, so the
+    /// digest-bound resolver never sees it: refused under every allowlist,
+    /// including an empty one.
+    #[test]
+    fn raw_lium_uuid_is_refused_under_any_allowlist() {
         let uuid = "f2f5e84c-3b09-4090-be83-1913eabd009e";
         assert!(is_lium_template_uuid(uuid));
+        assert!(is_lium_template_uuid(&uuid.to_ascii_uppercase()));
         assert!(!is_lium_template_uuid("proof-eval-78b614a1f51c"));
         assert!(!is_lium_template_uuid(
             "f2f5e84c-3b09-4090-be83-1913eabd009"
         ));
+        let p = pin();
         assert!(matches!(
             offer_for(uuid, 600, &p).validate(&p),
-            Err(ExecutorOfferError::TemplateNotAllowed(_))
+            Err(ExecutorOfferError::RawTemplateId(_))
         ));
         let mut open = p.clone();
         open.allowed_lium_template_prefixes.clear();
-        offer_for(uuid, 600, &open)
-            .validate(&open)
-            .expect("uuid under an empty allowlist");
-        // Unpinned digest (pre-launch): the name cannot be checked against
-        // a digest, and the host cannot rent anyway.
-        let mut unpinned = p.clone();
+        assert!(
+            matches!(
+                offer_for(uuid, 600, &open).validate(&open),
+                Err(ExecutorOfferError::RawTemplateId(_))
+            ),
+            "an empty allowlist must not admit an unbindable template"
+        );
+        let mut uuid_prefix = p.clone();
+        uuid_prefix.allowed_lium_template_prefixes = vec!["f2f5e84c-".into()];
+        assert!(matches!(
+            offer_for(uuid, 600, &uuid_prefix).validate(&uuid_prefix),
+            Err(ExecutorOfferError::RawTemplateId(_))
+        ));
+        assert!(matches!(
+            check_template_id(&open, uuid),
+            Err(ExecutorOfferError::RawTemplateId(_))
+        ));
+    }
+
+    /// With no pinned digest there is no image to bind a template to, so no
+    /// executor offer validates (the host cannot rent anyway).
+    #[test]
+    fn unpinned_digest_binds_no_executor() {
+        let mut unpinned = pin();
         unpinned.eval_image_digest.clear();
-        offer_for("proof-eval-deadbeef0000", 600, &unpinned)
-            .validate(&unpinned)
-            .expect("pre-launch pin skips the digest-name check");
+        assert!(matches!(
+            offer_for("proof-eval-deadbeef0000", 600, &unpinned).validate(&unpinned),
+            Err(ExecutorOfferError::UnpinnedDigest)
+        ));
+        assert!(matches!(
+            pinned_digest_prefix(&unpinned),
+            Err(ExecutorOfferError::UnpinnedDigest)
+        ));
+        assert_eq!(
+            pinned_digest_prefix(&pin()).expect("pinned"),
+            "78b614a1f51c"
+        );
     }
 
     #[test]
