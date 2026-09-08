@@ -1,0 +1,504 @@
+//! Custom-metric runner contract and the fail-closed registry.
+//!
+//! A topic names its metric by `custom_id`. A [`CustomRunner`] registered
+//! under that id knows how to inspect an artefact against the topic's rule
+//! set and, behind a [`SpendToken`], run it and report a `primary_value`.
+//! Nothing is registered by default: [`RunnerRegistry::resolve`] on an
+//! unknown id is [`RunnerError::Unregistered`], which the host turns into a
+//! 503 before any row or rent. No runner in this repository knows a
+//! benchmark, a model, or a repository; those are topic data.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use proof_canon::is_custom_id;
+use proof_task::{
+    Constraints, InferenceOffer, MetricDirection, MetricFamily, ProofPin, TopicDocument,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::gate::SpendToken;
+use crate::rules::{Checklist, RuleSet};
+
+/// Only accepted `schema_version` of a run request.
+pub const RUN_REQUEST_SCHEMA: u32 = 1;
+
+/// Only accepted `schema_version` of a run report.
+pub const RUN_REPORT_SCHEMA: u32 = 1;
+
+/// Public fields of the RLM judge offer the runner may show the harness judge.
+/// Never the origin, never a key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JudgeRef {
+    /// Live judge offer id.
+    pub offer_id: String,
+    /// Judge model id.
+    pub model_ref: String,
+    /// Judge config commitment (config knobs + origin, hashed).
+    pub config_commitment: String,
+}
+
+/// Sandbox policy the runner and the topic VM must honour for miner code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxPolicy {
+    /// Miner code runs only inside a Firecracker guest under the topic VM.
+    pub firecracker_required: bool,
+    /// Wall-clock deadline for one proof run (topic `eval_executor`, else pin).
+    pub deadline_s: u64,
+}
+
+/// Everything a runner needs to inspect and run one submission once.
+///
+/// Every value is copied from the signed topic, the live judge offer, the
+/// rule set, and the submission. Nothing is a default of this crate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomRunRequest {
+    /// Must equal [`RUN_REQUEST_SCHEMA`].
+    pub schema_version: u32,
+    /// Topic id.
+    pub topic_id: String,
+    /// Custom metric id the topic names.
+    pub custom_id: String,
+    /// Primary metric name the report must fill.
+    pub primary: String,
+    /// Improvement direction.
+    pub direction: MetricDirection,
+    /// Relative win the topic demands over the bar.
+    pub epsilon_rel: f64,
+    /// Frozen submission digest.
+    pub submission_digest: String,
+    /// Artefact digest (sha256 of the recipe bytes).
+    pub artifact_digest: String,
+    /// Optional locator for the same bytes.
+    pub artifact_uri: Option<String>,
+    /// Miner claim (English).
+    pub claim: String,
+    /// Topic constraints (sandbox flag, model pin, opaque slice / params).
+    pub constraints: Constraints,
+    /// Rule version the checklist must tick.
+    pub rules_version: u32,
+    /// Digest of that rule set.
+    pub rules_digest: String,
+    /// Seed every paid call must use (topic baseline seed).
+    pub seed: u64,
+    /// Public judge reference.
+    pub judge: JudgeRef,
+    /// Sandbox policy.
+    pub sandbox: SandboxPolicy,
+    /// Executor offer commitment the topic pins, if any.
+    pub executor_commitment: Option<String>,
+}
+
+/// Why a run did not happen or is not evidence.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RunnerError {
+    /// No runner registered under this custom id. Root cause for the 503.
+    #[error("custom metric {0:?} has no registered runner")]
+    Unregistered(String),
+    /// A runner exists but its backend (topic VM orchestrator) is not configured.
+    #[error("runner not wired: {0}")]
+    NotWired(String),
+    /// The topic is not a custom-family topic.
+    #[error("topic {0:?} is not a custom-family topic")]
+    NotCustom(String),
+    /// Registry key is not a well-formed custom id.
+    #[error("custom id {0:?} must match [a-z0-9][a-z0-9_-]{{1,63}}")]
+    BadCustomId(String),
+    /// The token covers another submission.
+    #[error("spend token does not cover this run")]
+    SpendTokenMismatch,
+    /// The backend failed.
+    #[error("runner backend: {0}")]
+    Backend(String),
+    /// The runner returned a document that is not evidence.
+    #[error("run report: {0}")]
+    Report(#[from] ReportError),
+}
+
+impl CustomRunRequest {
+    /// Build the request from a custom-family topic, the live judge offer,
+    /// and the current rule set.
+    ///
+    /// # Errors
+    ///
+    /// [`RunnerError::NotCustom`] for `nll` / `throughput` topics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_topic(
+        topic: &TopicDocument,
+        pin: &ProofPin,
+        offer: &InferenceOffer,
+        rules: &RuleSet,
+        submission_digest: &str,
+        artifact_digest: &str,
+        artifact_uri: Option<&str>,
+        claim: &str,
+    ) -> Result<Self, RunnerError> {
+        if topic.metric.family != MetricFamily::Custom {
+            return Err(RunnerError::NotCustom(topic.id.clone()));
+        }
+        Ok(Self {
+            schema_version: RUN_REQUEST_SCHEMA,
+            topic_id: topic.id.clone(),
+            custom_id: topic.metric.custom_id.trim().to_owned(),
+            primary: topic.metric.primary.trim().to_owned(),
+            direction: topic.metric.direction,
+            epsilon_rel: topic.metric.epsilon_rel,
+            submission_digest: submission_digest.trim().to_owned(),
+            artifact_digest: artifact_digest.trim().to_ascii_lowercase(),
+            artifact_uri: artifact_uri.map(|u| u.trim().to_owned()),
+            claim: claim.to_owned(),
+            constraints: topic.constraints.clone(),
+            rules_version: rules.version,
+            rules_digest: rules.digest(),
+            seed: topic.baseline.seed,
+            judge: JudgeRef {
+                offer_id: offer.offer_id.clone(),
+                model_ref: offer.config.model_ref.clone(),
+                config_commitment: offer.config_commitment.clone(),
+            },
+            sandbox: SandboxPolicy {
+                firecracker_required: topic.constraints.firecracker_required,
+                deadline_s: topic
+                    .eval_executor
+                    .max_proof_deadline_s
+                    .unwrap_or(pin.max_proof_deadline_s),
+            },
+            executor_commitment: topic.eval_executor.require_offer_commitment.clone(),
+        })
+    }
+}
+
+/// Runner-authored measurement for one submission.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomRunReport {
+    /// Must equal [`RUN_REPORT_SCHEMA`].
+    pub schema_version: u32,
+    /// Topic run for.
+    pub topic_id: String,
+    /// Custom metric id.
+    pub custom_id: String,
+    /// Frozen submission digest.
+    pub submission_digest: String,
+    /// Artefact digest that was run.
+    pub artifact_digest: String,
+    /// Rule version the run was gated by.
+    pub rules_version: u32,
+    /// The primary metric value (becomes `custom_value`).
+    pub primary_value: f64,
+    /// Whether the miner's claim matches the measured numbers (runner/judge-filled).
+    pub claim_holds: bool,
+    /// Whether miner code ran inside the Firecracker guest.
+    pub sandboxed: bool,
+    /// Opaque runner evidence (per-task rows, timings). Shipped in the artefact.
+    pub evidence: BTreeMap<String, serde_json::Value>,
+}
+
+/// Why a report is not evidence.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ReportError {
+    /// JSON did not parse.
+    #[error("parse run report: {0}")]
+    Parse(String),
+    /// Schema drift.
+    #[error("run report schema_version {got}, this build reads {RUN_REPORT_SCHEMA}")]
+    WrongSchema {
+        /// What the document said.
+        got: u32,
+    },
+    /// A binding field does not echo the request.
+    #[error("run report {0} does not match the run request")]
+    Mismatch(&'static str),
+    /// Primary is NaN / infinite.
+    #[error("run report primary_value is not finite")]
+    NotFinite,
+    /// The topic requires Firecracker and the run was not sandboxed.
+    #[error("run report says miner code ran outside the Firecracker guest")]
+    NotSandboxed,
+}
+
+impl CustomRunReport {
+    /// Parse `report.json`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReportError::Parse`].
+    pub fn from_json(body: &str) -> Result<Self, ReportError> {
+        serde_json::from_str(body).map_err(|e| ReportError::Parse(e.to_string()))
+    }
+
+    /// Pretty JSON for the artefact bundle.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".into())
+    }
+
+    /// Bind the report to the request that produced it.
+    ///
+    /// # Errors
+    ///
+    /// See [`ReportError`]. A report that fails here never becomes a `custom_value`.
+    pub fn verify(&self, req: &CustomRunRequest) -> Result<(), ReportError> {
+        if self.schema_version != RUN_REPORT_SCHEMA {
+            return Err(ReportError::WrongSchema {
+                got: self.schema_version,
+            });
+        }
+        let pairs: [(&'static str, bool); 5] = [
+            ("topic_id", self.topic_id.trim() == req.topic_id.trim()),
+            ("custom_id", self.custom_id.trim() == req.custom_id.trim()),
+            (
+                "submission_digest",
+                self.submission_digest.trim() == req.submission_digest.trim(),
+            ),
+            (
+                "artifact_digest",
+                self.artifact_digest
+                    .trim()
+                    .eq_ignore_ascii_case(req.artifact_digest.trim()),
+            ),
+            ("rules_version", self.rules_version == req.rules_version),
+        ];
+        if let Some((field, _)) = pairs.iter().find(|(_, ok)| !ok) {
+            return Err(ReportError::Mismatch(field));
+        }
+        if !self.primary_value.is_finite() {
+            return Err(ReportError::NotFinite);
+        }
+        if req.sandbox.firecracker_required && !self.sandboxed {
+            return Err(ReportError::NotSandboxed);
+        }
+        Ok(())
+    }
+}
+
+/// One file of the miner's artefact tree as inspected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactFile {
+    /// Relative path inside the artefact (`src/main.rs`).
+    pub path: String,
+    /// Bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// A log the runner captured (harness stdout, guest console, judge transcript).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogFile {
+    /// File name under `logs/` in the artefact (single path segment).
+    pub name: String,
+    /// Raw bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// What inspection produced: the ticked checklist and the tree it looked at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectOutcome {
+    /// One item per rule of the requested version.
+    pub checklist: Checklist,
+    /// The artefact tree as inspected (shipped in the artefact zip).
+    pub artifact: Vec<ArtifactFile>,
+}
+
+/// What a paid run produced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunOutcome {
+    /// Runner-authored measurement.
+    pub report: CustomRunReport,
+    /// Captured logs.
+    pub logs: Vec<LogFile>,
+}
+
+/// Inspects and runs submissions for one custom metric id. Paid work needs a token.
+#[async_trait]
+pub trait CustomRunner: Send + Sync {
+    /// Whether this runner could run right now (fail-closed).
+    ///
+    /// # Errors
+    ///
+    /// [`RunnerError::NotWired`] when its backend is not configured.
+    fn ready(&self) -> Result<(), RunnerError>;
+
+    /// Tick every rule of `rules` over the artefact. **No paid inference.**
+    async fn inspect(
+        &self,
+        req: &CustomRunRequest,
+        rules: &RuleSet,
+    ) -> Result<InspectOutcome, RunnerError>;
+
+    /// Run the artefact. `spend` must cover the request.
+    async fn evaluate(
+        &self,
+        req: &CustomRunRequest,
+        spend: &SpendToken,
+    ) -> Result<RunOutcome, RunnerError>;
+}
+
+/// `custom_id → runner`. Empty by default; unknown ids fail closed.
+#[derive(Default)]
+pub struct RunnerRegistry {
+    runners: BTreeMap<String, Arc<dyn CustomRunner>>,
+}
+
+impl RunnerRegistry {
+    /// An empty registry: every custom topic is unscorable until something registers.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register `runner` under `custom_id` (replaces an earlier registration).
+    ///
+    /// # Errors
+    ///
+    /// [`RunnerError::BadCustomId`].
+    pub fn register(
+        &mut self,
+        custom_id: &str,
+        runner: Arc<dyn CustomRunner>,
+    ) -> Result<(), RunnerError> {
+        let id = custom_id.trim();
+        if !is_custom_id(id) {
+            return Err(RunnerError::BadCustomId(id.to_owned()));
+        }
+        self.runners.insert(id.to_owned(), runner);
+        Ok(())
+    }
+
+    /// Builder form of [`Self::register`]; a bad id is dropped with the error
+    /// surfaced through [`Self::ids`] being unchanged.
+    #[must_use]
+    pub fn with(mut self, custom_id: &str, runner: Arc<dyn CustomRunner>) -> Self {
+        let _ = self.register(custom_id, runner);
+        self
+    }
+
+    /// The runner for `custom_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`RunnerError::Unregistered`] — the fail-closed default.
+    pub fn resolve(&self, custom_id: &str) -> Result<Arc<dyn CustomRunner>, RunnerError> {
+        self.runners
+            .get(custom_id.trim())
+            .cloned()
+            .ok_or_else(|| RunnerError::Unregistered(custom_id.trim().to_owned()))
+    }
+
+    /// Registered ids, sorted.
+    #[must_use]
+    pub fn ids(&self) -> Vec<String> {
+        self.runners.keys().cloned().collect()
+    }
+
+    /// Whether anything is registered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.runners.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures::{offer, pin, report_for, request, rules, topic, FakeOrchestrator};
+    use crate::vm::{VmBackedRunner, VmTemplate};
+
+    #[test]
+    fn the_request_copies_topic_offer_and_rules_and_never_a_secret() {
+        let req = request();
+        let t = topic();
+        assert_eq!(req.custom_id, t.metric.custom_id);
+        assert_eq!(req.constraints, t.constraints);
+        assert_eq!(req.rules_version, 1);
+        assert_eq!(req.rules_digest, rules().digest());
+        assert_eq!(req.seed, t.baseline.seed);
+        assert!(req.sandbox.firecracker_required);
+        assert_eq!(req.sandbox.deadline_s, pin().max_proof_deadline_s);
+        assert_eq!(req.judge.offer_id, offer().offer_id);
+        let dump = serde_json::to_string(&req).expect("json");
+        assert!(
+            !dump.contains("127.0.0.1"),
+            "judge origin must not travel: {dump}"
+        );
+        assert!(!dump.contains("base_url"), "{dump}");
+        assert!(!dump.contains("api_key"), "{dump}");
+        let mut plain = t;
+        plain.metric.family = MetricFamily::Nll;
+        assert!(matches!(
+            CustomRunRequest::from_topic(&plain, &pin(), &offer(), &rules(), "d", "a", None, ""),
+            Err(RunnerError::NotCustom(_))
+        ));
+        let mut tight = topic();
+        tight.eval_executor.max_proof_deadline_s = Some(600);
+        let req =
+            CustomRunRequest::from_topic(&tight, &pin(), &offer(), &rules(), "d", "a", None, "")
+                .expect("request");
+        assert_eq!(req.sandbox.deadline_s, 600);
+    }
+
+    #[test]
+    fn a_report_must_echo_the_request_and_honour_the_sandbox() {
+        let req = request();
+        let r = report_for(&req, 0.7);
+        r.verify(&req).expect("bound");
+        let round = CustomRunReport::from_json(&r.to_json()).expect("round trip");
+        assert_eq!(round, r);
+        let mut other = report_for(&req, 0.7);
+        other.custom_id = "other_metric".into();
+        assert_eq!(other.verify(&req), Err(ReportError::Mismatch("custom_id")));
+        let mut stale = report_for(&req, 0.7);
+        stale.rules_version += 1;
+        assert_eq!(
+            stale.verify(&req),
+            Err(ReportError::Mismatch("rules_version"))
+        );
+        let mut nan = report_for(&req, f64::NAN);
+        nan.primary_value = f64::NAN;
+        assert_eq!(nan.verify(&req), Err(ReportError::NotFinite));
+        let mut host = report_for(&req, 0.7);
+        host.sandboxed = false;
+        assert_eq!(host.verify(&req), Err(ReportError::NotSandboxed));
+        let mut relaxed = req.clone();
+        relaxed.sandbox.firecracker_required = false;
+        host.verify(&relaxed)
+            .expect("topic did not require the guest");
+        let mut schema = report_for(&req, 0.7);
+        schema.schema_version = 9;
+        assert_eq!(
+            schema.verify(&req),
+            Err(ReportError::WrongSchema { got: 9 })
+        );
+        assert!(CustomRunReport::from_json("[]").is_err());
+    }
+
+    /// The registry is empty by default and resolves nothing: the
+    /// fail-closed contract for every custom id nobody registered.
+    #[test]
+    fn the_registry_is_empty_by_default_and_unknown_ids_fail_closed() {
+        let reg = RunnerRegistry::new();
+        assert!(reg.is_empty());
+        assert!(reg.ids().is_empty());
+        for id in ["any_metric", "another_metric", "yet_another_metric"] {
+            assert_eq!(
+                reg.resolve(id).err(),
+                Some(RunnerError::Unregistered(id.into()))
+            );
+        }
+        let runner: Arc<dyn CustomRunner> = Arc::new(VmBackedRunner::new(
+            FakeOrchestrator::new(0.5),
+            VmTemplate::unpinned(),
+        ));
+        let mut reg = RunnerRegistry::new();
+        assert_eq!(
+            reg.register("Bad Id", runner.clone()),
+            Err(RunnerError::BadCustomId("Bad Id".into()))
+        );
+        reg.register("topic_minted_metric", runner.clone())
+            .expect("register");
+        assert_eq!(reg.ids(), vec!["topic_minted_metric".to_owned()]);
+        reg.resolve("topic_minted_metric").expect("resolved");
+        assert!(reg.resolve("other").is_err());
+        let built = RunnerRegistry::new().with("also_minted", runner);
+        assert_eq!(built.ids(), vec!["also_minted".to_owned()]);
+    }
+}
