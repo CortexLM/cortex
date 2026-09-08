@@ -133,20 +133,31 @@ impl GuestChannel {
     }
 }
 
-/// Listen for guest-initiated connections to host `port` (bind before boot).
+/// Listen for guest-initiated connections to host `port`.
+///
+/// Firecracker connects to this socket as the **jail uid**, while the agent
+/// binds it as root, so the socket inode is opened to `0666`; the jail root
+/// directory (owned by the jail uid, not world-searchable) is what confines
+/// it.
 ///
 /// # Errors
 ///
 /// [`HvError::Backend`].
 pub fn listen(jail_root: &Path, port: u32) -> Result<UnixListener, HvError> {
+    use std::os::unix::fs::PermissionsExt;
     let path = listener_path(jail_root, port);
     let _ = std::fs::remove_file(&path);
-    UnixListener::bind(&path)
-        .map_err(|e| HvError::Backend(format!("listen {}: {e}", path.display())))
+    let listener = UnixListener::bind(&path)
+        .map_err(|e| HvError::Backend(format!("listen {}: {e}", path.display())))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
+        .map_err(|e| HvError::Backend(format!("chmod {}: {e}", path.display())))?;
+    Ok(listener)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
     use proof_vm_proto::guest::{HostToRlm, RlmToHost};
     use proof_vm_proto::API_VERSION;
@@ -221,6 +232,12 @@ mod tests {
         assert!(matches!(err, HvError::Guest(_)), "{err}");
         assert_eq!(listener_path(&r3, 5001), r3.join("v.sock_5001"));
         let l = listen(&r3, 5001).expect("listen");
+        let mode = std::fs::metadata(listener_path(&r3, 5001))
+            .expect("socket")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o666, "the jail uid must be able to connect");
         drop(l);
         let _ = listen(&r3, 5001).expect("rebinding replaces a stale socket");
     }
