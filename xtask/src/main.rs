@@ -282,6 +282,7 @@ fn dispatch(command: Command, root: &Path) -> Result<(), String> {
             closed,
             out,
         } => proof_executor_offer::run(&proof_executor_offer::ExecutorOfferArgs {
+            repo_root: root.to_path_buf(),
             pin: if pin.is_absolute() {
                 pin
             } else {
