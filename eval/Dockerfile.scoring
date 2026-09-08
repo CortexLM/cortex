@@ -11,14 +11,17 @@
 #
 # Triton (pulled in via torch) JIT-compiles CUDA kernels on the first GPU
 # forward after proxy weights load (Qwen SDPA/flash). That needs a host C
-# compiler. We stay on the runtime tag and install `build-essential`
-# (~200MB: gcc/g++) rather than switching to
+# compiler *and* CPython headers. We stay on the runtime tag and install
+# `build-essential` (~200MB: gcc/g++) plus `python3-dev` (Python.h for
+# the venv's 3.12) rather than switching to
 # `nvidia/cuda:12.8.1-devel-ubuntu24.04` (several GB: nvcc + CUDA headers).
 # Triton's LLVM backend does not need nvcc for this stack. The live
 # failure on pin `ff21fd98` was "Failed to find C compiler" / exit 1
-# after weight load — not a missing `cuda.h`. If a later kernel compile
-# fails on missing CUDA headers, switch BASE_IMAGE to the matching devel
-# digest (do not invent a sha256).
+# after weight load — not a missing `cuda.h`. After gcc landed
+# (`sha256:996cb5f4…`), the next live refuse was Triton's
+# `backends/nvidia/driver.c` failing `#include <Python.h>` (no python3-dev).
+# If a later kernel compile fails on missing CUDA headers, switch
+# BASE_IMAGE to the matching devel digest (do not invent a sha256).
 #
 #   docker build -f eval/Dockerfile.scoring -t proof-eval:scoring .
 #
@@ -51,7 +54,7 @@ RUN set -eux; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates curl openssh-server iproute2 \
         build-essential \
-        python3 python3-pip python3-venv; \
+        python3 python3-dev python3-pip python3-venv; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tini \
         || curl -fsSL -o /usr/bin/tini \
             https://github.com/krallin/tini/releases/download/v0.19.0/tini-amd64; \
@@ -65,7 +68,8 @@ RUN set -eux; \
     test -x /usr/bin/python3; \
     test -x /usr/bin/tini; \
     test -x /usr/bin/gcc; \
-    test -x /usr/bin/g++
+    test -x /usr/bin/g++; \
+    test -f "$(python3 -c 'import sysconfig; print(sysconfig.get_path("include"))')/Python.h"
 
 WORKDIR /opt/proof-eval
 COPY eval/pyproject.toml ./
@@ -99,6 +103,9 @@ RUN set -eux; \
     test ! -L /usr/bin/proof-eval; \
     test -x /usr/bin/proof-eval; \
     env -i PATH=/usr/bin:/bin /usr/bin/gcc --version >/dev/null; \
+    inc="$(/opt/proof-eval-venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("include"))')"; \
+    test -f "${inc}/Python.h"; \
+    echo '#include <Python.h>' | gcc -E -I"${inc}" - >/dev/null; \
     env -i PATH=/usr/bin:/bin /usr/bin/proof-eval --help >/dev/null; \
     env -i PATH=/usr/bin:/bin /usr/bin/proof-eval score --help >/dev/null; \
     env -i PATH=/usr/bin:/bin HOME=/root PROOF_SELFTEST_REQUIRE_RUNTIME=1 \
