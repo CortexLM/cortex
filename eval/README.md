@@ -30,14 +30,15 @@ This is not yet the autonomous research judge described in the whitepaper.
 `judge.py` requests an authenticated acknowledgement and does not parse a
 research verdict. `agent.py` performs static text checks: clean inspection raises
 `ContractError` absent agent reproduction and verified FLOP evidence; forbidden
-fabric yields a rejection. `cli.py` gates before judge/model calls and produces
-no successful metrics. General recipe reproduction is not implemented.
+fabric yields a rejection. `cli.py` still refuses success unless
+`PROOF_TRAINING_EVIDENCE_FILE` carries a retained compute trace whose FLOPs
+independently recompute. General recipe reproduction is not implemented.
+`adamw.py` is a parameter lock, not executable training.
 
-Agent-led accounting is not implemented: the agent must determine experiment-appropriate accounting, retain reproducible evidence, and have that evidence verified by the controller. Neither a universal formula nor an arbitrary model assertion is sufficient.
-
-`harness.py` has model-loss and optional-throughput measurement code, but no
-independent FLOP accounting; the unsupported `2ND` estimate is removed. Custom
-and canary metrics remain unset. Optional observer/judge-egress wiring exists in
+Holdout measurement records a listed-op compute trace (`mm` / `addmm` / `bmm` /
+math SDPA). Unlisted compute-shaped ops refuse. This is not a universal formula
+and not hostile-proof of flash or custom kernels. `artifact_fingerprint` hashes
+file bytes. Custom and canary metrics remain unset. Optional observer/judge-egress wiring exists in
 `proof-experiment`, with explicit `PROOF_JUDGE_PROXY=1` helper transport without Authorization only for the exact alias `http://proof-judge:8080/v1` and `chat/completions`; direct mode still requires a key. A
 synthetic probe obtained a real completion and blocked four sampled escapes;
 arbitrary allowed payloads and artifact code leave confidentiality/integrity

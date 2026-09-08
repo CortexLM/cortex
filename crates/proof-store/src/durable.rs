@@ -28,6 +28,7 @@ impl DurableJournal {
 
     /// Create a submission, or update only its mutable terminal fields, and
     /// record its payout run in the same transaction.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn commit(
         &self,
         mut row: Submission,
@@ -61,6 +62,10 @@ impl DurableJournal {
             if decoded.verdict != row.verdict {
                 return Err(StoreError::Illegal("non-finite submission metric".into()));
             }
+            sqlx::query("SAVEPOINT proof_sub_insert")
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| StoreError::Backend)?;
             let result = if update {
                 sqlx::query(
                     "UPDATE proof_submission SET document = $5, updated_at = now() \
@@ -76,14 +81,40 @@ impl DurableJournal {
                 )
             }.bind(&row.id).bind(&row.topic_id).bind(&row.miner_hotkey)
                 .bind(&row.artifact_digest).bind(document)
-                .execute(&mut *tx).await.map_err(|_| StoreError::Backend)?;
-            if result.rows_affected() == 1 {
-                break;
-            }
-            if !generated {
-                return Err(StoreError::Illegal(
-                    "duplicate id or immutable identity mismatch".into(),
-                ));
+                .execute(&mut *tx).await;
+            match result {
+                Ok(done) if done.rows_affected() == 1 => {
+                    sqlx::query("RELEASE SAVEPOINT proof_sub_insert")
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|_| StoreError::Backend)?;
+                    break;
+                }
+                Ok(_) => {
+                    sqlx::query("ROLLBACK TO SAVEPOINT proof_sub_insert")
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|_| StoreError::Backend)?;
+                    if !generated {
+                        return Err(StoreError::Illegal(
+                            "duplicate id or immutable identity mismatch".into(),
+                        ));
+                    }
+                }
+                Err(err) if unique_violation(&err) => {
+                    sqlx::query("ROLLBACK TO SAVEPOINT proof_sub_insert")
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|_| StoreError::Backend)?;
+                    let existing =
+                        Self::existing_by_digest(&mut tx, &row.submission_digest).await?;
+                    if same_freeze(&existing, &row) {
+                        row.id = existing.id;
+                        break;
+                    }
+                    return Err(StoreError::Illegal("duplicate submission digest".into()));
+                }
+                Err(_) => return Err(StoreError::Backend),
             }
         }
         {
@@ -107,6 +138,23 @@ impl DurableJournal {
         }
         tx.commit().await.map_err(|_| StoreError::Backend)?;
         Ok(row)
+    }
+
+    async fn existing_by_digest(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        digest: &str,
+    ) -> Result<Submission, StoreError> {
+        let row = sqlx::query(
+            "SELECT document FROM proof_submission \
+             WHERE document->>'submission_digest' = $1",
+        )
+        .bind(digest)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| StoreError::Backend)?
+        .ok_or(StoreError::Backend)?;
+        let value: serde_json::Value = row.try_get("document").map_err(|_| StoreError::Backend)?;
+        serde_json::from_value(value).map_err(|_| StoreError::Backend)
     }
 
     /// Read submissions and payouts from one MVCC snapshot.
@@ -180,4 +228,17 @@ impl DurableJournal {
             })
             .collect()
     }
+}
+
+fn unique_violation(err: &sqlx::Error) -> bool {
+    err.as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .is_some_and(|code| code == "23505")
+}
+
+fn same_freeze(existing: &Submission, row: &Submission) -> bool {
+    existing.miner_hotkey == row.miner_hotkey
+        && existing.topic_id == row.topic_id
+        && existing.artifact_digest == row.artifact_digest
+        && existing.submission_digest == row.submission_digest
 }

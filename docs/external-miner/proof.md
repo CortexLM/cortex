@@ -5,11 +5,12 @@
 Challenge id is `proof`. The two configured challenges are `bounty`
 (**2000 bps**) and `proof` (**8000 bps**), a 20/80 allocation.
 
-**Implementation warning:** Proof's v1 Python judge is partial. The default v1 store is in memory. The optional SQL journal now passes fresh workspace durability tests (2/2) after fixing embedded-migration tracking. Async writes persist SQL before memory and reject NaN/infinity. Production durability remains unproven: cross-process ID collisions/upserts, separate submission/score transactions, synchronous bypass and cancellation-induced memory lag remain.
-The service does not yet drive automatic reward-leaf emission. Clean static
-inspection raises `ContractError` absent agent reproduction and verified FLOP
-evidence; forbidden fabric rejects. CLI gates before judge/model calls and
-produces no successful metrics. Agent-led accounting is not implemented: the agent must determine experiment-appropriate accounting, retain reproducible evidence, and have that evidence verified by the controller. Neither a universal formula nor an arbitrary model assertion is sufficient.
+**Implementation warning:** Proof's v1 Python judge is partial. The default v1 store is in memory. The optional SQL journal snapshots before payout emission and refuses sync empty-map reads; sequence ids and a unique frozen digest live in migrations 0031–0032. Production durability remains unproven: network loss during COMMIT and concurrent topic-run last-writer-wins are still open.
+The service does not yet drive automatic reward-leaf emission. Forbidden fabric
+rejects before measure/judge. Score still refuses without controller-verified
+training/FLOP evidence (a retained op trace, independently recomputed — not a
+miner-declared number and not `adamw.py`). A tiny listed-op fixture does not
+attest every recipe. Artifact fingerprints hash file bytes, not paths.
 Do not spend compute on the assumption that `can_score` proves the complete
 research-to-payment path. Read the
 [paper-to-code comparison](../WHITEPAPER.md#proposal-versus-current-code) and

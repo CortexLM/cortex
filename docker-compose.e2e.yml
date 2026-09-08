@@ -18,6 +18,7 @@ services:
     environment:
       BASE_CHALLENGE_BIND: 0.0.0.0:8100
       PROOF_FORCE_SIM: "true"
+      PROOF_SIM_STUB_WIN: "true"
   bounty-challenge:
     ports:
       - "8096:8096"

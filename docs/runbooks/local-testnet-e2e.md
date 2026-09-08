@@ -79,7 +79,14 @@ cargo run -q --release -p weights-smoke -- \
 ./deploy/scripts/local-e2e.sh --down
 ```
 
-Challenge verification must **simulate a submission** (harness/intake) and probe failures (bad harness, sanitize, quota, routes) in addition to the weights seal smoke above — see root [`AGENTS.md`](../../AGENTS.md).
+Challenge verification must **simulate a submission** (harness/intake) and probe failures (bad harness, sanitize, quota, routes) in addition to the weights seal smoke above — see root [`AGENTS.md`](../../AGENTS.md). Proof submit → score (Sim or explicit 400/503) is [`proof-submit-e2e.md`](proof-submit-e2e.md); `--smoke` now probes it when `proof-challenge` is healthy.
+
+```bash
+# In-process + disposable --force-sim binary (no Docker, no Lium):
+./deploy/scripts/proof-submit-e2e.sh --http-tests --local-sim
+# Against the compose Proof port:
+PROOF_E2E_BASE=http://127.0.0.1:28100 ./deploy/scripts/proof-submit-e2e.sh --probe
+```
 
 Compose matrix equivalent (what the script runs):
 

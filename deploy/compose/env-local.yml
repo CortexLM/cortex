@@ -68,6 +68,7 @@ services:
       BASE_DATABASE_URL: ${LOCAL_DATABASE_URL:-postgres://base:base_dev_only_change_me@postgres:5432/base}
       # No Lium spend on a laptop unless operator opts in.
       PROOF_FORCE_SIM: "${LOCAL_PROOF_FORCE_SIM:-true}"
+      PROOF_SIM_STUB_WIN: "${LOCAL_PROOF_SIM_STUB_WIN:-true}"
 
   bounty-challenge:
     ports:

@@ -18,9 +18,12 @@ proof-score = { path = "../proof-score" }
 proof-store = { path = "../proof-store" }
 proof-task = { path = "../proof-task" }
 serde_json = "1"
+thiserror = "2"
 
 [dev-dependencies]
 crypto = { path = "../crypto" }
+db = { path = "../db", features = ["testing"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

@@ -113,10 +113,7 @@ pub async fn topics(client: &Client, json_out: bool) -> Result<(), String> {
     if json_out {
         return Ok(());
     }
-    let items = reply
-        .body
-        .as_array()
-        .or_else(|| reply.body.get("topics").and_then(Value::as_array));
+    let items = topic_list_items(&reply.body);
     match items {
         Some(list) if list.is_empty() => {
             println!("No open topics. Submits answer 503 until an operator publishes one.");
@@ -245,6 +242,14 @@ fn print_fields(body: &Value) {
     }
 }
 
+/// `GET /v1/proof/topics` returns `{ "items": [...] }`. Older shapes used
+/// a bare array or `{ "topics": [...] }`.
+fn topic_list_items(body: &Value) -> Option<&Vec<Value>> {
+    body.as_array()
+        .or_else(|| body.get("items").and_then(Value::as_array))
+        .or_else(|| body.get("topics").and_then(Value::as_array))
+}
+
 fn explain_failure(status: u16, message: &str) -> String {
     match status {
         400 => format!("refused ({message}). Nothing was stored and nothing was rented."),
@@ -286,5 +291,19 @@ mod tests {
         assert!(normalize_hex64("abcd", "hotkey").is_err());
         let ok = "a".repeat(64);
         assert_eq!(normalize_hex64(&ok, "hotkey").unwrap(), ok);
+    }
+
+    #[test]
+    fn topic_list_reads_the_items_wrapper() {
+        let body = serde_json::json!({
+            "items": [
+                { "id": "dt-no-ib-v0", "status": "open", "payout_mode": "wta" },
+                { "id": "muon-vs-adamw-10m-v0", "status": "open", "payout_mode": "wta" }
+            ]
+        });
+        let items = topic_list_items(&body).expect("items");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["id"], "dt-no-ib-v0");
+        assert_eq!(items[1]["id"], "muon-vs-adamw-10m-v0");
     }
 }

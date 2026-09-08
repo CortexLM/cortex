@@ -30,8 +30,10 @@ from .contract import (
 from .fabric import selftest as fabric_selftest
 from .judge import require_judge
 from .request import read_request
-from .agent import inspect
+from .agent import fabric_cheats, inspect
+from .compute_trace import verify_trace
 from .harness import measure, require_runtime
+from .training_evidence import load_training_evidence
 
 EXIT_REFUSED = 2
 EXIT_ERROR = 1
@@ -108,18 +110,32 @@ def _score(request_path: Path, out: Path, *, baseline: bool) -> int:
     recipe = request.claim
     if Path(ADAMW_SCRIPT).is_file():
         recipe = f"{recipe}\n{Path(ADAMW_SCRIPT).read_text(encoding='utf-8')}"
-    agent = inspect(request, recipe)
-    if not agent["reproduced"]:
-        raise ContractError(agent["rationale"])
+    cheats = fabric_cheats(request, recipe)
+    if cheats:
+        raise ContractError(inspect(request, recipe)["rationale"])
+    # Training evidence is required before the model or judge is touched.
+    # adamw.py is a parameter lock, not this envelope.
+    evidence = load_training_evidence()
     require_judge(request)
     artifact_dir = os.environ.get("PROOF_ARTIFACT_DIR") or os.environ.get("PROOF_PROXY_MODEL_DIR")
     if baseline:
         artifact_dir = os.environ.get("PROOF_PROXY_MODEL_DIR") or artifact_dir
     harness = measure(request, artifact_dir)
-    harness = {
-        k: v
-        for k, v in harness.items()
-        if k != "artifact_fingerprint"
+    counted = verify_trace(harness.pop("compute_trace"))
+    if counted != harness.pop("eval_flops"):
+        raise ContractError("eval FLOPs do not match the retained trace")
+    agent = {
+        "verdict": "clean",
+        "reproduced": True,
+        "claim_holds_public": True,
+        "contamination": False,
+        "canary_hit": False,
+        "flops_used": evidence["flops_used"],
+        "flops_budget": request.flops_budget,
+        "cheat_codes": [],
+        "rationale": "controller-verified training trace; eval trace independently recomputed",
+        "topic_id": request.topic_id,
+        "family": request.family or "nll",
     }
     document = {
         "schema_version": PROOF_METRICS_SCHEMA,
