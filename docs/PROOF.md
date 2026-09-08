@@ -212,9 +212,15 @@ Trust-root keygen is the throwaway owner path in
 ## HTTP
 
 - `GET /health`, `GET /v1/status` — `can_score`, `eval_backend`, `force_sim`,
-  `live_harvest_wired`, `baseline_sealed`, `open_topics`, `scorable_topics`
-  (open topics whose scorer is wired on this host; `can_score` is true when
-  it is non-empty), `registered_custom` (custom ids with a runner), public
+  `live_harvest_wired` (**Lium harvest only** — the `nll` / `throughput`
+  scorer; never true because a custom-family scorer is present),
+  `custom_family_wired` (a custom-family scorer with ≥1 registered runner is
+  on this host, independent of Lium), `baseline_sealed`, `open_topics`,
+  `scorable_topics` (open topics whose family's scorer is wired on this
+  host; `can_score` is true when it is non-empty), `registered_custom`
+  (custom ids with a runner), `custom_ready` (registered ids whose runner
+  could run right now: topic-VM orchestrator bearer file present, image
+  pinned — independent of which topics are open), public
   pin `inference` judge defaults (no origin), public `inference_offer` (RLM
   judge backend), public `eval_executor` (live `1x` executor offer) and pin
   `executor` ceilings. Never leak origins, keys, or holdout records.
@@ -231,7 +237,8 @@ Trust-root keygen is the throwaway owner path in
   open / unsealed baseline / empty digest / missing or closed RLM judge
   backend / missing, closed, or non-`1x` executor / agent down / run cut at
   the proof deadline / no registered or wired runner for the topic's
-  `custom_id` → **503**. Refusals must **not** persist rows. Scored rows
+  `custom_id` / `nll` or `throughput` topic on a host with no Lium harvest
+  → **503**. Refusals must **not** persist rows. Scored rows
   stamp `executor_offer_id` + `executor_commitment` next to the judge
   `inference_offer_id` + `config_commitment`.
 - A pass that the family scorer crowns (custom: green checklist and
@@ -477,6 +484,26 @@ whose runner reports its backend unwired) is open but not in
 `scorable_topics`; a submit is **503** with the root cause and no row.
 Publishing an `open` custom topic without a registered runner is **400**;
 the same document drafts fine.
+
+The registry is wired from the topic-VM orchestrator env alone, **not**
+from the Lium harvest. `proof-challenge` builds the RLM scorer over the
+registry whenever the env selects the live `FirecrackerOrchestrator`
+(`PROOF_VM_ORCHESTRATOR_URL` + `PROOF_VM_ORCHESTRATOR_TOKEN_FILE`, https)
+and `PROOF_VM_RUNNER_CUSTOM_IDS` registers at least one id; with no Lium
+credentials the mux is `FamilyMux::custom_only` — custom topics score over
+the topic VMs while every `nll` / `throughput` topic is open but not in
+`scorable_topics` and a submit there is **503** (`LiveHarvestUnavailable`,
+no row, no rent, never an in-process sim). No placeholder harvest is needed
+to open a custom topic. `GET /v1/status` reports the two families apart:
+such a host shows `live_harvest_wired: false` (that flag is the Lium harvest
+and nothing else) next to `custom_family_wired: true`, `registered_custom`,
+and `custom_ready`. Token file and image digest are still checked per
+request (**503** naming the variable; the id then drops out of
+`custom_ready` while staying in `registered_custom`). URL unset or refused
+(plain `http://` off loopback) keeps `UnwiredVmOrchestrator`, and with no
+Lium harvest either the host has no live scorer at all (both flags false,
+every submission **503**); the unwired stub never carries a mux, and ids
+listed over it register nothing.
 
 ### Artefacts and promotion
 

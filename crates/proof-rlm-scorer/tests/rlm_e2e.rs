@@ -1,10 +1,12 @@
 //! Full control-plane path for the generic RLM engine, without any VM,
 //! Lium, or paid inference: `POST /v1/submissions` on an open custom-family
-//! topic through `FamilyMux` → `RlmScorer` → registry → generic
-//! `VmBackedRunner` → fake orchestrator, with the memory RLM store and a
-//! temp artefact root.
+//! topic through `FamilyMux::custom_only` (the shape a host with no Lium
+//! harvest boots) → `RlmScorer` → registry → generic `VmBackedRunner` →
+//! fake orchestrator, with the memory RLM store and a temp artefact root.
 //!
-//! Covers: an unregistered `custom_id` is a 503 with no row; a custom
+//! Covers: `/v1/status` reports the custom family wired and ready while
+//! `live_harvest_wired` stays false; an unregistered `custom_id` is a 503
+//! with no row; a custom
 //! submission without an artefact locator is a 400 with no row; a green
 //! checklist scores and is crowned against the sealed value, with the
 //! miner's artefact locator and declaration reaching the runner and the
@@ -53,33 +55,11 @@ use proof_rlm_store::{MemoryRlmStore, PromotionRow, RlmStore};
 use proof_score::SealedBaseline;
 use proof_store::MemoryStore;
 use proof_task::{
-    holdout_commitment, synthetic_holdout, HoldoutRecord, HoldoutSplit, InferenceOffer, ProofPin,
-    TopicDocument, TopicError, TopicStatus, STRATUM_SIZE,
+    holdout_commitment, synthetic_holdout, HoldoutSplit, ProofPin, TopicDocument, TopicError,
+    TopicStatus, STRATUM_SIZE,
 };
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
-
-/// Default route: a harvest that is ready and never asked to score here.
-struct IdleHarvest;
-
-#[async_trait::async_trait]
-impl LiveScorer for IdleHarvest {
-    async fn score(
-        &self,
-        _pin: &ProofPin,
-        _topic: &TopicDocument,
-        _offer: &InferenceOffer,
-        _plan: &ExecutorPlan,
-        _frozen: &str,
-        _artifact: &str,
-        _artifact_uri: Option<&str>,
-        _declared_flops: u64,
-        _holdout: &[HoldoutRecord],
-        _claim: &str,
-    ) -> Result<ProofEvalDocument, EvalError> {
-        Err(EvalError::Backend("idle harvest".into()))
-    }
-}
 
 /// Open `1x` executor on the digest-scoped template of `pin` (host state the
 /// live path requires; the RLM path only records its plan commitment).
@@ -166,7 +146,8 @@ fn stack(register: bool) -> Stack {
     let root = tmp_root("stack");
     let scorer = RlmScorer::new(Arc::new(registry), rlm_store.clone())
         .with_artefacts(Some(ArtefactStore::new(&root)));
-    let mux = FamilyMux::new(Arc::new(IdleHarvest)).with_custom_family(Arc::new(scorer));
+    // No Lium harvest on this host: the custom family stands on its own.
+    let mux = FamilyMux::custom_only(Arc::new(scorer));
     let executor = test_executor(&pin);
     let app = proof_router(AppState {
         store,
@@ -271,6 +252,9 @@ async fn an_unregistered_custom_id_is_503_with_no_row() {
         status["registered_custom"].as_array().unwrap().is_empty(),
         "{status}"
     );
+    assert_eq!(status["live_harvest_wired"], false, "{status}");
+    assert_eq!(status["custom_family_wired"], false, "{status}");
+    assert!(status["custom_ready"].as_array().unwrap().is_empty());
     assert_eq!(status["can_score"], false, "{status}");
 
     let (st, body) = json_req(
@@ -299,13 +283,20 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
     } = stack(true);
     let tid = topic.id.clone();
 
-    // 0. Open, registered, scorable.
+    // 0. Open, registered, scorable — and reported per family: the custom
+    //    family is wired and ready, the Lium harvest is not.
     let (st, status) = json_req(app.clone(), "GET", "/v1/status", serde_json::json!({})).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(status["can_score"], true, "{status}");
     assert_eq!(status["scorable_topics"][0], tid, "{status}");
     assert_eq!(
         status["registered_custom"][0], topic.metric.custom_id,
+        "{status}"
+    );
+    assert_eq!(status["live_harvest_wired"], false, "{status}");
+    assert_eq!(status["custom_family_wired"], true, "{status}");
+    assert_eq!(
+        status["custom_ready"][0], topic.metric.custom_id,
         "{status}"
     );
     let (_, topics) = json_req(
