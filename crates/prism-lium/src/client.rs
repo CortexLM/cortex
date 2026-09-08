@@ -815,6 +815,14 @@ impl EvalJobBackend for LiumClient {
                 prism_lium_types::effective_gpu_count(selected.gpu_count, &selected.gpu_type);
             // Split hosts: requested width. NCU / non-split: whole host.
             let rent_gpu_count = selected.rent_count(spec.gpu_count);
+            // Exact-width specs (Proof 1x executor) never upsize to a whole host.
+            if !spec.accepts_rent_count(rent_gpu_count) {
+                last_err = format!(
+                    "abort: offer {} rents {rent_gpu_count}x, spec requires exactly {}x",
+                    selected.id, spec.gpu_count
+                );
+                continue;
+            }
             if pref.matches_pin("RTX 5090") && rent_gpu_count >= 8 && spec.gpu_count < 8 {
                 return Err(LiumError::Api(format!(
                     "abort: refusing {rent_gpu_count}× 5090 rent (no 8×5090 fallback)"
@@ -1018,6 +1026,7 @@ mod tests {
             preferred_offer_id: None,
             template_id: None,
             template_name: None,
+            exact_gpu_count: false,
         };
         let err = c.provision(&spec).await.unwrap_err();
         assert!(matches!(
@@ -1042,6 +1051,7 @@ mod tests {
             preferred_offer_id: None,
             template_id: None,
             template_name: None,
+            exact_gpu_count: false,
         };
         let err = c.provision(&spec).await.unwrap_err();
         assert!(matches!(err, LiumError::Api(_)));
@@ -1106,6 +1116,7 @@ mod tests {
             preferred_offer_id: None,
             template_id: None,
             template_name: None,
+            exact_gpu_count: false,
         }
     }
 
@@ -1593,6 +1604,44 @@ mod tests {
         let inst = c.provision(&provision_spec()).await.unwrap();
         assert_eq!(inst.id, "pod-ncu");
         assert_eq!(provision_spec().gpu_count, 1);
+    }
+
+    /// Proof `1x` executor: the same NCU host that the loose spec upsizes to
+    /// a 2× whole-host rent is skipped, and no rent is ever POSTed.
+    #[tokio::test]
+    async fn provision_exact_gpu_count_aborts_instead_of_renting_two() {
+        let server = MockServer::start().await;
+        mount_common(
+            &server,
+            serde_json::json!([{
+                "id": "4a36877c",
+                "machine_name": "NVIDIA B200",
+                "gpu_count": 2,
+                "available_gpu_count": 2,
+                "min_gpu_count_for_rental": 1,
+                "ncu_profiling_enabled": true,
+                "price_per_gpu": 5.5
+            }]),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/executors/4a36877c/rent"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "pod-ncu"})),
+            )
+            .expect(0)
+            .mount(&server)
+            .await;
+        let c = LiumClient::with_base_url("test-key", server.uri()).unwrap();
+        let mut spec = provision_spec();
+        spec.exact_gpu_count = true;
+        let err = c.provision(&spec).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("abort") && msg.contains("2x") && msg.contains("exactly 1x"),
+            "got {msg}"
+        );
+        server.verify().await;
     }
 
     #[tokio::test]

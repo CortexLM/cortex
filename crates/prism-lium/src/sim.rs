@@ -218,6 +218,7 @@ mod tests {
             preferred_offer_id: None,
             template_id: None,
             template_name: None,
+            exact_gpu_count: false,
         };
         let inst = b.provision(&spec).await.unwrap();
         assert!(!b.verify_terminated(&inst.id).await.unwrap());
@@ -283,6 +284,7 @@ mod tests {
             preferred_offer_id: None,
             template_id: None,
             template_name: None,
+            exact_gpu_count: false,
         };
         let e = b.provision(&spec).await.unwrap_err();
         assert!(matches!(
