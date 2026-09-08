@@ -15,6 +15,7 @@ Use this before every promote and after every incident. Architecture: [`ARCHITEC
 - [ ] Cloudflare / DO / Phala tokens live only in operator secret stores, not in docs or CI logs.
 - [ ] Proof miner BYOK (`LIUM_API_KEY` / `X-Lium-Api-Key`) is never written to git, compose env committed files, or logs. Control-plane Lium mounts under `deploy/secrets/lium` are files, mode **0400**, uid **65532**.
 - [ ] The eval-image InferenceOffer / `proxy_model` is the **RLM judge agent**, not a miner training proxy. Never commit judge credentials.
+- [ ] The Proof `EvalExecutorOffer` (`deploy/secrets/proof/eval_executor_offer.json`) is operator state, never git; it carries no secret but names the live Lium template. Only a `1x` offer may be open; `POST /v1/admin/proof/executor` is operator-bearer only.
 
 ---
 

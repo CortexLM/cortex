@@ -48,10 +48,11 @@ Holdout records are not included in public topic responses.
 
 `GET /challenge/proof/v1/status` shows `can_score`, `eval_backend`,
 `force_sim`, `live_harvest_wired`, `baseline_sealed`, public pin `inference`
-judge defaults (provider, model, mode, token caps — never the origin), and
-the public RLM judge `inference_offer` (id, kind, mode, model_ref, token
-caps, commitment, status). It never leaks holdout records, teacher hosts,
-origins, or keys.
+judge defaults (provider, model, mode, token caps — never the origin), the
+public RLM judge `inference_offer` (id, kind, mode, model_ref, token caps,
+commitment, status), and the public `eval_executor` — the `1x` Lium machine
+class your recipe is re-run on (template, shape, proof deadline, commitment,
+status). It never leaks holdout records, teacher hosts, origins, or keys.
 
 Muon, token superposition, and “decentralized training without InfiniBand”
 are *examples* of solutions or of topics — they are not the product.
@@ -72,9 +73,11 @@ curl -sS https://network.cortex.foundation/challenge/proof/v1/status
 
 `GET /challenge/proof/v1/status` shows `can_score`, `eval_backend`,
 `force_sim`, `live_harvest_wired`, `baseline_sealed`, `eval_image_digest`,
-public pin `inference` (no origin), public RLM judge `inference_offer`, and
+public pin `inference` (no origin), public RLM judge `inference_offer`,
+public `eval_executor` (plus the pin `executor` ceilings), and
 `open_topics`. It never leaks holdout records, teacher hosts, origins, or
-keys.
+keys. `GET /challenge/proof/v1/proof/executor` shows the executor alone with
+`ready` and a `reason` when it cannot rent.
 
 `can_score: false` means submits **503**. Nothing is stored and nothing is
 rented.
@@ -83,6 +86,7 @@ rented.
 |--------------|----------------|
 | `eval_image_digest` | Must be a `sha256:…` pin (live pin is `sha256:78b614a1…`). Empty → **503** |
 | `inference_offer` | Public RLM **judge** backend (id, kind, mode, model_ref, token caps, commitment, status). Missing/closed/misconfigured → **503**. You do not pass an offer id |
+| `eval_executor` | Public `1x` **executor**: the Lium machine class your recipe is re-run on (`lium_template_id`, `machine_shape`, `max_proof_deadline_s`, commitment, status). Your recipe must finish inside `max_proof_deadline_s` (≤ pin ceiling 7200 s; a topic may name a shorter one) on **one** GPU — the host never rents more. Missing/closed/any shape but `1x` → **503**. You do not pass or rent it |
 | `open_topics` empty | No currently `open` signed topic with a sealed baseline → **503** |
 | `baseline_sealed: false` | An open topic without `script_sha256` + `metrics_commitment` → **503** |
 | `live_harvest_wired: false` | Live RLM harvest is not connected → **503** |
@@ -162,7 +166,7 @@ code against the public split and checks the claim against those public
 numbers. A claim the code cannot support is `unreproduced_claim` / reject.
 
 ```bash
-ctx proof status          # can_score, inference_offer, eval_image_digest
+ctx proof status          # can_score, inference_offer, eval_executor, eval_image_digest
 ctx proof topics          # pick an open topic_id; read flops_budget + payout_mode
 
 ctx proof submit \
@@ -257,6 +261,8 @@ Refusals (**400** / **503**) do **not** persist a submission row.
 | **503** unsealed baseline | Topic open without both seal hashes | no | no |
 | **503** live harvest down / unparseable agent verdict | Host cannot judge | no | no |
 | **503** missing / closed RLM judge backend | Live `InferenceOffer` not scoring | no | no |
+| **503** missing / closed / non-`1x` executor | Live `eval_executor` cannot rent the `1x` machine | no | no |
+| **503** `proof deadline … exceeded` | Your recipe did not finish inside `max_proof_deadline_s`; the body carries the run's `stdout_tail` | no | no (pod torn down) |
 | **201** `rejected` + `contamination_evidence_missing` | Empty manifest | **yes** (rejected) | **no** |
 | **201** `rejected` + contamination | Holdout shard / corpus id in `manifest` | **yes** (rejected) | **no** |
 

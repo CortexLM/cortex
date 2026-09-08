@@ -34,10 +34,11 @@ chmod 0400 deploy/secrets/gateway_admin_token
 | `proof/topics.json` | proof-challenge | Signed topic documents (JSON array). **Never commit secrets**; the documents themselves are operator-published. Mode **0400**, uid **65532** |
 | `proof/holdouts.json` | proof-challenge | Per-topic holdout records (array or map keyed by `topic_id`). **Never commit.** Verified at boot against each topic's `holdout_commitment`. Mode **0400**, uid **65532** |
 | `proof/baselines.json` | proof-challenge | Sealed baseline measurements keyed by topic id. **Never commit.** Mode **0400**, uid **65532** |
-| `proof/admin_tokens` | proof-challenge | One operator bearer per line for `POST /v1/admin/proof/topics` |
+| `proof/admin_tokens` | proof-challenge | One operator bearer per line for `POST /v1/admin/proof/topics` and `POST /v1/admin/proof/executor` |
 | `proof/inference_offer.json` | proof-challenge | Live RLM judge `InferenceOffer` (provider kind, origin, mode, model_ref, token caps, `config_commitment`, status). Consumed by proof-eval; **not** a miner training proxy. **Never commit.** Missing/closed → `can_score=false` / 503. Mode **0400**, uid **65532** |
 | `proof/inference_api_key` | proof-challenge | Provider API key for the eval image. **Never commit, never log.** Mode **0400**, uid **65532** |
 | `proof/inference_base_url` | proof-challenge | Optional secret-backed origin (`PROOF_INFERENCE_BASE_URL_FILE`) when pin `[inference].base_url` and the topic omit one. **Never commit, never log.** Mode **0400**, uid **65532** |
+| `proof/eval_executor_offer.json` | proof-challenge | Live `1x` `EvalExecutorOffer` (`offer_id`, `lium_template_id`, `machine_shape`, `max_proof_deadline_s`, `eval_image_digest`, `config_commitment`, status). Sibling of the judge offer, no secret inside; still operator state, **never commit**. Build with `cargo run -p xtask -- proof-executor-offer …`; rotate live via `POST /v1/admin/proof/executor`. Missing/closed/shape ≠ pin `gpu_class` → `can_score=false` / 503. Mode **0400**, uid **65532** |
 | `bounty/admin_tokens` | bounty-challenge | Operator bearer for `POST /v1/admin/adjudicate` |
 | `bounty/session_secret` | bounty-challenge | Pairing session HMAC secret. Empty/missing no longer crashes boot (`/health` stays up; pairing will not survive restart). `remote-deploy.sh` fills a 32-byte value from urandom when the file is missing or 0-length. |
 
