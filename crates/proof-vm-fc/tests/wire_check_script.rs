@@ -253,7 +253,15 @@ async fn production_hosts_are_refused_case_insensitively_before_any_request() {
     ] {
         let (code, text) = tokio::task::spawn_blocking(move || {
             run_script_env(
-                &["submit-probe", "--cp", cp, "--topic", "x", "--expect", "400"],
+                &[
+                    "submit-probe",
+                    "--cp",
+                    cp,
+                    "--topic",
+                    "x",
+                    "--expect",
+                    "400",
+                ],
                 &[],
             )
         })
@@ -261,7 +269,10 @@ async fn production_hosts_are_refused_case_insensitively_before_any_request() {
         .expect("join");
         assert_eq!(code, 2, "{cp} must be refused:\n{text}");
         assert!(text.contains("refusing production host"), "{cp}: {text}");
-        assert!(!text.contains("POST"), "{cp}: no request may go out:\n{text}");
+        assert!(
+            !text.contains("POST"),
+            "{cp}: no request may go out:\n{text}"
+        );
     }
     // The agent URL is refused at env load, before boot-probe reads the bearer.
     let (secrets, _) = {
