@@ -426,10 +426,11 @@ orchestrators exist: `UnwiredVmOrchestrator` (the default; refuses, names
 `PROOF_VM_ORCHESTRATOR_URL` / `PROOF_VM_ORCHESTRATOR_TOKEN_FILE`) and the
 live `FirecrackerOrchestrator` (`crates/proof-vm-fc`), a thin HTTPS client of
 the `proof-vm-orchestrator` agent on a host with a working `/dev/kvm` —
-production: **dedicated DO metal preferred, never colocated on the CP**;
-staging: colocating the agent on the control-plane droplet with nested
-`/dev/kvm` is an **allowed exception, proven** on `cortex-staging` (fragile
-— if the boot fails, provision metal); never a Lium pod, never an emulator.
+production: **a dedicated DO droplet (`g-8vcpu-32gb`, nyc1, nested
+`/dev/kvm`) on the VPC, never colocated on the CP**; staging: colocating the
+agent on the control-plane droplet with nested `/dev/kvm` is an **allowed
+exception, proven** on `cortex-staging` (fragile — if the boot fails,
+provision the dedicated droplet); never a Lium pod, never an emulator.
 The host prefers it
 when `PROOF_VM_ORCHESTRATOR_URL` (https; plain http only on loopback) and
 `PROOF_VM_ORCHESTRATOR_TOKEN_FILE` are set; the bearer is a file re-read per
