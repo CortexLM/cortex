@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
@@ -12,7 +13,7 @@ import pytest
 from proof_eval.baked import baked_proxies, require_baked
 from proof_eval.contract import DEFAULT_PROXY, METRICS_MARKER, OK_MARKER
 from proof_eval.fabric import DT_NO_IB_GBPS, enforce
-from proof_eval.harness import _shard_text, require_local_model_dir
+from proof_eval.harness import _ensure_host_cc, _shard_text, require_local_model_dir
 from proof_eval.judge import call_judge, load_judge_api_key, require_judge
 from proof_eval.request import Constraints, HarvestRequest, canonical_json, holdout_commitment
 
@@ -32,6 +33,26 @@ def test_no_hf_default_proxy() -> None:
 def test_unknown_proxy_is_refused() -> None:
     with pytest.raises(Exception, match="not baked"):
         require_baked("Qwen/Qwen3-0.6B")
+
+
+def test_ensure_host_cc_sets_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CC", raising=False)
+    monkeypatch.delenv("CXX", raising=False)
+    monkeypatch.delenv("CUDAHOSTCXX", raising=False)
+    _ensure_host_cc()
+    assert os.environ["CC"] == "gcc"
+    assert os.environ["CXX"] == "g++"
+    assert os.environ["CUDAHOSTCXX"] == "g++"
+
+
+def test_ensure_host_cc_does_not_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CC", "clang")
+    monkeypatch.setenv("CXX", "clang++")
+    monkeypatch.setenv("CUDAHOSTCXX", "clang++")
+    _ensure_host_cc()
+    assert os.environ["CC"] == "clang"
+    assert os.environ["CXX"] == "clang++"
+    assert os.environ["CUDAHOSTCXX"] == "clang++"
 
 
 def test_local_model_dir_is_required() -> None:

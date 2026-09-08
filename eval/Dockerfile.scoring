@@ -2,11 +2,23 @@
 #
 # Scoring image. This is the digest the control plane pins.
 #
-# CUDA Ubuntu base — the live pod is a GPU machine. `/usr/bin/proof-eval` is
-# a regular file (COPY), not a symlink. The image ships no HF bake
-# (`baked_proxies.json` is empty) and enforces the 12.5 Gbit/s / no-IB /
-# no-NVLink / no-NCCL-fast-fabric cap. Harvest stages local weights at
-# `PROOF_PROXY_MODEL_DIR` and holdout shards at `PROOF_HOLDOUT_STORE`.
+# CUDA Ubuntu *runtime* base — the live pod is a GPU machine.
+# `/usr/bin/proof-eval` is a regular file (COPY), not a symlink. The image
+# ships no HF bake (`baked_proxies.json` is empty) and enforces the
+# 12.5 Gbit/s / no-IB / no-NVLink / no-NCCL-fast-fabric cap. Harvest stages
+# local weights at `PROOF_PROXY_MODEL_DIR` and holdout shards at
+# `PROOF_HOLDOUT_STORE`.
+#
+# Triton (pulled in via torch) JIT-compiles CUDA kernels on the first GPU
+# forward after proxy weights load (Qwen SDPA/flash). That needs a host C
+# compiler. We stay on the runtime tag and install `build-essential`
+# (~200MB: gcc/g++) rather than switching to
+# `nvidia/cuda:12.8.1-devel-ubuntu24.04` (several GB: nvcc + CUDA headers).
+# Triton's LLVM backend does not need nvcc for this stack. The live
+# failure on pin `ff21fd98` was "Failed to find C compiler" / exit 1
+# after weight load — not a missing `cuda.h`. If a later kernel compile
+# fails on missing CUDA headers, switch BASE_IMAGE to the matching devel
+# digest (do not invent a sha256).
 #
 #   docker build -f eval/Dockerfile.scoring -t proof-eval:scoring .
 #
@@ -28,6 +40,9 @@ ENV PYTHONUNBUFFERED=1 \
     HF_HUB_DISABLE_TELEMETRY=1 \
     TRANSFORMERS_VERBOSITY=error \
     TOKENIZERS_PARALLELISM=false \
+    CC=gcc \
+    CXX=g++ \
+    CUDAHOSTCXX=g++ \
     PROOF_GIT_SHA=${PROOF_GIT_SHA} \
     PROOF_SELFTEST_REQUIRE_RUNTIME=1
 
@@ -35,6 +50,7 @@ RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates curl openssh-server iproute2 \
+        build-essential \
         python3 python3-pip python3-venv; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tini \
         || curl -fsSL -o /usr/bin/tini \
@@ -47,7 +63,9 @@ RUN set -eux; \
     mkdir -p /run/sshd /root/.ssh /opt/proof-eval/baselines; \
     chmod 700 /root/.ssh; \
     test -x /usr/bin/python3; \
-    test -x /usr/bin/tini
+    test -x /usr/bin/tini; \
+    test -x /usr/bin/gcc; \
+    test -x /usr/bin/g++
 
 WORKDIR /opt/proof-eval
 COPY eval/pyproject.toml ./
@@ -80,6 +98,7 @@ RUN set -eux; \
     test -f /usr/bin/proof-eval; \
     test ! -L /usr/bin/proof-eval; \
     test -x /usr/bin/proof-eval; \
+    env -i PATH=/usr/bin:/bin /usr/bin/gcc --version >/dev/null; \
     env -i PATH=/usr/bin:/bin /usr/bin/proof-eval --help >/dev/null; \
     env -i PATH=/usr/bin:/bin /usr/bin/proof-eval score --help >/dev/null; \
     env -i PATH=/usr/bin:/bin HOME=/root PROOF_SELFTEST_REQUIRE_RUNTIME=1 \
