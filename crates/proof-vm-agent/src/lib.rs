@@ -1,7 +1,10 @@
 //! `proof-vm-orchestrator` agent library.
 //!
-//! The agent runs on a **dedicated KVM host** (never the control-plane
-//! droplet, never a Lium pod) and is the only thing that talks to Firecracker.
+//! The agent runs on a host with a working `/dev/kvm` — **dedicated DO
+//! metal** in production (never colocated on the control plane); on staging
+//! the control-plane droplet itself with nested `/dev/kvm` is an allowed,
+//! proven exception; never a Lium pod — and is the only thing that talks to
+//! Firecracker.
 //! The Proof control plane reaches it over HTTPS with a bearer read from a
 //! file ([`BearerAuth`]) and drives four verbs (`proof_vm_proto::paths`):
 //!

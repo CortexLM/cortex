@@ -284,10 +284,14 @@ impl FirecrackerOrchestrator {
         if let Some(b) = body {
             req = req.json(b);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| backend(format!("orchestrator unreachable ({method} {path}): {e}")))?;
+        // The error travels into a miner-facing 503: keep the route, drop the
+        // agent URL reqwest would otherwise print.
+        let resp = req.send().await.map_err(|e| {
+            backend(format!(
+                "orchestrator unreachable ({method} {path}): {}",
+                e.without_url()
+            ))
+        })?;
         let status = resp.status();
         if status == StatusCode::NOT_FOUND {
             return Ok(None);

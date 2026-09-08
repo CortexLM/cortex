@@ -13,6 +13,7 @@ name = "proof-challenge"
 path = "src/main.rs"
 
 [dependencies]
+async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 challenge-keys = { path = "../../crates/challenge-keys" }
 clap = { version = "4", features = ["derive", "env"] }
@@ -36,6 +37,7 @@ tracing = "0.1"
 crypto = { path = "../../crates/crypto" }
 hex = "0.4"
 proof-rlm = { path = "../../crates/proof-rlm", features = ["test-fixtures"] }
+proof-vm-agent = { path = "../../crates/proof-vm-agent", features = ["test-fixtures"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "process", "time"] }

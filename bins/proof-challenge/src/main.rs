@@ -17,13 +17,15 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use challenge_keys::load_challenge_secret;
 use clap::Parser;
 use prism_lium::LiumClient;
 use proof_challenge::{
     executor_slot, hash_admin_token, parse_holdout_file, proof_router, AppState,
     BaselineMeasurement, EvalBackend, EvalExecutorOffer, HarvestOverrides, InferenceOffer,
-    LiveScorer, MemoryStore, ProofPin, TopicDocument, CHALLENGE_ID, SCORING_VERSION,
+    LiveScorer, MemoryStore, ProofPin, TopicDocument, VmAgentHealth, VmOrchestratorProbe,
+    VmOrchestratorReport, CHALLENGE_ID, SCORING_VERSION,
 };
 use proof_eval::{custom_ids_ref, registered_custom, FamilyMux};
 use proof_harvest::{HarvestLimits, LiumProofHarvest};
@@ -183,7 +185,10 @@ fn run(cli: &Cli) -> Result<(), String> {
         cli.proxy_model_dir.clone(),
         cli.holdout_store.clone(),
     );
-    let live_scorer = live_scorer(backend, harvest, rlm_store, &cli.artefact_root);
+    // One topic-VM orchestrator per process: the runner registry drives it
+    // and the admin probe reports on the same client (bearer file, pin, CA).
+    let vm = Arc::new(topic_vm_orchestrator());
+    let live_scorer = live_scorer(backend, harvest, rlm_store, &cli.artefact_root, &vm);
     log_live_wiring(backend, live_scorer.as_deref(), &cli.artefact_root);
 
     let store = MemoryStore::new();
@@ -210,6 +215,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         executor: executor_slot(executor),
         judge_api_key,
         admin_hashes: Arc::new(load_admin_hashes(cli.admin_tokens_file.as_deref())),
+        vm_probe: Some(vm),
         epoch: 0,
     };
     rt.block_on(serve(cli.bind, state))
@@ -312,11 +318,12 @@ fn live_scorer(
     harvest: Option<Arc<dyn LiveScorer>>,
     rlm_store: Arc<dyn RlmStore>,
     artefact_root: &Path,
+    vm: &TopicVm,
 ) -> Option<Arc<dyn LiveScorer>> {
     if backend != EvalBackend::Lium {
         return None;
     }
-    let custom = custom_family(rlm_store, artefact_root);
+    let custom = custom_family(rlm_store, artefact_root, vm);
     match harvest {
         Some(harvest) => Some(Arc::new(
             FamilyMux::new(harvest).with_custom_family(custom.scorer),
@@ -343,14 +350,14 @@ struct CustomFamily {
 ///
 /// No benchmark, model, or repository is compiled in: the registry holds only
 /// the generic `VmBackedRunner`, under the custom ids the operator lists in
-/// `PROOF_VM_RUNNER_CUSTOM_IDS`, over the topic-VM orchestrator
-/// [`topic_vm_orchestrator`] resolved. With no ids the registry is empty and
-/// every custom topic answers 503 (`RunnerUnwired`); with ids but an unwired
-/// or unpinned orchestrator, 503 naming the missing env var. It never falls
-/// back to the digest-pinned harvest and never spends.
-fn custom_family(rlm_store: Arc<dyn RlmStore>, artefact_root: &Path) -> CustomFamily {
-    let vm = topic_vm_orchestrator();
-    let registry = runner_registry(&vm);
+/// `PROOF_VM_RUNNER_CUSTOM_IDS`, over the topic-VM orchestrator `vm`
+/// ([`topic_vm_orchestrator`] resolved once per process). With no ids the
+/// registry is empty and every custom topic answers 503 (`RunnerUnwired`);
+/// with ids but an unwired or unpinned orchestrator, 503 naming the missing
+/// env var. It never falls back to the digest-pinned harvest and never
+/// spends.
+fn custom_family(rlm_store: Arc<dyn RlmStore>, artefact_root: &Path, vm: &TopicVm) -> CustomFamily {
+    let registry = runner_registry(vm);
     let standalone = vm.live && !registry.is_empty();
     let scorer = RlmScorer::new(Arc::new(registry), rlm_store)
         .with_artefacts(Some(ArtefactStore::new(artefact_root)));
@@ -360,7 +367,10 @@ fn custom_family(rlm_store: Arc<dyn RlmStore>, artefact_root: &Path) -> CustomFa
     }
 }
 
-/// What the topic-VM orchestrator env resolved to.
+/// What the topic-VM orchestrator env resolved to. Resolved once per process
+/// and shared: the runner registry drives `orchestrator`, and
+/// `GET /v1/admin/proof/vm-orchestrator` reports through the same client
+/// ([`VmOrchestratorProbe`]) — same bearer file, same pin, same TLS roots.
 struct TopicVm {
     orchestrator: Arc<dyn TopicVmOrchestrator>,
     /// RLM VM template the runner boots for topics without a VM.
@@ -369,6 +379,11 @@ struct TopicVm {
     /// file env, https). False = `UnwiredVmOrchestrator`, which refuses
     /// every call.
     live: bool,
+    /// The live client, concretely, for the probe's agent health call. The
+    /// same allocation as `orchestrator`; `None` when unwired.
+    fc: Option<Arc<FirecrackerOrchestrator>>,
+    /// Why nothing is wired (names the env vars). Empty when live.
+    unwired_reason: String,
 }
 
 /// The topic-VM orchestrator this host talks to, plus the RLM VM template.
@@ -397,35 +412,79 @@ fn topic_vm_orchestrator() -> TopicVm {
                      topics answer 503 until fixed"
                 ),
             }
+            let fc = Arc::new(fc);
             TopicVm {
-                orchestrator: Arc::new(fc),
+                orchestrator: fc.clone(),
                 template,
                 live: true,
+                fc: Some(fc),
+                unwired_reason: String::new(),
             }
         }
         Ok(None) => {
-            tracing::warn!(
+            let reason = format!(
                 "no topic-vm orchestrator ({VM_ORCHESTRATOR_URL_ENV} / \
-                 {VM_ORCHESTRATOR_TOKEN_FILE_ENV} / {RLM_VM_IMAGE_DIGEST_ENV} unset); every custom \
-                 topic answers 503 and nothing runs on this host"
+                 {VM_ORCHESTRATOR_TOKEN_FILE_ENV} / {RLM_VM_IMAGE_DIGEST_ENV} unset)"
             );
-            TopicVm::unwired()
+            tracing::warn!(
+                "{reason}; every custom topic answers 503 and nothing runs on this host"
+            );
+            TopicVm::unwired(reason)
         }
         Err(e) => {
-            tracing::warn!(
-                "topic-vm orchestrator refused ({e}); staying unwired, custom topics 503"
-            );
-            TopicVm::unwired()
+            let reason = format!("topic-vm orchestrator refused ({e})");
+            tracing::warn!("{reason}; staying unwired, custom topics 503");
+            TopicVm::unwired(reason)
         }
     }
 }
 
 impl TopicVm {
-    fn unwired() -> Self {
+    fn unwired(reason: String) -> Self {
         Self {
             orchestrator: Arc::new(UnwiredVmOrchestrator),
             template: VmTemplate::from_env(),
             live: false,
+            fc: None,
+            unwired_reason: reason,
+        }
+    }
+}
+
+#[async_trait]
+impl VmOrchestratorProbe for TopicVm {
+    /// `ready()` (bearer file + pin, re-read now) and one agent health call
+    /// through the very client the runner uses — the same TLS roots, the same
+    /// bearer file — so a green answer here is the wire the runner will use.
+    /// Unwired hosts report the boot-time reason. Never the bearer.
+    async fn probe(&self) -> VmOrchestratorReport {
+        let Some(fc) = &self.fc else {
+            return VmOrchestratorReport::unwired(
+                &self.unwired_reason,
+                &self.template.image_digest,
+            );
+        };
+        let template = fc.template();
+        let ready = fc.ready();
+        let health = fc.health().await;
+        VmOrchestratorReport {
+            orchestrator: "firecracker".into(),
+            ready: ready.is_ok(),
+            reason: ready.err().map(|e| e.to_string()).unwrap_or_default(),
+            image_digest: template.image_digest.clone(),
+            vcpus: template.vcpus,
+            mem_mib: template.mem_mib,
+            agent: health.as_ref().ok().map(|h| VmAgentHealth {
+                api_version: h.api_version,
+                ready: h.ready,
+                reason: h.reason.clone(),
+                hypervisor: h.hypervisor.clone(),
+                vms: h.vms,
+            }),
+            agent_error: health.err().map(|e| e.to_string()),
+            live_harvest_wired: false,
+            custom_family_wired: false,
+            registered_custom: Vec::new(),
         }
     }
 }
@@ -779,6 +838,7 @@ mod tests {
             Some(harvest),
             Arc::new(MemoryRlmStore::new()),
             &root,
+            &topic_vm_orchestrator(),
         )
         .expect("a wired harvest is the live scorer");
         assert!(mux.harvest_wired(), "the Lium harvest is the default route");
@@ -971,6 +1031,98 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The admin probe reports through the very client the runner drives: an
+    /// unwired host names the env vars; a wired one shows `ready()` next to
+    /// one agent health call, and a bad bearer, a dead agent, or an emptied
+    /// bearer file each show up as data — never as a fallback, never as the
+    /// bearer itself.
+    #[test]
+    fn vm_orchestrator_probe_reports_ready_agent_bearer_and_outage_as_data() {
+        const TOKEN: &str = "probe-bearer-not-a-real-secret";
+        let _guard = LIUM_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_vm_env();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let unwired = topic_vm_orchestrator();
+        let report = rt.block_on(unwired.probe());
+        assert_eq!(report.orchestrator, "unwired");
+        assert!(!report.ready);
+        assert!(
+            report.reason.contains(VM_ORCHESTRATOR_URL_ENV),
+            "{report:?}"
+        );
+        assert!(report.agent.is_none() && report.agent_error.is_none());
+
+        // Two copies of the bearer, as on a real deployment: the agent's
+        // /etc/proof-vm/token and the CP's PROOF_VM_ORCHESTRATOR_TOKEN_FILE.
+        let agent_token = proof_vm_agent::fixtures::token_file("probe-agent", TOKEN);
+        let token = proof_vm_agent::fixtures::token_file("probe-cp", TOKEN);
+        let agent = rt.block_on(proof_vm_agent::fixtures::FakeAgent::serve(
+            proof_vm_agent::fixtures::FakeHypervisor::new(0.8),
+            &agent_token,
+        ));
+        std::env::set_var(VM_ORCHESTRATOR_URL_ENV, agent.url());
+        std::env::set_var(VM_ORCHESTRATOR_TOKEN_FILE_ENV, &token);
+        std::env::set_var(
+            RLM_VM_IMAGE_DIGEST_ENV,
+            format!("sha256:{}", "ab".repeat(32)),
+        );
+        let wired = topic_vm_orchestrator();
+        assert!(wired.live && wired.fc.is_some());
+        let report = rt.block_on(wired.probe());
+        assert_eq!(report.orchestrator, "firecracker");
+        assert!(report.ready, "{report:?}");
+        assert_eq!((report.vcpus, report.mem_mib), (4, 8_192));
+        let health = report.agent.as_ref().expect("agent answered");
+        assert!(health.ready && health.hypervisor == "fake" && health.vms == 0);
+        assert_eq!(report.agent_error, None);
+        let dump = serde_json::to_string(&report).expect("json");
+        assert!(!dump.contains(TOKEN), "bearer leaked: {dump}");
+
+        std::fs::write(&token, "another-bearer-not-a-real-secret\n").expect("rotate one side");
+        let report = rt.block_on(wired.probe());
+        assert!(
+            report.ready,
+            "a non-empty bearer file is ready on the client"
+        );
+        assert!(report.agent.is_none());
+        assert!(
+            report
+                .agent_error
+                .as_deref()
+                .is_some_and(|e| e.contains("refused the bearer")),
+            "{report:?}"
+        );
+
+        agent.stop();
+        std::fs::write(&token, format!("{TOKEN}\n")).expect("restore");
+        let report = rt.block_on(wired.probe());
+        assert!(
+            report
+                .agent_error
+                .as_deref()
+                .is_some_and(|e| e.contains("unreachable")),
+            "{report:?}"
+        );
+
+        std::fs::write(&token, "\n").expect("empty");
+        let report = rt.block_on(wired.probe());
+        assert!(!report.ready);
+        assert!(
+            report.reason.contains(VM_ORCHESTRATOR_TOKEN_FILE_ENV),
+            "{report:?}"
+        );
+        assert!(report.agent.is_none(), "no call without a bearer");
+        clear_vm_env();
+        let _ = std::fs::remove_file(&token);
+        let _ = std::fs::remove_file(&agent_token);
+    }
+
     /// Full topic-VM env (https URL, bearer file, image pin, one custom id),
     /// **no** Lium credentials: the custom family stands on its own. The
     /// registry is non-empty, the mux passes the host-wide gate and the
@@ -1007,6 +1159,7 @@ mod tests {
             harvest,
             Arc::new(MemoryRlmStore::new()),
             &root,
+            &topic_vm_orchestrator(),
         )
         .expect("the custom family is wired from the topic-vm env alone");
         assert!(
@@ -1072,7 +1225,8 @@ mod tests {
             EvalBackend::Sim,
             None,
             Arc::new(MemoryRlmStore::new()),
-            &root
+            &root,
+            &topic_vm_orchestrator(),
         )
         .is_none());
         clear_vm_env();
@@ -1098,7 +1252,14 @@ mod tests {
         let store: Arc<dyn RlmStore> = Arc::new(MemoryRlmStore::new());
         let none = |label: &str| {
             assert!(
-                live_scorer(EvalBackend::Lium, None, store.clone(), &root).is_none(),
+                live_scorer(
+                    EvalBackend::Lium,
+                    None,
+                    store.clone(),
+                    &root,
+                    &topic_vm_orchestrator()
+                )
+                .is_none(),
                 "{label}: nothing may be wired"
             );
         };

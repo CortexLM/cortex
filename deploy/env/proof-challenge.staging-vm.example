@@ -1,0 +1,65 @@
+# operator-managed, never committed with values filled in.
+#
+# STAGING overlay for deploy/env/proof-challenge.env on the staging MASTER
+# droplet (`cortex-staging`, compose role-master + env-staging): the CLIENT
+# side of the Proof topic-VM orchestrator. proof-challenge only talks HTTPS
+# to `proof-vm-orchestrator`, a host systemd unit — on staging colocated on
+# this same droplet with nested /dev/kvm (allowed exception, proven on
+# cortex-staging; fragile — if the boot fails, provision metal), in
+# production on dedicated DO metal, never colocated on the CP
+# (deploy/env/proof-vm-orchestrator.staging.example).
+#
+# Use: append these keys to the age-encrypted source of proof-challenge.env,
+# re-materialize, restart proof-challenge, then
+#   ./deploy/scripts/proof-vm-wire-check.sh all
+# Runbook: docs/runbooks/proof-vm-orchestrator.md § DigitalOcean staging.
+#
+# Every REPLACE_WITH_* value is a placeholder that FAILS CLOSED as written
+# (not https / not 64 hex / not a custom id → unwired or 503). No digest in
+# this file is real: take PROOF_RLM_VM_IMAGE_DIGEST from `sha256sum` of the
+# RLM rootfs you staged on the KVM host. Do not invent one.
+
+# HTTPS URL of the agent on its private (VPC) address — never a public one.
+# Colocated: this droplet's VPC IP, not 127.0.0.1 (inside the proof-challenge
+# container loopback is the container). Plain http:// off loopback is refused
+# at boot and the host stays unwired.
+PROOF_VM_ORCHESTRATOR_URL=https://REPLACE_WITH_AGENT_HOST_PRIVATE_ADDRESS:8200
+
+# Bearer FILE, container path. Host file: deploy/secrets/proof/vm_orchestrator_token
+# (mode 0400, uid 65532), same bytes as the agent's /etc/proof-vm/token (a
+# second copy even when colocated: the container reads its own mount).
+# Re-read per request: rotate by rewriting both files, no restart.
+PROOF_VM_ORCHESTRATOR_TOKEN_FILE=/run/base/proof/vm_orchestrator_token
+
+# PEM root the agent certificate chains to (staging uses a private CA).
+# Remove the line when the certificate chains to a public root. The
+# certificate MUST carry a SAN matching the host in the URL: the CP's rustls
+# client refuses CN-only certificates even when curl accepts them.
+PROOF_VM_ORCHESTRATOR_CA_FILE=/run/base/proof/vm_orchestrator_ca.pem
+
+# sha256: pin of the RLM rootfs the agent boots, staged on the KVM host as
+# PROOF_VM_AGENT_IMAGE_DIR/sha256-<hex>.ext4. Empty or malformed = unpinned =
+# ready() 503 naming this variable; nothing ever boots.
+PROOF_RLM_VM_IMAGE_DIGEST=sha256:REPLACE_WITH_SHA256SUM_OF_THE_STAGED_RLM_ROOTFS
+
+# Locked RLM VM shape (4 vCPU / 8192 MiB). Leave as is.
+PROOF_RLM_VM_VCPUS=4
+PROOF_RLM_VM_MEM_MIB=8192
+
+# Custom metric ids the generic VmBackedRunner serves on this host: exactly
+# the ids named by the signed staging topics (comma-separated). Registration
+# is an operator action — empty = empty registry = every custom topic 503.
+# The custom family is wired from these four variables alone: no Lium
+# credentials needed (live_harvest_wired is Lium-only and reads false on a
+# custom-only host — expected). Check custom_family_wired / registered_custom /
+# custom_ready on GET /v1/status instead.
+PROOF_VM_RUNNER_CUSTOM_IDS=REPLACE_WITH_CUSTOM_ID_FROM_THE_SIGNED_STAGING_TOPIC
+
+# Operator bearers for /v1/admin/* (topics, executor, vm-orchestrator probe).
+# The wire check reads the first line of deploy/secrets/proof/admin_tokens.
+PROOF_ADMIN_TOKENS_FILE=/run/base/proof/admin_tokens
+
+# Presence-probed at awaiting_owner_keys only. The MATERIAL the RLM uses is
+# staged into the topic VM by the KVM-host agent from its own
+# PROOF_VM_AGENT_OWNER_KEY_DIR; this droplet never reads or sends it.
+# PROOF_RLM_OWNER_INFERENCE_KEY_FILE=/run/base/proof/rlm_owner_inference_key

@@ -1,9 +1,14 @@
 [Unit]
-Description=Proof topic-VM orchestrator (Firecracker + jailer agent; dedicated KVM host only)
+Description=Proof topic-VM orchestrator (Firecracker + jailer agent; host with /dev/kvm)
 Documentation=https://github.com/CortexLM/cortex/blob/main/docs/runbooks/proof-vm-orchestrator.md
-# Never install this unit on a control-plane droplet or a Lium pod: it needs
-# /dev/kvm, a pinned kernel + rootfs images, and CAP_NET_ADMIN for the per-VM
-# TAP + nftables allowlist. The control plane reaches it over HTTPS only.
+# Runs only where /dev/kvm works. Production: dedicated DO metal preferred,
+# never colocated on the control plane. Staging: sharing the control-plane
+# droplet with nested /dev/kvm is an allowed exception, proven on
+# cortex-staging (fragile — if the boot fails, provision metal). Never a
+# Lium pod. It needs /dev/kvm, a pinned kernel + rootfs images, and
+# CAP_NET_ADMIN for the per-VM TAP + nftables allowlist. The control plane
+# reaches it over HTTPS only (on its private address, never loopback from a
+# container).
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/dev/kvm

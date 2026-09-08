@@ -232,6 +232,16 @@ Trust-root keygen is the throwaway owner path in
   document. Pin-validated (**400** keeps the previous offer); `status: closed`
   takes the executor down live. In-memory until restart, like submissions —
   update `PROOF_EVAL_EXECUTOR_OFFER_FILE` to persist.
+- `GET /v1/admin/proof/vm-orchestrator` — operator bearer; read-only probe
+  of the topic-VM orchestrator through the host's own client: `orchestrator`
+  (`firecracker` / `unwired`), `ready` + `reason` (bearer file, RLM image
+  pin), the locked template, one agent health call (`agent` /
+  `agent_error`), plus the host gates `custom_family_wired`,
+  `registered_custom`, and `live_harvest_wired` (Lium only — informational
+  for the custom family). Always **200** once authorised — a broken wire is
+  data. Names env vars and container
+  paths, never the bearer. Run over loopback; wrapped by
+  [`deploy/scripts/proof-vm-wire-check.sh`](../deploy/scripts/proof-vm-wire-check.sh).
 - `POST /v1/submissions` **requires** `topic_id`. Missing/unknown/not-open →
   **400**. Miners do **not** bind the judge offer or the executor offer. Zero
   open / unsealed baseline / empty digest / missing or closed RLM judge
@@ -415,8 +425,12 @@ rule set, request) — never a host path, a key, or a judge origin. Two
 orchestrators exist: `UnwiredVmOrchestrator` (the default; refuses, names
 `PROOF_VM_ORCHESTRATOR_URL` / `PROOF_VM_ORCHESTRATOR_TOKEN_FILE`) and the
 live `FirecrackerOrchestrator` (`crates/proof-vm-fc`), a thin HTTPS client of
-the `proof-vm-orchestrator` agent on a **dedicated KVM host** (never the
-control-plane droplet, never a Lium pod, never nested). The host prefers it
+the `proof-vm-orchestrator` agent on a host with a working `/dev/kvm` —
+production: **dedicated DO metal preferred, never colocated on the CP**;
+staging: colocating the agent on the control-plane droplet with nested
+`/dev/kvm` is an **allowed exception, proven** on `cortex-staging` (fragile
+— if the boot fails, provision metal); never a Lium pod, never an emulator.
+The host prefers it
 when `PROOF_VM_ORCHESTRATOR_URL` (https; plain http only on loopback) and
 `PROOF_VM_ORCHESTRATOR_TOKEN_FILE` are set; the bearer is a file re-read per
 request and never logged; `PROOF_RLM_VM_IMAGE_DIGEST` pins the RLM VM rootfs

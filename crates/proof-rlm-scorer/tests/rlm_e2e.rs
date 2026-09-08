@@ -158,6 +158,7 @@ fn stack(register: bool) -> Stack {
         executor: executor_slot(Some(executor)),
         judge_api_key: Some("test-judge-key".into()),
         admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+        vm_probe: None,
         epoch: 0,
     });
     Stack {

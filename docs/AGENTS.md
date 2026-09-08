@@ -20,7 +20,7 @@ When a spike or evidence report conflicts with a frozen spec or runbook, the nor
 | [`runbooks/local-testnet-e2e.md`](runbooks/local-testnet-e2e.md) | Local laptop/VM full subnet stack on testnet 541 + ephemeral gateway tunnel |
 | [`runbooks/staging-testnet-e2e.md`](runbooks/staging-testnet-e2e.md) | Staging droplet testnet end-to-end validation |
 | [`runbooks/proof-submit-e2e.md`](runbooks/proof-submit-e2e.md) | Proof (and Bounty) submit → score: cargo tests, local `--force-sim`, staging curl/ctx |
-| [`runbooks/proof-vm-orchestrator.md`](runbooks/proof-vm-orchestrator.md) | Proof topic VMs: Firecracker + jailer agent on the dedicated KVM host, CP wiring, sister-guest verification, security model |
+| [`runbooks/proof-vm-orchestrator.md`](runbooks/proof-vm-orchestrator.md) | Proof topic VMs: Firecracker + jailer agent on the dedicated KVM host, CP wiring, DigitalOcean staging wire + fail-closed matrix + happy path (`deploy/scripts/proof-vm-wire-check.sh`), sister-guest verification, security model |
 | [`runbooks/trust-root-rotation.md`](runbooks/trust-root-rotation.md) | Trust-root key rotation |
 | [`runbooks/gateway-failover.md`](runbooks/gateway-failover.md) | Gateway kill/restart / failover checks |
 | [`runbooks/measurement-repin-socket-proxy.md`](runbooks/measurement-repin-socket-proxy.md) | Socket-proxy measurement re-pin |

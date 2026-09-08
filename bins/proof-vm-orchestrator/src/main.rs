@@ -1,12 +1,14 @@
-//! `proof-vm-orchestrator` — Firecracker topic-VM agent for the **dedicated
-//! KVM host** (HTTPS `:8200`).
+//! `proof-vm-orchestrator` — Firecracker topic-VM agent for a **KVM host**
+//! (HTTPS `:8200`): dedicated DO metal in production (never colocated on the
+//! control plane); on staging the control-plane droplet itself with nested
+//! `/dev/kvm` is an allowed, proven exception.
 //!
 //! The Proof control plane (`proof-challenge`, `FirecrackerOrchestrator`)
 //! is its only client. It boots one jailed RLM microVM per topic from the
 //! digest the control plane pins, runs every miner artefact in a sister
 //! microVM with no network, and stamps what it saw onto the report. It
-//! never runs on the control-plane droplet, never on a Lium pod, and never
-//! receives a key from the control plane — owner key material is read from
+//! never runs on a Lium pod, never without `/dev/kvm`, and never receives a
+//! key from the control plane — owner key material is read from
 //! `--owner-key-dir` on this host and staged over vsock.
 //!
 //! Fail-closed at boot: malformed kernel / sister image pins exit 1, a

@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 hex = "0.4"
 proof-eval = { path = "../proof-eval" }
@@ -22,7 +23,6 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 
 [dev-dependencies]
-async-trait = "0.1"
 crypto = { path = "../crypto" }
 http-body-util = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
