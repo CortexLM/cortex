@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use proof_eval::{EvalError, LiveScorer, ProofEvalDocument, PROOF_METRICS_SCHEMA};
+use proof_executor::ExecutorPlan;
 use proof_rlm::{
     authorize_spend, decide_promote, ArtifactFile, Checklist, CustomRunReport, CustomRunRequest,
     Lifecycle, LogFile, PromoteDecision, RlmEvent, RlmState, RuleSet, RunnerError, RunnerRegistry,
@@ -297,6 +298,7 @@ impl RlmScorer {
         pin: &ProofPin,
         topic: &TopicDocument,
         offer: &InferenceOffer,
+        plan: &ExecutorPlan,
         frozen_digest: &str,
         artifact_digest: &str,
         claim: &str,
@@ -317,7 +319,8 @@ impl RlmScorer {
             None,
             claim,
         )
-        .map_err(|e| map_runner(&custom_id, e))?;
+        .map_err(|e| map_runner(&custom_id, e))?
+        .with_executor_plan(plan.deadline_s, &plan.config_commitment);
         let inspected = runner
             .inspect(&req, &rules)
             .await
@@ -489,6 +492,7 @@ impl LiveScorer for RlmScorer {
         pin: &ProofPin,
         topic: &TopicDocument,
         offer: &InferenceOffer,
+        plan: &ExecutorPlan,
         frozen_digest: &str,
         artifact_digest: &str,
         _holdout: &[HoldoutRecord],
@@ -502,7 +506,15 @@ impl LiveScorer for RlmScorer {
         self.apply(topic, RlmEvent::SubmissionReceived, frozen_digest)
             .await?;
         let out = self
-            .evaluate(pin, topic, offer, frozen_digest, artifact_digest, claim)
+            .evaluate(
+                pin,
+                topic,
+                offer,
+                plan,
+                frozen_digest,
+                artifact_digest,
+                claim,
+            )
             .await;
         if out.is_err() {
             // No row will follow a refusal, so the verdict phase is over now.

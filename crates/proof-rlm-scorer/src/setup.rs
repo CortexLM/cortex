@@ -163,7 +163,7 @@ impl TopicSetup {
             deadline_s: topic
                 .eval_executor
                 .max_proof_deadline_s
-                .unwrap_or(pin.max_proof_deadline_s),
+                .unwrap_or(pin.max_proof_deadline_s_ceiling),
         };
         let spec = TopicVmSpec::for_topic(&topic.id, self.template.clone(), sandbox);
         spec.validate()?;

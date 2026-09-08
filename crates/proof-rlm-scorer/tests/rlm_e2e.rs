@@ -28,7 +28,8 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use proof_eval::{EvalBackend, EvalError, FamilyMux, LiveScorer, ProofEvalDocument};
-use proof_http::{hash_admin_token, proof_router, AppState};
+use proof_executor::{EvalExecutorOffer, ExecutorPlan};
+use proof_http::{executor_slot, hash_admin_token, proof_router, AppState};
 use proof_rlm::fixtures::{offer, pin, pinned_template, topic, FakeOrchestrator};
 use proof_rlm::{
     FileKeysProbe, OwnerDecision, RlmEvent, RlmState, RunnerRegistry, StaticOwnerHook,
@@ -55,6 +56,7 @@ impl LiveScorer for IdleHarvest {
         _pin: &ProofPin,
         _topic: &TopicDocument,
         _offer: &InferenceOffer,
+        _plan: &ExecutorPlan,
         _frozen: &str,
         _artifact: &str,
         _holdout: &[HoldoutRecord],
@@ -62,6 +64,23 @@ impl LiveScorer for IdleHarvest {
     ) -> Result<ProofEvalDocument, EvalError> {
         Err(EvalError::Backend("idle harvest".into()))
     }
+}
+
+/// Open `1x` executor on the digest-scoped template of `pin` (host state the
+/// live path requires; the RLM path only records its plan commitment).
+fn test_executor(pin: &ProofPin) -> EvalExecutorOffer {
+    let hex = pin.eval_image_digest.trim_start_matches("sha256:");
+    let mut o = EvalExecutorOffer {
+        offer_id: "executor-placeholder".into(),
+        lium_template_id: format!("proof-eval-{}", hex.get(..12).unwrap_or("unpinned")),
+        machine_shape: "1x".into(),
+        max_proof_deadline_s: 3_600,
+        eval_image_digest: pin.eval_image_digest.clone(),
+        config_commitment: String::new(),
+        status: proof_executor::OfferStatus::Open,
+    };
+    o.config_commitment = o.expected_commitment();
+    o
 }
 
 fn digest(label: &str) -> String {
@@ -133,12 +152,14 @@ fn stack(register: bool) -> Stack {
     let scorer = RlmScorer::new(Arc::new(registry), rlm_store.clone())
         .with_artefacts(Some(ArtefactStore::new(&root)));
     let mux = FamilyMux::new(Arc::new(IdleHarvest)).with_custom_family(Arc::new(scorer));
+    let executor = test_executor(&pin);
     let app = proof_router(AppState {
         store,
         pin,
         backend: EvalBackend::Lium,
         live_scorer: Some(Arc::new(mux)),
         offer: Some(offer()),
+        executor: executor_slot(Some(executor)),
         judge_api_key: Some("test-judge-key".into()),
         admin_hashes: Arc::new(vec![hash_admin_token("op")]),
         epoch: 0,

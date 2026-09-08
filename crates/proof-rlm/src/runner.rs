@@ -162,10 +162,26 @@ impl CustomRunRequest {
                 deadline_s: topic
                     .eval_executor
                     .max_proof_deadline_s
-                    .unwrap_or(pin.max_proof_deadline_s),
+                    .unwrap_or(pin.max_proof_deadline_s_ceiling),
             },
             executor_commitment: topic.eval_executor.require_offer_commitment.clone(),
         })
+    }
+
+    /// Bind the resolved executor plan the host is running under: the run's
+    /// deadline is the tighter of the topic's and the plan's, and the
+    /// commitment of the configuration that actually runs replaces the
+    /// topic's pin as provenance.
+    #[must_use]
+    pub fn with_executor_plan(mut self, deadline_s: u64, config_commitment: &str) -> Self {
+        if deadline_s > 0 {
+            self.sandbox.deadline_s = self.sandbox.deadline_s.min(deadline_s);
+        }
+        let c = config_commitment.trim();
+        if !c.is_empty() {
+            self.executor_commitment = Some(c.to_owned());
+        }
+        self
     }
 }
 
@@ -413,7 +429,7 @@ mod tests {
         assert_eq!(req.rules_digest, rules().digest());
         assert_eq!(req.seed, t.baseline.seed);
         assert!(req.sandbox.firecracker_required);
-        assert_eq!(req.sandbox.deadline_s, pin().max_proof_deadline_s);
+        assert_eq!(req.sandbox.deadline_s, pin().max_proof_deadline_s_ceiling);
         assert_eq!(req.judge.offer_id, offer().offer_id);
         let dump = serde_json::to_string(&req).expect("json");
         assert!(
@@ -428,6 +444,15 @@ mod tests {
             CustomRunRequest::from_topic(&plain, &pin(), &offer(), &rules(), "d", "a", None, ""),
             Err(RunnerError::NotCustom(_))
         ));
+        let bound = request().with_executor_plan(900, "ab".repeat(32).as_str());
+        assert_eq!(bound.sandbox.deadline_s, 900, "plan tightens the deadline");
+        assert_eq!(
+            bound.executor_commitment.as_deref(),
+            Some("ab".repeat(32).as_str())
+        );
+        let looser = request().with_executor_plan(u64::MAX, "");
+        assert_eq!(looser.sandbox.deadline_s, request().sandbox.deadline_s);
+        assert_eq!(looser.executor_commitment, request().executor_commitment);
         let mut tight = topic();
         tight.eval_executor.max_proof_deadline_s = Some(600);
         let req =

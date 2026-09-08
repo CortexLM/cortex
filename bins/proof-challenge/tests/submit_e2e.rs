@@ -88,6 +88,7 @@ fn dt_topic() -> TopicDocument {
             no_nvlink: true,
             no_nccl_fast_fabric: true,
             max_inter_node_gbps: Some(12.5),
+            ..Constraints::default()
         },
         metric: MetricSpec {
             family: MetricFamily::Throughput,

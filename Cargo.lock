@@ -3450,12 +3450,16 @@ dependencies = [
  "challenge-keys",
  "clap",
  "crypto",
+ "db",
  "harvest-pod",
  "hex",
  "prism-lium",
  "proof-challenge",
  "proof-eval",
  "proof-harvest",
+ "proof-rlm",
+ "proof-rlm-scorer",
+ "proof-rlm-store",
  "proof-task",
  "reqwest 0.12.28",
  "serde_json",
@@ -3543,6 +3547,64 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "proof-rlm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "proof-canon",
+ "proof-score",
+ "proof-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "proof-rlm-scorer"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "hex",
+ "http-body-util",
+ "proof-canon",
+ "proof-eval",
+ "proof-executor",
+ "proof-http",
+ "proof-rlm",
+ "proof-rlm-store",
+ "proof-score",
+ "proof-store",
+ "proof-task",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+ "tower",
+ "tracing",
+ "zip",
+]
+
+[[package]]
+name = "proof-rlm-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "db",
+ "proof-rlm",
+ "proof-task",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]
