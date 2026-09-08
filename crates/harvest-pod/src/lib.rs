@@ -83,6 +83,8 @@ pub struct RunExtras {
 
 /// Exit codes GNU `timeout` reports when the entrypoint hit the deadline:
 /// `124` on the TERM timeout, `137` when `--kill-after` had to SIGKILL.
+/// `137` is also what an external SIGKILL (OOM) reports; either way the run
+/// did not finish inside its budget and the harvest refuses with the tail.
 pub const DEADLINE_EXIT_CODES: [u32; 2] = [124, 137];
 
 /// Seconds the entrypoint gets for one run: the configured run timeout,

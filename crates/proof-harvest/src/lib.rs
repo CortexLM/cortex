@@ -528,23 +528,22 @@ impl LiumProofHarvest {
         extras: &RunExtras,
         deadline_s: u64,
     ) -> Result<String, EvalError> {
-        let outcome = match self.pod.stage(instance, body, env, extras).await {
-            Err(e) => Err(EvalError::Backend(e)),
-            Ok(()) => {
-                let wait =
-                    Duration::from_secs(deadline_s.saturating_add(self.deadline_wait_grace_secs));
-                match tokio::time::timeout(wait, self.pod.run(instance, Some(deadline_s))).await {
-                    Ok(Ok(stdout)) => Ok(stdout),
-                    Ok(Err(e)) => Err(EvalError::Backend(e)),
-                    Err(_elapsed) => Err(EvalError::ProofDeadlineExceeded {
-                        deadline_s,
-                        stdout_tail: format!(
-                            "harvest wait exceeded the {deadline_s}s deadline (+{}s grace); \
-                             no pod stdout",
-                            self.deadline_wait_grace_secs
-                        ),
-                    }),
-                }
+        let outcome = if let Err(e) = self.pod.stage(instance, body, env, extras).await {
+            Err(EvalError::Backend(e))
+        } else {
+            let wait =
+                Duration::from_secs(deadline_s.saturating_add(self.deadline_wait_grace_secs));
+            match tokio::time::timeout(wait, self.pod.run(instance, Some(deadline_s))).await {
+                Ok(Ok(stdout)) => Ok(stdout),
+                Ok(Err(e)) => Err(EvalError::Backend(e)),
+                Err(_elapsed) => Err(EvalError::ProofDeadlineExceeded {
+                    deadline_s,
+                    stdout_tail: format!(
+                        "harvest wait exceeded the {deadline_s}s deadline (+{}s grace); \
+                         no pod stdout",
+                        self.deadline_wait_grace_secs
+                    ),
+                }),
             }
         };
         match self.pod.shutdown(instance).await {
@@ -799,7 +798,8 @@ mod tests {
         proxy_tar_len: std::sync::Mutex<u64>,
         booted: std::sync::Mutex<bool>,
         spec: std::sync::Mutex<Option<InstanceSpec>>,
-        run_deadline: std::sync::Mutex<Option<Option<u64>>>,
+        /// Deadline the harvest handed to `run` (the harvest always passes one).
+        run_deadline: std::sync::Mutex<Option<u64>>,
         shutdowns: std::sync::Mutex<u32>,
     }
 
@@ -858,7 +858,7 @@ mod tests {
             _instance_id: &str,
             deadline_secs: Option<u64>,
         ) -> Result<String, String> {
-            *self.run_deadline.lock().expect("deadline") = Some(deadline_secs);
+            *self.run_deadline.lock().expect("deadline") = deadline_secs;
             Err("captured".into())
         }
 
@@ -1501,7 +1501,7 @@ mod tests {
         );
         assert_eq!(
             *pod.run_deadline.lock().expect("deadline"),
-            Some(Some(1_800)),
+            Some(1_800),
             "topic tightens the offer deadline and the pod run is held to it"
         );
         assert_eq!(*pod.shutdowns.lock().expect("shutdowns"), 1);
@@ -1672,7 +1672,7 @@ mod tests {
             pod.spec().template_name.as_deref(),
             Some("proof-eval-abababababab-hotfix")
         );
-        assert_eq!(*pod.run_deadline.lock().expect("deadline"), Some(Some(600)));
+        assert_eq!(*pod.run_deadline.lock().expect("deadline"), Some(600));
     }
 
     #[tokio::test]

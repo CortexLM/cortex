@@ -10,7 +10,7 @@
 //! - `external-docs-check` — fail if external miner docs `protocol_version` ≠ bundle, or D19 drifts
 //! - `proof-holdout` — select a Proof per-topic holdout set and print its commitment
 //! - `proof-topic` — sign a Proof YAML/JSON topic draft (fills holdout + signature)
-//! - `proof-executor-offer` — build + validate a Proof `1x` EvalExecutorOffer (computes the commitment)
+//! - `proof-executor-offer` — build + validate a Proof `1x` `EvalExecutorOffer` (computes the commitment)
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod consensus_lint;

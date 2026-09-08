@@ -156,36 +156,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         ),
         _ => {}
     }
-    let executor = match load_executor(&pin, cli.eval_executor_offer_file.as_deref()) {
-        Ok(x) => {
-            tracing::info!(
-                offer_id = %x.offer_id,
-                lium_template_id = %x.lium_template_id,
-                machine_shape = %x.machine_shape,
-                max_proof_deadline_s = x.max_proof_deadline_s,
-                status = ?x.status,
-                "eval executor offer loaded"
-            );
-            Some(x)
-        }
-        Err(e) => {
-            if backend == EvalBackend::Lium {
-                tracing::warn!(
-                    "eval executor offer unavailable ({e}); live submits will 503 until \
-                     PROOF_EVAL_EXECUTOR_OFFER_FILE holds an open 1x offer or one is posted \
-                     to /v1/admin/proof/executor"
-                );
-            }
-            None
-        }
-    };
-    match HarvestOverrides::from_env() {
-        Ok(o) if !o.is_empty() => {
-            tracing::info!(?o, "PROOF_HARVEST_* override set; pin ceilings still bind");
-        }
-        Ok(_) => {}
-        Err(e) => tracing::warn!("{e}; every live harvest will refuse until it is fixed"),
-    }
+    let executor = boot_executor(&pin, backend, cli.eval_executor_offer_file.as_deref());
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -393,6 +364,46 @@ fn load_offer(pin: &ProofPin, path: Option<&Path>) -> Result<InferenceOffer, Str
     let offer = InferenceOffer::from_json(&body).map_err(|e| e.to_string())?;
     offer.validate(pin).map_err(|e| e.to_string())?;
     Ok(offer)
+}
+
+/// Load the live executor offer and log the harvest hot-swap state. Neither
+/// is a boot error: the Lium path answers 503 until an open `1x` offer is on
+/// the host (file or `POST /v1/admin/proof/executor`).
+fn boot_executor(
+    pin: &ProofPin,
+    backend: EvalBackend,
+    path: Option<&Path>,
+) -> Option<EvalExecutorOffer> {
+    match HarvestOverrides::from_env() {
+        Ok(o) if !o.is_empty() => {
+            tracing::info!(?o, "PROOF_HARVEST_* override set; pin ceilings still bind");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("{e}; every live harvest will refuse until it is fixed"),
+    }
+    match load_executor(pin, path) {
+        Ok(x) => {
+            tracing::info!(
+                offer_id = %x.offer_id,
+                lium_template_id = %x.lium_template_id,
+                machine_shape = %x.machine_shape,
+                max_proof_deadline_s = x.max_proof_deadline_s,
+                status = ?x.status,
+                "eval executor offer loaded"
+            );
+            Some(x)
+        }
+        Err(e) => {
+            if backend == EvalBackend::Lium {
+                tracing::warn!(
+                    "eval executor offer unavailable ({e}); live submits will 503 until \
+                     PROOF_EVAL_EXECUTOR_OFFER_FILE holds an open 1x offer or one is posted \
+                     to /v1/admin/proof/executor"
+                );
+            }
+            None
+        }
+    }
 }
 
 fn load_executor(pin: &ProofPin, path: Option<&Path>) -> Result<EvalExecutorOffer, String> {

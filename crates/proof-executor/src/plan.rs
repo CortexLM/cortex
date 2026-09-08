@@ -132,8 +132,7 @@ pub fn executor_plan(
     let template_id = overrides
         .template_id
         .as_deref()
-        .map(str::trim)
-        .unwrap_or(offer.lium_template_id.trim())
+        .map_or(offer.lium_template_id.trim(), str::trim)
         .to_owned();
     check_template_id(pin, &template_id)?;
 
