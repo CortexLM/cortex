@@ -26,20 +26,20 @@ control plane (proof-challenge, master)      KVM host = wherever /dev/kvm works 
 └─────────────────────────────────┘          └────────────────────────────────────────────┘
 ```
 
-**Where the agent runs.** Anywhere `/dev/kvm` works and the agent's
+**Where the agent runs.** Only where `/dev/kvm` works and the agent's
 `ready()` is green — the isolation boundary is the RLM microVM plus the
 sister guest, not the machine they sit on:
 
-- **Production prefers a dedicated DigitalOcean bare-metal / KVM host**
-  (bare metal, its own `/dev/kvm`, reachable from the master over the VPC or
-  a private network).
-- **Staging may colocate the agent on the control-plane droplet** when
-  `/dev/kvm` works there. Validated on `cortex-staging`: nested DO
+- **Production: dedicated DigitalOcean metal preferred — never colocated on
+  the CP.** A bare-metal / dedicated KVM host with its own `/dev/kvm`,
+  reachable from the master over the VPC or a private network.
+- **Staging: colocating the agent on the CP droplet with nested `/dev/kvm`
+  is an allowed exception, proven.** On `cortex-staging` nested DO
   virtualisation booted Firecracker and the § 4 fail-closed matrix came back
   green. Nested virtualisation stays **fragile** (it depends on what the
   hypervisor underneath exposes and can change with a resize or a
   migration): if the boot fails or `/dev/kvm` disappears, do not patch
-  around it — provision a dedicated KVM host and point the CP at it.
+  around it — provision dedicated metal and point the CP at it.
 - Never a Lium pod, never a software emulator, never anything without
   `/dev/kvm` (the unit's `ConditionPathExists` refuses).
 
@@ -47,7 +47,7 @@ Locked by design (do not move any of it):
 
 | Rule | Where it is enforced |
 |------|----------------------|
-| Firecracker microVMs, **sisters** (RLM VM + miner guest) run only where `/dev/kvm` works — production on a dedicated KVM host, staging colocated on the CP droplet when nested KVM boots (validated); never Lium, never emulated | agent runs only where `/dev/kvm` exists (`ConditionPathExists`); nothing in `proof-challenge` can exec |
+| Firecracker microVMs, **sisters** (RLM VM + miner guest) run only where `/dev/kvm` works — production on dedicated DO metal (never colocated on the CP); staging colocated on the CP droplet with nested `/dev/kvm` as the allowed, proven exception; never Lium, never emulated | agent runs only where `/dev/kvm` exists (`ConditionPathExists`); nothing in `proof-challenge` can exec |
 | The RLM never sees the host filesystem or secrets — only `VmJob` payloads | `proof-vm-proto` types; jobs are the signed topic, digests, rule versions; tests assert no path / key / origin in any body |
 | RLM image pin `PROOF_RLM_VM_IMAGE_DIGEST=sha256:…`, empty = fail-closed | `FirecrackerOrchestrator::ready()` → `NotWired` naming the var; agent re-hashes `images/sha256-<hex>.ext4` before boot |
 | Auth: `PROOF_VM_ORCHESTRATOR_URL` + `PROOF_VM_ORCHESTRATOR_TOKEN_FILE`, bearer file first, never logged | client reads the file per request; agent compares SHA-256 digests in constant time, re-reads its file per request |
@@ -199,13 +199,14 @@ bearer; refuses production hosts). Env overlays with placeholders only:
 | Piece | Host | Notes |
 |-------|------|-------|
 | `proof-challenge` (client, `FirecrackerOrchestrator`) | the **existing staging master droplet** (`cortex-staging`; topology in [`staging-testnet-e2e.md`](staging-testnet-e2e.md)), compose `role-master` + `env-staging` | holds the bearer file, the CA PEM, the RLM image pin, and the custom ids; it is only the HTTPS client — nothing in the container can exec Firecracker |
-| `proof-vm-orchestrator` (agent, Firecracker + jailer) | **colocated on that same droplet** (validated) — or a dedicated KVM host when nested KVM does not boot | `systemd/proof-vm-orchestrator.service` on the host, `ConditionPathExists=/dev/kvm`; bind on the droplet's private address, HTTPS + bearer file |
+| `proof-vm-orchestrator` (agent, Firecracker + jailer) | **colocated on that same droplet** — the allowed, proven staging exception — or dedicated DO metal when nested KVM does not boot | `systemd/proof-vm-orchestrator.service` on the host, `ConditionPathExists=/dev/kvm`; bind on the droplet's private address, HTTPS + bearer file |
 
-**Colocated staging (validated).** `cortex-staging` exposes a working
-`/dev/kvm` through nested DigitalOcean virtualisation; the agent booted
-Firecracker there and § 4 came back green. This is the staging default: one
-droplet runs the compose stack **and** the agent as a host systemd unit. Two
-things follow from the CP living in a container on the same machine:
+**Colocated staging (allowed exception, proven).** `cortex-staging` exposes
+a working `/dev/kvm` through nested DigitalOcean virtualisation; the agent
+booted Firecracker there and § 4 came back green. This is the staging
+default — and staging only: production never colocates the agent on the CP.
+One droplet runs the compose stack **and** the agent as a host systemd unit.
+Two things follow from the CP living in a container on the same machine:
 
 - The CP must reach the agent on the **droplet's private (VPC) address**,
   never on loopback: `127.0.0.1` inside the `proof-challenge` container is
@@ -234,12 +235,13 @@ the isolation boundary):
   never saying hello inside `PROOF_VM_AGENT_BOOT_TIMEOUT_SECS`.
 - Sisters cut at the deadline on a run that fits comfortably on metal.
 
-**Dedicated KVM host (production preference, staging fallback).** A
-DigitalOcean bare-metal / dedicated-hardware host, or any bare-metal KVM
-host attached to the staging VPC's private network (WireGuard from the
-master, or VPC peering when both sides are DO). Same unit, same env file;
-the agent listens on the private address only and TLS + bearer stay
-mandatory (the bearer never crosses a network in clear).
+**Dedicated DO metal (production — preferred, never colocated on the CP;
+staging fallback when nested does not boot).** A DigitalOcean bare-metal /
+dedicated-hardware host, or any bare-metal KVM host attached to the VPC's
+private network (WireGuard from the master, or VPC peering when both sides
+are DO). Same unit, same env file; the agent listens on the private address
+only and TLS + bearer stay mandatory (the bearer never crosses a network in
+clear).
 
 Check whichever host you pick before installing anything:
 
@@ -387,9 +389,10 @@ Then run the § Verify cleanup probes (failed `ip tuntap`, deadline cut,
 Staging is "wired and tested" when all of these are in the change log with
 dates and the exact commands:
 
-- [ ] placement recorded: colocated on `cortex-staging` (nested KVM boots)
-      or a dedicated KVM host, with `ls -l /dev/kvm` + `kvm-ok` output from
-      that host; none of the fragility signs above appeared during the run.
+- [ ] placement recorded: colocated on `cortex-staging` (the allowed,
+      proven nested-KVM exception — staging only) or dedicated DO metal, with
+      `ls -l /dev/kvm` + `kvm-ok` output from that host; none of the
+      fragility signs above appeared during the run.
 - [ ] `proof-vm-wire-check.sh all` → all PASS on the staging master.
 - [ ] `proof-vm-wire-check.sh boot-probe` → all PASS; KVM host left clean.
 - [ ] every row of § 4 → the expected 503 (or 400) with the expected reason,

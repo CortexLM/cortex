@@ -3,12 +3,13 @@
 # STAGING /etc/proof-vm/orchestrator.env for the host that runs the agent
 # (deploy/systemd/proof-vm-orchestrator.service — a host systemd unit, not a
 # compose service). It needs a working /dev/kvm (ConditionPathExists):
-#   - staging: the staging master droplet itself (`cortex-staging`), where
-#     nested DO virtualisation booted Firecracker (validated). Nested KVM is
-#     fragile — if the boot fails or /dev/kvm goes away, do not patch around
-#     it: provision a dedicated KVM host and repoint the CP.
-#   - production: a dedicated DO bare-metal / KVM host on the VPC or a
-#     private network (WireGuard / peering).
+#   - staging: the staging master droplet itself (`cortex-staging`) with
+#     nested /dev/kvm — an allowed exception, proven (nested DO
+#     virtualisation booted Firecracker there). Nested KVM is fragile — if
+#     the boot fails or /dev/kvm goes away, do not patch around it:
+#     provision dedicated metal and repoint the CP.
+#   - production: dedicated DO metal preferred, never colocated on the CP;
+#     on the VPC or a private network (WireGuard / peering).
 # Either way bind the agent on the host's PRIVATE address with TLS; when
 # colocated that is the droplet's VPC IP (the CP container cannot use
 # loopback). Generic reference with every knob:

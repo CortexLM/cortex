@@ -71,10 +71,11 @@ gaps. See [`docs/WHITEPAPER.md`](../docs/WHITEPAPER.md).
 
 Custom-family topics run their RLM in one Firecracker microVM per `topic_id`
 and every miner run in a **sister** Firecracker guest with no network — on a
-host with a working `/dev/kvm`: production prefers a **dedicated DO
-bare-metal / KVM host**; staging may colocate the agent on the CP droplet
-when nested KVM boots (validated on `cortex-staging`; nested stays fragile —
-if the boot fails, provision metal); never Lium. That host runs
+host with a working `/dev/kvm`: production — **dedicated DO metal
+preferred, never colocated on the CP**; staging — colocating the agent on
+the CP droplet with nested `/dev/kvm` is an **allowed exception, proven** on
+`cortex-staging` (nested stays fragile — if the boot fails, provision metal);
+never Lium. That host runs
 `proof-vm-orchestrator` as a systemd unit
 ([`systemd/proof-vm-orchestrator.service`](systemd/proof-vm-orchestrator.service),
 env [`env/proof-vm-orchestrator.env.example`](env/proof-vm-orchestrator.env.example)),
@@ -95,10 +96,11 @@ Procedure and the mandatory submission verification:
 [`docs/runbooks/proof-vm-orchestrator.md`](../docs/runbooks/proof-vm-orchestrator.md).
 
 **Staging wire (DO):** the CP is the existing staging master; the agent runs
-as a host systemd unit on the same droplet (`cortex-staging`, nested KVM
-validated) bound on the VPC address the CP container reaches over HTTPS — or
-on a dedicated KVM host when nested KVM does not boot. Overlays with
-placeholders only:
+as a host systemd unit on the same droplet (`cortex-staging`, nested
+`/dev/kvm` — the allowed, proven staging exception) bound on the VPC address
+the CP container reaches over HTTPS — or on dedicated DO metal when nested
+KVM does not boot (production never colocates). Overlays with placeholders
+only:
 [`env/proof-challenge.staging-vm.example`](env/proof-challenge.staging-vm.example)
 (CP) and
 [`env/proof-vm-orchestrator.staging.example`](env/proof-vm-orchestrator.staging.example)

@@ -1,6 +1,7 @@
 //! `proof-vm-orchestrator` — Firecracker topic-VM agent for a **KVM host**
-//! (HTTPS `:8200`): a dedicated host in production, or the control-plane
-//! droplet itself on staging when nested KVM boots there.
+//! (HTTPS `:8200`): dedicated DO metal in production (never colocated on the
+//! control plane); on staging the control-plane droplet itself with nested
+//! `/dev/kvm` is an allowed, proven exception.
 //!
 //! The Proof control plane (`proof-challenge`, `FirecrackerOrchestrator`)
 //! is its only client. It boots one jailed RLM microVM per topic from the

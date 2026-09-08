@@ -4,9 +4,10 @@
 # droplet (`cortex-staging`, compose role-master + env-staging): the CLIENT
 # side of the Proof topic-VM orchestrator. proof-challenge only talks HTTPS
 # to `proof-vm-orchestrator`, a host systemd unit — on staging colocated on
-# this same droplet (nested KVM validated; fragile — if the boot fails,
-# provision a dedicated KVM host), in production on a dedicated DO
-# bare-metal / KVM host (deploy/env/proof-vm-orchestrator.staging.example).
+# this same droplet with nested /dev/kvm (allowed exception, proven on
+# cortex-staging; fragile — if the boot fails, provision metal), in
+# production on dedicated DO metal, never colocated on the CP
+# (deploy/env/proof-vm-orchestrator.staging.example).
 #
 # Use: append these keys to the age-encrypted source of proof-challenge.env,
 # re-materialize, restart proof-challenge, then
