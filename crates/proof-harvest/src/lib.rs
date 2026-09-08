@@ -6,6 +6,14 @@
 //! must enforce — e.g. a 12.5 Gbit/s cap), reads back the metrics document,
 //! and tears the pod down. Nothing here computes a score. Miners do not bind
 //! or train against the offer. There is no sim fallback.
+//!
+//! **Where** the image runs is the live `EvalExecutorOffer`: the pod is
+//! rented on that offer's Lium template, at exactly the pinned `1x` width
+//! (any other rent width aborts before the rent), and the run is held to the
+//! resolved proof deadline (offer, tightened by the topic, or an operator
+//! `PROOF_HARVEST_*` override) both by the pod-side `timeout` and by this
+//! crate's wait. A run cut at the deadline is a **503** carrying the pod's
+//! stdout tail, never a zero.
 
 #![forbid(unsafe_code)]
 #![allow(
@@ -19,15 +27,19 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use harvest_pod::{
-    harvest_template_name, truncate_tail, EvalPod, PodProgram, RunExtras, HOLDOUT_DIR, PROXY_DIR,
+    harvest_template_name, hit_deadline, truncate_tail, EvalPod, PodProgram, RunExtras,
+    HOLDOUT_DIR, PROXY_DIR,
 };
 use prism_lium_types::InstanceSpec;
 use proof_eval::{
-    secret_backed_base_url, EvalError, LiveScorer, ProofEvalDocument, PROOF_METRICS_SCHEMA,
+    map_executor_err, secret_backed_base_url, EvalError, LiveScorer, ProofEvalDocument,
+    PROOF_METRICS_SCHEMA,
 };
+use proof_executor::{executor_plan, EvalExecutorOffer, ExecutorPlan, HarvestOverrides};
 use proof_task::{
     resolve_inference, HoldoutRecord, InferenceOffer, ProofPin, TopicDocument, CHALLENGE_ID,
 };
@@ -40,8 +52,13 @@ pub const METRICS_MARKER: &str = "PROOF_METRICS=";
 /// Marker the eval image prints on a completed run.
 pub const OK_MARKER: &str = "PROOF_EVAL_OK";
 
-/// Bytes of pod stdout retained on a missing [`OK_MARKER`] refuse.
+/// Bytes of pod stdout retained on a missing [`OK_MARKER`] or deadline refuse.
 const STDOUT_TAIL_BYTES: usize = 8 * 1024;
+
+/// Seconds the harvest waits past the proof deadline for the pod-side
+/// `timeout --kill-after=60` and the SSH round trip to report back before it
+/// stops waiting and tears the pod down anyway.
+pub const DEADLINE_WAIT_GRACE_SECS: u64 = 300;
 
 /// Directory the request and metrics sidecar live in, on the pod.
 pub const POD_WORKDIR: &str = "/tmp/proof_eval";
@@ -92,6 +109,12 @@ pub struct HarvestRequest {
     pub max_output_tokens: u32,
     /// Judge config commitment.
     pub config_commitment: String,
+    /// Live executor offer the pod was rented on (host stamp).
+    pub executor_offer_id: String,
+    /// Executor `config_commitment` (template, shape, deadline, digest).
+    pub executor_commitment: String,
+    /// Proof deadline this run is held to, seconds.
+    pub max_proof_deadline_s: u64,
     /// Eval image digest, so the image can stamp its own provenance.
     pub eval_image_digest: String,
     /// Commitment the records below must hash to.
@@ -108,15 +131,14 @@ pub struct HarvestRequest {
     pub holdout: Vec<HoldoutRecord>,
 }
 
-/// Rent limits for one harvest.
+/// Rent limits for one harvest. Width is not a limit: it is the executor
+/// plan's exact `1x`, and any other rent aborts.
 #[derive(Debug, Clone)]
 pub struct HarvestLimits {
     /// Max pod lifetime hours.
     pub max_lifetime_hours: f64,
     /// Max USD per GPU-hour.
     pub max_price_per_hour: f64,
-    /// GPUs requested.
-    pub gpu_count: u32,
 }
 
 impl Default for HarvestLimits {
@@ -124,7 +146,6 @@ impl Default for HarvestLimits {
         Self {
             max_lifetime_hours: 6.0,
             max_price_per_hour: 12.0,
-            gpu_count: 1,
         }
     }
 }
@@ -353,6 +374,11 @@ pub struct LiumProofHarvest {
     /// Defaults to the process temp dir. Tests override this so leftover
     /// scans do not race sibling unit tests that share `/tmp`.
     proxy_tar_dir: PathBuf,
+    /// Operator `PROOF_HARVEST_*` hot-swap. `None` reads the process env at
+    /// score time; tests inject a value so they never touch the env.
+    overrides: Option<HarvestOverrides>,
+    /// Seconds past the deadline the wait tolerates ([`DEADLINE_WAIT_GRACE_SECS`]).
+    deadline_wait_grace_secs: u64,
 }
 
 impl LiumProofHarvest {
@@ -367,7 +393,40 @@ impl LiumProofHarvest {
             proxy_model_dir: None,
             holdout_store: None,
             proxy_tar_dir: std::env::temp_dir(),
+            overrides: None,
+            deadline_wait_grace_secs: DEADLINE_WAIT_GRACE_SECS,
         }
+    }
+
+    /// Pin the operator overrides instead of reading `PROOF_HARVEST_*` env.
+    #[must_use]
+    pub fn with_harvest_overrides(mut self, overrides: Option<HarvestOverrides>) -> Self {
+        self.overrides = overrides;
+        self
+    }
+
+    /// Tighten the post-deadline wait grace (tests).
+    #[cfg(test)]
+    #[must_use]
+    fn with_deadline_wait_grace_secs(mut self, secs: u64) -> Self {
+        self.deadline_wait_grace_secs = secs;
+        self
+    }
+
+    fn plan(
+        &self,
+        pin: &ProofPin,
+        topic: &TopicDocument,
+        executor: &EvalExecutorOffer,
+    ) -> Result<ExecutorPlan, EvalError> {
+        let overrides = match &self.overrides {
+            Some(o) => o.clone(),
+            None => HarvestOverrides::from_env().map_err(map_executor_err)?,
+        };
+        if !overrides.is_empty() {
+            tracing::info!(?overrides, "PROOF_HARVEST_* override in effect");
+        }
+        executor_plan(pin, Some(executor), topic, &overrides).map_err(map_executor_err)
     }
 
     /// Inject the judge API key staged into `teacher.env` on the pod.
@@ -432,24 +491,86 @@ impl LiumProofHarvest {
         ))
     }
 
-    fn spec(&self, pin: &ProofPin, frozen_digest: &str) -> InstanceSpec {
+    /// Rent spec for one run: the executor plan's template at exactly its
+    /// width. A raw Lium UUID is rented verbatim; a digest-scoped template
+    /// name is resolved (or created) bound to `eval_image@digest`.
+    fn spec(&self, pin: &ProofPin, frozen_digest: &str, plan: &ExecutorPlan) -> InstanceSpec {
+        let template_name = if plan.template_is_uuid {
+            harvest_template_name(&pin.eval_image, &pin.eval_image_digest)
+        } else {
+            plan.template_id.clone()
+        };
         InstanceSpec {
             name: format!("proof-{}", &frozen_digest[..12.min(frozen_digest.len())]),
             max_lifetime_hours: self.limits.max_lifetime_hours,
             max_price_per_hour: self.limits.max_price_per_hour,
-            gpu_count: self.limits.gpu_count,
+            gpu_count: plan.gpu_count,
             image_digest: Some(pin.eval_image_digest.clone()),
             docker_image: Some(pin.eval_image.clone()),
             startup_commands: None,
             ssh_public_keys: self.ssh_public_keys.clone(),
             ssh_key_name: Some(SSH_KEY_NAME.to_owned()),
             preferred_offer_id: None,
-            template_id: None,
-            template_name: Some(harvest_template_name(
-                &pin.eval_image,
-                &pin.eval_image_digest,
-            )),
+            template_id: plan.template_is_uuid.then(|| plan.template_id.clone()),
+            template_name: Some(template_name),
+            exact_gpu_count: true,
         }
+    }
+
+    /// Stage, then run under the deadline, then always tear down. The run
+    /// wait is bounded here too: a pod that never reports back is not a
+    /// reason to hold the submission open past the deadline.
+    async fn run_on_pod(
+        &self,
+        instance: &str,
+        body: &[u8],
+        env: &[u8],
+        extras: &RunExtras,
+        deadline_s: u64,
+    ) -> Result<String, EvalError> {
+        let outcome = match self.pod.stage(instance, body, env, extras).await {
+            Err(e) => Err(EvalError::Backend(e)),
+            Ok(()) => {
+                let wait =
+                    Duration::from_secs(deadline_s.saturating_add(self.deadline_wait_grace_secs));
+                match tokio::time::timeout(wait, self.pod.run(instance, Some(deadline_s))).await {
+                    Ok(Ok(stdout)) => Ok(stdout),
+                    Ok(Err(e)) => Err(EvalError::Backend(e)),
+                    Err(_elapsed) => Err(EvalError::ProofDeadlineExceeded {
+                        deadline_s,
+                        stdout_tail: format!(
+                            "harvest wait exceeded the {deadline_s}s deadline (+{}s grace); \
+                             no pod stdout",
+                            self.deadline_wait_grace_secs
+                        ),
+                    }),
+                }
+            }
+        };
+        match self.pod.shutdown(instance).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(EvalError::Integrity(format!(
+                    "pod {instance} terminate not verified"
+                )))
+            }
+            Err(e) => return Err(EvalError::Backend(e)),
+        }
+        let stdout = outcome?;
+        if hit_deadline(&stdout) {
+            let stdout_tail = truncate_tail(&stdout, STDOUT_TAIL_BYTES);
+            tracing::warn!(
+                instance,
+                deadline_s,
+                stdout_tail = %stdout_tail,
+                "eval run cut at the proof deadline; refusing"
+            );
+            return Err(EvalError::ProofDeadlineExceeded {
+                deadline_s,
+                stdout_tail,
+            });
+        }
+        Ok(stdout)
     }
 }
 
@@ -460,6 +581,7 @@ impl LiveScorer for LiumProofHarvest {
         pin: &ProofPin,
         topic: &TopicDocument,
         offer: &InferenceOffer,
+        executor: &EvalExecutorOffer,
         frozen_digest: &str,
         artifact_digest: &str,
         holdout: &[HoldoutRecord],
@@ -472,6 +594,10 @@ impl LiveScorer for LiumProofHarvest {
             return Err(EvalError::HoldoutSealed);
         }
         self.ready()?;
+        // Executor first: no judge env, no proxy tar, no rent unless the
+        // open 1x executor, the topic tighten, and any operator override
+        // collapse into a legal plan.
+        let plan = self.plan(pin, topic, executor)?;
         offer
             .serves_topic(pin, topic)
             .map_err(|e| EvalError::InferenceOffer(e.to_string()))?;
@@ -512,6 +638,9 @@ impl LiveScorer for LiumProofHarvest {
             max_input_tokens: max_in,
             max_output_tokens: max_out,
             config_commitment: offer.config_commitment.clone(),
+            executor_offer_id: plan.offer_id.clone(),
+            executor_commitment: plan.config_commitment.clone(),
+            max_proof_deadline_s: plan.deadline_s,
             eval_image_digest: pin.eval_image_digest.clone(),
             holdout_commitment: topic.holdout_commitment.clone(),
             constraints: topic.constraints,
@@ -523,23 +652,21 @@ impl LiveScorer for LiumProofHarvest {
         let body = serde_json::to_vec(&request)
             .map_err(|e| EvalError::Backend(format!("encode request: {e}")))?;
 
+        tracing::info!(
+            executor_offer_id = %plan.offer_id,
+            template_id = %plan.template_id,
+            gpu_count = plan.gpu_count,
+            deadline_s = plan.deadline_s,
+            "proof harvest rent plan"
+        );
         let instance = self
             .pod
-            .boot(&self.spec(pin, frozen_digest))
+            .boot(&self.spec(pin, frozen_digest, &plan))
             .await
             .map_err(EvalError::Backend)?;
-        let run = self.pod.run(&instance, &body, &env, &extras).await;
-        let shutdown = self.pod.shutdown(&instance).await;
-        match shutdown {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(EvalError::Integrity(format!(
-                    "pod {instance} terminate not verified"
-                )))
-            }
-            Err(e) => return Err(EvalError::Backend(e)),
-        }
-        let stdout = run.map_err(EvalError::Backend)?;
+        let stdout = self
+            .run_on_pod(&instance, &body, &env, &extras, plan.deadline_s)
+            .await?;
         if !PROGRAM.ran_to_completion(&stdout) {
             let stdout_tail = truncate_tail(&stdout, STDOUT_TAIL_BYTES);
             tracing::warn!(
@@ -625,6 +752,9 @@ mod tests {
             max_input_tokens: 4_096,
             max_output_tokens: 256,
             config_commitment: "ab".repeat(32),
+            executor_offer_id: "lium-1x-v0".into(),
+            executor_commitment: "cd".repeat(32),
+            max_proof_deadline_s: 3_600,
             eval_image_digest: String::new(),
             holdout_commitment: topic.holdout_commitment.clone(),
             constraints: topic.constraints,
@@ -639,8 +769,11 @@ mod tests {
         assert_eq!(v["challenge_id"], "proof");
         assert_eq!(v["provider_kind"], "openai_compatible");
         assert_eq!(v["mode"], "chat");
+        assert_eq!(v["executor_offer_id"], "lium-1x-v0");
+        assert_eq!(v["max_proof_deadline_s"], 3_600);
         assert!(v.get("proxy_model").is_none());
         assert!(v.get("api_key").is_none());
+        assert!(v.get("lium_api_key").is_none());
     }
 
     #[test]
@@ -665,6 +798,9 @@ mod tests {
         extras: std::sync::Mutex<RunExtras>,
         proxy_tar_len: std::sync::Mutex<u64>,
         booted: std::sync::Mutex<bool>,
+        spec: std::sync::Mutex<Option<InstanceSpec>>,
+        run_deadline: std::sync::Mutex<Option<Option<u64>>>,
+        shutdowns: std::sync::Mutex<u32>,
     }
 
     impl CapturePod {
@@ -675,24 +811,36 @@ mod tests {
                 extras: std::sync::Mutex::new(RunExtras::default()),
                 proxy_tar_len: std::sync::Mutex::new(0),
                 booted: std::sync::Mutex::new(false),
+                spec: std::sync::Mutex::new(None),
+                run_deadline: std::sync::Mutex::new(None),
+                shutdowns: std::sync::Mutex::new(0),
             })
+        }
+
+        fn spec(&self) -> InstanceSpec {
+            self.spec
+                .lock()
+                .expect("spec")
+                .clone()
+                .expect("booted spec")
         }
     }
 
     #[async_trait]
     impl EvalPod for CapturePod {
-        async fn boot(&self, _spec: &InstanceSpec) -> Result<String, String> {
+        async fn boot(&self, spec: &InstanceSpec) -> Result<String, String> {
             *self.booted.lock().expect("boot") = true;
+            *self.spec.lock().expect("spec") = Some(spec.clone());
             Ok("pod-1".into())
         }
 
-        async fn run(
+        async fn stage(
             &self,
             _instance_id: &str,
             request: &[u8],
             env_file: &[u8],
             extras: &RunExtras,
-        ) -> Result<String, String> {
+        ) -> Result<(), String> {
             *self.request.lock().expect("req") = request.to_vec();
             *self.env.lock().expect("env") = env_file.to_vec();
             *self.extras.lock().expect("extras") = extras.clone();
@@ -702,10 +850,20 @@ mod tests {
                 .and_then(|p| std::fs::metadata(p).ok())
                 .map_or(0, |m| m.len());
             *self.proxy_tar_len.lock().expect("proxy len") = n;
+            Ok(())
+        }
+
+        async fn run(
+            &self,
+            _instance_id: &str,
+            deadline_secs: Option<u64>,
+        ) -> Result<String, String> {
+            *self.run_deadline.lock().expect("deadline") = Some(deadline_secs);
             Err("captured".into())
         }
 
         async fn shutdown(&self, _instance_id: &str) -> Result<bool, String> {
+            *self.shutdowns.lock().expect("shutdowns") += 1;
             Ok(true)
         }
     }
@@ -714,10 +872,26 @@ mod tests {
         let mut p = ProofPin {
             eval_image_digest: format!("sha256:{}", "ab".repeat(32)),
             topic_pubkey: "ab".repeat(32),
+            allowed_lium_template_prefixes: vec!["proof-eval-".into()],
             ..ProofPin::default()
         };
         p.inference.model = "master-proxy-v0".into();
         p
+    }
+
+    /// Open `1x` executor on the digest-scoped template of [`harvest_pin`].
+    fn harvest_executor() -> EvalExecutorOffer {
+        let mut o = EvalExecutorOffer {
+            offer_id: "lium-1x-v0".into(),
+            lium_template_id: "proof-eval-abababababab".into(),
+            machine_shape: "1x".into(),
+            max_proof_deadline_s: 3_600,
+            eval_image_digest: harvest_pin().eval_image_digest,
+            config_commitment: String::new(),
+            status: proof_executor::OfferStatus::Open,
+        };
+        o.config_commitment = o.expected_commitment();
+        o
     }
 
     fn harvest_offer() -> InferenceOffer {
@@ -806,6 +980,8 @@ mod tests {
         .with_judge_api_key(key)
         .with_proxy_model_dir(Some(proxy))
         .with_holdout_store(Some(store))
+        // Deterministic: never read PROOF_HARVEST_* from the test process env.
+        .with_harvest_overrides(Some(HarvestOverrides::default()))
     }
 
     #[tokio::test]
@@ -820,6 +996,7 @@ mod tests {
                 &harvest_pin(),
                 &topic,
                 &harvest_offer(),
+                &harvest_executor(),
                 "digest-abcdef",
                 "artifact",
                 &recs,
@@ -878,6 +1055,7 @@ mod tests {
                 &harvest_pin(),
                 &topic,
                 &harvest_offer(),
+                &harvest_executor(),
                 "digest-abcdef",
                 "artifact",
                 &recs,
@@ -905,6 +1083,7 @@ mod tests {
                 &harvest_pin(),
                 &topic,
                 &harvest_offer(),
+                &harvest_executor(),
                 "digest-abcdef",
                 "artifact",
                 &recs,
@@ -936,6 +1115,7 @@ mod tests {
                 &harvest_pin(),
                 &harvest_topic(&recs),
                 &harvest_offer(),
+                &harvest_executor(),
                 "digest-abcdef",
                 "artifact",
                 &recs,
@@ -1010,6 +1190,7 @@ mod tests {
                 &harvest_pin(),
                 &harvest_topic(&recs),
                 &harvest_offer(),
+                &harvest_executor(),
                 "digest-abcdef",
                 "artifact",
                 &missing,
@@ -1207,6 +1388,7 @@ mod tests {
                 &harvest_pin(),
                 &topic,
                 &harvest_offer(),
+                &harvest_executor(),
                 "digest-abcdef",
                 "artifact",
                 &recs,
@@ -1249,12 +1431,20 @@ mod tests {
             Ok("pod-1".into())
         }
 
-        async fn run(
+        async fn stage(
             &self,
             _instance_id: &str,
             _request: &[u8],
             _env_file: &[u8],
             _extras: &RunExtras,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn run(
+            &self,
+            _instance_id: &str,
+            _deadline_secs: Option<u64>,
         ) -> Result<String, String> {
             Ok(self.stdout.clone())
         }
@@ -1262,6 +1452,353 @@ mod tests {
         async fn shutdown(&self, _instance_id: &str) -> Result<bool, String> {
             Ok(true)
         }
+    }
+
+    fn deadline_stdout(rc: u32) -> String {
+        format!(
+            "{}\nexit={rc}\nTraceback: still training step 4200 when the proof deadline hit\n",
+            "boot ok\n".repeat(3)
+        )
+    }
+
+    #[tokio::test]
+    async fn harvest_rents_the_executor_template_at_exactly_one_gpu_under_its_deadline() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let pod = CapturePod::new();
+        let harvest =
+            harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()))
+                .with_harvest_overrides(Some(HarvestOverrides::default()));
+        let mut topic = harvest_topic(&recs);
+        topic.eval_executor.max_proof_deadline_s = Some(1_800);
+        let err = harvest
+            .score(
+                &harvest_pin(),
+                &topic,
+                &harvest_offer(),
+                &harvest_executor(),
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err("capture");
+        assert!(matches!(err, EvalError::Backend(_)), "{err}");
+        let spec = pod.spec();
+        assert_eq!(spec.gpu_count, 1);
+        assert!(spec.exact_gpu_count, "any other rent width must abort");
+        assert_eq!(
+            spec.template_id, None,
+            "a template name is resolved, not rented verbatim"
+        );
+        assert_eq!(
+            spec.template_name.as_deref(),
+            Some("proof-eval-abababababab")
+        );
+        assert_eq!(
+            spec.image_digest.as_deref(),
+            Some(harvest_pin().eval_image_digest.as_str())
+        );
+        assert_eq!(
+            *pod.run_deadline.lock().expect("deadline"),
+            Some(Some(1_800)),
+            "topic tightens the offer deadline and the pod run is held to it"
+        );
+        assert_eq!(*pod.shutdowns.lock().expect("shutdowns"), 1);
+        let req: serde_json::Value =
+            serde_json::from_slice(&pod.request.lock().expect("req")).expect("json");
+        assert_eq!(req["executor_offer_id"], "lium-1x-v0");
+        assert_eq!(
+            req["executor_commitment"],
+            harvest_executor().config_commitment
+        );
+        assert_eq!(req["max_proof_deadline_s"], 1_800);
+    }
+
+    #[tokio::test]
+    async fn harvest_rents_a_uuid_template_verbatim() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let pod = CapturePod::new();
+        let mut pin = harvest_pin();
+        pin.allowed_lium_template_prefixes.clear();
+        let mut executor = harvest_executor();
+        executor.lium_template_id = "f2f5e84c-3b09-4090-be83-1913eabd009e".into();
+        executor.config_commitment = executor.expected_commitment();
+        let harvest =
+            harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()))
+                .with_harvest_overrides(Some(HarvestOverrides::default()));
+        let _ = harvest
+            .score(
+                &pin,
+                &harvest_topic(&recs),
+                &harvest_offer(),
+                &executor,
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await;
+        let spec = pod.spec();
+        assert_eq!(
+            spec.template_id.as_deref(),
+            Some("f2f5e84c-3b09-4090-be83-1913eabd009e")
+        );
+        assert_eq!(
+            spec.template_name.as_deref(),
+            Some("proof-eval-abababababab")
+        );
+        assert!(spec.exact_gpu_count);
+    }
+
+    #[tokio::test]
+    async fn harvest_refuses_a_closed_wide_or_topic_mismatched_executor_before_boot() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let mut closed = harvest_executor();
+        closed.status = proof_executor::OfferStatus::Closed;
+        let mut wide = harvest_executor();
+        wide.machine_shape = "8x".into();
+        wide.config_commitment = wide.expected_commitment();
+        let mut pinned_topic = harvest_topic(&recs);
+        pinned_topic.eval_executor.require_offer_commitment = Some("cd".repeat(32));
+        for (label, executor, topic, want) in [
+            ("closed", closed, harvest_topic(&recs), "closed"),
+            ("8x", wide, harvest_topic(&recs), "machine_shape"),
+            (
+                "topic pins another executor",
+                harvest_executor(),
+                pinned_topic,
+                "cannot serve",
+            ),
+        ] {
+            let pod = CapturePod::new();
+            let harvest =
+                harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()))
+                    .with_harvest_overrides(Some(HarvestOverrides::default()));
+            let err = harvest
+                .score(
+                    &harvest_pin(),
+                    &topic,
+                    &harvest_offer(),
+                    &executor,
+                    "digest-abcdef",
+                    "artifact",
+                    &recs,
+                    "claim",
+                )
+                .await
+                .expect_err(label);
+            assert!(err.to_string().contains(want), "{label}: {err}");
+            assert!(
+                !*pod.booted.lock().expect("booted"),
+                "{label} must not rent"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn harvest_env_override_aborts_any_width_but_one_and_never_loosens_the_ceiling() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        for (overrides, want) in [
+            (
+                HarvestOverrides {
+                    gpu_count: Some(8),
+                    ..HarvestOverrides::default()
+                },
+                "abort: executor would rent 8x",
+            ),
+            (
+                HarvestOverrides {
+                    deadline_secs: Some(7_201),
+                    ..HarvestOverrides::default()
+                },
+                "max_proof_deadline_s = 7201",
+            ),
+            (
+                HarvestOverrides {
+                    template_id: Some("prism-recipe-v10".into()),
+                    ..HarvestOverrides::default()
+                },
+                "allowed_lium_template_prefixes",
+            ),
+        ] {
+            let pod = CapturePod::new();
+            let harvest =
+                harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()))
+                    .with_harvest_overrides(Some(overrides));
+            let err = harvest
+                .score(
+                    &harvest_pin(),
+                    &harvest_topic(&recs),
+                    &harvest_offer(),
+                    &harvest_executor(),
+                    "digest-abcdef",
+                    "artifact",
+                    &recs,
+                    "claim",
+                )
+                .await
+                .expect_err("override refused");
+            assert!(
+                matches!(err, EvalError::ExecutorOffer(ref m) if m.contains(want)),
+                "{err}"
+            );
+            assert!(!*pod.booted.lock().expect("booted"));
+        }
+
+        // A legal hot-swap: same width, shorter deadline, another allowed template.
+        let pod = CapturePod::new();
+        let harvest =
+            harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()))
+                .with_harvest_overrides(Some(HarvestOverrides {
+                    template_id: Some("proof-eval-abababababab-hotfix".into()),
+                    gpu_count: Some(1),
+                    deadline_secs: Some(600),
+                }));
+        let _ = harvest
+            .score(
+                &harvest_pin(),
+                &harvest_topic(&recs),
+                &harvest_offer(),
+                &harvest_executor(),
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await;
+        assert!(*pod.booted.lock().expect("booted"));
+        assert_eq!(
+            pod.spec().template_name.as_deref(),
+            Some("proof-eval-abababababab-hotfix")
+        );
+        assert_eq!(*pod.run_deadline.lock().expect("deadline"), Some(Some(600)));
+    }
+
+    #[tokio::test]
+    async fn a_run_cut_at_the_deadline_is_a_503_with_the_stdout_tail() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        for rc in harvest_pod::DEADLINE_EXIT_CODES {
+            let (proxy, store) = live_asset_dirs(&recs);
+            let pod = StdoutPod::new(deadline_stdout(rc));
+            let harvest = LiumProofHarvest::new(
+                pod.clone(),
+                HarvestLimits::default(),
+                vec!["ssh-ed25519 AAAAtest proof".into()],
+            )
+            .with_judge_api_key(Some("sk-live-not-a-real-secret".into()))
+            .with_proxy_model_dir(Some(proxy))
+            .with_holdout_store(Some(store))
+            .with_harvest_overrides(Some(HarvestOverrides::default()));
+            let err = harvest
+                .score(
+                    &harvest_pin(),
+                    &harvest_topic(&recs),
+                    &harvest_offer(),
+                    &harvest_executor(),
+                    "digest-abcdef",
+                    "artifact",
+                    &recs,
+                    "claim",
+                )
+                .await
+                .expect_err("deadline");
+            match err {
+                EvalError::ProofDeadlineExceeded {
+                    deadline_s,
+                    stdout_tail,
+                } => {
+                    assert_eq!(deadline_s, 3_600);
+                    assert!(stdout_tail.contains(&format!("exit={rc}")), "{stdout_tail}");
+                    assert!(stdout_tail.contains("step 4200"), "{stdout_tail}");
+                }
+                other => panic!("exit={rc}: expected deadline refuse, got {other}"),
+            }
+            assert!(*pod.booted.lock().expect("booted"));
+        }
+    }
+
+    struct HangingPod {
+        shutdowns: std::sync::Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl EvalPod for HangingPod {
+        async fn boot(&self, _spec: &InstanceSpec) -> Result<String, String> {
+            Ok("pod-hang".into())
+        }
+
+        async fn stage(
+            &self,
+            _instance_id: &str,
+            _request: &[u8],
+            _env_file: &[u8],
+            _extras: &RunExtras,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn run(
+            &self,
+            _instance_id: &str,
+            _deadline_secs: Option<u64>,
+        ) -> Result<String, String> {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok("PROOF_EVAL_OK\n".into())
+        }
+
+        async fn shutdown(&self, _instance_id: &str) -> Result<bool, String> {
+            *self.shutdowns.lock().expect("shutdowns") += 1;
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pod_that_never_reports_back_is_torn_down_at_the_deadline() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (proxy, store) = live_asset_dirs(&recs);
+        let pod = Arc::new(HangingPod {
+            shutdowns: std::sync::Mutex::new(0),
+        });
+        let mut executor = harvest_executor();
+        executor.max_proof_deadline_s = 1;
+        executor.config_commitment = executor.expected_commitment();
+        let harvest = LiumProofHarvest::new(
+            pod.clone(),
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAtest proof".into()],
+        )
+        .with_judge_api_key(Some("sk-live-not-a-real-secret".into()))
+        .with_proxy_model_dir(Some(proxy))
+        .with_holdout_store(Some(store))
+        .with_harvest_overrides(Some(HarvestOverrides::default()))
+        .with_deadline_wait_grace_secs(0);
+        let err = harvest
+            .score(
+                &harvest_pin(),
+                &harvest_topic(&recs),
+                &harvest_offer(),
+                &executor,
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err("wait elapsed");
+        assert!(
+            matches!(
+                err,
+                EvalError::ProofDeadlineExceeded { deadline_s: 1, ref stdout_tail }
+                    if stdout_tail.contains("harvest wait exceeded")
+            ),
+            "{err}"
+        );
+        assert_eq!(
+            *pod.shutdowns.lock().expect("shutdowns"),
+            1,
+            "the pod is terminated even when its run never returned"
+        );
     }
 
     #[tokio::test]
@@ -1283,6 +1820,7 @@ mod tests {
                 &harvest_pin(),
                 &topic,
                 &harvest_offer(),
+                &harvest_executor(),
                 "digest-abcdef",
                 "artifact",
                 &recs,

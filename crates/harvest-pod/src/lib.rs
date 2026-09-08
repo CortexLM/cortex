@@ -79,10 +79,6 @@ pub struct RunExtras {
     pub holdout_tar: Vec<u8>,
     /// On-disk proxy-model tar. Missing / empty skips.
     pub proxy_tar_path: Option<PathBuf>,
-    /// Per-run proof deadline in seconds. When set it caps the pod-side
-    /// `timeout` (and the SSH wait) at `min(deadline, configured run
-    /// timeout)`; the image is killed at the deadline, never given more.
-    pub deadline_secs: Option<u64>,
 }
 
 /// Exit codes GNU `timeout` reports when the entrypoint hit the deadline:
@@ -90,7 +86,8 @@ pub struct RunExtras {
 pub const DEADLINE_EXIT_CODES: [u32; 2] = [124, 137];
 
 /// Seconds the entrypoint gets for one run: the configured run timeout,
-/// tightened by a per-run deadline when one is staged.
+/// tightened by a per-run proof deadline when one is given. The image is
+/// killed at the deadline, never given more.
 #[must_use]
 pub fn effective_run_timeout_secs(run_timeout_secs: u64, deadline_secs: Option<u64>) -> u64 {
     deadline_secs
@@ -284,18 +281,25 @@ pub trait EvalPod: Send + Sync {
     /// Boot the digest-pinned image and return the instance id.
     async fn boot(&self, spec: &InstanceSpec) -> Result<String, String>;
 
-    /// Deliver `request` bytes (and optional env file), run the image, return stdout.
+    /// Deliver `request` bytes (and optional env file) onto the pod.
     ///
     /// `env_file` is written to [`ENV_FILE`] over stdin when non-empty. Empty
     /// skips that stage so challenges without a judge host stay env-free.
     /// `extras` stages holdout bytes and a proxy tar path when present.
-    async fn run(
+    /// Staging is separate from [`Self::run`] so a slow multi-GB upload never
+    /// eats into a proof deadline.
+    async fn stage(
         &self,
         instance_id: &str,
         request: &[u8],
         env_file: &[u8],
         extras: &RunExtras,
-    ) -> Result<String, String>;
+    ) -> Result<(), String>;
+
+    /// Run the image entrypoint on what [`Self::stage`] delivered and return
+    /// stdout. `deadline_secs` caps the pod-side `timeout` at
+    /// `min(deadline, configured run timeout)` ([`effective_run_timeout_secs`]).
+    async fn run(&self, instance_id: &str, deadline_secs: Option<u64>) -> Result<String, String>;
 
     /// Terminate. `Ok(true)` only when the provider confirms the pod is gone.
     async fn shutdown(&self, instance_id: &str) -> Result<bool, String>;
@@ -507,13 +511,13 @@ impl EvalPod for LiumEvalPod {
         Ok(inst.id)
     }
 
-    async fn run(
+    async fn stage(
         &self,
         instance_id: &str,
         request: &[u8],
         env_file: &[u8],
         extras: &RunExtras,
-    ) -> Result<String, String> {
+    ) -> Result<(), String> {
         let key = resolve_private_key(None).map_err(|e| e.to_string())?;
         let target = self.target(instance_id).await?;
 
@@ -550,10 +554,16 @@ impl EvalPod for LiumEvalPod {
         if let Some(path) = extras.proxy_tar_path.as_deref() {
             self.stage_tree_file(&target, &key, PROXY_DIR, path).await?;
         }
+        Ok(())
+    }
+
+    async fn run(&self, instance_id: &str, deadline_secs: Option<u64>) -> Result<String, String> {
+        let key = resolve_private_key(None).map_err(|e| e.to_string())?;
+        let target = self.target(instance_id).await?;
 
         // `allow_fail`: a non-zero image exit still has to be harvested, since
         // the log tail is the only diagnosis the operator gets.
-        let run_secs = effective_run_timeout_secs(self.run_timeout_secs, extras.deadline_secs);
+        let run_secs = effective_run_timeout_secs(self.run_timeout_secs, deadline_secs);
         let out = ssh_exec_allow_fail(
             &target,
             &key,
@@ -734,7 +744,6 @@ mod tests {
         );
         let cmd = PROGRAM.run_cmd(effective_run_timeout_secs(5400, Some(1800)));
         assert!(cmd.contains("timeout --kill-after=60 1800"), "{cmd}");
-        assert!(RunExtras::default().deadline_secs.is_none());
     }
 
     #[test]

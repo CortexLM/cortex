@@ -3495,6 +3495,7 @@ dependencies = [
  "hex",
  "prism-lium-types",
  "proof-eval",
+ "proof-executor",
  "proof-task",
  "serde",
  "serde_json",
