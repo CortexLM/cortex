@@ -24,6 +24,7 @@ tokio = { version = "1", features = ["macros", "rt", "sync"] }
 async-trait = "0.1"
 crypto = { path = "../crypto" }
 http-body-util = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync"] }
 tower = { version = "0.5", features = ["util"] }
 
