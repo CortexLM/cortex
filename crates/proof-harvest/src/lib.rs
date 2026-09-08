@@ -14,6 +14,13 @@
 //! `PROOF_HARVEST_*` override) both by the pod-side `timeout` and by this
 //! crate's wait. A run cut at the deadline is a **503** carrying the pod's
 //! stdout tail, never a zero.
+//!
+//! This crate is the **only** path from the control plane to a rented GPU.
+//! The control-plane host runs neither the eval image nor the RLM judge; the
+//! judge is a remote offer the image calls from the pod, and the executor is
+//! a remote machine class. Nothing here knows a topic beyond the signed
+//! document it is handed: no topic ids, benchmarks, or model names are
+//! compiled in.
 
 #![forbid(unsafe_code)]
 #![allow(
@@ -653,6 +660,7 @@ impl LiveScorer for LiumProofHarvest {
 
         tracing::info!(
             executor_offer_id = %plan.offer_id,
+            topic_id = %plan.topic_id,
             template_id = %plan.template_id,
             gpu_count = plan.gpu_count,
             deadline_s = plan.deadline_s,

@@ -94,6 +94,12 @@ baseline + an open topic are on the host.
   still bind, and an unparseable or out-of-ceiling value refuses the rent
   rather than clamping. Ceremony:
   `cargo run -p xtask -- proof-executor-offer --offer-id <slug> --max-proof-deadline-s <s> --out <off-git path>`.
+  Isolation: the control-plane host runs neither the eval image nor the RLM
+  judge; the harvest is the **only** path to the rented GPU, and the executor
+  offer names a remote machine class, never a host process. The contract is
+  challenge-agnostic — no topic ids, benchmark names, or model names are
+  compiled in; the rent plan carries the topic id only as scope for a
+  topic-scoped attach.
 - A baseline must be sealed (`script_sha256` + `metrics_commitment`) to
   open. Nobody is paid for beating a number nobody measured.
 - 8000 bps is split equally across currently `open` topics. Each topic then

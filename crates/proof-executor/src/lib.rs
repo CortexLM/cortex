@@ -11,6 +11,13 @@
 //!
 //! Every refusal here is fail-closed: a missing, closed, or non-`1x` offer
 //! means `can_score=false` and submits answer **503**. Nothing here rents.
+//!
+//! Isolation invariants this contract assumes and never weakens: the
+//! control-plane host runs neither the eval image nor the RLM judge; the
+//! harvest is the **only** path from the control plane to a rented GPU; an
+//! offer names a remote machine class, never a host process or a specific
+//! machine. The contract is challenge-agnostic — it carries no topic ids,
+//! benchmark names, or model names, only ceilings the operator publishes.
 
 #![forbid(unsafe_code)]
 #![allow(

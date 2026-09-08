@@ -100,6 +100,10 @@ impl HarvestOverrides {
 pub struct ExecutorPlan {
     /// Offer this plan was resolved from.
     pub offer_id: String,
+    /// Topic the rent is scoped to. Carried so a topic-scoped attach (the
+    /// per-topic judge VM the pod reports to) can key on the plan without
+    /// changing its shape; this crate does not interpret the id.
+    pub topic_id: String,
     /// Lium template id or digest-scoped template name to rent.
     pub template_id: String,
     /// `true` when `template_id` is a raw Lium UUID (rent verbatim) rather
@@ -164,6 +168,7 @@ pub fn executor_plan(
 
     Ok(ExecutorPlan {
         offer_id: offer.offer_id.clone(),
+        topic_id: topic.id.clone(),
         template_is_uuid: is_lium_template_uuid(&template_id),
         template_id,
         gpu_count,
@@ -180,7 +185,10 @@ mod tests {
     use crate::fixtures::{offer, offer_for, pin};
 
     fn topic() -> TopicDocument {
-        TopicDocument::default()
+        TopicDocument {
+            id: "any-open-topic-v0".into(),
+            ..TopicDocument::default()
+        }
     }
 
     #[test]
@@ -193,6 +201,10 @@ mod tests {
         )
         .expect("plan");
         assert_eq!(plan.offer_id, "lium-1x-v0");
+        assert_eq!(
+            plan.topic_id, "any-open-topic-v0",
+            "topic scope rides on the plan"
+        );
         assert_eq!(plan.template_id, "proof-eval-78b614a1f51c");
         assert!(!plan.template_is_uuid);
         assert_eq!(plan.gpu_count, 1);
