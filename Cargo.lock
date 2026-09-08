@@ -2087,6 +2087,7 @@ dependencies = [
  "async-trait",
  "prism-lium",
  "prism-lium-types",
+ "tokio",
 ]
 
 [[package]]
@@ -3474,11 +3475,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "harvest-pod",
+ "hex",
  "prism-lium-types",
  "proof-eval",
  "proof-task",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
 ]

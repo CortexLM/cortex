@@ -127,8 +127,8 @@ jobs:
             'env -i PATH=/usr/bin:/bin /usr/bin/proof-eval score --help'
           docker run --rm --entrypoint /opt/proof-eval-venv/bin/python "${ref}" \
             -c 'import torch, transformers'
-          docker run --rm --entrypoint /bin/sh "${ref}" -c \
-            'test -f /opt/proof-eval/baked_proxies.json && ! grep -q "Qwen/Qwen3.8-0.6B" /opt/proof-eval/baked_proxies.json'
+          docker run --rm --entrypoint /opt/proof-eval-venv/bin/python "${ref}" \
+            -c 'import json,sys; p=json.load(open("/opt/proof-eval/baked_proxies.json")); sys.exit(0 if p==[] else 1)'
           docker run --rm --entrypoint /bin/sh "${ref}" -c \
             'env -i PATH=/usr/bin:/bin HOME=/root PROOF_SELFTEST_REQUIRE_RUNTIME=1 /usr/bin/proof-eval selftest'
       - name: publicize the GHCR package

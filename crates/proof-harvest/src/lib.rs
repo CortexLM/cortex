@@ -14,8 +14,9 @@
     clippy::too_many_arguments
 )]
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -30,6 +31,7 @@ use proof_task::{
     resolve_inference, HoldoutRecord, InferenceOffer, ProofPin, TopicDocument, CHALLENGE_ID,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Prefix the eval image prints before its metrics document.
 pub const METRICS_MARKER: &str = "PROOF_METRICS=";
@@ -146,31 +148,67 @@ pub fn judge_teacher_env(api_key: &str) -> Result<Vec<u8>, EvalError> {
     .into_bytes())
 }
 
-/// Pack operator-staged holdout shard bytes for the pod.
-///
-/// Each record must already exist as `store/<content_sha256>`. Missing
-/// bytes are a refuse, not invented text.
-pub fn pack_holdout_tar(store: &Path, holdout: &[HoldoutRecord]) -> Result<Vec<u8>, EvalError> {
+fn is_hex64(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn file_sha256_hex(path: &Path) -> Result<String, EvalError> {
+    let mut file = std::fs::File::open(path).map_err(|_| EvalError::HoldoutStoreMissing)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|_| EvalError::HoldoutStoreMissing)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn verify_shard_bytes(path: &Path, digest: &str) -> Result<(), EvalError> {
+    let got = file_sha256_hex(path)?;
+    if got != digest {
+        return Err(EvalError::HoldoutStoreMissing);
+    }
+    Ok(())
+}
+
+/// The holdout store can supply at least one digest-named shard whose
+/// bytes match the filename / catalog digest.
+pub fn holdout_store_usable(store: &Path) -> Result<(), EvalError> {
     if !store.is_dir() {
         return Err(EvalError::HoldoutStoreMissing);
     }
-    let mut names = Vec::with_capacity(holdout.len());
-    for rec in holdout {
-        let digest = rec.content_sha256.to_ascii_lowercase();
-        if digest.len() != 64 || digest.chars().any(|c| !c.is_ascii_hexdigit()) {
-            return Err(EvalError::HoldoutStoreMissing);
-        }
-        let path = store.join(&digest);
+    let entries = std::fs::read_dir(store).map_err(|_| EvalError::HoldoutStoreMissing)?;
+    let mut usable = false;
+    for ent in entries {
+        let ent = ent.map_err(|_| EvalError::HoldoutStoreMissing)?;
+        let path = ent.path();
         if !path.is_file() {
-            return Err(EvalError::HoldoutStoreMissing);
+            continue;
         }
-        names.push(digest);
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let digest = name.to_ascii_lowercase();
+        if !is_hex64(&digest) {
+            continue;
+        }
+        verify_shard_bytes(&path, &digest)?;
+        usable = true;
     }
-    tar_named_files(store, &names).map_err(|_| EvalError::HoldoutStoreMissing)
+    if usable {
+        Ok(())
+    } else {
+        Err(EvalError::HoldoutStoreMissing)
+    }
 }
 
-/// Pack operator-provided local measurement weights (no HF bake).
-pub fn pack_proxy_tar(dir: &Path) -> Result<Vec<u8>, EvalError> {
+/// Proxy tree exists, is non-empty, and `tar` can archive it (stdout discarded).
+pub fn proxy_archive_usable(dir: &Path) -> Result<(), EvalError> {
     if !dir.is_dir() {
         return Err(EvalError::ProxyModelMissing);
     }
@@ -179,7 +217,78 @@ pub fn pack_proxy_tar(dir: &Path) -> Result<Vec<u8>, EvalError> {
         Some(Ok(_)) => {}
         Some(Err(_)) | None => return Err(EvalError::ProxyModelMissing),
     }
-    tar_directory(dir).map_err(|_| EvalError::ProxyModelMissing)
+    let status = Command::new("tar")
+        .arg("-C")
+        .arg(dir)
+        .arg("-cf")
+        .arg("-")
+        .arg(".")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| EvalError::ProxyModelMissing)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(EvalError::ProxyModelMissing)
+    }
+}
+
+/// Pack operator-staged holdout shard bytes for the pod.
+///
+/// Each record must already exist as `store/<content_sha256>`, and the
+/// file bytes must hash to that digest. Missing or stale bytes refuse.
+pub fn pack_holdout_tar(store: &Path, holdout: &[HoldoutRecord]) -> Result<Vec<u8>, EvalError> {
+    if !store.is_dir() {
+        return Err(EvalError::HoldoutStoreMissing);
+    }
+    let mut names = Vec::with_capacity(holdout.len());
+    for rec in holdout {
+        let digest = rec.content_sha256.to_ascii_lowercase();
+        if !is_hex64(&digest) {
+            return Err(EvalError::HoldoutStoreMissing);
+        }
+        let path = store.join(&digest);
+        if !path.is_file() {
+            return Err(EvalError::HoldoutStoreMissing);
+        }
+        verify_shard_bytes(&path, &digest)?;
+        names.push(digest);
+    }
+    tar_named_files(store, &names).map_err(|_| EvalError::HoldoutStoreMissing)
+}
+
+/// Pack operator-provided local measurement weights to a temp tar (no HF bake).
+///
+/// The archive is written to disk so live score can stream it to SSH
+/// instead of buffering the model in control-plane memory.
+pub fn pack_proxy_tar(dir: &Path) -> Result<PathBuf, EvalError> {
+    proxy_archive_usable(dir)?;
+    let dest = {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        std::env::temp_dir().join(format!("proof-proxy-{}-{nanos}.tar", std::process::id()))
+    };
+    let status = Command::new("tar")
+        .arg("-C")
+        .arg(dir)
+        .arg("-cf")
+        .arg(&dest)
+        .arg(".")
+        .status()
+        .map_err(|_| EvalError::ProxyModelMissing)?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&dest);
+        return Err(EvalError::ProxyModelMissing);
+    }
+    match std::fs::metadata(&dest) {
+        Ok(meta) if meta.len() > 0 => Ok(dest),
+        _ => {
+            let _ = std::fs::remove_file(&dest);
+            Err(EvalError::ProxyModelMissing)
+        }
+    }
 }
 
 fn tar_named_files(dir: &Path, names: &[String]) -> Result<Vec<u8>, String> {
@@ -194,12 +303,6 @@ fn tar_named_files(dir: &Path, names: &[String]) -> Result<Vec<u8>, String> {
     run_tar(cmd)
 }
 
-fn tar_directory(dir: &Path) -> Result<Vec<u8>, String> {
-    let mut cmd = Command::new("tar");
-    cmd.arg("-C").arg(dir).arg("-cf").arg("-").arg(".");
-    run_tar(cmd)
-}
-
 fn run_tar(mut cmd: Command) -> Result<Vec<u8>, String> {
     let out = cmd.output().map_err(|e| format!("tar: {e}"))?;
     if !out.status.success() {
@@ -209,6 +312,17 @@ fn run_tar(mut cmd: Command) -> Result<Vec<u8>, String> {
         return Err("tar produced no archive".into());
     }
     Ok(out.stdout)
+}
+
+/// Delete a staged proxy tar when the harvest returns (or unwinds).
+struct ProxyTarGuard(Option<PathBuf>);
+
+impl Drop for ProxyTarGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// [`LiveScorer`] over a digest-pinned eval image on a Lium pod.
@@ -264,7 +378,10 @@ impl LiumProofHarvest {
         self
     }
 
-    fn live_extras(&self, holdout: &[HoldoutRecord]) -> Result<RunExtras, EvalError> {
+    fn live_extras(
+        &self,
+        holdout: &[HoldoutRecord],
+    ) -> Result<(RunExtras, ProxyTarGuard), EvalError> {
         let proxy = self
             .proxy_model_dir
             .as_deref()
@@ -273,10 +390,14 @@ impl LiumProofHarvest {
             .holdout_store
             .as_deref()
             .ok_or(EvalError::HoldoutStoreMissing)?;
-        Ok(RunExtras {
-            holdout_tar: pack_holdout_tar(store, holdout)?,
-            proxy_tar: pack_proxy_tar(proxy)?,
-        })
+        let proxy_path = pack_proxy_tar(proxy)?;
+        Ok((
+            RunExtras {
+                holdout_tar: pack_holdout_tar(store, holdout)?,
+                proxy_tar_path: Some(proxy_path.clone()),
+            },
+            ProxyTarGuard(Some(proxy_path)),
+        ))
     }
 
     fn spec(&self, pin: &ProofPin, frozen_digest: &str) -> InstanceSpec {
@@ -339,7 +460,7 @@ impl LiveScorer for LiumProofHarvest {
             ));
         }
         let env = judge_teacher_env(self.judge_api_key.as_deref().unwrap_or(""))?;
-        let extras = self.live_extras(holdout)?;
+        let (extras, _proxy_guard) = self.live_extras(holdout)?;
         let max_in = resolved.max_input_tokens.min(offer.config.max_input_tokens);
         let max_out = resolved
             .max_output_tokens
@@ -413,12 +534,12 @@ impl LiveScorer for LiumProofHarvest {
             ));
         }
         match self.proxy_model_dir.as_deref() {
-            Some(dir) if dir.is_dir() => {}
-            _ => return Err(EvalError::ProxyModelMissing),
+            Some(dir) => proxy_archive_usable(dir)?,
+            None => return Err(EvalError::ProxyModelMissing),
         }
         match self.holdout_store.as_deref() {
-            Some(dir) if dir.is_dir() => {}
-            _ => return Err(EvalError::HoldoutStoreMissing),
+            Some(dir) => holdout_store_usable(dir)?,
+            None => return Err(EvalError::HoldoutStoreMissing),
         }
         Ok(())
     }
@@ -510,6 +631,7 @@ mod tests {
         env: std::sync::Mutex<Vec<u8>>,
         request: std::sync::Mutex<Vec<u8>>,
         extras: std::sync::Mutex<RunExtras>,
+        proxy_tar_len: std::sync::Mutex<u64>,
         booted: std::sync::Mutex<bool>,
     }
 
@@ -519,6 +641,7 @@ mod tests {
                 env: std::sync::Mutex::new(Vec::new()),
                 request: std::sync::Mutex::new(Vec::new()),
                 extras: std::sync::Mutex::new(RunExtras::default()),
+                proxy_tar_len: std::sync::Mutex::new(0),
                 booted: std::sync::Mutex::new(false),
             })
         }
@@ -541,6 +664,12 @@ mod tests {
             *self.request.lock().expect("req") = request.to_vec();
             *self.env.lock().expect("env") = env_file.to_vec();
             *self.extras.lock().expect("extras") = extras.clone();
+            let n = extras
+                .proxy_tar_path
+                .as_ref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map_or(0, |m| m.len());
+            *self.proxy_tar_len.lock().expect("proxy len") = n;
             Err("captured".into())
         }
 
@@ -597,6 +726,13 @@ mod tests {
         }
     }
 
+    fn synthetic_shard_bytes(rec: &proof_task::HoldoutRecord) -> Vec<u8> {
+        let mut buf = b"proof-synthetic-shard-v1".to_vec();
+        buf.extend_from_slice(rec.split.as_str().as_bytes());
+        buf.extend_from_slice(&rec.id.to_le_bytes());
+        buf
+    }
+
     fn live_asset_dirs(recs: &[proof_task::HoldoutRecord]) -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!(
             "proof-harvest-assets-{}",
@@ -617,7 +753,7 @@ mod tests {
         for rec in recs {
             std::fs::write(
                 store.join(rec.content_sha256.to_ascii_lowercase()),
-                format!("shard-{}\n", rec.id),
+                synthetic_shard_bytes(rec),
             )
             .expect("shard");
         }
@@ -683,7 +819,14 @@ mod tests {
             !extras.holdout_tar.is_empty(),
             "holdout shards must be staged"
         );
-        assert!(!extras.proxy_tar.is_empty(), "proxy weights must be staged");
+        assert!(
+            extras.proxy_tar_path.is_some(),
+            "proxy archive path must be staged"
+        );
+        assert!(
+            *pod.proxy_tar_len.lock().expect("proxy len") > 0,
+            "proxy archive must be non-empty on disk"
+        );
         let req: serde_json::Value =
             serde_json::from_slice(&pod.request.lock().expect("req")).expect("json");
         assert!(req.get("api_key").is_none(), "{req}");
@@ -741,6 +884,37 @@ mod tests {
         assert!(!*pod.booted.lock().expect("booted"));
     }
 
+    #[tokio::test]
+    async fn harvest_empty_proxy_dir_does_not_boot() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (_proxy, store) = live_asset_dirs(&recs);
+        let empty = store.parent().expect("root").join("empty-proxy-score");
+        std::fs::create_dir_all(&empty).expect("empty");
+        let pod = CapturePod::new();
+        let harvest = LiumProofHarvest::new(
+            pod.clone(),
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAtest proof".into()],
+        )
+        .with_judge_api_key(Some("sk-live-not-a-real-secret".into()))
+        .with_proxy_model_dir(Some(empty))
+        .with_holdout_store(Some(store));
+        let err = harvest
+            .score(
+                &harvest_pin(),
+                &harvest_topic(&recs),
+                &harvest_offer(),
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err("empty proxy");
+        assert!(matches!(err, EvalError::ProxyModelMissing), "{err}");
+        assert!(!*pod.booted.lock().expect("booted"));
+    }
+
     #[test]
     fn pack_holdout_tar_refuses_a_missing_shard() {
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
@@ -752,6 +926,29 @@ mod tests {
             Err(EvalError::HoldoutStoreMissing)
         ));
         let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn pack_holdout_tar_refuses_a_hash_mismatch() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let store = std::env::temp_dir().join(format!(
+            "proof-holdout-mismatch-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&store).expect("dir");
+        std::fs::write(
+            store.join(recs[0].content_sha256.to_ascii_lowercase()),
+            b"not-the-catalogued-shard\n",
+        )
+        .expect("wrong bytes");
+        assert!(matches!(
+            pack_holdout_tar(&store, &recs),
+            Err(EvalError::HoldoutStoreMissing)
+        ));
+        let _ = std::fs::remove_dir_all(&store);
     }
 
     #[test]
@@ -769,7 +966,7 @@ mod tests {
         let holdout = pack_holdout_tar(&store, &recs).expect("holdout tar");
         let weights = pack_proxy_tar(&proxy).expect("proxy tar");
         assert!(!holdout.is_empty());
-        assert!(!weights.is_empty());
+        assert!(std::fs::metadata(&weights).expect("meta").len() > 0);
         let listed = Command::new("tar")
             .args(["-tf", "-"])
             .stdin(std::process::Stdio::piped())
@@ -791,6 +988,65 @@ mod tests {
             listing.contains(&recs[0].content_sha256.to_ascii_lowercase()),
             "{listing}"
         );
+        let _ = std::fs::remove_file(&weights);
+    }
+
+    fn harvest_for_ready(proxy: PathBuf, store: PathBuf) -> LiumProofHarvest {
+        LiumProofHarvest::new(
+            CapturePod::new(),
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAtest proof".into()],
+        )
+        .with_proxy_model_dir(Some(proxy))
+        .with_holdout_store(Some(store))
+    }
+
+    #[test]
+    fn ready_rejects_empty_proxy_dir() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (_proxy, store) = live_asset_dirs(&recs);
+        let empty = store.parent().expect("root").join("empty-proxy");
+        std::fs::create_dir_all(&empty).expect("empty proxy");
+        let harvest = harvest_for_ready(empty, store);
+        assert!(matches!(harvest.ready(), Err(EvalError::ProxyModelMissing)));
+    }
+
+    #[test]
+    fn ready_rejects_empty_holdout_store() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (proxy, store) = live_asset_dirs(&recs);
+        for rec in &recs {
+            let _ = std::fs::remove_file(store.join(rec.content_sha256.to_ascii_lowercase()));
+        }
+        let harvest = harvest_for_ready(proxy, store);
+        assert!(matches!(
+            harvest.ready(),
+            Err(EvalError::HoldoutStoreMissing)
+        ));
+    }
+
+    #[test]
+    fn ready_rejects_holdout_hash_mismatch() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (proxy, store) = live_asset_dirs(&recs);
+        std::fs::write(
+            store.join(recs[0].content_sha256.to_ascii_lowercase()),
+            b"stale-or-wrong-holdout-bytes\n",
+        )
+        .expect("tamper");
+        let harvest = harvest_for_ready(proxy, store);
+        assert!(matches!(
+            harvest.ready(),
+            Err(EvalError::HoldoutStoreMissing)
+        ));
+    }
+
+    #[test]
+    fn ready_accepts_usable_staged_assets() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (proxy, store) = live_asset_dirs(&recs);
+        let harvest = harvest_for_ready(proxy, store);
+        harvest.ready().expect("usable assets");
     }
 
     #[tokio::test]

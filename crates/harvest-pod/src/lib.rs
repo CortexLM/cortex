@@ -17,6 +17,8 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
 
+use std::path::{Path, PathBuf};
+
 use async_trait::async_trait;
 use prism_lium::{
     parse_ssh_target, resolve_private_key, ssh_exec, ssh_exec_allow_fail, ssh_exec_stdin,
@@ -69,13 +71,25 @@ pub const PROXY_DIR: &str = "proxy";
 /// Extra trees staged after `request.json` / [`ENV_FILE`], before the run.
 ///
 /// Dest names are control-plane constants ([`HOLDOUT_DIR`], [`PROXY_DIR`]).
-/// Bytes are an uncompressed tar (`tar -cf -`). Empty skips that tree.
+/// Holdout bytes are an uncompressed tar (`tar -cf -`). The proxy archive
+/// is a path so large models are streamed, not buffered. Empty skips.
 #[derive(Debug, Clone, Default)]
 pub struct RunExtras {
     /// Packed holdout shards (`<content_sha256>` entries). Empty skips.
     pub holdout_tar: Vec<u8>,
-    /// Packed local measurement weights. Empty skips.
-    pub proxy_tar: Vec<u8>,
+    /// On-disk proxy-model tar. Missing / empty skips.
+    pub proxy_tar_path: Option<PathBuf>,
+}
+
+/// Seconds allowed to stream `bytes` over SSH. Floor is the short-op
+/// budget; large archives get one extra second per MiB (capped at 1h).
+#[must_use]
+pub fn stage_timeout_secs(bytes: u64) -> u64 {
+    const MIB: u64 = 1024 * 1024;
+    const CAP_SECS: u64 = 3600;
+    SSH_SHORT_TIMEOUT_SECS
+        .saturating_add(bytes.div_ceil(MIB))
+        .min(CAP_SECS)
 }
 
 /// True when `dest` is a single path segment harvest may interpolate.
@@ -245,7 +259,7 @@ pub trait EvalPod: Send + Sync {
     ///
     /// `env_file` is written to [`ENV_FILE`] over stdin when non-empty. Empty
     /// skips that stage so challenges without a judge host stay env-free.
-    /// `extras` stages holdout / proxy trees when their tars are non-empty.
+    /// `extras` stages holdout bytes and a proxy tar path when present.
     async fn run(
         &self,
         instance_id: &str,
@@ -318,7 +332,7 @@ impl LiumEvalPod {
     async fn stage_tree(
         &self,
         target: &SshTarget,
-        key: &std::path::Path,
+        key: &Path,
         dest: &str,
         tar: &[u8],
     ) -> Result<(), String> {
@@ -336,12 +350,108 @@ impl LiumEvalPod {
             tar,
             SSH_ATTEMPTS,
             SSH_RETRY_SECS,
-            SSH_SHORT_TIMEOUT_SECS,
+            stage_timeout_secs(tar.len() as u64),
         )
         .await
         .map(|_| ())
         .map_err(|e| format!("stage {dest}: {e}"))
     }
+
+    async fn stage_tree_file(
+        &self,
+        target: &SshTarget,
+        key: &Path,
+        dest: &str,
+        tar_path: &Path,
+    ) -> Result<(), String> {
+        let len = std::fs::metadata(tar_path)
+            .map_err(|e| format!("stage {dest}: {e}"))?
+            .len();
+        if len == 0 {
+            return Err(format!("stage {dest}: archive is empty"));
+        }
+        let cmd = self
+            .program
+            .stage_tree_cmd(dest)
+            .ok_or_else(|| format!("staged tree dest {dest:?} is not a safe identifier"))?;
+        ssh_stream_file(
+            target,
+            key,
+            &cmd,
+            tar_path,
+            SSH_ATTEMPTS,
+            SSH_RETRY_SECS,
+            stage_timeout_secs(len),
+        )
+        .await
+        .map_err(|e| format!("stage {dest}: {e}"))
+    }
+}
+
+/// Stream a local file to remote stdin. The kernel copies the file; the
+/// control plane never holds the archive as an owned `Vec<u8>`.
+async fn ssh_stream_file(
+    target: &SshTarget,
+    private_key: &Path,
+    remote_cmd: &str,
+    stdin_path: &Path,
+    attempts: u32,
+    retry_secs: u64,
+    timeout_secs: u64,
+) -> Result<(), String> {
+    let mut last_err = String::new();
+    for attempt in 1..=attempts.max(1) {
+        let file = std::fs::File::open(stdin_path).map_err(|e| format!("open archive: {e}"))?;
+        let port = target.port.to_string();
+        let mut cmd = tokio::process::Command::new("ssh");
+        cmd.arg("-i").arg(private_key).args([
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=15",
+            "-o",
+            "ServerAliveInterval=10",
+            "-o",
+            "ServerAliveCountMax=60",
+            "-o",
+            "TCPKeepAlive=yes",
+            "-o",
+            "BatchMode=yes",
+            "-p",
+            &port,
+        ]);
+        cmd.arg(format!("{}@{}", target.user, target.host))
+            .arg(remote_cmd)
+            .stdin(file)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let run = async move {
+            let child = cmd.spawn().map_err(|e| format!("ssh spawn: {e}"))?;
+            child
+                .wait_with_output()
+                .await
+                .map_err(|e| format!("ssh wait: {e}"))
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), run).await {
+            Ok(Ok(out)) if out.status.success() => return Ok(()),
+            Ok(Ok(out)) => {
+                last_err = format!(
+                    "ssh exit {:?}: {}",
+                    out.status.code(),
+                    truncate_tail(&String::from_utf8_lossy(&out.stderr), 200)
+                );
+            }
+            Ok(Err(e)) => last_err = e,
+            Err(_) => last_err = "ssh timed out".into(),
+        }
+        if attempt < attempts {
+            tokio::time::sleep(std::time::Duration::from_secs(retry_secs)).await;
+        }
+    }
+    Err(last_err)
 }
 
 #[async_trait]
@@ -408,8 +518,9 @@ impl EvalPod for LiumEvalPod {
 
         self.stage_tree(&target, &key, HOLDOUT_DIR, &extras.holdout_tar)
             .await?;
-        self.stage_tree(&target, &key, PROXY_DIR, &extras.proxy_tar)
-            .await?;
+        if let Some(path) = extras.proxy_tar_path.as_deref() {
+            self.stage_tree_file(&target, &key, PROXY_DIR, path).await?;
+        }
 
         // `allow_fail`: a non-zero image exit still has to be harvested, since
         // the log tail is the only diagnosis the operator gets.
@@ -579,6 +690,14 @@ mod tests {
         assert!(err.contains("abababab"), "{err}");
         assert!(err.contains("/usr/bin/relearn-eval"), "{err}");
         assert!(err.contains("refusing to stage the holdout"), "{err}");
+    }
+
+    #[test]
+    fn stage_timeout_grows_with_archive_size() {
+        assert_eq!(stage_timeout_secs(0), 120);
+        assert_eq!(stage_timeout_secs(1), 121);
+        assert_eq!(stage_timeout_secs(96 * 1024 * 1024), 216);
+        assert_eq!(stage_timeout_secs(10 * 1024 * 1024 * 1024), 3600);
     }
 
     #[test]
