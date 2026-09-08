@@ -1,0 +1,27 @@
+[package]
+name = "proof-rlm-store"
+description = "Proof RLM persistence: DB-backed topic versions, RLM-authored rule versions, checklists, lifecycle transitions, artefact metadata, and the promotion continuum (Postgres via sqlx, plus an in-memory store for CI/local)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+db = { path = "../db" }
+proof-rlm = { path = "../proof-rlm" }
+proof-task = { path = "../proof-task" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "json"] }
+thiserror = "2"
+
+[dev-dependencies]
+db = { path = "../db", features = ["testing"] }
+proof-rlm = { path = "../proof-rlm", features = ["test-fixtures"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true
