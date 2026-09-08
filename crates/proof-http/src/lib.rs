@@ -34,7 +34,7 @@ use proof_eval::{
     contamination_evidence, eval_after_freeze, force_sim, scoring_readiness,
     secret_backed_base_url, supported_custom, EvalBackend, EvalError, LiveScorer,
 };
-use proof_executor::{require_open_executor, EvalExecutorOffer};
+use proof_executor::{require_open_executor, EvalExecutorOffer, ExecutorPlan};
 use proof_score::{
     judge_topic, primary_from_harness, AgentVerdict, GateFail, HarnessMetrics, MinerTopicRun,
     ProofKind, ProofVerdict,
@@ -406,6 +406,7 @@ async fn submit(
     persist_scored(
         &st,
         executor.as_ref(),
+        eval.executor.as_ref(),
         body,
         hotkey,
         artifact,
@@ -509,6 +510,7 @@ fn persist_pre_eval_reject(
 fn persist_scored(
     st: &AppState,
     executor: Option<&EvalExecutorOffer>,
+    plan: Option<&ExecutorPlan>,
     body: SubmitBody,
     hotkey: String,
     artifact: String,
@@ -553,8 +555,11 @@ fn persist_scored(
                 .map(|o| o.config_commitment.clone())
                 .unwrap_or_default(),
             executor_offer_id: executor.map(|x| x.offer_id.clone()).unwrap_or_default(),
-            executor_commitment: executor
-                .map(|x| x.config_commitment.clone())
+            // A live run stamps the configuration it was actually held to
+            // (template, 1x, effective deadline); sim has no plan and no rent.
+            executor_commitment: plan
+                .map(|p| p.config_commitment.clone())
+                .or_else(|| executor.map(|x| x.config_commitment.clone()))
                 .unwrap_or_default(),
             manifest: body.manifest,
             nonce,
@@ -906,7 +911,7 @@ mod tests {
             pin: &ProofPin,
             topic: &TopicDocument,
             _offer: &InferenceOffer,
-            _executor: &EvalExecutorOffer,
+            _plan: &ExecutorPlan,
             frozen: &str,
             artifact: &str,
             _holdout: &[proof_task::HoldoutRecord],

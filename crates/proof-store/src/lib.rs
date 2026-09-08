@@ -86,7 +86,10 @@ pub struct Submission {
     /// on sim, which rents nothing).
     #[serde(default)]
     pub executor_offer_id: String,
-    /// Executor `config_commitment` stamped from the host offer.
+    /// Commitment of the executor configuration a live run was actually held
+    /// to (template, `1x`, effective deadline, digest) — the offer's
+    /// `config_commitment` when nothing tightened or overrode it, and the
+    /// offer's when no run happened (pre-eval reject).
     #[serde(default)]
     pub executor_commitment: String,
     /// Declared training fingerprints.

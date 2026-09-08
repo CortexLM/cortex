@@ -25,7 +25,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
 use prism_lium_types::{EvalReceipt, NoScoreGate};
-use proof_executor::{require_open_executor, EvalExecutorOffer, ExecutorOfferError};
+use proof_executor::{
+    executor_plan, require_open_executor, EvalExecutorOffer, ExecutorOfferError, ExecutorPlan,
+    HarvestOverrides,
+};
 use proof_score::{AgentVerdict, HarnessMetrics, ProofCheatCode, ProofKind, SealedBaseline};
 use proof_store::ArtifactManifest;
 use proof_task::{
@@ -258,17 +261,32 @@ impl ProofEvalDocument {
 /// Handle to the digest-pinned eval image's harvest.
 #[async_trait]
 pub trait LiveScorer: Send + Sync {
+    /// Resolve what one rent is allowed to do for `topic` on `executor`:
+    /// template, exact width, deadline, and the commitment of that resolved
+    /// configuration. The harvest applies its `PROOF_HARVEST_*` overrides
+    /// here; the default applies none. Called before [`Self::score`] so the
+    /// caller can persist the plan the run was actually held to.
+    fn plan(
+        &self,
+        pin: &ProofPin,
+        topic: &TopicDocument,
+        executor: &EvalExecutorOffer,
+    ) -> Result<ExecutorPlan, EvalError> {
+        executor_plan(pin, Some(executor), topic, &HarvestOverrides::default())
+            .map_err(map_executor_err)
+    }
+
     /// Score one artifact on one topic's verified holdout.
     ///
-    /// `offer` is the RLM judge the image calls; `executor` is the open
-    /// `1x` machine class the image is rented on. Both are host state.
+    /// `offer` is the RLM judge the image calls; `plan` is the resolved `1x`
+    /// rent ([`Self::plan`]) the image is run under. Both are host state.
     #[allow(clippy::too_many_arguments)]
     async fn score(
         &self,
         pin: &ProofPin,
         topic: &TopicDocument,
         offer: &InferenceOffer,
-        executor: &EvalExecutorOffer,
+        plan: &ExecutorPlan,
         frozen_digest: &str,
         artifact_digest: &str,
         holdout: &[HoldoutRecord],
@@ -481,6 +499,9 @@ pub struct EvalOutcome {
     pub receipt: EvalReceipt,
     /// Backend that produced the scores.
     pub backend: EvalBackend,
+    /// Executor plan the live run was held to (template, `1x`, deadline,
+    /// commitment of that resolved configuration). `None` on sim.
+    pub executor: Option<ExecutorPlan>,
 }
 
 /// Declared training metadata plus the holdout fingerprints inside it.
@@ -732,6 +753,7 @@ pub async fn eval_after_freeze(
             OfferError::OriginMismatch.to_string(),
         ));
     }
+    let mut plan = None;
     let doc = match backend {
         EvalBackend::Sim => {
             if let Some(sealed) = sealed {
@@ -744,18 +766,23 @@ pub async fn eval_after_freeze(
         EvalBackend::Lium => {
             let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
             let executor = executor.ok_or(EvalError::ExecutorOfferMissing)?;
-            scorer
+            // Resolve the rent before anything runs so the row records the
+            // configuration the run was actually held to.
+            let resolved = scorer.plan(pin, topic, executor)?;
+            let doc = scorer
                 .score(
                     pin,
                     topic,
                     offer,
-                    executor,
+                    &resolved,
                     frozen_digest,
                     artifact_digest,
                     holdout,
                     claim,
                 )
-                .await?
+                .await?;
+            plan = Some(resolved);
+            doc
         }
     };
     doc.verify(pin, topic, frozen_digest, artifact_digest)?;
@@ -783,6 +810,7 @@ pub async fn eval_after_freeze(
         harness: doc.harness,
         receipt,
         backend,
+        executor: plan,
     })
 }
 
@@ -884,7 +912,7 @@ mod tests {
             pin: &ProofPin,
             topic: &TopicDocument,
             _offer: &InferenceOffer,
-            _executor: &EvalExecutorOffer,
+            _plan: &ExecutorPlan,
             frozen: &str,
             artifact: &str,
             _holdout: &[HoldoutRecord],
@@ -979,6 +1007,15 @@ mod tests {
         assert!(out.agent.reproduced);
         assert_eq!(out.agent.topic_id, t.id);
         assert_eq!(out.receipt.provider, "lium");
+        let plan = out
+            .executor
+            .expect("live outcome carries the resolved plan");
+        assert_eq!(plan.offer_id, "lium-1x-v0");
+        assert_eq!(plan.topic_id, t.id);
+        assert_eq!(plan.gpu_count, 1);
+        assert_eq!(plan.deadline_s, 3_600);
+        assert_eq!(plan.offer_commitment, executor(&p).config_commitment);
+        assert_eq!(plan.config_commitment, plan.offer_commitment);
     }
 
     #[test]
@@ -1343,6 +1380,7 @@ mod tests {
         .expect("sim");
         assert_eq!(out.backend, EvalBackend::Sim);
         assert_eq!(out.receipt.provider, "sim");
+        assert!(out.executor.is_none(), "sim rents nothing");
         assert_eq!(out.agent.rationale, "sim stub win");
         assert!(out.harness.holdout_nll <= sealed.holdout_nll + t.metric.quality_floor_nll);
         assert!(

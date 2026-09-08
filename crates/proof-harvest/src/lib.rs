@@ -38,8 +38,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use harvest_pod::{
-    harvest_template_name, hit_deadline, truncate_tail, EvalPod, PodProgram, RunExtras,
-    HOLDOUT_DIR, PROXY_DIR,
+    hit_deadline, killed_externally, truncate_tail, EvalPod, PodProgram, RunExtras, HOLDOUT_DIR,
+    PROXY_DIR,
 };
 use prism_lium_types::InstanceSpec;
 use proof_eval::{
@@ -118,7 +118,11 @@ pub struct HarvestRequest {
     pub config_commitment: String,
     /// Live executor offer the pod was rented on (host stamp).
     pub executor_offer_id: String,
-    /// Executor `config_commitment` (template, shape, deadline, digest).
+    /// The offer's published `config_commitment`.
+    pub executor_offer_commitment: String,
+    /// Commitment of the executor configuration this run actually got
+    /// (template, shape, `max_proof_deadline_s`, digest). Equals the offer
+    /// commitment unless a topic tighten or an operator override changed it.
     pub executor_commitment: String,
     /// Proof deadline this run is held to, seconds.
     pub max_proof_deadline_s: u64,
@@ -136,6 +140,72 @@ pub struct HarvestRequest {
     pub claim: String,
     /// Verified holdout records. Rotate the set if a pod is suspected of exfil.
     pub holdout: Vec<HoldoutRecord>,
+}
+
+impl HarvestRequest {
+    /// Resolve the judge for `topic` against the committed offer and bind the
+    /// run to the executor plan. Refuses (no rent) when the offer cannot
+    /// serve the topic, the resolved judge config is incomplete, or a topic
+    /// tried to redirect the judge origin.
+    pub fn build(
+        pin: &ProofPin,
+        topic: &TopicDocument,
+        offer: &InferenceOffer,
+        plan: &ExecutorPlan,
+        frozen_digest: &str,
+        artifact_digest: &str,
+        holdout: &[HoldoutRecord],
+        claim: &str,
+    ) -> Result<Self, EvalError> {
+        offer
+            .serves_topic(pin, topic)
+            .map_err(|e| EvalError::InferenceOffer(e.to_string()))?;
+        let resolved = resolve_inference(
+            pin,
+            Some(&topic.inference),
+            secret_backed_base_url().as_deref(),
+            Some(offer),
+        );
+        if !resolved.ready_to_score() {
+            return Err(EvalError::InferenceOffer(
+                proof_task::OfferError::Incomplete.to_string(),
+            ));
+        }
+        if resolved.base_url.trim() != offer.provider.base_url.trim() {
+            return Err(EvalError::InferenceOffer(
+                proof_task::OfferError::OriginMismatch.to_string(),
+            ));
+        }
+        Ok(Self {
+            schema_version: PROOF_METRICS_SCHEMA,
+            challenge_id: CHALLENGE_ID.to_owned(),
+            submission_digest: frozen_digest.to_owned(),
+            artifact_digest: artifact_digest.to_owned(),
+            topic_id: topic.id.clone(),
+            family: topic.metric.family.as_str().to_owned(),
+            inference_offer_id: offer.offer_id.clone(),
+            provider_kind: resolved.provider.as_str().to_owned(),
+            base_url: resolved.base_url.clone(),
+            mode: resolved.mode.as_str().to_owned(),
+            model_ref: resolved.model.clone(),
+            max_input_tokens: resolved.max_input_tokens.min(offer.config.max_input_tokens),
+            max_output_tokens: resolved
+                .max_output_tokens
+                .min(offer.config.max_output_tokens),
+            config_commitment: offer.config_commitment.clone(),
+            executor_offer_id: plan.offer_id.clone(),
+            executor_offer_commitment: plan.offer_commitment.clone(),
+            executor_commitment: plan.config_commitment.clone(),
+            max_proof_deadline_s: plan.deadline_s,
+            eval_image_digest: pin.eval_image_digest.clone(),
+            holdout_commitment: topic.holdout_commitment.clone(),
+            constraints: topic.constraints,
+            flops_budget: topic.flops_budget,
+            wall_budget_s: topic.metric.wall_budget_s,
+            claim: claim.to_owned(),
+            holdout: holdout.to_vec(),
+        })
+    }
 }
 
 /// Rent limits for one harvest. Width is not a limit: it is the executor
@@ -420,22 +490,6 @@ impl LiumProofHarvest {
         self
     }
 
-    fn plan(
-        &self,
-        pin: &ProofPin,
-        topic: &TopicDocument,
-        executor: &EvalExecutorOffer,
-    ) -> Result<ExecutorPlan, EvalError> {
-        let overrides = match &self.overrides {
-            Some(o) => o.clone(),
-            None => HarvestOverrides::from_env().map_err(map_executor_err)?,
-        };
-        if !overrides.is_empty() {
-            tracing::info!(?overrides, "PROOF_HARVEST_* override in effect");
-        }
-        executor_plan(pin, Some(executor), topic, &overrides).map_err(map_executor_err)
-    }
-
     /// Inject the judge API key staged into `teacher.env` on the pod.
     ///
     /// Empty / whitespace is treated as missing (fail-closed on a live run).
@@ -498,15 +552,13 @@ impl LiumProofHarvest {
         ))
     }
 
-    /// Rent spec for one run: the executor plan's template at exactly its
-    /// width. A raw Lium UUID is rented verbatim; a digest-scoped template
-    /// name is resolved (or created) bound to `eval_image@digest`.
+    /// Rent spec for one run: the executor plan's digest-scoped template at
+    /// exactly its width. `template_id` stays `None` on purpose — the
+    /// provider would rent a raw id verbatim — so the digest-bound resolver
+    /// is the only way a template is chosen: it reuses a listed template only
+    /// when its image is `eval_image@digest`, and otherwise creates one bound
+    /// to that pin.
     fn spec(&self, pin: &ProofPin, frozen_digest: &str, plan: &ExecutorPlan) -> InstanceSpec {
-        let template_name = if plan.template_is_uuid {
-            harvest_template_name(&pin.eval_image, &pin.eval_image_digest)
-        } else {
-            plan.template_id.clone()
-        };
         InstanceSpec {
             name: format!("proof-{}", &frozen_digest[..12.min(frozen_digest.len())]),
             max_lifetime_hours: self.limits.max_lifetime_hours,
@@ -518,8 +570,8 @@ impl LiumProofHarvest {
             ssh_public_keys: self.ssh_public_keys.clone(),
             ssh_key_name: Some(SSH_KEY_NAME.to_owned()),
             preferred_offer_id: None,
-            template_id: plan.template_is_uuid.then(|| plan.template_id.clone()),
-            template_name: Some(template_name),
+            template_id: None,
+            template_name: Some(plan.template_id.clone()),
             exact_gpu_count: true,
         }
     }
@@ -582,12 +634,31 @@ impl LiumProofHarvest {
 
 #[async_trait]
 impl LiveScorer for LiumProofHarvest {
+    /// Pin ceilings + open offer + topic tighten + this host's
+    /// `PROOF_HARVEST_*` overrides, collapsed into one rent. Refuses before
+    /// anything is staged or rented: no judge env, no proxy tar, no pod.
+    fn plan(
+        &self,
+        pin: &ProofPin,
+        topic: &TopicDocument,
+        executor: &EvalExecutorOffer,
+    ) -> Result<ExecutorPlan, EvalError> {
+        let overrides = match &self.overrides {
+            Some(o) => o.clone(),
+            None => HarvestOverrides::from_env().map_err(map_executor_err)?,
+        };
+        if !overrides.is_empty() {
+            tracing::info!(?overrides, "PROOF_HARVEST_* override in effect");
+        }
+        executor_plan(pin, Some(executor), topic, &overrides).map_err(map_executor_err)
+    }
+
     async fn score(
         &self,
         pin: &ProofPin,
         topic: &TopicDocument,
         offer: &InferenceOffer,
-        executor: &EvalExecutorOffer,
+        plan: &ExecutorPlan,
         frozen_digest: &str,
         artifact_digest: &str,
         holdout: &[HoldoutRecord],
@@ -600,61 +671,26 @@ impl LiveScorer for LiumProofHarvest {
             return Err(EvalError::HoldoutSealed);
         }
         self.ready()?;
-        // Executor first: no judge env, no proxy tar, no rent unless the
-        // open 1x executor, the topic tighten, and any operator override
-        // collapse into a legal plan.
-        let plan = self.plan(pin, topic, executor)?;
-        offer
-            .serves_topic(pin, topic)
-            .map_err(|e| EvalError::InferenceOffer(e.to_string()))?;
-        let resolved = resolve_inference(
+        // The plan is what `Self::plan` resolved for this topic; a plan for
+        // another topic is a caller bug and must not rent.
+        if plan.topic_id != topic.id {
+            return Err(EvalError::ExecutorOffer(format!(
+                "executor plan is for topic {:?}, scoring {:?}",
+                plan.topic_id, topic.id
+            )));
+        }
+        let request = HarvestRequest::build(
             pin,
-            Some(&topic.inference),
-            secret_backed_base_url().as_deref(),
-            Some(offer),
-        );
-        if !resolved.ready_to_score() {
-            return Err(EvalError::InferenceOffer(
-                proof_task::OfferError::Incomplete.to_string(),
-            ));
-        }
-        if resolved.base_url.trim() != offer.provider.base_url.trim() {
-            return Err(EvalError::InferenceOffer(
-                proof_task::OfferError::OriginMismatch.to_string(),
-            ));
-        }
+            topic,
+            offer,
+            plan,
+            frozen_digest,
+            artifact_digest,
+            holdout,
+            claim,
+        )?;
         let env = judge_teacher_env(self.judge_api_key.as_deref().unwrap_or(""))?;
         let (extras, _proxy_guard) = self.live_extras(holdout)?;
-        let max_in = resolved.max_input_tokens.min(offer.config.max_input_tokens);
-        let max_out = resolved
-            .max_output_tokens
-            .min(offer.config.max_output_tokens);
-        let request = HarvestRequest {
-            schema_version: PROOF_METRICS_SCHEMA,
-            challenge_id: CHALLENGE_ID.to_owned(),
-            submission_digest: frozen_digest.to_owned(),
-            artifact_digest: artifact_digest.to_owned(),
-            topic_id: topic.id.clone(),
-            family: topic.metric.family.as_str().to_owned(),
-            inference_offer_id: offer.offer_id.clone(),
-            provider_kind: resolved.provider.as_str().to_owned(),
-            base_url: resolved.base_url.clone(),
-            mode: resolved.mode.as_str().to_owned(),
-            model_ref: resolved.model.clone(),
-            max_input_tokens: max_in,
-            max_output_tokens: max_out,
-            config_commitment: offer.config_commitment.clone(),
-            executor_offer_id: plan.offer_id.clone(),
-            executor_commitment: plan.config_commitment.clone(),
-            max_proof_deadline_s: plan.deadline_s,
-            eval_image_digest: pin.eval_image_digest.clone(),
-            holdout_commitment: topic.holdout_commitment.clone(),
-            constraints: topic.constraints,
-            flops_budget: topic.flops_budget,
-            wall_budget_s: topic.metric.wall_budget_s,
-            claim: claim.to_owned(),
-            holdout: holdout.to_vec(),
-        };
         let body = serde_json::to_vec(&request)
             .map_err(|e| EvalError::Backend(format!("encode request: {e}")))?;
 
@@ -664,11 +700,12 @@ impl LiveScorer for LiumProofHarvest {
             template_id = %plan.template_id,
             gpu_count = plan.gpu_count,
             deadline_s = plan.deadline_s,
+            overridden = plan.overridden,
             "proof harvest rent plan"
         );
         let instance = self
             .pod
-            .boot(&self.spec(pin, frozen_digest, &plan))
+            .boot(&self.spec(pin, frozen_digest, plan))
             .await
             .map_err(EvalError::Backend)?;
         let stdout = self
@@ -676,13 +713,18 @@ impl LiveScorer for LiumProofHarvest {
             .await?;
         if !PROGRAM.ran_to_completion(&stdout) {
             let stdout_tail = truncate_tail(&stdout, STDOUT_TAIL_BYTES);
-            tracing::warn!(
-                instance,
-                stdout_tail = %stdout_tail,
-                "eval image did not print {OK_MARKER}; refusing"
-            );
+            // An external SIGKILL (GPU OOM, host pressure) is an
+            // infrastructure failure, not the proof deadline; name it so the
+            // operator does not chase the wrong budget.
+            let what = if killed_externally(&stdout) {
+                "eval image was SIGKILLed before the deadline (exit=137: external kill such as OOM)"
+                    .to_owned()
+            } else {
+                format!("eval image did not print {OK_MARKER}")
+            };
+            tracing::warn!(instance, stdout_tail = %stdout_tail, "{what}; refusing");
             return Err(EvalError::Backend(format!(
-                "eval image did not print {OK_MARKER}"
+                "{what}; stdout_tail: {stdout_tail}"
             )));
         }
         let body = PROGRAM.extract_document(&stdout).ok_or_else(|| {
@@ -716,6 +758,25 @@ mod tests {
     use proof_task::{default_adamw, holdout_commitment, synthetic_holdout, STRATUM_SIZE};
 
     use super::*;
+
+    /// What `eval_after_freeze` does on the Lium path: resolve the rent plan
+    /// with this harvest's overrides, then score under it.
+    async fn score_via_plan(
+        harvest: &LiumProofHarvest,
+        pin: &ProofPin,
+        topic: &TopicDocument,
+        offer: &InferenceOffer,
+        executor: &EvalExecutorOffer,
+        frozen: &str,
+        artifact: &str,
+        holdout: &[HoldoutRecord],
+        claim: &str,
+    ) -> Result<ProofEvalDocument, EvalError> {
+        let plan = harvest.plan(pin, topic, executor)?;
+        harvest
+            .score(pin, topic, offer, &plan, frozen, artifact, holdout, claim)
+            .await
+    }
 
     #[test]
     fn program_is_proof_not_relearn() {
@@ -760,6 +821,7 @@ mod tests {
             max_output_tokens: 256,
             config_commitment: "ab".repeat(32),
             executor_offer_id: "lium-1x-v0".into(),
+            executor_offer_commitment: "cd".repeat(32),
             executor_commitment: "cd".repeat(32),
             max_proof_deadline_s: 3_600,
             eval_image_digest: String::new(),
@@ -999,19 +1061,19 @@ mod tests {
         let pod = CapturePod::new();
         let harvest =
             harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()));
-        let err = harvest
-            .score(
-                &harvest_pin(),
-                &topic,
-                &harvest_offer(),
-                &harvest_executor(),
-                "digest-abcdef",
-                "artifact",
-                &recs,
-                "claim",
-            )
-            .await
-            .expect_err("capture");
+        let err = score_via_plan(
+            &harvest,
+            &harvest_pin(),
+            &topic,
+            &harvest_offer(),
+            &harvest_executor(),
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await
+        .expect_err("capture");
         assert!(matches!(err, EvalError::Backend(_)), "{err}");
         assert!(*pod.booted.lock().expect("booted"));
         let env = String::from_utf8(pod.env.lock().expect("env").clone()).expect("utf8");
@@ -1058,19 +1120,19 @@ mod tests {
         let topic = harvest_topic(&recs);
         let pod = CapturePod::new();
         let harvest = harvest_with_assets(pod.clone(), &recs, None);
-        let err = harvest
-            .score(
-                &harvest_pin(),
-                &topic,
-                &harvest_offer(),
-                &harvest_executor(),
-                "digest-abcdef",
-                "artifact",
-                &recs,
-                "claim",
-            )
-            .await
-            .expect_err("no key");
+        let err = score_via_plan(
+            &harvest,
+            &harvest_pin(),
+            &topic,
+            &harvest_offer(),
+            &harvest_executor(),
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await
+        .expect_err("no key");
         assert!(matches!(err, EvalError::InferenceAuthMissing), "{err}");
         assert!(!*pod.booted.lock().expect("booted"));
     }
@@ -1086,19 +1148,19 @@ mod tests {
             vec!["ssh-ed25519 AAAAtest proof".into()],
         )
         .with_judge_api_key(Some("sk-live-not-a-real-secret".into()));
-        let err = harvest
-            .score(
-                &harvest_pin(),
-                &topic,
-                &harvest_offer(),
-                &harvest_executor(),
-                "digest-abcdef",
-                "artifact",
-                &recs,
-                "claim",
-            )
-            .await
-            .expect_err("no proxy");
+        let err = score_via_plan(
+            &harvest,
+            &harvest_pin(),
+            &topic,
+            &harvest_offer(),
+            &harvest_executor(),
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await
+        .expect_err("no proxy");
         assert!(matches!(err, EvalError::ProxyModelMissing), "{err}");
         assert!(!*pod.booted.lock().expect("booted"));
     }
@@ -1118,19 +1180,19 @@ mod tests {
         .with_judge_api_key(Some("sk-live-not-a-real-secret".into()))
         .with_proxy_model_dir(Some(empty))
         .with_holdout_store(Some(store));
-        let err = harvest
-            .score(
-                &harvest_pin(),
-                &harvest_topic(&recs),
-                &harvest_offer(),
-                &harvest_executor(),
-                "digest-abcdef",
-                "artifact",
-                &recs,
-                "claim",
-            )
-            .await
-            .expect_err("empty proxy");
+        let err = score_via_plan(
+            &harvest,
+            &harvest_pin(),
+            &harvest_topic(&recs),
+            &harvest_offer(),
+            &harvest_executor(),
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await
+        .expect_err("empty proxy");
         assert!(matches!(err, EvalError::ProxyModelMissing), "{err}");
         assert!(!*pod.booted.lock().expect("booted"));
     }
@@ -1193,19 +1255,19 @@ mod tests {
         let mut missing = recs.clone();
         missing[0].content_sha256 = "ab".repeat(32);
         let before = leftover_proxy_tars(&staging);
-        let err = harvest
-            .score(
-                &harvest_pin(),
-                &harvest_topic(&recs),
-                &harvest_offer(),
-                &harvest_executor(),
-                "digest-abcdef",
-                "artifact",
-                &missing,
-                "claim",
-            )
-            .await
-            .expect_err("missing shard");
+        let err = score_via_plan(
+            &harvest,
+            &harvest_pin(),
+            &harvest_topic(&recs),
+            &harvest_offer(),
+            &harvest_executor(),
+            "digest-abcdef",
+            "artifact",
+            &missing,
+            "claim",
+        )
+        .await
+        .expect_err("missing shard");
         assert!(matches!(err, EvalError::HoldoutStoreMissing), "{err}");
         assert!(!*pod.booted.lock().expect("booted"));
         let after = leftover_proxy_tars(&staging);
@@ -1391,19 +1453,19 @@ mod tests {
         let pod = CapturePod::new();
         let harvest =
             harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()));
-        let err = harvest
-            .score(
-                &harvest_pin(),
-                &topic,
-                &harvest_offer(),
-                &harvest_executor(),
-                "digest-abcdef",
-                "artifact",
-                &recs,
-                "claim",
-            )
-            .await
-            .expect_err("spoof");
+        let err = score_via_plan(
+            &harvest,
+            &harvest_pin(),
+            &topic,
+            &harvest_offer(),
+            &harvest_executor(),
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await
+        .expect_err("spoof");
         assert!(err.to_string().contains("committed judge origin"), "{err}");
         assert!(!*pod.booted.lock().expect("booted"));
     }
@@ -1462,10 +1524,13 @@ mod tests {
         }
     }
 
+    /// Pod stdout for a run the wrapper ended: `124` on TERM, or `137` after
+    /// `--kill-after` — the run command marks both with the deadline line.
     fn deadline_stdout(rc: u32) -> String {
         format!(
-            "{}\nexit={rc}\nTraceback: still training step 4200 when the proof deadline hit\n",
-            "boot ok\n".repeat(3)
+            "{}\nexit={rc}\n{}\nTraceback: still training step 4200 when the proof deadline hit\n",
+            "boot ok\n".repeat(3),
+            harvest_pod::DEADLINE_MARKER
         )
     }
 
@@ -1478,19 +1543,19 @@ mod tests {
                 .with_harvest_overrides(Some(HarvestOverrides::default()));
         let mut topic = harvest_topic(&recs);
         topic.eval_executor.max_proof_deadline_s = Some(1_800);
-        let err = harvest
-            .score(
-                &harvest_pin(),
-                &topic,
-                &harvest_offer(),
-                &harvest_executor(),
-                "digest-abcdef",
-                "artifact",
-                &recs,
-                "claim",
-            )
-            .await
-            .expect_err("capture");
+        let err = score_via_plan(
+            &harvest,
+            &harvest_pin(),
+            &topic,
+            &harvest_offer(),
+            &harvest_executor(),
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await
+        .expect_err("capture");
         assert!(matches!(err, EvalError::Backend(_)), "{err}");
         let spec = pod.spec();
         assert_eq!(spec.gpu_count, 1);
@@ -1517,46 +1582,189 @@ mod tests {
             serde_json::from_slice(&pod.request.lock().expect("req")).expect("json");
         assert_eq!(req["executor_offer_id"], "lium-1x-v0");
         assert_eq!(
-            req["executor_commitment"],
+            req["executor_offer_commitment"],
             harvest_executor().config_commitment
+        );
+        assert_eq!(
+            req["executor_commitment"],
+            proof_executor::executor_config_commitment(
+                "proof-eval-abababababab",
+                "1x",
+                1_800,
+                &harvest_pin().eval_image_digest
+            ),
+            "the request commits the executed configuration (topic-tightened 1800s)"
         );
         assert_eq!(req["max_proof_deadline_s"], 1_800);
     }
 
+    /// A raw Lium template UUID would be rented verbatim by the provider, so
+    /// the digest-bound resolver could never check its image: refused before
+    /// boot even when the pin allowlist is empty (offer or env override).
     #[tokio::test]
-    async fn harvest_rents_a_uuid_template_verbatim() {
+    async fn harvest_refuses_a_raw_uuid_template_from_offer_or_override() {
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
-        let pod = CapturePod::new();
         let mut pin = harvest_pin();
         pin.allowed_lium_template_prefixes.clear();
         let mut executor = harvest_executor();
         executor.lium_template_id = "f2f5e84c-3b09-4090-be83-1913eabd009e".into();
         executor.config_commitment = executor.expected_commitment();
+        let pod = CapturePod::new();
+        let harvest =
+            harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()));
+        let err = score_via_plan(
+            &harvest,
+            &pin,
+            &harvest_topic(&recs),
+            &harvest_offer(),
+            &executor,
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await
+        .expect_err("raw uuid offer");
+        assert!(
+            matches!(err, EvalError::ExecutorOffer(ref m) if m.contains("raw Lium template id")),
+            "{err}"
+        );
+        assert!(!*pod.booted.lock().expect("booted"));
+
+        let pod = CapturePod::new();
         let harvest =
             harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()))
-                .with_harvest_overrides(Some(HarvestOverrides::default()));
-        let _ = harvest
-            .score(
-                &pin,
-                &harvest_topic(&recs),
-                &harvest_offer(),
-                &executor,
-                "digest-abcdef",
-                "artifact",
-                &recs,
-                "claim",
+                .with_harvest_overrides(Some(HarvestOverrides {
+                    template_id: Some("f2f5e84c-3b09-4090-be83-1913eabd009e".into()),
+                    ..HarvestOverrides::default()
+                }));
+        let err = score_via_plan(
+            &harvest,
+            &pin,
+            &harvest_topic(&recs),
+            &harvest_offer(),
+            &harvest_executor(),
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await
+        .expect_err("raw uuid override");
+        assert!(
+            matches!(err, EvalError::ExecutorOffer(ref m) if m.contains("raw Lium template id")),
+            "{err}"
+        );
+        assert!(!*pod.booted.lock().expect("booted"));
+    }
+
+    /// A topic that pinned the offer commitment never runs under an
+    /// operator override that changes the template or deadline; the same
+    /// override on an unpinned topic runs and is re-committed as what ran.
+    #[tokio::test]
+    async fn harvest_refuses_config_changing_override_when_the_topic_pins_the_commitment() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let mut pinned = harvest_topic(&recs);
+        pinned.eval_executor.require_offer_commitment = Some(harvest_executor().config_commitment);
+        let override_ = HarvestOverrides {
+            deadline_secs: Some(600),
+            ..HarvestOverrides::default()
+        };
+        let pod = CapturePod::new();
+        let harvest =
+            harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()))
+                .with_harvest_overrides(Some(override_.clone()));
+        let err = score_via_plan(
+            &harvest,
+            &harvest_pin(),
+            &pinned,
+            &harvest_offer(),
+            &harvest_executor(),
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await
+        .expect_err("pinned topic");
+        assert!(
+            matches!(err, EvalError::ExecutorOffer(ref m) if m.contains("pins the offer config_commitment")),
+            "{err}"
+        );
+        assert!(!*pod.booted.lock().expect("booted"), "must not rent");
+
+        let pod = CapturePod::new();
+        let harvest =
+            harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()))
+                .with_harvest_overrides(Some(override_));
+        let _ = score_via_plan(
+            &harvest,
+            &harvest_pin(),
+            &harvest_topic(&recs),
+            &harvest_offer(),
+            &harvest_executor(),
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await;
+        assert!(*pod.booted.lock().expect("booted"));
+        let req: serde_json::Value =
+            serde_json::from_slice(&pod.request.lock().expect("req")).expect("json");
+        assert_eq!(req["max_proof_deadline_s"], 600);
+        assert_eq!(
+            req["executor_offer_commitment"],
+            harvest_executor().config_commitment
+        );
+        assert_ne!(
+            req["executor_commitment"], req["executor_offer_commitment"],
+            "the run is stamped with what actually ran, not the offer's knobs"
+        );
+        assert_eq!(
+            req["executor_commitment"],
+            proof_executor::executor_config_commitment(
+                "proof-eval-abababababab",
+                "1x",
+                600,
+                &harvest_pin().eval_image_digest
             )
-            .await;
-        let spec = pod.spec();
-        assert_eq!(
-            spec.template_id.as_deref(),
-            Some("f2f5e84c-3b09-4090-be83-1913eabd009e")
         );
-        assert_eq!(
-            spec.template_name.as_deref(),
-            Some("proof-eval-abababababab")
+    }
+
+    /// `exit=137` without the wrapper's deadline marker is an external
+    /// SIGKILL (GPU OOM): a backend refusal that names it, not a deadline 503.
+    #[tokio::test]
+    async fn an_external_sigkill_is_not_reported_as_the_deadline() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (proxy, store) = live_asset_dirs(&recs);
+        let pod = StdoutPod::new("boot ok\nexit=137\nCUDA error: out of memory\n");
+        let harvest = LiumProofHarvest::new(
+            pod.clone(),
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAtest proof".into()],
+        )
+        .with_judge_api_key(Some("sk-live-not-a-real-secret".into()))
+        .with_proxy_model_dir(Some(proxy))
+        .with_holdout_store(Some(store))
+        .with_harvest_overrides(Some(HarvestOverrides::default()));
+        let err = score_via_plan(
+            &harvest,
+            &harvest_pin(),
+            &harvest_topic(&recs),
+            &harvest_offer(),
+            &harvest_executor(),
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await
+        .expect_err("oom");
+        assert!(
+            matches!(err, EvalError::Backend(ref m) if m.contains("SIGKILLed before the deadline") && m.contains("out of memory")),
+            "{err}"
         );
-        assert!(spec.exact_gpu_count);
     }
 
     #[tokio::test]
@@ -1583,19 +1791,19 @@ mod tests {
             let harvest =
                 harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()))
                     .with_harvest_overrides(Some(HarvestOverrides::default()));
-            let err = harvest
-                .score(
-                    &harvest_pin(),
-                    &topic,
-                    &harvest_offer(),
-                    &executor,
-                    "digest-abcdef",
-                    "artifact",
-                    &recs,
-                    "claim",
-                )
-                .await
-                .expect_err(label);
+            let err = score_via_plan(
+                &harvest,
+                &harvest_pin(),
+                &topic,
+                &harvest_offer(),
+                &executor,
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err(label);
             assert!(err.to_string().contains(want), "{label}: {err}");
             assert!(
                 !*pod.booted.lock().expect("booted"),
@@ -1627,6 +1835,13 @@ mod tests {
                     template_id: Some("prism-recipe-v10".into()),
                     ..HarvestOverrides::default()
                 },
+                "does not carry the pinned eval image digest prefix",
+            ),
+            (
+                HarvestOverrides {
+                    template_id: Some("other-abababababab".into()),
+                    ..HarvestOverrides::default()
+                },
                 "allowed_lium_template_prefixes",
             ),
         ] {
@@ -1634,19 +1849,19 @@ mod tests {
             let harvest =
                 harvest_with_assets(pod.clone(), &recs, Some("sk-live-not-a-real-secret".into()))
                     .with_harvest_overrides(Some(overrides));
-            let err = harvest
-                .score(
-                    &harvest_pin(),
-                    &harvest_topic(&recs),
-                    &harvest_offer(),
-                    &harvest_executor(),
-                    "digest-abcdef",
-                    "artifact",
-                    &recs,
-                    "claim",
-                )
-                .await
-                .expect_err("override refused");
+            let err = score_via_plan(
+                &harvest,
+                &harvest_pin(),
+                &harvest_topic(&recs),
+                &harvest_offer(),
+                &harvest_executor(),
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err("override refused");
             assert!(
                 matches!(err, EvalError::ExecutorOffer(ref m) if m.contains(want)),
                 "{err}"
@@ -1663,18 +1878,18 @@ mod tests {
                     gpu_count: Some(1),
                     deadline_secs: Some(600),
                 }));
-        let _ = harvest
-            .score(
-                &harvest_pin(),
-                &harvest_topic(&recs),
-                &harvest_offer(),
-                &harvest_executor(),
-                "digest-abcdef",
-                "artifact",
-                &recs,
-                "claim",
-            )
-            .await;
+        let _ = score_via_plan(
+            &harvest,
+            &harvest_pin(),
+            &harvest_topic(&recs),
+            &harvest_offer(),
+            &harvest_executor(),
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await;
         assert!(*pod.booted.lock().expect("booted"));
         assert_eq!(
             pod.spec().template_name.as_deref(),
@@ -1686,7 +1901,10 @@ mod tests {
     #[tokio::test]
     async fn a_run_cut_at_the_deadline_is_a_503_with_the_stdout_tail() {
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
-        for rc in harvest_pod::DEADLINE_EXIT_CODES {
+        for rc in [
+            harvest_pod::DEADLINE_EXIT_CODE,
+            harvest_pod::SIGKILL_EXIT_CODE,
+        ] {
             let (proxy, store) = live_asset_dirs(&recs);
             let pod = StdoutPod::new(deadline_stdout(rc));
             let harvest = LiumProofHarvest::new(
@@ -1698,19 +1916,19 @@ mod tests {
             .with_proxy_model_dir(Some(proxy))
             .with_holdout_store(Some(store))
             .with_harvest_overrides(Some(HarvestOverrides::default()));
-            let err = harvest
-                .score(
-                    &harvest_pin(),
-                    &harvest_topic(&recs),
-                    &harvest_offer(),
-                    &harvest_executor(),
-                    "digest-abcdef",
-                    "artifact",
-                    &recs,
-                    "claim",
-                )
-                .await
-                .expect_err("deadline");
+            let err = score_via_plan(
+                &harvest,
+                &harvest_pin(),
+                &harvest_topic(&recs),
+                &harvest_offer(),
+                &harvest_executor(),
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err("deadline");
             match err {
                 EvalError::ProofDeadlineExceeded {
                     deadline_s,
@@ -1781,19 +1999,19 @@ mod tests {
         .with_holdout_store(Some(store))
         .with_harvest_overrides(Some(HarvestOverrides::default()))
         .with_deadline_wait_grace_secs(0);
-        let err = harvest
-            .score(
-                &harvest_pin(),
-                &harvest_topic(&recs),
-                &harvest_offer(),
-                &executor,
-                "digest-abcdef",
-                "artifact",
-                &recs,
-                "claim",
-            )
-            .await
-            .expect_err("wait elapsed");
+        let err = score_via_plan(
+            &harvest,
+            &harvest_pin(),
+            &harvest_topic(&recs),
+            &harvest_offer(),
+            &executor,
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await
+        .expect_err("wait elapsed");
         assert!(
             matches!(
                 err,
@@ -1823,19 +2041,19 @@ mod tests {
         .with_judge_api_key(Some("sk-live-not-a-real-secret".into()))
         .with_proxy_model_dir(Some(proxy))
         .with_holdout_store(Some(store));
-        let err = harvest
-            .score(
-                &harvest_pin(),
-                &topic,
-                &harvest_offer(),
-                &harvest_executor(),
-                "digest-abcdef",
-                "artifact",
-                &recs,
-                "claim",
-            )
-            .await
-            .expect_err("no ok");
+        let err = score_via_plan(
+            &harvest,
+            &harvest_pin(),
+            &topic,
+            &harvest_offer(),
+            &harvest_executor(),
+            "digest-abcdef",
+            "artifact",
+            &recs,
+            "claim",
+        )
+        .await
+        .expect_err("no ok");
         assert!(
             matches!(err, EvalError::Backend(ref m) if m.contains(OK_MARKER)),
             "{err}"

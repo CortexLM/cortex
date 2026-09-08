@@ -135,6 +135,13 @@ pub enum ExecutorOfferError {
     /// silently fall back to the offer.
     #[error("{0} is set but not a usable harvest override")]
     BadOverride(&'static str),
+    /// The topic pinned the offer commitment and an operator override would
+    /// run a different template or deadline than the one it approved.
+    #[error(
+        "PROOF_HARVEST_* override changes the executor template or deadline, but the topic pins \
+         the offer config_commitment; refuse scoring (drop the override or republish the offer)"
+    )]
+    OverrideBreaksCommitment,
     /// The rent would not be exactly the pinned width.
     #[error("abort: executor would rent {0}x GPUs; the Proof executor is exactly {1}x")]
     GpuCount(u32, u32),

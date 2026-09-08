@@ -10,7 +10,7 @@
 use proof_task::{ProofPin, TopicDocument, EVAL_EXECUTOR_GPU_COUNT};
 
 use crate::{
-    check_template_id, is_lium_template_uuid, require_open_executor, shape_gpu_count,
+    check_template_id, executor_config_commitment, require_open_executor, shape_gpu_count,
     EvalExecutorOffer, ExecutorOfferError,
 };
 
@@ -104,17 +104,23 @@ pub struct ExecutorPlan {
     /// per-topic judge VM the pod reports to) can key on the plan without
     /// changing its shape; this crate does not interpret the id.
     pub topic_id: String,
-    /// Lium template id or digest-scoped template name to rent.
+    /// Digest-scoped template name to rent (resolved / created bound to the
+    /// pinned `eval_image@digest`; never a raw Lium UUID).
     pub template_id: String,
-    /// `true` when `template_id` is a raw Lium UUID (rent verbatim) rather
-    /// than a template name to resolve / create bound to the pinned digest.
-    pub template_is_uuid: bool,
     /// Exact GPUs to rent. Always [`EVAL_EXECUTOR_GPU_COUNT`].
     pub gpu_count: u32,
     /// Proof deadline the pod-side `timeout` and the harvest wait enforce.
     pub deadline_s: u64,
-    /// Offer `config_commitment` stamped onto the run request.
+    /// The live offer's `config_commitment` (what a topic may pin).
+    pub offer_commitment: String,
+    /// Commitment of the configuration that actually runs: `template_id`,
+    /// shape, `deadline_s`, digest. Equals `offer_commitment` only when no
+    /// override and no topic tighten changed the offer's knobs. This is what
+    /// the run request and the scored row carry as executor provenance.
     pub config_commitment: String,
+    /// `true` when an operator `PROOF_HARVEST_*` override changed the
+    /// template or the deadline away from the offer.
+    pub overridden: bool,
 }
 
 /// Resolve the plan for scoring `topic` on `offer` under `pin`.
@@ -122,8 +128,9 @@ pub struct ExecutorPlan {
 /// # Errors
 ///
 /// Any [`ExecutorOfferError`]: the offer must be open and valid, the
-/// template legal, the width exactly the pin, and the deadline within the
-/// ceiling after the topic tighten and the operator override.
+/// template legal, the width exactly the pin, the deadline within the
+/// ceiling after the topic tighten and the operator override, and — when
+/// the topic pins the offer commitment — no override may change what runs.
 pub fn executor_plan(
     pin: &ProofPin,
     offer: Option<&EvalExecutorOffer>,
@@ -155,6 +162,14 @@ pub fn executor_plan(
     let base = overrides
         .deadline_secs
         .unwrap_or(offer.max_proof_deadline_s);
+    let overridden =
+        template_id != offer.lium_template_id.trim() || base != offer.max_proof_deadline_s;
+    // A topic that pinned the offer commitment approved *that* template and
+    // deadline. An operator override that changes either would run a
+    // configuration the topic never approved: refuse, never re-stamp.
+    if overridden && topic.eval_executor.require_offer_commitment.is_some() {
+        return Err(ExecutorOfferError::OverrideBreaksCommitment);
+    }
     let deadline_s = topic
         .eval_executor
         .max_proof_deadline_s
@@ -166,14 +181,21 @@ pub fn executor_plan(
         ));
     }
 
+    let config_commitment = executor_config_commitment(
+        &template_id,
+        &offer.machine_shape,
+        deadline_s,
+        &offer.eval_image_digest,
+    );
     Ok(ExecutorPlan {
         offer_id: offer.offer_id.clone(),
         topic_id: topic.id.clone(),
-        template_is_uuid: is_lium_template_uuid(&template_id),
         template_id,
         gpu_count,
         deadline_s,
-        config_commitment: offer.config_commitment.clone(),
+        offer_commitment: offer.config_commitment.clone(),
+        config_commitment,
+        overridden,
     })
 }
 
@@ -206,10 +228,14 @@ mod tests {
             "topic scope rides on the plan"
         );
         assert_eq!(plan.template_id, "proof-eval-78b614a1f51c");
-        assert!(!plan.template_is_uuid);
         assert_eq!(plan.gpu_count, 1);
         assert_eq!(plan.deadline_s, 7_200);
-        assert_eq!(plan.config_commitment, offer().config_commitment);
+        assert!(!plan.overridden);
+        assert_eq!(plan.offer_commitment, offer().config_commitment);
+        assert_eq!(
+            plan.config_commitment, plan.offer_commitment,
+            "untouched offer: the executed configuration is the committed one"
+        );
     }
 
     #[test]
@@ -244,6 +270,21 @@ mod tests {
         let plan =
             executor_plan(&pin(), Some(&offer()), &t, &HarvestOverrides::default()).expect("plan");
         assert_eq!(plan.deadline_s, 900);
+        assert!(
+            !plan.overridden,
+            "a topic tighten is signed, not an override"
+        );
+        assert_eq!(plan.offer_commitment, offer().config_commitment);
+        assert_eq!(
+            plan.config_commitment,
+            executor_config_commitment(
+                "proof-eval-78b614a1f51c",
+                "1x",
+                900,
+                &pin().eval_image_digest
+            ),
+            "provenance commits the executed 900s, not the offer's 7200s"
+        );
         t.eval_executor.require_offer_commitment = Some("ab".repeat(32));
         assert!(matches!(
             executor_plan(&pin(), Some(&offer()), &t, &HarvestOverrides::default()),
@@ -262,6 +303,21 @@ mod tests {
         let plan = executor_plan(&p, Some(&offer()), &topic(), &swapped).expect("plan");
         assert_eq!(plan.template_id, "proof-eval-78b614a1f51c-hotfix");
         assert_eq!(plan.deadline_s, 3_600);
+        assert!(plan.overridden);
+        assert_eq!(plan.offer_commitment, offer().config_commitment);
+        assert_ne!(
+            plan.config_commitment, plan.offer_commitment,
+            "an override must not be stamped as the offer's committed config"
+        );
+        assert_eq!(
+            plan.config_commitment,
+            executor_config_commitment(
+                "proof-eval-78b614a1f51c-hotfix",
+                "1x",
+                3_600,
+                &p.eval_image_digest
+            )
+        );
 
         // The override replaces the offer deadline, so a longer one is legal
         // up to the ceiling — never past it.
@@ -301,23 +357,97 @@ mod tests {
                 .deadline_s,
             300
         );
-        // The template override obeys the allowlist and the pinned digest.
-        let off_list = HarvestOverrides {
+        // The template override obeys the pinned digest and the allowlist.
+        let unbound = HarvestOverrides {
             template_id: Some("prism-recipe-v10".into()),
+            ..HarvestOverrides::default()
+        };
+        assert!(matches!(
+            executor_plan(&p, Some(&offer()), &topic(), &unbound),
+            Err(ExecutorOfferError::TemplateDigestMismatch(..))
+        ));
+        let off_list = HarvestOverrides {
+            template_id: Some("other-78b614a1f51c".into()),
             ..HarvestOverrides::default()
         };
         assert!(matches!(
             executor_plan(&p, Some(&offer()), &topic(), &off_list),
             Err(ExecutorOfferError::TemplateNotAllowed(_))
         ));
+        // A raw UUID override is refused like a raw UUID offer would be.
         let mut open = p.clone();
         open.allowed_lium_template_prefixes.clear();
         let uuid = HarvestOverrides {
             template_id: Some("f2f5e84c-3b09-4090-be83-1913eabd009e".into()),
             ..HarvestOverrides::default()
         };
-        let plan = executor_plan(&open, Some(&offer()), &topic(), &uuid).expect("plan");
-        assert!(plan.template_is_uuid);
+        assert!(matches!(
+            executor_plan(&open, Some(&offer()), &topic(), &uuid),
+            Err(ExecutorOfferError::RawTemplateId(_))
+        ));
+    }
+
+    /// A topic that pinned the offer commitment approved that template and
+    /// deadline; an override that changes either is refused rather than run
+    /// under the old stamp. A no-op override (same width) is still fine.
+    #[test]
+    fn commitment_pinned_topic_refuses_config_changing_overrides() {
+        let p = pin();
+        let mut t = topic();
+        t.eval_executor.require_offer_commitment = Some(offer().config_commitment);
+        for over in [
+            HarvestOverrides {
+                template_id: Some("proof-eval-78b614a1f51c-hotfix".into()),
+                ..HarvestOverrides::default()
+            },
+            HarvestOverrides {
+                deadline_secs: Some(3_600),
+                ..HarvestOverrides::default()
+            },
+            HarvestOverrides {
+                deadline_secs: Some(7_200 - 1),
+                ..HarvestOverrides::default()
+            },
+        ] {
+            assert!(
+                matches!(
+                    executor_plan(&p, Some(&offer()), &t, &over),
+                    Err(ExecutorOfferError::OverrideBreaksCommitment)
+                ),
+                "{over:?} must not run under a pinned commitment"
+            );
+        }
+        // Same values as the offer, or only the (no-op) width: not a change.
+        for over in [
+            HarvestOverrides {
+                template_id: Some("proof-eval-78b614a1f51c".into()),
+                gpu_count: Some(1),
+                deadline_secs: Some(7_200),
+            },
+            HarvestOverrides {
+                gpu_count: Some(1),
+                ..HarvestOverrides::default()
+            },
+        ] {
+            let plan = executor_plan(&p, Some(&offer()), &t, &over).expect("no-op override");
+            assert!(!plan.overridden);
+            assert_eq!(plan.config_commitment, plan.offer_commitment);
+        }
+        // Without the pin the same override is legal and re-committed.
+        let mut unpinned = topic();
+        unpinned.eval_executor.max_proof_deadline_s = Some(900);
+        let plan = executor_plan(
+            &p,
+            Some(&offer()),
+            &unpinned,
+            &HarvestOverrides {
+                template_id: Some("proof-eval-78b614a1f51c-hotfix".into()),
+                ..HarvestOverrides::default()
+            },
+        )
+        .expect("plan");
+        assert!(plan.overridden);
+        assert_ne!(plan.config_commitment, plan.offer_commitment);
     }
 
     #[test]
