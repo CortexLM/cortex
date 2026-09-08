@@ -127,8 +127,8 @@ jobs:
             'env -i PATH=/usr/bin:/bin /usr/bin/proof-eval score --help'
           docker run --rm --entrypoint /opt/proof-eval-venv/bin/python "${ref}" \
             -c 'import torch, transformers'
-          docker run --rm --entrypoint /bin/sh "${ref}" -c \
-            'test -f /opt/proof-eval/baked_proxies.json && grep -q "Qwen/Qwen3.8-0.6B" /opt/proof-eval/baked_proxies.json'
+          docker run --rm --entrypoint /opt/proof-eval-venv/bin/python "${ref}" \
+            -c 'import json,sys; p=json.load(open("/opt/proof-eval/baked_proxies.json")); sys.exit(0 if p==[] else 1)'
           docker run --rm --entrypoint /bin/sh "${ref}" -c \
             'env -i PATH=/usr/bin:/bin HOME=/root PROOF_SELFTEST_REQUIRE_RUNTIME=1 /usr/bin/proof-eval selftest'
       - name: publicize the GHCR package
@@ -159,15 +159,17 @@ jobs:
             echo "### proof-eval (scoring image, CUDA base)"
             echo
             echo "Pulled this digest after push, ran the harvest-PATH check,"
-            echo "proved \`import torch, transformers\`, baked proxy Qwen/Qwen3.8-0.6B,"
+            echo "proved \`import torch, transformers\`, empty baked_proxies (no HF bake),"
             echo "and ran \`proof-eval selftest\` (fabric 12.5 Gbit/s / no IB-NVLink-NCCL)."
-            echo "Paste into the control plane's \`config/proof-pin.toml\`:"
+            echo "Live score requires harvest-staged \`PROOF_PROXY_MODEL_DIR\` +"
+            echo "\`PROOF_HOLDOUT_STORE\`. Paste into the control plane's"
+            echo "\`config/proof-pin.toml\` (keep proxy_model empty):"
             echo
             echo '```toml'
             echo "eval_image = \"${IMAGE}\""
             echo "eval_image_digest = \"${DIGEST}\""
-            echo "proxy_model = \"Qwen/Qwen3.8-0.6B\""
-            echo "proxy_models = [\"Qwen/Qwen3.8-0.6B\"]"
+            echo "proxy_model = \"\""
+            echo "proxy_models = []"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
           echo "eval_image_digest = \"${DIGEST}\""

@@ -3,16 +3,16 @@
 # Scoring image. This is the digest the control plane pins.
 #
 # CUDA Ubuntu base — the live pod is a GPU machine. `/usr/bin/proof-eval` is
-# a regular file (COPY), not a symlink. The image bakes proxy id
-# Qwen/Qwen3.8-0.6B (see /opt/proof-eval/baked_proxies.json) and enforces
-# the 12.5 Gbit/s / no-IB / no-NVLink / no-NCCL-fast-fabric cap.
+# a regular file (COPY), not a symlink. The image ships no HF bake
+# (`baked_proxies.json` is empty) and enforces the 12.5 Gbit/s / no-IB /
+# no-NVLink / no-NCCL-fast-fabric cap. Harvest stages local weights at
+# `PROOF_PROXY_MODEL_DIR` and holdout shards at `PROOF_HOLDOUT_STORE`.
 #
 #   docker build -f eval/Dockerfile.scoring -t proof-eval:scoring .
 #
 # No secret, holdout item, teacher endpoint, or Modal reference is baked in.
-# Weights are primed on the pod (`PROOF_PROXY_MODEL_DIR` /
-# `PROOF_ALLOW_MODEL_DOWNLOAD=1`); the pin declares which proxy ids the
-# image will load.
+# Weights are primed on the pod via `PROOF_PROXY_MODEL_DIR`. There is no
+# Hugging Face download fallback.
 
 ARG BASE_IMAGE=nvidia/cuda:12.8.1-runtime-ubuntu24.04@sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867
 FROM ${BASE_IMAGE}

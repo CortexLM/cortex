@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     base = sub.add_parser("baseline", help="measure the sealed AdamW/comms reference")
     base.add_argument("--request", required=True, type=Path)
     base.add_argument("--out", required=True, type=Path)
-    sub.add_parser("selftest", help="prove PATH + fabric + baked proxy (no holdout)")
+    sub.add_parser("selftest", help="prove PATH + fabric + runtime (no holdout, no HF bake)")
     args = parser.parse_args(argv)
     try:
         if args.cmd == "selftest":
@@ -66,9 +66,8 @@ def main(argv: list[str] | None = None) -> int:
 
 def _selftest() -> int:
     proxies = baked_proxies()
-    if not proxies:
-        raise ContractError("no baked proxies")
-    require_baked(proxies[0])
+    if proxies:
+        require_baked(proxies[0])
     fabric_selftest()
     try:
         require_runtime()

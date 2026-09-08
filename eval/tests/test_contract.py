@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from threading import Thread
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from proof_eval.baked import baked_proxies, require_baked
 from proof_eval.contract import DEFAULT_PROXY, METRICS_MARKER, OK_MARKER
 from proof_eval.fabric import DT_NO_IB_GBPS, enforce
+from proof_eval.harness import _shard_text, require_local_model_dir
 from proof_eval.judge import call_judge, load_judge_api_key, require_judge
 from proof_eval.request import Constraints, HarvestRequest, canonical_json, holdout_commitment
 
@@ -20,15 +22,41 @@ def test_markers_match_harvest_pod() -> None:
     assert OK_MARKER == "PROOF_EVAL_OK"
 
 
-def test_default_proxy_is_baked() -> None:
-    assert DEFAULT_PROXY == "Qwen/Qwen3.8-0.6B"
-    assert DEFAULT_PROXY in baked_proxies()
-    require_baked(DEFAULT_PROXY)
+def test_no_hf_default_proxy() -> None:
+    assert DEFAULT_PROXY == ""
+    assert baked_proxies() == []
+    with pytest.raises(Exception, match="no HF bake"):
+        require_baked(DEFAULT_PROXY)
 
 
 def test_unknown_proxy_is_refused() -> None:
     with pytest.raises(Exception, match="not baked"):
-        require_baked("Qwen/Qwen3.8-27B")
+        require_baked("Qwen/Qwen3-0.6B")
+
+
+def test_local_model_dir_is_required() -> None:
+    with pytest.raises(Exception, match="PROOF_PROXY_MODEL_DIR is required"):
+        require_local_model_dir(None)
+    with pytest.raises(Exception, match="PROOF_PROXY_MODEL_DIR is required"):
+        require_local_model_dir("  ")
+    with pytest.raises(Exception, match="not a local folder"):
+        require_local_model_dir("/no/such/proof-proxy-model")
+
+
+def test_local_model_dir_accepts_a_folder(tmp_path: Path) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    assert require_local_model_dir(str(tmp_path)) == tmp_path
+
+
+def test_holdout_store_refuses_a_missing_shard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PROOF_HOLDOUT_STORE", str(tmp_path))
+    rec = {"id": 1, "content_sha256": "aa" * 32}
+    with pytest.raises(Exception, match="not in PROOF_HOLDOUT_STORE"):
+        _shard_text(rec)
+    (tmp_path / ("aa" * 32)).write_text("held-out shard\n", encoding="utf-8")
+    assert _shard_text(rec) == "held-out shard\n"
 
 
 def test_fabric_applies_the_dt_no_ib_cap(monkeypatch: pytest.MonkeyPatch) -> None:

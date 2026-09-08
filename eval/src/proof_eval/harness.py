@@ -47,23 +47,37 @@ def _shard_text(rec: dict[str, Any]) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def require_local_model_dir(artifact_dir: str | None) -> Path:
+    """Local measurement weights. Missing dir is a refuse, not an HF download."""
+    raw = (artifact_dir or "").strip()
+    if not raw:
+        raise ContractError(
+            "PROOF_PROXY_MODEL_DIR is required; this image does not download HF ids"
+        )
+    path = Path(raw)
+    if not path.is_dir():
+        raise ContractError(
+            f"PROOF_PROXY_MODEL_DIR {raw!r} is not a local folder; refuse scoring"
+        )
+    return path
+
+
 def measure(request: HarvestRequest, artifact_dir: str | None) -> dict[str, Any]:
     """Measure holdout NLL + optional throughput.
 
     A missing runtime is a failed run, not a zero. Hash-derived numbers are
     forbidden here: they would be a sim fallback inside the live image.
+    The pin ships no HF bake: weights must already be a local directory.
     """
     require_runtime()
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    proxy = (request.proxy_model or request.model_ref or "").strip()
-    if not (artifact_dir or proxy):
-        raise ContractError("no model to measure")
+    weights = require_local_model_dir(artifact_dir)
     try:
-        tok = AutoTokenizer.from_pretrained(proxy, trust_remote_code=True)
+        tok = AutoTokenizer.from_pretrained(weights, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
-            artifact_dir or proxy,
+            weights,
             torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
             trust_remote_code=True,
         )
@@ -110,5 +124,5 @@ def measure(request: HarvestRequest, artifact_dir: str | None) -> dict[str, Any]
         "wall_s": int(wall) if request.family == "throughput" else None,
         "custom_value": None,
         "canary_nll": None,
-        "artifact_fingerprint": hashlib.sha256((artifact_dir or proxy).encode()).hexdigest()[:16],
+        "artifact_fingerprint": hashlib.sha256(str(weights).encode()).hexdigest()[:16],
     }

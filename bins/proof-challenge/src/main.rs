@@ -71,6 +71,12 @@ struct Cli {
     /// Provider API key file. Never logged, never on `/v1/status`.
     #[arg(long, env = "PROOF_INFERENCE_API_KEY_FILE")]
     inference_api_key_file: Option<PathBuf>,
+    /// Local measurement weights staged onto the eval pod (no HF bake).
+    #[arg(long, env = "PROOF_PROXY_MODEL_DIR")]
+    proxy_model_dir: Option<PathBuf>,
+    /// Holdout shard bytes (`<content_sha256>` files). Not the record catalog.
+    #[arg(long, env = "PROOF_HOLDOUT_STORE")]
+    holdout_store: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -151,7 +157,13 @@ fn run(cli: &Cli) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    let live_scorer = build_live_scorer(backend, cli.eval_timeout_secs, judge_api_key.clone());
+    let live_scorer = build_live_scorer(
+        backend,
+        cli.eval_timeout_secs,
+        judge_api_key.clone(),
+        cli.proxy_model_dir.clone(),
+        cli.holdout_store.clone(),
+    );
     match backend {
         EvalBackend::Lium if live_scorer.is_some() => {
             tracing::info!("live harvest wired: digest-pinned proof-eval image on Lium");
@@ -180,6 +192,8 @@ fn build_live_scorer(
     backend: EvalBackend,
     run_timeout_secs: u64,
     judge_api_key: Option<String>,
+    proxy_model_dir: Option<PathBuf>,
+    holdout_store: Option<PathBuf>,
 ) -> Option<Arc<dyn LiveScorer>> {
     if backend != EvalBackend::Lium {
         return None;
@@ -216,7 +230,9 @@ fn build_live_scorer(
     ));
     Some(Arc::new(
         LiumProofHarvest::new(pod, HarvestLimits::default(), vec![ssh_pub])
-            .with_judge_api_key(judge_api_key),
+            .with_judge_api_key(judge_api_key)
+            .with_proxy_model_dir(proxy_model_dir)
+            .with_holdout_store(holdout_store),
     ))
 }
 
@@ -405,22 +421,22 @@ mod tests {
         std::env::set_var("LIUM_SSH_PUBLIC_KEY_FILE", &pubkey);
 
         assert!(
-            build_live_scorer(EvalBackend::Lium, 900, None).is_some(),
+            build_live_scorer(EvalBackend::Lium, 900, None, None, None).is_some(),
             "Lium boot must wire the digest-pinned harvest"
         );
         assert!(
-            build_live_scorer(EvalBackend::Sim, 900, None).is_none(),
+            build_live_scorer(EvalBackend::Sim, 900, None, None, None).is_none(),
             "sim scores in-process; a Lium harvest there would spend money"
         );
 
         std::env::remove_var("LIUM_API_KEY");
-        assert!(build_live_scorer(EvalBackend::Lium, 900, None).is_none());
+        assert!(build_live_scorer(EvalBackend::Lium, 900, None, None, None).is_none());
         std::env::set_var("LIUM_API_KEY", "   ");
-        assert!(build_live_scorer(EvalBackend::Lium, 900, None).is_none());
+        assert!(build_live_scorer(EvalBackend::Lium, 900, None, None, None).is_none());
 
         std::env::set_var("LIUM_API_KEY", "test-key-not-a-real-secret");
         std::env::set_var("LIUM_SSH_PUBLIC_KEY_FILE", "/nonexistent/id.pub");
-        assert!(build_live_scorer(EvalBackend::Lium, 900, None).is_none());
+        assert!(build_live_scorer(EvalBackend::Lium, 900, None, None, None).is_none());
         std::env::remove_var("LIUM_API_KEY");
         std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
     }

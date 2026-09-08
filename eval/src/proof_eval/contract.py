@@ -3,6 +3,10 @@
 Markers are also printed by `harvest-pod` from `metrics.json` + exit 0.
 This process still prints them so a local `proof-eval score` transcript is
 the same shape as a harvested run.
+
+The pin ships no HF bake. Measurement weights come from a local directory
+(`PROOF_PROXY_MODEL_DIR`); there is no default Hugging Face id and no
+silent download fallback.
 """
 
 from __future__ import annotations
@@ -18,9 +22,10 @@ PROOF_METRICS_SCHEMA = 1
 BAKED_PROXIES_PATH = "/opt/proof-eval/baked_proxies.json"
 ADAMW_SCRIPT = "/opt/proof-eval/baselines/adamw.py"
 
-# Default proxy the scoring image is declared to contain. Must stay in the
-# Qwen/Qwen3.8 family the control-plane pin locks.
-DEFAULT_PROXY = "Qwen/Qwen3.8-0.6B"
+# Empty: the scoring image does not bake or download a proxy. Harvest must
+# stage local weights at PROOF_PROXY_MODEL_DIR. A non-empty HF id here was
+# how live score silently tried `Qwen/Qwen3.8-0.6B` (invalid) and refused.
+DEFAULT_PROXY = ""
 
 
 class ContractError(Exception):

@@ -20,9 +20,13 @@ git. No HF bake into the judge path. Fabric: no InfiniBand, no NVLink, no
 NCCL fast path, 12.5 Gbit/s cap.
 
 No secrets, holdout text, teacher hosts, or Modal references are baked in.
-Shard bytes arrive via `PROOF_HOLDOUT_STORE/<content_sha256>`. Optional
-local measurement weights via `PROOF_PROXY_MODEL_DIR` or
-`PROOF_ALLOW_MODEL_DOWNLOAD=1`.
+The pin ships **no HF bake** and this image does not download a default
+Hugging Face id. Harvest must stage:
+
+- local measurement weights at `PROOF_PROXY_MODEL_DIR` (a directory of
+  operator-provided weights; missing dir → refuse, not a silent HF fetch)
+- shard bytes at `PROOF_HOLDOUT_STORE/<content_sha256>` (the image has no
+  `/opt/proof-eval/holdout` tree)
 
 ## Implementation limits
 

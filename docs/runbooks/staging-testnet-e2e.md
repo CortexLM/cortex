@@ -117,4 +117,4 @@ git checkout <good-sha>
 
 - `FakeChain` is the default backend; `BASE_CHAIN_BACKEND=live` switches to `chain-live`.
 - CRV4 tlock encryption is implemented (`tle` / Drand Quicknet); when commit-reveal is off, `set_weights` is used instead.
-- Proof live submits stay **503** until harvest is wired, a baseline is sealed, and ≥1 topic is open.
+- Proof live submits stay **503** until harvest is wired, a baseline is sealed, ≥1 topic is open, and the operator has staged live-score assets: `PROOF_PROXY_MODEL_DIR` (local measurement weights) plus `PROOF_HOLDOUT_STORE/<content_sha256>` shard files. The pin ships no HF bake; the image does not download `Qwen/Qwen3.8-0.6B`. See [`docs/PROOF.md`](../PROOF.md).
