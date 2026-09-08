@@ -292,6 +292,39 @@ async fn production_hosts_are_refused_case_insensitively_before_any_request() {
             "{cp}: no request may go out:\n{text}"
         );
     }
+    // A zero (or non-numeric) declaration can only end rejected
+    // (flops_under_declared): refused before any request, live run or not.
+    for bad in ["0", "abc", "-1"] {
+        let (code, text) = tokio::task::spawn_blocking(move || {
+            run_script_env(
+                &[
+                    "submit-probe",
+                    "--cp",
+                    "http://127.0.0.1:9",
+                    "--topic",
+                    "x",
+                    "--expect",
+                    "201",
+                    "--allow-live-run",
+                    "--declared-flops",
+                    bad,
+                ],
+                &[],
+            )
+        })
+        .await
+        .expect("join");
+        assert_eq!(code, 1, "--declared-flops {bad} must be refused:\n{text}");
+        assert!(
+            text.contains("--declared-flops must be a positive integer"),
+            "{bad}: {text}"
+        );
+        assert!(
+            !text.contains("POST"),
+            "{bad}: no request may go out:\n{text}"
+        );
+    }
+
     // The agent URL is refused at env load, before boot-probe reads the bearer.
     let (secrets, _) = {
         let (env, secrets) = cp_env(

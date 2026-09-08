@@ -30,8 +30,8 @@
 #   --reason SUBSTR       submit-probe: the error text must contain this
 #   --artifact-uri URI    submit-probe locator (default https://example.invalid/wire-probe.tar — never fetchable)
 #   --no-artifact-uri     submit-probe without a locator (a custom topic must answer 400, no row)
-#   --declared-flops N    submit-probe declaration (default: 1 for fail-closed probes; the topic's
-#                         flops_budget for --expect 2xx so a real run is not rejected flops_under_declared)
+#   --declared-flops N    submit-probe declaration, positive integer (default: 1 for fail-closed probes; the
+#                         topic's flops_budget for --expect 2xx so a real run is not rejected flops_under_declared)
 #   --wait SECS           submit-probe --expect 201: how long the synchronous POST may take (default 900)
 #
 # Exit: 0 all PASS, 1 any FAIL, 2 refused (production host / unsafe request).
@@ -631,7 +631,12 @@ submit_probe() {
     fi
     LOG "live run declares the topic budget: declared_flops=$flops"
   fi
-  [[ "$flops" =~ ^[0-9]+$ ]] || { RED "--declared-flops must be an integer"; exit 1; }
+  # Zero is never a useful declaration: any measured usage would be
+  # flops_under_declared, so a live probe could only end rejected.
+  if [[ ! "$flops" =~ ^[0-9]+$ || "$flops" == "0" ]]; then
+    RED "--declared-flops must be a positive integer (got '$flops'); a live run measuring anything above the declaration is rejected flops_under_declared"
+    exit 1
+  fi
   local hotkey hex uri_field="" body code
   hotkey="$(head -c 64 /dev/zero | tr '\0' 'a')"
   hex="$(printf '%s' "wire-probe-$TOPIC-$(date +%s)-$$-$RANDOM" | sha256sum | awk '{print $1}')"
