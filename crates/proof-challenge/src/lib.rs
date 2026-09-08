@@ -23,7 +23,10 @@ pub use proof_executor::{
     EvalExecutorOffer, ExecutorOfferError, HarvestOverrides, OfferStatus,
     EVAL_EXECUTOR_OFFER_FILE_ENV,
 };
-pub use proof_http::{executor_slot, hash_admin_token, proof_router, AppState, ExecutorSlot};
+pub use proof_http::{
+    executor_slot, hash_admin_token, proof_router, AppState, ExecutorSlot, VmAgentHealth,
+    VmOrchestratorProbe, VmOrchestratorReport,
+};
 pub use proof_store::{ArtifactManifest, MemoryStore};
 pub use proof_task::{
     HoldoutRecord, InferenceOffer, OfferError, ProofPin, TopicDocument, BASE_MODEL_FAMILY,

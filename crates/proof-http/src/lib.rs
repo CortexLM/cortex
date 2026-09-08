@@ -11,6 +11,7 @@
 //! GET  /v1/submissions/{id}
 //! POST /v1/admin/proof/topics     operator publish (signed document)
 //! POST /v1/admin/proof/executor   operator rotate the live executor offer
+//! GET  /v1/admin/proof/vm-orchestrator   operator probe: topic-VM orchestrator readiness + agent health
 //! ```
 
 #![forbid(unsafe_code)]
@@ -24,6 +25,7 @@
 
 use std::sync::{Arc, PoisonError, RwLock};
 
+use async_trait::async_trait;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -59,6 +61,92 @@ pub fn executor_slot(offer: Option<EvalExecutorOffer>) -> ExecutorSlot {
     Arc::new(RwLock::new(offer))
 }
 
+/// The KVM-host agent's health as the control plane saw it on one
+/// `GET /v1/health` (mirrors `proof_vm_proto::AgentHealth` field for field).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmAgentHealth {
+    /// Wire version the agent speaks.
+    pub api_version: u32,
+    /// Whether the hypervisor could boot a VM right now.
+    pub ready: bool,
+    /// Why not (empty when ready). Never a secret.
+    pub reason: String,
+    /// Backend name (`firecracker`; `fake` only in tests).
+    pub hypervisor: String,
+    /// VMs currently bound on the host.
+    pub vms: usize,
+}
+
+/// `GET /v1/admin/proof/vm-orchestrator` body: what this host resolved for
+/// the topic-VM orchestrator and whether its agent answers. Operator data
+/// behind the admin bearer — it may name env vars and container paths, never
+/// the bearer, a key, or an origin the RLM could reach.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmOrchestratorReport {
+    /// `firecracker` (live client resolved at boot) or `unwired`.
+    pub orchestrator: String,
+    /// The client's own `ready()`: bearer file present and non-empty, RLM
+    /// image digest pinned. Checked per request, so a fix needs no restart.
+    pub ready: bool,
+    /// Why not ready (empty when ready). Names the env var to fix.
+    pub reason: String,
+    /// `sha256:` pin of the RLM VM image the client asks the agent to boot
+    /// (empty = unpinned = nothing ever boots).
+    pub image_digest: String,
+    /// RLM VM vCPUs (locked default 4).
+    pub vcpus: u32,
+    /// RLM VM memory in MiB (locked default 8192).
+    pub mem_mib: u32,
+    /// The agent's answer to one health call, when it answered.
+    pub agent: Option<VmAgentHealth>,
+    /// Why the agent did not answer: unreachable, bearer refused, not wired.
+    pub agent_error: Option<String>,
+    /// Filled by the host: the digest-pinned Lium harvest (`nll` /
+    /// `throughput`) is wired. Lium only — informational for the custom
+    /// family, which is wired from the topic-VM env on its own.
+    #[serde(default)]
+    pub live_harvest_wired: bool,
+    /// Filled by the host: at least one custom id has a registered runner
+    /// (the custom family is routed, harvest or not).
+    #[serde(default)]
+    pub custom_family_wired: bool,
+    /// Filled by the host: custom ids with a registered runner.
+    #[serde(default)]
+    pub registered_custom: Vec<String>,
+}
+
+impl VmOrchestratorReport {
+    /// Report for a host that keeps `UnwiredVmOrchestrator`; `reason` names
+    /// the env vars a live one reads. `image_digest` is whatever pin the env
+    /// carries so "pinned but URL unset" is visible.
+    pub fn unwired(reason: &str, image_digest: &str) -> Self {
+        Self {
+            orchestrator: "unwired".into(),
+            ready: false,
+            reason: reason.trim().to_owned(),
+            image_digest: image_digest.trim().to_owned(),
+            vcpus: 0,
+            mem_mib: 0,
+            agent: None,
+            agent_error: None,
+            live_harvest_wired: false,
+            custom_family_wired: false,
+            registered_custom: Vec::new(),
+        }
+    }
+}
+
+/// Operator diagnostic over the topic-VM orchestrator this host resolved at
+/// boot. The binary implements it over the live `FirecrackerOrchestrator`
+/// (its `ready()` plus one agent health call) or the unwired stand-in; the
+/// route only adds what the host knows (harvest wired, registered ids). It
+/// changes nothing and spends nothing.
+#[async_trait]
+pub trait VmOrchestratorProbe: Send + Sync {
+    /// Snapshot as of now (bearer file and pin re-read; one agent round trip).
+    async fn probe(&self) -> VmOrchestratorReport;
+}
+
 /// Shared HTTP state.
 #[derive(Clone)]
 pub struct AppState {
@@ -82,6 +170,9 @@ pub struct AppState {
     pub judge_api_key: Option<String>,
     /// Operator bearer hashes (sha256 hex). Empty → admin 503.
     pub admin_hashes: Arc<Vec<String>>,
+    /// Topic-VM orchestrator diagnostic for `GET /v1/admin/proof/vm-orchestrator`.
+    /// `None` = the host resolved none (the route then reports `none`).
+    pub vm_probe: Option<Arc<dyn VmOrchestratorProbe>>,
     /// Chain epoch used for topic windows. v0 hosts pass 0.
     pub epoch: u64,
 }
@@ -197,6 +288,10 @@ pub fn proof_router(state: AppState) -> Router {
         .route("/v1/submissions/{id}", get(get_sub))
         .route("/v1/admin/proof/topics", post(publish_topic))
         .route("/v1/admin/proof/executor", post(rotate_executor))
+        .route(
+            "/v1/admin/proof/vm-orchestrator",
+            get(vm_orchestrator_probe),
+        )
         .with_state(state)
 }
 
@@ -758,6 +853,30 @@ async fn rotate_executor(
     ))
 }
 
+/// Operator probe: is the topic-VM orchestrator wired, is its bearer file
+/// and RLM image pin in place, and does the KVM-host agent answer? Same
+/// bearer gate as the other admin routes; always 200 once authorised (a
+/// broken wire is data, not an error). Read-only, no VM, no spend.
+async fn vm_orchestrator_probe(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    if st.admin_hashes.is_empty() {
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "auth_unconfigured"));
+    }
+    if !admin_ok(&headers, &st.admin_hashes) {
+        return Err(err(StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
+    let mut report = match &st.vm_probe {
+        Some(probe) => probe.probe().await,
+        None => VmOrchestratorReport::unwired("no topic-vm orchestrator resolved on this host", ""),
+    };
+    report.live_harvest_wired = st.live_harvest_wired();
+    report.registered_custom = st.registered_custom();
+    report.custom_family_wired = !report.registered_custom.is_empty();
+    Ok(Json(report))
+}
+
 fn admin_ok(headers: &HeaderMap, hashes: &[String]) -> bool {
     let Some(raw) = headers
         .get(axum::http::header::AUTHORIZATION)
@@ -1074,6 +1193,7 @@ mod tests {
             // Testeur blocker. Sim does not call the judge, so it stays None.
             judge_api_key,
             admin_hashes: Arc::new(vec![hash_admin_token(token)]),
+            vm_probe: None,
             epoch: 0,
         })
     }
@@ -1118,6 +1238,7 @@ mod tests {
             executor: executor_slot(executor),
             judge_api_key: Some("test-judge-key".into()),
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            vm_probe: None,
             epoch: 0,
         })
     }
@@ -1424,6 +1545,162 @@ mod tests {
         assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     }
 
+    /// What the binary hands the route on a wired host: a canned snapshot.
+    struct StubProbe(VmOrchestratorReport);
+
+    #[async_trait]
+    impl VmOrchestratorProbe for StubProbe {
+        async fn probe(&self) -> VmOrchestratorReport {
+            self.0.clone()
+        }
+    }
+
+    fn app_with_probe(probe: Option<Arc<dyn VmOrchestratorProbe>>, admin: bool) -> Router {
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        proof_router(AppState {
+            store: MemoryStore::new(),
+            pin: p,
+            backend: EvalBackend::Lium,
+            live_scorer: Some(Arc::new(StubScorer::win())),
+            offer: Some(offer()),
+            executor: executor_slot(None),
+            judge_api_key: Some("test-judge-key".into()),
+            admin_hashes: Arc::new(if admin {
+                vec![hash_admin_token("op")]
+            } else {
+                Vec::new()
+            }),
+            vm_probe: probe,
+            epoch: 0,
+        })
+    }
+
+    /// The operator probe sits behind the admin bearer, is always 200 once
+    /// authorised (a broken wire is data), reports the host's own gates next
+    /// to the client's snapshot, and never carries a bearer value.
+    #[tokio::test]
+    async fn admin_vm_orchestrator_probe_is_bearer_gated_and_reports_the_wire() {
+        let none = app_with_probe(None, true);
+        let (st, body) = json_req(
+            none.clone(),
+            "GET",
+            "/v1/admin/proof/vm-orchestrator",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
+        let (st, body) = json_req(
+            none.clone(),
+            "GET",
+            "/v1/admin/proof/vm-orchestrator",
+            serde_json::json!({}),
+            Some("wrong"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
+        let (st, body) = json_req(
+            app_with_probe(None, false),
+            "GET",
+            "/v1/admin/proof/vm-orchestrator",
+            serde_json::json!({}),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["error"], "auth_unconfigured");
+
+        let (st, body) = json_req(
+            none,
+            "GET",
+            "/v1/admin/proof/vm-orchestrator",
+            serde_json::json!({}),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["orchestrator"], "unwired", "{body}");
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["live_harvest_wired"], true, "{body}");
+        assert_eq!(body["registered_custom"], serde_json::json!([]), "{body}");
+
+        let mut wired = VmOrchestratorReport::unwired("", &format!("sha256:{}", "cd".repeat(32)));
+        wired.orchestrator = "firecracker".into();
+        wired.ready = true;
+        wired.vcpus = 4;
+        wired.mem_mib = 8_192;
+        wired.agent = Some(VmAgentHealth {
+            api_version: 1,
+            ready: true,
+            reason: String::new(),
+            hypervisor: "firecracker".into(),
+            vms: 2,
+        });
+        // The probe's own view of the host gates is overwritten by the route.
+        wired.live_harvest_wired = false;
+        wired.custom_family_wired = true;
+        wired.registered_custom = vec!["stale".into()];
+        let (st, body) = json_req(
+            app_with_probe(Some(Arc::new(StubProbe(wired))), true),
+            "GET",
+            "/v1/admin/proof/vm-orchestrator",
+            serde_json::json!({}),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let report: VmOrchestratorReport = serde_json::from_value(body.clone()).expect("typed");
+        assert_eq!(report.orchestrator, "firecracker");
+        assert!(report.ready);
+        assert_eq!((report.vcpus, report.mem_mib), (4, 8_192));
+        assert_eq!(
+            report.agent.as_ref().map(|a| a.hypervisor.as_str()),
+            Some("firecracker")
+        );
+        assert_eq!(report.agent.as_ref().map(|a| a.vms), Some(2));
+        assert!(
+            report.live_harvest_wired,
+            "Lium-only host gate, not the probe's copy"
+        );
+        assert!(
+            report.registered_custom.is_empty(),
+            "host registry, not the probe's copy"
+        );
+        assert!(
+            !report.custom_family_wired,
+            "follows the host registry, not the probe's copy"
+        );
+        let dump = body.to_string();
+        for forbidden in ["Bearer ", "\"token\"", "api_key"] {
+            assert!(!dump.contains(forbidden), "{forbidden} in {dump}");
+        }
+
+        let (st, body) = json_req(
+            app_with_probe(
+                Some(Arc::new(StubProbe(VmOrchestratorReport::unwired(
+                    "PROOF_VM_ORCHESTRATOR_TOKEN_FILE (/run/base/proof/vm_orchestrator_token) missing or empty",
+                    "",
+                )))),
+                true,
+            ),
+            "GET",
+            "/v1/admin/proof/vm-orchestrator",
+            serde_json::json!({}),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["ready"], false);
+        assert!(
+            body["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("PROOF_VM_ORCHESTRATOR_TOKEN_FILE"),
+            "{body}"
+        );
+        assert_eq!(body["image_digest"], "", "unpinned stays visibly empty");
+    }
+
     #[tokio::test]
     async fn topic_pinning_another_executor_commitment_is_503() {
         let p = pin(&format!("sha256:{}", "ab".repeat(32)));
@@ -1449,6 +1726,7 @@ mod tests {
             executor: executor_slot(Some(test_executor(&p))),
             judge_api_key: Some("test-judge-key".into()),
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            vm_probe: None,
             epoch: 0,
         });
         let (st, body) = json_req(
@@ -2057,6 +2335,7 @@ mod tests {
             executor: executor_slot(Some(executor)),
             judge_api_key: Some("test-judge-key".into()),
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            vm_probe: None,
             epoch: 0,
         })
     }
@@ -2347,6 +2626,7 @@ mod tests {
             executor: executor_slot(None),
             judge_api_key: None,
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            vm_probe: None,
             epoch: 0,
         })
     }
@@ -2436,6 +2716,7 @@ mod tests {
             executor: executor_slot(None),
             judge_api_key: None,
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            vm_probe: None,
             epoch: 0,
         });
         let (st, body) = json_req(
@@ -2477,6 +2758,7 @@ mod tests {
             executor: executor_slot(None),
             judge_api_key: None,
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            vm_probe: None,
             epoch: 0,
         })
     }
@@ -2685,6 +2967,7 @@ mod tests {
             executor: executor_slot(None),
             judge_api_key: None,
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            vm_probe: None,
             epoch: 0,
         })
     }
