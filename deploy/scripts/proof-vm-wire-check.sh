@@ -29,6 +29,7 @@
 #   --expect CODE         submit-probe expected HTTP status (400 / 503; 2xx needs --allow-live-run)
 #   --reason SUBSTR       submit-probe: the error text must contain this
 #   --artifact-uri URI    submit-probe locator (default https://example.invalid/wire-probe.tar — never fetchable)
+#   --no-artifact-uri     submit-probe without a locator (a custom topic must answer 400, no row)
 #   --wait SECS           submit-probe --expect 201: how long the synchronous POST may take (default 900)
 #
 # Exit: 0 all PASS, 1 any FAIL, 2 refused (production host / unsafe request).
@@ -71,7 +72,7 @@ ALLOW_LIVE_RUN=0
 ARTIFACT_URI="https://example.invalid/wire-probe.tar"
 WAIT_SECS=900
 
-usage() { sed -n '2,34p' "$0"; }
+usage() { sed -n '2,35p' "$0"; }
 
 [[ $# -ge 1 ]] || { usage; exit 1; }
 SUBCOMMAND="$1"; shift
@@ -87,6 +88,7 @@ while [[ $# -gt 0 ]]; do
     --reason) REASON="${2:?}"; shift 2 ;;
     --allow-live-run) ALLOW_LIVE_RUN=1; shift ;;
     --artifact-uri) ARTIFACT_URI="${2:?}"; shift 2 ;;
+    --no-artifact-uri) ARTIFACT_URI=""; shift ;;
     --wait) WAIT_SECS="${2:?}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) RED "unknown arg: $1"; usage; exit 1 ;;
@@ -507,12 +509,13 @@ submit_probe() {
     exit 2
   fi
   resolve_cp || return 0
-  local hotkey hex body code
+  local hotkey hex uri_field="" body code
   hotkey="$(head -c 64 /dev/zero | tr '\0' 'a')"
   hex="$(printf '%s' "wire-probe-$TOPIC-$(date +%s)-$$-$RANDOM" | sha256sum | awk '{print $1}')"
-  body="$(printf '{"miner_hotkey":"%s","artifact_digest":"%s","artifact_uri":"%s","claim":"proof-vm-wire-check probe","declared_flops":1,"topic_id":"%s","manifest":{"train_dataset_ids":["wire-probe-v0"]}}' \
-    "$hotkey" "$hex" "$ARTIFACT_URI" "$TOPIC")"
-  LOG "submit-probe: POST $CP/v1/submissions topic=$TOPIC expect=$EXPECT${REASON:+ reason~'$REASON'}"
+  [[ -n "$ARTIFACT_URI" ]] && uri_field="$(printf '"artifact_uri":"%s",' "$ARTIFACT_URI")"
+  body="$(printf '{"miner_hotkey":"%s","artifact_digest":"%s",%s"claim":"proof-vm-wire-check probe","declared_flops":1,"topic_id":"%s","manifest":{"train_dataset_ids":["wire-probe-v0"]}}' \
+    "$hotkey" "$hex" "$uri_field" "$TOPIC")"
+  LOG "submit-probe: POST $CP/v1/submissions topic=$TOPIC expect=$EXPECT${REASON:+ reason~'$REASON'}${ARTIFACT_URI:+ artifact_uri=$ARTIFACT_URI}"
   http POST "$CP/v1/submissions" "$body" -m "$WAIT_SECS"; code="$HTTP_CODE"
   LOG "→ HTTP $code $(printf '%s' "$HTTP_BODY" | head -c 500)"
   if [[ "$code" != "$EXPECT" ]]; then
@@ -587,8 +590,9 @@ $0 submit-probe --cp $cp --topic $topic --expect 503 --reason PROOF_RLM_VM_IMAGE
 $0 submit-probe --cp $cp --topic $topic --expect 503 --reason 'orchestrator unreachable'
 #    systemctl start proof-vm-orchestrator; then: $0 agent
 #
-# 6. Unknown / closed topic → 400 (no row); a custom topic without artifact_uri → 400.
-$0 submit-probe --cp $cp --topic does-not-exist --expect 400
+# 6. Unknown / closed topic → 400 (no row); a custom topic without artifact_uri → 400 (no row).
+$0 submit-probe --cp $cp --topic does-not-exist --expect 400 --reason 'unknown topic'
+$0 submit-probe --cp $cp --topic $topic --expect 400 --no-artifact-uri --reason artifact_uri
 #
 # After every row: $0 cp   (the admin probe shows the same root cause: ready / reason / agent_error)
 EOF
