@@ -440,16 +440,27 @@ check_cp() {
     fail "GET /v1/status → $code"
     return 0
   fi
-  local status="$HTTP_BODY" harvest can_score registered
+  local status="$HTTP_BODY" harvest can_score registered custom_wired custom_ready
   harvest="$(jget "$status" live_harvest_wired)"; can_score="$(jget "$status" can_score)"
-  registered="$(jget "$status" registered_custom)"
-  LOG "status: eval_backend=$(jget "$status" eval_backend) live_harvest_wired=$harvest can_score=$can_score baseline_sealed=$(jget "$status" baseline_sealed)"
-  LOG "status: open_topics=$(jget "$status" open_topics) scorable_topics=$(jget "$status" scorable_topics) registered_custom=$registered"
+  registered="$(jget "$status" registered_custom)"; custom_wired="$(jget "$status" custom_family_wired)"
+  custom_ready="$(jget "$status" custom_ready)"
+  LOG "status: eval_backend=$(jget "$status" eval_backend) live_harvest_wired=$harvest custom_family_wired=$custom_wired can_score=$can_score baseline_sealed=$(jget "$status" baseline_sealed)"
+  LOG "status: open_topics=$(jget "$status" open_topics) scorable_topics=$(jget "$status" scorable_topics) registered_custom=$registered custom_ready=$custom_ready"
   [[ "$(jget "$status" eval_backend)" == "lium" ]] || fail "eval_backend is not lium (sim never hosts staging scoring)"
+  # live_harvest_wired is the Lium harvest (nll / throughput) and nothing else:
+  # the custom family is wired from the topic-VM env on its own, so on a
+  # custom-only host this reads false by design. Informational, never a FAIL.
   if [[ "$harvest" == "true" ]]; then
-    pass "live_harvest_wired: the custom family is routed (LIUM_API_KEY + LIUM_SSH_PUBLIC_KEY_FILE present)"
+    LOG "live_harvest_wired=true: the Lium harvest scores nll / throughput as well"
   else
-    fail "live_harvest_wired=false: the custom family is not routed and registered_custom stays [] whatever PROOF_VM_RUNNER_CUSTOM_IDS says"
+    LOG "live_harvest_wired=false: Lium-only flag; nll / throughput topics 503 here, the custom family is judged by custom_family_wired / registered_custom / custom_ready"
+  fi
+  if [[ -n "$IDS" ]]; then
+    if [[ "$custom_wired" == "true" ]]; then
+      pass "custom_family_wired: the custom family is routed over the topic-vm orchestrator"
+    else
+      fail "custom_family_wired=$custom_wired with PROOF_VM_RUNNER_CUSTOM_IDS set: URL unset or refused, or no id registered (boot log: 'firecracker topic-vm orchestrator wired' + 'vm-backed runner registered')"
+    fi
   fi
   local leak leaked=0
   for leak in "vm_orchestrator" "/run/base" "Bearer " "PROOF_VM_ORCHESTRATOR"; do
@@ -462,11 +473,13 @@ check_cp() {
   fi
   [[ "$leaked" -eq 0 ]] && pass "/v1/status carries no orchestrator URL, token, or path"
   if [[ -n "$IDS" ]]; then
-    local id missing=0
+    local id missing=0 not_ready=0
     while IFS= read -r id; do
       printf '%s' "$registered" | grep -qF "\"$id\"" || { fail "registered_custom lacks $id (PROOF_VM_RUNNER_CUSTOM_IDS says it is served)"; missing=1; }
+      printf '%s' "$custom_ready" | grep -qF "\"$id\"" || { fail "custom_ready lacks $id: registered but its runner cannot run now (bearer file / image pin on this host — see the admin probe)"; not_ready=1; }
     done < <(split_ids "$IDS")
     [[ "$missing" -eq 0 ]] && pass "registered_custom lists every id in PROOF_VM_RUNNER_CUSTOM_IDS"
+    [[ "$not_ready" -eq 0 ]] && pass "custom_ready lists every id: the runner over the orchestrator is ready now"
   fi
 
   http GET "$CP/v1/proof/topics" ""; code="$HTTP_CODE"
@@ -500,6 +513,7 @@ check_cp() {
   orch="$(jget "$rep" orchestrator)"; ready="$(jget "$rep" ready)"; reason="$(jget "$rep" reason)"
   a_ready="$(jget "$rep" agent.ready)"; a_reason="$(jget "$rep" agent.reason)"; a_hv="$(jget "$rep" agent.hypervisor)"
   LOG "admin probe: orchestrator=$orch ready=$ready image=$(jget "$rep" image_digest | head -c 19)… shape=$(jget "$rep" vcpus)vCPU/$(jget "$rep" mem_mib)MiB agent=$(jget "$rep" agent) agent_error=$(jget "$rep" agent_error)"
+  LOG "admin probe: custom_family_wired=$(jget "$rep" custom_family_wired) registered_custom=$(jget "$rep" registered_custom) live_harvest_wired=$(jget "$rep" live_harvest_wired) (Lium-only, informational)"
   if [[ "$orch" == "firecracker" ]]; then pass "CP resolved FirecrackerOrchestrator"; else fail "CP orchestrator is '$orch': $reason"; fi
   if [[ "$ready" == "true" ]]; then pass "CP ready(): bearer file + RLM image pin in place"; else fail "CP not ready: $reason"; fi
   if [[ -n "$(jget "$rep" agent)" ]]; then

@@ -129,11 +129,10 @@ PROOF_VM_RUNNER_CUSTOM_IDS=<custom ids from the signed topics this host serves>
 Put the token under `deploy/secrets/proof/` (mounted at `/run/base/proof`,
 mode 0400, uid 65532). Restart `proof-challenge`; its boot log must show
 `firecracker topic-vm orchestrator wired` and one `vm-backed runner
-registered` line per id. `GET /v1/status` → `registered_custom` lists the
-ids; an open custom topic with a listed id appears in `scorable_topics`.
-Both need `live_harvest_wired: true`: the custom family is routed only over
-a wired Lium harvest, so without `LIUM_API_KEY` + `LIUM_SSH_PUBLIC_KEY_FILE`
-the registry is never built and `registered_custom` stays `[]`.
+registered` line per id. `GET /v1/status` → `custom_family_wired: true`,
+`registered_custom` lists the ids, `custom_ready` lists the ones whose runner
+can run now; an open custom topic with a ready id appears in
+`scorable_topics`.
 
 The Lium harvest is **not** a prerequisite. With these four variables set
 and no `LIUM_API_KEY` / `LIUM_SSH_PUBLIC_KEY_FILE`, the boot log shows
@@ -163,7 +162,7 @@ TOKEN=$(head -n1 deploy/secrets/proof/admin_tokens)
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/challenge/proof/v1/admin/proof/vm-orchestrator
 # {"orchestrator":"firecracker","ready":true,"reason":"","image_digest":"sha256:…","vcpus":4,"mem_mib":8192,
 #  "agent":{"api_version":1,"ready":true,"reason":"","hypervisor":"firecracker","vms":0},"agent_error":null,
-#  "live_harvest_wired":true,"registered_custom":["<custom-id>"]}
+#  "live_harvest_wired":false,"custom_family_wired":true,"registered_custom":["<custom-id>"]}
 unset TOKEN
 ```
 
@@ -173,7 +172,8 @@ unset TOKEN
 | `ready: false` + `reason` | bearer file missing / empty, or `PROOF_RLM_VM_IMAGE_DIGEST` unpinned — fix the file / env; the token needs no restart |
 | `agent: null` + `agent_error` | `orchestrator unreachable` (agent down, firewall, VPC route), `orchestrator refused the bearer` (bytes differ from `/etc/proof-vm/token`), TLS refused (CA / SAN) |
 | `agent.ready: false` + `agent.reason` | the KVM host: `firecracker` / `jailer` / `/dev/kvm` / image missing |
-| `live_harvest_wired: false` | Lium creds absent on the CP → custom family not routed, `registered_custom` empty |
+| `custom_family_wired: false` (ids set) | the custom family is not routed: orchestrator env unset / refused, or no id registered — `registered_custom` says which |
+| `live_harvest_wired` | **Lium only** (`nll` / `throughput`); informational for the custom family — `false` on a custom-only host is expected, not a fault |
 
 Run it over SSH + loopback (staging's public API is cleartext; never send
 the operator bearer over it). The reason strings name env vars and
@@ -261,13 +261,14 @@ top of the compose stack.
 
 ### 0. Preconditions on the CP
 
-The custom family is routed only when the whole live stack is up; check
+The custom family scores only when the rest of the live stack is up; check
 `GET /v1/status` on the master **before** touching the wire:
 
 | Gate | Where | Must read |
 |------|-------|-----------|
 | eval backend | `/v1/status` `eval_backend` | `lium` (`PROOF_FORCE_SIM` off — sim never hosts staging scoring) |
-| harvest | `/v1/status` `live_harvest_wired` | `true` (`LIUM_API_KEY` + `LIUM_SSH_PUBLIC_KEY_FILE`); `false` → `registered_custom` stays `[]` whatever the ids say |
+| custom family | `/v1/status` `custom_family_wired`, `registered_custom`, `custom_ready` | `true`, your ids, your ids — wired from the topic-VM env alone (§ Wire the control plane); an id registered but not ready = bearer file / image pin on this host |
+| harvest (Lium, informational here) | `/v1/status` `live_harvest_wired` | Lium only (`nll` / `throughput`): `true` with `LIUM_API_KEY` + `LIUM_SSH_PUBLIC_KEY_FILE`, `false` on a custom-only host — expected, not a fault; never stage a placeholder Lium key to open custom topics |
 | judge | `/v1/status` `inference_offer.status` | `open`, plus `PROOF_INFERENCE_API_KEY_FILE` present |
 | executor | `GET /v1/proof/executor` | `ready: true` (open `1x` offer) |
 | topic | a **signed custom topic** (`metric.family: custom`, `metric.custom_id: <id>`) with a **sealed baseline**; the RLM of that topic sets it up per [`../PROOF.md`](../PROOF.md) § Dynamic agentic engine | its `custom_id` is what goes into `PROOF_VM_RUNNER_CUSTOM_IDS`; the topic can only **open** once that id is registered |
@@ -329,7 +330,7 @@ cd /opt/base
 |------------|--------|
 | `env` | `PROOF_VM_ORCHESTRATOR_URL` is `https://`; the bearer file (container path mapped through the compose bind mount, `--path-map`) exists and is non-empty, mode 0400 / uid 65532; `PROOF_RLM_VM_IMAGE_DIGEST` is `sha256:<64 hex>` (empty or a placeholder = FAIL — never invented); the CA file is PEM when set; every custom id is well-formed; the shape is the locked 4 / 8192; `PROOF_FORCE_SIM` is off |
 | `agent` | `GET /v1/health` with the bearer → `ready: true`, `hypervisor: firecracker`; no bearer → 401; wrong bearer → 401 |
-| `cp` | `/v1/status`: `lium`, `live_harvest_wired`, `registered_custom` ⊇ ids, no URL / token / path in the body; `/v1/proof/topics` leaks no holdout; `/v1/proof/executor` readiness; then the admin probe above — `orchestrator: firecracker`, `ready: true`, `agent.ready: true` through the CP's own rustls client |
+| `cp` | `/v1/status`: `lium`, `custom_family_wired`, `registered_custom` ⊇ ids, `custom_ready` ⊇ ids (`live_harvest_wired` is logged, Lium-only, never a FAIL), no URL / token / path in the body; `/v1/proof/topics` leaks no holdout; `/v1/proof/executor` readiness; then the admin probe above — `orchestrator: firecracker`, `ready: true`, `agent.ready: true` through the CP's own rustls client |
 | `boot-probe` | the agent boots the **pinned** image for a probe topic, one topic ↔ one VM, a teardown naming another topic is refused, destroy is confirmed, nothing is left for the topic. Opt-in: it boots a real 4 vCPU / 8 GiB RLM VM on the KVM host (up to 10 min, the RLM guest must say hello); no job runs, nothing is spent. Nothing outlives it: Ctrl-C, a lost `201` (timeout, dropped connection), or an unconfirmed teardown all end in a by-topic attach + destroy before the script exits, so a retry on the same probe topic is never blocked by a stranded VM |
 
 Every check re-reads the files it names, so a fix to the bearer or the CA

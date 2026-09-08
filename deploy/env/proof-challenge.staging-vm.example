@@ -49,8 +49,10 @@ PROOF_RLM_VM_MEM_MIB=8192
 # Custom metric ids the generic VmBackedRunner serves on this host: exactly
 # the ids named by the signed staging topics (comma-separated). Registration
 # is an operator action — empty = empty registry = every custom topic 503.
-# Also requires live_harvest_wired (LIUM_API_KEY + LIUM_SSH_PUBLIC_KEY_FILE):
-# without the harvest the custom family is not routed at all.
+# The custom family is wired from these four variables alone: no Lium
+# credentials needed (live_harvest_wired is Lium-only and reads false on a
+# custom-only host — expected). Check custom_family_wired / registered_custom /
+# custom_ready on GET /v1/status instead.
 PROOF_VM_RUNNER_CUSTOM_IDS=REPLACE_WITH_CUSTOM_ID_FROM_THE_SIGNED_STAGING_TOPIC
 
 # Operator bearers for /v1/admin/* (topics, executor, vm-orchestrator probe).

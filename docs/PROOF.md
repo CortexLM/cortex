@@ -236,8 +236,10 @@ Trust-root keygen is the throwaway owner path in
   of the topic-VM orchestrator through the host's own client: `orchestrator`
   (`firecracker` / `unwired`), `ready` + `reason` (bearer file, RLM image
   pin), the locked template, one agent health call (`agent` /
-  `agent_error`), `live_harvest_wired`, `registered_custom`. Always **200**
-  once authorised — a broken wire is data. Names env vars and container
+  `agent_error`), plus the host gates `custom_family_wired`,
+  `registered_custom`, and `live_harvest_wired` (Lium only — informational
+  for the custom family). Always **200** once authorised — a broken wire is
+  data. Names env vars and container
   paths, never the bearer. Run over loopback; wrapped by
   [`deploy/scripts/proof-vm-wire-check.sh`](../deploy/scripts/proof-vm-wire-check.sh).
 - `POST /v1/submissions` **requires** `topic_id`. Missing/unknown/not-open →
