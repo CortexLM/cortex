@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
 use prism_lium_types::{EvalReceipt, NoScoreGate};
+use proof_executor::{require_open_executor, EvalExecutorOffer, ExecutorOfferError};
 use proof_score::{AgentVerdict, HarnessMetrics, ProofCheatCode, ProofKind, SealedBaseline};
 use proof_store::ArtifactManifest;
 use proof_task::{
@@ -124,6 +125,33 @@ pub enum EvalError {
     /// Live score needs operator-staged holdout shard bytes.
     #[error("PROOF_HOLDOUT_STORE missing or incomplete; refuse scoring")]
     HoldoutStoreMissing,
+    /// No live `EvalExecutorOffer` on this host (Lium path).
+    #[error("eval executor offer missing; refuse scoring")]
+    ExecutorOfferMissing,
+    /// Live `EvalExecutorOffer` is closed.
+    #[error("eval executor offer is closed; refuse scoring")]
+    ExecutorOfferClosed,
+    /// Live `EvalExecutorOffer` failed pin validation or cannot serve the topic.
+    #[error("eval executor offer: {0}")]
+    ExecutorOffer(String),
+    /// The eval run was cut at the executor proof deadline. Not a zero — a 503
+    /// whose body carries the pod's log tail.
+    #[error("proof deadline of {deadline_s}s exceeded; stdout_tail: {stdout_tail}")]
+    ProofDeadlineExceeded {
+        /// Deadline the run was held to (offer, topic tighten, operator override).
+        deadline_s: u64,
+        /// Last bytes of pod stdout (run log tail), for the operator.
+        stdout_tail: String,
+    },
+}
+
+/// Map an executor refusal onto the eval error the HTTP layer answers 503 with.
+pub fn map_executor_err(e: ExecutorOfferError) -> EvalError {
+    match e {
+        ExecutorOfferError::Missing => EvalError::ExecutorOfferMissing,
+        ExecutorOfferError::Closed => EvalError::ExecutorOfferClosed,
+        other => EvalError::ExecutorOffer(other.to_string()),
+    }
 }
 
 /// Schema version of the metrics+verdict document the eval image emits.
@@ -231,12 +259,16 @@ impl ProofEvalDocument {
 #[async_trait]
 pub trait LiveScorer: Send + Sync {
     /// Score one artifact on one topic's verified holdout.
+    ///
+    /// `offer` is the RLM judge the image calls; `executor` is the open
+    /// `1x` machine class the image is rented on. Both are host state.
     #[allow(clippy::too_many_arguments)]
     async fn score(
         &self,
         pin: &ProofPin,
         topic: &TopicDocument,
         offer: &InferenceOffer,
+        executor: &EvalExecutorOffer,
         frozen_digest: &str,
         artifact_digest: &str,
         holdout: &[HoldoutRecord],
@@ -378,12 +410,17 @@ fn map_offer_err(e: OfferError) -> EvalError {
 }
 
 /// Whether this host can produce a verdict at all.
+///
+/// The RLM judge offer is required on every backend. The eval executor offer
+/// is a Lium-path requirement: sim rents nothing, so there is no machine to
+/// bind; a live host with no open `1x` executor cannot score.
 pub fn scoring_readiness(
     pin: &ProofPin,
     backend: EvalBackend,
     live: Option<&dyn LiveScorer>,
     has_open_sealed_topic: bool,
     offer: Option<&InferenceOffer>,
+    executor: Option<&EvalExecutorOffer>,
     judge_api_key: Option<&str>,
 ) -> Result<(), EvalError> {
     if !has_open_sealed_topic {
@@ -398,7 +435,9 @@ pub fn scoring_readiness(
             }
             let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
             scorer.ready()?;
-            judge_api_key_ready(judge_api_key)
+            judge_api_key_ready(judge_api_key)?;
+            require_open_executor(executor, pin).map_err(map_executor_err)?;
+            Ok(())
         }
     }
 }
@@ -646,6 +685,7 @@ pub async fn eval_after_freeze(
     pin: &ProofPin,
     topic: &TopicDocument,
     offer: &InferenceOffer,
+    executor: Option<&EvalExecutorOffer>,
     frozen_digest: &str,
     artifact_digest: &str,
     holdout: &[HoldoutRecord],
@@ -658,10 +698,24 @@ pub async fn eval_after_freeze(
     if frozen_digest.trim().is_empty() || holdout.is_empty() {
         return Err(EvalError::HoldoutSealed);
     }
-    scoring_readiness(pin, backend, live, true, Some(offer), judge_api_key)?;
+    scoring_readiness(
+        pin,
+        backend,
+        live,
+        true,
+        Some(offer),
+        executor,
+        judge_api_key,
+    )?;
     offer
         .serves_topic(pin, topic)
         .map_err(|e| EvalError::InferenceOffer(e.to_string()))?;
+    if backend == EvalBackend::Lium {
+        executor
+            .ok_or(EvalError::ExecutorOfferMissing)?
+            .serves_topic(topic)
+            .map_err(map_executor_err)?;
+    }
     let resolved = resolve_inference(
         pin,
         Some(&topic.inference),
@@ -689,11 +743,13 @@ pub async fn eval_after_freeze(
         }
         EvalBackend::Lium => {
             let scorer = live.ok_or(EvalError::LiveHarvestUnavailable)?;
+            let executor = executor.ok_or(EvalError::ExecutorOfferMissing)?;
             scorer
                 .score(
                     pin,
                     topic,
                     offer,
+                    executor,
                     frozen_digest,
                     artifact_digest,
                     holdout,
@@ -800,6 +856,23 @@ mod tests {
         }
     }
 
+    /// Open `1x` executor bound to `pin`'s digest (template name carries the
+    /// digest prefix, as the digest-scoped harvest template does).
+    fn executor(pin: &ProofPin) -> EvalExecutorOffer {
+        let hex = pin.eval_image_digest.trim_start_matches("sha256:");
+        let mut o = EvalExecutorOffer {
+            offer_id: "lium-1x-v0".into(),
+            lium_template_id: format!("proof-eval-{}", hex.get(..12).unwrap_or("unpinned")),
+            machine_shape: "1x".into(),
+            max_proof_deadline_s: 3_600,
+            eval_image_digest: pin.eval_image_digest.clone(),
+            config_commitment: String::new(),
+            status: proof_executor::OfferStatus::Open,
+        };
+        o.config_commitment = o.expected_commitment();
+        o
+    }
+
     struct Harvest {
         reproduced: bool,
     }
@@ -811,6 +884,7 @@ mod tests {
             pin: &ProofPin,
             topic: &TopicDocument,
             _offer: &InferenceOffer,
+            _executor: &EvalExecutorOffer,
             frozen: &str,
             artifact: &str,
             _holdout: &[HoldoutRecord],
@@ -841,6 +915,7 @@ mod tests {
             &pin(""),
             &t,
             &offer(),
+            Some(&executor(&pin(""))),
             "d",
             "art",
             &recs,
@@ -861,6 +936,7 @@ mod tests {
             &pin(&format!("sha256:{}", "ab".repeat(32))),
             &t,
             &offer(),
+            Some(&executor(&pin(&format!("sha256:{}", "ab".repeat(32))))),
             "d",
             "art",
             &recs,
@@ -887,6 +963,7 @@ mod tests {
             &p,
             &t,
             &offer(),
+            Some(&executor(&p)),
             "digest-a",
             "art",
             &recs,
@@ -930,7 +1007,15 @@ mod tests {
         let live = pin(&format!("sha256:{}", "ab".repeat(32)));
         let o = offer();
         assert!(matches!(
-            scoring_readiness(&live, EvalBackend::Sim, None, false, Some(&o), None),
+            scoring_readiness(
+                &live,
+                EvalBackend::Sim,
+                None,
+                false,
+                Some(&o),
+                Some(&executor(&live)),
+                None
+            ),
             Err(EvalError::NoOpenTopic)
         ));
         scoring_readiness(
@@ -939,6 +1024,7 @@ mod tests {
             None,
             true,
             Some(&o),
+            Some(&executor(&ProofPin::default())),
             None,
         )
         .expect("sim");
@@ -949,7 +1035,8 @@ mod tests {
                 None,
                 true,
                 None,
-                None
+                Some(&executor(&ProofPin::default())),
+                None,
             ),
             Err(EvalError::InferenceOfferMissing)
         ));
@@ -960,12 +1047,21 @@ mod tests {
                 None,
                 true,
                 Some(&o),
+                Some(&executor(&ProofPin::default())),
                 None,
             ),
             Err(EvalError::EvalImageUnpinned)
         ));
         assert!(matches!(
-            scoring_readiness(&live, EvalBackend::Lium, None, true, Some(&o), None),
+            scoring_readiness(
+                &live,
+                EvalBackend::Lium,
+                None,
+                true,
+                Some(&o),
+                Some(&executor(&live)),
+                None
+            ),
             Err(EvalError::LiveHarvestUnavailable)
         ));
         scoring_readiness(
@@ -974,6 +1070,7 @@ mod tests {
             Some(&Harvest { reproduced: true }),
             true,
             Some(&o),
+            Some(&executor(&live)),
             Some("test-judge-key"),
         )
         .expect("ready");
@@ -984,10 +1081,128 @@ mod tests {
                 Some(&Harvest { reproduced: true }),
                 true,
                 Some(&o),
+                Some(&executor(&live)),
                 None,
             ),
             Err(EvalError::InferenceAuthMissing)
         ));
+    }
+
+    /// Lium: missing / closed / non-`1x` executor is a refusal after every
+    /// other live prerequisite holds. Sim never rents, so it does not care.
+    #[test]
+    fn readiness_requires_an_open_one_gpu_executor_on_lium_only() {
+        let live = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let o = offer();
+        let harvest = Harvest { reproduced: true };
+        assert!(matches!(
+            scoring_readiness(
+                &live,
+                EvalBackend::Lium,
+                Some(&harvest),
+                true,
+                Some(&o),
+                None,
+                Some("test-judge-key"),
+            ),
+            Err(EvalError::ExecutorOfferMissing)
+        ));
+        let mut closed = executor(&live);
+        closed.status = proof_executor::OfferStatus::Closed;
+        assert!(matches!(
+            scoring_readiness(
+                &live,
+                EvalBackend::Lium,
+                Some(&harvest),
+                true,
+                Some(&o),
+                Some(&closed),
+                Some("test-judge-key"),
+            ),
+            Err(EvalError::ExecutorOfferClosed)
+        ));
+        let mut wide = executor(&live);
+        wide.machine_shape = "8x".into();
+        wide.config_commitment = wide.expected_commitment();
+        let err = scoring_readiness(
+            &live,
+            EvalBackend::Lium,
+            Some(&harvest),
+            true,
+            Some(&o),
+            Some(&wide),
+            Some("test-judge-key"),
+        )
+        .expect_err("8x cannot score");
+        assert!(
+            matches!(err, EvalError::ExecutorOffer(ref m) if m.contains("machine_shape")),
+            "{err}"
+        );
+        scoring_readiness(
+            &ProofPin::default(),
+            EvalBackend::Sim,
+            None,
+            true,
+            Some(&o),
+            None,
+            None,
+        )
+        .expect("sim rents nothing");
+    }
+
+    #[tokio::test]
+    async fn live_eval_refuses_without_an_executor_that_serves_the_topic() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let mut t = topic();
+        let missing = eval_after_freeze(
+            &p,
+            &t,
+            &offer(),
+            None,
+            "digest-a",
+            "art",
+            &recs,
+            "claim",
+            EvalBackend::Lium,
+            Some(&Harvest { reproduced: true }),
+            Some("test-judge-key"),
+            None,
+        )
+        .await
+        .expect_err("no executor");
+        assert!(
+            matches!(missing, EvalError::ExecutorOfferMissing),
+            "{missing}"
+        );
+
+        t.eval_executor.require_offer_commitment = Some("cd".repeat(32));
+        let pinned_elsewhere = eval_after_freeze(
+            &p,
+            &t,
+            &offer(),
+            Some(&executor(&p)),
+            "digest-a",
+            "art",
+            &recs,
+            "claim",
+            EvalBackend::Lium,
+            Some(&Harvest { reproduced: true }),
+            Some("test-judge-key"),
+            None,
+        )
+        .await
+        .expect_err("topic pins another executor");
+        assert!(
+            matches!(pinned_elsewhere, EvalError::ExecutorOffer(ref m) if m.contains("cannot serve")),
+            "{pinned_elsewhere}"
+        );
+        assert!(EvalError::ProofDeadlineExceeded {
+            deadline_s: 600,
+            stdout_tail: "exit=124".into(),
+        }
+        .to_string()
+        .contains("600s"),);
     }
 
     #[test]
@@ -1114,6 +1329,7 @@ mod tests {
             &p,
             &t,
             &offer(),
+            Some(&executor(&p)),
             "digest-a",
             "art",
             &recs,
@@ -1146,6 +1362,7 @@ mod tests {
             &p,
             &t,
             &offer(),
+            Some(&executor(&p)),
             "digest-a",
             "art",
             &recs,
