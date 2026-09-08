@@ -423,8 +423,11 @@ rule set, request) — never a host path, a key, or a judge origin. Two
 orchestrators exist: `UnwiredVmOrchestrator` (the default; refuses, names
 `PROOF_VM_ORCHESTRATOR_URL` / `PROOF_VM_ORCHESTRATOR_TOKEN_FILE`) and the
 live `FirecrackerOrchestrator` (`crates/proof-vm-fc`), a thin HTTPS client of
-the `proof-vm-orchestrator` agent on a **dedicated KVM host** (never the
-control-plane droplet, never a Lium pod, never nested). The host prefers it
+the `proof-vm-orchestrator` agent on a host with a working `/dev/kvm` — a
+**dedicated KVM host** in production; on staging the agent may share the
+control-plane droplet when nested KVM boots (validated on `cortex-staging`;
+fragile — if the boot fails, provision metal); never a Lium pod, never an
+emulator. The host prefers it
 when `PROOF_VM_ORCHESTRATOR_URL` (https; plain http only on loopback) and
 `PROOF_VM_ORCHESTRATOR_TOKEN_FILE` are set; the bearer is a file re-read per
 request and never logged; `PROOF_RLM_VM_IMAGE_DIGEST` pins the RLM VM rootfs

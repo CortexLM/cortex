@@ -1,4 +1,4 @@
-# Runbook — Proof topic-VM orchestrator (Firecracker on a dedicated KVM host)
+# Runbook — Proof topic-VM orchestrator (Firecracker + jailer agent on a KVM host)
 
 Operator procedure for the `proof-vm-orchestrator` agent that boots one
 Firecracker RLM microVM per Proof topic and a **sister** Firecracker guest
@@ -12,7 +12,7 @@ Staging wire + probes: § DigitalOcean staging and
 ## What runs where
 
 ```text
-master droplet (DO)                          dedicated KVM host (bare metal, /dev/kvm)
+control plane (proof-challenge, master)      KVM host = wherever /dev/kvm works (see below)
 ┌─────────────────────────────────┐          ┌────────────────────────────────────────────┐
 │ proof-challenge                 │  HTTPS   │ proof-vm-orchestrator (systemd, :8200)     │
 │  RlmScorer → RunnerRegistry     │ bearer   │  bearer file · one running VM per topic_id  │
@@ -26,11 +26,28 @@ master droplet (DO)                          dedicated KVM host (bare metal, /de
 └─────────────────────────────────┘          └────────────────────────────────────────────┘
 ```
 
+**Where the agent runs.** Anywhere `/dev/kvm` works and the agent's
+`ready()` is green — the isolation boundary is the RLM microVM plus the
+sister guest, not the machine they sit on:
+
+- **Production prefers a dedicated DigitalOcean bare-metal / KVM host**
+  (bare metal, its own `/dev/kvm`, reachable from the master over the VPC or
+  a private network).
+- **Staging may colocate the agent on the control-plane droplet** when
+  `/dev/kvm` works there. Validated on `cortex-staging`: nested DO
+  virtualisation booted Firecracker and the § 4 fail-closed matrix came back
+  green. Nested virtualisation stays **fragile** (it depends on what the
+  hypervisor underneath exposes and can change with a resize or a
+  migration): if the boot fails or `/dev/kvm` disappears, do not patch
+  around it — provision a dedicated KVM host and point the CP at it.
+- Never a Lium pod, never a software emulator, never anything without
+  `/dev/kvm` (the unit's `ConditionPathExists` refuses).
+
 Locked by design (do not move any of it):
 
 | Rule | Where it is enforced |
 |------|----------------------|
-| Firecracker microVMs, **sisters** (RLM VM + miner guest) on one dedicated KVM host — not the control-plane droplet, not Lium, not nested | agent runs only where `/dev/kvm` exists (`ConditionPathExists`); nothing in `proof-challenge` can exec |
+| Firecracker microVMs, **sisters** (RLM VM + miner guest) run only where `/dev/kvm` works — production on a dedicated KVM host, staging colocated on the CP droplet when nested KVM boots (validated); never Lium, never emulated | agent runs only where `/dev/kvm` exists (`ConditionPathExists`); nothing in `proof-challenge` can exec |
 | The RLM never sees the host filesystem or secrets — only `VmJob` payloads | `proof-vm-proto` types; jobs are the signed topic, digests, rule versions; tests assert no path / key / origin in any body |
 | RLM image pin `PROOF_RLM_VM_IMAGE_DIGEST=sha256:…`, empty = fail-closed | `FirecrackerOrchestrator::ready()` → `NotWired` naming the var; agent re-hashes `images/sha256-<hex>.ext4` before boot |
 | Auth: `PROOF_VM_ORCHESTRATOR_URL` + `PROOF_VM_ORCHESTRATOR_TOKEN_FILE`, bearer file first, never logged | client reads the file per request; agent compares SHA-256 digests in constant time, re-reads its file per request |
@@ -181,23 +198,50 @@ bearer; refuses production hosts). Env overlays with placeholders only:
 
 | Piece | Host | Notes |
 |-------|------|-------|
-| `proof-challenge` (client, `FirecrackerOrchestrator`) | the **existing staging master droplet** `base-staging` (see [`staging-testnet-e2e.md`](staging-testnet-e2e.md)), compose `role-master` + `env-staging` | nothing Firecracker on it: no `/dev/kvm`, no unit, no images; it holds the bearer file, the CA PEM, the RLM image pin, and the custom ids |
-| `proof-vm-orchestrator` (agent, Firecracker + jailer) | a **KVM host with `/dev/kvm`**, reachable from the staging VPC / private network | `systemd/proof-vm-orchestrator.service` has `ConditionPathExists=/dev/kvm`; bind on the private address, HTTPS + bearer file |
+| `proof-challenge` (client, `FirecrackerOrchestrator`) | the **existing staging master droplet** (`cortex-staging`; topology in [`staging-testnet-e2e.md`](staging-testnet-e2e.md)), compose `role-master` + `env-staging` | holds the bearer file, the CA PEM, the RLM image pin, and the custom ids; it is only the HTTPS client — nothing in the container can exec Firecracker |
+| `proof-vm-orchestrator` (agent, Firecracker + jailer) | **colocated on that same droplet** (validated) — or a dedicated KVM host when nested KVM does not boot | `systemd/proof-vm-orchestrator.service` on the host, `ConditionPathExists=/dev/kvm`; bind on the droplet's private address, HTTPS + bearer file |
 
-**A DigitalOcean Droplet is not that host.** Standard, CPU-optimized, and
-dedicated-CPU Droplets are KVM guests that expose no nested virtualisation:
-`/dev/kvm` does not exist inside them, `kvm-ok` reports the CPU cannot run
-KVM, and the unit refuses to start by design. Do not try to work around it
-(no nested-FC redesign, no `--no-kvm` anything): the RLM VM and the sister
-guest are the isolation boundary and a software emulator is not one. Use a
-DigitalOcean bare-metal / dedicated-hardware host when the account has one,
-or any bare-metal KVM host elsewhere (another provider, colo), attached to
-the staging VPC's private network — WireGuard from the staging master, or
-VPC peering when both sides are DO. Either way the agent listens on the
-private address only and TLS + bearer stay mandatory (the bearer never
-crosses a network in clear).
+**Colocated staging (validated).** `cortex-staging` exposes a working
+`/dev/kvm` through nested DigitalOcean virtualisation; the agent booted
+Firecracker there and § 4 came back green. This is the staging default: one
+droplet runs the compose stack **and** the agent as a host systemd unit. Two
+things follow from the CP living in a container on the same machine:
 
-Check the candidate host before installing anything:
+- The CP must reach the agent on the **droplet's private (VPC) address**,
+  never on loopback: `127.0.0.1` inside the `proof-challenge` container is
+  the container, and `FcConfig` only accepts plain `http://` on loopback
+  anyway. Bind the agent on the VPC IP with TLS (`PROOF_VM_AGENT_BIND=<vpc-ip>:8200`,
+  a certificate with that IP or name as SAN) and set
+  `PROOF_VM_ORCHESTRATOR_URL=https://<vpc-ip>:8200` on the CP. Open `:8200`
+  on the host firewall to the compose network only (`docker network ls` →
+  the stack's `base` network → `docker network inspect <name>` for its
+  subnet); the wire check runs on the host itself and needs nothing more.
+- The RLM VM (4 vCPU / 8 GiB) and each sister (2 vCPU / 4 GiB, no NIC)
+  share CPU, RAM, and disk with gateway, Postgres, and both challenges. Size
+  the droplet for it and keep `/srv/jailer` + `/var/lib/proof-vm` on a disk
+  with room for the images plus ~10 GiB scratch per open topic.
+
+**Nested virtualisation is fragile.** What the droplet's hypervisor exposes
+is not under our control and can change with a resize or a live migration.
+Treat any of these as "provision metal", not as something to patch around
+(no nested-FC redesign, no `--no-kvm` anything — a software emulator is not
+the isolation boundary):
+
+- `/dev/kvm` missing or `kvm-ok` reporting KVM cannot be used → the unit
+  does not start (`ConditionPathExists`), agent health `ready: false`.
+- `topic vm boot failed; releasing its jail` with a KVM ioctl error from
+  Firecracker in the agent journal / the jail's `console.log`, or the guest
+  never saying hello inside `PROOF_VM_AGENT_BOOT_TIMEOUT_SECS`.
+- Sisters cut at the deadline on a run that fits comfortably on metal.
+
+**Dedicated KVM host (production preference, staging fallback).** A
+DigitalOcean bare-metal / dedicated-hardware host, or any bare-metal KVM
+host attached to the staging VPC's private network (WireGuard from the
+master, or VPC peering when both sides are DO). Same unit, same env file;
+the agent listens on the private address only and TLS + bearer stay
+mandatory (the bearer never crosses a network in clear).
+
+Check whichever host you pick before installing anything:
 
 ```bash
 ls -l /dev/kvm                                  # must exist (crw-rw---- root kvm)
@@ -210,7 +254,8 @@ df -T /srv /var/lib | grep -E 'xfs|btrfs'       # reflink FS preferred (see Host
 
 Budget per open topic: RLM VM 4 vCPU / 8192 MiB + sister 2 vCPU / 4096 MiB
 + ~10 GiB scratch. Size the host for the number of custom topics staging
-will keep open at once, plus one probe VM.
+will keep open at once, plus one probe VM — on the colocated droplet, on
+top of the compose stack.
 
 ### 0. Preconditions on the CP
 
@@ -228,14 +273,16 @@ The custom family is routed only when the whole live stack is up; check
 Nothing here is challenge content in git: the topic, its rules, and its
 images are operator-published documents and staged files.
 
-### 1. KVM host
+### 1. KVM host (the staging droplet itself, or the dedicated host)
 
 Follow § Host prerequisites and § Install with
 `deploy/env/proof-vm-orchestrator.staging.example` as `/etc/proof-vm/orchestrator.env`:
 
-1. `PROOF_VM_AGENT_BIND=<private-ip>:8200`; a certificate for that address
-   (a private CA is fine — the CP pins its root) **with a SAN**: the CP's
-   rustls client refuses CN-only certificates even when curl accepts them.
+1. `PROOF_VM_AGENT_BIND=<private-ip>:8200` — the droplet's VPC address when
+   colocated (the CP container cannot use loopback), the private address of
+   the dedicated host otherwise; a certificate for that address (a private CA
+   is fine — the CP pins its root) **with a SAN**: the CP's rustls client
+   refuses CN-only certificates even when curl accepts them.
 2. Bearer: `head -c 32 /dev/urandom | base64 -w0 > /etc/proof-vm/token; chmod 0400 /etc/proof-vm/token`.
 3. Stage `vmlinux`, the RLM rootfs, and the sister rootfs; `sha256sum` each;
    name the rootfs files `images/sha256-<hex>.ext4`; put the kernel and
@@ -246,18 +293,19 @@ Follow § Host prerequisites and § Install with
 5. `systemctl enable --now proof-vm-orchestrator`; the boot log shows
    `firecracker + jailer + /dev/kvm present; agent ready` and
    `bearer token file present (contents not logged)`.
-6. Open `:8200` on the host firewall to the staging master's private
-   address only.
+6. Open `:8200` on the host firewall to the CP only: the compose network's
+   subnet when colocated, the staging master's private address when the
+   host is dedicated.
 
 ### 2. Control plane (staging master)
 
 ```bash
 ssh root@<staging-master> ; cd /opt/base ; umask 077
-# The bearer: copy the KVM host's file over the private network — never paste it on a command line.
-scp root@<kvm-host-private-ip>:/etc/proof-vm/token deploy/secrets/proof/vm_orchestrator_token
-scp root@<kvm-host-private-ip>:/etc/proof-vm/ca.pem deploy/secrets/proof/vm_orchestrator_ca.pem   # private CA only
-chown 65532:65532 deploy/secrets/proof/vm_orchestrator_token deploy/secrets/proof/vm_orchestrator_ca.pem
-chmod 0400 deploy/secrets/proof/vm_orchestrator_token deploy/secrets/proof/vm_orchestrator_ca.pem
+# The bearer: a second copy of the agent's file — never pasted on a command line.
+install -m 0400 -o 65532 -g 65532 /etc/proof-vm/token deploy/secrets/proof/vm_orchestrator_token         # colocated
+install -m 0400 -o 65532 -g 65532 /etc/proof-vm/ca.pem deploy/secrets/proof/vm_orchestrator_ca.pem       # private CA only
+# Dedicated host instead: scp root@<kvm-host-private-ip>:/etc/proof-vm/{token,ca.pem} over the private
+# network to the same paths, then chown 65532:65532 + chmod 0400 both files.
 # Append the keys of deploy/env/proof-challenge.staging-vm.example (values filled) to the age source
 # of proof-challenge.env (deploy/scripts/age-encrypt-env.sh / age-push-env.sh), then:
 ./deploy/scripts/materialize-env.sh
@@ -339,6 +387,9 @@ Then run the § Verify cleanup probes (failed `ip tuntap`, deadline cut,
 Staging is "wired and tested" when all of these are in the change log with
 dates and the exact commands:
 
+- [ ] placement recorded: colocated on `cortex-staging` (nested KVM boots)
+      or a dedicated KVM host, with `ls -l /dev/kvm` + `kvm-ok` output from
+      that host; none of the fragility signs above appeared during the run.
 - [ ] `proof-vm-wire-check.sh all` → all PASS on the staging master.
 - [ ] `proof-vm-wire-check.sh boot-probe` → all PASS; KVM host left clean.
 - [ ] every row of § 4 → the expected 503 (or 400) with the expected reason,

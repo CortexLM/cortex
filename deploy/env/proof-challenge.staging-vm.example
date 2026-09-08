@@ -1,10 +1,12 @@
 # operator-managed, never committed with values filled in.
 #
 # STAGING overlay for deploy/env/proof-challenge.env on the staging MASTER
-# droplet (`base-staging`, compose role-master + env-staging): the CLIENT side
-# of the Proof topic-VM orchestrator. Nothing Firecracker runs on this
-# droplet; proof-challenge only talks HTTPS to `proof-vm-orchestrator` on the
-# dedicated KVM host (deploy/env/proof-vm-orchestrator.staging.example).
+# droplet (`cortex-staging`, compose role-master + env-staging): the CLIENT
+# side of the Proof topic-VM orchestrator. proof-challenge only talks HTTPS
+# to `proof-vm-orchestrator`, a host systemd unit — on staging colocated on
+# this same droplet (nested KVM validated; fragile — if the boot fails,
+# provision a dedicated KVM host), in production on a dedicated DO
+# bare-metal / KVM host (deploy/env/proof-vm-orchestrator.staging.example).
 #
 # Use: append these keys to the age-encrypted source of proof-challenge.env,
 # re-materialize, restart proof-challenge, then
@@ -16,13 +18,15 @@
 # this file is real: take PROOF_RLM_VM_IMAGE_DIGEST from `sha256sum` of the
 # RLM rootfs you staged on the KVM host. Do not invent one.
 
-# HTTPS URL of the agent, reachable from the staging VPC / private network
-# only (never a public address, never this droplet). Plain http:// off
-# loopback is refused at boot and the host stays unwired.
-PROOF_VM_ORCHESTRATOR_URL=https://REPLACE_WITH_KVM_HOST_PRIVATE_ADDRESS:8200
+# HTTPS URL of the agent on its private (VPC) address — never a public one.
+# Colocated: this droplet's VPC IP, not 127.0.0.1 (inside the proof-challenge
+# container loopback is the container). Plain http:// off loopback is refused
+# at boot and the host stays unwired.
+PROOF_VM_ORCHESTRATOR_URL=https://REPLACE_WITH_AGENT_HOST_PRIVATE_ADDRESS:8200
 
 # Bearer FILE, container path. Host file: deploy/secrets/proof/vm_orchestrator_token
-# (mode 0400, uid 65532), same bytes as /etc/proof-vm/token on the KVM host.
+# (mode 0400, uid 65532), same bytes as the agent's /etc/proof-vm/token (a
+# second copy even when colocated: the container reads its own mount).
 # Re-read per request: rotate by rewriting both files, no restart.
 PROOF_VM_ORCHESTRATOR_TOKEN_FILE=/run/base/proof/vm_orchestrator_token
 
