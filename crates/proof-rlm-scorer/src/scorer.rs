@@ -16,11 +16,19 @@
 //! 6. on persist: artefact zip + metadata row + public event; on promotion:
 //!    promotion row, `best.json`, lifecycle `promoting → open`.
 //!
-//! Evaluations are serialised per topic so the lifecycle mirror is exact
-//! and every transition is written to the store.
+//! Runs are serialised per topic by a **lease** the run holds from `score`
+//! until the host reports the row persisted (`on_persisted`). Promotion is
+//! decided under that lease against the store's current best and persisted
+//! under the same lease with a compare-and-swap on the best pointer, so two
+//! runs can never both promote against one stale bar and a later, worse run
+//! can never displace a better champion. A run whose row never lands
+//! releases its lease after [`DEFAULT_LEASE_TTL`].
+//!
+//! [`SpendToken`]: proof_rlm::SpendToken
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use proof_eval::{EvalError, LiveScorer, ProofEvalDocument, PROOF_METRICS_SCHEMA};
@@ -31,14 +39,38 @@ use proof_rlm::{
 };
 use proof_rlm_store::{ArtefactRow, ChecklistRow, PromotionRow, RlmStore, TransitionRow};
 use proof_score::{AgentVerdict, HarnessMetrics, ProofCheatCode, ProofKind};
-use proof_task::{HoldoutRecord, InferenceOffer, MetricFamily, ProofPin, TopicDocument};
+use proof_task::{
+    HoldoutRecord, InferenceOffer, MetricDirection, MetricFamily, ProofPin, TopicDocument,
+};
+use tokio::sync::OwnedMutexGuard;
 
 use crate::artefact::{ArtefactBundle, ArtefactStore, BaselineRef, BestRef, PublicEvent};
+
+/// How long a scored run may hold its topic lease waiting for the host to
+/// report its row persisted. Past this the persist is treated as abandoned
+/// (the row never landed) and the next run of the topic proceeds.
+pub const DEFAULT_LEASE_TTL: Duration = Duration::from_mins(5);
+
+/// How often a run waiting for a topic lease re-checks for abandoned holders.
+const LEASE_POLL: Duration = Duration::from_secs(1);
+
+/// A promotion decision and the world it was taken in.
+struct Decided {
+    outcome: PromoteDecision,
+    /// The store's best when the decision was taken; persist refuses when it
+    /// has moved (another writer crowned something in between).
+    previous_best: Option<PromotionRow>,
+    direction: MetricDirection,
+}
 
 /// Scored-but-not-yet-persisted state for one submission.
 struct Pending {
     bundle: ArtefactBundle,
-    decision: Option<PromoteDecision>,
+    decided: Option<Decided>,
+    /// Topic lease held since `score` returned; dropped when the row is
+    /// persisted (end of `on_persisted`) or the entry is reaped.
+    lease: Option<OwnedMutexGuard<()>>,
+    since: Instant,
 }
 
 /// Family scorer over the runner registry, the RLM store, and the artefact store.
@@ -48,6 +80,7 @@ pub struct RlmScorer {
     artefacts: Option<ArtefactStore>,
     pending: Mutex<BTreeMap<String, Pending>>,
     locks: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    lease_ttl: Duration,
 }
 
 fn unwired(custom_id: &str, detail: String) -> EvalError {
@@ -70,6 +103,26 @@ fn store_err<E: std::fmt::Display>(e: E) -> EvalError {
     EvalError::Backend(format!("rlm store: {e}"))
 }
 
+/// The harder of two bars, direction-aware (`None` when neither exists).
+fn tighter_bar(a: Option<f64>, b: Option<f64>, direction: MetricDirection) -> Option<f64> {
+    match (a.filter(|v| v.is_finite()), b.filter(|v| v.is_finite())) {
+        (None, None) => None,
+        (Some(v), None) | (None, Some(v)) => Some(v),
+        (Some(x), Some(y)) => Some(match direction {
+            MetricDirection::Max => x.max(y),
+            MetricDirection::Min => x.min(y),
+        }),
+    }
+}
+
+/// Strictly better, direction-aware.
+fn strictly_better(candidate: f64, incumbent: f64, direction: MetricDirection) -> bool {
+    match direction {
+        MetricDirection::Max => candidate > incumbent,
+        MetricDirection::Min => candidate < incumbent,
+    }
+}
+
 impl RlmScorer {
     /// Scorer over `registry` and `store`, no artefact store.
     #[must_use]
@@ -80,6 +133,7 @@ impl RlmScorer {
             artefacts: None,
             pending: Mutex::new(BTreeMap::new()),
             locks: Mutex::new(BTreeMap::new()),
+            lease_ttl: DEFAULT_LEASE_TTL,
         }
     }
 
@@ -87,6 +141,14 @@ impl RlmScorer {
     #[must_use]
     pub fn with_artefacts(mut self, store: Option<ArtefactStore>) -> Self {
         self.artefacts = store;
+        self
+    }
+
+    /// How long a scored run may wait for its row before its topic lease is
+    /// released (default [`DEFAULT_LEASE_TTL`]).
+    #[must_use]
+    pub fn with_lease_ttl(mut self, ttl: Duration) -> Self {
+        self.lease_ttl = ttl;
         self
     }
 
@@ -99,10 +161,56 @@ impl RlmScorer {
     fn topic_lock(&self, topic_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.locks
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner)
             .entry(topic_id.to_owned())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
+    }
+
+    /// Drop pending runs of `topic_id` whose row never landed within the TTL,
+    /// releasing the lease they hold.
+    fn reap_abandoned(&self, topic_id: &str) {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let stale: Vec<String> = pending
+            .iter()
+            .filter(|(_, p)| p.bundle.topic_id == topic_id && p.since.elapsed() >= self.lease_ttl)
+            .map(|(digest, _)| digest.clone())
+            .collect();
+        for digest in stale {
+            pending.remove(&digest);
+            tracing::warn!(
+                topic_id,
+                submission_digest = %digest,
+                "scored run never persisted within the lease ttl; lease released"
+            );
+        }
+    }
+
+    /// Take the topic lease, reaping abandoned holders while waiting.
+    async fn lease(&self, topic_id: &str) -> OwnedMutexGuard<()> {
+        let lock = self.topic_lock(topic_id);
+        loop {
+            self.reap_abandoned(topic_id);
+            if let Ok(guard) = tokio::time::timeout(LEASE_POLL, lock.clone().lock_owned()).await {
+                return guard;
+            }
+        }
+    }
+
+    /// Hand the lease to the pending run so it outlives `score`.
+    fn hold(&self, submission_digest: &str, lease: OwnedMutexGuard<()>) {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        match pending.get_mut(submission_digest.trim()) {
+            Some(p) => p.lease = Some(lease),
+            None => drop(lease),
+        }
+    }
+
+    fn take(&self, submission_digest: &str) -> Option<Pending> {
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(submission_digest)
     }
 
     /// Make sure the signed document this run is scored under is in the store
@@ -165,7 +273,7 @@ impl RlmScorer {
         }
     }
 
-    /// Called with the topic lock held: a persisted `evaluating` /
+    /// Called with the topic lease held: a persisted `evaluating` /
     /// `promoting` means the previous run's row never landed. Close that
     /// phase rather than refusing the topic forever.
     async fn recover_stale(&self, topic: &TopicDocument) -> Result<(), EvalError> {
@@ -283,12 +391,14 @@ impl RlmScorer {
         };
         self.pending
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(
                 req.submission_digest.clone(),
                 Pending {
                     bundle,
-                    decision: None,
+                    decided: None,
+                    lease: None,
+                    since: Instant::now(),
                 },
             );
     }
@@ -418,104 +528,144 @@ impl RlmScorer {
         Ok(doc)
     }
 
+    /// Whether a decided promotion still stands at persist time: the best
+    /// pointer must be the one the decision was taken against (compare-and-
+    /// swap) and this run must be strictly better than it. Returns the
+    /// promotion row to append, or `None` when the crown is refused.
+    async fn crown(
+        &self,
+        topic_id: &str,
+        submission_digest: &str,
+        submission_id: &str,
+        pending: &Pending,
+    ) -> Option<PromotionRow> {
+        let primary = pending.bundle.report.as_ref().map(|r| r.primary_value);
+        let (Some(primary_value), Some(decided)) = (primary, pending.decided.as_ref()) else {
+            tracing::error!(
+                topic_id,
+                submission_id,
+                "promoted without a primary or a decision"
+            );
+            return None;
+        };
+        let PromoteDecision::Promote { bar, .. } = decided.outcome else {
+            tracing::error!(topic_id, submission_id, "promoted against a keep decision");
+            return None;
+        };
+        let current = match self.store.best(topic_id).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(topic_id, submission_id, %e, "best unreadable; promotion refused");
+                return None;
+            }
+        };
+        let expected = decided
+            .previous_best
+            .as_ref()
+            .map(|b| b.submission_id.as_str());
+        let unchanged = current.as_ref().map(|b| b.submission_id.as_str()) == expected;
+        let better = current
+            .as_ref()
+            .is_none_or(|b| strictly_better(primary_value, b.primary_value, decided.direction));
+        if !unchanged || !better {
+            tracing::error!(
+                topic_id,
+                submission_id,
+                primary_value,
+                best = ?current.as_ref().map(|b| (&b.submission_id, b.primary_value)),
+                "stale promotion refused: best moved since the decision"
+            );
+            return None;
+        }
+        Some(PromotionRow {
+            topic_id: topic_id.to_owned(),
+            submission_id: submission_id.to_owned(),
+            submission_digest: submission_digest.to_owned(),
+            primary_value,
+            bar: Some(bar),
+            previous_best: current.map(|b| b.submission_id),
+        })
+    }
+
+    /// Write the artefact and, when the crown stands ([`Self::crown`]), the
+    /// promotion row, best pointer, and public event. Returns whether the
+    /// promotion landed; the manifest records that, not the caller's flag.
     async fn persist(
         &self,
         topic_id: &str,
         submission_digest: &str,
         submission_id: &str,
         promoted: bool,
-    ) {
-        let Some(pending) = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(submission_digest)
-        else {
-            return;
+        pending: &Pending,
+    ) -> bool {
+        let crown = if promoted {
+            self.crown(topic_id, submission_digest, submission_id, pending)
+                .await
+        } else {
+            None
         };
-        let bundle = pending.bundle;
+        let landed = crown.is_some();
+        let bundle = &pending.bundle;
         let primary = bundle.report.as_ref().map(|r| r.primary_value);
-        let Some(store) = &self.artefacts else {
-            return;
-        };
-        match store.write(&bundle, submission_id, promoted) {
-            Ok(written) => {
-                let row = ArtefactRow {
-                    topic_id: topic_id.to_owned(),
-                    submission_id: submission_id.to_owned(),
-                    submission_digest: submission_digest.to_owned(),
-                    path: written.path.display().to_string(),
-                    sha256: written.sha256,
-                    bytes: written.bytes,
-                    primary_value: primary,
-                    checklist_green: bundle.checklist_green,
-                    promoted,
-                };
-                if let Err(e) = self.store.put_artefact(&row).await {
-                    tracing::error!(topic_id, submission_id, %e, "artefact metadata not persisted");
-                }
-                let _ = store.append_event(
-                    topic_id,
-                    &PublicEvent::Scored {
+        if let Some(store) = &self.artefacts {
+            match store.write(bundle, submission_id, landed) {
+                Ok(written) => {
+                    let row = ArtefactRow {
+                        topic_id: topic_id.to_owned(),
                         submission_id: submission_id.to_owned(),
+                        submission_digest: submission_digest.to_owned(),
+                        path: written.path.display().to_string(),
+                        sha256: written.sha256,
+                        bytes: written.bytes,
                         primary_value: primary,
                         checklist_green: bundle.checklist_green,
-                    },
-                );
-                tracing::info!(topic_id, submission_id, path = %written.path.display(), "artefact written");
+                        promoted: landed,
+                    };
+                    if let Err(e) = self.store.put_artefact(&row).await {
+                        tracing::error!(topic_id, submission_id, %e, "artefact metadata not persisted");
+                    }
+                    let _ = store.append_event(
+                        topic_id,
+                        &PublicEvent::Scored {
+                            submission_id: submission_id.to_owned(),
+                            primary_value: primary,
+                            checklist_green: bundle.checklist_green,
+                        },
+                    );
+                    tracing::info!(topic_id, submission_id, path = %written.path.display(), "artefact written");
+                }
+                Err(e) => tracing::error!(topic_id, submission_id, %e, "artefact not written"),
             }
-            Err(e) => tracing::error!(topic_id, submission_id, %e, "artefact not written"),
         }
-        if !promoted {
-            return;
-        }
-        let (Some(primary_value), Some(PromoteDecision::Promote { bar, .. })) =
-            (primary, pending.decision)
-        else {
-            tracing::error!(
-                topic_id,
-                submission_id,
-                "promoted without a primary or a decision"
-            );
-            return;
-        };
-        let previous_best = self
-            .store
-            .best(topic_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|b| b.submission_id);
-        let row = PromotionRow {
-            topic_id: topic_id.to_owned(),
-            submission_id: submission_id.to_owned(),
-            submission_digest: submission_digest.to_owned(),
-            primary_value,
-            bar: Some(bar),
-            previous_best: previous_best.clone(),
+        let Some(row) = crown else {
+            return false;
         };
         if let Err(e) = self.store.record_promotion(&row).await {
             tracing::error!(topic_id, submission_id, %e, "promotion not persisted");
+            return false;
         }
-        if let Err(e) = store.mark_best(&BestRef {
-            topic_id: topic_id.to_owned(),
-            submission_id: submission_id.to_owned(),
-            submission_digest: submission_digest.to_owned(),
-            primary_value,
-            bar: Some(bar),
-            artefact: format!("{submission_id}.zip"),
-        }) {
-            tracing::error!(topic_id, submission_id, %e, "best pointer not written");
-        }
-        let _ = store.append_event(
-            topic_id,
-            &PublicEvent::Promoted {
+        if let Some(store) = &self.artefacts {
+            if let Err(e) = store.mark_best(&BestRef {
+                topic_id: topic_id.to_owned(),
                 submission_id: submission_id.to_owned(),
-                primary_value,
-                bar: Some(bar),
-                previous_best,
-            },
-        );
+                submission_digest: submission_digest.to_owned(),
+                primary_value: row.primary_value,
+                bar: row.bar,
+                artefact: format!("{submission_id}.zip"),
+            }) {
+                tracing::error!(topic_id, submission_id, %e, "best pointer not written");
+            }
+            let _ = store.append_event(
+                topic_id,
+                &PublicEvent::Promoted {
+                    submission_id: submission_id.to_owned(),
+                    primary_value: row.primary_value,
+                    bar: row.bar,
+                    previous_best: row.previous_best,
+                },
+            );
+        }
+        true
     }
 }
 
@@ -534,8 +684,7 @@ impl LiveScorer for RlmScorer {
         claim: &str,
     ) -> Result<ProofEvalDocument, EvalError> {
         self.ready_for_topic(topic)?;
-        let lock = self.topic_lock(&topic.id);
-        let _serial = lock.lock().await;
+        let lease = self.lease(&topic.id).await;
         self.ensure_topic(topic).await?;
         self.recover_stale(topic).await?;
         self.apply(topic, RlmEvent::SubmissionReceived, frozen_digest)
@@ -552,10 +701,15 @@ impl LiveScorer for RlmScorer {
                 claim,
             )
             .await;
-        if out.is_err() {
+        if out.is_ok() {
+            // The lease now belongs to the pending run: promotion is decided
+            // and persisted under it, then it is released in `on_persisted`.
+            self.hold(frozen_digest, lease);
+        } else {
             // No row will follow a refusal, so the verdict phase is over now.
             self.apply_logged(topic, RlmEvent::VerdictRecorded, "refused; no row")
                 .await;
+            drop(lease);
         }
         out
     }
@@ -583,6 +737,10 @@ impl LiveScorer for RlmScorer {
         self.registry.ids()
     }
 
+    /// Decided under the topic lease this run has held since `score`
+    /// returned, against the harder of the caller's bar and the store's
+    /// current best: no other run of this topic can be between score and
+    /// persist, and a bar computed before an earlier crown cannot be reused.
     async fn auto_promote(
         &self,
         topic: &TopicDocument,
@@ -591,17 +749,34 @@ impl LiveScorer for RlmScorer {
         primary: Option<f64>,
         bar: Option<f64>,
     ) -> bool {
-        let mut pending = self
+        let held = self
             .pending
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(submission_digest);
+        if !held {
+            return false;
+        }
+        let current = match self.store.best(&topic.id).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(topic_id = %topic.id, %e, "best unreadable; no promotion");
+                return false;
+            }
+        };
+        let bar = tighter_bar(
+            bar,
+            current.as_ref().map(|b| b.primary_value),
+            topic.metric.direction,
+        );
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(p) = pending.get_mut(submission_digest) else {
             return false;
         };
         let reported = p.bundle.report.as_ref().map(|r| r.primary_value);
         // The payout primary and the report must agree, or neither is evidence.
         let agree = matches!((primary, reported), (Some(a), Some(b)) if (a - b).abs() < 1e-9);
-        let decision = decide_promote(
+        let outcome = decide_promote(
             pass && agree,
             p.bundle.checklist_green,
             &p.bundle.checklist.failed_ids(),
@@ -610,8 +785,12 @@ impl LiveScorer for RlmScorer {
             topic.metric.direction,
             topic.metric.epsilon_rel,
         );
-        let promote = decision.is_promote();
-        p.decision = Some(decision);
+        let promote = outcome.is_promote();
+        p.decided = Some(Decided {
+            outcome,
+            previous_best: current,
+            direction: topic.metric.direction,
+        });
         promote
     }
 
@@ -622,14 +801,12 @@ impl LiveScorer for RlmScorer {
         submission_id: &str,
         promoted: bool,
     ) {
-        let owned = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(submission_digest);
-        if !owned {
+        // `pending` (and the topic lease inside it) lives to the end of this
+        // function: the artefact, the promotion row, and the best pointer
+        // land under the guard the decision was taken under.
+        let Some(pending) = self.take(submission_digest) else {
             return;
-        }
+        };
         let topic = self
             .store
             .latest_topic(topic_id)
@@ -643,15 +820,23 @@ impl LiveScorer for RlmScorer {
                     .await;
             }
         }
-        self.persist(topic_id, submission_digest, submission_id, promoted)
+        let landed = self
+            .persist(
+                topic_id,
+                submission_digest,
+                submission_id,
+                promoted,
+                &pending,
+            )
             .await;
         if let Some(t) = &topic {
-            let event = if promoted {
-                RlmEvent::Promoted
-            } else {
-                RlmEvent::VerdictRecorded
+            let event = match (promoted, landed) {
+                (true, true) => RlmEvent::Promoted,
+                (true, false) => RlmEvent::PromotionRefused,
+                (false, _) => RlmEvent::VerdictRecorded,
             };
             self.apply_logged(t, event, submission_id).await;
         }
+        drop(pending);
     }
 }

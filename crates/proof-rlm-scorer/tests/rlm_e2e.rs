@@ -12,7 +12,10 @@
 //! over-budget measurement is a persisted reject and a missing one is a 503;
 //! every scored row leaves its zip, the crown leaves
 //! `best.json` + a promotion row, and the store holds rules v1, every
-//! checklist, and the lifecycle. Then the setup driver walks
+//! checklist, and the lifecycle. Runs hold their topic lease until
+//! persisted, so a worse run decided against a stale bar can never displace
+//! the champion, a moved best pointer refuses a stale crown, and an
+//! abandoned run releases its lease after the TTL. Then the setup driver walks
 //! `draft → … → baselining` with RLM-written rules and a baseline in the
 //! store, and `mark_sealed` opens the topic. Every id here is a placeholder.
 
@@ -25,6 +28,7 @@
 )]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -39,7 +43,7 @@ use proof_rlm::{
     VmBackedRunner, VmJob,
 };
 use proof_rlm_scorer::{ArtefactStore, RlmScorer, SetupError, TopicSetup};
-use proof_rlm_store::{MemoryRlmStore, RlmStore};
+use proof_rlm_store::{MemoryRlmStore, PromotionRow, RlmStore};
 use proof_score::SealedBaseline;
 use proof_store::MemoryStore;
 use proof_task::{
@@ -217,6 +221,15 @@ fn zip_names(path: &std::path::Path) -> Vec<String> {
     names
 }
 
+fn manifest_of(path: &std::path::Path) -> serde_json::Value {
+    let bytes = std::fs::read(path).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut file = archive.by_name("manifest.json").unwrap();
+    let mut body = String::new();
+    std::io::Read::read_to_string(&mut file, &mut body).unwrap();
+    serde_json::from_str(&body).unwrap()
+}
+
 fn paid_runs(orchestrator: &FakeOrchestrator) -> usize {
     orchestrator
         .jobs()
@@ -365,6 +378,7 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
             "report.json",
         ]
     );
+    assert_eq!(manifest_of(&zip_a)["promoted"], true);
     let best = ArtefactStore::new(&root).best(&tid).expect("best.json");
     assert_eq!(best.submission_id, id_a);
     let promo = rlm_store.best(&tid).await.unwrap().expect("promotion row");
@@ -571,6 +585,230 @@ async fn an_over_budget_or_unmeasured_run_never_passes() {
     assert_eq!(st, StatusCode::CREATED, "{created}");
     assert_eq!(created["state"], "champion", "{created}");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+struct Direct {
+    scorer: Arc<RlmScorer>,
+    orchestrator: Arc<FakeOrchestrator>,
+    rlm_store: Arc<MemoryRlmStore>,
+    root: std::path::PathBuf,
+    topic: TopicDocument,
+    pin: ProofPin,
+    plan: ExecutorPlan,
+}
+
+/// The scorer alone (no router), for lease and persist ordering tests.
+fn direct(tag: &str, lease_ttl: Option<Duration>) -> Direct {
+    let pin = pin();
+    let recs = synthetic_holdout(STRATUM_SIZE, 1);
+    let mut t = topic();
+    t.holdout_commitment = holdout_commitment(&recs);
+    let orchestrator = FakeOrchestrator::new(0.7);
+    let registry = RunnerRegistry::new().with(
+        &t.metric.custom_id,
+        Arc::new(VmBackedRunner::new(orchestrator.clone(), pinned_template())),
+    );
+    let rlm_store = Arc::new(MemoryRlmStore::new());
+    let root = tmp_root(tag);
+    let mut scorer = RlmScorer::new(Arc::new(registry), rlm_store.clone())
+        .with_artefacts(Some(ArtefactStore::new(&root)));
+    if let Some(ttl) = lease_ttl {
+        scorer = scorer.with_lease_ttl(ttl);
+    }
+    let plan = scorer.plan(&pin, &t, &test_executor(&pin)).expect("plan");
+    Direct {
+        scorer: Arc::new(scorer),
+        orchestrator,
+        rlm_store,
+        root,
+        topic: t,
+        pin,
+        plan,
+    }
+}
+
+async fn score(d: &Direct, label: &str) -> Result<ProofEvalDocument, EvalError> {
+    d.scorer
+        .score(
+            &d.pin,
+            &d.topic,
+            &offer(),
+            &d.plan,
+            &format!("digest-{label}"),
+            &digest(label),
+            None,
+            &[],
+            "placeholder claim",
+        )
+        .await
+}
+
+/// Two runs decided against the same old bar: the second cannot score until
+/// the first is persisted, its decision then sees the new best, and a moved
+/// best pointer refuses a crown that was decided before it moved.
+#[tokio::test]
+async fn a_worse_run_never_displaces_the_champion_under_the_topic_lease() {
+    let d = direct("lease", None);
+    let tid = d.topic.id.clone();
+
+    // A scores 0.70 and now holds the topic lease until its row lands.
+    let doc_a = score(&d, "a").await.expect("a scores");
+    assert!((doc_a.harness.custom_value.unwrap() - 0.7).abs() < 1e-12);
+    assert_eq!(d.scorer.pending_len(), 1);
+
+    // B (0.60) is blocked on the lease, not scored against the stale world.
+    d.orchestrator.set_primary(0.6);
+    let scorer_b = d.scorer.clone();
+    let (pin_b, topic_b, plan_b) = (d.pin.clone(), d.topic.clone(), d.plan.clone());
+    let mut task_b = tokio::spawn(async move {
+        scorer_b
+            .score(
+                &pin_b,
+                &topic_b,
+                &offer(),
+                &plan_b,
+                "digest-b",
+                &digest("b"),
+                None,
+                &[],
+                "placeholder claim",
+            )
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut task_b)
+            .await
+            .is_err(),
+        "b must wait for a's row"
+    );
+    assert_eq!(paid_runs(&d.orchestrator), 1, "b has not run");
+
+    // A is decided against bar 0.50 and persisted under the lease.
+    assert!(
+        d.scorer
+            .auto_promote(&d.topic, "digest-a", true, Some(0.7), Some(0.5))
+            .await
+    );
+    d.scorer
+        .on_persisted(&tid, "digest-a", "pf_0000000000000001", true)
+        .await;
+    assert_eq!(d.scorer.pending_len(), 0);
+
+    // The lease is free: b scores, and its decision — even handed the stale
+    // bar 0.50 — is taken against the store's best 0.70.
+    let doc_b = task_b.await.unwrap().expect("b scores after a persisted");
+    assert!((doc_b.harness.custom_value.unwrap() - 0.6).abs() < 1e-12);
+    assert!(
+        !d.scorer
+            .auto_promote(&d.topic, "digest-b", true, Some(0.6), Some(0.5))
+            .await,
+        "0.60 does not beat the reigning 0.70"
+    );
+    d.scorer
+        .on_persisted(&tid, "digest-b", "pf_0000000000000002", false)
+        .await;
+    let best = d.rlm_store.best(&tid).await.unwrap().expect("best");
+    assert_eq!(best.submission_id, "pf_0000000000000001");
+    assert!((best.primary_value - 0.7).abs() < 1e-12);
+    assert_eq!(d.rlm_store.promotions(&tid).await.unwrap().len(), 1);
+    assert_eq!(
+        ArtefactStore::new(&d.root)
+            .best(&tid)
+            .unwrap()
+            .submission_id,
+        "pf_0000000000000001"
+    );
+
+    // C (0.90) is decided to promote; another writer crowns 0.95 before C's
+    // row lands. The compare-and-swap on the best pointer refuses C.
+    d.orchestrator.set_primary(0.9);
+    score(&d, "c").await.expect("c scores");
+    assert!(
+        d.scorer
+            .auto_promote(&d.topic, "digest-c", true, Some(0.9), Some(0.7))
+            .await
+    );
+    d.rlm_store
+        .record_promotion(&PromotionRow {
+            topic_id: tid.clone(),
+            submission_id: "pf_00000000000000ff".into(),
+            submission_digest: "digest-elsewhere".into(),
+            primary_value: 0.95,
+            bar: Some(0.7),
+            previous_best: Some("pf_0000000000000001".into()),
+        })
+        .await
+        .unwrap();
+    d.scorer
+        .on_persisted(&tid, "digest-c", "pf_0000000000000003", true)
+        .await;
+    let best = d.rlm_store.best(&tid).await.unwrap().unwrap();
+    assert_eq!(
+        best.submission_id, "pf_00000000000000ff",
+        "stale crown refused"
+    );
+    assert_eq!(d.rlm_store.promotions(&tid).await.unwrap().len(), 2);
+    assert_eq!(
+        ArtefactStore::new(&d.root)
+            .best(&tid)
+            .unwrap()
+            .submission_id,
+        "pf_0000000000000001",
+        "best pointer untouched by the refused crown"
+    );
+    let zip_c = d.root.join(&tid).join("pf_0000000000000003.zip");
+    assert_eq!(manifest_of(&zip_c)["promoted"], false);
+    let artefacts = d.rlm_store.artefacts(&tid).await.unwrap();
+    assert!(
+        !artefacts
+            .iter()
+            .find(|a| a.submission_id == "pf_0000000000000003")
+            .unwrap()
+            .promoted
+    );
+    let lc = d.rlm_store.lifecycle(&tid).await.unwrap().unwrap();
+    assert_eq!(lc.state, RlmState::Open);
+    let events: Vec<RlmEvent> = lc.history.iter().map(|h| h.event).collect();
+    assert_eq!(
+        &events[events.len() - 3..],
+        [
+            RlmEvent::SubmissionReceived,
+            RlmEvent::PromotionCandidate,
+            RlmEvent::PromotionRefused,
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&d.root);
+}
+
+/// A run whose row never lands must not hold its topic hostage: past the
+/// lease TTL the next run reaps it, recovers the lifecycle, and proceeds.
+#[tokio::test]
+async fn an_abandoned_run_releases_its_topic_lease_after_the_ttl() {
+    let d = direct("ttl", Some(Duration::ZERO));
+    let tid = d.topic.id.clone();
+    score(&d, "abandoned").await.expect("scores");
+    assert_eq!(d.scorer.pending_len(), 1);
+    let next = tokio::time::timeout(Duration::from_secs(10), score(&d, "next"))
+        .await
+        .expect("the abandoned lease is reaped, not waited on")
+        .expect("scores");
+    assert!((next.harness.custom_value.unwrap() - 0.7).abs() < 1e-12);
+    assert_eq!(d.scorer.pending_len(), 1, "only the live run is pending");
+    assert!(
+        !d.scorer
+            .auto_promote(&d.topic, "digest-abandoned", true, Some(0.7), Some(0.5))
+            .await,
+        "a reaped run cannot be promoted"
+    );
+    let lc = d.rlm_store.lifecycle(&tid).await.unwrap().unwrap();
+    assert!(
+        lc.history
+            .iter()
+            .any(|h| h.event == RlmEvent::VerdictRecorded && h.note.contains("recovered")),
+        "{lc:?}"
+    );
+    assert_eq!(lc.state, RlmState::Evaluating, "the live run is still open");
+    let _ = std::fs::remove_dir_all(&d.root);
 }
 
 /// The agentic setup: owner hook, key probe, VM provision, RLM-written
