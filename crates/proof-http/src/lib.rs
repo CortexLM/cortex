@@ -43,8 +43,8 @@ use proof_store::{
     freeze_submission_digest, ArtifactManifest, MemoryStore, Submission, SubmissionState,
 };
 use proof_task::{
-    resolve_inference, InferenceOffer, OfferError, ProofPin, TopicDocument, TopicError,
-    TopicStatus, CHALLENGE_ID, SCORE_MAX, SCORING_VERSION,
+    resolve_inference, InferenceOffer, MetricFamily, OfferError, ProofPin, TopicDocument,
+    TopicError, TopicStatus, CHALLENGE_ID, SCORE_MAX, SCORING_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -327,6 +327,20 @@ async fn submit(
             "declared_flops exceeds the topic budget",
         ));
     }
+    // A custom-family runner retrieves the artefact from the miner's locator
+    // inside the topic VM; with none there is nothing to inspect, so the
+    // submission is refused here, before any row or rent.
+    let artifact_uri = body
+        .artifact_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty());
+    if topic.metric.family == MetricFamily::Custom && artifact_uri.is_none() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "artifact_uri is required for custom topics",
+        ));
+    }
 
     let nonce = nonce_from(&hotkey, &topic_id, &artifact);
     let submission_digest = freeze_submission_digest(&hotkey, &topic_id, &artifact, &nonce);
@@ -417,7 +431,7 @@ async fn submit(
         executor.as_ref(),
         &submission_digest,
         &artifact,
-        body.artifact_uri.as_deref(),
+        artifact_uri,
         &holdout,
         &body.claim,
         st.backend,
@@ -1867,6 +1881,12 @@ mod tests {
             claim: &str,
         ) -> Result<proof_eval::ProofEvalDocument, EvalError> {
             self.ready_for_topic(topic)?;
+            if topic.metric.family == MetricFamily::Custom {
+                assert!(
+                    artifact_uri.is_some_and(|u| !u.trim().is_empty()),
+                    "intake must never hand a custom run to the scorer without a locator"
+                );
+            }
             let mut doc = self
                 .inner
                 .score(
@@ -2034,7 +2054,10 @@ mod tests {
             "/v1/submissions",
             submit_body(
                 "custom-artifact",
-                &serde_json::json!({ "topic_id": "custom-topic-v0" }),
+                &serde_json::json!({
+                    "topic_id": "custom-topic-v0",
+                    "artifact_uri": "https://example.invalid/custom-artifact.zip",
+                }),
             ),
             None,
         )
@@ -2053,6 +2076,59 @@ mod tests {
         assert!(scorer.persisted.lock().expect("p").is_empty());
     }
 
+    /// A custom-family runner retrieves the artefact from the miner's
+    /// locator; a custom submission without one is refused at intake with
+    /// no row and no scorer call. `nll` / `throughput` keep it optional.
+    #[tokio::test]
+    async fn a_custom_submission_without_a_locator_is_400_with_no_row() {
+        let scorer = Arc::new(FamilyStub::win("topic_minted_metric"));
+        let app = app_with_custom(scorer.clone());
+        for missing in [serde_json::Value::Null, serde_json::json!("   ")] {
+            let (st, body) = json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                submit_body(
+                    "no-locator",
+                    &serde_json::json!({
+                        "topic_id": "custom-topic-v0",
+                        "artifact_uri": missing,
+                    }),
+                ),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"], "artifact_uri is required for custom topics");
+        }
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0, "no run");
+        let (_, list) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/submissions",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert!(
+            list["items"].as_array().is_some_and(Vec::is_empty),
+            "{list}"
+        );
+        let (st, created) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body("harvest-topic", &serde_json::json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::CREATED,
+            "the harvest fetches by digest: {created}"
+        );
+    }
+
     /// The generic promotion plumbing: a pass the family scorer crowns is
     /// persisted as `champion`, and the persist hook fires with the row id.
     #[tokio::test]
@@ -2065,7 +2141,10 @@ mod tests {
             "/v1/submissions",
             submit_body(
                 "crowned",
-                &serde_json::json!({ "topic_id": "custom-topic-v0" }),
+                &serde_json::json!({
+                    "topic_id": "custom-topic-v0",
+                    "artifact_uri": "https://example.invalid/crowned.zip",
+                }),
             ),
             None,
         )

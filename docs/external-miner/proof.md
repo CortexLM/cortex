@@ -162,8 +162,10 @@ are paid on**. You never see the records.
 
 Build a recipe the judge can re-run: code, lockfile, and entrypoint, under
 the topic's FLOP (and for throughput, wall) budget. Hash that tree. That hash
-is `artifact_digest`. Optional `artifact_uri` is a locator (git URL, object
-URL) so the image can fetch the same bytes.
+is `artifact_digest`. `artifact_uri` is a locator (git URL, object URL) for
+the same bytes: optional on `nll` / `throughput` (the image fetches by
+digest), **required on custom topics** (the topic's runner fetches from it
+inside the topic VM and checks the digest; without one the submit is a 400).
 
 The **claim** is one English sentence of what improved. The RLM re-runs the
 code against the public split and checks the claim against those public
@@ -224,7 +226,7 @@ judge config, no open sealed topic), submissions answer **503**.
 | `declared_flops` | yes | `u64`, must be `≤ topic.flops_budget` |
 | `manifest.train_content_hashes` | yes (array) | Shard hashes you trained on (may be `[]` if you declare dataset ids) |
 | `manifest.train_dataset_ids` | yes (array) | Corpus ids you trained on (may be `[]` if you declare hashes) |
-| `artifact_uri` | no | Locator for the same bytes as `artifact_digest` |
+| `artifact_uri` | custom topics: yes | Locator for the same bytes as `artifact_digest`; optional on `nll` / `throughput` |
 
 An empty `manifest` (both arrays empty / omitted) is **not** a clean
 contamination check. It is `contamination_evidence_missing`: the row is
@@ -259,6 +261,7 @@ Refusals (**400** / **503**) do **not** persist a submission row.
 | **400** `unknown topic` | `topic_id` not published | no | no |
 | **400** `topic is not open` | Draft / closed / outside epoch window | no | no |
 | **400** `declared_flops exceeds the topic budget` | `declared_flops > topic.flops_budget` | no | no |
+| **400** `artifact_uri is required for custom topics` | Custom topic, no locator | no | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not 64 hex | no | no |
 | **503** empty `eval_image_digest` | Digest not pinned | no | no |
 | **503** zero open sealed topics | Nothing to score against | no | no |
@@ -350,11 +353,11 @@ duplicated, or evidence-less item is a persisted `rejected` row with no
 spend. The rules may be re-versioned by the topic's RLM; the version you were
 ticked against is recorded with your row.
 
-Send `artifact_uri` with your `artifact_digest`: the runner fetches the
-bytes from it inside the topic VM and checks the digest, so a submission the
-runner cannot retrieve cannot be inspected. The runner also measures your
-run's FLOPs; that measurement (not `declared_flops`) is what the verdict
-carries against the topic budget.
+`artifact_uri` is required: the runner fetches the bytes from it inside the
+topic VM and checks the digest, so a submission the runner cannot retrieve is
+a **400** with no row. The runner also measures your run's FLOPs; that
+measurement (not `declared_flops`) is what the verdict carries against the
+topic budget.
 
 A clean pass that beats the current best (sealed value or reigning best) by
 `epsilon_rel` is promoted automatically: the row is `champion` and the

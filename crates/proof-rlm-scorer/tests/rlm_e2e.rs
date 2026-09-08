@@ -4,7 +4,8 @@
 //! `VmBackedRunner` → fake orchestrator, with the memory RLM store and a
 //! temp artefact root.
 //!
-//! Covers: an unregistered `custom_id` is a 503 with no row; a green
+//! Covers: an unregistered `custom_id` is a 503 with no row; a custom
+//! submission without an artefact locator is a 400 with no row; a green
 //! checklist scores and is crowned against the sealed value, with the
 //! miner's artefact locator reaching the runner and the runner's measured
 //! FLOPs in the verdict; a red checklist is a persisted reject with **zero**
@@ -204,10 +205,18 @@ async fn json_req(
     (status, v)
 }
 
+/// Where a test miner says the bytes behind `label` live.
+fn locator(label: &str) -> String {
+    format!("https://example.invalid/artefacts/{label}.zip")
+}
+
+/// A custom-topic submission; the locator is required on custom topics, so
+/// every body carries one.
 fn submit_body(topic_id: &str, label: &str) -> serde_json::Value {
     serde_json::json!({
         "miner_hotkey": digest("miner"),
         "artifact_digest": digest(label),
+        "artifact_uri": locator(label),
         "claim": "placeholder claim",
         "declared_flops": 1u64,
         "topic_id": topic_id,
@@ -314,12 +323,25 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
         "holdout leak"
     );
 
+    // 0b. A custom submission without a locator is refused at intake: no
+    //     row, no VM job, no rent — the runner would have nothing to fetch.
+    let mut no_locator = submit_body(&tid, "artifact-a");
+    no_locator["artifact_uri"] = serde_json::Value::Null;
+    let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", no_locator).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "artifact_uri is required for custom topics");
+    assert!(orchestrator.jobs().is_empty(), "no job without a locator");
+
     // 1. Green checklist, primary 0.70 > 0.50 * 1.02: scored and crowned.
     //    The miner's artefact locator travels to the runner with the digest.
-    let uri = "https://example.invalid/artefacts/artifact-a.zip";
-    let mut body_a = submit_body(&tid, "artifact-a");
-    body_a["artifact_uri"] = serde_json::json!(uri);
-    let (st, created) = json_req(app.clone(), "POST", "/v1/submissions", body_a).await;
+    let uri = locator("artifact-a");
+    let (st, created) = json_req(
+        app.clone(),
+        "POST",
+        "/v1/submissions",
+        submit_body(&tid, "artifact-a"),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{created}");
     assert_eq!(created["eligible"], true, "{created}");
     assert_eq!(created["state"], "champion", "{created}");
@@ -338,7 +360,7 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
     for req in &requests {
         assert_eq!(
             req.artifact_uri.as_deref(),
-            Some(uri),
+            Some(uri.as_str()),
             "runner must receive the submitted locator"
         );
         assert_eq!(req.artifact_digest, digest("artifact-a"));
@@ -640,7 +662,7 @@ async fn score(d: &Direct, label: &str) -> Result<ProofEvalDocument, EvalError> 
             &d.plan,
             &format!("digest-{label}"),
             &digest(label),
-            None,
+            Some(&locator(label)),
             &[],
             "placeholder claim",
         )
@@ -673,7 +695,7 @@ async fn a_worse_run_never_displaces_the_champion_under_the_topic_lease() {
                 &plan_b,
                 "digest-b",
                 &digest("b"),
-                None,
+                Some(&locator("b")),
                 &[],
                 "placeholder claim",
             )

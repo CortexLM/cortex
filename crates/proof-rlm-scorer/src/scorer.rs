@@ -458,6 +458,15 @@ impl RlmScorer {
             .registry
             .resolve(&custom_id)
             .map_err(|e| map_runner(&custom_id, e))?;
+        // The runner can only retrieve the artefact from the miner's locator;
+        // intake refuses a custom submission without one, and so does this
+        // path rather than hand the runner a request it cannot act on.
+        let Some(artifact_uri) = artifact_uri.map(str::trim).filter(|u| !u.is_empty()) else {
+            return Err(EvalError::Backend(
+                "custom submission carries no artifact_uri; the runner cannot retrieve the artefact"
+                    .into(),
+            ));
+        };
         let rules = self.rules_for(topic).await?;
         let req = CustomRunRequest::from_topic(
             topic,
@@ -466,7 +475,7 @@ impl RlmScorer {
             &rules,
             frozen_digest,
             artifact_digest,
-            artifact_uri,
+            Some(artifact_uri),
             claim,
         )
         .map_err(|e| map_runner(&custom_id, e))?

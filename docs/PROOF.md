@@ -236,7 +236,8 @@ Trust-root keygen is the throwaway owner path in
   reigning best) persists as `champion`; other passes stay `awaiting_admin`.
 - Submit fields miners must send: `claim` (what the recipe achieved),
   `declared_flops` (≤ topic budget), `artifact_digest` of a **reproducible
-  train/eval recipe** (code under budget, not weights-only), plus `manifest`.
+  train/eval recipe** (code under budget, not weights-only), plus `manifest`;
+  on custom topics also `artifact_uri` (the runner fetches from it).
   The agent verdict (`reproduced`, `claim_holds_public`, cheat codes) is
   filled by the eval image, not the miner.
 - Contamination / empty manifest: persist **rejected** without renting.
@@ -412,7 +413,9 @@ resolved executor plan's deadline (tighter of topic and plan) and
 `config_commitment` as provenance, and the row stamps `executor_commitment`
 like every other scored row. The run request also carries the miner's
 `artifact_uri` (the runner fetches it inside the VM and checks
-`artifact_digest`) and the topic's `flops_budget`; the runner's report must
+`artifact_digest`; a custom submission without one is a **400** at intake,
+no row, and the scorer refuses a request without it) and the topic's
+`flops_budget`; the runner's report must
 carry its measured `flops_used`, which becomes the verdict's usage — a
 report without one is not evidence (**503**, no row), and a measurement over
 budget is a persisted reject (`flops_over_budget`). The miner's
