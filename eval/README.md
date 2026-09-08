@@ -13,11 +13,15 @@ Harvest wrappers print `PROOF_METRICS=<document>` and `PROOF_EVAL_OK`.
 non-zero with no marker.
 
 Pin the **scoring** image (`eval/Dockerfile.scoring`, CUDA + torch), never
-the contract-only digest. The RLM **judge** is the live `InferenceOffer`
-(OpenAI-compatible HTTP). Auth is `teacher.env` (`OPENAI_API_KEY` /
-`PROOF_INFERENCE_API_KEY`) staged by harvest — never request.json, never
-git. No HF bake into the judge path. Fabric: no InfiniBand, no NVLink, no
-NCCL fast path, 12.5 Gbit/s cap.
+the contract-only digest. The scoring image installs a host C compiler
+(`build-essential`, `CC=gcc`). Torch/Triton JIT-compiles CUDA kernels on
+the first GPU forward after measurement weights load; without gcc the
+process exits 1 and harvest never prints `PROOF_EVAL_OK` (control plane
+503). The RLM **judge** is the live `InferenceOffer` (OpenAI-compatible
+HTTP). Auth is `teacher.env` (`OPENAI_API_KEY` / `PROOF_INFERENCE_API_KEY`)
+staged by harvest — never request.json, never git. No HF bake into the
+judge path. Fabric: no InfiniBand, no NVLink, no NCCL fast path,
+12.5 Gbit/s cap.
 
 No secrets, holdout text, teacher hosts, or Modal references are baked in.
 The pin ships **no HF bake** and this image does not download a default

@@ -19,6 +19,22 @@ from .request import HarvestRequest
 SCORED_SPLITS = ("web_ood", "code_ood", "math_ood", "longctx", "multilingual_ood")
 
 
+def _ensure_host_cc() -> None:
+    """Point Triton at gcc when harvest SSH dropped Docker ENV.
+
+    First CUDA kernel compile (SDPA / flash after Qwen weight load) needs a
+    host C compiler. The scoring image installs `build-essential`. This only
+    sets `CC`/`CXX`/`CUDAHOSTCXX` when unset — scores are unchanged. Do not
+    disable flash/SDPA here: that would change tokens/sec and possibly NLL.
+    """
+    if not os.environ.get("CC"):
+        os.environ["CC"] = "gcc"
+    if not os.environ.get("CXX"):
+        os.environ["CXX"] = "g++"
+    if not os.environ.get("CUDAHOSTCXX"):
+        os.environ["CUDAHOSTCXX"] = "g++"
+
+
 def require_runtime() -> None:
     try:
         import torch  # noqa: F401
@@ -70,6 +86,7 @@ def measure(request: HarvestRequest, artifact_dir: str | None) -> dict[str, Any]
     The pin ships no HF bake: weights must already be a local directory.
     """
     require_runtime()
+    _ensure_host_cc()
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 

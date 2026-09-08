@@ -125,6 +125,8 @@ jobs:
             'test ! -L /usr/bin/proof-eval'
           docker run --rm --entrypoint /bin/sh "${ref}" -c \
             'env -i PATH=/usr/bin:/bin /usr/bin/proof-eval score --help'
+          docker run --rm --entrypoint /bin/sh "${ref}" -c \
+            'test -x /usr/bin/gcc && test -x /usr/bin/g++ && test "$CC" = gcc && test "$CXX" = g++'
           docker run --rm --entrypoint /opt/proof-eval-venv/bin/python "${ref}" \
             -c 'import torch, transformers'
           docker run --rm --entrypoint /opt/proof-eval-venv/bin/python "${ref}" \
