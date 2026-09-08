@@ -5,9 +5,15 @@
 //! rootfs copy, fresh scratch drive, `vm-config.json`) and referenced by
 //! jail-relative paths. Without `--daemonize` / `--new-pid-ns` the jailer
 //! `exec`s into Firecracker, so the child handle we hold **is** the VM.
+//!
+//! From [`prepare`] until the VM is registered (or, for a sister, until its
+//! run ends) the jail is owned by a [`JailGuard`]: every failure path, a
+//! cancelled task, or a dropped request destroys the jail — process, TAP,
+//! nftables table, directory — so nothing a boot started is left behind.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 
 use proof_vm_agent::HvError;
 use proof_vm_proto::guest::GUEST_CID;
@@ -120,7 +126,9 @@ pub fn jailer_args(cfg: &HostConfig, id: &str) -> Vec<String> {
 
 /// Build the jail root for `boot`: copies (reflink when the filesystem can),
 /// a fresh ext4 scratch drive, ownership for the jail uid, the config file,
-/// and the per-VM nftables ruleset beside the root (never inside it).
+/// and the per-VM nftables ruleset beside the root (never inside it). A step
+/// that fails removes whatever was already built; a jail that already exists
+/// is refused and left alone.
 ///
 /// # Errors
 ///
@@ -131,10 +139,30 @@ pub async fn prepare(
     boot: &VmBoot,
 ) -> Result<PathBuf, HvError> {
     let root = cfg.jail_root(&boot.id);
-    let root_s = root.display().to_string();
     if root.exists() {
-        return Err(HvError::Backend(format!("jail {root_s} already exists")));
+        return Err(HvError::Backend(format!(
+            "jail {} already exists",
+            root.display()
+        )));
     }
+    match build(cfg, shell, boot, &root).await {
+        Ok(()) => Ok(root),
+        Err(e) => {
+            if let Err(rm) = destroy(cfg, shell, &boot.id).await {
+                tracing::warn!(jail = %boot.id, "half-built jail not removed: {rm}");
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn build(
+    cfg: &HostConfig,
+    shell: &dyn Shell,
+    boot: &VmBoot,
+    root: &Path,
+) -> Result<(), HvError> {
+    let root_s = root.display().to_string();
     sh(shell, "mkdir", &["-p", &format!("{root_s}/run")]).await?;
     let kernel_src = cfg.kernel.display().to_string();
     sh(
@@ -177,7 +205,7 @@ pub async fn prepare(
     }
     let owner = format!("{}:{}", cfg.jail_uid, cfg.jail_gid);
     sh(shell, "chown", &["-R", &owner, &root_s]).await?;
-    Ok(root)
+    Ok(())
 }
 
 fn write(path: &Path, bytes: &[u8]) -> Result<(), HvError> {
@@ -245,6 +273,141 @@ pub async fn retain(cfg: &HostConfig, shell: &dyn Shell, id: &str) -> Result<Pat
     let src = cfg.jail_dir(id).display().to_string();
     sh(shell, "mv", &[&src, &dest.display().to_string()]).await?;
     Ok(dest)
+}
+
+/// Kill the process (if any), tear the network down (if any), remove the jail.
+async fn release(
+    cfg: Arc<HostConfig>,
+    shell: Arc<dyn Shell>,
+    id: String,
+    net: Option<NetPlan>,
+    child: Option<tokio::process::Child>,
+) {
+    if let Some(mut child) = child {
+        kill(&mut child).await;
+    }
+    if let Some(net) = net {
+        for e in net.down(shell.as_ref()).await {
+            tracing::debug!(jail = %id, "network teardown on release: {e}");
+        }
+    }
+    if let Err(e) = destroy(&cfg, shell.as_ref(), &id).await {
+        tracing::warn!(jail = %id, "jail not removed on release: {e}");
+    } else {
+        tracing::info!(jail = %id, "jail released");
+    }
+}
+
+/// Owns a prepared jail — and, once spawned, its VM process — until it is
+/// either handed over ([`keep`](Self::keep)) or torn down
+/// ([`destroy`](Self::destroy)). Dropping an armed guard (an error before
+/// the guest handshake, a cancelled sister task, a request the client gave
+/// up on) releases everything on the runtime instead, so a boot that did not
+/// finish never leaves a jail directory, a scratch drive, a TAP, or an
+/// nftables table behind.
+pub struct JailGuard {
+    cfg: Arc<HostConfig>,
+    shell: Arc<dyn Shell>,
+    id: String,
+    root: PathBuf,
+    net: Option<NetPlan>,
+    child: Option<tokio::process::Child>,
+    armed: bool,
+}
+
+impl JailGuard {
+    /// [`prepare`] the jail for `boot` and take ownership of it.
+    ///
+    /// # Errors
+    ///
+    /// [`HvError::Backend`]; nothing is left behind.
+    pub async fn prepare(
+        cfg: Arc<HostConfig>,
+        shell: Arc<dyn Shell>,
+        boot: &VmBoot,
+    ) -> Result<Self, HvError> {
+        let root = prepare(&cfg, shell.as_ref(), boot).await?;
+        Ok(Self {
+            cfg,
+            shell,
+            id: boot.id.clone(),
+            root,
+            net: boot.net.clone(),
+            child: None,
+            armed: true,
+        })
+    }
+
+    /// Jail id.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Jail root (`<chroot_base>/firecracker/<id>/root`).
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// [`spawn`] the VM process into this jail. A guard holds at most one.
+    ///
+    /// # Errors
+    ///
+    /// [`HvError::Backend`]; the guard stays armed, so the jail is still released.
+    pub fn spawn(&mut self) -> Result<(), HvError> {
+        if self.child.is_some() {
+            return Err(HvError::Backend(format!(
+                "jail {} already has a process",
+                self.id
+            )));
+        }
+        self.child = Some(spawn(&self.cfg, &self.id)?);
+        Ok(())
+    }
+
+    /// Hand the jail and its process over: the caller now owns both and the
+    /// guard does nothing more.
+    #[must_use]
+    pub fn keep(mut self) -> Option<tokio::process::Child> {
+        self.armed = false;
+        self.child.take()
+    }
+
+    /// Kill the process, tear the network down, remove the jail — now, and
+    /// to completion.
+    pub async fn destroy(mut self) {
+        self.armed = false;
+        release(
+            self.cfg.clone(),
+            self.shell.clone(),
+            std::mem::take(&mut self.id),
+            self.net.take(),
+            self.child.take(),
+        )
+        .await;
+    }
+}
+
+impl Drop for JailGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let id = std::mem::take(&mut self.id);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tracing::warn!(jail = %id, "jail dropped before hand-over; releasing");
+            handle.spawn(release(
+                self.cfg.clone(),
+                self.shell.clone(),
+                id,
+                self.net.take(),
+                self.child.take(),
+            ));
+        } else {
+            tracing::error!(jail = %id, "jail dropped outside a runtime; not released");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -371,5 +534,108 @@ mod tests {
             .any(|l| l == &format!("rm -rf {}", c.jail_dir("topic-a-0001").display())));
         assert!(flat.iter().any(|l| l.starts_with("mv ")));
         let _ = std::fs::remove_dir_all(&c.chroot_base);
+    }
+
+    /// A step of `prepare` that fails removes what was already built; a jail
+    /// that already exists is refused without touching it.
+    #[tokio::test]
+    async fn a_half_built_jail_is_removed_and_an_existing_one_is_left_alone() {
+        let c = cfg("half");
+        let shell = crate::shell::FailingShell::failing_on("mkfs.ext4");
+        let err = prepare(&c, &shell, &boot(None))
+            .await
+            .expect_err("mkfs failed");
+        assert!(err.to_string().contains("mkfs.ext4"), "{err}");
+        let lines = shell.lines();
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(format!("rm -rf {}", c.jail_dir("topic-a-0001").display()).as_str()),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.starts_with("chown")),
+            "stopped at mkfs"
+        );
+
+        std::fs::create_dir_all(c.jail_root("topic-a-0001")).expect("pre-existing jail");
+        let fresh = RecordingShell::default();
+        let err = prepare(&c, &fresh, &boot(None)).await.expect_err("exists");
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert!(fresh.calls().is_empty(), "not ours to remove");
+        let _ = std::fs::remove_dir_all(&c.chroot_base);
+    }
+
+    /// The guard is the no-leak contract: dropped armed (an aborted task, a
+    /// request the client gave up on) it releases the jail on the runtime;
+    /// handed over with `keep` it does nothing; `destroy` releases inline.
+    #[tokio::test]
+    async fn a_dropped_guard_releases_the_jail_and_a_kept_one_does_not() {
+        let c = Arc::new(cfg("guard"));
+        let shell = Arc::new(RecordingShell::default());
+        let plan = NetPlan::for_index(&c, 5);
+        let guard = JailGuard::prepare(c.clone(), shell.clone(), &boot(Some(plan)))
+            .await
+            .expect("prepare");
+        assert_eq!(guard.id(), "topic-a-0001");
+        assert_eq!(guard.root(), c.jail_root("topic-a-0001"));
+        let before = shell.calls().len();
+        let aborted = tokio::spawn(async move {
+            let _held = guard;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        aborted.abort();
+        let _ = aborted.await;
+        for _ in 0..50 {
+            if shell.calls().len() > before {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let after: Vec<String> = shell.calls()[before..]
+            .iter()
+            .map(|c| c.join(" "))
+            .collect();
+        assert!(
+            after.contains(&"nft delete table inet proof_vm_pfc5".to_owned()),
+            "{after:?}"
+        );
+        assert!(after.contains(&"ip link del pfc5".to_owned()), "{after:?}");
+        assert_eq!(
+            after.last().map(String::as_str),
+            Some(format!("rm -rf {}", c.jail_dir("topic-a-0001").display()).as_str()),
+            "{after:?}"
+        );
+        let _ = std::fs::remove_dir_all(&c.chroot_base);
+
+        let c2 = Arc::new(cfg("kept"));
+        let shell2 = Arc::new(RecordingShell::default());
+        let guard = JailGuard::prepare(c2.clone(), shell2.clone(), &boot(None))
+            .await
+            .expect("prepare");
+        let before = shell2.calls().len();
+        assert!(guard.keep().is_none(), "nothing spawned");
+        tokio::task::yield_now().await;
+        assert_eq!(shell2.calls().len(), before, "a kept jail is not removed");
+
+        let Err(err) = JailGuard::prepare(c2.clone(), shell2.clone(), &boot(None)).await else {
+            panic!("root still exists on disk");
+        };
+        assert!(err.to_string().contains("already exists"), "{err}");
+        let _ = std::fs::remove_dir_all(c2.jail_root("topic-a-0001"));
+        let guard = JailGuard::prepare(c2.clone(), shell2.clone(), &boot(None))
+            .await
+            .expect("prepare again");
+        let before = shell2.calls().len();
+        guard.destroy().await;
+        let lines: Vec<String> = shell2.calls()[before..]
+            .iter()
+            .map(|c| c.join(" "))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![format!("rm -rf {}", c2.jail_dir("topic-a-0001").display())]
+        );
+        let _ = std::fs::remove_dir_all(&c2.chroot_base);
     }
 }

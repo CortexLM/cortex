@@ -111,3 +111,56 @@ pub async fn sh(shell: &dyn Shell, program: &str, args: &[&str]) -> Result<CmdOu
     let owned: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
     shell.run(program, &owned).await?.ok(program)
 }
+
+#[cfg(test)]
+pub(crate) use failing::FailingShell;
+
+#[cfg(test)]
+mod failing {
+    use super::{async_trait, CmdOutput, HvError, RecordingShell, Shell};
+
+    /// Records like [`RecordingShell`] but fails every command whose rendered
+    /// argv starts with `fail_prefix` (e.g. `"ip tuntap"`), to inject one
+    /// host failure and assert what the cleanup path does next.
+    pub struct FailingShell {
+        inner: RecordingShell,
+        fail_prefix: String,
+    }
+
+    impl FailingShell {
+        /// Fail commands whose `program args…` string starts with `fail_prefix`.
+        #[must_use]
+        pub fn failing_on(fail_prefix: &str) -> Self {
+            Self {
+                inner: RecordingShell::default(),
+                fail_prefix: fail_prefix.to_owned(),
+            }
+        }
+
+        /// Every command attempted so far, program first (failed ones included).
+        pub fn calls(&self) -> Vec<Vec<String>> {
+            self.inner.calls()
+        }
+
+        /// `calls()` joined as `program args…` lines.
+        pub fn lines(&self) -> Vec<String> {
+            self.calls().iter().map(|c| c.join(" ")).collect()
+        }
+    }
+
+    #[async_trait]
+    impl Shell for FailingShell {
+        async fn run(&self, program: &str, args: &[String]) -> Result<CmdOutput, HvError> {
+            let out = self.inner.run(program, args).await?;
+            let rendered = format!("{program} {}", args.join(" "));
+            if rendered.starts_with(&self.fail_prefix) {
+                return Ok(CmdOutput {
+                    code: Some(1),
+                    stdout: String::new(),
+                    stderr: format!("injected failure: {rendered}"),
+                });
+            }
+            Ok(out)
+        }
+    }
+}

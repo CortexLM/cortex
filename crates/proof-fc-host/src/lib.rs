@@ -13,9 +13,17 @@
 //!    host's own directory — the control plane never sees it ([`vsock`]);
 //! 4. runs jobs over vsock; while a **paid** job runs it listens for the
 //!    RLM's sister request and boots a second microVM with **no network**
-//!    for the miner artefact, then attests that run ([`sister`]);
+//!    for the miner artefact — for that job's topic, submission, and
+//!    artefact only — then attests that run ([`sister`]);
 //! 5. tears the VM down: `Destroy` removes the jail, `Retain` moves it under
 //!    `retain_dir` for audit.
+//!
+//! Nothing a boot started outlives its failure: from the moment a jail is
+//! prepared it is owned by a [`jail::JailGuard`] until the VM is registered
+//! (or, for a sister, until its run ends), and every error, cancellation, or
+//! dropped request releases the process, the TAP, the nftables table, and
+//! the directory. A sister whose job ends first is cancelled cooperatively —
+//! killed and destroyed before the job answers — never abandoned mid-flight.
 //!
 //! Every host command goes through [`Shell`], so the tests in this crate
 //! assert the exact argv without spawning anything. Nothing in CI boots a
@@ -46,15 +54,22 @@ use proof_vm_proto::guest::{
     check_version, HostToRlm, RlmToHost, SisterAnswer, SisterRequest, StagedFile, RLM_JOB_PORT,
     SISTER_PORT,
 };
-use proof_vm_proto::{SisterAttestation, API_VERSION};
+use proof_vm_proto::{EvidenceBinding, SisterAttestation, API_VERSION};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 pub use config::{EgressAllow, HostConfig, Proto};
 pub use images::ImageCache;
+pub use jail::JailGuard;
 pub use net::NetPlan;
 pub use shell::{RecordingShell, Shell, SystemShell};
 pub use sister::SisterCtx;
+
+/// How long a job waits for its sister task to finish killing and destroying
+/// a sister after the job ended. Past this the task keeps cleaning up on its
+/// own; it is never aborted mid-cleanup.
+const SISTER_STOP_BUDGET: Duration = Duration::from_mins(1);
 
 struct LiveVm {
     child: tokio::process::Child,
@@ -154,31 +169,41 @@ impl FirecrackerHypervisor {
     }
 
     /// Accept sister requests from the RLM guest for one job; at most one
-    /// sister per job, none for jobs that run no miner code.
+    /// sister per job, none for jobs that run no miner code (`paid` is
+    /// `None`), and only for the paid job's own topic / submission /
+    /// artefact. Returns once `cancel` fires — after any sister in flight has
+    /// been killed and its jail destroyed — so the job never outruns its
+    /// sister's cleanup.
     async fn serve_sisters(
         ctx: Arc<SisterCtx>,
         listener: UnixListener,
         vm: BootedVm,
         seq: Arc<AtomicU64>,
         slot: Arc<Mutex<Option<SisterAttestation>>>,
-        paid: bool,
+        paid: Option<EvidenceBinding>,
+        cancel: CancellationToken,
     ) {
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
+            let accepted = tokio::select! {
+                () = cancel.cancelled() => return,
+                accepted = listener.accept() => accepted,
+            };
+            let Ok((stream, _)) = accepted else {
                 return;
             };
             let mut ch = vsock::GuestChannel::from_stream(stream);
-            let answer = match ch
-                .recv_within::<SisterRequest>(Duration::from_mins(1))
-                .await
-            {
-                Err(e) => SisterAnswer::Refused {
+            let received = tokio::select! {
+                () = cancel.cancelled() => return,
+                r = ch.recv_within::<SisterRequest>(Duration::from_mins(1)) => r,
+            };
+            let answer = match (received, &paid) {
+                (Err(e), _) => SisterAnswer::Refused {
                     error: e.to_string(),
                 },
-                Ok(_) if !paid => SisterAnswer::Refused {
+                (Ok(_), None) => SisterAnswer::Refused {
                     error: "this job runs no miner code; no sister".into(),
                 },
-                Ok(req) => {
+                (Ok(req), Some(job)) => {
                     let mut taken = slot.lock().await;
                     if taken.is_some() {
                         SisterAnswer::Refused {
@@ -186,7 +211,7 @@ impl FirecrackerHypervisor {
                         }
                     } else {
                         let n = seq.fetch_add(1, Ordering::SeqCst);
-                        match sister::run(&ctx, &vm, n, &req).await {
+                        match sister::run(&ctx, &vm, job, n, &req, &cancel).await {
                             Ok((result, attestation)) => {
                                 *taken = Some(attestation);
                                 SisterAnswer::Result { result }
@@ -201,7 +226,114 @@ impl FirecrackerHypervisor {
             if let Err(e) = ch.send(&answer).await {
                 tracing::warn!(vm_id = %vm.vm_id, "sister answer not delivered: {e}");
             }
+            if cancel.is_cancelled() {
+                return;
+            }
         }
+    }
+
+    /// Boot once the host is ready and the kernel + `image` verified: jail,
+    /// network, process, guest handshake, staging, registration. Any failure
+    /// after the jail exists releases the process, the TAP + nftables table,
+    /// and the jail directory before the error is returned; a dropped future
+    /// releases them through the guard.
+    async fn boot_verified(
+        &self,
+        vm_id: &str,
+        spec: &TopicVmSpec,
+        image: PathBuf,
+    ) -> Result<BootedVm, HvError> {
+        let cfg = self.ctx.cfg.clone();
+        let owner_files = self.owner_files()?;
+        let net = NetPlan::for_index(&cfg, self.net_index.fetch_add(1, Ordering::SeqCst));
+        let boot = jail::VmBoot {
+            id: vm_id.to_owned(),
+            vcpus: spec.template.vcpus,
+            mem_mib: spec.template.mem_mib,
+            rootfs: image,
+            scratch_mib: cfg.scratch_mib,
+            net: Some(net.clone()),
+        };
+        let mut jail = JailGuard::prepare(cfg.clone(), self.ctx.shell.clone(), &boot).await?;
+        let up = Self::bring_up(
+            &cfg,
+            self.ctx.shell.as_ref(),
+            &mut jail,
+            &net,
+            spec,
+            owner_files,
+        )
+        .await;
+        if let Err(e) = up {
+            tracing::warn!(%vm_id, "topic vm boot failed; releasing its jail: {e}");
+            jail.destroy().await;
+            return Err(e);
+        }
+        let root = jail.root().to_path_buf();
+        let child = jail
+            .keep()
+            .ok_or_else(|| HvError::Backend(format!("vm {vm_id} has no process after boot")))?;
+        self.vms
+            .lock()
+            .await
+            .insert(vm_id.to_owned(), LiveVm { child, root, net });
+        Ok(BootedVm {
+            vm_id: vm_id.to_owned(),
+            topic_id: spec.topic_id.clone(),
+            image_digest: spec.template.image_digest.clone(),
+        })
+    }
+
+    /// Everything after the jail exists, up to a guest that answered hello
+    /// and took its owner key material. On any error the guard the caller
+    /// holds still owns the jail, so the caller releases it.
+    async fn bring_up(
+        cfg: &HostConfig,
+        shell: &dyn Shell,
+        jail: &mut JailGuard,
+        net: &NetPlan,
+        spec: &TopicVmSpec,
+        owner_files: Vec<StagedFile>,
+    ) -> Result<(), HvError> {
+        let vm_id = jail.id().to_owned();
+        net.up(shell, cfg.jail_uid).await?;
+        let rules = cfg.jail_dir(&vm_id).join("net.nft").display().to_string();
+        net.load_rules(shell, &rules).await?;
+        jail.spawn()?;
+        let root = jail.root();
+        let mut ch =
+            vsock::GuestChannel::connect_within(root, RLM_JOB_PORT, cfg.boot_timeout).await?;
+        ch.send(&HostToRlm::Hello {
+            api_version: API_VERSION,
+            topic_id: spec.topic_id.clone(),
+            vm_id: vm_id.clone(),
+        })
+        .await?;
+        match ch.recv_within::<RlmToHost>(cfg.boot_timeout).await? {
+            RlmToHost::Ready { api_version, agent } => {
+                check_version(api_version).map_err(|e| HvError::Guest(e.to_string()))?;
+                tracing::info!(%vm_id, %agent, "rlm guest ready");
+            }
+            other => {
+                return Err(HvError::Guest(format!(
+                    "rlm guest answered {other:?} to hello"
+                )))
+            }
+        }
+        if !owner_files.is_empty() {
+            let count = owner_files.len();
+            ch.send(&HostToRlm::StageSecrets { files: owner_files })
+                .await?;
+            match ch.recv_within::<RlmToHost>(cfg.boot_timeout).await? {
+                RlmToHost::Staged { count: got } if got == count => {
+                    tracing::info!(%vm_id, count, "owner key material staged (contents not logged)");
+                }
+                other => {
+                    return Err(HvError::Guest(format!("staging answered {other:?}")));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -241,68 +373,13 @@ impl Hypervisor for FirecrackerHypervisor {
             .images
             .verify(&image, &spec.template.image_digest)
             .await?;
-        let owner_files = self.owner_files()?;
-        let net = NetPlan::for_index(&cfg, self.net_index.fetch_add(1, Ordering::SeqCst));
-        let boot = jail::VmBoot {
-            id: vm_id.to_owned(),
-            vcpus: spec.template.vcpus,
-            mem_mib: spec.template.mem_mib,
-            rootfs: image,
-            scratch_mib: cfg.scratch_mib,
-            net: Some(net.clone()),
-        };
-        let shell = self.ctx.shell.as_ref();
-        let root = jail::prepare(&cfg, shell, &boot).await?;
-        net.up(shell, cfg.jail_uid).await?;
-        let rules = cfg.jail_dir(vm_id).join("net.nft").display().to_string();
-        net.load_rules(shell, &rules).await?;
-        let mut child = jail::spawn(&cfg, vm_id)?;
-        let hello = async {
-            let mut ch =
-                vsock::GuestChannel::connect_within(&root, RLM_JOB_PORT, cfg.boot_timeout).await?;
-            ch.send(&HostToRlm::Hello {
-                api_version: API_VERSION,
-                topic_id: spec.topic_id.clone(),
-                vm_id: vm_id.to_owned(),
-            })
-            .await?;
-            match ch.recv_within::<RlmToHost>(cfg.boot_timeout).await? {
-                RlmToHost::Ready { api_version, agent } => {
-                    check_version(api_version).map_err(|e| HvError::Guest(e.to_string()))?;
-                    tracing::info!(%vm_id, %agent, "rlm guest ready");
-                }
-                other => return Err(HvError::Guest(format!("rlm guest answered {other:?} to hello"))),
-            }
-            if !owner_files.is_empty() {
-                let count = owner_files.len();
-                ch.send(&HostToRlm::StageSecrets { files: owner_files }).await?;
-                match ch.recv_within::<RlmToHost>(cfg.boot_timeout).await? {
-                    RlmToHost::Staged { count: got } if got == count => {
-                        tracing::info!(%vm_id, count, "owner key material staged (contents not logged)");
-                    }
-                    other => {
-                        return Err(HvError::Guest(format!("staging answered {other:?}")));
-                    }
-                }
-            }
-            Ok::<(), HvError>(())
-        }
-        .await;
-        if let Err(e) = hello {
-            jail::kill(&mut child).await;
-            net.down(shell).await;
-            let _ = jail::destroy(&cfg, shell, vm_id).await;
-            return Err(e);
-        }
-        self.vms
-            .lock()
-            .await
-            .insert(vm_id.to_owned(), LiveVm { child, root, net });
-        Ok(BootedVm {
-            vm_id: vm_id.to_owned(),
-            topic_id: spec.topic_id.clone(),
-            image_digest: spec.template.image_digest.clone(),
-        })
+        self.boot_verified(vm_id, spec, image).await
+    }
+
+    async fn alive(&self, vm: &BootedVm) -> bool {
+        let mut vms = self.vms.lock().await;
+        vms.get_mut(&vm.vm_id)
+            .is_some_and(|live| matches!(live.child.try_wait(), Ok(None)))
     }
 
     async fn run_job(&self, vm: &BootedVm, job: &VmJob) -> Result<JobOutcome, HvError> {
@@ -313,9 +390,14 @@ impl Hypervisor for FirecrackerHypervisor {
                 .ok_or_else(|| HvError::Backend(format!("vm {} is not running here", vm.vm_id)))?;
             live.root.clone()
         };
-        let paid = matches!(job, VmJob::Baseline { .. } | VmJob::Evaluate { .. });
+        // Only a paid job may ask for a sister, and only for its own identities.
+        let paid = EvidenceBinding::of_job(job);
         let listener = vsock::listen(&root, SISTER_PORT)?;
         let slot = Arc::new(Mutex::new(None));
+        let cancel = CancellationToken::new();
+        // Should this job be dropped mid-flight (the client gave up), the
+        // guard still fires the token and the sister task cleans up after itself.
+        let _stop_sisters = cancel.clone().drop_guard();
         let sisters = tokio::spawn(Self::serve_sisters(
             Arc::new(SisterCtx {
                 cfg: self.ctx.cfg.clone(),
@@ -329,6 +411,7 @@ impl Hypervisor for FirecrackerHypervisor {
             )),
             slot.clone(),
             paid,
+            cancel.clone(),
         ));
         let budget = self.job_budget(job);
         let answer = async {
@@ -340,7 +423,16 @@ impl Hypervisor for FirecrackerHypervisor {
             ch.recv_within::<RlmToHost>(budget).await
         }
         .await;
-        sisters.abort();
+        // The job is over: stop serving sisters, and wait for a sister still
+        // in flight to be killed and its jail destroyed. Never abort the task
+        // — an aborted sister would leave its jail and scratch on disk.
+        cancel.cancel();
+        if tokio::time::timeout(SISTER_STOP_BUDGET, sisters)
+            .await
+            .is_err()
+        {
+            tracing::warn!(vm_id = %vm.vm_id, "sister cleanup still running after the job; it finishes on its own");
+        }
         let _ = std::fs::remove_file(vsock::listener_path(&root, SISTER_PORT));
         let sister = slot.lock().await.take();
         match answer? {
@@ -466,6 +558,90 @@ mod tests {
         assert!(shell.calls().is_empty(), "refused before the jail");
         let owner = hv.owner_files().expect("no dir = nothing");
         assert!(owner.is_empty());
+    }
+
+    /// A boot that fails after the jail is prepared — TAP setup, rules load,
+    /// or a guest that never says hello — releases everything it built: the
+    /// nftables table, the TAP, and the jail directory (with the rules file
+    /// and scratch inside it). Nothing is registered, nothing is alive.
+    #[tokio::test]
+    async fn a_boot_that_fails_before_the_handshake_releases_its_jail_and_network() {
+        let req = request();
+        let spec = TopicVmSpec::for_topic(&req.topic_id, pinned_template(), req.sandbox.clone());
+        for (tag, fail_on) in [("tap", "ip tuntap"), ("rules", "nft -f")] {
+            let c = cfg(tag);
+            let image = c.image_dir.join("rlm.ext4");
+            std::fs::write(&image, b"rlm rootfs stand-in").expect("image");
+            let shell = Arc::new(shell::FailingShell::failing_on(fail_on));
+            let hv = FirecrackerHypervisor::with_shell(c.clone(), shell.clone()).expect("config");
+            let err = hv
+                .boot_verified("topic-a-0001", &spec, image)
+                .await
+                .expect_err("injected host failure");
+            assert!(err.to_string().contains("injected failure"), "{tag}: {err}");
+            let lines = shell.lines();
+            let jail_dir = c.jail_dir("topic-a-0001").display().to_string();
+            assert!(
+                lines.iter().any(|l| l.starts_with(fail_on)),
+                "{tag}: the failing step ran: {lines:?}"
+            );
+            let failed_at = lines
+                .iter()
+                .position(|l| l.starts_with(fail_on))
+                .expect("position");
+            let after = &lines[failed_at + 1..];
+            assert!(
+                after.contains(&"nft delete table inet proof_vm_pfc0".to_owned()),
+                "{tag}: table released: {after:?}"
+            );
+            assert!(
+                after.contains(&"ip link del pfc0".to_owned()),
+                "{tag}: tap released: {after:?}"
+            );
+            assert_eq!(
+                after.last().map(String::as_str),
+                Some(format!("rm -rf {jail_dir}").as_str()),
+                "{tag}: jail removed last: {after:?}"
+            );
+            assert!(hv.vms.lock().await.is_empty(), "{tag}: nothing registered");
+            let vm = BootedVm {
+                vm_id: "topic-a-0001".into(),
+                topic_id: req.topic_id.clone(),
+                image_digest: pinned_template().image_digest,
+            };
+            assert!(!hv.alive(&vm).await, "{tag}: never alive");
+            let _ = std::fs::remove_dir_all(c.chroot_base.parent().unwrap_or(&c.chroot_base));
+        }
+
+        // The process side: a stand-in "jailer" (a sleeping shell script, no
+        // Firecracker) that never brings a guest up. The handshake budget
+        // runs out, the process is killed, and the jail is released.
+        let c = {
+            let mut c = cfg("hello");
+            c.boot_timeout = Duration::from_millis(400);
+            std::fs::write(&c.jailer_bin, b"#!/bin/sh\nexec sleep 30\n").expect("stand-in");
+            std::fs::set_permissions(&c.jailer_bin, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+            c
+        };
+        let image = c.image_dir.join("rlm.ext4");
+        std::fs::write(&image, b"rlm rootfs stand-in").expect("image");
+        let shell = Arc::new(RecordingShell::default());
+        let hv = FirecrackerHypervisor::with_shell(c.clone(), shell.clone()).expect("config");
+        let err = hv
+            .boot_verified("topic-a-0002", &spec, image)
+            .await
+            .expect_err("no guest ever answered");
+        assert!(matches!(err, HvError::Guest(_)), "{err}");
+        let lines: Vec<String> = shell.calls().iter().map(|l| l.join(" ")).collect();
+        assert!(lines.contains(&"ip link del pfc0".to_owned()), "{lines:?}");
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(format!("rm -rf {}", c.jail_dir("topic-a-0002").display()).as_str()),
+            "{lines:?}"
+        );
+        assert!(hv.vms.lock().await.is_empty());
+        let _ = std::fs::remove_dir_all(c.chroot_base.parent().unwrap_or(&c.chroot_base));
     }
 
     #[tokio::test]
