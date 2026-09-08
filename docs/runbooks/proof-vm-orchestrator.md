@@ -6,6 +6,8 @@ for every miner run. Product spec: [`../PROOF.md`](../PROOF.md) § Isolation
 boundary. Code: `crates/proof-vm-proto` (wire), `crates/proof-vm-fc`
 (control-plane client), `crates/proof-vm-agent` (agent API),
 `crates/proof-fc-host` (Firecracker backend), `bins/proof-vm-orchestrator`.
+Staging wire + probes: § DigitalOcean staging and
+[`deploy/scripts/proof-vm-wire-check.sh`](../../deploy/scripts/proof-vm-wire-check.sh).
 
 ## What runs where
 
@@ -112,6 +114,9 @@ mode 0400, uid 65532). Restart `proof-challenge`; its boot log must show
 `firecracker topic-vm orchestrator wired` and one `vm-backed runner
 registered` line per id. `GET /v1/status` → `registered_custom` lists the
 ids; an open custom topic with a listed id appears in `scorable_topics`.
+Both need `live_harvest_wired: true`: the custom family is routed only over
+a wired Lium harvest, so without `LIUM_API_KEY` + `LIUM_SSH_PUBLIC_KEY_FILE`
+the registry is never built and `registered_custom` stays `[]`.
 
 The Lium harvest is **not** a prerequisite. With these four variables set
 and no `LIUM_API_KEY` / `LIUM_SSH_PUBLIC_KEY_FILE`, the boot log shows
@@ -130,6 +135,234 @@ every submission will 503` instead, the orchestrator URL is unset or refused
 The RLM VM shape is 4 vCPU / 8192 MiB. `PROOF_RLM_VM_VCPUS` /
 `PROOF_RLM_VM_MEM_MIB` exist for a deliberate change only.
 
+**Probe the wire from inside the CP** (operator bearer, read-only, no VM,
+no spend): `GET /v1/admin/proof/vm-orchestrator` runs the client's own
+`ready()` (bearer file + pin, re-read now) and one agent health call through
+the very client the runner uses — same bearer file, same CA, same rustls —
+and reports the host gates next to it. A broken wire is data, not an error:
+
+```bash
+TOKEN=$(head -n1 deploy/secrets/proof/admin_tokens)
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/challenge/proof/v1/admin/proof/vm-orchestrator
+# {"orchestrator":"firecracker","ready":true,"reason":"","image_digest":"sha256:…","vcpus":4,"mem_mib":8192,
+#  "agent":{"api_version":1,"ready":true,"reason":"","hypervisor":"firecracker","vms":0},"agent_error":null,
+#  "live_harvest_wired":true,"registered_custom":["<custom-id>"]}
+unset TOKEN
+```
+
+| Field | Root cause it names |
+|-------|---------------------|
+| `orchestrator: "unwired"` + `reason` | `PROOF_VM_ORCHESTRATOR_URL` unset, or set but refused (plain http off loopback, no `PROOF_VM_ORCHESTRATOR_TOKEN_FILE`) — restart after fixing |
+| `ready: false` + `reason` | bearer file missing / empty, or `PROOF_RLM_VM_IMAGE_DIGEST` unpinned — fix the file / env; the token needs no restart |
+| `agent: null` + `agent_error` | `orchestrator unreachable` (agent down, firewall, VPC route), `orchestrator refused the bearer` (bytes differ from `/etc/proof-vm/token`), TLS refused (CA / SAN) |
+| `agent.ready: false` + `agent.reason` | the KVM host: `firecracker` / `jailer` / `/dev/kvm` / image missing |
+| `live_harvest_wired: false` | Lium creds absent on the CP → custom family not routed, `registered_custom` empty |
+
+Run it over SSH + loopback (staging's public API is cleartext; never send
+the operator bearer over it). The reason strings name env vars and
+container paths — operator data — never the bearer.
+[`deploy/scripts/proof-vm-wire-check.sh cp`](../../deploy/scripts/proof-vm-wire-check.sh)
+wraps this route with the status / leak checks (§ DigitalOcean staging).
+
+## DigitalOcean staging (wire + e2e probes)
+
+Flip staging from `UnwiredVmOrchestrator` to `FirecrackerOrchestrator` and
+prove both the fail-closed matrix and one happy path, with evidence. The
+operator harness is
+[`deploy/scripts/proof-vm-wire-check.sh`](../../deploy/scripts/proof-vm-wire-check.sh)
+(bash + curl + python3; runs on the droplet, no cargo; never prints the
+bearer; refuses production hosts). Env overlays with placeholders only:
+[`deploy/env/proof-challenge.staging-vm.example`](../../deploy/env/proof-challenge.staging-vm.example)
+(CP side) and
+[`deploy/env/proof-vm-orchestrator.staging.example`](../../deploy/env/proof-vm-orchestrator.staging.example)
+(KVM host side).
+
+### Where things run
+
+| Piece | Host | Notes |
+|-------|------|-------|
+| `proof-challenge` (client, `FirecrackerOrchestrator`) | the **existing staging master droplet** `base-staging` (see [`staging-testnet-e2e.md`](staging-testnet-e2e.md)), compose `role-master` + `env-staging` | nothing Firecracker on it: no `/dev/kvm`, no unit, no images; it holds the bearer file, the CA PEM, the RLM image pin, and the custom ids |
+| `proof-vm-orchestrator` (agent, Firecracker + jailer) | a **KVM host with `/dev/kvm`**, reachable from the staging VPC / private network | `systemd/proof-vm-orchestrator.service` has `ConditionPathExists=/dev/kvm`; bind on the private address, HTTPS + bearer file |
+
+**A DigitalOcean Droplet is not that host.** Standard, CPU-optimized, and
+dedicated-CPU Droplets are KVM guests that expose no nested virtualisation:
+`/dev/kvm` does not exist inside them, `kvm-ok` reports the CPU cannot run
+KVM, and the unit refuses to start by design. Do not try to work around it
+(no nested-FC redesign, no `--no-kvm` anything): the RLM VM and the sister
+guest are the isolation boundary and a software emulator is not one. Use a
+DigitalOcean bare-metal / dedicated-hardware host when the account has one,
+or any bare-metal KVM host elsewhere (another provider, colo), attached to
+the staging VPC's private network — WireGuard from the staging master, or
+VPC peering when both sides are DO. Either way the agent listens on the
+private address only and TLS + bearer stay mandatory (the bearer never
+crosses a network in clear).
+
+Check the candidate host before installing anything:
+
+```bash
+ls -l /dev/kvm                                  # must exist (crw-rw---- root kvm)
+grep -cE '(vmx|svm)' /proc/cpuinfo              # > 0
+kvm-ok                                          # "KVM acceleration can be used" (apt install cpu-checker)
+modprobe vhost_vsock && ls -l /dev/vhost-vsock  # vsock for the guest channels
+nft list ruleset >/dev/null && ip -br link      # nftables + the uplink you will name
+df -T /srv /var/lib | grep -E 'xfs|btrfs'       # reflink FS preferred (see Host prerequisites)
+```
+
+Budget per open topic: RLM VM 4 vCPU / 8192 MiB + sister 2 vCPU / 4096 MiB
++ ~10 GiB scratch. Size the host for the number of custom topics staging
+will keep open at once, plus one probe VM.
+
+### 0. Preconditions on the CP
+
+The custom family is routed only when the whole live stack is up; check
+`GET /v1/status` on the master **before** touching the wire:
+
+| Gate | Where | Must read |
+|------|-------|-----------|
+| eval backend | `/v1/status` `eval_backend` | `lium` (`PROOF_FORCE_SIM` off — sim never hosts staging scoring) |
+| harvest | `/v1/status` `live_harvest_wired` | `true` (`LIUM_API_KEY` + `LIUM_SSH_PUBLIC_KEY_FILE`); `false` → `registered_custom` stays `[]` whatever the ids say |
+| judge | `/v1/status` `inference_offer.status` | `open`, plus `PROOF_INFERENCE_API_KEY_FILE` present |
+| executor | `GET /v1/proof/executor` | `ready: true` (open `1x` offer) |
+| topic | a **signed custom topic** (`metric.family: custom`, `metric.custom_id: <id>`) with a **sealed baseline**; the RLM of that topic sets it up per [`../PROOF.md`](../PROOF.md) § Dynamic agentic engine | its `custom_id` is what goes into `PROOF_VM_RUNNER_CUSTOM_IDS`; the topic can only **open** once that id is registered |
+
+Nothing here is challenge content in git: the topic, its rules, and its
+images are operator-published documents and staged files.
+
+### 1. KVM host
+
+Follow § Host prerequisites and § Install with
+`deploy/env/proof-vm-orchestrator.staging.example` as `/etc/proof-vm/orchestrator.env`:
+
+1. `PROOF_VM_AGENT_BIND=<private-ip>:8200`; a certificate for that address
+   (a private CA is fine — the CP pins its root) **with a SAN**: the CP's
+   rustls client refuses CN-only certificates even when curl accepts them.
+2. Bearer: `head -c 32 /dev/urandom | base64 -w0 > /etc/proof-vm/token; chmod 0400 /etc/proof-vm/token`.
+3. Stage `vmlinux`, the RLM rootfs, and the sister rootfs; `sha256sum` each;
+   name the rootfs files `images/sha256-<hex>.ext4`; put the kernel and
+   sister digests in the env. The RLM digest goes to the CP. Never copy a
+   digest from a document; only from `sha256sum` of the file you staged.
+4. `PROOF_VM_AGENT_EGRESS_ALLOW`: the judge `InferenceOffer` origin, the
+   artefact hosts miners use, a resolver — IPv4 CIDRs, nothing else.
+5. `systemctl enable --now proof-vm-orchestrator`; the boot log shows
+   `firecracker + jailer + /dev/kvm present; agent ready` and
+   `bearer token file present (contents not logged)`.
+6. Open `:8200` on the host firewall to the staging master's private
+   address only.
+
+### 2. Control plane (staging master)
+
+```bash
+ssh root@<staging-master> ; cd /opt/base ; umask 077
+# The bearer: copy the KVM host's file over the private network — never paste it on a command line.
+scp root@<kvm-host-private-ip>:/etc/proof-vm/token deploy/secrets/proof/vm_orchestrator_token
+scp root@<kvm-host-private-ip>:/etc/proof-vm/ca.pem deploy/secrets/proof/vm_orchestrator_ca.pem   # private CA only
+chown 65532:65532 deploy/secrets/proof/vm_orchestrator_token deploy/secrets/proof/vm_orchestrator_ca.pem
+chmod 0400 deploy/secrets/proof/vm_orchestrator_token deploy/secrets/proof/vm_orchestrator_ca.pem
+# Append the keys of deploy/env/proof-challenge.staging-vm.example (values filled) to the age source
+# of proof-challenge.env (deploy/scripts/age-encrypt-env.sh / age-push-env.sh), then:
+./deploy/scripts/materialize-env.sh
+docker compose -f docker-compose.yml -f deploy/compose/role-master.yml -f deploy/compose/env-staging.yml --profile master up -d proof-challenge
+docker compose logs proof-challenge | grep -E 'topic-vm orchestrator|vm-backed runner'
+# firecracker topic-vm orchestrator wired (bearer file present, contents not logged)
+# vm-backed runner registered custom_id=<id>
+```
+
+### 3. Wire check (on the droplet, no cargo)
+
+```bash
+cd /opt/base
+./deploy/scripts/proof-vm-wire-check.sh all          # env + agent + cp; exit 0 = every check PASS
+./deploy/scripts/proof-vm-wire-check.sh boot-probe   # one RLM VM: create → attach → 409 → 409 topic_mismatch → destroy → 404
+```
+
+| Subcommand | Proves |
+|------------|--------|
+| `env` | `PROOF_VM_ORCHESTRATOR_URL` is `https://`; the bearer file (container path mapped through the compose bind mount, `--path-map`) exists and is non-empty, mode 0400 / uid 65532; `PROOF_RLM_VM_IMAGE_DIGEST` is `sha256:<64 hex>` (empty or a placeholder = FAIL — never invented); the CA file is PEM when set; every custom id is well-formed; the shape is the locked 4 / 8192; `PROOF_FORCE_SIM` is off |
+| `agent` | `GET /v1/health` with the bearer → `ready: true`, `hypervisor: firecracker`; no bearer → 401; wrong bearer → 401 |
+| `cp` | `/v1/status`: `lium`, `live_harvest_wired`, `registered_custom` ⊇ ids, no URL / token / path in the body; `/v1/proof/topics` leaks no holdout; `/v1/proof/executor` readiness; then the admin probe above — `orchestrator: firecracker`, `ready: true`, `agent.ready: true` through the CP's own rustls client |
+| `boot-probe` | the agent boots the **pinned** image for a probe topic, one topic ↔ one VM, a teardown naming another topic is refused, destroy is confirmed, nothing is left for the topic. Opt-in: it boots a real 4 vCPU / 8 GiB RLM VM on the KVM host (up to 10 min, the RLM guest must say hello); no job runs, nothing is spent; Ctrl-C tears the VM down |
+
+Every check re-reads the files it names, so a fix to the bearer or the CA
+needs no restart; URL / digest / ids are read at boot.
+
+### 4. Fail-closed matrix (every row: 503, no row, no VM, no rent)
+
+`./deploy/scripts/proof-vm-wire-check.sh matrix --topic <custom-topic-id>`
+prints these as ready-to-paste steps. Flip one knob, probe, restore, re-run
+`cp`. `submit-probe` POSTs a probe submission (64×`a` hotkey, random
+artefact digest, `https://example.invalid/…` locator — never fetchable) and
+asserts the status **and** the reason text; a 2xx expectation is refused
+without `--allow-live-run`.
+
+| Flip | Restart? | `submit-probe --expect 503 --reason …` | Admin probe shows |
+|------|----------|----------------------------------------|-------------------|
+| comment out `PROOF_VM_ORCHESTRATOR_URL` | yes | `PROOF_VM_ORCHESTRATOR_URL` (from `runner not wired: no orchestrator configured (…)`) | `orchestrator: unwired` |
+| empty the CP bearer file (`: > deploy/secrets/proof/vm_orchestrator_token`) | no | `PROOF_VM_ORCHESTRATOR_TOKEN_FILE` … `missing or empty` | `ready: false` |
+| write other bytes into the CP bearer file | no | `refused the bearer` (agent 401 → CP 503) | `agent_error: … refused the bearer` |
+| `PROOF_RLM_VM_IMAGE_DIGEST=` | yes | `PROOF_RLM_VM_IMAGE_DIGEST` … `image_digest is missing or out of range` | `ready: false`, `image_digest: ""` |
+| `systemctl stop proof-vm-orchestrator` on the KVM host | no | `orchestrator unreachable` (route named, agent address never) | `agent_error: … unreachable` |
+| unknown / closed topic → `--expect 400 --reason 'unknown topic'`; custom topic without a locator → `--expect 400 --no-artifact-uri --reason artifact_uri` | no | 400, explicit error, no row | — |
+
+After each row `docker compose logs proof-challenge` must show no
+`topic vm created`, and the KVM host journal no `topic vm booted`; the
+`/v1/submissions` list gains no row. Restore the knob and run
+`proof-vm-wire-check.sh cp` before the next flip.
+
+### 5. Happy path (one real run)
+
+With everything restored and an open custom topic whose id is registered:
+
+```bash
+./deploy/scripts/proof-vm-wire-check.sh submit-probe --topic <custom-topic-id> \
+  --expect 201 --allow-live-run --artifact-uri <locator the RLM VM can fetch through the egress allowlist>
+```
+
+The POST is synchronous (the RLM job runs before the 201). Evidence to
+collect, in order:
+
+| Step | Where | Must show |
+|------|-------|-----------|
+| topic VM created (first job) | CP log · agent journal | `topic vm created` · `topic vm booted`, `rlm guest ready`, `owner key material staged` when a key dir is set |
+| inspection (`Inspect` job, no miner code, no sister) | agent journal | the job, no `sister guest` line |
+| paid run (`Evaluate`) in the sister | agent journal | `sister guest booting (no network)` → `sister guest run attested` with `sandboxed=true` and the guest's `flops_used` |
+| evidence bound to the job | agent + CP | no `evidence_mismatch` (agent 502) and no `orchestrator evidence is not this job's` (CP): the attestation named this job's topic / submission / artefact |
+| host-stamped facts on the row | `submit-probe` output · `GET /v1/submissions/<pf_id>` | `state: awaiting_admin`, `verdict.agent.flops_used` > 0 (the sister's measurement, never the RLM's) |
+| `sandboxed: true` in the artefact | CP volume | `docker compose cp proof-challenge:/var/lib/proof/artefacts/<topic>/<pf_id>.zip /tmp/ && unzip -p /tmp/<pf_id>.zip report.json` |
+| sister destroyed | agent journal · KVM host | `jail released`; `/srv/jailer/firecracker/` has no `<vm_id>-s<n>` |
+| topic VM teardown | close the topic → CP log · agent journal · KVM host | `topic vm teardown` with `state: Destroyed`, `confirmed: true` · `topic vm torn down` · `/srv/jailer/firecracker/<vm_id>` gone, `nft list tables` has no `proof_vm_pfc<n>` |
+
+Then run the § Verify cleanup probes (failed `ip tuntap`, deadline cut,
+`kill -9`) at least once on the staging KVM host.
+
+### 6. Sign-off
+
+Staging is "wired and tested" when all of these are in the change log with
+dates and the exact commands:
+
+- [ ] `proof-vm-wire-check.sh all` → all PASS on the staging master.
+- [ ] `proof-vm-wire-check.sh boot-probe` → all PASS; KVM host left clean.
+- [ ] every row of § 4 → the expected 503 (or 400) with the expected reason,
+      no row, no VM, no rent; knob restored; `cp` PASS again.
+- [ ] § 5 evidence table complete for one submission, including
+      `flops_used` on the row and `sandboxed: true` in `report.json`.
+- [ ] topic close → VM destroyed, host clean.
+- [ ] `GET /v1/status` and `GET /v1/proof/topics` still leak nothing
+      (`cp` checks both).
+
+Where an item cannot be run yet (no custom topic sealed, no RLM image
+built), write **unknown / not run** with the blocker — never a green box
+without the evidence.
+
+### Rollback
+
+Comment out `PROOF_VM_ORCHESTRATOR_URL` (or all four keys) in the age
+source, re-materialize, restart `proof-challenge`: the host logs
+`no topic-vm orchestrator (…)` and every custom topic answers 503 with that
+reason — the same state as before the flip. `systemctl stop
+proof-vm-orchestrator` on the KVM host; live VMs die with the agent (no
+`--daemonize`); remove `/srv/jailer/firecracker/*` by hand before the next
+start (§ Limitations).
+
 ## Verify a submission end to end (mandatory, see root `AGENTS.md`)
 
 1. `POST /v1/submissions` on a custom topic with a listed id → the first job
@@ -140,7 +373,9 @@ The RLM VM shape is 4 vCPU / 8192 MiB. `PROOF_RLM_VM_VCPUS` /
    and the guest's `flops_used`.
 2. The persisted row's verdict carries that `flops_used`; the artefact zip's
    `report.json` has `sandboxed: true`.
-3. Failure probes, each **503 with no row and no rent**:
+3. Failure probes, each **503 with no row and no rent**
+   (`proof-vm-wire-check.sh submit-probe --topic <id> --expect 503 --reason <text>`
+   asserts the status and the reason; § DigitalOcean staging has the matrix):
    - stop the agent → `orchestrator unreachable`;
    - empty `/etc/proof-vm/token` → `orchestrator refused the bearer`;
    - remove `PROOF_RLM_VM_IMAGE_DIGEST` → `PROOF_RLM_VM_IMAGE_DIGEST … missing or out of range`;
@@ -172,7 +407,8 @@ The RLM VM shape is 4 vCPU / 8192 MiB. `PROOF_RLM_VM_VCPUS` /
 
 | Task | How |
 |------|-----|
-| Rotate the bearer | write the new token to `/etc/proof-vm/token` and to the CP's token file; no restart on either side (both re-read per request) |
+| Is the wire up? | on the master: `./deploy/scripts/proof-vm-wire-check.sh all` (env + agent + admin probe); or `GET /v1/admin/proof/vm-orchestrator` with the operator bearer over loopback |
+| Rotate the bearer | write the new token to `/etc/proof-vm/token` and to the CP's token file; no restart on either side (both re-read per request); confirm with `proof-vm-wire-check.sh agent` |
 | Rotate the RLM image | stage `images/sha256-<new>.ext4`, set `PROOF_RLM_VM_IMAGE_DIGEST` on the CP, restart `proof-challenge`; running VMs keep the old image until torn down |
 | Close a topic | the CP tears the VM down with the topic's `retain` policy (default destroy). `retain` moves `/srv/jailer/firecracker/<vm_id>` to `/var/lib/proof-vm/retained/<vm_id>` (scratch, console log, config) |
 | Agent restart | live VMs die with the agent (no `--daemonize`); `attach` then answers 404 and the CP's next job creates a fresh VM. Rules, checklists, and promotions live in the CP's RLM store, not in the VM |
