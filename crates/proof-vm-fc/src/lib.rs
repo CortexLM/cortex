@@ -24,8 +24,11 @@
 //! Hard binds the client enforces on top of the agent's: a job must name
 //! the handle's topic before any request leaves; the agent must echo the
 //! same topic and VM; a created VM must report the digest that was pinned;
-//! and a `firecracker_required` run must come back with the host's sister
-//! attestation (`sandboxed: true`) or the output is not evidence.
+//! a `firecracker_required` run must come back with the host's sister
+//! attestation (`sandboxed: true`) or the output is not evidence; and that
+//! attestation — like the report — must name the job's own topic,
+//! submission, and artefact (`proof_vm_proto::bind_evidence`), so sister
+//! evidence for one artefact never scores another.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
@@ -39,8 +42,8 @@ use proof_rlm::{
     VmTemplate, RLM_VM_IMAGE_DIGEST_ENV, VM_ORCHESTRATOR_TOKEN_FILE_ENV, VM_ORCHESTRATOR_URL_ENV,
 };
 use proof_vm_proto::{
-    paths, AgentHealth, CreateVmRequest, ErrorBody, RunJobRequest, RunJobResponse, TeardownRequest,
-    TeardownResponse, VmRecord, API_VERSION,
+    bind_evidence, paths, AgentHealth, CreateVmRequest, ErrorBody, RunJobRequest, RunJobResponse,
+    TeardownRequest, TeardownResponse, VmRecord, API_VERSION,
 };
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
@@ -416,19 +419,23 @@ impl TopicVmOrchestrator for FirecrackerOrchestrator {
         }
         let needs_sister = job.requires_firecracker();
         let timeout = self.job_timeout(&job);
+        let request = RunJobRequest {
+            topic_id: handle.topic_id.clone(),
+            job,
+        };
         let resp: RunJobResponse = self
             .call(
                 Method::POST,
                 &paths::vm_jobs(&handle.vm_id),
-                Some(&RunJobRequest {
-                    topic_id: handle.topic_id.clone(),
-                    job,
-                }),
+                Some(&request),
                 timeout,
             )
             .await?
             .ok_or_else(|| backend(format!("orchestrator knows no vm {}", handle.vm_id)))?;
         check_echo(handle, &resp.topic_id, &resp.vm_id)?;
+        // The stamps are only evidence for the job they were produced for.
+        bind_evidence(&request.job, &resp.output, resp.sister.as_ref())
+            .map_err(|e| backend(format!("orchestrator evidence is not this job's: {e}")))?;
         let attested = resp.sister.as_ref().is_some_and(|s| s.sandboxed);
         if needs_sister && !attested {
             return Err(backend(

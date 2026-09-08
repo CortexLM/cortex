@@ -274,6 +274,62 @@ async fn a_firecracker_required_run_without_the_sister_attestation_is_not_eviden
     assert!(report.verify(&req).is_err());
 }
 
+/// Sister evidence is bound to the artefact it ran. A paid run for artefact
+/// B that comes back with the attestation of artefact A is refused on both
+/// sides: the agent answers 502 `evidence_mismatch` and never stamps, and a
+/// client that received such a body would refuse it too. No row, no score.
+#[tokio::test]
+async fn replayed_sister_evidence_for_another_artifact_never_scores() {
+    let (agent, token) = live("replay").await;
+    let orch = Arc::new(client(&agent, &token, &pinned_template().image_digest));
+    let runner = VmBackedRunner::new(orch.clone(), pinned_template());
+    let a = request();
+    let mut b = request();
+    b.submission_digest = "submission-b".into();
+    b.artifact_digest = "ba".repeat(32);
+    agent
+        .hypervisor
+        .set_sister_replay(Some(proof_vm_proto::EvidenceBinding::new(
+            &a.topic_id,
+            &a.submission_digest,
+            &a.artifact_digest,
+        )));
+    let err = runner
+        .evaluate(&b, &token_for(&b))
+        .await
+        .expect_err("evidence for a is not evidence for b");
+    assert!(matches!(err, RunnerError::Backend(_)), "{err}");
+    let text = err.to_string();
+    assert!(text.contains("EvidenceMismatch"), "{text}");
+    assert!(text.contains("submission_digest"), "{text}");
+
+    // The client's own check refuses the same body should an agent ever emit it.
+    let handle = orch.attach(&b.topic_id).await.expect("attach").expect("vm");
+    let sister = proof_vm_proto::SisterAttestation {
+        sister_vm_id: format!("{}-s1", handle.vm_id),
+        image_digest: format!("sha256:{}", "dd".repeat(32)),
+        topic_id: a.topic_id.clone(),
+        submission_digest: a.submission_digest.clone(),
+        artifact_digest: a.artifact_digest.clone(),
+        sandboxed: true,
+        network: "none".into(),
+        flops_used: Some(1),
+        wall_ms: 1,
+        exit_code: Some(0),
+    };
+    let job_b = VmJob::Baseline { request: b.clone() };
+    let out_b = VmJobOutput::Baseline(proof_rlm::fixtures::report_for(&b, 0.5));
+    assert!(proof_vm_proto::bind_evidence(&job_b, &out_b, Some(&sister)).is_err());
+
+    agent.hypervisor.set_sister_replay(None);
+    let run = runner
+        .evaluate(&b, &token_for(&b))
+        .await
+        .expect("honest evidence for b scores b");
+    assert!(run.report.sandboxed);
+    assert_eq!(run.report.submission_digest, "submission-b");
+}
+
 #[tokio::test]
 async fn the_created_vm_must_run_the_pinned_image_and_a_fake_answer_is_refused() {
     let (agent, token) = live("pin").await;
