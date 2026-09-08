@@ -7,7 +7,7 @@
 //! | Port | Direction | Purpose |
 //! |------|-----------|---------|
 //! | [`RLM_JOB_PORT`] | host → RLM guest | [`HostToRlm`] / [`RlmToHost`]: hello, secret staging, jobs |
-//! | [`SISTER_PORT`] | RLM guest → host | [`SisterRequest`] / [`SisterResult`]: "run this artefact in a sister guest" |
+//! | [`SISTER_PORT`] | RLM guest → host | [`SisterRequest`] / [`SisterAnswer`]: "run this artefact in a sister guest" |
 //! | [`MINER_PORT`] | host → miner guest | [`HostToMiner`] / [`MinerToHost`]: the run itself |
 //!
 //! The RLM guest never talks to the miner guest; the host relays the
@@ -144,6 +144,23 @@ pub struct SisterRequest {
     pub seed: u64,
     /// Opaque topic params (`constraints.params`), exported to the run.
     pub params: BTreeMap<String, String>,
+}
+
+/// Host → RLM guest on [`SISTER_PORT`]: the answer to a [`SisterRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SisterAnswer {
+    /// The sister booted, ran, and was destroyed.
+    Result {
+        /// What happened.
+        result: SisterResult,
+    },
+    /// The host refused to boot a sister (bad bind, digest mismatch, no
+    /// image, a second sister in the same job, host not ready).
+    Refused {
+        /// Why (never a secret).
+        error: String,
+    },
 }
 
 /// Host → RLM guest: what happened in the sister.

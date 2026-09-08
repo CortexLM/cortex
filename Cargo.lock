@@ -3500,6 +3500,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "proof-fc-host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "proof-rlm",
+ "proof-vm-agent",
+ "proof-vm-proto",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "proof-harvest"
 version = "0.1.0"
 dependencies = [
