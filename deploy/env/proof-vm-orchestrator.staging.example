@@ -1,0 +1,81 @@
+# operator-managed, never committed with values filled in.
+#
+# STAGING /etc/proof-vm/orchestrator.env for the DEDICATED KVM HOST that serves
+# the staging master (deploy/systemd/proof-vm-orchestrator.service). This is
+# not a compose file and never lands on a droplet: the unit needs /dev/kvm
+# (ConditionPathExists) and DigitalOcean Droplets expose no nested KVM. Use a
+# bare-metal / dedicated KVM host reachable from the staging VPC or a private
+# network (WireGuard / peering) and bind the agent on that private address.
+# Generic reference with every knob: deploy/env/proof-vm-orchestrator.env.example.
+#
+# Every REPLACE_WITH_* value FAILS CLOSED as written: a malformed kernel or
+# sister pin exits 1 at boot, a non-loopback bind without TLS exits 1. The
+# pins are `sha256sum` of the files YOU staged — never copied, never invented.
+# Nothing in this file is a secret value: the bearer is a FILE re-read per
+# request, owner key material is a DIRECTORY staged over vsock.
+
+# Listen on the private (VPC / WireGuard) address only; the staging master's
+# PROOF_VM_ORCHESTRATOR_URL points here over HTTPS.
+PROOF_VM_AGENT_BIND=REPLACE_WITH_KVM_HOST_PRIVATE_IP:8200
+# Certificate with a SAN for that address / name (rustls on the CP refuses
+# CN-only). Private CA → its root goes to the CP as vm_orchestrator_ca.pem.
+PROOF_VM_AGENT_TLS_CERT=/etc/proof-vm/tls.crt
+PROOF_VM_AGENT_TLS_KEY=/etc/proof-vm/tls.key
+
+# Bearer file (0400 root); same bytes as the master's
+# deploy/secrets/proof/vm_orchestrator_token. Missing/empty = every request 401.
+PROOF_VM_AGENT_TOKEN_FILE=/etc/proof-vm/token
+
+# Firecracker + jailer of the SAME release, statically linked (musl).
+PROOF_VM_AGENT_FIRECRACKER_BIN=/usr/local/bin/firecracker
+PROOF_VM_AGENT_JAILER_BIN=/usr/local/bin/jailer
+PROOF_VM_AGENT_CHROOT_BASE=/srv/jailer
+
+# Rootfs images: sha256-<64 hex>.ext4, one per pin. The RLM image the CP pins
+# (PROOF_RLM_VM_IMAGE_DIGEST) must be present here; the agent re-hashes it
+# before the first boot.
+PROOF_VM_AGENT_IMAGE_DIR=/var/lib/proof-vm/images
+
+# Guest kernel and its pin. REQUIRED. `sha256sum /var/lib/proof-vm/vmlinux`.
+PROOF_VM_AGENT_KERNEL=/var/lib/proof-vm/vmlinux
+PROOF_VM_AGENT_KERNEL_DIGEST=sha256:REPLACE_WITH_SHA256SUM_OF_THE_STAGED_VMLINUX
+
+# Sister (miner) guest rootfs pin, present in PROOF_VM_AGENT_IMAGE_DIR.
+# REQUIRED. No network, vsock miner protocol, reports flops_used.
+PROOF_VM_AGENT_SISTER_IMAGE_DIGEST=sha256:REPLACE_WITH_SHA256SUM_OF_THE_STAGED_SISTER_ROOTFS
+
+# uid/gid the jailer drops Firecracker to.
+PROOF_VM_AGENT_JAIL_UID=65534
+PROOF_VM_AGENT_JAIL_GID=65534
+
+# Sizes. The RLM VM shape (4 vCPU / 8192 MiB) is set by the CP; the sister
+# is sized here, never by the RLM. Staging host budget: one RLM VM + one
+# sister per open topic → 6 vCPU / 12 GiB RAM / ~10 GiB scratch per topic.
+PROOF_VM_AGENT_SCRATCH_MIB=8192
+PROOF_VM_AGENT_SISTER_VCPUS=2
+PROOF_VM_AGENT_SISTER_MEM_MIB=4096
+PROOF_VM_AGENT_SISTER_SCRATCH_MIB=2048
+
+# Timeouts (seconds). Guest hello budget; grace past a job's topic deadline
+# before the host kills the sister; jobs without a deadline of their own.
+PROOF_VM_AGENT_BOOT_TIMEOUT_SECS=120
+PROOF_VM_AGENT_DEADLINE_GRACE_SECS=30
+PROOF_VM_AGENT_DEFAULT_JOB_TIMEOUT_SECS=3600
+
+# Owner paid-inference key material staged into the RLM VM over vsock (files
+# by name, 0400 root). Optional; the CP never sees these bytes.
+# PROOF_VM_AGENT_OWNER_KEY_DIR=/etc/proof-vm/owner-keys
+
+# Uplink the RLM VMs masquerade through (the interface that reaches the judge
+# origin and the artefact hosts — usually the public one, not the VPC one).
+PROOF_VM_AGENT_UPLINK=REPLACE_WITH_UPLINK_INTERFACE
+# First /30 of the host<->guest pool; must not overlap the VPC range.
+PROOF_VM_AGENT_NET_BASE=172.16.0.0
+# Egress the RLM VM may reach and nothing else: CIDR[:port[/tcp|udp]],
+# comma-separated. Staging: the RLM judge InferenceOffer origin, the artefact
+# locator hosts miners use, and a resolver. EMPTY = NO EGRESS. IPv4 CIDRs
+# only — resolve hostnames yourself. The sister guest never has a NIC.
+PROOF_VM_AGENT_EGRESS_ALLOW=REPLACE_WITH_JUDGE_ORIGIN_IP/32:443,REPLACE_WITH_ARTEFACT_HOST_IP/32:443,REPLACE_WITH_RESOLVER_IP/32:53/udp
+
+# Where `retain` teardowns move a topic's jail (scratch, console, config).
+PROOF_VM_AGENT_RETAIN_DIR=/var/lib/proof-vm/retained
