@@ -10,7 +10,9 @@
 //!    persisted red or green;
 //! 4. red → **reject document, no paid inference**;
 //! 5. green → [`SpendToken`] → **evaluate** (the only paid step) → report →
-//!    `custom_value = primary_value`;
+//!    `custom_value = primary_value`, `flops_used` = the runner's
+//!    measurement (a report without one is not evidence; over budget is a
+//!    reject the judge fails on);
 //! 6. on persist: artefact zip + metadata row + public event; on promotion:
 //!    promotion row, `best.json`, lifecycle `promoting → open`.
 //!
@@ -215,6 +217,8 @@ impl RlmScorer {
         kind: ProofKind,
         reproduced: bool,
         claim_holds: bool,
+        flops_used: u64,
+        cheat_codes: Vec<ProofCheatCode>,
         rationale: String,
     ) -> AgentVerdict {
         AgentVerdict {
@@ -223,13 +227,9 @@ impl RlmScorer {
             claim_holds_public: claim_holds,
             contamination: false,
             canary_hit: false,
-            flops_used: 0,
+            flops_used,
             flops_budget: topic.flops_budget,
-            cheat_codes: if kind == ProofKind::Clean {
-                Vec::new()
-            } else {
-                vec![ProofCheatCode::Other]
-            },
+            cheat_codes,
             rationale,
             topic_id: topic.id.clone(),
             family: topic.metric.family,
@@ -293,6 +293,44 @@ impl RlmScorer {
             );
     }
 
+    /// Verdict for a verified paid run: the runner's measured FLOPs are the
+    /// verdict's usage, and a measurement over the topic budget is a reject
+    /// (the judge's `FlopsOverBudget` gate then fails the row).
+    fn paid_verdict(
+        topic: &TopicDocument,
+        req: &CustomRunRequest,
+        report: &CustomRunReport,
+        rules_version: u32,
+    ) -> Result<AgentVerdict, EvalError> {
+        let flops_used = report
+            .flops_used_for(req)
+            .map_err(|e| EvalError::NoVerdict(e.to_string()))?;
+        let measured = format!(
+            "{}: {} = {:.6}; checklist green (rules v{rules_version}); sandboxed={}; flops_used={flops_used}",
+            req.custom_id, req.primary, report.primary_value, report.sandboxed
+        );
+        if flops_used > req.flops_budget {
+            return Ok(Self::agent(
+                topic,
+                ProofKind::Reject,
+                true,
+                report.claim_holds,
+                flops_used,
+                vec![ProofCheatCode::FlopsOverBudget],
+                format!("{measured}; over the topic budget {}", req.flops_budget),
+            ));
+        }
+        Ok(Self::agent(
+            topic,
+            ProofKind::Clean,
+            true,
+            report.claim_holds,
+            flops_used,
+            Vec::new(),
+            measured,
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn evaluate(
         &self,
@@ -335,7 +373,15 @@ impl RlmScorer {
                 "anti-cheat {red} (rules v{}); no paid inference",
                 rules.version
             );
-            let agent = Self::agent(topic, ProofKind::Reject, false, false, rationale);
+            let agent = Self::agent(
+                topic,
+                ProofKind::Reject,
+                false,
+                false,
+                0,
+                vec![ProofCheatCode::Other],
+                rationale,
+            );
             self.stash(
                 pin,
                 topic,
@@ -357,21 +403,7 @@ impl RlmScorer {
         run.report
             .verify(&req)
             .map_err(|e| EvalError::NoVerdict(e.to_string()))?;
-        let rationale = format!(
-            "{}: {} = {:.6}; checklist green (rules v{}); sandboxed={}",
-            req.custom_id,
-            req.primary,
-            run.report.primary_value,
-            rules.version,
-            run.report.sandboxed
-        );
-        let agent = Self::agent(
-            topic,
-            ProofKind::Clean,
-            true,
-            run.report.claim_holds,
-            rationale,
-        );
+        let agent = Self::paid_verdict(topic, &req, &run.report, rules.version)?;
         let doc = Self::document(pin, topic, &req, agent, Some(run.report.primary_value));
         self.stash(
             pin,

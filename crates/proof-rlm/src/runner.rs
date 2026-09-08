@@ -76,6 +76,9 @@ pub struct CustomRunRequest {
     pub artifact_uri: Option<String>,
     /// Miner claim (English).
     pub claim: String,
+    /// FLOPs one run may spend (the topic's signed `flops_budget`). The report
+    /// must carry its measured usage against this figure.
+    pub flops_budget: u64,
     /// Topic constraints (sandbox flag, model pin, opaque slice / params).
     pub constraints: Constraints,
     /// Rule version the checklist must tick.
@@ -153,6 +156,7 @@ impl CustomRunRequest {
                 .filter(|u| !u.is_empty())
                 .map(str::to_owned),
             claim: claim.to_owned(),
+            flops_budget: topic.flops_budget,
             constraints: topic.constraints.clone(),
             rules_version: rules.version,
             rules_digest: rules.digest(),
@@ -211,6 +215,12 @@ pub struct CustomRunReport {
     pub claim_holds: bool,
     /// Whether miner code ran inside the Firecracker guest.
     pub sandboxed: bool,
+    /// FLOPs the run consumed, as measured by the runner. This is the only
+    /// usage figure a verdict may carry — the miner's declaration never is.
+    /// Absent against a topic budget the report is not evidence
+    /// ([`ReportError::FlopsMissing`]); zero is accepted only as a measurement.
+    #[serde(default)]
+    pub flops_used: Option<u64>,
     /// Opaque runner evidence (per-task rows, timings). Shipped in the artefact.
     pub evidence: BTreeMap<String, serde_json::Value>,
 }
@@ -236,6 +246,12 @@ pub enum ReportError {
     /// The topic requires Firecracker and the run was not sandboxed.
     #[error("run report says miner code ran outside the Firecracker guest")]
     NotSandboxed,
+    /// The topic has a FLOP budget and the runner measured no usage.
+    #[error("run report carries no measured flops_used against a budget of {budget}")]
+    FlopsMissing {
+        /// The topic's budget the usage had to be measured against.
+        budget: u64,
+    },
 }
 
 impl CustomRunReport {
@@ -289,7 +305,25 @@ impl CustomRunReport {
         if req.sandbox.firecracker_required && !self.sandboxed {
             return Err(ReportError::NotSandboxed);
         }
+        self.flops_used_for(req)?;
         Ok(())
+    }
+
+    /// The runner-measured FLOPs this run consumed: the authoritative usage
+    /// the verdict carries and the judge compares with the topic budget.
+    ///
+    /// # Errors
+    ///
+    /// [`ReportError::FlopsMissing`] when the topic has a budget and the
+    /// report carries no measurement. A missing figure is never read as zero.
+    pub fn flops_used_for(&self, req: &CustomRunRequest) -> Result<u64, ReportError> {
+        match self.flops_used {
+            Some(used) => Ok(used),
+            None if req.flops_budget == 0 => Ok(0),
+            None => Err(ReportError::FlopsMissing {
+                budget: req.flops_budget,
+            }),
+        }
     }
 }
 
@@ -434,6 +468,10 @@ mod tests {
         assert_eq!(req.rules_digest, rules().digest());
         assert_eq!(req.seed, t.baseline.seed);
         assert_eq!(
+            req.flops_budget, t.flops_budget,
+            "budget travels to the runner"
+        );
+        assert_eq!(
             req.artifact_uri.as_deref(),
             Some("https://example.invalid/artifact.zip"),
             "the miner locator reaches the runner"
@@ -481,6 +519,43 @@ mod tests {
         )
         .expect("request");
         assert_eq!(blank.artifact_uri, None, "whitespace is no locator");
+    }
+
+    /// The verdict's usage figure comes from the runner's measurement. A
+    /// report that carries none against a budget is not evidence, so a runner
+    /// cannot leave the budget unenforced by omitting the field.
+    #[test]
+    fn a_report_must_measure_flops_against_a_budget() {
+        let req = request();
+        assert!(req.flops_budget > 0, "fixture topic carries a budget");
+        let measured = report_for(&req, 0.7);
+        assert_eq!(measured.flops_used_for(&req), Ok(1));
+        let mut none = report_for(&req, 0.7);
+        none.flops_used = None;
+        assert_eq!(
+            none.flops_used_for(&req),
+            Err(ReportError::FlopsMissing {
+                budget: req.flops_budget
+            })
+        );
+        assert_eq!(
+            none.verify(&req),
+            Err(ReportError::FlopsMissing {
+                budget: req.flops_budget
+            }),
+            "binding fails closed without a measurement"
+        );
+        let mut over = report_for(&req, 0.7);
+        over.flops_used = Some(req.flops_budget + 1);
+        over.verify(&req)
+            .expect("over budget is a measurement, judged downstream");
+        assert_eq!(over.flops_used_for(&req), Ok(req.flops_budget + 1));
+        let mut unbudgeted = req.clone();
+        unbudgeted.flops_budget = 0;
+        assert_eq!(none.flops_used_for(&unbudgeted), Ok(0));
+        let legacy: CustomRunReport =
+            serde_json::from_str(&none.to_json()).expect("a report without the field parses");
+        assert_eq!(legacy.flops_used, None);
     }
 
     #[test]

@@ -147,6 +147,7 @@ pub fn report_for(req: &CustomRunRequest, primary_value: f64) -> CustomRunReport
         primary_value,
         claim_holds: true,
         sandboxed: true,
+        flops_used: Some(1),
         evidence,
     }
 }
@@ -181,6 +182,7 @@ pub struct FakeOrchestrator {
     primary: Mutex<f64>,
     red: Mutex<Option<String>>,
     sandboxed: AtomicBool,
+    flops_used: Mutex<Option<u64>>,
     created: AtomicUsize,
     vms: Mutex<Vec<VmHandle>>,
     jobs: Mutex<Vec<VmJob>>,
@@ -193,6 +195,7 @@ impl FakeOrchestrator {
             primary: Mutex::new(primary),
             red: Mutex::new(None),
             sandboxed: AtomicBool::new(true),
+            flops_used: Mutex::new(Some(1)),
             created: AtomicUsize::new(0),
             vms: Mutex::new(Vec::new()),
             jobs: Mutex::new(Vec::new()),
@@ -205,6 +208,12 @@ impl FakeOrchestrator {
 
     pub fn set_primary(&self, v: f64) {
         *self.primary.lock().unwrap() = v;
+    }
+
+    /// What every report measures as `flops_used` (`None` = the runner
+    /// forgot to measure, which the host must refuse).
+    pub fn set_flops_used(&self, v: Option<u64>) {
+        *self.flops_used.lock().unwrap() = v;
     }
 
     /// Make inspections fail this rule id (None = green).
@@ -235,6 +244,7 @@ impl FakeOrchestrator {
     fn report(&self, req: &CustomRunRequest) -> CustomRunReport {
         let mut r = report_for(req, *self.primary.lock().unwrap());
         r.sandboxed = self.sandboxed.load(Ordering::SeqCst);
+        r.flops_used = *self.flops_used.lock().unwrap();
         r
     }
 }

@@ -6,9 +6,11 @@
 //!
 //! Covers: an unregistered `custom_id` is a 503 with no row; a green
 //! checklist scores and is crowned against the sealed value, with the
-//! miner's artefact locator reaching the runner; a red checklist
-//! is a persisted reject with **zero** paid runs; a later pass below the best
-//! stays `awaiting_admin`; every scored row leaves its zip, the crown leaves
+//! miner's artefact locator reaching the runner and the runner's measured
+//! FLOPs in the verdict; a red checklist is a persisted reject with **zero**
+//! paid runs; a later pass below the best stays `awaiting_admin`; an
+//! over-budget measurement is a persisted reject and a missing one is a 503;
+//! every scored row leaves its zip, the crown leaves
 //! `best.json` + a promotion row, and the store holds rules v1, every
 //! checklist, and the lifecycle. Then the setup driver walks
 //! `draft → … → baselining` with RLM-written rules and a baseline in the
@@ -323,6 +325,7 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
             "runner must receive the submitted locator"
         );
         assert_eq!(req.artifact_digest, digest("artifact-a"));
+        assert_eq!(req.flops_budget, topic.flops_budget);
     }
 
     let (_, row) = json_req(
@@ -334,6 +337,11 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
     .await;
     assert_eq!(row["verdict"]["pass"], true, "{row}");
     assert!((row["verdict"]["harness"]["custom_value"].as_f64().unwrap() - 0.7).abs() < 1e-12);
+    assert_eq!(
+        row["verdict"]["agent"]["flops_used"], 1u64,
+        "verdict carries the runner's measured usage, not zero"
+    );
+    assert_eq!(row["verdict"]["agent"]["flops_budget"], topic.flops_budget);
     assert_eq!(row["artifact_uri"], uri, "{row}");
     assert!(row["verdict"]["agent"]["rationale"]
         .as_str()
@@ -403,6 +411,10 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
         .unwrap()
         .contains("rule_b"));
     assert!(row_b["verdict"]["harness"]["custom_value"].is_null());
+    assert_eq!(
+        row_b["verdict"]["agent"]["flops_used"], 0u64,
+        "nothing ran, nothing was spent"
+    );
     let names_b = zip_names(&root.join(&tid).join(format!("{id_b}.zip")));
     assert!(!names_b.iter().any(|n| n == "report.json"), "{names_b:?}");
     let digest_b = row_b["submission_digest"].as_str().unwrap();
@@ -463,6 +475,104 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The signed budget binds the runner's measurement, not the miner's
+/// declaration: a run measured over budget is a persisted reject even with a
+/// winning primary, and a report with no measurement is refused with no row.
+#[tokio::test]
+async fn an_over_budget_or_unmeasured_run_never_passes() {
+    let Stack {
+        app,
+        orchestrator,
+        rlm_store,
+        root,
+        topic,
+    } = stack(true);
+    let tid = topic.id.clone();
+    let budget = topic.flops_budget;
+
+    orchestrator.set_flops_used(Some(budget + 1));
+    let (st, created) = json_req(
+        app.clone(),
+        "POST",
+        "/v1/submissions",
+        submit_body(&tid, "artifact-over"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{created}");
+    assert_eq!(created["eligible"], false, "{created}");
+    assert_eq!(created["state"], "rejected", "{created}");
+    let id = created["id"].as_str().unwrap().to_owned();
+    let (_, row) = json_req(
+        app.clone(),
+        "GET",
+        &format!("/v1/submissions/{id}"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(row["verdict"]["pass"], false, "{row}");
+    assert_eq!(row["verdict"]["agent"]["flops_used"], budget + 1, "{row}");
+    assert_eq!(row["verdict"]["agent"]["verdict"], "reject", "{row}");
+    assert!((row["verdict"]["harness"]["custom_value"].as_f64().unwrap() - 0.7).abs() < 1e-12);
+    let failed = row["verdict"]["failed"].to_string();
+    assert!(failed.contains("flops_over_budget"), "{failed}");
+    assert!(row["verdict"]["agent"]["cheat_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c == "flops_over_budget"));
+    assert!(row["verdict"]["agent"]["rationale"]
+        .as_str()
+        .unwrap()
+        .contains("over the topic budget"));
+    assert!(ArtefactStore::new(&root).best(&tid).is_none());
+    assert!(rlm_store.best(&tid).await.unwrap().is_none());
+    assert!(root.join(&tid).join(format!("{id}.zip")).is_file());
+
+    // No measurement at all: not evidence, 503, no row.
+    orchestrator.set_flops_used(None);
+    let (st, body) = json_req(
+        app.clone(),
+        "POST",
+        "/v1/submissions",
+        submit_body(&tid, "artifact-unmeasured"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("no measured flops_used"),
+        "{body}"
+    );
+    let (_, list) = json_req(app.clone(), "GET", "/v1/submissions", serde_json::json!({})).await;
+    assert_eq!(list["items"].as_array().unwrap().len(), 1, "{list}");
+    assert_eq!(
+        paid_runs(&orchestrator),
+        2,
+        "both runs were paid; neither passed"
+    );
+    let lc = rlm_store.lifecycle(&tid).await.unwrap().unwrap();
+    assert_eq!(
+        lc.state,
+        RlmState::Open,
+        "a refusal closes the verdict phase"
+    );
+
+    // Back within budget the same topic scores again.
+    orchestrator.set_flops_used(Some(budget));
+    let (st, created) = json_req(
+        app,
+        "POST",
+        "/v1/submissions",
+        submit_body(&tid, "artifact-at-budget"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{created}");
+    assert_eq!(created["state"], "champion", "{created}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The agentic setup: owner hook, key probe, VM provision, RLM-written
 /// rules and baseline persisted, then the operator seals and opens.
 #[tokio::test]
@@ -511,17 +621,45 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
     );
     assert_eq!(orchestrator.created(), 0);
 
-    // Key present: provision, RLM rules v1 in store, baseline in store.
+    // Key present but the baseline run overspends: refused, nothing sealed.
     std::fs::write(&key, "not-a-real-secret\n").unwrap();
+    orchestrator.set_flops_used(Some(draft.flops_budget + 1));
+    let err = setup
+        .run(&draft, &pin(), &offer())
+        .await
+        .expect_err("over budget");
+    assert!(
+        matches!(err, SetupError::BaselineOverBudget { used, budget } if used == budget + 1),
+        "{err}"
+    );
+    assert!(rlm_store.baseline(&draft.id).await.unwrap().is_none());
+    orchestrator.set_flops_used(None);
+    let err = setup
+        .run(&draft, &pin(), &offer())
+        .await
+        .expect_err("unmeasured");
+    assert!(matches!(err, SetupError::Report(_)), "{err}");
+    assert!(rlm_store.baseline(&draft.id).await.unwrap().is_none());
+
+    // Measured within budget: the attached VM, RLM rules in store (each pass
+    // through setup had the RLM write a version: v1, v2 for the two refused
+    // baselines, v3 now), baseline in store under the current version.
+    orchestrator.set_flops_used(Some(1));
     let out = setup.run(&draft, &pin(), &offer()).await.expect("setup");
-    assert_eq!(out.rules_version, 1);
+    assert_eq!(out.rules_version, 3);
     assert!((out.baseline_primary - 0.42).abs() < 1e-12);
-    assert_eq!(orchestrator.created(), 1);
+    assert_eq!(
+        orchestrator.created(),
+        1,
+        "the vm is attached, not re-created"
+    );
     let rules = rlm_store.current_rules(&draft.id).await.unwrap().unwrap();
+    assert_eq!(rules.version, 3);
     assert_eq!(rules.source, proof_rlm::RuleSource::Rlm);
     assert_eq!(rules.rules[0].id, "rlm_rule");
     let baseline = rlm_store.baseline(&draft.id).await.unwrap().unwrap();
-    assert_eq!(baseline.rules_version, 1);
+    assert_eq!(baseline.rules_version, 3);
+    assert_eq!(baseline.report.flops_used, Some(1));
     let lc = rlm_store.lifecycle(&draft.id).await.unwrap().unwrap();
     assert_eq!(lc.state, RlmState::Baselining);
     assert!(lc.history.iter().any(|h| h.event == RlmEvent::Provisioned));

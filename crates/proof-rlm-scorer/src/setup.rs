@@ -4,7 +4,8 @@
 //! ```text
 //! draft ──submit_for_review──▶ owner_presend ──(owner hook)──▶ awaiting_owner_keys
 //!   ──(key probe)──▶ provisioning ──(orchestrator.create)──▶ baselining
-//!   ──(ProposeRules job → rules vN in store; Baseline job → measurement in store)──▶
+//!   ──(ProposeRules job → rules vN in store; Baseline job → measurement in store,
+//!     refused when it spends over the topic budget or measures nothing)──▶
 //!   returns SetupOutcome; the operator seals custom_value, re-signs `open`,
 //!   and calls `mark_sealed` (baselining → open).
 //! ```
@@ -47,6 +48,14 @@ pub enum SetupError {
     /// The baseline report did not bind to the request.
     #[error("baseline report: {0}")]
     Report(#[from] proof_rlm::ReportError),
+    /// The baseline run measured more FLOPs than the topic budget allows.
+    #[error("baseline spent {used} FLOPs over the topic budget {budget}")]
+    BaselineOverBudget {
+        /// Runner-measured usage.
+        used: u64,
+        /// Topic budget.
+        budget: u64,
+    },
     /// The owner declined at presend; the topic is back at draft.
     #[error("owner declined; topic {0:?} returned to draft")]
     Declined(String),
@@ -248,6 +257,13 @@ impl TopicSetup {
             }
         };
         report.verify(&request)?;
+        let used = report.flops_used_for(&request)?;
+        if used > topic.flops_budget {
+            return Err(SetupError::BaselineOverBudget {
+                used,
+                budget: topic.flops_budget,
+            });
+        }
         self.store
             .put_baseline(&BaselineRow {
                 topic_id: topic.id.clone(),
