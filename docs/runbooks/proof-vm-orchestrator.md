@@ -88,6 +88,60 @@ frames are 4-byte big-endian length + JSON, `api_version: 1`). The RLM guest
 asks for a sister by connecting to host port `5001` with a `SisterRequest`
 carrying the artefact tarball it already fetched and inspected.
 
+## Build
+
+The agent is a host binary (systemd unit), not a compose image. Build it on
+a box with the pinned toolchain (`rust-toolchain.toml`) and copy the file to
+the KVM host:
+
+```bash
+# glibc (matches the DO Ubuntu droplet's libc; simplest)
+cargo build --release -p proof-vm-orchestrator-bin
+ls -l target/release/proof-vm-orchestrator
+
+# static musl (one file, no libc dependency on the host)
+rustup target add x86_64-unknown-linux-musl          # plus `apt install musl-tools` for the C shim
+CC_x86_64_unknown_linux_musl=musl-gcc \
+  cargo build --release -p proof-vm-orchestrator-bin --target x86_64-unknown-linux-musl
+ls -l target/x86_64-unknown-linux-musl/release/proof-vm-orchestrator   # static-pie, ~8 MiB unstripped
+```
+
+(`ring` compiles its C with the target's compiler; Debian/Ubuntu ship it as
+`musl-gcc`, hence the `CC_…` variable — without it the build stops at
+`failed to find tool "x86_64-linux-musl-gcc"`.)
+
+Either shape boots. The binary selects its rustls `CryptoProvider` (`ring`)
+explicitly at start-up — boot log `rustls crypto provider selected
+provider=ring` — so a build that unified rustls's `ring` and `aws-lc-rs`
+features (`cargo build --workspace`, or `--bin proof-vm-orchestrator` from
+the workspace root, which resolves features over every member) no longer
+panics at the first HTTPS listener with `Could not automatically determine
+the process-level CryptoProvider`. That panic is what forced staging to keep
+a previously built binary; that workaround is retired — rebuild from `main`
+and install. The package-scoped command above is still the one to use: it
+also keeps `aws-lc-rs` (cmake + a C toolchain) out of the graph, which is
+what makes the musl build a plain `cargo build`.
+
+Smoke the file before installing it — no `/dev/kvm`, no images needed; it
+must **listen**, not panic (health answers `ready: false` naming the missing
+firecracker, which is the expected answer off the KVM host):
+
+```bash
+d=$(mktemp -d) && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout $d/k.pem -out $d/c.pem -subj /CN=smoke -addext subjectAltName=IP:127.0.0.1 -days 1 2>/dev/null
+echo smoke > $d/token
+timeout 3 target/release/proof-vm-orchestrator --bind 127.0.0.1:18200 --token-file $d/token \
+  --tls-cert $d/c.pem --tls-key $d/k.pem \
+  --kernel-digest sha256:$(printf 'a%.0s' {1..64}) --sister-image-digest sha256:$(printf 'b%.0s' {1..64}) \
+  2>&1 | grep -E 'crypto provider selected|listening \(https\)|panicked'
+# want: "rustls crypto provider selected" then "proof-vm-orchestrator listening (https)"; never "panicked"
+rm -rf $d
+```
+
+The same check runs in CI as the binary's unit test
+(`crypto_provider_installs_once_and_tls_boots_from_pem`: install twice, load
+a self-signed PEM pair into the server config).
+
 ## Install
 
 ```bash
@@ -102,9 +156,11 @@ systemctl daemon-reload && systemctl enable --now proof-vm-orchestrator
 journalctl -u proof-vm-orchestrator -n 50
 ```
 
-Boot log must show `firecracker + jailer + /dev/kvm present; agent ready` and
-`bearer token file present (contents not logged)`. A malformed pin exits 1; a
-non-loopback bind without TLS exits 1.
+Boot log must show `rustls crypto provider selected provider=ring`,
+`firecracker + jailer + /dev/kvm present; agent ready` and `bearer token file
+present (contents not logged)`. A malformed pin exits 1; a non-loopback bind
+without TLS exits 1; a `panicked` line anywhere at boot is a bug, never
+something to work around by keeping an older binary.
 
 Verify from the host (the bearer is required even for health):
 
