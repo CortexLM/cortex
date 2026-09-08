@@ -21,10 +21,12 @@
 //!    default. An unregistered id is [`RunnerError::Unregistered`], which the
 //!    host turns into a 503 before any row or rent.
 //! 4. [`TopicVmOrchestrator`] — create / attach / run / teardown for topic
-//!    VMs, with [`VmJob`]s that carry public data only. The shipped
-//!    implementation is [`UnwiredVmOrchestrator`] (refuses); the generic
-//!    [`VmBackedRunner`] turns inspect / evaluate into VM jobs and is only
-//!    ever registered by an operator.
+//!    VMs, with [`VmJob`]s that carry public data only. This crate ships
+//!    [`UnwiredVmOrchestrator`] (refuses); the live `FirecrackerOrchestrator`
+//!    (crate `proof-vm-fc`) is an HTTPS client of the `proof-vm-orchestrator`
+//!    agent on a dedicated KVM host. The generic [`VmBackedRunner`] turns
+//!    inspect / evaluate into VM jobs and is only ever registered by an
+//!    operator.
 //! 5. [`decide_promote`] — pass + green checklist + relative win over the
 //!    bar, direction from the topic.
 //!

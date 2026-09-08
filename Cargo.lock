@@ -3644,6 +3644,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "proof-vm-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "http-body-util",
+ "proof-canon",
+ "proof-rlm",
+ "proof-vm-proto",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 2.0.19",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "proof-vm-fc"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "proof-rlm",
+ "proof-vm-agent",
+ "proof-vm-proto",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "proof-vm-proto"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "proof-rlm",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "proptest"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -352,7 +352,7 @@ pub struct LogFile {
 }
 
 /// What inspection produced: the ticked checklist and the tree it looked at.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectOutcome {
     /// One item per rule of the requested version.
     pub checklist: Checklist,
@@ -361,7 +361,7 @@ pub struct InspectOutcome {
 }
 
 /// What a paid run produced.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunOutcome {
     /// Runner-authored measurement.
     pub report: CustomRunReport,

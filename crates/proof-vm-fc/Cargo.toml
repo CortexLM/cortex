@@ -1,0 +1,28 @@
+[package]
+name = "proof-vm-fc"
+description = "FirecrackerOrchestrator: the live TopicVmOrchestrator. A thin HTTPS client (bearer from a file, never logged) of the proof-vm-orchestrator agent on a dedicated KVM host. Fail-closed: unset URL → unwired, missing token / unpinned RLM image digest / agent down → 503, never a host-local fallback."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+proof-rlm = { path = "../proof-rlm" }
+proof-vm-proto = { path = "../proof-vm-proto" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+proof-rlm = { path = "../proof-rlm", features = ["test-fixtures"] }
+proof-vm-agent = { path = "../proof-vm-agent", features = ["test-fixtures"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true
