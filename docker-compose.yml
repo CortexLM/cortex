@@ -253,6 +253,8 @@ services:
       BASE_CHALLENGE_SK_FILE: /run/base/challenge_sk
       # Sim eval unless the operator opts in. Never log LIUM_API_KEY.
       PROOF_FORCE_SIM: "${PROOF_FORCE_SIM:-false}"
+      # Staging/dev only. Ignored unless PROOF_FORCE_SIM is on. Never a Lium path.
+      PROOF_SIM_STUB_WIN: "${PROOF_SIM_STUB_WIN:-false}"
       PROOF_PIN_FILE: /etc/base/config/proof-pin.toml
       PROOF_TOPICS_FILE: /run/base/proof/topics.json
       PROOF_HOLDOUT_FILE: /run/base/proof/holdouts.json

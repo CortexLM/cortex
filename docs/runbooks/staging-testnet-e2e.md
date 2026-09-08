@@ -117,4 +117,15 @@ git checkout <good-sha>
 
 - `FakeChain` is the default backend; `BASE_CHAIN_BACKEND=live` switches to `chain-live`.
 - CRV4 tlock encryption is implemented (`tle` / Drand Quicknet); when commit-reveal is off, `set_weights` is used instead.
-- Proof live submits stay **503** until harvest is wired, a baseline is sealed, and ≥1 topic is open.
+- Proof live (Lium) submits stay **503** until harvest is wired, a baseline is sealed, and ≥1 topic is open.
+- When staging is opted into **sim** (`PROOF_FORCE_SIM=true` on the host, not in `env-staging.yml`), submit → score is the contract in [`proof-submit-e2e.md`](proof-submit-e2e.md). Topic ids in that window: `dt-no-ib-v0`, `muon-vs-adamw-10m-v0`. **Option A (code):** a sealed topic under `force_sim` emits a sealed-relative harness (deploy the binary; do not edit host files). **Option B (Développeur, paused):** reseal to `BASELINE_SKILL=0.40` (NLL ≈ 2.94); Mathis redirected that lane to prod RLM E2E. Do not reseal from the code lane. Do not `set_weights`. Do not POST if `eval_backend` is `lium` and `can_score` is true.
+
+```bash
+# From a machine that can reach the staging gateway (no SSH required).
+# Prefer the droplet IP: staging.api.joinbase.ai has answered a stale
+# Lium/fail-closed instance while 159.223.159.205 is the ready sim host.
+PROOF_E2E_BASE=http://159.223.159.205/challenge/proof \
+  ./deploy/scripts/proof-submit-e2e.sh --probe
+# Host-local: http://127.0.0.1:8080/challenge/proof
+# Direct service if published: http://<staging-master>:8100
+```

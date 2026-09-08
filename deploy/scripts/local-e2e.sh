@@ -664,6 +664,18 @@ probe_bounty_fail_closed() {
   fi
 }
 
+# Proof submit → score (or explicit 400/503). Never rents Lium.
+# Full matrix + curl/ctx contract: docs/runbooks/proof-submit-e2e.md
+probe_proof_submit() {
+  local base="http://127.0.0.1:${PROOF_HOST_PORT}"
+  if ! curl -fsS -m 5 "${base}/health" >/dev/null 2>&1; then
+    log "warning: proof /health unavailable (skipping submit probe)"
+    return 0
+  fi
+  log "proof submit e2e probe against ${base}"
+  PROOF_E2E_BASE="$base" "$ROOT/deploy/scripts/proof-submit-e2e.sh" --probe "$base"
+}
+
 print_summary() {
   local pub=""
   if [[ -f "$TUNNEL_ENV" ]]; then
@@ -678,6 +690,7 @@ Internal (compose network):
   bounty:             http://127.0.0.1:${BOUNTY_HOST_PORT}/health
                       (scorer: GET /v1/status → scoring_backend, can_score)
   proof:              http://127.0.0.1:${PROOF_HOST_PORT}/health
+                      (submit: docs/runbooks/proof-submit-e2e.md)
 
 EOF
   if [[ -n "$pub" ]]; then
@@ -773,6 +786,7 @@ wait_all_health || die "health checks failed — see logs above"
 # tunnel flake cannot mask a weights regression.
 probe_weights_latest || die "weights seal smoke failed"
 probe_bounty_fail_closed
+probe_proof_submit || die "proof submit e2e probe failed"
 
 if [[ "$DO_TUNNEL" -eq 1 ]]; then
   start_tunnel

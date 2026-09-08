@@ -16,8 +16,8 @@ use proof_score::{payout_lattices, MinerTopicRun, SealedBaseline};
 use proof_task::{CHALLENGE_ID_BYTES, SCORE_MAX};
 
 pub use proof_eval::{
-    force_sim, resolve_eval_backend, scoring_readiness, supported_custom, BaselineMeasurement,
-    EvalBackend, LiveScorer,
+    force_sim, resolve_eval_backend, scoring_readiness, sim_stub_win, supported_custom,
+    BaselineMeasurement, EvalBackend, LiveScorer,
 };
 pub use proof_http::{hash_admin_token, proof_router, AppState};
 pub use proof_store::{ArtifactManifest, MemoryStore, StoreError};
