@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use harvest_pod::{harvest_template_name, EvalPod, PodProgram};
+use harvest_pod::{harvest_template_name, truncate_tail, EvalPod, PodProgram};
 use prism_lium_types::InstanceSpec;
 use proof_eval::{
     secret_backed_base_url, EvalError, LiveScorer, ProofEvalDocument, PROOF_METRICS_SCHEMA,
@@ -32,6 +32,9 @@ pub const METRICS_MARKER: &str = "PROOF_METRICS=";
 
 /// Marker the eval image prints on a completed run.
 pub const OK_MARKER: &str = "PROOF_EVAL_OK";
+
+/// Bytes of pod stdout retained on a missing [`OK_MARKER`] refuse.
+const STDOUT_TAIL_BYTES: usize = 8 * 1024;
 
 /// Directory the request and metrics sidecar live in, on the pod.
 pub const POD_WORKDIR: &str = "/tmp/proof_eval";
@@ -272,7 +275,12 @@ impl LiveScorer for LiumProofHarvest {
         }
         let stdout = run.map_err(EvalError::Backend)?;
         if !PROGRAM.ran_to_completion(&stdout) {
-            tracing::warn!(instance, "eval image did not print {OK_MARKER}; refusing");
+            let stdout_tail = truncate_tail(&stdout, STDOUT_TAIL_BYTES);
+            tracing::warn!(
+                instance,
+                stdout_tail = %stdout_tail,
+                "eval image did not print {OK_MARKER}; refusing"
+            );
             return Err(EvalError::Backend(format!(
                 "eval image did not print {OK_MARKER}"
             )));
@@ -558,5 +566,80 @@ mod tests {
             .expect_err("spoof");
         assert!(err.to_string().contains("committed judge origin"), "{err}");
         assert!(!*pod.booted.lock().expect("booted"));
+    }
+
+    #[test]
+    fn stdout_tail_keeps_the_last_8kib() {
+        let fatal = "refused: no model: Qwen/Qwen3.8-0.6B";
+        let stdout = format!("{}{fatal}", "x".repeat(10 * 1024));
+        let tail = truncate_tail(&stdout, STDOUT_TAIL_BYTES);
+        assert!(tail.starts_with('…'), "{tail}");
+        assert!(tail.ends_with(fatal), "{tail}");
+        assert!(tail.len() <= STDOUT_TAIL_BYTES + '…'.len_utf8());
+    }
+
+    struct StdoutPod {
+        stdout: String,
+        booted: std::sync::Mutex<bool>,
+    }
+
+    impl StdoutPod {
+        fn new(stdout: impl Into<String>) -> Arc<Self> {
+            Arc::new(Self {
+                stdout: stdout.into(),
+                booted: std::sync::Mutex::new(false),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl EvalPod for StdoutPod {
+        async fn boot(&self, _spec: &InstanceSpec) -> Result<String, String> {
+            *self.booted.lock().expect("boot") = true;
+            Ok("pod-1".into())
+        }
+
+        async fn run(
+            &self,
+            _instance_id: &str,
+            _request: &[u8],
+            _env_file: &[u8],
+        ) -> Result<String, String> {
+            Ok(self.stdout.clone())
+        }
+
+        async fn shutdown(&self, _instance_id: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn harvest_refuses_stdout_without_ok_marker() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let topic = harvest_topic(&recs);
+        let pod = StdoutPod::new("refused: no model: Qwen/Qwen3.8-0.6B\nexit=2\n");
+        let harvest = LiumProofHarvest::new(
+            pod.clone(),
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAtest proof".into()],
+        )
+        .with_judge_api_key(Some("sk-live-not-a-real-secret".into()));
+        let err = harvest
+            .score(
+                &harvest_pin(),
+                &topic,
+                &harvest_offer(),
+                "digest-abcdef",
+                "artifact",
+                &recs,
+                "claim",
+            )
+            .await
+            .expect_err("no ok");
+        assert!(
+            matches!(err, EvalError::Backend(ref m) if m.contains(OK_MARKER)),
+            "{err}"
+        );
+        assert!(*pod.booted.lock().expect("booted"));
     }
 }
