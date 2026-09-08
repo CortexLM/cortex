@@ -14,9 +14,11 @@ use thiserror::Error;
 use crate::{
     is_hex64, is_http_origin, InferenceMode, PinInference, ALLOWED_MODES, BASE_MODEL_FAMILY,
     CHALLENGE_ID, EPSILON_NLL_MIN, EPSILON_THROUGHPUT_REL_MIN, EPSILON_TOPIC_MAX_REGRESS_MIN,
+    EVAL_EXECUTOR_COMMITMENT_ALG, EVAL_EXECUTOR_GPU_CLASS, EVAL_EXECUTOR_SCHEMA_VERSION,
     EVAL_IMAGE, FLOPS_BUDGET_MAX, HOLDOUT_SIZE, INFERENCE_CONFIG_SCHEMA_VERSION,
     INFERENCE_OFFER_COMMITMENT_ALG, MAX_INPUT_TOKENS_CEILING, MAX_OUTPUT_TOKENS_CEILING,
-    PROOF_GIT_URL, QUALITY_FLOOR_NLL_MAX, SCORING_VERSION, STRATUM_SIZE,
+    MAX_PROOF_DEADLINE_S_CEILING, PROOF_GIT_URL, QUALITY_FLOOR_NLL_MAX, SCORING_VERSION,
+    STRATUM_SIZE,
 };
 
 /// `config/proof-pin.toml`.
@@ -47,6 +49,16 @@ pub struct ProofPin {
     pub inference_offer_commitment_alg: String,
     /// Complete provider defaults. Empty model/url is pre-launch fail-closed.
     pub inference: PinInference,
+    /// Eval executor schema (`1`). Bounds the live `EvalExecutorOffer`.
+    pub eval_executor_schema_version: u32,
+    /// Machine class the proof runs on (`1x`). An offer of any other shape cannot score.
+    pub gpu_class: String,
+    /// Longest proof deadline an offer or topic may declare (seconds).
+    pub max_proof_deadline_s_ceiling: u64,
+    /// Optional allowlist of `lium_template_id` prefixes. Empty = any id.
+    pub allowed_lium_template_prefixes: Vec<String>,
+    /// Hash algorithm for the executor `config_commitment` (`sha256`).
+    pub eval_executor_commitment_alg: String,
     /// Eval image reference (no floating tag in prod).
     pub eval_image: String,
     /// `sha256:…` digest. Empty until the first green proof-eval CI image.
@@ -87,6 +99,11 @@ impl Default for ProofPin {
             max_output_tokens_ceiling: MAX_OUTPUT_TOKENS_CEILING,
             inference_offer_commitment_alg: INFERENCE_OFFER_COMMITMENT_ALG.into(),
             inference: PinInference::default(),
+            eval_executor_schema_version: EVAL_EXECUTOR_SCHEMA_VERSION,
+            gpu_class: EVAL_EXECUTOR_GPU_CLASS.into(),
+            max_proof_deadline_s_ceiling: MAX_PROOF_DEADLINE_S_CEILING,
+            allowed_lium_template_prefixes: Vec::new(),
+            eval_executor_commitment_alg: EVAL_EXECUTOR_COMMITMENT_ALG.into(),
             eval_image: EVAL_IMAGE.into(),
             eval_image_digest: String::new(),
             proof_git: PROOF_GIT_URL.into(),
@@ -169,6 +186,27 @@ pub enum PinError {
     /// `[inference].base_url` is set but is not an http(s) origin.
     #[error("inference.base_url must be empty (secret-backed) or an http(s) origin")]
     BadInferenceUrl,
+    /// An eval-executor knob is not the locked value (schema, `gpu_class`, alg).
+    #[error("{field} = {got:?} is not the locked {want:?}")]
+    ExecutorLock {
+        /// Which knob.
+        field: &'static str,
+        /// What the pin said.
+        got: String,
+        /// Locked value.
+        want: String,
+    },
+    /// `max_proof_deadline_s_ceiling` is zero or above the crate lock.
+    #[error("max_proof_deadline_s_ceiling {got} must be 1..={max}")]
+    DeadlineCeiling {
+        /// Pin value.
+        got: u64,
+        /// Locked ceiling.
+        max: u64,
+    },
+    /// An `allowed_lium_template_prefixes` entry is empty, oversized, or has whitespace.
+    #[error("allowed_lium_template_prefixes entries must be 1..=64 chars without whitespace")]
+    BadTemplatePrefix,
     /// The topic key is not a 64-hex sr25519 public key.
     #[error("topic_pubkey must be 64 hex chars (the challenges.toml `proof` row key)")]
     BadTopicPubkey,
@@ -245,6 +283,7 @@ impl ProofPin {
             });
         }
         self.validate_inference()?;
+        self.validate_executor()?;
         if !is_hex64(&self.topic_pubkey) {
             return Err(PinError::BadTopicPubkey);
         }
@@ -362,6 +401,57 @@ impl ProofPin {
         Ok(())
     }
 
+    /// Executor ceilings: a pin may tighten the deadline, never the shape.
+    fn validate_executor(&self) -> Result<(), PinError> {
+        for (field, got, want) in [
+            (
+                "eval_executor_schema_version",
+                self.eval_executor_schema_version.to_string(),
+                EVAL_EXECUTOR_SCHEMA_VERSION.to_string(),
+            ),
+            (
+                "gpu_class",
+                self.gpu_class.trim().to_owned(),
+                EVAL_EXECUTOR_GPU_CLASS.to_owned(),
+            ),
+            (
+                "eval_executor_commitment_alg",
+                self.eval_executor_commitment_alg.trim().to_owned(),
+                EVAL_EXECUTOR_COMMITMENT_ALG.to_owned(),
+            ),
+        ] {
+            if got != want {
+                return Err(PinError::ExecutorLock { field, got, want });
+            }
+        }
+        if self.max_proof_deadline_s_ceiling == 0
+            || self.max_proof_deadline_s_ceiling > MAX_PROOF_DEADLINE_S_CEILING
+        {
+            return Err(PinError::DeadlineCeiling {
+                got: self.max_proof_deadline_s_ceiling,
+                max: MAX_PROOF_DEADLINE_S_CEILING,
+            });
+        }
+        if self
+            .allowed_lium_template_prefixes
+            .iter()
+            .any(|p| p.is_empty() || p.len() > 64 || p.contains(char::is_whitespace))
+        {
+            return Err(PinError::BadTemplatePrefix);
+        }
+        Ok(())
+    }
+
+    /// Whether `template_id` is legal under `allowed_lium_template_prefixes`.
+    /// An empty allowlist accepts any id.
+    pub fn allows_template(&self, template_id: &str) -> bool {
+        self.allowed_lium_template_prefixes.is_empty()
+            || self
+                .allowed_lium_template_prefixes
+                .iter()
+                .any(|p| template_id.starts_with(p.as_str()))
+    }
+
     /// True when a live rent is allowed (real digest pin present).
     ///
     /// An empty digest is the normal pre-launch state and the reason submits
@@ -416,6 +506,11 @@ allowed_modes = ["chat", "completions", "embeddings"]
 max_input_tokens_ceiling = 32768
 max_output_tokens_ceiling = 8192
 inference_offer_commitment_alg = "sha256"
+eval_executor_schema_version = 1
+gpu_class = "1x"
+max_proof_deadline_s_ceiling = 7200
+allowed_lium_template_prefixes = ["proof-eval-"]
+eval_executor_commitment_alg = "sha256"
 eval_image = "{EVAL_IMAGE}"
 eval_image_digest = ""
 topic_pubkey = "{}"
@@ -434,6 +529,98 @@ stratum_size = 24
         assert_eq!(p.topic_pubkey_bytes().expect("key"), [0xcd; 32]);
         assert!(p.proxy_model.is_empty());
         assert!(p.proxy_models.is_empty());
+        assert_eq!(p.gpu_class, "1x");
+        assert_eq!(p.max_proof_deadline_s_ceiling, 7_200);
+        assert_eq!(p.allowed_lium_template_prefixes, vec!["proof-eval-"]);
+        assert!(p.allows_template("proof-eval-78b614a1f51c"));
+        assert!(!p.allows_template("prism-recipe-v10"));
+    }
+
+    /// A pin written before the executor keys existed still boots: the
+    /// defaults are the locked values and an empty allowlist.
+    #[test]
+    fn executor_keys_default_when_absent() {
+        let body = format!(
+            r#"
+challenge_id = "proof"
+scoring_version = 1
+base_model_family = "{BASE_MODEL_FAMILY}"
+eval_image = "{EVAL_IMAGE}"
+topic_pubkey = "{}"
+"#,
+            "cd".repeat(32)
+        );
+        let p = ProofPin::from_toml(&body).expect("parse");
+        p.validate().expect("validates");
+        assert_eq!(p.eval_executor_schema_version, EVAL_EXECUTOR_SCHEMA_VERSION);
+        assert_eq!(p.gpu_class, EVAL_EXECUTOR_GPU_CLASS);
+        assert_eq!(p.max_proof_deadline_s_ceiling, MAX_PROOF_DEADLINE_S_CEILING);
+        assert_eq!(p.eval_executor_commitment_alg, EVAL_EXECUTOR_COMMITMENT_ALG);
+        assert!(p.allowed_lium_template_prefixes.is_empty());
+        assert!(p.allows_template("any-template-id"));
+    }
+
+    #[test]
+    fn executor_shape_schema_and_alg_are_locked() {
+        let mut p = pin();
+        p.gpu_class = "8x".into();
+        assert!(
+            matches!(
+                p.validate(),
+                Err(PinError::ExecutorLock {
+                    field: "gpu_class",
+                    ..
+                })
+            ),
+            "a multi-GPU class must not become the pin"
+        );
+        p = pin();
+        p.eval_executor_schema_version = 2;
+        assert!(matches!(
+            p.validate(),
+            Err(PinError::ExecutorLock {
+                field: "eval_executor_schema_version",
+                ..
+            })
+        ));
+        p = pin();
+        p.eval_executor_commitment_alg = "blake3".into();
+        assert!(matches!(
+            p.validate(),
+            Err(PinError::ExecutorLock {
+                field: "eval_executor_commitment_alg",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn deadline_ceiling_may_tighten_never_loosen() {
+        let mut p = pin();
+        p.max_proof_deadline_s_ceiling = 3_600;
+        p.validate().expect("tighter ceiling is legal");
+        p.max_proof_deadline_s_ceiling = MAX_PROOF_DEADLINE_S_CEILING + 1;
+        assert!(matches!(
+            p.validate(),
+            Err(PinError::DeadlineCeiling { .. })
+        ));
+        p.max_proof_deadline_s_ceiling = 0;
+        assert!(matches!(
+            p.validate(),
+            Err(PinError::DeadlineCeiling { .. })
+        ));
+    }
+
+    #[test]
+    fn template_prefixes_must_be_usable() {
+        for bad in ["", "has space", &"x".repeat(65)] {
+            let mut p = pin();
+            p.allowed_lium_template_prefixes = vec![bad.to_owned()];
+            assert!(
+                matches!(p.validate(), Err(PinError::BadTemplatePrefix)),
+                "{bad:?} must be refused"
+            );
+        }
     }
 
     #[test]

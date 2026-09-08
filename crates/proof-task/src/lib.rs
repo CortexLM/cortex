@@ -32,11 +32,16 @@
 )]
 
 mod canonical;
+mod executor;
 mod inference;
 mod pin;
 mod topic;
 
 pub use canonical::canonical_json;
+pub use executor::{
+    TopicEvalExecutor, EVAL_EXECUTOR_COMMITMENT_ALG, EVAL_EXECUTOR_GPU_CLASS,
+    EVAL_EXECUTOR_GPU_COUNT, EVAL_EXECUTOR_SCHEMA_VERSION, MAX_PROOF_DEADLINE_S_CEILING,
+};
 pub use inference::{
     inference_config_commitment, require_open_offer, resolve_inference, InferenceConfig,
     InferenceMode, InferenceOffer, InferenceProvider, InferenceProviderKind, OfferError,
@@ -127,7 +132,8 @@ pub const QUALITY_FLOOR_NLL_MAX: f64 = 0.02;
 /// Slice id prefix bound into per-topic measurements.
 pub const HOLDOUT_SLICE_PREFIX: &str = "proof-holdout";
 
-pub(crate) fn is_hex64(s: &str) -> bool {
+/// Whether `s` (trimmed) is exactly 64 hex characters.
+pub fn is_hex64(s: &str) -> bool {
     let t = s.trim();
     t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -139,7 +145,8 @@ pub(crate) fn is_http_origin(url: &str) -> bool {
         && !u.contains(['\n', ' '])
 }
 
-pub(crate) fn is_slug(id: &str) -> bool {
+/// Whether `id` matches `[a-z0-9][a-z0-9-]{1,62}` (offer and topic ids).
+pub fn is_slug(id: &str) -> bool {
     let b = id.as_bytes();
     (2..=63).contains(&b.len())
         && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())

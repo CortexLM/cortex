@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{canonical_json, is_hex64, ProofPin, TopicInference, TOPIC_DOMAIN};
+use crate::{canonical_json, is_hex64, ProofPin, TopicEvalExecutor, TopicInference, TOPIC_DOMAIN};
 
 /// Only accepted `schema_version`.
 pub const TOPIC_SCHEMA_VERSION: u32 = 1;
@@ -369,6 +369,10 @@ pub struct TopicDocument {
     pub proxy_model: Option<String>,
     /// Inference constraints this topic tightens against the pin.
     pub inference: TopicInference,
+    /// Executor constraints this topic tightens (deadline, offer commitment).
+    /// Omitted from the signed payload when empty, so older signatures hold.
+    #[serde(skip_serializing_if = "TopicEvalExecutor::is_empty")]
+    pub eval_executor: TopicEvalExecutor,
     /// Sealed baseline recipe plus its two seal hashes.
     pub baseline: Baseline,
     /// Commitment over this topic's holdout records.
@@ -406,6 +410,7 @@ impl Default for TopicDocument {
             epsilon_topic_max_regress: crate::EPSILON_TOPIC_MAX_REGRESS_MIN,
             proxy_model: None,
             inference: TopicInference::default(),
+            eval_executor: TopicEvalExecutor::default(),
             baseline: default_adamw(crate::FLOPS_BUDGET_MAX),
             holdout_commitment: String::new(),
             holdout_size: crate::HOLDOUT_SIZE,
@@ -547,6 +552,12 @@ pub enum TopicError {
     /// Open topic resolved to an incomplete provider config, or an override is unusable.
     #[error("inference is incomplete or misconfigured (provider, model, mode, tokens, origin)")]
     IncompleteInference,
+    /// `eval_executor.require_offer_commitment` is not 64 hex.
+    #[error("eval_executor.require_offer_commitment must be 64 hex chars")]
+    BadExecutorCommitment,
+    /// Topic proof deadline is zero or above the pin ceiling (tighten only).
+    #[error("eval_executor.max_proof_deadline_s = {0} must be 1..={1}")]
+    ExecutorDeadlineCeiling(u64, u64),
     /// The validity window is inverted.
     #[error("valid_until_epoch {until} is before valid_from_epoch {from}")]
     BadWindow {
@@ -828,6 +839,7 @@ impl TopicDocument {
             }
         }
         self.inference.validate(pin)?;
+        self.eval_executor.validate(pin)?;
         let model = crate::resolve_inference(pin, Some(&self.inference), None, None).model;
         if self.status == TopicStatus::Open && model.trim().is_empty() {
             return Err(TopicError::IncompleteInference);
@@ -1012,6 +1024,68 @@ mod tests {
             unsigned.verify_signature(&p),
             Err(TopicError::BadSignatureEncoding)
         ));
+    }
+
+    /// A topic that tightens nothing about the executor signs to the exact
+    /// bytes it signed before the `eval_executor` field existed.
+    #[test]
+    fn empty_eval_executor_does_not_change_the_signed_payload() {
+        let doc = dt_no_ib();
+        assert!(doc.eval_executor.is_empty());
+        let payload =
+            String::from_utf8(topic_signing_payload(&doc).expect("payload")).expect("utf8");
+        assert!(!payload.contains("eval_executor"), "{payload}");
+        assert!(!payload.contains("max_proof_deadline_s"), "{payload}");
+        let parsed = TopicDocument::from_json(&serde_json::to_string(&doc).expect("json"))
+            .expect("round trip");
+        assert_eq!(parsed, doc);
+    }
+
+    #[test]
+    fn eval_executor_tighten_is_signed_and_tighten_only() {
+        let p = pin();
+        let mut doc = dt_no_ib();
+        doc.eval_executor.max_proof_deadline_s = Some(1_800);
+        doc.eval_executor.require_offer_commitment = Some("ab".repeat(32));
+        doc.validate(&p, &[]).expect("tightened topic validates");
+        doc.signature = doc.sign_with(&sk()).expect("sign");
+        doc.verify_signature(&p).expect("verifies");
+        let payload =
+            String::from_utf8(topic_signing_payload(&doc).expect("payload")).expect("utf8");
+        assert!(
+            payload.contains("\"max_proof_deadline_s\":1800"),
+            "{payload}"
+        );
+
+        // Loosening the deadline after signing breaks the signature, and a
+        // deadline above the pin ceiling never validates at publish.
+        let mut loosened = doc.clone();
+        loosened.eval_executor.max_proof_deadline_s = Some(7_200);
+        assert!(matches!(
+            loosened.verify_signature(&p),
+            Err(TopicError::SignatureInvalid)
+        ));
+        loosened.eval_executor.max_proof_deadline_s = Some(p.max_proof_deadline_s_ceiling + 1);
+        assert!(matches!(
+            loosened.validate(&p, &[]),
+            Err(TopicError::ExecutorDeadlineCeiling(..))
+        ));
+        doc.eval_executor.require_offer_commitment = Some("nope".into());
+        assert!(matches!(
+            doc.validate(&p, &[]),
+            Err(TopicError::BadExecutorCommitment)
+        ));
+    }
+
+    #[test]
+    fn a_topic_naming_a_machine_id_is_refused_at_parse() {
+        let mut v = serde_json::to_value(dt_no_ib()).expect("json");
+        v["eval_executor"] = serde_json::json!({ "machine_id": "lium-pod-42" });
+        let err = TopicDocument::from_json(&v.to_string()).expect_err("no per-topic machine_id");
+        assert!(
+            matches!(err, TopicError::Parse(ref m) if m.contains("machine_id")),
+            "{err}"
+        );
     }
 
     #[test]

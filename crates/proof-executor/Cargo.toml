@@ -1,0 +1,20 @@
+[package]
+name = "proof-executor"
+description = "Proof eval executor offer: the 1x Lium machine class the digest-pinned proof-eval image is rented on"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+hex = "0.4"
+proof-task = { path = "../proof-task" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[lints]
+workspace = true
