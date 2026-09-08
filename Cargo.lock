@@ -3502,6 +3502,7 @@ dependencies = [
  "proof-rlm-scorer",
  "proof-rlm-store",
  "proof-task",
+ "proof-vm-fc",
  "reqwest 0.12.28",
  "serde_json",
  "sha2 0.10.9",

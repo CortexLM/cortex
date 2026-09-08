@@ -26,6 +26,7 @@ proof-rlm = { path = "../../crates/proof-rlm" }
 proof-rlm-scorer = { path = "../../crates/proof-rlm-scorer" }
 proof-rlm-store = { path = "../../crates/proof-rlm-store" }
 proof-task = { path = "../../crates/proof-task" }
+proof-vm-fc = { path = "../../crates/proof-vm-fc" }
 serde_json = "1"
 telemetry = { path = "../../crates/telemetry" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
