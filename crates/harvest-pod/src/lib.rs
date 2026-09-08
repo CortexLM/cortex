@@ -79,6 +79,35 @@ pub struct RunExtras {
     pub holdout_tar: Vec<u8>,
     /// On-disk proxy-model tar. Missing / empty skips.
     pub proxy_tar_path: Option<PathBuf>,
+    /// Per-run proof deadline in seconds. When set it caps the pod-side
+    /// `timeout` (and the SSH wait) at `min(deadline, configured run
+    /// timeout)`; the image is killed at the deadline, never given more.
+    pub deadline_secs: Option<u64>,
+}
+
+/// Exit codes GNU `timeout` reports when the entrypoint hit the deadline:
+/// `124` on the TERM timeout, `137` when `--kill-after` had to SIGKILL.
+pub const DEADLINE_EXIT_CODES: [u32; 2] = [124, 137];
+
+/// Seconds the entrypoint gets for one run: the configured run timeout,
+/// tightened by a per-run deadline when one is staged.
+#[must_use]
+pub fn effective_run_timeout_secs(run_timeout_secs: u64, deadline_secs: Option<u64>) -> u64 {
+    deadline_secs
+        .filter(|d| *d > 0)
+        .map_or(run_timeout_secs, |d| d.min(run_timeout_secs))
+}
+
+/// Whether pod stdout reports an `exit=<rc>` line with a deadline exit code
+/// (the run was cut at the `timeout`, not a scoring failure).
+#[must_use]
+pub fn hit_deadline(stdout: &str) -> bool {
+    stdout.lines().any(|l| {
+        l.trim()
+            .strip_prefix("exit=")
+            .and_then(|rc| rc.trim().parse::<u32>().ok())
+            .is_some_and(|rc| DEADLINE_EXIT_CODES.contains(&rc))
+    })
 }
 
 /// Seconds allowed to stream `bytes` over SSH. Floor is the short-op
@@ -524,13 +553,14 @@ impl EvalPod for LiumEvalPod {
 
         // `allow_fail`: a non-zero image exit still has to be harvested, since
         // the log tail is the only diagnosis the operator gets.
+        let run_secs = effective_run_timeout_secs(self.run_timeout_secs, extras.deadline_secs);
         let out = ssh_exec_allow_fail(
             &target,
             &key,
-            &self.program.run_cmd(self.run_timeout_secs),
+            &self.program.run_cmd(run_secs),
             1,
             SSH_RETRY_SECS,
-            self.run_timeout_secs.saturating_add(SSH_SHORT_TIMEOUT_SECS),
+            run_secs.saturating_add(SSH_SHORT_TIMEOUT_SECS),
         )
         .await
         .map_err(|e| format!("run eval image: {e}"))?;
@@ -690,6 +720,31 @@ mod tests {
         assert!(err.contains("abababab"), "{err}");
         assert!(err.contains("/usr/bin/relearn-eval"), "{err}");
         assert!(err.contains("refusing to stage the holdout"), "{err}");
+    }
+
+    #[test]
+    fn a_staged_deadline_only_tightens_the_run_timeout() {
+        assert_eq!(effective_run_timeout_secs(5400, None), 5400);
+        assert_eq!(effective_run_timeout_secs(5400, Some(0)), 5400);
+        assert_eq!(effective_run_timeout_secs(5400, Some(1800)), 1800);
+        assert_eq!(
+            effective_run_timeout_secs(5400, Some(9000)),
+            5400,
+            "a deadline never extends the configured run timeout"
+        );
+        let cmd = PROGRAM.run_cmd(effective_run_timeout_secs(5400, Some(1800)));
+        assert!(cmd.contains("timeout --kill-after=60 1800"), "{cmd}");
+        assert!(RunExtras::default().deadline_secs.is_none());
+    }
+
+    #[test]
+    fn deadline_exit_codes_are_recognised_in_stdout() {
+        assert!(hit_deadline("boot\nexit=124\ntail of run.log\n"));
+        assert!(hit_deadline("exit=137\n"));
+        assert!(!hit_deadline("exit=2\n"));
+        assert!(!hit_deadline("DEMO_METRICS={\"a\":1}\nDEMO_EVAL_OK\n"));
+        assert!(!hit_deadline("the log said exit=124 once"));
+        assert_eq!(DEADLINE_EXIT_CODES, [124, 137]);
     }
 
     #[test]
