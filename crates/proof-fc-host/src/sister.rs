@@ -120,7 +120,7 @@ pub async fn run(
         let mut ch = GuestChannel::connect_within(&root, MINER_PORT, cfg.boot_timeout).await?;
         match ch.recv_within::<MinerToHost>(cfg.boot_timeout).await? {
             MinerToHost::Ready { api_version, .. } => {
-                check_version(api_version).map_err(|e| HvError::Guest(e.to_string()))?
+                check_version(api_version).map_err(|e| HvError::Guest(e.to_string()))?;
             }
             other => {
                 return Err(HvError::Guest(format!(

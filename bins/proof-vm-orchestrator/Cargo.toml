@@ -1,0 +1,27 @@
+[package]
+name = "proof-vm-orchestrator-bin"
+description = "proof-vm-orchestrator: the Firecracker topic-VM agent for the dedicated KVM host (HTTPS :8200, bearer from a file). Never runs on the control-plane droplet."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "proof-vm-orchestrator"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+clap = { version = "4", features = ["derive", "env"] }
+proof-fc-host = { path = "../../crates/proof-fc-host" }
+proof-vm-agent = { path = "../../crates/proof-vm-agent" }
+proof-vm-proto = { path = "../../crates/proof-vm-proto" }
+telemetry = { path = "../../crates/telemetry" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+tracing = "0.1"
+
+[lints]
+workspace = true
