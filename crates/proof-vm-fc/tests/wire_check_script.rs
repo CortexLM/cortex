@@ -160,22 +160,54 @@ async fn agent_and_boot_probe_speak_the_router_json_and_never_print_the_bearer()
         "nothing outlives the probe"
     );
 
-    // The agent committed the create but its answer never arrived: the probe
-    // must find the VM by topic and destroy it, never leave it running.
+    // A stopped agent is reported, not swallowed.
+    agent.stop();
+    let (ok, text) = tokio::task::spawn_blocking(move || {
+        run_script(&["agent", "--env-file", &env_s, "--path-map", &map])
+    })
+    .await
+    .expect("join");
+    assert!(!ok, "a dead agent must fail the check:\n{text}");
+    assert!(text.contains("agent health → HTTP 000"), "{text}");
+    let _ = std::fs::remove_dir_all(env.parent().expect("dir"));
+}
+
+/// The agent committed the create but its answer never arrived (timeout,
+/// dropped connection): the probe must find the VM by topic and destroy it,
+/// never leave it running, and a retry on the same topic must not be blocked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lost_create_answer_is_reconciled_by_topic_and_destroyed() {
+    if !tools_present() {
+        eprintln!("skipping: bash / curl / python3 not all present");
+        return;
+    }
+    let agent_token = token_file("wire-script-lost", TOKEN);
+    let agent = FakeAgent::serve(FakeHypervisor::new(0.8), &agent_token).await;
+    let digest = pinned_template().image_digest;
+    let (env, secrets) = cp_env("lost", &agent.url(), &digest);
+    let env_s = env.to_string_lossy().into_owned();
+    let map = format!("/run/base/proof={}", secrets.display());
+    let probe_args = |env_s: &str, map: &str| -> Vec<String> {
+        [
+            "boot-probe",
+            "--env-file",
+            env_s,
+            "--path-map",
+            map,
+            "--probe-topic",
+            "wire-probe-lost",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+    };
+
     let (code, text) = tokio::task::spawn_blocking({
-        let env_s = env_s.clone();
-        let map = map.clone();
+        let argv = probe_args(&env_s, &map);
         move || {
+            let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
             run_script_env(
-                &[
-                    "boot-probe",
-                    "--env-file",
-                    &env_s,
-                    "--path-map",
-                    &map,
-                    "--probe-topic",
-                    "wire-probe-lost",
-                ],
+                &refs,
                 &[("PROOF_VM_WIRE_CHECK_FAULT", "lose-create-answer")],
             )
         }
@@ -196,43 +228,29 @@ async fn agent_and_boot_probe_speak_the_router_json_and_never_print_the_bearer()
         !text.contains("left topic wire-probe-lost in flight"),
         "the in-line reconcile must clear the topic before exit:\n{text}"
     );
-    assert_eq!(hv.boots().len(), 2, "the lost create still booted a VM");
-    assert_eq!(hv.boots()[1].topic_id, "wire-probe-lost");
-    assert_eq!(hv.teardowns().len(), 2, "and it was destroyed");
-    assert_eq!(hv.teardowns()[1].1, RetainPolicy::Destroy);
+    let hv = &agent.hypervisor;
+    assert_eq!(hv.boots().len(), 1, "the lost create still booted a VM");
+    assert_eq!(hv.boots()[0].topic_id, "wire-probe-lost");
+    assert_eq!(hv.teardowns().len(), 1, "and it was destroyed");
+    assert_eq!(hv.teardowns()[0].1, RetainPolicy::Destroy);
     assert!(
         agent.state.running().await.is_empty(),
         "nothing outlives an ambiguous create"
     );
-    // A retry on the same topic is not blocked by a stranded VM.
-    let (ok, text) = tokio::task::spawn_blocking({
-        let env_s = env_s.clone();
-        let map = map.clone();
+
+    let (code, text) = tokio::task::spawn_blocking({
+        let argv = probe_args(&env_s, &map);
         move || {
-            run_script(&[
-                "boot-probe",
-                "--env-file",
-                &env_s,
-                "--path-map",
-                &map,
-                "--probe-topic",
-                "wire-probe-lost",
-            ])
+            let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+            run_script_env(&refs, &[])
         }
     })
     .await
     .expect("join");
-    assert!(ok, "retry after reconcile:\n{text}");
-
-    // A stopped agent is reported, not swallowed.
-    agent.stop();
-    let (ok, text) = tokio::task::spawn_blocking(move || {
-        run_script(&["agent", "--env-file", &env_s, "--path-map", &map])
-    })
-    .await
-    .expect("join");
-    assert!(!ok, "a dead agent must fail the check:\n{text}");
-    assert!(text.contains("agent health → HTTP 000"), "{text}");
+    assert_eq!(code, 0, "retry after reconcile:\n{text}");
+    assert_eq!(hv.boots().len(), 2);
+    assert_eq!(hv.teardowns().len(), 2);
+    assert!(agent.state.running().await.is_empty());
     let _ = std::fs::remove_dir_all(env.parent().expect("dir"));
 }
 
