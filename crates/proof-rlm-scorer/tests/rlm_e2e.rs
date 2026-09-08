@@ -5,7 +5,8 @@
 //! temp artefact root.
 //!
 //! Covers: an unregistered `custom_id` is a 503 with no row; a green
-//! checklist scores and is crowned against the sealed value; a red checklist
+//! checklist scores and is crowned against the sealed value, with the
+//! miner's artefact locator reaching the runner; a red checklist
 //! is a persisted reject with **zero** paid runs; a later pass below the best
 //! stays `awaiting_admin`; every scored row leaves its zip, the crown leaves
 //! `best.json` + a promotion row, and the store holds rules v1, every
@@ -59,6 +60,7 @@ impl LiveScorer for IdleHarvest {
         _plan: &ExecutorPlan,
         _frozen: &str,
         _artifact: &str,
+        _artifact_uri: Option<&str>,
         _holdout: &[HoldoutRecord],
         _claim: &str,
     ) -> Result<ProofEvalDocument, EvalError> {
@@ -294,19 +296,34 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
     );
 
     // 1. Green checklist, primary 0.70 > 0.50 * 1.02: scored and crowned.
-    let (st, created) = json_req(
-        app.clone(),
-        "POST",
-        "/v1/submissions",
-        submit_body(&tid, "artifact-a"),
-    )
-    .await;
+    //    The miner's artefact locator travels to the runner with the digest.
+    let uri = "https://example.invalid/artefacts/artifact-a.zip";
+    let mut body_a = submit_body(&tid, "artifact-a");
+    body_a["artifact_uri"] = serde_json::json!(uri);
+    let (st, created) = json_req(app.clone(), "POST", "/v1/submissions", body_a).await;
     assert_eq!(st, StatusCode::CREATED, "{created}");
     assert_eq!(created["eligible"], true, "{created}");
     assert_eq!(created["state"], "champion", "{created}");
     let id_a = created["id"].as_str().unwrap().to_owned();
     assert_eq!(paid_runs(&orchestrator), 1);
     assert_eq!(orchestrator.created(), 1, "one topic, one vm");
+    let requests: Vec<proof_rlm::CustomRunRequest> = orchestrator
+        .jobs()
+        .into_iter()
+        .filter_map(|j| match j {
+            VmJob::Inspect { request, .. } | VmJob::Evaluate { request, .. } => Some(request),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requests.len(), 2, "one inspect, one evaluate");
+    for req in &requests {
+        assert_eq!(
+            req.artifact_uri.as_deref(),
+            Some(uri),
+            "runner must receive the submitted locator"
+        );
+        assert_eq!(req.artifact_digest, digest("artifact-a"));
+    }
 
     let (_, row) = json_req(
         app.clone(),
@@ -317,6 +334,7 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
     .await;
     assert_eq!(row["verdict"]["pass"], true, "{row}");
     assert!((row["verdict"]["harness"]["custom_value"].as_f64().unwrap() - 0.7).abs() < 1e-12);
+    assert_eq!(row["artifact_uri"], uri, "{row}");
     assert!(row["verdict"]["agent"]["rationale"]
         .as_str()
         .unwrap()

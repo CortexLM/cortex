@@ -293,6 +293,7 @@ impl RlmScorer {
             );
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn evaluate(
         &self,
         pin: &ProofPin,
@@ -301,6 +302,7 @@ impl RlmScorer {
         plan: &ExecutorPlan,
         frozen_digest: &str,
         artifact_digest: &str,
+        artifact_uri: Option<&str>,
         claim: &str,
     ) -> Result<ProofEvalDocument, EvalError> {
         let custom_id = topic.metric.custom_id.trim().to_owned();
@@ -316,7 +318,7 @@ impl RlmScorer {
             &rules,
             frozen_digest,
             artifact_digest,
-            None,
+            artifact_uri,
             claim,
         )
         .map_err(|e| map_runner(&custom_id, e))?
@@ -495,6 +497,7 @@ impl LiveScorer for RlmScorer {
         plan: &ExecutorPlan,
         frozen_digest: &str,
         artifact_digest: &str,
+        artifact_uri: Option<&str>,
         _holdout: &[HoldoutRecord],
         claim: &str,
     ) -> Result<ProofEvalDocument, EvalError> {
@@ -513,6 +516,7 @@ impl LiveScorer for RlmScorer {
                 plan,
                 frozen_digest,
                 artifact_digest,
+                artifact_uri,
                 claim,
             )
             .await;

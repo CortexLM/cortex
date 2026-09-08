@@ -293,6 +293,9 @@ pub trait LiveScorer: Send + Sync {
     ///
     /// `offer` is the RLM judge the image calls; `plan` is the resolved `1x`
     /// rent ([`Self::plan`]) the image is run under. Both are host state.
+    /// `artifact_uri` is the miner-supplied locator of the bytes behind
+    /// `artifact_digest` (the runner fetches and digest-checks them); the
+    /// digest alone is not enough to retrieve an artefact.
     #[allow(clippy::too_many_arguments)]
     async fn score(
         &self,
@@ -302,6 +305,7 @@ pub trait LiveScorer: Send + Sync {
         plan: &ExecutorPlan,
         frozen_digest: &str,
         artifact_digest: &str,
+        artifact_uri: Option<&str>,
         holdout: &[HoldoutRecord],
         claim: &str,
     ) -> Result<ProofEvalDocument, EvalError>;
@@ -416,6 +420,7 @@ impl LiveScorer for FamilyMux {
         plan: &ExecutorPlan,
         frozen_digest: &str,
         artifact_digest: &str,
+        artifact_uri: Option<&str>,
         holdout: &[HoldoutRecord],
         claim: &str,
     ) -> Result<ProofEvalDocument, EvalError> {
@@ -427,6 +432,7 @@ impl LiveScorer for FamilyMux {
                 plan,
                 frozen_digest,
                 artifact_digest,
+                artifact_uri,
                 holdout,
                 claim,
             )
@@ -885,6 +891,9 @@ pub fn sim_win_document(
 }
 
 /// Score only after the submission digest is frozen and a topic is open.
+///
+/// `artifact_uri` travels to the live scorer untouched: it is the miner's
+/// locator for the bytes behind `artifact_digest`, never trusted beyond that.
 #[allow(clippy::too_many_arguments)]
 pub async fn eval_after_freeze(
     pin: &ProofPin,
@@ -893,6 +902,7 @@ pub async fn eval_after_freeze(
     executor: Option<&EvalExecutorOffer>,
     frozen_digest: &str,
     artifact_digest: &str,
+    artifact_uri: Option<&str>,
     holdout: &[HoldoutRecord],
     claim: &str,
     backend: EvalBackend,
@@ -961,6 +971,7 @@ pub async fn eval_after_freeze(
                     &resolved,
                     frozen_digest,
                     artifact_digest,
+                    artifact_uri,
                     holdout,
                     claim,
                 )
@@ -1099,6 +1110,7 @@ mod tests {
             _plan: &ExecutorPlan,
             frozen: &str,
             artifact: &str,
+            _artifact_uri: Option<&str>,
             _holdout: &[HoldoutRecord],
             _claim: &str,
         ) -> Result<ProofEvalDocument, EvalError> {
@@ -1130,6 +1142,7 @@ mod tests {
             Some(&executor(&pin(""))),
             "d",
             "art",
+            None,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -1151,6 +1164,7 @@ mod tests {
             Some(&executor(&pin(&format!("sha256:{}", "ab".repeat(32))))),
             "d",
             "art",
+            None,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -1178,6 +1192,7 @@ mod tests {
             Some(&executor(&p)),
             "digest-a",
             "art",
+            None,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -1383,6 +1398,7 @@ mod tests {
             None,
             "digest-a",
             "art",
+            None,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -1405,6 +1421,7 @@ mod tests {
             Some(&executor(&p)),
             "digest-a",
             "art",
+            None,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -1464,6 +1481,7 @@ mod tests {
             _plan: &ExecutorPlan,
             _frozen: &str,
             _artifact: &str,
+            _artifact_uri: Option<&str>,
             _holdout: &[HoldoutRecord],
             _claim: &str,
         ) -> Result<ProofEvalDocument, EvalError> {
@@ -1567,6 +1585,7 @@ mod tests {
                 &plan,
                 "d",
                 "a",
+                None,
                 &recs,
                 "c",
             )
@@ -1687,6 +1706,7 @@ mod tests {
             Some(&executor(&p)),
             "digest-a",
             "art",
+            None,
             &recs,
             "claim",
             EvalBackend::Sim,
@@ -1721,6 +1741,7 @@ mod tests {
             Some(&executor(&p)),
             "digest-a",
             "art",
+            None,
             &recs,
             "claim",
             EvalBackend::Lium,

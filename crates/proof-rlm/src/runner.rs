@@ -70,7 +70,9 @@ pub struct CustomRunRequest {
     pub submission_digest: String,
     /// Artefact digest (sha256 of the recipe bytes).
     pub artifact_digest: String,
-    /// Optional locator for the same bytes.
+    /// Miner-supplied locator for the same bytes. The runner fetches from it
+    /// inside the topic VM and checks the digest; it is never trusted beyond
+    /// that. Empty / whitespace is `None`.
     pub artifact_uri: Option<String>,
     /// Miner claim (English).
     pub claim: String,
@@ -146,7 +148,10 @@ impl CustomRunRequest {
             epsilon_rel: topic.metric.epsilon_rel,
             submission_digest: submission_digest.trim().to_owned(),
             artifact_digest: artifact_digest.trim().to_ascii_lowercase(),
-            artifact_uri: artifact_uri.map(|u| u.trim().to_owned()),
+            artifact_uri: artifact_uri
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .map(str::to_owned),
             claim: claim.to_owned(),
             constraints: topic.constraints.clone(),
             rules_version: rules.version,
@@ -428,6 +433,11 @@ mod tests {
         assert_eq!(req.rules_version, 1);
         assert_eq!(req.rules_digest, rules().digest());
         assert_eq!(req.seed, t.baseline.seed);
+        assert_eq!(
+            req.artifact_uri.as_deref(),
+            Some("https://example.invalid/artifact.zip"),
+            "the miner locator reaches the runner"
+        );
         assert!(req.sandbox.firecracker_required);
         assert_eq!(req.sandbox.deadline_s, pin().max_proof_deadline_s_ceiling);
         assert_eq!(req.judge.offer_id, offer().offer_id);
@@ -459,6 +469,18 @@ mod tests {
             CustomRunRequest::from_topic(&tight, &pin(), &offer(), &rules(), "d", "a", None, "")
                 .expect("request");
         assert_eq!(req.sandbox.deadline_s, 600);
+        let blank = CustomRunRequest::from_topic(
+            &topic(),
+            &pin(),
+            &offer(),
+            &rules(),
+            "d",
+            "a",
+            Some("  "),
+            "",
+        )
+        .expect("request");
+        assert_eq!(blank.artifact_uri, None, "whitespace is no locator");
     }
 
     #[test]

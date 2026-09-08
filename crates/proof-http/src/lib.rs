@@ -417,6 +417,7 @@ async fn submit(
         executor.as_ref(),
         &submission_digest,
         &artifact,
+        body.artifact_uri.as_deref(),
         &holdout,
         &body.claim,
         st.backend,
@@ -975,6 +976,7 @@ mod tests {
             _plan: &ExecutorPlan,
             frozen: &str,
             artifact: &str,
+            _artifact_uri: Option<&str>,
             _holdout: &[proof_task::HoldoutRecord],
             _claim: &str,
         ) -> Result<proof_eval::ProofEvalDocument, EvalError> {
@@ -1860,13 +1862,24 @@ mod tests {
             plan: &ExecutorPlan,
             frozen: &str,
             artifact: &str,
+            artifact_uri: Option<&str>,
             holdout: &[proof_task::HoldoutRecord],
             claim: &str,
         ) -> Result<proof_eval::ProofEvalDocument, EvalError> {
             self.ready_for_topic(topic)?;
             let mut doc = self
                 .inner
-                .score(pin, topic, offer, plan, frozen, artifact, holdout, claim)
+                .score(
+                    pin,
+                    topic,
+                    offer,
+                    plan,
+                    frozen,
+                    artifact,
+                    artifact_uri,
+                    holdout,
+                    claim,
+                )
                 .await?;
             if topic.metric.family == MetricFamily::Custom {
                 doc.harness.custom_value = Some(0.7);
