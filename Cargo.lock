@@ -143,6 +143,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "ark-bls12-377"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -461,6 +470,28 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "axum-server"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "either",
+ "fs-err",
+ "http",
+ "http-body",
+ "hyper",
+ "hyper-util",
+ "pin-project-lite",
+ "rustls",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tower-service",
 ]
 
 [[package]]
@@ -1735,6 +1766,16 @@ dependencies = [
  "parity-scale-codec",
  "scale-info",
  "serde",
+]
+
+[[package]]
+name = "fs-err"
+version = "3.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b91aa448ca50d7e79433bdf3ee8d99215430d2ec02ade5aefab2a073a1822e8a"
+dependencies = [
+ "autocfg",
+ "tokio",
 ]
 
 [[package]]
@@ -3461,6 +3502,7 @@ dependencies = [
  "proof-rlm-scorer",
  "proof-rlm-store",
  "proof-task",
+ "proof-vm-fc",
  "reqwest 0.12.28",
  "serde_json",
  "sha2 0.10.9",
@@ -3497,6 +3539,24 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "proof-fc-host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "proof-rlm",
+ "proof-vm-agent",
+ "proof-vm-proto",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -3641,6 +3701,70 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.19",
  "toml",
+]
+
+[[package]]
+name = "proof-vm-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "http-body-util",
+ "proof-canon",
+ "proof-rlm",
+ "proof-vm-proto",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 2.0.19",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "proof-vm-fc"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "proof-rlm",
+ "proof-vm-agent",
+ "proof-vm-proto",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "proof-vm-orchestrator-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "axum-server",
+ "clap",
+ "proof-fc-host",
+ "proof-vm-agent",
+ "proof-vm-proto",
+ "telemetry",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "proof-vm-proto"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "proof-rlm",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]

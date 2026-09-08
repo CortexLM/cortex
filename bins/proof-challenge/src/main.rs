@@ -25,9 +25,13 @@ use proof_challenge::{
 };
 use proof_eval::{custom_ids_ref, registered_custom, FamilyMux};
 use proof_harvest::{HarvestLimits, LiumProofHarvest};
-use proof_rlm::RunnerRegistry;
+use proof_rlm::{
+    RunnerRegistry, TopicVmOrchestrator, UnwiredVmOrchestrator, VmBackedRunner, VmTemplate,
+    RLM_VM_IMAGE_DIGEST_ENV, VM_ORCHESTRATOR_TOKEN_FILE_ENV, VM_ORCHESTRATOR_URL_ENV,
+};
 use proof_rlm_scorer::{ArtefactStore, RlmScorer};
 use proof_rlm_store::{MemoryRlmStore, PgRlmStore, RlmStore};
+use proof_vm_fc::{parse_custom_ids, FirecrackerOrchestrator, VM_RUNNER_CUSTOM_IDS_ENV};
 use tokio::net::TcpListener;
 
 /// Operator Proof challenge service CLI.
@@ -274,18 +278,91 @@ fn build_live_scorer(
 
 /// Route the `custom` metric family to the RLM scorer over the default harvest.
 ///
-/// The runner registry starts **empty**: no benchmark, model, or repository is
-/// compiled in, so every custom topic answers 503 (`RunnerUnwired`) until an
-/// operator or the topic's RLM registers a runner under its `custom_id`. It
-/// never falls back to the digest-pinned harvest and never spends.
+/// No benchmark, model, or repository is compiled in: the registry holds only
+/// the generic `VmBackedRunner`, under the custom ids the operator lists in
+/// `PROOF_VM_RUNNER_CUSTOM_IDS`, over the topic-VM orchestrator
+/// [`topic_vm_orchestrator`] resolved. With no ids the registry is empty and
+/// every custom topic answers 503 (`RunnerUnwired`); with ids but an unwired
+/// or unpinned orchestrator, 503 naming the missing env var. It never falls
+/// back to the digest-pinned harvest and never spends.
 fn with_custom_family(
     harvest: Arc<dyn LiveScorer>,
     rlm_store: Arc<dyn RlmStore>,
     artefact_root: &Path,
 ) -> Arc<dyn LiveScorer> {
-    let scorer = RlmScorer::new(Arc::new(RunnerRegistry::new()), rlm_store)
+    let scorer = RlmScorer::new(Arc::new(runner_registry()), rlm_store)
         .with_artefacts(Some(ArtefactStore::new(artefact_root)));
     Arc::new(FamilyMux::new(harvest).with_custom_family(Arc::new(scorer)))
+}
+
+/// The topic-VM orchestrator this host talks to, plus the RLM VM template.
+///
+/// `PROOF_VM_ORCHESTRATOR_URL` + `PROOF_VM_ORCHESTRATOR_TOKEN_FILE` +
+/// `PROOF_RLM_VM_IMAGE_DIGEST` select the live `FirecrackerOrchestrator`
+/// (HTTPS to the agent on the dedicated KVM host, 4 vCPU / 8192 MiB by
+/// default). URL unset → `UnwiredVmOrchestrator` (503, names the env vars).
+/// URL set but malformed (not https, no token file env) → also unwired, with
+/// the error logged: a half-configured orchestrator never becomes a host
+/// fallback. Token / digest are checked at `ready()` so they can be fixed
+/// without a restart.
+fn topic_vm_orchestrator() -> (Arc<dyn TopicVmOrchestrator>, VmTemplate) {
+    match FirecrackerOrchestrator::from_env() {
+        Ok(Some(fc)) => {
+            let template = fc.template().clone();
+            match fc.ready() {
+                Ok(()) => tracing::info!(
+                    url = %fc.url(), vcpus = template.vcpus, mem_mib = template.mem_mib,
+                    image = %template.image_digest,
+                    "firecracker topic-vm orchestrator wired (bearer file present, contents not logged)"
+                ),
+                Err(e) => tracing::warn!(
+                    url = %fc.url(),
+                    "firecracker topic-vm orchestrator configured but not ready ({e}); custom \
+                     topics answer 503 until fixed"
+                ),
+            }
+            (Arc::new(fc), template)
+        }
+        Ok(None) => {
+            tracing::warn!(
+                "no topic-vm orchestrator ({VM_ORCHESTRATOR_URL_ENV} / \
+                 {VM_ORCHESTRATOR_TOKEN_FILE_ENV} / {RLM_VM_IMAGE_DIGEST_ENV} unset); every custom \
+                 topic answers 503 and nothing runs on this host"
+            );
+            (Arc::new(UnwiredVmOrchestrator), VmTemplate::from_env())
+        }
+        Err(e) => {
+            tracing::warn!(
+                "topic-vm orchestrator refused ({e}); staying unwired, custom topics 503"
+            );
+            (Arc::new(UnwiredVmOrchestrator), VmTemplate::from_env())
+        }
+    }
+}
+
+/// `custom_id → VmBackedRunner` for every id in `PROOF_VM_RUNNER_CUSTOM_IDS`.
+fn runner_registry() -> RunnerRegistry {
+    let (orchestrator, template) = topic_vm_orchestrator();
+    let runner = Arc::new(VmBackedRunner::new(orchestrator, template));
+    let raw = std::env::var(VM_RUNNER_CUSTOM_IDS_ENV).unwrap_or_default();
+    registry_for(&raw, &runner)
+}
+
+fn registry_for(raw_ids: &str, runner: &Arc<VmBackedRunner>) -> RunnerRegistry {
+    let mut registry = RunnerRegistry::new();
+    for id in parse_custom_ids(raw_ids) {
+        match registry.register(&id, runner.clone()) {
+            Ok(()) => tracing::info!(custom_id = %id, "vm-backed runner registered"),
+            Err(e) => tracing::warn!("{VM_RUNNER_CUSTOM_IDS_ENV}: {e}; skipped"),
+        }
+    }
+    if registry.is_empty() {
+        tracing::warn!(
+            "{VM_RUNNER_CUSTOM_IDS_ENV} names no custom id; the runner registry is empty and \
+             every custom topic answers 503 (registration is an operator action)"
+        );
+    }
+    registry
 }
 
 fn database_url(cli: &Cli) -> Result<Option<String>, String> {
@@ -586,14 +663,16 @@ mod tests {
         std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
     }
 
-    /// No runner is compiled in: every custom id refuses through the mux
-    /// (`RunnerUnwired`, the 503 root cause), the harvest still owns the
-    /// nll / throughput route, and nothing is registered.
+    /// No runner is compiled in: with no orchestrator env and no listed ids,
+    /// every custom id refuses through the mux (`RunnerUnwired`, the 503 root
+    /// cause), the harvest still owns the nll / throughput route, and nothing
+    /// is registered.
     #[test]
     fn live_scorer_registers_no_custom_runner_and_refuses_every_custom_id() {
         let _guard = LIUM_ENV
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_vm_env();
         let pubkey = stub_ssh_pubkey("proof-families");
         std::env::set_var("LIUM_API_KEY", "test-key-not-a-real-secret");
         std::env::set_var("LIUM_SSH_PUBLIC_KEY_FILE", &pubkey);
@@ -677,6 +756,109 @@ mod tests {
         let path = std::env::temp_dir().join(format!("proof-test-{tag}.pub"));
         std::fs::write(&path, "ssh-ed25519 AAAAtest proof-test\n").expect("write pubkey");
         path
+    }
+
+    /// Every env var the topic-vm wiring reads. Cleared under `LIUM_ENV`.
+    fn clear_vm_env() {
+        for name in [
+            VM_ORCHESTRATOR_URL_ENV,
+            VM_ORCHESTRATOR_TOKEN_FILE_ENV,
+            RLM_VM_IMAGE_DIGEST_ENV,
+            VM_RUNNER_CUSTOM_IDS_ENV,
+            proof_vm_fc::RLM_VM_VCPUS_ENV,
+            proof_vm_fc::RLM_VM_MEM_MIB_ENV,
+            proof_vm_fc::VM_ORCHESTRATOR_CA_FILE_ENV,
+        ] {
+            std::env::remove_var(name);
+        }
+    }
+
+    /// Registration is an operator action: no ids → empty registry; listed
+    /// ids bind the one generic `VmBackedRunner`; a malformed id is skipped,
+    /// never a boot error.
+    #[test]
+    fn runner_registry_binds_the_vm_runner_only_to_listed_custom_ids() {
+        let runner = Arc::new(VmBackedRunner::unwired());
+        assert!(registry_for("", &runner).is_empty());
+        assert!(registry_for(" , ", &runner).is_empty());
+        let reg = registry_for("metric_a, Bad Id ,metric-b,metric_a", &runner);
+        assert_eq!(
+            reg.ids(),
+            vec!["metric-b".to_owned(), "metric_a".to_owned()]
+        );
+        let resolved = reg.resolve("metric_a").expect("registered");
+        let err = resolved.ready().expect_err("unwired orchestrator");
+        assert!(matches!(err, proof_rlm::RunnerError::NotWired(_)), "{err}");
+        assert!(err.to_string().contains(VM_ORCHESTRATOR_URL_ENV), "{err}");
+        assert!(
+            reg.resolve("metric_c").is_err(),
+            "unlisted ids stay unregistered"
+        );
+    }
+
+    /// URL + token file + digest select the live `FirecrackerOrchestrator`
+    /// with the locked 4 vCPU / 8192 MiB shape; anything less keeps the
+    /// unwired orchestrator (503), including a half-configured plain-http URL.
+    #[test]
+    fn firecracker_orchestrator_is_preferred_only_when_fully_configured() {
+        let _guard = LIUM_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_vm_env();
+        let (unwired, template) = topic_vm_orchestrator();
+        assert!(matches!(
+            unwired.ready(),
+            Err(proof_rlm::VmError::NotWired(_))
+        ));
+        assert!(template.image_digest.is_empty());
+
+        let dir = std::env::temp_dir().join(format!("proof-vm-wire-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let token = dir.join("vm_orchestrator_token");
+        std::fs::write(&token, "vm-bearer-not-a-real-secret\n").expect("token");
+        std::env::set_var(VM_ORCHESTRATOR_URL_ENV, "https://kvm.example.invalid:8200");
+        std::env::set_var(VM_ORCHESTRATOR_TOKEN_FILE_ENV, &token);
+        let (pinned_less, template) = topic_vm_orchestrator();
+        let err = pinned_less.ready().expect_err("no image pin");
+        assert!(matches!(err, proof_rlm::VmError::NotWired(_)), "{err}");
+        assert!(err.to_string().contains(RLM_VM_IMAGE_DIGEST_ENV), "{err}");
+        assert_eq!(
+            (template.vcpus, template.mem_mib),
+            (4, 8_192),
+            "locked shape"
+        );
+
+        std::env::set_var(
+            RLM_VM_IMAGE_DIGEST_ENV,
+            format!("sha256:{}", "ab".repeat(32)),
+        );
+        let (live, template) = topic_vm_orchestrator();
+        live.ready().expect("url + token + digest = wired");
+        template.validate().expect("pinned");
+        std::env::set_var(VM_RUNNER_CUSTOM_IDS_ENV, "metric_a");
+        let reg = runner_registry();
+        assert_eq!(reg.ids(), vec!["metric_a".to_owned()]);
+        reg.resolve("metric_a")
+            .expect("registered")
+            .ready()
+            .expect("runner over the live orchestrator is ready");
+
+        std::fs::write(&token, "\n").expect("empty token");
+        let (live, _) = topic_vm_orchestrator();
+        let err = live.ready().expect_err("empty bearer file");
+        assert!(
+            err.to_string().contains(VM_ORCHESTRATOR_TOKEN_FILE_ENV),
+            "{err}"
+        );
+
+        std::env::set_var(VM_ORCHESTRATOR_URL_ENV, "http://10.0.0.7:8200");
+        let (refused, _) = topic_vm_orchestrator();
+        let err = refused
+            .ready()
+            .expect_err("plain http off loopback is never wired");
+        assert!(err.to_string().contains(VM_ORCHESTRATOR_URL_ENV), "{err}");
+        clear_vm_env();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     static LIUM_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());

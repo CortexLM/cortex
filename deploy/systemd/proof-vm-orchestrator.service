@@ -1,0 +1,46 @@
+[Unit]
+Description=Proof topic-VM orchestrator (Firecracker + jailer agent; dedicated KVM host only)
+Documentation=https://github.com/CortexLM/cortex/blob/main/docs/runbooks/proof-vm-orchestrator.md
+# Never install this unit on a control-plane droplet or a Lium pod: it needs
+# /dev/kvm, a pinned kernel + rootfs images, and CAP_NET_ADMIN for the per-VM
+# TAP + nftables allowlist. The control plane reaches it over HTTPS only.
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/dev/kvm
+ConditionPathExists=/etc/proof-vm/orchestrator.env
+
+[Service]
+Type=simple
+# Pins (kernel + sister image digests), TLS paths, egress allowlist, token
+# file path. No secret value lives in the env file: the bearer is a file the
+# agent re-reads per request, owner key material is a directory it stages
+# over vsock. See deploy/env/proof-vm-orchestrator.env.example.
+EnvironmentFile=/etc/proof-vm/orchestrator.env
+ExecStart=/usr/local/bin/proof-vm-orchestrator
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+KillMode=control-group
+# The jailer needs root to chroot / pivot_root / mknod and to drop to the jail
+# uid; the agent itself needs NET_ADMIN for TAP + nftables. Everything else is
+# locked down.
+User=root
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=no
+ProtectControlGroups=no
+# Writable: jails, images (verified, never written by the agent but reflinked
+# from), retained jails, console logs.
+ReadWritePaths=/srv/jailer /var/lib/proof-vm /run
+# Read-only: binaries, pins, TLS, bearer, owner keys.
+ReadOnlyPaths=/etc/proof-vm /usr/local/bin/firecracker /usr/local/bin/jailer
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_MKNOD CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL CAP_SYS_RESOURCE
+AmbientCapabilities=
+LimitNOFILE=65536
+# JSON tracing; never logs the bearer or owner key material.
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

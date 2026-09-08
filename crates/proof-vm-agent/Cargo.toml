@@ -1,0 +1,36 @@
+[package]
+name = "proof-vm-agent"
+description = "proof-vm-orchestrator agent library: bearer-authenticated HTTP API (create / attach / run / teardown) with a hard topic_id ↔ VM bind, the Hypervisor trait the Firecracker backend implements, and host stamping of paid outputs (sandboxed / flops_used come from the sister guest the host booted, never from the RLM). The fake hypervisor ships behind test-fixtures; CI never boots a VM."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+# Exposes `proof_vm_agent::fixtures::FakeHypervisor` to sibling crates' tests.
+test-fixtures = []
+
+[dependencies]
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+proof-canon = { path = "../proof-canon" }
+proof-rlm = { path = "../proof-rlm" }
+proof-vm-proto = { path = "../proof-vm-proto" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "rt", "time", "net"] }
+tracing = "0.1"
+
+[dev-dependencies]
+http-body-util = "0.1"
+proof-rlm = { path = "../proof-rlm", features = ["test-fixtures"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

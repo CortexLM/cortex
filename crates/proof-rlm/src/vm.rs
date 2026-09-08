@@ -9,10 +9,13 @@
 //! never host paths, never keys), reads back documents, and tears the VM down
 //! or retains it by policy.
 //!
-//! The only orchestrator shipped here is [`UnwiredVmOrchestrator`]: it
-//! refuses every call and names the env vars a live one would read. There is
-//! no host-local execution path in this crate — a missing orchestrator is a
-//! 503, not a fallback.
+//! The only orchestrator shipped in this crate is [`UnwiredVmOrchestrator`]:
+//! it refuses every call and names the env vars a live one reads. The live
+//! implementation (`FirecrackerOrchestrator`, crate `proof-vm-fc`) is a thin
+//! HTTPS client of the `proof-vm-orchestrator` agent on a dedicated KVM host,
+//! where jailer boots one Firecracker RLM VM per topic and every miner run is
+//! a **sister** Firecracker guest. There is no host-local execution path
+//! anywhere — a missing orchestrator is a 503, not a fallback.
 
 use std::sync::Arc;
 
@@ -190,8 +193,47 @@ pub enum VmJob {
     },
 }
 
-/// What a job produced.
-#[derive(Debug, Clone, PartialEq)]
+impl VmJob {
+    /// The topic every job is attributed to. An orchestrator refuses a job
+    /// whose topic is not the one its VM is bound to.
+    #[must_use]
+    pub fn topic_id(&self) -> &str {
+        match self {
+            Self::ProposeRules { topic, .. } => &topic.id,
+            Self::Baseline { request }
+            | Self::Inspect { request, .. }
+            | Self::Evaluate { request, .. } => &request.topic_id,
+            Self::Archive { topic_id } => topic_id,
+        }
+    }
+
+    /// Wall-clock budget the job's run request carries, if it carries one.
+    #[must_use]
+    pub fn deadline_s(&self) -> Option<u64> {
+        match self {
+            Self::Baseline { request }
+            | Self::Inspect { request, .. }
+            | Self::Evaluate { request, .. } => Some(request.sandbox.deadline_s),
+            Self::ProposeRules { .. } | Self::Archive { .. } => None,
+        }
+    }
+
+    /// Whether the job runs miner code and the topic demands the guest.
+    #[must_use]
+    pub fn requires_firecracker(&self) -> bool {
+        match self {
+            Self::Baseline { request } | Self::Evaluate { request, .. } => {
+                request.sandbox.firecracker_required
+            }
+            Self::ProposeRules { .. } | Self::Inspect { .. } | Self::Archive { .. } => false,
+        }
+    }
+}
+
+/// What a job produced. Serialised adjacently tagged (`output` / `body`) so
+/// an orchestrator can answer over the wire with the same type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "output", content = "body", rename_all = "snake_case")]
 pub enum VmJobOutput {
     /// Rules the RLM proposes; the store versions them.
     Rules(Vec<ChecklistRule>),
@@ -492,6 +534,65 @@ mod tests {
             err,
             RunnerError::Report(crate::runner::ReportError::NotSandboxed)
         ));
+    }
+
+    /// Every job names its topic (the orchestrator's hard bind), the paid
+    /// jobs carry the deadline the guest is held to, and outputs round-trip
+    /// over the wire as the same type.
+    #[test]
+    fn jobs_name_their_topic_and_outputs_round_trip() {
+        let req = request();
+        let jobs = [
+            VmJob::ProposeRules {
+                topic: Box::new(crate::fixtures::topic()),
+                current_version: None,
+            },
+            VmJob::Baseline {
+                request: req.clone(),
+            },
+            VmJob::Inspect {
+                request: req.clone(),
+                rules: rules(),
+            },
+            VmJob::Evaluate {
+                request: req.clone(),
+                checklist_digest: "c".into(),
+                rules_version: 1,
+            },
+            VmJob::Archive {
+                topic_id: req.topic_id.clone(),
+            },
+        ];
+        for job in &jobs {
+            assert_eq!(job.topic_id(), req.topic_id);
+        }
+        assert_eq!(jobs[0].deadline_s(), None);
+        assert_eq!(jobs[1].deadline_s(), Some(req.sandbox.deadline_s));
+        assert_eq!(jobs[3].deadline_s(), Some(req.sandbox.deadline_s));
+        assert!(jobs[1].requires_firecracker() && jobs[3].requires_firecracker());
+        assert!(
+            !jobs[2].requires_firecracker(),
+            "inspection runs no miner code"
+        );
+        let outputs = [
+            VmJobOutput::Rules(rules().rules),
+            VmJobOutput::Baseline(crate::fixtures::report_for(&req, 0.5)),
+            VmJobOutput::Inspected(crate::runner::InspectOutcome {
+                checklist: crate::fixtures::green(&rules(), &req.submission_digest),
+                artifact: vec![],
+            }),
+            VmJobOutput::Evaluated(crate::runner::RunOutcome {
+                report: crate::fixtures::report_for(&req, 0.5),
+                logs: vec![],
+            }),
+            VmJobOutput::Archived,
+        ];
+        for out in outputs {
+            let json = serde_json::to_string(&out).expect("json");
+            assert!(json.contains("\"output\""), "{json}");
+            let back: VmJobOutput = serde_json::from_str(&json).expect("round trip");
+            assert_eq!(back, out);
+        }
     }
 
     #[test]

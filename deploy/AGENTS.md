@@ -67,6 +67,25 @@ checks and an acknowledgement request, and the binary does not drive its
 leaf-signing helpers. Deployment configuration cannot fill these implementation
 gaps. See [`docs/WHITEPAPER.md`](../docs/WHITEPAPER.md).
 
+## Proof topic VMs (Firecracker on a dedicated KVM host)
+
+Custom-family topics run their RLM in one Firecracker microVM per `topic_id`
+and every miner run in a **sister** Firecracker guest with no network — on a
+**dedicated KVM host**, not on any droplet (DO has no nested virt), not on
+Lium. That host runs `proof-vm-orchestrator` as a systemd unit
+([`systemd/proof-vm-orchestrator.service`](systemd/proof-vm-orchestrator.service),
+env [`env/proof-vm-orchestrator.env.example`](env/proof-vm-orchestrator.env.example)),
+**not** a compose service. The master's `proof-challenge` is only its HTTPS
+client: set `PROOF_VM_ORCHESTRATOR_URL`, `PROOF_VM_ORCHESTRATOR_TOKEN_FILE`
+(bearer **file** under `deploy/secrets/proof/`, same bytes as the host's
+`/etc/proof-vm/token`, mode 0400), `PROOF_RLM_VM_IMAGE_DIGEST`, and
+`PROOF_VM_RUNNER_CUSTOM_IDS` in `deploy/env/proof-challenge.env`. Unset →
+unwired (503); token missing, digest unpinned, or agent down → 503, never a
+host-local fallback. Kernel / RLM / sister image digests are computed from the
+files the operator stages (`sha256sum`) — never invented, never in git.
+Procedure and the mandatory submission verification:
+[`docs/runbooks/proof-vm-orchestrator.md`](../docs/runbooks/proof-vm-orchestrator.md).
+
 ## Local testnet E2E
 
 Full procedure: [`docs/runbooks/local-testnet-e2e.md`](../docs/runbooks/local-testnet-e2e.md).

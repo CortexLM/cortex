@@ -1,0 +1,24 @@
+[package]
+name = "proof-vm-proto"
+description = "Wire protocol between the Proof control plane (FirecrackerOrchestrator client) and the proof-vm-orchestrator agent on the KVM host, plus the vsock framing the agent speaks to the RLM and miner guests. Types only; no challenge content."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+base64 = "0.22"
+proof-rlm = { path = "../proof-rlm" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util"] }
+
+[dev-dependencies]
+proof-rlm = { path = "../proof-rlm", features = ["test-fixtures"] }
+tokio = { version = "1", features = ["io-util", "macros", "rt"] }
+
+[lints]
+workspace = true

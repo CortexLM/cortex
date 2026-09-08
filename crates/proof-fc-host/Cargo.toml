@@ -1,0 +1,30 @@
+[package]
+name = "proof-fc-host"
+description = "Firecracker + jailer backend of the proof-vm-orchestrator agent: digest-verified images, one jailed RLM microVM per topic, vsock job channel, per-VM egress allowlist (nftables), sister miner guest with no network for every paid run, destroy-or-retain teardown. Every host action is rendered through a Shell trait so tests never spawn firecracker."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+hex = "0.4"
+proof-rlm = { path = "../proof-rlm" }
+proof-vm-agent = { path = "../proof-vm-agent" }
+proof-vm-proto = { path = "../proof-vm-proto" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "net", "process", "rt", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", default-features = false }
+tracing = "0.1"
+
+[dev-dependencies]
+proof-rlm = { path = "../proof-rlm", features = ["test-fixtures"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true
