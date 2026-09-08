@@ -59,8 +59,14 @@ struct Cli {
     /// Operator holdout records (JSON array or map keyed by topic id). Never in git.
     #[arg(long, env = "PROOF_HOLDOUT_FILE")]
     holdout_file: Option<PathBuf>,
-    /// Seconds the eval image gets to score one artifact on the pod.
-    #[arg(long, env = "PROOF_EVAL_TIMEOUT_SECS", default_value_t = 5400)]
+    /// Fallback seconds the eval image gets when no executor deadline was
+    /// resolved. A resolved `max_proof_deadline_s` is the pod timeout and is
+    /// never clamped by this value; the default equals the pin ceiling.
+    #[arg(
+        long,
+        env = "PROOF_EVAL_TIMEOUT_SECS",
+        default_value_t = proof_task::MAX_PROOF_DEADLINE_S_CEILING
+    )]
     eval_timeout_secs: u64,
     /// Sealed baseline measurements (JSON map keyed by topic id).
     #[arg(long, env = "PROOF_BASELINE_FILE")]

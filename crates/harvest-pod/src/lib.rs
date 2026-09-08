@@ -81,32 +81,55 @@ pub struct RunExtras {
     pub proxy_tar_path: Option<PathBuf>,
 }
 
-/// Exit codes GNU `timeout` reports when the entrypoint hit the deadline:
-/// `124` on the TERM timeout, `137` when `--kill-after` had to SIGKILL.
-/// `137` is also what an external SIGKILL (OOM) reports; either way the run
-/// did not finish inside its budget and the harvest refuses with the tail.
-pub const DEADLINE_EXIT_CODES: [u32; 2] = [124, 137];
+/// Exit code GNU `timeout` reports when the entrypoint hit the deadline and
+/// died on TERM. Unambiguous: only the wrapper produces it.
+pub const DEADLINE_EXIT_CODE: u32 = 124;
 
-/// Seconds the entrypoint gets for one run: the configured run timeout,
-/// tightened by a per-run proof deadline when one is given. The image is
-/// killed at the deadline, never given more.
+/// `128 + SIGKILL`. Ambiguous on its own: the wrapper's `--kill-after` and an
+/// external kill (GPU OOM, host pressure) both report it. The run command
+/// therefore records provenance itself ([`DEADLINE_MARKER`]) instead of the
+/// harvest guessing from the code.
+pub const SIGKILL_EXIT_CODE: u32 = 137;
+
+/// Line the run command prints when the **wrapper** ended the run: exit
+/// `124`, or exit `137` after at least the full timeout had elapsed (the
+/// `--kill-after` path). A `137` before the deadline is an external kill and
+/// does not print it.
+pub const DEADLINE_MARKER: &str = "EVAL_DEADLINE_HIT";
+
+/// Seconds the entrypoint gets for one run.
+///
+/// A resolved proof deadline **is** the pod timeout: the run is killed at
+/// the deadline and never clamped below it by the host's fallback
+/// `run_timeout_secs` (which only applies when no deadline was resolved).
+/// An approved 7200 s proof therefore gets 7200 s even on a host whose
+/// fallback is shorter.
 #[must_use]
 pub fn effective_run_timeout_secs(run_timeout_secs: u64, deadline_secs: Option<u64>) -> u64 {
-    deadline_secs
-        .filter(|d| *d > 0)
-        .map_or(run_timeout_secs, |d| d.min(run_timeout_secs))
+    deadline_secs.filter(|d| *d > 0).unwrap_or(run_timeout_secs)
 }
 
-/// Whether pod stdout reports an `exit=<rc>` line with a deadline exit code
-/// (the run was cut at the `timeout`, not a scoring failure).
-#[must_use]
-pub fn hit_deadline(stdout: &str) -> bool {
-    stdout.lines().any(|l| {
+fn exit_code(stdout: &str) -> Option<u32> {
+    stdout.lines().find_map(|l| {
         l.trim()
             .strip_prefix("exit=")
             .and_then(|rc| rc.trim().parse::<u32>().ok())
-            .is_some_and(|rc| DEADLINE_EXIT_CODES.contains(&rc))
     })
+}
+
+/// Whether the run was cut by the deadline wrapper: the [`DEADLINE_MARKER`]
+/// line, or the unambiguous `exit=124`.
+#[must_use]
+pub fn hit_deadline(stdout: &str) -> bool {
+    stdout.lines().any(|l| l.trim_end() == DEADLINE_MARKER)
+        || exit_code(stdout) == Some(DEADLINE_EXIT_CODE)
+}
+
+/// Whether the entrypoint was SIGKILLed by something other than the deadline
+/// wrapper (e.g. GPU out-of-memory): `exit=137` without the deadline marker.
+#[must_use]
+pub fn killed_externally(stdout: &str) -> bool {
+    exit_code(stdout) == Some(SIGKILL_EXIT_CODE) && !hit_deadline(stdout)
 }
 
 /// Seconds allowed to stream `bytes` over SSH. Floor is the short-op
@@ -180,6 +203,11 @@ impl PodProgram {
     /// A non-interactive SSH session often has a login-less PATH that misses
     /// the image's install location; exit 127 with no `OK` marker is that miss,
     /// not a scoring failure.
+    ///
+    /// Deadline provenance is recorded on the pod: [`DEADLINE_MARKER`] is
+    /// printed when the wrapper ended the run (`exit=124`, or `exit=137`
+    /// once the full timeout had elapsed — the `--kill-after` path). A
+    /// `137` earlier than that is an external SIGKILL and stays unmarked.
     #[must_use]
     pub fn run_cmd(&self, timeout_secs: u64) -> String {
         let Self {
@@ -204,11 +232,14 @@ impl PodProgram {
              bin={bin}; \
              if [ -x \"/usr/bin/$bin\" ]; then resolved=\"/usr/bin/$bin\"; \
              else resolved=$(command -v \"$bin\" 2>/dev/null || echo \"/usr/bin/$bin\"); fi; \
+             t0=$(date +%s); \
              timeout --kill-after=60 {timeout_secs} \"$resolved\"{args} \
                --request {REQUEST_FILE} --out metrics.json > run.log 2>&1; \
-             rc=$?; \
+             rc=$?; t1=$(date +%s); \
              if [ -f metrics.json ]; then printf '{metrics_marker}'; cat metrics.json; printf '\\n'; fi; \
              if [ $rc -eq 0 ]; then echo {ok_marker}; else echo \"exit=$rc\"; fi; \
+             if [ $rc -eq {DEADLINE_EXIT_CODE} ] || {{ [ $rc -eq {SIGKILL_EXIT_CODE} ] && \
+               [ $((t1 - t0)) -ge {timeout_secs} ]; }}; then echo {DEADLINE_MARKER}; fi; \
              tail -c 8192 run.log 2>/dev/null || true"
         )
     }
@@ -734,28 +765,110 @@ mod tests {
         assert!(err.contains("refusing to stage the holdout"), "{err}");
     }
 
+    /// The resolved deadline is the pod timeout. A host whose fallback run
+    /// timeout is 5400 s must still give an approved 7200 s proof its full
+    /// 7200 s; the fallback only applies when no deadline was resolved.
     #[test]
-    fn a_staged_deadline_only_tightens_the_run_timeout() {
+    fn a_resolved_deadline_is_honored_even_above_the_fallback_run_timeout() {
         assert_eq!(effective_run_timeout_secs(5400, None), 5400);
         assert_eq!(effective_run_timeout_secs(5400, Some(0)), 5400);
         assert_eq!(effective_run_timeout_secs(5400, Some(1800)), 1800);
         assert_eq!(
-            effective_run_timeout_secs(5400, Some(9000)),
-            5400,
-            "a deadline never extends the configured run timeout"
+            effective_run_timeout_secs(5400, Some(7200)),
+            7200,
+            "a 7200s approved deadline must never be clamped to a 5400s host default"
         );
+        let cmd = PROGRAM.run_cmd(effective_run_timeout_secs(5400, Some(7200)));
+        assert!(cmd.contains("timeout --kill-after=60 7200"), "{cmd}");
         let cmd = PROGRAM.run_cmd(effective_run_timeout_secs(5400, Some(1800)));
         assert!(cmd.contains("timeout --kill-after=60 1800"), "{cmd}");
     }
 
     #[test]
-    fn deadline_exit_codes_are_recognised_in_stdout() {
+    fn deadline_provenance_comes_from_the_wrapper_not_the_exit_code_alone() {
         assert!(hit_deadline("boot\nexit=124\ntail of run.log\n"));
-        assert!(hit_deadline("exit=137\n"));
+        assert!(hit_deadline("exit=137\nEVAL_DEADLINE_HIT\ntail\n"));
+        assert!(
+            !hit_deadline("exit=137\ntail\n"),
+            "a bare 137 is an external SIGKILL (OOM), not the deadline"
+        );
+        assert!(killed_externally("exit=137\nCUDA out of memory\n"));
+        assert!(!killed_externally("exit=137\nEVAL_DEADLINE_HIT\n"));
+        assert!(!killed_externally("exit=2\n"));
         assert!(!hit_deadline("exit=2\n"));
         assert!(!hit_deadline("DEMO_METRICS={\"a\":1}\nDEMO_EVAL_OK\n"));
         assert!(!hit_deadline("the log said exit=124 once"));
-        assert_eq!(DEADLINE_EXIT_CODES, [124, 137]);
+        assert_eq!(DEADLINE_EXIT_CODE, 124);
+        assert_eq!(SIGKILL_EXIT_CODE, 137);
+        let cmd = PROGRAM.run_cmd(600);
+        assert!(cmd.contains("t0=$(date +%s)"), "{cmd}");
+        assert!(cmd.contains("$((t1 - t0)) -ge 600"), "{cmd}");
+        assert!(cmd.contains("echo EVAL_DEADLINE_HIT"), "{cmd}");
+    }
+
+    /// Run the real command tail in a shell: the wrapper's TERM timeout
+    /// prints the marker, an external SIGKILL inside the budget does not.
+    #[test]
+    fn run_cmd_marks_only_wrapper_caused_kills() {
+        fn shell(timeout_secs: u64, entrypoint: &str) -> String {
+            let dir = std::env::temp_dir().join(format!(
+                "harvest-pod-deadline-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
+            ));
+            std::fs::create_dir_all(&dir).expect("dir");
+            let bin = dir.join("demo-eval");
+            std::fs::write(&bin, format!("#!/bin/sh\n{entrypoint}\n")).expect("script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
+            let program = PodProgram {
+                workdir: "/tmp/harvest-pod-deadline-workdir",
+                entrypoint: "demo-eval score",
+                metrics_marker: "DEMO_METRICS=",
+                ok_marker: "DEMO_EVAL_OK",
+                score_binary: "/usr/bin/demo-eval",
+            };
+            let cmd = program
+                .run_cmd(timeout_secs)
+                .replace(
+                    "cd /tmp/harvest-pod-deadline-workdir || exit 1;",
+                    &format!("cd {} || exit 1;", dir.display()),
+                )
+                .replace("bin=demo-eval;", &format!("bin={};", bin.display()));
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .output()
+                .expect("sh");
+            let _ = std::fs::remove_dir_all(&dir);
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+        if std::process::Command::new("timeout")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skip: GNU timeout not available");
+            return;
+        }
+        let term = shell(1, "sleep 5");
+        assert!(term.contains("exit=124"), "{term}");
+        assert!(hit_deadline(&term), "{term}");
+        assert!(!killed_externally(&term), "{term}");
+
+        let oom = shell(30, "kill -9 $$");
+        assert!(oom.contains("exit=137"), "{oom}");
+        assert!(
+            !hit_deadline(&oom),
+            "an early SIGKILL is not the deadline: {oom}"
+        );
+        assert!(killed_externally(&oom), "{oom}");
     }
 
     #[test]
