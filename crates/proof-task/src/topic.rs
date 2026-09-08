@@ -27,7 +27,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{canonical_json, is_hex64, ProofPin, TopicEvalExecutor, TopicInference, TOPIC_DOMAIN};
+use crate::{
+    canonical_json, is_hex64, ChecklistRule, Constraints, ProofPin, TopicEvalExecutor,
+    TopicInference, TOPIC_DOMAIN,
+};
 
 /// Only accepted `schema_version`.
 pub const TOPIC_SCHEMA_VERSION: u32 = 1;
@@ -321,24 +324,6 @@ impl Baseline {
     }
 }
 
-/// Machine-checkable constraints the eval image enforces.
-///
-/// `deny_unknown_fields` is the point: a constraint this control plane does
-/// not understand is a constraint the image cannot be trusted to enforce, so
-/// an unknown key rejects the topic at publish instead of being ignored.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Constraints {
-    /// No `InfiniBand` fabric.
-    pub no_infiniband: bool,
-    /// No NVLink between ranks.
-    pub no_nvlink: bool,
-    /// No NCCL all-reduce over a fast fabric.
-    pub no_nccl_fast_fabric: bool,
-    /// Inter-node (or emulated inter-rank) bandwidth cap in Gbit/s.
-    pub max_inter_node_gbps: Option<f64>,
-}
-
 /// One signed research problem.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -373,6 +358,10 @@ pub struct TopicDocument {
     /// Omitted from the signed payload when empty, so older signatures hold.
     #[serde(skip_serializing_if = "TopicEvalExecutor::is_empty")]
     pub eval_executor: TopicEvalExecutor,
+    /// Anti-cheat rules ticked before any paid inference spend (custom family).
+    /// Omitted from the signed payload when empty, so older signatures hold.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub checklist: Vec<ChecklistRule>,
     /// Sealed baseline recipe plus its two seal hashes.
     pub baseline: Baseline,
     /// Commitment over this topic's holdout records.
@@ -411,6 +400,7 @@ impl Default for TopicDocument {
             proxy_model: None,
             inference: TopicInference::default(),
             eval_executor: TopicEvalExecutor::default(),
+            checklist: Vec::new(),
             baseline: default_adamw(crate::FLOPS_BUDGET_MAX),
             holdout_commitment: String::new(),
             holdout_size: crate::HOLDOUT_SIZE,
@@ -464,9 +454,19 @@ pub enum TopicError {
         /// Family it declared.
         family: &'static str,
     },
-    /// A custom metric this build cannot compute.
-    #[error("custom metric {0:?} is not implemented in proof-eval")]
+    /// An open custom topic names a metric no registered runner can compute.
+    #[error(
+        "custom metric {0:?} has no registered runner on this host; a topic may draft but not open"
+    )]
     UnknownCustomMetric(String),
+    /// A generic binding (constraint, checklist rule) is malformed.
+    #[error("topic binding {field}: {why}")]
+    BadBinding {
+        /// Which field (`constraints.*`, `checklist[id]`).
+        field: String,
+        /// What is wrong.
+        why: &'static str,
+    },
     /// A family knob is missing.
     #[error("family {family:?} requires {field}")]
     MissingFamilyField {
@@ -601,7 +601,17 @@ pub fn topic_signing_payload(doc: &TopicDocument) -> Result<Vec<u8>, TopicError>
 
 impl MetricSpec {
     /// Enforce the family's allowlist and knobs.
-    fn validate(&self, pin: &ProofPin, supported_custom: &[&str]) -> Result<(), TopicError> {
+    ///
+    /// `registered_custom` is the set of custom ids with a runner on this
+    /// host. A custom topic may **draft** with any well-formed id (the RLM
+    /// mints ids); it may **open** only when a runner is registered, because
+    /// nobody is paid for a metric nobody can compute.
+    fn validate(
+        &self,
+        pin: &ProofPin,
+        registered_custom: &[&str],
+        status: TopicStatus,
+    ) -> Result<(), TopicError> {
         let family = self.family.as_str();
         let bad_metric = || TopicError::BadMetric {
             name: self.primary.clone(),
@@ -681,10 +691,16 @@ impl MetricSpec {
                         field: "custom_id",
                     });
                 }
-                if !supported_custom.contains(&id) {
+                if !crate::is_custom_id(id) {
+                    return Err(TopicError::BadBinding {
+                        field: "metric.custom_id".into(),
+                        why: "must match [a-z0-9][a-z0-9_-]{1,63}",
+                    });
+                }
+                if status == TopicStatus::Open && !registered_custom.contains(&id) {
                     return Err(TopicError::UnknownCustomMetric(id.to_owned()));
                 }
-                if self.primary.trim().is_empty() {
+                if self.primary.trim().is_empty() || !crate::is_custom_id(self.primary.trim()) {
                     return Err(bad_metric());
                 }
                 if self.epsilon_rel.is_nan() || self.epsilon_rel <= 0.0 {
@@ -789,11 +805,14 @@ impl TopicDocument {
 
     /// Structural + floor validation. Does **not** check the signature.
     ///
+    /// `registered_custom` is the set of custom metric ids with a runner on
+    /// this host (empty when none is registered).
+    ///
     /// # Errors
     ///
-    /// See [`TopicError`]. A `draft` topic with an unsealed baseline is legal;
-    /// an `open` one is not.
-    pub fn validate(&self, pin: &ProofPin, supported_custom: &[&str]) -> Result<(), TopicError> {
+    /// See [`TopicError`]. A `draft` topic with an unsealed baseline or an
+    /// unregistered custom id is legal; an `open` one is not.
+    pub fn validate(&self, pin: &ProofPin, registered_custom: &[&str]) -> Result<(), TopicError> {
         if self.schema_version != TOPIC_SCHEMA_VERSION {
             return Err(TopicError::WrongSchema {
                 got: self.schema_version,
@@ -814,7 +833,14 @@ impl TopicDocument {
                     + u32::from(self.discovery.novelty_pool_share_bps),
             });
         }
-        self.metric.validate(pin, supported_custom)?;
+        self.metric.validate(pin, registered_custom, self.status)?;
+        self.constraints
+            .validate_shape()
+            .and_then(|()| proof_canon::validate_rules(&self.checklist))
+            .map_err(|e| TopicError::BadBinding {
+                field: e.field,
+                why: e.why,
+            })?;
         if self.flops_budget == 0 || self.flops_budget > pin.flops_budget_max {
             return Err(TopicError::BadFlopsBudget {
                 got: self.flops_budget,
@@ -971,6 +997,7 @@ mod tests {
                 no_nvlink: true,
                 no_nccl_fast_fabric: true,
                 max_inter_node_gbps: Some(12.5),
+                ..Constraints::default()
             },
             metric: MetricSpec {
                 family: MetricFamily::Throughput,
@@ -1285,43 +1312,152 @@ mod tests {
         ));
     }
 
-    /// A custom metric nothing implements is a 400 at publish, never a
-    /// silently-skipped gate.
-    #[test]
-    fn custom_metrics_must_be_implemented() {
-        let p = pin();
+    fn custom_topic(custom_id: &str) -> TopicDocument {
         let mut doc = nll_topic();
+        doc.id = "custom-topic-v0".into();
         doc.metric = MetricSpec {
             family: MetricFamily::Custom,
-            primary: "bits_per_joule".into(),
-            direction: MetricDirection::Min,
-            unit: "bits/J".into(),
-            epsilon_rel: 0.10,
-            quality_floor_nll: 0.0,
-            wall_budget_s: 0,
-            custom_id: "bits_per_joule".into(),
-        };
-        assert!(matches!(
-            doc.validate(&p, &[]),
-            Err(TopicError::UnknownCustomMetric(_))
-        ));
-        doc.validate(&p, &["bits_per_joule"])
-            .expect("implemented custom metric");
-
-        let mut harness = nll_topic();
-        harness.metric = MetricSpec {
-            family: MetricFamily::Custom,
-            primary: "success_rate".into(),
+            primary: "primary_value".into(),
             direction: MetricDirection::Max,
             unit: "rate".into(),
             epsilon_rel: 0.05,
             quality_floor_nll: 0.0,
             wall_budget_s: 0,
-            custom_id: crate::CUSTOM_HARNESS_SUCCESS_RATE.into(),
+            custom_id: custom_id.into(),
         };
-        harness
-            .validate(&p, &[crate::CUSTOM_HARNESS_SUCCESS_RATE])
-            .expect("listed custom stub is publishable");
+        doc
+    }
+
+    /// A custom metric id is topic data: any well-formed id drafts. Opening
+    /// needs a registered runner on the host, because nobody is paid for a
+    /// metric nobody can compute. There is no id list in this crate.
+    #[test]
+    fn custom_metrics_draft_freely_and_open_only_with_a_registered_runner() {
+        let p = pin();
+        let mut open = custom_topic("bits_per_joule");
+        assert!(matches!(
+            open.validate(&p, &[]),
+            Err(TopicError::UnknownCustomMetric(_))
+        ));
+        open.validate(&p, &["bits_per_joule"])
+            .expect("registered runner may open");
+        open.status = TopicStatus::Draft;
+        open.validate(&p, &[]).expect("a draft may name any id");
+
+        for bad in ["", "Upper", "has space", "x", "dotted.id"] {
+            let mut doc = custom_topic(bad);
+            doc.status = TopicStatus::Draft;
+            assert!(
+                matches!(
+                    doc.validate(&p, &[]),
+                    Err(TopicError::BadBinding { .. } | TopicError::MissingFamilyField { .. })
+                ),
+                "{bad:?}"
+            );
+        }
+        let mut bad_primary = custom_topic("bits_per_joule");
+        bad_primary.metric.primary = "bits per joule".into();
+        assert!(matches!(
+            bad_primary.validate(&p, &["bits_per_joule"]),
+            Err(TopicError::BadMetric { .. })
+        ));
+    }
+
+    /// Sandbox / model / slice knobs are generic policy; values are checked
+    /// for shape only and the document is what carries them.
+    #[test]
+    fn generic_constraints_and_rules_are_shape_checked_topic_data() {
+        let p = pin();
+        let mut doc = custom_topic("agent_pass_rate");
+        doc.status = TopicStatus::Draft;
+        doc.constraints.firecracker_required = true;
+        doc.constraints.model_pin = Some("vendor/model:tag".into());
+        doc.constraints.task_slice = Some("0..20".into());
+        doc.constraints
+            .params
+            .insert("target_repo".into(), "owner/name".into());
+        doc.checklist = vec![
+            ChecklistRule {
+                id: "same_seed".into(),
+                text: "every paid call uses the topic seed".into(),
+            },
+            ChecklistRule {
+                id: "no_hardcode".into(),
+                text: "no task answers in the artefact".into(),
+            },
+        ];
+        doc.validate(&p, &[]).expect("generic bindings validate");
+        let payload =
+            String::from_utf8(topic_signing_payload(&doc).expect("payload")).expect("utf8");
+        for field in [
+            "\"firecracker_required\":true",
+            "\"model_pin\":\"vendor/model:tag\"",
+            "\"task_slice\":\"0..20\"",
+            "\"params\":{\"target_repo\":\"owner/name\"}",
+            "\"checklist\":[{\"id\":\"same_seed\"",
+        ] {
+            assert!(payload.contains(field), "missing {field} in {payload}");
+        }
+
+        let mut bad_model = doc.clone();
+        bad_model.constraints.model_pin = Some("model".into());
+        assert!(matches!(
+            bad_model.validate(&p, &[]),
+            Err(TopicError::BadBinding { ref field, .. }) if field == "constraints.model_pin"
+        ));
+        let mut bad_slice = doc.clone();
+        bad_slice.constraints.task_slice = Some("two\nlines".into());
+        assert!(matches!(
+            bad_slice.validate(&p, &[]),
+            Err(TopicError::BadBinding { ref field, .. }) if field == "constraints.task_slice"
+        ));
+        let mut bad_param = doc.clone();
+        bad_param
+            .constraints
+            .params
+            .insert("Bad Key".into(), "v".into());
+        assert!(matches!(
+            bad_param.validate(&p, &[]),
+            Err(TopicError::BadBinding { ref field, .. }) if field == "constraints.params"
+        ));
+        let mut dup = doc.clone();
+        dup.checklist.push(ChecklistRule {
+            id: "same_seed".into(),
+            text: "again".into(),
+        });
+        assert!(matches!(
+            dup.validate(&p, &[]),
+            Err(TopicError::BadBinding {
+                why: "duplicate id",
+                ..
+            })
+        ));
+        let mut blank = doc.clone();
+        blank.checklist[0].text = "  ".into();
+        assert!(matches!(
+            blank.validate(&p, &[]),
+            Err(TopicError::BadBinding { .. })
+        ));
+        let mut bad_id = doc.clone();
+        bad_id.checklist[0].id = "Same Seed".into();
+        assert!(matches!(
+            bad_id.validate(&p, &[]),
+            Err(TopicError::BadBinding { .. })
+        ));
+        let mut many = doc;
+        many.checklist = (0..=crate::MAX_CHECKLIST_RULES)
+            .map(|i| ChecklistRule {
+                id: format!("rule_{i}"),
+                text: "x".into(),
+            })
+            .collect();
+        assert!(matches!(
+            many.validate(&p, &[]),
+            Err(TopicError::BadBinding {
+                why: "too many rules",
+                ..
+            })
+        ));
     }
 
     #[test]

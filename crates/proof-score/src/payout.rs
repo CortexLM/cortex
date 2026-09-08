@@ -267,7 +267,11 @@ fn discovery(
     out
 }
 
-fn novelty_bar(
+/// The bar a discovery run must clear for novelty weight (and a run for
+/// automatic promotion): the sealed primary, the reigning champion, or the
+/// better of the two, direction-aware. `None` when nothing has been measured.
+#[must_use]
+pub fn novelty_bar(
     topic: &TopicDocument,
     sealed: Option<&SealedBaseline>,
     champion: Option<f64>,

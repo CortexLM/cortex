@@ -3418,6 +3418,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "proof-canon"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "proof-challenge"
 version = "0.1.0"
 dependencies = [
@@ -3563,6 +3571,7 @@ version = "0.1.0"
 dependencies = [
  "crypto",
  "hex",
+ "proof-canon",
  "proof-holdout",
  "serde",
  "serde_json",

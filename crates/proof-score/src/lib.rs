@@ -19,8 +19,8 @@
 mod payout;
 
 pub use payout::{
-    payout_lattices, primary_from_harness, primary_metric, sealed_primary, topic_masses,
-    topic_share_bps, MinerTopicRun, PrimaryExtras, PROOF_SHARE_BPS,
+    novelty_bar, payout_lattices, primary_from_harness, primary_metric, sealed_primary,
+    topic_masses, topic_share_bps, MinerTopicRun, PrimaryExtras, PROOF_SHARE_BPS,
 };
 
 use std::collections::BTreeMap;
@@ -247,7 +247,17 @@ fn finite(x: f64) -> bool {
     x.is_finite()
 }
 
-fn rel_win(challenger: f64, baseline: f64, direction: MetricDirection, epsilon: f64) -> bool {
+/// Relative win rule shared by the throughput and custom families (and by
+/// automatic promotion): `challenger` beats `baseline` by at least `epsilon`
+/// relative, direction-aware. A zero or non-finite baseline can never be
+/// beaten — there is no number to be relative to.
+#[must_use]
+pub fn relative_win(
+    challenger: f64,
+    baseline: f64,
+    direction: MetricDirection,
+    epsilon: f64,
+) -> bool {
     if !finite(challenger) || !finite(baseline) || baseline.abs() < 1e-12 {
         return false;
     }
@@ -255,6 +265,10 @@ fn rel_win(challenger: f64, baseline: f64, direction: MetricDirection, epsilon: 
         MetricDirection::Max => challenger >= baseline * (1.0 + epsilon),
         MetricDirection::Min => challenger <= baseline * (1.0 - epsilon),
     }
+}
+
+fn rel_win(challenger: f64, baseline: f64, direction: MetricDirection, epsilon: f64) -> bool {
+    relative_win(challenger, baseline, direction, epsilon)
 }
 
 fn nll_gates(
@@ -520,6 +534,7 @@ mod tests {
                 no_nvlink: true,
                 no_nccl_fast_fabric: true,
                 max_inter_node_gbps: Some(12.5),
+                ..Constraints::default()
             },
             metric: MetricSpec {
                 family: MetricFamily::Throughput,
@@ -693,10 +708,10 @@ mod tests {
     }
 
     #[test]
-    fn harness_success_rate_is_listed_and_fail_closes_without_a_harness_value() {
+    fn a_registered_custom_metric_still_fail_closes_without_a_harness_value() {
         let mut topic = nll_topic();
         topic.metric.family = MetricFamily::Custom;
-        topic.metric.custom_id = proof_task::CUSTOM_HARNESS_SUCCESS_RATE.into();
+        topic.metric.custom_id = "agent_success_rate".into();
         topic.metric.primary = "success_rate".into();
         topic.metric.direction = MetricDirection::Max;
         topic.metric.epsilon_rel = 0.05;
@@ -708,7 +723,7 @@ mod tests {
             &harness,
             &flat_nll(3.0),
             &[],
-            &[proof_task::CUSTOM_HARNESS_SUCCESS_RATE],
+            &["agent_success_rate"],
         );
         assert!(v
             .failed

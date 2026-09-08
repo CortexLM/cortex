@@ -31,13 +31,11 @@
     clippy::must_use_candidate
 )]
 
-mod canonical;
 mod executor;
 mod inference;
 mod pin;
 mod topic;
 
-pub use canonical::canonical_json;
 pub use executor::{
     TopicEvalExecutor, EVAL_EXECUTOR_COMMITMENT_ALG, EVAL_EXECUTOR_GPU_CLASS,
     EVAL_EXECUTOR_GPU_COUNT, EVAL_EXECUTOR_SCHEMA_VERSION, MAX_PROOF_DEADLINE_S_CEILING,
@@ -49,15 +47,20 @@ pub use inference::{
     INFERENCE_OFFER_COMMITMENT_ALG, MAX_INPUT_TOKENS_CEILING, MAX_OUTPUT_TOKENS_CEILING,
 };
 pub use pin::{PinError, ProofPin};
+pub(crate) use proof_canon::is_http_origin;
+pub use proof_canon::{
+    canonical_json, is_custom_id, is_hex64, is_model_pin, is_opaque_param, is_slug, ChecklistRule,
+    Constraints, MAX_CHECKLIST_RULES, MAX_CONSTRAINT_PARAMS, MAX_RULE_TEXT_LEN,
+};
 pub use proof_holdout::{
     contamination, holdout_commitment, synthetic_holdout, verify_holdout, HoldoutError,
     HoldoutRecord, HoldoutSplit, HOLDOUT_DOMAIN, HOLDOUT_SIZE, LONGCTX_MAX_TOKENS,
     LONGCTX_MIN_TOKENS, STRATUM_SIZE,
 };
 pub use topic::{
-    default_adamw, topic_signing_payload, Baseline, Constraints, DiscoverySpec, MetricDirection,
-    MetricFamily, MetricSpec, PayoutMode, TopicDocument, TopicError, TopicStatus, ValidationSpec,
-    BPS_DENOM, DISCOVERY_NOVELTY_POOL_SHARE_BPS, DISCOVERY_PASS_FLOOR_SHARE_BPS, MAX_STATEMENT_LEN,
+    default_adamw, topic_signing_payload, Baseline, DiscoverySpec, MetricDirection, MetricFamily,
+    MetricSpec, PayoutMode, TopicDocument, TopicError, TopicStatus, ValidationSpec, BPS_DENOM,
+    DISCOVERY_NOVELTY_POOL_SHARE_BPS, DISCOVERY_PASS_FLOOR_SHARE_BPS, MAX_STATEMENT_LEN,
     MAX_TOPIC_ID_LEN, MAX_VALIDATION_LEN, METRIC_STEP_LATENCY_MS, METRIC_TOKENS_PER_SEC,
     MIN_TOPIC_ID_LEN, PRIMARY_HOLDOUT_NLL, TOPIC_SCHEMA_VERSION,
 };
@@ -103,11 +106,6 @@ pub const EVAL_IMAGE: &str = "ghcr.io/cortexlm/proof-eval";
 /// Public docs pointer (this control-plane repo).
 pub const PROOF_GIT_URL: &str = "https://github.com/CortexLM/cortex";
 
-/// Custom metric id for the agent-harness success-rate topic. Listed so an
-/// operator can publish the document; the eval image fail-closes until a
-/// real harness fills `custom_value`.
-pub const CUSTOM_HARNESS_SUCCESS_RATE: &str = "harness_success_rate";
-
 /// Proof challenge emission share (basis points of the subnet).
 pub const PROOF_EMISSION_BPS: u16 = 8_000;
 
@@ -131,28 +129,6 @@ pub const QUALITY_FLOOR_NLL_MAX: f64 = 0.02;
 
 /// Slice id prefix bound into per-topic measurements.
 pub const HOLDOUT_SLICE_PREFIX: &str = "proof-holdout";
-
-/// Whether `s` (trimmed) is exactly 64 hex characters.
-pub fn is_hex64(s: &str) -> bool {
-    let t = s.trim();
-    t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-pub(crate) fn is_http_origin(url: &str) -> bool {
-    let u = url.trim();
-    (u.starts_with("http://") || u.starts_with("https://"))
-        && u.len() >= 8
-        && !u.contains(['\n', ' '])
-}
-
-/// Whether `id` matches `[a-z0-9][a-z0-9-]{1,62}` (offer and topic ids).
-pub fn is_slug(id: &str) -> bool {
-    let b = id.as_bytes();
-    (2..=63).contains(&b.len())
-        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
-        && b.iter()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
-}
 
 #[cfg(test)]
 mod tests {
@@ -215,7 +191,6 @@ mod tests {
             u32::from(PROOF_EMISSION_BPS) + u32::from(BOUNTY_EMISSION_BPS),
             10_000
         );
-        assert_eq!(CUSTOM_HARNESS_SUCCESS_RATE, "harness_success_rate");
         assert_eq!(INFERENCE_CONFIG_SCHEMA_VERSION, 1);
         assert_eq!(INFERENCE_OFFER_COMMITMENT_ALG, "sha256");
         assert_eq!(MAX_INPUT_TOKENS_CEILING, LONGCTX_MAX_TOKENS);
