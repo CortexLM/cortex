@@ -91,6 +91,20 @@ files the operator stages (`sha256sum`) — never invented, never in git.
 Procedure and the mandatory submission verification:
 [`docs/runbooks/proof-vm-orchestrator.md`](../docs/runbooks/proof-vm-orchestrator.md).
 
+**Staging wire (DO):** the CP is the existing staging master; the agent
+needs a KVM host with `/dev/kvm` reachable from the staging VPC — a Droplet
+is not one (no nested virt). Overlays with placeholders only:
+[`env/proof-challenge.staging-vm.example`](env/proof-challenge.staging-vm.example)
+(CP) and
+[`env/proof-vm-orchestrator.staging.example`](env/proof-vm-orchestrator.staging.example)
+(KVM host); every `REPLACE_WITH_*` fails closed as written. Prove the wire
+on the master with
+[`scripts/proof-vm-wire-check.sh`](scripts/proof-vm-wire-check.sh) — `all`
+(env + agent + `GET /v1/admin/proof/vm-orchestrator` through the CP's own
+client), `boot-probe` (one RLM VM created and destroyed, no job), `matrix`
++ `submit-probe --expect 503 --reason …` (every fail-closed flip), and the
+one `--allow-live-run` happy path. Runbook § DigitalOcean staging.
+
 ## Local testnet E2E
 
 Full procedure: [`docs/runbooks/local-testnet-e2e.md`](../docs/runbooks/local-testnet-e2e.md).

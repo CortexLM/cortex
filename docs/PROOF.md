@@ -232,6 +232,14 @@ Trust-root keygen is the throwaway owner path in
   document. Pin-validated (**400** keeps the previous offer); `status: closed`
   takes the executor down live. In-memory until restart, like submissions —
   update `PROOF_EVAL_EXECUTOR_OFFER_FILE` to persist.
+- `GET /v1/admin/proof/vm-orchestrator` — operator bearer; read-only probe
+  of the topic-VM orchestrator through the host's own client: `orchestrator`
+  (`firecracker` / `unwired`), `ready` + `reason` (bearer file, RLM image
+  pin), the locked template, one agent health call (`agent` /
+  `agent_error`), `live_harvest_wired`, `registered_custom`. Always **200**
+  once authorised — a broken wire is data. Names env vars and container
+  paths, never the bearer. Run over loopback; wrapped by
+  [`deploy/scripts/proof-vm-wire-check.sh`](../deploy/scripts/proof-vm-wire-check.sh).
 - `POST /v1/submissions` **requires** `topic_id`. Missing/unknown/not-open →
   **400**. Miners do **not** bind the judge offer or the executor offer. Zero
   open / unsealed baseline / empty digest / missing or closed RLM judge
