@@ -77,22 +77,38 @@ baseline + an open topic are on the host.
   rotate or close) names `offer_id`, `lium_template_id`, `machine_shape`,
   `max_proof_deadline_s` (≤ ceiling), `eval_image_digest` (must equal the pin
   when non-empty), `config_commitment` = sha256 of the canonical public knobs,
-  and `status`. Every field is public: `GET /v1/status` (`eval_executor`,
-  pin `executor`) and `GET /v1/proof/executor` show it whole. Missing /
-  closed / `machine_shape ≠ 1x` → `can_score=false` → **503** on the Lium
-  path (sim rents nothing and does not consult it). Harvest rents exactly
-  that template at exactly `1x` — a rent that would upsize to a whole host
+  and `status`. `lium_template_id` is the **digest-scoped template name**
+  (it must carry the pinned digest's 12-hex prefix); harvest resolves it
+  through the digest-bound resolver, which reuses a listed template only when
+  its image is `eval_image@digest` and otherwise creates one bound to it. A
+  raw Lium template UUID is **refused** (offer or override, under any
+  allowlist) because the provider would rent it verbatim with no image
+  check; a pin with no digest binds no executor at all. Every field is
+  public: `GET /v1/status` (`eval_executor`, pin `executor`) and
+  `GET /v1/proof/executor` show it whole. Missing / closed /
+  `machine_shape ≠ 1x` → `can_score=false` → **503** on the Lium path (sim
+  rents nothing and does not consult it). Harvest rents exactly that
+  template at exactly `1x` — a rent that would upsize to a whole host
   (`rent_gpu_count ≠ 1`) aborts before the rent — and holds the run to the
-  resolved deadline both pod-side (`timeout`) and in its own wait; a run cut
-  at the deadline is a **503** carrying the pod's `stdout_tail`, never a
-  zero. A topic may only tighten: `eval_executor.max_proof_deadline_s`
-  (shorter) and `eval_executor.require_offer_commitment` (64-hex pin of the
-  live offer, not a miner bind). There is **no per-topic `machine_id`**
-  (publish reject). Operator hot-swap without a rebuild:
-  `PROOF_HARVEST_TEMPLATE_ID` / `PROOF_HARVEST_GPU_COUNT` /
-  `PROOF_HARVEST_DEADLINE_SECS` replace the offer's values; the pin ceilings
-  still bind, and an unparseable or out-of-ceiling value refuses the rent
-  rather than clamping. Ceremony:
+  resolved deadline: the deadline **is** the pod-side `timeout` (never
+  clamped below it by the host's `PROOF_EVAL_TIMEOUT_SECS` fallback, whose
+  default equals the ceiling) and the harvest wait is deadline + grace. A run
+  the wrapper cut (`exit=124`, or `137` after the full budget) is a **503**
+  carrying the pod's `stdout_tail`, never a zero; a `137` before the deadline
+  is reported as an external SIGKILL (e.g. OOM), not as the deadline. A
+  topic may only tighten: `eval_executor.max_proof_deadline_s` (shorter) and
+  `eval_executor.require_offer_commitment` (64-hex pin of the live offer,
+  not a miner bind). There is **no per-topic `machine_id`** (publish
+  reject). Operator hot-swap without a rebuild: `PROOF_HARVEST_TEMPLATE_ID`
+  / `PROOF_HARVEST_GPU_COUNT` / `PROOF_HARVEST_DEADLINE_SECS` replace the
+  offer's values; the pin ceilings still bind, an unparseable or
+  out-of-ceiling value refuses the rent rather than clamping, and a topic
+  that pins `require_offer_commitment` **refuses** any override that changes
+  the template or deadline (it approved the offer's configuration, not the
+  operator's). The run request and the scored row stamp the commitment of
+  the configuration that actually ran (`executor_commitment`) next to the
+  offer's (`executor_offer_commitment` on the request); they differ only when
+  a topic tighten or an override changed the offer's knobs. Ceremony:
   `cargo run -p xtask -- proof-executor-offer --offer-id <slug> --max-proof-deadline-s <s> --out <off-git path>`.
   Isolation: the control-plane host runs neither the eval image nor the RLM
   judge; the harvest is the **only** path to the rented GPU, and the executor
