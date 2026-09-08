@@ -132,9 +132,27 @@ The RLM VM shape is 4 vCPU / 8192 MiB. `PROOF_RLM_VM_VCPUS` /
    - remove `PROOF_RLM_VM_IMAGE_DIGEST` → `PROOF_RLM_VM_IMAGE_DIGEST … missing or out of range`;
    - delete the RLM image file → agent `503 not_ready: image … no … on this host`;
    - `firecracker_required` topic whose RLM never asked for a sister →
-     `firecracker_required run came back without the host's sister-guest attestation`.
+     `firecracker_required run came back without the host's sister-guest attestation`;
+   - an RLM whose `SisterRequest` names another submission or artefact than
+     the job → agent log `sister request names submission_digest … the paid
+     job names …`, no sister jail is built, and the run comes back without
+     an attestation (same 503 as above). A hypervisor that ever presented
+     evidence for another identity would be a `502 evidence_mismatch` from
+     the agent and `orchestrator evidence is not this job's` on the CP.
 4. `GET /v1/proof/topics` still leaks no holdout; `GET /v1/status` shows no
    URL, token, or path.
+5. Cleanup probes on the KVM host (nothing a run started may outlive it):
+   - make `ip tuntap add` fail once (e.g. a stale `pfc<n>` device) → the
+     agent logs `topic vm boot failed; releasing its jail` and
+     `/srv/jailer/firecracker/<vm_id>` is gone, along with the
+     `proof_vm_pfc<n>` table;
+   - a paid run whose deadline passes while its sister is still up → the
+     sister is killed and `/srv/jailer/firecracker/<vm_id>-s<n>` removed
+     before the job answers (log `jail released`);
+   - `kill -9` a topic VM's Firecracker → the next `attach` / `create` /
+     job / health logs `topic vm process exited outside teardown; reaping`,
+     the record becomes `crashed`, the jail is destroyed or retained per the
+     topic's policy, and the CP's next job creates a fresh VM (no 409).
 
 ## Operate
 
@@ -144,6 +162,7 @@ The RLM VM shape is 4 vCPU / 8192 MiB. `PROOF_RLM_VM_VCPUS` /
 | Rotate the RLM image | stage `images/sha256-<new>.ext4`, set `PROOF_RLM_VM_IMAGE_DIGEST` on the CP, restart `proof-challenge`; running VMs keep the old image until torn down |
 | Close a topic | the CP tears the VM down with the topic's `retain` policy (default destroy). `retain` moves `/srv/jailer/firecracker/<vm_id>` to `/var/lib/proof-vm/retained/<vm_id>` (scratch, console log, config) |
 | Agent restart | live VMs die with the agent (no `--daemonize`); `attach` then answers 404 and the CP's next job creates a fresh VM. Rules, checklists, and promotions live in the CP's RLM store, not in the VM |
+| A topic VM crashed | nothing to do: the agent probes the process on every attach / create / job / health, reaps a dead VM per the topic's `retain` policy (destroy removes the jail; retain moves it for audit — read `console.log` there), records it `crashed`, and the CP's next job creates a fresh VM. A crashed record answers `DELETE` with `state: crashed, confirmed: true` |
 | Egress change | edit `PROOF_VM_AGENT_EGRESS_ALLOW`, restart the agent; existing VMs keep their table until torn down |
 | Inspect a VM | `nft list table inet proof_vm_pfc<n>`, `cat /srv/jailer/firecracker/<vm_id>/console.log`, `ls /srv/jailer/firecracker/<vm_id>/root/` |
 
@@ -170,6 +189,22 @@ The RLM VM shape is 4 vCPU / 8192 MiB. `PROOF_RLM_VM_VCPUS` /
   sandbox without a sister is corrected to `false` and the CP refuses the
   report for a `firecracker_required` topic; a sister that measured nothing
   yields `flops_used: null` → 503, never a substituted number.
+- **Evidence is bound to its job.** The `SisterAttestation` names the
+  `topic_id`, `submission_digest`, and `artifact_digest` the host verified
+  against the paid job before it built the sister jail (a `SisterRequest`
+  for anything else is refused with no jail). Before stamping, the agent
+  checks the attestation **and** the RLM's report against the job
+  (`proof_vm_proto::bind_evidence`; mismatch → `502 evidence_mismatch`,
+  nothing stamped); the CP runs the same check before accepting. Sister
+  evidence for artefact A is never evidence for artefact B.
+- **No orphaned host state.** A jail is owned by a guard from `prepare`
+  until the VM is registered (or the sister run ends): a failed TAP / rules /
+  spawn / handshake step, a cancelled or timed-out sister, or a request the
+  CP gave up on releases the process, the TAP, the nftables table, and the
+  directory. Sisters are cancelled cooperatively (killed + destroyed before
+  the job answers), never aborted mid-flight. A VM whose process died is
+  reaped per its retain policy and recorded `crashed`; its topic is free to
+  create a fresh one.
 - **Jailer.** Firecracker runs chrooted under `/srv/jailer/firecracker/<vm_id>/root`
   as `PROOF_VM_AGENT_JAIL_UID`, with a read-only rootfs copy, a fresh scratch
   drive, and `/dev/kvm` + `/dev/net/tun` mknod'ed by the jailer. No
@@ -177,7 +212,8 @@ The RLM VM shape is 4 vCPU / 8192 MiB. `PROOF_RLM_VM_VCPUS` /
 
 ## Limitations (v1)
 
-- Agent restarts drop live VMs (state is in the CP's RLM store; the next job re-creates).
+- Agent restarts drop live VMs (state is in the CP's RLM store; the next job re-creates). Jails of VMs that died with the agent are not swept at the next start; remove `/srv/jailer/firecracker/*` by hand before restarting.
+- Dead VMs are detected on the next attach / create / job / health call, not by a background reaper; an idle host with a crashed VM reaps it when something asks.
 - One sister per paid job; a second `SisterRequest` in the same job is refused.
 - Allowlist entries are IPv4 CIDRs; hostnames must be resolved by the operator (allow the resolver's `:53/udp` if the RLM needs DNS).
 - mTLS between CP and agent is a follow-up; today the bearer file over TLS is the auth.

@@ -426,13 +426,27 @@ the topic deadline, destroys it, and writes the `SisterAttestation`. The
 agent then **stamps** the report: `sandboxed` is `true` only when a sister
 ran, `flops_used` is the sister guest's measurement — an RLM cannot claim a
 sandbox the host did not boot, and a sister that measured nothing yields no
-usage (503, never a substituted number). Hard binds on both sides: a job
+usage (503, never a substituted number). The attestation is evidence for
+**one job**: it names the topic, submission, and artefact the host verified
+before booting the sister (a `SisterRequest` for any other identity is
+refused before a jail exists), the agent refuses to stamp — 502
+`evidence_mismatch` — when the attestation or the report names another
+identity than the job, and the client runs the same `bind_evidence` check
+before accepting the stamps, so a sister that ran artefact A can never score
+artefact B. Hard binds on both sides: a job
 must name the VM's topic (envelope **and** job) or the agent answers 409; the
 client refuses a job for another topic before any request, checks every
 echo, refuses a created VM on another digest, and refuses a
 `firecracker_required` run that came back without the sister attestation.
 Teardown honours the topic's `retain` policy (default **destroy**; `retain`
-keeps the jail for audit). Deploy: `deploy/systemd/proof-vm-orchestrator.service`,
+keeps the jail for audit). Nothing a boot started outlives its failure: a
+boot that fails after the jail is prepared (TAP, rules, spawn, guest
+handshake) releases the process, the TAP, the nftables table, and the jail;
+a sister whose job ends first is cancelled cooperatively and destroyed
+before the job answers; and a VM whose process exits outside a teardown is
+reaped per its retain policy, recorded as `crashed`, and never advertised
+as running — its topic gets a fresh VM on the next job.
+Deploy: `deploy/systemd/proof-vm-orchestrator.service`,
 runbook [`runbooks/proof-vm-orchestrator.md`](runbooks/proof-vm-orchestrator.md).
 CI runs the fake hypervisor only; no GitHub runner ever boots Firecracker.
 The generic `VmBackedRunner` turns inspect / evaluate into VM jobs;
