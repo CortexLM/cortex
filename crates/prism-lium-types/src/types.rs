@@ -184,9 +184,9 @@ impl Offer {
     ///
     /// Accepts an exact-width host, a larger host when `requested > 1`, or a
     /// multi-GPU host that advertises (or omits-min) GPU splitting. A 1-GPU
-    /// pin never takes a non-split 8× pack — except NCU, which is whole-host
-    /// only and is the live B200 champion path. 8×5090 is never a silent
-    /// fallback.
+    /// pin never takes a non-split 8× pack. NCU is whole-host only, so
+    /// `rent_count` may exceed the pin; the client skips that offer before
+    /// POST and tries later split-capable rows. 8×5090 is never posted.
     #[must_use]
     pub fn matches_gpu_count(&self, requested: u32) -> bool {
         if self.allows_split_for(requested) {
