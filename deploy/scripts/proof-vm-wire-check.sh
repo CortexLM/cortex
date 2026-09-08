@@ -30,6 +30,8 @@
 #   --reason SUBSTR       submit-probe: the error text must contain this
 #   --artifact-uri URI    submit-probe locator (default https://example.invalid/wire-probe.tar — never fetchable)
 #   --no-artifact-uri     submit-probe without a locator (a custom topic must answer 400, no row)
+#   --declared-flops N    submit-probe declaration (default: 1 for fail-closed probes; the topic's
+#                         flops_budget for --expect 2xx so a real run is not rejected flops_under_declared)
 #   --wait SECS           submit-probe --expect 201: how long the synchronous POST may take (default 900)
 #
 # Exit: 0 all PASS, 1 any FAIL, 2 refused (production host / unsafe request).
@@ -50,9 +52,25 @@ warn() { YEL "WARN  $*"; WARNS=$((WARNS + 1)); }
 fail() { RED "FAIL  $*"; FAILS=$((FAILS + 1)); }
 
 PROD_HOSTS='network\.cortex\.foundation|chain\.joinbase\.ai|api\.cortex\.foundation'
+# url_host URL → the host part, lower-cased (no scheme, userinfo, port, path,
+# query; a trailing dot dropped; IPv6 literal kept bracketed).
+url_host() {
+  local h="$1"
+  h="${h#*://}"; h="${h%%/*}"; h="${h%%\?*}"; h="${h%%\#*}"; h="${h##*@}"
+  if [[ "$h" == \[* ]]; then h="${h%%]*}]"; else h="${h%%:*}"; fi
+  h="${h%.}"
+  printf '%s' "$h" | tr '[:upper:]' '[:lower:]'
+}
+# Refuse a production origin however it is spelled: the parsed host (or any
+# subdomain of a protected host) is compared lower-cased, and the whole URL is
+# also matched case-insensitively as belt and braces. DNS is case-insensitive;
+# the guard must be too.
 refuse_prod() {
-  if printf '%s' "$1" | grep -Eq "$PROD_HOSTS"; then
-    RED "refusing production host: $1"
+  local url="$1" host
+  host="$(url_host "$url")"
+  if printf '%s\n' "$host" | grep -Eq "^(.*\.)?(${PROD_HOSTS})$" \
+     || printf '%s' "$url" | grep -Eiq "$PROD_HOSTS"; then
+    RED "refusing production host: $url"
     exit 2
   fi
 }
@@ -71,8 +89,9 @@ REASON=""
 ALLOW_LIVE_RUN=0
 ARTIFACT_URI="https://example.invalid/wire-probe.tar"
 WAIT_SECS=900
+DECLARED_FLOPS=""
 
-usage() { sed -n '2,35p' "$0"; }
+usage() { sed -n '2,37p' "$0"; }
 
 [[ $# -ge 1 ]] || { usage; exit 1; }
 SUBCOMMAND="$1"; shift
@@ -90,6 +109,7 @@ while [[ $# -gt 0 ]]; do
     --artifact-uri) ARTIFACT_URI="${2:?}"; shift 2 ;;
     --no-artifact-uri) ARTIFACT_URI=""; shift ;;
     --wait) WAIT_SECS="${2:?}"; shift 2 ;;
+    --declared-flops) DECLARED_FLOPS="${2:?}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) RED "unknown arg: $1"; usage; exit 1 ;;
   esac
@@ -152,15 +172,17 @@ map_path() {
 TMPDIR_WC="$(mktemp -d)"
 umask 077
 
-# A boot-probe VM must never outlive the probe, even on Ctrl-C.
+# A boot-probe VM must never outlive the probe: not on Ctrl-C, and not when
+# the agent committed a create whose answer never reached us. PROBE_TOPIC_LIVE
+# is set BEFORE the create goes out, so the exit path can always reconcile by
+# topic (GET /v1/vms/by-topic) even without a vm id; PROBE_VM is the id once
+# an answer named it. Both are cleared only after a confirmed destroy + 404.
 PROBE_BASE=""; PROBE_VM=""; PROBE_TOPIC_LIVE=""; PROBE_HDR=""
 AGENT_ARGS=()
 on_exit() {
-  if [[ -n "$PROBE_VM" ]]; then
-    RED "boot-probe interrupted with vm $PROBE_VM up; destroying"
-    curl -sS -m 660 -o /dev/null -X DELETE -H 'content-type: application/json' \
-      --data-binary "$(printf '{"topic_id":"%s","policy":"destroy"}' "$PROBE_TOPIC_LIVE")" \
-      "${AGENT_ARGS[@]}" -K "$PROBE_HDR" "$PROBE_BASE/v1/vms/$PROBE_VM" || true
+  if [[ -n "$PROBE_TOPIC_LIVE" ]]; then
+    RED "boot-probe left topic $PROBE_TOPIC_LIVE in flight; reconciling on the agent"
+    probe_reconcile_destroy || true
   fi
   rm -rf "$TMPDIR_WC"
 }
@@ -190,6 +212,59 @@ http() {
     HTTP_CODE="000"
   fi
   rm -f "$out"
+  # Test hook (crates/proof-vm-fc/tests/wire_check_script.rs): the agent
+  # committed the create but its answer never arrived. Never set by operators.
+  if [[ "${PROOF_VM_WIRE_CHECK_FAULT:-}" == "lose-create-answer" && "$method" == "POST" && "$url" == */v1/vms ]]; then
+    HTTP_CODE="000"; HTTP_BODY="(simulated: answer to POST /v1/vms lost)"
+  fi
+}
+
+# The VM the agent holds for the probe topic, if any → $PROBE_VM ("" when none).
+probe_attach() {
+  http GET "$PROBE_BASE/v1/vms/by-topic/$PROBE_TOPIC_LIVE" "" "${AGENT_ARGS[@]}" -K "$PROBE_HDR"
+  if [[ "$HTTP_CODE" == "200" ]]; then
+    PROBE_VM="$(jget "$HTTP_BODY" handle.vm_id)"
+  elif [[ "$HTTP_CODE" == "404" ]]; then
+    PROBE_VM=""
+  fi
+  return 0
+}
+
+# Destroy whatever VM the probe topic holds — the id we were told, or the one
+# the agent reports for the topic when the create's answer was lost. Clears
+# PROBE_VM / PROBE_TOPIC_LIVE only on a confirmed destroy followed by a 404.
+# Returns 0 when the topic is verifiably free, 1 otherwise.
+probe_reconcile_destroy() {
+  [[ -n "$PROBE_TOPIC_LIVE" ]] || return 0
+  if [[ -z "$PROBE_VM" ]]; then
+    probe_attach
+    if [[ "$HTTP_CODE" == "404" ]]; then
+      LOG "reconcile: agent holds no vm for $PROBE_TOPIC_LIVE"
+      PROBE_TOPIC_LIVE=""
+      return 0
+    fi
+    if [[ -z "$PROBE_VM" ]]; then
+      RED "reconcile: attach for $PROBE_TOPIC_LIVE → HTTP $HTTP_CODE $(printf '%s' "$HTTP_BODY" | head -c 200); check the agent by hand"
+      return 1
+    fi
+    LOG "reconcile: agent reports vm $PROBE_VM for $PROBE_TOPIC_LIVE"
+  fi
+  local body
+  body="$(printf '{"topic_id":"%s","policy":"destroy"}' "$PROBE_TOPIC_LIVE")"
+  http DELETE "$PROBE_BASE/v1/vms/$PROBE_VM" "$body" "${AGENT_ARGS[@]}" -K "$PROBE_HDR" -m 660
+  if [[ "$HTTP_CODE" == "200" && "$(jget "$HTTP_BODY" state)" == "destroyed" && "$(jget "$HTTP_BODY" confirmed)" == "true" ]] \
+     || [[ "$HTTP_CODE" == "404" ]]; then
+    local destroyed="$PROBE_VM"
+    PROBE_VM=""
+    probe_attach
+    if [[ "$HTTP_CODE" == "404" ]]; then
+      LOG "reconcile: vm $destroyed destroyed; topic $PROBE_TOPIC_LIVE free"
+      PROBE_TOPIC_LIVE=""
+      return 0
+    fi
+  fi
+  RED "reconcile: vm $PROBE_VM for $PROBE_TOPIC_LIVE not confirmed destroyed (HTTP $HTTP_CODE $(printf '%s' "$HTTP_BODY" | head -c 200)); on the agent host: journalctl -u proof-vm-orchestrator, ls /srv/jailer/firecracker/"
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -206,6 +281,8 @@ load_env() {
   [[ -n "$CA_PATH" ]] && CA_PATH="$(map_path "$CA_PATH")"
   AGENT_ARGS=()
   [[ -n "$CA_PATH" && -f "$CA_PATH" ]] && AGENT_ARGS+=(--cacert "$CA_PATH")
+  # Before any other check or request: a production agent is never probed.
+  [[ -n "$URL" ]] && refuse_prod "$URL"
   return 0
 }
 
@@ -379,8 +456,9 @@ check_cp() {
     if printf '%s' "$status" | grep -qF "$leak"; then fail "/v1/status leaks '$leak'"; leaked=1; fi
   done
   if [[ -n "$URL" ]]; then
-    local host="${URL#*://}"; host="${host%%/*}"; host="${host%%:*}"
-    if printf '%s' "$status" | grep -qF "$host"; then fail "/v1/status leaks the agent host $host"; leaked=1; fi
+    local host
+    host="$(url_host "$URL")"
+    if printf '%s' "$status" | grep -qiF "$host"; then fail "/v1/status leaks the agent host $host"; leaked=1; fi
   fi
   [[ "$leaked" -eq 0 ]] && pass "/v1/status carries no orchestrator URL, token, or path"
   if [[ -n "$IDS" ]]; then
@@ -457,13 +535,24 @@ boot_probe() {
   local spec
   spec="$(printf '{"spec":{"topic_id":"%s","template":{"image_digest":"%s","vcpus":%s,"mem_mib":%s},"sandbox":{"firecracker_required":true,"deadline_s":60},"retain":"destroy"}}' \
     "$topic" "$DIGEST" "$vcpus" "$mem")"
+  # From here the topic is in flight: whatever the create's answer, the exit
+  # path reconciles by topic and destroys what the agent holds for it.
+  PROBE_BASE="$base"; PROBE_HDR="$hdr"; PROBE_TOPIC_LIVE="$topic"; PROBE_VM=""
   http POST "$base/v1/vms" "$spec" "${AGENT_ARGS[@]}" -K "$hdr" -m 660; code="$HTTP_CODE"
-  if [[ "$code" != "201" ]]; then
-    fail "create → HTTP $code: $(printf '%s' "$HTTP_BODY" | head -c 400) (503 not_ready = image/kernel/kvm on the host; 400 bad_spec; 401 bearer)"
+  vm_id=""
+  [[ "$code" == "201" ]] && vm_id="$(jget "$HTTP_BODY" handle.vm_id)"
+  if [[ -z "$vm_id" ]]; then
+    # 000 (timeout / connection lost), 5xx, or a 201 we could not parse: the
+    # agent may have committed the VM. Ask it by topic and destroy any hit.
+    fail "create → HTTP $code: $(printf '%s' "$HTTP_BODY" | head -c 400) (503 not_ready = image/kernel/kvm on the host; 400 bad_spec; 401 bearer; 000 = answer lost)"
+    if probe_reconcile_destroy; then
+      LOG "reconciled: the agent holds nothing for $topic"
+    else
+      fail "reconcile after the ambiguous create did not free $topic"
+    fi
     return 0
   fi
-  vm_id="$(jget "$HTTP_BODY" handle.vm_id)"
-  PROBE_BASE="$base"; PROBE_VM="$vm_id"; PROBE_TOPIC_LIVE="$topic"; PROBE_HDR="$hdr"
+  PROBE_VM="$vm_id"
   if [[ "$(jget "$HTTP_BODY" handle.topic_id)" == "$topic" ]]; then pass "create bound vm $vm_id to $topic"; else fail "create bound another topic: $HTTP_BODY"; fi
   if [[ "$(jget "$HTTP_BODY" image_digest | tr '[:upper:]' '[:lower:]')" == "$(printf '%s' "$DIGEST" | tr '[:upper:]' '[:lower:]')" ]]; then
     pass "agent booted the pinned image"
@@ -490,12 +579,17 @@ boot_probe() {
   http DELETE "$base/v1/vms/$vm_id" "$body" "${AGENT_ARGS[@]}" -K "$hdr" -m 660; code="$HTTP_CODE"
   if [[ "$code" == "200" && "$(jget "$HTTP_BODY" state)" == "destroyed" && "$(jget "$HTTP_BODY" confirmed)" == "true" ]]; then
     pass "teardown destroyed $vm_id (confirmed)"
-    PROBE_VM=""
   else
     fail "teardown → HTTP $code $HTTP_BODY — check the KVM host: /srv/jailer/firecracker/$vm_id, nft list tables"
   fi
   http GET "$base/v1/vms/by-topic/$topic" "" "${AGENT_ARGS[@]}" -K "$hdr"; code="$HTTP_CODE"
-  if [[ "$code" == "404" ]]; then pass "attach after destroy → 404 (nothing left for $topic)"; else fail "attach after destroy → HTTP $code $HTTP_BODY"; fi
+  if [[ "$code" == "404" ]]; then
+    pass "attach after destroy → 404 (nothing left for $topic)"
+    PROBE_VM=""; PROBE_TOPIC_LIVE=""
+  else
+    fail "attach after destroy → HTTP $code $HTTP_BODY"
+    # The exit path retries the destroy by topic before the script ends.
+  fi
   LOG "on the KVM host: journalctl -u proof-vm-orchestrator | grep -E 'topic vm booted|torn down'; ls /srv/jailer/firecracker/ must not list $vm_id"
 }
 
@@ -509,13 +603,28 @@ submit_probe() {
     exit 2
   fi
   resolve_cp || return 0
+  # A real run measures FLOPs in the sister and the CP rejects a run over its
+  # declaration (flops_under_declared). The fail-closed probes never run, so
+  # they declare 1; a live run declares the topic's whole budget unless told
+  # otherwise (over the budget is a 400 before anything runs).
+  local flops="${DECLARED_FLOPS:-1}"
+  if [[ -z "$DECLARED_FLOPS" && "$EXPECT" =~ ^2 ]]; then
+    http GET "$CP/v1/proof/topics/$TOPIC" ""
+    flops="$(jget "$HTTP_BODY" flops_budget)"
+    if [[ "$HTTP_CODE" != "200" || ! "$flops" =~ ^[0-9]+$ || "$flops" == "0" ]]; then
+      fail "cannot read flops_budget of topic $TOPIC (HTTP $HTTP_CODE); pass --declared-flops N for the live run"
+      return 0
+    fi
+    LOG "live run declares the topic budget: declared_flops=$flops"
+  fi
+  [[ "$flops" =~ ^[0-9]+$ ]] || { RED "--declared-flops must be an integer"; exit 1; }
   local hotkey hex uri_field="" body code
   hotkey="$(head -c 64 /dev/zero | tr '\0' 'a')"
   hex="$(printf '%s' "wire-probe-$TOPIC-$(date +%s)-$$-$RANDOM" | sha256sum | awk '{print $1}')"
   [[ -n "$ARTIFACT_URI" ]] && uri_field="$(printf '"artifact_uri":"%s",' "$ARTIFACT_URI")"
-  body="$(printf '{"miner_hotkey":"%s","artifact_digest":"%s",%s"claim":"proof-vm-wire-check probe","declared_flops":1,"topic_id":"%s","manifest":{"train_dataset_ids":["wire-probe-v0"]}}' \
-    "$hotkey" "$hex" "$uri_field" "$TOPIC")"
-  LOG "submit-probe: POST $CP/v1/submissions topic=$TOPIC expect=$EXPECT${REASON:+ reason~'$REASON'}${ARTIFACT_URI:+ artifact_uri=$ARTIFACT_URI}"
+  body="$(printf '{"miner_hotkey":"%s","artifact_digest":"%s",%s"claim":"proof-vm-wire-check probe","declared_flops":%s,"topic_id":"%s","manifest":{"train_dataset_ids":["wire-probe-v0"]}}' \
+    "$hotkey" "$hex" "$uri_field" "$flops" "$TOPIC")"
+  LOG "submit-probe: POST $CP/v1/submissions topic=$TOPIC expect=$EXPECT declared_flops=$flops${REASON:+ reason~'$REASON'}${ARTIFACT_URI:+ artifact_uri=$ARTIFACT_URI}"
   http POST "$CP/v1/submissions" "$body" -m "$WAIT_SECS"; code="$HTTP_CODE"
   LOG "→ HTTP $code $(printf '%s' "$HTTP_BODY" | head -c 500)"
   if [[ "$code" != "$EXPECT" ]]; then

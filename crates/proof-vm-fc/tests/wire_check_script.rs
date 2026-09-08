@@ -53,10 +53,11 @@ fn cp_env(tag: &str, agent_url: &str, digest: &str) -> (PathBuf, PathBuf) {
     (env, secrets)
 }
 
-fn run_script(args: &[&str]) -> (bool, String) {
+fn run_script_env(args: &[&str], env: &[(&str, &str)]) -> (i32, String) {
     let out = Command::new("bash")
         .arg(repo_root().join("deploy/scripts/proof-vm-wire-check.sh"))
         .args(args)
+        .envs(env.iter().copied())
         .current_dir(repo_root())
         .output()
         .expect("run script");
@@ -65,7 +66,12 @@ fn run_script(args: &[&str]) -> (bool, String) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    (out.status.success(), text)
+    (out.status.code().unwrap_or(-1), text)
+}
+
+fn run_script(args: &[&str]) -> (bool, String) {
+    let (code, text) = run_script_env(args, &[]);
+    (code == 0, text)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -154,6 +160,70 @@ async fn agent_and_boot_probe_speak_the_router_json_and_never_print_the_bearer()
         "nothing outlives the probe"
     );
 
+    // The agent committed the create but its answer never arrived: the probe
+    // must find the VM by topic and destroy it, never leave it running.
+    let (code, text) = tokio::task::spawn_blocking({
+        let env_s = env_s.clone();
+        let map = map.clone();
+        move || {
+            run_script_env(
+                &[
+                    "boot-probe",
+                    "--env-file",
+                    &env_s,
+                    "--path-map",
+                    &map,
+                    "--probe-topic",
+                    "wire-probe-lost",
+                ],
+                &[("PROOF_VM_WIRE_CHECK_FAULT", "lose-create-answer")],
+            )
+        }
+    })
+    .await
+    .expect("join");
+    assert_eq!(code, 1, "a lost answer is a FAIL, not a pass:\n{text}");
+    assert!(text.contains("create → HTTP 000"), "{text}");
+    assert!(
+        text.contains("reconcile: agent reports vm wire-probe-lost-"),
+        "{text}"
+    );
+    assert!(
+        text.contains("destroyed; topic wire-probe-lost free"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("left topic wire-probe-lost in flight"),
+        "the in-line reconcile must clear the topic before exit:\n{text}"
+    );
+    assert_eq!(hv.boots().len(), 2, "the lost create still booted a VM");
+    assert_eq!(hv.boots()[1].topic_id, "wire-probe-lost");
+    assert_eq!(hv.teardowns().len(), 2, "and it was destroyed");
+    assert_eq!(hv.teardowns()[1].1, RetainPolicy::Destroy);
+    assert!(
+        agent.state.running().await.is_empty(),
+        "nothing outlives an ambiguous create"
+    );
+    // A retry on the same topic is not blocked by a stranded VM.
+    let (ok, text) = tokio::task::spawn_blocking({
+        let env_s = env_s.clone();
+        let map = map.clone();
+        move || {
+            run_script(&[
+                "boot-probe",
+                "--env-file",
+                &env_s,
+                "--path-map",
+                &map,
+                "--probe-topic",
+                "wire-probe-lost",
+            ])
+        }
+    })
+    .await
+    .expect("join");
+    assert!(ok, "retry after reconcile:\n{text}");
+
     // A stopped agent is reported, not swallowed.
     agent.stop();
     let (ok, text) = tokio::task::spawn_blocking(move || {
@@ -164,6 +234,62 @@ async fn agent_and_boot_probe_speak_the_router_json_and_never_print_the_bearer()
     assert!(!ok, "a dead agent must fail the check:\n{text}");
     assert!(text.contains("agent health → HTTP 000"), "{text}");
     let _ = std::fs::remove_dir_all(env.parent().expect("dir"));
+}
+
+/// DNS is case-insensitive, so is the guard: a production origin is refused
+/// however it is spelled, before any authenticated request, on every probe
+/// that would send one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_hosts_are_refused_case_insensitively_before_any_request() {
+    if !tools_present() {
+        eprintln!("skipping: bash / curl / python3 not all present");
+        return;
+    }
+    for cp in [
+        "https://NETWORK.CORTEX.FOUNDATION/challenge/proof",
+        "http://user@Chain.JoinBase.AI:8080/challenge/proof",
+        "https://api.cortex.foundation./v1",
+        "https://sub.network.cortex.foundation:443/challenge/proof",
+    ] {
+        let (code, text) = tokio::task::spawn_blocking(move || {
+            run_script_env(
+                &["submit-probe", "--cp", cp, "--topic", "x", "--expect", "400"],
+                &[],
+            )
+        })
+        .await
+        .expect("join");
+        assert_eq!(code, 2, "{cp} must be refused:\n{text}");
+        assert!(text.contains("refusing production host"), "{cp}: {text}");
+        assert!(!text.contains("POST"), "{cp}: no request may go out:\n{text}");
+    }
+    // The agent URL is refused at env load, before boot-probe reads the bearer.
+    let (secrets, _) = {
+        let (env, secrets) = cp_env(
+            "prod-agent",
+            "https://NETWORK.Cortex.Foundation:8200",
+            &pinned_template().image_digest,
+        );
+        (secrets, env)
+    };
+    let env_s = secrets
+        .parent()
+        .expect("dir")
+        .join("proof-challenge.env")
+        .to_string_lossy()
+        .into_owned();
+    let map = format!("/run/base/proof={}", secrets.display());
+    let (code, text) = tokio::task::spawn_blocking(move || {
+        run_script_env(
+            &["boot-probe", "--env-file", &env_s, "--path-map", &map],
+            &[],
+        )
+    })
+    .await
+    .expect("join");
+    assert_eq!(code, 2, "{text}");
+    assert!(text.contains("refusing production host"), "{text}");
+    let _ = std::fs::remove_dir_all(secrets.parent().expect("dir"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

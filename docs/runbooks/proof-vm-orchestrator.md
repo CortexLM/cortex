@@ -330,7 +330,7 @@ cd /opt/base
 | `env` | `PROOF_VM_ORCHESTRATOR_URL` is `https://`; the bearer file (container path mapped through the compose bind mount, `--path-map`) exists and is non-empty, mode 0400 / uid 65532; `PROOF_RLM_VM_IMAGE_DIGEST` is `sha256:<64 hex>` (empty or a placeholder = FAIL — never invented); the CA file is PEM when set; every custom id is well-formed; the shape is the locked 4 / 8192; `PROOF_FORCE_SIM` is off |
 | `agent` | `GET /v1/health` with the bearer → `ready: true`, `hypervisor: firecracker`; no bearer → 401; wrong bearer → 401 |
 | `cp` | `/v1/status`: `lium`, `live_harvest_wired`, `registered_custom` ⊇ ids, no URL / token / path in the body; `/v1/proof/topics` leaks no holdout; `/v1/proof/executor` readiness; then the admin probe above — `orchestrator: firecracker`, `ready: true`, `agent.ready: true` through the CP's own rustls client |
-| `boot-probe` | the agent boots the **pinned** image for a probe topic, one topic ↔ one VM, a teardown naming another topic is refused, destroy is confirmed, nothing is left for the topic. Opt-in: it boots a real 4 vCPU / 8 GiB RLM VM on the KVM host (up to 10 min, the RLM guest must say hello); no job runs, nothing is spent; Ctrl-C tears the VM down |
+| `boot-probe` | the agent boots the **pinned** image for a probe topic, one topic ↔ one VM, a teardown naming another topic is refused, destroy is confirmed, nothing is left for the topic. Opt-in: it boots a real 4 vCPU / 8 GiB RLM VM on the KVM host (up to 10 min, the RLM guest must say hello); no job runs, nothing is spent. Nothing outlives it: Ctrl-C, a lost `201` (timeout, dropped connection), or an unconfirmed teardown all end in a by-topic attach + destroy before the script exits, so a retry on the same probe topic is never blocked by a stranded VM |
 
 Every check re-reads the files it names, so a fix to the bearer or the CA
 needs no restart; URL / digest / ids are read at boot.
@@ -367,8 +367,13 @@ With everything restored and an open custom topic whose id is registered:
   --expect 201 --allow-live-run --artifact-uri <locator the RLM VM can fetch through the egress allowlist>
 ```
 
-The POST is synchronous (the RLM job runs before the 201). Evidence to
-collect, in order:
+The POST is synchronous (the RLM job runs before the 201). The live probe
+declares the topic's whole `flops_budget` (read from `GET
+/v1/proof/topics/<id>`; `--declared-flops N` overrides) so the sister's
+measurement is judged against the budget, not against the token `1` the
+fail-closed probes send — a run over its own declaration is a
+`flops_under_declared` reject, which is the miner rule, not a wire fault.
+Evidence to collect, in order:
 
 | Step | Where | Must show |
 |------|-------|-----------|
