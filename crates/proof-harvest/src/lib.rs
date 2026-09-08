@@ -390,13 +390,17 @@ impl LiumProofHarvest {
             .holdout_store
             .as_deref()
             .ok_or(EvalError::HoldoutStoreMissing)?;
+        // Holdout first: a missing/mismatched shard must not leave a
+        // model-sized proxy tar on the control plane.
+        let holdout_tar = pack_holdout_tar(store, holdout)?;
         let proxy_path = pack_proxy_tar(proxy)?;
+        let guard = ProxyTarGuard(Some(proxy_path.clone()));
         Ok((
             RunExtras {
-                holdout_tar: pack_holdout_tar(store, holdout)?,
-                proxy_tar_path: Some(proxy_path.clone()),
+                holdout_tar,
+                proxy_tar_path: Some(proxy_path),
             },
-            ProxyTarGuard(Some(proxy_path)),
+            guard,
         ))
     }
 
@@ -913,6 +917,59 @@ mod tests {
             .expect_err("empty proxy");
         assert!(matches!(err, EvalError::ProxyModelMissing), "{err}");
         assert!(!*pod.booted.lock().expect("booted"));
+    }
+
+    fn leftover_proxy_tars() -> Vec<PathBuf> {
+        let prefix = format!("proof-proxy-{}-", std::process::id());
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+                    && p.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("tar"))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn missing_holdout_shard_does_not_leak_a_proxy_tar() {
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (proxy, store) = live_asset_dirs(&recs);
+        let pod = CapturePod::new();
+        let harvest = LiumProofHarvest::new(
+            pod.clone(),
+            HarvestLimits::default(),
+            vec!["ssh-ed25519 AAAAtest proof".into()],
+        )
+        .with_judge_api_key(Some("sk-live-not-a-real-secret".into()))
+        .with_proxy_model_dir(Some(proxy))
+        .with_holdout_store(Some(store));
+        harvest.ready().expect("store is usable");
+        let mut missing = recs.clone();
+        missing[0].content_sha256 = "ab".repeat(32);
+        let before = leftover_proxy_tars();
+        let err = harvest
+            .score(
+                &harvest_pin(),
+                &harvest_topic(&recs),
+                &harvest_offer(),
+                "digest-abcdef",
+                "artifact",
+                &missing,
+                "claim",
+            )
+            .await
+            .expect_err("missing shard");
+        assert!(matches!(err, EvalError::HoldoutStoreMissing), "{err}");
+        assert!(!*pod.booted.lock().expect("booted"));
+        let after = leftover_proxy_tars();
+        assert_eq!(after, before, "proxy tar leaked: {after:?}");
     }
 
     #[test]
