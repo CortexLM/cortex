@@ -47,7 +47,8 @@ its static checks and model measurements are only part of that design.
 Holdout records are not included in public topic responses.
 
 `GET /challenge/proof/v1/status` shows `can_score`, `eval_backend`,
-`force_sim`, `live_harvest_wired`, `baseline_sealed`, public pin `inference`
+`force_sim`, `live_harvest_wired`, `custom_family_wired`, `baseline_sealed`,
+public pin `inference`
 judge defaults (provider, model, mode, token caps — never the origin), the
 public RLM judge `inference_offer` (id, kind, mode, model_ref, token caps,
 commitment, status), and the public `eval_executor` — the `1x` Lium machine
@@ -72,7 +73,9 @@ curl -sS https://network.cortex.foundation/challenge/proof/v1/status
 ```
 
 `GET /challenge/proof/v1/status` shows `can_score`, `eval_backend`,
-`force_sim`, `live_harvest_wired`, `baseline_sealed`, `eval_image_digest`,
+`force_sim`, `live_harvest_wired` (Lium harvest, `nll` / `throughput`),
+`custom_family_wired` + `registered_custom` + `custom_ready` (the `custom`
+family, reported apart), `baseline_sealed`, `eval_image_digest`,
 public pin `inference` (no origin), public RLM judge `inference_offer`,
 public `eval_executor` (plus the pin `executor` ceilings), and
 `open_topics`. It never leaks holdout records, teacher hosts, origins, or
@@ -90,8 +93,10 @@ rented.
 | `open_topics` empty | No currently `open` signed topic with a sealed baseline → **503** |
 | `scorable_topics` | Open topics whose family's scorer is wired on this host. An open topic **not** listed here (a `custom` topic whose runner is not registered or not wired; an `nll` / `throughput` topic on a host whose Lium harvest is not wired) answers **503** |
 | `registered_custom` | Custom metric ids with a registered runner. Nothing is compiled in; ids come from signed topics |
+| `custom_ready` | The subset of `registered_custom` whose runner can run right now (topic-VM orchestrator reachable by config, image pinned). A registered id missing here → its topics answer **503** |
 | `baseline_sealed: false` | An open topic without `script_sha256` + `metrics_commitment` → **503** |
-| `live_harvest_wired: false` | No live scorer is connected — neither the Lium harvest (`nll` / `throughput`) nor a topic-VM runner (`custom`) → **503** for everything. `true` does not by itself make every open topic scorable: check `scorable_topics` |
+| `live_harvest_wired: false` | The Lium harvest — the `nll` / `throughput` scorer — is not connected → **503** on those families. **Lium only**: it says nothing about `custom` topics |
+| `custom_family_wired: false` | No custom-family runner is registered on this host → **503** on `custom` topics. Independent of `live_harvest_wired`; both `false` → **503** for everything |
 
 ## 1. List open topics
 

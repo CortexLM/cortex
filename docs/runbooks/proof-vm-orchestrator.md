@@ -118,10 +118,14 @@ and no `LIUM_API_KEY` / `LIUM_SSH_PUBLIC_KEY_FILE`, the boot log shows
 `live harvest not wired: custom-family topics route to the rlm scorer over
 the topic-vm orchestrator`, custom topics open and score, and every `nll` /
 `throughput` topic stays out of `scorable_topics` (submit **503**, no row).
-Do not stage a placeholder Lium key to open custom topics. If the log shows
-`live harvest not wired; every submission will 503` instead, the orchestrator
-URL is unset or refused (plain `http://` off loopback) or no id registered —
-fix that, not Lium.
+`GET /v1/status` then reads `live_harvest_wired: false` (that flag is Lium
+only — expected here, not a fault), `custom_family_wired: true`,
+`registered_custom` = your ids, and `custom_ready` = the ids whose runner can
+run now; an id in `registered_custom` but not in `custom_ready` means the
+bearer file or image pin is missing on this host. Do not stage a placeholder
+Lium key to open custom topics. If the log shows `live harvest not wired;
+every submission will 503` instead, the orchestrator URL is unset or refused
+(plain `http://` off loopback) or no id registered — fix that, not Lium.
 
 The RLM VM shape is 4 vCPU / 8192 MiB. `PROOF_RLM_VM_VCPUS` /
 `PROOF_RLM_VM_MEM_MIB` exist for a deliberate change only.

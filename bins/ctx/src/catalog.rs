@@ -140,6 +140,7 @@ fn print_challenge_status(c: &Challenge, body: &Value) {
         "scoring_backend",
         "force_sim",
         "live_harvest_wired",
+        "custom_family_wired",
         "baseline_sealed",
         "eval_image_digest",
     ] {

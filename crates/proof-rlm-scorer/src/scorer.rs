@@ -759,6 +759,26 @@ impl LiveScorer for RlmScorer {
         self.registry.ids()
     }
 
+    /// Registered ids whose runner reports ready (topic-VM orchestrator
+    /// bearer file present, image pinned). Local checks only; no request
+    /// leaves the host.
+    fn ready_custom_ids(&self) -> Vec<String> {
+        self.registry
+            .ids()
+            .into_iter()
+            .filter(|id| {
+                self.registry
+                    .resolve(id)
+                    .is_ok_and(|runner| runner.ready().is_ok())
+            })
+            .collect()
+    }
+
+    /// The RLM scorer is the custom family, never the Lium harvest.
+    fn harvest_wired(&self) -> bool {
+        false
+    }
+
     /// Decided under the topic lease this run has held since `score`
     /// returned, against the harder of the caller's bar and the store's
     /// current best: no other run of this topic can be between score and

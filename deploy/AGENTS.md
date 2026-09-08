@@ -84,7 +84,9 @@ unwired (503); token missing, digest unpinned, or agent down → 503, never a
 host-local fallback. Those four are the whole custom-family prerequisite: with
 them set and no `LIUM_API_KEY` / `LIUM_SSH_PUBLIC_KEY_FILE`, custom topics
 score and `nll` / `throughput` answer 503 — do not stage a placeholder Lium
-key to open custom topics. Kernel / RLM / sister image digests are computed from the
+key to open custom topics. On `/v1/status` that host reads
+`live_harvest_wired: false` (Lium only) with `custom_family_wired: true` and
+its ids in `registered_custom` / `custom_ready`. Kernel / RLM / sister image digests are computed from the
 files the operator stages (`sha256sum`) — never invented, never in git.
 Procedure and the mandatory submission verification:
 [`docs/runbooks/proof-vm-orchestrator.md`](../docs/runbooks/proof-vm-orchestrator.md).

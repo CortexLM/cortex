@@ -183,14 +183,8 @@ fn run(cli: &Cli) -> Result<(), String> {
         cli.proxy_model_dir.clone(),
         cli.holdout_store.clone(),
     );
-    let harvest_wired = harvest.is_some();
     let live_scorer = live_scorer(backend, harvest, rlm_store, &cli.artefact_root);
-    log_live_wiring(
-        backend,
-        harvest_wired,
-        live_scorer.as_deref(),
-        &cli.artefact_root,
-    );
+    log_live_wiring(backend, live_scorer.as_deref(), &cli.artefact_root);
 
     let store = MemoryStore::new();
     let registered = registered_custom(live_scorer.as_deref());
@@ -271,13 +265,10 @@ fn build_live_scorer(
 
 /// Boot log for what [`live_scorer`] wired, and what answers 503 because of
 /// what is missing. Nothing here is a boot error: a live host refuses until
-/// the operator wires the piece it names.
-fn log_live_wiring(
-    backend: EvalBackend,
-    harvest_wired: bool,
-    live: Option<&dyn LiveScorer>,
-    artefact_root: &Path,
-) {
+/// the operator wires the piece it names. The harvest flag is the same
+/// Lium-only answer `/v1/status` gives as `live_harvest_wired`.
+fn log_live_wiring(backend: EvalBackend, live: Option<&dyn LiveScorer>, artefact_root: &Path) {
+    let harvest_wired = live.is_some_and(LiveScorer::harvest_wired);
     match backend {
         EvalBackend::Lium if harvest_wired => {
             tracing::info!("live harvest wired: digest-pinned proof-eval image on Lium");
@@ -790,7 +781,9 @@ mod tests {
             &root,
         )
         .expect("a wired harvest is the live scorer");
+        assert!(mux.harvest_wired(), "the Lium harvest is the default route");
         assert!(registered_custom(Some(mux.as_ref())).is_empty());
+        assert!(mux.ready_custom_ids().is_empty());
         for id in ["any_metric", "another_metric"] {
             let mut custom = TopicDocument::default();
             custom.metric.family = proof_task::MetricFamily::Custom;
@@ -1016,9 +1009,18 @@ mod tests {
             &root,
         )
         .expect("the custom family is wired from the topic-vm env alone");
+        assert!(
+            !mux.harvest_wired(),
+            "live_harvest_wired is Lium-only; a custom-only host reads false"
+        );
         assert_eq!(
             registered_custom(Some(mux.as_ref())),
             vec!["metric_a".to_owned()]
+        );
+        assert_eq!(
+            mux.ready_custom_ids(),
+            vec!["metric_a".to_owned()],
+            "custom readiness is reported on its own"
         );
         mux.ready().expect("no host-wide blocker");
 
@@ -1054,6 +1056,16 @@ mod tests {
             Some("test-judge-key"),
         )
         .expect("ready host-wide without Lium");
+
+        // Registration and readiness are separate: an emptied bearer file
+        // keeps the id registered but no longer ready (per-request 503).
+        std::fs::write(&token, "\n").expect("empty token");
+        assert_eq!(
+            registered_custom(Some(mux.as_ref())),
+            vec!["metric_a".to_owned()]
+        );
+        assert!(mux.ready_custom_ids().is_empty());
+        assert!(!mux.harvest_wired());
 
         // Sim scores in-process and never wires anything live.
         assert!(live_scorer(

@@ -331,6 +331,25 @@ pub trait LiveScorer: Send + Sync {
         Vec::new()
     }
 
+    /// Custom metric ids whose registered runner could run right now (its
+    /// topic-VM orchestrator wired, image pinned): a subset of
+    /// [`Self::custom_ids`]. Default: none. Status reporting only, never a
+    /// gate — the submit path asks [`Self::ready_for_topic`].
+    fn ready_custom_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Whether the digest-pinned Lium harvest — the scorer of the `nll` /
+    /// `throughput` families — is wired behind this handle. Default: this
+    /// scorer *is* that harvest. A custom-family scorer answers `false`; a
+    /// mux answers for its default route. Status reporting only, never a
+    /// gate: `live_harvest_wired` on `/v1/status` is this and nothing else,
+    /// so a host that scores only its custom family never reads as
+    /// harvest-ready.
+    fn harvest_wired(&self) -> bool {
+        true
+    }
+
     /// Whether the run for `submission_digest` on `topic` should be crowned
     /// champion automatically.
     ///
@@ -480,6 +499,19 @@ impl LiveScorer for FamilyMux {
         self.custom
             .as_deref()
             .map_or_else(Vec::new, LiveScorer::custom_ids)
+    }
+
+    fn ready_custom_ids(&self) -> Vec<String> {
+        self.custom
+            .as_deref()
+            .map_or_else(Vec::new, LiveScorer::ready_custom_ids)
+    }
+
+    /// Only the default route is a harvest: a custom-only mux is not one.
+    fn harvest_wired(&self) -> bool {
+        self.default
+            .as_deref()
+            .is_some_and(LiveScorer::harvest_wired)
     }
 
     async fn auto_promote(
@@ -1544,6 +1576,15 @@ mod tests {
             vec!["registered_metric".into()]
         }
 
+        fn ready_custom_ids(&self) -> Vec<String> {
+            self.custom_ids()
+        }
+
+        /// A custom-family scorer is never the harvest.
+        fn harvest_wired(&self) -> bool {
+            false
+        }
+
         async fn auto_promote(
             &self,
             _t: &TopicDocument,
@@ -1569,6 +1610,8 @@ mod tests {
         bare.ready_for_topic(&topic())
             .expect("nll routes to the harvest");
         assert!(bare.custom_ids().is_empty());
+        assert!(bare.ready_custom_ids().is_empty());
+        assert!(bare.harvest_wired(), "the default route is the harvest");
         assert!(matches!(
             bare.ready_for_topic(&custom_topic("anything")),
             Err(EvalError::RunnerUnwired { .. })
@@ -1577,6 +1620,11 @@ mod tests {
         let mux = FamilyMux::new(Arc::new(Harvest { reproduced: true }))
             .with_custom_family(Arc::new(OneRunner));
         assert_eq!(mux.custom_ids(), vec!["registered_metric".to_owned()]);
+        assert_eq!(mux.ready_custom_ids(), vec!["registered_metric".to_owned()]);
+        assert!(
+            mux.harvest_wired(),
+            "adding a custom route keeps the harvest"
+        );
         assert_eq!(
             registered_custom(Some(&mux)),
             vec!["registered_metric".to_owned()]
@@ -1651,7 +1699,12 @@ mod tests {
     async fn custom_only_mux_scores_custom_and_refuses_the_harvest_families() {
         let mux = FamilyMux::custom_only(Arc::new(OneRunner));
         mux.ready().expect("no host-wide blocker without a harvest");
+        assert!(
+            !mux.harvest_wired(),
+            "a custom-only host must never read as harvest-wired"
+        );
         assert_eq!(mux.custom_ids(), vec!["registered_metric".to_owned()]);
+        assert_eq!(mux.ready_custom_ids(), vec!["registered_metric".to_owned()]);
         mux.ready_for_topic(&custom_topic("registered_metric"))
             .expect("registered id");
         assert!(matches!(

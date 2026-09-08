@@ -99,7 +99,7 @@ cargo run -p xtask -- proof-executor-offer \\
 #   PROOF_EVAL_EXECUTOR_OFFER_FILE=${SECRETS}/eval_executor_offer.json
 #   LIUM_API_KEY=…  LIUM_SSH_PUBLIC_KEY_FILE=…
 # Restart proof-challenge, then:
-#   curl -sS "\$PROOF_BASE/v1/status" | jq '{can_score,eval_image_digest,open_topics,live_harvest_wired,baseline_sealed,eval_executor}'
+#   curl -sS "\$PROOF_BASE/v1/status" | jq '{can_score,eval_image_digest,open_topics,live_harvest_wired,custom_family_wired,custom_ready,baseline_sealed,eval_executor}'
 #   curl -sS "\$PROOF_BASE/v1/proof/executor" | jq '{ready,reason}'
 
 # can_score is true only with: real digest + harvest wired + open topic +

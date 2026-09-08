@@ -68,8 +68,10 @@ pub struct AppState {
     pub pin: ProofPin,
     /// Backend that is allowed to produce scores on this host.
     pub backend: EvalBackend,
-    /// Harvest handle for the digest-pinned eval image. `None` on a live host
-    /// means nothing can score, so submissions refuse.
+    /// Live scorer by metric family: the digest-pinned Lium harvest for
+    /// `nll` / `throughput` and/or the custom-family RLM scorer (each wired
+    /// on its own; a family whose route is missing refuses per topic). `None`
+    /// on a live host means nothing can score, so submissions refuse.
     pub live_scorer: Option<Arc<dyn LiveScorer>>,
     /// Live RLM judge backend (operator state). Missing/closed → can_score false.
     pub offer: Option<InferenceOffer>,
@@ -119,6 +121,20 @@ impl AppState {
     /// makes the topic scorable.
     fn registered_custom(&self) -> Vec<String> {
         registered_custom(self.live())
+    }
+
+    /// Whether the digest-pinned Lium harvest — the `nll` / `throughput`
+    /// scorer — is wired. Lium only: a custom-only host answers `false`.
+    fn live_harvest_wired(&self) -> bool {
+        self.live().is_some_and(LiveScorer::harvest_wired)
+    }
+
+    /// Registered custom ids whose runner could run right now (topic-VM
+    /// orchestrator wired, image pinned). Independent of the harvest and of
+    /// which topics are open.
+    fn custom_ready(&self) -> Vec<String> {
+        self.live()
+            .map_or_else(Vec::new, LiveScorer::ready_custom_ids)
     }
 
     /// Whether the host-wide gates (digest, harvest, judge offer, executor,
@@ -195,6 +211,9 @@ async fn health() -> impl IntoResponse {
 async fn status(State(st): State<AppState>) -> impl IntoResponse {
     let open = st.store.open_ids(st.epoch).unwrap_or_default();
     let baseline_sealed = st.store.any_open_scorable(st.epoch).unwrap_or(false);
+    // Family wiring is reported per family, never conflated: the harvest
+    // flag is Lium-only, the custom family has its own fields.
+    let registered_custom = st.registered_custom();
     Json(serde_json::json!({
         "challenge_id": CHALLENGE_ID,
         "scoring_version": SCORING_VERSION,
@@ -215,11 +234,13 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         "force_sim": force_sim(),
         "sim_stub_win": st.backend == EvalBackend::Sim,
         "can_score": st.can_score(),
-        "live_harvest_wired": st.live_scorer.is_some(),
+        "live_harvest_wired": st.live_harvest_wired(),
+        "custom_family_wired": !registered_custom.is_empty(),
         "baseline_sealed": baseline_sealed,
         "open_topics": open,
         "scorable_topics": st.scorable_topics(),
-        "registered_custom": st.registered_custom(),
+        "registered_custom": registered_custom,
+        "custom_ready": st.custom_ready(),
         "epoch": st.epoch,
     }))
 }
@@ -1684,6 +1705,11 @@ mod tests {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(body["can_score"], false, "{body}");
         assert_eq!(body["baseline_sealed"], false, "{body}");
+        // No live scorer at all: neither family is wired.
+        assert_eq!(body["live_harvest_wired"], false, "{body}");
+        assert_eq!(body["custom_family_wired"], false, "{body}");
+        assert_eq!(body["registered_custom"], serde_json::json!([]), "{body}");
+        assert_eq!(body["custom_ready"], serde_json::json!([]), "{body}");
 
         let (st, body) = json_req(
             app_full(
@@ -1702,7 +1728,10 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK);
+        // A harvest with no custom route: the harvest flag alone is true.
         assert_eq!(body["live_harvest_wired"], true);
+        assert_eq!(body["custom_family_wired"], false, "{body}");
+        assert_eq!(body["custom_ready"], serde_json::json!([]), "{body}");
         assert_eq!(body["can_score"], false, "{body}");
     }
 
@@ -1934,6 +1963,14 @@ mod tests {
             vec![self.custom_id.clone()]
         }
 
+        fn ready_custom_ids(&self) -> Vec<String> {
+            if self.wired {
+                self.custom_ids()
+            } else {
+                Vec::new()
+            }
+        }
+
         async fn auto_promote(
             &self,
             _topic: &TopicDocument,
@@ -2028,7 +2065,9 @@ mod tests {
     /// not wired (`FamilyMux::custom_only`): the host is ready, the custom
     /// topic is scorable and scores, and every `nll` / `throughput` topic is
     /// open but not scorable — a submit there is a 503 with no row and no
-    /// scorer call, never an in-process sim.
+    /// scorer call, never an in-process sim. `/v1/status` says so per
+    /// family: `live_harvest_wired` stays **false** (Lium only) while the
+    /// custom family reports wired and ready on its own fields.
     #[tokio::test]
     async fn a_custom_only_host_scores_custom_and_refuses_the_harvest_families() {
         let scorer = Arc::new(FamilyStub::win("topic_minted_metric"));
@@ -2059,7 +2098,12 @@ mod tests {
             ["topic_minted_metric"],
             "{status}"
         );
-        assert_eq!(status["live_harvest_wired"], true, "{status}");
+        assert_eq!(
+            status["live_harvest_wired"], false,
+            "no Lium harvest: the harvest flag must not follow the custom mux: {status}"
+        );
+        assert_eq!(status["custom_family_wired"], true, "{status}");
+        assert_eq!(ids("custom_ready"), ["topic_minted_metric"], "{status}");
         assert_eq!(status["can_score"], true, "{status}");
 
         let (st, body) = json_req(
@@ -2146,6 +2190,11 @@ mod tests {
             ["topic_minted_metric"],
             "{status}"
         );
+        // Harvest wired, custom registered but its VM backend not: each
+        // family reports its own state.
+        assert_eq!(status["live_harvest_wired"], true, "{status}");
+        assert_eq!(status["custom_family_wired"], true, "{status}");
+        assert!(ids("custom_ready").is_empty(), "{status}");
         assert_eq!(status["can_score"], true, "{status}");
 
         let (st, body) = json_req(
