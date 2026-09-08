@@ -270,13 +270,22 @@ impl FirecrackerHypervisor {
             return Err(e);
         }
         let root = jail.root().to_path_buf();
-        let child = jail
-            .keep()
-            .ok_or_else(|| HvError::Backend(format!("vm {vm_id} has no process after boot")))?;
-        self.vms
-            .lock()
-            .await
-            .insert(vm_id.to_owned(), LiveVm { child, root, net });
+        // Take the registry lock while the guard still owns the jail: a request
+        // cancelled here releases everything. Nothing awaits between the
+        // hand-over and the insert.
+        let mut vms = self.vms.lock().await;
+        let child = match jail.keep() {
+            Ok(child) => child,
+            Err(jail) => {
+                drop(vms);
+                jail.destroy().await;
+                return Err(HvError::Backend(format!(
+                    "vm {vm_id} has no process after boot"
+                )));
+            }
+        };
+        vms.insert(vm_id.to_owned(), LiveVm { child, root, net });
+        drop(vms);
         Ok(BootedVm {
             vm_id: vm_id.to_owned(),
             topic_id: spec.topic_id.clone(),
@@ -641,6 +650,139 @@ mod tests {
             "{lines:?}"
         );
         assert!(hv.vms.lock().await.is_empty());
+        let _ = std::fs::remove_dir_all(c.chroot_base.parent().unwrap_or(&c.chroot_base));
+    }
+
+    /// Stand in for Firecracker's vsock UDS + the RLM guest agent: answer the
+    /// `CONNECT` handshake, then `Hello` with `Ready`. Bound by the caller
+    /// once the jail root exists.
+    async fn fake_rlm_guest(listener: UnixListener) {
+        use proof_vm_proto::guest::{read_frame, write_frame};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let mut stream = BufReader::new(stream);
+        let mut line = String::new();
+        let _ = stream.read_line(&mut line).await;
+        assert_eq!(line, format!("CONNECT {RLM_JOB_PORT}\n"));
+        stream
+            .get_mut()
+            .write_all(b"OK 1073741824\n")
+            .await
+            .expect("ok");
+        let hello: HostToRlm = read_frame(&mut stream).await.expect("hello");
+        assert!(matches!(hello, HostToRlm::Hello { .. }));
+        write_frame(
+            stream.get_mut(),
+            &RlmToHost::Ready {
+                agent: "fake-rlm-guest".into(),
+                api_version: API_VERSION,
+            },
+        )
+        .await
+        .expect("ready");
+    }
+
+    /// Serve the fake guest as soon as the boot has prepared `root`.
+    fn serve_fake_guest_when_ready(root: PathBuf) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            for _ in 0..100 {
+                if root.is_dir() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let listener = UnixListener::bind(vsock::uds_path(&root)).expect("bind fake vsock");
+            fake_rlm_guest(listener).await;
+        })
+    }
+
+    fn stand_in_host(tag: &str) -> HostConfig {
+        let mut c = cfg(tag);
+        c.boot_timeout = Duration::from_secs(10);
+        std::fs::write(&c.jailer_bin, b"#!/bin/sh\nexec sleep 30\n").expect("stand-in");
+        std::fs::set_permissions(&c.jailer_bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        std::fs::write(c.image_dir.join("rlm.ext4"), b"rlm rootfs stand-in").expect("image");
+        c
+    }
+
+    /// The guest is ready and the boot is waiting for the VM registry when
+    /// the request is cancelled: the guard still owns the jail, so the
+    /// process, the network, and the directory are released — nothing is
+    /// registered. With the registry free the same boot completes, is alive,
+    /// and tears down cleanly. Stand-in process + fake guest, no Firecracker.
+    #[tokio::test]
+    async fn a_boot_cancelled_at_the_registry_still_releases_everything() {
+        let c = stand_in_host("registry");
+        let req = request();
+        let spec = TopicVmSpec::for_topic(&req.topic_id, pinned_template(), req.sandbox.clone());
+        let shell = Arc::new(RecordingShell::default());
+        let hv =
+            Arc::new(FirecrackerHypervisor::with_shell(c.clone(), shell.clone()).expect("config"));
+        let held = hv.vms.lock().await;
+        let guest = serve_fake_guest_when_ready(c.jail_root("topic-a-0001"));
+        let boot = {
+            let hv = hv.clone();
+            let spec = spec.clone();
+            let image = c.image_dir.join("rlm.ext4");
+            tokio::spawn(async move { hv.boot_verified("topic-a-0001", &spec, image).await })
+        };
+        guest.await.expect("guest answered hello");
+        // The boot is now parked on the registry lock we hold.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!boot.is_finished(), "blocked on the registry");
+        boot.abort();
+        let _ = boot.await;
+        drop(held);
+        let jail_dir = c.jail_dir("topic-a-0001").display().to_string();
+        for _ in 0..100 {
+            if shell
+                .calls()
+                .iter()
+                .any(|l| l.join(" ") == format!("rm -rf {jail_dir}"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let lines: Vec<String> = shell.calls().iter().map(|l| l.join(" ")).collect();
+        assert!(
+            lines.contains(&"nft delete table inet proof_vm_pfc0".to_owned()),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&"ip link del pfc0".to_owned()), "{lines:?}");
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(format!("rm -rf {jail_dir}").as_str()),
+            "{lines:?}"
+        );
+        assert!(hv.vms.lock().await.is_empty(), "nothing registered");
+        let _ = std::fs::remove_dir_all(c.jail_dir("topic-a-0001"));
+
+        // Registry free: the boot completes and the VM is alive until torn down.
+        let guest = serve_fake_guest_when_ready(c.jail_root("topic-a-0002"));
+        let vm = hv
+            .boot_verified("topic-a-0002", &spec, c.image_dir.join("rlm.ext4"))
+            .await
+            .expect("boot completes");
+        guest.await.expect("guest");
+        assert_eq!(vm.topic_id, req.topic_id);
+        assert!(hv.alive(&vm).await, "stand-in process is running");
+        assert_eq!(hv.vms.lock().await.len(), 1);
+        assert!(hv
+            .teardown(&vm, RetainPolicy::Destroy)
+            .await
+            .expect("teardown"));
+        assert!(!hv.alive(&vm).await);
+        assert!(hv.vms.lock().await.is_empty());
+        let lines: Vec<String> = shell.calls().iter().map(|l| l.join(" ")).collect();
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(format!("rm -rf {}", c.jail_dir("topic-a-0002").display()).as_str()),
+            "{lines:?}"
+        );
         let _ = std::fs::remove_dir_all(c.chroot_base.parent().unwrap_or(&c.chroot_base));
     }
 

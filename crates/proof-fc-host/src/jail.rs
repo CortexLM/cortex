@@ -367,11 +367,20 @@ impl JailGuard {
     }
 
     /// Hand the jail and its process over: the caller now owns both and the
-    /// guard does nothing more.
-    #[must_use]
-    pub fn keep(mut self) -> Option<tokio::process::Child> {
-        self.armed = false;
-        self.child.take()
+    /// guard does nothing more. Without a spawned process there is nothing
+    /// to hand over, so the guard comes back still owning the jail.
+    ///
+    /// # Errors
+    ///
+    /// The guard itself, still armed, when no process was spawned.
+    pub fn keep(mut self) -> Result<tokio::process::Child, Box<Self>> {
+        match self.child.take() {
+            Some(child) => {
+                self.armed = false;
+                Ok(child)
+            }
+            None => Err(Box::new(self)),
+        }
     }
 
     /// Kill the process, tear the network down, remove the jail — now, and
@@ -412,6 +421,8 @@ impl Drop for JailGuard {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
     use crate::shell::RecordingShell;
 
@@ -608,24 +619,20 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&c.chroot_base);
 
+        // Without a process there is nothing to hand over: `keep` gives the
+        // guard back, still owning the jail, and `destroy` releases inline.
         let c2 = Arc::new(cfg("kept"));
         let shell2 = Arc::new(RecordingShell::default());
         let guard = JailGuard::prepare(c2.clone(), shell2.clone(), &boot(None))
             .await
             .expect("prepare");
-        let before = shell2.calls().len();
-        assert!(guard.keep().is_none(), "nothing spawned");
-        tokio::task::yield_now().await;
-        assert_eq!(shell2.calls().len(), before, "a kept jail is not removed");
-
+        let Err(guard) = guard.keep() else {
+            panic!("nothing was spawned, nothing to keep");
+        };
         let Err(err) = JailGuard::prepare(c2.clone(), shell2.clone(), &boot(None)).await else {
             panic!("root still exists on disk");
         };
         assert!(err.to_string().contains("already exists"), "{err}");
-        let _ = std::fs::remove_dir_all(c2.jail_root("topic-a-0001"));
-        let guard = JailGuard::prepare(c2.clone(), shell2.clone(), &boot(None))
-            .await
-            .expect("prepare again");
         let before = shell2.calls().len();
         guard.destroy().await;
         let lines: Vec<String> = shell2.calls()[before..]
@@ -636,6 +643,34 @@ mod tests {
             lines,
             vec![format!("rm -rf {}", c2.jail_dir("topic-a-0001").display())]
         );
+
+        // With a process (a sleeping stand-in, not Firecracker) `keep` hands
+        // it over and the guard does nothing more.
+        let _ = std::fs::remove_dir_all(c2.jail_root("topic-a-0001"));
+        let mut c3 = cfg("kept-process");
+        c3.jailer_bin = c3.chroot_base.join("jailer");
+        std::fs::create_dir_all(&c3.chroot_base).expect("base");
+        std::fs::write(&c3.jailer_bin, b"#!/bin/sh\nexec sleep 30\n").expect("stand-in");
+        std::fs::set_permissions(&c3.jailer_bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        let c3 = Arc::new(c3);
+        let shell3 = Arc::new(RecordingShell::default());
+        let mut guard = JailGuard::prepare(c3.clone(), shell3.clone(), &boot(None))
+            .await
+            .expect("prepare");
+        guard.spawn().expect("stand-in spawned");
+        let before = shell3.calls().len();
+        let Ok(mut child) = guard.keep() else {
+            panic!("a process to keep");
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(shell3.calls().len(), before, "a kept jail is not removed");
+        assert!(
+            matches!(child.try_wait(), Ok(None)),
+            "the process is ours now"
+        );
+        kill(&mut child).await;
+        let _ = std::fs::remove_dir_all(&c3.chroot_base);
         let _ = std::fs::remove_dir_all(&c2.chroot_base);
     }
 }
