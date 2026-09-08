@@ -3571,6 +3571,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "crypto",
  "hex",
  "http-body-util",
  "proof-canon",

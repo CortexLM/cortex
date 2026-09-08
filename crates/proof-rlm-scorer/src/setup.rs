@@ -4,10 +4,10 @@
 //! ```text
 //! draft ──submit_for_review──▶ owner_presend ──(owner hook)──▶ awaiting_owner_keys
 //!   ──(key probe)──▶ provisioning ──(orchestrator.create)──▶ baselining
-//!   ──(ProposeRules job → rules vN in store; Baseline job → measurement in store,
-//!     refused when it spends over the topic budget or measures nothing)──▶
+//!   ──(ProposeRules job → rules vN in store; Baseline job → measurement in store)──▶
 //!   returns SetupOutcome; the operator seals custom_value, re-signs `open`,
-//!   and calls `mark_sealed` (baselining → open).
+//!   and calls `mark_sealed` (baselining → open) with the signed open
+//!   document and the sealed measurement — both are checked before the move.
 //! ```
 //!
 //! The control plane never runs RLM logic: it forwards jobs through
@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use proof_eval::BaselineMeasurement;
 use proof_rlm::{
     await_owner_keys, owner_presend, CustomRunReport, CustomRunRequest, Lifecycle, OwnerHook,
     OwnerKeysProbe, OwnerPrompt, RlmEvent, RlmState, RuleSet, RuleSource, SandboxPolicy,
@@ -25,7 +26,7 @@ use proof_rlm::{
     VmTemplate,
 };
 use proof_rlm_store::{BaselineRow, RlmStore, StoreError, TransitionRow};
-use proof_task::{InferenceOffer, MetricFamily, ProofPin, TopicDocument};
+use proof_task::{InferenceOffer, MetricFamily, ProofPin, TopicDocument, TopicError, TopicStatus};
 
 /// Why setup stopped.
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +60,17 @@ pub enum SetupError {
     /// The owner declined at presend; the topic is back at draft.
     #[error("owner declined; topic {0:?} returned to draft")]
     Declined(String),
+    /// `mark_sealed` was handed a document that is not `status: open`.
+    #[error("topic {0:?} is not an open document; nothing to open")]
+    NotOpen(String),
+    /// The document does not validate as an open topic or does not verify
+    /// under the pin's topic key.
+    #[error("topic document: {0}")]
+    Topic(#[from] TopicError),
+    /// The sealed measurement does not bind to the document, or is not what
+    /// the RLM measured in the topic VM.
+    #[error("seal: {0}")]
+    Seal(String),
 }
 
 /// What setup produced for the operator to seal.
@@ -315,22 +327,66 @@ impl TopicSetup {
         })
     }
 
-    /// The operator sealed the baseline and re-signed `status: open`:
+    /// The operator sealed the RLM's baseline and re-signed `status: open`:
     /// `baselining → open`, recorded, and the new document version stored.
+    ///
+    /// Nothing moves or is written unless, in this order: the document is
+    /// `status: open`; it validates as an open topic on this host
+    /// (`registered_custom` are the custom ids with a runner here — an open
+    /// custom topic needs one, a sealed baseline, tighten-only floors); its
+    /// operator signature verifies under the pin's topic key; `sealed` binds
+    /// to it (`BaselineMeasurement::verify`: commitment, holdout, image
+    /// digest) and its `custom_value` is the primary the RLM measured in the
+    /// topic VM; and the lifecycle is at `baselining`.
     ///
     /// # Errors
     ///
-    /// [`SetupError::State`] when the topic is not at `baselining`.
-    pub async fn mark_sealed(&self, topic: &TopicDocument) -> Result<RlmState, SetupError> {
+    /// [`SetupError::NotOpen`], [`SetupError::Topic`], [`SetupError::Seal`],
+    /// or [`SetupError::State`] when the topic is not at `baselining`. An
+    /// invalid draft never becomes the open version.
+    pub async fn mark_sealed(
+        &self,
+        topic: &TopicDocument,
+        pin: &ProofPin,
+        registered_custom: &[&str],
+        sealed: &BaselineMeasurement,
+    ) -> Result<RlmState, SetupError> {
+        if topic.status != TopicStatus::Open {
+            return Err(SetupError::NotOpen(topic.id.clone()));
+        }
+        topic.validate(pin, registered_custom)?;
+        topic.verify_signature(pin)?;
+        sealed
+            .verify(pin, topic)
+            .map_err(|e| SetupError::Seal(e.to_string()))?;
+        let measured =
+            self.store.baseline(&topic.id).await?.ok_or_else(|| {
+                SetupError::Seal(format!("no baseline measured for {:?}", topic.id))
+            })?;
+        let sealed_primary = sealed
+            .custom_value
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| SetupError::Seal("sealed measurement has no custom_value".into()))?;
+        if (sealed_primary - measured.primary_value).abs() > 1e-9 {
+            return Err(SetupError::Seal(format!(
+                "sealed custom_value {sealed_primary} is not the measured baseline {}",
+                measured.primary_value
+            )));
+        }
         let mut lc = self.lifecycle(topic).await?;
-        let to = self
-            .step(
-                &mut lc,
-                RlmEvent::BaselineSealed,
-                "operator sealed the baseline",
-            )
-            .await?;
+        if lc.state != RlmState::Baselining {
+            return Err(StateError::Illegal {
+                from: lc.state,
+                event: RlmEvent::BaselineSealed,
+            }
+            .into());
+        }
         self.store.put_topic_version(topic).await?;
-        Ok(to)
+        self.step(
+            &mut lc,
+            RlmEvent::BaselineSealed,
+            "operator sealed the baseline",
+        )
+        .await
     }
 }

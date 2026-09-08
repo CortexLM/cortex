@@ -17,7 +17,9 @@
 //!   the promotion continuum mirrored into the RLM store.
 //! - [`TopicSetup`] drives `draft → … → baselining` over the topic-VM
 //!   boundary (owner hook, key probe, provision, RLM rule proposal →
-//!   store, baseline → store), and `mark_sealed` closes the loop to `open`.
+//!   store, baseline → store), and `mark_sealed` closes the loop to `open`
+//!   only for a signed, valid, open document whose sealed measurement is the
+//!   one the RLM produced.
 //!
 //! Core types live in `proof-rlm`; persistence in `proof-rlm-store`.
 

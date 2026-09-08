@@ -10,14 +10,15 @@
 //! FLOPs in the verdict; a red checklist is a persisted reject with **zero**
 //! paid runs; a later pass below the best stays `awaiting_admin`; an
 //! over-budget measurement is a persisted reject and a missing one is a 503;
-//! every scored row leaves its zip, the crown leaves
-//! `best.json` + a promotion row, and the store holds rules v1, every
-//! checklist, and the lifecycle. Runs hold their topic lease until
-//! persisted, so a worse run decided against a stale bar can never displace
-//! the champion, a moved best pointer refuses a stale crown, and an
-//! abandoned run releases its lease after the TTL. Then the setup driver walks
-//! `draft → … → baselining` with RLM-written rules and a baseline in the
-//! store, and `mark_sealed` opens the topic. Every id here is a placeholder.
+//! every scored row leaves its zip, the crown leaves `best.json` + a
+//! promotion row, and the store holds rules v1, every checklist, and the
+//! lifecycle. Runs hold their topic lease until persisted, so a worse run
+//! decided against a stale bar can never displace the champion, a moved
+//! best pointer refuses a stale crown, and an abandoned run releases its
+//! lease after the TTL. Then the setup driver walks `draft → … →
+//! baselining` with RLM-written rules and a baseline in the store, and
+//! `mark_sealed` opens the topic only for the signed, valid, open document
+//! whose sealed value is the RLM's. Every id here is a placeholder.
 
 #![allow(
     clippy::unwrap_used,
@@ -27,6 +28,7 @@
     clippy::too_many_lines
 )]
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,7 +36,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use proof_eval::{EvalBackend, EvalError, FamilyMux, LiveScorer, ProofEvalDocument};
+use proof_eval::{
+    BaselineMeasurement, EvalBackend, EvalError, FamilyMux, LiveScorer, ProofEvalDocument,
+};
 use proof_executor::{EvalExecutorOffer, ExecutorPlan};
 use proof_http::{executor_slot, hash_admin_token, proof_router, AppState};
 use proof_rlm::fixtures::{offer, pin, pinned_template, topic, FakeOrchestrator};
@@ -47,8 +51,8 @@ use proof_rlm_store::{MemoryRlmStore, PromotionRow, RlmStore};
 use proof_score::SealedBaseline;
 use proof_store::MemoryStore;
 use proof_task::{
-    holdout_commitment, synthetic_holdout, HoldoutRecord, InferenceOffer, ProofPin, TopicDocument,
-    TopicStatus, STRATUM_SIZE,
+    holdout_commitment, synthetic_holdout, HoldoutRecord, HoldoutSplit, InferenceOffer, ProofPin,
+    TopicDocument, TopicError, TopicStatus, STRATUM_SIZE,
 };
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
@@ -811,18 +815,62 @@ async fn an_abandoned_run_releases_its_topic_lease_after_the_ttl() {
     let _ = std::fs::remove_dir_all(&d.root);
 }
 
+fn sk() -> [u8; 32] {
+    let mut s = [7u8; 32];
+    s[0] = 42;
+    s
+}
+
+fn pin_with_topic_key() -> ProofPin {
+    let mut p = pin();
+    p.topic_pubkey = hex::encode(crypto::public_key_from_mini_secret(&sk()).unwrap());
+    p
+}
+
+/// A sealed measurement for a custom topic: every scored split present, the
+/// custom value the operator seals.
+fn sealed_measurement(pin: &ProofPin, topic: &TopicDocument, custom: f64) -> BaselineMeasurement {
+    let split_nll: BTreeMap<String, f64> = HoldoutSplit::SCORED
+        .iter()
+        .map(|s| (s.as_str().to_owned(), 0.0))
+        .collect();
+    BaselineMeasurement {
+        eval_image_digest: pin.eval_image_digest.clone(),
+        topic_id: topic.id.clone(),
+        holdout_commitment: topic.holdout_commitment.clone(),
+        holdout_nll: 0.0,
+        split_nll,
+        tokens_per_sec: None,
+        step_latency_ms: None,
+        custom_value: Some(custom),
+    }
+}
+
+/// The open document sealing `meas`, signed with the test topic key.
+fn signed_open(draft: &TopicDocument, meas: &BaselineMeasurement) -> TopicDocument {
+    let mut open = draft.clone();
+    open.status = TopicStatus::Open;
+    open.baseline.metrics_commitment = meas.commitment();
+    open.signature = open.sign_with(&sk()).unwrap();
+    open
+}
+
 /// The agentic setup: owner hook, key probe, VM provision, RLM-written
-/// rules and baseline persisted, then the operator seals and opens.
+/// rules and baseline persisted, then the operator seals and opens — and
+/// only a signed, valid, open document sealing the RLM's value opens.
 #[tokio::test]
 async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
     let root = tmp_root("setup");
     let key = root.join("owner_key");
+    let pin = pin_with_topic_key();
     let orchestrator = FakeOrchestrator::new(0.42);
     let rlm_store: Arc<MemoryRlmStore> = Arc::new(MemoryRlmStore::new());
     let mut draft = topic();
     draft.status = TopicStatus::Draft;
+    draft.holdout_commitment = holdout_commitment(&synthetic_holdout(STRATUM_SIZE, 1));
     draft.baseline.script_sha256 = "11".repeat(32);
     draft.baseline.metrics_commitment.clear();
+    let registered = [draft.metric.custom_id.as_str()];
     let mut setup = TopicSetup {
         orchestrator: orchestrator.clone(),
         store: rlm_store.clone(),
@@ -836,7 +884,7 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
 
     // A decline returns to draft; nothing is provisioned.
     let err = setup
-        .run(&draft, &pin(), &offer())
+        .run(&draft, &pin, &offer())
         .await
         .expect_err("declined");
     assert!(matches!(err, SetupError::Declined(_)), "{err}");
@@ -848,10 +896,7 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
 
     // Approved but no key file: stops at awaiting_owner_keys, nothing provisioned.
     setup.owner = Arc::new(StaticOwnerHook(OwnerDecision::Approve));
-    let err = setup
-        .run(&draft, &pin(), &offer())
-        .await
-        .expect_err("no key");
+    let err = setup.run(&draft, &pin, &offer()).await.expect_err("no key");
     assert!(err.to_string().contains("owner keys not present"), "{err}");
     assert_eq!(
         rlm_store.lifecycle(&draft.id).await.unwrap().unwrap().state,
@@ -863,7 +908,7 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
     std::fs::write(&key, "not-a-real-secret\n").unwrap();
     orchestrator.set_flops_used(Some(draft.flops_budget + 1));
     let err = setup
-        .run(&draft, &pin(), &offer())
+        .run(&draft, &pin, &offer())
         .await
         .expect_err("over budget");
     assert!(
@@ -873,7 +918,7 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
     assert!(rlm_store.baseline(&draft.id).await.unwrap().is_none());
     orchestrator.set_flops_used(None);
     let err = setup
-        .run(&draft, &pin(), &offer())
+        .run(&draft, &pin, &offer())
         .await
         .expect_err("unmeasured");
     assert!(matches!(err, SetupError::Report(_)), "{err}");
@@ -883,7 +928,7 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
     // through setup had the RLM write a version: v1, v2 for the two refused
     // baselines, v3 now), baseline in store under the current version.
     orchestrator.set_flops_used(Some(1));
-    let out = setup.run(&draft, &pin(), &offer()).await.expect("setup");
+    let out = setup.run(&draft, &pin, &offer()).await.expect("setup");
     assert_eq!(out.rules_version, 3);
     assert!((out.baseline_primary - 0.42).abs() < 1e-12);
     assert_eq!(
@@ -914,13 +959,92 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
         }
     )));
 
-    // The operator seals custom_value (0.42) and re-signs open.
-    let mut open = draft.clone();
-    open.status = TopicStatus::Open;
-    open.baseline.metrics_commitment = "22".repeat(32);
-    assert_eq!(setup.mark_sealed(&open).await.unwrap(), RlmState::Open);
+    // Sealing refuses everything that is not the signed, valid, open
+    // document sealing the RLM's 0.42 — and nothing moves or is stored.
+    let meas = sealed_measurement(&pin, &draft, 0.42);
+    let still_baselining = |store: &Arc<MemoryRlmStore>| {
+        let store = store.clone();
+        let id = draft.id.clone();
+        async move {
+            let lc = store.lifecycle(&id).await.unwrap().unwrap();
+            assert_eq!(lc.state, RlmState::Baselining);
+            let (version, latest) = store.latest_topic(&id).await.unwrap().unwrap();
+            assert_eq!(version, 1, "no new version was stored");
+            assert_eq!(latest.status, TopicStatus::Draft);
+        }
+    };
+
+    // Still a draft.
+    let err = setup
+        .mark_sealed(&draft, &pin, &registered, &meas)
+        .await
+        .expect_err("draft");
+    assert!(matches!(err, SetupError::NotOpen(_)), "{err}");
+    still_baselining(&rlm_store).await;
+
+    // Open but not signed by the operator key.
+    let mut unsigned = signed_open(&draft, &meas);
+    unsigned.signature = "00".repeat(64);
+    let err = setup
+        .mark_sealed(&unsigned, &pin, &registered, &meas)
+        .await
+        .expect_err("unsigned");
+    assert!(
+        matches!(err, SetupError::Topic(TopicError::SignatureInvalid)),
+        "{err}"
+    );
+    still_baselining(&rlm_store).await;
+
+    // Open and signed, but not valid as an open topic on this host (no runner).
+    let open = signed_open(&draft, &meas);
+    let err = setup
+        .mark_sealed(&open, &pin, &[], &meas)
+        .await
+        .expect_err("unregistered custom id cannot open");
+    assert!(
+        matches!(err, SetupError::Topic(TopicError::UnknownCustomMetric(_))),
+        "{err}"
+    );
+    still_baselining(&rlm_store).await;
+
+    // Open, signed, valid, but the sealed value is not what the RLM measured.
+    let wrong = sealed_measurement(&pin, &draft, 0.99);
+    let wrong_doc = signed_open(&draft, &wrong);
+    let err = setup
+        .mark_sealed(&wrong_doc, &pin, &registered, &wrong)
+        .await
+        .expect_err("sealed a value the rlm never measured");
+    assert!(
+        matches!(err, SetupError::Seal(ref m) if m.contains("not the measured baseline")),
+        "{err}"
+    );
+    still_baselining(&rlm_store).await;
+
+    // Open, signed, valid, but the measurement does not bind to the document.
+    let err = setup
+        .mark_sealed(&open, &pin, &registered, &wrong)
+        .await
+        .expect_err("commitment mismatch");
+    assert!(matches!(err, SetupError::Seal(_)), "{err}");
+    still_baselining(&rlm_store).await;
+
+    // The real thing: baselining → open, version 2 stored.
+    assert_eq!(
+        setup
+            .mark_sealed(&open, &pin, &registered, &meas)
+            .await
+            .unwrap(),
+        RlmState::Open
+    );
     let (v, latest) = rlm_store.latest_topic(&draft.id).await.unwrap().unwrap();
     assert_eq!(v, 2);
     assert_eq!(latest.status, TopicStatus::Open);
+    assert_eq!(latest.signature, open.signature);
+    // Sealing twice is illegal from open.
+    let err = setup
+        .mark_sealed(&open, &pin, &registered, &meas)
+        .await
+        .expect_err("already open");
+    assert!(matches!(err, SetupError::State(_)), "{err}");
     let _ = std::fs::remove_dir_all(&root);
 }
