@@ -1,0 +1,16 @@
+[package]
+name = "proof-canon"
+description = "Canonical JSON and identifier shapes shared by the Proof crates (no challenge content)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

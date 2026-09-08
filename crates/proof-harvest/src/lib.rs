@@ -199,7 +199,7 @@ impl HarvestRequest {
             max_proof_deadline_s: plan.deadline_s,
             eval_image_digest: pin.eval_image_digest.clone(),
             holdout_commitment: topic.holdout_commitment.clone(),
-            constraints: topic.constraints,
+            constraints: topic.constraints.clone(),
             flops_budget: topic.flops_budget,
             wall_budget_s: topic.metric.wall_budget_s,
             claim: claim.to_owned(),
@@ -661,6 +661,11 @@ impl LiveScorer for LiumProofHarvest {
         plan: &ExecutorPlan,
         frozen_digest: &str,
         artifact_digest: &str,
+        // The digest-pinned image fetches by digest from the artifact store
+        // and its agent observes usage against the topic budget; the miner
+        // locator and declaration are custom-family concerns.
+        _artifact_uri: Option<&str>,
+        _declared_flops: u64,
         holdout: &[HoldoutRecord],
         claim: &str,
     ) -> Result<ProofEvalDocument, EvalError> {
@@ -774,7 +779,9 @@ mod tests {
     ) -> Result<ProofEvalDocument, EvalError> {
         let plan = harvest.plan(pin, topic, executor)?;
         harvest
-            .score(pin, topic, offer, &plan, frozen, artifact, holdout, claim)
+            .score(
+                pin, topic, offer, &plan, frozen, artifact, None, 1, holdout, claim,
+            )
             .await
     }
 
@@ -799,6 +806,7 @@ mod tests {
                 no_nvlink: true,
                 no_nccl_fast_fabric: true,
                 max_inter_node_gbps: Some(12.5),
+                ..proof_task::Constraints::default()
             },
             baseline: b,
             holdout_commitment: holdout_commitment(&recs),
@@ -826,7 +834,7 @@ mod tests {
             max_proof_deadline_s: 3_600,
             eval_image_digest: String::new(),
             holdout_commitment: topic.holdout_commitment.clone(),
-            constraints: topic.constraints,
+            constraints: topic.constraints.clone(),
             flops_budget: topic.flops_budget,
             wall_budget_s: topic.metric.wall_budget_s,
             claim: String::new(),

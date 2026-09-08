@@ -16,7 +16,7 @@ use proof_score::{payout_lattices, MinerTopicRun, SealedBaseline};
 use proof_task::{CHALLENGE_ID_BYTES, SCORE_MAX};
 
 pub use proof_eval::{
-    force_sim, resolve_eval_backend, scoring_readiness, sim_stub_win, supported_custom,
+    force_sim, registered_custom, resolve_eval_backend, scoring_readiness, sim_stub_win,
     BaselineMeasurement, EvalBackend, LiveScorer,
 };
 pub use proof_executor::{

@@ -23,8 +23,11 @@ use proof_challenge::{
     BaselineMeasurement, EvalBackend, EvalExecutorOffer, HarvestOverrides, InferenceOffer,
     LiveScorer, MemoryStore, ProofPin, TopicDocument, CHALLENGE_ID, SCORING_VERSION,
 };
-use proof_eval::supported_custom;
+use proof_eval::{custom_ids_ref, registered_custom, FamilyMux};
 use proof_harvest::{HarvestLimits, LiumProofHarvest};
+use proof_rlm::RunnerRegistry;
+use proof_rlm_scorer::{ArtefactStore, RlmScorer};
+use proof_rlm_store::{MemoryRlmStore, PgRlmStore, RlmStore};
 use tokio::net::TcpListener;
 
 /// Operator Proof challenge service CLI.
@@ -88,6 +91,16 @@ struct Cli {
     /// Holdout shard bytes (`<content_sha256>` files). Not the record catalog.
     #[arg(long, env = "PROOF_HOLDOUT_STORE")]
     holdout_store: Option<PathBuf>,
+    /// Root for per-submission artefact zips (`{root}/{topic_id}/{submission_id}.zip`).
+    #[arg(long, env = "PROOF_ARTEFACT_ROOT", default_value = "/artefacts")]
+    artefact_root: PathBuf,
+    /// Postgres URL for the RLM store (topic versions, rule versions,
+    /// checklists, lifecycle, artefact metadata, promotions). Unset → in-memory.
+    #[arg(long, env = "BASE_DATABASE_URL")]
+    database_url: Option<String>,
+    /// File holding the Postgres URL (preferred on a droplet).
+    #[arg(long, env = "BASE_DATABASE_URL_FILE")]
+    database_url_file: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -129,19 +142,6 @@ fn run(cli: &Cli) -> Result<(), String> {
         );
     }
 
-    let store = MemoryStore::new();
-    match load_topics(&store, &pin, cli.topics_file.as_deref()) {
-        Ok(n) => tracing::info!(topics = n, "signed topics loaded"),
-        Err(e) => tracing::warn!("topics unavailable ({e}); submissions will 400/503 until fixed"),
-    }
-    match load_holdouts(&store, cli.holdout_file.as_deref()) {
-        Ok(n) => tracing::info!(topics = n, "holdouts verified against topic commitments"),
-        Err(e) => tracing::warn!("holdouts unavailable ({e}); submissions will 503 until fixed"),
-    }
-    match load_baselines(&store, &pin, cli.baseline_file.as_deref()) {
-        Ok(n) => tracing::info!(topics = n, "sealed baselines recorded"),
-        Err(e) => tracing::warn!("baselines unavailable ({e}); submissions will 503 until fixed"),
-    }
     let offer = match load_offer(&pin, cli.inference_offer_file.as_deref()) {
         Ok(o) => {
             tracing::info!(offer_id = %o.offer_id, status = ?o.status, "inference offer loaded");
@@ -169,22 +169,45 @@ fn run(cli: &Cli) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
 
+    let rlm_store = rt.block_on(resolve_rlm_store(cli))?;
     let live_scorer = build_live_scorer(
         backend,
         cli.eval_timeout_secs,
         judge_api_key.clone(),
         cli.proxy_model_dir.clone(),
         cli.holdout_store.clone(),
-    );
+    )
+    .map(|harvest| with_custom_family(harvest, rlm_store, &cli.artefact_root));
     match backend {
         EvalBackend::Lium if live_scorer.is_some() => {
             tracing::info!("live harvest wired: digest-pinned proof-eval image on Lium");
+            tracing::info!(
+                registered_custom = ?registered_custom(live_scorer.as_deref()),
+                artefact_root = %cli.artefact_root.display(),
+                "custom-family topics route to the rlm scorer; an id with no registered runner \
+                 answers 503 (no runner is compiled in)"
+            );
         }
         EvalBackend::Lium => tracing::warn!(
             "live harvest not wired; every submission will 503. Set the Lium credentials \
              and LIUM_SSH_PUBLIC_KEY_FILE (deploy/env/proof-challenge.env.example)"
         ),
         EvalBackend::Sim => {}
+    }
+
+    let store = MemoryStore::new();
+    let registered = registered_custom(live_scorer.as_deref());
+    match load_topics(&store, &pin, cli.topics_file.as_deref(), &registered) {
+        Ok(n) => tracing::info!(topics = n, "signed topics loaded"),
+        Err(e) => tracing::warn!("topics unavailable ({e}); submissions will 400/503 until fixed"),
+    }
+    match load_holdouts(&store, cli.holdout_file.as_deref()) {
+        Ok(n) => tracing::info!(topics = n, "holdouts verified against topic commitments"),
+        Err(e) => tracing::warn!("holdouts unavailable ({e}); submissions will 503 until fixed"),
+    }
+    match load_baselines(&store, &pin, cli.baseline_file.as_deref()) {
+        Ok(n) => tracing::info!(topics = n, "sealed baselines recorded"),
+        Err(e) => tracing::warn!("baselines unavailable ({e}); submissions will 503 until fixed"),
     }
 
     let state = AppState {
@@ -249,6 +272,62 @@ fn build_live_scorer(
     ))
 }
 
+/// Route the `custom` metric family to the RLM scorer over the default harvest.
+///
+/// The runner registry starts **empty**: no benchmark, model, or repository is
+/// compiled in, so every custom topic answers 503 (`RunnerUnwired`) until an
+/// operator or the topic's RLM registers a runner under its `custom_id`. It
+/// never falls back to the digest-pinned harvest and never spends.
+fn with_custom_family(
+    harvest: Arc<dyn LiveScorer>,
+    rlm_store: Arc<dyn RlmStore>,
+    artefact_root: &Path,
+) -> Arc<dyn LiveScorer> {
+    let scorer = RlmScorer::new(Arc::new(RunnerRegistry::new()), rlm_store)
+        .with_artefacts(Some(ArtefactStore::new(artefact_root)));
+    Arc::new(FamilyMux::new(harvest).with_custom_family(Arc::new(scorer)))
+}
+
+fn database_url(cli: &Cli) -> Result<Option<String>, String> {
+    if let Some(url) = cli.database_url.as_deref().map(str::trim) {
+        if !url.is_empty() {
+            return Ok(Some(url.to_owned()));
+        }
+    }
+    let Some(path) = cli.database_url_file.as_deref() else {
+        return Ok(None);
+    };
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("BASE_DATABASE_URL_FILE is empty".into());
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
+/// Postgres RLM store when a database is configured, in-memory otherwise.
+///
+/// A configured but unreachable database is fatal: falling back to memory
+/// would silently drop every rule version, checklist, and promotion on
+/// restart.
+async fn resolve_rlm_store(cli: &Cli) -> Result<Arc<dyn RlmStore>, String> {
+    let Some(url) = database_url(cli)? else {
+        tracing::warn!(
+            "no database configured; rlm rules, checklists, lifecycle, and promotions are not \
+             persisted across restarts"
+        );
+        return Ok(Arc::new(MemoryRlmStore::new()));
+    };
+    let pool = db::connect(&url)
+        .await
+        .map_err(|e| format!("database connect failed: {e}"))?;
+    db::migrate(&pool)
+        .await
+        .map_err(|e| format!("database migrate failed: {e}"))?;
+    tracing::info!("rlm store persists to postgres");
+    Ok(Arc::new(PgRlmStore::new(pool)))
+}
+
 fn load_inference_api_key(path: Option<&Path>) -> Option<String> {
     let p = path?;
     std::fs::read_to_string(p)
@@ -278,13 +357,18 @@ fn load_pin(path: Option<&Path>) -> Result<ProofPin, String> {
     Ok(pin)
 }
 
-fn load_topics(store: &MemoryStore, pin: &ProofPin, path: Option<&Path>) -> Result<usize, String> {
+fn load_topics(
+    store: &MemoryStore,
+    pin: &ProofPin,
+    path: Option<&Path>,
+    registered_custom: &[String],
+) -> Result<usize, String> {
     let p = path.ok_or("PROOF_TOPICS_FILE not set")?;
     let body = std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?;
     let docs = TopicDocument::many_from_json(&body).map_err(|e| e.to_string())?;
     let n = docs.len();
     for doc in docs {
-        doc.validate(pin, &supported_custom())
+        doc.validate(pin, &custom_ids_ref(registered_custom))
             .map_err(|e| format!("topic {}: {e}", doc.id))?;
         doc.verify_signature(pin)
             .map_err(|e| format!("topic {}: {e}", doc.id))?;
@@ -500,6 +584,69 @@ mod tests {
         assert!(build_live_scorer(EvalBackend::Lium, 900, None, None, None).is_none());
         std::env::remove_var("LIUM_API_KEY");
         std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
+    }
+
+    /// No runner is compiled in: every custom id refuses through the mux
+    /// (`RunnerUnwired`, the 503 root cause), the harvest still owns the
+    /// nll / throughput route, and nothing is registered.
+    #[test]
+    fn live_scorer_registers_no_custom_runner_and_refuses_every_custom_id() {
+        let _guard = LIUM_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pubkey = stub_ssh_pubkey("proof-families");
+        std::env::set_var("LIUM_API_KEY", "test-key-not-a-real-secret");
+        std::env::set_var("LIUM_SSH_PUBLIC_KEY_FILE", &pubkey);
+        let harvest =
+            build_live_scorer(EvalBackend::Lium, 900, None, None, None).expect("harvest wired");
+        std::env::remove_var("LIUM_API_KEY");
+        std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
+
+        let root = std::env::temp_dir().join("proof-families-artefacts");
+        let mux = with_custom_family(harvest, Arc::new(MemoryRlmStore::new()), &root);
+        assert!(registered_custom(Some(mux.as_ref())).is_empty());
+        for id in ["any_metric", "another_metric"] {
+            let mut custom = TopicDocument::default();
+            custom.metric.family = proof_task::MetricFamily::Custom;
+            custom.metric.custom_id = id.into();
+            let err = mux.ready_for_topic(&custom).expect_err("unregistered");
+            assert!(
+                matches!(err, proof_eval::EvalError::RunnerUnwired { .. }),
+                "{err}"
+            );
+            assert!(err.to_string().contains("no registered runner"), "{err}");
+        }
+        // The default route is the harvest itself, whose readiness is about
+        // proxy weights and holdout shards, not the runner registry.
+        let nll = TopicDocument::default();
+        let err = mux.ready_for_topic(&nll).expect_err("no proxy dir staged");
+        assert!(
+            matches!(err, proof_eval::EvalError::ProxyModelMissing),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn database_url_comes_from_the_value_or_the_file_or_nowhere() {
+        let mut cli = Cli::try_parse_from(["proof-challenge"]).expect("cli");
+        assert_eq!(database_url(&cli).expect("none"), None);
+        cli.database_url = Some("  ".into());
+        assert_eq!(database_url(&cli).expect("blank is none"), None);
+        let dir = std::env::temp_dir().join(format!("proof-db-url-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = dir.join("url");
+        std::fs::write(&file, "postgres://placeholder/db\n").expect("write");
+        cli.database_url_file = Some(file.clone());
+        assert_eq!(
+            database_url(&cli).expect("file"),
+            Some("postgres://placeholder/db".into())
+        );
+        std::fs::write(&file, "\n").expect("write");
+        assert!(
+            database_url(&cli).is_err(),
+            "an empty file is a config error"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

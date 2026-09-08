@@ -31,20 +31,20 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use proof_eval::{
-    contamination_evidence, eval_after_freeze, force_sim, scoring_readiness,
-    secret_backed_base_url, supported_custom, EvalBackend, EvalError, LiveScorer,
+    contamination_evidence, custom_ids_ref, eval_after_freeze, force_sim, registered_custom,
+    scoring_readiness, secret_backed_base_url, EvalBackend, EvalError, LiveScorer,
 };
 use proof_executor::{require_open_executor, EvalExecutorOffer, ExecutorPlan};
 use proof_score::{
-    judge_topic, primary_from_harness, AgentVerdict, GateFail, HarnessMetrics, MinerTopicRun,
-    ProofKind, ProofVerdict,
+    judge_topic, novelty_bar, primary_from_harness, AgentVerdict, GateFail, HarnessMetrics,
+    MinerTopicRun, ProofKind, ProofVerdict,
 };
 use proof_store::{
     freeze_submission_digest, ArtifactManifest, MemoryStore, Submission, SubmissionState,
 };
 use proof_task::{
-    resolve_inference, InferenceOffer, OfferError, ProofPin, TopicDocument, TopicError,
-    TopicStatus, CHALLENGE_ID, SCORE_MAX, SCORING_VERSION,
+    resolve_inference, InferenceOffer, MetricFamily, OfferError, ProofPin, TopicDocument,
+    TopicError, TopicStatus, CHALLENGE_ID, SCORE_MAX, SCORING_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -114,9 +114,18 @@ impl AppState {
         })
     }
 
-    fn can_score(&self) -> bool {
+    /// Custom metric ids with a registered runner on this host. There is no
+    /// compiled-in list: a topic mints its id, a runner registered under it
+    /// makes the topic scorable.
+    fn registered_custom(&self) -> Vec<String> {
+        registered_custom(self.live())
+    }
+
+    /// Whether the host-wide gates (digest, harvest, judge offer, executor,
+    /// key, any open sealed topic) pass.
+    fn host_ready(&self) -> bool {
         let open = self.store.any_open_scorable(self.epoch).unwrap_or(false);
-        if scoring_readiness(
+        scoring_readiness(
             &self.pin,
             self.backend,
             self.live(),
@@ -125,21 +134,38 @@ impl AppState {
             self.executor_offer().as_ref(),
             self.judge_api_key.as_deref(),
         )
-        .is_err()
-        {
-            return false;
+        .is_ok()
+    }
+
+    /// Open topics this host can score right now: judge config resolves and,
+    /// on a live host, the family's scorer is wired (a custom topic whose
+    /// runner is not registered is open but not scorable).
+    fn scorable_topics(&self) -> Vec<String> {
+        if !self.host_ready() {
+            return Vec::new();
         }
         let secret = secret_backed_base_url();
-        self.store.topics().unwrap_or_default().iter().any(|t| {
-            t.is_open_at(self.epoch)
-                && resolve_inference(
-                    &self.pin,
-                    Some(&t.inference),
-                    secret.as_deref(),
-                    self.offer.as_ref(),
-                )
-                .ready_to_score()
-        })
+        self.store
+            .topics()
+            .unwrap_or_default()
+            .iter()
+            .filter(|t| {
+                t.is_open_at(self.epoch)
+                    && resolve_inference(
+                        &self.pin,
+                        Some(&t.inference),
+                        secret.as_deref(),
+                        self.offer.as_ref(),
+                    )
+                    .ready_to_score()
+                    && self.live().is_none_or(|s| s.ready_for_topic(t).is_ok())
+            })
+            .map(|t| t.id.clone())
+            .collect()
+    }
+
+    fn can_score(&self) -> bool {
+        !self.scorable_topics().is_empty()
     }
 }
 
@@ -192,6 +218,8 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         "live_harvest_wired": st.live_scorer.is_some(),
         "baseline_sealed": baseline_sealed,
         "open_topics": open,
+        "scorable_topics": st.scorable_topics(),
+        "registered_custom": st.registered_custom(),
         "epoch": st.epoch,
     }))
 }
@@ -299,6 +327,20 @@ async fn submit(
             "declared_flops exceeds the topic budget",
         ));
     }
+    // A custom-family runner retrieves the artefact from the miner's locator
+    // inside the topic VM; with none there is nothing to inspect, so the
+    // submission is refused here, before any row or rent.
+    let artifact_uri = body
+        .artifact_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty());
+    if topic.metric.family == MetricFamily::Custom && artifact_uri.is_none() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "artifact_uri is required for custom topics",
+        ));
+    }
 
     let nonce = nonce_from(&hotkey, &topic_id, &artifact);
     let submission_digest = freeze_submission_digest(&hotkey, &topic_id, &artifact, &nonce);
@@ -316,6 +358,11 @@ async fn submit(
         st.judge_api_key.as_deref(),
     )
     .map_err(|e| eval_err(&e))?;
+    // A custom topic whose runner is not registered on this host is a 503
+    // here, before any row or rent, not a rejected row downstream.
+    if let Some(live) = st.live() {
+        live.ready_for_topic(&topic).map_err(|e| eval_err(&e))?;
+    }
     let Some(offer) = st.offer.as_ref() else {
         return Err(eval_err(&EvalError::InferenceOfferMissing));
     };
@@ -384,6 +431,8 @@ async fn submit(
         executor.as_ref(),
         &submission_digest,
         &artifact,
+        artifact_uri,
+        body.declared_flops,
         &holdout,
         &body.claim,
         st.backend,
@@ -394,13 +443,14 @@ async fn submit(
     .await
     .map_err(|e| eval_err(&e))?;
 
+    let registered = st.registered_custom();
     let verdict = judge_topic(
         &topic,
         &eval.agent,
         &eval.harness,
         &sealed,
         &hits,
-        &supported_custom(),
+        &custom_ids_ref(&registered),
     );
     let receipt_json = serde_json::to_string(&eval.receipt).unwrap_or_default();
     persist_scored(
@@ -408,6 +458,7 @@ async fn submit(
         executor.as_ref(),
         eval.executor.as_ref(),
         body,
+        &topic,
         hotkey,
         artifact,
         nonce,
@@ -416,6 +467,7 @@ async fn submit(
         receipt_json,
         eval.backend,
     )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -507,11 +559,12 @@ fn persist_pre_eval_reject(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn persist_scored(
+async fn persist_scored(
     st: &AppState,
     executor: Option<&EvalExecutorOffer>,
     plan: Option<&ExecutorPlan>,
     body: SubmitBody,
+    topic: &TopicDocument,
     hotkey: String,
     artifact: String,
     nonce: String,
@@ -520,13 +573,24 @@ fn persist_scored(
     receipt_json: String,
     backend: EvalBackend,
 ) -> Result<(StatusCode, Json<SubmitResp>), (StatusCode, Json<serde_json::Value>)> {
-    let topic_id = body.topic_id.trim().to_owned();
+    let topic_id = topic.id.clone();
     let pass = verdict.pass;
-    let primary = st
-        .store
-        .topic(&topic_id)
-        .ok()
-        .and_then(|t| primary_from_harness(&t, &verdict.harness));
+    let primary = primary_from_harness(topic, &verdict.harness);
+    // Automatic promotion is a family decision (custom: pass + green checklist
+    // + relative win over the bar). Default scorers never crown.
+    let mut promoted = false;
+    if pass {
+        if let Some(live) = st.live() {
+            let bar = novelty_bar(
+                topic,
+                st.store.baseline(&topic_id).ok().flatten().as_ref(),
+                st.store.champion_primary(topic).ok().flatten(),
+            );
+            promoted = live
+                .auto_promote(topic, &submission_digest, pass, primary, bar)
+                .await;
+        }
+    }
     let artifact_digest = artifact.clone();
     let detail = if pass {
         None
@@ -564,7 +628,9 @@ fn persist_scored(
             manifest: body.manifest,
             nonce,
             submission_digest,
-            state: if pass {
+            state: if promoted {
+                SubmissionState::Champion
+            } else if pass {
                 SubmissionState::AwaitingAdmin
             } else {
                 SubmissionState::Rejected
@@ -584,6 +650,10 @@ fn persist_scored(
             near_duplicate: false,
         },
     );
+    if let Some(live) = st.live() {
+        live.on_persisted(&topic_id, &row.submission_digest, &row.id, promoted)
+            .await;
+    }
     Ok((
         StatusCode::CREATED,
         Json(SubmitResp {
@@ -624,7 +694,8 @@ async fn publish_topic(
     if !admin_ok(&headers, &st.admin_hashes) {
         return Err(err(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
-    doc.validate(&st.pin, &supported_custom())
+    let registered = st.registered_custom();
+    doc.validate(&st.pin, &custom_ids_ref(&registered))
         .map_err(|e| topic_err(&e))?;
     doc.verify_signature(&st.pin).map_err(|e| topic_err(&e))?;
     if doc.status == TopicStatus::Open && !doc.baseline.is_sealed() {
@@ -811,6 +882,7 @@ mod tests {
                 no_nvlink: true,
                 no_nccl_fast_fabric: true,
                 max_inter_node_gbps: Some(12.5),
+                ..Constraints::default()
             },
             metric: MetricSpec {
                 family: MetricFamily::Throughput,
@@ -857,9 +929,14 @@ mod tests {
         }
     }
 
-    fn seal_topic(
+    fn seal_topic(pin: &ProofPin, topic: TopicDocument) -> (TopicDocument, BaselineMeasurement) {
+        seal_topic_with(pin, topic, &[])
+    }
+
+    fn seal_topic_with(
         pin: &ProofPin,
         mut topic: TopicDocument,
+        registered: &[&str],
     ) -> (TopicDocument, BaselineMeasurement) {
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
         topic.holdout_commitment = holdout_commitment(&recs);
@@ -876,7 +953,7 @@ mod tests {
         };
         topic.baseline.metrics_commitment = meas.commitment();
         topic.signature = topic.sign_with(&sk()).expect("sign");
-        topic.validate(pin, &[]).expect("valid");
+        topic.validate(pin, registered).expect("valid");
         topic.verify_signature(pin).expect("sig");
         (topic, meas)
     }
@@ -914,6 +991,8 @@ mod tests {
             _plan: &ExecutorPlan,
             frozen: &str,
             artifact: &str,
+            _artifact_uri: Option<&str>,
+            _declared_flops: u64,
             _holdout: &[proof_task::HoldoutRecord],
             _claim: &str,
         ) -> Result<proof_eval::ProofEvalDocument, EvalError> {
@@ -1688,19 +1767,35 @@ mod tests {
         assert_eq!(created["id"], "adamw-beater-v0");
     }
 
+    fn custom_metric(custom_id: &str) -> MetricSpec {
+        MetricSpec {
+            family: MetricFamily::Custom,
+            primary: "primary_value".into(),
+            direction: MetricDirection::Max,
+            unit: "rate".into(),
+            epsilon_rel: 0.05,
+            quality_floor_nll: 0.0,
+            wall_budget_s: 0,
+            custom_id: custom_id.into(),
+        }
+    }
+
+    /// Custom ids are topic data. With no runner registered on the host an
+    /// open custom topic is a publish 400 (nobody can compute it); the same
+    /// document drafts fine, and a topic-minted id with a registered runner
+    /// opens. Nothing about the id is compiled in.
     #[tokio::test]
-    async fn unknown_custom_is_a_publish_400() {
+    async fn custom_topics_open_only_with_a_registered_runner() {
         let token = "op";
-        let app = app(token);
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
         let p = pin("");
         let (mut doc, _) = seal_topic(&p, unsigned_topic(&recs));
-        doc.id = "custom-unknown-v0".into();
-        doc.metric.family = MetricFamily::Custom;
-        doc.metric.custom_id = "not-implemented".into();
+        doc.id = "custom-topic-v0".into();
+        doc.payout_mode = proof_task::PayoutMode::Discovery;
+        doc.metric = custom_metric("topic_minted_metric");
         doc.signature = doc.sign_with(&sk()).expect("sign");
         let (st, body) = json_req(
-            app,
+            app(token),
             "POST",
             "/v1/admin/proof/topics",
             serde_json::to_value(&doc).expect("json"),
@@ -1711,37 +1806,12 @@ mod tests {
         assert!(body["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("custom metric"));
-    }
+            .contains("no registered runner"));
 
-    #[tokio::test]
-    async fn harness_success_rate_is_a_listed_custom_and_publishes() {
-        let token = "op";
-        let app = app(token);
-        let recs = synthetic_holdout(STRATUM_SIZE, 1);
-        let p = pin("");
-        let (mut doc, _) = seal_topic(&p, unsigned_topic(&recs));
-        doc.id = "agent-harness-improve-v0".into();
-        doc.payout_mode = proof_task::PayoutMode::Discovery;
-        doc.validation = proof_task::ValidationSpec {
-            score_on: "Holdout harness success rate (and secondary latency) vs sealed baseline"
-                .into(),
-            accept_if: "Reproduced under FLOP/wall budget; no contamination; success rate >= baseline + epsilon".into(),
-            reject_if: "Unreproduced claim; eval short-circuit; FLOP over budget; near-duplicate of an accepted artifact".into(),
-        };
-        doc.metric = MetricSpec {
-            family: MetricFamily::Custom,
-            primary: "success_rate".into(),
-            direction: MetricDirection::Max,
-            unit: "rate".into(),
-            epsilon_rel: 0.05,
-            quality_floor_nll: 0.0,
-            wall_budget_s: 0,
-            custom_id: proof_task::CUSTOM_HARNESS_SUCCESS_RATE.into(),
-        };
+        doc.status = TopicStatus::Draft;
         doc.signature = doc.sign_with(&sk()).expect("sign");
         let (st, body) = json_req(
-            app,
+            app(token),
             "POST",
             "/v1/admin/proof/topics",
             serde_json::to_value(&doc).expect("json"),
@@ -1749,8 +1819,368 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::CREATED, "{body}");
-        assert_eq!(body["id"], "agent-harness-improve-v0");
-        assert_eq!(body["payout_mode"], "discovery");
+        assert_eq!(body["status"], "draft");
+
+        let (st, body) = json_req(
+            app_with_custom(Arc::new(FamilyStub::win("topic_minted_metric"))),
+            "POST",
+            "/v1/admin/proof/topics",
+            serde_json::to_value(&{
+                let mut open = doc.clone();
+                open.status = TopicStatus::Open;
+                open.signature = open.sign_with(&sk()).expect("sign");
+                open
+            })
+            .expect("json"),
+            Some(token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        assert_eq!(body["metric"]["custom_id"], "topic_minted_metric");
+    }
+
+    /// A live scorer with one registered custom id. `wired: false` models a
+    /// registered runner whose backend (topic VM) is not configured. It
+    /// crowns every pass and records persist hooks, so the generic promotion
+    /// / artefact plumbing is exercised without the RLM crates.
+    struct FamilyStub {
+        inner: StubScorer,
+        custom_id: String,
+        wired: bool,
+        persisted: std::sync::Mutex<Vec<(String, String, bool)>>,
+    }
+
+    impl FamilyStub {
+        fn win(custom_id: &str) -> Self {
+            Self {
+                inner: StubScorer::win(),
+                custom_id: custom_id.into(),
+                wired: true,
+                persisted: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn unwired(custom_id: &str) -> Self {
+            Self {
+                wired: false,
+                ..Self::win(custom_id)
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LiveScorer for FamilyStub {
+        async fn score(
+            &self,
+            pin: &ProofPin,
+            topic: &TopicDocument,
+            offer: &InferenceOffer,
+            plan: &ExecutorPlan,
+            frozen: &str,
+            artifact: &str,
+            artifact_uri: Option<&str>,
+            declared_flops: u64,
+            holdout: &[proof_task::HoldoutRecord],
+            claim: &str,
+        ) -> Result<proof_eval::ProofEvalDocument, EvalError> {
+            self.ready_for_topic(topic)?;
+            if topic.metric.family == MetricFamily::Custom {
+                assert!(
+                    artifact_uri.is_some_and(|u| !u.trim().is_empty()),
+                    "intake must never hand a custom run to the scorer without a locator"
+                );
+            }
+            let mut doc = self
+                .inner
+                .score(
+                    pin,
+                    topic,
+                    offer,
+                    plan,
+                    frozen,
+                    artifact,
+                    artifact_uri,
+                    declared_flops,
+                    holdout,
+                    claim,
+                )
+                .await?;
+            if topic.metric.family == MetricFamily::Custom {
+                doc.harness.custom_value = Some(0.7);
+            }
+            Ok(doc)
+        }
+
+        fn ready_for_topic(&self, topic: &TopicDocument) -> Result<(), EvalError> {
+            if topic.metric.family != MetricFamily::Custom {
+                return Ok(());
+            }
+            if topic.metric.custom_id != self.custom_id {
+                return Err(EvalError::RunnerUnwired {
+                    custom_id: topic.metric.custom_id.clone(),
+                    detail: "no registered runner".into(),
+                });
+            }
+            if !self.wired {
+                return Err(EvalError::RunnerUnwired {
+                    custom_id: topic.metric.custom_id.clone(),
+                    detail: "topic-vm orchestrator not wired".into(),
+                });
+            }
+            Ok(())
+        }
+
+        fn custom_ids(&self) -> Vec<String> {
+            vec![self.custom_id.clone()]
+        }
+
+        async fn auto_promote(
+            &self,
+            _topic: &TopicDocument,
+            _digest: &str,
+            pass: bool,
+            primary: Option<f64>,
+            bar: Option<f64>,
+        ) -> bool {
+            pass && primary.is_some() && bar.is_some()
+        }
+
+        async fn on_persisted(&self, topic_id: &str, _digest: &str, id: &str, promoted: bool) {
+            self.persisted
+                .lock()
+                .expect("persisted")
+                .push((topic_id.into(), id.into(), promoted));
+        }
+    }
+
+    fn unsigned_custom_topic(recs: &[proof_task::HoldoutRecord], custom_id: &str) -> TopicDocument {
+        let mut baseline = default_adamw(FLOPS_BUDGET_MAX);
+        baseline.optimizer = "reference-placeholder".into();
+        baseline.lr = 1.0;
+        baseline.schedule = "n/a".into();
+        baseline.dtype = "n/a".into();
+        baseline.script_sha256 = "11".repeat(32);
+        TopicDocument {
+            id: "custom-topic-v0".into(),
+            statement: "Placeholder problem scored by a topic-minted custom metric.".into(),
+            payout_mode: proof_task::PayoutMode::Discovery,
+            constraints: Constraints {
+                firecracker_required: true,
+                model_pin: Some("vendor/model-placeholder".into()),
+                task_slice: Some("slice-placeholder".into()),
+                ..Constraints::default()
+            },
+            metric: custom_metric(custom_id),
+            checklist: vec![proof_task::ChecklistRule {
+                id: "rule_a".into(),
+                text: "placeholder rule".into(),
+            }],
+            baseline,
+            holdout_commitment: holdout_commitment(recs),
+            holdout_size: HOLDOUT_SIZE,
+            status: TopicStatus::Open,
+            ..TopicDocument::default()
+        }
+    }
+
+    /// Live host: the throughput topic scores through the harvest stub, the
+    /// custom topic goes through `scorer` (registered id `topic_minted_metric`).
+    fn app_with_custom(scorer: Arc<FamilyStub>) -> Router {
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let store = MemoryStore::new();
+        let registered = scorer.custom_ids();
+        for draft in [
+            unsigned_topic(&[]),
+            unsigned_custom_topic(&[], "topic_minted_metric"),
+        ] {
+            let recs = synthetic_holdout(STRATUM_SIZE, 1);
+            let (topic, meas) = seal_topic_with(&p, draft, &custom_ids_ref(&registered));
+            store.put_topic(topic.clone()).expect("topic");
+            store.load_holdout(&topic.id, recs).expect("holdout");
+            let mut sealed = meas.into_sealed();
+            if topic.metric.family == MetricFamily::Custom {
+                sealed.custom_value = Some(0.5);
+            }
+            store.set_baseline(&topic.id, sealed).expect("baseline");
+        }
+        let executor = test_executor(&p);
+        proof_router(AppState {
+            store,
+            pin: p,
+            backend: EvalBackend::Lium,
+            live_scorer: Some(scorer),
+            offer: Some(offer()),
+            executor: executor_slot(Some(executor)),
+            judge_api_key: Some("test-judge-key".into()),
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            epoch: 0,
+        })
+    }
+
+    /// A registered runner whose topic VM is not wired: the topic is open
+    /// but not scorable, and a submit is a 503 with no row.
+    #[tokio::test]
+    async fn an_unwired_custom_runner_is_503_with_no_row_and_not_scorable() {
+        let scorer = Arc::new(FamilyStub::unwired("topic_minted_metric"));
+        let app = app_with_custom(scorer.clone());
+        let (st, status) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let ids = |key: &str| -> Vec<String> {
+            status[key]
+                .as_array()
+                .expect(key)
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        };
+        assert!(
+            ids("open_topics").contains(&"custom-topic-v0".to_owned()),
+            "{status}"
+        );
+        assert_eq!(ids("scorable_topics"), ["dt-no-ib-v0"], "{status}");
+        assert_eq!(
+            ids("registered_custom"),
+            ["topic_minted_metric"],
+            "{status}"
+        );
+        assert_eq!(status["can_score"], true, "{status}");
+
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            submit_body(
+                "custom-artifact",
+                &serde_json::json!({
+                    "topic_id": "custom-topic-v0",
+                    "artifact_uri": "https://example.invalid/custom-artifact.zip",
+                }),
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let msg = body["error"].as_str().unwrap_or_default();
+        assert!(msg.contains("topic_minted_metric"), "{body}");
+        assert!(msg.contains("not wired"), "{body}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0);
+        let (st, list) = json_req(app, "GET", "/v1/submissions", serde_json::json!({}), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(
+            list["items"].as_array().is_some_and(Vec::is_empty),
+            "unwired runner banked a row: {list}"
+        );
+        assert!(scorer.persisted.lock().expect("p").is_empty());
+    }
+
+    /// A custom-family runner retrieves the artefact from the miner's
+    /// locator; a custom submission without one is refused at intake with
+    /// no row and no scorer call. `nll` / `throughput` keep it optional.
+    #[tokio::test]
+    async fn a_custom_submission_without_a_locator_is_400_with_no_row() {
+        let scorer = Arc::new(FamilyStub::win("topic_minted_metric"));
+        let app = app_with_custom(scorer.clone());
+        for missing in [serde_json::Value::Null, serde_json::json!("   ")] {
+            let (st, body) = json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                submit_body(
+                    "no-locator",
+                    &serde_json::json!({
+                        "topic_id": "custom-topic-v0",
+                        "artifact_uri": missing,
+                    }),
+                ),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"], "artifact_uri is required for custom topics");
+        }
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0, "no run");
+        let (_, list) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/submissions",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert!(
+            list["items"].as_array().is_some_and(Vec::is_empty),
+            "{list}"
+        );
+        let (st, created) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body("harvest-topic", &serde_json::json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::CREATED,
+            "the harvest fetches by digest: {created}"
+        );
+    }
+
+    /// The generic promotion plumbing: a pass the family scorer crowns is
+    /// persisted as `champion`, and the persist hook fires with the row id.
+    #[tokio::test]
+    async fn a_family_scorer_can_crown_a_pass_and_sees_the_persisted_row() {
+        let scorer = Arc::new(FamilyStub::win("topic_minted_metric"));
+        let app = app_with_custom(scorer.clone());
+        let (st, created) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            submit_body(
+                "crowned",
+                &serde_json::json!({
+                    "topic_id": "custom-topic-v0",
+                    "artifact_uri": "https://example.invalid/crowned.zip",
+                }),
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_eq!(created["eligible"], true, "{created}");
+        assert_eq!(created["state"], "champion", "{created}");
+        let id = created["id"].as_str().expect("id").to_owned();
+        let persisted = scorer.persisted.lock().expect("p").clone();
+        assert_eq!(
+            persisted,
+            vec![("custom-topic-v0".to_owned(), id.clone(), true)]
+        );
+
+        // A reject is persisted too, never crowned.
+        let lose = Arc::new(FamilyStub {
+            inner: StubScorer::lose(),
+            ..FamilyStub::win("topic_minted_metric")
+        });
+        let (st, created) = json_req(
+            app_with_custom(lose.clone()),
+            "POST",
+            "/v1/submissions",
+            submit_body("not-crowned", &serde_json::json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_eq!(created["state"], "rejected", "{created}");
+        let persisted = lose.persisted.lock().expect("p").clone();
+        assert_eq!(persisted.len(), 1);
+        assert!(!persisted[0].2, "a reject must not be promoted");
     }
 
     fn app_lium_missing_judge_key() -> Router {

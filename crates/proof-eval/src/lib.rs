@@ -22,6 +22,7 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use prism_lium_types::{EvalReceipt, NoScoreGate};
@@ -146,6 +147,14 @@ pub enum EvalError {
         /// Last bytes of pod stdout (run log tail), for the operator.
         stdout_tail: String,
     },
+    /// A custom metric family has no registered runner on this host.
+    #[error("custom metric {custom_id:?} has no registered runner ({detail}); refuse scoring")]
+    RunnerUnwired {
+        /// Custom metric id the topic names.
+        custom_id: String,
+        /// Which piece is missing (never a secret).
+        detail: String,
+    },
 }
 
 /// Map an executor refusal onto the eval error the HTTP layer answers 503 with.
@@ -160,15 +169,19 @@ pub fn map_executor_err(e: ExecutorOfferError) -> EvalError {
 /// Schema version of the metrics+verdict document the eval image emits.
 pub const PROOF_METRICS_SCHEMA: u32 = 1;
 
-/// Custom metric ids this control-plane build can score.
-///
-/// `harness_success_rate` is listed so an operator can publish the agent-harness
-/// topic. The real GPU harness is not in this image yet: scoring fail-closes
-/// (`EvidenceMissing` on `custom_value`) until that sidecar exists. Do not
-/// invent a success rate.
+/// Custom metric ids with a registered runner, as reported by the host's
+/// live scorer. There is **no** compiled-in list: a topic mints its
+/// `custom_id`, a runner registered under that id makes it scorable, and an
+/// open topic whose id is absent here answers 503.
 #[must_use]
-pub fn supported_custom() -> Vec<&'static str> {
-    vec![proof_task::CUSTOM_HARNESS_SUCCESS_RATE]
+pub fn registered_custom(live: Option<&dyn LiveScorer>) -> Vec<String> {
+    live.map(LiveScorer::custom_ids).unwrap_or_default()
+}
+
+/// Borrow a registered-id list as the `&[&str]` the topic validator takes.
+#[must_use]
+pub fn custom_ids_ref(ids: &[String]) -> Vec<&str> {
+    ids.iter().map(String::as_str).collect()
 }
 
 /// The document `proof-eval` must print for one scored artifact.
@@ -280,6 +293,11 @@ pub trait LiveScorer: Send + Sync {
     ///
     /// `offer` is the RLM judge the image calls; `plan` is the resolved `1x`
     /// rent ([`Self::plan`]) the image is run under. Both are host state.
+    /// `artifact_uri` is the miner-supplied locator of the bytes behind
+    /// `artifact_digest` (the runner fetches and digest-checks them); the
+    /// digest alone is not enough to retrieve an artefact. `declared_flops`
+    /// is the miner's declaration (already `<=` the topic budget at intake):
+    /// a scorer that measures usage must fail a run that exceeds it.
     #[allow(clippy::too_many_arguments)]
     async fn score(
         &self,
@@ -289,6 +307,8 @@ pub trait LiveScorer: Send + Sync {
         plan: &ExecutorPlan,
         frozen_digest: &str,
         artifact_digest: &str,
+        artifact_uri: Option<&str>,
+        declared_flops: u64,
         holdout: &[HoldoutRecord],
         claim: &str,
     ) -> Result<ProofEvalDocument, EvalError>;
@@ -296,6 +316,181 @@ pub trait LiveScorer: Send + Sync {
     /// Whether this scorer could run right now.
     fn ready(&self) -> Result<(), EvalError> {
         Ok(())
+    }
+
+    /// Whether this scorer could score `topic` right now. A custom family
+    /// whose runner is not registered refuses here, before any row or rent.
+    fn ready_for_topic(&self, topic: &TopicDocument) -> Result<(), EvalError> {
+        let _ = topic;
+        self.ready()
+    }
+
+    /// Custom metric ids this scorer has a registered runner for. Default:
+    /// none — the digest-pinned harvest scores `nll` / `throughput` only.
+    fn custom_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Whether the run for `submission_digest` on `topic` should be crowned
+    /// champion automatically.
+    ///
+    /// `pass` is the harness verdict, `primary` its primary metric, `bar` the
+    /// current novelty bar (sealed baseline vs reigning champion,
+    /// direction-aware). Default: never — promotion stays an operator action.
+    async fn auto_promote(
+        &self,
+        topic: &TopicDocument,
+        submission_digest: &str,
+        pass: bool,
+        primary: Option<f64>,
+        bar: Option<f64>,
+    ) -> bool {
+        let _ = (topic, submission_digest, pass, primary, bar);
+        false
+    }
+
+    /// Called once the scored row is persisted and has its `pf_…` id, so a
+    /// scorer can write per-submission artefacts and promotion events.
+    /// Failures are the scorer's to log; the row is already final.
+    async fn on_persisted(
+        &self,
+        topic_id: &str,
+        submission_digest: &str,
+        submission_id: &str,
+        promoted: bool,
+    ) {
+        let _ = (topic_id, submission_digest, submission_id, promoted);
+    }
+}
+
+/// Route scoring by metric family: `custom` topics go to the registered
+/// custom-family scorer (which resolves the runner by `custom_id`, fail-closed);
+/// `nll` / `throughput` go to the default digest-pinned harvest. Planning,
+/// readiness, promotion, and artefact hooks follow the same route, so an
+/// unregistered custom id can never fall back to the harvest.
+pub struct FamilyMux {
+    default: Arc<dyn LiveScorer>,
+    custom: Option<Arc<dyn LiveScorer>>,
+}
+
+impl FamilyMux {
+    /// Mux over the default harvest with no custom-family scorer: every
+    /// custom topic is unscorable (503).
+    #[must_use]
+    pub fn new(default: Arc<dyn LiveScorer>) -> Self {
+        Self {
+            default,
+            custom: None,
+        }
+    }
+
+    /// Route the whole `custom` family to `scorer`.
+    #[must_use]
+    pub fn with_custom_family(mut self, scorer: Arc<dyn LiveScorer>) -> Self {
+        self.custom = Some(scorer);
+        self
+    }
+
+    fn route(&self, topic: &TopicDocument) -> Result<&dyn LiveScorer, EvalError> {
+        if topic.metric.family != MetricFamily::Custom {
+            return Ok(self.default.as_ref());
+        }
+        self.custom
+            .as_deref()
+            .ok_or_else(|| EvalError::RunnerUnwired {
+                custom_id: topic.metric.custom_id.trim().to_owned(),
+                detail: "no custom-family scorer on this host".into(),
+            })
+    }
+}
+
+#[async_trait]
+impl LiveScorer for FamilyMux {
+    fn plan(
+        &self,
+        pin: &ProofPin,
+        topic: &TopicDocument,
+        executor: &EvalExecutorOffer,
+    ) -> Result<ExecutorPlan, EvalError> {
+        self.route(topic)?.plan(pin, topic, executor)
+    }
+
+    async fn score(
+        &self,
+        pin: &ProofPin,
+        topic: &TopicDocument,
+        offer: &InferenceOffer,
+        plan: &ExecutorPlan,
+        frozen_digest: &str,
+        artifact_digest: &str,
+        artifact_uri: Option<&str>,
+        declared_flops: u64,
+        holdout: &[HoldoutRecord],
+        claim: &str,
+    ) -> Result<ProofEvalDocument, EvalError> {
+        self.route(topic)?
+            .score(
+                pin,
+                topic,
+                offer,
+                plan,
+                frozen_digest,
+                artifact_digest,
+                artifact_uri,
+                declared_flops,
+                holdout,
+                claim,
+            )
+            .await
+    }
+
+    fn ready(&self) -> Result<(), EvalError> {
+        self.default.ready()
+    }
+
+    fn ready_for_topic(&self, topic: &TopicDocument) -> Result<(), EvalError> {
+        self.route(topic)?.ready_for_topic(topic)
+    }
+
+    fn custom_ids(&self) -> Vec<String> {
+        self.custom
+            .as_deref()
+            .map_or_else(Vec::new, LiveScorer::custom_ids)
+    }
+
+    async fn auto_promote(
+        &self,
+        topic: &TopicDocument,
+        submission_digest: &str,
+        pass: bool,
+        primary: Option<f64>,
+        bar: Option<f64>,
+    ) -> bool {
+        match self.route(topic) {
+            Ok(s) => {
+                s.auto_promote(topic, submission_digest, pass, primary, bar)
+                    .await
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// The persist hook arrives without the document, so both routes are
+    /// told; only the scorer holding a pending bundle for this digest acts.
+    async fn on_persisted(
+        &self,
+        topic_id: &str,
+        submission_digest: &str,
+        submission_id: &str,
+        promoted: bool,
+    ) {
+        self.default
+            .on_persisted(topic_id, submission_digest, submission_id, promoted)
+            .await;
+        if let Some(c) = &self.custom {
+            c.on_persisted(topic_id, submission_digest, submission_id, promoted)
+                .await;
+        }
     }
 }
 
@@ -701,6 +896,10 @@ pub fn sim_win_document(
 }
 
 /// Score only after the submission digest is frozen and a topic is open.
+///
+/// `artifact_uri` and `declared_flops` travel to the live scorer untouched:
+/// the miner's locator for the bytes behind `artifact_digest` (never trusted
+/// beyond that) and the miner's FLOP declaration the measured run is held to.
 #[allow(clippy::too_many_arguments)]
 pub async fn eval_after_freeze(
     pin: &ProofPin,
@@ -709,6 +908,8 @@ pub async fn eval_after_freeze(
     executor: Option<&EvalExecutorOffer>,
     frozen_digest: &str,
     artifact_digest: &str,
+    artifact_uri: Option<&str>,
+    declared_flops: u64,
     holdout: &[HoldoutRecord],
     claim: &str,
     backend: EvalBackend,
@@ -777,6 +978,8 @@ pub async fn eval_after_freeze(
                     &resolved,
                     frozen_digest,
                     artifact_digest,
+                    artifact_uri,
+                    declared_flops,
                     holdout,
                     claim,
                 )
@@ -915,6 +1118,8 @@ mod tests {
             _plan: &ExecutorPlan,
             frozen: &str,
             artifact: &str,
+            _artifact_uri: Option<&str>,
+            _declared_flops: u64,
             _holdout: &[HoldoutRecord],
             _claim: &str,
         ) -> Result<ProofEvalDocument, EvalError> {
@@ -946,6 +1151,8 @@ mod tests {
             Some(&executor(&pin(""))),
             "d",
             "art",
+            None,
+            1,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -967,6 +1174,8 @@ mod tests {
             Some(&executor(&pin(&format!("sha256:{}", "ab".repeat(32))))),
             "d",
             "art",
+            None,
+            1,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -994,6 +1203,8 @@ mod tests {
             Some(&executor(&p)),
             "digest-a",
             "art",
+            None,
+            1,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -1199,6 +1410,8 @@ mod tests {
             None,
             "digest-a",
             "art",
+            None,
+            1,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -1221,6 +1434,8 @@ mod tests {
             Some(&executor(&p)),
             "digest-a",
             "art",
+            None,
+            1,
             &recs,
             "claim",
             EvalBackend::Lium,
@@ -1256,12 +1471,150 @@ mod tests {
     }
 
     #[test]
-    fn harness_success_rate_is_listed_and_sim_does_not_invent_a_value() {
-        assert!(supported_custom().contains(&proof_task::CUSTOM_HARNESS_SUCCESS_RATE));
+    fn custom_ids_come_from_the_live_scorer_and_sim_never_invents_a_value() {
+        assert!(registered_custom(None).is_empty());
+        assert!(registered_custom(Some(&Harvest { reproduced: true })).is_empty());
         let t = topic();
         let pin = pin("");
         let doc = sim_document(&pin, &t, "f", "art", 1.0, true);
         assert!(doc.harness.custom_value.is_none());
+    }
+
+    /// A custom-family scorer with a registry of one id: that id is
+    /// scorable, another id refuses, and no custom topic ever reaches the
+    /// default harvest.
+    struct OneRunner;
+
+    #[async_trait]
+    impl LiveScorer for OneRunner {
+        async fn score(
+            &self,
+            _pin: &ProofPin,
+            topic: &TopicDocument,
+            _offer: &InferenceOffer,
+            _plan: &ExecutorPlan,
+            _frozen: &str,
+            _artifact: &str,
+            _artifact_uri: Option<&str>,
+            _declared_flops: u64,
+            _holdout: &[HoldoutRecord],
+            _claim: &str,
+        ) -> Result<ProofEvalDocument, EvalError> {
+            self.ready_for_topic(topic)?;
+            Err(EvalError::Backend("would run the registered runner".into()))
+        }
+
+        fn ready_for_topic(&self, topic: &TopicDocument) -> Result<(), EvalError> {
+            if topic.metric.custom_id == "registered_metric" {
+                Ok(())
+            } else {
+                Err(EvalError::RunnerUnwired {
+                    custom_id: topic.metric.custom_id.clone(),
+                    detail: "not in registry".into(),
+                })
+            }
+        }
+
+        fn custom_ids(&self) -> Vec<String> {
+            vec!["registered_metric".into()]
+        }
+
+        async fn auto_promote(
+            &self,
+            _t: &TopicDocument,
+            _digest: &str,
+            pass: bool,
+            p: Option<f64>,
+            b: Option<f64>,
+        ) -> bool {
+            pass && p > b
+        }
+    }
+
+    fn custom_topic(id: &str) -> TopicDocument {
+        let mut t = topic();
+        t.metric.family = MetricFamily::Custom;
+        t.metric.custom_id = id.into();
+        t
+    }
+
+    #[tokio::test]
+    async fn family_mux_routes_custom_to_the_registry_and_never_to_the_harvest() {
+        let bare = FamilyMux::new(Arc::new(Harvest { reproduced: true }));
+        bare.ready_for_topic(&topic())
+            .expect("nll routes to the harvest");
+        assert!(bare.custom_ids().is_empty());
+        assert!(matches!(
+            bare.ready_for_topic(&custom_topic("anything")),
+            Err(EvalError::RunnerUnwired { .. })
+        ));
+
+        let mux = FamilyMux::new(Arc::new(Harvest { reproduced: true }))
+            .with_custom_family(Arc::new(OneRunner));
+        assert_eq!(mux.custom_ids(), vec!["registered_metric".to_owned()]);
+        assert_eq!(
+            registered_custom(Some(&mux)),
+            vec!["registered_metric".to_owned()]
+        );
+        assert_eq!(custom_ids_ref(&mux.custom_ids()), vec!["registered_metric"]);
+        mux.ready_for_topic(&custom_topic("registered_metric"))
+            .expect("registered id");
+        let err = mux
+            .ready_for_topic(&custom_topic("unknown_metric"))
+            .expect_err("unregistered id");
+        assert!(matches!(err, EvalError::RunnerUnwired { .. }), "{err}");
+        assert!(
+            !mux.auto_promote(&topic(), "d", true, Some(1.0), Some(0.5))
+                .await
+        );
+        assert!(
+            mux.auto_promote(
+                &custom_topic("registered_metric"),
+                "d",
+                true,
+                Some(1.0),
+                Some(0.5)
+            )
+            .await
+        );
+        assert!(
+            !mux.auto_promote(
+                &custom_topic("registered_metric"),
+                "d",
+                false,
+                Some(1.0),
+                Some(0.5)
+            )
+            .await
+        );
+
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let exec = executor(&p);
+        let plan = mux.plan(&p, &topic(), &exec).expect("harvest plan");
+        let err = mux
+            .score(
+                &p,
+                &custom_topic("unknown_metric"),
+                &offer(),
+                &plan,
+                "d",
+                "a",
+                None,
+                1,
+                &recs,
+                "c",
+            )
+            .await
+            .expect_err("unregistered family must not sim or harvest");
+        assert!(matches!(err, EvalError::RunnerUnwired { .. }), "{err}");
+        // With no custom-family scorer at all, even planning a custom topic
+        // refuses: nothing may rent for a family nobody can score.
+        assert!(matches!(
+            bare.plan(&p, &custom_topic("unknown_metric"), &exec),
+            Err(EvalError::RunnerUnwired { .. })
+        ));
+        mux.on_persisted("t", "d", "pf_0", false).await;
     }
 
     fn tight_sealed() -> SealedBaseline {
@@ -1369,6 +1722,8 @@ mod tests {
             Some(&executor(&p)),
             "digest-a",
             "art",
+            None,
+            1,
             &recs,
             "claim",
             EvalBackend::Sim,
@@ -1403,6 +1758,8 @@ mod tests {
             Some(&executor(&p)),
             "digest-a",
             "art",
+            None,
+            1,
             &recs,
             "claim",
             EvalBackend::Lium,
