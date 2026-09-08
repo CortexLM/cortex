@@ -1,5 +1,5 @@
 {
-  "commit_sha": "f013abbce657bb231beddce603c42f3a5a8cb84e",
+  "commit_sha": "890ce5b35bfe4e65c985c2ac8d3ab0a43b964fd8",
   "env": "staging",
   "previous": {
     "commit_sha": "1dd07f7484bb6a2bab6f9fcd7c9348f95fec1927",
@@ -34,30 +34,30 @@
   },
   "services": {
     "bounty-challenge": {
-      "digest": "sha256:86fe198e6732b7470ae2c8d15e2390c7457861a5110cf617aaf1b7cd6a91e2a0",
-      "image": "ghcr.io/cortexlm/cortex/bounty-challenge@sha256:86fe198e6732b7470ae2c8d15e2390c7457861a5110cf617aaf1b7cd6a91e2a0",
+      "digest": "sha256:2cd3fa547115c98c206d6f3650f8a56f8bf6a6acc32dbe5a7529afbd030a47fd",
+      "image": "ghcr.io/cortexlm/cortex/bounty-challenge@sha256:2cd3fa547115c98c206d6f3650f8a56f8bf6a6acc32dbe5a7529afbd030a47fd",
       "repository": "ghcr.io/cortexlm/cortex/bounty-challenge"
     },
     "gateway": {
-      "digest": "sha256:45bcc340e8844361aaf4ee99c49d542fe5a79ff23a4f094545252f2e7980b81c",
-      "image": "ghcr.io/cortexlm/cortex/gateway@sha256:45bcc340e8844361aaf4ee99c49d542fe5a79ff23a4f094545252f2e7980b81c",
+      "digest": "sha256:2f1914d32faee31774153eb2543a47c95fb7936dd975304633a0bff0d8b0b0c2",
+      "image": "ghcr.io/cortexlm/cortex/gateway@sha256:2f1914d32faee31774153eb2543a47c95fb7936dd975304633a0bff0d8b0b0c2",
       "repository": "ghcr.io/cortexlm/cortex/gateway"
     },
     "proof-challenge": {
-      "digest": "sha256:d501b28fd33560c4089ee95e2b26fb664fafaf787e1c767c38de5197ced6ce0a",
-      "image": "ghcr.io/cortexlm/cortex/proof-challenge@sha256:d501b28fd33560c4089ee95e2b26fb664fafaf787e1c767c38de5197ced6ce0a",
+      "digest": "sha256:0353d0afe2088a8a715b8724e99d94b0b8367804fd2a4cf172d1563ff18741c5",
+      "image": "ghcr.io/cortexlm/cortex/proof-challenge@sha256:0353d0afe2088a8a715b8724e99d94b0b8367804fd2a4cf172d1563ff18741c5",
       "repository": "ghcr.io/cortexlm/cortex/proof-challenge"
     },
     "updater": {
-      "digest": "sha256:76aa9787749a8664eacaeaf7fab2d268a887527c83cfb23767bdd7001d1454f6",
-      "image": "ghcr.io/cortexlm/cortex/updater@sha256:76aa9787749a8664eacaeaf7fab2d268a887527c83cfb23767bdd7001d1454f6",
+      "digest": "sha256:dbba3efaaa25cd83899562035cf9801d063e4567377eecd89bb471fc13763c48",
+      "image": "ghcr.io/cortexlm/cortex/updater@sha256:dbba3efaaa25cd83899562035cf9801d063e4567377eecd89bb471fc13763c48",
       "repository": "ghcr.io/cortexlm/cortex/updater"
     },
     "validator": {
-      "digest": "sha256:39227ffb93470a179688ad8a2b29d12e5c3f2a32970e6de61ed4bcccbc17d93b",
-      "image": "ghcr.io/cortexlm/cortex/validator@sha256:39227ffb93470a179688ad8a2b29d12e5c3f2a32970e6de61ed4bcccbc17d93b",
+      "digest": "sha256:dbb35e4559246cd76b9253fca8fae133168034091a42f931c01608028c1647d1",
+      "image": "ghcr.io/cortexlm/cortex/validator@sha256:dbb35e4559246cd76b9253fca8fae133168034091a42f931c01608028c1647d1",
       "repository": "ghcr.io/cortexlm/cortex/validator"
     }
   },
-  "updated_at": "2026-09-08T21:51:55Z"
+  "updated_at": "2026-09-08T22:41:27Z"
 }
