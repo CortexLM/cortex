@@ -3524,6 +3524,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "proof-eval",
+ "proof-executor",
  "proof-score",
  "proof-store",
  "proof-task",

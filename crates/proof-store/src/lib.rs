@@ -82,6 +82,13 @@ pub struct Submission {
     /// Judge `config_commitment` stamped from the host offer.
     #[serde(default)]
     pub config_commitment: String,
+    /// Live `EvalExecutorOffer` id the run was rented on (host stamp; empty
+    /// on sim, which rents nothing).
+    #[serde(default)]
+    pub executor_offer_id: String,
+    /// Executor `config_commitment` stamped from the host offer.
+    #[serde(default)]
+    pub executor_commitment: String,
     /// Declared training fingerprints.
     #[serde(default)]
     pub manifest: ArtifactManifest,

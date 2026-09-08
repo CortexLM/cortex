@@ -12,6 +12,7 @@ publish = false
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 hex = "0.4"
 proof-eval = { path = "../proof-eval" }
+proof-executor = { path = "../proof-executor" }
 proof-score = { path = "../proof-score" }
 proof-store = { path = "../proof-store" }
 proof-task = { path = "../proof-task" }

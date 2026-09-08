@@ -5,10 +5,12 @@
 //! GET  /v1/status
 //! GET  /v1/proof/topics
 //! GET  /v1/proof/topics/{id}
-//! POST /v1/submissions          miner submit (topic_id required)
+//! GET  /v1/proof/executor         public EvalExecutorOffer + pin ceilings
+//! POST /v1/submissions            miner submit (topic_id required)
 //! GET  /v1/submissions
 //! GET  /v1/submissions/{id}
-//! POST /v1/admin/proof/topics   operator publish (signed document)
+//! POST /v1/admin/proof/topics     operator publish (signed document)
+//! POST /v1/admin/proof/executor   operator rotate the live executor offer
 //! ```
 
 #![forbid(unsafe_code)]
@@ -20,7 +22,7 @@
     clippy::too_many_arguments
 )]
 
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -32,6 +34,7 @@ use proof_eval::{
     contamination_evidence, eval_after_freeze, force_sim, scoring_readiness,
     secret_backed_base_url, supported_custom, EvalBackend, EvalError, LiveScorer,
 };
+use proof_executor::{require_open_executor, EvalExecutorOffer};
 use proof_score::{
     judge_topic, primary_from_harness, AgentVerdict, GateFail, HarnessMetrics, MinerTopicRun,
     ProofKind, ProofVerdict,
@@ -45,6 +48,16 @@ use proof_task::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+/// Live executor offer slot: rotated at runtime by the admin route, read on
+/// every status / submit. In-memory like the rest of the submission state;
+/// the boot value comes from `PROOF_EVAL_EXECUTOR_OFFER_FILE`.
+pub type ExecutorSlot = Arc<RwLock<Option<EvalExecutorOffer>>>;
+
+/// Build an [`ExecutorSlot`] holding `offer`.
+pub fn executor_slot(offer: Option<EvalExecutorOffer>) -> ExecutorSlot {
+    Arc::new(RwLock::new(offer))
+}
 
 /// Shared HTTP state.
 #[derive(Clone)]
@@ -60,6 +73,9 @@ pub struct AppState {
     pub live_scorer: Option<Arc<dyn LiveScorer>>,
     /// Live RLM judge backend (operator state). Missing/closed → can_score false.
     pub offer: Option<InferenceOffer>,
+    /// Live `1x` eval executor (operator state). On the Lium path
+    /// missing/closed/shape ≠ pin → can_score false.
+    pub executor: ExecutorSlot,
     /// Judge API key from `PROOF_INFERENCE_API_KEY_FILE`. Never on `/v1/status`.
     pub judge_api_key: Option<String>,
     /// Operator bearer hashes (sha256 hex). Empty → admin 503.
@@ -73,6 +89,31 @@ impl AppState {
         self.live_scorer.as_deref()
     }
 
+    /// Snapshot of the live executor offer (a poisoned lock still reads).
+    pub fn executor_offer(&self) -> Option<EvalExecutorOffer> {
+        self.executor
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_executor_offer(&self, offer: EvalExecutorOffer) {
+        *self
+            .executor
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(offer);
+    }
+
+    fn executor_pin_view(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": self.pin.eval_executor_schema_version,
+            "gpu_class": self.pin.gpu_class,
+            "max_proof_deadline_s_ceiling": self.pin.max_proof_deadline_s_ceiling,
+            "allowed_lium_template_prefixes": self.pin.allowed_lium_template_prefixes,
+            "commitment_alg": self.pin.eval_executor_commitment_alg,
+        })
+    }
+
     fn can_score(&self) -> bool {
         let open = self.store.any_open_scorable(self.epoch).unwrap_or(false);
         if scoring_readiness(
@@ -81,6 +122,7 @@ impl AppState {
             self.live(),
             open,
             self.offer.as_ref(),
+            self.executor_offer().as_ref(),
             self.judge_api_key.as_deref(),
         )
         .is_err()
@@ -108,9 +150,11 @@ pub fn proof_router(state: AppState) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/proof/topics", get(list_topics))
         .route("/v1/proof/topics/{id}", get(get_topic))
+        .route("/v1/proof/executor", get(get_executor))
         .route("/v1/submissions", post(submit).get(list_subs))
         .route("/v1/submissions/{id}", get(get_sub))
         .route("/v1/admin/proof/topics", post(publish_topic))
+        .route("/v1/admin/proof/executor", post(rotate_executor))
         .with_state(state)
 }
 
@@ -139,6 +183,8 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
             "max_input_tokens": st.pin.inference.max_input_tokens,
             "max_output_tokens": st.pin.inference.max_output_tokens,
         },
+        "eval_executor": st.executor_offer().as_ref().map(EvalExecutorOffer::public_view),
+        "executor": st.executor_pin_view(),
         "eval_backend": st.backend,
         "force_sim": force_sim(),
         "sim_stub_win": st.backend == EvalBackend::Sim,
@@ -164,6 +210,20 @@ async fn get_topic(
         .topic(&id)
         .map_err(|_| err(StatusCode::NOT_FOUND, "unknown topic"))?;
     Ok(Json(doc))
+}
+
+/// Public executor contract: the live offer (every field is public), whether
+/// it can rent right now, and the pin ceilings it is bound by. Always 200 —
+/// a missing offer is `eval_executor: null` with the reason, never a 404.
+async fn get_executor(State(st): State<AppState>) -> impl IntoResponse {
+    let offer = st.executor_offer();
+    let readiness = require_open_executor(offer.as_ref(), &st.pin).map(|_| ());
+    Json(serde_json::json!({
+        "eval_executor": offer.as_ref().map(EvalExecutorOffer::public_view),
+        "ready": readiness.is_ok(),
+        "reason": readiness.err().map(|e| e.to_string()),
+        "pin": st.executor_pin_view(),
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,12 +303,16 @@ async fn submit(
     let nonce = nonce_from(&hotkey, &topic_id, &artifact);
     let submission_digest = freeze_submission_digest(&hotkey, &topic_id, &artifact, &nonce);
 
+    // One snapshot of the executor for this request: rotation mid-submit
+    // must not score under one offer and stamp another.
+    let executor = st.executor_offer();
     scoring_readiness(
         &st.pin,
         st.backend,
         st.live(),
         st.store.any_open_scorable(st.epoch).unwrap_or(false),
         st.offer.as_ref(),
+        executor.as_ref(),
         st.judge_api_key.as_deref(),
     )
     .map_err(|e| eval_err(&e))?;
@@ -258,6 +322,13 @@ async fn submit(
     offer
         .serves_topic(&st.pin, &topic)
         .map_err(|e| offer_err(&e))?;
+    if st.backend == EvalBackend::Lium {
+        executor
+            .as_ref()
+            .ok_or(EvalError::ExecutorOfferMissing)
+            .and_then(|x| x.serves_topic(&topic).map_err(proof_eval::map_executor_err))
+            .map_err(|e| eval_err(&e))?;
+    }
     let resolved = resolve_inference(
         &st.pin,
         Some(&topic.inference),
@@ -295,6 +366,7 @@ async fn submit(
         };
         return persist_pre_eval_reject(
             &st,
+            executor.as_ref(),
             body,
             &topic,
             hotkey,
@@ -309,6 +381,7 @@ async fn submit(
         &st.pin,
         &topic,
         offer,
+        executor.as_ref(),
         &submission_digest,
         &artifact,
         &holdout,
@@ -332,6 +405,7 @@ async fn submit(
     let receipt_json = serde_json::to_string(&eval.receipt).unwrap_or_default();
     persist_scored(
         &st,
+        executor.as_ref(),
         body,
         hotkey,
         artifact,
@@ -346,6 +420,7 @@ async fn submit(
 #[allow(clippy::too_many_arguments)]
 fn persist_pre_eval_reject(
     st: &AppState,
+    executor: Option<&EvalExecutorOffer>,
     body: SubmitBody,
     topic: &TopicDocument,
     hotkey: String,
@@ -394,6 +469,10 @@ fn persist_pre_eval_reject(
                 .as_ref()
                 .map(|o| o.config_commitment.clone())
                 .unwrap_or_default(),
+            executor_offer_id: executor.map(|x| x.offer_id.clone()).unwrap_or_default(),
+            executor_commitment: executor
+                .map(|x| x.config_commitment.clone())
+                .unwrap_or_default(),
             manifest: body.manifest,
             nonce,
             submission_digest,
@@ -429,6 +508,7 @@ fn persist_pre_eval_reject(
 #[allow(clippy::too_many_arguments)]
 fn persist_scored(
     st: &AppState,
+    executor: Option<&EvalExecutorOffer>,
     body: SubmitBody,
     hotkey: String,
     artifact: String,
@@ -471,6 +551,10 @@ fn persist_scored(
                 .offer
                 .as_ref()
                 .map(|o| o.config_commitment.clone())
+                .unwrap_or_default(),
+            executor_offer_id: executor.map(|x| x.offer_id.clone()).unwrap_or_default(),
+            executor_commitment: executor
+                .map(|x| x.config_commitment.clone())
                 .unwrap_or_default(),
             manifest: body.manifest,
             nonce,
@@ -546,6 +630,35 @@ async fn publish_topic(
     }
     st.store.put_topic(doc.clone()).map_err(|e| store_err(&e))?;
     Ok((StatusCode::CREATED, Json(doc)))
+}
+
+/// Rotate the live executor offer. The body is the same document as
+/// `PROOF_EVAL_EXECUTOR_OFFER_FILE`; it must validate against the pin
+/// (shape, deadline ceiling, template allowlist, digest, commitment) or it is
+/// a 400 and the previous offer stays. Posting `status: closed` is how an
+/// operator takes the executor down without a restart.
+async fn rotate_executor(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(offer): Json<EvalExecutorOffer>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    if st.admin_hashes.is_empty() {
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "auth_unconfigured"));
+    }
+    if !admin_ok(&headers, &st.admin_hashes) {
+        return Err(err(StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
+    offer
+        .validate(&st.pin)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    st.set_executor_offer(offer.clone());
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "eval_executor": offer.public_view(),
+            "can_score": st.can_score(),
+        })),
+    ))
 }
 
 fn admin_ok(headers: &HeaderMap, hashes: &[String]) -> bool {
@@ -793,6 +906,7 @@ mod tests {
             pin: &ProofPin,
             topic: &TopicDocument,
             _offer: &InferenceOffer,
+            _executor: &EvalExecutorOffer,
             frozen: &str,
             artifact: &str,
             _holdout: &[proof_task::HoldoutRecord],
@@ -841,12 +955,16 @@ mod tests {
         }
         let judge_api_key =
             (backend == EvalBackend::Lium && live.is_some()).then(|| "test-judge-key".to_owned());
+        // Lium + a wired harvest is the live path: it also needs the open 1x
+        // executor. Sim rents nothing, so the slot stays empty there.
+        let executor = (backend == EvalBackend::Lium && live.is_some()).then(|| test_executor(&p));
         proof_router(AppState {
             store,
             pin: p,
             backend,
             live_scorer: live,
             offer: with_offer.then(offer),
+            executor: executor_slot(executor),
             // Lium + a wired harvest is the live path: a missing key is the
             // Testeur blocker. Sim does not call the judge, so it stays None.
             judge_api_key,
@@ -857,6 +975,46 @@ mod tests {
 
     fn app(token: &str) -> Router {
         app_full(token, EvalBackend::Sim, "", None, true, true, true)
+    }
+
+    /// Open `1x` executor on the digest-scoped template of `pin`.
+    fn test_executor(pin: &ProofPin) -> EvalExecutorOffer {
+        let hex = pin.eval_image_digest.trim_start_matches("sha256:");
+        let mut o = EvalExecutorOffer {
+            offer_id: "lium-1x-v0".into(),
+            lium_template_id: format!("proof-eval-{}", hex.get(..12).unwrap_or("unpinned")),
+            machine_shape: "1x".into(),
+            max_proof_deadline_s: 3_600,
+            eval_image_digest: pin.eval_image_digest.clone(),
+            config_commitment: String::new(),
+            status: proof_executor::OfferStatus::Open,
+        };
+        o.config_commitment = o.expected_commitment();
+        o
+    }
+
+    /// Lium host with a wired harvest whose executor slot holds `executor`.
+    fn app_lium_with_executor(executor: Option<EvalExecutorOffer>) -> Router {
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let store = MemoryStore::new();
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (topic, meas) = seal_topic(&p, unsigned_topic(&recs));
+        store.put_topic(topic.clone()).expect("topic");
+        store.load_holdout(&topic.id, recs).expect("holdout");
+        store
+            .set_baseline(&topic.id, meas.into_sealed())
+            .expect("baseline");
+        proof_router(AppState {
+            store,
+            pin: p,
+            backend: EvalBackend::Lium,
+            live_scorer: Some(Arc::new(StubScorer::win())),
+            offer: Some(offer()),
+            executor: executor_slot(executor),
+            judge_api_key: Some("test-judge-key".into()),
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            epoch: 0,
+        })
     }
 
     async fn json_req(
@@ -928,6 +1086,283 @@ mod tests {
         assert!(!dump.contains("base_url"), "{dump}");
         assert!(!dump.contains("api_key"), "{dump}");
         assert!(!dump.contains("evil.example"), "{dump}");
+        // Sim rents nothing: no executor offer, still scorable; the pin
+        // ceilings are public regardless.
+        assert!(body["eval_executor"].is_null(), "{body}");
+        assert_eq!(body["executor"]["gpu_class"], "1x");
+        assert_eq!(body["executor"]["max_proof_deadline_s_ceiling"], 7_200);
+    }
+
+    #[tokio::test]
+    async fn status_and_executor_route_expose_the_public_executor_contract() {
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let app = app_lium_with_executor(Some(test_executor(&p)));
+        let (st, body) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["can_score"], true, "{body}");
+        assert_eq!(body["eval_executor"]["offer_id"], "lium-1x-v0");
+        assert_eq!(body["eval_executor"]["machine_shape"], "1x");
+        assert_eq!(body["eval_executor"]["gpu_count"], 1);
+        assert_eq!(body["eval_executor"]["max_proof_deadline_s"], 3_600);
+        assert_eq!(
+            body["eval_executor"]["lium_template_id"],
+            "proof-eval-abababababab"
+        );
+        assert_eq!(body["eval_executor"]["status"], "open");
+        assert_eq!(body["executor"]["gpu_class"], "1x");
+        assert_eq!(body["executor"]["schema_version"], 1);
+
+        let (st, view) = json_req(
+            app,
+            "GET",
+            "/v1/proof/executor",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(view["ready"], true, "{view}");
+        assert!(view["reason"].is_null(), "{view}");
+        assert_eq!(view["eval_executor"]["offer_id"], "lium-1x-v0");
+        assert_eq!(view["pin"]["max_proof_deadline_s_ceiling"], 7_200);
+        let dump = view.to_string();
+        assert!(!dump.contains("api_key"), "{dump}");
+        assert!(!dump.contains("/run/base"), "{dump}");
+    }
+
+    #[tokio::test]
+    async fn missing_closed_or_wide_executor_is_can_score_false_and_submit_503() {
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let mut closed = test_executor(&p);
+        closed.status = proof_executor::OfferStatus::Closed;
+        let mut wide = test_executor(&p);
+        wide.machine_shape = "8x".into();
+        wide.config_commitment = wide.expected_commitment();
+        for (label, executor, want) in [
+            ("missing", None, "executor offer missing"),
+            ("closed", Some(closed), "closed"),
+            ("8x", Some(wide), "machine_shape"),
+        ] {
+            let app = app_lium_with_executor(executor);
+            let (st, status) = json_req(
+                app.clone(),
+                "GET",
+                "/v1/status",
+                serde_json::json!({}),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            assert_eq!(status["live_harvest_wired"], true, "{label}: {status}");
+            assert_eq!(status["can_score"], false, "{label}: {status}");
+
+            let (st, view) = json_req(
+                app.clone(),
+                "GET",
+                "/v1/proof/executor",
+                serde_json::json!({}),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            assert_eq!(view["ready"], false, "{label}: {view}");
+            assert!(
+                view["reason"].as_str().unwrap_or_default().contains(want),
+                "{label}: {view}"
+            );
+
+            let (st, body) = json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                submit_body("x", &serde_json::json!({})),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{label}: {body}");
+            assert!(
+                body["error"].as_str().unwrap_or_default().contains(want),
+                "{label}: {body}"
+            );
+            let (_, list) =
+                json_req(app, "GET", "/v1/submissions", serde_json::json!({}), None).await;
+            assert!(
+                list["items"].as_array().is_some_and(Vec::is_empty),
+                "{label} banked rows: {list}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_rotate_executor_requires_bearer_validates_and_takes_effect() {
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let app = app_lium_with_executor(None);
+        let good = serde_json::to_value(test_executor(&p)).expect("json");
+
+        let (st, _) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/executor",
+            good.clone(),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+        let mut wide = test_executor(&p);
+        wide.machine_shape = "8x".into();
+        wide.config_commitment = wide.expected_commitment();
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/executor",
+            serde_json::to_value(&wide).expect("json"),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("machine_shape"),
+            "{body}"
+        );
+        let mut forged = test_executor(&p);
+        forged.config_commitment = "cd".repeat(32);
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/executor",
+            serde_json::to_value(&forged).expect("json"),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        let (_, status) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status["can_score"], false,
+            "refused rotations leave the slot empty"
+        );
+
+        let (st, created) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/executor",
+            good,
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_eq!(created["eval_executor"]["offer_id"], "lium-1x-v0");
+        assert_eq!(created["can_score"], true, "{created}");
+        let (st, created) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            submit_body("after-rotate", &serde_json::json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        let id = created["id"].as_str().expect("id");
+        let (_, row) = json_req(
+            app.clone(),
+            "GET",
+            &format!("/v1/submissions/{id}"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(row["executor_offer_id"], "lium-1x-v0", "{row}");
+        assert_eq!(
+            row["executor_commitment"],
+            test_executor(&p).config_commitment,
+            "{row}"
+        );
+
+        // Closing is the same route: the host stops scoring without a restart.
+        let mut closed = test_executor(&p);
+        closed.status = proof_executor::OfferStatus::Closed;
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/executor",
+            serde_json::to_value(&closed).expect("json"),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        assert_eq!(body["can_score"], false, "{body}");
+        let (st, body) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body("after-close", &serde_json::json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    }
+
+    #[tokio::test]
+    async fn topic_pinning_another_executor_commitment_is_503() {
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let store = MemoryStore::new();
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (mut topic, meas) = seal_topic(&p, unsigned_topic(&recs));
+        topic.eval_executor.require_offer_commitment = Some("cd".repeat(32));
+        topic.eval_executor.max_proof_deadline_s = Some(900);
+        topic.signature = topic.sign_with(&sk()).expect("sign");
+        topic.validate(&p, &[]).expect("tightened topic is legal");
+        store.put_topic(topic.clone()).expect("topic");
+        store.load_holdout(&topic.id, recs).expect("holdout");
+        store
+            .set_baseline(&topic.id, meas.into_sealed())
+            .expect("baseline");
+        let scorer = Arc::new(StubScorer::win());
+        let app = proof_router(AppState {
+            store,
+            pin: p.clone(),
+            backend: EvalBackend::Lium,
+            live_scorer: Some(scorer.clone()),
+            offer: Some(offer()),
+            executor: executor_slot(Some(test_executor(&p))),
+            judge_api_key: Some("test-judge-key".into()),
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            epoch: 0,
+        });
+        let (st, body) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body("pinned", &serde_json::json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("cannot serve"),
+            "{body}"
+        );
+        assert_eq!(scorer.hits.load(Ordering::SeqCst), 0, "no rent");
     }
 
     #[tokio::test]
@@ -1329,6 +1764,7 @@ mod tests {
             backend: EvalBackend::Lium,
             live_scorer: Some(Arc::new(StubScorer::win())),
             offer: Some(offer()),
+            executor: executor_slot(None),
             judge_api_key: None,
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             epoch: 0,
@@ -1417,6 +1853,7 @@ mod tests {
             backend: EvalBackend::Sim,
             live_scorer: None,
             offer: Some(offer()),
+            executor: executor_slot(None),
             judge_api_key: None,
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             epoch: 0,
@@ -1457,6 +1894,7 @@ mod tests {
             backend: EvalBackend::Sim,
             live_scorer: None,
             offer: Some(staging_offer()),
+            executor: executor_slot(None),
             judge_api_key: None,
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             epoch: 0,
@@ -1664,6 +2102,7 @@ mod tests {
             backend: EvalBackend::Sim,
             live_scorer: None,
             offer: Some(staging_offer()),
+            executor: executor_slot(None),
             judge_api_key: None,
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             epoch: 0,

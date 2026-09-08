@@ -78,6 +78,21 @@ async fn live_host_submit_scores_or_fails_closed() {
     let dump = status.to_string();
     assert!(!dump.contains("api_key"), "{dump}");
     assert!(!dump.contains("content_sha256"), "{dump}");
+    assert_eq!(status["executor"]["gpu_class"], "1x", "{status}");
+
+    // Public executor contract: always 200, `ready` says whether the live 1x
+    // offer can rent, `reason` names the refusal when it cannot.
+    let (st, executor) = get(&client, &format!("{base}/v1/proof/executor")).await;
+    assert_eq!(st, 200, "{executor}");
+    assert!(executor["ready"].is_boolean(), "{executor}");
+    assert_eq!(executor["pin"]["gpu_class"], "1x", "{executor}");
+    if executor["ready"] == false {
+        assert!(
+            executor["reason"].as_str().is_some_and(|r| !r.is_empty()),
+            "silent not-ready executor: {executor}"
+        );
+    }
+    assert!(!executor.to_string().contains("api_key"), "{executor}");
 
     let (st, topics) = get(&client, &format!("{base}/v1/proof/topics")).await;
     assert_eq!(st, 200, "{topics}");
