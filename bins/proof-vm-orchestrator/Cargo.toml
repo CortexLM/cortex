@@ -25,6 +25,10 @@ proof-fc-host = { path = "../../crates/proof-fc-host" }
 proof-vm-agent = { path = "../../crates/proof-vm-agent" }
 proof-vm-proto = { path = "../../crates/proof-vm-proto" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Boot-time SAN check: the served certificate must be valid for every host
+# the control plane's PROOF_VM_ORCHESTRATOR_URL can name (same validator the
+# CP's rustls client runs, so a refusal shows up here instead of as a 503).
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
 telemetry = { path = "../../crates/telemetry" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
 tracing = "0.1"

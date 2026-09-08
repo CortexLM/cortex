@@ -1,7 +1,7 @@
 //! `proof-vm-orchestrator` agent library.
 //!
-//! The agent runs on a host with a working `/dev/kvm` — **dedicated DO
-//! metal** in production (never colocated on the control plane); on staging
+//! The agent runs on a host with a working `/dev/kvm` — a **dedicated DO
+//! droplet** in production (never colocated on the control plane); on staging
 //! the control-plane droplet itself with nested `/dev/kvm` is an allowed,
 //! proven exception; never a Lium pod — and is the only thing that talks to
 //! Firecracker.

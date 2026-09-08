@@ -7,13 +7,13 @@
 #     nested /dev/kvm — an allowed exception, proven (nested DO
 #     virtualisation booted Firecracker there). Nested KVM is fragile — if
 #     the boot fails or /dev/kvm goes away, do not patch around it:
-#     provision dedicated metal and repoint the CP.
-#   - production: dedicated DO metal preferred, never colocated on the CP;
-#     on the VPC or a private network (WireGuard / peering).
-# Either way bind the agent on the host's PRIVATE address with TLS; when
-# colocated that is the droplet's VPC IP (the CP container cannot use
-# loopback). Generic reference with every knob:
-# deploy/env/proof-vm-orchestrator.env.example.
+#     provision a dedicated droplet and repoint the CP.
+#   - production: a DEDICATED DO droplet (g-8vcpu-32gb, nyc1, nested
+#     /dev/kvm) on the same VPC as the master — never the CP droplet.
+# Either way bind the agent on a PRIVATE address of the host with TLS; when
+# colocated that is an address the CP container can reach (the compose
+# gateway or the droplet's VPC IP — never loopback). Generic reference with
+# every knob: deploy/env/proof-vm-orchestrator.env.example.
 #
 # Every REPLACE_WITH_* value FAILS CLOSED as written: a malformed kernel or
 # sister pin exits 1 at boot, a non-loopback bind without TLS exits 1. The
@@ -21,14 +21,21 @@
 # Nothing in this file is a secret value: the bearer is a FILE re-read per
 # request, owner key material is a DIRECTORY staged over vsock.
 
-# Listen on the private (VPC / WireGuard) address only; the staging master's
-# PROOF_VM_ORCHESTRATOR_URL points here over HTTPS. Colocated: the droplet's
-# own VPC IP, firewalled to the compose network's subnet.
+# Listen on the private (VPC / compose-gateway) address only; the staging
+# master's PROOF_VM_ORCHESTRATOR_URL points here over HTTPS. Colocated: an
+# address of the host the CP container reaches (compose gateway or VPC IP),
+# firewalled to the compose network's subnet.
 PROOF_VM_AGENT_BIND=REPLACE_WITH_AGENT_HOST_PRIVATE_IP:8200
-# Certificate with a SAN for that address / name (rustls on the CP refuses
-# CN-only). Private CA → its root goes to the CP as vm_orchestrator_ca.pem.
+# Certificate with a SAN for every host the CP's URL may name (rustls on the
+# CP refuses CN-only). Mint it from those names on this host:
+#   deploy/scripts/proof-vm-agent-tls.sh --san <host in PROOF_VM_ORCHESTRATOR_URL> --write-env
+# Private CA → its root goes to the CP as vm_orchestrator_ca.pem.
 PROOF_VM_AGENT_TLS_CERT=/etc/proof-vm/tls.crt
 PROOF_VM_AGENT_TLS_KEY=/etc/proof-vm/tls.key
+# The names the certificate is checked against at boot (exit 1 on a missing
+# SAN). Exactly the host(s) in the CP's PROOF_VM_ORCHESTRATOR_URL; the
+# helper's --write-env fills this in. Required with a wildcard bind.
+PROOF_VM_AGENT_TLS_SANS=REPLACE_WITH_AGENT_HOST_PRIVATE_IP
 
 # Bearer file (0400 root); same bytes as the master's
 # deploy/secrets/proof/vm_orchestrator_token. Missing/empty = every request 401.
