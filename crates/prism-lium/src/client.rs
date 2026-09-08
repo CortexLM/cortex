@@ -815,9 +815,12 @@ impl EvalJobBackend for LiumClient {
                 prism_lium_types::effective_gpu_count(selected.gpu_count, &selected.gpu_type);
             // Split hosts: requested width. NCU / non-split: whole host.
             let rent_gpu_count = selected.rent_count(spec.gpu_count);
-            if pref.matches_pin("RTX 5090") && rent_gpu_count >= 8 && spec.gpu_count < 8 {
+            // Proof harvest default is 1× (`HarvestLimits.gpu_count`). Never POST
+            // an 8× B200 whole-host / NCU upsell, and keep the 5090 8× abort.
+            if rent_gpu_count > spec.gpu_count {
                 return Err(LiumError::Api(format!(
-                    "abort: refusing {rent_gpu_count}× 5090 rent (no 8×5090 fallback)"
+                    "abort: refusing {rent_gpu_count}× {} rent (requested {}; no whole-host upsell)",
+                    selected.gpu_type, spec.gpu_count
                 )));
             }
             loop {
@@ -1557,7 +1560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provision_rents_whole_host_on_ncu_2x_b200() {
+    async fn provision_refuses_ncu_2x_b200_when_requesting_one() {
         let server = MockServer::start().await;
         mount_common(
             &server,
@@ -1578,21 +1581,53 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "pod-ncu"})),
             )
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/pods/pod-ncu"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"id": "pod-ncu", "status": "RUNNING"})),
-            )
+            .expect(0)
             .mount(&server)
             .await;
         let c = LiumClient::with_base_url("test-key", server.uri()).unwrap();
-        // HarvestLimits.gpu_count stays 1; rent_count upsizes NCU to 2.
-        let inst = c.provision(&provision_spec()).await.unwrap();
-        assert_eq!(inst.id, "pod-ncu");
+        // HarvestLimits.gpu_count stays 1; rent_count would upsize NCU to 2.
+        let err = c.provision(&provision_spec()).await.unwrap_err();
+        assert!(
+            err.to_string().contains("abort:") && err.to_string().contains("requested 1"),
+            "got {err}"
+        );
         assert_eq!(provision_spec().gpu_count, 1);
+    }
+
+    #[tokio::test]
+    async fn provision_refuses_8x_b200_when_requesting_one() {
+        let server = MockServer::start().await;
+        mount_common(
+            &server,
+            serde_json::json!([{
+                "id": "eight-b200",
+                "machine_name": "NVIDIA B200",
+                "gpu_count": 8,
+                "available_gpu_count": 8,
+                "min_gpu_count_for_rental": 1,
+                "ncu_profiling_enabled": true,
+                "price_per_gpu": 6.52
+            }]),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/executors/eight-b200/rent"))
+            .and(body_partial_json(serde_json::json!({"gpu_count": 8})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "pod-8x"})),
+            )
+            .expect(0)
+            .mount(&server)
+            .await;
+        let c = LiumClient::with_base_url("test-key", server.uri()).unwrap();
+        assert_eq!(provision_spec().gpu_count, 1);
+        let err = c.provision(&provision_spec()).await.unwrap_err();
+        assert!(
+            err.to_string().contains("abort:")
+                && err.to_string().contains("requested 1")
+                && (err.to_string().contains("8×") || err.to_string().contains("8x")),
+            "got {err}"
+        );
     }
 
     #[tokio::test]
@@ -1683,9 +1718,13 @@ mod tests {
         spec.gpu_count = 4;
         let err = c.provision(&spec).await.unwrap_err();
         assert!(
-            err.to_string().contains("8×5090")
-                || err.to_string().contains("8x5090")
-                || err.to_string().contains("no 8"),
+            err.to_string().contains("abort:")
+                && err.to_string().contains("requested 4")
+                && (err.to_string().contains("8×")
+                    || err.to_string().contains("8x")
+                    || err.to_string().contains("8×5090")
+                    || err.to_string().contains("8x5090")
+                    || err.to_string().contains("no 8")),
             "got {err}"
         );
     }
