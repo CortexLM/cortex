@@ -367,9 +367,13 @@ pub trait LiveScorer: Send + Sync {
 /// custom-family scorer (which resolves the runner by `custom_id`, fail-closed);
 /// `nll` / `throughput` go to the default digest-pinned harvest. Planning,
 /// readiness, promotion, and artefact hooks follow the same route, so an
-/// unregistered custom id can never fall back to the harvest.
+/// unregistered custom id can never fall back to the harvest, and — on a
+/// host with no harvest ([`Self::custom_only`]) — no `nll` / `throughput`
+/// topic can ever reach the custom scorer or an in-process sim.
 pub struct FamilyMux {
-    default: Arc<dyn LiveScorer>,
+    /// Digest-pinned harvest for `nll` / `throughput`. `None` on a host with
+    /// no Lium harvest: those families refuse per topic.
+    default: Option<Arc<dyn LiveScorer>>,
     custom: Option<Arc<dyn LiveScorer>>,
 }
 
@@ -379,8 +383,21 @@ impl FamilyMux {
     #[must_use]
     pub fn new(default: Arc<dyn LiveScorer>) -> Self {
         Self {
-            default,
+            default: Some(default),
             custom: None,
+        }
+    }
+
+    /// Mux with **no** default harvest: the `custom` family routes to
+    /// `scorer`; every `nll` / `throughput` topic refuses with
+    /// [`EvalError::LiveHarvestUnavailable`] at readiness, plan, and score
+    /// (503, no row, no rent). For a host whose topic-VM orchestrator and
+    /// custom runners are wired but whose Lium harvest is not.
+    #[must_use]
+    pub fn custom_only(scorer: Arc<dyn LiveScorer>) -> Self {
+        Self {
+            default: None,
+            custom: Some(scorer),
         }
     }
 
@@ -393,7 +410,10 @@ impl FamilyMux {
 
     fn route(&self, topic: &TopicDocument) -> Result<&dyn LiveScorer, EvalError> {
         if topic.metric.family != MetricFamily::Custom {
-            return Ok(self.default.as_ref());
+            return self
+                .default
+                .as_deref()
+                .ok_or(EvalError::LiveHarvestUnavailable);
         }
         self.custom
             .as_deref()
@@ -444,8 +464,12 @@ impl LiveScorer for FamilyMux {
             .await
     }
 
+    /// Host-wide gate: the default harvest's readiness. With no harvest
+    /// there is no host-wide blocker — the host still scores its `custom`
+    /// family — and the `nll` / `throughput` refusal lands per topic in the
+    /// route, where `ready_for_topic`, `plan`, and `score` look.
     fn ready(&self) -> Result<(), EvalError> {
-        self.default.ready()
+        self.default.as_deref().map_or(Ok(()), LiveScorer::ready)
     }
 
     fn ready_for_topic(&self, topic: &TopicDocument) -> Result<(), EvalError> {
@@ -484,9 +508,10 @@ impl LiveScorer for FamilyMux {
         submission_id: &str,
         promoted: bool,
     ) {
-        self.default
-            .on_persisted(topic_id, submission_digest, submission_id, promoted)
-            .await;
+        if let Some(d) = &self.default {
+            d.on_persisted(topic_id, submission_digest, submission_id, promoted)
+                .await;
+        }
         if let Some(c) = &self.custom {
             c.on_persisted(topic_id, submission_digest, submission_id, promoted)
                 .await;
@@ -1615,6 +1640,105 @@ mod tests {
             Err(EvalError::RunnerUnwired { .. })
         ));
         mux.on_persisted("t", "d", "pf_0", false).await;
+    }
+
+    /// A host with a registered custom runner but no Lium harvest: the mux
+    /// passes the host-wide gate, `custom` routes to the registry, and every
+    /// `nll` / `throughput` topic refuses at readiness, plan, and score with
+    /// `LiveHarvestUnavailable` — never the custom scorer, never a sim, no
+    /// plan to rent under.
+    #[tokio::test]
+    async fn custom_only_mux_scores_custom_and_refuses_the_harvest_families() {
+        let mux = FamilyMux::custom_only(Arc::new(OneRunner));
+        mux.ready().expect("no host-wide blocker without a harvest");
+        assert_eq!(mux.custom_ids(), vec!["registered_metric".to_owned()]);
+        mux.ready_for_topic(&custom_topic("registered_metric"))
+            .expect("registered id");
+        assert!(matches!(
+            mux.ready_for_topic(&custom_topic("unknown_metric")),
+            Err(EvalError::RunnerUnwired { .. })
+        ));
+
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let exec = executor(&p);
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        for t in [topic(), throughput_topic()] {
+            assert!(
+                matches!(
+                    mux.ready_for_topic(&t),
+                    Err(EvalError::LiveHarvestUnavailable)
+                ),
+                "{}",
+                t.id
+            );
+            assert!(matches!(
+                mux.plan(&p, &t, &exec),
+                Err(EvalError::LiveHarvestUnavailable)
+            ));
+            let plan = executor_plan(&p, Some(&exec), &t, &HarvestOverrides::default())
+                .expect("plan resolved outside the mux");
+            let err = mux
+                .score(&p, &t, &offer(), &plan, "d", "a", None, 1, &recs, "c")
+                .await
+                .expect_err("no harvest to score on");
+            assert!(matches!(err, EvalError::LiveHarvestUnavailable), "{err}");
+            assert!(!mux.auto_promote(&t, "d", true, Some(1.0), Some(0.5)).await);
+        }
+        mux.on_persisted("t", "d", "pf_0", false).await;
+
+        // The whole live path: the host-wide gate passes, an `nll` run
+        // refuses before any plan, a registered custom run reaches its runner.
+        scoring_readiness(
+            &p,
+            EvalBackend::Lium,
+            Some(&mux),
+            true,
+            Some(&offer()),
+            Some(&exec),
+            Some("test-judge-key"),
+        )
+        .expect("custom-only host is ready host-wide");
+        let err = eval_after_freeze(
+            &p,
+            &topic(),
+            &offer(),
+            Some(&exec),
+            "digest-a",
+            "art",
+            None,
+            1,
+            &recs,
+            "claim",
+            EvalBackend::Lium,
+            Some(&mux),
+            Some("test-judge-key"),
+            None,
+        )
+        .await
+        .expect_err("nll needs the harvest");
+        assert!(matches!(err, EvalError::LiveHarvestUnavailable), "{err}");
+        let err = eval_after_freeze(
+            &p,
+            &custom_topic("registered_metric"),
+            &offer(),
+            Some(&exec),
+            "digest-a",
+            "art",
+            Some("https://example.invalid/a.zip"),
+            1,
+            &recs,
+            "claim",
+            EvalBackend::Lium,
+            Some(&mux),
+            Some("test-judge-key"),
+            None,
+        )
+        .await
+        .expect_err("the stub runner refuses after routing");
+        assert!(
+            matches!(err, EvalError::Backend(ref m) if m.contains("registered runner")),
+            "{err}"
+        );
     }
 
     fn tight_sealed() -> SealedBaseline {

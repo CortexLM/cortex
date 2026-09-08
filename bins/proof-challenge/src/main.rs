@@ -5,8 +5,10 @@
 //! signed documents, not a catalog in git.
 //!
 //! Without `PROOF_FORCE_SIM=1` the host needs a `sha256:` eval-image pin, a
-//! wired harvest, at least one `open` topic with a verified holdout, and a
-//! sealed baseline. Sim is never a fallback.
+//! wired scorer for the topic's family (the Lium harvest for `nll` /
+//! `throughput`; the topic-VM orchestrator plus a registered custom id for
+//! `custom` — each wired on its own), at least one `open` topic with a
+//! verified holdout, and a sealed baseline. Sim is never a fallback.
 
 #![forbid(unsafe_code)]
 
@@ -174,30 +176,21 @@ fn run(cli: &Cli) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     let rlm_store = rt.block_on(resolve_rlm_store(cli))?;
-    let live_scorer = build_live_scorer(
+    let harvest = build_live_scorer(
         backend,
         cli.eval_timeout_secs,
         judge_api_key.clone(),
         cli.proxy_model_dir.clone(),
         cli.holdout_store.clone(),
-    )
-    .map(|harvest| with_custom_family(harvest, rlm_store, &cli.artefact_root));
-    match backend {
-        EvalBackend::Lium if live_scorer.is_some() => {
-            tracing::info!("live harvest wired: digest-pinned proof-eval image on Lium");
-            tracing::info!(
-                registered_custom = ?registered_custom(live_scorer.as_deref()),
-                artefact_root = %cli.artefact_root.display(),
-                "custom-family topics route to the rlm scorer; an id with no registered runner \
-                 answers 503 (no runner is compiled in)"
-            );
-        }
-        EvalBackend::Lium => tracing::warn!(
-            "live harvest not wired; every submission will 503. Set the Lium credentials \
-             and LIUM_SSH_PUBLIC_KEY_FILE (deploy/env/proof-challenge.env.example)"
-        ),
-        EvalBackend::Sim => {}
-    }
+    );
+    let harvest_wired = harvest.is_some();
+    let live_scorer = live_scorer(backend, harvest, rlm_store, &cli.artefact_root);
+    log_live_wiring(
+        backend,
+        harvest_wired,
+        live_scorer.as_deref(),
+        &cli.artefact_root,
+    );
 
     let store = MemoryStore::new();
     let registered = registered_custom(live_scorer.as_deref());
@@ -276,7 +269,86 @@ fn build_live_scorer(
     ))
 }
 
-/// Route the `custom` metric family to the RLM scorer over the default harvest.
+/// Boot log for what [`live_scorer`] wired, and what answers 503 because of
+/// what is missing. Nothing here is a boot error: a live host refuses until
+/// the operator wires the piece it names.
+fn log_live_wiring(
+    backend: EvalBackend,
+    harvest_wired: bool,
+    live: Option<&dyn LiveScorer>,
+    artefact_root: &Path,
+) {
+    match backend {
+        EvalBackend::Lium if harvest_wired => {
+            tracing::info!("live harvest wired: digest-pinned proof-eval image on Lium");
+            tracing::info!(
+                registered_custom = ?registered_custom(live),
+                artefact_root = %artefact_root.display(),
+                "custom-family topics route to the rlm scorer; an id with no registered runner \
+                 answers 503 (no runner is compiled in)"
+            );
+        }
+        EvalBackend::Lium if live.is_some() => tracing::info!(
+            registered_custom = ?registered_custom(live),
+            artefact_root = %artefact_root.display(),
+            "live harvest not wired: custom-family topics route to the rlm scorer over the \
+             topic-vm orchestrator; every nll / throughput topic answers 503 until the Lium \
+             credentials and LIUM_SSH_PUBLIC_KEY_FILE are set"
+        ),
+        EvalBackend::Lium => tracing::warn!(
+            "live harvest not wired; every submission will 503. Set the Lium credentials \
+             and LIUM_SSH_PUBLIC_KEY_FILE (deploy/env/proof-challenge.env.example), or wire \
+             the topic-vm orchestrator and {VM_RUNNER_CUSTOM_IDS_ENV} for custom topics"
+        ),
+        EvalBackend::Sim => {}
+    }
+}
+
+/// The live scorer of this host, by metric family.
+///
+/// `nll` / `throughput` score on the digest-pinned Lium harvest; `custom`
+/// scores on the RLM scorer over the runner registry [`custom_family`]
+/// builds from the topic-VM orchestrator env. The two are wired
+/// independently: with a harvest the mux routes both families; with none,
+/// the custom family still stands on its own when the env selected the live
+/// orchestrator and registered at least one custom id
+/// ([`FamilyMux::custom_only`] — every `nll` / `throughput` topic then
+/// answers 503 `LiveHarvestUnavailable`, no row, no rent). Neither wired →
+/// `None`, and every submission answers 503. Sim scores in-process and
+/// wires nothing live.
+fn live_scorer(
+    backend: EvalBackend,
+    harvest: Option<Arc<dyn LiveScorer>>,
+    rlm_store: Arc<dyn RlmStore>,
+    artefact_root: &Path,
+) -> Option<Arc<dyn LiveScorer>> {
+    if backend != EvalBackend::Lium {
+        return None;
+    }
+    let custom = custom_family(rlm_store, artefact_root);
+    match harvest {
+        Some(harvest) => Some(Arc::new(
+            FamilyMux::new(harvest).with_custom_family(custom.scorer),
+        )),
+        None if custom.standalone => Some(Arc::new(FamilyMux::custom_only(custom.scorer))),
+        None => None,
+    }
+}
+
+/// The custom-family scorer of this host.
+struct CustomFamily {
+    /// RLM scorer over the runner registry.
+    scorer: Arc<dyn LiveScorer>,
+    /// The env selected the live topic-VM orchestrator **and** at least one
+    /// custom id is registered over it: enough to carry the custom family
+    /// with no Lium harvest. False with the unwired orchestrator (env unset
+    /// or refused) or an empty registry — a mux with nothing to route to is
+    /// not wired.
+    standalone: bool,
+}
+
+/// The RLM scorer over the runner registry, wired from the topic-VM
+/// orchestrator env alone — never from the Lium harvest.
 ///
 /// No benchmark, model, or repository is compiled in: the registry holds only
 /// the generic `VmBackedRunner`, under the custom ids the operator lists in
@@ -285,14 +357,27 @@ fn build_live_scorer(
 /// every custom topic answers 503 (`RunnerUnwired`); with ids but an unwired
 /// or unpinned orchestrator, 503 naming the missing env var. It never falls
 /// back to the digest-pinned harvest and never spends.
-fn with_custom_family(
-    harvest: Arc<dyn LiveScorer>,
-    rlm_store: Arc<dyn RlmStore>,
-    artefact_root: &Path,
-) -> Arc<dyn LiveScorer> {
-    let scorer = RlmScorer::new(Arc::new(runner_registry()), rlm_store)
+fn custom_family(rlm_store: Arc<dyn RlmStore>, artefact_root: &Path) -> CustomFamily {
+    let vm = topic_vm_orchestrator();
+    let registry = runner_registry(&vm);
+    let standalone = vm.live && !registry.is_empty();
+    let scorer = RlmScorer::new(Arc::new(registry), rlm_store)
         .with_artefacts(Some(ArtefactStore::new(artefact_root)));
-    Arc::new(FamilyMux::new(harvest).with_custom_family(Arc::new(scorer)))
+    CustomFamily {
+        scorer: Arc::new(scorer),
+        standalone,
+    }
+}
+
+/// What the topic-VM orchestrator env resolved to.
+struct TopicVm {
+    orchestrator: Arc<dyn TopicVmOrchestrator>,
+    /// RLM VM template the runner boots for topics without a VM.
+    template: VmTemplate,
+    /// The env selected the live `FirecrackerOrchestrator` (URL + bearer
+    /// file env, https). False = `UnwiredVmOrchestrator`, which refuses
+    /// every call.
+    live: bool,
 }
 
 /// The topic-VM orchestrator this host talks to, plus the RLM VM template.
@@ -305,7 +390,7 @@ fn with_custom_family(
 /// the error logged: a half-configured orchestrator never becomes a host
 /// fallback. Token / digest are checked at `ready()` so they can be fixed
 /// without a restart.
-fn topic_vm_orchestrator() -> (Arc<dyn TopicVmOrchestrator>, VmTemplate) {
+fn topic_vm_orchestrator() -> TopicVm {
     match FirecrackerOrchestrator::from_env() {
         Ok(Some(fc)) => {
             let template = fc.template().clone();
@@ -321,7 +406,11 @@ fn topic_vm_orchestrator() -> (Arc<dyn TopicVmOrchestrator>, VmTemplate) {
                      topics answer 503 until fixed"
                 ),
             }
-            (Arc::new(fc), template)
+            TopicVm {
+                orchestrator: Arc::new(fc),
+                template,
+                live: true,
+            }
         }
         Ok(None) => {
             tracing::warn!(
@@ -329,21 +418,33 @@ fn topic_vm_orchestrator() -> (Arc<dyn TopicVmOrchestrator>, VmTemplate) {
                  {VM_ORCHESTRATOR_TOKEN_FILE_ENV} / {RLM_VM_IMAGE_DIGEST_ENV} unset); every custom \
                  topic answers 503 and nothing runs on this host"
             );
-            (Arc::new(UnwiredVmOrchestrator), VmTemplate::from_env())
+            TopicVm::unwired()
         }
         Err(e) => {
             tracing::warn!(
                 "topic-vm orchestrator refused ({e}); staying unwired, custom topics 503"
             );
-            (Arc::new(UnwiredVmOrchestrator), VmTemplate::from_env())
+            TopicVm::unwired()
+        }
+    }
+}
+
+impl TopicVm {
+    fn unwired() -> Self {
+        Self {
+            orchestrator: Arc::new(UnwiredVmOrchestrator),
+            template: VmTemplate::from_env(),
+            live: false,
         }
     }
 }
 
 /// `custom_id → VmBackedRunner` for every id in `PROOF_VM_RUNNER_CUSTOM_IDS`.
-fn runner_registry() -> RunnerRegistry {
-    let (orchestrator, template) = topic_vm_orchestrator();
-    let runner = Arc::new(VmBackedRunner::new(orchestrator, template));
+fn runner_registry(vm: &TopicVm) -> RunnerRegistry {
+    let runner = Arc::new(VmBackedRunner::new(
+        vm.orchestrator.clone(),
+        vm.template.clone(),
+    ));
     let raw = std::env::var(VM_RUNNER_CUSTOM_IDS_ENV).unwrap_or_default();
     registry_for(&raw, &runner)
 }
@@ -682,7 +783,13 @@ mod tests {
         std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
 
         let root = std::env::temp_dir().join("proof-families-artefacts");
-        let mux = with_custom_family(harvest, Arc::new(MemoryRlmStore::new()), &root);
+        let mux = live_scorer(
+            EvalBackend::Lium,
+            Some(harvest),
+            Arc::new(MemoryRlmStore::new()),
+            &root,
+        )
+        .expect("a wired harvest is the live scorer");
         assert!(registered_custom(Some(mux.as_ref())).is_empty());
         for id in ["any_metric", "another_metric"] {
             let mut custom = TopicDocument::default();
@@ -805,12 +912,13 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_vm_env();
-        let (unwired, template) = topic_vm_orchestrator();
+        let unwired = topic_vm_orchestrator();
         assert!(matches!(
-            unwired.ready(),
+            unwired.orchestrator.ready(),
             Err(proof_rlm::VmError::NotWired(_))
         ));
-        assert!(template.image_digest.is_empty());
+        assert!(unwired.template.image_digest.is_empty());
+        assert!(!unwired.live);
 
         let dir = std::env::temp_dir().join(format!("proof-vm-wire-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
@@ -818,25 +926,32 @@ mod tests {
         std::fs::write(&token, "vm-bearer-not-a-real-secret\n").expect("token");
         std::env::set_var(VM_ORCHESTRATOR_URL_ENV, "https://kvm.example.invalid:8200");
         std::env::set_var(VM_ORCHESTRATOR_TOKEN_FILE_ENV, &token);
-        let (pinned_less, template) = topic_vm_orchestrator();
-        let err = pinned_less.ready().expect_err("no image pin");
+        let pinned_less = topic_vm_orchestrator();
+        let err = pinned_less.orchestrator.ready().expect_err("no image pin");
         assert!(matches!(err, proof_rlm::VmError::NotWired(_)), "{err}");
         assert!(err.to_string().contains(RLM_VM_IMAGE_DIGEST_ENV), "{err}");
         assert_eq!(
-            (template.vcpus, template.mem_mib),
+            (pinned_less.template.vcpus, pinned_less.template.mem_mib),
             (4, 8_192),
             "locked shape"
+        );
+        assert!(
+            pinned_less.live,
+            "selected by env; readiness is per request"
         );
 
         std::env::set_var(
             RLM_VM_IMAGE_DIGEST_ENV,
             format!("sha256:{}", "ab".repeat(32)),
         );
-        let (live, template) = topic_vm_orchestrator();
-        live.ready().expect("url + token + digest = wired");
-        template.validate().expect("pinned");
+        let live = topic_vm_orchestrator();
+        live.orchestrator
+            .ready()
+            .expect("url + token + digest = wired");
+        live.template.validate().expect("pinned");
+        assert!(live.live);
         std::env::set_var(VM_RUNNER_CUSTOM_IDS_ENV, "metric_a");
-        let reg = runner_registry();
+        let reg = runner_registry(&live);
         assert_eq!(reg.ids(), vec!["metric_a".to_owned()]);
         reg.resolve("metric_a")
             .expect("registered")
@@ -844,21 +959,193 @@ mod tests {
             .expect("runner over the live orchestrator is ready");
 
         std::fs::write(&token, "\n").expect("empty token");
-        let (live, _) = topic_vm_orchestrator();
-        let err = live.ready().expect_err("empty bearer file");
+        let live = topic_vm_orchestrator();
+        let err = live.orchestrator.ready().expect_err("empty bearer file");
         assert!(
             err.to_string().contains(VM_ORCHESTRATOR_TOKEN_FILE_ENV),
             "{err}"
         );
 
         std::env::set_var(VM_ORCHESTRATOR_URL_ENV, "http://10.0.0.7:8200");
-        let (refused, _) = topic_vm_orchestrator();
+        let refused = topic_vm_orchestrator();
         let err = refused
+            .orchestrator
             .ready()
             .expect_err("plain http off loopback is never wired");
         assert!(err.to_string().contains(VM_ORCHESTRATOR_URL_ENV), "{err}");
+        assert!(!refused.live, "a refused config is the unwired stub");
         clear_vm_env();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Full topic-VM env (https URL, bearer file, image pin, one custom id),
+    /// **no** Lium credentials: the custom family stands on its own. The
+    /// registry is non-empty, the mux passes the host-wide gate and the
+    /// registered custom topic is ready over the live orchestrator, while
+    /// every `nll` / `throughput` topic refuses with
+    /// `LiveHarvestUnavailable` and an unlisted custom id with
+    /// `RunnerUnwired` — no placeholder Lium harvest is needed to open
+    /// custom topics.
+    #[test]
+    fn custom_family_stands_without_a_lium_harvest() {
+        let _guard = LIUM_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_vm_env();
+        std::env::remove_var("LIUM_API_KEY");
+        std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
+        let dir = std::env::temp_dir().join(format!("proof-custom-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let token = dir.join("vm_orchestrator_token");
+        std::fs::write(&token, "vm-bearer-not-a-real-secret\n").expect("token");
+        std::env::set_var(VM_ORCHESTRATOR_URL_ENV, "https://kvm.example.invalid:8200");
+        std::env::set_var(VM_ORCHESTRATOR_TOKEN_FILE_ENV, &token);
+        std::env::set_var(
+            RLM_VM_IMAGE_DIGEST_ENV,
+            format!("sha256:{}", "ab".repeat(32)),
+        );
+        std::env::set_var(VM_RUNNER_CUSTOM_IDS_ENV, "metric_a");
+
+        let harvest = build_live_scorer(EvalBackend::Lium, 900, None, None, None);
+        assert!(harvest.is_none(), "no Lium credentials, no harvest");
+        let root = dir.join("artefacts");
+        let mux = live_scorer(
+            EvalBackend::Lium,
+            harvest,
+            Arc::new(MemoryRlmStore::new()),
+            &root,
+        )
+        .expect("the custom family is wired from the topic-vm env alone");
+        assert_eq!(
+            registered_custom(Some(mux.as_ref())),
+            vec!["metric_a".to_owned()]
+        );
+        mux.ready().expect("no host-wide blocker");
+
+        let mut custom = TopicDocument::default();
+        custom.metric.family = proof_task::MetricFamily::Custom;
+        custom.metric.custom_id = "metric_a".into();
+        mux.ready_for_topic(&custom)
+            .expect("registered runner over the live orchestrator is ready");
+        custom.metric.custom_id = "metric_b".into();
+        let err = mux.ready_for_topic(&custom).expect_err("unlisted id");
+        assert!(
+            matches!(err, proof_eval::EvalError::RunnerUnwired { .. }),
+            "{err}"
+        );
+        let nll = TopicDocument::default();
+        let err = mux.ready_for_topic(&nll).expect_err("no harvest");
+        assert!(
+            matches!(err, proof_eval::EvalError::LiveHarvestUnavailable),
+            "{err}"
+        );
+
+        // Exactly the gate `/v1/status` and `POST /v1/submissions` apply
+        // host-wide: it passes, so custom topics can score here.
+        let pin = proof_rlm::fixtures::pin();
+        let exec = executor_for(&pin);
+        proof_eval::scoring_readiness(
+            &pin,
+            EvalBackend::Lium,
+            Some(mux.as_ref()),
+            true,
+            Some(&proof_rlm::fixtures::offer()),
+            Some(&exec),
+            Some("test-judge-key"),
+        )
+        .expect("ready host-wide without Lium");
+
+        // Sim scores in-process and never wires anything live.
+        assert!(live_scorer(
+            EvalBackend::Sim,
+            None,
+            Arc::new(MemoryRlmStore::new()),
+            &root
+        )
+        .is_none());
+        clear_vm_env();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without Lium the custom family needs the live orchestrator **and** a
+    /// listed id, or nothing is wired and the host stays fail-closed:
+    /// orchestrator env unset (ids listed or not), env refused, or ids
+    /// unset → `None` → `LiveHarvestUnavailable` host-wide (503). The
+    /// `UnwiredVmOrchestrator` never carries a mux.
+    #[test]
+    fn without_lium_the_custom_family_needs_the_live_orchestrator_and_an_id() {
+        let _guard = LIUM_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_vm_env();
+        std::env::remove_var("LIUM_API_KEY");
+        std::env::remove_var("LIUM_SSH_PUBLIC_KEY_FILE");
+        let dir = std::env::temp_dir().join(format!("proof-unwired-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let root = dir.join("artefacts");
+        let store: Arc<dyn RlmStore> = Arc::new(MemoryRlmStore::new());
+        let none = |label: &str| {
+            assert!(
+                live_scorer(EvalBackend::Lium, None, store.clone(), &root).is_none(),
+                "{label}: nothing may be wired"
+            );
+        };
+
+        none("no env at all");
+        std::env::set_var(VM_RUNNER_CUSTOM_IDS_ENV, "metric_a");
+        none("ids listed over the unwired orchestrator");
+
+        let token = dir.join("vm_orchestrator_token");
+        std::fs::write(&token, "vm-bearer-not-a-real-secret\n").expect("token");
+        std::env::set_var(VM_ORCHESTRATOR_URL_ENV, "http://10.0.0.7:8200");
+        std::env::set_var(VM_ORCHESTRATOR_TOKEN_FILE_ENV, &token);
+        std::env::set_var(
+            RLM_VM_IMAGE_DIGEST_ENV,
+            format!("sha256:{}", "ab".repeat(32)),
+        );
+        none("refused orchestrator config (plain http off loopback)");
+
+        std::env::set_var(VM_ORCHESTRATOR_URL_ENV, "https://kvm.example.invalid:8200");
+        std::env::remove_var(VM_RUNNER_CUSTOM_IDS_ENV);
+        none("live orchestrator but no custom id registered");
+        std::env::set_var(VM_RUNNER_CUSTOM_IDS_ENV, " , Bad Id ");
+        none("live orchestrator but no valid custom id");
+
+        // What that `None` is on the wire: the host-wide gate refuses.
+        let pin = proof_rlm::fixtures::pin();
+        let err = proof_eval::scoring_readiness(
+            &pin,
+            EvalBackend::Lium,
+            None,
+            true,
+            Some(&proof_rlm::fixtures::offer()),
+            Some(&executor_for(&pin)),
+            Some("test-judge-key"),
+        )
+        .expect_err("unwired host");
+        assert!(
+            matches!(err, proof_eval::EvalError::LiveHarvestUnavailable),
+            "{err}"
+        );
+        clear_vm_env();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Open `1x` executor on `pin`'s digest-scoped template (host state the
+    /// live gate requires; nothing here rents).
+    fn executor_for(pin: &ProofPin) -> EvalExecutorOffer {
+        let hex = pin.eval_image_digest.trim_start_matches("sha256:");
+        let mut offer = EvalExecutorOffer {
+            offer_id: "executor-placeholder".into(),
+            lium_template_id: format!("proof-eval-{}", hex.get(..12).unwrap_or("unpinned")),
+            machine_shape: "1x".into(),
+            max_proof_deadline_s: 3_600,
+            eval_image_digest: pin.eval_image_digest.clone(),
+            config_commitment: String::new(),
+            status: proof_challenge::OfferStatus::Open,
+        };
+        offer.config_commitment = offer.expected_commitment();
+        offer
     }
 
     static LIUM_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());

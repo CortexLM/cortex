@@ -799,7 +799,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use proof_eval::{sim_document, BaselineMeasurement, BASELINE_SKILL};
+    use proof_eval::{sim_document, BaselineMeasurement, FamilyMux, BASELINE_SKILL};
     use proof_task::{
         default_adamw, holdout_commitment, inference_config_commitment, synthetic_holdout,
         Constraints, HoldoutSplit, InferenceConfig, InferenceMode, InferenceOffer,
@@ -1986,9 +1986,16 @@ mod tests {
     /// Live host: the throughput topic scores through the harvest stub, the
     /// custom topic goes through `scorer` (registered id `topic_minted_metric`).
     fn app_with_custom(scorer: Arc<FamilyStub>) -> Router {
+        app_with_live_scorer(scorer)
+    }
+
+    /// Live host holding the open, sealed throughput topic `dt-no-ib-v0` and
+    /// custom topic `custom-topic-v0` (id `topic_minted_metric`, which
+    /// `live.custom_ids()` must list), scored by `live`.
+    fn app_with_live_scorer(live: Arc<dyn LiveScorer>) -> Router {
         let p = pin(&format!("sha256:{}", "ab".repeat(32)));
         let store = MemoryStore::new();
-        let registered = scorer.custom_ids();
+        let registered = live.custom_ids();
         for draft in [
             unsigned_topic(&[]),
             unsigned_custom_topic(&[], "topic_minted_metric"),
@@ -2008,13 +2015,102 @@ mod tests {
             store,
             pin: p,
             backend: EvalBackend::Lium,
-            live_scorer: Some(scorer),
+            live_scorer: Some(live),
             offer: Some(offer()),
             executor: executor_slot(Some(executor)),
             judge_api_key: Some("test-judge-key".into()),
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             epoch: 0,
         })
+    }
+
+    /// A host whose topic-VM runner is registered but whose Lium harvest is
+    /// not wired (`FamilyMux::custom_only`): the host is ready, the custom
+    /// topic is scorable and scores, and every `nll` / `throughput` topic is
+    /// open but not scorable — a submit there is a 503 with no row and no
+    /// scorer call, never an in-process sim.
+    #[tokio::test]
+    async fn a_custom_only_host_scores_custom_and_refuses_the_harvest_families() {
+        let scorer = Arc::new(FamilyStub::win("topic_minted_metric"));
+        let app = app_with_live_scorer(Arc::new(FamilyMux::custom_only(scorer.clone())));
+        let (st, status) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/status",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let ids = |key: &str| -> Vec<String> {
+            status[key]
+                .as_array()
+                .expect(key)
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        };
+        let mut open = ids("open_topics");
+        open.sort();
+        assert_eq!(open, ["custom-topic-v0", "dt-no-ib-v0"], "{status}");
+        assert_eq!(ids("scorable_topics"), ["custom-topic-v0"], "{status}");
+        assert_eq!(
+            ids("registered_custom"),
+            ["topic_minted_metric"],
+            "{status}"
+        );
+        assert_eq!(status["live_harvest_wired"], true, "{status}");
+        assert_eq!(status["can_score"], true, "{status}");
+
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            submit_body("harvest-topic", &serde_json::json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(
+            body["error"],
+            EvalError::LiveHarvestUnavailable.to_string(),
+            "{body}"
+        );
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0, "no run");
+        let (st, list) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/submissions",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(
+            list["items"].as_array().is_some_and(Vec::is_empty),
+            "a harvest-family refusal banked a row: {list}"
+        );
+
+        let (st, created) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body(
+                "custom-without-lium",
+                &serde_json::json!({
+                    "topic_id": "custom-topic-v0",
+                    "artifact_uri": "https://example.invalid/custom-without-lium.zip",
+                }),
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_eq!(created["state"], "champion", "{created}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 1);
+        let persisted = scorer.persisted.lock().expect("p").clone();
+        assert_eq!(persisted.len(), 1, "{persisted:?}");
+        assert_eq!(persisted[0].0, "custom-topic-v0");
     }
 
     /// A registered runner whose topic VM is not wired: the topic is open
