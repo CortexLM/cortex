@@ -1,7 +1,8 @@
 //! `proof-vm-orchestrator` — Firecracker topic-VM agent for a **KVM host**
-//! (HTTPS `:8200`): dedicated DO metal in production (never colocated on the
-//! control plane); on staging the control-plane droplet itself with nested
-//! `/dev/kvm` is an allowed, proven exception.
+//! (HTTPS `:8200`): in production a **dedicated** DO droplet on the VPC
+//! (`g-8vcpu-32gb`, nested `/dev/kvm`), never the control-plane droplet; on
+//! staging the control-plane droplet itself with nested `/dev/kvm` is an
+//! allowed, proven exception.
 //!
 //! The Proof control plane (`proof-challenge`, `FirecrackerOrchestrator`)
 //! is its only client. It boots one jailed RLM microVM per topic from the
@@ -12,9 +13,13 @@
 //! `--owner-key-dir` on this host and staged over vsock.
 //!
 //! Fail-closed at boot: malformed kernel / sister image pins exit 1, a
-//! non-loopback bind without a TLS certificate + key exits 1. A missing bearer
-//! file does not stop the process — every request is refused until it exists
-//! (the file is re-read per request, so rotation needs no restart).
+//! non-loopback bind without a TLS certificate + key exits 1, a certificate
+//! without a SAN for every host the control plane's
+//! `PROOF_VM_ORCHESTRATOR_URL` may name (`--tls-sans`, or the bind address)
+//! exits 1 — the CP's rustls client would refuse it anyway, and a wildcard
+//! bind must say which names it serves. A missing bearer file does not stop
+//! the process — every request is refused until it exists (the file is
+//! re-read per request, so rotation needs no restart).
 //!
 //! TLS boots the same way however the binary was built: the rustls
 //! [`CryptoProvider`](rustls::crypto::CryptoProvider) is installed explicitly
@@ -56,6 +61,12 @@ struct Cli {
     /// TLS private key (PEM).
     #[arg(long, env = "PROOF_VM_AGENT_TLS_KEY")]
     tls_key: Option<PathBuf>,
+    /// Hosts the control plane's orchestrator URL may name for this agent —
+    /// the dedicated droplet's VPC IP, its hostname, … (repeat or
+    /// comma-separate). The certificate must carry a SAN for each, or boot
+    /// exits 1. Default: the bind address; required with a wildcard bind.
+    #[arg(long, env = "PROOF_VM_AGENT_TLS_SANS", value_delimiter = ',')]
+    tls_sans: Vec<String>,
     /// Statically linked firecracker binary.
     #[arg(
         long,
@@ -203,6 +214,91 @@ fn tls_required(
     }
 }
 
+/// Operator tool that mints a certificate covering the right names.
+const TLS_HELPER: &str = "deploy/scripts/proof-vm-agent-tls.sh";
+
+/// The server names the certificate must be valid for: every `--tls-sans`
+/// entry (DNS name or IP literal), else the bind address when it is a
+/// specific one. A wildcard bind (`0.0.0.0` / `[::]`) says nothing about the
+/// host clients use, so it requires the list — no default, no guess (a
+/// docker gateway address is a colocated-staging artefact, never a prod
+/// default).
+///
+/// # Errors
+///
+/// A name that is neither a DNS name nor an IP, or a wildcard bind without
+/// `--tls-sans`.
+fn expected_server_names(
+    bind: SocketAddr,
+    sans: &[String],
+) -> Result<Vec<rustls::pki_types::ServerName<'static>>, String> {
+    use rustls::pki_types::ServerName;
+    let mut names = Vec::new();
+    for raw in sans.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let name = ServerName::try_from(raw.to_ascii_lowercase()).map_err(|e| {
+            format!("--tls-sans entry {raw:?} is neither a DNS name nor an IP address: {e}")
+        })?;
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        if bind.ip().is_unspecified() {
+            return Err(format!(
+                "bind {bind} is a wildcard: --tls-sans (PROOF_VM_AGENT_TLS_SANS) must list the host(s) \
+                 the control plane's PROOF_VM_ORCHESTRATOR_URL uses for this agent (VPC IP, hostname); \
+                 the certificate is checked against them at boot"
+            ));
+        }
+        names.push(ServerName::IpAddress(bind.ip().into()));
+    }
+    Ok(names)
+}
+
+/// Refuse a certificate the control plane's rustls client would refuse:
+/// the leaf must be valid for every expected name (SAN — a CN alone is not
+/// a name). The names it does present are reported so the operator can see
+/// what to regenerate.
+///
+/// # Errors
+///
+/// Unparseable PEM / DER, or a name the leaf does not cover.
+fn check_cert_covers(
+    cert_pem: &[u8],
+    cert_path: &Path,
+    names: &[rustls::pki_types::ServerName<'static>],
+) -> Result<(), String> {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::CertificateDer;
+    let leaf = CertificateDer::from_pem_slice(cert_pem)
+        .map_err(|e| format!("tls cert {}: {e:?}", cert_path.display()))?;
+    let cert = webpki::EndEntityCert::try_from(&leaf)
+        .map_err(|e| format!("tls cert {}: {e}", cert_path.display()))?;
+    for name in names {
+        match cert.verify_is_valid_for_subject_name(name) {
+            Ok(()) => {}
+            Err(webpki::Error::CertNotValidForName(ctx)) => {
+                return Err(format!(
+                    "tls cert {} has no SAN for {} (it presents {:?}); the control plane's rustls client \
+                     refuses it — regenerate with {TLS_HELPER} --san {} (CN alone is never a name)",
+                    cert_path.display(),
+                    name.to_str(),
+                    ctx.presented,
+                    name.to_str(),
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "tls cert {} cannot be checked for {}: {e}",
+                    cert_path.display(),
+                    name.to_str()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Name of the rustls provider this binary runs on.
 const CRYPTO_PROVIDER: &str = "ring";
 
@@ -298,8 +394,16 @@ async fn run(cli: &Cli) -> Result<(), String> {
         shutdown.graceful_shutdown(Some(Duration::from_secs(10)));
     });
     if let Some((cert, key)) = tls {
+        let names = expected_server_names(cli.bind, &cli.tls_sans)?;
+        let pem = std::fs::read(&cert).map_err(|e| format!("tls cert {}: {e}", cert.display()))?;
+        check_cert_covers(&pem, &cert, &names)?;
         let config = tls_config(&cert, &key).await?;
-        tracing::info!(bind = %cli.bind, "proof-vm-orchestrator listening (https)");
+        let served: Vec<String> = names.iter().map(|n| n.to_str().into_owned()).collect();
+        tracing::info!(
+            bind = %cli.bind,
+            tls_sans = ?served,
+            "proof-vm-orchestrator listening (https); certificate covers every listed name"
+        );
         return axum_server::bind_rustls(cli.bind, config)
             .handle(handle)
             .serve(app.into_make_service())
@@ -405,6 +509,199 @@ mod tests {
             .await
             .expect_err("missing cert");
         assert!(err.contains("missing.crt"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The names the certificate is held to come from the operator (every
+    /// host the CP's URL may use), else the specific bind address. A wildcard
+    /// bind has no default: it must say which names it serves.
+    #[test]
+    fn expected_names_come_from_the_sans_list_or_a_specific_bind() {
+        let vpc: SocketAddr = "10.116.0.7:8200".parse().expect("addr");
+        let any: SocketAddr = "0.0.0.0:8200".parse().expect("addr");
+        let any6: SocketAddr = "[::]:8200".parse().expect("addr");
+        let names = expected_server_names(vpc, &[]).expect("bind ip is the default");
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].to_str(), "10.116.0.7");
+        for wildcard in [any, any6] {
+            let err = expected_server_names(wildcard, &[]).expect_err("wildcard needs the list");
+            assert!(err.contains("PROOF_VM_AGENT_TLS_SANS"), "{err}");
+            assert!(err.contains("PROOF_VM_ORCHESTRATOR_URL"), "{err}");
+        }
+        let listed = expected_server_names(
+            any,
+            &[
+                " 10.116.0.7 ".into(),
+                "KVM-1.internal".into(),
+                "10.116.0.7".into(),
+                String::new(),
+            ],
+        )
+        .expect("list");
+        let shown: Vec<String> = listed.iter().map(|n| n.to_str().into_owned()).collect();
+        assert_eq!(
+            shown,
+            ["10.116.0.7", "kvm-1.internal"],
+            "trimmed, lower-cased, deduplicated"
+        );
+        let cli = cli(&["--tls-sans", "10.116.0.7,kvm-1.internal"]);
+        assert_eq!(cli.tls_sans, ["10.116.0.7", "kvm-1.internal"]);
+        let err = expected_server_names(vpc, &["not a name!".into()]).expect_err("junk");
+        assert!(err.contains("neither a DNS name nor an IP"), "{err}");
+    }
+
+    /// The boot check is the CP's own rule: a SAN for every name, CN never
+    /// counts. A certificate minted for the docker gateway only is refused
+    /// for the droplet's VPC address, and the message names what it presents
+    /// and the helper that fixes it.
+    #[test]
+    fn certificate_must_carry_a_san_for_every_expected_name() {
+        let names = |list: &[&str]| {
+            expected_server_names(
+                "0.0.0.0:8200".parse().expect("addr"),
+                &list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            )
+            .expect("names")
+        };
+        let path = Path::new("/etc/proof-vm/tls.crt");
+        let key = rcgen::KeyPair::generate().expect("keypair");
+        let droplet = rcgen::CertificateParams::new(vec![
+            "10.116.0.7".to_owned(),
+            "kvm-1.internal".to_owned(),
+        ])
+        .expect("params")
+        .self_signed(&key)
+        .expect("cert");
+        let pem = droplet.pem();
+        check_cert_covers(
+            pem.as_bytes(),
+            path,
+            &names(&["10.116.0.7", "kvm-1.internal"]),
+        )
+        .expect("vpc ip + hostname covered");
+        check_cert_covers(pem.as_bytes(), path, &names(&["KVM-1.internal"]))
+            .expect("dns names compare case-insensitively");
+        let err = check_cert_covers(pem.as_bytes(), path, &names(&["10.116.0.7", "172.18.0.1"]))
+            .expect_err("docker gateway is not on this cert");
+        assert!(err.contains("no SAN for 172.18.0.1"), "{err}");
+        assert!(
+            err.contains("10.116.0.7") && err.contains("kvm-1.internal"),
+            "presented names: {err}"
+        );
+        assert!(
+            err.contains(TLS_HELPER) && err.contains("--san 172.18.0.1"),
+            "{err}"
+        );
+
+        let gateway_only = rcgen::CertificateParams::new(vec!["172.18.0.1".to_owned()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("cert");
+        let err = check_cert_covers(gateway_only.pem().as_bytes(), path, &names(&["10.116.0.7"]))
+            .expect_err("staging colo cert does not serve the dedicated droplet");
+        assert!(err.contains("no SAN for 10.116.0.7"), "{err}");
+
+        let mut cn_only = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        cn_only
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "10.116.0.7");
+        let cn_only = cn_only.self_signed(&key).expect("cert");
+        let err = check_cert_covers(cn_only.pem().as_bytes(), path, &names(&["10.116.0.7"]))
+            .expect_err("CN is not a SAN");
+        assert!(err.contains("no SAN for 10.116.0.7"), "{err}");
+        assert!(
+            check_cert_covers(b"not pem", path, &names(&["10.116.0.7"])).is_err(),
+            "garbage is refused, not skipped"
+        );
+    }
+
+    /// The operator helper mints what the boot check wants: run it for the
+    /// names a dedicated droplet needs, then hold its output to the same
+    /// rule the agent applies at boot and load the pair as the listener
+    /// would. `--write-env` records exactly the minted names; an empty list
+    /// is refused.
+    #[tokio::test]
+    async fn tls_helper_mints_a_certificate_the_boot_check_accepts() {
+        use std::process::Command;
+        if Command::new("openssl").arg("version").output().is_err() {
+            eprintln!("openssl not installed; skipping the helper run");
+            return;
+        }
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../{TLS_HELPER}"));
+        let dir = std::env::temp_dir().join(format!("proof-vm-tls-helper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let env_file = dir.join("orchestrator.env");
+        std::fs::write(&env_file, "PROOF_VM_AGENT_BIND=0.0.0.0:8200\n").expect("env");
+        let out = Command::new("bash")
+            .arg(&script)
+            .args([
+                "--out-dir",
+                &dir.display().to_string(),
+                "--no-hostname",
+                "--no-vpc",
+            ])
+            .args([
+                "--san",
+                "10.116.0.7",
+                "--san",
+                "KVM-1.internal",
+                "--write-env",
+            ])
+            .output()
+            .expect("run helper");
+        assert!(
+            out.status.success(),
+            "helper failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let env = std::fs::read_to_string(&env_file).expect("env");
+        assert!(
+            env.contains("PROOF_VM_AGENT_TLS_SANS=10.116.0.7,kvm-1.internal"),
+            "{env}"
+        );
+        let cert_path = dir.join("tls.crt");
+        let pem = std::fs::read(&cert_path).expect("cert");
+        let names = |list: &[&str]| {
+            expected_server_names(
+                "0.0.0.0:8200".parse().expect("addr"),
+                &list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            )
+            .expect("names")
+        };
+        check_cert_covers(&pem, &cert_path, &names(&["10.116.0.7", "kvm-1.internal"]))
+            .expect("the minted certificate covers the minted names");
+        let err = check_cert_covers(&pem, &cert_path, &names(&["172.18.0.1"]))
+            .expect_err("not minted for the docker gateway");
+        assert!(err.contains("no SAN for 172.18.0.1"), "{err}");
+        install_crypto_provider();
+        tls_config(&cert_path, &dir.join("tls.key"))
+            .await
+            .expect("the pair loads as the listener would");
+        let ca = std::fs::read(dir.join("ca.pem")).expect("ca");
+        assert!(
+            ca.starts_with(b"-----BEGIN CERTIFICATE-----"),
+            "ca.pem is PEM"
+        );
+
+        let refused = Command::new("bash")
+            .arg(&script)
+            .args([
+                "--out-dir",
+                &dir.display().to_string(),
+                "--no-hostname",
+                "--no-vpc",
+            ])
+            .args(["--env-file", "/nonexistent/orchestrator.env", "--dry-run"])
+            .output()
+            .expect("run helper");
+        assert!(!refused.status.success(), "no SAN at all is refused");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("no SAN"),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

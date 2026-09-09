@@ -378,6 +378,14 @@ check_agent() {
   http GET "$base/v1/health" "" "${AGENT_ARGS[@]}" -K "$hdr"; code="$HTTP_CODE"
   if [[ "$code" != "200" ]]; then
     fail "agent health → HTTP $code: $(printf '%s' "$HTTP_BODY" | head -c 300)"
+    # curl's TLS refusals, translated: the CP's rustls client fails the same way.
+    local host
+    host="$(url_host "$URL")"
+    if printf '%s' "$HTTP_BODY" | grep -qiE 'no alternative certificate subject name matches|does not match target host|certificate subject name .* does not match'; then
+      fail "agent certificate has no SAN for '$host' (the host in PROOF_VM_ORCHESTRATOR_URL): on the KVM host run deploy/scripts/proof-vm-agent-tls.sh --san $host [--write-env], restart the agent, copy ca.pem to the CP"
+    elif printf '%s' "$HTTP_BODY" | grep -qiE 'self[- ]signed certificate|unable to get local issuer|certificate verify failed|SSL certificate problem'; then
+      fail "agent certificate does not chain to the CA the CP pins (PROOF_VM_ORCHESTRATOR_CA_FILE${CA_PATH:+ → $CA_PATH}): copy the KVM host's ca.pem to the CP, or unset the var when the cert chains to a public root"
+    fi
   else
     local api ready reason hv vms
     api="$(jget "$HTTP_BODY" api_version)"; ready="$(jget "$HTTP_BODY" ready)"

@@ -3857,6 +3857,7 @@ dependencies = [
  "proof-vm-proto",
  "rcgen",
  "rustls",
+ "rustls-webpki",
  "telemetry",
  "tokio",
  "tracing",
