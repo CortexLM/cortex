@@ -187,6 +187,9 @@ pub struct FakeOrchestrator {
     sandboxed: AtomicBool,
     flops_used: Mutex<Option<u64>>,
     fail_run: AtomicBool,
+    /// What `teardown` answers (`Ok(true)` = confirmed destroyed). Anything
+    /// else leaves the VM in `vms`, like a host that kept it.
+    teardown_reply: Mutex<Result<bool, String>>,
     created: AtomicUsize,
     vms: Mutex<Vec<VmHandle>>,
     /// `vm_id → spec` of every experiment VM ever created.
@@ -205,6 +208,7 @@ impl FakeOrchestrator {
             sandboxed: AtomicBool::new(true),
             flops_used: Mutex::new(Some(1)),
             fail_run: AtomicBool::new(false),
+            teardown_reply: Mutex::new(Ok(true)),
             created: AtomicUsize::new(0),
             vms: Mutex::new(Vec::new()),
             experiments: Mutex::new(Vec::new()),
@@ -220,6 +224,13 @@ impl FakeOrchestrator {
     /// Every job fails inside the guest (`Backend`) until cleared.
     pub fn set_fail_run(&self, v: bool) {
         self.fail_run.store(v, Ordering::SeqCst);
+    }
+
+    /// What `teardown` answers from now on: `Ok(false)` (unconfirmed) or
+    /// `Err(msg)` (transport failure) keep the VM alive, like a host that
+    /// did not release it.
+    pub fn set_teardown(&self, reply: Result<bool, &str>) {
+        *self.teardown_reply.lock().unwrap() = reply.map_err(str::to_owned);
     }
 
     /// Specs of the experiment VMs created so far, in order.
@@ -374,12 +385,18 @@ impl TopicVmOrchestrator for FakeOrchestrator {
     }
 
     async fn teardown(&self, handle: &VmHandle, policy: RetainPolicy) -> Result<bool, VmError> {
-        self.vms.lock().unwrap().retain(|h| h != handle);
         self.teardowns
             .lock()
             .unwrap()
             .push((handle.clone(), policy));
-        Ok(true)
+        match self.teardown_reply.lock().unwrap().clone() {
+            Ok(true) => {
+                self.vms.lock().unwrap().retain(|h| h != handle);
+                Ok(true)
+            }
+            Ok(false) => Ok(false),
+            Err(msg) => Err(VmError::Backend(msg)),
+        }
     }
 }
 

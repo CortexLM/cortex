@@ -1186,5 +1186,37 @@ async fn an_experiment_topic_measures_its_baseline_in_a_dedicated_vm() {
     assert_eq!(orchestrator.vms().len(), 1, "the topic vm stays");
     let baseline = rlm_store.baseline(&draft.id).await.unwrap().unwrap();
     assert!((baseline.primary_value - 0.61).abs() < 1e-12);
+
+    // A baseline whose experiment VM is not confirmed destroyed is not a
+    // baseline: the setup fails, names the VM, and seals nothing.
+    orchestrator.set_teardown(Ok(false));
+    let mut leaky = draft.clone();
+    leaky.id = "topic-b".into();
+    let err = setup
+        .run(&leaky, &pin, &offer())
+        .await
+        .expect_err("unconfirmed destroy withholds the baseline");
+    assert!(
+        matches!(
+            err,
+            SetupError::Vm(proof_rlm::VmError::TeardownUnconfirmed { .. })
+        ),
+        "{err}"
+    );
+    assert!(err.to_string().contains("not confirmed destroyed"), "{err}");
+    assert!(
+        rlm_store.baseline(&leaky.id).await.unwrap().is_none(),
+        "no baseline row from a run whose vm may still hold capacity"
+    );
+    assert_eq!(
+        orchestrator.experiments().len(),
+        2,
+        "the second experiment vm was created for the job"
+    );
+    assert_eq!(
+        orchestrator.vms().len(),
+        3,
+        "and is still alive on the fake host"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

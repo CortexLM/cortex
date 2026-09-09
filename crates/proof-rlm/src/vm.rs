@@ -299,6 +299,16 @@ pub enum VmError {
     /// The topic's in-guest experiment binding is malformed or over a ceiling.
     #[error("experiment vm: {0}")]
     Experiment(#[from] ExperimentError),
+    /// An experiment VM was not confirmed destroyed after its paid job. The
+    /// job's outcome is withheld: nothing is scored while the VM may still
+    /// hold host capacity.
+    #[error("experiment vm {vm_id} not confirmed destroyed after its job ({reason}); the outcome is withheld, not scored — reconcile the vm on the KVM host")]
+    TeardownUnconfirmed {
+        /// The VM the orchestrator did not confirm gone.
+        vm_id: String,
+        /// What the orchestrator answered (and the job's own failure, if any).
+        reason: String,
+    },
 }
 
 /// Create / attach / run / teardown for topic VMs.
@@ -393,8 +403,12 @@ impl CustomRunRequest {
 /// # Errors
 ///
 /// [`VmError::Experiment`] for a malformed / over-ceiling binding (before
-/// any VM exists), else whatever the orchestrator returned. A teardown that
-/// fails after the job is logged, never turned into a scored result.
+/// any VM exists), else whatever the orchestrator returned. The outcome is
+/// returned **only when the orchestrator confirms the VM destroyed**
+/// (`teardown` → `Ok(true)`): an unconfirmed (`Ok(false)`) or failed
+/// teardown is [`VmError::TeardownUnconfirmed`] even for a successful run —
+/// fail-closed, so a result is never scored while its VM may still consume
+/// host capacity. A job that failed *and* leaked its VM names both.
 pub async fn run_paid_job(
     orchestrator: &dyn TopicVmOrchestrator,
     policy: &ExperimentPolicy,
@@ -434,15 +448,30 @@ pub async fn run_paid_job(
         disk_mib = shape.disk_mib, "experiment vm created for one paid job"
     );
     let outcome = orchestrator.run(&vm, job).await;
-    match orchestrator.teardown(&vm, RetainPolicy::Destroy).await {
-        Ok(true) => {}
-        Ok(false) => tracing::warn!(
-            vm_id = %vm.vm_id,
-            "experiment vm teardown not confirmed by the orchestrator"
-        ),
-        Err(e) => tracing::warn!(vm_id = %vm.vm_id, "experiment vm teardown failed: {e}"),
+    let destroyed = match orchestrator.teardown(&vm, RetainPolicy::Destroy).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("the orchestrator did not confirm the destroy".to_owned()),
+        Err(e) => Err(format!("teardown failed: {e}")),
+    };
+    match (outcome, destroyed) {
+        (outcome, Ok(())) => {
+            tracing::info!(vm_id = %vm.vm_id, "experiment vm destroyed after its job");
+            outcome
+        }
+        (outcome, Err(teardown)) => {
+            tracing::error!(
+                vm_id = %vm.vm_id, topic_id = %vm.topic_id,
+                "experiment vm not confirmed destroyed; withholding the job outcome: {teardown}"
+            );
+            Err(VmError::TeardownUnconfirmed {
+                vm_id: vm.vm_id.clone(),
+                reason: match outcome {
+                    Ok(_) => teardown,
+                    Err(job) => format!("{teardown}; the job itself failed: {job}"),
+                },
+            })
+        }
     }
-    outcome
 }
 
 /// The generic runner: every inspect / evaluate is a job inside the topic's
@@ -912,6 +941,98 @@ mod tests {
         ))
         .expect("json");
         assert!(!json.contains("experiment"), "absent on the wire: {json}");
+    }
+
+    /// A paid run is scored only once its experiment VM is **confirmed**
+    /// destroyed. `Ok(false)` and a teardown error both withhold a
+    /// successful outcome (fail-closed: the VM may still hold capacity), the
+    /// error names the VM, a job that failed *and* leaked names both, and a
+    /// confirmed destroy scores again. Nothing here is warn-only.
+    #[tokio::test]
+    async fn a_paid_run_is_withheld_unless_its_experiment_vm_is_confirmed_destroyed() {
+        use crate::fixtures::experiment_request;
+        let orch = FakeOrchestrator::new(0.8);
+        let runner = VmBackedRunner::new(orch.clone(), pinned_template());
+        let req = experiment_request(None);
+        runner.inspect(&req, &rules()).await.expect("topic vm");
+
+        orch.set_teardown(Ok(false));
+        let err = runner
+            .evaluate(&req, &token_for(&req))
+            .await
+            .expect_err("unconfirmed destroy is not a scored run");
+        assert!(matches!(err, RunnerError::Backend(_)), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("not confirmed destroyed"), "{msg}");
+        assert!(msg.contains("vm-1"), "names the leaked vm: {msg}");
+        assert!(msg.contains("did not confirm the destroy"), "{msg}");
+        assert!(msg.contains("withheld"), "{msg}");
+        assert_eq!(orch.teardowns().len(), 1, "the destroy was attempted");
+        assert_eq!(orch.vms().len(), 2, "the fake kept the vm, as the host did");
+
+        orch.set_teardown(Err("injected transport error"));
+        let err = runner
+            .evaluate(&req, &token_for(&req))
+            .await
+            .expect_err("failed destroy is not a scored run");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("teardown failed: topic-vm orchestrator: injected transport error"),
+            "{msg}"
+        );
+        assert!(msg.contains("vm-2"), "{msg}");
+        assert!(
+            !msg.contains("the job itself failed"),
+            "the run itself succeeded: {msg}"
+        );
+
+        orch.set_fail_run(true);
+        let err = runner
+            .evaluate(&req, &token_for(&req))
+            .await
+            .expect_err("job failed and the vm leaked");
+        let msg = err.to_string();
+        assert!(msg.contains("injected transport error"), "{msg}");
+        assert!(msg.contains("the job itself failed"), "{msg}");
+        assert!(msg.contains("injected run failure"), "{msg}");
+        orch.set_fail_run(false);
+
+        let direct = run_paid_job(
+            orch.as_ref(),
+            &ExperimentPolicy::default(),
+            &pinned_template(),
+            &orch
+                .attach(&req.topic_id)
+                .await
+                .expect("attach")
+                .expect("vm"),
+            VmJob::Baseline {
+                request: req.clone(),
+            },
+        )
+        .await
+        .expect_err("baseline is a paid job too");
+        assert!(
+            matches!(direct, VmError::TeardownUnconfirmed { ref vm_id, .. } if vm_id == "vm-4"),
+            "{direct}"
+        );
+        assert_eq!(
+            orch.vms().len(),
+            5,
+            "four leaked experiment vms + the topic vm"
+        );
+
+        orch.set_teardown(Ok(true));
+        let run = runner
+            .evaluate(&req, &token_for(&req))
+            .await
+            .expect("confirmed destroy scores");
+        assert!((run.report.primary_value - 0.8).abs() < 1e-12);
+        assert_eq!(
+            orch.vms().len(),
+            5,
+            "the new vm is gone; the leaked ones are the host's to reconcile"
+        );
     }
 
     #[test]
