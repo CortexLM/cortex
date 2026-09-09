@@ -53,14 +53,26 @@ pub async fn fetch_artifact(
     Ok(Some(dir))
 }
 
-/// GET `uri` with a size cap and a deadline; the bytes as served.
+/// GET `uri` under [`MAX_ARTIFACT_BYTES`] and [`FETCH_TIMEOUT`]; the bytes
+/// as served. See [`download_capped`].
 pub async fn download(uri: &str) -> Result<Vec<u8>, String> {
+    download_capped(uri, MAX_ARTIFACT_BYTES).await
+}
+
+/// GET `uri`, **streaming** the body and stopping the moment more than
+/// `max` bytes have arrived — the body is never buffered whole before the
+/// cap is applied, so a server that omits `Content-Length` (or lies about
+/// it) and streams an arbitrarily long body cannot exhaust the guest's
+/// memory: the fetch aborts at `max`, the connection is dropped, and the
+/// job fails. An honest `Content-Length` over the cap is refused before the
+/// first body byte.
+pub async fn download_capped(uri: &str, max: usize) -> Result<Vec<u8>, String> {
     let client = reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
         .redirect(reqwest::redirect::Policy::limited(3))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = client
+    let mut resp = client
         .get(uri)
         .send()
         .await
@@ -71,24 +83,28 @@ pub async fn download(uri: &str) -> Result<Vec<u8>, String> {
             resp.status()
         ));
     }
-    if resp
-        .content_length()
-        .is_some_and(|n| n > MAX_ARTIFACT_BYTES as u64)
-    {
-        return Err(format!(
-            "artifact at {uri} is larger than {MAX_ARTIFACT_BYTES} bytes"
-        ));
+    let too_large =
+        |got: usize| format!("artifact at {uri} is larger than {max} bytes (aborted after {got})");
+    let declared = resp.content_length();
+    if declared.is_some_and(|n| n > max as u64) {
+        return Err(too_large(0));
     }
-    let bytes = resp
-        .bytes()
+    // Reserve at most what the cap allows, whatever the header claims.
+    let reserve = declared
+        .and_then(|n| usize::try_from(n).ok())
+        .map_or(0, |n| n.min(max));
+    let mut bytes = Vec::with_capacity(reserve);
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| format!("artifact fetch failed: {uri}: {}", e.without_url()))?;
-    if bytes.len() > MAX_ARTIFACT_BYTES {
-        return Err(format!(
-            "artifact at {uri} is larger than {MAX_ARTIFACT_BYTES} bytes"
-        ));
+        .map_err(|e| format!("artifact fetch failed: {uri}: {}", e.without_url()))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > max {
+            return Err(too_large(bytes.len().saturating_add(chunk.len())));
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -121,5 +137,91 @@ mod tests {
             .expect_err("plain http refused before any request");
         assert!(err.contains("must be https://"), "{err}");
         assert_eq!(MAX_ARTIFACT_BYTES, 64 * 1024 * 1024);
+    }
+
+    /// Serve one chunked-encoding response with no `Content-Length`: `body`
+    /// chunks of `chunk` bytes, then either a terminating chunk (`finite`)
+    /// or more chunks forever, until the client hangs up. Returns the URL
+    /// and a counter of bytes the server managed to write.
+    async fn serve_chunked(
+        chunk: usize,
+        finite: Option<usize>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let written = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = written.clone();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf).await;
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: application/x-tar\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+            if s.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let payload = vec![b'x'; chunk];
+            let frame = format!("{chunk:x}\r\n");
+            let mut sent = 0usize;
+            loop {
+                if finite.is_some_and(|n| sent >= n) {
+                    let _ = s.write_all(b"0\r\n\r\n").await;
+                    let _ = s.shutdown().await;
+                    return;
+                }
+                if s.write_all(frame.as_bytes()).await.is_err()
+                    || s.write_all(&payload).await.is_err()
+                    || s.write_all(b"\r\n").await.is_err()
+                {
+                    return;
+                }
+                sent += chunk;
+                counter.fetch_add(chunk, Ordering::SeqCst);
+            }
+        });
+        (format!("http://{addr}/recipe.tar"), written)
+    }
+
+    /// A body with no `Content-Length` is read **incrementally**: a server
+    /// that streams past the cap is cut off at the cap (promptly — the old
+    /// `bytes()` path would have buffered until the 5-minute timeout or the
+    /// host ran out of memory), while a chunked body under the cap arrives
+    /// whole. The whole-body cap is what the guest fetches under.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_bodies_are_cut_at_the_cap_not_buffered_first() {
+        let cap = 256 * 1024;
+        let (endless, _written) = serve_chunked(16 * 1024, None).await;
+        let started = std::time::Instant::now();
+        let err = download_capped(&endless, cap)
+            .await
+            .expect_err("an endless body never fits");
+        assert!(
+            err.contains(&format!("larger than {cap} bytes")),
+            "names the cap: {err}"
+        );
+        assert!(err.contains("aborted after"), "{err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "cut while streaming, not after a timeout: {:?}",
+            started.elapsed()
+        );
+
+        let (small, _) = serve_chunked(1_000, Some(3_000)).await;
+        let bytes = download_capped(&small, cap).await.expect("under the cap");
+        assert_eq!(bytes.len(), 3_000);
+        assert!(bytes.iter().all(|b| *b == b'x'));
+        let (exact, _) = serve_chunked(1_024, Some(cap)).await;
+        assert_eq!(
+            download_capped(&exact, cap)
+                .await
+                .expect("at the cap")
+                .len(),
+            cap
+        );
+        let (over, _) = serve_chunked(1_024, Some(cap + 1_024)).await;
+        assert!(download_capped(&over, cap).await.is_err());
     }
 }
