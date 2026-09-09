@@ -16,7 +16,6 @@ use proof_vm_proto::guest::{
     check_version, HostToMiner, MinerToHost, SisterRequest, SisterResult, MINER_PORT,
 };
 use proof_vm_proto::{EvidenceBinding, SisterAttestation, API_VERSION};
-use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{HostConfig, MAX_ARTIFACT_TAR_BYTES};
@@ -52,12 +51,18 @@ pub fn sister_id(parent_vm_id: &str, seq: u64) -> String {
 ///
 /// `job` is what the control plane asked the RLM to run; the sister must be
 /// for exactly that topic, submission, and artefact, or its evidence would be
-/// evidence for something else.
+/// evidence for something else. The bytes must also *be* that artefact: the
+/// file served at `artifact_uri`, forwarded verbatim — an uncompressed tar
+/// with file content whose sha256 is the paid digest
+/// ([`proof_vm_proto::tar::verify_artifact`], the same check the guest runs
+/// on what it fetched). A re-tarred tree hashes differently and is refused;
+/// a digest that matches an empty tree is a guest whose fetch failed, not a
+/// miner's work.
 ///
 /// # Errors
 ///
-/// [`HvError::Spec`]: wrong topic / submission / artefact, oversized or
-/// mis-hashed artefact.
+/// [`HvError::Spec`]: wrong topic / submission / artefact, oversized,
+/// content-less, compressed, or mis-hashed artefact.
 pub fn check_request(
     parent: &BootedVm,
     job: &EvidenceBinding,
@@ -85,13 +90,11 @@ pub fn check_request(
             tar.len()
         )));
     }
-    let got = hex::encode(Sha256::digest(&tar));
-    if !got.eq_ignore_ascii_case(req.artifact_digest.trim()) {
-        return Err(HvError::Spec(format!(
-            "artifact_tar hashes to {got}, request says {}",
-            req.artifact_digest
-        )));
-    }
+    // Same check, same bytes, same digest as the guest ran on its fetch:
+    // shape (uncompressed tar with content) then identity (sha256 of the
+    // bytes as served).
+    proof_vm_proto::tar::verify_artifact(&tar, &req.artifact_digest)
+        .map_err(|e| HvError::Spec(e.to_string()))?;
     if req.entrypoint.is_empty() || req.deadline_s == 0 {
         return Err(HvError::Spec(
             "entrypoint and deadline_s are required".into(),
@@ -257,6 +260,13 @@ mod tests {
     use super::*;
     use crate::shell::RecordingShell;
     use proof_vm_proto::guest::StagedFile;
+    use proof_vm_proto::tar::fixtures::{archive, empty_archive, member};
+    use sha2::{Digest, Sha256};
+
+    /// A real (uncompressed ustar) artefact whose one file holds `payload`.
+    fn tarball(payload: &[u8]) -> Vec<u8> {
+        archive(&[member("recipe/run.sh", b'0', payload)])
+    }
 
     fn parent() -> BootedVm {
         BootedVm {
@@ -292,7 +302,7 @@ mod tests {
         let id = sister_id(&long, 12);
         assert!(id.len() <= MAX_JAIL_ID, "{id}");
         assert!(id.ends_with("-s12"));
-        let tar = b"tar bytes";
+        let tar = &tarball(b"tar bytes");
         check_request(&parent(), &job(tar), &request(tar)).expect("bound + hashed");
         let mut other = request(tar);
         other.topic_id = "topic-b".into();
@@ -307,6 +317,26 @@ mod tests {
         let mut empty = request(b"");
         empty.artifact_digest = hex::encode(Sha256::digest(b""));
         assert!(check_request(&parent(), &job(b""), &empty).is_err());
+        // Consistent digest, but the bytes are an empty archive / a tree of
+        // empty files: exactly the shape a guest whose fetch failed would
+        // send. Refused by name before any hash or jail.
+        for hollow in [
+            empty_archive(),
+            tarball(b""),
+            archive(&[member("recipe/", b'5', b"")]),
+        ] {
+            let err =
+                check_request(&parent(), &job(&hollow), &request(&hollow)).expect_err("no content");
+            assert!(err.to_string().contains("no file content"), "{err}");
+        }
+        let mut gz = tarball(b"x");
+        gz[0] = 0x1f;
+        gz[1] = 0x8b;
+        let err = check_request(&parent(), &job(&gz), &request(&gz)).expect_err("gzip");
+        assert!(err.to_string().contains("gzip"), "{err}");
+        let not_tar = b"not a tar at all, just bytes that hash consistently";
+        let err = check_request(&parent(), &job(not_tar), &request(not_tar)).expect_err("not tar");
+        assert!(err.to_string().contains("not a tar archive"), "{err}");
         let mut junk = request(tar);
         junk.artifact_tar.bytes_b64 = "!!".into();
         assert!(check_request(&parent(), &job(tar), &junk).is_err());
@@ -324,13 +354,32 @@ mod tests {
         )
         .expect_err("hash");
         assert!(err.to_string().contains("hashes to"), "{err}");
+        // The paid digest is the served file's. A guest that re-tars the same
+        // tree (here: another member order) ships different bytes under that
+        // digest and is refused with the reason — forward the fetch verbatim.
+        let served = archive(&[
+            member("recipe/run.sh", b'0', b"echo hi\n"),
+            member("recipe/data.bin", b'0', &[1u8; 600]),
+        ]);
+        let retarred = archive(&[
+            member("recipe/data.bin", b'0', &[1u8; 600]),
+            member("recipe/run.sh", b'0', b"echo hi\n"),
+        ]);
+        let paid = job(&served);
+        check_request(&parent(), &paid, &request(&served)).expect("verbatim bytes");
+        let mut forwarded = request(&retarred);
+        forwarded.artifact_digest = hex::encode(Sha256::digest(&served));
+        let err = check_request(&parent(), &paid, &forwarded).expect_err("re-tar");
+        let msg = err.to_string();
+        assert!(msg.contains("re-tarred tree never matches"), "{msg}");
+        assert!(msg.contains("verbatim"), "{msg}");
     }
 
     /// A sister request for another submission or artefact than the paid job
     /// is refused before any jail is built: replayed evidence cannot exist.
     #[tokio::test]
     async fn a_request_for_another_submission_or_artifact_never_boots() {
-        let tar = b"artifact b";
+        let tar = &tarball(b"artifact b");
         let for_a = EvidenceBinding::new("topic-a", "submission-a", &"aa".repeat(32));
         let err = check_request(&parent(), &for_a, &request(tar)).expect_err("other job");
         assert!(matches!(err, HvError::Spec(_)), "{err}");
@@ -379,9 +428,9 @@ mod tests {
         let err = run(
             &ctx,
             &parent(),
-            &job(b"tar"),
+            &job(&tarball(b"tar")),
             1,
-            &request(b"tar"),
+            &request(&tarball(b"tar")),
             &CancellationToken::new(),
         )
         .await
@@ -428,7 +477,7 @@ mod tests {
             images: Arc::new(ImageCache::default()),
         };
         let cancel = CancellationToken::new();
-        let tar = b"artifact";
+        let tar = &tarball(b"artifact");
         let started = Instant::now();
         let sister = {
             let cancel = cancel.clone();

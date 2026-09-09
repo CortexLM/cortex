@@ -268,6 +268,7 @@ Refusals (**400** / **503**) do **not** persist a submission row.
 | **400** `declared_flops exceeds the topic budget` | `declared_flops > topic.flops_budget` | no | no |
 | **400** `artifact_uri is required for custom topics` | Custom topic, no locator | no | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not 64 hex | no | no |
+| **400** `artifact_digest is the sha256 of empty input …` | The digest of zero bytes or of an empty tar archive: hash the recipe bytes you actually serve at `artifact_uri` | no | no |
 | **503** empty `eval_image_digest` | Digest not pinned | no | no |
 | **503** zero open sealed topics | Nothing to score against | no | no |
 | **503** unsealed baseline | Topic open without both seal hashes | no | no |
@@ -349,8 +350,9 @@ by the runner registered on the host under `metric.custom_id`; nothing
 about it is compiled into the network. The topic's RLM runs in its own
 Firecracker microVM on a dedicated KVM host, and **your code runs in a
 separate ("sister") Firecracker guest beside it that has no network
-interface**: the RLM fetches your artefact from `artifact_uri`, inspects it,
-and ships the bytes into the sister over vsock. Plan for an offline run —
+interface**: the RLM fetches the file at `artifact_uri`, checks it against
+your `artifact_digest`, inspects it, and ships **those exact bytes** into the
+sister over vsock. Plan for an offline run —
 nothing your code does at run time can reach the internet, the RLM, or the
 host. The host (not the RLM) stamps `sandboxed` on your report from the
 guest it booted, and the `flops_used` your verdict carries is what that
@@ -369,7 +371,16 @@ ticked against is recorded with your row.
 
 `artifact_uri` is required: the runner fetches the bytes from it inside the
 topic VM and checks the digest, so a submission the runner cannot retrieve is
-a **400** with no row. The runner also measures your run's FLOPs; that
+a **400** with no row. Serve an **uncompressed** tar of your recipe tree
+(`tar -cf recipe.tar recipe/`, then `sha256sum recipe.tar` is your
+`artifact_digest`) — the digest is of **that file**, byte for byte, not of
+the tree: re-running `tar` later produces a different file (mtimes, member
+order) with a different digest, so keep and serve the file you hashed. The
+runner forwards the fetched file unchanged and the host re-hashes exactly
+those bytes before it boots your sister guest; it refuses gzip, non-tar
+bytes, a tree with no file content, or bytes that do not hash to your
+`artifact_digest` — a run never starts on a substitute or re-encoded
+artefact. The runner also measures your run's FLOPs; that
 measurement (not `declared_flops`) is what the verdict carries, and it must
 stay within both the topic budget (`flops_over_budget`) and your own
 `declared_flops` (`flops_under_declared`) — declare what you will use, up to

@@ -406,6 +406,28 @@ fn parse_hex64(s: &str, field: &str) -> Result<String, (StatusCode, Json<serde_j
     Ok(t.to_ascii_lowercase())
 }
 
+/// A digest of **nothing** is not an artefact digest: the sha256 of zero
+/// bytes and of an empty tar archive (`tar cf - -T /dev/null`, 10240 zero
+/// bytes). Staging's happy path once matched exactly such a digest because
+/// the RLM guest could not fetch the artefact and fell back to an empty
+/// tree; refusing it at submit keeps that stub out of every row and rent.
+fn is_digest_of_nothing(hex64: &str) -> bool {
+    let empty_input = hex::encode(Sha256::digest(b""));
+    let empty_tar = hex::encode(Sha256::digest([0u8; 10_240]));
+    hex64.eq_ignore_ascii_case(&empty_input) || hex64.eq_ignore_ascii_case(&empty_tar)
+}
+
+fn parse_artifact_digest(s: &str) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let digest = parse_hex64(s, "artifact_digest")?;
+    if is_digest_of_nothing(&digest) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "artifact_digest is the sha256 of empty input (or of an empty tar archive): hash the recipe bytes you ship at artifact_uri",
+        ));
+    }
+    Ok(digest)
+}
+
 fn nonce_from(hotkey: &str, topic_id: &str, digest: &str) -> String {
     let mut h = Sha256::new();
     h.update(b"proof-nonce-v1");
@@ -421,7 +443,7 @@ async fn submit(
     Json(body): Json<SubmitBody>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let hotkey = parse_hex64(&body.miner_hotkey, "miner_hotkey")?;
-    let artifact = parse_hex64(&body.artifact_digest, "artifact_digest")?;
+    let artifact = parse_artifact_digest(&body.artifact_digest)?;
     let _lium_present = headers
         .get("x-lium-api-key")
         .and_then(|v| v.to_str().ok())
@@ -1968,6 +1990,55 @@ mod tests {
                 "{label} banked rows: {list}"
             );
         }
+    }
+
+    /// The sha256 of nothing — zero bytes, or an empty tar archive — is not
+    /// a recipe digest. It is refused as the miner's request (400, no row)
+    /// on a fully scorable host, before readiness, rent, or a topic VM.
+    #[tokio::test]
+    async fn a_digest_of_nothing_is_a_400_before_anything_runs() {
+        let app = app_tight_sim();
+        let empty_input = hex::encode(Sha256::digest(b""));
+        let empty_tar = hex::encode(Sha256::digest([0u8; 10_240]));
+        assert!(is_digest_of_nothing(&empty_input) && is_digest_of_nothing(&empty_tar));
+        assert!(!is_digest_of_nothing(&digest("a real recipe")));
+        for nothing in [empty_input, empty_tar.to_ascii_uppercase()] {
+            let (st, body) = json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                submit_body("x", &serde_json::json!({ "artifact_digest": nothing })),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+            let error = body["error"].as_str().unwrap_or_default();
+            assert!(error.contains("sha256 of empty input"), "{body}");
+            assert!(error.contains("artifact_uri"), "{body}");
+        }
+        let (st, list) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/submissions",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(
+            list["items"].as_array().is_some_and(Vec::is_empty),
+            "no row: {list}"
+        );
+        // The same host scores a real digest.
+        let (st, body) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body("a real recipe", &serde_json::json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
     }
 
     #[tokio::test]

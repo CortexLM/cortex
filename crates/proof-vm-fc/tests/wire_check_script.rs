@@ -354,6 +354,159 @@ async fn production_hosts_are_refused_case_insensitively_before_any_request() {
     let _ = std::fs::remove_dir_all(secrets.parent().expect("dir"));
 }
 
+/// A live probe (`--expect 2xx`) is judged on the bytes the RLM VM fetches,
+/// so it must carry the sha256 of a real artefact: no digest, a digest of
+/// nothing (empty input / empty tar), an empty or compressed file, or a URI
+/// the VM cannot reach are all refused before any request. With a real tar
+/// and a reachable-looking URI the request goes out (and fails here only
+/// because there is no CP on port 9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines)]
+async fn a_live_probe_needs_a_real_artefact_never_a_digest_of_nothing() {
+    if !tools_present()
+        || !Command::new("sh")
+            .args(["-c", "command -v tar"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    {
+        eprintln!("skipping: bash / curl / python3 / tar not all present");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("proof-vm-wire-live-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("recipe")).expect("dir");
+    std::fs::write(dir.join("recipe/run.sh"), "#!/bin/sh\necho hi\n").expect("file");
+    let real = dir.join("recipe.tar");
+    let status = Command::new("tar")
+        .args([
+            "-cf",
+            &real.to_string_lossy(),
+            "-C",
+            &dir.to_string_lossy(),
+            "recipe",
+        ])
+        .status()
+        .expect("tar");
+    assert!(status.success());
+    let empty_tar = dir.join("empty.tar");
+    std::fs::write(&empty_tar, vec![0u8; 10_240]).expect("empty tar");
+    let gz = dir.join("recipe.tar.gz");
+    std::fs::write(&gz, [0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 3, 1, 2, 3]).expect("gz");
+    let empty_input_digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let base = |extra: &[&str]| -> Vec<String> {
+        let mut v: Vec<String> = [
+            "submit-probe",
+            "--cp",
+            "http://127.0.0.1:9",
+            "--topic",
+            "x",
+            "--expect",
+            "201",
+            "--allow-live-run",
+            "--declared-flops",
+            "5",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        v.extend(extra.iter().map(ToString::to_string));
+        v
+    };
+    let real_s = real.to_string_lossy().into_owned();
+    let empty_s = empty_tar.to_string_lossy().into_owned();
+    let gz_s = gz.to_string_lossy().into_owned();
+    let cases: Vec<(Vec<String>, i32, &str)> = vec![
+        (base(&[]), 2, "a live run needs the digest"),
+        (
+            base(&["--artifact-digest", empty_input_digest]),
+            2,
+            "sha256 of nothing",
+        ),
+        (base(&["--artifact-file", &empty_s]), 2, "no file content"),
+        (base(&["--artifact-file", &gz_s]), 2, "gzip-compressed"),
+        (
+            base(&[
+                "--artifact-file",
+                &real_s,
+                "--artifact-uri",
+                "http://127.0.0.1:8000/recipe.tar",
+            ]),
+            2,
+            "not reachable from the RLM VM",
+        ),
+        (
+            base(&["--artifact-file", &real_s]),
+            2,
+            "not reachable from the RLM VM",
+        ),
+        (
+            base(&[
+                "--artifact-file",
+                &real_s,
+                "--artifact-digest",
+                empty_input_digest,
+            ]),
+            2,
+            "is not the sha256 of --artifact-file",
+        ),
+    ];
+    for (argv, want_code, want_text) in cases {
+        let (code, text) = tokio::task::spawn_blocking(move || {
+            let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+            run_script_env(&refs, &[])
+        })
+        .await
+        .expect("join");
+        assert_eq!(code, want_code, "{want_text}:\n{text}");
+        assert!(text.contains(want_text), "{want_text}:\n{text}");
+        assert!(
+            !text.contains("POST http"),
+            "{want_text}: no request may go out:\n{text}"
+        );
+    }
+    // Real tar, a URI off loopback, fetch check skipped: the probe proceeds
+    // to the CP with the file's digest — and reports the dead CP, not a pass.
+    let argv = base(&[
+        "--artifact-file",
+        &real_s,
+        "--artifact-uri",
+        "https://artefacts.example.test/recipe.tar",
+        "--no-fetch-check",
+    ]);
+    let (code, text) = tokio::task::spawn_blocking(move || {
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        run_script_env(&refs, &[])
+    })
+    .await
+    .expect("join");
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("uncompressed tar"), "{text}");
+    assert!(text.contains("expected HTTP 201, got 000"), "{text}");
+    // The fetch check itself: a URL nothing serves is a stop before the POST.
+    let argv = base(&[
+        "--artifact-file",
+        &real_s,
+        "--artifact-uri",
+        "https://artefacts.example.test/recipe.tar",
+    ]);
+    let (code, text) = tokio::task::spawn_blocking(move || {
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        run_script_env(&refs, &[])
+    })
+    .await
+    .expect("join");
+    assert_eq!(code, 1, "{text}");
+    assert!(
+        text.contains("artefact fetch from this host failed"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("POST http"),
+        "no request after a failed fetch:\n{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn env_check_fails_closed_on_unpinned_digest_and_empty_bearer() {
     if !tools_present() {

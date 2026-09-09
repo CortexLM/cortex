@@ -443,8 +443,13 @@ control plane only probes its copy for presence), and gives it an nftables
 egress allowlist (empty = no egress). Every paid run (`Baseline`,
 `Evaluate`) that the RLM asks for happens in a **sister** Firecracker guest
 with **no network**: the RLM ships the artefact bytes it already inspected
-over vsock, the host boots the sister from its own pinned image, holds it to
-the topic deadline, destroys it, and writes the `SisterAttestation`. The
+over vsock — **the exact bytes it fetched from `artifact_uri`, verbatim**
+(`artifact_digest` is the sha256 of that served file; the guest runs
+`proof_vm_proto::tar::verify_artifact` on what it received and never re-tars
+the tree, never substitutes one — a fetch that fails or does not verify is
+`RlmToHost::Failed`, 503, no row), the host runs the same check and boots
+the sister from its own pinned image, holds it to the topic deadline,
+destroys it, and writes the `SisterAttestation`. The
 agent then **stamps** the report: `sandboxed` is `true` only when a sister
 ran, `flops_used` is the sister guest's measurement — an RLM cannot claim a
 sandbox the host did not boot, and a sister that measured nothing yields no
@@ -480,9 +485,18 @@ govern the harvest rent; on the custom path each run request records the
 resolved executor plan's deadline (tighter of topic and plan) and
 `config_commitment` as provenance, and the row stamps `executor_commitment`
 like every other scored row. The run request also carries the miner's
-`artifact_uri` (the runner fetches it inside the VM and checks
-`artifact_digest`; a custom submission without one is a **400** at intake,
-no row, and the scorer refuses a request without it), the topic's
+`artifact_uri` (`artifact_digest` is the sha256 of the **file** served
+there — an uncompressed tar of the recipe tree; the runner fetches it inside
+the VM, verifies the bytes as received against `artifact_digest`, and
+forwards them verbatim, and the KVM host runs the same check
+(`proof_vm_proto::tar::verify_artifact`) before it boots a sister: one
+identity, never a re-tar of the tree, which would hash differently. A
+custom submission without a locator is a **400** at intake, no row, and the
+scorer refuses a request without it; an `artifact_digest` that is the sha256
+of nothing — zero bytes, an empty tar — is a **400** too; the host refuses a
+content-less, compressed, non-tar, or mis-hashed `artifact_tar`, so a guest
+that substitutes an empty tree when its fetch fails can never produce a
+scored run), the topic's
 `flops_budget`, and the miner's `declared_flops` (the runner may enforce it
 as a hard cap). The runner's report must carry its measured `flops_used`,
 which becomes the verdict's usage — a report without one is not evidence

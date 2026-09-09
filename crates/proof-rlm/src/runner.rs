@@ -68,11 +68,14 @@ pub struct CustomRunRequest {
     pub epsilon_rel: f64,
     /// Frozen submission digest.
     pub submission_digest: String,
-    /// Artefact digest (sha256 of the recipe bytes).
+    /// Artefact digest: sha256 of the exact file served at `artifact_uri`
+    /// (an uncompressed tar of the recipe tree).
     pub artifact_digest: String,
     /// Miner-supplied locator for the same bytes. The runner fetches from it
-    /// inside the topic VM and checks the digest; it is never trusted beyond
-    /// that. Empty / whitespace is `None`.
+    /// inside the topic VM, verifies the bytes as received against
+    /// `artifact_digest`, and forwards them **verbatim** to the sister (never
+    /// a re-tar of the tree); it is never trusted beyond that. Empty /
+    /// whitespace is `None`.
     pub artifact_uri: Option<String>,
     /// Miner claim (English).
     pub claim: String,

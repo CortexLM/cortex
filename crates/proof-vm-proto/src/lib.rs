@@ -31,6 +31,7 @@ use proof_rlm::{
 use serde::{Deserialize, Serialize};
 
 pub mod guest;
+pub mod tar;
 
 /// Only accepted `api_version` on both boundaries.
 pub const API_VERSION: u32 = 1;
