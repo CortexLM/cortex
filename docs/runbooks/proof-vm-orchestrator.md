@@ -256,6 +256,42 @@ every submission will 503` instead, the orchestrator URL is unset or refused
 The RLM VM shape is 4 vCPU / 8192 MiB. `PROOF_RLM_VM_VCPUS` /
 `PROOF_RLM_VM_MEM_MIB` exist for a deliberate change only.
 
+### Identifiers: `topic_id` (hyphen slug) vs `custom_id` (underscores allowed)
+
+Two namespaces, deliberately different shapes, and **nothing maps one onto
+the other**. Staging tripped on exactly this: the topic was
+`staging-fc-colo-test`, its metric `staging_fc_colo_test`, and every place
+that wanted one got the other.
+
+| Identifier | Shape | Where it is used | Example |
+|------------|-------|------------------|---------|
+| `topic_id` (the signed topic's `id`) | slug `[a-z0-9][a-z0-9-]{1,62}` — **hyphens only**, lower-case | `POST /v1/submissions.topic_id`, `GET /v1/proof/topics/<id>`, the VM ↔ topic bind, jail / nftables names, the DB `CHECK`, `--probe-topic` | `staging-fc-colo-test` |
+| `metric.custom_id` | identifier `[a-z0-9][a-z0-9_-]{1,63}` — underscores **and** hyphens | the signed topic's `metric.custom_id`; `PROOF_VM_RUNNER_CUSTOM_IDS`; `registered_custom` / `custom_ready` on `/v1/status` | `staging_fc_colo_test` |
+| checklist rule ids, `constraints.params` keys | identifier (same as `custom_id`) | the signed topic | `no_hardcoded_outputs` |
+| `offer_id` (`InferenceOffer`, `EvalExecutorOffer`) | slug | pin / admin routes | `judge-v0` |
+
+Canonical rule: **the runner is looked up by `metric.custom_id`,
+byte-for-byte; the topic id never looks a runner up.** `_` is not `-`, so a
+topic whose `custom_id` is `staging_fc_colo_test` is not served by
+`PROOF_VM_RUNNER_CUSTOM_IDS=staging-fc-colo-test`, and vice versa. Pick the
+custom id first (underscores are fine there), name the topic as a slug
+(`<something>-v0`), and copy the custom id — not the topic id — into
+`PROOF_VM_RUNNER_CUSTOM_IDS`. If you want the two to rhyme, the convention
+is `custom_id` = topic slug with `-` → `_` (`staging-fc-colo-test` /
+`staging_fc_colo_test`), but that is a habit, not something any code derives.
+
+The validation messages name the mix-up so you do not have to remember this
+table:
+
+| You did | You see |
+|---------|---------|
+| topic `id: "staging_fc_colo_test"` (publish / probe) | `topic id "staging_fc_colo_test" must match [a-z0-9][a-z0-9-]{1,62}; topic ids are slugs with hyphens only — underscores belong to metric.custom_id / checklist ids …; did you mean "staging-fc-colo-test"?` (400 at publish) |
+| `metric.custom_id: "Staging FC"` | `topic binding metric.custom_id "Staging FC" must match [a-z0-9][a-z0-9_-]{1,63}; lower-case only; no whitespace; did you mean "staging_fc"?` |
+| opened a topic with `custom_id: staging_fc_colo_test` while the host registered `staging-fc-colo-test` | `custom metric "staging_fc_colo_test" has no registered runner on this host; a topic may draft but not open (ids match byte-for-byte: "staging-fc-colo-test" is registered, and '_' is not '-'; …)` |
+| submitted on such a topic | **503** `custom metric "staging_fc_colo_test" has no registered runner (ids match byte-for-byte: "staging-fc-colo-test" is registered …)` — no row |
+| `PROOF_VM_RUNNER_CUSTOM_IDS=Staging-FC` | boot log `PROOF_VM_RUNNER_CUSTOM_IDS: custom id "Staging-FC" must match …; lower-case only; did you mean "staging-fc"?; skipped` |
+| `proof-vm-wire-check.sh boot-probe --probe-topic wire_probe` | `probe topic 'wire_probe' is not a slug: … hyphens only …; try 'wire-probe'` |
+
 **Probe the wire from inside the CP** (operator bearer, read-only, no VM,
 no spend): `GET /v1/admin/proof/vm-orchestrator` runs the client's own
 `ready()` (bearer file + pin, re-read now) and one agent health call through
@@ -382,7 +418,7 @@ The custom family scores only when the rest of the live stack is up; check
 | harvest (Lium, informational here) | `/v1/status` `live_harvest_wired` | Lium only (`nll` / `throughput`): `true` with `LIUM_API_KEY` + `LIUM_SSH_PUBLIC_KEY_FILE`, `false` on a custom-only host — expected, not a fault; never stage a placeholder Lium key to open custom topics |
 | judge | `/v1/status` `inference_offer.status` | `open`, plus `PROOF_INFERENCE_API_KEY_FILE` present |
 | executor | `GET /v1/proof/executor` | `ready: true` (open `1x` offer) |
-| topic | a **signed custom topic** (`metric.family: custom`, `metric.custom_id: <id>`) with a **sealed baseline**; the RLM of that topic sets it up per [`../PROOF.md`](../PROOF.md) § Dynamic agentic engine | its `custom_id` is what goes into `PROOF_VM_RUNNER_CUSTOM_IDS`; the topic can only **open** once that id is registered |
+| topic | a **signed custom topic** (`metric.family: custom`, `metric.custom_id: <id>`) with a **sealed baseline**; the RLM of that topic sets it up per [`../PROOF.md`](../PROOF.md) § Dynamic agentic engine | its `custom_id` — byte-for-byte, underscores and all — is what goes into `PROOF_VM_RUNNER_CUSTOM_IDS` (never the hyphenated topic id; § Identifiers); the topic can only **open** once that id is registered |
 
 Nothing here is challenge content in git: the topic, its rules, and its
 images are operator-published documents and staged files.

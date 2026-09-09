@@ -365,9 +365,10 @@ check_env() {
   else
     local id bad=0
     while IFS= read -r id; do
-      [[ "$id" =~ ^[a-z0-9][a-z0-9_-]{1,63}$ ]] || { fail "custom id '$id' is malformed (skipped at boot): want [a-z0-9][a-z0-9_-]{1,63}"; bad=1; }
+      [[ "$id" =~ ^[a-z0-9][a-z0-9_-]{1,63}$ ]] || { fail "custom id '$id' is malformed (skipped at boot): want [a-z0-9][a-z0-9_-]{1,63} — lower-case, underscores and hyphens both fine (a topic id is the stricter hyphen-only slug)"; bad=1; }
     done < <(split_ids "$IDS")
     [[ "$bad" -eq 0 ]] && pass "PROOF_VM_RUNNER_CUSTOM_IDS well-formed: $IDS"
+    LOG "ids are matched byte-for-byte against the signed topic's metric.custom_id ('_' is not '-'); the topic_id is a separate hyphen slug and never looks a runner up — a submit on a topic whose custom_id only differs by '_'/'-' from these answers 503 naming the registered twin"
   fi
 
   local vcpus mem
@@ -562,7 +563,7 @@ boot_probe() {
   fi
   refuse_prod "$URL"
   local base="${URL%/}" topic="${PROBE_TOPIC:-wire-probe-$(date +%s)}" hdr code vm_id
-  [[ "$topic" =~ ^[a-z0-9][a-z0-9-]{1,62}$ ]] || { fail "probe topic '$topic' is not a slug"; return 0; }
+  [[ "$topic" =~ ^[a-z0-9][a-z0-9-]{1,62}$ ]] || { fail "probe topic '$topic' is not a slug: topic ids are [a-z0-9][a-z0-9-]{1,62} — hyphens only (underscores belong to metric.custom_id); try '$(printf '%s' "$topic" | tr '[:upper:]_' '[:lower:]-')'"; return 0; }
   local vcpus mem
   vcpus="$(cfg PROOF_RLM_VM_VCPUS)"; mem="$(cfg PROOF_RLM_VM_MEM_MIB)"
   vcpus="${vcpus:-4}"; mem="${mem:-8192}"

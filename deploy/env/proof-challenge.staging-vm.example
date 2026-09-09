@@ -49,8 +49,12 @@ PROOF_RLM_VM_VCPUS=4
 PROOF_RLM_VM_MEM_MIB=8192
 
 # Custom metric ids the generic VmBackedRunner serves on this host: exactly
-# the ids named by the signed staging topics (comma-separated). Registration
-# is an operator action — empty = empty registry = every custom topic 503.
+# the ids named by the signed staging topics' metric.custom_id (comma-
+# separated), byte-for-byte — underscores allowed, '_' is not '-'. NOT the
+# topic ids (those are hyphen slugs and never look a runner up); a topic whose
+# custom_id only differs by '_'/'-' from what is listed here answers 503
+# naming the registered twin. Registration is an operator action — empty =
+# empty registry = every custom topic 503.
 # The custom family is wired from these four variables alone: no Lium
 # credentials needed (live_harvest_wired is Lium-only and reads false on a
 # custom-only host — expected). Check custom_family_wired / registered_custom /

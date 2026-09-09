@@ -15,6 +15,7 @@
 mod canonical;
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -171,16 +172,145 @@ fn ident(id: &str, max: usize, underscore: bool) -> bool {
         })
 }
 
-/// Topic / offer id: `[a-z0-9][a-z0-9-]{1,62}`.
+/// Topic / offer id: `[a-z0-9][a-z0-9-]{1,62}` — a **slug**, hyphens only.
+///
+/// Two identifier namespaces exist and nothing maps one onto the other: a
+/// topic id (`staging-fc-colo-test`) is a slug because it becomes a URL
+/// path segment, a VM / jail name, and a DB-checked key; a topic's
+/// `metric.custom_id` / checklist ids (`staging_fc_colo_test`) are
+/// [`is_custom_id`] identifiers that may also carry `_`. A runner is looked
+/// up by `metric.custom_id` **byte-for-byte**, never by the topic id, and
+/// `_` ≠ `-`. [`slug_hint`] / [`custom_id_hint`] spell that out to an
+/// operator who mixed the two up.
 pub fn is_slug(id: &str) -> bool {
     ident(id, 63, false)
 }
 
 /// Identifier a topic may mint for a custom metric or a checklist rule:
-/// `[a-z0-9][a-z0-9_-]{1,63}`. Values come from the signed document, never
-/// from a list compiled into any crate.
+/// `[a-z0-9][a-z0-9_-]{1,63}` (underscores allowed — unlike a topic id, see
+/// [`is_slug`]). Values come from the signed document, never from a list
+/// compiled into any crate.
 pub fn is_custom_id(id: &str) -> bool {
     ident(id, 64, true)
+}
+
+/// `id` with case and `_` / `-` folded away: two ids that fold to the same
+/// string are *twins* — what an operator typing `staging_fc_colo_test` for
+/// `staging-fc-colo-test` (or the reverse) produced.
+fn fold_id(id: &str) -> String {
+    id.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+/// The entry of `known` that is a twin of `id` (same up to `_` ↔ `-` and
+/// ASCII case) without being `id` itself.
+pub fn id_twin<'a, I>(id: &str, known: I) -> Option<&'a str>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let want = fold_id(id);
+    known
+        .into_iter()
+        .find(|k| k.trim() != id.trim() && fold_id(k) == want)
+}
+
+/// Message tail naming a registered twin, or empty.
+#[must_use]
+pub fn twin_suffix(twin: Option<&str>) -> String {
+    twin.map_or_else(String::new, |t| {
+        format!(
+            " (ids match byte-for-byte: {t:?} is registered, and '_' is not '-'; use exactly that id in metric.custom_id / PROOF_VM_RUNNER_CUSTOM_IDS)"
+        )
+    })
+}
+
+/// The nearest well-formed id: lower-cased, every run of characters the
+/// namespace does not allow (whitespace, dots, `_` for a slug, …) turned
+/// into one separator (`-` for a slug, `_` for a custom id), ends trimmed.
+fn corrected(id: &str, underscore: bool) -> String {
+    let sep = if underscore { '_' } else { '-' };
+    let mut out = String::with_capacity(id.len());
+    for c in id.trim().to_ascii_lowercase().chars() {
+        let keep =
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || (underscore && c == '_');
+        if keep {
+            out.push(c);
+        } else if !out.ends_with(sep) && !out.is_empty() {
+            out.push(sep);
+        }
+    }
+    out.trim_matches(['-', '_']).to_owned()
+}
+
+/// Why `id` is not a topic / offer slug, for an operator — names the
+/// namespace mix-up (underscores belong to custom ids) and a corrected form
+/// when one exists. `None` when `id` is a slug.
+#[must_use]
+pub fn slug_hint(id: &str) -> Option<String> {
+    if is_slug(id) {
+        return None;
+    }
+    let mut why: Vec<&str> = Vec::new();
+    if id.contains('_') {
+        why.push("topic ids are slugs with hyphens only — underscores belong to metric.custom_id / checklist ids, which are a separate namespace");
+    }
+    if id.chars().any(|c| c.is_ascii_uppercase()) {
+        why.push("lower-case only");
+    }
+    if id.chars().any(char::is_whitespace) {
+        why.push("no whitespace");
+    }
+    if why.is_empty() {
+        why.push("2..=63 chars of [a-z0-9-], starting with a letter or digit");
+    }
+    let fixed = corrected(id, false);
+    let mut hint = why.join("; ");
+    if is_slug(&fixed) && fixed != id.trim() {
+        let _ = write!(hint, "; did you mean {fixed:?}?");
+    }
+    Some(hint)
+}
+
+/// [`slug_hint`] as a message tail (`; …`), or empty for a slug.
+#[must_use]
+pub fn slug_suffix(id: &str) -> String {
+    slug_hint(id).map_or_else(String::new, |h| format!("; {h}"))
+}
+
+/// Why `id` is not a custom / checklist identifier, for an operator, with a
+/// corrected form when one exists. `None` when `id` is well-formed.
+#[must_use]
+pub fn custom_id_hint(id: &str) -> Option<String> {
+    if is_custom_id(id) {
+        return None;
+    }
+    let mut why: Vec<&str> = Vec::new();
+    if id.chars().any(|c| c.is_ascii_uppercase()) {
+        why.push("lower-case only");
+    }
+    if id.chars().any(char::is_whitespace) {
+        why.push("no whitespace");
+    }
+    if id
+        .chars()
+        .any(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-' && !c.is_whitespace())
+    {
+        why.push("only [a-z0-9_-] (underscores and hyphens are both fine here, unlike a topic id)");
+    }
+    if why.is_empty() {
+        why.push("2..=64 chars of [a-z0-9_-], starting with a letter or digit");
+    }
+    let fixed = corrected(id, true);
+    let mut hint = why.join("; ");
+    if is_custom_id(&fixed) && fixed != id.trim() {
+        let _ = write!(hint, "; did you mean {fixed:?}?");
+    }
+    Some(hint)
+}
+
+/// [`custom_id_hint`] as a message tail (`; …`), or empty when well-formed.
+#[must_use]
+pub fn custom_id_suffix(id: &str) -> String {
+    custom_id_hint(id).map_or_else(String::new, |h| format!("; {h}"))
 }
 
 fn is_segment(s: &str) -> bool {
@@ -225,6 +355,8 @@ mod tests {
             assert!(!is_custom_id(bad), "{bad:?}");
         }
         assert!(is_slug("dt-no-ib-v0") && !is_slug("has_underscore"));
+        assert!(is_custom_id("staging_fc_colo_test") && !is_slug("staging_fc_colo_test"));
+        assert!(is_slug("staging-fc-colo-test") && is_custom_id("staging-fc-colo-test"));
         for good in ["vendor/model", "vendor/model-2.5:thinking", "a/b"] {
             assert!(is_model_pin(good), "{good}");
         }
@@ -238,6 +370,68 @@ mod tests {
         assert!(!is_opaque_param(&"x".repeat(257)));
         assert!(is_hex64(&"ab".repeat(32)) && !is_hex64("abc"));
         assert!(is_http_origin("https://example.invalid/v1") && !is_http_origin("ftp://x"));
+    }
+
+    /// The staging mix-up, spelled out: a topic id typed with underscores
+    /// gets the namespace explanation and the hyphenated form; a custom id
+    /// looked up under its hyphenated twin is told which id is registered.
+    #[test]
+    fn hyphen_underscore_mixups_get_named_and_corrected() {
+        assert_eq!(slug_hint("staging-fc-colo-test"), None);
+        assert_eq!(slug_suffix("staging-fc-colo-test"), "");
+        let hint = slug_hint("staging_fc_colo_test").expect("not a slug");
+        assert!(
+            hint.contains("underscores belong to metric.custom_id"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains("did you mean \"staging-fc-colo-test\"?"),
+            "{hint}"
+        );
+        assert!(slug_suffix("staging_fc_colo_test").starts_with("; "));
+        let upper = slug_hint("Staging-FC").expect("upper");
+        assert!(upper.contains("lower-case only"), "{upper}");
+        assert!(upper.contains("did you mean \"staging-fc\"?"), "{upper}");
+        let short = slug_hint("a").expect("too short");
+        assert!(short.contains("2..=63"), "{short}");
+        assert!(!short.contains("did you mean"), "{short}");
+        assert_eq!(custom_id_hint("staging_fc_colo_test"), None);
+        let spaced = custom_id_hint("Staging FC.colo").expect("bad");
+        assert!(spaced.contains("lower-case only"), "{spaced}");
+        assert!(spaced.contains("no whitespace"), "{spaced}");
+        assert!(spaced.contains("only [a-z0-9_-]"), "{spaced}");
+        assert!(
+            spaced.contains("did you mean \"staging_fc_colo\"?"),
+            "{spaced}"
+        );
+        let dotted = slug_hint("Topic.Name  v0").expect("bad slug");
+        assert!(
+            dotted.contains("did you mean \"topic-name-v0\"?"),
+            "{dotted}"
+        );
+        assert_eq!(custom_id_suffix("ok_id"), "");
+
+        let registered = ["other_metric", "staging_fc_colo_test"];
+        assert_eq!(
+            id_twin("staging-fc-colo-test", registered),
+            Some("staging_fc_colo_test")
+        );
+        assert_eq!(
+            id_twin("STAGING_FC_COLO_TEST", registered),
+            Some("staging_fc_colo_test")
+        );
+        assert_eq!(
+            id_twin("staging_fc_colo_test", registered),
+            None,
+            "itself is no twin"
+        );
+        assert_eq!(id_twin("something-else", registered), None);
+        assert_eq!(twin_suffix(None), "");
+        let tail = twin_suffix(Some("staging_fc_colo_test"));
+        assert!(
+            tail.contains("byte-for-byte") && tail.contains("PROOF_VM_RUNNER_CUSTOM_IDS"),
+            "{tail}"
+        );
     }
 
     #[test]
