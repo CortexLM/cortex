@@ -93,7 +93,7 @@ fn unwired(custom_id: &str, detail: String) -> EvalError {
 
 fn map_runner(custom_id: &str, e: RunnerError) -> EvalError {
     match e {
-        RunnerError::Unregistered(_) | RunnerError::NotWired(_) => {
+        RunnerError::Unregistered { .. } | RunnerError::NotWired(_) => {
             unwired(custom_id, e.to_string())
         }
         other => EvalError::Backend(other.to_string()),

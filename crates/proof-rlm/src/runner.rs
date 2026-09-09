@@ -103,8 +103,15 @@ pub struct CustomRunRequest {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RunnerError {
     /// No runner registered under this custom id. Root cause for the 503.
-    #[error("custom metric {0:?} has no registered runner")]
-    Unregistered(String),
+    /// `twin` names a registered id that differs only by `_` ↔ `-` / case
+    /// (the operator mix-up between a topic slug and a custom id), if any.
+    #[error("custom metric {custom_id:?} has no registered runner{tail}", tail = proof_canon::twin_suffix(twin.as_deref()))]
+    Unregistered {
+        /// The id the topic named.
+        custom_id: String,
+        /// A registered id that is this one up to `_` ↔ `-` and case.
+        twin: Option<String>,
+    },
     /// A runner exists but its backend (topic VM orchestrator) is not configured.
     #[error("runner not wired: {0}")]
     NotWired(String),
@@ -112,7 +119,7 @@ pub enum RunnerError {
     #[error("topic {0:?} is not a custom-family topic")]
     NotCustom(String),
     /// Registry key is not a well-formed custom id.
-    #[error("custom id {0:?} must match [a-z0-9][a-z0-9_-]{{1,63}}")]
+    #[error("custom id {0:?} must match [a-z0-9][a-z0-9_-]{{1,63}}{hint}", hint = proof_canon::custom_id_suffix(.0))]
     BadCustomId(String),
     /// The token covers another submission.
     #[error("spend token does not cover this run")]
@@ -439,10 +446,17 @@ impl RunnerRegistry {
     ///
     /// [`RunnerError::Unregistered`] — the fail-closed default.
     pub fn resolve(&self, custom_id: &str) -> Result<Arc<dyn CustomRunner>, RunnerError> {
-        self.runners
-            .get(custom_id.trim())
-            .cloned()
-            .ok_or_else(|| RunnerError::Unregistered(custom_id.trim().to_owned()))
+        let id = custom_id.trim();
+        self.runners.get(id).cloned().ok_or_else(|| {
+            // Exact match only — but say so when the operator registered the
+            // hyphen / underscore twin (topic slug typed for a custom id).
+            let twin = proof_canon::id_twin(id, self.runners.keys().map(String::as_str))
+                .map(str::to_owned);
+            RunnerError::Unregistered {
+                custom_id: id.to_owned(),
+                twin,
+            }
+        })
     }
 
     /// Registered ids, sorted.
@@ -611,7 +625,10 @@ mod tests {
         for id in ["any_metric", "another_metric", "yet_another_metric"] {
             assert_eq!(
                 reg.resolve(id).err(),
-                Some(RunnerError::Unregistered(id.into()))
+                Some(RunnerError::Unregistered {
+                    custom_id: id.into(),
+                    twin: None,
+                })
             );
         }
         let runner: Arc<dyn CustomRunner> = Arc::new(VmBackedRunner::new(
@@ -623,11 +640,33 @@ mod tests {
             reg.register("Bad Id", runner.clone()),
             Err(RunnerError::BadCustomId("Bad Id".into()))
         );
+        let msg = RunnerError::BadCustomId("Bad Id".into()).to_string();
+        assert!(msg.contains("did you mean \"bad_id\"?"), "{msg}");
         reg.register("topic_minted_metric", runner.clone())
             .expect("register");
         assert_eq!(reg.ids(), vec!["topic_minted_metric".to_owned()]);
         reg.resolve("topic_minted_metric").expect("resolved");
         assert!(reg.resolve("other").is_err());
+        // The hyphenated twin of a registered id is NOT a match — ids are
+        // byte-for-byte — but the error names the id that is registered.
+        let err = reg
+            .resolve("topic-minted-metric")
+            .err()
+            .expect("twin is not a match");
+        assert_eq!(
+            err,
+            RunnerError::Unregistered {
+                custom_id: "topic-minted-metric".into(),
+                twin: Some("topic_minted_metric".into()),
+            }
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("has no registered runner")
+                && msg.contains("\"topic_minted_metric\" is registered")
+                && msg.contains("PROOF_VM_RUNNER_CUSTOM_IDS"),
+            "{msg}"
+        );
         let built = RunnerRegistry::new().with("also_minted", runner);
         assert_eq!(built.ids(), vec!["also_minted".to_owned()]);
     }

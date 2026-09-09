@@ -1061,7 +1061,10 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
         .await
         .expect_err("unregistered custom id cannot open");
     assert!(
-        matches!(err, SetupError::Topic(TopicError::UnknownCustomMetric(_))),
+        matches!(
+            err,
+            SetupError::Topic(TopicError::UnknownCustomMetric { .. })
+        ),
         "{err}"
     );
     still_baselining(&rlm_store).await;
