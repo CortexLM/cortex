@@ -153,9 +153,14 @@ impl<C: ChainClient + Send + Sync> ProofEmitter<C> {
     pub async fn tick(&self) -> Result<EmitOutcome, EmitError> {
         let pinned = self.expected_set_at_last_epoch()?;
         let (epoch, pin_block, hotkeys) = pinned;
-        let (topics, sealed, champion_primary, per_miner) = emission_inputs(&self.store, epoch)?;
-        let leaf_scores =
-            emission_scores(&hotkeys, &topics, &sealed, &champion_primary, &per_miner);
+        let inputs = emission_inputs(&self.store, epoch)?;
+        let leaf_scores = emission_scores(
+            &hotkeys,
+            &inputs.topics,
+            &inputs.sealed,
+            &inputs.champion_primary,
+            &inputs.per_miner,
+        );
         let paid = leaf_scores
             .values()
             .filter(|s| matches!(s, ScoreOrAbsence::Score { value } if *value > 0))
@@ -288,18 +293,14 @@ impl<C: ChainClient + Send + Sync> ProofEmitter<C> {
 }
 
 /// Open topics + baselines + champion primaries + miner runs at `epoch`.
-fn emission_inputs(
-    store: &MemoryStore,
-    epoch: u64,
-) -> Result<
-    (
-        Vec<TopicDocument>,
-        BTreeMap<String, SealedBaseline>,
-        BTreeMap<String, f64>,
-        BTreeMap<Hotkey, BTreeMap<String, MinerTopicRun>>,
-    ),
-    EmitError,
-> {
+struct EmissionInputs {
+    topics: Vec<TopicDocument>,
+    sealed: BTreeMap<String, SealedBaseline>,
+    champion_primary: BTreeMap<String, f64>,
+    per_miner: BTreeMap<Hotkey, BTreeMap<String, MinerTopicRun>>,
+}
+
+fn emission_inputs(store: &MemoryStore, epoch: u64) -> Result<EmissionInputs, EmitError> {
     let topics = store
         .topics()
         .map_err(|e| EmitError::Store(e.to_string()))?
@@ -328,5 +329,10 @@ fn emission_inputs(
             per_miner.insert(hk, runs);
         }
     }
-    Ok((topics, sealed, champion_primary, per_miner))
+    Ok(EmissionInputs {
+        topics,
+        sealed,
+        champion_primary,
+        per_miner,
+    })
 }
