@@ -2227,17 +2227,9 @@ mod tests {
             "unsigned must not insert: {list}"
         );
 
-        let (st, body) = json_req(
-            app.clone(),
-            "POST",
-            "/v1/submissions",
-            submit_body(
-                "x",
-                &serde_json::json!({ "hotkey_signature": "00".repeat(64) }),
-            ),
-            None,
-        )
-        .await;
+        let mut zero_sig = submit_body("x", &serde_json::json!({}));
+        zero_sig["hotkey_signature"] = serde_json::json!("00".repeat(64));
+        let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", zero_sig, None).await;
         assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
         assert_eq!(body["error"], "hotkey_signature invalid");
 
