@@ -677,15 +677,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(c.chroot_base.parent().unwrap_or(&c.chroot_base));
     }
 
-    /// Stand in for Firecracker's vsock UDS + the RLM guest agent: answer the
-    /// `CONNECT` handshake, then `Hello` with `Ready`. Bound by the caller
-    /// once the jail root exists.
-    async fn fake_rlm_guest(listener: UnixListener) {
-        use proof_vm_proto::guest::{read_frame, write_frame};
+    /// One vsock connection from the host: answer the `CONNECT <port>`
+    /// handshake the way Firecracker does and hand back the framed stream.
+    async fn accept_vsock(listener: &UnixListener) -> tokio::io::BufReader<tokio::net::UnixStream> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        let Ok((stream, _)) = listener.accept().await else {
-            return;
-        };
+        let (stream, _) = listener.accept().await.expect("vsock connection");
         let mut stream = BufReader::new(stream);
         let mut line = String::new();
         let _ = stream.read_line(&mut line).await;
@@ -695,6 +691,15 @@ mod tests {
             .write_all(b"OK 1073741824\n")
             .await
             .expect("ok");
+        stream
+    }
+
+    /// Stand in for Firecracker's vsock UDS + the RLM guest agent: answer the
+    /// `CONNECT` handshake, then `Hello` with `Ready`. Bound by the caller
+    /// once the jail root exists.
+    async fn fake_rlm_guest(listener: UnixListener) {
+        use proof_vm_proto::guest::{read_frame, write_frame};
+        let mut stream = accept_vsock(&listener).await;
         let hello: HostToRlm = read_frame(&mut stream).await.expect("hello");
         assert!(matches!(hello, HostToRlm::Hello { .. }));
         write_frame(
@@ -708,17 +713,62 @@ mod tests {
         .expect("ready");
     }
 
+    /// Bind the fake guest's vsock as soon as the boot has prepared `root`.
+    async fn bind_when_ready(root: &Path) -> UnixListener {
+        for _ in 0..100 {
+            if root.is_dir() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        UnixListener::bind(vsock::uds_path(root)).expect("bind fake vsock")
+    }
+
     /// Serve the fake guest as soon as the boot has prepared `root`.
     fn serve_fake_guest_when_ready(root: PathBuf) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            for _ in 0..100 {
-                if root.is_dir() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            let listener = UnixListener::bind(vsock::uds_path(&root)).expect("bind fake vsock");
+            let listener = bind_when_ready(&root).await;
             fake_rlm_guest(listener).await;
+        })
+    }
+
+    /// A guest that says hello, then answers its one job with `Failed`
+    /// carrying `error` — what the contract demands of an RLM whose artefact
+    /// fetch failed or did not verify. Never a sister request, never `Done`.
+    /// Returns the job it was handed.
+    fn serve_fake_guest_failing_its_job(
+        root: PathBuf,
+        error: &'static str,
+    ) -> tokio::task::JoinHandle<VmJob> {
+        use proof_vm_proto::guest::{read_frame, write_frame};
+        tokio::spawn(async move {
+            let listener = bind_when_ready(&root).await;
+            let mut stream = accept_vsock(&listener).await;
+            let hello: HostToRlm = read_frame(&mut stream).await.expect("hello");
+            assert!(matches!(hello, HostToRlm::Hello { .. }));
+            write_frame(
+                stream.get_mut(),
+                &RlmToHost::Ready {
+                    agent: "fake-rlm-guest-fetch-fails".into(),
+                    api_version: API_VERSION,
+                },
+            )
+            .await
+            .expect("ready");
+            // The job arrives on a fresh connection to the same vsock.
+            let mut stream = accept_vsock(&listener).await;
+            let HostToRlm::Run { job } = read_frame(&mut stream).await.expect("job") else {
+                panic!("expected a job");
+            };
+            write_frame(
+                stream.get_mut(),
+                &RlmToHost::Failed {
+                    error: error.to_owned(),
+                },
+            )
+            .await
+            .expect("failed");
+            *job
         })
     }
 
@@ -807,6 +857,68 @@ mod tests {
             Some(format!("rm -rf {}", c.jail_dir("topic-a-0002").display()).as_str()),
             "{lines:?}"
         );
+        let _ = std::fs::remove_dir_all(c.chroot_base.parent().unwrap_or(&c.chroot_base));
+    }
+
+    /// The fail-closed half of the artefact contract, on the host: a guest
+    /// whose fetch failed answers its job `Failed` (never a substitute tree,
+    /// never `Done`), and the host turns that into an error — no output, no
+    /// sister, no attestation, the sister listener released — which the
+    /// agent answers as 502 `backend` and the control plane as 503 with no
+    /// row. Stand-in process + fake guest, no Firecracker.
+    #[tokio::test]
+    async fn a_guest_whose_fetch_failed_answers_failed_and_nothing_is_scored() {
+        let c = stand_in_host("fetchfail");
+        let req = request();
+        let spec = TopicVmSpec::for_topic(&req.topic_id, pinned_template(), req.sandbox.clone());
+        let shell = Arc::new(RecordingShell::default());
+        let hv = FirecrackerHypervisor::with_shell(c.clone(), shell.clone()).expect("config");
+        let guest = serve_fake_guest_failing_its_job(
+            c.jail_root("topic-a-0003"),
+            "artifact fetch failed: https://artefacts.example.test/recipe.tar: connection refused; \
+             refusing to run a substitute",
+        );
+        let vm = hv
+            .boot_verified("topic-a-0003", &spec, c.image_dir.join("rlm.ext4"))
+            .await
+            .expect("boot");
+        let job = VmJob::Evaluate {
+            request: req.clone(),
+            checklist_digest: "c".into(),
+            rules_version: 1,
+        };
+        assert!(job.requires_firecracker(), "a paid run on this topic");
+        let err = hv
+            .run_job(&vm, &job)
+            .await
+            .expect_err("failed fetch is a failed job");
+        assert!(matches!(err, HvError::Guest(_)), "{err}");
+        assert!(
+            err.to_string().contains("artifact fetch failed"),
+            "the guest's reason travels: {err}"
+        );
+        let handed = guest.await.expect("guest");
+        assert!(
+            matches!(&handed, VmJob::Evaluate { request, .. } if request.artifact_uri == req.artifact_uri),
+            "the guest was handed the job with the miner's locator"
+        );
+        assert!(
+            !vsock::listener_path(&c.jail_root("topic-a-0003"), SISTER_PORT).exists(),
+            "sister listener released with the job"
+        );
+        assert!(
+            !shell
+                .calls()
+                .iter()
+                .any(|l| l.join(" ").contains("topic-a-0003-s")),
+            "no sister jail was prepared: {:?}",
+            shell.calls()
+        );
+        assert!(hv.alive(&vm).await, "the topic VM outlives its failed job");
+        assert!(hv
+            .teardown(&vm, RetainPolicy::Destroy)
+            .await
+            .expect("teardown"));
         let _ = std::fs::remove_dir_all(c.chroot_base.parent().unwrap_or(&c.chroot_base));
     }
 

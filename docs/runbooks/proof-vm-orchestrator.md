@@ -59,6 +59,7 @@ Locked by design (do not move any of it):
 | Sister sized by the host / topic deadline only, never by the RLM | `PROOF_VM_AGENT_SISTER_VCPUS` / `_MEM_MIB`; the RLM's request carries no size |
 | `retain` default **destroy** on topic close | `TopicVmSpec::for_topic` → `RetainPolicy::Destroy` |
 | Hard `topic_id ↔ VM` bind | agent: request topic **and** job topic must equal the VM's (409 `topic_mismatch`); client refuses a job for another topic before any request and checks every echo |
+| Artefact identity = the file served at `artifact_uri`, verbatim (`artifact_digest` is its sha256); the guest forwards what it fetched, never a re-tar or a substitute tree; a failed / non-verifying fetch is `RlmToHost::Failed` (503, no row) | `proof_vm_proto::tar::verify_artifact` run by the guest on the fetch and by the host in `sister::check_request` before any sister jail (shape, then digest — gzip / non-tar / content-less / mis-hashed refused by name); the CP refuses the digest of nothing at submit (400) |
 | Zero live Firecracker in CI | every test uses `FakeHypervisor` / `RecordingShell`; `FirecrackerHypervisor::ready()` refuses without `firecracker`, `jailer`, `/dev/kvm` and the test asserts nothing was spawned |
 
 ## Host prerequisites

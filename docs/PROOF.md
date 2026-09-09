@@ -443,8 +443,13 @@ control plane only probes its copy for presence), and gives it an nftables
 egress allowlist (empty = no egress). Every paid run (`Baseline`,
 `Evaluate`) that the RLM asks for happens in a **sister** Firecracker guest
 with **no network**: the RLM ships the artefact bytes it already inspected
-over vsock, the host boots the sister from its own pinned image, holds it to
-the topic deadline, destroys it, and writes the `SisterAttestation`. The
+over vsock — **the exact bytes it fetched from `artifact_uri`, verbatim**
+(`artifact_digest` is the sha256 of that served file; the guest runs
+`proof_vm_proto::tar::verify_artifact` on what it received and never re-tars
+the tree, never substitutes one — a fetch that fails or does not verify is
+`RlmToHost::Failed`, 503, no row), the host runs the same check and boots
+the sister from its own pinned image, holds it to the topic deadline,
+destroys it, and writes the `SisterAttestation`. The
 agent then **stamps** the report: `sandboxed` is `true` only when a sister
 ran, `flops_used` is the sister guest's measurement — an RLM cannot claim a
 sandbox the host did not boot, and a sister that measured nothing yields no
