@@ -13,8 +13,11 @@
 //!   VM ([`PARAM_VCPUS`], [`PARAM_MEM_MIB`], [`PARAM_DISK_MIB`]);
 //! - the operator **defaults and ceilings** every experiment VM is held to
 //!   ([`ExperimentCeilings`]; Architecte lock: **16 vCPU / 32 GiB RAM** —
-//!   what a silent topic gets and the most a topic may ask for — writable
-//!   disk **≥ 16 GiB**, 32 GiB by default) and the control-plane policy env
+//!   what a silent topic gets, the most a topic may ask for, **and a hard
+//!   maximum no operator ceiling may exceed** ([`LOCK_MAX_EXPERIMENT_VCPUS`],
+//!   [`LOCK_MAX_EXPERIMENT_MEM_MIB`]: an operator may lower a ceiling for a
+//!   smaller host, never raise it above the lock) — writable disk
+//!   **≥ 16 GiB**, 32 GiB by default) and the control-plane policy env
 //!   ([`ExperimentPolicy`]);
 //! - the public wire shape the orchestrator carries for one experiment VM
 //!   ([`ExperimentSpec`]).
@@ -53,14 +56,23 @@ pub const PARAM_MEM_MIB: &str = "experiment_mem_mib";
 /// `constraints.params` key: writable disk in MiB (≤ ceiling).
 pub const PARAM_DISK_MIB: &str = "experiment_disk_mib";
 
+/// Architecte lock: the **hard** vCPU maximum of one experiment VM. Not an
+/// operator knob — [`ExperimentCeilings::validate`] refuses any ceiling
+/// above it, on the control plane and on the KVM host alike.
+pub const LOCK_MAX_EXPERIMENT_VCPUS: u32 = 16;
+/// Architecte lock: the **hard** memory maximum of one experiment VM in MiB
+/// (32 GiB). Not an operator knob; see [`LOCK_MAX_EXPERIMENT_VCPUS`].
+pub const LOCK_MAX_EXPERIMENT_MEM_MIB: u32 = 32_768;
 /// Architecte lock: vCPUs an experiment VM gets when the topic does not ask.
-pub const DEFAULT_EXPERIMENT_VCPUS: u32 = 16;
+pub const DEFAULT_EXPERIMENT_VCPUS: u32 = LOCK_MAX_EXPERIMENT_VCPUS;
 /// Architecte lock: guest memory when the topic does not ask (32 GiB).
-pub const DEFAULT_EXPERIMENT_MEM_MIB: u32 = 32_768;
-/// Architecte lock: most vCPUs a topic may ask for.
-pub const DEFAULT_MAX_EXPERIMENT_VCPUS: u32 = 16;
-/// Architecte lock: most guest memory a topic may ask for (32 GiB).
-pub const DEFAULT_MAX_EXPERIMENT_MEM_MIB: u32 = 32_768;
+pub const DEFAULT_EXPERIMENT_MEM_MIB: u32 = LOCK_MAX_EXPERIMENT_MEM_MIB;
+/// Architecte lock: most vCPUs a topic may ask for (the default ceiling; an
+/// operator may set a lower one for a smaller host, never a higher one).
+pub const DEFAULT_MAX_EXPERIMENT_VCPUS: u32 = LOCK_MAX_EXPERIMENT_VCPUS;
+/// Architecte lock: most guest memory a topic may ask for (32 GiB; the
+/// default ceiling — lower is an operator choice, higher is refused).
+pub const DEFAULT_MAX_EXPERIMENT_MEM_MIB: u32 = LOCK_MAX_EXPERIMENT_MEM_MIB;
 /// Writable disk an experiment VM gets when the topic does not ask (32 GiB,
 /// the preferred size when the metal allows: container image pulls land
 /// here, never on the read-only rootfs).
@@ -88,8 +100,9 @@ pub const EXPERIMENT_VM_DISK_MIB_ENV: &str = "PROOF_EXPERIMENT_VM_DISK_MIB";
 /// Control-plane env: writable disk ceiling in MiB (default [`DEFAULT_MAX_EXPERIMENT_DISK_MIB`]).
 pub const EXPERIMENT_VM_MAX_DISK_MIB_ENV: &str = "PROOF_EXPERIMENT_VM_MAX_DISK_MIB";
 
-/// Where an operator raises a ceiling (both sides enforce their own).
-const CEILING_HINT: &str = "raise the operator ceiling on both sides — PROOF_EXPERIMENT_VM_MAX_* on the control plane, PROOF_VM_AGENT_EXPERIMENT_MAX_* on the KVM host — or re-sign the topic with a smaller ask";
+/// What an operator may do about an ask over a ceiling (both sides enforce
+/// their own copy; neither may sit above the lock).
+const CEILING_HINT: &str = "re-sign the topic with a smaller ask; an operator ceiling (PROOF_EXPERIMENT_VM_MAX_* on the control plane, PROOF_VM_AGENT_EXPERIMENT_MAX_* on the KVM host) may sit below the lock of 16 vCPU / 32768 MiB, never above it";
 
 /// Why a binding, spec, or ceiling is not usable.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -150,6 +163,16 @@ pub enum ExperimentError {
     /// A wire spec field is malformed.
     #[error("experiment spec: {0} is missing or out of range")]
     Spec(&'static str),
+    /// An operator ceiling (or a VM shape) sits above the hard lock.
+    #[error("experiment {field} {value} is above the lock {lock} (16 vCPU / 32768 MiB per experiment VM; the lock is not an operator knob — lower the ceiling or the ask)")]
+    AboveLock {
+        /// `max_vcpus`, `max_mem_mib`, `vcpus`, or `mem_mib`.
+        field: &'static str,
+        /// The value refused.
+        value: u32,
+        /// The lock it exceeds.
+        lock: u32,
+    },
 }
 
 /// The experiment pack one topic pins: an uncompressed tar the KVM host
@@ -349,16 +372,19 @@ pub struct VmShape {
 /// Operator defaults and ceilings every experiment VM is held to. The
 /// control plane sizes a VM under its own copy (a silent topic gets the
 /// defaults); the KVM host refuses a spec over its copy. A topic may ask for
-/// less than a ceiling or more than a default, never more than a ceiling.
+/// less than a ceiling or more than a default, never more than a ceiling —
+/// and no ceiling may sit above the lock ([`LOCK_MAX_EXPERIMENT_VCPUS`] /
+/// [`LOCK_MAX_EXPERIMENT_MEM_MIB`]): `validate` refuses one, so a process
+/// configured above the lock does not boot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExperimentCeilings {
     /// vCPUs when the topic does not ask.
     pub default_vcpus: u32,
-    /// Most vCPUs a topic may ask for.
+    /// Most vCPUs a topic may ask for (≤ [`LOCK_MAX_EXPERIMENT_VCPUS`]).
     pub max_vcpus: u32,
     /// Memory (MiB) when the topic does not ask.
     pub default_mem_mib: u32,
-    /// Most memory (MiB) a topic may ask for.
+    /// Most memory (MiB) a topic may ask for (≤ [`LOCK_MAX_EXPERIMENT_MEM_MIB`]).
     pub max_mem_mib: u32,
     /// Writable disk (MiB) when the topic does not ask.
     pub default_disk_mib: u32,
@@ -399,21 +425,32 @@ fn over(field: &'static str, asked: u32, min: u32) -> Result<u32, ExperimentErro
     }
 }
 
+fn locked(field: &'static str, value: u32, lock: u32) -> Result<u32, ExperimentError> {
+    if value > lock {
+        Err(ExperimentError::AboveLock { field, value, lock })
+    } else {
+        Ok(value)
+    }
+}
+
 impl ExperimentCeilings {
-    /// Ranges a Firecracker guest can boot with; every default under its
-    /// ceiling; the disk floor.
+    /// Ranges a Firecracker guest can boot with; no ceiling above the lock;
+    /// every default under its ceiling; the disk floor.
     ///
     /// # Errors
     ///
-    /// [`ExperimentError::Spec`] naming the field.
+    /// [`ExperimentError::AboveLock`] for a vCPU / memory ceiling above the
+    /// lock, [`ExperimentError::Spec`] naming any other bad field.
     pub fn validate(&self) -> Result<(), ExperimentError> {
-        if !(1..=64).contains(&self.max_vcpus) {
+        locked("max_vcpus", self.max_vcpus, LOCK_MAX_EXPERIMENT_VCPUS)?;
+        locked("max_mem_mib", self.max_mem_mib, LOCK_MAX_EXPERIMENT_MEM_MIB)?;
+        if self.max_vcpus == 0 {
             return Err(ExperimentError::Spec("max_vcpus"));
         }
         if !(1..=self.max_vcpus).contains(&self.default_vcpus) {
             return Err(ExperimentError::Spec("default_vcpus"));
         }
-        if !(512..=131_072).contains(&self.max_mem_mib) {
+        if self.max_mem_mib < 512 {
             return Err(ExperimentError::Spec("max_mem_mib"));
         }
         if !(512..=self.max_mem_mib).contains(&self.default_mem_mib) {
@@ -429,8 +466,8 @@ impl ExperimentCeilings {
     }
 
     /// Size a VM for `binding`: what the topic asks for, held under the
-    /// ceilings; a topic that does not ask gets the operator defaults (lock:
-    /// 16 vCPU / 32 GiB / 32 GiB disk).
+    /// ceilings (which sit under the lock); a topic that does not ask gets
+    /// the operator defaults (lock: 16 vCPU / 32 GiB / 32 GiB disk).
     ///
     /// # Errors
     ///
@@ -439,7 +476,7 @@ impl ExperimentCeilings {
     /// does not run on a smaller machine than it was signed for.
     pub fn shape(&self, binding: &ExperimentBinding) -> Result<VmShape, ExperimentError> {
         self.validate()?;
-        Ok(VmShape {
+        let shape = VmShape {
             vcpus: under(
                 "vcpus",
                 binding.vcpus.unwrap_or(self.default_vcpus),
@@ -463,20 +500,39 @@ impl ExperimentCeilings {
                 )?,
                 MIN_EXPERIMENT_DISK_MIB,
             )?,
-        })
+        };
+        shape.locked()?;
+        Ok(shape)
     }
 
-    /// Host-side gate: refuse a spec sized over this host's ceilings.
+    /// Host-side gate: refuse a spec sized over this host's ceilings (or,
+    /// whatever the ceilings say, over the lock).
     ///
     /// # Errors
     ///
-    /// [`ExperimentError::OverCeiling`] / [`ExperimentError::UnderFloor`].
+    /// [`ExperimentError::OverCeiling`] / [`ExperimentError::UnderFloor`] /
+    /// [`ExperimentError::AboveLock`].
     pub fn admit(&self, shape: VmShape) -> Result<(), ExperimentError> {
         self.validate()?;
+        shape.locked()?;
         under("vcpus", shape.vcpus, self.max_vcpus)?;
         under("mem_mib", shape.mem_mib, self.max_mem_mib)?;
         under("disk_mib", shape.disk_mib, self.max_disk_mib)?;
         over("disk_mib", shape.disk_mib, MIN_EXPERIMENT_DISK_MIB)?;
+        Ok(())
+    }
+}
+
+impl VmShape {
+    /// The lock, independent of any ceiling: no experiment VM shape above
+    /// 16 vCPU / 32768 MiB is ever admitted or created.
+    ///
+    /// # Errors
+    ///
+    /// [`ExperimentError::AboveLock`].
+    pub fn locked(&self) -> Result<(), ExperimentError> {
+        locked("vcpus", self.vcpus, LOCK_MAX_EXPERIMENT_VCPUS)?;
+        locked("mem_mib", self.mem_mib, LOCK_MAX_EXPERIMENT_MEM_MIB)?;
         Ok(())
     }
 }
@@ -838,6 +894,154 @@ mod tests {
             bad.validate(),
             Err(ExperimentError::Spec("default_mem_mib"))
         );
+    }
+
+    /// The lock is a **hard** maximum, not a default: an operator ceiling
+    /// above 16 vCPU / 32768 MiB does not validate (so the process does not
+    /// boot), a matching shape is not admitted, and a topic's ask against
+    /// such a ceiling is refused — on both sides. Lower ceilings (a smaller
+    /// host) are fine; the disk ceiling is not locked.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn the_lock_is_a_hard_maximum_no_ceiling_or_shape_may_exceed() {
+        assert_eq!(LOCK_MAX_EXPERIMENT_VCPUS, 16);
+        assert_eq!(LOCK_MAX_EXPERIMENT_MEM_MIB, 32_768);
+        assert_eq!(DEFAULT_MAX_EXPERIMENT_VCPUS, LOCK_MAX_EXPERIMENT_VCPUS);
+        assert_eq!(DEFAULT_MAX_EXPERIMENT_MEM_MIB, LOCK_MAX_EXPERIMENT_MEM_MIB);
+        assert_eq!(DEFAULT_EXPERIMENT_VCPUS, LOCK_MAX_EXPERIMENT_VCPUS);
+        assert_eq!(DEFAULT_EXPERIMENT_MEM_MIB, LOCK_MAX_EXPERIMENT_MEM_MIB);
+        let binding = ExperimentBinding {
+            runner: "r_0".into(),
+            pack: PackRef {
+                path: None,
+                digest: format!("sha256:{HEX}"),
+            },
+            vcpus: Some(64),
+            mem_mib: Some(131_072),
+            disk_mib: None,
+        };
+        let oversized = ExperimentCeilings {
+            max_vcpus: 64,
+            max_mem_mib: 131_072,
+            ..ExperimentCeilings::default()
+        };
+        assert_eq!(
+            oversized.validate(),
+            Err(ExperimentError::AboveLock {
+                field: "max_vcpus",
+                value: 64,
+                lock: 16
+            }),
+            "an operator ceiling above the lock does not validate"
+        );
+        assert!(
+            oversized.shape(&binding).is_err(),
+            "nor does it size a vm for a matching ask"
+        );
+        assert!(oversized
+            .admit(VmShape {
+                vcpus: 64,
+                mem_mib: 131_072,
+                disk_mib: 32_768,
+            })
+            .is_err());
+        let msg = oversized.validate().expect_err("above").to_string();
+        assert!(msg.contains("above the lock 16"), "{msg}");
+        assert!(msg.contains("not an operator knob"), "{msg}");
+        let just_mem = ExperimentCeilings {
+            max_mem_mib: 32_769,
+            ..ExperimentCeilings::default()
+        };
+        assert_eq!(
+            just_mem.validate(),
+            Err(ExperimentError::AboveLock {
+                field: "max_mem_mib",
+                value: 32_769,
+                lock: 32_768
+            })
+        );
+        let just_vcpus = ExperimentCeilings {
+            max_vcpus: 17,
+            ..ExperimentCeilings::default()
+        };
+        assert!(matches!(
+            just_vcpus.validate(),
+            Err(ExperimentError::AboveLock {
+                field: "max_vcpus",
+                ..
+            })
+        ));
+        // The shape check is independent of the ceilings that produced it.
+        assert!(matches!(
+            VmShape {
+                vcpus: 17,
+                mem_mib: 1_024,
+                disk_mib: 32_768
+            }
+            .locked(),
+            Err(ExperimentError::AboveLock { field: "vcpus", .. })
+        ));
+        assert!(matches!(
+            VmShape {
+                vcpus: 1,
+                mem_mib: 32_769,
+                disk_mib: 32_768
+            }
+            .locked(),
+            Err(ExperimentError::AboveLock {
+                field: "mem_mib",
+                ..
+            })
+        ));
+        VmShape {
+            vcpus: 16,
+            mem_mib: 32_768,
+            disk_mib: 1 << 20,
+        }
+        .locked()
+        .expect("at the lock; disk is not locked");
+        // A smaller host lowers its ceilings — allowed — and asks are held
+        // under those, with the ceiling named.
+        let small = ExperimentCeilings {
+            default_vcpus: 4,
+            max_vcpus: 8,
+            default_mem_mib: 8_192,
+            max_mem_mib: 16_384,
+            ..ExperimentCeilings::default()
+        };
+        small
+            .validate()
+            .expect("below the lock is an operator choice");
+        assert!(matches!(
+            small.shape(&binding),
+            Err(ExperimentError::OverCeiling {
+                field: "vcpus",
+                asked: 64,
+                ceiling: 8
+            })
+        ));
+        let fits = ExperimentBinding {
+            vcpus: Some(8),
+            mem_mib: Some(16_384),
+            ..binding
+        };
+        assert_eq!(
+            small.shape(&fits).expect("under the lowered ceiling"),
+            VmShape {
+                vcpus: 8,
+                mem_mib: 16_384,
+                disk_mib: 32_768
+            }
+        );
+        // The env reader builds ceilings the same validator refuses.
+        let msg = ExperimentError::OverCeiling {
+            field: "vcpus",
+            asked: 32,
+            ceiling: 16,
+        }
+        .to_string();
+        assert!(msg.contains("never above it"), "{msg}");
+        assert!(!msg.contains("raise the operator ceiling"), "{msg}");
     }
 
     #[test]

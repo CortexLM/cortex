@@ -102,7 +102,8 @@ PROOF_VM_AGENT_RETAIN_DIR=/var/lib/proof-vm/retained
 # Experiment VMs (topics whose signed params select an in-guest runner get
 # one dedicated microVM per paid job). Packs the topics pin live here as
 # sha256-<hex>.tar (sha256sum the exact tar; never type a digest). Lock:
-# 16 vCPU / 32 GiB per experiment VM (default and ceiling). The colocated
+# 16 vCPU / 32 GiB per experiment VM (default, ceiling, and hard maximum —
+# the agent refuses to boot above it; lower is allowed). The colocated
 # staging droplet (g-8vcpu-32gb) cannot carry one such VM beside the 4/8
 # topic VM and the compose stack: lower the ceilings to what the droplet has
 # left (the CP's PROOF_EXPERIMENT_VM_MAX_* and defaults must agree) or size

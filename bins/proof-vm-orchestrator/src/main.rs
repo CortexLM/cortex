@@ -179,12 +179,14 @@ struct Cli {
     /// staged into dedicated experiment VMs. Never written by the agent.
     #[arg(long, env = "PROOF_VM_AGENT_EXPERIMENT_PACK_DIR", default_value = DEFAULT_PACK_DIR)]
     experiment_pack_dir: PathBuf,
-    /// Most vCPUs one experiment VM may be created with (lock 16; a silent
-    /// topic gets the control plane's default, also 16).
+    /// Most vCPUs one experiment VM may be created with. Hard lock 16: a
+    /// smaller host may lower this, a value above 16 refuses to boot (a
+    /// silent topic gets the control plane's default, also 16).
     #[arg(long, env = "PROOF_VM_AGENT_EXPERIMENT_MAX_VCPUS", default_value_t = proof_experiment::DEFAULT_MAX_EXPERIMENT_VCPUS)]
     experiment_max_vcpus: u32,
-    /// Most memory (MiB) one experiment VM may be created with (lock 32768; a
-    /// silent topic gets the control plane's default, also 32768).
+    /// Most memory (MiB) one experiment VM may be created with. Hard lock
+    /// 32768: lower is allowed, above refuses to boot (a silent topic gets
+    /// the control plane's default, also 32768).
     #[arg(long, env = "PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB", default_value_t = proof_experiment::DEFAULT_MAX_EXPERIMENT_MEM_MIB)]
     experiment_max_mem_mib: u32,
     /// Most writable disk (MiB) one experiment VM may be created with (lock:
@@ -536,8 +538,9 @@ mod tests {
 
     /// The experiment layer boots with the lock ceilings (16 vCPU / 32 GiB
     /// RAM, 32 GiB disk default and max, 16 GiB floor), a small VM count, and
-    /// the default pack dir; the operator may move every knob, but not out of
-    /// a bootable range.
+    /// the default pack dir; the operator may lower the vCPU / memory
+    /// ceilings and move the disk / count knobs, but a vCPU or memory
+    /// ceiling above the lock refuses to boot.
     #[test]
     fn experiment_knobs_default_to_the_lock_and_validate() {
         let c = cli(&[]);
@@ -550,11 +553,24 @@ mod tests {
         );
         assert_eq!(c.max_experiment_vms, 2);
         assert_eq!(e.stage_timeout, Duration::from_mins(10));
-        let bigger = cli(&[
+        let above_lock = cli(&[
             "--experiment-max-vcpus",
             "32",
             "--experiment-max-mem-mib",
             "65536",
+        ]);
+        let err = experiment_config(&above_lock).expect_err("the lock is not a knob");
+        assert!(err.contains("above the lock 16"), "{err}");
+        for (flag, value) in [
+            ("--experiment-max-vcpus", "17"),
+            ("--experiment-max-mem-mib", "32769"),
+        ] {
+            assert!(
+                experiment_config(&cli(&[flag, value])).is_err(),
+                "{flag}={value} sits above the lock"
+            );
+        }
+        let moved = cli(&[
             "--experiment-max-disk-mib",
             "16384",
             "--max-experiment-vms",
@@ -562,14 +578,22 @@ mod tests {
             "--experiment-pack-dir",
             "/srv/packs",
         ]);
-        let e = experiment_config(&bigger).expect("raised");
-        assert_eq!((e.ceilings.max_vcpus, e.ceilings.max_mem_mib), (32, 65_536));
+        let e = experiment_config(&moved).expect("disk, count, and pack dir are knobs");
+        assert_eq!((e.ceilings.max_vcpus, e.ceilings.max_mem_mib), (16, 32_768));
         assert_eq!(
             e.ceilings.default_disk_mib, 16_384,
             "the default disk never exceeds the disk ceiling"
         );
         assert_eq!(e.pack_dir, PathBuf::from("/srv/packs"));
-        assert_eq!(bigger.max_experiment_vms, 4);
+        assert_eq!(moved.max_experiment_vms, 4);
+        let roomy_disk = cli(&["--experiment-max-disk-mib", "131072"]);
+        assert_eq!(
+            experiment_config(&roomy_disk)
+                .expect("the disk ceiling is not locked")
+                .ceilings
+                .max_disk_mib,
+            131_072
+        );
         let unbootable = cli(&["--experiment-max-mem-mib", "128"]);
         assert!(experiment_config(&unbootable).is_err());
         let no_disk = cli(&["--experiment-max-disk-mib", "8192"]);

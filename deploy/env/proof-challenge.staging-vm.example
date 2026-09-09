@@ -49,9 +49,10 @@ PROOF_RLM_VM_VCPUS=4
 PROOF_RLM_VM_MEM_MIB=8192
 
 # Per-experiment VMs (topics whose params select an in-guest runner get one
-# dedicated VM per paid job). Architecte lock: 16 vCPU / 32 GiB RAM (default
-# and ceiling; a topic may ask for less), writable disk >= 16 GiB (32 by
-# default). Size the KVM host for max_experiment_vms x the ceiling on top of
+# dedicated VM per paid job). Architecte lock: 16 vCPU / 32 GiB RAM (default,
+# ceiling, and hard maximum — above it the CP refuses to boot; a topic may
+# ask for less), writable disk >= 16 GiB (32 by default). Size the KVM host
+# for max_experiment_vms x the ceiling on top of
 # the 4/8 topic VMs; the agent's PROOF_VM_AGENT_EXPERIMENT_MAX_* must agree.
 # The colocated g-8vcpu-32gb staging droplet cannot carry the lock beside the
 # compose stack: lower these (both sides) to what it has left, or have the

@@ -564,8 +564,23 @@ mod tests {
             .await
             .expect_err("over the ceiling");
         assert!(matches!(err, HvError::Spec(_)), "{err}");
-        assert!(err.to_string().contains("exceeds the ceiling 16"), "{err}");
+        assert!(
+            err.to_string().contains("vcpus 32 is above the lock 16"),
+            "{err}"
+        );
         assert!(hv.boots().is_empty(), "refused before any boot");
+        let mut over_mem = spec_for(&digest, 4, 32_768);
+        over_mem.template.mem_mib = 65_536;
+        let err = layer
+            .boot("topic-a-x0001", &over_mem)
+            .await
+            .expect_err("over the memory lock");
+        assert!(
+            err.to_string()
+                .contains("mem_mib 65536 is above the lock 32768"),
+            "{err}"
+        );
+        assert!(hv.boots().is_empty());
 
         let absent = spec_for(&format!("sha256:{}", "77".repeat(32)), 4, 32_768);
         let err = layer

@@ -377,19 +377,25 @@ check_env() {
   [[ -z "$mem" || "$mem" == "8192" ]] || warn "PROOF_RLM_VM_MEM_MIB=$mem deviates from the locked 8192"
 
   # Experiment VMs (one dedicated VM per paid job for in-guest runner topics):
-  # ceilings are integers, the lock is 16 vCPU / 32768 MiB (default and
-  # ceiling), disk >= 16 GiB (32 by default), and the image pin is a real
-  # digest when set (unset = the RLM image).
-  local exp_vcpus exp_mem exp_disk exp_img
-  exp_vcpus="$(cfg PROOF_EXPERIMENT_VM_MAX_VCPUS)"; exp_mem="$(cfg PROOF_EXPERIMENT_VM_MAX_MEM_MIB)"
+  # ceilings are integers, the lock is 16 vCPU / 32768 MiB (default, ceiling,
+  # and hard maximum — a ceiling above it does not boot; lower is allowed),
+  # disk >= 16 GiB (32 by default), and the image pin is a real digest when
+  # set (unset = the RLM image).
+  local exp_disk exp_img
   exp_disk="$(cfg PROOF_EXPERIMENT_VM_DISK_MIB)"; exp_img="$(cfg PROOF_EXPERIMENT_VM_IMAGE_DIGEST)"
   local knob val
   for knob in PROOF_EXPERIMENT_VM_VCPUS PROOF_EXPERIMENT_VM_MEM_MIB PROOF_EXPERIMENT_VM_MAX_VCPUS PROOF_EXPERIMENT_VM_MAX_MEM_MIB PROOF_EXPERIMENT_VM_DISK_MIB PROOF_EXPERIMENT_VM_MAX_DISK_MIB; do
     val="$(cfg "$knob")"
     [[ -z "$val" || "$val" =~ ^[0-9]+$ ]] || fail "$knob=$val is not an integer (the CP refuses to boot on it)"
   done
-  [[ -z "$exp_vcpus" || ! "$exp_vcpus" =~ ^[0-9]+$ || "$exp_vcpus" -le 16 ]] || warn "PROOF_EXPERIMENT_VM_MAX_VCPUS=$exp_vcpus is above the 16 vCPU lock; the KVM host's PROOF_VM_AGENT_EXPERIMENT_MAX_VCPUS must agree"
-  [[ -z "$exp_mem" || ! "$exp_mem" =~ ^[0-9]+$ || "$exp_mem" -le 32768 ]] || warn "PROOF_EXPERIMENT_VM_MAX_MEM_MIB=$exp_mem is above the 32768 MiB lock; the KVM host's PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB must agree"
+  for knob in PROOF_EXPERIMENT_VM_VCPUS PROOF_EXPERIMENT_VM_MAX_VCPUS; do
+    val="$(cfg "$knob")"
+    [[ -z "$val" || ! "$val" =~ ^[0-9]+$ || "$val" -le 16 ]] || fail "$knob=$val is above the 16 vCPU lock (the CP refuses to boot on it; the lock is not a knob — lower it, and keep the KVM host's PROOF_VM_AGENT_EXPERIMENT_MAX_VCPUS <= 16 too)"
+  done
+  for knob in PROOF_EXPERIMENT_VM_MEM_MIB PROOF_EXPERIMENT_VM_MAX_MEM_MIB; do
+    val="$(cfg "$knob")"
+    [[ -z "$val" || ! "$val" =~ ^[0-9]+$ || "$val" -le 32768 ]] || fail "$knob=$val is above the 32768 MiB lock (the CP refuses to boot on it; the lock is not a knob — lower it, and keep the KVM host's PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB <= 32768 too)"
+  done
   [[ -z "$exp_disk" || ! "$exp_disk" =~ ^[0-9]+$ || "$exp_disk" -ge 16384 ]] || fail "PROOF_EXPERIMENT_VM_DISK_MIB=$exp_disk is under the 16 GiB writable-disk floor (the CP refuses to boot on it)"
   [[ -z "$exp_disk" || ! "$exp_disk" =~ ^[0-9]+$ || "$exp_disk" -lt 16384 || "$exp_disk" -ge 32768 ]] || warn "PROOF_EXPERIMENT_VM_DISK_MIB=$exp_disk is under the preferred 32 GiB (container image pulls land there); fine when the metal has no more"
   if [[ -n "$exp_img" ]]; then
