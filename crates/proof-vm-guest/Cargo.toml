@@ -1,0 +1,33 @@
+[package]
+name = "proof-vm-guest"
+description = "Guest side of the Proof topic-VM protocol (proof-vm-proto::guest), run inside the RLM / experiment microVM: answers hello, keeps owner key material in tmpfs, verifies and unpacks the staged experiment pack, and runs every job through an operator-installed runner adaptor resolved from the topic's params. It never reports a value it did not measure: no runner selected, no adaptor installed, no pack, no report = the job fails. Transport-agnostic (vsock or stdio); no benchmark, dataset, model, or runner is named here."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+hex = "0.4"
+proof-canon = { path = "../proof-canon" }
+proof-experiment = { path = "../proof-experiment" }
+proof-rlm = { path = "../proof-rlm" }
+proof-task = { path = "../proof-task" }
+proof-vm-proto = { path = "../proof-vm-proto" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "process", "rt", "sync", "time", "macros"] }
+tracing = "0.1"
+
+[dev-dependencies]
+proof-rlm = { path = "../proof-rlm", features = ["test-fixtures"] }
+proof-vm-proto = { path = "../proof-vm-proto", features = ["test-fixtures"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net"] }
+
+[lints]
+workspace = true
