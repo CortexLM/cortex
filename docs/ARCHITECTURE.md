@@ -49,7 +49,10 @@ Master host (role-master overlay + master profile)
   │                    ├─ Proof harvest → Lium evaluation pod (nll / throughput)
   │                    └─ HTTPS + bearer file → dedicated KVM host (custom topics)
   │                         proof-vm-orchestrator: jailer/Firecracker RLM VM per topic,
-  │                         sister Firecracker guest (no network) per miner run
+  │                         sister Firecracker guest (no network) per miner run, or —
+  │                         for topics whose signed params select an in-guest runner —
+  │                         one experiment Firecracker VM per paid job (pack staged
+  │                         over vsock, operator adaptor inside, destroyed after)
   │ signed bundles
   ▼
 Validator host (role-validator overlay)
@@ -69,7 +72,7 @@ terminates in the host reverse proxy, not in the gateway process.
 | `validator` | Fetch/mirror bundle, verify, recompute, peer cross-check, CRV4 submit, dissent |
 | `bounty-challenge` | **Master-only:** internal pair/reports/adjudicate; **reads** CortexLM/backend public API for scoring and signs leaves from those rows. An unreadable feed pays nobody — `E` is covered with `ChallengeInternal`, share burns to uid 0 — rather than scoring offline |
 | `proof-challenge` | **Master-only:** signed topics, holdout loading, evaluation orchestration. Library payout is a sum of WTA/discovery topic masses; the binary has no automatic leaf-emission loop yet |
-| `proof-vm-orchestrator` | **Host with a working `/dev/kvm`** — production: a dedicated DO droplet (`g-8vcpu-32gb`, nyc1, nested `/dev/kvm`) on the VPC, never colocated on the CP; staging: colocation on the CP droplet with nested `/dev/kvm` is an allowed exception, proven on `cortex-staging` (fragile → provision the dedicated droplet if the boot fails); never Lium: Firecracker + jailer agent behind HTTPS + a bearer file. One RLM microVM per Proof topic from the digest the control plane pins, sister miner guest with no network per paid run, host-stamped `sandboxed` / `flops_used`. Client side is `proof-vm-fc::FirecrackerOrchestrator`; runbook [`runbooks/proof-vm-orchestrator.md`](runbooks/proof-vm-orchestrator.md) |
+| `proof-vm-orchestrator` | **Host with a working `/dev/kvm`** — production: a dedicated DO droplet (`g-8vcpu-32gb`, nyc1, nested `/dev/kvm`) on the VPC, never colocated on the CP; staging: colocation on the CP droplet with nested `/dev/kvm` is an allowed exception, proven on `cortex-staging` (fragile → provision the dedicated droplet if the boot fails); never Lium: Firecracker + jailer agent behind HTTPS + a bearer file. One RLM microVM per Proof topic from the digest the control plane pins, sister miner guest with no network per paid run, host-stamped `sandboxed` / `flops_used`; for topics whose signed params select an in-guest runner, one dedicated experiment microVM per paid job under configurable ceilings (lock 16 vCPU / 32 GiB / 32 GiB disk), pinned pack staged over vsock, destroyed after the job. Client side is `proof-vm-fc::FirecrackerOrchestrator`; runbooks [`runbooks/proof-vm-orchestrator.md`](runbooks/proof-vm-orchestrator.md), [`runbooks/proof-experiment-vms.md`](runbooks/proof-experiment-vms.md) |
 | `updater` | Digest-pinned rollouts via `docker-socket-proxy` (master) |
 | `trustroot` | Offline keygen / sign / verify for owner-signed TOML |
 | `bundle` | SCALE types, seal, verify (`PROTOCOL_VERSION`) |

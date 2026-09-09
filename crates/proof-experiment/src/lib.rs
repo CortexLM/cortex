@@ -542,6 +542,7 @@ mod tests {
     /// A topic that names no runner selects nothing; one that names a runner
     /// must pin a pack digest, and every knob is shape-checked, never guessed.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn the_binding_is_topic_data_and_fails_closed_on_a_half_selection() {
         assert_eq!(
             ExperimentBinding::from_params(&params(&[("param_a", "value-a")])),
@@ -655,6 +656,7 @@ mod tests {
     /// whole ceiling for CPU and memory; an ask over the ceiling is refused
     /// with the ceiling named, never clamped.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn ceilings_are_the_lock_and_asks_are_held_under_them() {
         let c = ExperimentCeilings::default();
         c.validate().expect("lock validates");

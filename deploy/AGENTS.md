@@ -98,6 +98,19 @@ files the operator stages (`sha256sum`) — never invented, never in git.
 Procedure and the mandatory submission verification:
 [`docs/runbooks/proof-vm-orchestrator.md`](../docs/runbooks/proof-vm-orchestrator.md).
 
+**Experiment VMs.** Topics whose signed `constraints.params` select an
+in-guest runner get one dedicated Firecracker VM per paid job on that same
+host, under configurable ceilings (lock 16 vCPU / 32 GiB RAM / 32 GiB
+writable disk; `PROOF_VM_AGENT_EXPERIMENT_MAX_*`,
+`PROOF_VM_AGENT_MAX_EXPERIMENT_VMS`, packs in
+`PROOF_VM_AGENT_EXPERIMENT_PACK_DIR`; CP side `PROOF_EXPERIMENT_VM_*`). The
+guest image is baked with [`guest/bake-rootfs.sh`](guest/bake-rootfs.sh)
+(rootless podman + `proof-vm-guest-agent` + operator adaptors per
+[`guest/runners/README.md`](guest/runners/README.md)) and named after its own
+`sha256sum`; packs and adaptors are operator artefacts, never in git.
+Procedure, RE-LOCK, and limits:
+[`docs/runbooks/proof-experiment-vms.md`](../docs/runbooks/proof-experiment-vms.md).
+
 **Staging wire (DO):** the CP is the existing staging master; the agent runs
 as a host systemd unit on the same droplet (`cortex-staging`, nested
 `/dev/kvm` — the allowed, proven staging exception) bound on the VPC address

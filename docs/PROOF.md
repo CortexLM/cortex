@@ -379,6 +379,9 @@ id shapes shared with `proof-task`).
 | `constraints.model_pin` | `vendor/model[:tag]` every paid call must name (shape-checked only) |
 | `constraints.task_slice` | Opaque label the runner interprets; the control plane does not |
 | `constraints.params` | ≤32 opaque `slug → printable` runner params |
+| `constraints.params.in_guest_benchmark_runner` (alias `baseline_runner`) | Generic knob (`proof-experiment`): selects an **operator adaptor id** baked into the guest image; the topic's paid jobs then run in **one dedicated experiment VM per job**. Values are topic data; no adaptor ships in git |
+| `constraints.params.experiment_pack_digest` / `experiment_pack_path` | `sha256:` of the pack tar the KVM host stages into that VM (required with a runner; never defaulted) / optional relative locator under the host pack dir |
+| `constraints.params.experiment_vcpus` / `experiment_mem_mib` / `experiment_disk_mib` | The topic's size ask, held under the operator ceilings (lock 16 vCPU / 32 GiB RAM / 32 GiB disk default); over = 503, never a clamp |
 | `checklist` | ≤64 `{id, text}` anti-cheat rules (unique slug ids), version 1 of the rule set |
 | `eval_executor.require_offer_commitment` | 64-hex pin against the live `1x` `EvalExecutorOffer` (`proof-executor`) |
 | `eval_executor.max_proof_deadline_s` | Tighten-only against pin `max_proof_deadline_s_ceiling` (7200 s; the live offer may be shorter) |
@@ -473,6 +476,24 @@ a sister whose job ends first is cancelled cooperatively and destroyed
 before the job answers; and a VM whose process exits outside a teardown is
 reaped per its retain policy, recorded as `crashed`, and never advertised
 as running — its topic gets a fresh VM on the next job.
+**Experiment VMs (in-guest runner topics).** A topic whose signed
+`constraints.params` select an in-guest runner (`in_guest_benchmark_runner`
++ `experiment_pack_digest`, `proof-experiment`) gets **one dedicated
+experiment microVM per paid job** instead of a sister: `run_paid_job` sizes
+it from the topic's ask under the operator ceilings (lock 16 vCPU / 32 GiB
+RAM / 32 GiB writable disk; over = 503, never clamped), the agent creates it
+beside the topic's RLM VM (no one-per-topic rule for experiments, a host
+capacity cap instead — parallel experiments are parallel VMs, never
+containers sharing one), the host resolves the pinned pack under its pack
+directory, re-hashes it with the same artefact check, and stages it over
+vsock before any job, the guest agent (`proof-vm-guest-agent`, this
+repository) execs the operator adaptor for that runner id with the
+experiment pack, the fetched-and-verified artefact, the model pin, and every
+topic param, and the host attests the run as `experiment_vm` for that VM,
+topic, submission, and artefact; the VM is destroyed after the job. No
+adaptor, pack, or value is defaulted anywhere: no runner selected, no
+adaptor baked, no pack staged, no report, or a non-finite value is a failed
+job. Runbook [`runbooks/proof-experiment-vms.md`](runbooks/proof-experiment-vms.md).
 Deploy: `deploy/systemd/proof-vm-orchestrator.service`,
 runbook [`runbooks/proof-vm-orchestrator.md`](runbooks/proof-vm-orchestrator.md).
 CI runs the fake hypervisor only; no GitHub runner ever boots Firecracker.

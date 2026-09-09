@@ -548,6 +548,7 @@ mod tests {
     /// then the boot, then staging; a paid job on the VM is bound to its
     /// runner + pack and attested `experiment_vm`; teardown forgets it.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn an_experiment_vm_is_admitted_staged_bound_and_attested() {
         let dir = pack_dir("flow");
         let (digest, tar) = stage_pack(&dir, b"task content");

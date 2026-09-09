@@ -21,6 +21,7 @@ When a spike or evidence report conflicts with a frozen spec or runbook, the nor
 | [`runbooks/staging-testnet-e2e.md`](runbooks/staging-testnet-e2e.md) | Staging droplet testnet end-to-end validation |
 | [`runbooks/proof-submit-e2e.md`](runbooks/proof-submit-e2e.md) | Proof (and Bounty) submit → score: cargo tests, local `--force-sim`, staging curl/ctx |
 | [`runbooks/proof-vm-orchestrator.md`](runbooks/proof-vm-orchestrator.md) | Proof topic VMs: Firecracker + jailer agent on the dedicated KVM host, CP wiring, DigitalOcean staging wire + fail-closed matrix + happy path (`deploy/scripts/proof-vm-wire-check.sh`), sister-guest verification, security model |
+| [`runbooks/proof-experiment-vms.md`](runbooks/proof-experiment-vms.md) | Proof experiment VMs: one Firecracker VM per paid job for topics whose signed params select an in-guest runner — generic params, ceilings (16 vCPU / 32 GiB / 32 GiB disk), pack staging, guest image bake (`deploy/guest/bake-rootfs.sh`, rootless podman), RE-LOCK steps, fail-closed rows, limitations |
 | [`runbooks/trust-root-rotation.md`](runbooks/trust-root-rotation.md) | Trust-root key rotation |
 | [`runbooks/gateway-failover.md`](runbooks/gateway-failover.md) | Gateway kill/restart / failover checks |
 | [`runbooks/measurement-repin-socket-proxy.md`](runbooks/measurement-repin-socket-proxy.md) | Socket-proxy measurement re-pin |
