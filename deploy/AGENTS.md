@@ -62,10 +62,12 @@ droplet overlay sets it). Live submits stay fail-closed until harvest is
 wired, a baseline is sealed, and ≥1 topic is open. Do not invent an eval
 digest.
 
-Current Proof judging and emission are incomplete: the Python judge uses static
-checks and an acknowledgement request, and the binary does not drive its
-leaf-signing helpers. Deployment configuration cannot fill these implementation
-gaps. See [`docs/WHITEPAPER.md`](../docs/WHITEPAPER.md).
+Current Proof judging is incomplete: the Python judge uses static checks and
+an acknowledgement request. The binary now drives a leaf emitter
+(`PROOF_EMIT_POLL_SECS`, default 120 — same cadence as bounty): positive
+store lattices become signed leaves; otherwise `E` is covered with
+`NoScore(ChallengeInternal)` so D24 can seal. That is not the paper's
+automatic research-to-payment path. See [`docs/WHITEPAPER.md`](../docs/WHITEPAPER.md).
 
 ## Proof topic VMs (Firecracker on a dedicated KVM host)
 
@@ -205,7 +207,7 @@ Validator logs should show `Match epoch=` then `Match → submit_intent` / `subm
 
 **Legacy Python agents (mainnet):** `validator-5gzi` (`95.133.252.120`) may point `master_url` / `weights_url` / `registry_url` at `https://chain.joinbase.ai` with **`submit_on_chain_enabled: false`**. Coordination shims live in `gateway-compat` (`/v1/validators/*`, `/v1/registry`, empty assignments). `GET /v1/weights/latest` refreshes `computed_at` / `expires_at` at serve time so Python pydantic clients accept sealed vectors older than 720s. Do **not** start `base-weight-submitter-5gzi` on `validator-root` unless CR ownership is moved off Rust.
 
-**Challenge verification:** on **master** only (validator has **no challenge exec**). Bounty: pair, report, probe quota/auth/fail-closed paths, then verify feed-driven leaves. Proof: submit against a signed `topic_id`, probe rejected and unavailable-evaluation paths, and distinguish library tests from the unwired live emitter. Verify leaf → seal → `GET /v1/weights/latest` **`sealed: true`** where the full path is available. Follow the root [verification contract](../AGENTS.md#challenge-verification-mandatory-path-coverage); do not use retired Design run/winner endpoints. **Never host Sim in staging/prod** (`BASE_ALLOW_HOST_SIM` / host `SimSandbox` are CI/local only). Healthz alone is insufficient.
+**Challenge verification:** on **master** only (validator has **no challenge exec**). Bounty: pair, report, probe quota/auth/fail-closed paths, then verify feed-driven leaves. Proof: submit against a signed `topic_id`, probe rejected and unavailable-evaluation paths, and verify the live emitter covers `E` (`ChallengeInternal` when nobody scored). Verify leaf → seal → `GET /v1/weights/latest` **`sealed: true`** where the full path is available. Follow the root [verification contract](../AGENTS.md#challenge-verification-mandatory-path-coverage); do not use retired Design run/winner endpoints. **Never host Sim in staging/prod** (`BASE_ALLOW_HOST_SIM` / host `SimSandbox` are CI/local only). Healthz alone is insufficient.
 
 Tunnel writes gitignored `deploy/env/local-tunnel.env` (`BASE_GATEWAY_PUBLIC_URL`). Co-located validator stays on `http://gateway:8080`; external clients use the tunnel URL. Host probe ports default to `2808x` (avoid staging SSH on `1808x`).
 

@@ -81,8 +81,9 @@ software:
 - An allocation does not guarantee payment. Work must meet the evaluation rules,
   and a challenge without the evidence needed to score cannot pay contributors.
 
-The Proof payout functions still need a service emission loop. Configured shares
-are not evidence of completed payments, revenue, equity, or a promised yield.
+Proof now has a service leaf-emission loop (`PROOF_EMIT_POLL_SECS`, default 120).
+Configured shares and a signed leaf set are not evidence of completed payments,
+revenue, equity, or a promised yield.
 
 ## What “autonomous” means today
 

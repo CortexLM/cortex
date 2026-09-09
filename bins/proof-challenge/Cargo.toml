@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+chain-live = { path = "../../crates/chain-live" }
 challenge-keys = { path = "../../crates/challenge-keys" }
 clap = { version = "4", features = ["derive", "env"] }
 db = { path = "../../crates/db" }

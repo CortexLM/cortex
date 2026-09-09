@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use challenge_keys::load_challenge_secret;
@@ -23,9 +24,10 @@ use clap::Parser;
 use prism_lium::LiumClient;
 use proof_challenge::{
     executor_slot, hash_admin_token, parse_holdout_file, proof_router, AppState,
-    BaselineMeasurement, EvalBackend, EvalExecutorOffer, HarvestOverrides, InferenceOffer,
-    LiveScorer, MemoryStore, ProofPin, TopicDocument, VmAgentHealth, VmOrchestratorProbe,
-    VmOrchestratorReport, CHALLENGE_ID, SCORING_VERSION,
+    BaselineMeasurement, EvalBackend, EvalExecutorOffer, GatewayClient, GatewayClientConfig,
+    HarvestOverrides, InferenceOffer, LiveScorer, MemoryStore, ProofEmitter, ProofPin,
+    TopicDocument, VmAgentHealth, VmOrchestratorProbe, VmOrchestratorReport, CHALLENGE_ID,
+    DEFAULT_EMIT_POLL_SECS, SCORING_VERSION,
 };
 use proof_eval::{custom_ids_ref, registered_custom, FamilyMux};
 use proof_harvest::{HarvestLimits, LiumProofHarvest};
@@ -109,11 +111,37 @@ struct Cli {
     /// File holding the Postgres URL (preferred on a droplet).
     #[arg(long, env = "BASE_DATABASE_URL_FILE")]
     database_url_file: Option<PathBuf>,
+    /// Netuid the expected set is derived from.
+    #[arg(long, env = "BASE_NETUID", default_value_t = 1)]
+    netuid: u16,
+    /// Chain WS endpoint (`BASE_CHAIN_ENDPOINTS` wins when it carries a list).
+    #[arg(
+        long,
+        env = "BASE_CHAIN_ENDPOINT",
+        default_value = "wss://test.finney.opentensor.ai:443"
+    )]
+    chain_endpoint: String,
+    /// Gateway base URL for `POST /v1/weights/raw`.
+    #[arg(
+        long,
+        env = "BASE_CHALLENGE_GATEWAY_ENDPOINT",
+        default_value = "http://gateway:8080"
+    )]
+    gateway_endpoint: String,
+    /// Seconds between emitter ticks.
+    #[arg(long, env = "PROOF_EMIT_POLL_SECS", default_value_t = DEFAULT_EMIT_POLL_SECS)]
+    emit_poll_secs: u64,
 }
 
 fn main() -> ExitCode {
     let _ = telemetry::init_tracing();
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // Ordered failover list wins over the single-endpoint flag/env.
+    if let Ok(list) = std::env::var("BASE_CHAIN_ENDPOINTS") {
+        if !list.trim().is_empty() {
+            cli.chain_endpoint = list;
+        }
+    }
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -124,17 +152,7 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> Result<(), String> {
-    if let Some(p) = &cli.challenge_sk_file {
-        if let Err(e) = load_challenge_secret(p) {
-            // Compose always sets BASE_CHALLENGE_SK_FILE; remote-deploy may
-            // materialize an empty placeholder so Docker does not create a
-            // directory. Missing/invalid key must not take /health down.
-            tracing::warn!(
-                "challenge sk: {e}; leaf signing unavailable until BASE_CHALLENGE_SK_FILE is a \
-                 32-byte mini-secret (or 64 hex chars)"
-            );
-        }
-    }
+    let sk = load_optional_sk(cli.challenge_sk_file.as_deref());
     let pin = load_pin(cli.pin_file.as_deref())?;
     let backend = if cli.force_sim {
         tracing::info!("PROOF_FORCE_SIM=1 — deterministic offline eval, not a real eval");
@@ -204,6 +222,11 @@ fn run(cli: &Cli) -> Result<(), String> {
     match load_baselines(&store, &pin, cli.baseline_file.as_deref()) {
         Ok(n) => tracing::info!(topics = n, "sealed baselines recorded"),
         Err(e) => tracing::warn!("baselines unavailable ({e}); submissions will 503 until fixed"),
+    }
+
+    if let Some(emitter) = build_emitter(cli, store.clone(), sk)? {
+        let poll = Duration::from_secs(cli.emit_poll_secs.max(1));
+        rt.spawn(emitter.run(poll));
     }
 
     let state = AppState {
@@ -743,6 +766,63 @@ fn load_executor(pin: &ProofPin, path: Option<&Path>) -> Result<EvalExecutorOffe
     Ok(offer)
 }
 
+/// Wire the leaf emitter.
+///
+/// An empty store still gets one. It pays nobody — every leaf is
+/// `NoScore(ChallengeInternal)`, so the share burns to uid 0 — but proof
+/// holds a paid trust-root row, and a paid challenge with no leaves fails D24:
+/// the seal would 409 for *every* challenge. Only a missing challenge key
+/// stops emission, because a leaf the trust root rejects is not weight.
+fn build_emitter(
+    cli: &Cli,
+    store: MemoryStore,
+    sk: Option<[u8; 32]>,
+) -> Result<Option<Arc<ProofEmitter<chain_live::LiveChainClient>>>, String> {
+    let Some(sk) = sk else {
+        tracing::warn!(
+            "no BASE_CHALLENGE_SK_FILE: proof cannot sign leaves, so nothing will be emitted \
+             and POST /v1/admin/seal will answer 409 while proof holds a paid trust-root row"
+        );
+        return Ok(None);
+    };
+    let gateway = Arc::new(
+        GatewayClient::new(GatewayClientConfig {
+            base_url: cli.gateway_endpoint.clone(),
+            ..GatewayClientConfig::default()
+        })
+        .map_err(|e| format!("gateway client: {e}"))?,
+    );
+    let mut chain = chain_live::LiveChainClient::connect(&cli.chain_endpoint)
+        .map_err(|e| format!("chain connect: {e}"))?;
+    chain.set_netuid(cli.netuid);
+    tracing::info!(
+        netuid = cli.netuid,
+        gateway = %cli.gateway_endpoint,
+        poll_secs = cli.emit_poll_secs,
+        "proof emitter wired"
+    );
+    Ok(Some(Arc::new(ProofEmitter::new(
+        chain, gateway, sk, cli.netuid, store,
+    ))))
+}
+
+fn load_optional_sk(path: Option<&Path>) -> Option<[u8; 32]> {
+    let p = path?;
+    match load_challenge_secret(p) {
+        Ok(k) => Some(k),
+        Err(e) => {
+            // Compose always sets BASE_CHALLENGE_SK_FILE; remote-deploy may
+            // materialize an empty placeholder so Docker does not create a
+            // directory. Missing/invalid key must not take /health down.
+            tracing::warn!(
+                "challenge sk: {e}; leaf signing unavailable until BASE_CHALLENGE_SK_FILE is a \
+                 32-byte mini-secret (or 64 hex chars)"
+            );
+            None
+        }
+    }
+}
+
 fn load_admin_hashes(path: Option<&Path>) -> Vec<String> {
     let Some(p) = path else {
         return Vec::new();
@@ -779,6 +859,54 @@ async fn serve(bind: SocketAddr, state: AppState) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cli() -> Cli {
+        Cli::try_parse_from(["proof-challenge"]).expect("defaults parse")
+    }
+
+    /// A leaf the trust root would reject is not weight, so a missing
+    /// challenge key is a refusal rather than an unsigned emit.
+    #[test]
+    fn no_challenge_key_wires_no_emitter() {
+        assert!(build_emitter(&cli(), MemoryStore::new(), None)
+            .expect("no emitter is not an error")
+            .is_none());
+    }
+
+    #[test]
+    fn a_challenge_key_wires_the_emitter() {
+        let wired = build_emitter(&cli(), MemoryStore::new(), Some([3u8; 32]))
+            .expect("wire")
+            .expect("emitter");
+        assert_eq!(wired.scored_epoch(), 0);
+    }
+
+    #[test]
+    fn emit_poll_secs_defaults_to_the_bounty_cadence() {
+        assert_eq!(cli().emit_poll_secs, DEFAULT_EMIT_POLL_SECS);
+        assert_eq!(DEFAULT_EMIT_POLL_SECS, 120);
+    }
+
+    /// Compose always sets `BASE_CHALLENGE_SK_FILE`. remote-deploy may leave an
+    /// empty placeholder so Docker does not create a directory at that path.
+    /// That must not exit 1 — `/health` has to come up so routing smoke works.
+    #[test]
+    fn an_empty_or_missing_challenge_sk_file_does_not_abort_boot() {
+        let dir = std::env::temp_dir().join(format!(
+            "proof-sk-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let empty = dir.join("sk");
+        std::fs::write(&empty, []).expect("write");
+        assert!(load_optional_sk(Some(&empty)).is_none());
+        assert!(load_optional_sk(Some(&dir.join("missing"))).is_none());
+        assert!(load_optional_sk(None).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn documented_force_sim_values_do_not_break_argument_parsing() {

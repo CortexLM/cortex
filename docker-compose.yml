@@ -268,6 +268,9 @@ services:
       # RLM artefact zips ({topic_id}/{submission_id}.zip, best.json,
       # events.jsonl) on the persistent proof-artifacts volume.
       PROOF_ARTEFACT_ROOT: /var/lib/proof/artefacts
+      # Emission posts signed leaves to the gateway that seals what validators
+      # fetch. Empty store → ChallengeInternal cover so D24 can still seal.
+      PROOF_EMIT_POLL_SECS: "${PROOF_EMIT_POLL_SECS:-120}"
       BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
     env_file:
       - path: ./deploy/env/proof-challenge.env

@@ -69,6 +69,8 @@ services:
       # No Lium spend on a laptop unless operator opts in.
       PROOF_FORCE_SIM: "${LOCAL_PROOF_FORCE_SIM:-true}"
       PROOF_SIM_STUB_WIN: "${LOCAL_PROOF_SIM_STUB_WIN:-true}"
+      # Tighter than prod so a local run sees a leaf set without waiting.
+      PROOF_EMIT_POLL_SECS: "${LOCAL_PROOF_EMIT_POLL_SECS:-30}"
 
   bounty-challenge:
     ports:

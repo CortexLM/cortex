@@ -10,11 +10,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+mod emit;
+
 use bundle::{NoScoreReasonCode, ScoreOrAbsence};
 use challenge_common::{emit_signed_leaf_set, Hotkey, LeafEmitError};
 use proof_score::{payout_lattices, MinerTopicRun, SealedBaseline};
 use proof_task::{CHALLENGE_ID_BYTES, SCORE_MAX};
 
+pub use challenge_common::{GatewayClient, GatewayClientConfig};
+pub use emit::{EmitError, EmitOutcome, ProofEmitter, DEFAULT_EMIT_POLL_SECS};
 pub use proof_eval::{
     force_sim, registered_custom, resolve_eval_backend, scoring_readiness, sim_stub_win,
     BaselineMeasurement, EvalBackend, LiveScorer,
