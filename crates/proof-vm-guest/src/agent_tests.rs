@@ -388,6 +388,243 @@ async fn bad_reports_and_deadline_cuts_fail_the_job() {
     let _ = std::fs::remove_dir_all(&r);
 }
 
+/// Two distinct signed param names that normalise to the same
+/// `PROOF_PARAM_*` variable (`foo-bar` / `foo_bar`) are refused **before the
+/// adaptor runs** — a run never executes with one signed input silently
+/// replaced by another — while a lone hyphenated name still maps.
+#[tokio::test]
+async fn colliding_param_names_are_refused_before_the_adaptor_runs() {
+    let r = root("collide");
+    let a = agent(&r);
+    hello(&a).await;
+    let (tar, digest) = pack();
+    stage(&a, &tar, &digest).await;
+    install(
+        &r,
+        "run",
+        r#"
+touch "$PROOF_WORK_DIR/adaptor-ran"
+echo "{\"primary_value\": 1.0, \"evidence\": {\"foo_bar\": \"$PROOF_PARAM_FOO_BAR\"}}" > "$PROOF_OUTPUT_DIR/report.json"
+"#,
+    );
+    let mut control = req_for(&digest);
+    control
+        .constraints
+        .params
+        .insert("foo-bar".into(), "dash-value".into());
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::Baseline {
+                request: control.clone(),
+            }),
+        })
+        .await;
+    let RlmToHost::Done {
+        output: VmJobOutput::Baseline(report),
+    } = out
+    else {
+        panic!("expected a baseline report, got {out:?}");
+    };
+    assert_eq!(
+        report.evidence["foo_bar"],
+        serde_json::json!("dash-value"),
+        "a lone hyphenated name maps to PROOF_PARAM_FOO_BAR"
+    );
+
+    let mut colliding = control.clone();
+    colliding
+        .constraints
+        .params
+        .insert("foo_bar".into(), "underscore-value".into());
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::Baseline {
+                request: colliding.clone(),
+            }),
+        })
+        .await,
+    );
+    assert!(err.contains("\"foo-bar\" and \"foo_bar\""), "{err}");
+    assert!(err.contains("both map to PROOF_PARAM_FOO_BAR"), "{err}");
+    assert!(err.contains("re-sign the topic"), "{err}");
+    let ran: Vec<_> = walkdir(&r.join("work"))
+        .into_iter()
+        .filter(|p| p.ends_with("adaptor-ran"))
+        .collect();
+    assert_eq!(
+        ran.len(),
+        1,
+        "only the control run reached the adaptor: {ran:?}"
+    );
+
+    // The same refusal guards inspection and rule proposals.
+    install(
+        &r,
+        "inspect",
+        "echo '[]' > \"$PROOF_OUTPUT_DIR/checklist.json\"",
+    );
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::Inspect {
+                request: colliding,
+                rules: rules(),
+            }),
+        })
+        .await,
+    );
+    assert!(err.contains("both map to PROOF_PARAM_FOO_BAR"), "{err}");
+    install(
+        &r,
+        "propose_rules",
+        "echo '[{\"id\": \"r_x\", \"text\": \"x\"}]' > \"$PROOF_OUTPUT_DIR/rules.json\"",
+    );
+    let mut t = topic();
+    t.constraints
+        .params
+        .insert(proof_experiment::PARAM_RUNNER.into(), RUNNER.into());
+    t.constraints
+        .params
+        .insert(proof_experiment::PARAM_PACK_DIGEST.into(), digest.clone());
+    t.constraints.params.insert("foo-bar".into(), "a".into());
+    t.constraints.params.insert("foo_bar".into(), "b".into());
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::ProposeRules {
+                topic: Box::new(t),
+                current_version: None,
+            }),
+        })
+        .await,
+    );
+    assert!(err.contains("both map to PROOF_PARAM_FOO_BAR"), "{err}");
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+fn walkdir(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// An adaptor that floods stdout and stderr (well past the 64 KiB tail, on
+/// both streams at once) still completes: the guest drains both streams
+/// concurrently into rolling tails — bounded while the process runs, not
+/// only after it exits — and the log the host sees is the documented tail
+/// with a marker for what was cut. The `Tail` itself never holds more than
+/// its cap, whatever is pushed through it.
+#[tokio::test]
+async fn adaptor_output_is_bounded_while_draining_not_after() {
+    use crate::runner::{Tail, MAX_TAIL_BYTES, STREAM_TAIL_BYTES};
+    assert_eq!(STREAM_TAIL_BYTES * 2, MAX_TAIL_BYTES);
+    let mut t = Tail::new(1_000);
+    t.push(&[b'a'; 600]);
+    assert_eq!(t.bytes().len(), 600);
+    assert_eq!(t.dropped(), 0);
+    t.push(&[b'b'; 600]);
+    assert_eq!(t.bytes().len(), 1_000, "capped");
+    assert_eq!(t.dropped(), 200);
+    assert!(t.bytes().starts_with(&[b'a'; 400]));
+    assert!(t.bytes().ends_with(&[b'b'; 600]));
+    t.push(&[b'c'; 5_000]);
+    assert_eq!(
+        t.bytes().len(),
+        1_000,
+        "one chunk over the cap keeps its last cap bytes"
+    );
+    assert_eq!(t.dropped(), 200 + 1_000 + 4_000);
+    assert!(t.bytes().iter().all(|b| *b == b'c'));
+    assert!(t
+        .text()
+        .starts_with("[... 5200 earlier bytes dropped ...]\n"));
+    assert_eq!(Tail::new(8).text(), "");
+
+    let r = root("flood");
+    let a = agent(&r);
+    hello(&a).await;
+    let (tar, digest) = pack();
+    stage(&a, &tar, &digest).await;
+    // 8 MiB on each stream, stderr first (a sequential drain waiting on
+    // stdout EOF would deadlock on the full stderr pipe until the deadline).
+    install(
+        &r,
+        "run",
+        r#"
+head -c 8388608 /dev/zero | tr '\0' 'e' >&2
+head -c 8388608 /dev/zero | tr '\0' 'o'
+echo "LAST-STDOUT-LINE"
+echo "LAST-STDERR-LINE" >&2
+echo '{"primary_value": 0.25}' > "$PROOF_OUTPUT_DIR/report.json"
+"#,
+    );
+    let mut req = req_for(&digest);
+    req.sandbox.deadline_s = 60;
+    let started = std::time::Instant::now();
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::Baseline { request: req }),
+        })
+        .await;
+    let RlmToHost::Done {
+        output: VmJobOutput::Baseline(report),
+    } = out
+    else {
+        panic!("expected a baseline report, got {out:?}");
+    };
+    assert!((report.primary_value - 0.25).abs() < 1e-12);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "drained concurrently, no pipe deadlock: {:?}",
+        started.elapsed()
+    );
+    // The evaluate path carries the log; drive the same script through it
+    // to read the tail the host would see.
+    let artefact = archive(&[member("recipe/run.sh", b'0', b"echo hi\n")]);
+    let mut eval = req_for(&digest);
+    eval.artifact_digest = hex::encode(Sha256::digest(&artefact));
+    eval.artifact_uri = Some(serve_once(artefact).await);
+    eval.sandbox.deadline_s = 60;
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::Evaluate {
+                request: eval,
+                checklist_digest: "c".into(),
+                rules_version: 1,
+            }),
+        })
+        .await;
+    let RlmToHost::Done {
+        output: VmJobOutput::Evaluated(run),
+    } = out
+    else {
+        panic!("expected an evaluated run, got {out:?}");
+    };
+    let log = String::from_utf8_lossy(&run.logs[0].bytes);
+    assert!(
+        run.logs[0].bytes.len() <= MAX_TAIL_BYTES,
+        "the documented tail limit holds: {}",
+        run.logs[0].bytes.len()
+    );
+    assert!(
+        log.contains("LAST-STDERR-LINE"),
+        "the end of stderr survives"
+    );
+    assert!(log.contains("earlier bytes dropped"), "{}", &log[..200]);
+    let _ = std::fs::remove_dir_all(&r);
+}
+
 /// Inspection ticks every rule through `inspect` (unanswered rules are red),
 /// and rule proposals come from `propose_rules` or, without one, from the
 /// signed checklist itself.

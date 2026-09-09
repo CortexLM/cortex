@@ -17,10 +17,14 @@
 //! and digest, the artefact directory (when the request carries a locator),
 //! the model pin, seed, deadline, FLOP figures, the secrets directory, and
 //! one `PROOF_PARAM_<KEY>` per `constraints.params` entry (key upper-cased,
-//! `-` → `_`). The adaptor decides what those mean; this module never does.
+//! `-` → `_`; two signed names that collide after that are refused before
+//! anything runs). The adaptor decides what those mean; this module never
+//! does.
 //!
-//! The process is held to the request's deadline, its stdout / stderr tail
-//! is bounded and **redacted** (every staged secret value is blanked), and a
+//! The process is held to the request's deadline, its stdout / stderr are
+//! drained into a **rolling tail** bounded at [`MAX_TAIL_BYTES`] per stream
+//! while it runs (a flooding adaptor costs the guest no more memory than
+//! that) and **redacted** (every staged secret value is blanked), and a
 //! missing / malformed / non-finite report is a failed job.
 
 use std::collections::BTreeMap;
@@ -94,8 +98,13 @@ pub mod env {
     pub const PARAM_PREFIX: &str = "PROOF_PARAM_";
 }
 
-/// Bounded stdout / stderr tail kept from a run.
+/// Bounded stdout + stderr tail kept from a run — the most the run log the
+/// host sees can be. Each stream is drained into a rolling half of it
+/// ([`STREAM_TAIL_BYTES`]) **while the process runs**, so a flooding adaptor
+/// costs the guest no more memory than this, whatever it writes.
 pub const MAX_TAIL_BYTES: usize = 64 * 1024;
+/// Rolling tail kept per stream while draining (half of [`MAX_TAIL_BYTES`]).
+pub const STREAM_TAIL_BYTES: usize = MAX_TAIL_BYTES / 2;
 /// Largest `report.json` / `checklist.json` / `rules.json` read back.
 pub const MAX_OUTPUT_DOC_BYTES: u64 = 8 * 1024 * 1024;
 /// Deadline for jobs that carry none (`ProposeRules`).
@@ -246,6 +255,82 @@ struct Exec {
     tail: String,
 }
 
+/// A rolling tail: keeps the last `cap` bytes pushed, counts what it dropped.
+/// Memory is bounded by `cap` however much the writer produces.
+#[derive(Debug)]
+pub(crate) struct Tail {
+    cap: usize,
+    buf: Vec<u8>,
+    dropped: u64,
+}
+
+impl Tail {
+    /// A tail keeping at most `cap` bytes.
+    #[must_use]
+    pub(crate) fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            buf: Vec::new(),
+            dropped: 0,
+        }
+    }
+
+    /// Append `chunk`, forgetting the oldest bytes beyond the cap.
+    pub(crate) fn push(&mut self, chunk: &[u8]) {
+        if chunk.len() >= self.cap {
+            self.dropped += (self.buf.len() + chunk.len() - self.cap) as u64;
+            self.buf.clear();
+            self.buf.extend_from_slice(&chunk[chunk.len() - self.cap..]);
+            return;
+        }
+        let excess = (self.buf.len() + chunk.len()).saturating_sub(self.cap);
+        if excess > 0 {
+            self.buf.drain(..excess);
+            self.dropped += excess as u64;
+        }
+        self.buf.extend_from_slice(chunk);
+    }
+
+    /// Bytes kept.
+    #[cfg(test)]
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.buf
+    }
+
+    /// Bytes forgotten so far.
+    #[cfg(test)]
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// The kept bytes as text, prefixed with a marker when anything was cut.
+    #[must_use]
+    pub(crate) fn text(&self) -> String {
+        let body = String::from_utf8_lossy(&self.buf);
+        if self.dropped == 0 {
+            body.into_owned()
+        } else {
+            format!("[... {} earlier bytes dropped ...]\n{body}", self.dropped)
+        }
+    }
+}
+
+/// Drain `reader` to EOF into a bounded tail (never into memory unbounded).
+async fn drain_bounded<R: tokio::io::AsyncRead + Unpin>(reader: Option<R>, cap: usize) -> Tail {
+    let mut tail = Tail::new(cap);
+    let Some(mut reader) = reader else {
+        return tail;
+    };
+    let mut chunk = vec![0u8; 16 * 1024];
+    loop {
+        match tokio::io::AsyncReadExt::read(&mut reader, &mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => tail.push(&chunk[..n]),
+        }
+    }
+    tail
+}
+
 /// Last `max` bytes as text.
 fn tail(bytes: &[u8], max: usize) -> String {
     let start = bytes.len().saturating_sub(max);
@@ -275,27 +360,41 @@ fn redact_value(v: &mut serde_json::Value, secrets: &[Vec<u8>]) {
     }
 }
 
-/// `PROOF_PARAM_<KEY>` for every topic param.
-fn param_env(params: &BTreeMap<String, String>) -> Vec<(String, String)> {
-    params
-        .iter()
-        .map(|(k, v)| {
-            let key: String = k
-                .chars()
-                .map(|c| {
-                    if c == '-' {
-                        '_'
-                    } else {
-                        c.to_ascii_uppercase()
-                    }
-                })
-                .collect();
-            (format!("{}{key}", env::PARAM_PREFIX), v.clone())
+/// The env var name a topic param key maps to: upper-cased, `-` → `_`.
+fn param_env_name(key: &str) -> String {
+    let normalised: String = key
+        .chars()
+        .map(|c| {
+            if c == '-' {
+                '_'
+            } else {
+                c.to_ascii_uppercase()
+            }
         })
-        .collect()
+        .collect();
+    format!("{}{normalised}", env::PARAM_PREFIX)
 }
 
-/// The contract for one job.
+/// `PROOF_PARAM_<KEY>` for every topic param. Two **distinct** signed names
+/// that normalise to the same variable (`foo-bar` / `foo_bar`) are refused:
+/// the adaptor environment cannot carry both, and a run must never execute
+/// with one of its signed inputs silently replaced by another.
+fn param_env(params: &BTreeMap<String, String>) -> Result<Vec<(String, String)>, String> {
+    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+    let mut vars = Vec::with_capacity(params.len());
+    for (k, v) in params {
+        let name = param_env_name(k);
+        if let Some(first) = seen.insert(name.clone(), k) {
+            return Err(format!(
+                "constraints.params {first:?} and {k:?} both map to {name}; the adaptor environment cannot carry both — re-sign the topic with names that stay distinct after upper-casing and '-' → '_'"
+            ));
+        }
+        vars.push((name, v.clone()));
+    }
+    Ok(vars)
+}
+
+/// The contract for one job. Fails on a param-name collision (nothing runs).
 #[allow(clippy::too_many_arguments)]
 fn job_env(
     cfg: &GuestConfig,
@@ -306,7 +405,8 @@ fn job_env(
     output: &Path,
     pack: Option<&StagedPack>,
     artifact: Option<&Path>,
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>, String> {
+    let params = param_env(&request.constraints.params)?;
     let direction = match request.direction {
         proof_task::MetricDirection::Max => "max",
         proof_task::MetricDirection::Min => "min",
@@ -363,8 +463,8 @@ fn job_env(
     if let Some(s) = &request.constraints.task_slice {
         vars.push((env::TASK_SLICE.to_owned(), s.clone()));
     }
-    vars.extend(param_env(&request.constraints.params));
-    vars
+    vars.extend(params);
+    Ok(vars)
 }
 
 /// Base environment every adaptor gets, regardless of the job.
@@ -413,18 +513,18 @@ async fn exec(
     let pid = child.id();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    // Both streams are drained concurrently (a full stderr pipe never stalls
+    // a chatty stdout) into rolling tails: whatever the adaptor floods, the
+    // guest holds at most MAX_TAIL_BYTES of it.
     let drain = async {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        if let Some(mut s) = stdout {
-            let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut out).await;
-        }
-        if let Some(mut s) = stderr {
-            let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut err).await;
-        }
-        out.extend_from_slice(b"\n--- stderr ---\n");
-        out.extend_from_slice(&err);
-        out
+        let (out, err) = tokio::join!(
+            drain_bounded(stdout, STREAM_TAIL_BYTES),
+            drain_bounded(stderr, STREAM_TAIL_BYTES)
+        );
+        let mut text = out.text();
+        text.push_str("\n--- stderr ---\n");
+        text.push_str(&err.text());
+        text
     };
     let budget = deadline
         .saturating_sub(DEADLINE_SLACK)
@@ -438,7 +538,7 @@ async fn exec(
         return Ok(Exec {
             exit: status.ok().and_then(|s| s.code()),
             timed_out: false,
-            tail: tail(&output, MAX_TAIL_BYTES),
+            tail: tail(output.as_bytes(), MAX_TAIL_BYTES),
         });
     }
     kill_group(pid).await;
@@ -551,7 +651,7 @@ pub async fn run_paid(
         &output,
         Some(pack),
         artifact,
-    );
+    )?;
     vars.push((
         env::CLAIM_FILE.to_owned(),
         work.join("claim.txt").display().to_string(),
@@ -664,7 +764,7 @@ pub async fn inspect(
         &output,
         None,
         artifact,
-    );
+    )?;
     vars.push((env::RULES_FILE.to_owned(), rules_file.display().to_string()));
     let secrets = secret_values(&cfg.secrets_dir);
     let exec = exec(
@@ -726,6 +826,7 @@ pub async fn propose_rules(
         return Ok(topic.checklist.clone());
     };
     let adaptor = adaptor.ok_or_else(|| "adaptor vanished".to_owned())?;
+    let params = param_env(&topic.constraints.params)?;
     let output = prepare(cfg, work)?;
     let topic_file = work.join("topic.json");
     write_doc(&topic_file, topic)?;
@@ -753,7 +854,7 @@ pub async fn propose_rules(
             current_version.map_or(String::new(), |v| v.to_string()),
         ),
     ];
-    vars.extend(param_env(&topic.constraints.params));
+    vars.extend(params);
     let secrets = secret_values(&cfg.secrets_dir);
     let exec = exec(cfg, &entry, vars, work, DEFAULT_UNPAID_DEADLINE).await?;
     if exec.timed_out {
