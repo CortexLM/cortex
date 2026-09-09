@@ -126,34 +126,53 @@ impl NetPlan {
     }
 
     /// Forward chains of **other** tables that drop by default (ufw's
-    /// `filter FORWARD`, Docker's), rendered `family table chain`. Every base
-    /// chain on the forward hook sees the packet and one `drop` verdict
-    /// wins, so the per-VM allow rules cannot rescue guest egress from such
-    /// a chain: the operator has to accept the TAPs there (runbook § Egress).
-    /// Diagnostic only — an `nft` that cannot list or a host without those
-    /// chains yields an empty list / an error the caller logs, never a
-    /// failed boot.
+    /// `filter FORWARD`, Docker's) **and do not accept the TAPs**, rendered
+    /// `family table chain`. Every base chain on the forward hook sees the
+    /// packet and one `drop` verdict wins, so the per-VM allow rules cannot
+    /// rescue guest egress from such a chain: the operator has to accept the
+    /// TAPs there (runbook § Egress). The fix leaves the policy at `drop` and
+    /// adds an `iifname "pfc*"` accept somewhere in that table (ufw's
+    /// `ufw-before-forward`, Docker's `DOCKER-USER`, iptables `-i pfc+`), so
+    /// the check reads the rules: a table with such an accept is handled and
+    /// not reported — the warning clears once the fix is in. Advisory only —
+    /// an `nft` that cannot list or a host without those chains yields an
+    /// empty list / an error the caller logs, never a failed boot.
     ///
     /// # Errors
     ///
-    /// [`HvError::Backend`] when `nft -j list chains` fails or is not JSON.
+    /// [`HvError::Backend`] when `nft -j list ruleset` fails or is not JSON.
     pub async fn foreign_forward_drops(shell: &dyn Shell) -> Result<Vec<String>, HvError> {
-        let out = sh(shell, "nft", &["-j", "list", "chains"]).await?;
+        let out = sh(shell, "nft", &["-j", "list", "ruleset"]).await?;
         let doc: serde_json::Value = serde_json::from_str(&out.stdout)
-            .map_err(|e| HvError::Backend(format!("nft -j list chains: {e}")))?;
+            .map_err(|e| HvError::Backend(format!("nft -j list ruleset: {e}")))?;
+        let items = doc["nftables"].as_array().into_iter().flatten();
+        let key = |v: &serde_json::Value| {
+            format!(
+                "{} {}",
+                v["family"].as_str().unwrap_or("?"),
+                v["table"].as_str().unwrap_or("?")
+            )
+        };
+        // Tables that already accept traffic from a TAP anywhere in them.
+        let handled: Vec<String> = items
+            .clone()
+            .filter(|item| rule_accepts_tap(&item["rule"]))
+            .map(|item| key(&item["rule"]))
+            .collect();
         let mut drops = Vec::new();
-        for item in doc["nftables"].as_array().into_iter().flatten() {
+        for item in items {
             let chain = &item["chain"];
             let table = chain["table"].as_str().unwrap_or_default();
             if chain["hook"].as_str() != Some("forward")
                 || chain["policy"].as_str() != Some("drop")
                 || table.starts_with("proof_vm_")
+                || handled.contains(&key(chain))
             {
                 continue;
             }
             drops.push(format!(
-                "{} {table} {}",
-                chain["family"].as_str().unwrap_or("?"),
+                "{} {}",
+                key(chain),
                 chain["name"].as_str().unwrap_or("?")
             ));
         }
@@ -172,6 +191,34 @@ impl NetPlan {
         }
         errs
     }
+}
+
+/// Prefix every TAP name shares (`pfc<n>`).
+const TAP_PREFIX: &str = "pfc";
+
+/// Does this `nft -j` rule accept traffic arriving on a TAP? True for an
+/// `iifname` match against `pfc*` / `pfc+` / a specific `pfc<n>` (also inside
+/// a set) that ends in an `accept` verdict — the shape both
+/// `iptables -I … -i pfc+ -j ACCEPT` (rendered by iptables-nft as
+/// `iifname "pfc*" … accept`) and a native `iifname "pfc*" accept` take.
+fn rule_accepts_tap(rule: &serde_json::Value) -> bool {
+    let Some(exprs) = rule["expr"].as_array() else {
+        return false;
+    };
+    let names_tap = |right: &serde_json::Value| -> bool {
+        let is_tap = |s: &str| s.starts_with(TAP_PREFIX);
+        right.as_str().is_some_and(is_tap)
+            || right["set"]
+                .as_array()
+                .is_some_and(|set| set.iter().any(|v| v.as_str().is_some_and(is_tap)))
+    };
+    let matches_tap = exprs.iter().any(|e| {
+        let m = &e["match"];
+        m["left"]["meta"]["key"].as_str() == Some("iifname")
+            && matches!(m["op"].as_str(), Some("==") | None)
+            && names_tap(&m["right"])
+    });
+    matches_tap && exprs.iter().any(|e| e.get("accept").is_some())
 }
 
 #[cfg(test)]
@@ -247,8 +294,8 @@ mod tests {
         assert!(flat.contains(&"ip link del pfc2".to_owned()));
     }
 
-    /// Shell that answers `nft -j list chains` with a canned ruleset listing.
-    struct NftListing(&'static str);
+    /// Shell that answers `nft -j list ruleset` with a canned listing.
+    struct NftListing(String);
 
     #[async_trait::async_trait]
     impl Shell for NftListing {
@@ -258,44 +305,99 @@ mod tests {
             args: &[String],
         ) -> Result<crate::shell::CmdOutput, HvError> {
             assert_eq!(program, "nft");
-            assert_eq!(args, ["-j", "list", "chains"]);
+            assert_eq!(args, ["-j", "list", "ruleset"]);
             Ok(crate::shell::CmdOutput {
                 code: Some(0),
-                stdout: self.0.to_owned(),
+                stdout: self.0.clone(),
                 stderr: String::new(),
             })
         }
     }
 
+    /// A host with ufw (ip + ip6 `filter FORWARD` drop) and Docker
+    /// (`DOCKER-USER`), plus one of our per-VM tables. `extra_rules` are
+    /// appended as the operator's fix.
+    fn ruleset(extra_rules: &str) -> String {
+        format!(
+            r#"{{"nftables": [
+          {{"metainfo": {{"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}}},
+          {{"table": {{"family": "ip", "table": "filter", "handle": 1}}}},
+          {{"chain": {{"family": "ip", "table": "filter", "name": "INPUT", "handle": 1, "type": "filter", "hook": "input", "prio": 0, "policy": "drop"}}}},
+          {{"chain": {{"family": "ip", "table": "filter", "name": "FORWARD", "handle": 2, "type": "filter", "hook": "forward", "prio": 0, "policy": "drop"}}}},
+          {{"chain": {{"family": "ip", "table": "filter", "name": "ufw-before-forward", "handle": 9}}}},
+          {{"chain": {{"family": "ip", "table": "filter", "name": "DOCKER-USER", "handle": 12}}}},
+          {{"rule": {{"family": "ip", "table": "filter", "chain": "FORWARD", "handle": 13, "expr": [{{"jump": {{"target": "DOCKER-USER"}}}}]}}}},
+          {{"rule": {{"family": "ip", "table": "filter", "chain": "FORWARD", "handle": 14, "expr": [{{"jump": {{"target": "ufw-before-forward"}}}}]}}}},
+          {{"rule": {{"family": "ip", "table": "filter", "chain": "ufw-before-forward", "handle": 15, "expr": [{{"match": {{"op": "in", "left": {{"ct": {{"key": "state"}}}}, "right": ["related", "established"]}}}}, {{"counter": {{"packets": 0, "bytes": 0}}}}, {{"accept": null}}]}}}},
+          {{"rule": {{"family": "ip", "table": "filter", "chain": "DOCKER-USER", "handle": 16, "expr": [{{"counter": {{"packets": 0, "bytes": 0}}}}, {{"return": null}}]}}}},
+          {{"chain": {{"family": "inet", "table": "proof_vm_pfc0", "name": "forward", "handle": 30, "type": "filter", "hook": "forward", "prio": 0, "policy": "accept"}}}},
+          {{"rule": {{"family": "inet", "table": "proof_vm_pfc0", "chain": "forward", "handle": 32, "expr": [{{"match": {{"op": "==", "left": {{"meta": {{"key": "iifname"}}}}, "right": "pfc0"}}}}, {{"match": {{"op": "==", "left": {{"payload": {{"protocol": "ip", "field": "daddr"}}}}, "right": {{"prefix": {{"addr": "203.0.113.10", "len": 32}}}}}}}}, {{"accept": null}}]}}}},
+          {{"chain": {{"family": "inet", "table": "proof_vm_pfc0", "name": "postrouting", "handle": 31, "type": "nat", "hook": "postrouting", "prio": 100, "policy": "accept"}}}},
+          {{"chain": {{"family": "ip6", "table": "filter", "name": "FORWARD", "handle": 40, "type": "filter", "hook": "forward", "prio": 0, "policy": "drop"}}}},
+          {{"chain": {{"family": "inet", "table": "firewalld", "name": "filter_FORWARD", "handle": 50, "type": "filter", "hook": "forward", "prio": 10, "policy": "accept"}}}}
+          {extra_rules}
+        ]}}"#
+        )
+    }
+
     /// ufw's and Docker's forward chains drop by default and sit beside the
     /// per-VM tables; the preflight names exactly those, never our own
-    /// tables, never chains on other hooks or with an accept policy.
+    /// tables, never chains on other hooks or with an accept policy — and
+    /// stops naming a table once it accepts the TAPs (the runbook's ufw /
+    /// `DOCKER-USER` fix, which leaves the policy at `drop`).
     #[tokio::test]
-    async fn foreign_forward_drops_name_ufw_and_docker_not_our_tables() {
-        let listing = r#"{"nftables": [
-          {"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}},
-          {"chain": {"family": "ip", "table": "filter", "name": "INPUT", "handle": 1, "type": "filter", "hook": "input", "prio": 0, "policy": "drop"}},
-          {"chain": {"family": "ip", "table": "filter", "name": "FORWARD", "handle": 2, "type": "filter", "hook": "forward", "prio": 0, "policy": "drop"}},
-          {"chain": {"family": "ip", "table": "filter", "name": "ufw-before-forward", "handle": 9}},
-          {"chain": {"family": "ip", "table": "filter", "name": "DOCKER-USER", "handle": 12}},
-          {"chain": {"family": "inet", "table": "proof_vm_pfc0", "name": "forward", "handle": 30, "type": "filter", "hook": "forward", "prio": 0, "policy": "accept"}},
-          {"chain": {"family": "inet", "table": "proof_vm_pfc0", "name": "postrouting", "handle": 31, "type": "nat", "hook": "postrouting", "prio": 100, "policy": "accept"}},
-          {"chain": {"family": "ip6", "table": "filter", "name": "FORWARD", "handle": 40, "type": "filter", "hook": "forward", "prio": 0, "policy": "drop"}},
-          {"chain": {"family": "inet", "table": "firewalld", "name": "filter_FORWARD", "handle": 50, "type": "filter", "hook": "forward", "prio": 10, "policy": "accept"}}
-        ]}"#;
-        let drops = NetPlan::foreign_forward_drops(&NftListing(listing))
+    async fn foreign_forward_drops_name_ufw_and_docker_until_the_taps_are_accepted() {
+        let before = NetPlan::foreign_forward_drops(&NftListing(ruleset("")))
             .await
             .expect("parsed");
-        assert_eq!(drops, ["ip filter FORWARD", "ip6 filter FORWARD"]);
-        let clean =
-            NetPlan::foreign_forward_drops(&NftListing(r#"{"nftables": [{"metainfo": {}}]}"#))
-                .await
-                .expect("parsed");
+        assert_eq!(before, ["ip filter FORWARD", "ip6 filter FORWARD"]);
+
+        // The ufw fix as iptables-nft renders `-A ufw-before-forward -i pfc+ -j ACCEPT`
+        // (+ the return path): the ip table is handled, ip6 still is not.
+        let ufw_fix = r#",
+          {"rule": {"family": "ip", "table": "filter", "chain": "ufw-before-forward", "handle": 60, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "pfc*"}}, {"counter": {"packets": 0, "bytes": 0}}, {"accept": null}]}},
+          {"rule": {"family": "ip", "table": "filter", "chain": "ufw-before-forward", "handle": 61, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "oifname"}}, "right": "pfc*"}}, {"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": ["related", "established"]}}, {"counter": {"packets": 0, "bytes": 0}}, {"accept": null}]}}"#;
+        let after_ufw = NetPlan::foreign_forward_drops(&NftListing(ruleset(ufw_fix)))
+            .await
+            .expect("parsed");
+        assert_eq!(after_ufw, ["ip6 filter FORWARD"], "ip filter handled");
+
+        // The Docker fix in DOCKER-USER, spelled as a native set of TAP names.
+        let docker_fix = r#",
+          {"rule": {"family": "ip", "table": "filter", "chain": "DOCKER-USER", "handle": 70, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": {"set": ["pfc0", "pfc1"]}}}, {"accept": null}]}}"#;
+        let after_docker = NetPlan::foreign_forward_drops(&NftListing(ruleset(docker_fix)))
+            .await
+            .expect("parsed");
+        assert_eq!(after_docker, ["ip6 filter FORWARD"]);
+
+        // Not fixes: an oifname-only rule, a TAP match that drops / returns,
+        // an accept for another interface. An accept in the ip6 table fixes
+        // ip6 only.
+        let not_fixes = r#",
+          {"rule": {"family": "ip", "table": "filter", "chain": "DOCKER-USER", "handle": 80, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "oifname"}}, "right": "pfc*"}}, {"accept": null}]}},
+          {"rule": {"family": "ip", "table": "filter", "chain": "DOCKER-USER", "handle": 81, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "pfc*"}}, {"drop": null}]}},
+          {"rule": {"family": "ip", "table": "filter", "chain": "DOCKER-USER", "handle": 82, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "pfc*"}}, {"return": null}]}},
+          {"rule": {"family": "ip", "table": "filter", "chain": "DOCKER-USER", "handle": 83, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "docker0"}}, {"accept": null}]}},
+          {"rule": {"family": "ip6", "table": "filter", "chain": "FORWARD", "handle": 84, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "pfc*"}}, {"accept": null}]}}"#;
+        let still = NetPlan::foreign_forward_drops(&NftListing(ruleset(not_fixes)))
+            .await
+            .expect("parsed");
+        assert_eq!(
+            still,
+            ["ip filter FORWARD"],
+            "ip6 is fixed by its own rule, ip is not"
+        );
+
+        let clean = NetPlan::foreign_forward_drops(&NftListing(
+            r#"{"nftables": [{"metainfo": {}}]}"#.to_owned(),
+        ))
+        .await
+        .expect("parsed");
         assert!(clean.is_empty());
-        let err = NetPlan::foreign_forward_drops(&NftListing("not json"))
+        let err = NetPlan::foreign_forward_drops(&NftListing("not json".to_owned()))
             .await
             .expect_err("garbage");
-        assert!(err.to_string().contains("nft -j list chains"), "{err}");
+        assert!(err.to_string().contains("nft -j list ruleset"), "{err}");
         // The recording shell (CI) answers an empty stdout: an error to log,
         // never a boot failure — `bring_up` ignores it.
         assert!(NetPlan::foreign_forward_drops(&RecordingShell::default())

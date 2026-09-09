@@ -93,7 +93,7 @@ PROOF_VM_AGENT_NET_BASE=172.16.0.0
 # only — resolve hostnames yourself. The sister guest never has a NIC. On the
 # colocated droplet Docker's FORWARD policy is DROP (ufw's too, on prod): the
 # pfc+ TAPs must be accepted in that chain once (runbook § Egress) or the RLM
-# VM reaches nothing — the agent warns `host forward chains drop by default`.
+# VM reaches nothing — the agent logs an advisory `accept no pfc* tap` until then.
 PROOF_VM_AGENT_EGRESS_ALLOW=REPLACE_WITH_JUDGE_ORIGIN_IP/32:443,REPLACE_WITH_ARTEFACT_HOST_IP/32:443,REPLACE_WITH_RESOLVER_IP/32:53/udp
 
 # Where `retain` teardowns move a topic's jail (scratch, console, config).

@@ -445,8 +445,9 @@ Follow § Host prerequisites and § Install with
 4. `PROOF_VM_AGENT_EGRESS_ALLOW`: the judge `InferenceOffer` origin, the
    artefact hosts miners use, a resolver — IPv4 CIDRs, nothing else. On a
    host with ufw or Docker also accept the TAPs in their forward chain
-   (§ Egress) — the agent warns `host forward chains drop by default` at
-   every VM boot until you do, and the RLM VM reaches nothing before that.
+   (§ Egress) — the agent logs an advisory `accept no pfc* tap` at every VM
+   boot until a rule accepting the TAPs exists there, and the RLM VM reaches
+   nothing before that.
 5. `systemctl enable --now proof-vm-orchestrator`; the boot log shows
    `firecracker + jailer + /dev/kvm present; agent ready`,
    `bearer token file present (contents not logged)` and `listening (https);
@@ -517,17 +518,24 @@ After each row `docker compose logs proof-challenge` must show no
 
 ### 5. Happy path (one real run, real artefact)
 
-The live run is judged on **bytes**: the RLM VM fetches `artifact_uri`,
-tars the tree, and the KVM host re-hashes that tar against the submission's
-`artifact_digest` before it boots a sister — then checks it *is* an artefact
-(an uncompressed tar with at least one byte of file content). So the probe
-needs a real recipe, served where the RLM VM can reach it. A random digest
-can never pass this path honestly; the staging happy path that once went
-green matched the digest of an **empty** tree because the RLM VM could not
-reach the artefact host and its guest agent substituted an empty artefact.
-That stub is staging history, not a path: the CP now answers 400 to a digest
-of nothing, the host refuses a content-less tar by name, and the harness
-refuses to start a live run without the real digest.
+The live run is judged on **bytes** — one identity, end to end
+(`proof_vm_proto::tar::verify_artifact`): `artifact_digest` is the sha256 of
+the **file served at `artifact_uri`**, an uncompressed tar of the recipe
+tree. The RLM VM fetches that file, verifies the bytes *as received* against
+the job's digest, inspects a copy, and forwards **those same bytes** to the
+host; the host runs the same check before it boots a sister (digest, then
+"is an artefact": uncompressed tar with at least one byte of file content);
+the sister unpacks the same bytes. Nobody re-tars: tar metadata and member
+order change under re-encoding even when every file is identical, so a
+re-tarred tree hashes differently and is refused (`artifact_tar hashes to …:
+the guest must forward the bytes it fetched from artifact_uri verbatim`).
+So the probe needs a real recipe file, served where the RLM VM can reach it.
+A random digest can never pass this path honestly; the staging happy path
+that once went green matched the digest of an **empty** tree because the RLM
+VM could not reach the artefact host and its guest agent substituted an empty
+artefact. That stub is staging history, not a path: the CP now answers 400
+to a digest of nothing, the host refuses a content-less tar by name, and the
+harness refuses to start a live run without the real digest.
 
 1. Build the recipe and hash it — the bytes the sister will unpack, as an
    **uncompressed** tar:
@@ -536,6 +544,10 @@ refuses to start a live run without the real digest.
    tar -cf recipe.tar -C <dir> recipe        # run.sh + code, no gzip
    sha256sum recipe.tar                      # this is artifact_digest; never type it by hand
    ```
+
+   The digest is of **this file**, not of the tree: re-running `tar` later
+   (other mtime, other order) makes a different file with a different
+   digest. Keep the file you hashed and serve that one.
 
 2. Serve exactly that file at an `https://` (or `http://`) URL the RLM VM
    can reach: an object-store URL, or a web server on an address the VM
@@ -571,7 +583,7 @@ Evidence to collect, in order:
 | Step | Where | Must show |
 |------|-------|-----------|
 | artefact reachable from the VM | agent journal | no `sister request refused: …` line (`artifact_tar carries no file content`, `is gzip-compressed`, `hashes to …`, `names artifact_digest …`); a guest that could not fetch must answer the job with `Failed` (the CP logs the error, 503, no row) — never a substitute tree |
-| topic VM created (first job) | CP log · agent journal | `topic vm created` · `topic vm booted`, `rlm guest ready`, `owner key material staged` when a key dir is set; **no** `host forward chains drop by default` warning (§ Egress) |
+| topic VM created (first job) | CP log · agent journal | `topic vm created` · `topic vm booted`, `rlm guest ready`, `owner key material staged` when a key dir is set; **no** `accept no pfc* tap` advisory for this boot (§ Egress) |
 | inspection (`Inspect` job, no miner code, no sister) | agent journal | the job, no `sister guest` line |
 | paid run (`Evaluate`) in the sister | agent journal | `sister guest booting (no network)` → `sister guest run attested` with `sandboxed=true` and the guest's `flops_used` |
 | evidence bound to the job | agent + CP | no `evidence_mismatch` (agent 502) and no `orchestrator evidence is not this job's` (CP): the attestation named this job's topic / submission / artefact |
@@ -604,8 +616,8 @@ dates and the exact commands:
       `flops_used` on the row and `sandboxed: true` in `report.json`,
       with the row's `artifact_digest` = `sha256sum` of the served
       `recipe.tar` (never a random or empty digest, never a guest that
-      substituted bytes); no `host forward chains drop by default` warning
-      in the agent journal for that VM.
+      substituted bytes, never a re-tarred tree); no `accept no pfc* tap`
+      advisory in the agent journal for that VM's boot.
 - [ ] topic close → VM destroyed, host clean.
 - [ ] `GET /v1/status` and `GET /v1/proof/topics` still leak nothing
       (`cp` checks both).
@@ -690,12 +702,16 @@ fetch ("guest cannot reach the host HTTP"): the nftables `FORWARD` drop, and
 a server bound to an address the VM never sees (a container's netns,
 loopback).
 
-The agent tells you at every VM boot: `host forward chains drop by default:
-guest egress (judge, artefact host) is blocked until the TAPs are accepted
-there` with `chains = ["ip filter FORWARD", …]` (it lists `nft -j list
-chains` and names foreign forward chains with `policy drop`). Accept the TAPs
-in those chains once per host — the allowlist table still drops everything
-the list does not name, so this opens nothing beyond it:
+The agent tells you at every VM boot, as an **advisory** warning:
+`advisory: host forward chains drop by default and accept no pfc* tap: guest
+egress (judge, artefact host) is blocked until an iifname "pfc*" … accept
+exists in those tables` with `chains = ["ip filter FORWARD", …]`. It reads
+`nft -j list ruleset`: a foreign forward chain with `policy drop` is named
+**unless its table already has a rule accepting `iifname` `pfc*` / `pfc+` /
+`pfc<n>`** — which is exactly what the fixes below add (the policy stays
+`drop`; that is fine). Accept the TAPs in those chains once per host — the
+allowlist table still drops everything the list does not name, so this opens
+nothing beyond it:
 
 ```bash
 # ufw: /etc/ufw/before.rules, inside the *filter section, before COMMIT
@@ -709,25 +725,35 @@ iptables -I DOCKER-USER -i pfc+ -j ACCEPT
 iptables -I DOCKER-USER -o pfc+ -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 ```
 
-Then verify from inside the path the guest takes, not from the host:
+Then check the rules landed where the agent looks, and that the advisory is
+gone on the **next** VM boot (it is evaluated per boot, so an old line in the
+journal from before the fix is not a fault):
 
 ```bash
-nft -j list chains | python3 -c 'import json,sys; [print(c["chain"]["family"],c["chain"]["table"],c["chain"]["name"],c["chain"].get("policy")) for c in json.load(sys.stdin)["nftables"] if "chain" in c and c["chain"].get("hook")=="forward"]'
-journalctl -u proof-vm-orchestrator -n 200 | grep -c 'host forward chains drop by default'   # 0 after the fix, on a fresh VM boot
+nft list ruleset | grep -E 'iifname "pfc\*?" .*accept'      # one line per table you fixed (iptables-nft renders -i pfc+ as "pfc*")
+./deploy/scripts/proof-vm-wire-check.sh boot-probe          # boots one VM …
+journalctl -u proof-vm-orchestrator --since '-5 min' | grep -c 'accept no pfc\* tap'   # … 0 after the fix
 ```
+
+The advisory is a heuristic on the rules, not proof of connectivity: the
+proof is § 5 — the RLM VM fetching the artefact and the sister booting.
 
 Serve artefacts on an address the VM routes to and the allowlist names
 (object store, or the host's VPC / public address with `<ip>/32:443` in
 `PROOF_VM_AGENT_EGRESS_ALLOW`); a web server on the host's loopback or inside
 a container's network namespace is unreachable from the VM by construction.
 
-**No fetch fallback, ever.** A guest whose artefact fetch fails must answer
-its job with `RlmToHost::Failed` (the CP logs it and answers 503 with no
-row). The staging RLM image used to substitute an empty tree instead, and
-the happy path matched that empty-file digest; that behaviour is
-**staging-only history and forbidden in the production image**. It is also
-no longer able to pass: the CP answers 400 to a digest of nothing, the host
-refuses a content-less / compressed / non-tar `artifact_tar` before any
+**No fetch fallback, no re-tar, ever.** A guest whose artefact fetch fails
+or does not verify (`proof_vm_proto::tar::verify_artifact` on the bytes as
+received, against the job's `artifact_digest`) must answer its job with
+`RlmToHost::Failed` (the CP logs it and answers 503 with no row); a guest
+that fetched must forward **the fetched bytes verbatim** as `artifact_tar`
+— never a tar it rebuilt from the extracted tree, which hashes differently.
+The staging RLM image used to substitute an empty tree instead, and the
+happy path matched that empty-file digest; that behaviour is **staging-only
+history and forbidden in the production image**. It is also no longer able
+to pass: the CP answers 400 to a digest of nothing, the host refuses a
+content-less / compressed / non-tar / mis-hashed `artifact_tar` before any
 sister jail, and the harness will not start a live run without the real
 digest of the real file.
 
@@ -745,14 +771,17 @@ digest of the real file.
   its TAP only to `PROOF_VM_AGENT_EGRESS_ALLOW`, established replies back,
   masquerade out the uplink, drop the rest. Empty list = no egress. The
   sister guest has **no network interface**; the artefact arrives over vsock.
-- **The artefact is bytes, never a stub.** Before a sister jail is built the
-  host re-hashes `artifact_tar` against the paid job's digest **and** walks
-  it: an uncompressed tar with at least one byte of file content
-  (`proof_vm_proto::tar`, the guest contract crate). gzip, non-tar bytes, an empty archive, or a
-  tree of empty files are refused by name — a digest that matches an empty
-  tree is a guest whose fetch failed, not a miner's work. The CP refuses the
-  digest of nothing (sha256 of zero bytes / of an empty tar) at submit, 400,
-  no row.
+- **The artefact is the served file's bytes, never a stub, never a re-tar.**
+  `artifact_digest` = sha256 of the file at `artifact_uri`. The guest runs
+  `proof_vm_proto::tar::verify_artifact` on what it fetched and forwards
+  those bytes verbatim; before a sister jail is built the host runs the same
+  function on `artifact_tar`: uncompressed tar with at least one byte of
+  file content, hashing to the paid digest. gzip, non-tar bytes, an empty
+  archive, a tree of empty files, or a re-encoded tar are refused by name —
+  a digest that matches an empty tree is a guest whose fetch failed, not a
+  miner's work; a tar that does not hash is not the file the miner served.
+  The CP refuses the digest of nothing (sha256 of zero bytes / of an empty
+  tar) at submit, 400, no row.
 - **Hard `topic_id ↔ VM` bind.** Agent: every job / teardown names the topic
   twice (envelope + job) and both must match the VM's. Client: a job for
   another topic never leaves the process; every echo is checked; a created VM

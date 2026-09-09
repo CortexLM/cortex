@@ -1,22 +1,37 @@
-//! Shape check of the artefact tarball a sister is asked to run
-//! ([`crate::guest::SisterRequest::artifact_tar`]).
+//! Artefact identity on the topic-VM path
+//! ([`crate::guest::SisterRequest::artifact_tar`]): **the bytes served at
+//! `artifact_uri`, verbatim**, hashed with SHA-256.
 //!
-//! The RLM guest fetches the miner's artefact from `artifact_uri`, tars the
-//! tree, and ships the bytes over vsock. The host re-hashes them against the
-//! paid job's digest — but a digest match alone does not say the bytes are a
-//! miner's work: a guest whose fetch failed and that fell back to an empty
-//! tree hashes just as consistently (staging matched exactly such an
-//! empty-file digest when the RLM VM could not reach the artefact host). So
-//! before any jail is built the host also walks the tar with
-//! [`require_content`]: it must be an **uncompressed** ustar / GNU / pax
-//! archive whose regular files carry at least one byte. Anything else —
-//! gzip, not a tar, an empty archive, a tree of empty files — is refused
-//! with a reason, and the run comes back without a sister attestation (the
-//! control plane then answers 503 for a `firecracker_required` topic;
-//! nothing is scored). Guest images implement this contract: never
-//! substitute bytes when the fetch fails — answer the job `Failed`.
+//! One identity, three places, one function — [`verify_artifact`]:
+//!
+//! 1. **Miner / submit.** `artifact_digest` is the SHA-256 of the exact file
+//!    `artifact_uri` serves: an **uncompressed** ustar / GNU / pax tar of
+//!    the recipe tree with at least one byte of file content
+//!    (`tar -cf recipe.tar recipe/ && sha256sum recipe.tar`).
+//! 2. **RLM guest.** Fetches `artifact_uri`, runs [`verify_artifact`] on
+//!    the bytes *as received* against the job's `artifact_digest`, inspects
+//!    a copy of the tree, and forwards **those same bytes** as
+//!    `artifact_tar`. It never re-tars: tar metadata and member order change
+//!    under re-encoding even when every file is identical, so a re-tarred
+//!    tree hashes differently and the host refuses it. A fetch that fails or
+//!    does not verify is a failed job (`RlmToHost::Failed`) — never a
+//!    substitute archive.
+//! 3. **KVM host.** Runs the same [`verify_artifact`] on `artifact_tar`
+//!    against the paid job's digest before any sister jail is built; the
+//!    sister unpacks the same bytes.
+//!
+//! A digest match alone does not say the bytes are a miner's work: a guest
+//! whose fetch failed and that fell back to an empty tree hashes just as
+//! consistently (staging matched exactly such an empty-file digest when the
+//! RLM VM could not reach the artefact host). So [`require_content`] also
+//! walks the tar: gzip, not a tar, an empty archive, or a tree of empty
+//! files is refused with a reason, and the run comes back without a sister
+//! attestation (the control plane then answers 503 for a
+//! `firecracker_required` topic; nothing is scored).
 
 use std::fmt;
+
+use sha2::{Digest, Sha256};
 
 /// 512-byte tar block.
 const BLOCK: usize = 512;
@@ -30,6 +45,14 @@ pub enum TarError {
     Malformed(&'static str),
     /// A well-formed archive whose regular files carry zero bytes.
     NoContent,
+    /// The bytes do not hash to the digest they are presented under: the
+    /// archive was re-encoded (re-tarred) or is not the file the miner served.
+    Digest {
+        /// SHA-256 hex of the bytes as received.
+        got: String,
+        /// The digest the paid job names.
+        want: String,
+    },
 }
 
 impl fmt::Display for TarError {
@@ -43,11 +66,46 @@ impl fmt::Display for TarError {
                 "artifact_tar carries no file content: an empty tree is not a miner artefact \
                  (a guest that substitutes bytes when its fetch fails is refused here)",
             ),
+            Self::Digest { got, want } => write!(
+                f,
+                "artifact_tar hashes to {got}, request says {want}: the guest must forward the bytes \
+                 it fetched from artifact_uri verbatim (a re-tarred tree never matches), and the miner's \
+                 artifact_digest must be the sha256 of the served file"
+            ),
         }
     }
 }
 
 impl std::error::Error for TarError {}
+
+/// The artefact identity check every side runs on the same bytes: an
+/// uncompressed tar with file content whose SHA-256 is `artifact_digest`
+/// (hex, case-insensitive, whitespace-trimmed). Returns the bytes of file
+/// content the archive carries.
+///
+/// The RLM guest calls this on what it fetched from `artifact_uri` before
+/// inspecting or forwarding anything; the KVM host calls it on
+/// `SisterRequest::artifact_tar` before building a sister jail. Because the
+/// guest forwards the fetched bytes verbatim, both calls see the same bytes
+/// and the same digest — that is the contract.
+///
+/// # Errors
+///
+/// [`TarError::Gzip`] / [`TarError::Malformed`] / [`TarError::NoContent`]
+/// for the shape, [`TarError::Digest`] when the bytes are not the file the
+/// digest names.
+pub fn verify_artifact(bytes: &[u8], artifact_digest: &str) -> Result<u64, TarError> {
+    let content = require_content(bytes)?;
+    let got = hex::encode(Sha256::digest(bytes));
+    let want = artifact_digest.trim();
+    if !got.eq_ignore_ascii_case(want) {
+        return Err(TarError::Digest {
+            got,
+            want: want.to_owned(),
+        });
+    }
+    Ok(content)
+}
 
 /// Octal ASCII field (NUL / space terminated), or GNU base-256 when the
 /// first byte has its high bit set.
@@ -253,6 +311,76 @@ mod tests {
         // Trailing end-of-archive blocks may be absent (a bare member list).
         let bare = member("a", b'0', b"abc");
         assert_eq!(require_content(&bare), Ok(3));
+    }
+
+    /// The identity is the served file's bytes. The guest that forwards
+    /// them verbatim verifies; a guest that re-tars the same tree — other
+    /// member order, other mtime — produces different bytes and is refused
+    /// by name, as is any digest that is not the sha256 of the bytes.
+    #[test]
+    fn identity_is_the_served_bytes_and_a_retar_never_matches() {
+        let served = archive(&[
+            member("recipe/", b'5', b""),
+            member("recipe/run.sh", b'0', b"#!/bin/sh\necho hi\n"),
+            member("recipe/model.bin", b'0', &[7u8; 700]),
+        ]);
+        let digest = hex::encode(Sha256::digest(&served));
+        assert_eq!(
+            verify_artifact(&served, &digest),
+            Ok(718),
+            "verbatim bytes verify"
+        );
+        assert_eq!(
+            verify_artifact(&served, &format!(" {} ", digest.to_ascii_uppercase())),
+            Ok(718),
+            "hex case and whitespace do not matter"
+        );
+        // Same files, re-tarred: members in another order …
+        let reordered = archive(&[
+            member("recipe/", b'5', b""),
+            member("recipe/model.bin", b'0', &[7u8; 700]),
+            member("recipe/run.sh", b'0', b"#!/bin/sh\necho hi\n"),
+        ]);
+        // … or the same order with another mtime on one header.
+        let mut restamped = served.clone();
+        restamped[136..148].copy_from_slice(b"14700000000\0");
+        let sum: u64 = restamped[..512]
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                if (148..156).contains(&i) {
+                    u64::from(b' ')
+                } else {
+                    u64::from(*b)
+                }
+            })
+            .sum();
+        restamped[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        for (label, retar) in [("reordered", reordered), ("restamped", restamped)] {
+            assert_eq!(
+                regular_file_bytes(&retar),
+                Ok(718),
+                "{label}: identical file content"
+            );
+            let err = verify_artifact(&retar, &digest).expect_err(label);
+            assert!(
+                matches!(&err, TarError::Digest { want, .. } if *want == digest),
+                "{label}: {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("hashes to") && msg.contains("verbatim"),
+                "{msg}"
+            );
+            assert!(msg.contains("re-tarred tree never matches"), "{msg}");
+        }
+        // Shape errors come first: a hollow archive under a matching digest
+        // is the fetch-fallback stub, not a digest problem.
+        let hollow = empty_archive();
+        assert_eq!(
+            verify_artifact(&hollow, &hex::encode(Sha256::digest(&hollow))),
+            Err(TarError::NoContent)
+        );
     }
 
     #[test]

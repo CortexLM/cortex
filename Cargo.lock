@@ -3868,9 +3868,11 @@ name = "proof-vm-proto"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "hex",
  "proof-rlm",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.19",
  "tokio",
 ]

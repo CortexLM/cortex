@@ -314,17 +314,20 @@ impl FirecrackerHypervisor {
         net.up(shell, cfg.jail_uid).await?;
         let rules = cfg.jail_dir(&vm_id).join("net.nft").display().to_string();
         net.load_rules(shell, &rules).await?;
-        // Diagnostic: a ufw / Docker forward chain that drops by default
+        // Advisory: a ufw / Docker forward chain that drops by default
         // silently kills the guest's egress (judge origin, artefact host) no
         // matter what the per-VM table allows. Name it so the operator adds
-        // the TAP accept there (runbook § Egress); never fail the boot on it.
+        // the TAP accept there (runbook § Egress); the check reads the rules,
+        // so it goes quiet once that accept exists. Never fail the boot on it.
         match NetPlan::foreign_forward_drops(shell).await {
             Ok(drops) if !drops.is_empty() => tracing::warn!(
                 %vm_id,
                 tap = %net.tap,
                 chains = ?drops,
-                "host forward chains drop by default: guest egress (judge, artefact host) is blocked until \
-                 the TAPs are accepted there (see runbook: proof-vm-orchestrator.md § Egress)"
+                "advisory: host forward chains drop by default and accept no pfc* tap: guest egress \
+                 (judge, artefact host) is blocked until an `iifname \"pfc*\" … accept` exists in those \
+                 tables (runbook: proof-vm-orchestrator.md § Egress); this line clears on the next vm boot \
+                 once it does"
             ),
             Ok(_) => {}
             Err(e) => tracing::debug!(%vm_id, "forward-policy preflight skipped: {e}"),
