@@ -375,6 +375,36 @@ check_env() {
   vcpus="$(cfg PROOF_RLM_VM_VCPUS)"; mem="$(cfg PROOF_RLM_VM_MEM_MIB)"
   [[ -z "$vcpus" || "$vcpus" == "4" ]] || warn "PROOF_RLM_VM_VCPUS=$vcpus deviates from the locked 4"
   [[ -z "$mem" || "$mem" == "8192" ]] || warn "PROOF_RLM_VM_MEM_MIB=$mem deviates from the locked 8192"
+
+  # Experiment VMs (one dedicated VM per paid job for in-guest runner topics):
+  # ceilings are integers, the lock is 16 vCPU / 32768 MiB (default, ceiling,
+  # and hard maximum — a ceiling above it does not boot; lower is allowed),
+  # disk >= 16 GiB (32 by default), and the image pin is a real digest when
+  # set (unset = the RLM image).
+  local exp_disk exp_img
+  exp_disk="$(cfg PROOF_EXPERIMENT_VM_DISK_MIB)"; exp_img="$(cfg PROOF_EXPERIMENT_VM_IMAGE_DIGEST)"
+  local knob val
+  for knob in PROOF_EXPERIMENT_VM_VCPUS PROOF_EXPERIMENT_VM_MEM_MIB PROOF_EXPERIMENT_VM_MAX_VCPUS PROOF_EXPERIMENT_VM_MAX_MEM_MIB PROOF_EXPERIMENT_VM_DISK_MIB PROOF_EXPERIMENT_VM_MAX_DISK_MIB; do
+    val="$(cfg "$knob")"
+    [[ -z "$val" || "$val" =~ ^[0-9]+$ ]] || fail "$knob=$val is not an integer (the CP refuses to boot on it)"
+  done
+  for knob in PROOF_EXPERIMENT_VM_VCPUS PROOF_EXPERIMENT_VM_MAX_VCPUS; do
+    val="$(cfg "$knob")"
+    [[ -z "$val" || ! "$val" =~ ^[0-9]+$ || "$val" -le 16 ]] || fail "$knob=$val is above the 16 vCPU lock (the CP refuses to boot on it; the lock is not a knob — lower it, and keep the KVM host's PROOF_VM_AGENT_EXPERIMENT_MAX_VCPUS <= 16 too)"
+  done
+  for knob in PROOF_EXPERIMENT_VM_MEM_MIB PROOF_EXPERIMENT_VM_MAX_MEM_MIB; do
+    val="$(cfg "$knob")"
+    [[ -z "$val" || ! "$val" =~ ^[0-9]+$ || "$val" -le 32768 ]] || fail "$knob=$val is above the 32768 MiB lock (the CP refuses to boot on it; the lock is not a knob — lower it, and keep the KVM host's PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB <= 32768 too)"
+  done
+  [[ -z "$exp_disk" || ! "$exp_disk" =~ ^[0-9]+$ || "$exp_disk" -ge 16384 ]] || fail "PROOF_EXPERIMENT_VM_DISK_MIB=$exp_disk is under the 16 GiB writable-disk floor (the CP refuses to boot on it)"
+  [[ -z "$exp_disk" || ! "$exp_disk" =~ ^[0-9]+$ || "$exp_disk" -lt 16384 || "$exp_disk" -ge 32768 ]] || warn "PROOF_EXPERIMENT_VM_DISK_MIB=$exp_disk is under the preferred 32 GiB (container image pulls land there); fine when the metal has no more"
+  if [[ -n "$exp_img" ]]; then
+    if [[ "$exp_img" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+      pass "PROOF_EXPERIMENT_VM_IMAGE_DIGEST is sha256:<64 hex> (experiment VMs boot their own image; stage it on the KVM host)"
+    else
+      fail "PROOF_EXPERIMENT_VM_IMAGE_DIGEST='$exp_img' is not sha256:<64 hex> (take it from sha256sum of the baked rootfs; never invent one)"
+    fi
+  fi
   if [[ "$(cfg PROOF_FORCE_SIM)" =~ ^(1|true|TRUE|yes)$ ]]; then
     fail "PROOF_FORCE_SIM is on: sim never hosts staging/prod scoring (assert-compose-matrix.sh refuses it too)"
   fi

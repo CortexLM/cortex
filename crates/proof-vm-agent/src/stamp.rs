@@ -61,6 +61,7 @@ mod tests {
     fn sister(sandboxed: bool, flops: Option<u64>) -> SisterAttestation {
         let req = request();
         SisterAttestation {
+            mode: proof_vm_proto::GuestMode::Sister,
             sister_vm_id: "topic-a-0001-s1".into(),
             image_digest: format!("sha256:{}", "dd".repeat(32)),
             topic_id: req.topic_id,

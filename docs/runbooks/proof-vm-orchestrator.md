@@ -58,6 +58,7 @@ Locked by design (do not move any of it):
 | RLM VM 4 vCPU / 8192 MiB | `proof_vm_fc::DEFAULT_RLM_VCPUS` / `DEFAULT_RLM_MEM_MIB` |
 | Sister sized by the host / topic deadline only, never by the RLM | `PROOF_VM_AGENT_SISTER_VCPUS` / `_MEM_MIB`; the RLM's request carries no size |
 | `retain` default **destroy** on topic close | `TopicVmSpec::for_topic` → `RetainPolicy::Destroy` |
+| **One experiment VM per paid job** for topics whose signed `constraints.params` select an in-guest runner (`baseline_runner` / `in_guest_benchmark_runner` + `experiment_pack_digest`): created for the job, sized under the caps (lock 16 vCPU / 32 GiB, disk ≥ 16 GiB), pack staged over vsock, attested `experiment_vm`, destroyed after; parallel experiments are parallel VMs | `proof_rlm::run_paid_job`, `proof-fc-experiment`, agent capacity `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS`; runbook [`proof-experiment-vms.md`](proof-experiment-vms.md) |
 | Hard `topic_id ↔ VM` bind | agent: request topic **and** job topic must equal the VM's (409 `topic_mismatch`); client refuses a job for another topic before any request and checks every echo |
 | Artefact identity = the file served at `artifact_uri`, verbatim (`artifact_digest` is its sha256); the guest forwards what it fetched, never a re-tar or a substitute tree; a failed / non-verifying fetch is `RlmToHost::Failed` (503, no row) | `proof_vm_proto::tar::verify_artifact` run by the guest on the fetch and by the host in `sister::check_request` before any sister jail (shape, then digest — gzip / non-tar / content-less / mis-hashed refused by name); the CP refuses the digest of nothing at submit (400) |
 | Zero live Firecracker in CI | every test uses `FakeHypervisor` / `RecordingShell`; `FirecrackerHypervisor::ready()` refuses without `firecracker`, `jailer`, `/dev/kvm` and the test asserts nothing was spawned |
@@ -86,13 +87,22 @@ file `sha256-<hex>.ext4`. **Never write a digest you did not compute from the
 file you staged.** An unpinned or mis-pinned image never boots; that is the
 intended failure.
 
-Guest images are **not** built by this repository. The RLM image must ship a
-guest agent listening on vsock port `5000` and speaking `HostToRlm` /
+Guest images are operator artefacts, never committed. The RLM image must ship
+a guest agent listening on vsock port `5000` and speaking `HostToRlm` /
 `RlmToHost`; the sister image must ship one listening on port `5002` speaking
 `HostToMiner` / `MinerToHost` (both in `crates/proof-vm-proto/src/guest.rs`;
 frames are 4-byte big-endian length + JSON, `api_version: 1`). The RLM guest
 asks for a sister by connecting to host port `5001` with a `SisterRequest`
-carrying the artefact tarball it already fetched and inspected.
+carrying the artefact tarball it already fetched and inspected. This
+repository now ships the **generic in-guest agent** (`bins/proof-vm-guest-agent`,
+port `5000`; it runs operator adaptors, never a built-in runner) and a bake
+script for the enlarged rootfs (rootless podman on run-as-owned scratch
+paths; the operator's harness tooling via generic `--extra-pkgs` /
+`--overlay` / `--chroot-hook` — no harness is named in git)
+— [`proof-experiment-vms.md`](proof-experiment-vms.md) § The guest image.
+Experiment packs live in `/var/lib/proof-vm/packs/sha256-<hex>.tar`
+(`PROOF_VM_AGENT_EXPERIMENT_PACK_DIR`), staged files the agent re-hashes
+before every boot.
 
 ## Build
 
@@ -485,7 +495,7 @@ cd /opt/base
 
 | Subcommand | Proves |
 |------------|--------|
-| `env` | `PROOF_VM_ORCHESTRATOR_URL` is `https://`; the bearer file (container path mapped through the compose bind mount, `--path-map`) exists and is non-empty, mode 0400 / uid 65532; `PROOF_RLM_VM_IMAGE_DIGEST` is `sha256:<64 hex>` (empty or a placeholder = FAIL — never invented); the CA file is PEM when set; every custom id is well-formed; the shape is the locked 4 / 8192; `PROOF_FORCE_SIM` is off |
+| `env` | `PROOF_VM_ORCHESTRATOR_URL` is `https://`; the bearer file (container path mapped through the compose bind mount, `--path-map`) exists and is non-empty, mode 0400 / uid 65532; `PROOF_RLM_VM_IMAGE_DIGEST` is `sha256:<64 hex>` (empty or a placeholder = FAIL — never invented); the CA file is PEM when set; every custom id is well-formed; the shape is the locked 4 / 8192; the experiment caps `PROOF_EXPERIMENT_VM_*` are integers (warn above the 16 / 32768 ceiling lock, FAIL under the 16 GiB disk floor) and `PROOF_EXPERIMENT_VM_IMAGE_DIGEST` is a real digest when set; `PROOF_FORCE_SIM` is off |
 | `agent` | `GET /v1/health` with the bearer → `ready: true`, `hypervisor: firecracker`; no bearer → 401; wrong bearer → 401 |
 | `cp` | `/v1/status`: `lium`, `custom_family_wired`, `registered_custom` ⊇ ids, `custom_ready` ⊇ ids (`live_harvest_wired` is logged, Lium-only, never a FAIL), no URL / token / path in the body; `/v1/proof/topics` leaks no holdout; `/v1/proof/executor` readiness; then the admin probe above — `orchestrator: firecracker`, `ready: true`, `agent.ready: true` through the CP's own rustls client |
 | `boot-probe` | the agent boots the **pinned** image for a probe topic, one topic ↔ one VM, a teardown naming another topic is refused, destroy is confirmed, nothing is left for the topic. Opt-in: it boots a real 4 vCPU / 8 GiB RLM VM on the KVM host (up to 10 min, the RLM guest must say hello); no job runs, nothing is spent. Nothing outlives it: Ctrl-C, a lost `201` (timeout, dropped connection), or an unconfirmed teardown all end in a by-topic attach + destroy before the script exits, so a retry on the same probe topic is never blocked by a stranded VM |
@@ -820,4 +830,4 @@ digest of the real file.
 - One sister per paid job; a second `SisterRequest` in the same job is refused.
 - Allowlist entries are IPv4 CIDRs; hostnames must be resolved by the operator (allow the resolver's `:53/udp` if the RLM needs DNS).
 - mTLS between CP and agent is a follow-up; today the bearer file over TLS is the auth.
-- Guest images (RLM, sister) and their vsock agents are built outside this repository against `proof-vm-proto::guest`.
+- Guest images are operator artefacts: the sister image and its agent are built outside this repository against `proof-vm-proto::guest`; the RLM / experiment image is baked with `deploy/guest/bake-rootfs.sh` around `proof-vm-guest-agent`, whose in-guest runs need an operator adaptor and a staged pack ([`proof-experiment-vms.md`](proof-experiment-vms.md) § Limitations: rootless podman not Docker-in-VM, guest kernel features, guest-authored `flops_used`, 160 MiB pack cap, no image booted yet from this change).

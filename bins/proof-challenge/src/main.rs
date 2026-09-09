@@ -30,8 +30,8 @@ use proof_challenge::{
 use proof_eval::{custom_ids_ref, registered_custom, FamilyMux};
 use proof_harvest::{HarvestLimits, LiumProofHarvest};
 use proof_rlm::{
-    RunnerRegistry, TopicVmOrchestrator, UnwiredVmOrchestrator, VmBackedRunner, VmTemplate,
-    RLM_VM_IMAGE_DIGEST_ENV, VM_ORCHESTRATOR_TOKEN_FILE_ENV, VM_ORCHESTRATOR_URL_ENV,
+    ExperimentPolicy, RunnerRegistry, TopicVmOrchestrator, UnwiredVmOrchestrator, VmBackedRunner,
+    VmTemplate, RLM_VM_IMAGE_DIGEST_ENV, VM_ORCHESTRATOR_TOKEN_FILE_ENV, VM_ORCHESTRATOR_URL_ENV,
 };
 use proof_rlm_scorer::{ArtefactStore, RlmScorer};
 use proof_rlm_store::{MemoryRlmStore, PgRlmStore, RlmStore};
@@ -375,6 +375,10 @@ struct TopicVm {
     orchestrator: Arc<dyn TopicVmOrchestrator>,
     /// RLM VM template the runner boots for topics without a VM.
     template: VmTemplate,
+    /// Per-experiment VM policy (`PROOF_EXPERIMENT_VM_*`: ceilings, image)
+    /// for topics whose signed params select an in-guest runner — one
+    /// dedicated VM per paid job, destroyed after it.
+    experiments: ExperimentPolicy,
     /// The env selected the live `FirecrackerOrchestrator` (URL + bearer
     /// file env, https). False = `UnwiredVmOrchestrator`, which refuses
     /// every call.
@@ -400,10 +404,15 @@ fn topic_vm_orchestrator() -> TopicVm {
     match FirecrackerOrchestrator::from_env() {
         Ok(Some(fc)) => {
             let template = fc.template().clone();
+            let experiments = fc.experiments().clone();
             match fc.ready() {
                 Ok(()) => tracing::info!(
                     url = %fc.url(), vcpus = template.vcpus, mem_mib = template.mem_mib,
                     image = %template.image_digest,
+                    experiment_max_vcpus = experiments.ceilings.max_vcpus,
+                    experiment_max_mem_mib = experiments.ceilings.max_mem_mib,
+                    experiment_disk_mib = experiments.ceilings.default_disk_mib,
+                    experiment_image = %experiments.image_for(&template.image_digest),
                     "firecracker topic-vm orchestrator wired (bearer file present, contents not logged)"
                 ),
                 Err(e) => tracing::warn!(
@@ -416,6 +425,7 @@ fn topic_vm_orchestrator() -> TopicVm {
             TopicVm {
                 orchestrator: fc.clone(),
                 template,
+                experiments,
                 live: true,
                 fc: Some(fc),
                 unwired_reason: String::new(),
@@ -444,6 +454,7 @@ impl TopicVm {
         Self {
             orchestrator: Arc::new(UnwiredVmOrchestrator),
             template: VmTemplate::from_env(),
+            experiments: ExperimentPolicy::default(),
             live: false,
             fc: None,
             unwired_reason: reason,
@@ -491,10 +502,10 @@ impl VmOrchestratorProbe for TopicVm {
 
 /// `custom_id → VmBackedRunner` for every id in `PROOF_VM_RUNNER_CUSTOM_IDS`.
 fn runner_registry(vm: &TopicVm) -> RunnerRegistry {
-    let runner = Arc::new(VmBackedRunner::new(
-        vm.orchestrator.clone(),
-        vm.template.clone(),
-    ));
+    let runner = Arc::new(
+        VmBackedRunner::new(vm.orchestrator.clone(), vm.template.clone())
+            .with_experiments(vm.experiments.clone()),
+    );
     let raw = std::env::var(VM_RUNNER_CUSTOM_IDS_ENV).unwrap_or_default();
     registry_for(&raw, &runner)
 }

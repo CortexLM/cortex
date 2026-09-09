@@ -16,11 +16,20 @@
 //! where jailer boots one Firecracker RLM VM per topic and every miner run is
 //! a **sister** Firecracker guest. There is no host-local execution path
 //! anywhere — a missing orchestrator is a 503, not a fallback.
+//!
+//! A topic whose signed `constraints.params` select an **in-guest runner**
+//! (`proof_experiment`: runner id + pinned pack digest, optional size) runs
+//! each paid job in a **dedicated experiment VM** instead — one VM per
+//! experiment, created for the job and destroyed after it, sized under the
+//! operator ceilings ([`run_paid_job`]). Parallel experiments are parallel
+//! VMs, never containers sharing one VM. Nothing here knows what the runner
+//! or the pack are; both are topic data resolved inside the guest.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use proof_canon::is_slug;
+use proof_experiment::{ExperimentBinding, ExperimentError, ExperimentPolicy, ExperimentSpec};
 use proof_task::{ChecklistRule, TopicDocument};
 use serde::{Deserialize, Serialize};
 
@@ -106,10 +115,12 @@ impl VmTemplate {
     }
 }
 
-/// What the orchestrator is asked to create for one topic.
+/// What the orchestrator is asked to create for one topic — its RLM VM, or,
+/// with `experiment` set, a dedicated experiment VM for one paid job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopicVmSpec {
-    /// Topic the VM is attributed to (one topic ↔ its own VM).
+    /// Topic the VM is attributed to (one topic ↔ its own RLM VM; any number
+    /// of experiment VMs, each for one job).
     pub topic_id: String,
     /// Image + sizes.
     pub template: VmTemplate,
@@ -117,6 +128,10 @@ pub struct TopicVmSpec {
     pub sandbox: SandboxPolicy,
     /// What to do with the VM when the topic closes.
     pub retain: RetainPolicy,
+    /// Present iff this is an experiment VM: the runner the guest resolves,
+    /// the pack the host stages, the writable disk. Public data only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment: Option<ExperimentSpec>,
 }
 
 impl TopicVmSpec {
@@ -128,19 +143,38 @@ impl TopicVmSpec {
             template,
             sandbox,
             retain: RetainPolicy::Destroy,
+            experiment: None,
         }
     }
 
-    /// Slug topic id + valid template.
+    /// Spec for one experiment VM of `topic`: always destroyed after its job.
+    #[must_use]
+    pub fn for_experiment(
+        topic_id: &str,
+        template: VmTemplate,
+        sandbox: SandboxPolicy,
+        experiment: ExperimentSpec,
+    ) -> Self {
+        Self {
+            experiment: Some(experiment),
+            ..Self::for_topic(topic_id, template, sandbox)
+        }
+    }
+
+    /// Slug topic id + valid template (+ valid experiment shape).
     ///
     /// # Errors
     ///
-    /// [`VmError::Spec`].
+    /// [`VmError::Spec`] / [`VmError::Experiment`].
     pub fn validate(&self) -> Result<(), VmError> {
         if !is_slug(&self.topic_id) {
             return Err(VmError::Spec("topic_id"));
         }
-        self.template.validate()
+        self.template.validate()?;
+        if let Some(e) = &self.experiment {
+            e.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -262,6 +296,19 @@ pub enum VmError {
     /// The job's output was not the shape the job asked for.
     #[error("topic-vm returned the wrong output for {0}")]
     WrongOutput(&'static str),
+    /// The topic's in-guest experiment binding is malformed or over a ceiling.
+    #[error("experiment vm: {0}")]
+    Experiment(#[from] ExperimentError),
+    /// An experiment VM was not confirmed destroyed after its paid job. The
+    /// job's outcome is withheld: nothing is scored while the VM may still
+    /// hold host capacity.
+    #[error("experiment vm {vm_id} not confirmed destroyed after its job ({reason}); the outcome is withheld, not scored — reconcile the vm on the KVM host")]
+    TeardownUnconfirmed {
+        /// The VM the orchestrator did not confirm gone.
+        vm_id: String,
+        /// What the orchestrator answered (and the job's own failure, if any).
+        reason: String,
+    },
 }
 
 /// Create / attach / run / teardown for topic VMs.
@@ -329,22 +376,138 @@ fn map_vm(e: VmError) -> RunnerError {
     }
 }
 
+impl CustomRunRequest {
+    /// The in-guest experiment binding the topic's signed params carry, if
+    /// the topic selects one (`proof_experiment::PARAM_RUNNER`).
+    ///
+    /// # Errors
+    ///
+    /// [`ExperimentError`] for a half-selected or malformed binding — refused,
+    /// never ignored.
+    pub fn experiment(&self) -> Result<Option<ExperimentBinding>, ExperimentError> {
+        ExperimentBinding::from_params(&self.constraints.params)
+    }
+}
+
+/// Run one paid job (`Baseline` / `Evaluate`) where its topic says it runs.
+///
+/// A topic that selects no in-guest runner runs the job in `topic_vm` as
+/// before. A topic that does gets **one dedicated experiment VM for this
+/// job**: created from `policy` (its image, or the RLM `template`'s; sized
+/// by the topic's ask under the ceilings — an ask over a ceiling is refused,
+/// never clamped), handed the job, then **destroyed** whatever the outcome.
+/// The KVM host stages the pinned pack at boot and attests the run as
+/// `experiment_vm`; the guest resolves the runner id itself. Non-paid jobs
+/// always run in `topic_vm`.
+///
+/// # Errors
+///
+/// [`VmError::Experiment`] for a malformed / over-ceiling binding (before
+/// any VM exists), else whatever the orchestrator returned. The outcome is
+/// returned **only when the orchestrator confirms the VM destroyed**
+/// (`teardown` → `Ok(true)`): an unconfirmed (`Ok(false)`) or failed
+/// teardown is [`VmError::TeardownUnconfirmed`] even for a successful run —
+/// fail-closed, so a result is never scored while its VM may still consume
+/// host capacity. A job that failed *and* leaked its VM names both.
+pub async fn run_paid_job(
+    orchestrator: &dyn TopicVmOrchestrator,
+    policy: &ExperimentPolicy,
+    template: &VmTemplate,
+    topic_vm: &VmHandle,
+    job: VmJob,
+) -> Result<VmJobOutput, VmError> {
+    let request = match &job {
+        VmJob::Baseline { request } | VmJob::Evaluate { request, .. } => request,
+        VmJob::ProposeRules { .. } | VmJob::Inspect { .. } | VmJob::Archive { .. } => {
+            return orchestrator.run(topic_vm, job).await;
+        }
+    };
+    let Some(binding) = request.experiment()? else {
+        return orchestrator.run(topic_vm, job).await;
+    };
+    let shape = policy.ceilings.shape(&binding)?;
+    let spec = TopicVmSpec::for_experiment(
+        &request.topic_id,
+        VmTemplate {
+            image_digest: policy.image_for(&template.image_digest).to_owned(),
+            vcpus: shape.vcpus,
+            mem_mib: shape.mem_mib,
+        },
+        request.sandbox.clone(),
+        ExperimentSpec {
+            runner: binding.runner.clone(),
+            pack: binding.pack.clone(),
+            disk_mib: shape.disk_mib,
+        },
+    );
+    spec.validate()?;
+    let vm = orchestrator.create(&spec).await?;
+    tracing::info!(
+        topic_id = %vm.topic_id, vm_id = %vm.vm_id, runner = %binding.runner,
+        pack = %binding.pack.digest, vcpus = shape.vcpus, mem_mib = shape.mem_mib,
+        disk_mib = shape.disk_mib, "experiment vm created for one paid job"
+    );
+    let outcome = orchestrator.run(&vm, job).await;
+    let destroyed = match orchestrator.teardown(&vm, RetainPolicy::Destroy).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("the orchestrator did not confirm the destroy".to_owned()),
+        Err(e) => Err(format!("teardown failed: {e}")),
+    };
+    match (outcome, destroyed) {
+        (outcome, Ok(())) => {
+            tracing::info!(vm_id = %vm.vm_id, "experiment vm destroyed after its job");
+            outcome
+        }
+        (outcome, Err(teardown)) => {
+            tracing::error!(
+                vm_id = %vm.vm_id, topic_id = %vm.topic_id,
+                "experiment vm not confirmed destroyed; withholding the job outcome: {teardown}"
+            );
+            Err(VmError::TeardownUnconfirmed {
+                vm_id: vm.vm_id.clone(),
+                reason: match outcome {
+                    Ok(_) => teardown,
+                    Err(job) => format!("{teardown}; the job itself failed: {job}"),
+                },
+            })
+        }
+    }
+}
+
 /// The generic runner: every inspect / evaluate is a job inside the topic's
-/// VM. Registering it under a `custom_id` is an operator action; nothing
-/// registers it by default.
+/// VM — or, for a topic whose params select an in-guest runner, inside a
+/// dedicated experiment VM per paid job ([`run_paid_job`]). Registering it
+/// under a `custom_id` is an operator action; nothing registers it by default.
 pub struct VmBackedRunner {
     orchestrator: Arc<dyn TopicVmOrchestrator>,
     template: VmTemplate,
+    experiments: ExperimentPolicy,
 }
 
 impl VmBackedRunner {
     /// Runner over `orchestrator` booting `template` for topics without a VM.
+    /// Experiment VMs follow the default policy until
+    /// [`with_experiments`](Self::with_experiments) sets the operator's.
     #[must_use]
     pub fn new(orchestrator: Arc<dyn TopicVmOrchestrator>, template: VmTemplate) -> Self {
         Self {
             orchestrator,
             template,
+            experiments: ExperimentPolicy::default(),
         }
+    }
+
+    /// Operator policy (ceilings, image) for per-experiment VMs.
+    #[must_use]
+    pub fn with_experiments(mut self, experiments: ExperimentPolicy) -> Self {
+        self.experiments = experiments;
+        self
+    }
+
+    /// The experiment policy in force.
+    #[must_use]
+    pub fn experiments(&self) -> &ExperimentPolicy {
+        &self.experiments
     }
 
     /// The runner an unconfigured host would get: unwired orchestrator,
@@ -411,7 +574,16 @@ impl CustomRunner for VmBackedRunner {
             checklist_digest: spend.checklist_digest().to_owned(),
             rules_version: spend.rules_version(),
         };
-        match self.orchestrator.run(&vm, job).await.map_err(map_vm)? {
+        let output = run_paid_job(
+            self.orchestrator.as_ref(),
+            &self.experiments,
+            &self.template,
+            &vm,
+            job,
+        )
+        .await
+        .map_err(map_vm)?;
+        match output {
             VmJobOutput::Evaluated(out) => {
                 out.report.verify(req)?;
                 Ok(out)
@@ -593,6 +765,274 @@ mod tests {
             let back: VmJobOutput = serde_json::from_str(&json).expect("round trip");
             assert_eq!(back, out);
         }
+    }
+
+    /// A topic whose params select an in-guest runner gets **one experiment
+    /// VM per paid job**: created for the job, sized by the topic's ask under
+    /// the ceilings (silent knobs = the operator defaults), destroyed
+    /// afterwards. The topic's RLM VM stays for inspection and is what
+    /// `attach` returns.
+    #[tokio::test]
+    async fn an_experiment_topic_gets_one_vm_per_paid_job_destroyed_after_it() {
+        use crate::fixtures::experiment_request;
+        let orch = FakeOrchestrator::new(0.8);
+        let runner = VmBackedRunner::new(orch.clone(), pinned_template());
+        let req = experiment_request(Some(8));
+        runner.inspect(&req, &rules()).await.expect("inspect");
+        assert_eq!(orch.created(), 1, "inspection uses the topic vm");
+        assert!(orch.experiments().is_empty());
+        let run = runner
+            .evaluate(&req, &token_for(&req))
+            .await
+            .expect("evaluate");
+        assert!((run.report.primary_value - 0.8).abs() < 1e-12);
+        assert_eq!(orch.created(), 2, "one experiment vm for the paid job");
+        let specs = orch.experiments();
+        assert_eq!(specs.len(), 1);
+        let spec = &specs[0];
+        let exp = spec.experiment.as_ref().expect("experiment spec");
+        assert_eq!(exp.runner, "placeholder_in_guest_runner");
+        assert_eq!(exp.pack.digest, format!("sha256:{}", "ee".repeat(32)));
+        assert_eq!(exp.disk_mib, 32_768, "default writable disk");
+        assert_eq!(spec.template.vcpus, 8, "the topic's ask");
+        assert_eq!(spec.template.mem_mib, 32_768, "silent = the default");
+        assert_eq!(spec.template.image_digest, pinned_template().image_digest);
+        assert_eq!(spec.retain, RetainPolicy::Destroy);
+        let runs = orch.runs();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].0, "vm-0", "inspect on the topic vm");
+        assert_eq!(runs[1].0, "vm-1", "evaluate on the experiment vm");
+        assert!(matches!(runs[1].1, VmJob::Evaluate { .. }));
+        let downs = orch.teardowns();
+        assert_eq!(downs.len(), 1);
+        assert_eq!(downs[0].0.vm_id, "vm-1");
+        assert_eq!(downs[0].1, RetainPolicy::Destroy);
+        let alive = orch.vms();
+        assert_eq!(alive.len(), 1, "only the topic vm survives");
+        assert_eq!(alive[0].vm_id, "vm-0");
+        assert_eq!(
+            orch.attach(&req.topic_id).await.expect("attach"),
+            Some(alive[0].clone()),
+            "attach names the topic vm, never an experiment"
+        );
+        // A second paid job is a second VM: parallel experiments are VMs.
+        runner
+            .evaluate(&req, &token_for(&req))
+            .await
+            .expect("second evaluate");
+        assert_eq!(orch.created(), 3);
+        assert_eq!(orch.teardowns().len(), 2);
+        assert_eq!(orch.vms().len(), 1);
+        // The policy's own image pin wins over the RLM image for experiments.
+        let own = VmBackedRunner::new(orch.clone(), pinned_template()).with_experiments(
+            ExperimentPolicy {
+                image_digest: Some(format!("sha256:{}", "ff".repeat(32))),
+                ..ExperimentPolicy::default()
+            },
+        );
+        own.evaluate(&req, &token_for(&req))
+            .await
+            .expect("evaluate");
+        let last = orch.experiments().pop().expect("spec");
+        assert_eq!(
+            last.template.image_digest,
+            format!("sha256:{}", "ff".repeat(32))
+        );
+        assert_eq!(own.experiments().ceilings.max_vcpus, 16);
+        assert_eq!(own.experiments().ceilings.default_vcpus, 16);
+    }
+
+    /// An ask over the operator ceiling is refused before any VM exists, a
+    /// job that fails inside the experiment VM still destroys it, and a topic
+    /// that selects no runner keeps the topic-VM path untouched.
+    #[tokio::test]
+    async fn experiment_vms_fail_closed_and_are_never_left_behind() {
+        use crate::fixtures::experiment_request;
+        let orch = FakeOrchestrator::new(0.8);
+        let runner = VmBackedRunner::new(orch.clone(), pinned_template());
+        let greedy = experiment_request(Some(32));
+        let err = runner
+            .evaluate(&greedy, &token_for(&greedy))
+            .await
+            .expect_err("over the ceiling");
+        assert!(matches!(err, RunnerError::Backend(_)), "{err}");
+        assert!(err.to_string().contains("exceeds the ceiling 16"), "{err}");
+        assert_eq!(orch.created(), 1, "only the topic vm; no experiment vm");
+        assert!(orch.experiments().is_empty());
+
+        let req = experiment_request(None);
+        orch.set_fail_run(true);
+        let err = runner
+            .evaluate(&req, &token_for(&req))
+            .await
+            .expect_err("guest failure");
+        assert!(err.to_string().contains("injected run failure"), "{err}");
+        orch.set_fail_run(false);
+        assert_eq!(orch.experiments().len(), 1);
+        let downs = orch.teardowns();
+        assert_eq!(downs.len(), 1, "destroyed despite the failure");
+        assert_eq!(downs[0].1, RetainPolicy::Destroy);
+        assert_eq!(orch.vms().len(), 1, "the topic vm only");
+
+        let plain = request();
+        let out = runner
+            .evaluate(&plain, &token_for(&plain))
+            .await
+            .expect("plain topic");
+        assert!((out.report.primary_value - 0.8).abs() < 1e-12);
+        assert_eq!(orch.experiments().len(), 1, "no new experiment vm");
+        assert_eq!(orch.teardowns().len(), 1);
+        let last = orch.runs().pop().expect("run");
+        assert_eq!(last.0, "vm-0", "ran on the topic vm");
+
+        // A half-selected binding (runner, no pack digest) is refused, not
+        // routed to the ordinary path.
+        let mut half = request();
+        half.constraints
+            .params
+            .insert(proof_experiment::PARAM_RUNNER.into(), "some_runner".into());
+        let err = runner
+            .evaluate(&half, &token_for(&half))
+            .await
+            .expect_err("no pack digest");
+        assert!(
+            err.to_string()
+                .contains(proof_experiment::PARAM_PACK_DIGEST),
+            "{err}"
+        );
+        assert_eq!(orch.experiments().len(), 1);
+        // Non-paid jobs never leave the topic vm, whatever the params say.
+        let vm = orch
+            .attach(&req.topic_id)
+            .await
+            .expect("attach")
+            .expect("vm");
+        let out = run_paid_job(
+            orch.as_ref(),
+            &ExperimentPolicy::default(),
+            &pinned_template(),
+            &vm,
+            VmJob::Archive {
+                topic_id: req.topic_id.clone(),
+            },
+        )
+        .await
+        .expect("archive");
+        assert_eq!(out, VmJobOutput::Archived);
+        assert_eq!(orch.experiments().len(), 1);
+        let spec = TopicVmSpec::for_experiment(
+            &req.topic_id,
+            pinned_template(),
+            req.sandbox.clone(),
+            ExperimentSpec {
+                runner: "Bad Runner".into(),
+                pack: proof_experiment::PackRef {
+                    path: None,
+                    digest: format!("sha256:{}", "ee".repeat(32)),
+                },
+                disk_mib: 32_768,
+            },
+        );
+        assert!(matches!(spec.validate(), Err(VmError::Experiment(_))));
+        let json = serde_json::to_string(&TopicVmSpec::for_topic(
+            &req.topic_id,
+            pinned_template(),
+            req.sandbox.clone(),
+        ))
+        .expect("json");
+        assert!(!json.contains("experiment"), "absent on the wire: {json}");
+    }
+
+    /// A paid run is scored only once its experiment VM is **confirmed**
+    /// destroyed. `Ok(false)` and a teardown error both withhold a
+    /// successful outcome (fail-closed: the VM may still hold capacity), the
+    /// error names the VM, a job that failed *and* leaked names both, and a
+    /// confirmed destroy scores again. Nothing here is warn-only.
+    #[tokio::test]
+    async fn a_paid_run_is_withheld_unless_its_experiment_vm_is_confirmed_destroyed() {
+        use crate::fixtures::experiment_request;
+        let orch = FakeOrchestrator::new(0.8);
+        let runner = VmBackedRunner::new(orch.clone(), pinned_template());
+        let req = experiment_request(None);
+        runner.inspect(&req, &rules()).await.expect("topic vm");
+
+        orch.set_teardown(Ok(false));
+        let err = runner
+            .evaluate(&req, &token_for(&req))
+            .await
+            .expect_err("unconfirmed destroy is not a scored run");
+        assert!(matches!(err, RunnerError::Backend(_)), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("not confirmed destroyed"), "{msg}");
+        assert!(msg.contains("vm-1"), "names the leaked vm: {msg}");
+        assert!(msg.contains("did not confirm the destroy"), "{msg}");
+        assert!(msg.contains("withheld"), "{msg}");
+        assert_eq!(orch.teardowns().len(), 1, "the destroy was attempted");
+        assert_eq!(orch.vms().len(), 2, "the fake kept the vm, as the host did");
+
+        orch.set_teardown(Err("injected transport error"));
+        let err = runner
+            .evaluate(&req, &token_for(&req))
+            .await
+            .expect_err("failed destroy is not a scored run");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("teardown failed: topic-vm orchestrator: injected transport error"),
+            "{msg}"
+        );
+        assert!(msg.contains("vm-2"), "{msg}");
+        assert!(
+            !msg.contains("the job itself failed"),
+            "the run itself succeeded: {msg}"
+        );
+
+        orch.set_fail_run(true);
+        let err = runner
+            .evaluate(&req, &token_for(&req))
+            .await
+            .expect_err("job failed and the vm leaked");
+        let msg = err.to_string();
+        assert!(msg.contains("injected transport error"), "{msg}");
+        assert!(msg.contains("the job itself failed"), "{msg}");
+        assert!(msg.contains("injected run failure"), "{msg}");
+        orch.set_fail_run(false);
+
+        let direct = run_paid_job(
+            orch.as_ref(),
+            &ExperimentPolicy::default(),
+            &pinned_template(),
+            &orch
+                .attach(&req.topic_id)
+                .await
+                .expect("attach")
+                .expect("vm"),
+            VmJob::Baseline {
+                request: req.clone(),
+            },
+        )
+        .await
+        .expect_err("baseline is a paid job too");
+        assert!(
+            matches!(direct, VmError::TeardownUnconfirmed { ref vm_id, .. } if vm_id == "vm-4"),
+            "{direct}"
+        );
+        assert_eq!(
+            orch.vms().len(),
+            5,
+            "four leaked experiment vms + the topic vm"
+        );
+
+        orch.set_teardown(Ok(true));
+        let run = runner
+            .evaluate(&req, &token_for(&req))
+            .await
+            .expect("confirmed destroy scores");
+        assert!((run.report.primary_value - 0.8).abs() < 1e-12);
+        assert_eq!(
+            orch.vms().len(),
+            5,
+            "the new vm is gone; the leaked ones are the host's to reconcile"
+        );
     }
 
     #[test]

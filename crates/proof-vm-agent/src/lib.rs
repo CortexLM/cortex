@@ -19,6 +19,13 @@
 //! died outside a teardown is reaped per its retain policy, recorded as
 //! `crashed`, and its topic may create a fresh one.
 //!
+//! A spec with `experiment` set creates a dedicated **experiment VM** for one
+//! paid job instead of the topic's RLM VM: the one-per-topic rule does not
+//! apply (parallel experiments are parallel VMs), `attach` never returns it,
+//! and the host caps how many run at once (`max_experiment_vms`, 503
+//! `capacity` beyond it). Its paid output is stamped from the host's
+//! `experiment_vm` attestation exactly like a sister's.
+//!
 //! The agent never mounts a host path into a guest, never receives a key
 //! from the control plane, and stamps `sandboxed` / `flops_used` on paid
 //! outputs from the sister guest **it** booted ([`stamp_output`]) — and only
@@ -48,7 +55,7 @@ pub mod fixtures;
 
 pub use auth::{AuthError, BearerAuth};
 pub use hypervisor::{BootedVm, HvError, Hypervisor, JobOutcome};
-pub use router::{agent_router, AgentError, AgentState};
+pub use router::{agent_router, AgentError, AgentState, DEFAULT_MAX_EXPERIMENT_VMS};
 pub use stamp::{output_matches, stamp_output};
 
 #[cfg(test)]
@@ -689,6 +696,193 @@ mod tests {
             rec2.handle.vm_id, rec.handle.vm_id,
             "fresh vm id after retain"
         );
+    }
+
+    fn experiment_spec(req: &proof_rlm::CustomRunRequest) -> TopicVmSpec {
+        let binding = req.experiment().expect("binding").expect("selected");
+        let shape = proof_rlm::ExperimentCeilings::default()
+            .shape(&binding)
+            .expect("shape");
+        TopicVmSpec::for_experiment(
+            &req.topic_id,
+            proof_rlm::VmTemplate {
+                vcpus: shape.vcpus,
+                mem_mib: shape.mem_mib,
+                ..pinned_template()
+            },
+            req.sandbox.clone(),
+            proof_rlm::ExperimentSpec {
+                runner: binding.runner,
+                pack: binding.pack,
+                disk_mib: shape.disk_mib,
+            },
+        )
+    }
+
+    /// One VM per experiment: several experiment VMs of one topic run beside
+    /// its RLM VM, none of them answers `attach`, the host says when it is
+    /// full, and a paid job on one is stamped from the `experiment_vm`
+    /// attestation the host wrote for that VM.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn experiment_vms_run_beside_the_topic_vm_under_a_capacity_cap() {
+        use proof_rlm::fixtures::experiment_request;
+        let hv = FakeHypervisor::new(0.8);
+        hv.set_rlm_flops(Some(42));
+        let auth = Arc::new(BearerAuth::from_file(&token_file("experiments", TOKEN)));
+        let state = AgentState::with_max_experiment_vms(hv.clone(), auth, 2);
+        let app = agent_router(state.clone());
+        let topic = create(&app).await;
+        assert!(topic.experiment.is_none());
+        let req = experiment_request(Some(8));
+        let create_exp = || {
+            serde_json::to_value(CreateVmRequest {
+                spec: experiment_spec(&req),
+            })
+            .expect("json")
+        };
+        let (status, x1): (StatusCode, VmRecord) =
+            call(&app, "POST", paths::VMS, Some(TOKEN), Some(create_exp())).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "no 409: the topic vm is not in the way"
+        );
+        assert!(x1.handle.vm_id.contains("-x"), "{}", x1.handle.vm_id);
+        assert_eq!(
+            (x1.vcpus, x1.mem_mib),
+            (8, 32_768),
+            "asked 8 vCPU, default memory"
+        );
+        let exp = x1.experiment.as_ref().expect("experiment record");
+        assert_eq!(exp.runner, "placeholder_in_guest_runner");
+        assert_eq!(exp.disk_mib, 32_768);
+        let (status, x2): (StatusCode, VmRecord) =
+            call(&app, "POST", paths::VMS, Some(TOKEN), Some(create_exp())).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "a second experiment of the same topic"
+        );
+        assert_ne!(x1.handle.vm_id, x2.handle.vm_id);
+        let (status, full): (StatusCode, ErrorBody) =
+            call(&app, "POST", paths::VMS, Some(TOKEN), Some(create_exp())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(full.code, ErrorCode::Capacity);
+        assert!(
+            full.error.contains("PROOF_VM_AGENT_MAX_EXPERIMENT_VMS"),
+            "{}",
+            full.error
+        );
+        assert_eq!(hv.boots().len(), 3, "no boot past the cap");
+
+        let (status, attached): (StatusCode, VmRecord) = call(
+            &app,
+            "GET",
+            &paths::vm_by_topic("topic-a"),
+            Some(TOKEN),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            attached.handle, topic.handle,
+            "attach is the topic vm, never an experiment"
+        );
+        let (_, health): (StatusCode, AgentHealth) =
+            call(&app, "GET", paths::HEALTH, Some(TOKEN), None).await;
+        assert_eq!(
+            (health.vms, health.experiment_vms, health.max_experiment_vms),
+            (3, 2, 2)
+        );
+
+        let evaluate = RunJobRequest {
+            topic_id: req.topic_id.clone(),
+            job: VmJob::Evaluate {
+                request: req.clone(),
+                checklist_digest: token_for(&req).checklist_digest().to_owned(),
+                rules_version: 1,
+            },
+        };
+        let (status, out): (StatusCode, RunJobResponse) = call(
+            &app,
+            "POST",
+            &paths::vm_jobs(&x1.handle.vm_id),
+            Some(TOKEN),
+            Some(serde_json::to_value(&evaluate).expect("json")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let att = out.sister.expect("experiment attestation");
+        assert_eq!(att.mode, proof_vm_proto::GuestMode::ExperimentVm);
+        assert_eq!(
+            att.sister_vm_id, x1.handle.vm_id,
+            "names the vm the job ran in"
+        );
+        assert_eq!(att.network, "egress-allowlist");
+        assert_eq!(att.image_digest, pinned_template().image_digest);
+        let VmJobOutput::Evaluated(run) = out.output else {
+            panic!("shape");
+        };
+        assert!(run.report.sandboxed);
+        assert_eq!(
+            run.report.flops_used,
+            Some(42),
+            "the guest's measurement, host-relayed"
+        );
+        run.report.verify(&req).expect("bound");
+
+        // Destroying an experiment frees capacity; the topic vm is untouched.
+        let (status, down): (StatusCode, TeardownResponse) = call(
+            &app,
+            "DELETE",
+            &paths::vm(&x1.handle.vm_id),
+            Some(TOKEN),
+            Some(
+                serde_json::to_value(TeardownRequest {
+                    topic_id: "topic-a".into(),
+                    policy: RetainPolicy::Destroy,
+                })
+                .expect("json"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(down.state, VmState::Destroyed);
+        assert_eq!(state.running_experiments().await, 1);
+        let (status, _): (StatusCode, VmRecord) =
+            call(&app, "POST", paths::VMS, Some(TOKEN), Some(create_exp())).await;
+        assert_eq!(status, StatusCode::CREATED, "capacity freed");
+        assert_eq!(state.running().await.len(), 3);
+
+        // A host that did not attest an experiment run leaves the report
+        // unsandboxed, which the control plane refuses for the topic.
+        hv.set_experiment_attests(false);
+        let (status, out): (StatusCode, RunJobResponse) = call(
+            &app,
+            "POST",
+            &paths::vm_jobs(&x2.handle.vm_id),
+            Some(TOKEN),
+            Some(serde_json::to_value(&evaluate).expect("json")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(out.sister.is_none());
+        let VmJobOutput::Evaluated(run) = out.output else {
+            panic!("shape");
+        };
+        assert!(!run.report.sandboxed, "no attestation, no sandbox claim");
+
+        // Zero capacity disables experiments outright; topic VMs still boot.
+        let hv0 = FakeHypervisor::new(0.8);
+        let auth0 = Arc::new(BearerAuth::from_file(&token_file("no-experiments", TOKEN)));
+        let app0 = agent_router(AgentState::with_max_experiment_vms(hv0.clone(), auth0, 0));
+        let (status, err): (StatusCode, ErrorBody) =
+            call(&app0, "POST", paths::VMS, Some(TOKEN), Some(create_exp())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.code, ErrorCode::Capacity);
+        create(&app0).await;
+        assert_eq!(hv0.boots().len(), 1);
     }
 
     #[tokio::test]

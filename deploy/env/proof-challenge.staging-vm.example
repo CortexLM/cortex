@@ -48,6 +48,28 @@ PROOF_RLM_VM_IMAGE_DIGEST=sha256:REPLACE_WITH_SHA256SUM_OF_THE_STAGED_RLM_ROOTFS
 PROOF_RLM_VM_VCPUS=4
 PROOF_RLM_VM_MEM_MIB=8192
 
+# Per-experiment VMs (topics whose params select an in-guest runner get one
+# dedicated VM per paid job). Architecte lock: 16 vCPU / 32 GiB RAM (default,
+# ceiling, and hard maximum — above it the CP refuses to boot; a topic may
+# ask for less), writable disk >= 16 GiB (32 by default). Size the KVM host
+# for max_experiment_vms x the ceiling on top of
+# the 4/8 topic VMs; the agent's PROOF_VM_AGENT_EXPERIMENT_MAX_* must agree.
+# The colocated g-8vcpu-32gb staging droplet cannot carry the lock beside the
+# compose stack: lower these (both sides) to what it has left, or have the
+# staging topic ask for less, and set PROOF_EXPERIMENT_VM_DISK_MIB=16384 when
+# its disk is tight. Lowering only the MAX knobs is enough — an unset
+# default follows its lowered ceiling; a default set above it refuses to
+# boot.
+PROOF_EXPERIMENT_VM_VCPUS=16
+PROOF_EXPERIMENT_VM_MEM_MIB=32768
+PROOF_EXPERIMENT_VM_MAX_VCPUS=16
+PROOF_EXPERIMENT_VM_MAX_MEM_MIB=32768
+PROOF_EXPERIMENT_VM_DISK_MIB=32768
+PROOF_EXPERIMENT_VM_MAX_DISK_MIB=32768
+# Unset = experiment VMs boot the RLM image above (the enlarged rootfs from
+# deploy/guest/bake-rootfs.sh). Only set when topic VMs keep another image.
+# PROOF_EXPERIMENT_VM_IMAGE_DIGEST=sha256:REPLACE_WITH_SHA256SUM_OF_THE_BAKED_ROOTFS
+
 # Custom metric ids the generic VmBackedRunner serves on this host: exactly
 # the ids named by the signed staging topics' metric.custom_id (comma-
 # separated), byte-for-byte — underscores allowed, '_' is not '-'. NOT the

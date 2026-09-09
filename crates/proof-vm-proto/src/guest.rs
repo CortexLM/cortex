@@ -6,15 +6,18 @@
 //!
 //! | Port | Direction | Purpose |
 //! |------|-----------|---------|
-//! | [`RLM_JOB_PORT`] | host → RLM guest | [`HostToRlm`] / [`RlmToHost`]: hello, secret staging, jobs |
+//! | [`RLM_JOB_PORT`] | host → RLM guest | [`HostToRlm`] / [`RlmToHost`]: hello, secret staging, pack staging (experiment VMs), jobs |
 //! | [`SISTER_PORT`] | RLM guest → host | [`SisterRequest`] / [`SisterAnswer`]: "run this artefact in a sister guest" |
 //! | [`MINER_PORT`] | host → miner guest | [`HostToMiner`] / [`MinerToHost`]: the run itself |
 //!
 //! The RLM guest never talks to the miner guest; the host relays the
 //! artefact bytes it already inspected and relays the result back. The miner
 //! guest has no network interface at all. Guest agents live in the pinned
-//! images (`PROOF_RLM_VM_IMAGE_DIGEST`, the agent's miner image), not in this
-//! repository; this module is the contract they implement.
+//! images (`PROOF_RLM_VM_IMAGE_DIGEST`, the agent's miner image); this module
+//! is the contract they implement. The generic in-guest agent
+//! (`crates/proof-vm-guest`, `bins/proof-vm-guest-agent`) implements the
+//! [`RLM_JOB_PORT`] side of it for experiment VMs; the sister-guest side is
+//! still an operator image built against these types.
 
 use std::collections::BTreeMap;
 
@@ -35,6 +38,11 @@ pub const MINER_PORT: u32 = 5002;
 pub const GUEST_CID: u32 = 3;
 /// Largest frame either side accepts (artefact tarballs travel inside one).
 pub const MAX_FRAME_BYTES: u32 = 256 * 1024 * 1024;
+/// Largest experiment pack the host stages into an experiment VM over vsock
+/// (one [`HostToRlm::StagePack`] frame, under [`MAX_FRAME_BYTES`] with room
+/// for the base64 envelope). Bigger packs need a block-device staging path,
+/// which this protocol version does not have; the host refuses them by name.
+pub const MAX_PACK_TAR_BYTES: usize = 160 * 1024 * 1024;
 
 /// One file staged into a guest (owner key material, artefact members, outputs).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +94,20 @@ pub enum HostToRlm {
         /// Files by name.
         files: Vec<StagedFile>,
     },
+    /// The experiment pack a dedicated **experiment VM** runs its paid jobs
+    /// against: the exact bytes of the pack tar the host resolved under its
+    /// pack directory from the topic's `experiment_pack_digest` and verified
+    /// (`crate::tar::verify_artifact`: uncompressed tar with content whose
+    /// sha256 is `digest`). The guest runs the same check on what it received
+    /// before unpacking, and answers [`RlmToHost::PackStaged`] naming the
+    /// digest it verified. Sent once, after `Hello` / `StageSecrets`, before
+    /// any job; a guest that never got one refuses in-guest runs.
+    StagePack {
+        /// `sha256:<hex>` the pack must hash to.
+        digest: String,
+        /// The pack tar, verbatim (`StagedFile` named `pack.tar`).
+        pack_tar: StagedFile,
+    },
     /// Run one job. Answered by [`RlmToHost::Done`] or [`RlmToHost::Failed`].
     Run {
         /// The work (public data only).
@@ -108,6 +130,14 @@ pub enum RlmToHost {
     Staged {
         /// Files accepted.
         count: usize,
+    },
+    /// Answer to `StagePack`: the pack verified against `digest` and is
+    /// unpacked on the VM's writable disk.
+    PackStaged {
+        /// `sha256:<hex>` the guest verified (must echo the request).
+        digest: String,
+        /// Bytes of the tar as received.
+        bytes: u64,
     },
     /// Job finished.
     Done {
@@ -405,5 +435,29 @@ mod tests {
         assert_eq!(RLM_JOB_PORT, 5000);
         assert_eq!(SISTER_PORT, 5001);
         assert_eq!(MINER_PORT, 5002);
+    }
+
+    /// Pack staging is one frame each way, names the digest on both sides,
+    /// and the pack cap leaves room for the base64 envelope under the frame cap.
+    #[test]
+    fn pack_staging_frames_round_trip_and_fit_the_frame_cap() {
+        let digest = format!("sha256:{}", "ee".repeat(32));
+        let stage = HostToRlm::StagePack {
+            digest: digest.clone(),
+            pack_tar: StagedFile::new("pack.tar", b"pack bytes"),
+        };
+        let json = serde_json::to_string(&stage).expect("json");
+        assert!(json.contains("\"type\":\"stage_pack\""), "{json}");
+        assert!(!json.contains("/var/lib"), "no host path travels: {json}");
+        let back: HostToRlm = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back, stage);
+        let staged = RlmToHost::PackStaged { digest, bytes: 10 };
+        let json = serde_json::to_string(&staged).expect("json");
+        assert!(json.contains("\"type\":\"pack_staged\""), "{json}");
+        let back: RlmToHost = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back, staged);
+        // base64 grows bytes by 4/3; the cap must still encode as one frame.
+        let envelope = MAX_PACK_TAR_BYTES / 3 * 4 + 1024;
+        assert!(envelope < MAX_FRAME_BYTES as usize, "{envelope}");
     }
 }

@@ -934,6 +934,7 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
         orchestrator: orchestrator.clone(),
         store: rlm_store.clone(),
         template: pinned_template(),
+        experiments: proof_rlm::ExperimentPolicy::default(),
         owner: Arc::new(StaticOwnerHook(OwnerDecision::Decline {
             reason: "not yet".into(),
         })),
@@ -1108,5 +1109,114 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
         .await
         .expect_err("already open");
     assert!(matches!(err, SetupError::State(_)), "{err}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A topic whose signed params select an in-guest runner measures its
+/// baseline in **one dedicated experiment VM** — created for the `Baseline`
+/// job, sized under the lock ceilings, carrying the pinned pack, destroyed
+/// afterwards — while the RLM's rule proposal still runs in the topic VM.
+#[tokio::test]
+async fn an_experiment_topic_measures_its_baseline_in_a_dedicated_vm() {
+    let root = tmp_root("setup-experiment");
+    let key = root.join("owner_key");
+    std::fs::write(&key, "not-a-real-secret\n").unwrap();
+    let pin = pin_with_topic_key();
+    let orchestrator = FakeOrchestrator::new(0.61);
+    let rlm_store: Arc<MemoryRlmStore> = Arc::new(MemoryRlmStore::new());
+    let mut draft = topic();
+    draft.status = TopicStatus::Draft;
+    draft.holdout_commitment = holdout_commitment(&synthetic_holdout(STRATUM_SIZE, 1));
+    draft.baseline.script_sha256 = "11".repeat(32);
+    draft.baseline.metrics_commitment.clear();
+    draft.constraints.params.insert(
+        proof_experiment::PARAM_RUNNER.into(),
+        "placeholder_in_guest_runner".into(),
+    );
+    draft.constraints.params.insert(
+        proof_experiment::PARAM_PACK_DIGEST.into(),
+        format!("sha256:{}", "ee".repeat(32)),
+    );
+    draft
+        .constraints
+        .params
+        .insert(proof_experiment::PARAM_MEM_MIB.into(), "16384".into());
+    let setup = TopicSetup {
+        orchestrator: orchestrator.clone(),
+        store: rlm_store.clone(),
+        template: pinned_template(),
+        experiments: proof_rlm::ExperimentPolicy::default(),
+        owner: Arc::new(StaticOwnerHook(OwnerDecision::Approve)),
+        keys: Arc::new(FileKeysProbe::new(&key)),
+        spend_cap_usd: None,
+    };
+    let out = setup.run(&draft, &pin, &offer()).await.expect("setup");
+    assert!((out.baseline_primary - 0.61).abs() < 1e-12);
+    assert_eq!(
+        orchestrator.created(),
+        2,
+        "topic vm + one baseline experiment vm"
+    );
+    let specs = orchestrator.experiments();
+    assert_eq!(specs.len(), 1);
+    let exp = specs[0].experiment.as_ref().unwrap();
+    assert_eq!(exp.runner, "placeholder_in_guest_runner");
+    assert_eq!(exp.pack.digest, format!("sha256:{}", "ee".repeat(32)));
+    assert_eq!(exp.disk_mib, 32_768);
+    assert_eq!(
+        (specs[0].template.vcpus, specs[0].template.mem_mib),
+        (16, 16_384)
+    );
+    let runs = orchestrator.runs();
+    assert!(
+        matches!(runs[0], (ref vm, VmJob::ProposeRules { .. }) if vm == &out.vm.vm_id),
+        "rules are proposed in the topic vm"
+    );
+    assert!(
+        matches!(runs[1], (ref vm, VmJob::Baseline { .. }) if vm != &out.vm.vm_id),
+        "the baseline ran in the experiment vm"
+    );
+    let downs = orchestrator.teardowns();
+    assert_eq!(
+        downs.len(),
+        1,
+        "the experiment vm is destroyed after the baseline"
+    );
+    assert_eq!(downs[0].1, proof_rlm::RetainPolicy::Destroy);
+    assert_eq!(orchestrator.vms().len(), 1, "the topic vm stays");
+    let baseline = rlm_store.baseline(&draft.id).await.unwrap().unwrap();
+    assert!((baseline.primary_value - 0.61).abs() < 1e-12);
+
+    // A baseline whose experiment VM is not confirmed destroyed is not a
+    // baseline: the setup fails, names the VM, and seals nothing.
+    orchestrator.set_teardown(Ok(false));
+    let mut leaky = draft.clone();
+    leaky.id = "topic-b".into();
+    let err = setup
+        .run(&leaky, &pin, &offer())
+        .await
+        .expect_err("unconfirmed destroy withholds the baseline");
+    assert!(
+        matches!(
+            err,
+            SetupError::Vm(proof_rlm::VmError::TeardownUnconfirmed { .. })
+        ),
+        "{err}"
+    );
+    assert!(err.to_string().contains("not confirmed destroyed"), "{err}");
+    assert!(
+        rlm_store.baseline(&leaky.id).await.unwrap().is_none(),
+        "no baseline row from a run whose vm may still hold capacity"
+    );
+    assert_eq!(
+        orchestrator.experiments().len(),
+        2,
+        "the second experiment vm was created for the job"
+    );
+    assert_eq!(
+        orchestrator.vms().len(),
+        3,
+        "and is still alive on the fake host"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

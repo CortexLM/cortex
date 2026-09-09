@@ -1,0 +1,20 @@
+[package]
+name = "proof-experiment"
+description = "Generic in-guest experiment binding for Proof topic VMs: the well-known constraints.params knobs a signed topic uses to select an operator in-guest execution backend (runner id, pinned experiment pack, VM size), the per-experiment VM ceilings (16 vCPU / 32 GiB RAM / 32 GiB writable disk by default), and the control-plane policy env. Shape and policy only — no benchmark, dataset, model, or pack is named here."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+proof-canon = { path = "../proof-canon" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

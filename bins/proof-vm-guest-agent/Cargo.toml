@@ -1,0 +1,25 @@
+[package]
+name = "proof-vm-guest-agent-bin"
+description = "proof-vm-guest-agent: the vsock guest agent baked into the Proof RLM / experiment microVM image (port 5000). Speaks proof-vm-proto::guest to the KVM host; runs jobs through operator-installed runner adaptors. Never part of the control plane."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "proof-vm-guest-agent"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+proof-vm-guest = { path = "../../crates/proof-vm-guest" }
+proof-vm-proto = { path = "../../crates/proof-vm-proto" }
+telemetry = { path = "../../crates/telemetry" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal", "net"] }
+tokio-vsock = "0.7"
+tracing = "0.1"
+
+[lints]
+workspace = true
