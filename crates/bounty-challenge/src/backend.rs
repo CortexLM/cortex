@@ -30,9 +30,12 @@ pub enum BackendError {
     /// `BOUNTY_BACKEND_PUBLIC_URL` unset — this host cannot score.
     #[error("BOUNTY_BACKEND_PUBLIC_URL unset")]
     Unset,
-    /// HTTP transport or status.
+    /// HTTP transport failure (no status available).
     #[error("backend public fetch failed")]
     Fetch,
+    /// HTTP non-2xx from the public feed. Status only — no host, URL, or body.
+    #[error("backend public fetch failed: HTTP {0}")]
+    FetchStatus(u16),
     /// JSON did not match the public DTO.
     #[error("backend public json: {0}")]
     Json(String),
@@ -65,7 +68,8 @@ pub fn public_path(base: &str, tail: &str) -> String {
 ///
 /// # Errors
 /// [`BackendError::Unset`] when neither the argument nor the env carries a
-/// base URL, [`BackendError::Fetch`] on transport or non-2xx,
+/// base URL, [`BackendError::Fetch`] on transport failure,
+/// [`BackendError::FetchStatus`] on non-2xx,
 /// [`BackendError::Json`] when a body does not match the public DTO,
 /// [`BackendError::Mismatched`] when the two routes describe different
 /// publications, and [`BackendError::Inconsistent`] when the feed never held
@@ -75,10 +79,7 @@ pub async fn fetch_public_snapshot(base: Option<&str>) -> Result<PublicSnapshot,
         Some(u) if !u.trim().is_empty() => u.trim().to_owned(),
         _ => backend_public_url().ok_or(BackendError::Unset)?,
     };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|_| BackendError::Fetch)?;
+    let client = public_feed_client()?;
     let mut prev = read_pair(&client, &url).await?;
     for _ in 1..MAX_PAIR_READS {
         let next = read_pair(&client, &url).await?;
@@ -94,6 +95,19 @@ pub async fn fetch_public_snapshot(base: Option<&str>) -> Result<PublicSnapshot,
         prev = next;
     }
     Err(BackendError::Inconsistent)
+}
+
+/// Identify this process on outbound GETs.
+const PUBLIC_FEED_USER_AGENT: &str = concat!("cortex-bounty-challenge/", env!("CARGO_PKG_VERSION"));
+
+fn public_feed_client() -> Result<reqwest::Client, BackendError> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        // CloudFront/WAF rejects an empty User-Agent (curl's default works;
+        // reqwest `default-features = false` does not send one).
+        .user_agent(PUBLIC_FEED_USER_AGENT)
+        .build()
+        .map_err(|_| BackendError::Fetch)
 }
 
 /// One GET-pair, plus any publication token the backend put on each route.
@@ -159,7 +173,7 @@ async fn get_text(
         .await
         .map_err(|_| BackendError::Fetch)?;
     if !resp.status().is_success() {
-        return Err(BackendError::Fetch);
+        return Err(BackendError::FetchStatus(resp.status().as_u16()));
     }
     let etag = resp
         .headers()
@@ -249,5 +263,36 @@ mod tests {
             .await
             .expect_err("unreachable");
         assert!(matches!(err, BackendError::Fetch), "{err}");
+    }
+
+    #[test]
+    fn public_feed_client_sets_a_nonempty_user_agent() {
+        let client = public_feed_client().expect("client");
+        let req = client.get("http://127.0.0.1/").build().expect("request");
+        let ua = req
+            .headers()
+            .get(reqwest::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(!ua.is_empty(), "{ua:?}");
+        assert!(ua.starts_with("cortex-bounty-challenge/"), "{ua}");
+    }
+
+    #[tokio::test]
+    async fn a_non_2xx_feed_is_a_fetch_status_error() {
+        let listener =
+            tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let app = axum::Router::new().fallback(|| async { axum::http::StatusCode::FORBIDDEN });
+            let _ = axum::serve(listener, app).await;
+        });
+        let err = fetch_public_snapshot(Some(&format!("http://{addr}")))
+            .await
+            .expect_err("403");
+        assert!(matches!(err, BackendError::FetchStatus(403)), "{err}");
+        assert_eq!(err.to_string(), "backend public fetch failed: HTTP 403");
     }
 }
