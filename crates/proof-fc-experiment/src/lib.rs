@@ -6,7 +6,7 @@
 //!
 //! 1. **Ceilings.** A spec with `experiment` set is admitted only under this
 //!    host's own copy of the per-VM ceilings ([`ExperimentCeilings`]; lock:
-//!    up to 8 vCPU / 16 GiB RAM, writable disk ≥ 16 GiB). Over a ceiling is
+//!    16 vCPU / 32 GiB RAM, writable disk ≥ 16 GiB). Over a ceiling is
 //!    `BadSpec`, never a silent clamp.
 //! 2. **Pack.** The topic-pinned experiment pack is resolved under the host's
 //!    pack directory ([`PackStore`]) from the digest the signed topic carries
@@ -558,13 +558,13 @@ mod tests {
         assert_eq!(layer.name(), "fake");
         layer.ready().expect("ready");
 
-        let over = spec_for(&digest, 16, 32_768);
+        let over = spec_for(&digest, 32, 32_768);
         let err = layer
             .boot("topic-a-x0001", &over)
             .await
             .expect_err("over the ceiling");
         assert!(matches!(err, HvError::Spec(_)), "{err}");
-        assert!(err.to_string().contains("exceeds the ceiling 8"), "{err}");
+        assert!(err.to_string().contains("exceeds the ceiling 16"), "{err}");
         assert!(hv.boots().is_empty(), "refused before any boot");
 
         let absent = spec_for(&format!("sha256:{}", "77".repeat(32)), 4, 32_768);

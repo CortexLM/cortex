@@ -751,7 +751,7 @@ mod tests {
         assert!(x1.handle.vm_id.contains("-x"), "{}", x1.handle.vm_id);
         assert_eq!(
             (x1.vcpus, x1.mem_mib),
-            (8, 8_192),
+            (8, 32_768),
             "asked 8 vCPU, default memory"
         );
         let exp = x1.experiment.as_ref().expect("experiment record");

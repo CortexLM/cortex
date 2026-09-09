@@ -101,13 +101,14 @@ PROOF_VM_AGENT_RETAIN_DIR=/var/lib/proof-vm/retained
 
 # Experiment VMs (topics whose signed params select an in-guest runner get
 # one dedicated microVM per paid job). Packs the topics pin live here as
-# sha256-<hex>.tar (sha256sum the exact tar; never type a digest). Lock: a
-# topic may ask up to 8 vCPU / 16 GiB (default 4 / 8). On the colocated
-# staging droplet (g-8vcpu-32gb) one experiment VM at the ceiling beside the
-# 4/8 topic VM and the compose stack is tight: lower the ceilings to what the
-# droplet has left (the CP's PROOF_EXPERIMENT_VM_MAX_* must agree) or size the
-# topic's ask smaller, and keep the count at 1. Disk floor 16 GiB (set the
-# CP's PROOF_EXPERIMENT_VM_DISK_MIB=16384 when the droplet disk is tight).
+# sha256-<hex>.tar (sha256sum the exact tar; never type a digest). Lock:
+# 16 vCPU / 32 GiB per experiment VM (default and ceiling). The colocated
+# staging droplet (g-8vcpu-32gb) cannot carry one such VM beside the 4/8
+# topic VM and the compose stack: lower the ceilings to what the droplet has
+# left (the CP's PROOF_EXPERIMENT_VM_MAX_* and defaults must agree) or size
+# the staging topic's ask smaller, and keep the count at 1. Disk floor 16 GiB
+# (set the CP's PROOF_EXPERIMENT_VM_DISK_MIB=16384 when the droplet disk is
+# tight). The dedicated production host carries the lock.
 # Container image pulls need the registry hosts + a resolver on
 # PROOF_VM_AGENT_EGRESS_ALLOW above.
 PROOF_VM_AGENT_EXPERIMENT_PACK_DIR=/var/lib/proof-vm/packs

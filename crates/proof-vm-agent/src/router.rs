@@ -41,7 +41,7 @@ use crate::stamp::{output_matches, stamp_output};
 const MAX_VM_ID_LEN: usize = 63;
 
 /// Experiment VMs one host runs at once unless the operator says otherwise.
-/// Each may be as large as the ceilings (lock 8 vCPU / 16 GiB), so this is a
+/// Each may be as large as the ceilings (lock 16 vCPU / 32 GiB), so this is a
 /// deliberate, small default; `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS` raises it.
 pub const DEFAULT_MAX_EXPERIMENT_VMS: usize = 2;
 

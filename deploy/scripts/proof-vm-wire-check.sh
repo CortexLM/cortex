@@ -377,9 +377,9 @@ check_env() {
   [[ -z "$mem" || "$mem" == "8192" ]] || warn "PROOF_RLM_VM_MEM_MIB=$mem deviates from the locked 8192"
 
   # Experiment VMs (one dedicated VM per paid job for in-guest runner topics):
-  # ceilings are integers, the lock is a 4 vCPU / 8192 MiB default that a
-  # topic may raise to 8 vCPU / 16384 MiB, disk >= 16 GiB (32 preferred), and
-  # the image pin is a real digest when set (unset = the RLM image).
+  # ceilings are integers, the lock is 16 vCPU / 32768 MiB (default and
+  # ceiling), disk >= 16 GiB (32 by default), and the image pin is a real
+  # digest when set (unset = the RLM image).
   local exp_vcpus exp_mem exp_disk exp_img
   exp_vcpus="$(cfg PROOF_EXPERIMENT_VM_MAX_VCPUS)"; exp_mem="$(cfg PROOF_EXPERIMENT_VM_MAX_MEM_MIB)"
   exp_disk="$(cfg PROOF_EXPERIMENT_VM_DISK_MIB)"; exp_img="$(cfg PROOF_EXPERIMENT_VM_IMAGE_DIGEST)"
@@ -388,8 +388,8 @@ check_env() {
     val="$(cfg "$knob")"
     [[ -z "$val" || "$val" =~ ^[0-9]+$ ]] || fail "$knob=$val is not an integer (the CP refuses to boot on it)"
   done
-  [[ -z "$exp_vcpus" || ! "$exp_vcpus" =~ ^[0-9]+$ || "$exp_vcpus" -le 8 ]] || warn "PROOF_EXPERIMENT_VM_MAX_VCPUS=$exp_vcpus is above the 8 vCPU lock; the KVM host's PROOF_VM_AGENT_EXPERIMENT_MAX_VCPUS must agree"
-  [[ -z "$exp_mem" || ! "$exp_mem" =~ ^[0-9]+$ || "$exp_mem" -le 16384 ]] || warn "PROOF_EXPERIMENT_VM_MAX_MEM_MIB=$exp_mem is above the 16384 MiB lock; the KVM host's PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB must agree"
+  [[ -z "$exp_vcpus" || ! "$exp_vcpus" =~ ^[0-9]+$ || "$exp_vcpus" -le 16 ]] || warn "PROOF_EXPERIMENT_VM_MAX_VCPUS=$exp_vcpus is above the 16 vCPU lock; the KVM host's PROOF_VM_AGENT_EXPERIMENT_MAX_VCPUS must agree"
+  [[ -z "$exp_mem" || ! "$exp_mem" =~ ^[0-9]+$ || "$exp_mem" -le 32768 ]] || warn "PROOF_EXPERIMENT_VM_MAX_MEM_MIB=$exp_mem is above the 32768 MiB lock; the KVM host's PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB must agree"
   [[ -z "$exp_disk" || ! "$exp_disk" =~ ^[0-9]+$ || "$exp_disk" -ge 16384 ]] || fail "PROOF_EXPERIMENT_VM_DISK_MIB=$exp_disk is under the 16 GiB writable-disk floor (the CP refuses to boot on it)"
   [[ -z "$exp_disk" || ! "$exp_disk" =~ ^[0-9]+$ || "$exp_disk" -lt 16384 || "$exp_disk" -ge 32768 ]] || warn "PROOF_EXPERIMENT_VM_DISK_MIB=$exp_disk is under the preferred 32 GiB (container image pulls land there); fine when the metal has no more"
   if [[ -n "$exp_img" ]]; then

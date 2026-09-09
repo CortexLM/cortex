@@ -82,8 +82,8 @@ async fn an_experiment_topic_gets_one_attested_vm_per_paid_job_over_the_wire() {
     let spec = hv.spec_of(&boots[1].vm_id).expect("spec");
     assert_eq!(
         (spec.template.vcpus, spec.template.mem_mib),
-        (4, 8_192),
-        "the topic's 4 vCPU ask, the 8 GiB default"
+        (4, 32_768),
+        "the topic's 4 vCPU ask, the 32 GiB default"
     );
     assert!(boots[1].vm_id.contains("-x"), "{}", boots[1].vm_id);
     assert_eq!(

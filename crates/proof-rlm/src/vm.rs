@@ -766,7 +766,7 @@ mod tests {
         assert_eq!(exp.pack.digest, format!("sha256:{}", "ee".repeat(32)));
         assert_eq!(exp.disk_mib, 32_768, "default writable disk");
         assert_eq!(spec.template.vcpus, 8, "the topic's ask");
-        assert_eq!(spec.template.mem_mib, 8_192, "silent = the default");
+        assert_eq!(spec.template.mem_mib, 32_768, "silent = the default");
         assert_eq!(spec.template.image_digest, pinned_template().image_digest);
         assert_eq!(spec.retain, RetainPolicy::Destroy);
         let runs = orch.runs();
@@ -809,8 +809,8 @@ mod tests {
             last.template.image_digest,
             format!("sha256:{}", "ff".repeat(32))
         );
-        assert_eq!(own.experiments().ceilings.max_vcpus, 8);
-        assert_eq!(own.experiments().ceilings.default_vcpus, 4);
+        assert_eq!(own.experiments().ceilings.max_vcpus, 16);
+        assert_eq!(own.experiments().ceilings.default_vcpus, 16);
     }
 
     /// An ask over the operator ceiling is refused before any VM exists, a
@@ -821,13 +821,13 @@ mod tests {
         use crate::fixtures::experiment_request;
         let orch = FakeOrchestrator::new(0.8);
         let runner = VmBackedRunner::new(orch.clone(), pinned_template());
-        let greedy = experiment_request(Some(16));
+        let greedy = experiment_request(Some(32));
         let err = runner
             .evaluate(&greedy, &token_for(&greedy))
             .await
             .expect_err("over the ceiling");
         assert!(matches!(err, RunnerError::Backend(_)), "{err}");
-        assert!(err.to_string().contains("exceeds the ceiling 8"), "{err}");
+        assert!(err.to_string().contains("exceeds the ceiling 16"), "{err}");
         assert_eq!(orch.created(), 1, "only the topic vm; no experiment vm");
         assert!(orch.experiments().is_empty());
 

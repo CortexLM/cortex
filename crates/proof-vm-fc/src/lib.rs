@@ -560,10 +560,13 @@ mod tests {
         assert_eq!(cfg.template.vcpus, 4);
         assert_eq!(cfg.template.mem_mib, 8_192);
         assert_eq!(cfg.template.image_digest, "sha256:abc");
-        assert_eq!(cfg.experiments.ceilings.default_vcpus, 4, "experiment lock");
-        assert_eq!(cfg.experiments.ceilings.default_mem_mib, 8_192);
-        assert_eq!(cfg.experiments.ceilings.max_vcpus, 8);
-        assert_eq!(cfg.experiments.ceilings.max_mem_mib, 16_384);
+        assert_eq!(
+            cfg.experiments.ceilings.default_vcpus, 16,
+            "experiment lock"
+        );
+        assert_eq!(cfg.experiments.ceilings.default_mem_mib, 32_768);
+        assert_eq!(cfg.experiments.ceilings.max_vcpus, 16);
+        assert_eq!(cfg.experiments.ceilings.max_mem_mib, 32_768);
         assert_eq!(
             cfg.experiments.image_digest, None,
             "the rlm image by default"

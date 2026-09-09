@@ -12,10 +12,10 @@
 //!   ([`PARAM_PACK_DIGEST`], optional [`PARAM_PACK_PATH`]), and **size** the
 //!   VM ([`PARAM_VCPUS`], [`PARAM_MEM_MIB`], [`PARAM_DISK_MIB`]);
 //! - the operator **defaults and ceilings** every experiment VM is held to
-//!   ([`ExperimentCeilings`]; Architecte lock: **4 vCPU / 8 GiB RAM** when
-//!   the topic does not ask, a topic may override up to **8 vCPU / 16 GiB**,
-//!   writable disk **≥ 16 GiB**, 32 GiB preferred) and the control-plane
-//!   policy env ([`ExperimentPolicy`]);
+//!   ([`ExperimentCeilings`]; Architecte lock: **16 vCPU / 32 GiB RAM** —
+//!   what a silent topic gets and the most a topic may ask for — writable
+//!   disk **≥ 16 GiB**, 32 GiB by default) and the control-plane policy env
+//!   ([`ExperimentPolicy`]);
 //! - the public wire shape the orchestrator carries for one experiment VM
 //!   ([`ExperimentSpec`]).
 //!
@@ -54,13 +54,13 @@ pub const PARAM_MEM_MIB: &str = "experiment_mem_mib";
 pub const PARAM_DISK_MIB: &str = "experiment_disk_mib";
 
 /// Architecte lock: vCPUs an experiment VM gets when the topic does not ask.
-pub const DEFAULT_EXPERIMENT_VCPUS: u32 = 4;
-/// Architecte lock: guest memory when the topic does not ask (8 GiB).
-pub const DEFAULT_EXPERIMENT_MEM_MIB: u32 = 8_192;
+pub const DEFAULT_EXPERIMENT_VCPUS: u32 = 16;
+/// Architecte lock: guest memory when the topic does not ask (32 GiB).
+pub const DEFAULT_EXPERIMENT_MEM_MIB: u32 = 32_768;
 /// Architecte lock: most vCPUs a topic may ask for.
-pub const DEFAULT_MAX_EXPERIMENT_VCPUS: u32 = 8;
-/// Architecte lock: most guest memory a topic may ask for (16 GiB).
-pub const DEFAULT_MAX_EXPERIMENT_MEM_MIB: u32 = 16_384;
+pub const DEFAULT_MAX_EXPERIMENT_VCPUS: u32 = 16;
+/// Architecte lock: most guest memory a topic may ask for (32 GiB).
+pub const DEFAULT_MAX_EXPERIMENT_MEM_MIB: u32 = 32_768;
 /// Writable disk an experiment VM gets when the topic does not ask (32 GiB,
 /// the preferred size when the metal allows: container image pulls land
 /// here, never on the read-only rootfs).
@@ -430,7 +430,7 @@ impl ExperimentCeilings {
 
     /// Size a VM for `binding`: what the topic asks for, held under the
     /// ceilings; a topic that does not ask gets the operator defaults (lock:
-    /// 4 vCPU / 8 GiB / 32 GiB disk).
+    /// 16 vCPU / 32 GiB / 32 GiB disk).
     ///
     /// # Errors
     ///
@@ -678,16 +678,16 @@ mod tests {
         assert!(ExperimentBinding::from_params(&zero).is_err());
     }
 
-    /// The lock: a silent topic gets 4 vCPU / 8 GiB / 32 GiB disk; a topic
-    /// may ask up to 8 vCPU / 16 GiB; disk never under 16 GiB. An ask over a
-    /// ceiling is refused with the ceiling named, never clamped.
+    /// The lock: a silent topic gets 16 vCPU / 32 GiB / 32 GiB disk, which
+    /// is also the most a topic may ask for; disk never under 16 GiB. An ask
+    /// over a ceiling is refused with the ceiling named, never clamped.
     #[test]
     #[allow(clippy::too_many_lines)]
     fn ceilings_are_the_lock_and_asks_are_held_under_them() {
         let c = ExperimentCeilings::default();
         c.validate().expect("lock validates");
-        assert_eq!((c.default_vcpus, c.default_mem_mib), (4, 8_192));
-        assert_eq!((c.max_vcpus, c.max_mem_mib), (8, 16_384));
+        assert_eq!((c.default_vcpus, c.default_mem_mib), (16, 32_768));
+        assert_eq!((c.max_vcpus, c.max_mem_mib), (16, 32_768));
         assert_eq!((c.default_disk_mib, c.max_disk_mib), (32_768, 32_768));
         assert_eq!(MIN_EXPERIMENT_DISK_MIB, 16_384);
         let silent = ExperimentBinding {
@@ -703,21 +703,20 @@ mod tests {
         assert_eq!(
             c.shape(&silent).expect("shape"),
             VmShape {
-                vcpus: 4,
-                mem_mib: 8_192,
+                vcpus: 16,
+                mem_mib: 32_768,
                 disk_mib: 32_768
             },
-            "silent = the defaults"
+            "silent = the defaults = the lock"
         );
-        let bigger = ExperimentBinding {
+        let smaller = ExperimentBinding {
             vcpus: Some(8),
             mem_mib: Some(16_384),
             disk_mib: Some(16_384),
             ..silent.clone()
         };
         assert_eq!(
-            c.shape(&bigger)
-                .expect("the topic may override up to the ceiling"),
+            c.shape(&smaller).expect("the topic may ask for less"),
             VmShape {
                 vcpus: 8,
                 mem_mib: 16_384,
@@ -725,7 +724,7 @@ mod tests {
             }
         );
         let greedy = ExperimentBinding {
-            vcpus: Some(16),
+            vcpus: Some(32),
             ..silent.clone()
         };
         let err = c.shape(&greedy).expect_err("over");
@@ -733,20 +732,20 @@ mod tests {
             err,
             ExperimentError::OverCeiling {
                 field: "vcpus",
-                asked: 16,
-                ceiling: 8
+                asked: 32,
+                ceiling: 16
             }
         );
         let greedy_mem = ExperimentBinding {
-            mem_mib: Some(32_768),
+            mem_mib: Some(65_536),
             ..silent.clone()
         };
         assert!(matches!(
             c.shape(&greedy_mem),
             Err(ExperimentError::OverCeiling {
                 field: "mem_mib",
-                asked: 32_768,
-                ceiling: 16_384
+                asked: 65_536,
+                ceiling: 32_768
             })
         ));
         let thin_disk = ExperimentBinding {
@@ -802,14 +801,14 @@ mod tests {
             })
         ));
         c.admit(VmShape {
-            vcpus: 8,
-            mem_mib: 16_384,
+            vcpus: 16,
+            mem_mib: 32_768,
             disk_mib: 32_768,
         })
         .expect("at the ceiling is admitted");
         assert!(c
             .admit(VmShape {
-                vcpus: 9,
+                vcpus: 17,
                 mem_mib: 1_024,
                 disk_mib: 32_768,
             })

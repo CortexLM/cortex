@@ -15,8 +15,8 @@
 //! Topics whose signed params select an in-guest runner get **one dedicated
 //! experiment microVM per paid job** instead of a sister
 //! (`proof-fc-experiment`): sized under this host's ceilings
-//! (`--experiment-max-*`, lock: a topic may ask up to 8 vCPU / 16 GiB; disk
-//! ≥ 16 GiB, 32 GiB preferred), fed
+//! (`--experiment-max-*`, lock 16 vCPU / 32 GiB RAM; disk ≥ 16 GiB, 32 GiB
+//! by default), fed
 //! the topic-pinned pack from `--experiment-pack-dir` (re-hashed here, staged
 //! over vsock), at most `--max-experiment-vms` at once, destroyed after the
 //! job. What runs inside is topic data; nothing here names it.
@@ -179,12 +179,12 @@ struct Cli {
     /// staged into dedicated experiment VMs. Never written by the agent.
     #[arg(long, env = "PROOF_VM_AGENT_EXPERIMENT_PACK_DIR", default_value = DEFAULT_PACK_DIR)]
     experiment_pack_dir: PathBuf,
-    /// Most vCPUs one experiment VM may be created with (lock: 8; the default a
-    /// silent topic gets is the control plane's, 4).
+    /// Most vCPUs one experiment VM may be created with (lock 16; a silent
+    /// topic gets the control plane's default, also 16).
     #[arg(long, env = "PROOF_VM_AGENT_EXPERIMENT_MAX_VCPUS", default_value_t = proof_experiment::DEFAULT_MAX_EXPERIMENT_VCPUS)]
     experiment_max_vcpus: u32,
-    /// Most memory (MiB) one experiment VM may be created with (lock: 16384; a
-    /// silent topic gets the control plane's default, 8192).
+    /// Most memory (MiB) one experiment VM may be created with (lock 32768; a
+    /// silent topic gets the control plane's default, also 32768).
     #[arg(long, env = "PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB", default_value_t = proof_experiment::DEFAULT_MAX_EXPERIMENT_MEM_MIB)]
     experiment_max_mem_mib: u32,
     /// Most writable disk (MiB) one experiment VM may be created with (lock:
@@ -534,8 +534,8 @@ mod tests {
         );
     }
 
-    /// The experiment layer boots with the lock ceilings (8 vCPU / 16 GiB RAM
-    /// max, 32 GiB disk default and max, 16 GiB floor), a small VM count, and
+    /// The experiment layer boots with the lock ceilings (16 vCPU / 32 GiB
+    /// RAM, 32 GiB disk default and max, 16 GiB floor), a small VM count, and
     /// the default pack dir; the operator may move every knob, but not out of
     /// a bootable range.
     #[test]
@@ -543,7 +543,7 @@ mod tests {
         let c = cli(&[]);
         let e = experiment_config(&c).expect("defaults");
         assert_eq!(e.pack_dir, PathBuf::from("/var/lib/proof-vm/packs"));
-        assert_eq!((e.ceilings.max_vcpus, e.ceilings.max_mem_mib), (8, 16_384));
+        assert_eq!((e.ceilings.max_vcpus, e.ceilings.max_mem_mib), (16, 32_768));
         assert_eq!(
             (e.ceilings.default_disk_mib, e.ceilings.max_disk_mib),
             (32_768, 32_768)
@@ -552,9 +552,9 @@ mod tests {
         assert_eq!(e.stage_timeout, Duration::from_mins(10));
         let bigger = cli(&[
             "--experiment-max-vcpus",
-            "16",
+            "32",
             "--experiment-max-mem-mib",
-            "32768",
+            "65536",
             "--experiment-max-disk-mib",
             "16384",
             "--max-experiment-vms",
@@ -563,7 +563,7 @@ mod tests {
             "/srv/packs",
         ]);
         let e = experiment_config(&bigger).expect("raised");
-        assert_eq!((e.ceilings.max_vcpus, e.ceilings.max_mem_mib), (16, 32_768));
+        assert_eq!((e.ceilings.max_vcpus, e.ceilings.max_mem_mib), (32, 65_536));
         assert_eq!(
             e.ceilings.default_disk_mib, 16_384,
             "the default disk never exceeds the disk ceiling"

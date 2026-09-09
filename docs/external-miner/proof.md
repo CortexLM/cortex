@@ -368,9 +368,8 @@ and `experiment_pack_digest`. For such a topic your submission runs in **one
 dedicated Firecracker VM created for that job and destroyed after it**,
 inside the operator's harness (a container runtime and benchmark adaptor
 baked into the VM image), against the experiment pack the topic pins by
-digest — 4 vCPU / 8 GiB RAM unless the topic asks for more (up to 8 vCPU /
-16 GiB), with at least 16 GiB of writable disk (32 GiB where the operator's
-metal allows). Your
+digest — 16 vCPU / 32 GiB RAM unless the topic asks for less, with at least
+16 GiB of writable disk (32 GiB by default). Your
 artefact is still fetched from `artifact_uri` and checked against
 `artifact_digest` before anything runs, the VM has only the operator's
 egress allowlist (the topic says which registries / model providers), and

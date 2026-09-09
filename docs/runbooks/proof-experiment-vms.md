@@ -28,7 +28,7 @@ committed to this repository; the words that select the in-guest path are
 | `baseline_runner` (synonym `in_guest_benchmark_runner`) | The operator adaptor id the guest resolves under `/opt/proof/runners/<id>/` — e.g. `baseline_runner=rlm_fc_in_guest_harbor` selects the adaptor the operator baked under that id. Selecting it switches the topic's paid jobs to dedicated experiment VMs | `[a-z0-9][a-z0-9_-]{1,63}` |
 | `experiment_pack_digest` | `sha256:` of the pack tar the KVM host stages into the VM. **Required** with a runner — a topic that names a runner without a pack fails closed, and a digest is never invented | `sha256:<64 hex>` |
 | `experiment_pack_path` | Optional relative locator of that tar under the host pack dir (default `sha256-<hex>.tar`) | plain relative path, no `..` |
-| `experiment_vcpus`, `experiment_mem_mib`, `experiment_disk_mib` | What the topic asks for; silent = the operator defaults (lock 4 vCPU / 8 GiB / 32 GiB disk), an ask is held under the ceilings (lock 8 vCPU / 16 GiB; disk ≥ 16 GiB). Over a ceiling = **503**, never a clamp | positive integers |
+| `experiment_vcpus`, `experiment_mem_mib`, `experiment_disk_mib` | What the topic asks for; silent = the operator defaults (lock 16 vCPU / 32 GiB / 32 GiB disk), an ask is held under the ceilings (lock 16 vCPU / 32 GiB; disk ≥ 16 GiB) — a topic may ask for less, never for more. Over a ceiling = **503**, never a clamp | positive integers |
 | `model_pin` (top-level `constraints.model_pin`) | Exported to the adaptor as `PROOF_MODEL_PIN` | `vendor/model[:tag]` |
 | any other key | Reaches the adaptor as `PROOF_PARAM_<KEY>` — this is how a topic names its tasks sub-directory, harness agent, concurrency, key file, … | ≤32 printable params |
 
@@ -41,26 +41,29 @@ the KVM host and in the signed document, and is recognised by nothing here.
 
 | Knob | Lock | Where |
 |------|------|-------|
-| Default per-experiment VM (topic silent) | **4 vCPU / 8 GiB RAM** (`PROOF_EXPERIMENT_VM_VCPUS=4`, `PROOF_EXPERIMENT_VM_MEM_MIB=8192`) | CP |
-| Topic override ceiling | up to **8 vCPU / 16 GiB** (`PROOF_EXPERIMENT_VM_MAX_VCPUS=8`, `…_MAX_MEM_MIB=16384`; host `PROOF_VM_AGENT_EXPERIMENT_MAX_*`) | CP + KVM host |
+| Default per-experiment VM (topic silent) | **16 vCPU / 32 GiB RAM** (`PROOF_EXPERIMENT_VM_VCPUS=16`, `PROOF_EXPERIMENT_VM_MEM_MIB=32768`) | CP |
+| Ceiling a topic's ask is held under | **16 vCPU / 32 GiB** (`PROOF_EXPERIMENT_VM_MAX_VCPUS=16`, `…_MAX_MEM_MIB=32768`; host `PROOF_VM_AGENT_EXPERIMENT_MAX_*`) — the default **is** the ceiling; a topic may ask for less | CP + KVM host |
 | Writable disk per experiment VM | **≥ 16 GiB** floor; **32 GiB** default and default max (`PROOF_EXPERIMENT_VM_DISK_MIB` / `…_MAX_DISK_MIB`; raise the max when the metal has more) | CP (default), CP + host (max) |
 | Experiment VMs at once | `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS` (default **2**; `0` disables) | KVM host |
 | Image | `PROOF_EXPERIMENT_VM_IMAGE_DIGEST`, unset = `PROOF_RLM_VM_IMAGE_DIGEST` | CP |
 | Pack directory | `PROOF_VM_AGENT_EXPERIMENT_PACK_DIR=/var/lib/proof-vm/packs` | KVM host |
 
-A silent topic gets the defaults; a topic may ask for less than a ceiling or
-more than a default (`experiment_vcpus: 8`, `experiment_mem_mib: 16384`),
-never more than a ceiling. Both sides enforce their own copy: the control
+A silent topic gets the defaults (the whole lock: one experiment, one
+16 / 32 machine); a topic may ask for less (`experiment_vcpus: 8`,
+`experiment_mem_mib: 16384`), never for more than a ceiling. Both sides
+enforce their own copy: the control
 plane sizes the spec under its ceilings and refuses an ask above them before
 any request; the KVM host refuses a spec above its ceilings with `400
 bad_spec` before any jail. Keep the two in step. The topic VM keeps its own
 locked 4 vCPU / 8192 MiB.
 
 **Size the host** for `max_experiment_vms × (ceiling)` on top of the topic
-VMs: two experiment VMs at the ceiling want 16 vCPU / 32 GiB RAM / 64 GiB
-of disk beside the 4/8 topic VM — the whole of a `g-8vcpu-32gb` and then
-some. On that droplet keep the count at 1 (and lower the ceilings on both
-sides if the compose stack shares it). The writable disk is a fresh ext4
+VMs: one experiment VM at the lock wants 16 vCPU / 32 GiB RAM / 32 GiB of
+disk beside the 4/8 topic VM — already more than a `g-8vcpu-32gb`; two want
+32 vCPU / 64 GiB / 64 GiB. On a droplet that small keep the count at 1 and
+lower the ceilings on both sides (or have the topic ask for less); the
+dedicated production host must carry the lock. The writable disk is a fresh
+ext4
 file per boot under `/srv/jailer` (reflink filesystems make the rootfs copy
 free; the scratch is still allocated), so budget `max_experiment_vms × disk`
 there; set `PROOF_EXPERIMENT_VM_DISK_MIB=16384` when the metal disk cannot
@@ -182,8 +185,9 @@ typed from a document.
    your bake installed (`baseline_runner: rlm_fc_in_guest_harbor` for the
    example above), `experiment_pack_digest: sha256:<pack>`, the adaptor's
    `PROOF_PARAM_*` inputs, and any size ask under the ceilings
-   (`experiment_vcpus` ≤ 8, `experiment_mem_mib` ≤ 16384; omit them for the
-   4 / 8192 default); `metric.custom_id` is in `PROOF_VM_RUNNER_CUSTOM_IDS`.
+   (`experiment_vcpus` ≤ 16, `experiment_mem_mib` ≤ 32768; omit them for
+   the 16 / 32768 default); `metric.custom_id` is in
+   `PROOF_VM_RUNNER_CUSTOM_IDS`.
    Publish, run `TopicSetup` (the baseline is the first experiment VM),
    seal, open.
 7. **Verify** (below); record the evidence with dates and commands.
@@ -202,7 +206,7 @@ spend**. Use `proof-vm-wire-check.sh submit-probe --topic <id> --expect
 | topic selects a runner, no `experiment_pack_digest` | 503 `experiment_pack_digest is required` | nothing created (refused on the CP before any request) |
 | pack file absent on the host | 503 `experiment pack sha256:… (no …/packs/… on this host)` | no jail (`Image` before any boot) |
 | pack file present but re-tarred / wrong bytes | 503 `experiment pack …: … hashes to …` | no jail |
-| `experiment_vcpus: 16` with the 8 ceiling | 503 `experiment vcpus 16 exceeds the ceiling 8` | nothing created |
+| `experiment_vcpus: 32` with the 16 ceiling | 503 `experiment vcpus 32 exceeds the ceiling 16` | nothing created |
 | `experiment_disk_mib: 8192` (under the 16 GiB floor) | 503 `experiment disk_mib 8192 is below the minimum 16384` | nothing created |
 | host ceiling lower than the CP's | 503 `orchestrator 400 … BadSpec: experiment … exceeds the ceiling` | no jail |
 | `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS` reached | 503 `orchestrator 503 … Capacity: this host runs N of at most N experiment vms` | no boot |
