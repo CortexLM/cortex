@@ -6,7 +6,8 @@
 //! SECURITY DEFINER helper (no direct `UPDATE` grant on the table). Bundle
 //! reseal appends a new `epoch_bundle.revision`. Schema invariants live in
 //! `0001_init.sql`, `0002_epoch_bundle_revision.sql`,
-//! `0017_raw_weight_tip_supersede.sql`.
+//! `0017_raw_weight_tip_supersede.sql`,
+//! `0021_raw_weight_refuse_burn_over_score.sql`.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -73,7 +74,8 @@ pub struct RawWeightRecord {
 ///
 /// Returns `Ok(Some(id))` when a row was inserted or replaced because
 /// `payload_digest` changed. Returns `Ok(None)` when the unique key already
-/// holds an identical digest (idempotent replay → HTTP 409).
+/// holds an identical digest (idempotent replay → HTTP 409), or when the
+/// incoming row is a `ChallengeInternal` burn over a positive score.
 ///
 /// Tip supersede runs via `upsert_raw_weight_tip` so `base_app` never needs a
 /// direct `UPDATE` grant on `raw_weight_snapshot`.
@@ -87,8 +89,9 @@ pub async fn insert_raw_weight(
     row: &NewRawWeight<'_>,
 ) -> Result<Option<Uuid>, DbError> {
     // Runtime query: return type is `Option<Uuid>` from the tip-supersede
-    // helper (NULL = identical digest). Avoids regenerating sqlx offline
-    // metadata for a SECURITY DEFINER function signature.
+    // helper (NULL = identical digest or refused ChallengeInternal-over-score).
+    // Avoids regenerating sqlx offline metadata for a SECURITY DEFINER function
+    // signature.
     let id: Option<Uuid> = sqlx::query_scalar(
         r"
         SELECT upsert_raw_weight_tip(

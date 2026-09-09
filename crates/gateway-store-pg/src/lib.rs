@@ -197,7 +197,8 @@ impl RawWeightStore for PgRawWeightStore {
 
 impl PgRawWeightStore {
     /// `Ok(true)` when the row was inserted or tip-superseded; `Ok(false)` when
-    /// the unique key already holds an identical `payload_digest`.
+    /// the unique key already holds an identical `payload_digest` or when a
+    /// `ChallengeInternal` burn would replace a positive score.
     fn try_insert(&self, row: &RawWeightRow) -> Result<bool, String> {
         let epoch = epoch_i64(row.epoch)?;
         let score = row

@@ -203,6 +203,64 @@ async fn s2_duplicate_raw_weight_conflicts() {
 }
 
 #[tokio::test]
+async fn s2b_challenge_internal_must_not_replace_a_positive_score() {
+    if !database_url_present() {
+        return;
+    }
+    let tp = test_pool().await.expect("test_pool");
+    let pool = tp.pool();
+    let (digest, sig, nonce) = (digest32(), sig64(), nonce32());
+    let payload = b"scale-body".to_vec();
+    insert_raw_weight(
+        pool,
+        &score_row(
+            Uuid::new_v4(),
+            "c1",
+            1,
+            "aa",
+            &payload,
+            &digest,
+            &sig,
+            &nonce,
+        ),
+    )
+    .await
+    .expect("score");
+
+    let burn_digest = vec![6u8; 32];
+    let burn_payload = b"challenge-internal".to_vec();
+    let burn = NewRawWeight {
+        id: Uuid::new_v4(),
+        kind: "no_score",
+        score: None,
+        absence_reason: Some("6"),
+        payload: &burn_payload,
+        payload_digest: &burn_digest,
+        ..score_row(
+            Uuid::new_v4(),
+            "c1",
+            1,
+            "aa",
+            &burn_payload,
+            &burn_digest,
+            &sig,
+            &nonce,
+        )
+    };
+    let refused = insert_raw_weight(pool, &burn).await.expect("refuse");
+    assert!(refused.is_none(), "burn over score must be a conflict");
+    let row = get_raw_weight(pool, "c1", 1, "aa")
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.kind, "score");
+    assert_eq!(row.score, Some(42));
+    assert_eq!(row.payload_digest, digest);
+
+    tp.drop_schema().await.expect("drop");
+}
+
+#[tokio::test]
 async fn s3_epoch_bundle_revisions() {
     if !database_url_present() {
         return;

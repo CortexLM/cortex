@@ -4,8 +4,9 @@
 //! (D18 defence in depth) under domain tag `base-rawweight-v1`, then stored
 //! under unique key `(challenge_id, epoch, miner_hotkey)`. A later leaf with a
 //! different `payload_digest` tip-supersedes the prior row (202 +
-//! `superseded: true`); identical digest remains 409. The store plane itself
-//! lives in [`crate::weights_store`].
+//! `superseded: true`); identical digest remains 409. A `ChallengeInternal`
+//! burn must not replace a positive score (also 409, original kept). The
+//! store plane itself lives in [`crate::weights_store`].
 
 use std::sync::Arc;
 
@@ -261,5 +262,46 @@ mod unit_tests {
         // Identical digest replay → conflict.
         let err = accept_raw_weight(&challenges, &store, &mk(99)).unwrap_err();
         assert!(matches!(err, IngressError::Conflict { .. }));
+    }
+
+    #[test]
+    fn unit_accept_refuses_challenge_internal_burn_over_score() {
+        let (sk, pk) = kp();
+        let miner = [9u8; 32];
+        let store = MemoryRawWeightStore::new();
+        let challenges = body(pk);
+        let sign = |soa: ScoreOrAbsenceScale, wire: ScoreOrAbsenceWire| {
+            let scale = RawWeightBodyV1 {
+                challenge_id: b"c1".to_vec(),
+                miner_hotkey: miner,
+                epoch: 1,
+                score_or_absence: soa,
+            };
+            let payload = scale.encode();
+            let sig = sign_raw(&sk, domain::RAW_WEIGHT, &payload).unwrap();
+            RawWeightRequest {
+                challenge_id: "c1".into(),
+                miner_hotkey: hex::encode(miner),
+                epoch: 1,
+                score_or_absence: wire,
+                challenge_sig: hex::encode(sig),
+            }
+        };
+        let scored = sign(
+            ScoreOrAbsenceScale::Score { value: 7 },
+            ScoreOrAbsenceWire::Score { value: 7 },
+        );
+        let burn = sign(
+            ScoreOrAbsenceScale::NoScore { reason: 6 },
+            ScoreOrAbsenceWire::NoScore { reason: 6 },
+        );
+        accept_raw_weight(&challenges, &store, &scored).unwrap();
+        let err = accept_raw_weight(&challenges, &store, &burn).unwrap_err();
+        assert!(matches!(err, IngressError::Conflict { .. }));
+        assert_eq!(
+            store.get("c1", 1, &hex::encode(miner)).unwrap().score,
+            Some(7),
+            "a ChallengeInternal cover must not take back a paid leaf"
+        );
     }
 }

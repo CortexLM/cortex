@@ -266,8 +266,13 @@ services:
       # state, no secret; missing/closed → can_score=false / submit 503.
       PROOF_EVAL_EXECUTOR_OFFER_FILE: /run/base/proof/eval_executor_offer.json
       # RLM artefact zips ({topic_id}/{submission_id}.zip, best.json,
-      # events.jsonl) on the persistent proof-artifacts volume.
+      # events.jsonl) and the scored-epoch watermark on the persistent
+      # proof-artifacts volume.
       PROOF_ARTEFACT_ROOT: /var/lib/proof/artefacts
+      PROOF_SCORED_EPOCH_FILE: /var/lib/proof/scored_epoch
+      # Emission posts signed leaves to the gateway that seals what validators
+      # fetch. Empty store → ChallengeInternal cover so D24 can still seal.
+      PROOF_EMIT_POLL_SECS: "${PROOF_EMIT_POLL_SECS:-120}"
       BASE_CHALLENGE_GATEWAY_ENDPOINT: ${BASE_CHALLENGE_GATEWAY_ENDPOINT:-http://gateway:8080}
     env_file:
       - path: ./deploy/env/proof-challenge.env

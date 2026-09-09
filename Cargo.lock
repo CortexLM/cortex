@@ -3605,7 +3605,9 @@ dependencies = [
 name = "proof-challenge"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "bundle",
+ "chain",
  "challenge-common",
  "crypto",
  "hex",
@@ -3616,6 +3618,10 @@ dependencies = [
  "proof-store",
  "proof-task",
  "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "trustroot",
 ]
 
 [[package]]
@@ -3624,6 +3630,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "chain-live",
  "challenge-keys",
  "clap",
  "crypto",

@@ -45,15 +45,17 @@ pub struct RawWeightRow {
 /// Raw-weight persistence with tip supersede.
 ///
 /// Unique key: `(challenge_id, epoch, miner_hotkey)`. A later leaf with a
-/// **different** `payload_digest` replaces the stored row (tip tracking). An
-/// identical digest is a conflict (idempotent replay).
+/// **different** `payload_digest` replaces the stored row (tip tracking),
+/// except a `ChallengeInternal` burn must not replace a positive score.
+/// An identical digest is a conflict (idempotent replay).
 pub trait RawWeightStore: Send + Sync {
     /// Insert a new row, or replace when the digest changes for the same key.
     ///
     /// # Errors
     ///
     /// [`StoreError::Conflict`] when the key exists with the **same**
-    /// `payload_digest`.
+    /// `payload_digest`, or when the incoming row is a `ChallengeInternal`
+    /// burn that would take back a positive score.
     fn insert(&self, row: RawWeightRow) -> Result<RawWeightRow, StoreError>;
 
     /// Lookup by unique key.
@@ -74,7 +76,8 @@ pub trait RawWeightStore: Send + Sync {
 /// Store insert failures.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StoreError {
-    /// Unique key already present with the same digest; original for 409 bodies.
+    /// Unique key already present with the same digest, or a `ChallengeInternal`
+    /// burn that would replace a positive score; original for 409 bodies.
     #[error("raw weight already present for challenge/epoch/miner")]
     Conflict {
         /// Unchanged original row.
@@ -99,6 +102,26 @@ impl MemoryRawWeightStore {
     }
 }
 
+impl RawWeightRow {
+    /// Paid leaf (`kind == "score"` with `value > 0`).
+    #[must_use]
+    pub fn is_positive_score(&self) -> bool {
+        self.kind == "score" && self.score.is_some_and(|v| v > 0)
+    }
+
+    /// `BUNDLE_SPEC` §3.3.1 reason 6 (`ChallengeInternal`).
+    #[must_use]
+    pub fn is_challenge_internal_burn(&self) -> bool {
+        self.kind == "no_score" && self.absence_reason.as_deref() == Some("6")
+    }
+}
+
+/// True when `incoming` is a `ChallengeInternal` cover that would revoke `existing`.
+#[must_use]
+pub fn burn_replaces_positive_score(existing: &RawWeightRow, incoming: &RawWeightRow) -> bool {
+    existing.is_positive_score() && incoming.is_challenge_internal_burn()
+}
+
 impl RawWeightStore for MemoryRawWeightStore {
     fn insert(&self, row: RawWeightRow) -> Result<RawWeightRow, StoreError> {
         let key = (
@@ -108,7 +131,9 @@ impl RawWeightStore for MemoryRawWeightStore {
         );
         let mut guard = self.rows.write();
         if let Some(existing) = guard.get(&key) {
-            if existing.payload_digest == row.payload_digest {
+            if existing.payload_digest == row.payload_digest
+                || burn_replaces_positive_score(existing, &row)
+            {
                 return Err(StoreError::Conflict {
                     original: Box::new(existing.clone()),
                 });
