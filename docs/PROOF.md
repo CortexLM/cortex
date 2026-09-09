@@ -374,7 +374,7 @@ id shapes shared with `proof-task`).
 
 | Field | Meaning |
 |-------|---------|
-| `metric.custom_id` | Topic-minted metric id, `[a-z0-9][a-z0-9_-]{1,63}`. Draft with any; open needs a registered runner |
+| `metric.custom_id` | Topic-minted metric id, `[a-z0-9][a-z0-9_-]{1,63}` (underscores allowed — a separate namespace from the topic `id`, which is a hyphen slug `[a-z0-9][a-z0-9-]{1,62}`; nothing maps one onto the other). Draft with any; open needs a runner registered under **exactly** this id (`PROOF_VM_RUNNER_CUSTOM_IDS`, byte-for-byte: `_` ≠ `-`). A miss names the registered hyphen / underscore twin when there is one |
 | `constraints.firecracker_required` | Miner code runs only inside a Firecracker guest under the topic VM |
 | `constraints.model_pin` | `vendor/model[:tag]` every paid call must name (shape-checked only) |
 | `constraints.task_slice` | Opaque label the runner interprets; the control plane does not |

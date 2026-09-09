@@ -426,8 +426,10 @@ pub enum TopicError {
         /// What this build reads.
         want: u32,
     },
-    /// Id is not `[a-z0-9][a-z0-9-]{1,62}`.
-    #[error("topic id {0:?} must match [a-z0-9][a-z0-9-]{{1,62}}")]
+    /// Id is not `[a-z0-9][a-z0-9-]{1,62}` (a hyphen slug — underscores
+    /// belong to `metric.custom_id`; the message says so and suggests the
+    /// slug form).
+    #[error("topic id {0:?} must match [a-z0-9][a-z0-9-]{{1,62}}{hint}", hint = proof_canon::slug_suffix(.0))]
     BadId(String),
     /// Statement is empty or oversized.
     #[error("statement must be 1..={MAX_STATEMENT_LEN} chars")]
@@ -455,10 +457,26 @@ pub enum TopicError {
         family: &'static str,
     },
     /// An open custom topic names a metric no registered runner can compute.
+    /// `twin` is the registered id that differs only by `_` ↔ `-` / case,
+    /// when there is one — the usual operator mix-up, named.
     #[error(
-        "custom metric {0:?} has no registered runner on this host; a topic may draft but not open"
+        "custom metric {id:?} has no registered runner on this host; a topic may draft but not open{tail}",
+        tail = proof_canon::twin_suffix(twin.as_deref())
     )]
-    UnknownCustomMetric(String),
+    UnknownCustomMetric {
+        /// The topic's `metric.custom_id`.
+        id: String,
+        /// A registered id that is this one up to `_` ↔ `-` and case.
+        twin: Option<String>,
+    },
+    /// `metric.custom_id` is not `[a-z0-9][a-z0-9_-]{1,63}`.
+    #[error("topic binding metric.custom_id {id:?} must match [a-z0-9][a-z0-9_-]{{1,63}}{sep}{hint}", sep = if hint.is_empty() { "" } else { "; " })]
+    BadCustomId {
+        /// What the document said.
+        id: String,
+        /// Operator hint (namespace, corrected form); may be empty.
+        hint: String,
+    },
     /// A generic binding (constraint, checklist rule) is malformed.
     #[error("topic binding {field}: {why}")]
     BadBinding {
@@ -684,22 +702,7 @@ impl MetricSpec {
                 }
             }
             MetricFamily::Custom => {
-                let id = self.custom_id.trim();
-                if id.is_empty() {
-                    return Err(TopicError::MissingFamilyField {
-                        family,
-                        field: "custom_id",
-                    });
-                }
-                if !crate::is_custom_id(id) {
-                    return Err(TopicError::BadBinding {
-                        field: "metric.custom_id".into(),
-                        why: "must match [a-z0-9][a-z0-9_-]{1,63}",
-                    });
-                }
-                if status == TopicStatus::Open && !registered_custom.contains(&id) {
-                    return Err(TopicError::UnknownCustomMetric(id.to_owned()));
-                }
+                self.validate_custom_id(registered_custom, status)?;
                 if self.primary.trim().is_empty() || !crate::is_custom_id(self.primary.trim()) {
                     return Err(bad_metric());
                 }
@@ -710,6 +713,41 @@ impl MetricSpec {
                     });
                 }
             }
+        }
+        Ok(())
+    }
+}
+
+impl MetricSpec {
+    /// `metric.custom_id`: present, well-formed (`[a-z0-9][a-z0-9_-]{1,63}`,
+    /// with the shape hint spelled out), and — to **open** — registered on
+    /// this host byte-for-byte. A registered hyphen / underscore twin is
+    /// named in the error: the topic-slug-for-custom-id mix-up is the usual
+    /// cause, not a missing runner.
+    fn validate_custom_id(
+        &self,
+        registered_custom: &[&str],
+        status: TopicStatus,
+    ) -> Result<(), TopicError> {
+        let id = self.custom_id.trim();
+        if id.is_empty() {
+            return Err(TopicError::MissingFamilyField {
+                family: self.family.as_str(),
+                field: "custom_id",
+            });
+        }
+        if !crate::is_custom_id(id) {
+            return Err(TopicError::BadCustomId {
+                id: id.to_owned(),
+                hint: proof_canon::custom_id_hint(id).unwrap_or_default(),
+            });
+        }
+        if status == TopicStatus::Open && !registered_custom.contains(&id) {
+            return Err(TopicError::UnknownCustomMetric {
+                id: id.to_owned(),
+                twin: proof_canon::id_twin(id, registered_custom.iter().copied())
+                    .map(str::to_owned),
+            });
         }
         Ok(())
     }
@@ -1337,10 +1375,45 @@ mod tests {
         let mut open = custom_topic("bits_per_joule");
         assert!(matches!(
             open.validate(&p, &[]),
-            Err(TopicError::UnknownCustomMetric(_))
+            Err(TopicError::UnknownCustomMetric { .. })
         ));
         open.validate(&p, &["bits_per_joule"])
             .expect("registered runner may open");
+        // The staging mix-up: the runner is registered under the hyphenated
+        // twin of the topic's custom id (or vice versa) — the error names it.
+        let err = open
+            .validate(&p, &["bits-per-joule", "other_metric"])
+            .expect_err("twin is not a match");
+        assert!(
+            matches!(err, TopicError::UnknownCustomMetric { ref twin, .. } if twin.as_deref() == Some("bits-per-joule")),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("\"bits-per-joule\" is registered") && msg.contains("byte-for-byte"),
+            "{msg}"
+        );
+        let mut underscored_topic = open.clone();
+        underscored_topic.id = "bits_per_joule_v0".into();
+        let err = underscored_topic
+            .validate(&p, &["bits_per_joule"])
+            .expect_err("topic ids are slugs");
+        assert!(matches!(err, TopicError::BadId(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("underscores belong to metric.custom_id"),
+            "{msg}"
+        );
+        assert!(msg.contains("did you mean \"bits-per-joule-v0\"?"), "{msg}");
+        let mut bad_custom = open.clone();
+        bad_custom.metric.custom_id = "Bits Per Joule".into();
+        let err = bad_custom.validate(&p, &[]).expect_err("shape");
+        assert!(matches!(err, TopicError::BadCustomId { .. }), "{err:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("metric.custom_id") && msg.contains("did you mean \"bits_per_joule\"?"),
+            "{msg}"
+        );
         open.status = TopicStatus::Draft;
         open.validate(&p, &[]).expect("a draft may name any id");
 
@@ -1350,7 +1423,7 @@ mod tests {
             assert!(
                 matches!(
                     doc.validate(&p, &[]),
-                    Err(TopicError::BadBinding { .. } | TopicError::MissingFamilyField { .. })
+                    Err(TopicError::BadCustomId { .. } | TopicError::MissingFamilyField { .. })
                 ),
                 "{bad:?}"
             );
