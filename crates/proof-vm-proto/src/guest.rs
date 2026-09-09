@@ -13,8 +13,11 @@
 //! The RLM guest never talks to the miner guest; the host relays the
 //! artefact bytes it already inspected and relays the result back. The miner
 //! guest has no network interface at all. Guest agents live in the pinned
-//! images (`PROOF_RLM_VM_IMAGE_DIGEST`, the agent's miner image), not in this
-//! repository; this module is the contract they implement.
+//! images (`PROOF_RLM_VM_IMAGE_DIGEST`, the agent's miner image); this module
+//! is the contract they implement. The generic in-guest agent
+//! (`crates/proof-vm-guest`, `bins/proof-vm-guest-agent`) implements the
+//! [`RLM_JOB_PORT`] side of it for experiment VMs; the sister-guest side is
+//! still an operator image built against these types.
 
 use std::collections::BTreeMap;
 
