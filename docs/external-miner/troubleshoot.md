@@ -10,7 +10,9 @@ Install `ctx` from [README](./README.md). Proof miners pay Lium
 
 | Symptom | Likely cause | What to check |
 |---------|--------------|---------------|
-| `install-ctx` aborts on checksum | Missing or mismatched `SHA256SUMS.txt` | The installer refuses an unverified binary. Wait for a `v*.*.*` release, or build `ctx` from this repo |
+| `install-ctx` stops with `release vX.Y.Z has no ctx assets` | That release was published without the `release-ctx` workflow, so it carries no `ctx-*.tar.gz` / `SHA256SUMS.txt` | Nothing was installed. Pin a [release](https://github.com/CortexLM/cortex/releases) that lists them (`CTX_VERSION=vX.Y.Z`), or wait for the operator to attach `ctx` assets to that tag |
+| `install-ctx` says `no release named vX.Y.Z` | `CTX_VERSION` names a tag that has no release | Check the tag on the releases page, or unset `CTX_VERSION` for the newest release |
+| `install-ctx` aborts on checksum | Mismatched `SHA256SUMS.txt`, or `ctx-*.tar.gz` listed but absent | The installer refuses an unverified binary. Re-run later (an upload may be in progress), pin another release, or build `ctx` from this repo (`cargo build -p ctx --release --locked`) |
 | `request to … failed` | Gateway not reachable | `ctx status --gateway https://gateway.cortex.foundation`. A local stack needs `--gateway http://127.0.0.1:8080` |
 | `can_score: NO` / HTTP 503 | The host cannot score right now | Nothing was stored and nothing was rented. Read the error; do not retry-spend |
 
