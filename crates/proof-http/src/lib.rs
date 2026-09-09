@@ -6,7 +6,7 @@
 //! GET  /v1/proof/topics
 //! GET  /v1/proof/topics/{id}
 //! GET  /v1/proof/executor         public EvalExecutorOffer + pin ceilings
-//! POST /v1/submissions            miner submit (topic_id required)
+//! POST /v1/submissions            miner submit (topic_id + hotkey_signature required)
 //! GET  /v1/submissions            ?state=queued&topic_id=… filters
 //! GET  /v1/submissions/{id}
 //! POST /v1/admin/proof/topics     operator publish (signed document)
@@ -58,6 +58,7 @@ use proof_store::{
     freeze_submission_digest, ArtifactManifest, Enqueued, MemoryStore, StoreError, Submission,
     SubmissionState,
 };
+use proof_submit::{parse_hotkey_hex, parse_signature_hex, verify_submit};
 use proof_task::{
     resolve_inference, InferenceOffer, MetricFamily, OfferError, ProofPin, TopicDocument,
     TopicError, TopicStatus, CHALLENGE_ID, SCORE_MAX, SCORING_VERSION,
@@ -406,6 +407,9 @@ async fn get_executor(State(st): State<AppState>) -> impl IntoResponse {
 #[derive(Debug, Deserialize)]
 struct SubmitBody {
     miner_hotkey: String,
+    /// sr25519 signature over [`proof_submit::submit_signing_payload`] (128 hex).
+    #[serde(default)]
+    hotkey_signature: Option<String>,
     artifact_digest: String,
     artifact_uri: Option<String>,
     #[serde(default)]
@@ -491,6 +495,36 @@ fn parse_artifact_digest(s: &str) -> Result<String, (StatusCode, Json<serde_json
     Ok(digest)
 }
 
+fn verify_hotkey_signature(
+    hotkey: &str,
+    topic_id: &str,
+    artifact: &str,
+    body: &SubmitBody,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let sig_hex = body
+        .hotkey_signature
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(sig_hex) = sig_hex else {
+        return Err(err(StatusCode::UNAUTHORIZED, "hotkey_signature required"));
+    };
+    let sig = parse_signature_hex(sig_hex)
+        .map_err(|_| err(StatusCode::UNAUTHORIZED, "hotkey_signature invalid"))?;
+    let pk = parse_hotkey_hex(hotkey)
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid miner_hotkey"))?;
+    verify_submit(
+        &pk,
+        hotkey,
+        topic_id,
+        artifact,
+        body.declared_flops,
+        &body.claim,
+        &sig,
+    )
+    .map_err(|_| err(StatusCode::UNAUTHORIZED, "hotkey_signature invalid"))
+}
+
 fn nonce_from(hotkey: &str, topic_id: &str, digest: &str) -> String {
     let mut h = Sha256::new();
     h.update(b"proof-nonce-v1");
@@ -522,6 +556,7 @@ async fn submit(
     if !topic.is_open_at(st.epoch) {
         return Err(err(StatusCode::BAD_REQUEST, "topic is not open"));
     }
+    verify_hotkey_signature(&hotkey, &topic_id, &artifact, &body)?;
     if body.declared_flops > topic.flops_budget {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -1624,9 +1659,14 @@ mod tests {
         (status, v)
     }
 
+    fn fixture_sk() -> [u8; 32] {
+        let mut s = [0x11u8; 32];
+        s[0] = 0x42;
+        s
+    }
+
     fn submit_body(label: &str, extra: &serde_json::Value) -> serde_json::Value {
         let mut v = serde_json::json!({
-            "miner_hotkey": digest("miner-hotkey"),
             "artifact_digest": digest(label),
             "claim": "beats the sealed reference under the cap",
             "declared_flops": FLOPS_BUDGET_MAX / 2,
@@ -1641,6 +1681,9 @@ mod tests {
                     dst.insert(k.clone(), val.clone());
                 }
             }
+        }
+        if extra.get("hotkey_signature").is_none() {
+            proof_submit::attach_to_json(&mut v, &fixture_sk()).expect("sign");
         }
         v
     }
@@ -2158,6 +2201,59 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[tokio::test]
+    async fn submit_requires_a_hotkey_signature() {
+        let app = app("op");
+        let mut unsigned = submit_body("x", &serde_json::json!({}));
+        unsigned
+            .as_object_mut()
+            .expect("obj")
+            .remove("hotkey_signature");
+        let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", unsigned, None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["error"], "hotkey_signature required");
+        let (_, list) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/submissions",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert!(
+            list["items"].as_array().is_some_and(Vec::is_empty),
+            "unsigned must not insert: {list}"
+        );
+
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            submit_body(
+                "x",
+                &serde_json::json!({ "hotkey_signature": "00".repeat(64) }),
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["error"], "hotkey_signature invalid");
+
+        let mut other = [0x22u8; 32];
+        other[0] = 0x43;
+        let other_pk = crypto::public_key_from_mini_secret(&other).expect("other");
+        let mut wrong_key = submit_body("x", &serde_json::json!({}));
+        wrong_key["miner_hotkey"] = serde_json::json!(hex::encode(other_pk));
+        let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", wrong_key, None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["error"], "hotkey_signature invalid");
+        let (_, list) = json_req(app, "GET", "/v1/submissions", serde_json::json!({}), None).await;
+        assert!(
+            list["items"].as_array().is_some_and(Vec::is_empty),
+            "wrong key must not insert: {list}"
+        );
     }
 
     #[tokio::test]

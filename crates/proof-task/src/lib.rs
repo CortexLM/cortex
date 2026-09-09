@@ -4,6 +4,7 @@
 //! challenge_id     = "proof"
 //! scoring_version  = 1
 //! topic domain     = b"base-proof-topic-v1"
+//! submit domain    = b"base-proof-submit-v1"
 //! holdout domain   = b"base-proof-holdout-v1"
 //! receipt domain   = b"base-proof-receipt-v1"
 //! ```
@@ -151,13 +152,19 @@ mod tests {
     }
 
     #[test]
+    fn submit_domain_is_not_the_topic_domain() {
+        assert_ne!(TOPIC_DOMAIN.as_bytes(), b"base-proof-submit-v1");
+    }
+
+    #[test]
     fn domain_tags_are_proof_prefixed_and_unique() {
-        let tags: [&[u8]; 5] = [
+        let tags: [&[u8]; 6] = [
             TASK_ID_DOMAIN,
             HOLDOUT_DOMAIN,
             RECEIPT_DOMAIN,
             BASELINE_DOMAIN,
             TOPIC_DOMAIN.as_bytes(),
+            b"base-proof-submit-v1",
         ];
         for t in tags {
             let s = std::str::from_utf8(t).unwrap_or("");

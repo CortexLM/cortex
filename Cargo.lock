@@ -1288,6 +1288,7 @@ dependencies = [
  "clap",
  "hex",
  "keystore",
+ "proof-submit",
  "reqwest 0.12.28",
  "serde_json",
  "tokio",
@@ -3644,6 +3645,7 @@ dependencies = [
  "proof-rlm",
  "proof-rlm-scorer",
  "proof-rlm-store",
+ "proof-submit",
  "proof-task",
  "proof-vm-agent",
  "proof-vm-fc",
@@ -3770,6 +3772,7 @@ dependencies = [
  "proof-executor",
  "proof-score",
  "proof-store",
+ "proof-submit",
  "proof-task",
  "reqwest 0.12.28",
  "serde",
@@ -3815,6 +3818,7 @@ dependencies = [
  "proof-rlm-store",
  "proof-score",
  "proof-store",
+ "proof-submit",
  "proof-task",
  "serde",
  "serde_json",
@@ -3859,6 +3863,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "proof-submit"
+version = "0.1.0"
+dependencies = [
+ "crypto",
+ "hex",
+ "serde_json",
  "thiserror 2.0.19",
 ]
 

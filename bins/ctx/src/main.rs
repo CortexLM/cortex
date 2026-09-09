@@ -1,9 +1,10 @@
 //! `ctx` — the Cortex subnet CLI.
 //!
 //! One binary for the two live challenges: read what a host can score, submit
-//! a Proof experiment against an open `topic_id`, and pair plus file reports
-//! for Bounty. It talks to the public gateway over HTTPS and signs Bounty
-//! pairings locally; it never asks for a mnemonic and never prints a key.
+//! a Proof experiment against an open `topic_id` (sr25519 over
+//! `base-proof-submit-v1`), and pair plus file reports for Bounty. It talks to
+//! the public gateway over HTTPS and signs locally; it never asks for a
+//! mnemonic and never prints a key.
 
 #![forbid(unsafe_code)]
 
@@ -19,7 +20,7 @@ use clap::{Args, Parser, Subcommand};
 
 use api::{Client, DEFAULT_GATEWAY};
 use bounty::Signer;
-use proof::SubmitInput;
+use proof::{SubmitInput, SubmitKey};
 
 /// Cortex subnet CLI.
 #[derive(Debug, Parser)]
@@ -84,6 +85,8 @@ enum Cmd {
 enum ProofCmd {
     /// Submit an artifact digest against an open `topic_id`.
     Submit(Box<ProofSubmitArgs>),
+    /// Sign a submit payload (prints `miner_hotkey` + `hotkey_signature`).
+    Sign(Box<ProofSignArgs>),
     /// Show one submission.
     Show {
         /// Submission id returned by submit.
@@ -157,12 +160,34 @@ enum BountyCmd {
     Status,
 }
 
+/// Miner sr25519 key for a Proof submit (`base-proof-submit-v1`).
+#[derive(Debug, Args)]
+struct ProofKeyArgs {
+    /// 64-hex miner hotkey. Optional when a secret file or wallet is loaded.
+    #[arg(long, value_name = "HEX64")]
+    hotkey: Option<String>,
+    /// 32-byte hotkey mini-secret file. Never a mnemonic.
+    #[arg(long, value_name = "PATH")]
+    secret_file: Option<PathBuf>,
+    /// Bittensor wallets directory.
+    #[arg(long, value_name = "PATH")]
+    wallet_dir: Option<PathBuf>,
+    /// Wallet name to sign with.
+    #[arg(long, value_name = "NAME")]
+    wallet_name: Option<String>,
+    /// Hotkey file inside that wallet.
+    #[arg(long, default_value = "default", value_name = "NAME")]
+    wallet_hotkey: String,
+    /// 128-hex signature produced by an offline sign.
+    #[arg(long, value_name = "HEX")]
+    signature: Option<String>,
+}
+
 /// Artifact and topic arguments for a Proof submit.
 #[derive(Debug, Args)]
 struct ProofSubmitArgs {
-    /// 64-hex miner hotkey.
-    #[arg(long, value_name = "HEX64")]
-    hotkey: String,
+    #[command(flatten)]
+    key: ProofKeyArgs,
     /// Open topic id (`ctx proof topics`).
     #[arg(long, value_name = "ID")]
     topic_id: String,
@@ -190,6 +215,25 @@ struct ProofSubmitArgs {
     /// Keep polling until the submission stops moving.
     #[arg(long)]
     wait: bool,
+}
+
+/// Fields needed to sign a Proof submit without posting it.
+#[derive(Debug, Args)]
+struct ProofSignArgs {
+    #[command(flatten)]
+    key: ProofKeyArgs,
+    /// Open topic id (`ctx proof topics`).
+    #[arg(long, value_name = "ID")]
+    topic_id: String,
+    /// SHA-256 hex of the artifact you are submitting.
+    #[arg(long, value_name = "SHA256")]
+    artifact_digest: String,
+    /// What the recipe achieved (must match the submit body).
+    #[arg(long, value_name = "TEXT")]
+    claim: String,
+    /// FLOPs spent reproducing the recipe. Must be ≤ the topic budget.
+    #[arg(long, value_name = "N")]
+    declared_flops: u64,
 }
 
 #[tokio::main]
@@ -224,7 +268,6 @@ async fn run_proof(client: &Client, cmd: ProofCmd, json: bool) -> Result<(), Str
     match cmd {
         ProofCmd::Submit(args) => {
             let input = SubmitInput {
-                hotkey: args.hotkey,
                 topic_id: args.topic_id,
                 artifact_digest: args.artifact_digest,
                 artifact_uri: args.artifact_uri,
@@ -234,12 +277,39 @@ async fn run_proof(client: &Client, cmd: ProofCmd, json: bool) -> Result<(), Str
                 train_hashes: args.train_hashes,
                 train_datasets: args.train_datasets,
                 wait: args.wait,
+                key: submit_key(args.key),
             };
             proof::submit(client, &input, json).await
+        }
+        ProofCmd::Sign(args) => {
+            let input = SubmitInput {
+                topic_id: args.topic_id,
+                artifact_digest: args.artifact_digest,
+                artifact_uri: None,
+                claim: args.claim,
+                declared_flops: args.declared_flops,
+                manifest_file: None,
+                train_hashes: Vec::new(),
+                train_datasets: Vec::new(),
+                wait: false,
+                key: submit_key(args.key),
+            };
+            proof::print_signature(&input, json)
         }
         ProofCmd::Show { id, wait } => proof::show(client, &id, wait, json).await,
         ProofCmd::Status => catalog::print_status(client, Some("proof"), json).await,
         ProofCmd::Topics => proof::topics(client, json).await,
+    }
+}
+
+fn submit_key(key: ProofKeyArgs) -> SubmitKey {
+    SubmitKey {
+        hotkey: key.hotkey,
+        secret_file: key.secret_file,
+        wallet_dir: key.wallet_dir,
+        wallet_name: key.wallet_name,
+        wallet_hotkey: key.wallet_hotkey,
+        signature: key.signature,
     }
 }
 
@@ -378,5 +448,37 @@ mod tests {
             "inline"
         );
         assert!(text_arg(None, None, "--body").is_err());
+    }
+
+    #[test]
+    fn proof_submit_accepts_secret_file_without_hotkey() {
+        let digest = "ab".repeat(32);
+        let cli = Cli::try_parse_from([
+            "ctx",
+            "proof",
+            "submit",
+            "--secret-file",
+            "/tmp/hotkey.sk",
+            "--topic-id",
+            "dt-no-ib-v0",
+            "--artifact-digest",
+            &digest,
+            "--claim",
+            "beat baseline",
+            "--declared-flops",
+            "1",
+            "--train-dataset",
+            "mix-v0",
+        ])
+        .expect("parse");
+        match cli.cmd {
+            Cmd::Proof {
+                cmd: ProofCmd::Submit(args),
+            } => {
+                assert!(args.key.hotkey.is_none());
+                assert!(args.key.secret_file.is_some());
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
     }
 }

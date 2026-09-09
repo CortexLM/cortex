@@ -336,9 +336,14 @@ async fn json(method: reqwest::Method, url: &str, body: Option<Value>) -> (u16, 
     (status, v)
 }
 
+fn miner_sk() -> [u8; 32] {
+    let mut s = [0x11u8; 32];
+    s[0] = 0x42;
+    s
+}
+
 fn submit_body(topic_id: &str, extra: &Value) -> Value {
     let mut v = serde_json::json!({
-        "miner_hotkey": digest("e2e-miner"),
         "artifact_digest": digest(topic_id),
         "claim": "e2e sim claim + artifact + declared_flops",
         "declared_flops": 1_000_000u64,
@@ -351,6 +356,9 @@ fn submit_body(topic_id: &str, extra: &Value) -> Value {
                 dst.insert(k.clone(), val.clone());
             }
         }
+    }
+    if extra.get("hotkey_signature").is_none() {
+        proof_submit::attach_to_json(&mut v, &miner_sk()).expect("sign");
     }
     v
 }

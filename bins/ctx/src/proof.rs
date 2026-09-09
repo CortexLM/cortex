@@ -3,6 +3,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use keystore::{default_wallets_dir, load_hotkey, mini_secret_from_key_file, BittensorWallet};
+use proof_submit::{
+    hotkey_hex, parse_hotkey_hex, parse_signature_hex, sign_submit, verify_submit,
+    PROOF_SUBMIT_DOMAIN_LABEL,
+};
 use serde_json::{json, Value};
 
 use crate::api::{challenge_path, Client};
@@ -21,11 +26,26 @@ const QUEUED_HINT: &str =
 /// Poll interval for `--wait`.
 const POLL_SECS: u64 = 20;
 
+/// Miner key for a Proof submit signature.
+#[derive(Debug, Default)]
+pub struct SubmitKey {
+    /// 64-hex miner hotkey. Derived from the secret when omitted.
+    pub hotkey: Option<String>,
+    /// 32-byte hotkey mini-secret file (never a mnemonic).
+    pub secret_file: Option<PathBuf>,
+    /// Bittensor wallets directory.
+    pub wallet_dir: Option<PathBuf>,
+    /// Wallet name under the wallets directory.
+    pub wallet_name: Option<String>,
+    /// Hotkey file name inside that wallet.
+    pub wallet_hotkey: String,
+    /// 128-hex signature produced offline.
+    pub signature: Option<String>,
+}
+
 /// Artifact, topic, and manifest arguments for a Proof submit.
 #[derive(Debug, Default)]
 pub struct SubmitInput {
-    /// 64-hex miner hotkey.
-    pub hotkey: String,
     /// Open topic id from `GET /v1/proof/topics`.
     pub topic_id: String,
     /// SHA-256 hex of the artifact you are submitting.
@@ -44,12 +64,13 @@ pub struct SubmitInput {
     pub train_datasets: Vec<String>,
     /// Poll until the submission reaches a terminal state.
     pub wait: bool,
+    /// sr25519 key or offline signature.
+    pub key: SubmitKey,
 }
 
 /// POST a Proof submission and print the reply.
 pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Result<(), String> {
     let challenge = find("proof").ok_or_else(|| "proof is not a live challenge".to_owned())?;
-    let hotkey = normalize_hex64(&input.hotkey, "hotkey")?;
     let digest = normalize_hex64(&input.artifact_digest, "artifact-digest")?;
     let topic_id = input.topic_id.trim();
     if topic_id.is_empty() {
@@ -59,9 +80,12 @@ pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Res
     if claim.is_empty() {
         return Err("claim is required (what the recipe achieved)".into());
     }
+    let (hotkey, signature) =
+        resolve_hotkey_and_sig(&input.key, topic_id, &digest, input.declared_flops, claim)?;
     let manifest = build_manifest(input)?;
     let mut body = json!({
         "miner_hotkey": hotkey,
+        "hotkey_signature": signature,
         "topic_id": topic_id,
         "artifact_digest": digest,
         "claim": claim,
@@ -102,6 +126,108 @@ pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Res
         poll(client, &id, true, json_out).await?;
     }
     Ok(())
+}
+
+/// Print `miner_hotkey` + `hotkey_signature` without posting.
+pub fn print_signature(input: &SubmitInput, json_out: bool) -> Result<(), String> {
+    let digest = normalize_hex64(&input.artifact_digest, "artifact-digest")?;
+    let topic_id = input.topic_id.trim();
+    if topic_id.is_empty() {
+        return Err("topic-id is required".into());
+    }
+    let claim = input.claim.trim();
+    if claim.is_empty() {
+        return Err("claim is required".into());
+    }
+    let (hotkey, signature) =
+        resolve_hotkey_and_sig(&input.key, topic_id, &digest, input.declared_flops, claim)?;
+    if json_out {
+        println!(
+            "{}",
+            json!({
+                "miner_hotkey": hotkey,
+                "hotkey_signature": signature,
+                "domain": PROOF_SUBMIT_DOMAIN_LABEL,
+            })
+        );
+        return Ok(());
+    }
+    println!("miner_hotkey={hotkey}");
+    println!("hotkey_signature={signature}");
+    println!("domain={PROOF_SUBMIT_DOMAIN_LABEL}");
+    Ok(())
+}
+
+fn resolve_hotkey_and_sig(
+    key: &SubmitKey,
+    topic_id: &str,
+    digest: &str,
+    declared_flops: u64,
+    claim: &str,
+) -> Result<(String, String), String> {
+    if let Some(hex_sig) = &key.signature {
+        let hotkey = normalize_hex64(
+            key.hotkey
+                .as_deref()
+                .ok_or("hotkey is required with --signature")?,
+            "hotkey",
+        )?;
+        let pk = parse_hotkey_hex(&hotkey).map_err(|e| e.to_string())?;
+        let sig =
+            parse_signature_hex(hex_sig).map_err(|_| "hotkey_signature invalid".to_owned())?;
+        verify_submit(&pk, &hotkey, topic_id, digest, declared_flops, claim, &sig)
+            .map_err(|_| "hotkey_signature invalid".to_owned())?;
+        return Ok((hotkey, hex::encode(sig)));
+    }
+    let sk = load_mini_secret(key)?;
+    let derived = hotkey_hex(&sk).map_err(|e| e.to_string())?;
+    let hotkey = if let Some(raw) = &key.hotkey {
+        let want = normalize_hex64(raw, "hotkey")?;
+        if want != derived {
+            return Err(
+                "hotkey_mismatch: --hotkey is not the public key of the loaded secret".into(),
+            );
+        }
+        want
+    } else {
+        derived
+    };
+    let sig = sign_submit(&sk, &hotkey, topic_id, digest, declared_flops, claim)
+        .map_err(|e| e.to_string())?;
+    Ok((hotkey, hex::encode(sig)))
+}
+
+fn load_mini_secret(key: &SubmitKey) -> Result<[u8; 32], String> {
+    if let Some(path) = &key.secret_file {
+        return mini_secret_from_key_file(path).map_err(|e| e.to_string());
+    }
+    if let Some(name) = &key.wallet_name {
+        let dir = key.wallet_dir.clone().unwrap_or_else(default_wallets_dir);
+        let hotkey_name = if key.wallet_hotkey.is_empty() {
+            "default"
+        } else {
+            &key.wallet_hotkey
+        };
+        let wallet = BittensorWallet::new(name, hotkey_name);
+        let kp = load_hotkey(&dir, wallet.wallet_name(), wallet.hotkey_name())
+            .map_err(|e| e.to_string())?;
+        if let Some(raw) = &key.hotkey {
+            let want = normalize_hex64(raw, "hotkey")?;
+            let got = hex::encode(kp.public_key());
+            if want != got {
+                return Err(format!(
+                    "hotkey_mismatch: wallet hotkey {} is not --hotkey",
+                    kp.ss58_address()
+                ));
+            }
+        }
+        return Ok(*kp.expose_mini_secret());
+    }
+    Err(
+        "Proof submit requires an sr25519 signature over base-proof-submit-v1: \
+         pass --secret-file, --wallet-name, or --signature"
+            .into(),
+    )
 }
 
 /// GET one submission, optionally polling to a terminal state.
@@ -271,6 +397,10 @@ fn topic_list_items(body: &Value) -> Option<&Vec<Value>> {
 fn explain_failure(status: u16, message: &str) -> String {
     match status {
         400 => format!("refused ({message}). Nothing was stored and nothing was rented."),
+        401 => format!(
+            "unauthorized ({message}). Proof submit requires a hotkey_signature over \
+             {PROOF_SUBMIT_DOMAIN_LABEL} (X-Lium-Api-Key is not identity)."
+        ),
         503 => format!(
             "HTTP 503: {message}\n  The host cannot score right now (empty eval digest, \
              missing/closed RLM judge backend, no open topics, or an unsealed baseline). \
@@ -305,10 +435,46 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_must_be_64_hex() {
-        assert!(normalize_hex64("abcd", "hotkey").is_err());
-        let ok = "a".repeat(64);
-        assert_eq!(normalize_hex64(&ok, "hotkey").unwrap(), ok);
+    fn secret_file_signs_the_locked_payload() {
+        let mut sk = [0x11u8; 32];
+        sk[0] = 0x42;
+        let dir = std::env::temp_dir().join(format!(
+            "ctx-proof-sig-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("sk");
+        std::fs::write(&path, hex::encode(sk)).expect("write sk");
+        let key = SubmitKey {
+            secret_file: Some(path),
+            wallet_hotkey: "default".into(),
+            ..SubmitKey::default()
+        };
+        let digest = "ab".repeat(32);
+        let (hotkey, sig) =
+            resolve_hotkey_and_sig(&key, "dt-no-ib-v0", &digest, 1, "beat").expect("sign");
+        assert_eq!(hotkey, hotkey_hex(&sk).expect("pk"));
+        let pk = parse_hotkey_hex(&hotkey).expect("pk");
+        let raw = parse_signature_hex(&sig).expect("sig");
+        verify_submit(&pk, &hotkey, "dt-no-ib-v0", &digest, 1, "beat", &raw).expect("verify");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_signer_is_rejected() {
+        let err = resolve_hotkey_and_sig(
+            &SubmitKey::default(),
+            "dt-no-ib-v0",
+            &"ab".repeat(32),
+            1,
+            "beat",
+        )
+        .expect_err("unsigned");
+        assert!(err.contains("base-proof-submit-v1"), "{err}");
     }
 
     #[test]

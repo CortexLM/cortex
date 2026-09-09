@@ -264,8 +264,11 @@ Trust-root keygen is the throwaway owner path in
   the error names the head — / topic already has a row in flight / topic
   still deferring, **503** host refusal with the row released back to the
   queue).
-- `POST /v1/submissions` **requires** `topic_id`. Missing/unknown/not-open →
-  **400**. Miners do **not** bind the judge offer or the executor offer. Zero
+- `POST /v1/submissions` **requires** `topic_id` and a miner
+  `hotkey_signature` (sr25519 over `base-proof-submit-v1`: hotkey + topic_id +
+  artifact_digest + declared_flops + claim). Missing/unknown/not-open →
+  **400**. Missing/invalid signature → **401** (no row). `X-Lium-Api-Key` is
+  not identity. Miners do **not** bind the judge offer or the executor offer. Zero
   open / unsealed baseline / empty digest / missing or closed RLM judge
   backend / missing, closed, or non-`1x` executor / agent down / run cut at
   the proof deadline / no registered or wired runner for the topic's
@@ -288,7 +291,8 @@ Trust-root keygen is the throwaway owner path in
   reigning best) persists as `champion`; other passes stay `awaiting_admin`.
 - Submit fields miners must send: `claim` (what the recipe achieved),
   `declared_flops` (≤ topic budget), `artifact_digest` of a **reproducible
-  train/eval recipe** (code under budget, not weights-only), plus `manifest`;
+  train/eval recipe** (code under budget, not weights-only), `manifest`,
+  and `hotkey_signature` (128 hex sr25519 over `base-proof-submit-v1`);
   on custom topics also `artifact_uri` (the runner fetches from it).
   The agent verdict (`reproduced`, `claim_holds_public`, cheat codes) is
   filled by the eval image, not the miner.

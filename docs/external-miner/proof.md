@@ -18,12 +18,15 @@ confirm deployment support with the operator first.
 **Pin:** [`config/proof-pin.toml`](../../config/proof-pin.toml)  
 **Eval image:** `ghcr.io/cortexlm/proof-eval@sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009`
 
-You submit **claim + code + FLOPs + artifact** against a topic. You do
-not bind an offer id. The digest-pinned `proof-eval` image (harvest boots
-it) calls the master's `InferenceOffer` as the RLM **judge** backend.
-No baked Qwen; architecture is not an HF id check.
+You submit **claim + code + FLOPs + artifact** against a topic, signed with
+your miner hotkey. You do not bind an offer id. The digest-pinned
+`proof-eval` image (harvest boots it) calls the master's `InferenceOffer` as
+the RLM **judge** backend. No baked Qwen; architecture is not an HF id
+check.
 
-Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
+Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`). That key is **not**
+identity: every submit must carry `hotkey_signature` over
+`base-proof-submit-v1`.
 
 If `eval_image_digest` is empty the host answers **503**. That is fail-closed,
 not a sim fallback. The pin currently carries the digest above. Do not invent
@@ -185,7 +188,7 @@ ctx proof status          # can_score, inference_offer, eval_executor, eval_imag
 ctx proof topics          # pick an open topic_id; read flops_budget + payout_mode
 
 ctx proof submit \
-  --hotkey <64-hex hotkey> \
+  --secret-file /path/to/hotkey.sk \
   --topic-id <open topic id> \
   --artifact-digest <sha256 of the recipe> \
   --claim "beat sealed baseline holdout NLL by 0.04 at 1.2e18 FLOPs" \
@@ -193,12 +196,26 @@ ctx proof submit \
   --train-dataset my-mix-v0
 ```
 
+`--secret-file` is a 32-byte mini-secret (or 64 hex chars), never a mnemonic.
+`--wallet-name` / `--wallet-dir` / `--wallet-hotkey` load a Bittensor
+wallet the same way `ctx bounty pair` does. `--signature` is a 128-hex
+offline signature. `--hotkey` is optional when a secret or wallet is
+loaded (derived); with `--signature` it is required and must match.
+
+The signature is sr25519 under `base-proof-submit-v1` over:
+
+```
+hotkey_hex || 0xff || topic_id || 0xff || artifact_digest || 0xff || declared_flops_decimal || 0xff || claim
+```
+
+`ctx proof sign` prints `miner_hotkey` + `hotkey_signature` without posting.
+
 `--wait` keeps polling until the row is terminal (`awaiting_admin`,
 `rejected`, or `champion`). A `queued` row is not terminal: on a topic that
 defers scoring, `--wait` keeps polling until the operator drains the queue,
 which can take as long as the operator's install does.
 
-The same submit with `curl`:
+The same submit with `curl` (signature from `ctx proof sign --json`):
 
 ```bash
 curl -sS -X POST https://gateway.cortex.foundation/challenge/proof/v1/submissions \
@@ -206,6 +223,7 @@ curl -sS -X POST https://gateway.cortex.foundation/challenge/proof/v1/submission
   -H "X-Lium-Api-Key: $LIUM_API_KEY" \
   -d '{
     "miner_hotkey": "<64-hex hotkey>",
+    "hotkey_signature": "<128-hex sr25519>",
     "topic_id": "<open topic id>",
     "artifact_digest": "<sha256 of the recipe>",
     "claim": "beat sealed baseline holdout NLL by 0.04 at 1.2e18 FLOPs",
@@ -231,11 +249,12 @@ a topic in `deferred_topics`, where they answer **201** `queued`.
 
 | Field | Required | Shape |
 |-------|----------|-------|
-| `miner_hotkey` | yes | 64 hex characters (no `0x`) |
+| `miner_hotkey` | yes | 64 hex characters (no `0x`); the sr25519 public key that verifies `hotkey_signature` |
+| `hotkey_signature` | yes | 128 lowercase hex sr25519 over `base-proof-submit-v1` (see payload above). Missing/invalid → **401**. `X-Lium-Api-Key` is not a substitute |
 | `topic_id` | yes | Open topic id from `ctx proof topics` |
 | `artifact_digest` | yes | SHA-256 hex of the recipe bytes |
-| `claim` | yes | Non-empty string: NL of what improved |
-| `declared_flops` | yes | `u64`, must be `≤ topic.flops_budget` |
+| `claim` | yes | Non-empty string: NL of what improved (bound into the signature) |
+| `declared_flops` | yes | `u64`, must be `≤ topic.flops_budget` (bound into the signature) |
 | `manifest.train_content_hashes` | yes (array) | Shard hashes you trained on (may be `[]` if you declare dataset ids) |
 | `manifest.train_dataset_ids` | yes (array) | Corpus ids you trained on (may be `[]` if you declare hashes) |
 | `artifact_uri` | custom topics: yes | Locator for the same bytes as `artifact_digest`; optional on `nll` / `throughput` |
@@ -265,8 +284,9 @@ there is no row to show.
 
 ## HTTP 400 vs 503
 
-A **400** is your request. A **503** is the host. Neither rents a pod.
-Refusals (**400** / **503**) do **not** persist a submission row.
+A **400** is your request. A **401** is a missing or invalid hotkey
+signature. A **503** is the host. None of those rent a pod. Refusals
+(**400** / **401** / **503**) do **not** persist a submission row.
 
 | Status | When | Stored? | Rented? |
 |--------|------|---------|---------|
@@ -276,6 +296,8 @@ Refusals (**400** / **503**) do **not** persist a submission row.
 | **400** `declared_flops exceeds the topic budget` | `declared_flops > topic.flops_budget` | no | no |
 | **400** `artifact_uri is required for custom topics` | Custom topic, no locator | no | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not 64 hex | no | no |
+| **401** `hotkey_signature required` | Missing / empty `hotkey_signature` | no | no |
+| **401** `hotkey_signature invalid` | Signature does not verify under `miner_hotkey` for `base-proof-submit-v1` | no | no |
 | **400** `artifact_digest is the sha256 of empty input …` | The digest of zero bytes or of an empty tar archive: hash the recipe bytes you actually serve at `artifact_uri` | no | no |
 | **503** empty `eval_image_digest` | Digest not pinned | no | no |
 | **503** zero open sealed topics | Nothing to score against | no | no |

@@ -13,6 +13,16 @@ use serde_json::Value;
 
 const STAGING_TOPICS: [&str; 2] = ["dt-no-ib-v0", "muon-vs-adamw-10m-v0"];
 
+fn fixture_sk() -> [u8; 32] {
+    let mut s = [0x11u8; 32];
+    s[0] = 0x42;
+    s
+}
+
+fn sign_submit_json(body: &mut Value) {
+    proof_submit::attach_to_json(body, &fixture_sk()).expect("sign");
+}
+
 fn base_url() -> Option<String> {
     std::env::var("PROOF_E2E_BASE")
         .ok()
@@ -171,19 +181,15 @@ async fn live_host_submit_scores_or_fails_closed() {
     }
 
     for topic_id in topic_ids {
-        let (st, created) = post(
-            &client,
-            &format!("{base}/v1/submissions"),
-            &serde_json::json!({
-                "miner_hotkey": hex64("e2e-hotkey"),
-                "artifact_digest": hex64(&format!("e2e-artifact-{topic_id}")),
-                "claim": "e2e sim submit against an open topic",
-                "declared_flops": 1,
-                "topic_id": topic_id,
-                "manifest": { "train_dataset_ids": ["e2e-mix-v0"] }
-            }),
-        )
-        .await;
+        let mut body = serde_json::json!({
+            "artifact_digest": hex64(&format!("e2e-artifact-{topic_id}")),
+            "claim": "e2e sim submit against an open topic",
+            "declared_flops": 1,
+            "topic_id": topic_id,
+            "manifest": { "train_dataset_ids": ["e2e-mix-v0"] }
+        });
+        sign_submit_json(&mut body);
+        let (st, created) = post(&client, &format!("{base}/v1/submissions"), &body).await;
         assert!(
             st == 201 || st == 400 || st == 503,
             "unexpected {st} {created}"

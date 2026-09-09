@@ -2,8 +2,10 @@
 # Proof topic-VM orchestrator — staging wire check + end-to-end probes.
 #
 # Runs on the staging MASTER droplet (/opt/base) or any box that reaches the
-# Proof control plane and the KVM-host agent. bash + curl + python3 only, no
-# cargo. Never prints the bearer (it travels in a 0600 curl config, never in
+# Proof control plane and the KVM-host agent. bash + curl + python3 for
+# env/agent/cp probes. `submit-probe` also needs `ctx` (or cargo -p ctx from
+# this repo) so the POST carries `hotkey_signature` over `base-proof-submit-v1`.
+# Never prints the bearer (it travels in a 0600 curl config, never in
 # argv). Refuses production hosts. Runbook:
 # docs/runbooks/proof-vm-orchestrator.md § DigitalOcean staging.
 #
@@ -808,20 +810,21 @@ submit_probe() {
     RED "--declared-flops must be a positive integer (got '$flops'); a live run measuring anything above the declaration is rejected flops_under_declared"
     exit 1
   fi
-  local hotkey hex uri_field="" body code
-  hotkey="$(head -c 64 /dev/zero | tr '\0' 'a')"
+  local hotkey hex uri_field="" body code sig signed
   # artifact_digest: the fail-closed probes never run, so a random digest is
   # fine there. A LIVE run is judged on the bytes the RLM VM fetches from
   # --artifact-uri and the host re-hashes them against this digest before it
-  # boots a sister — so it must be the sha256 of the real file. A random one
-  # can only ever "pass" through a guest that substitutes bytes (the empty
-  # tree staging once matched); that stub is exactly what must never be relied
-  # on, so the live path refuses to start without a real digest.
+  # boots a sister — so it must be the sha256 of the real file.
   artifact_digest_for_probe || return 0
   hex="$PROBE_HEX"
   [[ -n "$ARTIFACT_URI" ]] && uri_field="$(printf '"artifact_uri":"%s",' "$ARTIFACT_URI")"
-  body="$(printf '{"miner_hotkey":"%s","artifact_digest":"%s",%s"claim":"proof-vm-wire-check probe","declared_flops":%s,"topic_id":"%s","manifest":{"train_dataset_ids":["wire-probe-v0"]}}' \
-    "$hotkey" "$hex" "$uri_field" "$flops" "$TOPIC")"
+  signed="$("$ROOT/deploy/scripts/proof-submit-sign.sh" \
+    --topic-id "$TOPIC" --artifact-digest "$hex" --declared-flops "$flops" \
+    --claim "proof-vm-wire-check probe")"
+  hotkey="$(printf '%s' "$signed" | python3 -c 'import json,sys; print(json.load(sys.stdin)["miner_hotkey"])')"
+  sig="$(printf '%s' "$signed" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hotkey_signature"])')"
+  body="$(printf '{"miner_hotkey":"%s","hotkey_signature":"%s","artifact_digest":"%s",%s"claim":"proof-vm-wire-check probe","declared_flops":%s,"topic_id":"%s","manifest":{"train_dataset_ids":["wire-probe-v0"]}}' \
+    "$hotkey" "$sig" "$hex" "$uri_field" "$flops" "$TOPIC")"
   LOG "submit-probe: POST $CP/v1/submissions topic=$TOPIC expect=$EXPECT declared_flops=$flops${REASON:+ reason~'$REASON'}${ARTIFACT_URI:+ artifact_uri=$ARTIFACT_URI}"
   http POST "$CP/v1/submissions" "$body" -m "$WAIT_SECS"; code="$HTTP_CODE"
   LOG "→ HTTP $code $(printf '%s' "$HTTP_BODY" | head -c 500)"

@@ -137,12 +137,33 @@ probe_proof() {
     fi
   fi
 
-  local topic hex sid row any_scored=0
+  local topic hex sid row any_scored=0 signed hotkey sig
+  topic="${topics_to_hit[0]}"
+  code="$(curl -sS -m 8 -o /tmp/proof-e2e-unsigned.json -w '%{http_code}' \
+    -X POST -H 'content-type: application/json' \
+    -d "{\"miner_hotkey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"artifact_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"claim\":\"unsigned\",\"declared_flops\":1,\"topic_id\":\"$topic\",\"manifest\":{\"train_dataset_ids\":[\"e2e-mix-v0\"]}}" \
+    "$base/v1/submissions")"
+  body="$(cat /tmp/proof-e2e-unsigned.json)"
+  LOG "POST /v1/submissions unsigned topic_id=$topic → HTTP $code $body"
+  if [[ "$code" == "400" ]]; then
+    echo "$body" | grep -q '"error"' || { RED "400 had no error field"; return 1; }
+    LOG "unsigned hit a 400 before the signature gate (topic missing/not open)"
+  else
+    [[ "$code" == "401" ]] || { RED "unsigned open-topic submit expected 401, got $code"; return 1; }
+    echo "$body" | grep -q 'hotkey_signature' || { RED "401 did not name hotkey_signature"; return 1; }
+    GRN "PASS  --probe $base unsigned submit HTTP 401"
+  fi
+
   for topic in "${topics_to_hit[@]}"; do
     hex="$(printf '%s' "e2e-$topic-$RANDOM-$$" | sha256sum | awk '{print $1}')"
+    signed="$("$ROOT/deploy/scripts/proof-submit-sign.sh" \
+      --topic-id "$topic" --artifact-digest "$hex" --declared-flops 1 \
+      --claim "e2e sim submit against $topic")"
+    hotkey="$(printf '%s' "$signed" | python3 -c 'import json,sys; print(json.load(sys.stdin)["miner_hotkey"])')"
+    sig="$(printf '%s' "$signed" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hotkey_signature"])')"
     code="$(curl -sS -m 20 -o /tmp/proof-e2e-submit.json -w '%{http_code}' \
       -X POST -H 'content-type: application/json' \
-      -d "{\"miner_hotkey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"artifact_digest\":\"$hex\",\"claim\":\"e2e sim submit against $topic\",\"declared_flops\":1,\"topic_id\":\"$topic\",\"manifest\":{\"train_dataset_ids\":[\"e2e-mix-v0\"]}}" \
+      -d "{\"miner_hotkey\":\"$hotkey\",\"hotkey_signature\":\"$sig\",\"artifact_digest\":\"$hex\",\"claim\":\"e2e sim submit against $topic\",\"declared_flops\":1,\"topic_id\":\"$topic\",\"manifest\":{\"train_dataset_ids\":[\"e2e-mix-v0\"]}}" \
       "$base/v1/submissions")"
     body="$(cat /tmp/proof-e2e-submit.json)"
     LOG "POST /v1/submissions topic_id=$topic → HTTP $code $body"
