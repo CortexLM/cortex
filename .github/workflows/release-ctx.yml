@@ -20,9 +20,10 @@ name: release-ctx
 # sources come from the tip of `main`. A dispatch never checks the tag out:
 # an old tag predates `bins/ctx`, which is how `package ID specification ctx
 # did not match any packages` happened. The resolve job refuses a build ref
-# without `bins/ctx` before any runner starts cargo, every archive of one run
-# is built from the same resolved commit, and the appended release notes
-# record that commit.
+# that is not a commit on `main` (miners install what this publishes; an
+# unmerged branch or a fork is never released) or has no `bins/ctx`, before
+# any runner starts cargo; every archive of one run is built from the same
+# resolved commit, and the appended release notes record that commit.
 #
 # Operator recipe (full text: deploy/README.md § ctx CLI release):
 #   gh release create vX.Y.Z --target main --title "ctx CLI vX.Y.Z" --notes "…"
@@ -71,11 +72,13 @@ jobs:
       sha: ${{ steps.pick.outputs.sha }}
     steps:
       # Push: the pushed tag ref (checkout peels annotated tags to the commit).
-      # Dispatch: the build ref, never the release tag.
+      # Dispatch: the build ref, never the release tag. Full history so the
+      # commit can be checked against main below.
       - name: Checkout build ref
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && (inputs.build_ref || 'main') || github.ref }}
+          fetch-depth: 0
 
       - name: Pick release tag and build commit
         id: pick
@@ -106,6 +109,13 @@ jobs:
           fi
 
           sha="$(git rev-parse HEAD)"
+          # Miners install what this publishes, so it is built from commits on
+          # the working branch only — never from an unmerged branch or a fork.
+          git fetch -q --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
+            echo "::error::build ref '$build_ref' ($sha) is not on main. ctx is released from commits on main only; land the change first, or dispatch with build_ref=main (the default)."
+            exit 1
+          fi
           if [ ! -f bins/ctx/Cargo.toml ]; then
             echo "::error::build ref '$build_ref' ($sha) has no bins/ctx — it predates the ctx CLI. Dispatch with build_ref=main (the default) so the release tag stays a label and the sources come from tip."
             exit 1
@@ -166,10 +176,9 @@ jobs:
           toolchain: "1.96.0"
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+      # No cargo cache on purpose: a release build is cold and reproducible,
+      # and a cache written after compiling a dispatched ref would be restored
+      # by every later run on main (cache poisoning).
 
       # `ring` needs a C toolchain, and the musl targets are what make the
       # Linux archives run on any distro without a glibc floor.
