@@ -100,14 +100,19 @@ Procedure and the mandatory submission verification:
 
 **Experiment VMs.** Topics whose signed `constraints.params` select an
 in-guest runner get one dedicated Firecracker VM per paid job on that same
-host, under configurable caps (lock 16 vCPU / 32 GiB RAM, writable disk
-≥ 16 GiB; `PROOF_VM_AGENT_EXPERIMENT_MAX_*`,
+host, under configurable caps (lock 16 vCPU / 32 GiB RAM — a **hard**
+maximum: a ceiling set above it does not boot, a smaller host may only lower
+it — writable disk ≥ 16 GiB; `PROOF_VM_AGENT_EXPERIMENT_MAX_*`,
 `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS`, packs in
-`PROOF_VM_AGENT_EXPERIMENT_PACK_DIR`; CP side `PROOF_EXPERIMENT_VM_*`). The
-guest image is baked with [`guest/bake-rootfs.sh`](guest/bake-rootfs.sh)
-(rootless podman + `proof-vm-guest-agent` + operator adaptors per
-[`guest/runners/README.md`](guest/runners/README.md)) and named after its own
-`sha256sum`; packs and adaptors are operator artefacts, never in git.
+`PROOF_VM_AGENT_EXPERIMENT_PACK_DIR`; CP side `PROOF_EXPERIMENT_VM_*`). A
+result scores only once the agent confirms the VM destroyed (`DELETE`
+failed / unconfirmed → 503, no row). The guest image is baked with
+[`guest/bake-rootfs.sh`](guest/bake-rootfs.sh) (rootless podman on
+run-as-owned scratch paths + `proof-vm-guest-agent` + operator adaptors per
+[`guest/runners/README.md`](guest/runners/README.md), harness tooling via the
+generic `--extra-pkgs` / `--overlay` / `--chroot-hook`) and named after its
+own `sha256sum`; packs, adaptors, and harnesses are operator artefacts,
+never in git (the repo ships the contract and a fail-closed skeleton only).
 Procedure, RE-LOCK, and limits:
 [`docs/runbooks/proof-experiment-vms.md`](../docs/runbooks/proof-experiment-vms.md).
 

@@ -96,7 +96,9 @@ asks for a sister by connecting to host port `5001` with a `SisterRequest`
 carrying the artefact tarball it already fetched and inspected. This
 repository now ships the **generic in-guest agent** (`bins/proof-vm-guest-agent`,
 port `5000`; it runs operator adaptors, never a built-in runner) and a bake
-script for the enlarged rootfs (rootless podman, optional pinned Harbor CLI)
+script for the enlarged rootfs (rootless podman on run-as-owned scratch
+paths; the operator's harness tooling via generic `--extra-pkgs` /
+`--overlay` / `--chroot-hook` — no harness is named in git)
 — [`proof-experiment-vms.md`](proof-experiment-vms.md) § The guest image.
 Experiment packs live in `/var/lib/proof-vm/packs/sha256-<hex>.tar`
 (`PROOF_VM_AGENT_EXPERIMENT_PACK_DIR`), staged files the agent re-hashes

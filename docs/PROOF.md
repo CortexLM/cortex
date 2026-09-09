@@ -379,7 +379,7 @@ id shapes shared with `proof-task`).
 | `constraints.model_pin` | `vendor/model[:tag]` every paid call must name (shape-checked only) |
 | `constraints.task_slice` | Opaque label the runner interprets; the control plane does not |
 | `constraints.params` | ≤32 opaque `slug → printable` runner params |
-| `constraints.params.baseline_runner` (synonym `in_guest_benchmark_runner`) | Generic knob (`proof-experiment`): selects an **operator adaptor id** baked into the guest image (e.g. `baseline_runner: rlm_fc_in_guest_harbor`); the topic's paid jobs then run in **one dedicated experiment VM per job**. Values are topic data; no adaptor ships in git |
+| `constraints.params.baseline_runner` (synonym `in_guest_benchmark_runner`) | Generic knob (`proof-experiment`): selects an **operator adaptor id** baked into the guest image (e.g. `baseline_runner: operator_adaptor_v0`); the topic's paid jobs then run in **one dedicated experiment VM per job**, sized under a hard 16 vCPU / 32 GiB lock, and score only once the orchestrator confirms that VM destroyed. Values are topic data; no adaptor, harness, or scoring rule ships in git |
 | `constraints.params.experiment_pack_digest` / `experiment_pack_path` | `sha256:` of the pack tar the KVM host stages into that VM (required with a runner; never defaulted) / optional relative locator under the host pack dir |
 | `constraints.params.experiment_vcpus` / `experiment_mem_mib` / `experiment_disk_mib` | The topic's size ask: silent = the operator defaults (lock 16 vCPU / 32 GiB / 32 GiB disk), an ask may go up to the ceilings (lock 16 vCPU / 32 GiB — the default is the ceiling; disk ≥ 16 GiB); over = 503, never a clamp |
 | `checklist` | ≤64 `{id, text}` anti-cheat rules (unique slug ids), version 1 of the rule set |

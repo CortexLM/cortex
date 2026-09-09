@@ -25,17 +25,20 @@ committed to this repository; the words that select the in-guest path are
 
 | `constraints.params` key | Meaning | Shape |
 |--------------------------|---------|-------|
-| `baseline_runner` (synonym `in_guest_benchmark_runner`) | The operator adaptor id the guest resolves under `/opt/proof/runners/<id>/` — e.g. `baseline_runner=rlm_fc_in_guest_harbor` selects the adaptor the operator baked under that id. Selecting it switches the topic's paid jobs to dedicated experiment VMs | `[a-z0-9][a-z0-9_-]{1,63}` |
+| `baseline_runner` (synonym `in_guest_benchmark_runner`) | The operator adaptor id the guest resolves under `/opt/proof/runners/<id>/` — e.g. `baseline_runner=operator_adaptor_v0` selects the adaptor the operator baked under that id. Selecting it switches the topic's paid jobs to dedicated experiment VMs | `[a-z0-9][a-z0-9_-]{1,63}` |
 | `experiment_pack_digest` | `sha256:` of the pack tar the KVM host stages into the VM. **Required** with a runner — a topic that names a runner without a pack fails closed, and a digest is never invented | `sha256:<64 hex>` |
 | `experiment_pack_path` | Optional relative locator of that tar under the host pack dir (default `sha256-<hex>.tar`) | plain relative path, no `..` |
-| `experiment_vcpus`, `experiment_mem_mib`, `experiment_disk_mib` | What the topic asks for; silent = the operator defaults (lock 16 vCPU / 32 GiB / 32 GiB disk), an ask is held under the ceilings (lock 16 vCPU / 32 GiB; disk ≥ 16 GiB) — a topic may ask for less, never for more. Over a ceiling = **503**, never a clamp | positive integers |
+| `experiment_vcpus`, `experiment_mem_mib`, `experiment_disk_mib` | What the topic asks for; silent = the operator defaults (lock 16 vCPU / 32 GiB / 32 GiB disk), an ask is held under the ceilings (lock 16 vCPU / 32 GiB — a **hard** maximum no operator ceiling may exceed; disk ≥ 16 GiB) — a topic may ask for less, never for more. Over a ceiling = **503**, never a clamp | positive integers |
 | `model_pin` (top-level `constraints.model_pin`) | Exported to the adaptor as `PROOF_MODEL_PIN` | `vendor/model[:tag]` |
-| any other key | Reaches the adaptor as `PROOF_PARAM_<KEY>` — this is how a topic names its tasks sub-directory, harness agent, concurrency, key file, … | ≤32 printable params |
+| any other key | Reaches the adaptor as `PROOF_PARAM_<KEY>` (upper-cased, `-` → `_`; two signed names that collide after that are refused before anything runs) — this is how a topic names its tasks sub-directory, harness agent, concurrency, key file, … | ≤32 printable params |
 
 A topic that names none of these keeps its registered custom runner's
-ordinary path (topic VM + sister guest). The example topic content the
-operator staged (a "TB4" pack, a Harbor agent, …) lives **outside git** on
-the KVM host and in the signed document, and is recognised by nothing here.
+ordinary path (topic VM + sister guest). The topic content the operator
+staged (the pack, the harness CLI and agent the adaptor drives, how a trial
+becomes a number) lives **outside git** — on the KVM host, in the baked
+image, and in the signed document — and is recognised by nothing here.
+`deploy/guest/runners/` ships the adaptor **contract and a skeleton only**;
+no adaptor, harness, or scoring rule is committed.
 
 ## Resource caps (Architecte lock)
 
@@ -43,6 +46,7 @@ the KVM host and in the signed document, and is recognised by nothing here.
 |------|------|-------|
 | Default per-experiment VM (topic silent) | **16 vCPU / 32 GiB RAM** (`PROOF_EXPERIMENT_VM_VCPUS=16`, `PROOF_EXPERIMENT_VM_MEM_MIB=32768`) | CP |
 | Ceiling a topic's ask is held under | **16 vCPU / 32 GiB** (`PROOF_EXPERIMENT_VM_MAX_VCPUS=16`, `…_MAX_MEM_MIB=32768`; host `PROOF_VM_AGENT_EXPERIMENT_MAX_*`) — the default **is** the ceiling; a topic may ask for less | CP + KVM host |
+| **Hard maximum** (`LOCK_MAX_EXPERIMENT_VCPUS` / `LOCK_MAX_EXPERIMENT_MEM_MIB`) | **16 vCPU / 32768 MiB** — not a knob. A ceiling set above it (`PROOF_EXPERIMENT_VM_MAX_VCPUS=32`, `PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB=65536`, …) fails `ExperimentCeilings::validate` and the process **refuses to boot**; a spec shaped above it is refused on both sides whatever the ceilings say. A smaller host may **lower** a ceiling. The disk ceiling is not locked | CP + KVM host (compiled in) |
 | Writable disk per experiment VM | **≥ 16 GiB** floor; **32 GiB** default and default max (`PROOF_EXPERIMENT_VM_DISK_MIB` / `…_MAX_DISK_MIB`; raise the max when the metal has more) | CP (default), CP + host (max) |
 | Experiment VMs at once | `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS` (default **2**; `0` disables) | KVM host |
 | Image | `PROOF_EXPERIMENT_VM_IMAGE_DIGEST`, unset = `PROOF_RLM_VM_IMAGE_DIGEST` | CP |
@@ -100,8 +104,15 @@ DELETE /v1/vms/{id} destroy      ──▶  jail + scratch gone
   the guest agent reported (see Limitations). The CP refuses an attestation
   for another VM than the one it dispatched to, an unbound one, and a
   `firecracker_required` run without one.
-- Destroy runs whatever the outcome; the agent frees the capacity slot when
-  the host confirms.
+- Destroy runs whatever the outcome, and the outcome is returned **only when
+  the orchestrator confirms the VM destroyed**: a `DELETE` that fails or
+  answers anything but a confirmed destroy makes the job
+  `VmError::TeardownUnconfirmed` (503, no row, no baseline) even when the
+  run itself succeeded — a result is never scored while its VM may still
+  hold host capacity. The error names the VM; reconcile it on the KVM host
+  (`GET /v1/health` `experiment_vms`, `/srv/jailer/firecracker/<topic>-x<n>`)
+  before treating the topic as scoring again. The agent frees the capacity
+  slot when the host confirms.
 
 ## The guest image (bake)
 
@@ -113,28 +124,29 @@ VMs and experiment VMs:
 | Debian minbase (`--suite trixie`) | coreutils, iproute2, e2fsprogs, python3, curl, jq | init + adaptors |
 | `proof-vm-guest-agent` (musl) | vsock `:5000`, `proof_vm_proto::guest` | the protocol half |
 | `/sbin/init` (`deploy/guest/init.sh`) + `catatonit` | mounts, cgroup v2, scratch on `/dev/vdb`, run-as user, agent loop | no systemd in the guest |
-| rootless podman + crun + fuse-overlayfs + pasta/slirp4netns + podman-compose | containers **inside** the VM as an unprivileged user (`--run-as-uid 1000`, subuid `100000:65536`), store on the scratch disk, `cgroup_manager = cgroupfs` | the harness's container runtime; no nested KVM |
-| `--with-harbor --harbor-version X.Y.Z` | Harbor CLI in `/opt/harbor` (venv, pinned) | one example harness; the bake refuses a Harbor whose `harbor run --help` lacks a flag the example adaptor uses |
-| `--runner <id>=<dir>` | adaptor under `/opt/proof/runners/<id>/` | operator capability; contract in [`../../deploy/guest/runners/README.md`](../../deploy/guest/runners/README.md) |
+| rootless podman + crun + fuse-overlayfs + pasta/slirp4netns + podman-compose | containers **inside** the VM as an unprivileged user (`--run-as-uid 1000`, subuid `100000:65536`), `cgroup_manager = cgroupfs`, store on paths `init.sh` creates and chowns to that user — `graphroot = /var/lib/proof/containers/storage` (scratch disk), `runroot = /run/user/<uid>/containers` (its `XDG_RUNTIME_DIR` tmpfs); never `/var/lib/containers` / `/run/containers` (root-owned, read-only rootfs) | the harness's container runtime; no nested KVM |
+| `--extra-pkgs a,b,c` · `--overlay DIR` · `--chroot-hook SCRIPT` | the operator's harness tooling: Debian packages; a tree copied over the rootfs (a prebuilt venv, a CLI); a script run inside the chroot (build a venv, `pip install <tool>==<pinned>`) | generic hooks — this repo names no harness; pin every version the hook installs, record it in your own manifest |
+| `--runner <id>=<dir>` | adaptor under `/opt/proof/runners/<id>/` | operator capability, **outside git**; contract + skeleton in [`../../deploy/guest/runners/README.md`](../../deploy/guest/runners/README.md) |
 
 **Size budget.** The baked tree must fit `--budget-mib` (default 2560 MiB;
-the 1.5–2.5 GiB target — minbase + podman stack ≈ 0.6–0.9 GiB, + Python +
-Harbor venv ≈ 0.3–0.6 GiB, + adaptors; rootless podman **and** Harbor fit
-the target), the image file is `--size-mib` (default 3072 MiB) and is
-mounted **read-only**. Everything a run writes — pulled container images,
-harness jobs, the artefact tree, `report.json` — lands on the per-VM
+the 1.5–2.5 GiB target — minbase + podman stack ≈ 0.6–0.9 GiB, + whatever
+the operator's hooks add (a Python venv with a harness CLI is typically
+0.3–0.6 GiB), + adaptors), the image file is `--size-mib` (default 3072 MiB)
+and is mounted **read-only**. Everything a run writes — pulled container
+images, harness jobs, the artefact tree, `report.json` — lands on the per-VM
 writable disk (`experiment_disk_mib`: ≥ 16 GiB, 32 GiB by default). Pulls
 are **not** pre-baked: they need the registry hosts (and a resolver,
 `--resolver` + `:53/udp`) on the host egress allowlist.
 
 ```bash
-# on a build box, as root (chroot + mkfs -d); network to the mirror (+ PyPI with --with-harbor)
+# on a build box, as root (chroot + mkfs -d); network to the mirror (+ whatever your hook fetches)
 rustup target add x86_64-unknown-linux-musl
 CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release -p proof-vm-guest-agent-bin --target x86_64-unknown-linux-musl
 deploy/guest/bake-rootfs.sh \
   --guest-agent target/x86_64-unknown-linux-musl/release/proof-vm-guest-agent \
-  --runner rlm_fc_in_guest_harbor=deploy/guest/runners/harbor-podman \   # the id your topics put in baseline_runner
-  --with-harbor --harbor-version <exact version you tested> \
+  --runner <id>=/path/outside/git/<your adaptor dir> \   # <id> = what your topics put in baseline_runner
+  --extra-pkgs python3-venv,python3-pip,git \             # what your adaptor's harness needs
+  --chroot-hook /path/outside/git/install-harness.sh \    # pins and installs it inside the chroot
   --resolver <resolver ip on the allowlist> \
   --check-kernel-config <the guest kernel's .config> \
   --out-dir ./out
@@ -182,9 +194,10 @@ typed from a document.
    carries `experiment_max_vcpus`, `experiment_max_mem_mib`,
    `experiment_disk_mib`, `experiment_image`.
 6. **Topic:** the signed document's `constraints.params` carry the runner id
-   your bake installed (`baseline_runner: rlm_fc_in_guest_harbor` for the
-   example above), `experiment_pack_digest: sha256:<pack>`, the adaptor's
-   `PROOF_PARAM_*` inputs, and any size ask under the ceilings
+   your bake installed (`baseline_runner: <id>` from the `--runner <id>=…`
+   above), `experiment_pack_digest: sha256:<pack>`, the adaptor's
+   `PROOF_PARAM_*` inputs (names that stay distinct after upper-casing and
+   `-` → `_`), and any size ask under the ceilings
    (`experiment_vcpus` ≤ 16, `experiment_mem_mib` ≤ 32768; omit them for
    the 16 / 32768 default); `metric.custom_id` is in
    `PROOF_VM_RUNNER_CUSTOM_IDS`.
@@ -207,8 +220,12 @@ spend**. Use `proof-vm-wire-check.sh submit-probe --topic <id> --expect
 | pack file absent on the host | 503 `experiment pack sha256:… (no …/packs/… on this host)` | no jail (`Image` before any boot) |
 | pack file present but re-tarred / wrong bytes | 503 `experiment pack …: … hashes to …` | no jail |
 | `experiment_vcpus: 32` with the 16 ceiling | 503 `experiment vcpus 32 exceeds the ceiling 16` | nothing created |
+| `PROOF_EXPERIMENT_VM_MAX_VCPUS=32` or `PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB=65536` (above the lock) | the process **does not boot**: `experiment max_vcpus 32 is above the lock 16 (… the lock is not an operator knob …)`; `proof-vm-wire-check.sh all` fails the knob | — |
 | `experiment_disk_mib: 8192` (under the 16 GiB floor) | 503 `experiment disk_mib 8192 is below the minimum 16384` | nothing created |
 | host ceiling lower than the CP's | 503 `orchestrator 400 … BadSpec: experiment … exceeds the ceiling` | no jail |
+| two params that collide as env names (`foo-bar` + `foo_bar`) | 503 `constraints.params "foo-bar" and "foo_bar" both map to PROOF_PARAM_FOO_BAR` | `experiment vm booted` → guest `Failed` before the adaptor runs → destroyed |
+| `artifact_uri` streams past 64 MiB (no / wrong `Content-Length`) | 503 `artifact at … is larger than 67108864 bytes (aborted after …)` | fetch cut mid-stream inside the VM; destroyed |
+| `DELETE /v1/vms/{id}` fails or is not confirmed after a **successful** run | 503 `experiment vm <topic>-x<n> not confirmed destroyed after its job (…); the outcome is withheld, not scored` — no row, no baseline | the VM is still listed by the agent (`experiment_vms` ≥ 1); reconcile it by hand |
 | `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS` reached | 503 `orchestrator 503 … Capacity: this host runs N of at most N experiment vms` | no boot |
 | runner id not baked (`/opt/proof/runners/<id>/run` missing) | 503 `runner … is not installed in this guest image` | `experiment vm booted` → guest `Failed` → destroyed; **no value reported** |
 | adaptor writes no `report.json` / non-finite value / outlives the deadline | 503 with the adaptor's exit + redacted tail / `cut at the deadline of Ns` | destroyed |
@@ -250,9 +267,14 @@ still leak no path, key, or origin (the wire check's `cp` step).
   adaptor uses — the adaptor never invents one, and a budgeted topic with no
   figure is `503` (`FlopsMissing`).
 - **Inspection needs an adaptor.** The anti-cheat checklist is ticked by the
-  adaptor's `inspect` entrypoint (topic RLM work); the example adaptor ships
-  none, so such a topic cannot reach `Evaluate` until the operator provides
-  one — by design, no spend without a green checklist.
+  adaptor's `inspect` entrypoint (topic RLM work); an adaptor that ships
+  none leaves its topic unable to reach `Evaluate` until the operator
+  provides one — by design, no spend without a green checklist.
+- **No adaptor ships in git.** `deploy/guest/runners/` is the contract and a
+  fail-closed skeleton; the harness CLI, agent, task format, and how a trial
+  becomes `primary_value` are operator artefacts baked with the generic
+  hooks and selected by signed params. A trial without a measurement is
+  never scored from some other value.
 - **Pack size.** Packs travel in one vsock frame: ≤ 160 MiB uncompressed
   tar. Larger packs need a block-device staging path this protocol version
   does not have; the host refuses them by name.
@@ -264,4 +286,8 @@ still leak no path, key, or origin (the wire check's `cp` step).
   hypervisor, a recording stager, and shell-script adaptors; the bake was
   planned (`--dry-run`) but no image has been built or booted from this
   change. Record the first bake's `bake-manifest.txt` and the § Verify
-  evidence before treating an experiment topic as scoring.
+  evidence before treating an experiment topic as scoring. On that first
+  boot, check as the run-as user that `podman info` reports
+  `graphRoot: /var/lib/proof/containers/storage` and
+  `runRoot: /run/user/<uid>/containers` — the paths `init.sh` created — and
+  that `podman system service` starts.

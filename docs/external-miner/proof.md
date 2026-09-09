@@ -367,11 +367,14 @@ Some topics select an **in-guest runner** instead: their
 and `experiment_pack_digest`. For such a topic your submission runs in **one
 dedicated Firecracker VM created for that job and destroyed after it**,
 inside the operator's harness (a container runtime and benchmark adaptor
-baked into the VM image), against the experiment pack the topic pins by
-digest — 16 vCPU / 32 GiB RAM unless the topic asks for less, with at least
-16 GiB of writable disk (32 GiB by default). Your
-artefact is still fetched from `artifact_uri` and checked against
-`artifact_digest` before anything runs, the VM has only the operator's
+baked into the VM image by the operator — nothing about it lives in the
+network repo), against the experiment pack the topic pins by digest —
+16 vCPU / 32 GiB RAM unless the topic asks for less (that lock is a hard
+maximum on every host), with at least 16 GiB of writable disk (32 GiB by
+default). Your artefact is still fetched from `artifact_uri` (streamed, cut
+at 64 MiB) and checked against `artifact_digest` before anything runs, the
+result is recorded only once that VM is confirmed destroyed (an operator
+cleanup failure is a 503 for you, never a score), the VM has only the operator's
 egress allowlist (the topic says which registries / model providers), and
 the host — not the harness — stamps `sandboxed` on your report. Read the
 topic's `params` in `ctx proof topics`: they name the harness inputs
