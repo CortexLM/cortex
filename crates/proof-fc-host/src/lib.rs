@@ -33,7 +33,6 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 
-pub mod artefact;
 pub mod config;
 pub mod images;
 pub mod jail;

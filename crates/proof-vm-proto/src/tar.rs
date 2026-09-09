@@ -1,17 +1,20 @@
-//! Shape check of the artefact tarball a sister is asked to run.
+//! Shape check of the artefact tarball a sister is asked to run
+//! ([`crate::guest::SisterRequest::artifact_tar`]).
 //!
 //! The RLM guest fetches the miner's artefact from `artifact_uri`, tars the
 //! tree, and ships the bytes over vsock. The host re-hashes them against the
-//! paid job's digest ([`crate::sister::check_request`]) — but a digest match
-//! alone does not say the bytes are a miner's work: a guest whose fetch
-//! failed and that fell back to an empty tree hashes just as consistently
-//! (staging matched exactly such an empty-file digest when the RLM VM could
-//! not reach the artefact host). So before any jail is built the host also
-//! walks the tar: it must be an **uncompressed** ustar / GNU / pax archive
-//! whose regular files carry at least one byte. Anything else — gzip, not a
-//! tar, an empty archive, a tree of empty files — is refused with a reason,
-//! and the run comes back without a sister attestation (the control plane
-//! then answers 503 for a `firecracker_required` topic; nothing is scored).
+//! paid job's digest — but a digest match alone does not say the bytes are a
+//! miner's work: a guest whose fetch failed and that fell back to an empty
+//! tree hashes just as consistently (staging matched exactly such an
+//! empty-file digest when the RLM VM could not reach the artefact host). So
+//! before any jail is built the host also walks the tar with
+//! [`require_content`]: it must be an **uncompressed** ustar / GNU / pax
+//! archive whose regular files carry at least one byte. Anything else —
+//! gzip, not a tar, an empty archive, a tree of empty files — is refused
+//! with a reason, and the run comes back without a sister attestation (the
+//! control plane then answers 503 for a `firecracker_required` topic;
+//! nothing is scored). Guest images implement this contract: never
+//! substitute bytes when the fetch fails — answer the job `Failed`.
 
 use std::fmt;
 
@@ -157,11 +160,14 @@ pub fn require_content(tar: &[u8]) -> Result<u64, TarError> {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod fixtures {
+/// Hand-built ustar archives for tests (`test-fixtures` feature): no `tar`
+/// binary, no filesystem.
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod fixtures {
     use super::BLOCK;
 
     /// One ustar member: header block + data padded to whole blocks.
+    #[must_use]
     pub fn member(name: &str, typeflag: u8, data: &[u8]) -> Vec<u8> {
         let mut h = vec![0u8; BLOCK];
         h[..name.len()].copy_from_slice(name.as_bytes());
@@ -187,6 +193,7 @@ pub(crate) mod fixtures {
 
     /// Members followed by the two end-of-archive zero blocks, padded to
     /// the 10 KiB record GNU tar writes.
+    #[must_use]
     pub fn archive(members: &[Vec<u8>]) -> Vec<u8> {
         let mut out: Vec<u8> = members.concat();
         out.extend(std::iter::repeat_n(0u8, 2 * BLOCK));
@@ -196,6 +203,7 @@ pub(crate) mod fixtures {
     }
 
     /// `tar cf empty.tar -T /dev/null`: 10240 zero bytes.
+    #[must_use]
     pub fn empty_archive() -> Vec<u8> {
         vec![0u8; 20 * BLOCK]
     }

@@ -592,7 +592,7 @@ digest of the real file.
 - **The artefact is bytes, never a stub.** Before a sister jail is built the
   host re-hashes `artifact_tar` against the paid job's digest **and** walks
   it: an uncompressed tar with at least one byte of file content
-  (`proof_fc_host::artefact`). gzip, non-tar bytes, an empty archive, or a
+  (`proof_vm_proto::tar`, the guest contract crate). gzip, non-tar bytes, an empty archive, or a
   tree of empty files are refused by name — a digest that matches an empty
   tree is a guest whose fetch failed, not a miner's work. The CP refuses the
   digest of nothing (sha256 of zero bytes / of an empty tar) at submit, 400,

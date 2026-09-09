@@ -19,7 +19,6 @@ use proof_vm_proto::{EvidenceBinding, SisterAttestation, API_VERSION};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use crate::artefact;
 use crate::config::{HostConfig, MAX_ARTIFACT_TAR_BYTES};
 use crate::images::{image_path, ImageCache};
 use crate::jail::{JailGuard, VmBoot};
@@ -54,7 +53,7 @@ pub fn sister_id(parent_vm_id: &str, seq: u64) -> String {
 /// `job` is what the control plane asked the RLM to run; the sister must be
 /// for exactly that topic, submission, and artefact, or its evidence would be
 /// evidence for something else. The bytes must also *be* an artefact: an
-/// uncompressed tar with file content ([`crate::artefact`]) — a digest that
+/// uncompressed tar with file content ([`proof_vm_proto::tar`]) — a digest that
 /// matches an empty tree is a guest whose fetch failed, not a miner's work.
 ///
 /// # Errors
@@ -88,7 +87,7 @@ pub fn check_request(
             tar.len()
         )));
     }
-    artefact::require_content(&tar).map_err(|e| HvError::Spec(e.to_string()))?;
+    proof_vm_proto::tar::require_content(&tar).map_err(|e| HvError::Spec(e.to_string()))?;
     let got = hex::encode(Sha256::digest(&tar));
     if !got.eq_ignore_ascii_case(req.artifact_digest.trim()) {
         return Err(HvError::Spec(format!(
@@ -259,9 +258,9 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
-    use crate::artefact::fixtures::{archive, empty_archive, member};
     use crate::shell::RecordingShell;
     use proof_vm_proto::guest::StagedFile;
+    use proof_vm_proto::tar::fixtures::{archive, empty_archive, member};
 
     /// A real (uncompressed ustar) artefact whose one file holds `payload`.
     fn tarball(payload: &[u8]) -> Vec<u8> {

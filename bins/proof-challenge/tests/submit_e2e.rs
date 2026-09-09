@@ -434,7 +434,12 @@ async fn force_sim_binary_scores_staging_topic_ids() {
     let (st, bad) = json(
         reqwest::Method::POST,
         &format!("{}/v1/submissions", host.base),
-        Some(submit_body("", &serde_json::json!({ "topic_id": "" }))),
+        // A real (non-empty-input) artefact digest: the digest of nothing is
+        // its own 400, and this probe is about the missing topic id.
+        Some(submit_body(
+            "",
+            &serde_json::json!({ "topic_id": "", "artifact_digest": digest("no-topic-probe") }),
+        )),
     )
     .await;
     assert_eq!(st, 400, "{bad}");

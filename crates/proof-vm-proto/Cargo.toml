@@ -8,6 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# Hand-built tar archives (`proof_vm_proto::tar::fixtures`) for sibling crates' tests.
+test-fixtures = []
+
 [dependencies]
 base64 = "0.22"
 proof-rlm = { path = "../proof-rlm" }
