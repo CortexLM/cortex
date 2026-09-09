@@ -265,28 +265,26 @@ mod tests {
         assert!(matches!(err, BackendError::Fetch), "{err}");
     }
 
-    #[test]
-    fn public_feed_client_sets_a_nonempty_user_agent() {
-        let client = public_feed_client().expect("client");
-        let req = client.get("http://127.0.0.1/").build().expect("request");
-        let ua = req
-            .headers()
-            .get(reqwest::header::USER_AGENT)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        assert!(!ua.is_empty(), "{ua:?}");
-        assert!(ua.starts_with("cortex-bounty-challenge/"), "{ua}");
-    }
-
     #[tokio::test]
     async fn a_non_2xx_feed_is_a_fetch_status_error() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let seen_h = std::sync::Arc::clone(&seen);
         let listener =
             tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
                 .await
                 .expect("bind");
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move {
-            let app = axum::Router::new().fallback(|| async { axum::http::StatusCode::FORBIDDEN });
+            let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+                let seen_h = std::sync::Arc::clone(&seen_h);
+                async move {
+                    *seen_h.lock().expect("lock") = headers
+                        .get(axum::http::header::USER_AGENT)
+                        .and_then(|v| v.to_str().ok())
+                        .map(ToOwned::to_owned);
+                    axum::http::StatusCode::FORBIDDEN
+                }
+            });
             let _ = axum::serve(listener, app).await;
         });
         let err = fetch_public_snapshot(Some(&format!("http://{addr}")))
@@ -294,5 +292,9 @@ mod tests {
             .expect_err("403");
         assert!(matches!(err, BackendError::FetchStatus(403)), "{err}");
         assert_eq!(err.to_string(), "backend public fetch failed: HTTP 403");
+        // reqwest applies Client default headers at send time, not RequestBuilder::build.
+        let ua = seen.lock().expect("lock").clone().unwrap_or_default();
+        assert!(!ua.is_empty(), "{ua:?}");
+        assert!(ua.starts_with("cortex-bounty-challenge/"), "{ua}");
     }
 }
