@@ -1,9 +1,10 @@
-//! The operator bake tooling under `deploy/guest/` stays runnable: scripts
-//! parse, the bake plans without root and refuses what it must, and the
-//! example adaptor's summariser reads Harbor-shaped trial results. Nothing
-//! here builds an image or runs a container.
+//! The operator bake tooling under `deploy/guest/` stays runnable and
+//! generalist: scripts parse, the bake plans without root and refuses what
+//! it must, rootless podman is pointed at paths init makes writable for the
+//! run-as user, and no harness is named anywhere under `deploy/guest/`.
+//! Nothing here builds an image or runs a container.
 
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::too_many_lines)]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -39,11 +40,14 @@ fn bake(args: &[&str]) -> (bool, String) {
     (out.status.success(), text)
 }
 
+fn read(rel: &str) -> String {
+    std::fs::read_to_string(repo().join(rel)).expect(rel)
+}
+
 #[test]
 fn guest_scripts_parse() {
     for (shell, file) in [
         ("bash", "deploy/guest/bake-rootfs.sh"),
-        ("bash", "deploy/guest/runners/harbor-podman/run"),
         ("sh", "deploy/guest/init.sh"),
         ("sh", "deploy/guest/agent-loop.sh"),
     ] {
@@ -54,16 +58,29 @@ fn guest_scripts_parse() {
             .expect("shell");
         assert!(status.success(), "{file} does not parse under {shell} -n");
     }
-    let status = Command::new("python3")
-        .args(["-m", "py_compile"])
-        .arg(repo().join("deploy/guest/runners/harbor-podman/summarize.py"))
-        .status()
-        .expect("python3");
-    assert!(status.success(), "summarize.py does not compile");
+    // The README skeleton is a real script: it must parse too.
+    let readme = read("deploy/guest/runners/README.md");
+    let skeleton = readme
+        .split("```bash\n")
+        .nth(1)
+        .and_then(|s| s.split("```").next())
+        .expect("skeleton block");
+    assert!(skeleton.starts_with("#!/bin/bash"), "{skeleton}");
+    let d = tmp("skeleton");
+    let path = d.join("run");
+    exe(&path, skeleton);
+    let status = Command::new("bash").arg("-n").arg(&path).status().unwrap();
+    assert!(status.success(), "README skeleton does not parse");
+    assert!(
+        skeleton.contains("no harness wired into this skeleton"),
+        "the skeleton fails closed until the operator fills it in"
+    );
+    let _ = std::fs::remove_dir_all(&d);
 }
 
-/// The bake plans without root and without network, refuses a floating
-/// Harbor install, a malformed runner id, and an adaptor without `run`, and
+/// The bake plans without root and without network, carries the operator's
+/// generic hooks (extra packages, overlays, chroot hooks) and refuses a
+/// malformed one, a malformed runner id, and an adaptor without `run`, and
 /// never prints a digest it did not compute.
 #[test]
 fn bake_dry_run_plans_and_refuses_what_it_must() {
@@ -73,7 +90,13 @@ fn bake_dry_run_plans_and_refuses_what_it_must() {
     let adaptor = d.join("adaptor");
     std::fs::create_dir_all(&adaptor).expect("adaptor dir");
     exe(&adaptor.join("run"), "#!/bin/sh\nexit 0\n");
+    let overlay = d.join("overlay/opt/operator-tool/bin");
+    std::fs::create_dir_all(&overlay).expect("overlay");
+    let hook = d.join("hook.sh");
+    exe(&hook, "#!/bin/sh\nexit 0\n");
     let agent_s = agent.display().to_string();
+    let overlay_s = d.join("overlay").display().to_string();
+    let hook_s = hook.display().to_string();
     let spec = format!("operator_runner_v0={}", adaptor.display());
 
     let (ok, text) = bake(&[
@@ -81,9 +104,12 @@ fn bake_dry_run_plans_and_refuses_what_it_must() {
         &agent_s,
         "--runner",
         &spec,
-        "--with-harbor",
-        "--harbor-version",
-        "0.13.2",
+        "--extra-pkgs",
+        "python3-venv,python3-pip,git",
+        "--overlay",
+        &overlay_s,
+        "--chroot-hook",
+        &hook_s,
         "--resolver",
         "1.1.1.1",
         "--dry-run",
@@ -93,9 +119,23 @@ fn bake_dry_run_plans_and_refuses_what_it_must() {
         text.contains("runners          operator_runner_v0"),
         "{text}"
     );
-    assert!(text.contains("harbor==0.13.2"), "{text}");
+    assert!(text.contains("python3-venv,python3-pip,git"), "{text}");
+    assert!(
+        text.contains(&format!("overlays         {overlay_s}")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("chroot hooks     {hook_s}")),
+        "{text}"
+    );
     assert!(
         text.contains("rootless (crun, fuse-overlayfs, cgroupfs)"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "runroot /run/user/1000/containers, graphroot /var/lib/proof/containers/storage"
+        ),
         "{text}"
     );
     assert!(text.contains("tree budget 2560 MiB"), "{text}");
@@ -105,9 +145,33 @@ fn bake_dry_run_plans_and_refuses_what_it_must() {
         "a dry run computes no digest: {text}"
     );
 
-    let (ok, text) = bake(&["--guest-agent", &agent_s, "--with-harbor", "--dry-run"]);
+    let (ok, text) = bake(&[
+        "--guest-agent",
+        &agent_s,
+        "--overlay",
+        &d.join("missing").display().to_string(),
+        "--dry-run",
+    ]);
     assert!(!ok);
-    assert!(text.contains("--harbor-version"), "{text}");
+    assert!(text.contains("is not a directory"), "{text}");
+    let (ok, text) = bake(&[
+        "--guest-agent",
+        &agent_s,
+        "--chroot-hook",
+        &d.join("adaptor/run.txt").display().to_string(),
+        "--dry-run",
+    ]);
+    assert!(!ok);
+    assert!(text.contains("is not an executable file"), "{text}");
+    let (ok, text) = bake(&[
+        "--guest-agent",
+        &agent_s,
+        "--extra-pkgs",
+        "python3; rm -rf /",
+        "--dry-run",
+    ]);
+    assert!(!ok);
+    assert!(text.contains("comma-separated list"), "{text}");
 
     let (ok, text) = bake(&[
         "--guest-agent",
@@ -169,85 +233,147 @@ fn bake_dry_run_plans_and_refuses_what_it_must() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// The example adaptor's summariser reads Harbor's per-trial `result.json`
-/// (`verifier_result.rewards.reward`, `exception_info`) into the report
-/// contract; an errored trial counts 0 and FLOPs appear only when the topic
-/// supplies an accounting figure.
+/// Rootless podman's `runroot` / `graphroot` are the paths `init.sh`
+/// creates and chowns to the run-as user (the `XDG_RUNTIME_DIR` tmpfs and
+/// the scratch drive) — never the root-owned `/run/containers/storage` or
+/// `/var/lib/containers/storage` on the read-only rootfs, which the
+/// unprivileged runner cannot initialise. Checked on the script text the
+/// bake writes and the init that prepares the guest, for the default uid
+/// and for another one.
 #[test]
-fn harbor_summariser_reads_trial_results_into_the_report_contract() {
-    let d = tmp("summarise");
-    let jobs = d.join("jobs");
-    for (job, trial, body) in [
-        (
-            "task-a",
-            "task-a__agent__attempt-1",
-            r#"{"task_name":"task-a","verifier_result":{"rewards":{"reward":1.0}},"exception_info":null}"#,
-        ),
-        (
-            "task-b",
-            "task-b__agent__attempt-1",
-            r#"{"task_name":"task-b","verifier_result":{"rewards":{"reward":0.5}},"exception_info":null}"#,
-        ),
-        (
-            "task-c",
-            "task-c__agent__attempt-1",
-            r#"{"task_name":"task-c","verifier_result":null,"exception_info":{"exception_type":"AgentTimeoutError"}}"#,
-        ),
-        ("task-d", "task-d__agent__attempt-1", "not json"),
-    ] {
-        let dir = jobs.join(job).join(trial);
-        std::fs::create_dir_all(&dir).expect("trial dir");
-        std::fs::write(dir.join("result.json"), body).expect("result");
-    }
-    let report = d.join("report.json");
-    let summarise = |fpt: &str| {
-        Command::new("python3")
-            .arg(repo().join("deploy/guest/runners/harbor-podman/summarize.py"))
-            .arg(&jobs)
-            .arg(&report)
-            .arg(fpt)
-            .output()
-            .expect("python3")
+fn podman_storage_points_at_paths_init_makes_writable_for_the_runner() {
+    let bake_sh = read("deploy/guest/bake-rootfs.sh");
+    let init_sh = read("deploy/guest/init.sh");
+    let conf_line = |key: &str| -> String {
+        bake_sh
+            .lines()
+            .find(|l| l.trim_start().starts_with(&format!("{key} = ")))
+            .unwrap_or_else(|| panic!("{key} in storage.conf"))
+            .trim()
+            .to_owned()
     };
-    let out = summarise("");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+    assert_eq!(conf_line("runroot"), "runroot = \"$PODMAN_RUNROOT\"");
+    assert_eq!(conf_line("graphroot"), "graphroot = \"$PODMAN_GRAPHROOT\"");
+    assert_eq!(
+        conf_line("rootless_storage_path"),
+        "rootless_storage_path = \"$PODMAN_GRAPHROOT\""
     );
-    let doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&report).expect("report")).expect("json");
     assert!(
-        (doc["primary_value"].as_f64().unwrap() - 0.375).abs() < 1e-12,
-        "{doc}"
+        bake_sh.contains("PODMAN_RUNROOT=\"/run/user/$RUN_AS_UID/containers\""),
+        "runroot under the run-as user's XDG_RUNTIME_DIR"
     );
-    assert_eq!(doc["claim_holds"], serde_json::json!(false));
     assert!(
-        doc.get("flops_used").is_none(),
-        "no accounting param, no FLOP figure: {doc}"
+        bake_sh.contains("PODMAN_GRAPHROOT=\"/var/lib/proof/containers/storage\""),
+        "graphroot on the scratch drive"
     );
-    assert_eq!(doc["evidence"]["n_trials"], serde_json::json!(4));
-    let trials = doc["evidence"]["trials"].as_array().unwrap();
-    assert_eq!(trials[2]["error"], serde_json::json!("exception"));
-    assert!(trials[3]["error"].as_str().unwrap().contains("unreadable"));
-    let parsed: proof_vm_guest::RunnerReport =
-        serde_json::from_value(doc).expect("matches the agent's RunnerReport");
-    assert!(parsed.primary_value.is_finite());
+    for forbidden in [
+        "runroot = \"/run/containers/storage\"",
+        "graphroot = \"/var/lib/containers/storage\"",
+        "/run/containers/storage",
+        "/var/lib/containers/storage",
+    ] {
+        assert!(
+            !bake_sh.contains(forbidden),
+            "{forbidden:?} is a root-owned / read-only path"
+        );
+    }
+    // init.sh creates both, owned by the run-as user, before the agent.
+    assert!(
+        init_sh.contains("mkdir -p \"/run/user/$PROOF_GUEST_RUN_AS_UID/containers\""),
+        "init creates the runroot"
+    );
+    assert!(
+        init_sh.contains(
+            "chown -R \"$PROOF_GUEST_RUN_AS_UID:$PROOF_GUEST_RUN_AS_GID\" \"/run/user/$PROOF_GUEST_RUN_AS_UID\""
+        ),
+        "init chowns the runtime dir tree"
+    );
+    assert!(
+        init_sh.contains("\"$SCRATCH/containers/storage\""),
+        "init creates the graphroot on scratch"
+    );
+    let scratch_chown = init_sh
+        .lines()
+        .find(|l| l.starts_with("chown ") && l.contains("\"$SCRATCH/containers/storage\""))
+        .expect("init chowns the graphroot");
+    assert!(scratch_chown.contains("$PROOF_GUEST_RUN_AS_UID:$PROOF_GUEST_RUN_AS_GID"));
+    assert!(
+        init_sh.contains("SCRATCH=/var/lib/proof"),
+        "the scratch mount is what the graphroot lives under"
+    );
+    let agent_before = init_sh.find("starting proof-vm-guest-agent").unwrap();
+    let runroot_at = init_sh
+        .find("/run/user/$PROOF_GUEST_RUN_AS_UID/containers")
+        .unwrap();
+    let graphroot_at = init_sh.find("$SCRATCH/containers/storage").unwrap();
+    assert!(runroot_at < agent_before && graphroot_at < agent_before);
 
-    let out = summarise("250");
-    assert!(out.status.success());
-    let doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&report).expect("report")).expect("json");
-    assert_eq!(doc["flops_used"], serde_json::json!(1000));
-
-    let empty = d.join("no-jobs");
-    std::fs::create_dir_all(&empty).expect("dir");
-    let out = Command::new("python3")
-        .arg(repo().join("deploy/guest/runners/harbor-podman/summarize.py"))
-        .arg(&empty)
-        .arg(&report)
-        .output()
-        .expect("python3");
-    assert!(!out.status.success(), "no trials is not a report");
+    // The plan shows the paths for whatever uid the operator picks.
+    let d = tmp("uid");
+    let agent = d.join("proof-vm-guest-agent");
+    exe(&agent, "#!/bin/sh\nexit 0\n");
+    let (ok, text) = bake(&[
+        "--guest-agent",
+        &agent.display().to_string(),
+        "--run-as-uid",
+        "4242",
+        "--dry-run",
+    ]);
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("run-as uid 4242, runroot /run/user/4242/containers, graphroot /var/lib/proof/containers/storage"),
+        "{text}"
+    );
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Zero challenge content in git: nothing under `deploy/guest/` names a
+/// harness, a benchmark, or a task set. Runner ids, packs, harness CLIs,
+/// agents, and scoring rules are operator artefacts staged outside this
+/// repository and selected by signed topic params.
+#[test]
+fn deploy_guest_names_no_harness_or_benchmark() {
+    let mut files = Vec::new();
+    let mut stack = vec![repo().join("deploy/guest")];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).expect("read_dir").flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                files.push(p);
+            }
+        }
+    }
+    assert!(files.len() >= 4, "{files:?}");
+    let runners: Vec<_> = files
+        .iter()
+        .filter(|p| p.to_string_lossy().contains("/runners/"))
+        .collect();
+    assert_eq!(
+        runners.len(),
+        1,
+        "only the contract README ships under runners/: {runners:?}"
+    );
+    for f in &files {
+        let lower = std::fs::read_to_string(f)
+            .expect("text file")
+            .to_ascii_lowercase();
+        for forbidden in [
+            "harbor",
+            "tb4",
+            "terminal-bench",
+            "terminal bench",
+            "tbench",
+            "swe-bench",
+            "verifier_result",
+            "rewards.reward",
+        ] {
+            assert!(
+                !lower.contains(forbidden),
+                "{} names {forbidden:?}; harness content is operator content, never in git",
+                f.display()
+            );
+        }
+    }
 }

@@ -6,8 +6,15 @@ image by the operator (`bake-rootfs.sh --runner <id>=<dir>`) under
 `/opt/proof/runners/<id>/`, where `<id>` is exactly the value the topic puts
 in `constraints.params.in_guest_benchmark_runner` (alias `baseline_runner`;
 shape `[a-z0-9][a-z0-9_-]{1,63}`). No adaptor is compiled into any Proof
-binary and none ships by default: a topic that names an id this image does
-not carry fails closed (`RlmToHost::Failed` → 503, no row).
+binary and **none ships in this repository**: a topic that names an id this
+image does not carry fails closed (`RlmToHost::Failed` → 503, no row).
+
+This directory holds the **contract only**. The harness an adaptor drives —
+its CLI, its agent, its task format, how a trial's output becomes a number —
+is operator content that lives outside git (baked with `--overlay` /
+`--chroot-hook` / `--extra-pkgs`, or shipped inside the topic-pinned pack) and
+is recognised by nothing in this repository. Proof stays generalist: the
+words below are generic knobs; every value is topic data.
 
 The contract lives in `crates/proof-vm-guest/src/runner.rs`; this is the
 operator's view of it.
@@ -22,7 +29,10 @@ operator's view of it.
 
 A non-zero exit with no document, a missing document, a non-finite
 `primary_value`, or a run that outlives `PROOF_DEADLINE_S` is a failed job.
-The agent never fills in a value.
+The agent never fills in a value — and neither may the adaptor: a trial that
+produced no measurement is reported as what it is (the topic decides whether
+that counts as zero or fails the run), never as some other number that
+happened to be lying around.
 
 ## Environment
 
@@ -31,7 +41,7 @@ The agent never fills in a value.
 | `PROOF_RUNNER_ID`, `PROOF_JOB` | runner id; `baseline` / `evaluate` / `inspect` / `propose_rules` |
 | `PROOF_TOPIC_ID`, `PROOF_CUSTOM_ID`, `PROOF_PRIMARY_METRIC`, `PROOF_METRIC_DIRECTION` | identities; `max` / `min` |
 | `PROOF_SUBMISSION_DIGEST`, `PROOF_ARTIFACT_DIGEST` | the run's identities (echoed into the report by the agent) |
-| `PROOF_ARTIFACT_DIR` | the miner's artefact, fetched **by the agent**, verified against `PROOF_ARTIFACT_DIGEST`, unpacked (set only when the request carries a locator; always set for `evaluate`). `$PROOF_WORK_DIR/artifact.tar` holds the verbatim bytes |
+| `PROOF_ARTIFACT_DIR` | the miner's artefact, fetched **by the agent** (streamed under a 64 MiB cap), verified against `PROOF_ARTIFACT_DIGEST`, unpacked (set only when the request carries a locator; always set for `evaluate`). `$PROOF_WORK_DIR/artifact.tar` holds the verbatim bytes |
 | `PROOF_PACK_DIR`, `PROOF_PACK_DIGEST` | the topic-pinned experiment pack, staged by the host at boot and verified by the agent (paid jobs) |
 | `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE` | `constraints.model_pin` / `constraints.task_slice` when the topic carries them |
 | `PROOF_SEED`, `PROOF_DEADLINE_S`, `PROOF_DECLARED_FLOPS`, `PROOF_FLOPS_BUDGET` | run parameters from the signed topic and the submission |
@@ -39,27 +49,82 @@ The agent never fills in a value.
 | `PROOF_RULES_FILE` | the rule set to tick (`inspect`); `PROOF_TOPIC_FILE` the signed topic (`propose_rules`) |
 | `PROOF_OUTPUT_DIR`, `PROOF_WORK_DIR` | where to write the answer; scratch on the writable disk |
 | `PROOF_SECRETS_DIR`, `PROOF_SECRET_FILES` | owner key material staged by the KVM host (`PROOF_VM_AGENT_OWNER_KEY_DIR`), by file name. **Read them; never print them** — the agent redacts their values from every log tail and evidence string it sends back, but not from anything you write elsewhere |
-| `PROOF_PARAM_<KEY>` | one per `constraints.params` entry (key upper-cased, `-` → `_`). This is how a topic tells its adaptor which tasks, agent, concurrency, key file, … to use — **the adaptor never hardcodes them** |
+| `PROOF_PARAM_<KEY>` | one per `constraints.params` entry (key upper-cased, `-` → `_`). This is how a topic tells its adaptor which tasks, agent, concurrency, key file, … to use — **the adaptor never hardcodes them**. Two signed names that collide after that mapping (`foo-bar` / `foo_bar`) are refused before anything runs |
 
 `HOME`, `XDG_RUNTIME_DIR`, `PATH`, `LANG` are set for the run-as user;
-nothing else of the agent's environment is inherited.
+nothing else of the agent's environment is inherited. stdout / stderr are
+drained into a rolling tail (64 KiB total) while the process runs; write
+logs you need to keep under `$PROOF_WORK_DIR`.
+
+## Skeleton (contract only — no harness)
+
+The shape every `run` has. Everything a harness needs is a `PROOF_PARAM_*`
+from the signed topic; the two marked lines are the operator's, outside git.
+
+```bash
+#!/bin/bash
+set -euo pipefail
+: "${PROOF_PACK_DIR:?}" "${PROOF_OUTPUT_DIR:?}" "${PROOF_WORK_DIR:?}" "${PROOF_JOB:?}"
+
+# Inputs are topic data. Refuse what the topic did not say; default nothing.
+tasks_rel="${PROOF_PARAM_TASKS_DIR:?constraints.params.tasks_dir is required}"
+case "$tasks_rel" in /*|*..*) echo "tasks_dir must be a plain relative path" >&2; exit 2 ;; esac
+tasks="$PROOF_PACK_DIR/$tasks_rel"
+[ -d "$tasks" ] || { echo "no $tasks in the staged pack" >&2; exit 2; }
+
+# A provider key, when the topic names one: read from the staged file into
+# the variable the topic names; the value never reaches stdout / stderr.
+if [ -n "${PROOF_PARAM_INFERENCE_KEY_FILE:-}" ]; then
+    : "${PROOF_PARAM_INFERENCE_KEY_ENV:?inference_key_env is required with inference_key_file}"
+    export "$PROOF_PARAM_INFERENCE_KEY_ENV"="$(tr -d '\n' < "$PROOF_SECRETS_DIR/$PROOF_PARAM_INFERENCE_KEY_FILE")"
+fi
+
+# Rootless podman API socket for harnesses that speak to a Docker daemon.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+mkdir -p "$XDG_RUNTIME_DIR/podman"
+podman system service --time=0 "unix://$XDG_RUNTIME_DIR/podman/podman.sock" > "$PROOF_WORK_DIR/podman-service.log" 2>&1 &
+trap 'kill $! 2>/dev/null || true' EXIT
+export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/podman/podman.sock"
+
+# OPERATOR: invoke your harness here over "$tasks" with the topic's params
+#           (agent, model = "${PROOF_MODEL_PIN:-}", concurrency, ...),
+#           held to PROOF_DEADLINE_S, writing under "$PROOF_WORK_DIR".
+# OPERATOR: turn its per-trial outputs into report.json. A trial with no
+#           measurement is no measurement — never another field's value.
+echo "no harness wired into this skeleton" >&2
+exit 2
+```
+
+Baked as `--runner <id>=<dir>` where `<id>` is what your topics put in
+`baseline_runner`. Ship the harness itself with `--extra-pkgs` (Debian
+packages), `--overlay DIR` (a tree copied over the rootfs, e.g. a venv), or
+`--chroot-hook SCRIPT` (run inside the chroot; pin every version it
+installs) — and smoke it on the baked image, as the run-as user, before
+signing a topic on it. An adaptor that ships no `inspect` cannot reach
+`Evaluate` (the anti-cheat inspection is the topic RLM's work; provide one
+or the run stops before any spend, by design).
 
 ## Rootless podman inside the guest
 
 The baked image ships podman + crun + fuse-overlayfs + pasta/slirp4netns
-with `cgroup_manager = "cgroupfs"` (there is no systemd in the guest) and
-the run-as user's container store on the per-VM writable disk. Containers
-are namespaces, not nested VMs — no nested KVM is used or needed. Known
-limits, honestly:
+with `cgroup_manager = "cgroupfs"` (there is no systemd in the guest). The
+store is on writable, run-as-owned paths `init.sh` creates before the agent
+starts: `graphroot = /var/lib/proof/containers/storage` (the per-VM scratch
+drive; also `~/.local/share/containers/storage` through the home bind) and
+`runroot = /run/user/<uid>/containers` (the user's `XDG_RUNTIME_DIR` tmpfs)
+— never `/var/lib/containers` or `/run/containers`, which would be
+root-owned and, for the former, on the read-only rootfs. Containers are
+namespaces, not nested VMs — no nested KVM is used or needed. Known limits,
+honestly:
 
 - Image pulls need egress: the registry hosts must be on the KVM host's
   `PROOF_VM_AGENT_EGRESS_ALLOW` (and a resolver, `--resolver` at bake +
   `:53/udp` on the allowlist). Nothing is pre-pulled into the image.
 - A harness that talks to a Docker daemon needs the podman API socket:
   `podman system service --time=0 unix://$XDG_RUNTIME_DIR/podman/podman.sock &`
-  and `DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock` (the example
-  adaptor does this). `docker` resolves to a podman shim; `docker-compose`
-  to `podman-compose` when installed. Harnesses relying on Docker-only API
+  and `DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock` (the skeleton
+  does this). `docker` resolves to a podman shim; `docker-compose` to
+  `podman-compose` when installed. Harnesses relying on Docker-only API
   features may still differ; verify with the harness's own smoke run on the
   baked image **before** signing a topic on it.
 - Rootless networking is user-mode (pasta / slirp4netns): fine for pulls and
@@ -70,29 +135,3 @@ limits, honestly:
 - Guest-measured FLOPs: an agentic harness has no FLOP counter. Either the
   topic sets `flops_budget: 0` (then `flops_used` may be omitted) or the
   adaptor derives a figure from a topic param — never invents one.
-
-## Example: `harbor-podman`
-
-`deploy/guest/runners/harbor-podman/run` drives the [Harbor](https://pypi.org/project/harbor/)
-CLI over rootless podman for every task directory the topic names inside
-the pack. Everything it needs is a `PROOF_PARAM_*` from the signed topic:
-
-| Param (`constraints.params`) | Meaning |
-|------------------------------|---------|
-| `harness_tasks` | relative path inside the pack to a directory of Harbor task dirs (required) |
-| `harness_agent` | `harbor run --agent` value (required) |
-| `harness_model` | `harbor run --model` value; default `constraints.model_pin` |
-| `harness_concurrency` | `--n-concurrent` (default 1) |
-| `harness_extra_args` | extra `harbor run` args, word-split (optional) |
-| `inference_key_file` | name of the staged secret to export (required when the agent calls a model) |
-| `inference_key_env` | env var name the provider expects for that key (required with `inference_key_file`) |
-| `flops_per_trial` | optional accounting: `flops_used = flops_per_trial × trials` |
-
-`primary_value` is the mean `verifier_result.rewards.reward` over every
-trial `result.json` under the job dirs (a trial with `exception_info` set or
-no reward counts 0); `evidence` lists per-trial rewards. Bake it as
-`--runner <your topic's runner id>=deploy/guest/runners/harbor-podman
---with-harbor --harbor-version <pinned>`; the bake refuses a Harbor whose
-`harbor run --help` lacks a flag the adaptor uses. It ships **no**
-`inspect`: the anti-cheat inspection is the topic RLM's work — provide one
-(or the run cannot reach `Evaluate`, by design).

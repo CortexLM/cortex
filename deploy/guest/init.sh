@@ -65,8 +65,8 @@ else
     log "no /dev/vdb scratch drive; using a tmpfs (runs will be memory-bound)"
     mount -t tmpfs tmpfs "$SCRATCH"
 fi
-mkdir -p "$SCRATCH/packs" "$SCRATCH/work" "$SCRATCH/home" "$SCRATCH/containers"
-chown "$PROOF_GUEST_RUN_AS_UID:$PROOF_GUEST_RUN_AS_GID" "$SCRATCH/work" "$SCRATCH/home" "$SCRATCH/containers"
+mkdir -p "$SCRATCH/packs" "$SCRATCH/work" "$SCRATCH/home" "$SCRATCH/containers/storage"
+chown "$PROOF_GUEST_RUN_AS_UID:$PROOF_GUEST_RUN_AS_GID" "$SCRATCH/work" "$SCRATCH/home" "$SCRATCH/containers" "$SCRATCH/containers/storage"
 chmod 755 "$SCRATCH/packs"
 # The run-as user's home (and its rootless container store) live on scratch.
 mkdir -p "/home/uid$PROOF_GUEST_RUN_AS_UID"
@@ -74,9 +74,12 @@ mount --bind "$SCRATCH/home" "/home/uid$PROOF_GUEST_RUN_AS_UID" 2>/dev/null || t
 mkdir -p "/home/uid$PROOF_GUEST_RUN_AS_UID/.local/share"
 ln -sfn "$SCRATCH/containers" "/home/uid$PROOF_GUEST_RUN_AS_UID/.local/share/containers"
 chown -R "$PROOF_GUEST_RUN_AS_UID:$PROOF_GUEST_RUN_AS_GID" "/home/uid$PROOF_GUEST_RUN_AS_UID/.local"
-# XDG_RUNTIME_DIR for the rootless runtime's sockets and state.
-mkdir -p "/run/user/$PROOF_GUEST_RUN_AS_UID"
-chown "$PROOF_GUEST_RUN_AS_UID:$PROOF_GUEST_RUN_AS_GID" "/run/user/$PROOF_GUEST_RUN_AS_UID"
+# XDG_RUNTIME_DIR for the rootless runtime's sockets and state, and the
+# podman runroot under it. Together with $SCRATCH/containers/storage these
+# are the two paths /etc/containers/storage.conf names (bake-rootfs.sh):
+# both exist, both are owned by the run-as user, before any adaptor runs.
+mkdir -p "/run/user/$PROOF_GUEST_RUN_AS_UID/containers"
+chown -R "$PROOF_GUEST_RUN_AS_UID:$PROOF_GUEST_RUN_AS_GID" "/run/user/$PROOF_GUEST_RUN_AS_UID"
 chmod 700 "/run/user/$PROOF_GUEST_RUN_AS_UID"
 # Owner key material: tmpfs, handed to the run-as user by the agent.
 mkdir -p /run/proof/secrets

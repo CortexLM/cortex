@@ -9,17 +9,21 @@
 #   * --with-podman (default on): rootless podman + crun + fuse-overlayfs +
 #     slirp4netns/passt + podman-compose + catatonit, an unprivileged run-as
 #     user with subuid/subgid ranges, storage on the writable scratch drive
-#     (cgroupfs manager: there is no systemd in the guest);
-#   * --with-harbor --harbor-version X.Y.Z: the Harbor CLI in a venv under
-#     /opt/harbor (pinned version, never floating) — one example of a
-#     container-based benchmark harness an adaptor may drive;
+#     under paths init.sh makes writable for that user (cgroupfs manager:
+#     there is no systemd in the guest);
+#   * --extra-pkgs a,b,c / --overlay DIR / --chroot-hook SCRIPT: the
+#     operator's own harness tooling — Debian packages, a tree copied over
+#     the rootfs, a script run inside the chroot (e.g. to build a venv and
+#     pip-install a *pinned* CLI). This repo names no harness; what these
+#     install is operator capability, versioned and hashed by the operator;
 #   * --runner <id>=<dir>: operator adaptors copied to /opt/proof/runners/<id>
 #     (the id is what a signed topic names in constraints.params;
 #     see deploy/guest/runners/README.md for the contract).
 #
 # What never goes in: a benchmark pack, a task list, a dataset, a model, a
-# key. Packs are staged by the KVM host at boot from its pack directory;
-# keys come over vsock from PROOF_VM_AGENT_OWNER_KEY_DIR.
+# key, a harness this repo would name. Packs are staged by the KVM host at
+# boot from its pack directory; keys come over vsock from
+# PROOF_VM_AGENT_OWNER_KEY_DIR.
 #
 # Size budget: the baked tree must fit --budget-mib (default 2560 MiB ~ the
 # 1.5–2.5 GiB target); the image file is --size-mib (default 3072 MiB, so
@@ -29,8 +33,8 @@
 #
 # Requires root (chroot + device nodes + mkfs -d ownership): run it in a
 # throwaway build VM or container. Tools: mmdebstrap, e2fsprogs (mkfs.ext4
-# with -d), tar, sha256sum, du. Network to the Debian mirror (and PyPI with
-# --with-harbor).
+# with -d), tar, sha256sum, du. Network to the Debian mirror (and whatever
+# the operator's --chroot-hook fetches).
 #
 # Never write a digest you did not compute from the file you staged: this
 # script prints `sha256sum` of the image it wrote and names the file after
@@ -46,8 +50,11 @@ usage: bake-rootfs.sh --guest-agent PATH [options]
   --runner ID=DIR          adaptor directory for runner id ID (repeatable);
                            DIR/run must be executable
   --with-podman | --no-podman   rootless podman + crun + fuse-overlayfs (default: with)
-  --with-harbor            install the Harbor CLI (needs --harbor-version)
-  --harbor-version X.Y.Z   exact Harbor version to pin (no floating installs)
+  --extra-pkgs a,b,c       extra Debian packages the operator's adaptors need
+  --overlay DIR            operator tree copied over the rootfs (repeatable;
+                           e.g. a prebuilt venv under opt/<tool>)
+  --chroot-hook SCRIPT     executable run inside the chroot after packages
+                           (repeatable; pin every version it installs)
   --suite NAME             Debian suite (default: trixie)
   --mirror URL             Debian mirror (default: http://deb.debian.org/debian)
   --run-as-uid N           unprivileged uid adaptors run as (default: 1000)
@@ -66,8 +73,9 @@ EOF
 GUEST_AGENT=""
 RUNNERS=()
 WITH_PODMAN=1
-WITH_HARBOR=0
-HARBOR_VERSION=""
+EXTRA_PKGS=""
+OVERLAYS=()
+HOOKS=()
 SUITE=trixie
 MIRROR=http://deb.debian.org/debian
 RUN_AS_UID=1000
@@ -85,8 +93,9 @@ while [ $# -gt 0 ]; do
         --runner) RUNNERS+=("$2"); shift 2 ;;
         --with-podman) WITH_PODMAN=1; shift ;;
         --no-podman) WITH_PODMAN=0; shift ;;
-        --with-harbor) WITH_HARBOR=1; shift ;;
-        --harbor-version) HARBOR_VERSION="$2"; shift 2 ;;
+        --extra-pkgs) EXTRA_PKGS="$2"; shift 2 ;;
+        --overlay) OVERLAYS+=("$2"); shift 2 ;;
+        --chroot-hook) HOOKS+=("$2"); shift 2 ;;
         --suite) SUITE="$2"; shift 2 ;;
         --mirror) MIRROR="$2"; shift 2 ;;
         --run-as-uid) RUN_AS_UID="$2"; shift 2 ;;
@@ -106,9 +115,13 @@ die() { echo "bake-rootfs: $*" >&2; exit 2; }
 
 [ -n "$GUEST_AGENT" ] || die "--guest-agent is required"
 [ -f "$GUEST_AGENT" ] && [ -x "$GUEST_AGENT" ] || die "guest agent $GUEST_AGENT is not an executable file"
-if [ "$WITH_HARBOR" = 1 ] && [ -z "$HARBOR_VERSION" ]; then
-    die "--with-harbor needs --harbor-version X.Y.Z (pin it; never a floating install)"
-fi
+for overlay in "${OVERLAYS[@]+"${OVERLAYS[@]}"}"; do
+    [ -d "$overlay" ] || die "--overlay $overlay is not a directory"
+done
+for hook in "${HOOKS[@]+"${HOOKS[@]}"}"; do
+    [ -f "$hook" ] && [ -x "$hook" ] || die "--chroot-hook $hook is not an executable file"
+done
+[[ "$EXTRA_PKGS" =~ ^[a-z0-9.+,-]*$ ]] || die "--extra-pkgs wants a comma-separated list of Debian package names, got $EXTRA_PKGS"
 [[ "$RUN_AS_UID" =~ ^[0-9]+$ ]] && [ "$RUN_AS_UID" -ge 1000 ] || die "--run-as-uid must be an unprivileged uid (>= 1000)"
 [[ "$SIZE_MIB" =~ ^[0-9]+$ ]] && [[ "$BUDGET_MIB" =~ ^[0-9]+$ ]] || die "--size-mib / --budget-mib must be integers"
 [ "$SIZE_MIB" -gt "$BUDGET_MIB" ] || die "--size-mib ($SIZE_MIB) must exceed --budget-mib ($BUDGET_MIB) so the tree fits"
@@ -144,11 +157,19 @@ fi
 
 BASE_PKGS=(ca-certificates iproute2 iputils-ping procps util-linux e2fsprogs tar gzip curl jq python3 openssl kmod less coreutils findutils grep sed gawk bash)
 PODMAN_PKGS=(podman uidmap slirp4netns passt fuse-overlayfs crun netavark aardvark-dns podman-compose catatonit fuse3)
-HARBOR_PKGS=(python3-venv python3-pip git)
 PKGS=("${BASE_PKGS[@]}")
 [ "$WITH_PODMAN" = 1 ] && PKGS+=("${PODMAN_PKGS[@]}")
-[ "$WITH_HARBOR" = 1 ] && PKGS+=("${HARBOR_PKGS[@]}")
+if [ -n "$EXTRA_PKGS" ]; then
+    IFS=, read -r -a extra_pkgs <<< "$EXTRA_PKGS"
+    for pkg in "${extra_pkgs[@]}"; do [ -n "$pkg" ] && PKGS+=("$pkg"); done
+fi
 INCLUDE="$(IFS=,; echo "${PKGS[*]}")"
+# Rootless podman storage: both paths must be ones init.sh creates and
+# chowns to the run-as user on the writable scratch drive / runtime tmpfs
+# (never the root-owned /var/lib/containers or /run/containers, and never
+# the read-only rootfs).
+PODMAN_RUNROOT="/run/user/$RUN_AS_UID/containers"
+PODMAN_GRAPHROOT="/var/lib/proof/containers/storage"
 
 cat <<EOF
 bake plan
@@ -157,8 +178,9 @@ bake plan
   guest agent      $GUEST_AGENT
   init             $HERE/init.sh -> /sbin/init ; $HERE/agent-loop.sh -> /usr/local/sbin/proof-agent-loop
   runners          ${RUNNER_IDS[*]:-(none: every in-guest job fails closed until an adaptor is baked)}
-  podman           $([ "$WITH_PODMAN" = 1 ] && echo "rootless (crun, fuse-overlayfs, cgroupfs), run-as uid $RUN_AS_UID" || echo no)
-  harbor           $([ "$WITH_HARBOR" = 1 ] && echo "venv /opt/harbor, harbor==$HARBOR_VERSION" || echo no)
+  podman           $([ "$WITH_PODMAN" = 1 ] && echo "rootless (crun, fuse-overlayfs, cgroupfs), run-as uid $RUN_AS_UID, runroot $PODMAN_RUNROOT, graphroot $PODMAN_GRAPHROOT" || echo no)
+  overlays         ${OVERLAYS[*]:-(none)}
+  chroot hooks     ${HOOKS[*]:-(none)}
   resolver         ${RESOLVER:-(none baked; adaptors must not need DNS or the topic must not need egress)}
   plain http       $([ "$ALLOW_PLAIN_HTTP" = 1 ] && echo "allowed (staging only)" || echo "refused (https only)")
   image            $OUT_DIR/sha256-<hex>.ext4, $SIZE_MIB MiB, tree budget $BUDGET_MIB MiB
@@ -223,16 +245,26 @@ runtime = "crun"
 network_backend = "netavark"
 default_rootless_network_cmd = "pasta"
 EOF
-    cat > "$ROOT/etc/containers/storage.conf" <<'EOF'
-# Rootless store lives on the per-VM writable disk (init bind-mounts the
-# run-as home onto /var/lib/proof/home and links .local/share/containers).
+    # Both stores live where init.sh puts writable, run-as-owned directories:
+    # the graphroot on the per-VM scratch drive ($SCRATCH/containers/storage,
+    # also reachable as ~/.local/share/containers/storage through the home
+    # bind + symlink) and the runroot under the user's XDG_RUNTIME_DIR tmpfs.
+    # rootless_storage_path repeats the graphroot so a rootless podman that
+    # consults it lands on the same store. Nothing points at a root-owned or
+    # read-only path.
+    cat > "$ROOT/etc/containers/storage.conf" <<EOF
+# Proof guest rootless store: writable, run-as-owned paths created by
+# /sbin/init on the scratch drive and the runtime tmpfs (never /var/lib/containers,
+# never /run/containers, never the read-only rootfs).
 [storage]
 driver = "overlay"
-runroot = "/run/containers/storage"
-graphroot = "/var/lib/containers/storage"
+runroot = "$PODMAN_RUNROOT"
+graphroot = "$PODMAN_GRAPHROOT"
+rootless_storage_path = "$PODMAN_GRAPHROOT"
 [storage.options.overlay]
 mount_program = "/usr/bin/fuse-overlayfs"
 EOF
+    chmod 0644 "$ROOT/etc/containers/storage.conf"
     # The docker CLI name many harnesses call: podman's compatibility shim.
     if [ ! -e "$ROOT/usr/bin/docker" ]; then
         printf '#!/bin/sh\nexec podman "$@"\n' > "$ROOT/usr/bin/docker"
@@ -243,20 +275,17 @@ EOF
     fi
 fi
 
-if [ "$WITH_HARBOR" = 1 ]; then
-    echo "== harbor==$HARBOR_VERSION (venv /opt/harbor) =="
-    chroot "$ROOT" /usr/bin/python3 -m venv /opt/harbor
-    chroot "$ROOT" /opt/harbor/bin/pip install --no-cache-dir "harbor==$HARBOR_VERSION"
-    ln -sf /opt/harbor/bin/harbor "$ROOT/usr/local/bin/harbor"
-    chroot "$ROOT" /usr/local/bin/harbor --version
-    # The example adaptor drives these flags; refuse a Harbor that lacks one
-    # instead of discovering it inside a paid run.
-    help="$(chroot "$ROOT" /usr/local/bin/harbor run --help 2>&1 || true)"
-    for flag in --path --agent --model --n-concurrent --jobs-dir --job-name; do
-        grep -q -- "$flag" <<< "$help" || die "harbor $HARBOR_VERSION: 'harbor run --help' shows no $flag; update the adaptor before baking"
-    done
-    rm -rf "$ROOT/root/.cache/pip"
-fi
+for overlay in "${OVERLAYS[@]+"${OVERLAYS[@]}"}"; do
+    echo "== overlay $overlay =="
+    cp -a "$overlay/." "$ROOT/"
+done
+for hook in "${HOOKS[@]+"${HOOKS[@]}"}"; do
+    echo "== chroot hook $hook =="
+    install -m 0755 "$hook" "$ROOT/tmp/proof-bake-hook"
+    chroot "$ROOT" /tmp/proof-bake-hook || die "chroot hook $hook failed"
+    rm -f "$ROOT/tmp/proof-bake-hook"
+    rm -rf "$ROOT/root/.cache"
+done
 
 for i in "${!RUNNER_IDS[@]}"; do
     id="${RUNNER_IDS[$i]}"
@@ -278,7 +307,7 @@ echo "== size budget =="
 TREE_MIB="$(du -sm "$ROOT" | cut -f1)"
 echo "baked tree: $TREE_MIB MiB (budget $BUDGET_MIB MiB, image $SIZE_MIB MiB)"
 if [ "$TREE_MIB" -gt "$BUDGET_MIB" ]; then
-    die "tree exceeds the budget: drop --with-harbor / packages, or raise --budget-mib and --size-mib deliberately"
+    die "tree exceeds the budget: trim overlays / hooks / --extra-pkgs, or raise --budget-mib and --size-mib deliberately"
 fi
 
 echo "== image =="
@@ -297,7 +326,11 @@ mv "$IMG" "$FINAL"
     echo "size_mib=$SIZE_MIB"
     echo "suite=$SUITE"
     echo "podman=$WITH_PODMAN"
-    echo "harbor=${HARBOR_VERSION:-none}"
+    echo "podman_runroot=$PODMAN_RUNROOT"
+    echo "podman_graphroot=$PODMAN_GRAPHROOT"
+    echo "extra_pkgs=${EXTRA_PKGS:-none}"
+    echo "overlays=${OVERLAYS[*]:-none}"
+    echo "chroot_hooks=${HOOKS[*]:-none}"
     echo "runners=${RUNNER_IDS[*]:-none}"
     echo "guest_agent_sha256=$(sha256sum "$GUEST_AGENT" | cut -d' ' -f1)"
 } > "$OUT_DIR/bake-manifest.txt"
