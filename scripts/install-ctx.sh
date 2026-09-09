@@ -102,12 +102,20 @@ release_label() {
 }
 
 # Whether $RELEASES/tag/<tag> exists at all, to tell "no such release" from
-# "release exists but was cut without ctx assets".
+# "release exists but was cut without ctx assets". Only a 404 means absent;
+# an outage or a network error aborts with its own message, so nobody is told
+# to change CTX_VERSION when GitHub is what is failing.
 release_exists() {
   case "$VERSION" in
     latest) return 0 ;;
   esac
-  curl -fsSLI -o /dev/null "$RELEASES/tag/$VERSION" >/dev/null 2>&1
+  code="$(curl -sSLI -o /dev/null -w '%{http_code}' "$RELEASES/tag/$VERSION")" \
+    || die "could not reach $RELEASES to check release $VERSION (network error); retry later"
+  case "$code" in
+    2??) return 0 ;;
+    404) return 44 ;;
+    *) die "HTTP $code from $RELEASES/tag/$VERSION while checking that the release exists; GitHub may be unavailable, retry later" ;;
+  esac
 }
 
 tmp="$(mktemp -d)"
