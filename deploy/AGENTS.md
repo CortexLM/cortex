@@ -66,8 +66,9 @@ Current Proof judging is incomplete: the Python judge uses static checks and
 an acknowledgement request. The binary now drives a leaf emitter
 (`PROOF_EMIT_POLL_SECS`, default 120 — same cadence as bounty): positive
 store lattices become signed leaves; otherwise `E` is covered with
-`NoScore(ChallengeInternal)` so D24 can seal. That is not the paper's
-automatic research-to-payment path. See [`docs/WHITEPAPER.md`](../docs/WHITEPAPER.md).
+`NoScore(ChallengeInternal)` so D24 can seal. A scored epoch is persisted
+(`PROOF_SCORED_EPOCH_FILE`) so a restart does not burn it. That is not the
+paper's automatic research-to-payment path. See [`docs/WHITEPAPER.md`](../docs/WHITEPAPER.md).
 
 ## Proof topic VMs (Firecracker on a dedicated KVM host)
 

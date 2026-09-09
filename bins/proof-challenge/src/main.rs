@@ -131,6 +131,13 @@ struct Cli {
     /// Seconds between emitter ticks.
     #[arg(long, env = "PROOF_EMIT_POLL_SECS", default_value_t = DEFAULT_EMIT_POLL_SECS)]
     emit_poll_secs: u64,
+    /// Persisted scored-epoch watermark (survives process restart).
+    #[arg(
+        long,
+        env = "PROOF_SCORED_EPOCH_FILE",
+        default_value = "/var/lib/proof/scored_epoch"
+    )]
+    scored_epoch_file: PathBuf,
 }
 
 fn main() -> ExitCode {
@@ -799,11 +806,13 @@ fn build_emitter(
         netuid = cli.netuid,
         gateway = %cli.gateway_endpoint,
         poll_secs = cli.emit_poll_secs,
+        scored_epoch_file = %cli.scored_epoch_file.display(),
         "proof emitter wired"
     );
-    Ok(Some(Arc::new(ProofEmitter::new(
-        chain, gateway, sk, cli.netuid, store,
-    ))))
+    Ok(Some(Arc::new(
+        ProofEmitter::new(chain, gateway, sk, cli.netuid, store)
+            .with_scored_epoch_path(cli.scored_epoch_file.clone()),
+    )))
 }
 
 fn load_optional_sk(path: Option<&Path>) -> Option<[u8; 32]> {
@@ -885,6 +894,14 @@ mod tests {
     fn emit_poll_secs_defaults_to_the_bounty_cadence() {
         assert_eq!(cli().emit_poll_secs, DEFAULT_EMIT_POLL_SECS);
         assert_eq!(DEFAULT_EMIT_POLL_SECS, 120);
+    }
+
+    #[test]
+    fn scored_epoch_file_defaults_to_the_artifacts_volume() {
+        assert_eq!(
+            cli().scored_epoch_file.as_os_str(),
+            "/var/lib/proof/scored_epoch"
+        );
     }
 
     /// Compose always sets `BASE_CHALLENGE_SK_FILE`. remote-deploy may leave an

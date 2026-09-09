@@ -11,12 +11,14 @@
 //!    leaves fails D24 and takes every other challenge's seal down with it.
 //!    That cover is `ChallengeInternal`, not `NotAttempted`.
 //! 3. An empty tick inside an already-scored epoch does not take back the
-//!    scores the store really did publish.
+//!    scores the store really did publish. A restart with a persisted
+//!    watermark holds the same way.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
@@ -133,6 +135,16 @@ fn emitter(store: MemoryStore, gateway_url: &str) -> ProofEmitter<LockedFake> {
         .expect("gateway client"),
     );
     ProofEmitter::new(fake_chain(), gateway, [7u8; 32], NETUID, store)
+}
+
+fn watermark_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "proof-scored-epoch-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ))
 }
 
 fn leaf_for(accepted: &Accepted, hotkey: [u8; 32]) -> serde_json::Value {
@@ -353,6 +365,46 @@ async fn an_empty_tick_after_a_scored_epoch_holds_instead_of_burning_it() {
             .unwrap_or_default()
             > 0,
         "the champion's score must still stand"
+    );
+}
+
+/// A restart with an empty store must not POST a burn for an epoch this host
+/// already scored. The watermark file is what survives the in-memory store.
+#[tokio::test]
+async fn a_restart_with_the_watermark_holds_instead_of_burning_scored_leaves() {
+    let path = watermark_path();
+    let (gateway, accepted) = spawn_gateway().await;
+    let em = emitter(seed_scored_store(), &gateway).with_scored_epoch_path(path.clone());
+
+    assert!(matches!(
+        em.tick().await.expect("scored"),
+        EmitOutcome::Scored { paid: 1, .. }
+    ));
+    let after_scored = accepted_count(&accepted);
+    let epoch = em.scored_epoch();
+    assert!(epoch > 0);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("watermark").trim(),
+        epoch.to_string()
+    );
+
+    let restarted = emitter(MemoryStore::new(), &gateway).with_scored_epoch_path(path);
+    assert_eq!(restarted.scored_epoch(), epoch);
+    match restarted.tick().await.expect("hold") {
+        EmitOutcome::Held { epoch: held, .. } => assert_eq!(held, epoch),
+        other => panic!("restarted empty store must not burn a scored epoch: {other:?}"),
+    }
+    assert_eq!(
+        accepted_count(&accepted),
+        after_scored,
+        "holding must post nothing at all"
+    );
+    assert!(
+        leaf_for(&accepted, CHAMPION)["score_or_absence"]["score"]["value"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "the champion's score must still stand after restart"
     );
 }
 

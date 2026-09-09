@@ -10,6 +10,7 @@
 //! S3 unknown challenge → 404 + no row
 //! S4 replay identical digest → 409 + original unchanged
 //! S5 digest change for same key → 202 tip supersede
+//! S6 `ChallengeInternal` must not supersede a positive score → 409 + original
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -400,6 +401,61 @@ async fn s5_digest_change_tip_supersedes() {
         .await
         .expect("replay");
     assert_eq!(third.status().as_u16(), 409);
+
+    let _ = shutdown.send(());
+}
+
+/// A `ChallengeInternal` cover (reason 6) must not tip-supersede a positive
+/// score. Restarted empty emitters used that path to turn a paid allocation
+/// into a uid-0 burn on the next reseal.
+#[tokio::test]
+async fn s6_challenge_internal_burn_must_not_supersede_a_positive_score() {
+    let (sk, pk) = mini_keypair();
+    let cid = "dummy";
+    let miner = [0x77u8; 32];
+    let epoch = 13u64;
+    let (_payload, sig) = sign_leaf(
+        &sk,
+        cid,
+        miner,
+        epoch,
+        ScoreOrAbsenceScale::Score { value: 100 },
+    );
+
+    let store = Arc::new(MemoryRawWeightStore::new());
+    let (addr, shutdown) = spawn_gateway(challenges_body(cid, pk), Arc::clone(&store)).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("http://{addr}/v1/weights/raw"))
+        .json(&json_score(cid, miner, epoch, 100, &sig))
+        .send()
+        .await
+        .expect("score");
+    assert_eq!(first.status().as_u16(), 202);
+
+    let (_p2, sig2) = sign_leaf(
+        &sk,
+        cid,
+        miner,
+        epoch,
+        ScoreOrAbsenceScale::NoScore { reason: 6 },
+    );
+    let burn = client
+        .post(format!("http://{addr}/v1/weights/raw"))
+        .json(&json_noscore(cid, miner, epoch, 6, &sig2))
+        .send()
+        .await
+        .expect("burn");
+    assert_eq!(
+        burn.status().as_u16(),
+        409,
+        "body={}",
+        burn.text().await.unwrap_or_default()
+    );
+    let row = store.get(cid, epoch, &hex::encode(miner)).expect("kept");
+    assert_eq!(row.kind, "score");
+    assert_eq!(row.score, Some(100));
 
     let _ = shutdown.send(());
 }

@@ -6,7 +6,7 @@
 //! connections should use the `base_app` role, which has **no** direct `UPDATE`
 //! privilege on the append-only tables `raw_weight_snapshot`, `epoch_bundle`,
 //! and `peer_root_statement`. Tip leaf supersede uses the
-//! `upsert_raw_weight_tip` SECURITY DEFINER helper (migration 0017).
+//! `upsert_raw_weight_tip` SECURITY DEFINER helper (migrations 0017 / 0021).
 //!
 //! # D18
 //!

@@ -9,8 +9,10 @@ Read the [overview](OVERVIEW.md) for the purpose and the
 acknowledgement request and static checks, not the paper's autonomous investigation
 and arbitrary recipe reproduction. The service stores submissions in memory.
 A `ProofEmitter` loop signs exact-`E` leaves (or covers `E` with
-`ChallengeInternal`) so D24 can seal; that is not the paper's automatic
-research-to-payment path. Readiness checks alone do not establish a complete
+`ChallengeInternal`) so D24 can seal; the scored-epoch watermark is
+persisted so a restart does not burn a paid allocation, and the gateway
+refuses a burn from replacing a positive leaf. That is still not the
+paper's automatic research-to-payment path. Readiness checks alone do not establish a complete
 path from a scored run to on-chain payment.
 The rules below describe the current interfaces and scoring functions, not a
 claim that these gaps are closed.

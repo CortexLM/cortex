@@ -19,17 +19,17 @@
 //!   for *no* challenge. Silence here would make an empty Proof store take
 //!   down bounty's weights too.
 //!
-//! A failed tick also tries not to overwrite good leaves: once *this process*
+//! A failed tick also tries not to overwrite good leaves: once this host
 //! has scored an epoch, a later empty tick inside that same epoch holds
-//! rather than superseding a champion's score with a burn. That watermark is
-//! in-process, so a restart inside an empty store can still burn an epoch
-//! that had scores (the gateway exposes no read side for raw leaves to
-//! consult). The next successful tick supersedes the burn with the published
-//! scores, and the bias is deliberate: erring toward a burn pays nobody who
-//! was not already paid, while erring toward silence would 409 the seal for
-//! every challenge.
+//! rather than superseding a champion's score with a burn. The watermark is
+//! persisted (`PROOF_SCORED_EPOCH_FILE`) so a restart with an empty store
+//! still holds. Independently, the gateway refuses a `ChallengeInternal`
+//! cover from replacing a positive leaf for the same key (409, original
+//! kept), so a lost watermark cannot reseal a paid allocation into a uid-0
+//! burn. The next successful tick still supersedes a *burn* with scores.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -117,6 +117,7 @@ pub struct ProofEmitter<C> {
     netuid: u16,
     store: MemoryStore,
     scored_epoch: AtomicU64,
+    scored_epoch_path: Option<PathBuf>,
 }
 
 impl<C: ChainClient + Send + Sync> ProofEmitter<C> {
@@ -136,10 +137,30 @@ impl<C: ChainClient + Send + Sync> ProofEmitter<C> {
             netuid,
             store,
             scored_epoch: AtomicU64::new(0),
+            scored_epoch_path: None,
         }
     }
 
-    /// Highest epoch this process scored from the store (0 = none yet).
+    /// Restore the scored-epoch watermark from `path` (0 if missing).
+    ///
+    /// Compose points this at the `proof-artifacts` volume so a restart does
+    /// not forget that this epoch already has scored leaves on the gateway.
+    #[must_use]
+    pub fn with_scored_epoch_path(mut self, path: PathBuf) -> Self {
+        let loaded = load_scored_epoch(&path);
+        if loaded > 0 {
+            tracing::info!(
+                epoch = loaded,
+                path = %path.display(),
+                "proof scored-epoch watermark restored"
+            );
+        }
+        self.scored_epoch.fetch_max(loaded, Ordering::Relaxed);
+        self.scored_epoch_path = Some(path);
+        self
+    }
+
+    /// Highest epoch this host scored from the store (0 = none yet).
     pub fn scored_epoch(&self) -> u64 {
         self.scored_epoch.load(Ordering::Relaxed)
     }
@@ -169,7 +190,7 @@ impl<C: ChainClient + Send + Sync> ProofEmitter<C> {
             return self.cover_without_scores(epoch, &hotkeys).await;
         }
         self.submit(epoch, &hotkeys, &leaf_scores).await?;
-        self.scored_epoch.fetch_max(epoch, Ordering::Relaxed);
+        self.mark_scored(epoch);
         Ok(EmitOutcome::Scored {
             epoch,
             pin_block,
@@ -246,6 +267,13 @@ impl<C: ChainClient + Send + Sync> ProofEmitter<C> {
         )
         .map_err(|e| EmitError::Chain(format!("expected set: {e}")))?;
         Ok((epoch, pin_block, expected.hotkeys()))
+    }
+
+    fn mark_scored(&self, epoch: u64) {
+        self.scored_epoch.fetch_max(epoch, Ordering::Relaxed);
+        if let Some(path) = self.scored_epoch_path.as_ref() {
+            persist_scored_epoch(path, self.scored_epoch());
+        }
     }
 
     /// Cover `E` when nobody scored: burn, or hold an already-scored epoch.
@@ -335,4 +363,40 @@ fn emission_inputs(store: &MemoryStore, epoch: u64) -> Result<EmissionInputs, Em
         champion_primary,
         per_miner,
     })
+}
+
+fn load_scored_epoch(path: &Path) -> u64 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|body| body.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn persist_scored_epoch(path: &Path, epoch: u64) {
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "proof scored-epoch watermark: parent dir"
+            );
+            return;
+        }
+    }
+    let tmp = path.with_extension("tmp");
+    if let Err(e) = std::fs::write(&tmp, format!("{epoch}\n")) {
+        tracing::warn!(
+            path = %tmp.display(),
+            error = %e,
+            "proof scored-epoch watermark: write"
+        );
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "proof scored-epoch watermark: persist"
+        );
+    }
 }
