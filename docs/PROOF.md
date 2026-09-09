@@ -481,7 +481,11 @@ resolved executor plan's deadline (tighter of topic and plan) and
 like every other scored row. The run request also carries the miner's
 `artifact_uri` (the runner fetches it inside the VM and checks
 `artifact_digest`; a custom submission without one is a **400** at intake,
-no row, and the scorer refuses a request without it), the topic's
+no row, and the scorer refuses a request without it; an `artifact_digest`
+that is the sha256 of nothing — zero bytes, an empty tar — is a **400** too,
+and the KVM host refuses a content-less, compressed, or non-tar
+`artifact_tar` before it boots a sister, so a guest that substitutes an empty
+tree when its fetch fails can never produce a scored run), the topic's
 `flops_budget`, and the miner's `declared_flops` (the runner may enforce it
 as a hard cap). The runner's report must carry its measured `flops_used`,
 which becomes the verdict's usage — a report without one is not evidence

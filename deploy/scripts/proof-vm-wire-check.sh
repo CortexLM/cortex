@@ -15,8 +15,11 @@
 #   proof-vm-wire-check.sh boot-probe   # create → attach → destroy ONE RLM VM on the KVM host (no job, no spend)
 #   proof-vm-wire-check.sh submit-probe --topic ID --expect 503 [--reason SUBSTR]
 #                                       # POST /v1/submissions on a custom topic; assert the fail-closed answer
-#   proof-vm-wire-check.sh submit-probe --topic ID --expect 201 --allow-live-run --artifact-uri URI
-#                                       # happy path: real RLM job + sister guest; prints flops_used from the row
+#   proof-vm-wire-check.sh submit-probe --topic ID --expect 201 --allow-live-run \
+#                                       --artifact-file recipe.tar --artifact-uri URI
+#                                       # happy path: REAL artefact (digest = sha256 of the file the URI serves,
+#                                       # fetched + re-hashed here first), real RLM job + sister guest; prints
+#                                       # flops_used from the row. Never a random or empty digest.
 #   proof-vm-wire-check.sh matrix       # print the fail-closed matrix as operator steps + expected 503 reasons
 #
 # Options (all subcommands):
@@ -28,8 +31,17 @@
 #   --topic ID            submit-probe topic id (must be an open custom topic)
 #   --expect CODE         submit-probe expected HTTP status (400 / 503; 2xx needs --allow-live-run)
 #   --reason SUBSTR       submit-probe: the error text must contain this
-#   --artifact-uri URI    submit-probe locator (default https://example.invalid/wire-probe.tar — never fetchable)
+#   --artifact-uri URI    submit-probe locator (default https://example.invalid/wire-probe.tar — never fetchable;
+#                         a live run needs a URI the RLM VM can reach through the agent's egress allowlist:
+#                         never loopback / example.invalid)
 #   --no-artifact-uri     submit-probe without a locator (a custom topic must answer 400, no row)
+#   --artifact-file F     submit-probe: the exact bytes --artifact-uri serves (an uncompressed tar with file
+#                         content); artifact_digest = its sha256. Required for --expect 2xx unless
+#                         --artifact-digest is given. Empty file / empty tar → refused
+#   --artifact-digest HEX submit-probe: use this artifact_digest instead of a random one (64 hex; a digest of
+#                         nothing — empty input, empty tar — is refused)
+#   --no-fetch-check      submit-probe --expect 2xx: skip fetching --artifact-uri from this host to compare its
+#                         sha256 with artifact_digest (only when the URI is reachable from the RLM VM but not here)
 #   --declared-flops N    submit-probe declaration, positive integer (default: 1 for fail-closed probes; the
 #                         topic's flops_budget for --expect 2xx so a real run is not rejected flops_under_declared)
 #   --wait SECS           submit-probe --expect 201: how long the synchronous POST may take (default 900)
@@ -88,10 +100,13 @@ EXPECT=""
 REASON=""
 ALLOW_LIVE_RUN=0
 ARTIFACT_URI="https://example.invalid/wire-probe.tar"
+ARTIFACT_FILE=""
+ARTIFACT_DIGEST=""
+FETCH_CHECK=1
 WAIT_SECS=900
 DECLARED_FLOPS=""
 
-usage() { sed -n '2,37p' "$0"; }
+usage() { sed -n '2,50p' "$0"; }
 
 [[ $# -ge 1 ]] || { usage; exit 1; }
 SUBCOMMAND="$1"; shift
@@ -108,6 +123,9 @@ while [[ $# -gt 0 ]]; do
     --allow-live-run) ALLOW_LIVE_RUN=1; shift ;;
     --artifact-uri) ARTIFACT_URI="${2:?}"; shift 2 ;;
     --no-artifact-uri) ARTIFACT_URI=""; shift ;;
+    --artifact-file) ARTIFACT_FILE="${2:?}"; shift 2 ;;
+    --artifact-digest) ARTIFACT_DIGEST="${2:?}"; shift 2 ;;
+    --no-fetch-check) FETCH_CHECK=0; shift ;;
     --wait) WAIT_SECS="${2:?}"; shift 2 ;;
     --declared-flops) DECLARED_FLOPS="${2:?}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -610,10 +628,124 @@ boot_probe() {
 # ---------------------------------------------------------------------------
 # submit-probe: POST /v1/submissions on a custom topic, assert the answer
 # ---------------------------------------------------------------------------
+sha256_of() { sha256sum "$1" | awk '{print $1}'; }
+
+# The sha256 of nothing: zero bytes, or an empty tar archive (10240 zero
+# bytes). Neither is a recipe; the CP answers 400 and the KVM host refuses a
+# content-less tar before any sister — a live probe must not even try.
+digest_of_nothing() {
+  local d
+  d="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ "$d" == "$(head -c 0 /dev/zero | sha256sum | awk '{print $1}')" ]] && return 0
+  [[ "$d" == "$(head -c 10240 /dev/zero | sha256sum | awk '{print $1}')" ]] && return 0
+  return 1
+}
+
+# --artifact-file must be what the sister will unpack: an UNCOMPRESSED tar
+# with at least one regular file that has content (the host refuses gzip,
+# non-tar bytes, and empty trees). python3's tarfile in ':' mode = no
+# compression accepted.
+check_artifact_file() {
+  local f="$1"
+  [[ -s "$f" ]] || { RED "refusing: --artifact-file $f is missing or empty"; exit 2; }
+  python3 - "$f" <<'PY' || exit 2
+import sys, tarfile
+path = sys.argv[1]
+with open(path, "rb") as fh:
+    if fh.read(2) == b"\x1f\x8b":
+        print(f"refusing: {path} is gzip-compressed; the sister needs an uncompressed tar", file=sys.stderr); sys.exit(1)
+try:
+    with tarfile.open(path, mode="r:") as t:
+        content = sum(m.size for m in t.getmembers() if m.isreg())
+except tarfile.TarError as e:
+    print(f"refusing: {path} is not a tar archive ({e})", file=sys.stderr); sys.exit(1)
+if content == 0:
+    print(f"refusing: {path} carries no file content (an empty tree is not a miner artefact)", file=sys.stderr); sys.exit(1)
+print(f"[wire-check] artefact {path}: uncompressed tar, {content} bytes of file content")
+PY
+}
+
+# Live runs only: the URI must be reachable from the RLM VM — so not this
+# host's loopback (a container / VM never sees it) and not example.invalid.
+check_live_uri() {
+  local host
+  host="$(url_host "$1")"
+  case "$host" in
+    ""|localhost|127.*|\[::1\]|example.invalid|*.example.invalid|*.invalid)
+      RED "refusing: --artifact-uri $1 is not reachable from the RLM VM (loopback is the VM's own; .invalid never resolves). Serve the file on an address in the agent's PROOF_VM_AGENT_EGRESS_ALLOW (a bucket, or the host's VPC / TAP-side address)."
+      exit 2 ;;
+  esac
+  case "$1" in
+    http://*|https://*) ;;
+    *) RED "refusing: --artifact-uri $1 is not an http(s) URL"; exit 2 ;;
+  esac
+}
+
+# Fetch the URI from here and re-hash: proves the URL serves the bytes the
+# digest names before anything is spent. Reachability from the RLM VM is a
+# separate question (egress allowlist, forward policy) that the agent journal
+# answers; a fetch that fails here is still a stop.
+fetch_check() { # fetch_check URI DIGEST → 0 ok / 1 fail (reported)
+  local out="$TMPDIR_WC/artefact.$RANDOM$RANDOM" got
+  if ! curl -fsSL -m 120 -o "$out" "$1" 2>"$TMPDIR_WC/fetch.err"; then
+    fail "artefact fetch from this host failed: $(head -c 300 "$TMPDIR_WC/fetch.err") — the RLM VM will not do better; fix the URL / server before any live run"
+    return 1
+  fi
+  got="$(sha256_of "$out")"
+  rm -f "$out"
+  if [[ "$got" != "$2" ]]; then
+    fail "the URL serves bytes hashing to $got, not the declared $2 — the host would refuse the sister (artifact_tar hashes to …); upload the right file or pass its --artifact-file"
+    return 1
+  fi
+  pass "the URL serves the declared bytes (sha256 ${2:0:16}… fetched + re-hashed here)"
+  LOG "from the RLM VM the same URL must pass the agent's egress allowlist (PROOF_VM_AGENT_EGRESS_ALLOW covers $(url_host "$1")) and any ufw / docker forward policy on the KVM host (runbook § Egress)"
+  return 0
+}
+
+# Sets PROBE_HEX to the artifact_digest for this probe; returns 1 (after a
+# FAIL) when a live run must not start. Runs in the main shell so FAIL counts.
+PROBE_HEX=""
+artifact_digest_for_probe() {
+  local hex=""
+  if [[ -n "$ARTIFACT_DIGEST" ]]; then
+    hex="$(printf '%s' "$ARTIFACT_DIGEST" | tr '[:upper:]' '[:lower:]')"
+    [[ "$hex" =~ ^[0-9a-f]{64}$ ]] || { RED "refusing: --artifact-digest must be 64 hex"; exit 2; }
+  fi
+  if [[ -n "$ARTIFACT_FILE" ]]; then
+    check_artifact_file "$ARTIFACT_FILE"
+    local from_file
+    from_file="$(sha256_of "$ARTIFACT_FILE")"
+    if [[ -n "$hex" && "$hex" != "$from_file" ]]; then
+      RED "refusing: --artifact-digest $hex is not the sha256 of --artifact-file ($from_file)"; exit 2
+    fi
+    hex="$from_file"
+  fi
+  if [[ "$EXPECT" =~ ^2 ]]; then
+    # A fail-closed probe may carry the digest of nothing on purpose (to
+    # assert the CP's 400); a live run never does.
+    if [[ -n "$hex" ]] && digest_of_nothing "$hex"; then
+      RED "refusing: $hex is the sha256 of nothing (empty input / empty tar) — that is the stub staging once matched, never a recipe"; exit 2
+    fi
+    if [[ -z "$hex" ]]; then
+      RED "refusing: a live run needs the digest of the bytes the RLM VM will fetch: --artifact-file F (sha256 computed here; F is what --artifact-uri serves) or --artifact-digest HEX. A random digest can only pass through a guest that substitutes an empty artefact — prod never relies on that stub."
+      exit 2
+    fi
+    [[ -n "$ARTIFACT_URI" ]] || { RED "refusing: a live run needs --artifact-uri"; exit 2; }
+    check_live_uri "$ARTIFACT_URI"
+    if [[ "$FETCH_CHECK" -eq 1 ]]; then
+      fetch_check "$ARTIFACT_URI" "$hex" || return 1
+    else
+      warn "--no-fetch-check: not proving from here that $ARTIFACT_URI serves ${hex:0:16}…; the KVM host will refuse a mismatch"
+    fi
+  fi
+  [[ -n "$hex" ]] || hex="$(printf '%s' "wire-probe-$TOPIC-$(date +%s)-$$-$RANDOM" | sha256sum | awk '{print $1}')"
+  PROBE_HEX="$hex"
+}
+
 submit_probe() {
   [[ -n "$TOPIC" && -n "$EXPECT" ]] || { RED "submit-probe needs --topic ID --expect CODE"; exit 1; }
   if [[ "$EXPECT" =~ ^2 && "$ALLOW_LIVE_RUN" -ne 1 ]]; then
-    RED "refusing: --expect $EXPECT means a real RLM job (topic VM + sister guest + paid inference). Pass --allow-live-run and a fetchable --artifact-uri."
+    RED "refusing: --expect $EXPECT means a real RLM job (topic VM + sister guest + paid inference). Pass --allow-live-run, --artifact-file F (the bytes --artifact-uri serves), and a fetchable --artifact-uri."
     exit 2
   fi
   resolve_cp || return 0
@@ -639,7 +771,15 @@ submit_probe() {
   fi
   local hotkey hex uri_field="" body code
   hotkey="$(head -c 64 /dev/zero | tr '\0' 'a')"
-  hex="$(printf '%s' "wire-probe-$TOPIC-$(date +%s)-$$-$RANDOM" | sha256sum | awk '{print $1}')"
+  # artifact_digest: the fail-closed probes never run, so a random digest is
+  # fine there. A LIVE run is judged on the bytes the RLM VM fetches from
+  # --artifact-uri and the host re-hashes them against this digest before it
+  # boots a sister — so it must be the sha256 of the real file. A random one
+  # can only ever "pass" through a guest that substitutes bytes (the empty
+  # tree staging once matched); that stub is exactly what must never be relied
+  # on, so the live path refuses to start without a real digest.
+  artifact_digest_for_probe || return 0
+  hex="$PROBE_HEX"
   [[ -n "$ARTIFACT_URI" ]] && uri_field="$(printf '"artifact_uri":"%s",' "$ARTIFACT_URI")"
   body="$(printf '{"miner_hotkey":"%s","artifact_digest":"%s",%s"claim":"proof-vm-wire-check probe","declared_flops":%s,"topic_id":"%s","manifest":{"train_dataset_ids":["wire-probe-v0"]}}' \
     "$hotkey" "$hex" "$uri_field" "$flops" "$TOPIC")"
@@ -666,6 +806,11 @@ submit_probe() {
   pass "submission scored synchronously: $id (state=$state)"
   http GET "$CP/v1/submissions/$id" ""; code="$HTTP_CODE"
   [[ "$code" == "200" ]] || { fail "GET /v1/submissions/$id → $code"; return 0; }
+  if [[ "$(jget "$HTTP_BODY" artifact_digest | tr '[:upper:]' '[:lower:]')" == "$hex" ]]; then
+    pass "row carries the real artefact digest ${hex:0:16}… (the sister ran these bytes, not a stub)"
+  else
+    fail "row artifact_digest $(jget "$HTTP_BODY" artifact_digest) is not the probe's $hex"
+  fi
   local flops pass_flag
   flops="$(jget "$HTTP_BODY" verdict.agent.flops_used)"; pass_flag="$(jget "$HTTP_BODY" verdict.pass)"
   LOG "row $id: state=$state pass=$pass_flag flops_used=$flops detail=$(jget "$HTTP_BODY" detail) failed=$(jget "$HTTP_BODY" verdict.failed)"
@@ -721,6 +866,13 @@ $0 submit-probe --cp $cp --topic $topic --expect 503 --reason 'orchestrator unre
 # 6. Unknown / closed topic → 400 (no row); a custom topic without artifact_uri → 400 (no row).
 $0 submit-probe --cp $cp --topic does-not-exist --expect 400 --reason 'unknown topic'
 $0 submit-probe --cp $cp --topic $topic --expect 400 --no-artifact-uri --reason artifact_uri
+#
+# 7. A digest of nothing (sha256 of zero bytes / of an empty tar) → 400 (no row): the CP never
+#    scores the empty-artefact stub; the KVM host refuses a content-less tar before any sister too.
+$0 submit-probe --cp $cp --topic $topic --expect 400 --artifact-digest \$(sha256sum </dev/null | cut -d' ' -f1) --reason 'sha256 of empty input'
+#
+# Happy path needs the REAL artefact (never a random / empty digest): see the runbook § 5.
+# $0 submit-probe --cp $cp --topic $topic --expect 201 --allow-live-run --artifact-file recipe.tar --artifact-uri https://<host>/recipe.tar
 #
 # After every row: $0 cp   (the admin probe shows the same root cause: ready / reason / agent_error)
 EOF

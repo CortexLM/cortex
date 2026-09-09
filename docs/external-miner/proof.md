@@ -268,6 +268,7 @@ Refusals (**400** / **503**) do **not** persist a submission row.
 | **400** `declared_flops exceeds the topic budget` | `declared_flops > topic.flops_budget` | no | no |
 | **400** `artifact_uri is required for custom topics` | Custom topic, no locator | no | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not 64 hex | no | no |
+| **400** `artifact_digest is the sha256 of empty input …` | The digest of zero bytes or of an empty tar archive: hash the recipe bytes you actually serve at `artifact_uri` | no | no |
 | **503** empty `eval_image_digest` | Digest not pinned | no | no |
 | **503** zero open sealed topics | Nothing to score against | no | no |
 | **503** unsealed baseline | Topic open without both seal hashes | no | no |
@@ -369,7 +370,11 @@ ticked against is recorded with your row.
 
 `artifact_uri` is required: the runner fetches the bytes from it inside the
 topic VM and checks the digest, so a submission the runner cannot retrieve is
-a **400** with no row. The runner also measures your run's FLOPs; that
+a **400** with no row. Serve an **uncompressed** tar of your recipe tree
+(`tar -cf recipe.tar recipe/`, then `sha256sum recipe.tar` is your
+`artifact_digest`): the host re-hashes exactly those bytes before it boots
+your sister guest and refuses gzip, non-tar bytes, or a tree with no file
+content — a run never starts on a substitute artefact. The runner also measures your run's FLOPs; that
 measurement (not `declared_flops`) is what the verdict carries, and it must
 stay within both the topic budget (`flops_over_budget`) and your own
 `declared_flops` (`flops_under_declared`) — declare what you will use, up to

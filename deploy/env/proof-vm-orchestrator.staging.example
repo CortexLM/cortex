@@ -83,7 +83,10 @@ PROOF_VM_AGENT_NET_BASE=172.16.0.0
 # Egress the RLM VM may reach and nothing else: CIDR[:port[/tcp|udp]],
 # comma-separated. Staging: the RLM judge InferenceOffer origin, the artefact
 # locator hosts miners use, and a resolver. EMPTY = NO EGRESS. IPv4 CIDRs
-# only — resolve hostnames yourself. The sister guest never has a NIC.
+# only — resolve hostnames yourself. The sister guest never has a NIC. On the
+# colocated droplet Docker's FORWARD policy is DROP (ufw's too, on prod): the
+# pfc+ TAPs must be accepted in that chain once (runbook § Egress) or the RLM
+# VM reaches nothing — the agent warns `host forward chains drop by default`.
 PROOF_VM_AGENT_EGRESS_ALLOW=REPLACE_WITH_JUDGE_ORIGIN_IP/32:443,REPLACE_WITH_ARTEFACT_HOST_IP/32:443,REPLACE_WITH_RESOLVER_IP/32:53/udp
 
 # Where `retain` teardowns move a topic's jail (scratch, console, config).

@@ -124,6 +124,11 @@ pub enum RlmToHost {
 /// RLM guest → host on [`SISTER_PORT`]: run a miner artefact in a sister
 /// Firecracker guest. The RLM already fetched and inspected the tree; it
 /// ships the bytes so the sister needs no network.
+///
+/// A fetch that fails is a failed job (`RlmToHost::Failed`), never a
+/// substitute artefact: the host refuses a `SisterRequest` whose tar is
+/// compressed, not a tar, or carries no file content — a digest that matches
+/// an empty tree is not evidence of anything.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SisterRequest {
     /// Must equal the RLM VM's bound topic.
@@ -132,7 +137,10 @@ pub struct SisterRequest {
     pub submission_digest: String,
     /// sha256 hex of `artifact_tar`; the host re-hashes before boot.
     pub artifact_digest: String,
-    /// The artefact tree as a tarball (`StagedFile` named `artifact.tar`).
+    /// The artefact tree as an **uncompressed** tar (ustar / GNU / pax;
+    /// `StagedFile` named `artifact.tar`) with at least one regular file
+    /// that has content. gzip, non-tar bytes, an empty archive, or a tree of
+    /// empty files are refused by the host before any sister jail is built.
     pub artifact_tar: StagedFile,
     /// Command run inside the sister (relative to the unpacked tree).
     pub entrypoint: Vec<String>,
