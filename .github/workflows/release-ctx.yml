@@ -75,7 +75,7 @@ jobs:
       # Dispatch: the tip of main — never an input, never the release tag.
       # Full history so the commit can be checked against main below.
       - name: Checkout build ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
           fetch-depth: 0
@@ -177,12 +177,14 @@ jobs:
       # Every platform builds the one commit resolve picked, so the archives in
       # SHA256SUMS.txt cannot straddle a push to main that lands mid-run.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.resolve.outputs.revision }}
 
       - name: Install Rust toolchain
-        # Pin by commit SHA. Never @master in a workflow that publishes.
+        # Every third-party action here is pinned by commit SHA (version in the
+        # trailing comment). A movable tag in a workflow that publishes what
+        # miners install would let upstream change the code on this path.
         uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
         with:
           toolchain: "1.96.0"
@@ -218,7 +220,7 @@ jobs:
           Remove-Item ctx.exe
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ctx-${{ matrix.name }}
           path: |
@@ -236,7 +238,7 @@ jobs:
       contents: write
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: ctx-*
           merge-multiple: true
@@ -266,19 +268,36 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          # Empty when the tag has no Release yet (the next step creates it).
-          existing="$(gh release view "$TAG" --json body -q .body 2>/dev/null || true)"
+          # Only "release not found" means the tag has no Release yet (the
+          # next step creates one). Any other failure is not an empty body:
+          # guessing would append a second install block to the real notes.
+          set +e
+          existing="$(gh release view "$TAG" --json body -q .body 2>"$RUNNER_TEMP/gh-release.err")"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if grep -q "release not found" "$RUNNER_TEMP/gh-release.err"; then
+              existing=""
+            else
+              echo "::error::could not read the release notes of $TAG (gh exit $rc); refusing to guess"
+              cat "$RUNNER_TEMP/gh-release.err"
+              exit 1
+            fi
+          fi
+          # The block is present when the notes carry this exact command — a
+          # bare link to the script is not the install instructions.
+          install_cmd='curl -fsSL https://raw.githubusercontent.com/CortexLM/cortex/main/scripts/install-ctx.sh | sh'
           {
             echo "body<<NOTES_EOF"
-            if ! printf '%s' "$existing" | grep -qF "scripts/install-ctx.sh"; then
-              cat <<'BLOCK'
-          Cortex subnet CLI (`ctx`) for miners.
+            if ! printf '%s' "$existing" | grep -qF "$install_cmd"; then
+              cat <<BLOCK
+          Cortex subnet CLI (\`ctx\`) for miners.
 
-          ```bash
-          curl -fsSL https://raw.githubusercontent.com/CortexLM/cortex/main/scripts/install-ctx.sh | sh
+          \`\`\`bash
+          $install_cmd
           ctx challenges
           ctx status
-          ```
+          \`\`\`
 
           Default gateway: https://gateway.cortex.foundation
 
@@ -289,7 +308,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Attach to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
           files: dist/*
