@@ -43,12 +43,27 @@ pub fn safe_name(name: &str) -> Result<&str, String> {
 }
 
 /// Write `files` under `dir` (created 0700), each 0600, replacing any
-/// earlier file of the same name. Returns how many were written.
-pub fn stage_secrets(dir: &Path, files: &[StagedFile]) -> Result<usize, String> {
+/// earlier file of the same name. With `owner`, the directory and files are
+/// handed to that uid / gid — the unprivileged user adaptors run as — so a
+/// root agent can stage what a rootless adaptor reads. Returns how many were
+/// written.
+pub fn stage_secrets(
+    dir: &Path,
+    files: &[StagedFile],
+    owner: Option<(u32, u32)>,
+) -> Result<usize, String> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
         .map_err(|e| format!("chmod {}: {e}", dir.display()))?;
+    let own = |path: &Path| -> Result<(), String> {
+        if let Some((uid, gid)) = owner {
+            std::os::unix::fs::chown(path, Some(uid), Some(gid))
+                .map_err(|e| format!("chown {}: {e}", path.display()))?;
+        }
+        Ok(())
+    };
+    own(dir)?;
     for f in files {
         let name = safe_name(&f.name)?;
         let bytes = f.bytes().map_err(|e| e.to_string())?;
@@ -56,6 +71,7 @@ pub fn stage_secrets(dir: &Path, files: &[StagedFile]) -> Result<usize, String> 
         std::fs::write(&tmp, &bytes).map_err(|e| format!("write secret {name}: {e}"))?;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("chmod secret {name}: {e}"))?;
+        own(&tmp)?;
         std::fs::rename(&tmp, dir.join(name)).map_err(|e| format!("place secret {name}: {e}"))?;
     }
     Ok(files.len())
@@ -223,7 +239,7 @@ mod tests {
             StagedFile::new("inference_key", b"owner-key-not-a-real-secret\n"),
             StagedFile::new(" other_key ", b"short"),
         ];
-        assert_eq!(stage_secrets(&d, &files).expect("staged"), 2);
+        assert_eq!(stage_secrets(&d, &files, None).expect("staged"), 2);
         let mode = std::fs::metadata(&d).expect("dir").permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
         let mode = std::fs::metadata(d.join("inference_key"))
@@ -244,7 +260,7 @@ mod tests {
             "short values are not redaction material"
         );
         for bad in ["../escape", "a/b", "", ".", "..", "nul\0byte"] {
-            let err = stage_secrets(&d, &[StagedFile::new(bad, b"x")]).expect_err(bad);
+            let err = stage_secrets(&d, &[StagedFile::new(bad, b"x")], None).expect_err(bad);
             assert!(err.contains("plain file name"), "{bad:?}: {err}");
         }
         let _ = std::fs::remove_dir_all(d.parent().expect("parent"));

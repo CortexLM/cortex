@@ -39,7 +39,8 @@ PrivateTmp=yes
 ProtectKernelTunables=no
 ProtectControlGroups=no
 # Writable: jails, images (verified, never written by the agent but reflinked
-# from), retained jails, console logs.
+# from), experiment packs (re-hashed, read, staged over vsock; never written),
+# retained jails, console logs.
 ReadWritePaths=/srv/jailer /var/lib/proof-vm /run
 # Read-only: binaries, pins, TLS, bearer, owner keys.
 ReadOnlyPaths=/etc/proof-vm /usr/local/bin/firecracker /usr/local/bin/jailer

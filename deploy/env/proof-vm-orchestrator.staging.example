@@ -98,3 +98,18 @@ PROOF_VM_AGENT_EGRESS_ALLOW=REPLACE_WITH_JUDGE_ORIGIN_IP/32:443,REPLACE_WITH_ART
 
 # Where `retain` teardowns move a topic's jail (scratch, console, config).
 PROOF_VM_AGENT_RETAIN_DIR=/var/lib/proof-vm/retained
+
+# Experiment VMs (topics whose signed params select an in-guest runner get
+# one dedicated microVM per paid job). Packs the topics pin live here as
+# sha256-<hex>.tar (sha256sum the exact tar; never type a digest). On the
+# colocated staging droplet ONE experiment VM at the 16 vCPU / 32 GiB lock
+# already exceeds a g-8vcpu-32gb: lower the ceilings to what the droplet has
+# left (the CP's PROOF_EXPERIMENT_VM_MAX_* must agree) or size the topic's
+# ask smaller, and keep the count at 1. Container image pulls need the
+# registry hosts + a resolver on PROOF_VM_AGENT_EGRESS_ALLOW above.
+PROOF_VM_AGENT_EXPERIMENT_PACK_DIR=/var/lib/proof-vm/packs
+PROOF_VM_AGENT_EXPERIMENT_MAX_VCPUS=REPLACE_WITH_VCPUS_THE_HOST_CAN_SPARE
+PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB=REPLACE_WITH_MEM_MIB_THE_HOST_CAN_SPARE
+PROOF_VM_AGENT_EXPERIMENT_MAX_DISK_MIB=65536
+PROOF_VM_AGENT_MAX_EXPERIMENT_VMS=1
+PROOF_VM_AGENT_PACK_STAGE_TIMEOUT_SECS=600

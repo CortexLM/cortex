@@ -1,0 +1,72 @@
+#!/bin/bash
+# Example operator adaptor: run a Harbor task set from the staged pack over
+# rootless podman, inside the experiment VM, and report the mean reward.
+#
+# Contract: deploy/guest/runners/README.md (env in, report.json out). Every
+# knob below is a PROOF_PARAM_* from the signed topic or a PROOF_* the guest
+# agent set; nothing about a benchmark, a dataset, an agent, or a model is
+# written here. Secrets are read from PROOF_SECRETS_DIR and never printed.
+set -euo pipefail
+
+: "${PROOF_PACK_DIR:?the agent stages the pack}" "${PROOF_OUTPUT_DIR:?}" "${PROOF_WORK_DIR:?}" "${PROOF_SECRETS_DIR:?}"
+: "${PROOF_JOB:?}" "${PROOF_DEADLINE_S:?}"
+
+tasks_rel="${PROOF_PARAM_HARNESS_TASKS:?constraints.params.harness_tasks (dir of task dirs inside the pack) is required}"
+agent="${PROOF_PARAM_HARNESS_AGENT:?constraints.params.harness_agent is required}"
+model="${PROOF_PARAM_HARNESS_MODEL:-${PROOF_MODEL_PIN:-}}"
+concurrency="${PROOF_PARAM_HARNESS_CONCURRENCY:-1}"
+extra_args="${PROOF_PARAM_HARNESS_EXTRA_ARGS:-}"
+key_file="${PROOF_PARAM_INFERENCE_KEY_FILE:-}"
+key_env="${PROOF_PARAM_INFERENCE_KEY_ENV:-}"
+flops_per_trial="${PROOF_PARAM_FLOPS_PER_TRIAL:-}"
+
+tasks_dir="$PROOF_PACK_DIR/$tasks_rel"
+[ -d "$tasks_dir" ] || { echo "no task directory $tasks_dir in the staged pack" >&2; exit 2; }
+case "$tasks_rel" in /*|*..*) echo "harness_tasks must be a plain relative path" >&2; exit 2 ;; esac
+[[ "$concurrency" =~ ^[0-9]+$ ]] && [ "$concurrency" -ge 1 ] || { echo "harness_concurrency must be a positive integer" >&2; exit 2; }
+command -v harbor > /dev/null || { echo "harbor is not installed in this image (bake with --with-harbor)" >&2; exit 2; }
+command -v podman > /dev/null || { echo "podman is not installed in this image (bake with --with-podman)" >&2; exit 2; }
+
+# The provider key: read from the staged file into the env var the provider
+# expects. Both names are topic data; the value never reaches stdout/stderr.
+if [ -n "$key_file" ]; then
+    [ -n "$key_env" ] || { echo "inference_key_env is required with inference_key_file" >&2; exit 2; }
+    [[ "$key_env" =~ ^[A-Z][A-Z0-9_]*$ ]] || { echo "inference_key_env must be an env var name" >&2; exit 2; }
+    case "$key_file" in */*|.*) echo "inference_key_file must be a plain file name" >&2; exit 2 ;; esac
+    [ -r "$PROOF_SECRETS_DIR/$key_file" ] || { echo "secret $key_file is not staged (PROOF_VM_AGENT_OWNER_KEY_DIR on the KVM host)" >&2; exit 2; }
+    export "$key_env"="$(tr -d '\n' < "$PROOF_SECRETS_DIR/$key_file")"
+fi
+
+# Rootless podman API socket for harnesses that speak to a Docker daemon.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+mkdir -p "$XDG_RUNTIME_DIR/podman"
+sock="$XDG_RUNTIME_DIR/podman/podman.sock"
+podman system service --time=0 "unix://$sock" > "$PROOF_WORK_DIR/podman-service.log" 2>&1 &
+service_pid=$!
+trap 'kill "$service_pid" 2> /dev/null || true' EXIT
+for _ in $(seq 1 50); do [ -S "$sock" ] && break; sleep 0.2; done
+[ -S "$sock" ] || { echo "podman API socket did not come up; see podman-service.log" >&2; exit 2; }
+export DOCKER_HOST="unix://$sock"
+podman info --format '{{.Host.Security.Rootless}} {{.Store.GraphDriverName}}' >&2
+
+jobs_dir="$PROOF_WORK_DIR/jobs"
+mkdir -p "$jobs_dir"
+# One Harbor job per task directory the topic names; the whole set is held
+# to the topic deadline by the agent (this script does not extend it).
+read -r -a extra <<< "$extra_args"
+n_tasks=0
+for task in "$tasks_dir"/*/; do
+    [ -d "$task" ] || continue
+    name="$(basename "$task")"
+    n_tasks=$((n_tasks + 1))
+    args=(run --path "$task" --agent "$agent" --n-concurrent "$concurrency" --jobs-dir "$jobs_dir" --job-name "$name")
+    [ -n "$model" ] && args+=(--model "$model")
+    args+=("${extra[@]+"${extra[@]}"}")
+    echo "harbor ${args[*]}" >&2
+    harbor "${args[@]}" > "$jobs_dir/$name.log" 2>&1 || echo "harbor exited $? for $name (see $name.log)" >&2
+done
+[ "$n_tasks" -gt 0 ] || { echo "no task directories under $tasks_dir" >&2; exit 2; }
+
+# Mean reward over every trial result.json (Harbor writes
+# verifier_result.rewards.reward per trial; an errored trial counts 0).
+python3 "$(dirname "$0")/summarize.py" "$jobs_dir" "$PROOF_OUTPUT_DIR/report.json" "$flops_per_trial"

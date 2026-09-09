@@ -166,7 +166,7 @@ impl GuestAgent {
                 }
             }
             HostToRlm::StageSecrets { files } => {
-                match staging::stage_secrets(&self.cfg.secrets_dir, &files) {
+                match staging::stage_secrets(&self.cfg.secrets_dir, &files, self.cfg.run_as) {
                     Ok(count) => {
                         tracing::info!(count, "owner key material staged (contents not logged)");
                         RlmToHost::Staged { count }

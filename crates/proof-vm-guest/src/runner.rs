@@ -479,9 +479,17 @@ fn read_output_doc<T: for<'de> Deserialize<'de>>(path: &Path, what: &str) -> Res
     serde_json::from_str(&body).map_err(|e| format!("{what} did not parse: {e}"))
 }
 
-fn prepare(work: &Path) -> Result<PathBuf, String> {
+/// The job's work + output directories, owned by the user adaptors run as
+/// (a root agent staging for a rootless adaptor).
+fn prepare(cfg: &GuestConfig, work: &Path) -> Result<PathBuf, String> {
     let output = work.join("output");
     std::fs::create_dir_all(&output).map_err(|e| format!("mkdir {}: {e}", output.display()))?;
+    if let Some((uid, gid)) = cfg.run_as {
+        for dir in [work, &output] {
+            std::os::unix::fs::chown(dir, Some(uid), Some(gid))
+                .map_err(|e| format!("chown {}: {e}", dir.display()))?;
+        }
+    }
     Ok(output)
 }
 
@@ -532,7 +540,7 @@ pub async fn run_paid(
     artifact: Option<&Path>,
 ) -> Result<RunOutcome, String> {
     let entry = adaptor.entrypoint(kind)?;
-    let output = prepare(work)?;
+    let output = prepare(cfg, work)?;
     std::fs::write(work.join("claim.txt"), &request.claim).map_err(|e| format!("claim: {e}"))?;
     let mut vars = job_env(
         cfg,
@@ -644,7 +652,7 @@ pub async fn inspect(
     artifact: Option<&Path>,
 ) -> Result<InspectOutcome, String> {
     let entry = adaptor.entrypoint(JobKind::Inspect)?;
-    let output = prepare(work)?;
+    let output = prepare(cfg, work)?;
     let rules_file = work.join("rules.json");
     write_doc(&rules_file, rules)?;
     let mut vars = job_env(
@@ -718,7 +726,7 @@ pub async fn propose_rules(
         return Ok(topic.checklist.clone());
     };
     let adaptor = adaptor.ok_or_else(|| "adaptor vanished".to_owned())?;
-    let output = prepare(work)?;
+    let output = prepare(cfg, work)?;
     let topic_file = work.join("topic.json");
     write_doc(&topic_file, topic)?;
     let mut vars = vec![
