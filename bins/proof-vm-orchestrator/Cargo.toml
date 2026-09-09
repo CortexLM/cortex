@@ -14,14 +14,24 @@ path = "src/main.rs"
 
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
-axum-server = { version = "0.8", features = ["tls-rustls"] }
+# `tls-rustls-no-provider`, not `tls-rustls`: the latter pulls rustls's
+# `aws-lc-rs` feature, while every other workspace crate (reqwest) enables
+# `ring`. A workspace-wide build then unified both and rustls could not pick a
+# CryptoProvider at boot (panic). The binary installs `ring` explicitly in
+# main.rs, so boot no longer depends on how the workspace was built.
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 clap = { version = "4", features = ["derive", "env"] }
 proof-fc-host = { path = "../../crates/proof-fc-host" }
 proof-vm-agent = { path = "../../crates/proof-vm-agent" }
 proof-vm-proto = { path = "../../crates/proof-vm-proto" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 telemetry = { path = "../../crates/telemetry" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
 tracing = "0.1"
+
+[dev-dependencies]
+# Self-signed certificate for the boot smoke test (never shipped).
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 
 [lints]
 workspace = true

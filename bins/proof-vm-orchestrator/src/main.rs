@@ -15,11 +15,17 @@
 //! non-loopback bind without a TLS certificate + key exits 1. A missing bearer
 //! file does not stop the process — every request is refused until it exists
 //! (the file is re-read per request, so rotation needs no restart).
+//!
+//! TLS boots the same way however the binary was built: the rustls
+//! [`CryptoProvider`](rustls::crypto::CryptoProvider) is installed explicitly
+//! ([`install_crypto_provider`]) before any TLS config exists, so a
+//! workspace-wide build that unified rustls's `ring` and `aws-lc-rs` features
+//! no longer panics at the first HTTPS listener.
 
 #![forbid(unsafe_code)]
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -197,8 +203,48 @@ fn tls_required(
     }
 }
 
+/// Name of the rustls provider this binary runs on.
+const CRYPTO_PROVIDER: &str = "ring";
+
+/// Select the process-level rustls [`CryptoProvider`](rustls::crypto::CryptoProvider)
+/// **once**, before any TLS config is built.
+///
+/// rustls only picks a provider on its own when exactly one of its `ring` /
+/// `aws-lc-rs` features is enabled. Cargo unifies features across every
+/// package selected for a build, so `cargo build --workspace` or `cargo build
+/// --bin proof-vm-orchestrator` from the workspace root used to enable both
+/// (reqwest → `ring`, axum-server's `tls-rustls` → `aws-lc-rs`) and
+/// `RustlsConfig::from_pem_file` panicked at boot with "Could not
+/// automatically determine the process-level `CryptoProvider`". Installing
+/// `ring` here makes boot independent of the build shape; the manifest also
+/// drops `aws-lc-rs` from this binary's own graph so a package-scoped build
+/// needs no cmake / C toolchain beyond what `ring` wants.
+///
+/// Returns `true` when this call installed the provider, `false` when one was
+/// already in place (a second call, or a test harness) — both are fine, and
+/// neither panics.
+fn install_crypto_provider() -> bool {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_ok()
+}
+
+/// Load the certificate chain + private key into a server config. Requires
+/// [`install_crypto_provider`] to have run (or exactly one provider feature).
+async fn tls_config(cert: &Path, key: &Path) -> Result<RustlsConfig, String> {
+    RustlsConfig::from_pem_file(cert, key)
+        .await
+        .map_err(|e| format!("tls {} / {}: {e}", cert.display(), key.display()))
+}
+
 fn main() -> ExitCode {
     let _ = telemetry::init_tracing();
+    let installed = install_crypto_provider();
+    tracing::info!(
+        provider = CRYPTO_PROVIDER,
+        installed_here = installed,
+        "rustls crypto provider selected"
+    );
     let cli = Cli::parse();
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -252,9 +298,7 @@ async fn run(cli: &Cli) -> Result<(), String> {
         shutdown.graceful_shutdown(Some(Duration::from_secs(10)));
     });
     if let Some((cert, key)) = tls {
-        let config = RustlsConfig::from_pem_file(&cert, &key)
-            .await
-            .map_err(|e| format!("tls {} / {}: {e}", cert.display(), key.display()))?;
+        let config = tls_config(&cert, &key).await?;
         tracing::info!(bind = %cli.bind, "proof-vm-orchestrator listening (https)");
         return axum_server::bind_rustls(cli.bind, config)
             .handle(handle)
@@ -322,5 +366,45 @@ mod tests {
             .is_some());
         assert!(tls_required(public, Some(&cert), None).is_err());
         assert_eq!(cli(&[]).bind, public);
+    }
+
+    /// Boot smoke: the provider is installed exactly once (a repeat is a
+    /// no-op, never a panic) and a certificate + key load into a server
+    /// config afterwards — the step that panicked on the workspace-built
+    /// binary. The certificate is self-signed at test time; nothing on disk.
+    #[tokio::test]
+    async fn crypto_provider_installs_once_and_tls_boots_from_pem() {
+        let first = install_crypto_provider();
+        let second = install_crypto_provider();
+        assert!(!second, "a second install is a no-op");
+        // `first` may be false when another test in this process got there
+        // earlier; what matters is that a provider is now in force.
+        let _ = first;
+        assert!(
+            rustls::crypto::CryptoProvider::get_default().is_some(),
+            "a process-level provider is installed"
+        );
+        // ServerConfig::builder() is where an undecidable provider panics.
+        let _builder = rustls::ServerConfig::builder();
+
+        let key = rcgen::KeyPair::generate().expect("keypair");
+        let cert = rcgen::CertificateParams::new(vec!["kvm.example.invalid".to_owned()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("self-signed");
+        let dir = std::env::temp_dir().join(format!("proof-vm-tls-smoke-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let cert_path = dir.join("tls.crt");
+        let key_path = dir.join("tls.key");
+        std::fs::write(&cert_path, cert.pem()).expect("cert");
+        std::fs::write(&key_path, key.serialize_pem()).expect("key");
+        tls_config(&cert_path, &key_path)
+            .await
+            .expect("pem cert + key load into a rustls server config");
+        let err = tls_config(&dir.join("missing.crt"), &key_path)
+            .await
+            .expect_err("missing cert");
+        assert!(err.contains("missing.crt"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
