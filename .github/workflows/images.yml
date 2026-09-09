@@ -229,6 +229,22 @@ jobs:
           cp "$SRC" "deploy/digests/${SHA}.json"
           echo "Recorded digest manifest: deploy/digests/${SHA}.json"
           chmod +x deploy/scripts/promote.sh
+          # Snapshot the full current staging release once. Sequential
+          # promote.sh calls overwrite `previous` per service and would
+          # otherwise leave a mixed rollback (new images + one old).
+          python3 -c '
+          import json
+          p = json.load(open("deploy/pins/staging.json"))
+          prev = {
+              "commit_sha": p.get("commit_sha"),
+              "services": p.get("services") or {},
+              "updated_at": p.get("updated_at"),
+          }
+          with open("/tmp/staging-previous.json", "w", encoding="utf-8") as f:
+              json.dump(prev, f, indent=2, sort_keys=True)
+              f.write("\n")
+          print("captured previous staging release", prev.get("commit_sha"))
+          '
           # Pin services only (validator/gateway/updater/live challenges).
           # --skip-backup: this job records CI digests; Spaces/PG backup runs at
           # prod promote (deploy-prod.yml, fail-closed).
@@ -250,11 +266,18 @@ jobs:
           python3 -c '
           import json, sys
           p = json.load(open("deploy/pins/staging.json"))
+          prev = json.load(open("/tmp/staging-previous.json"))
+          p["previous"] = prev
+          with open("deploy/pins/staging.json", "w", encoding="utf-8") as f:
+              json.dump(p, f, indent=2, sort_keys=True)
+              f.write("\n")
           assert p["commit_sha"] == sys.argv[1], (p["commit_sha"], sys.argv[1])
           for s in ("validator", "gateway", "updater", "bounty-challenge", "proof-challenge"):
               assert s in p["services"], s
               assert p["services"][s]["digest"].startswith("sha256:")
-          print("staging pins ok", p["commit_sha"])
+              assert s in prev["services"], s
+              assert prev["services"][s]["digest"].startswith("sha256:")
+          print("staging pins ok", p["commit_sha"], "previous", prev.get("commit_sha"))
           ' "$SHA"
 
       - name: Commit and push staging pins
