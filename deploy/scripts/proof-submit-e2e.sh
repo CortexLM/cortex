@@ -24,7 +24,7 @@ RED() { printf '\033[31m%s\033[0m\n' "$*"; }
 GRN() { printf '\033[32m%s\033[0m\n' "$*"; }
 LOG() { printf '[proof-e2e] %s\n' "$*"; }
 
-PROD_HOSTS='network.cortex.foundation|chain.joinbase.ai'
+PROD_HOSTS='gateway.cortex.foundation|network.cortex.foundation|chain.joinbase.ai'
 STAGING_TOPICS=(dt-no-ib-v0 muon-vs-adamw-10m-v0)
 
 refuse_prod() {

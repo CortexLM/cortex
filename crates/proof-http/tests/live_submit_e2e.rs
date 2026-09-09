@@ -21,7 +21,9 @@ fn base_url() -> Option<String> {
 }
 
 fn is_prod_host(base: &str) -> bool {
-    base.contains("network.cortex.foundation") || base.contains("chain.joinbase.ai")
+    base.contains("gateway.cortex.foundation")
+        || base.contains("network.cortex.foundation")
+        || base.contains("chain.joinbase.ai")
 }
 
 fn hex64(label: &str) -> String {

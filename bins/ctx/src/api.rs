@@ -12,7 +12,7 @@ use serde_json::Value;
 ///
 /// Docs, `--help`, and `scripts/install-ctx.sh` all name this host. Override
 /// with `--gateway` only when you run your own stack.
-pub const DEFAULT_GATEWAY: &str = "https://network.cortex.foundation";
+pub const DEFAULT_GATEWAY: &str = "https://gateway.cortex.foundation";
 
 /// Per-request timeout. Submits rent nothing synchronously, so this is short.
 const TIMEOUT_SECS: u64 = 60;
@@ -156,23 +156,23 @@ mod tests {
 
     #[test]
     fn default_gateway_is_the_public_host() {
-        assert_eq!(DEFAULT_GATEWAY, "https://network.cortex.foundation");
+        assert_eq!(DEFAULT_GATEWAY, "https://gateway.cortex.foundation");
         assert!(!DEFAULT_GATEWAY.ends_with('/'));
     }
 
     #[test]
     fn trailing_slash_does_not_double_up() {
-        let c = Client::new("https://network.cortex.foundation/", None).expect("client");
-        assert_eq!(c.gateway(), "https://network.cortex.foundation");
+        let c = Client::new("https://gateway.cortex.foundation/", None).expect("client");
+        assert_eq!(c.gateway(), "https://gateway.cortex.foundation");
         assert_eq!(
             c.url("/v1/weights/latest"),
-            "https://network.cortex.foundation/v1/weights/latest"
+            "https://gateway.cortex.foundation/v1/weights/latest"
         );
     }
 
     #[test]
     fn non_http_gateway_is_rejected() {
-        assert!(Client::new("network.cortex.foundation", None).is_err());
+        assert!(Client::new("gateway.cortex.foundation", None).is_err());
     }
 
     #[test]

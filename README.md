@@ -87,7 +87,7 @@ deployment is ready.
 
 ## Get started
 
-The public gateway is [https://network.cortex.foundation](https://network.cortex.foundation).
+The public gateway is [https://gateway.cortex.foundation](https://gateway.cortex.foundation).
 
 Install the `ctx` command-line tool using
 [`scripts/install-ctx.sh`](scripts/install-ctx.sh):

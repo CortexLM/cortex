@@ -25,7 +25,7 @@ const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("fail_closed", "fails closed"),
     ("bounty_backend_consumer", "CortexLM/backend"),
     ("ctx_cli", "ctx"),
-    ("gateway_host", "network.cortex.foundation"),
+    ("gateway_host", "gateway.cortex.foundation"),
     ("two_live", "Two live challenges"),
     ("emission_bounty", "2000 bps"),
     ("emission_proof", "8000 bps"),
@@ -535,7 +535,7 @@ mod tests {
             .any(|(n, v)| *n == "ctx_cli" && *v == "ctx"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
-            .any(|(n, v)| *n == "gateway_host" && *v == "network.cortex.foundation"));
+            .any(|(n, v)| *n == "gateway_host" && *v == "gateway.cortex.foundation"));
         assert!(EXTERNAL_MINER_PINS
             .iter()
             .any(|(n, v)| *n == "two_live" && *v == "Two live challenges"));
@@ -565,7 +565,7 @@ mod tests {
     fn the_ctx_default_gateway_is_the_documented_host() {
         let root = workspace_root();
         let gateway = read_ctx_default_gateway(&root).expect("ctx gateway const");
-        assert_eq!(gateway, "https://network.cortex.foundation");
+        assert_eq!(gateway, "https://gateway.cortex.foundation");
     }
 
     #[test]

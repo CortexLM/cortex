@@ -32,7 +32,7 @@ ctx challenges
 ctx status
 ```
 
-Default gateway is [https://network.cortex.foundation](https://network.cortex.foundation).
+Default gateway is [https://gateway.cortex.foundation](https://gateway.cortex.foundation).
 `--gateway` overrides it for a local stack. `LIUM_API_KEY` is forwarded as
 `X-Lium-Api-Key` and never printed.
 
@@ -51,21 +51,24 @@ Neither live challenge pays for a published split you can grind:
 
 - Proof scores operator-published topics against a **private per-topic holdout**.
   You submit a claim + reproducible recipe + `declared_flops` vs `topic_id`.
-  The pin has no catalog; `GET /v1/proof/topics` is the live list (operators
-  inject topics at any time). The canary stays **off the number you are paid on**.
-  Paid score is the **sum of per-topic** masses (`wta` or `discovery`).
-  Empty `eval_image_digest` still **503**; the live pin is
+  The pin has no catalog; `GET /challenge/proof/v1/proof/topics` is the live
+  list (operators inject topics at any time). The canary stays **off the
+  number you are paid on**. Paid score is the **sum of per-topic** masses
+  (`wta` or `discovery`). Empty `eval_image_digest` still **503**; the live
+  pin is
   `sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009`.
 - Bounty pays precision times severity. The triage-noise ratio stays off the
   visible score. An unpriced `valid` row is not creditable.
 - **Missing evidence fails closed.** An empty training manifest is not a clean
   contamination check, and a host that cannot score answers `503` instead of
-  inventing a verdict. Check `GET /v1/status` → `can_score` (or `ctx status`)
-  before you spend anything.
+  inventing a verdict. Check `GET /challenge/proof/v1/status` (or
+  `GET /challenge/bounty/v1/status`, or `ctx status`) before you spend
+  anything. Bare `GET /v1/status` on the public gateway is not the Proof
+  status path.
 
 ```text
-https://network.cortex.foundation/challenge/bounty/...
-https://network.cortex.foundation/challenge/proof/...
+https://gateway.cortex.foundation/challenge/bounty/...
+https://gateway.cortex.foundation/challenge/proof/...
 ```
 
 Never put mnemonics or challenge signing keys in miner clients.

@@ -49,8 +49,8 @@ missing `error`, missing `verdict` after 201, or holdout leak.
 
 ## Probe a running host (local compose or staging)
 
-Do **not** point this at `https://network.cortex.foundation` or
-`https://chain.joinbase.ai`.
+Do **not** point this at `https://gateway.cortex.foundation`,
+`https://network.cortex.foundation`, or `https://chain.joinbase.ai`.
 
 ```bash
 # Auto-detect first healthy origin among loopback + documented staging URLs:
