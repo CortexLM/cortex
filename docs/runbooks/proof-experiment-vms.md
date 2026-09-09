@@ -58,8 +58,12 @@ A silent topic gets the defaults (the whole lock: one experiment, one
 enforce their own copy: the control
 plane sizes the spec under its ceilings and refuses an ask above them before
 any request; the KVM host refuses a spec above its ceilings with `400
-bad_spec` before any jail. Keep the two in step. The topic VM keeps its own
-locked 4 vCPU / 8192 MiB.
+bad_spec` before any jail. Keep the two in step. A smaller host lowers a
+ceiling by setting **only** the `MAX` knob: an **unset** default follows the
+lowered ceiling on both sides (`PROOF_EXPERIMENT_VM_MAX_VCPUS=8` alone boots
+with an 8-vCPU default), while a default you **set** above its ceiling is
+refused at boot, never clamped. The topic VM keeps its own locked
+4 vCPU / 8192 MiB.
 
 **Size the host** for `max_experiment_vms × (ceiling)` on top of the topic
 VMs: one experiment VM at the lock wants 16 vCPU / 32 GiB RAM / 32 GiB of

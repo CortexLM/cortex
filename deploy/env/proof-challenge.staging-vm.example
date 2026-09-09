@@ -57,7 +57,9 @@ PROOF_RLM_VM_MEM_MIB=8192
 # The colocated g-8vcpu-32gb staging droplet cannot carry the lock beside the
 # compose stack: lower these (both sides) to what it has left, or have the
 # staging topic ask for less, and set PROOF_EXPERIMENT_VM_DISK_MIB=16384 when
-# its disk is tight.
+# its disk is tight. Lowering only the MAX knobs is enough — an unset
+# default follows its lowered ceiling; a default set above it refuses to
+# boot.
 PROOF_EXPERIMENT_VM_VCPUS=16
 PROOF_EXPERIMENT_VM_MEM_MIB=32768
 PROOF_EXPERIMENT_VM_MAX_VCPUS=16

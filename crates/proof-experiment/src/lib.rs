@@ -554,8 +554,10 @@ fn env_trimmed(name: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn env_u32(name: &'static str, default: u32) -> Result<u32, ExperimentError> {
-    match env_trimmed(name) {
+/// `raw` as a number, else `default`; a set value that is not a number is
+/// refused by name.
+fn knob_u32(name: &'static str, raw: Option<String>, default: u32) -> Result<u32, ExperimentError> {
+    match raw.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()) {
         None => Ok(default),
         Some(raw) => raw.parse::<u32>().map_err(|_| ExperimentError::BadEnv {
             env: name,
@@ -570,24 +572,62 @@ impl ExperimentPolicy {
     /// # Errors
     ///
     /// [`ExperimentError::BadEnv`] for a value that is not a number,
-    /// [`ExperimentError::Spec`] for ceilings out of range.
+    /// [`ExperimentError::AboveLock`] for a ceiling above the lock,
+    /// [`ExperimentError::Spec`] for ceilings otherwise out of range.
     pub fn from_env() -> Result<Self, ExperimentError> {
+        Self::from_lookup(env_trimmed)
+    }
+
+    /// [`from_env`](Self::from_env) over any name → value source. Ceilings
+    /// are read first; an **unset** default follows a lowered ceiling (a
+    /// smaller host that sets only `PROOF_EXPERIMENT_VM_MAX_VCPUS=8` boots
+    /// with an 8-vCPU default, as the KVM host does), while a default the
+    /// operator **set** is validated as written and refused above its
+    /// ceiling — never clamped behind the operator's back.
+    ///
+    /// # Errors
+    ///
+    /// As [`from_env`](Self::from_env).
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, ExperimentError> {
+        let max_vcpus = knob_u32(
+            EXPERIMENT_VM_MAX_VCPUS_ENV,
+            get(EXPERIMENT_VM_MAX_VCPUS_ENV),
+            DEFAULT_MAX_EXPERIMENT_VCPUS,
+        )?;
+        let max_mem_mib = knob_u32(
+            EXPERIMENT_VM_MAX_MEM_MIB_ENV,
+            get(EXPERIMENT_VM_MAX_MEM_MIB_ENV),
+            DEFAULT_MAX_EXPERIMENT_MEM_MIB,
+        )?;
+        let max_disk_mib = knob_u32(
+            EXPERIMENT_VM_MAX_DISK_MIB_ENV,
+            get(EXPERIMENT_VM_MAX_DISK_MIB_ENV),
+            DEFAULT_MAX_EXPERIMENT_DISK_MIB,
+        )?;
         let ceilings = ExperimentCeilings {
-            default_vcpus: env_u32(EXPERIMENT_VM_VCPUS_ENV, DEFAULT_EXPERIMENT_VCPUS)?,
-            max_vcpus: env_u32(EXPERIMENT_VM_MAX_VCPUS_ENV, DEFAULT_MAX_EXPERIMENT_VCPUS)?,
-            default_mem_mib: env_u32(EXPERIMENT_VM_MEM_MIB_ENV, DEFAULT_EXPERIMENT_MEM_MIB)?,
-            max_mem_mib: env_u32(
-                EXPERIMENT_VM_MAX_MEM_MIB_ENV,
-                DEFAULT_MAX_EXPERIMENT_MEM_MIB,
+            default_vcpus: knob_u32(
+                EXPERIMENT_VM_VCPUS_ENV,
+                get(EXPERIMENT_VM_VCPUS_ENV),
+                DEFAULT_EXPERIMENT_VCPUS.min(max_vcpus),
             )?,
-            default_disk_mib: env_u32(EXPERIMENT_VM_DISK_MIB_ENV, DEFAULT_EXPERIMENT_DISK_MIB)?,
-            max_disk_mib: env_u32(
-                EXPERIMENT_VM_MAX_DISK_MIB_ENV,
-                DEFAULT_MAX_EXPERIMENT_DISK_MIB,
+            max_vcpus,
+            default_mem_mib: knob_u32(
+                EXPERIMENT_VM_MEM_MIB_ENV,
+                get(EXPERIMENT_VM_MEM_MIB_ENV),
+                DEFAULT_EXPERIMENT_MEM_MIB.min(max_mem_mib),
             )?,
+            max_mem_mib,
+            default_disk_mib: knob_u32(
+                EXPERIMENT_VM_DISK_MIB_ENV,
+                get(EXPERIMENT_VM_DISK_MIB_ENV),
+                DEFAULT_EXPERIMENT_DISK_MIB.min(max_disk_mib),
+            )?,
+            max_disk_mib,
         };
         ceilings.validate()?;
-        let image_digest = env_trimmed(EXPERIMENT_VM_IMAGE_DIGEST_ENV);
+        let image_digest = get(EXPERIMENT_VM_IMAGE_DIGEST_ENV)
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
         if let Some(d) = &image_digest {
             if !d.strip_prefix("sha256:").is_some_and(is_hex64) {
                 return Err(ExperimentError::BadEnv {
@@ -1110,6 +1150,137 @@ mod tests {
         assert_eq!(own.image_for("sha256:rlm"), "sha256:exp");
         // The process env is shared across tests: only assert the parse
         // helper's behaviour on names no other test sets.
-        assert_eq!(env_u32("PROOF_EXPERIMENT_TEST_UNSET_KNOB", 7), Ok(7));
+        assert_eq!(knob_u32("PROOF_EXPERIMENT_TEST_UNSET_KNOB", None, 7), Ok(7));
+        assert_eq!(
+            knob_u32("PROOF_EXPERIMENT_TEST_UNSET_KNOB", Some("  ".into()), 7),
+            Ok(7),
+            "blank is unset"
+        );
+        assert!(matches!(
+            knob_u32("PROOF_EXPERIMENT_TEST_UNSET_KNOB", Some("many".into()), 7),
+            Err(ExperimentError::BadEnv { .. })
+        ));
+    }
+
+    /// A smaller host lowers **one** ceiling and boots: the unset default
+    /// follows it (as the KVM host's config does). A default the operator
+    /// set is validated as written — above its ceiling it is refused, never
+    /// clamped — and a ceiling above the lock never boots. Pure lookup, no
+    /// process env.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn a_lowered_ceiling_alone_boots_with_its_default_following_it() {
+        let policy = |pairs: &[(&str, &str)]| {
+            let map = params(pairs);
+            ExperimentPolicy::from_lookup(|name| map.get(name).cloned())
+        };
+        let unset = policy(&[]).expect("all defaults");
+        assert_eq!(unset.ceilings, ExperimentCeilings::default());
+        assert_eq!(unset.image_digest, None);
+
+        let small_cpu = policy(&[(EXPERIMENT_VM_MAX_VCPUS_ENV, "8")])
+            .expect("lowering only the vCPU ceiling boots");
+        assert_eq!(
+            (
+                small_cpu.ceilings.default_vcpus,
+                small_cpu.ceilings.max_vcpus
+            ),
+            (8, 8),
+            "the unset default follows the lowered ceiling"
+        );
+        assert_eq!(
+            (
+                small_cpu.ceilings.default_mem_mib,
+                small_cpu.ceilings.max_mem_mib
+            ),
+            (32_768, 32_768),
+            "memory untouched"
+        );
+        let small_mem = policy(&[(EXPERIMENT_VM_MAX_MEM_MIB_ENV, "8192")])
+            .expect("lowering only the memory ceiling boots");
+        assert_eq!(
+            (
+                small_mem.ceilings.default_mem_mib,
+                small_mem.ceilings.max_mem_mib
+            ),
+            (8_192, 8_192)
+        );
+        assert_eq!(small_mem.ceilings.default_vcpus, 16);
+        let small_disk = policy(&[(EXPERIMENT_VM_MAX_DISK_MIB_ENV, "16384")])
+            .expect("lowering only the disk ceiling boots");
+        assert_eq!(
+            (
+                small_disk.ceilings.default_disk_mib,
+                small_disk.ceilings.max_disk_mib
+            ),
+            (16_384, 16_384)
+        );
+        let both = policy(&[
+            (EXPERIMENT_VM_MAX_VCPUS_ENV, "8"),
+            (EXPERIMENT_VM_VCPUS_ENV, "4"),
+        ])
+        .expect("an explicit default under the ceiling");
+        assert_eq!(
+            (both.ceilings.default_vcpus, both.ceilings.max_vcpus),
+            (4, 8)
+        );
+
+        // A default the operator set above the ceiling is an error, not a
+        // silent clamp: the operator said two things that disagree.
+        assert_eq!(
+            policy(&[
+                (EXPERIMENT_VM_MAX_VCPUS_ENV, "8"),
+                (EXPERIMENT_VM_VCPUS_ENV, "12"),
+            ]),
+            Err(ExperimentError::Spec("default_vcpus"))
+        );
+        assert_eq!(
+            policy(&[
+                (EXPERIMENT_VM_MAX_MEM_MIB_ENV, "8192"),
+                (EXPERIMENT_VM_MEM_MIB_ENV, "16384"),
+            ]),
+            Err(ExperimentError::Spec("default_mem_mib"))
+        );
+        // The lock still holds through the env path.
+        assert!(matches!(
+            policy(&[(EXPERIMENT_VM_MAX_VCPUS_ENV, "32")]),
+            Err(ExperimentError::AboveLock {
+                field: "max_vcpus",
+                value: 32,
+                lock: 16
+            })
+        ));
+        assert!(matches!(
+            policy(&[(EXPERIMENT_VM_MAX_MEM_MIB_ENV, "65536")]),
+            Err(ExperimentError::AboveLock {
+                field: "max_mem_mib",
+                ..
+            })
+        ));
+        assert_eq!(
+            policy(&[(EXPERIMENT_VM_MAX_DISK_MIB_ENV, "8192")]),
+            Err(ExperimentError::Spec("max_disk_mib")),
+            "under the disk floor"
+        );
+        assert!(matches!(
+            policy(&[(EXPERIMENT_VM_VCPUS_ENV, "eight")]),
+            Err(ExperimentError::BadEnv {
+                env: EXPERIMENT_VM_VCPUS_ENV,
+                ..
+            })
+        ));
+        let pinned = policy(&[(EXPERIMENT_VM_IMAGE_DIGEST_ENV, &format!(" sha256:{HEX} "))])
+            .expect("image pin");
+        assert_eq!(
+            pinned.image_digest.as_deref(),
+            Some(&*format!("sha256:{HEX}"))
+        );
+        assert!(matches!(
+            policy(&[(EXPERIMENT_VM_IMAGE_DIGEST_ENV, "latest")]),
+            Err(ExperimentError::BadEnv {
+                env: EXPERIMENT_VM_IMAGE_DIGEST_ENV,
+                ..
+            })
+        ));
     }
 }
