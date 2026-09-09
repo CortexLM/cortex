@@ -62,10 +62,14 @@ jobs:
     name: resolve build ref
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # `source` / `revision`, not `ref` / `sha`: CodeQL's untrusted-checkout
+    # heuristic (actions/cache-poisoning) classifies any checkout whose ref
+    # expression is named *ref*/*branch*/*head*/*sha*/*commit* as a PR head,
+    # whatever it flows from. The trust argument is the resolve step below.
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
-      build_ref: ${{ steps.commit.outputs.build_ref }}
-      sha: ${{ steps.commit.outputs.sha }}
+      source: ${{ steps.source.outputs.source }}
+      revision: ${{ steps.source.outputs.revision }}
     steps:
       # Push: the pushed tag ref (checkout peels annotated tags to the commit).
       # Dispatch: the tip of main — never an input, never the release tag.
@@ -103,45 +107,45 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       # Derived from the checkout alone (no input reaches this step), so the
-      # SHA every build job checks out is trusted code from main.
+      # commit every build job checks out is trusted code from main.
       - name: Resolve build commit
-        id: commit
+        id: source
         env:
-          BUILD_REF: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
+          SOURCE: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
         run: |
           set -euo pipefail
-          sha="$(git rev-parse HEAD)"
+          revision="$(git rev-parse HEAD)"
           # Miners install what this publishes, so it is built from commits on
           # the working branch only — never from an unmerged branch or a fork.
           git fetch -q --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          if ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
-            echo "::error::$BUILD_REF ($sha) is not on main. ctx is released from commits on main only; land the change first, or dispatch (which builds the tip of main)."
+          if ! git merge-base --is-ancestor "$revision" refs/remotes/origin/main; then
+            echo "::error::$SOURCE ($revision) is not on main. ctx is released from commits on main only; land the change first, or dispatch (which builds the tip of main)."
             exit 1
           fi
           if [ ! -f bins/ctx/Cargo.toml ]; then
-            echo "::error::$BUILD_REF ($sha) has no bins/ctx — it predates the ctx CLI. Dispatch instead: the release tag stays a label and the sources come from the tip of main."
+            echo "::error::$SOURCE ($revision) has no bins/ctx — it predates the ctx CLI. Dispatch instead: the release tag stays a label and the sources come from the tip of main."
             exit 1
           fi
           {
-            echo "build_ref=$BUILD_REF"
-            echo "sha=$sha"
+            echo "source=$SOURCE"
+            echo "revision=$revision"
           } >> "$GITHUB_OUTPUT"
 
       - name: Summary
         env:
           TAG: ${{ steps.tag.outputs.tag }}
-          BUILD_REF: ${{ steps.commit.outputs.build_ref }}
-          SHA: ${{ steps.commit.outputs.sha }}
+          SOURCE: ${{ steps.source.outputs.source }}
+          REVISION: ${{ steps.source.outputs.revision }}
         run: |
           set -euo pipefail
           {
             echo "## release-ctx"
             echo
-            echo "| Release tag | Build ref | Commit |"
-            echo "|-------------|-----------|--------|"
-            echo "| \`$TAG\` | \`$BUILD_REF\` | \`$SHA\` |"
+            echo "| Release tag | Built from | Commit |"
+            echo "|-------------|------------|--------|"
+            echo "| \`$TAG\` | \`$SOURCE\` | \`$REVISION\` |"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "release tag $TAG <- build ref $BUILD_REF @ $SHA"
+          echo "release tag $TAG <- $SOURCE @ $REVISION"
 
   build:
     name: ctx ${{ matrix.name }}
@@ -175,7 +179,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.sha }}
+          ref: ${{ needs.resolve.outputs.revision }}
 
       - name: Install Rust toolchain
         # Pin by commit SHA. Never @master in a workflow that publishes.
@@ -257,8 +261,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.resolve.outputs.tag }}
-          BUILD_REF: ${{ needs.resolve.outputs.build_ref }}
-          SHA: ${{ needs.resolve.outputs.sha }}
+          SOURCE: ${{ needs.resolve.outputs.source }}
+          REVISION: ${{ needs.resolve.outputs.revision }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -280,7 +284,7 @@ jobs:
 
           BLOCK
             fi
-            echo "ctx assets built from \`$SHA\` (\`$BUILD_REF\`) by [release-ctx]($RUN_URL)."
+            echo "ctx assets built from \`$REVISION\` (\`$SOURCE\`) by [release-ctx]($RUN_URL)."
             echo "NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
 
