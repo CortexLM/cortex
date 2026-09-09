@@ -132,7 +132,10 @@ deploy/guest/bake-rootfs.sh \
 # prints: image=./out/sha256-<hex>.ext4  digest=sha256:<hex>  (+ bake-manifest.txt)
 ```
 
-`--dry-run` prints the plan without root or network. The kernel check
+Build the guest agent as static musl (above) so it runs on the Debian
+minbase regardless of the build box; a glibc build only works when the
+build box's glibc is not newer than the guest suite's. `--dry-run` prints
+the plan without root or network. The kernel check
 lists what rootless podman needs (`CONFIG_USER_NS`, `CONFIG_OVERLAY_FS`,
 `CONFIG_FUSE_FS`, `CONFIG_VETH`, `CONFIG_TUN`, cgroups, seccomp, netfilter,
 vsock, virtio-blk/net, ext4); a stock Firecracker microVM kernel config
