@@ -749,7 +749,11 @@ mod tests {
             "no 409: the topic vm is not in the way"
         );
         assert!(x1.handle.vm_id.contains("-x"), "{}", x1.handle.vm_id);
-        assert_eq!((x1.vcpus, x1.mem_mib), (8, 32_768));
+        assert_eq!(
+            (x1.vcpus, x1.mem_mib),
+            (8, 8_192),
+            "asked 8 vCPU, default memory"
+        );
         let exp = x1.experiment.as_ref().expect("experiment record");
         assert_eq!(exp.runner, "placeholder_in_guest_runner");
         assert_eq!(exp.disk_mib, 32_768);

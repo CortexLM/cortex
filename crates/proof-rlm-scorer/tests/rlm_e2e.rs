@@ -1165,7 +1165,7 @@ async fn an_experiment_topic_measures_its_baseline_in_a_dedicated_vm() {
     assert_eq!(exp.disk_mib, 32_768);
     assert_eq!(
         (specs[0].template.vcpus, specs[0].template.mem_mib),
-        (16, 16_384)
+        (4, 16_384)
     );
     let runs = orchestrator.runs();
     assert!(

@@ -23,8 +23,8 @@
 #
 # Size budget: the baked tree must fit --budget-mib (default 2560 MiB ~ the
 # 1.5–2.5 GiB target); the image file is --size-mib (default 3072 MiB, so
-# the read-only rootfs has headroom). Per-VM writable disk (>= 32 GiB by
-# default) is a separate scratch drive the host creates per boot; image
+# the read-only rootfs has headroom). Per-VM writable disk (>= 16 GiB, 32 GiB
+# by default) is a separate scratch drive the host creates per boot; image
 # pulls and job output never touch this image.
 #
 # Requires root (chroot + device nodes + mkfs -d ownership): run it in a

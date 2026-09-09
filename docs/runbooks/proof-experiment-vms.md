@@ -25,10 +25,10 @@ committed to this repository; the words that select the in-guest path are
 
 | `constraints.params` key | Meaning | Shape |
 |--------------------------|---------|-------|
-| `in_guest_benchmark_runner` (alias `baseline_runner`) | The operator adaptor id the guest resolves under `/opt/proof/runners/<id>/`. Selecting it switches the topic's paid jobs to dedicated experiment VMs | `[a-z0-9][a-z0-9_-]{1,63}` |
+| `baseline_runner` (synonym `in_guest_benchmark_runner`) | The operator adaptor id the guest resolves under `/opt/proof/runners/<id>/` — e.g. `baseline_runner=rlm_fc_in_guest_harbor` selects the adaptor the operator baked under that id. Selecting it switches the topic's paid jobs to dedicated experiment VMs | `[a-z0-9][a-z0-9_-]{1,63}` |
 | `experiment_pack_digest` | `sha256:` of the pack tar the KVM host stages into the VM. **Required** with a runner — a topic that names a runner without a pack fails closed, and a digest is never invented | `sha256:<64 hex>` |
 | `experiment_pack_path` | Optional relative locator of that tar under the host pack dir (default `sha256-<hex>.tar`) | plain relative path, no `..` |
-| `experiment_vcpus`, `experiment_mem_mib`, `experiment_disk_mib` | What the topic asks for; held under the ceilings (silent = the ceiling for CPU / memory, the operator default for disk). Over a ceiling = **503**, never a clamp | positive integers |
+| `experiment_vcpus`, `experiment_mem_mib`, `experiment_disk_mib` | What the topic asks for; silent = the operator defaults (lock 4 vCPU / 8 GiB / 32 GiB disk), an ask is held under the ceilings (lock 8 vCPU / 16 GiB; disk ≥ 16 GiB). Over a ceiling = **503**, never a clamp | positive integers |
 | `model_pin` (top-level `constraints.model_pin`) | Exported to the adaptor as `PROOF_MODEL_PIN` | `vendor/model[:tag]` |
 | any other key | Reaches the adaptor as `PROOF_PARAM_<KEY>` — this is how a topic names its tasks sub-directory, harness agent, concurrency, key file, … | ≤32 printable params |
 
@@ -37,29 +37,34 @@ ordinary path (topic VM + sister guest). The example topic content the
 operator staged (a "TB4" pack, a Harbor agent, …) lives **outside git** on
 the KVM host and in the signed document, and is recognised by nothing here.
 
-## Ceilings (Architecte lock)
+## Resource caps (Architecte lock)
 
-| Knob | Default | Where |
-|------|---------|-------|
-| vCPUs per experiment VM | **16** max (`PROOF_EXPERIMENT_VM_MAX_VCPUS` / `PROOF_VM_AGENT_EXPERIMENT_MAX_VCPUS`) | CP + KVM host |
-| Memory per experiment VM | **32 GiB** max (`…_MAX_MEM_MIB=32768`) | CP + KVM host |
-| Writable disk per experiment VM | **32 GiB** default (`PROOF_EXPERIMENT_VM_DISK_MIB`), 128 GiB max (`…_MAX_DISK_MIB`) | CP (default), CP + host (max) |
+| Knob | Lock | Where |
+|------|------|-------|
+| Default per-experiment VM (topic silent) | **4 vCPU / 8 GiB RAM** (`PROOF_EXPERIMENT_VM_VCPUS=4`, `PROOF_EXPERIMENT_VM_MEM_MIB=8192`) | CP |
+| Topic override ceiling | up to **8 vCPU / 16 GiB** (`PROOF_EXPERIMENT_VM_MAX_VCPUS=8`, `…_MAX_MEM_MIB=16384`; host `PROOF_VM_AGENT_EXPERIMENT_MAX_*`) | CP + KVM host |
+| Writable disk per experiment VM | **≥ 16 GiB** floor; **32 GiB** default and default max (`PROOF_EXPERIMENT_VM_DISK_MIB` / `…_MAX_DISK_MIB`; raise the max when the metal has more) | CP (default), CP + host (max) |
 | Experiment VMs at once | `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS` (default **2**; `0` disables) | KVM host |
 | Image | `PROOF_EXPERIMENT_VM_IMAGE_DIGEST`, unset = `PROOF_RLM_VM_IMAGE_DIGEST` | CP |
 | Pack directory | `PROOF_VM_AGENT_EXPERIMENT_PACK_DIR=/var/lib/proof-vm/packs` | KVM host |
 
-Both sides enforce their own copy: the control plane sizes the spec under
-its ceilings and refuses an ask above them before any request; the KVM host
-refuses a spec above its ceilings with `400 bad_spec` before any jail. Keep
-the two in step. The topic VM keeps its own locked 4 vCPU / 8192 MiB.
+A silent topic gets the defaults; a topic may ask for less than a ceiling or
+more than a default (`experiment_vcpus: 8`, `experiment_mem_mib: 16384`),
+never more than a ceiling. Both sides enforce their own copy: the control
+plane sizes the spec under its ceilings and refuses an ask above them before
+any request; the KVM host refuses a spec above its ceilings with `400
+bad_spec` before any jail. Keep the two in step. The topic VM keeps its own
+locked 4 vCPU / 8192 MiB.
 
 **Size the host** for `max_experiment_vms × (ceiling)` on top of the topic
-VMs: two experiment VMs at the lock want 32 vCPU / 64 GiB / 64 GiB of disk
-beside the 4/8 topic VM — more than a `g-8vcpu-32gb`. On that droplet lower
-the ceilings (both sides) or the topic's ask, and keep the count at 1. The
-writable disk is a fresh ext4 file per boot under `/srv/jailer` (reflink
-filesystems make the rootfs copy free; the scratch is still allocated), so
-budget `max_experiment_vms × disk` there.
+VMs: two experiment VMs at the ceiling want 16 vCPU / 32 GiB RAM / 64 GiB
+of disk beside the 4/8 topic VM — the whole of a `g-8vcpu-32gb` and then
+some. On that droplet keep the count at 1 (and lower the ceilings on both
+sides if the compose stack shares it). The writable disk is a fresh ext4
+file per boot under `/srv/jailer` (reflink filesystems make the rootfs copy
+free; the scratch is still allocated), so budget `max_experiment_vms × disk`
+there; set `PROOF_EXPERIMENT_VM_DISK_MIB=16384` when the metal disk cannot
+carry 32 GiB per VM.
 
 ## What happens on a paid job
 
@@ -111,12 +116,13 @@ VMs and experiment VMs:
 
 **Size budget.** The baked tree must fit `--budget-mib` (default 2560 MiB;
 the 1.5–2.5 GiB target — minbase + podman stack ≈ 0.6–0.9 GiB, + Python +
-Harbor venv ≈ 0.3–0.6 GiB, + adaptors), the image file is `--size-mib`
-(default 3072 MiB) and is mounted **read-only**. Everything a run writes —
-pulled container images, harness jobs, the artefact tree, `report.json` —
-lands on the per-VM writable disk (`experiment_disk_mib`, ≥ 32 GiB by
-default). Pulls are **not** pre-baked: they need the registry hosts (and a
-resolver, `--resolver` + `:53/udp`) on the host egress allowlist.
+Harbor venv ≈ 0.3–0.6 GiB, + adaptors; rootless podman **and** Harbor fit
+the target), the image file is `--size-mib` (default 3072 MiB) and is
+mounted **read-only**. Everything a run writes — pulled container images,
+harness jobs, the artefact tree, `report.json` — lands on the per-VM
+writable disk (`experiment_disk_mib`: ≥ 16 GiB, 32 GiB by default). Pulls
+are **not** pre-baked: they need the registry hosts (and a resolver,
+`--resolver` + `:53/udp`) on the host egress allowlist.
 
 ```bash
 # on a build box, as root (chroot + mkfs -d); network to the mirror (+ PyPI with --with-harbor)
@@ -124,7 +130,7 @@ rustup target add x86_64-unknown-linux-musl
 CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release -p proof-vm-guest-agent-bin --target x86_64-unknown-linux-musl
 deploy/guest/bake-rootfs.sh \
   --guest-agent target/x86_64-unknown-linux-musl/release/proof-vm-guest-agent \
-  --runner <runner id your topic names>=deploy/guest/runners/harbor-podman \
+  --runner rlm_fc_in_guest_harbor=deploy/guest/runners/harbor-podman \   # the id your topics put in baseline_runner
   --with-harbor --harbor-version <exact version you tested> \
   --resolver <resolver ip on the allowlist> \
   --check-kernel-config <the guest kernel's .config> \
@@ -173,10 +179,13 @@ typed from a document.
    carries `experiment_max_vcpus`, `experiment_max_mem_mib`,
    `experiment_disk_mib`, `experiment_image`.
 6. **Topic:** the signed document's `constraints.params` carry the runner id
-   your bake installed, `experiment_pack_digest: sha256:<pack>`, the
-   adaptor's `PROOF_PARAM_*` inputs, and any size ask under the ceilings;
-   `metric.custom_id` is in `PROOF_VM_RUNNER_CUSTOM_IDS`. Publish, run
-   `TopicSetup` (the baseline is the first experiment VM), seal, open.
+   your bake installed (`baseline_runner: rlm_fc_in_guest_harbor` for the
+   example above), `experiment_pack_digest: sha256:<pack>`, the adaptor's
+   `PROOF_PARAM_*` inputs, and any size ask under the ceilings
+   (`experiment_vcpus` ≤ 8, `experiment_mem_mib` ≤ 16384; omit them for the
+   4 / 8192 default); `metric.custom_id` is in `PROOF_VM_RUNNER_CUSTOM_IDS`.
+   Publish, run `TopicSetup` (the baseline is the first experiment VM),
+   seal, open.
 7. **Verify** (below); record the evidence with dates and commands.
 
 Running VMs keep the image they booted; a new image applies from the next
@@ -193,7 +202,8 @@ spend**. Use `proof-vm-wire-check.sh submit-probe --topic <id> --expect
 | topic selects a runner, no `experiment_pack_digest` | 503 `experiment_pack_digest is required` | nothing created (refused on the CP before any request) |
 | pack file absent on the host | 503 `experiment pack sha256:… (no …/packs/… on this host)` | no jail (`Image` before any boot) |
 | pack file present but re-tarred / wrong bytes | 503 `experiment pack …: … hashes to …` | no jail |
-| `experiment_vcpus: 32` with the 16 ceiling | 503 `experiment vcpus 32 exceeds the ceiling 16` | nothing created |
+| `experiment_vcpus: 16` with the 8 ceiling | 503 `experiment vcpus 16 exceeds the ceiling 8` | nothing created |
+| `experiment_disk_mib: 8192` (under the 16 GiB floor) | 503 `experiment disk_mib 8192 is below the minimum 16384` | nothing created |
 | host ceiling lower than the CP's | 503 `orchestrator 400 … BadSpec: experiment … exceeds the ceiling` | no jail |
 | `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS` reached | 503 `orchestrator 503 … Capacity: this host runs N of at most N experiment vms` | no boot |
 | runner id not baked (`/opt/proof/runners/<id>/run` missing) | 503 `runner … is not installed in this guest image` | `experiment vm booted` → guest `Failed` → destroyed; **no value reported** |

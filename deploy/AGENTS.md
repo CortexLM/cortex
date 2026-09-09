@@ -100,8 +100,8 @@ Procedure and the mandatory submission verification:
 
 **Experiment VMs.** Topics whose signed `constraints.params` select an
 in-guest runner get one dedicated Firecracker VM per paid job on that same
-host, under configurable ceilings (lock 16 vCPU / 32 GiB RAM / 32 GiB
-writable disk; `PROOF_VM_AGENT_EXPERIMENT_MAX_*`,
+host, under configurable caps (lock: 4 vCPU / 8 GiB default, topic override
+up to 8 vCPU / 16 GiB, writable disk ≥ 16 GiB; `PROOF_VM_AGENT_EXPERIMENT_MAX_*`,
 `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS`, packs in
 `PROOF_VM_AGENT_EXPERIMENT_PACK_DIR`; CP side `PROOF_EXPERIMENT_VM_*`). The
 guest image is baked with [`guest/bake-rootfs.sh`](guest/bake-rootfs.sh)

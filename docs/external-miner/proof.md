@@ -363,13 +363,14 @@ that did not happen in that sister guest is not evidence; if it sets
 exported to your run's environment).
 
 Some topics select an **in-guest runner** instead: their
-`constraints.params` carry `in_guest_benchmark_runner` (or `baseline_runner`)
+`constraints.params` carry `baseline_runner` (or `in_guest_benchmark_runner`)
 and `experiment_pack_digest`. For such a topic your submission runs in **one
 dedicated Firecracker VM created for that job and destroyed after it**,
 inside the operator's harness (a container runtime and benchmark adaptor
 baked into the VM image), against the experiment pack the topic pins by
-digest — sized by the topic under the operator's ceilings (up to 16 vCPU /
-32 GiB RAM / 32 GiB of writable disk unless the topic asks for less). Your
+digest — 4 vCPU / 8 GiB RAM unless the topic asks for more (up to 8 vCPU /
+16 GiB), with at least 16 GiB of writable disk (32 GiB where the operator's
+metal allows). Your
 artefact is still fetched from `artifact_uri` and checked against
 `artifact_digest` before anything runs, the VM has only the operator's
 egress allowlist (the topic says which registries / model providers), and

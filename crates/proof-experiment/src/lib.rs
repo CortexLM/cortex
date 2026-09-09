@@ -11,10 +11,11 @@
 //!   a backend ([`PARAM_RUNNER`]), **pin** the experiment pack it runs against
 //!   ([`PARAM_PACK_DIGEST`], optional [`PARAM_PACK_PATH`]), and **size** the
 //!   VM ([`PARAM_VCPUS`], [`PARAM_MEM_MIB`], [`PARAM_DISK_MIB`]);
-//! - the operator **ceilings** every experiment VM is held to
-//!   ([`ExperimentCeilings`]; Architecte lock: 16 vCPU / 32 GiB RAM, 32 GiB
-//!   writable disk by default) and the control-plane policy env
-//!   ([`ExperimentPolicy`]);
+//! - the operator **defaults and ceilings** every experiment VM is held to
+//!   ([`ExperimentCeilings`]; Architecte lock: **4 vCPU / 8 GiB RAM** when
+//!   the topic does not ask, a topic may override up to **8 vCPU / 16 GiB**,
+//!   writable disk **≥ 16 GiB**, 32 GiB preferred) and the control-plane
+//!   policy env ([`ExperimentPolicy`]);
 //! - the public wire shape the orchestrator carries for one experiment VM
 //!   ([`ExperimentSpec`]).
 //!
@@ -52,21 +53,31 @@ pub const PARAM_MEM_MIB: &str = "experiment_mem_mib";
 /// `constraints.params` key: writable disk in MiB (≤ ceiling).
 pub const PARAM_DISK_MIB: &str = "experiment_disk_mib";
 
-/// Architecte lock: most vCPUs one experiment VM gets.
-pub const DEFAULT_MAX_EXPERIMENT_VCPUS: u32 = 16;
-/// Architecte lock: most guest memory one experiment VM gets (32 GiB).
-pub const DEFAULT_MAX_EXPERIMENT_MEM_MIB: u32 = 32_768;
-/// Writable disk an experiment VM gets when the topic does not ask (32 GiB:
-/// container image pulls land here, never on the read-only rootfs).
+/// Architecte lock: vCPUs an experiment VM gets when the topic does not ask.
+pub const DEFAULT_EXPERIMENT_VCPUS: u32 = 4;
+/// Architecte lock: guest memory when the topic does not ask (8 GiB).
+pub const DEFAULT_EXPERIMENT_MEM_MIB: u32 = 8_192;
+/// Architecte lock: most vCPUs a topic may ask for.
+pub const DEFAULT_MAX_EXPERIMENT_VCPUS: u32 = 8;
+/// Architecte lock: most guest memory a topic may ask for (16 GiB).
+pub const DEFAULT_MAX_EXPERIMENT_MEM_MIB: u32 = 16_384;
+/// Writable disk an experiment VM gets when the topic does not ask (32 GiB,
+/// the preferred size when the metal allows: container image pulls land
+/// here, never on the read-only rootfs).
 pub const DEFAULT_EXPERIMENT_DISK_MIB: u32 = 32_768;
-/// Largest writable disk a topic may ask for by default (128 GiB).
-pub const DEFAULT_MAX_EXPERIMENT_DISK_MIB: u32 = 131_072;
-/// Smallest writable disk that can hold a pack plus a container store.
-pub const MIN_EXPERIMENT_DISK_MIB: u32 = 1_024;
+/// Largest writable disk a topic may ask for by default (32 GiB; the
+/// operator raises it when the metal has more).
+pub const DEFAULT_MAX_EXPERIMENT_DISK_MIB: u32 = 32_768;
+/// Architecte lock: smallest writable disk an experiment VM may have (16 GiB).
+pub const MIN_EXPERIMENT_DISK_MIB: u32 = 16_384;
 
 /// Control-plane env: `sha256:` digest of the guest image experiment VMs
 /// boot. Unset = the RLM image pin (`PROOF_RLM_VM_IMAGE_DIGEST`).
 pub const EXPERIMENT_VM_IMAGE_DIGEST_ENV: &str = "PROOF_EXPERIMENT_VM_IMAGE_DIGEST";
+/// Control-plane env: vCPUs when the topic does not ask (default [`DEFAULT_EXPERIMENT_VCPUS`]).
+pub const EXPERIMENT_VM_VCPUS_ENV: &str = "PROOF_EXPERIMENT_VM_VCPUS";
+/// Control-plane env: memory in MiB when the topic does not ask (default [`DEFAULT_EXPERIMENT_MEM_MIB`]).
+pub const EXPERIMENT_VM_MEM_MIB_ENV: &str = "PROOF_EXPERIMENT_VM_MEM_MIB";
 /// Control-plane env: vCPU ceiling (default [`DEFAULT_MAX_EXPERIMENT_VCPUS`]).
 pub const EXPERIMENT_VM_MAX_VCPUS_ENV: &str = "PROOF_EXPERIMENT_VM_MAX_VCPUS";
 /// Control-plane env: memory ceiling in MiB (default [`DEFAULT_MAX_EXPERIMENT_MEM_MIB`]).
@@ -237,9 +248,9 @@ pub struct ExperimentBinding {
     pub runner: String,
     /// Pinned experiment pack.
     pub pack: PackRef,
-    /// vCPUs the topic asks for (`None` = the ceiling).
+    /// vCPUs the topic asks for (`None` = the operator default).
     pub vcpus: Option<u32>,
-    /// Memory the topic asks for (`None` = the ceiling).
+    /// Memory the topic asks for (`None` = the operator default).
     pub mem_mib: Option<u32>,
     /// Writable disk the topic asks for (`None` = the operator default).
     pub disk_mib: Option<u32>,
@@ -335,14 +346,19 @@ pub struct VmShape {
     pub disk_mib: u32,
 }
 
-/// Operator ceilings every experiment VM is held to. The control plane sizes
-/// a VM under its own copy; the KVM host refuses a spec over its copy. A
-/// topic may ask for less, never for more.
+/// Operator defaults and ceilings every experiment VM is held to. The
+/// control plane sizes a VM under its own copy (a silent topic gets the
+/// defaults); the KVM host refuses a spec over its copy. A topic may ask for
+/// less than a ceiling or more than a default, never more than a ceiling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExperimentCeilings {
-    /// Most vCPUs.
+    /// vCPUs when the topic does not ask.
+    pub default_vcpus: u32,
+    /// Most vCPUs a topic may ask for.
     pub max_vcpus: u32,
-    /// Most memory (MiB).
+    /// Memory (MiB) when the topic does not ask.
+    pub default_mem_mib: u32,
+    /// Most memory (MiB) a topic may ask for.
     pub max_mem_mib: u32,
     /// Writable disk (MiB) when the topic does not ask.
     pub default_disk_mib: u32,
@@ -353,7 +369,9 @@ pub struct ExperimentCeilings {
 impl Default for ExperimentCeilings {
     fn default() -> Self {
         Self {
+            default_vcpus: DEFAULT_EXPERIMENT_VCPUS,
             max_vcpus: DEFAULT_MAX_EXPERIMENT_VCPUS,
+            default_mem_mib: DEFAULT_EXPERIMENT_MEM_MIB,
             max_mem_mib: DEFAULT_MAX_EXPERIMENT_MEM_MIB,
             default_disk_mib: DEFAULT_EXPERIMENT_DISK_MIB,
             max_disk_mib: DEFAULT_MAX_EXPERIMENT_DISK_MIB,
@@ -382,8 +400,8 @@ fn over(field: &'static str, asked: u32, min: u32) -> Result<u32, ExperimentErro
 }
 
 impl ExperimentCeilings {
-    /// Ranges a Firecracker guest can boot with; the default disk under the
-    /// disk ceiling.
+    /// Ranges a Firecracker guest can boot with; every default under its
+    /// ceiling; the disk floor.
     ///
     /// # Errors
     ///
@@ -392,8 +410,14 @@ impl ExperimentCeilings {
         if !(1..=64).contains(&self.max_vcpus) {
             return Err(ExperimentError::Spec("max_vcpus"));
         }
+        if !(1..=self.max_vcpus).contains(&self.default_vcpus) {
+            return Err(ExperimentError::Spec("default_vcpus"));
+        }
         if !(512..=131_072).contains(&self.max_mem_mib) {
             return Err(ExperimentError::Spec("max_mem_mib"));
+        }
+        if !(512..=self.max_mem_mib).contains(&self.default_mem_mib) {
+            return Err(ExperimentError::Spec("default_mem_mib"));
         }
         if self.max_disk_mib < MIN_EXPERIMENT_DISK_MIB {
             return Err(ExperimentError::Spec("max_disk_mib"));
@@ -405,8 +429,8 @@ impl ExperimentCeilings {
     }
 
     /// Size a VM for `binding`: what the topic asks for, held under the
-    /// ceilings; a topic that does not ask gets the whole ceiling for CPU and
-    /// memory (one experiment, one machine) and the operator default disk.
+    /// ceilings; a topic that does not ask gets the operator defaults (lock:
+    /// 4 vCPU / 8 GiB / 32 GiB disk).
     ///
     /// # Errors
     ///
@@ -418,14 +442,14 @@ impl ExperimentCeilings {
         Ok(VmShape {
             vcpus: under(
                 "vcpus",
-                binding.vcpus.unwrap_or(self.max_vcpus),
+                binding.vcpus.unwrap_or(self.default_vcpus),
                 self.max_vcpus,
             )?,
             mem_mib: over(
                 "mem_mib",
                 under(
                     "mem_mib",
-                    binding.mem_mib.unwrap_or(self.max_mem_mib),
+                    binding.mem_mib.unwrap_or(self.default_mem_mib),
                     self.max_mem_mib,
                 )?,
                 512,
@@ -493,7 +517,9 @@ impl ExperimentPolicy {
     /// [`ExperimentError::Spec`] for ceilings out of range.
     pub fn from_env() -> Result<Self, ExperimentError> {
         let ceilings = ExperimentCeilings {
+            default_vcpus: env_u32(EXPERIMENT_VM_VCPUS_ENV, DEFAULT_EXPERIMENT_VCPUS)?,
             max_vcpus: env_u32(EXPERIMENT_VM_MAX_VCPUS_ENV, DEFAULT_MAX_EXPERIMENT_VCPUS)?,
+            default_mem_mib: env_u32(EXPERIMENT_VM_MEM_MIB_ENV, DEFAULT_EXPERIMENT_MEM_MIB)?,
             max_mem_mib: env_u32(
                 EXPERIMENT_VM_MAX_MEM_MIB_ENV,
                 DEFAULT_MAX_EXPERIMENT_MEM_MIB,
@@ -652,16 +678,18 @@ mod tests {
         assert!(ExperimentBinding::from_params(&zero).is_err());
     }
 
-    /// The lock: 16 vCPU / 32 GiB / 32 GiB disk. A silent topic gets the
-    /// whole ceiling for CPU and memory; an ask over the ceiling is refused
-    /// with the ceiling named, never clamped.
+    /// The lock: a silent topic gets 4 vCPU / 8 GiB / 32 GiB disk; a topic
+    /// may ask up to 8 vCPU / 16 GiB; disk never under 16 GiB. An ask over a
+    /// ceiling is refused with the ceiling named, never clamped.
     #[test]
     #[allow(clippy::too_many_lines)]
     fn ceilings_are_the_lock_and_asks_are_held_under_them() {
         let c = ExperimentCeilings::default();
         c.validate().expect("lock validates");
-        assert_eq!((c.max_vcpus, c.max_mem_mib), (16, 32_768));
-        assert_eq!((c.default_disk_mib, c.max_disk_mib), (32_768, 131_072));
+        assert_eq!((c.default_vcpus, c.default_mem_mib), (4, 8_192));
+        assert_eq!((c.max_vcpus, c.max_mem_mib), (8, 16_384));
+        assert_eq!((c.default_disk_mib, c.max_disk_mib), (32_768, 32_768));
+        assert_eq!(MIN_EXPERIMENT_DISK_MIB, 16_384);
         let silent = ExperimentBinding {
             runner: "r_0".into(),
             pack: PackRef {
@@ -675,27 +703,29 @@ mod tests {
         assert_eq!(
             c.shape(&silent).expect("shape"),
             VmShape {
-                vcpus: 16,
-                mem_mib: 32_768,
+                vcpus: 4,
+                mem_mib: 8_192,
                 disk_mib: 32_768
-            }
+            },
+            "silent = the defaults"
         );
-        let smaller = ExperimentBinding {
-            vcpus: Some(4),
-            mem_mib: Some(8_192),
-            disk_mib: Some(65_536),
+        let bigger = ExperimentBinding {
+            vcpus: Some(8),
+            mem_mib: Some(16_384),
+            disk_mib: Some(16_384),
             ..silent.clone()
         };
         assert_eq!(
-            c.shape(&smaller).expect("under"),
+            c.shape(&bigger)
+                .expect("the topic may override up to the ceiling"),
             VmShape {
-                vcpus: 4,
-                mem_mib: 8_192,
-                disk_mib: 65_536
+                vcpus: 8,
+                mem_mib: 16_384,
+                disk_mib: 16_384
             }
         );
         let greedy = ExperimentBinding {
-            vcpus: Some(32),
+            vcpus: Some(16),
             ..silent.clone()
         };
         let err = c.shape(&greedy).expect_err("over");
@@ -703,9 +733,47 @@ mod tests {
             err,
             ExperimentError::OverCeiling {
                 field: "vcpus",
-                asked: 32,
-                ceiling: 16
+                asked: 16,
+                ceiling: 8
             }
+        );
+        let greedy_mem = ExperimentBinding {
+            mem_mib: Some(32_768),
+            ..silent.clone()
+        };
+        assert!(matches!(
+            c.shape(&greedy_mem),
+            Err(ExperimentError::OverCeiling {
+                field: "mem_mib",
+                asked: 32_768,
+                ceiling: 16_384
+            })
+        ));
+        let thin_disk = ExperimentBinding {
+            disk_mib: Some(8_192),
+            ..silent.clone()
+        };
+        assert!(matches!(
+            c.shape(&thin_disk),
+            Err(ExperimentError::UnderFloor {
+                field: "disk_mib",
+                asked: 8_192,
+                min: 16_384
+            })
+        ));
+        let roomy = ExperimentCeilings {
+            max_disk_mib: 131_072,
+            ..ExperimentCeilings::default()
+        };
+        assert_eq!(
+            roomy
+                .shape(&ExperimentBinding {
+                    disk_mib: Some(65_536),
+                    ..silent.clone()
+                })
+                .expect("the operator raised the disk ceiling")
+                .disk_mib,
+            65_536
         );
         assert!(
             err.to_string().contains("PROOF_VM_AGENT_EXPERIMENT_MAX_"),
@@ -734,14 +802,14 @@ mod tests {
             })
         ));
         c.admit(VmShape {
-            vcpus: 16,
-            mem_mib: 32_768,
+            vcpus: 8,
+            mem_mib: 16_384,
             disk_mib: 32_768,
         })
         .expect("at the ceiling is admitted");
         assert!(c
             .admit(VmShape {
-                vcpus: 17,
+                vcpus: 9,
                 mem_mib: 1_024,
                 disk_mib: 32_768,
             })
@@ -750,7 +818,7 @@ mod tests {
             .admit(VmShape {
                 vcpus: 1,
                 mem_mib: 1_024,
-                disk_mib: 512,
+                disk_mib: 8_192,
             })
             .is_err());
         let mut bad = ExperimentCeilings::default();
@@ -762,6 +830,15 @@ mod tests {
         bad = ExperimentCeilings::default();
         bad.max_vcpus = 0;
         assert!(bad.validate().is_err());
+        bad = ExperimentCeilings::default();
+        bad.default_vcpus = bad.max_vcpus + 1;
+        assert_eq!(bad.validate(), Err(ExperimentError::Spec("default_vcpus")));
+        bad = ExperimentCeilings::default();
+        bad.default_mem_mib = bad.max_mem_mib + 1;
+        assert_eq!(
+            bad.validate(),
+            Err(ExperimentError::Spec("default_mem_mib"))
+        );
     }
 
     #[test]
@@ -782,7 +859,7 @@ mod tests {
         let back: ExperimentSpec = serde_json::from_str(&json).expect("round trip");
         assert_eq!(back, spec);
         let bare: ExperimentSpec = serde_json::from_str(&format!(
-            r#"{{"runner":"r_0","pack":{{"digest":"sha256:{HEX}"}},"disk_mib":4096}}"#
+            r#"{{"runner":"r_0","pack":{{"digest":"sha256:{HEX}"}},"disk_mib":16384}}"#
         ))
         .expect("path is optional on the wire");
         assert_eq!(bare.pack.path, None);
@@ -793,8 +870,12 @@ mod tests {
         bad.pack.digest = "latest".into();
         assert_eq!(bad.validate(), Err(ExperimentError::Spec("pack")));
         let mut bad = spec;
-        bad.disk_mib = 100;
-        assert_eq!(bad.validate(), Err(ExperimentError::Spec("disk_mib")));
+        bad.disk_mib = 8_192;
+        assert_eq!(
+            bad.validate(),
+            Err(ExperimentError::Spec("disk_mib")),
+            "under the 16 GiB floor"
+        );
     }
 
     #[test]
