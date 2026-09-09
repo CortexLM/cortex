@@ -1,9 +1,36 @@
 name: release-ctx
 
-# Builds the miner CLI for every platform miners actually run and attaches the
-# archives (plus SHA256SUMS.txt) to the GitHub Release for the tag.
+# Builds the miner CLI (`ctx`) for every platform miners actually run and
+# attaches the archives (plus SHA256SUMS.txt) to a GitHub Release.
 # scripts/install-ctx.sh downloads from that release and verifies the checksum,
 # so a release without the sums file installs nothing.
+#
+# Build ref vs release tag — two different things:
+#
+#   * The **build ref** is the commit `ctx` is compiled from. On a tag push it
+#     is the tagged commit. On workflow_dispatch it is `build_ref`, default
+#     `main` (the tip of the working branch at run time).
+#   * The **release tag** is the GitHub Release the archives are attached to.
+#     On a tag push it is the pushed tag. On workflow_dispatch it is `tag`,
+#     which must already exist: the operator cuts the tag / Release first, and
+#     a typo can never mint a new release.
+#
+# So the release tag is a publishing label — `v*.*.*` numbering follows the
+# network's prod tags (deploy/README.md § Prod release flow) — while the `ctx`
+# sources come from the tip of `main`. A dispatch never checks the tag out:
+# an old tag predates `bins/ctx`, which is how `package ID specification ctx
+# did not match any packages` happened. The resolve job refuses a build ref
+# without `bins/ctx` before any runner starts cargo, every archive of one run
+# is built from the same resolved commit, and the appended release notes
+# record that commit.
+#
+# Operator recipe (full text: deploy/README.md § ctx CLI release):
+#   gh release create vX.Y.Z --target main --title "ctx CLI vX.Y.Z" --notes "…"
+#     → the tag push runs this workflow from the tagged commit
+#   gh workflow run release-ctx.yml -f tag=vX.Y.Z
+#     → rebuild from the tip of main and (re)attach to that existing tag
+#   gh workflow run release-ctx.yml -f tag=vX.Y.Z -f build_ref=<sha|branch>
+# Any v*.*.* tag push also triggers deploy-prod.yml (fail-closed preflight).
 
 on:
   push:
@@ -11,19 +38,96 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build and attach assets to"
+        description: "Existing release tag to attach the ctx assets to (publishing label, e.g. v3.3.30)"
         required: true
         type: string
+      build_ref:
+        description: "Branch, tag, or SHA to build ctx from (default: main)"
+        required: false
+        type: string
+        default: main
 
+# Read-only by default; only the job that touches the Release gets write.
 permissions:
-  contents: write
+  contents: read
+
+# A tag push and a dispatch for the same tag (or a re-run) would race on the
+# asset upload. Queue them per tag and never cancel a run about to publish.
+concurrency:
+  group: release-ctx-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  resolve:
+    name: resolve build ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      build_ref: ${{ steps.pick.outputs.build_ref }}
+      sha: ${{ steps.pick.outputs.sha }}
+    steps:
+      # Push: the pushed tag ref (checkout peels annotated tags to the commit).
+      # Dispatch: the build ref, never the release tag.
+      - name: Checkout build ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && (inputs.build_ref || 'main') || github.ref }}
+
+      - name: Pick release tag and build commit
+        id: pick
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_BUILD_REF: ${{ inputs.build_ref }}
+          PUSHED_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+            build_ref="${INPUT_BUILD_REF:-main}"
+            case "$tag" in
+              v*.*.*) ;;
+              *)
+                echo "::error::tag '$tag' does not match v*.*.* (the same shape the push trigger accepts)"
+                exit 1
+                ;;
+            esac
+            if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+              echo "::error::tag '$tag' does not exist on origin. Create the tag / Release first (gh release create $tag --target main …), then dispatch again."
+              exit 1
+            fi
+          else
+            tag="$PUSHED_TAG"
+            build_ref="refs/tags/$tag"
+          fi
+
+          sha="$(git rev-parse HEAD)"
+          if [ ! -f bins/ctx/Cargo.toml ]; then
+            echo "::error::build ref '$build_ref' ($sha) has no bins/ctx — it predates the ctx CLI. Dispatch with build_ref=main (the default) so the release tag stays a label and the sources come from tip."
+            exit 1
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "build_ref=$build_ref"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## release-ctx"
+            echo
+            echo "| Release tag | Build ref | Commit |"
+            echo "|-------------|-----------|--------|"
+            echo "| \`$tag\` | \`$build_ref\` | \`$sha\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "release tag $tag <- build ref $build_ref @ $sha"
+
   build:
     name: ctx ${{ matrix.name }}
+    needs: [resolve]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -48,13 +152,15 @@ jobs:
             runner: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
+      # Every platform builds the one commit resolve picked, so the archives in
+      # SHA256SUMS.txt cannot straddle a push to main that lands mid-run.
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
 
       - name: Install Rust toolchain
-        # Pin by commit SHA. Never @master under contents:write.
+        # Pin by commit SHA. Never @master in a workflow that publishes.
         uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
         with:
           toolchain: "1.96.0"
@@ -102,9 +208,11 @@ jobs:
 
   release:
     name: attach assets
-    needs: [build]
+    needs: [resolve, build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -123,21 +231,47 @@ jobs:
           sha256sum ctx-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      # Hand-written notes stay. The install block is added once per release,
+      # however many times ctx is rebuilt for that tag; every build appends one
+      # provenance line naming the commit it came from.
+      - name: Release notes
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          BUILD_REF: ${{ needs.resolve.outputs.build_ref }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Empty when the tag has no Release yet (the next step creates it).
+          existing="$(gh release view "$TAG" --json body -q .body 2>/dev/null || true)"
+          {
+            echo "body<<NOTES_EOF"
+            if ! printf '%s' "$existing" | grep -qF "scripts/install-ctx.sh"; then
+              cat <<'BLOCK'
+          Cortex subnet CLI (`ctx`) for miners.
+
+          ```bash
+          curl -fsSL https://raw.githubusercontent.com/CortexLM/cortex/main/scripts/install-ctx.sh | sh
+          ctx challenges
+          ctx status
+          ```
+
+          Default gateway: https://gateway.cortex.foundation
+
+          BLOCK
+            fi
+            echo "ctx assets built from \`$SHA\` (\`$BUILD_REF\`) by [release-ctx]($RUN_URL)."
+            echo "NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.resolve.outputs.tag }}
           files: dist/*
           fail_on_unmatched_files: true
-          # Keep hand-written release notes; only add the install block.
           append_body: true
-          body: |
-            Cortex subnet CLI (`ctx`) for ${{ inputs.tag || github.ref_name }}.
-
-            ```bash
-            curl -fsSL https://raw.githubusercontent.com/CortexLM/cortex/main/scripts/install-ctx.sh | sh
-            ctx challenges
-            ctx status
-            ```
-
-            Default gateway: https://gateway.cortex.foundation
+          body: ${{ steps.notes.outputs.body }}
