@@ -2,7 +2,7 @@
 
 # External miner — troubleshoot (HTTP)
 
-**Path:** HTTP submit through [https://network.cortex.foundation](https://network.cortex.foundation).
+**Path:** HTTP submit through [https://gateway.cortex.foundation](https://gateway.cortex.foundation).
 Install `ctx` from [README](./README.md). Proof miners pay Lium
 (`LIUM_API_KEY` / `X-Lium-Api-Key`).
 
@@ -11,7 +11,7 @@ Install `ctx` from [README](./README.md). Proof miners pay Lium
 | Symptom | Likely cause | What to check |
 |---------|--------------|---------------|
 | `install-ctx` aborts on checksum | Missing or mismatched `SHA256SUMS.txt` | The installer refuses an unverified binary. Wait for a `v*.*.*` release, or build `ctx` from this repo |
-| `request to … failed` | Gateway not reachable | `ctx status --gateway https://network.cortex.foundation`. A local stack needs `--gateway http://127.0.0.1:8080` |
+| `request to … failed` | Gateway not reachable | `ctx status --gateway https://gateway.cortex.foundation`. A local stack needs `--gateway http://127.0.0.1:8080` |
 | `can_score: NO` / HTTP 503 | The host cannot score right now | Nothing was stored and nothing was rented. Read the error; do not retry-spend |
 
 ## Bounty

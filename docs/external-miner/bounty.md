@@ -7,7 +7,7 @@ Challenge id is `bounty`. One of two live challenges (`bounty` **2000 bps**,
 unique reports earn subnet weight. Every report is tagged with your Bittensor
 hotkey so operators can patch in real time and pay (or penalize) the right miner.
 
-**Gateway:** `https://network.cortex.foundation`  
+**Gateway:** `https://gateway.cortex.foundation`  
 **CLI:** `ctx bounty status`, then `ctx bounty pair`, then `ctx bounty report`
 (install: [README](./README.md))
 
@@ -21,9 +21,9 @@ Validators do **not** re-run your reports. They verify the sealed weight
 bundle. Ingest goes through the gateway:
 
 ```text
-https://network.cortex.foundation/challenge/bounty/v1/pair
-https://network.cortex.foundation/challenge/bounty/v1/reports
-https://network.cortex.foundation/challenge/bounty/v1/status
+https://gateway.cortex.foundation/challenge/bounty/v1/pair
+https://gateway.cortex.foundation/challenge/bounty/v1/reports
+https://gateway.cortex.foundation/challenge/bounty/v1/status
 ```
 
 ## Dedicated account (required)
@@ -101,7 +101,7 @@ rate-limit window.
 The same thing with `curl` (the Lium header is optional and never logged):
 
 ```bash
-curl -sS -X POST https://network.cortex.foundation/challenge/bounty/v1/reports \
+curl -sS -X POST https://gateway.cortex.foundation/challenge/bounty/v1/reports \
   -H 'content-type: application/json' \
   -H "X-Lium-Api-Key: $LIUM_API_KEY" \
   -d '{

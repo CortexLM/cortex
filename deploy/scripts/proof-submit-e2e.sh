@@ -24,12 +24,25 @@ RED() { printf '\033[31m%s\033[0m\n' "$*"; }
 GRN() { printf '\033[32m%s\033[0m\n' "$*"; }
 LOG() { printf '[proof-e2e] %s\n' "$*"; }
 
-PROD_HOSTS='network.cortex.foundation|chain.joinbase.ai'
+PROD_HOSTS='gateway\.cortex\.foundation|network\.cortex\.foundation|chain\.joinbase\.ai'
 STAGING_TOPICS=(dt-no-ib-v0 muon-vs-adamw-10m-v0)
 
+# url_host URL → the host part, lower-cased (no scheme, userinfo, port, path,
+# query; a trailing dot dropped; IPv6 literal kept bracketed).
+url_host() {
+  local h="$1"
+  h="${h#*://}"; h="${h%%/*}"; h="${h%%\?*}"; h="${h%%\#*}"; h="${h##*@}"
+  if [[ "$h" == \[* ]]; then h="${h%%]*}]"; else h="${h%%:*}"; fi
+  h="${h%.}"
+  printf '%s' "$h" | tr '[:upper:]' '[:lower:]'
+}
+# Refuse a production origin however it is spelled: the parsed host (or any
+# subdomain of a protected host) is compared lower-cased. DNS is
+# case-insensitive; the guard must be too.
 refuse_prod() {
-  local url="${1:-}"
-  if echo "$url" | grep -Eq "$PROD_HOSTS"; then
+  local url="${1:-}" host
+  host="$(url_host "$url")"
+  if printf '%s\n' "$host" | grep -Eq "^(.*\.)?(${PROD_HOSTS})$"; then
     RED "refusing production host: $url"
     exit 2
   fi

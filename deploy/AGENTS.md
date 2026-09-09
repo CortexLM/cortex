@@ -175,7 +175,7 @@ Manual one-shot (from an operator host with secrets) is still:
 
 ```bash
 cargo run -q --release -p weights-smoke -- \
-  --gateway https://chain.joinbase.ai --burn
+  --gateway https://gateway.cortex.foundation --burn
 ```
 
 A seal older than ~256 blocks can never be verified by the validator (public RPC prunes state) — if `GET /v1/weights/latest` shows `metagraph_block` lagging tip by thousands of blocks, check `systemctl status base-burn-seal.timer` and `/var/log/base-burn-seal.log` on the master.
@@ -206,7 +206,7 @@ Validator logs should show `Match epoch=` then `Match → submit_intent` / `subm
 
 **Sole on-chain submitter (mainnet hotkey `5Gzi…`):** Rust `base-validator-1` on **`base-prod-validator` (`192.81.218.11`) only**. `role-master.yml` profiles the validator under `never`; `remote-deploy.sh --role master` force-removes any leftover container. Do **not** run a second validator (or Python weight submitter) with the same wallet — dual submitters fight `WeightsSetRateLimit` and can leave CRV4 commits stuck while incentive still shows a prior monopoly UID.
 
-**Legacy Python agents (mainnet):** `validator-5gzi` (`95.133.252.120`) may point `master_url` / `weights_url` / `registry_url` at `https://chain.joinbase.ai` with **`submit_on_chain_enabled: false`**. Coordination shims live in `gateway-compat` (`/v1/validators/*`, `/v1/registry`, empty assignments). `GET /v1/weights/latest` refreshes `computed_at` / `expires_at` at serve time so Python pydantic clients accept sealed vectors older than 720s. Do **not** start `base-weight-submitter-5gzi` on `validator-root` unless CR ownership is moved off Rust.
+**Legacy Python agents (mainnet):** `validator-5gzi` (`95.133.252.120`) may point `master_url` / `weights_url` / `registry_url` at `https://gateway.cortex.foundation` with **`submit_on_chain_enabled: false`**. Coordination shims live in `gateway-compat` (`/v1/validators/*`, `/v1/registry`, empty assignments). `GET /v1/weights/latest` refreshes `computed_at` / `expires_at` at serve time so Python pydantic clients accept sealed vectors older than 720s. Do **not** start `base-weight-submitter-5gzi` on `validator-root` unless CR ownership is moved off Rust.
 
 **Challenge verification:** on **master** only (validator has **no challenge exec**). Bounty: pair, report, probe quota/auth/fail-closed paths, then verify feed-driven leaves. Proof: submit against a signed `topic_id`, probe rejected and unavailable-evaluation paths, and verify the live emitter covers `E` (`ChallengeInternal` when nobody scored). Verify leaf → seal → `GET /v1/weights/latest` **`sealed: true`** where the full path is available. Follow the root [verification contract](../AGENTS.md#challenge-verification-mandatory-path-coverage); do not use retired Design run/winner endpoints. **Never host Sim in staging/prod** (`BASE_ALLOW_HOST_SIM` / host `SimSandbox` are CI/local only). Healthz alone is insufficient.
 
@@ -242,6 +242,6 @@ Ladder: CI → GHCR digests → `deploy/pins/staging.json` (committed by `images
 
 - DO Spaces backup credentials — set in GitHub (repo + `production` env): `BASE_BACKUP_ENDPOINT`, `SPACES_ACCESS_KEY_ID`, `SPACES_SECRET_ACCESS_KEY`, `BASE_BACKUP_BUCKET` (bucket `base-intelligence-backups` in nyc3; name `base-backups` was globally taken). Prod promote dumps Postgres over SSH then uploads from the runner (`deploy-prod.yml`).
 - GitHub `production` environment required reviewers / `main` branch protection
-- Gateway in-process TLS ACME (task 42 / `rustls-acme`) — **interim:** prod `chain.joinbase.ai` HTTPS via host Caddy on `:443` (TLS-ALPN-01) → `127.0.0.1:8080`; cleartext `:80` still docker→gateway
+- Gateway in-process TLS ACME (task 42 / `rustls-acme`) — **interim:** prod `gateway.cortex.foundation` HTTPS via host Caddy on `:443` (TLS-ALPN-01) → `127.0.0.1:8080`; cleartext `:80` still docker→gateway
 - Terraform remote state backend (recommended, not blocking app deploy)
 - Bootstrap of age/secrets on brand-new droplets (OOB)
