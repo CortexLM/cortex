@@ -216,9 +216,15 @@ impl FirecrackerHypervisor {
                                 *taken = Some(attestation);
                                 SisterAnswer::Result { result }
                             }
-                            Err(e) => SisterAnswer::Refused {
-                                error: e.to_string(),
-                            },
+                            Err(e) => {
+                                // Operator evidence: a refused artefact (empty
+                                // tree, gzip, wrong digest) is named here, and
+                                // the run comes back without an attestation.
+                                tracing::warn!(vm_id = %vm.vm_id, topic_id = %vm.topic_id, "sister request refused: {e}");
+                                SisterAnswer::Refused {
+                                    error: e.to_string(),
+                                }
+                            }
                         }
                     }
                 }

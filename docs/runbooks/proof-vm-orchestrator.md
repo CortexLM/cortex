@@ -418,7 +418,7 @@ Evidence to collect, in order:
 
 | Step | Where | Must show |
 |------|-------|-----------|
-| artefact reachable from the VM | agent journal | no `sister request names …`, no `artifact_tar …` refusal; a guest that could not fetch must answer the job with `Failed` (the CP logs the error, 503, no row) — never a substitute tree |
+| artefact reachable from the VM | agent journal | no `sister request refused: …` line (`artifact_tar carries no file content`, `is gzip-compressed`, `hashes to …`, `names artifact_digest …`); a guest that could not fetch must answer the job with `Failed` (the CP logs the error, 503, no row) — never a substitute tree |
 | topic VM created (first job) | CP log · agent journal | `topic vm created` · `topic vm booted`, `rlm guest ready`, `owner key material staged` when a key dir is set; **no** `host forward chains drop by default` warning (§ Egress) |
 | inspection (`Inspect` job, no miner code, no sister) | agent journal | the job, no `sister guest` line |
 | paid run (`Evaluate`) in the sister | agent journal | `sister guest booting (no network)` → `sister guest run attested` with `sandboxed=true` and the guest's `flops_used` |
