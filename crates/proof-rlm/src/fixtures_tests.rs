@@ -179,14 +179,21 @@ pub fn pinned_template() -> VmTemplate {
 }
 
 /// Records jobs and answers with canned documents. Never touches the network.
+/// Like the agent, it keeps experiment VMs apart from a topic's RLM VM:
+/// `attach` never returns one, and every create / teardown is recorded.
 pub struct FakeOrchestrator {
     primary: Mutex<f64>,
     red: Mutex<Option<String>>,
     sandboxed: AtomicBool,
     flops_used: Mutex<Option<u64>>,
+    fail_run: AtomicBool,
     created: AtomicUsize,
     vms: Mutex<Vec<VmHandle>>,
-    jobs: Mutex<Vec<VmJob>>,
+    /// `vm_id → spec` of every experiment VM ever created.
+    experiments: Mutex<Vec<(String, TopicVmSpec)>>,
+    /// Every job with the VM it ran on.
+    runs: Mutex<Vec<(String, VmJob)>>,
+    teardowns: Mutex<Vec<(VmHandle, RetainPolicy)>>,
     proposed: Mutex<Vec<ChecklistRule>>,
 }
 
@@ -197,14 +204,50 @@ impl FakeOrchestrator {
             red: Mutex::new(None),
             sandboxed: AtomicBool::new(true),
             flops_used: Mutex::new(Some(1)),
+            fail_run: AtomicBool::new(false),
             created: AtomicUsize::new(0),
             vms: Mutex::new(Vec::new()),
-            jobs: Mutex::new(Vec::new()),
+            experiments: Mutex::new(Vec::new()),
+            runs: Mutex::new(Vec::new()),
+            teardowns: Mutex::new(Vec::new()),
             proposed: Mutex::new(vec![ChecklistRule {
                 id: "rlm_rule".into(),
                 text: "a rule the fake rlm wrote".into(),
             }]),
         })
+    }
+
+    /// Every job fails inside the guest (`Backend`) until cleared.
+    pub fn set_fail_run(&self, v: bool) {
+        self.fail_run.store(v, Ordering::SeqCst);
+    }
+
+    /// Specs of the experiment VMs created so far, in order.
+    pub fn experiments(&self) -> Vec<TopicVmSpec> {
+        self.experiments
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, s)| s.clone())
+            .collect()
+    }
+
+    /// `(vm_id, job)` for every job dispatched, in order.
+    pub fn runs(&self) -> Vec<(String, VmJob)> {
+        self.runs.lock().unwrap().clone()
+    }
+
+    /// Every teardown, in order.
+    pub fn teardowns(&self) -> Vec<(VmHandle, RetainPolicy)> {
+        self.teardowns.lock().unwrap().clone()
+    }
+
+    fn is_experiment(&self, vm_id: &str) -> bool {
+        self.experiments
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id == vm_id)
     }
 
     pub fn set_primary(&self, v: f64) {
@@ -235,9 +278,15 @@ impl FakeOrchestrator {
     }
 
     pub fn jobs(&self) -> Vec<VmJob> {
-        self.jobs.lock().unwrap().clone()
+        self.runs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, j)| j.clone())
+            .collect()
     }
 
+    /// VMs alive right now (RLM and experiment).
     pub fn vms(&self) -> Vec<VmHandle> {
         self.vms.lock().unwrap().clone()
     }
@@ -263,6 +312,12 @@ impl TopicVmOrchestrator for FakeOrchestrator {
             topic_id: spec.topic_id.clone(),
             vm_id: format!("vm-{n}"),
         };
+        if spec.experiment.is_some() {
+            self.experiments
+                .lock()
+                .unwrap()
+                .push((h.vm_id.clone(), spec.clone()));
+        }
         self.vms.lock().unwrap().push(h.clone());
         Ok(h)
     }
@@ -273,7 +328,7 @@ impl TopicVmOrchestrator for FakeOrchestrator {
             .lock()
             .unwrap()
             .iter()
-            .find(|h| h.topic_id == topic_id)
+            .find(|h| h.topic_id == topic_id && !self.is_experiment(&h.vm_id))
             .cloned())
     }
 
@@ -282,7 +337,13 @@ impl TopicVmOrchestrator for FakeOrchestrator {
             self.vms.lock().unwrap().contains(handle),
             "job on an unknown vm"
         );
-        self.jobs.lock().unwrap().push(job.clone());
+        self.runs
+            .lock()
+            .unwrap()
+            .push((handle.vm_id.clone(), job.clone()));
+        if self.fail_run.load(Ordering::SeqCst) {
+            return Err(VmError::Backend("guest: injected run failure".into()));
+        }
         Ok(match job {
             VmJob::ProposeRules { .. } => VmJobOutput::Rules(self.proposed.lock().unwrap().clone()),
             VmJob::Baseline { request } => VmJobOutput::Baseline(self.report(&request)),
@@ -312,8 +373,31 @@ impl TopicVmOrchestrator for FakeOrchestrator {
         })
     }
 
-    async fn teardown(&self, handle: &VmHandle, _policy: RetainPolicy) -> Result<bool, VmError> {
+    async fn teardown(&self, handle: &VmHandle, policy: RetainPolicy) -> Result<bool, VmError> {
         self.vms.lock().unwrap().retain(|h| h != handle);
+        self.teardowns
+            .lock()
+            .unwrap()
+            .push((handle.clone(), policy));
         Ok(true)
     }
+}
+
+/// `request()` with the in-guest experiment binding a topic would sign:
+/// runner id + pinned pack digest (placeholders), optional size ask.
+pub fn experiment_request(vcpus: Option<u32>) -> CustomRunRequest {
+    let mut req = request();
+    let params = &mut req.constraints.params;
+    params.insert(
+        proof_experiment::PARAM_RUNNER.into(),
+        "placeholder_in_guest_runner".into(),
+    );
+    params.insert(
+        proof_experiment::PARAM_PACK_DIGEST.into(),
+        format!("sha256:{}", "ee".repeat(32)),
+    );
+    if let Some(n) = vcpus {
+        params.insert(proof_experiment::PARAM_VCPUS.into(), n.to_string());
+    }
+    req
 }

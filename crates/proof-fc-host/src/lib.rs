@@ -257,7 +257,12 @@ impl FirecrackerHypervisor {
             vcpus: spec.template.vcpus,
             mem_mib: spec.template.mem_mib,
             rootfs: image,
-            scratch_mib: cfg.scratch_mib,
+            // An experiment VM brings its own writable-disk size (pack +
+            // container store); the RLM VM takes the host default.
+            scratch_mib: spec
+                .experiment
+                .as_ref()
+                .map_or(cfg.scratch_mib, |e| e.disk_mib),
             net: Some(net.clone()),
         };
         let mut jail = JailGuard::prepare(cfg.clone(), self.ctx.shell.clone(), &boot).await?;

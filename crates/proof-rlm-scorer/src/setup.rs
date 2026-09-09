@@ -20,10 +20,10 @@ use std::sync::Arc;
 
 use proof_eval::BaselineMeasurement;
 use proof_rlm::{
-    await_owner_keys, owner_presend, CustomRunReport, CustomRunRequest, Lifecycle, OwnerHook,
-    OwnerKeysProbe, OwnerPrompt, RlmEvent, RlmState, RuleSet, RuleSource, SandboxPolicy,
-    StateError, TopicVmOrchestrator, TopicVmSpec, VmError, VmHandle, VmJob, VmJobOutput,
-    VmTemplate,
+    await_owner_keys, owner_presend, run_paid_job, CustomRunReport, CustomRunRequest,
+    ExperimentPolicy, Lifecycle, OwnerHook, OwnerKeysProbe, OwnerPrompt, RlmEvent, RlmState,
+    RuleSet, RuleSource, SandboxPolicy, StateError, TopicVmOrchestrator, TopicVmSpec, VmError,
+    VmHandle, VmJob, VmJobOutput, VmTemplate,
 };
 use proof_rlm_store::{BaselineRow, RlmStore, StoreError, TransitionRow};
 use proof_task::{InferenceOffer, MetricFamily, ProofPin, TopicDocument, TopicError, TopicStatus};
@@ -94,6 +94,9 @@ pub struct TopicSetup {
     pub store: Arc<dyn RlmStore>,
     /// RLM VM image + sizes.
     pub template: VmTemplate,
+    /// Per-experiment VM policy: a topic whose params select an in-guest
+    /// runner measures its baseline in a dedicated VM, destroyed afterwards.
+    pub experiments: ExperimentPolicy,
     /// `askUser`-style owner hook.
     pub owner: Arc<dyn OwnerHook>,
     /// Owner key presence probe.
@@ -235,7 +238,9 @@ impl TopicSetup {
         Ok(rules)
     }
 
-    /// Baseline inside the VM, shaped exactly like a miner run, persisted.
+    /// Baseline shaped exactly like a miner run, persisted: inside the topic
+    /// VM, or — when the topic's params select an in-guest runner — inside
+    /// one dedicated experiment VM created for it and destroyed after it.
     async fn baseline(
         &self,
         topic: &TopicDocument,
@@ -260,7 +265,15 @@ impl TopicSetup {
         let job = VmJob::Baseline {
             request: request.clone(),
         };
-        let report = match self.orchestrator.run(vm, job).await {
+        let ran = run_paid_job(
+            self.orchestrator.as_ref(),
+            &self.experiments,
+            &self.template,
+            vm,
+            job,
+        )
+        .await;
+        let report = match ran {
             Ok(VmJobOutput::Baseline(r)) => r,
             Ok(_) => return Err(VmError::WrongOutput("baseline").into()),
             Err(e) => {

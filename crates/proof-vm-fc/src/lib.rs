@@ -38,12 +38,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use proof_rlm::{
-    RetainPolicy, TopicVmOrchestrator, TopicVmSpec, VmError, VmHandle, VmJob, VmJobOutput,
-    VmTemplate, RLM_VM_IMAGE_DIGEST_ENV, VM_ORCHESTRATOR_TOKEN_FILE_ENV, VM_ORCHESTRATOR_URL_ENV,
+    ExperimentPolicy, RetainPolicy, TopicVmOrchestrator, TopicVmSpec, VmError, VmHandle, VmJob,
+    VmJobOutput, VmTemplate, RLM_VM_IMAGE_DIGEST_ENV, VM_ORCHESTRATOR_TOKEN_FILE_ENV,
+    VM_ORCHESTRATOR_URL_ENV,
 };
 use proof_vm_proto::{
-    bind_evidence, paths, AgentHealth, CreateVmRequest, ErrorBody, RunJobRequest, RunJobResponse,
-    TeardownRequest, TeardownResponse, VmRecord, API_VERSION,
+    bind_evidence, paths, AgentHealth, CreateVmRequest, ErrorBody, GuestMode, RunJobRequest,
+    RunJobResponse, TeardownRequest, TeardownResponse, VmRecord, API_VERSION,
 };
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
@@ -92,6 +93,9 @@ pub enum FcConfigError {
     /// The HTTP client could not be built.
     #[error("http client: {0}")]
     Client(String),
+    /// A `PROOF_EXPERIMENT_VM_*` knob is malformed or out of range.
+    #[error("experiment vm policy: {0}")]
+    Experiment(#[from] proof_rlm::ExperimentError),
 }
 
 /// Operator configuration. Holds paths, never secrets.
@@ -103,6 +107,9 @@ pub struct FcConfig {
     pub token_file: PathBuf,
     /// RLM VM image pin + size.
     pub template: VmTemplate,
+    /// Per-experiment VM policy (ceilings + image) for topics whose params
+    /// select an in-guest runner (`PROOF_EXPERIMENT_VM_*`).
+    pub experiments: ExperimentPolicy,
     /// Extra PEM root, if the agent uses a private CA.
     pub ca_file: Option<PathBuf>,
     /// TCP + TLS connect budget.
@@ -152,6 +159,7 @@ impl FcConfig {
                 vcpus: DEFAULT_RLM_VCPUS,
                 mem_mib: DEFAULT_RLM_MEM_MIB,
             },
+            experiments: ExperimentPolicy::default(),
             ca_file: None,
             connect_timeout: Duration::from_secs(10),
             create_timeout: Duration::from_secs(DEFAULT_CREATE_TIMEOUT_S),
@@ -171,6 +179,7 @@ impl FcConfig {
         let mut cfg = Self::new(url, Path::new(&token_file), &digest);
         cfg.template.vcpus = env_u32(RLM_VM_VCPUS_ENV, DEFAULT_RLM_VCPUS)?;
         cfg.template.mem_mib = env_u32(RLM_VM_MEM_MIB_ENV, DEFAULT_RLM_MEM_MIB)?;
+        cfg.experiments = ExperimentPolicy::from_env()?;
         cfg.ca_file = env_trimmed(VM_ORCHESTRATOR_CA_FILE_ENV).map(PathBuf::from);
         cfg.validate()?;
         Ok(Some(cfg))
@@ -236,6 +245,12 @@ impl FirecrackerOrchestrator {
     #[must_use]
     pub fn template(&self) -> &VmTemplate {
         &self.config.template
+    }
+
+    /// The per-experiment VM policy (ceilings, image) in force.
+    #[must_use]
+    pub fn experiments(&self) -> &ExperimentPolicy {
+        &self.config.experiments
     }
 
     /// Agent base URL.
@@ -440,6 +455,18 @@ impl TopicVmOrchestrator for FirecrackerOrchestrator {
         // The stamps are only evidence for the job they were produced for.
         bind_evidence(&request.job, &resp.output, resp.sister.as_ref())
             .map_err(|e| backend(format!("orchestrator evidence is not this job's: {e}")))?;
+        // An experiment-VM attestation is evidence about the VM the job was
+        // dispatched to, and no other.
+        if let Some(s) = resp
+            .sister
+            .as_ref()
+            .filter(|s| s.mode == GuestMode::ExperimentVm && s.sister_vm_id != handle.vm_id)
+        {
+            return Err(backend(format!(
+                "orchestrator attested experiment vm {} for a job dispatched to {}",
+                s.sister_vm_id, handle.vm_id
+            )));
+        }
         let attested = resp.sister.as_ref().is_some_and(|s| s.sandboxed);
         if needs_sister && !attested {
             return Err(backend(
@@ -533,6 +560,12 @@ mod tests {
         assert_eq!(cfg.template.vcpus, 4);
         assert_eq!(cfg.template.mem_mib, 8_192);
         assert_eq!(cfg.template.image_digest, "sha256:abc");
+        assert_eq!(cfg.experiments.ceilings.max_vcpus, 16, "experiment lock");
+        assert_eq!(cfg.experiments.ceilings.max_mem_mib, 32_768);
+        assert_eq!(
+            cfg.experiments.image_digest, None,
+            "the rlm image by default"
+        );
         assert_eq!(
             parse_custom_ids(" a_metric, b-metric ,,a_metric, "),
             vec!["a_metric".to_owned(), "b-metric".to_owned()]

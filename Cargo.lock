@@ -3647,6 +3647,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "proof-experiment"
+version = "0.1.0"
+dependencies = [
+ "proof-canon",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "proof-fc-experiment"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "proof-experiment",
+ "proof-fc-host",
+ "proof-rlm",
+ "proof-vm-agent",
+ "proof-vm-proto",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "proof-fc-host"
 version = "0.1.0"
 dependencies = [
@@ -3721,6 +3747,7 @@ dependencies = [
  "async-trait",
  "hex",
  "proof-canon",
+ "proof-experiment",
  "proof-score",
  "proof-task",
  "serde",
@@ -3728,6 +3755,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3742,6 +3770,7 @@ dependencies = [
  "proof-canon",
  "proof-eval",
  "proof-executor",
+ "proof-experiment",
  "proof-http",
  "proof-rlm",
  "proof-rlm-store",
@@ -3852,6 +3881,8 @@ dependencies = [
  "axum",
  "axum-server",
  "clap",
+ "proof-experiment",
+ "proof-fc-experiment",
  "proof-fc-host",
  "proof-vm-agent",
  "proof-vm-proto",
@@ -3869,6 +3900,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "hex",
+ "proof-experiment",
  "proof-rlm",
  "serde",
  "serde_json",

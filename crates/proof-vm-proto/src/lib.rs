@@ -19,11 +19,19 @@
 //!    plane (before accepting) run: evidence for one artefact is never
 //!    evidence for another.
 //!
+//! A topic whose signed params select an **in-guest runner**
+//! (`proof_experiment`) gets a dedicated **experiment VM** per paid job
+//! instead of a sister: the host boots it from the pinned image, stages the
+//! pinned experiment pack over vsock ([`guest::HostToRlm::StagePack`]), runs
+//! the one job, and attests the run with [`GuestMode::ExperimentVm`] before
+//! the VM is destroyed. Same binding, same fail-closed checks.
+//!
 //! Nothing here names a benchmark, a model, or a repository.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 
+use proof_experiment::ExperimentSpec;
 use proof_rlm::{
     CustomRunReport, CustomRunRequest, RetainPolicy, SandboxPolicy, TopicVmSpec, VmHandle, VmJob,
     VmJobOutput,
@@ -78,6 +86,12 @@ pub struct AgentHealth {
     pub hypervisor: String,
     /// VMs currently bound (running or retained).
     pub vms: usize,
+    /// Dedicated experiment VMs currently running (a subset of `vms`).
+    #[serde(default)]
+    pub experiment_vms: usize,
+    /// Most experiment VMs this host runs at once (0 = experiments disabled).
+    #[serde(default)]
+    pub max_experiment_vms: usize,
 }
 
 /// `POST /v1/vms` body.
@@ -120,6 +134,10 @@ pub struct VmRecord {
     pub retain: RetainPolicy,
     /// Lifecycle state.
     pub state: VmState,
+    /// Present iff this is a dedicated experiment VM (one paid job, then
+    /// destroyed); such VMs never count as the topic's RLM VM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment: Option<ExperimentSpec>,
 }
 
 /// `POST /v1/vms/{vm_id}/jobs` body.
@@ -131,17 +149,49 @@ pub struct RunJobRequest {
     pub job: VmJob,
 }
 
-/// What the host attests about the sister miner guest a job used.
+/// Which guest the host attests a paid run happened in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestMode {
+    /// A sister miner guest beside the topic's RLM VM: no network, artefact
+    /// over vsock, destroyed after the run.
+    #[default]
+    Sister,
+    /// A dedicated experiment VM the host booted for this one job from the
+    /// pinned image, with the pinned pack staged; network = the operator's
+    /// egress allowlist (container image pulls, paid inference); destroyed
+    /// after the run. `sister_vm_id` is that VM's id.
+    ExperimentVm,
+}
+
+impl GuestMode {
+    /// Network the guest had, as recorded on the attestation.
+    #[must_use]
+    pub const fn network(self) -> &'static str {
+        match self {
+            Self::Sister => "none",
+            Self::ExperimentVm => "egress-allowlist",
+        }
+    }
+}
+
+/// What the host attests about the guest a paid job ran in — a sister miner
+/// guest, or the dedicated experiment VM ([`GuestMode`]).
 ///
 /// Written by the agent from what it booted and observed, never copied from
 /// the RLM guest. It is evidence for **one** paid job: the host copies
 /// `topic_id` / `submission_digest` / `artifact_digest` from the sister
-/// request it verified against that job before booting, and both the agent
-/// and the control plane run [`bind_evidence`] so a sister that ran artefact
-/// A can never stamp a report for artefact B.
+/// request (or the job itself, for an experiment VM) it verified against
+/// that job before booting, and both the agent and the control plane run
+/// [`bind_evidence`] so a guest that ran artefact A can never stamp a report
+/// for artefact B.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SisterAttestation {
-    /// Host id of the sister VM (destroyed after the run).
+    /// Which guest ran the job (absent on the wire = `sister`).
+    #[serde(default)]
+    pub mode: GuestMode,
+    /// Host id of the sister VM (destroyed after the run), or of the
+    /// experiment VM under [`GuestMode::ExperimentVm`].
     pub sister_vm_id: String,
     /// `sha256:` digest of the miner-guest image the host verified and booted.
     pub image_digest: String,
@@ -151,9 +201,10 @@ pub struct SisterAttestation {
     pub submission_digest: String,
     /// sha256 hex of the artefact tarball the host re-hashed and booted.
     pub artifact_digest: String,
-    /// The host booted the sister and the run happened inside it.
+    /// The host booted the guest and the run happened inside it.
     pub sandboxed: bool,
-    /// Network the sister had. Always `none`: the artefact travels over vsock.
+    /// Network the guest had: `none` for a sister (the artefact travels over
+    /// vsock), `egress-allowlist` for an experiment VM ([`GuestMode::network`]).
     pub network: String,
     /// FLOPs the guest measured for the run (host-relayed, never RLM-authored).
     pub flops_used: Option<u64>,
@@ -367,6 +418,8 @@ pub enum ErrorCode {
     NotFound,
     /// The VM is running another job.
     Busy,
+    /// The host runs its maximum of experiment VMs; retry when one finishes.
+    Capacity,
     /// The hypervisor or guest failed.
     Backend,
     /// The guest answered with the wrong output shape.
@@ -382,7 +435,7 @@ impl ErrorCode {
     pub fn status(self) -> u16 {
         match self {
             Self::Unauthorized => 401,
-            Self::NotReady => 503,
+            Self::NotReady | Self::Capacity => 503,
             Self::BadSpec => 400,
             Self::TopicMismatch | Self::AlreadyExists | Self::Busy => 409,
             Self::NotFound => 404,
@@ -437,6 +490,7 @@ mod tests {
         assert_eq!(ErrorCode::NotReady.status(), 503);
         assert_eq!(ErrorCode::BadSpec.status(), 400);
         assert_eq!(ErrorCode::TopicMismatch.status(), 409);
+        assert_eq!(ErrorCode::Capacity.status(), 503);
         assert_eq!(ErrorCode::NotFound.status(), 404);
         assert_eq!(ErrorCode::Backend.status(), 502);
         assert_eq!(ErrorCode::EvidenceMismatch.status(), 502);
@@ -449,6 +503,7 @@ mod tests {
 
     fn sister_for(req: &proof_rlm::CustomRunRequest) -> SisterAttestation {
         SisterAttestation {
+            mode: GuestMode::Sister,
             sister_vm_id: "topic-a-0001-s1".into(),
             image_digest: format!("sha256:{}", "dd".repeat(32)),
             topic_id: req.topic_id.clone(),
@@ -536,6 +591,52 @@ mod tests {
         );
         assert_eq!(EvidenceBinding::of_job(&inspect), None);
         assert_eq!(EvidenceBinding::of_output(&VmJobOutput::Archived), None);
+    }
+
+    /// An attestation without `mode` on the wire is a sister (older agents);
+    /// an experiment-VM attestation binds the same way and names its network.
+    #[test]
+    fn attestation_mode_defaults_to_sister_and_experiment_vms_bind_alike() {
+        let req = request();
+        let mut json = serde_json::to_value(sister_for(&req)).expect("json");
+        json.as_object_mut().expect("object").remove("mode");
+        let back: SisterAttestation = serde_json::from_value(json).expect("legacy");
+        assert_eq!(back.mode, GuestMode::Sister);
+        assert_eq!(GuestMode::Sister.network(), "none");
+        assert_eq!(GuestMode::ExperimentVm.network(), "egress-allowlist");
+        let experiment = SisterAttestation {
+            mode: GuestMode::ExperimentVm,
+            sister_vm_id: "topic-a-x0002".into(),
+            network: GuestMode::ExperimentVm.network().into(),
+            ..sister_for(&req)
+        };
+        let json = serde_json::to_string(&experiment).expect("json");
+        assert!(json.contains("\"mode\":\"experiment_vm\""), "{json}");
+        let job = VmJob::Evaluate {
+            request: req.clone(),
+            checklist_digest: "c".into(),
+            rules_version: 1,
+        };
+        let out = VmJobOutput::Evaluated(RunOutcome {
+            report: report_for(&req, 0.9),
+            logs: vec![],
+        });
+        bind_evidence(&job, &out, Some(&experiment)).expect("bound to the job");
+        let health = AgentHealth {
+            api_version: API_VERSION,
+            ready: true,
+            reason: String::new(),
+            hypervisor: "fake".into(),
+            vms: 1,
+            experiment_vms: 1,
+            max_experiment_vms: 2,
+        };
+        let legacy: AgentHealth = serde_json::from_str(
+            r#"{"api_version":1,"ready":true,"reason":"","hypervisor":"firecracker","vms":0}"#,
+        )
+        .expect("older agents omit the experiment counters");
+        assert_eq!((legacy.experiment_vms, legacy.max_experiment_vms), (0, 0));
+        assert_eq!(health.experiment_vms, 1);
     }
 
     #[test]

@@ -73,9 +73,15 @@ pub use state::{
     StaticOwnerHook, Transition, OWNER_INFERENCE_KEY_FILE_ENV,
 };
 pub use vm::{
-    RetainPolicy, TopicVmOrchestrator, TopicVmSpec, UnwiredVmOrchestrator, VmBackedRunner, VmError,
-    VmHandle, VmJob, VmJobOutput, VmTemplate, RLM_VM_IMAGE_DIGEST_ENV,
+    run_paid_job, RetainPolicy, TopicVmOrchestrator, TopicVmSpec, UnwiredVmOrchestrator,
+    VmBackedRunner, VmError, VmHandle, VmJob, VmJobOutput, VmTemplate, RLM_VM_IMAGE_DIGEST_ENV,
     VM_ORCHESTRATOR_TOKEN_FILE_ENV, VM_ORCHESTRATOR_URL_ENV,
+};
+// The generic in-guest experiment binding (runner id, pinned pack, VM size
+// read from the signed topic's `constraints.params`; operator ceilings).
+pub use proof_experiment::{
+    ExperimentBinding, ExperimentCeilings, ExperimentError, ExperimentPolicy, ExperimentSpec,
+    PackRef, VmShape,
 };
 
 #[cfg(test)]

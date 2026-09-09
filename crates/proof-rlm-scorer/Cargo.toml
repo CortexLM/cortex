@@ -31,6 +31,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 crypto = { path = "../crypto" }
 hex = "0.4"
 http-body-util = "0.1"
+proof-experiment = { path = "../proof-experiment" }
 proof-http = { path = "../proof-http" }
 proof-rlm = { path = "../proof-rlm", features = ["test-fixtures"] }
 proof-store = { path = "../proof-store" }

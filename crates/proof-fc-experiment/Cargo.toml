@@ -1,0 +1,30 @@
+[package]
+name = "proof-fc-experiment"
+description = "Experiment-VM layer of the proof-vm-orchestrator host: wraps the Firecracker hypervisor so a spec with `experiment` set is held under the host's per-VM ceilings, gets the topic-pinned experiment pack resolved from the host pack directory, re-hashed, and staged into the guest over vsock before any job, and has its one paid job attested by the host as an experiment_vm run. Generic: no benchmark, dataset, runner, or pack is named here."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+proof-experiment = { path = "../proof-experiment" }
+proof-fc-host = { path = "../proof-fc-host" }
+proof-rlm = { path = "../proof-rlm" }
+proof-vm-agent = { path = "../proof-vm-agent" }
+proof-vm-proto = { path = "../proof-vm-proto" }
+tokio = { version = "1", features = ["sync", "time", "rt", "net", "io-util"] }
+tracing = "0.1"
+
+[dev-dependencies]
+hex = "0.4"
+proof-rlm = { path = "../proof-rlm", features = ["test-fixtures"] }
+proof-vm-agent = { path = "../proof-vm-agent", features = ["test-fixtures"] }
+proof-vm-proto = { path = "../proof-vm-proto", features = ["test-fixtures"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "sync", "time"] }
+
+[lints]
+workspace = true

@@ -239,6 +239,7 @@ pub async fn run(
         outputs,
     };
     let attestation = SisterAttestation {
+        mode: proof_vm_proto::GuestMode::Sister,
         sister_vm_id: id,
         image_digest: cfg.sister_image_digest.clone(),
         topic_id: job.topic_id.clone(),

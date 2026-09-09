@@ -21,6 +21,8 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 # main.rs, so boot no longer depends on how the workspace was built.
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 clap = { version = "4", features = ["derive", "env"] }
+proof-experiment = { path = "../../crates/proof-experiment" }
+proof-fc-experiment = { path = "../../crates/proof-fc-experiment" }
 proof-fc-host = { path = "../../crates/proof-fc-host" }
 proof-vm-agent = { path = "../../crates/proof-vm-agent" }
 proof-vm-proto = { path = "../../crates/proof-vm-proto" }

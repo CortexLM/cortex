@@ -12,6 +12,14 @@
 //! key from the control plane — owner key material is read from
 //! `--owner-key-dir` on this host and staged over vsock.
 //!
+//! Topics whose signed params select an in-guest runner get **one dedicated
+//! experiment microVM per paid job** instead of a sister
+//! (`proof-fc-experiment`): sized under this host's ceilings
+//! (`--experiment-max-*`, lock default 16 vCPU / 32 GiB / 32 GiB disk), fed
+//! the topic-pinned pack from `--experiment-pack-dir` (re-hashed here, staged
+//! over vsock), at most `--max-experiment-vms` at once, destroyed after the
+//! job. What runs inside is topic data; nothing here names it.
+//!
 //! Fail-closed at boot: malformed kernel / sister image pins exit 1, a
 //! non-loopback bind without a TLS certificate + key exits 1, a certificate
 //! without a SAN for every host the control plane's
@@ -37,8 +45,15 @@ use std::time::Duration;
 
 use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
+use proof_experiment::ExperimentCeilings;
+use proof_fc_experiment::{
+    ExperimentHostConfig, ExperimentHypervisor, VsockPackStager, DEFAULT_PACK_DIR,
+    DEFAULT_STAGE_TIMEOUT,
+};
 use proof_fc_host::{EgressAllow, FirecrackerHypervisor, HostConfig};
-use proof_vm_agent::{agent_router, AgentState, BearerAuth, Hypervisor};
+use proof_vm_agent::{
+    agent_router, AgentState, BearerAuth, Hypervisor, DEFAULT_MAX_EXPERIMENT_VMS,
+};
 use proof_vm_proto::DEFAULT_AGENT_PORT;
 
 /// KVM-host agent CLI. Every flag has a `PROOF_VM_AGENT_*` env twin for the
@@ -159,6 +174,42 @@ struct Cli {
         default_value = "/var/lib/proof-vm/retained"
     )]
     retain_dir: PathBuf,
+    /// Experiment packs (`sha256-<hex>.tar`, or a topic's relative locator)
+    /// staged into dedicated experiment VMs. Never written by the agent.
+    #[arg(long, env = "PROOF_VM_AGENT_EXPERIMENT_PACK_DIR", default_value = DEFAULT_PACK_DIR)]
+    experiment_pack_dir: PathBuf,
+    /// Most vCPUs one experiment VM may be created with (lock default 16).
+    #[arg(long, env = "PROOF_VM_AGENT_EXPERIMENT_MAX_VCPUS", default_value_t = proof_experiment::DEFAULT_MAX_EXPERIMENT_VCPUS)]
+    experiment_max_vcpus: u32,
+    /// Most memory (MiB) one experiment VM may be created with (lock default 32768).
+    #[arg(long, env = "PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB", default_value_t = proof_experiment::DEFAULT_MAX_EXPERIMENT_MEM_MIB)]
+    experiment_max_mem_mib: u32,
+    /// Most writable disk (MiB) one experiment VM may be created with.
+    #[arg(long, env = "PROOF_VM_AGENT_EXPERIMENT_MAX_DISK_MIB", default_value_t = proof_experiment::DEFAULT_MAX_EXPERIMENT_DISK_MIB)]
+    experiment_max_disk_mib: u32,
+    /// Experiment VMs this host runs at once (each up to the ceilings; 0 = none).
+    #[arg(long, env = "PROOF_VM_AGENT_MAX_EXPERIMENT_VMS", default_value_t = DEFAULT_MAX_EXPERIMENT_VMS)]
+    max_experiment_vms: usize,
+    /// Seconds the guest may take to verify and unpack a staged pack.
+    #[arg(long, env = "PROOF_VM_AGENT_PACK_STAGE_TIMEOUT_SECS", default_value_t = DEFAULT_STAGE_TIMEOUT.as_secs())]
+    pack_stage_timeout_secs: u64,
+}
+
+/// The experiment layer's config from the flags; ceilings validated.
+fn experiment_config(cli: &Cli) -> Result<ExperimentHostConfig, String> {
+    let cfg = ExperimentHostConfig {
+        pack_dir: cli.experiment_pack_dir.clone(),
+        ceilings: ExperimentCeilings {
+            max_vcpus: cli.experiment_max_vcpus,
+            max_mem_mib: cli.experiment_max_mem_mib,
+            default_disk_mib: proof_experiment::DEFAULT_EXPERIMENT_DISK_MIB
+                .min(cli.experiment_max_disk_mib),
+            max_disk_mib: cli.experiment_max_disk_mib,
+        },
+        stage_timeout: Duration::from_secs(cli.pack_stage_timeout_secs),
+    };
+    cfg.validate().map_err(|e| e.to_string())?;
+    Ok(cfg)
 }
 
 fn host_config(cli: &Cli) -> Result<HostConfig, String> {
@@ -363,12 +414,23 @@ fn main() -> ExitCode {
 
 async fn run(cli: &Cli) -> Result<(), String> {
     let cfg = host_config(cli)?;
+    let experiments = experiment_config(cli)?;
     let tls = tls_required(cli.bind, cli.tls_cert.as_ref(), cli.tls_key.as_ref())?;
-    let hypervisor = Arc::new(FirecrackerHypervisor::new(cfg).map_err(|e| e.to_string())?);
+    let hypervisor = Arc::new(FirecrackerHypervisor::new(cfg.clone()).map_err(|e| e.to_string())?);
     match hypervisor.ready() {
         Ok(()) => tracing::info!("firecracker + jailer + /dev/kvm present; agent ready"),
         Err(e) => tracing::warn!("{e}; every create will answer 503 until fixed"),
     }
+    tracing::info!(
+        pack_dir = %experiments.pack_dir.display(),
+        pack_dir_present = experiments.pack_dir.is_dir(),
+        max_vcpus = experiments.ceilings.max_vcpus,
+        max_mem_mib = experiments.ceilings.max_mem_mib,
+        max_disk_mib = experiments.ceilings.max_disk_mib,
+        default_disk_mib = experiments.ceilings.default_disk_mib,
+        max_experiment_vms = cli.max_experiment_vms,
+        "experiment vm layer (one dedicated vm per paid job; pack staged over vsock)"
+    );
     let auth = Arc::new(BearerAuth::from_file(&cli.token_file));
     if auth.configured() {
         tracing::info!(token_file = %cli.token_file.display(), "bearer token file present (contents not logged)");
@@ -385,7 +447,15 @@ async fn run(cli: &Cli) -> Result<(), String> {
         sister_mem_mib = hypervisor.config().sister_mem_mib,
         "host config"
     );
-    let state = AgentState::new(hypervisor as Arc<dyn Hypervisor>, auth);
+    let stage_timeout = experiments.stage_timeout;
+    let layered = ExperimentHypervisor::new(
+        hypervisor as Arc<dyn Hypervisor>,
+        experiments,
+        Box::new(VsockPackStager::new(cfg, stage_timeout)),
+    )
+    .map_err(|e| e.to_string())?;
+    let state =
+        AgentState::with_max_experiment_vms(Arc::new(layered), auth, cli.max_experiment_vms);
     let app = agent_router(state);
     let handle = axum_server::Handle::new();
     let shutdown = handle.clone();
@@ -453,6 +523,48 @@ mod tests {
             Cli::try_parse_from(["proof-vm-orchestrator"]).is_err(),
             "pins and token file are required"
         );
+    }
+
+    /// The experiment layer boots with the lock ceilings (16 vCPU / 32 GiB
+    /// RAM / 32 GiB disk default, 128 GiB max), a small VM count, and the
+    /// default pack dir; the operator may move every knob, but not out of a
+    /// bootable range.
+    #[test]
+    fn experiment_knobs_default_to_the_lock_and_validate() {
+        let c = cli(&[]);
+        let e = experiment_config(&c).expect("defaults");
+        assert_eq!(e.pack_dir, PathBuf::from("/var/lib/proof-vm/packs"));
+        assert_eq!((e.ceilings.max_vcpus, e.ceilings.max_mem_mib), (16, 32_768));
+        assert_eq!(
+            (e.ceilings.default_disk_mib, e.ceilings.max_disk_mib),
+            (32_768, 131_072)
+        );
+        assert_eq!(c.max_experiment_vms, 2);
+        assert_eq!(e.stage_timeout, Duration::from_mins(10));
+        let bigger = cli(&[
+            "--experiment-max-vcpus",
+            "32",
+            "--experiment-max-mem-mib",
+            "65536",
+            "--experiment-max-disk-mib",
+            "16384",
+            "--max-experiment-vms",
+            "4",
+            "--experiment-pack-dir",
+            "/srv/packs",
+        ]);
+        let e = experiment_config(&bigger).expect("raised");
+        assert_eq!((e.ceilings.max_vcpus, e.ceilings.max_mem_mib), (32, 65_536));
+        assert_eq!(
+            e.ceilings.default_disk_mib, 16_384,
+            "the default disk never exceeds the disk ceiling"
+        );
+        assert_eq!(e.pack_dir, PathBuf::from("/srv/packs"));
+        assert_eq!(bigger.max_experiment_vms, 4);
+        let unbootable = cli(&["--experiment-max-mem-mib", "128"]);
+        assert!(experiment_config(&unbootable).is_err());
+        let no_disk = cli(&["--experiment-max-disk-mib", "512"]);
+        assert!(experiment_config(&no_disk).is_err());
     }
 
     #[test]

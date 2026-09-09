@@ -24,7 +24,7 @@ use proof_rlm::{
     ArtifactFile, Checklist, CustomRunRequest, InspectOutcome, LogFile, RetainPolicy, RunOutcome,
     TopicVmSpec, VmJob, VmJobOutput,
 };
-use proof_vm_proto::{EvidenceBinding, SisterAttestation};
+use proof_vm_proto::{EvidenceBinding, GuestMode, SisterAttestation};
 
 use crate::auth::BearerAuth;
 use crate::hypervisor::{BootedVm, HvError, Hypervisor, JobOutcome};
@@ -59,7 +59,12 @@ pub struct FakeHypervisor {
     dead: Mutex<BTreeSet<String>>,
     /// The VM process exits while the next job runs.
     dies_under_job: AtomicBool,
+    /// Whether an experiment VM attests the paid job it ran (the host's
+    /// view). `false` models a host that lost track of what it booted.
+    experiment_attests: AtomicBool,
     boots: Mutex<Vec<BootedVm>>,
+    /// Specs of every VM booted, by id (experiment VMs carry `experiment`).
+    specs: Mutex<Vec<(String, TopicVmSpec)>>,
     jobs: Mutex<Vec<(String, VmJob)>>,
     teardowns: Mutex<Vec<(String, RetainPolicy)>>,
 }
@@ -84,10 +89,27 @@ impl FakeHypervisor {
             job_delay: Mutex::new(None),
             dead: Mutex::new(BTreeSet::new()),
             dies_under_job: AtomicBool::new(false),
+            experiment_attests: AtomicBool::new(true),
             boots: Mutex::new(Vec::new()),
+            specs: Mutex::new(Vec::new()),
             jobs: Mutex::new(Vec::new()),
             teardowns: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Whether experiment VMs attest their paid job (default `true`).
+    pub fn set_experiment_attests(&self, v: bool) {
+        self.experiment_attests.store(v, Ordering::SeqCst);
+    }
+
+    /// The spec `vm_id` was booted with, if this fake booted it.
+    pub fn spec_of(&self, vm_id: &str) -> Option<TopicVmSpec> {
+        self.specs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(id, _)| id == vm_id)
+            .map(|(_, s)| s.clone())
     }
 
     pub fn set_ready(&self, v: bool) {
@@ -178,9 +200,6 @@ impl FakeHypervisor {
     }
 
     fn sister_for(&self, vm: &BootedVm, req: &CustomRunRequest) -> Option<SisterAttestation> {
-        if !self.sister.load(Ordering::SeqCst) {
-            return None;
-        }
         let binding = self
             .sister_replay
             .lock()
@@ -189,7 +208,34 @@ impl FakeHypervisor {
             .unwrap_or_else(|| {
                 EvidenceBinding::new(&req.topic_id, &req.submission_digest, &req.artifact_digest)
             });
+        // An experiment VM is the sandbox itself: the host attests the run
+        // in that VM (no sister), with the guest's own measurement.
+        if self
+            .spec_of(&vm.vm_id)
+            .is_some_and(|s| s.experiment.is_some())
+        {
+            if !self.experiment_attests.load(Ordering::SeqCst) {
+                return None;
+            }
+            return Some(SisterAttestation {
+                mode: GuestMode::ExperimentVm,
+                sister_vm_id: vm.vm_id.clone(),
+                image_digest: vm.image_digest.clone(),
+                topic_id: binding.topic_id,
+                submission_digest: binding.submission_digest,
+                artifact_digest: binding.artifact_digest,
+                sandboxed: true,
+                network: GuestMode::ExperimentVm.network().into(),
+                flops_used: *self.rlm_flops.lock().unwrap(),
+                wall_ms: 10,
+                exit_code: Some(0),
+            });
+        }
+        if !self.sister.load(Ordering::SeqCst) {
+            return None;
+        }
         Some(SisterAttestation {
+            mode: GuestMode::Sister,
             sister_vm_id: format!("{}-s{}", vm.vm_id, req.submission_digest.len()),
             image_digest: miner_image_digest(),
             topic_id: binding.topic_id,
@@ -228,6 +274,10 @@ impl Hypervisor for FakeHypervisor {
             image_digest: spec.template.image_digest.clone(),
         };
         self.boots.lock().unwrap().push(vm.clone());
+        self.specs
+            .lock()
+            .unwrap()
+            .push((vm_id.to_owned(), spec.clone()));
         Ok(vm)
     }
 

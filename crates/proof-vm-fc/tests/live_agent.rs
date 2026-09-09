@@ -42,6 +42,108 @@ fn spec(template: VmTemplate) -> TopicVmSpec {
     TopicVmSpec::for_topic(&req.topic_id, template, req.sandbox)
 }
 
+/// Over the live wire: a topic whose params select an in-guest runner gets
+/// one experiment VM per paid job on the agent (beside its RLM VM, sized by
+/// the topic under the lock ceilings, carrying the pack pin), the host's
+/// `experiment_vm` attestation stamps the report, and the VM is destroyed
+/// after the job. A second evaluation is a second VM, and a topic that
+/// selects nothing keeps the sister path.
+#[tokio::test]
+async fn an_experiment_topic_gets_one_attested_vm_per_paid_job_over_the_wire() {
+    use proof_rlm::fixtures::experiment_request;
+    use proof_vm_proto::GuestMode;
+    let (agent, token) = live("experiments").await;
+    let orch = Arc::new(client(&agent, &token, &pinned_template().image_digest));
+    let runner = VmBackedRunner::new(orch.clone(), pinned_template());
+    let req = experiment_request(Some(4));
+    runner.inspect(&req, &rules()).await.expect("inspect");
+    let hv = &agent.hypervisor;
+    hv.set_rlm_flops(Some(77));
+    let run = runner
+        .evaluate(&req, &token_for(&req))
+        .await
+        .expect("evaluate in an experiment vm");
+    assert!(run.report.sandboxed, "the host attested the experiment vm");
+    assert_eq!(
+        run.report.flops_used,
+        Some(77),
+        "the guest's measurement, host-relayed"
+    );
+    let boots = hv.boots();
+    assert_eq!(boots.len(), 2, "topic vm + one experiment vm");
+    let exp = hv
+        .spec_of(&boots[1].vm_id)
+        .expect("spec")
+        .experiment
+        .expect("experiment spec");
+    assert_eq!(exp.runner, "placeholder_in_guest_runner");
+    assert_eq!(exp.pack.digest, format!("sha256:{}", "ee".repeat(32)));
+    assert_eq!(exp.disk_mib, 32_768);
+    let spec = hv.spec_of(&boots[1].vm_id).expect("spec");
+    assert_eq!((spec.template.vcpus, spec.template.mem_mib), (4, 32_768));
+    assert!(boots[1].vm_id.contains("-x"), "{}", boots[1].vm_id);
+    assert_eq!(
+        hv.teardowns(),
+        vec![(boots[1].vm_id.clone(), RetainPolicy::Destroy)],
+        "destroyed after its one job"
+    );
+    let jobs = hv.jobs();
+    assert_eq!(jobs.len(), 2);
+    assert_eq!(
+        jobs[1].0, boots[1].vm_id,
+        "the paid job ran in the experiment vm"
+    );
+    assert_eq!(agent.state.running_experiments().await, 0);
+    assert_eq!(agent.state.running().await.len(), 1, "the topic vm stays");
+
+    runner
+        .evaluate(&req, &token_for(&req))
+        .await
+        .expect("second evaluate");
+    assert_eq!(hv.boots().len(), 3, "a second experiment is a second vm");
+    assert_eq!(hv.teardowns().len(), 2);
+
+    // The host stops attesting: the report comes back unsandboxed and the
+    // client refuses it for a firecracker_required topic — no substitute.
+    hv.set_experiment_attests(false);
+    let err = runner
+        .evaluate(&req, &token_for(&req))
+        .await
+        .expect_err("no attestation");
+    assert!(
+        err.to_string()
+            .contains("without the host's sister-guest attestation"),
+        "{err}"
+    );
+    assert_eq!(hv.teardowns().len(), 3, "still destroyed after the failure");
+    hv.set_experiment_attests(true);
+
+    // The attestation must be about the VM the job was dispatched to.
+    let handle = orch
+        .attach(&req.topic_id)
+        .await
+        .expect("attach")
+        .expect("topic vm");
+    let mut plain = request();
+    plain.constraints.params.clear();
+    let out = orch
+        .run(
+            &handle,
+            VmJob::Evaluate {
+                request: plain.clone(),
+                checklist_digest: token_for(&plain).checklist_digest().to_owned(),
+                rules_version: 1,
+            },
+        )
+        .await
+        .expect("sister path on the topic vm");
+    let VmJobOutput::Evaluated(run) = out else {
+        panic!("shape");
+    };
+    assert!(run.report.sandboxed);
+    assert_eq!(GuestMode::Sister.network(), "none");
+}
+
 #[tokio::test]
 async fn one_topic_one_vm_inspect_then_paid_run_with_sister_attestation() {
     let (agent, token) = live("flow").await;
@@ -315,6 +417,7 @@ async fn replayed_sister_evidence_for_another_artifact_never_scores() {
     // The client's own check refuses the same body should an agent ever emit it.
     let handle = orch.attach(&b.topic_id).await.expect("attach").expect("vm");
     let sister = proof_vm_proto::SisterAttestation {
+        mode: proof_vm_proto::GuestMode::Sister,
         sister_vm_id: format!("{}-s1", handle.vm_id),
         image_digest: format!("sha256:{}", "dd".repeat(32)),
         topic_id: a.topic_id.clone(),
