@@ -18,11 +18,11 @@ services:
       # for 60s and tries the next in order.
       BASE_CHAIN_ENDPOINTS: "wss://bittensor-finney.api.onfinality.io/public-ws,wss://entrypoint-finney.opentensor.ai:443"
       BASE_COORDINATION_INTERVAL_SECS: "10"
-      # Public sealed-weights API (same gateway as Caddy). Validators verify
+      # Public metal gateway (gateway.cortex.foundation). Validators verify
       # `GET /v1/weights/latest` + `GET /v1/bundle/{epoch}` here — not the
       # VPC bind. Do not fall back to role-validator.yml (that default is
       # the staging master VPC IP / netuid 541).
-      BASE_GATEWAY_ENDPOINT: "https://chain.joinbase.ai"
+      BASE_GATEWAY_ENDPOINT: "https://gateway.cortex.foundation"
       BT_WALLETS_PATH: /run/base/wallets
       BASE_VALIDATOR_WALLET: base-validator
     volumes:
@@ -34,8 +34,8 @@ services:
       BASE_CHAIN_ENDPOINT: "wss://entrypoint-finney.opentensor.ai:443"
       # Same ordered failover list as the validator (see note above).
       BASE_CHAIN_ENDPOINTS: "wss://bittensor-finney.api.onfinality.io/public-ws,wss://entrypoint-finney.opentensor.ai:443"
-      # Public API hostname (cleartext on :80/:8080 until ACME).
-      BASE_DOMAIN: chain.joinbase.ai
+      # Public API hostname (Caddy TLS → this process on :8080).
+      BASE_DOMAIN: gateway.cortex.foundation
       BT_WALLETS_PATH: /run/base/wallets
       BASE_GATEWAY_WALLET: base-owner
       BASE_GATEWAY_WALLET_HOTKEY: default
@@ -43,7 +43,7 @@ services:
       BASE_GATEWAY_REQUIRE_OWNER: "1"
       # Required whenever REQUIRE_OWNER=1 — gates /v1/admin/* (seal, backends, …).
       BASE_GATEWAY_ADMIN_TOKEN_FILE: /run/secrets/gateway_admin_token
-    # Serve chain.joinbase.ai without forcing clients onto :8080 (8080 is VPC-only).
+    # Serve gateway.cortex.foundation without forcing clients onto :8080 (8080 is VPC-only).
     # Note: cleartext :80 publishes the full gateway surface; pair with host Caddy
     # path filters / DOCKER-USER drops until ACME owns :80. Prefer HTTPS clients.
     ports:

@@ -27,7 +27,7 @@ use proof::SubmitInput;
     name = "ctx",
     version,
     about = "Cortex subnet CLI: challenge status, Proof submits, and Bounty reports",
-    long_about = "ctx talks to the public Cortex gateway at https://network.cortex.foundation.
+    long_about = "ctx talks to the public Cortex gateway at https://gateway.cortex.foundation.
 
 Live challenges: bounty (2000 bps) and proof (8000 bps). relearn*, design, and
 prism are off and earn nothing.
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn default_gateway_matches_the_docs_host() {
-        assert_eq!(DEFAULT_GATEWAY, "https://network.cortex.foundation");
+        assert_eq!(DEFAULT_GATEWAY, "https://gateway.cortex.foundation");
     }
 
     #[test]
@@ -363,7 +363,7 @@ mod tests {
             .map(ToString::to_string)
             .unwrap_or_default();
         assert!(
-            long_about.contains("https://network.cortex.foundation"),
+            long_about.contains("https://gateway.cortex.foundation"),
             "{long_about}"
         );
         assert!(!long_about.contains("<gateway>"), "{long_about}");

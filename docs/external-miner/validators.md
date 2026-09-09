@@ -13,7 +13,7 @@ trust-root check, which is the point.
 ## Job
 
 1. Pull `GET /v1/weights/latest` from the master gateway.
-   - Prod: `https://chain.joinbase.ai/v1/weights/latest`
+   - Prod: `https://gateway.cortex.foundation/v1/weights/latest`
    - Staging / VPC: `$BASE_GATEWAY_ENDPOINT/v1/weights/latest` (compose default `http://10.116.0.2:8080`)
 2. Verify the sealed bundle: signatures, D24 completeness (every declared participant has a leaf), owner trust root on **local disk** (`config/challenges.toml`, `config/measurements.toml`), no forged leaves.
 3. `set_weights` on-chain.
@@ -44,7 +44,7 @@ Env: [`deploy/env/validator.env.example`](../../deploy/env/validator.env.example
 
 ```bash
 # required: BASE_ROLE=validator, BASE_NETUID, database URL, BASE_CHAIN_ENDPOINT
-# BASE_GATEWAY_ENDPOINT = master gateway (prod pin: https://chain.joinbase.ai)
+# BASE_GATEWAY_ENDPOINT = master gateway (prod pin: https://gateway.cortex.foundation)
 # wallet: BASE_VALIDATOR_WALLET or BASE_VALIDATOR_MNEMONIC_FILE (for set_weights)
 
 ./deploy/scripts/materialize-env.sh

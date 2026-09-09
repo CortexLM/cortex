@@ -140,4 +140,4 @@ jobs:
             ctx status
             ```
 
-            Default gateway: https://network.cortex.foundation
+            Default gateway: https://gateway.cortex.foundation

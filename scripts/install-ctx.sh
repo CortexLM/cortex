@@ -14,7 +14,7 @@
 set -eu
 
 REPO="CortexLM/cortex"
-GATEWAY="https://network.cortex.foundation"
+GATEWAY="https://gateway.cortex.foundation"
 VERSION="${CTX_VERSION:-latest}"
 INSTALL_DIR="${CTX_INSTALL_DIR:-$HOME/.local/bin}"
 

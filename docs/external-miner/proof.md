@@ -12,7 +12,7 @@ research-to-payment path. Read the
 [paper-to-code comparison](../WHITEPAPER.md#proposal-versus-current-code) and
 confirm deployment support with the operator first.
 
-**Gateway:** [https://network.cortex.foundation](https://network.cortex.foundation)  
+**Gateway:** [https://gateway.cortex.foundation](https://gateway.cortex.foundation)  
 **CLI:** `ctx proof topics`, then `ctx proof submit` (install:
 [README](./README.md))  
 **Pin:** [`config/proof-pin.toml`](../../config/proof-pin.toml)  
@@ -69,7 +69,7 @@ that topic. Zero open topics → the host cannot score (`503`), not a paid 0.
 ```bash
 ctx proof status
 # same as:
-curl -sS https://network.cortex.foundation/challenge/proof/v1/status
+curl -sS https://gateway.cortex.foundation/challenge/proof/v1/status
 ```
 
 `GET /challenge/proof/v1/status` shows `can_score`, `eval_backend`,
@@ -102,8 +102,8 @@ rented.
 
 ```bash
 ctx proof topics
-curl -sS https://network.cortex.foundation/challenge/proof/v1/proof/topics
-curl -sS https://network.cortex.foundation/challenge/proof/v1/proof/topics/dt-no-ib-v0
+curl -sS https://gateway.cortex.foundation/challenge/proof/v1/proof/topics
+curl -sS https://gateway.cortex.foundation/challenge/proof/v1/proof/topics/dt-no-ib-v0
 ```
 
 Topics are **operator-published** and can be **injected at any time** (operator
@@ -195,7 +195,7 @@ ctx proof submit \
 The same submit with `curl`:
 
 ```bash
-curl -sS -X POST https://network.cortex.foundation/challenge/proof/v1/submissions \
+curl -sS -X POST https://gateway.cortex.foundation/challenge/proof/v1/submissions \
   -H 'content-type: application/json' \
   -H "X-Lium-Api-Key: $LIUM_API_KEY" \
   -d '{
@@ -220,7 +220,7 @@ judge config, no open sealed topic), submissions answer **503**.
 
 ### Required POST JSON
 
-`POST https://network.cortex.foundation/challenge/proof/v1/submissions`
+`POST https://gateway.cortex.foundation/challenge/proof/v1/submissions`
 
 | Field | Required | Shape |
 |-------|----------|-------|
@@ -242,7 +242,7 @@ contamination check. It is `contamination_evidence_missing`: the row is
 ```bash
 ctx proof show <id>
 # same as:
-curl -sS https://network.cortex.foundation/challenge/proof/v1/submissions/<id>
+curl -sS https://gateway.cortex.foundation/challenge/proof/v1/submissions/<id>
 ```
 
 | `state` | Meaning |
