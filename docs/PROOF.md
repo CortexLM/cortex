@@ -221,7 +221,11 @@ Trust-root keygen is the throwaway owner path in
   `custom_family_wired` (a custom-family scorer with ≥1 registered runner is
   on this host, independent of Lium), `baseline_sealed`, `open_topics`,
   `scorable_topics` (open topics whose family's scorer is wired on this
-  host; `can_score` is true when it is non-empty), `registered_custom`
+  host **and** that do not defer scoring; `can_score` is true when it is
+  non-empty), `deferred_topics` (open topics whose signed document sets
+  `constraints.params.defer_scoring = "true"`: submits there are **201**
+  `queued`, nothing is evaluated), `queued_submissions` (rows waiting for a
+  drain), `registered_custom`
   (custom ids with a runner), `custom_ready` (registered ids whose runner
   could run right now: topic-VM orchestrator bearer file present, image
   pinned — independent of which topics are open), public
@@ -246,6 +250,18 @@ Trust-root keygen is the throwaway owner path in
   data. Names env vars and container
   paths, never the bearer. Run over loopback; wrapped by
   [`deploy/scripts/proof-vm-wire-check.sh`](../deploy/scripts/proof-vm-wire-check.sh).
+- `POST /v1/admin/proof/queue/drain` — operator bearer; body
+  `{"topic_id": "<id>", "limit": 1}`. Scores that topic's `queued` rows
+  oldest first through the live submit path (`limit` rows per call, default
+  1) and answers a report (`drained[]`, `remaining`, `stopped`). **409**
+  while the topic still defers scoring or is not open (nothing touched);
+  **400** unknown topic; **503** carrying the report when the host refused
+  before one row scored — every row stays `queued`, nothing was rented. See
+  § Deferred scoring.
+- `POST /v1/admin/proof/submissions/{id}/score` — operator bearer; scores
+  one `queued` row now under the same rules (**404** unknown, **409** not
+  queued / already being scored / topic still deferring, **503** host
+  refusal with the row released back to the queue).
 - `POST /v1/submissions` **requires** `topic_id`. Missing/unknown/not-open →
   **400**. Miners do **not** bind the judge offer or the executor offer. Zero
   open / unsealed baseline / empty digest / missing or closed RLM judge
@@ -254,7 +270,15 @@ Trust-root keygen is the throwaway owner path in
   `custom_id` / `nll` or `throughput` topic on a host with no Lium harvest
   → **503**. Refusals must **not** persist rows. Scored rows
   stamp `executor_offer_id` + `executor_commitment` next to the judge
-  `inference_offer_id` + `config_commitment`.
+  `inference_offer_id` + `config_commitment`. On a topic listed in
+  `deferred_topics` the same intake gates apply (**400**s unchanged) but
+  the host gates are not consulted: the row persists as **`queued`**
+  (**201**, `eligible: false`, `detail` names the deferral) with no eval,
+  no rent, no judge call, no stamps, no mass; the same artefact from the
+  same hotkey again is **200** with the existing row.
+- `GET /v1/submissions?state=<queued|awaiting_admin|rejected|champion>&topic_id=<id>`
+  — both filters optional; newest first. `GET /v1/submissions/{id}` shows a
+  `queued` row with `verdict: null` until it is drained.
 - A pass that the family scorer crowns (custom: green checklist and
   `primary >= bar * (1 + epsilon_rel)` direction-aware, bar = sealed value or
   reigning best) persists as `champion`; other passes stay `awaiting_admin`.
@@ -267,6 +291,55 @@ Trust-root keygen is the throwaway owner path in
 - Contamination / empty manifest: persist **rejected** without renting.
 
 Miner-facing: [`external-miner/proof.md`](./external-miner/proof.md).
+
+## Deferred scoring (`queued` rows)
+
+An open topic may **accept artefacts before its scoring path is ready** —
+the live case is a topic whose in-guest baseline / harness is still being
+installed on the KVM host while miners already have recipes to file. The
+switch is topic data, signed like every other binding:
+
+```json
+"constraints": { "params": { "defer_scoring": "true" } }
+```
+
+(`params` values are strings — quote it in YAML too: `defer_scoring: "true"`.
+`"false"` and an absent key are the same thing; any other spelling is a
+publish **400** naming `constraints.params.defer_scoring`.)
+
+Semantics, none of which weaken a product rule:
+
+| Rule | With `defer_scoring = "true"` |
+|------|-------------------------------|
+| Topic status | Stays **`open`**: it needs a sealed baseline to publish, it is listed in `open_topics`, and it is **not** `draft` (a draft is still a submit **400**). |
+| Intake gates | Unchanged: hotkey / digest shape, digest-of-nothing, unknown / not-open topic, `declared_flops` over budget, missing `artifact_uri` on a custom topic are the same **400**s with no row. |
+| Host gates | **Not consulted.** The row persists as **`queued`** (**201**) whether or not the host could score it right now — no readiness check, no harvest rent, no topic VM, no judge call, no verdict, no stamps, no topic mass, no emission. |
+| Status | The topic is in `deferred_topics`, **not** in `scorable_topics`; `can_score` keeps its meaning (something is scored right now). `queued_submissions` counts the waiting rows. |
+| Duplicates | One `queued` row per frozen digest per topic: the same artefact from the same hotkey again is **200** with the existing id (`detail: already queued …`). |
+| Drain | A drain of a topic that still defers is **409**, nothing touched. |
+
+**Lifting the flag** is a re-publish: sign the same document without the
+param (or with `"false"`) and `POST /v1/admin/proof/topics`. The queue
+survives the re-publish (rows bind `topic_id`, not a signature). From then
+on the rows score **oldest first, one at a time, through the exact path a
+live submit takes** (readiness → offers → sealed baseline → holdout unseal →
+contamination gate → eval → judge → persist with the host stamps and the
+family scorer's promotion / persist hooks), each row keeping its `pf_…` id:
+
+- automatically, by the binary's poll loop (`PROOF_QUEUE_DRAIN_POLL_SECS`,
+  default 60; `0` disables it) — lifting the flag *is* "score now";
+- on demand, with `POST /v1/admin/proof/queue/drain {"topic_id": …, "limit": n}`
+  (default one row per call; the report says what is `remaining`), or one
+  row with `POST /v1/admin/proof/submissions/{id}/score`.
+
+Fail-closed on the drain: a host refusal (unwired runner, closed executor,
+no sealed baseline recorded, agent down, …) leaves that row **`queued`** —
+never a reject — and stops the pass (**503** with the reason when nothing
+scored); a contamination / empty-manifest row persists **`rejected`** with no
+rent, exactly as a live submit would. Two concurrent drains never score one
+row twice (a claimed row is skipped until it lands or is released). Re-publishing
+the topic with the flag back on **pauses** the queue mid-pass. `queued` is the
+only non-terminal state; `ctx proof show --wait` keeps polling through it.
 
 ## Example topics (not live)
 

@@ -23,10 +23,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-/// Submission lifecycle.
+/// Submission lifecycle. Wire names are the snake_case of the variant
+/// (`queued`, `awaiting_admin`, `rejected`, `champion`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubmissionState {
+    /// Accepted and persisted on an open topic whose signed document defers
+    /// scoring (`constraints.params.defer_scoring = "true"`). Nothing has
+    /// run: no harvest rent, no topic VM, no judge call, no verdict, no
+    /// topic mass. The only non-terminal state — the row moves on when the
+    /// operator lifts the flag and the queue is drained (FIFO by id).
+    Queued,
     /// Eval finished; waiting operator audit (informational).
     AwaitingAdmin,
     /// Rejected (gates / integrity).
@@ -142,6 +149,11 @@ pub struct MemoryStore {
 struct Inner {
     next: u64,
     submissions: BTreeMap<String, Submission>,
+    /// Queued rows a drain has claimed and is scoring right now. A claim is
+    /// what keeps two concurrent drains from renting twice for one row; it
+    /// is cleared when the scored row lands ([`MemoryStore::insert`]) or the
+    /// drain gives the row back ([`MemoryStore::release_claim`]).
+    scoring: BTreeSet<String>,
     topics: BTreeMap<String, TopicDocument>,
     holdouts: BTreeMap<String, Vec<HoldoutRecord>>,
     baselines: BTreeMap<String, SealedBaseline>,
@@ -248,7 +260,11 @@ impl MemoryStore {
         }))
     }
 
-    /// Insert a scored submission in its final state.
+    /// Insert a submission: a scored row in its final state, or a `queued`
+    /// row awaiting a drain. An empty id mints the next `pf_…` (ids are
+    /// monotonic, so id order is intake order); a row that carries its id
+    /// replaces the stored one — that is how a drained `queued` row lands
+    /// scored — and settles any claim on it.
     pub fn insert(&self, mut row: Submission) -> Result<Submission, StoreError> {
         let mut g = self.lock()?;
         if row.id.is_empty() {
@@ -256,6 +272,7 @@ impl MemoryStore {
             g.next = g.next.saturating_add(1);
             row.id = format!("pf_{n:016x}");
         }
+        g.scoring.remove(&row.id);
         g.submissions.insert(row.id.clone(), row.clone());
         Ok(row)
     }
@@ -275,6 +292,89 @@ impl MemoryStore {
         let mut rows: Vec<_> = g.submissions.values().cloned().collect();
         rows.sort_by(|a, b| b.id.cmp(&a.id));
         Ok(rows)
+    }
+
+    /// `queued` rows, oldest first (the drain order), on one topic or all.
+    /// Rows a drain is scoring right now are still `queued` and still listed.
+    pub fn queued(&self, topic_id: Option<&str>) -> Result<Vec<Submission>, StoreError> {
+        Ok(self
+            .lock()?
+            .submissions
+            .values()
+            .filter(|r| r.state == SubmissionState::Queued)
+            .filter(|r| topic_id.is_none_or(|t| r.topic_id == t))
+            .cloned()
+            .collect())
+    }
+
+    /// The `queued` row with `submission_digest` on `topic_id`, if any: one
+    /// artefact per hotkey is queued once, so a retried submit finds its row
+    /// instead of queueing a second paid run.
+    pub fn queued_by_digest(
+        &self,
+        topic_id: &str,
+        submission_digest: &str,
+    ) -> Result<Option<Submission>, StoreError> {
+        Ok(self
+            .lock()?
+            .submissions
+            .values()
+            .find(|r| {
+                r.state == SubmissionState::Queued
+                    && r.topic_id == topic_id
+                    && r.submission_digest == submission_digest
+            })
+            .cloned())
+    }
+
+    /// Claim the oldest `queued` row on `topic_id` nobody is scoring, for
+    /// this caller to score. `None` when the queue (minus claimed rows) is
+    /// empty. Atomic: two drains never get the same row.
+    pub fn claim_next_queued(&self, topic_id: &str) -> Result<Option<Submission>, StoreError> {
+        let mut g = self.lock()?;
+        let next = g
+            .submissions
+            .values()
+            .find(|r| {
+                r.state == SubmissionState::Queued
+                    && r.topic_id == topic_id
+                    && !g.scoring.contains(&r.id)
+            })
+            .cloned();
+        if let Some(row) = &next {
+            g.scoring.insert(row.id.clone());
+        }
+        Ok(next)
+    }
+
+    /// Claim one `queued` row by id. A row that is not `queued`, or that
+    /// another drain already claimed, is [`StoreError::Illegal`].
+    pub fn claim_queued(&self, id: &str) -> Result<Submission, StoreError> {
+        let mut g = self.lock()?;
+        let row = g
+            .submissions
+            .get(id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(id.to_owned()))?;
+        if row.state != SubmissionState::Queued {
+            return Err(StoreError::Illegal(format!(
+                "submission {id} is {:?}, not queued",
+                row.state
+            )));
+        }
+        if !g.scoring.insert(id.to_owned()) {
+            return Err(StoreError::Illegal(format!(
+                "submission {id} is already being scored"
+            )));
+        }
+        Ok(row)
+    }
+
+    /// Give a claimed row back unscored (the host refused): it stays
+    /// `queued` and the next drain may claim it again.
+    pub fn release_claim(&self, id: &str) -> Result<(), StoreError> {
+        self.lock()?.scoring.remove(id);
+        Ok(())
     }
 
     /// Persist one topic attempt for a hotkey so emission can run WTA / discovery.
@@ -448,5 +548,114 @@ mod tests {
         t.status = TopicStatus::Draft;
         st.put_topic(t).expect("topic");
         assert!(st.open_ids(0).expect("ids").is_empty());
+    }
+
+    fn queued_row(topic_id: &str, label: &str) -> Submission {
+        let hotkey = "aa".repeat(32);
+        let artifact = format!("{label:0>64}");
+        let nonce = format!("nonce-{label}");
+        Submission {
+            id: String::new(),
+            topic_id: topic_id.into(),
+            miner_hotkey: hotkey.clone(),
+            artifact_digest: artifact.clone(),
+            artifact_uri: Some("https://example.invalid/a.tar".into()),
+            claim: "claim".into(),
+            declared_flops: 1,
+            architecture: String::new(),
+            inference_offer_id: String::new(),
+            config_commitment: String::new(),
+            executor_offer_id: String::new(),
+            executor_commitment: String::new(),
+            manifest: ArtifactManifest::default(),
+            submission_digest: freeze_submission_digest(&hotkey, topic_id, &artifact, &nonce),
+            nonce,
+            state: SubmissionState::Queued,
+            receipt_json: None,
+            verdict: None,
+            detail: Some("scoring deferred".into()),
+        }
+    }
+
+    /// The queue is FIFO by id, a claim is exclusive until the row lands or
+    /// is released, and landing the scored row (same id) settles the claim.
+    #[test]
+    fn queued_rows_drain_in_order_and_a_claim_is_exclusive() {
+        let st = MemoryStore::new();
+        let first = st.insert(queued_row("t", "1")).expect("first");
+        let second = st.insert(queued_row("t", "2")).expect("second");
+        let other = st.insert(queued_row("u", "3")).expect("other topic");
+        assert!(first.id < second.id, "ids are monotonic");
+        let ids = |rows: Vec<Submission>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(st.queued(None).expect("all")),
+            [first.id.clone(), second.id.clone(), other.id.clone()]
+        );
+        assert_eq!(
+            ids(st.queued(Some("t")).expect("t")),
+            [first.id.clone(), second.id.clone()]
+        );
+        assert_eq!(
+            st.queued_by_digest("t", &first.submission_digest)
+                .expect("lookup")
+                .map(|r| r.id),
+            Some(first.id.clone())
+        );
+        assert!(st
+            .queued_by_digest("u", &first.submission_digest)
+            .expect("lookup")
+            .is_none());
+
+        let claimed = st.claim_next_queued("t").expect("claim").expect("row");
+        assert_eq!(claimed.id, first.id, "oldest first");
+        assert!(
+            matches!(st.claim_queued(&first.id), Err(StoreError::Illegal(_))),
+            "a claimed row cannot be claimed twice"
+        );
+        let next = st.claim_next_queued("t").expect("claim").expect("row");
+        assert_eq!(next.id, second.id, "the claimed row is skipped");
+        assert!(st.claim_next_queued("t").expect("claim").is_none());
+        assert_eq!(
+            st.queued(Some("t")).expect("still listed").len(),
+            2,
+            "claimed rows are still queued to readers"
+        );
+
+        st.release_claim(&second.id).expect("release");
+        assert_eq!(
+            st.claim_next_queued("t").expect("claim").map(|r| r.id),
+            Some(second.id.clone()),
+            "a released row is claimable again"
+        );
+
+        let mut scored = claimed;
+        scored.state = SubmissionState::AwaitingAdmin;
+        let landed = st.insert(scored).expect("land");
+        assert_eq!(landed.id, first.id, "the scored row keeps its id");
+        assert_eq!(
+            st.get(&first.id).expect("get").state,
+            SubmissionState::AwaitingAdmin
+        );
+        assert!(
+            matches!(st.claim_queued(&first.id), Err(StoreError::Illegal(_))),
+            "a scored row is not queued"
+        );
+        assert!(matches!(
+            st.claim_queued("pf_missing"),
+            Err(StoreError::NotFound(_))
+        ));
+        assert_eq!(ids(st.queued(Some("t")).expect("t")), [second.id]);
+    }
+
+    #[test]
+    fn submission_states_have_snake_case_wire_names() {
+        for (state, wire) in [
+            (SubmissionState::Queued, "\"queued\""),
+            (SubmissionState::AwaitingAdmin, "\"awaiting_admin\""),
+            (SubmissionState::Rejected, "\"rejected\""),
+            (SubmissionState::Champion, "\"champion\""),
+        ] {
+            assert_eq!(serde_json::to_string(&state).expect("json"), wire);
+        }
     }
 }

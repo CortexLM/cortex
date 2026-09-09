@@ -30,6 +30,18 @@ pub const MAX_RULE_TEXT_LEN: usize = 2_048;
 /// Most opaque constraint params one topic may carry.
 pub const MAX_CONSTRAINT_PARAMS: usize = 32;
 
+/// `constraints.params` key that **defers scoring** on an open topic.
+///
+/// `"true"` keeps the topic `open` — submissions are validated and persisted
+/// as `queued` — but nothing is evaluated: no harvest rent, no topic VM, no
+/// judge call, until the operator re-publishes the topic without the flag
+/// and the queue is drained. This is how a topic accepts artefacts while its
+/// baseline / harness is still being installed. It is not `draft` (a draft
+/// answers 400) and it is not a scorer switch: `"false"` and an absent key
+/// are the same thing. Any other spelling is a publish reject. A value, like
+/// every param, that travels in the signed document — never host state.
+pub const PARAM_DEFER_SCORING: &str = "defer_scoring";
+
 /// Why a shared shape is malformed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShapeError {
@@ -103,7 +115,35 @@ impl Constraints {
         {
             return bad("params", "<=32 slug keys with printable values");
         }
+        if self
+            .params
+            .get(PARAM_DEFER_SCORING)
+            .is_some_and(|v| parse_bool_param(v).is_none())
+        {
+            return bad("params.defer_scoring", "\"true\" or \"false\"");
+        }
         Ok(())
+    }
+
+    /// Whether the signed topic defers scoring
+    /// (`params.defer_scoring = "true"`; see [`PARAM_DEFER_SCORING`]).
+    /// Absent, `"false"`, or — for a document that skipped
+    /// [`Self::validate_shape`] — malformed all read as **not** deferred, so
+    /// the flag can only ever hold evaluation back, never unlock it.
+    pub fn defer_scoring(&self) -> bool {
+        self.params
+            .get(PARAM_DEFER_SCORING)
+            .and_then(|v| parse_bool_param(v))
+            .unwrap_or(false)
+    }
+}
+
+/// `"true"` / `"false"` (trimmed, ASCII case-insensitive); anything else `None`.
+fn parse_bool_param(v: &str) -> Option<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
     }
 }
 
@@ -432,6 +472,40 @@ mod tests {
             tail.contains("byte-for-byte") && tail.contains("PROOF_VM_RUNNER_CUSTOM_IDS"),
             "{tail}"
         );
+    }
+
+    /// `defer_scoring` is a plain boolean word carried by the signed
+    /// document: a typo is a shape reject (never silently "not deferred"
+    /// at publish), and only the exact word `true` holds scoring back.
+    #[test]
+    fn defer_scoring_is_a_boolean_param_and_a_typo_is_a_shape_reject() {
+        let with = |v: &str| Constraints {
+            params: BTreeMap::from([(PARAM_DEFER_SCORING.to_owned(), v.to_owned())]),
+            ..Constraints::default()
+        };
+        assert!(!Constraints::default().defer_scoring());
+        for (value, want) in [("true", true), (" TRUE ", true), ("false", false)] {
+            let c = with(value);
+            c.validate_shape().expect(value);
+            assert_eq!(c.defer_scoring(), want, "{value:?}");
+        }
+        for bad in ["yes", "1", "maybe", "ture"] {
+            let c = with(bad);
+            let err = c.validate_shape().expect_err(bad);
+            assert_eq!(err.field, "constraints.params.defer_scoring", "{bad:?}");
+            assert!(
+                err.why.contains("\"true\" or \"false\""),
+                "{bad:?}: {}",
+                err.why
+            );
+            assert!(!c.defer_scoring(), "a malformed flag never defers: {bad:?}");
+        }
+        let other = Constraints {
+            params: BTreeMap::from([("unrelated_knob".to_owned(), "true".to_owned())]),
+            ..Constraints::default()
+        };
+        other.validate_shape().expect("other params are opaque");
+        assert!(!other.defer_scoring());
     }
 
     #[test]

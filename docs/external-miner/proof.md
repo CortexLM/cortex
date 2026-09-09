@@ -83,7 +83,9 @@ keys. `GET /challenge/proof/v1/proof/executor` shows the executor alone with
 `ready` and a `reason` when it cannot rent.
 
 `can_score: false` means submits **503**. Nothing is stored and nothing is
-rented.
+rented. The one exception is a topic listed in `deferred_topics`: it accepts
+your submission and stores it as **`queued`** (see § 3) while the operator
+finishes installing its scoring path — nothing is evaluated or rented yet.
 
 | Status field | What it means |
 |--------------|----------------|
@@ -91,7 +93,9 @@ rented.
 | `inference_offer` | Public RLM **judge** backend (id, kind, mode, model_ref, token caps, commitment, status). Missing/closed/misconfigured → **503**. You do not pass an offer id |
 | `eval_executor` | Public `1x` **executor**: the Lium machine class your recipe is re-run on (`lium_template_id`, `machine_shape`, `max_proof_deadline_s`, commitment, status). Your recipe must finish inside `max_proof_deadline_s` (≤ pin ceiling 7200 s; a topic may name a shorter one) on **one** GPU — the host never rents more. Missing/closed/any shape but `1x` → **503**. You do not pass or rent it |
 | `open_topics` empty | No currently `open` signed topic with a sealed baseline → **503** |
-| `scorable_topics` | Open topics whose family's scorer is wired on this host. An open topic **not** listed here (a `custom` topic whose runner is not registered or not wired; an `nll` / `throughput` topic on a host whose Lium harvest is not wired) answers **503** |
+| `scorable_topics` | Open topics whose family's scorer is wired on this host and that are scored right now. An open topic **not** listed here (a `custom` topic whose runner is not registered or not wired; an `nll` / `throughput` topic on a host whose Lium harvest is not wired) answers **503** — unless it is in `deferred_topics` |
+| `deferred_topics` | Open topics whose signed document sets `constraints.params.defer_scoring = "true"`: the operator is still installing the baseline / harness. Submits are accepted (**201**) and stored as **`queued`**; nothing is evaluated or rented until the operator lifts the flag and drains the queue, oldest first |
+| `queued_submissions` | Rows waiting in that queue across topics |
 | `registered_custom` | Custom metric ids with a registered runner. Nothing is compiled in; ids come from signed topics |
 | `custom_ready` | The subset of `registered_custom` whose runner can run right now (topic-VM orchestrator reachable by config, image pinned). A registered id missing here → its topics answer **503** |
 | `baseline_sealed: false` | An open topic without `script_sha256` + `metrics_commitment` → **503** |
@@ -116,7 +120,7 @@ Each topic is a signed document. Read at least:
 |-------|------------------------|
 | `id` | The `topic_id` you submit against |
 | `statement` | The research problem in English |
-| `constraints` | Fabric / comms caps the eval image enforces (it never trusts the claim). Custom topics may add `firecracker_required`, `model_pin`, an opaque `task_slice`, and `params` |
+| `constraints` | Fabric / comms caps the eval image enforces (it never trusts the claim). Custom topics may add `firecracker_required`, `model_pin`, an opaque `task_slice`, and `params`. `params.defer_scoring: "true"` means the topic accepts submits but scores them later (`queued`) |
 | `checklist` | Anti-cheat rules `[{id, text}]` the topic's RLM ticks over your artefact **before any paid inference** |
 | `eval_executor` | Executor commitment (`require_offer_commitment`, tighten-only `max_proof_deadline_s`) |
 | `metric.family` | `nll` \| `throughput` \| `custom` (`metric.custom_id` names the metric; it is topic data) |
@@ -190,7 +194,9 @@ ctx proof submit \
 ```
 
 `--wait` keeps polling until the row is terminal (`awaiting_admin`,
-`rejected`, or `champion`).
+`rejected`, or `champion`). A `queued` row is not terminal: on a topic that
+defers scoring, `--wait` keeps polling until the operator drains the queue,
+which can take as long as the operator's install does.
 
 The same submit with `curl`:
 
@@ -216,7 +222,8 @@ claim against public numbers and checks FLOPs against the topic budget.
 
 Poll `GET /challenge/proof/v1/submissions/{id}`. While `can_score` is
 `false` (empty digest, missing/closed RLM judge backend, incomplete pin+topic
-judge config, no open sealed topic), submissions answer **503**.
+judge config, no open sealed topic), submissions answer **503** — except on
+a topic in `deferred_topics`, where they answer **201** `queued`.
 
 ### Required POST JSON
 
@@ -247,6 +254,7 @@ curl -sS https://gateway.cortex.foundation/challenge/proof/v1/submissions/<id>
 
 | `state` | Meaning |
 |---------|---------|
+| `queued` | Accepted and stored, **not yet evaluated**: the topic defers scoring (`constraints.params.defer_scoring`) while the operator finishes its baseline / harness install. No eval, no rent, no judge call, no mass yet; `verdict` is `null` and `detail` says so. The only non-terminal state — the row is scored later, oldest first, when the operator lifts the flag and drains the queue, and then becomes one of the three below. Re-sending the same artefact returns the same row (**200**). |
 | `awaiting_admin` | Clean pass; mass recorded. Operator audit is informational. |
 | `rejected` | Gates failed (contamination, unreproduced claim, NLL miss, red anti-cheat checklist, …). No rent and no paid inference on pre-eval rejects. |
 | `champion` | Promoted: operator crown, or automatic on custom topics when a pass beats the current best by `epsilon_rel` with a green checklist. Proof pays on pass, not on a crown. |
@@ -277,6 +285,8 @@ Refusals (**400** / **503**) do **not** persist a submission row.
 | **503** missing / closed / non-`1x` executor | Live `eval_executor` cannot rent the `1x` machine | no | no |
 | **503** `proof deadline … exceeded` | Your recipe did not finish inside `max_proof_deadline_s`; the body carries the run's `stdout_tail` | no | no (pod torn down) |
 | **503** `custom metric … has no registered runner` / `not wired` | The topic's `custom_id` has no runner on this host, or its topic VM is not configured | no | no |
+| **201** `queued` | Topic in `deferred_topics` (operator still installing its scoring path); every **400** above still applies first | **yes** (queued, scored later) | **no** (not yet) |
+| **200** `queued` + `already queued …` | Same artefact + hotkey re-sent to a deferring topic | existing row | **no** |
 | **201** `rejected` + `contamination_evidence_missing` | Empty manifest | **yes** (rejected) | **no** |
 | **201** `rejected` + contamination | Holdout shard / corpus id in `manifest` | **yes** (rejected) | **no** |
 | **201** `rejected` + `anti-cheat checklist red` | A topic rule failed on your artefact | **yes** (rejected) | **no** (no paid inference) |

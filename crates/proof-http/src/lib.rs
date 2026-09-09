@@ -7,12 +7,25 @@
 //! GET  /v1/proof/topics/{id}
 //! GET  /v1/proof/executor         public EvalExecutorOffer + pin ceilings
 //! POST /v1/submissions            miner submit (topic_id required)
-//! GET  /v1/submissions
+//! GET  /v1/submissions            ?state=queued&topic_id=… filters
 //! GET  /v1/submissions/{id}
 //! POST /v1/admin/proof/topics     operator publish (signed document)
 //! POST /v1/admin/proof/executor   operator rotate the live executor offer
 //! GET  /v1/admin/proof/vm-orchestrator   operator probe: topic-VM orchestrator readiness + agent health
+//! POST /v1/admin/proof/queue/drain       operator: score `queued` rows of one topic, in order
+//! POST /v1/admin/proof/submissions/{id}/score   operator: score one `queued` row
 //! ```
+//!
+//! **Deferred scoring.** An open topic whose signed document carries
+//! `constraints.params.defer_scoring = "true"` accepts submissions the same
+//! way (every intake gate applies) but persists them as `queued` (**201**)
+//! instead of evaluating: no readiness check, no harvest rent, no topic VM,
+//! no judge call, no verdict, no topic mass. The rows wait until the operator
+//! re-publishes the topic without the flag and the queue is drained (the
+//! admin route here, or the binary's poll loop) — one row at a time, oldest
+//! first, through the exact path a live submit takes. A drain on a topic
+//! that still defers is a **409**; a host that cannot score leaves the rows
+//! `queued` (**503**, nothing rented), never a reject.
 
 #![forbid(unsafe_code)]
 #![allow(
@@ -26,7 +39,7 @@
 use std::sync::{Arc, PoisonError, RwLock};
 
 use async_trait::async_trait;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -246,7 +259,9 @@ impl AppState {
 
     /// Open topics this host can score right now: judge config resolves and,
     /// on a live host, the family's scorer is wired (a custom topic whose
-    /// runner is not registered is open but not scorable).
+    /// runner is not registered is open but not scorable). A topic that
+    /// defers scoring is open — it accepts and queues — but is not scored
+    /// right now, so it is not listed here ([`Self::deferred_topics`]).
     fn scorable_topics(&self) -> Vec<String> {
         if !self.host_ready() {
             return Vec::new();
@@ -258,6 +273,7 @@ impl AppState {
             .iter()
             .filter(|t| {
                 t.is_open_at(self.epoch)
+                    && !t.constraints.defer_scoring()
                     && resolve_inference(
                         &self.pin,
                         Some(&t.inference),
@@ -267,6 +283,18 @@ impl AppState {
                     .ready_to_score()
                     && self.live().is_none_or(|s| s.ready_for_topic(t).is_ok())
             })
+            .map(|t| t.id.clone())
+            .collect()
+    }
+
+    /// Open topics whose signed document defers scoring: a submit there is
+    /// a **201** `queued` row, whatever the host can score right now.
+    fn deferred_topics(&self) -> Vec<String> {
+        self.store
+            .topics()
+            .unwrap_or_default()
+            .iter()
+            .filter(|t| t.is_open_at(self.epoch) && t.constraints.defer_scoring())
             .map(|t| t.id.clone())
             .collect()
     }
@@ -292,6 +320,8 @@ pub fn proof_router(state: AppState) -> Router {
             "/v1/admin/proof/vm-orchestrator",
             get(vm_orchestrator_probe),
         )
+        .route("/v1/admin/proof/queue/drain", post(drain_queue))
+        .route("/v1/admin/proof/submissions/{id}/score", post(score_queued))
         .with_state(state)
 }
 
@@ -334,6 +364,8 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         "baseline_sealed": baseline_sealed,
         "open_topics": open,
         "scorable_topics": st.scorable_topics(),
+        "deferred_topics": st.deferred_topics(),
+        "queued_submissions": st.store.queued(None).map_or(0, |q| q.len()),
         "registered_custom": registered_custom,
         "custom_ready": st.custom_ready(),
         "epoch": st.epoch,
@@ -388,15 +420,45 @@ struct SubmitBody {
     manifest: ArtifactManifest,
 }
 
-#[derive(Debug, Serialize)]
-struct SubmitResp {
-    id: String,
-    submission_digest: String,
-    topic_id: String,
-    state: SubmissionState,
-    eval_backend: EvalBackend,
-    eligible: bool,
+/// What a submit — or a drain of one row — answers.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubmitResp {
+    /// Row id (`pf_…`).
+    pub id: String,
+    /// Frozen digest.
+    pub submission_digest: String,
+    /// Topic scored (or queued) against.
+    pub topic_id: String,
+    /// Lifecycle; `queued` when the topic defers scoring.
+    pub state: SubmissionState,
+    /// Backend that scored — the host's when nothing has run yet.
+    pub eval_backend: EvalBackend,
+    /// Clean pass. Always `false` on a `queued` row.
+    pub eligible: bool,
+    /// Why the row is where it is: the deferred-scoring note on a `queued`
+    /// row, the failed gates on a reject. `None` on a clean pass.
+    pub detail: Option<String>,
 }
+
+impl SubmitResp {
+    fn of(row: &Submission, backend: EvalBackend, eligible: bool) -> Self {
+        Self {
+            id: row.id.clone(),
+            submission_digest: row.submission_digest.clone(),
+            topic_id: row.topic_id.clone(),
+            state: row.state,
+            eval_backend: backend,
+            eligible,
+            detail: row.detail.clone(),
+        }
+    }
+}
+
+/// `detail` of every `queued` row: what the miner sees while the operator
+/// finishes the topic, and why nothing has run.
+pub const DEFERRED_DETAIL: &str = "scoring deferred until the topic is ready: the signed topic sets constraints.params.defer_scoring, so this row is queued (no eval, no rent, no judge call yet) and is scored in order once the operator lifts the flag and drains the queue";
+
+type ErrResp = (StatusCode, Json<serde_json::Value>);
 
 fn parse_hex64(s: &str, field: &str) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     let t = s.trim().trim_start_matches("0x");
@@ -482,7 +544,83 @@ async fn submit(
 
     let nonce = nonce_from(&hotkey, &topic_id, &artifact);
     let submission_digest = freeze_submission_digest(&hotkey, &topic_id, &artifact, &nonce);
+    // The intake row: every miner-supplied field, frozen digest, no host
+    // stamps yet. It is either queued as-is or scored right now.
+    let row = Submission {
+        id: String::new(),
+        topic_id: topic_id.clone(),
+        miner_hotkey: hotkey,
+        artifact_digest: artifact,
+        artifact_uri: artifact_uri.map(str::to_owned),
+        claim: body.claim,
+        declared_flops: body.declared_flops,
+        architecture: body.architecture,
+        inference_offer_id: String::new(),
+        config_commitment: String::new(),
+        executor_offer_id: String::new(),
+        executor_commitment: String::new(),
+        manifest: body.manifest,
+        nonce,
+        submission_digest,
+        state: SubmissionState::Queued,
+        receipt_json: None,
+        verdict: None,
+        detail: None,
+    };
 
+    // A topic that defers scoring accepts the artefact now and scores it
+    // later: the row is persisted `queued` before any readiness check, so a
+    // host still installing its baseline / harness never rents, boots, or
+    // judges for it — and never refuses it either.
+    if topic.constraints.defer_scoring() {
+        return queue_deferred(&st, row);
+    }
+    let resp = score_intake(&st, row, &topic).await?;
+    Ok((StatusCode::CREATED, Json(resp)))
+}
+
+/// Persist an intake row as `queued`. A retry of the same artefact by the
+/// same hotkey (same frozen digest) finds its queued row (**200**) instead
+/// of queueing a second paid run.
+fn queue_deferred(
+    st: &AppState,
+    mut row: Submission,
+) -> Result<(StatusCode, Json<SubmitResp>), ErrResp> {
+    if let Some(existing) = st
+        .store
+        .queued_by_digest(&row.topic_id, &row.submission_digest)
+        .map_err(|e| store_err(&e))?
+    {
+        let mut resp = SubmitResp::of(&existing, st.backend, false);
+        resp.detail = Some(format!(
+            "already queued as {}; {DEFERRED_DETAIL}",
+            existing.id
+        ));
+        return Ok((StatusCode::OK, Json(resp)));
+    }
+    row.detail = Some(DEFERRED_DETAIL.to_owned());
+    let row = st
+        .store
+        .insert(row)
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(SubmitResp::of(&row, st.backend, false)),
+    ))
+}
+
+/// Score one intake row on `topic` and persist the result: host readiness,
+/// the judge / executor offers, the sealed baseline, the holdout unseal, the
+/// contamination gate (a persisted reject with no rent), then the eval and
+/// the judge. The same path serves a live submit (a fresh row) and a drain
+/// (a `queued` row that keeps its id). Every refusal is an error with no
+/// row change — the caller decides whether that means "no row" (submit) or
+/// "still queued" (drain).
+async fn score_intake(
+    st: &AppState,
+    row: Submission,
+    topic: &TopicDocument,
+) -> Result<SubmitResp, ErrResp> {
     // One snapshot of the executor for this request: rotation mid-submit
     // must not score under one offer and stamp another.
     let executor = st.executor_offer();
@@ -499,19 +637,19 @@ async fn submit(
     // A custom topic whose runner is not registered on this host is a 503
     // here, before any row or rent, not a rejected row downstream.
     if let Some(live) = st.live() {
-        live.ready_for_topic(&topic).map_err(|e| eval_err(&e))?;
+        live.ready_for_topic(topic).map_err(|e| eval_err(&e))?;
     }
     let Some(offer) = st.offer.as_ref() else {
         return Err(eval_err(&EvalError::InferenceOfferMissing));
     };
     offer
-        .serves_topic(&st.pin, &topic)
+        .serves_topic(&st.pin, topic)
         .map_err(|e| offer_err(&e))?;
     if st.backend == EvalBackend::Lium {
         executor
             .as_ref()
             .ok_or(EvalError::ExecutorOfferMissing)
-            .and_then(|x| x.serves_topic(&topic).map_err(proof_eval::map_executor_err))
+            .and_then(|x| x.serves_topic(topic).map_err(proof_eval::map_executor_err))
             .map_err(|e| eval_err(&e))?;
     }
     let resolved = resolve_inference(
@@ -526,7 +664,7 @@ async fn submit(
 
     let sealed = st
         .store
-        .baseline(&topic_id)
+        .baseline(&topic.id)
         .map_err(|e| store_err(&e))?
         .ok_or_else(|| {
             err(
@@ -537,10 +675,10 @@ async fn submit(
 
     let holdout = st
         .store
-        .unseal_holdout(&topic_id, &submission_digest)
+        .unseal_holdout(&topic.id, &row.submission_digest)
         .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
 
-    let (declared, hits) = contamination_evidence(&body.manifest, &holdout);
+    let (declared, hits) = contamination_evidence(&row.manifest, &holdout);
     if !declared || !hits.is_empty() {
         let failed = if declared {
             vec![GateFail::Contamination]
@@ -549,30 +687,20 @@ async fn submit(
                 field: "contamination_evidence".into(),
             }]
         };
-        return persist_pre_eval_reject(
-            &st,
-            executor.as_ref(),
-            body,
-            &topic,
-            hotkey,
-            artifact,
-            nonce,
-            submission_digest,
-            &failed,
-        );
+        return persist_pre_eval_reject(st, executor.as_ref(), row, topic, &failed);
     }
 
     let eval = eval_after_freeze(
         &st.pin,
-        &topic,
+        topic,
         offer,
         executor.as_ref(),
-        &submission_digest,
-        &artifact,
-        artifact_uri,
-        body.declared_flops,
+        &row.submission_digest,
+        &row.artifact_digest,
+        row.artifact_uri.as_deref(),
+        row.declared_flops,
         &holdout,
-        &body.claim,
+        &row.claim,
         st.backend,
         st.live(),
         st.judge_api_key.as_deref(),
@@ -583,7 +711,7 @@ async fn submit(
 
     let registered = st.registered_custom();
     let verdict = judge_topic(
-        &topic,
+        topic,
         &eval.agent,
         &eval.harness,
         &sealed,
@@ -592,15 +720,11 @@ async fn submit(
     );
     let receipt_json = serde_json::to_string(&eval.receipt).unwrap_or_default();
     persist_scored(
-        &st,
+        st,
         executor.as_ref(),
         eval.executor.as_ref(),
-        body,
-        &topic,
-        hotkey,
-        artifact,
-        nonce,
-        submission_digest,
+        row,
+        topic,
         verdict,
         receipt_json,
         eval.backend,
@@ -608,18 +732,40 @@ async fn submit(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Stamp the judge offer and the executor offer the run was held to.
+fn stamp_offers(
+    st: &AppState,
+    executor: Option<&EvalExecutorOffer>,
+    plan: Option<&ExecutorPlan>,
+    row: &mut Submission,
+) {
+    row.inference_offer_id = st
+        .offer
+        .as_ref()
+        .map(|o| o.offer_id.clone())
+        .unwrap_or_default();
+    row.config_commitment = st
+        .offer
+        .as_ref()
+        .map(|o| o.config_commitment.clone())
+        .unwrap_or_default();
+    row.executor_offer_id = executor.map(|x| x.offer_id.clone()).unwrap_or_default();
+    // A live run stamps the configuration it was actually held to (template,
+    // 1x, effective deadline); sim has no plan and no rent, and a pre-eval
+    // reject stamps the offer's own commitment.
+    row.executor_commitment = plan
+        .map(|p| p.config_commitment.clone())
+        .or_else(|| executor.map(|x| x.config_commitment.clone()))
+        .unwrap_or_default();
+}
+
 fn persist_pre_eval_reject(
     st: &AppState,
     executor: Option<&EvalExecutorOffer>,
-    body: SubmitBody,
+    mut row: Submission,
     topic: &TopicDocument,
-    hotkey: String,
-    artifact: String,
-    nonce: String,
-    submission_digest: String,
     failed: &[GateFail],
-) -> Result<(StatusCode, Json<SubmitResp>), (StatusCode, Json<serde_json::Value>)> {
+) -> Result<SubmitResp, ErrResp> {
     let verdict = ProofVerdict {
         pass: false,
         agent: AgentVerdict {
@@ -639,39 +785,14 @@ fn persist_pre_eval_reject(
         failed: failed.to_vec(),
         lattice: 0,
     };
+    stamp_offers(st, executor, None, &mut row);
+    row.state = SubmissionState::Rejected;
+    row.receipt_json = None;
+    row.verdict = Some(verdict);
+    row.detail = Some(format!("gates={failed:?}"));
     let row = st
         .store
-        .insert(Submission {
-            id: String::new(),
-            topic_id: topic.id.clone(),
-            miner_hotkey: hotkey,
-            artifact_digest: artifact,
-            artifact_uri: body.artifact_uri,
-            claim: body.claim,
-            declared_flops: body.declared_flops,
-            architecture: body.architecture,
-            inference_offer_id: st
-                .offer
-                .as_ref()
-                .map(|o| o.offer_id.clone())
-                .unwrap_or_default(),
-            config_commitment: st
-                .offer
-                .as_ref()
-                .map(|o| o.config_commitment.clone())
-                .unwrap_or_default(),
-            executor_offer_id: executor.map(|x| x.offer_id.clone()).unwrap_or_default(),
-            executor_commitment: executor
-                .map(|x| x.config_commitment.clone())
-                .unwrap_or_default(),
-            manifest: body.manifest,
-            nonce,
-            submission_digest,
-            state: SubmissionState::Rejected,
-            receipt_json: None,
-            verdict: Some(verdict),
-            detail: Some(format!("gates={failed:?}")),
-        })
+        .insert(row)
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
     let _ = st.store.record_topic_run(
         &row.miner_hotkey,
@@ -683,34 +804,19 @@ fn persist_pre_eval_reject(
             near_duplicate: false,
         },
     );
-    Ok((
-        StatusCode::CREATED,
-        Json(SubmitResp {
-            id: row.id,
-            submission_digest: row.submission_digest,
-            topic_id: topic.id.clone(),
-            state: row.state,
-            eval_backend: st.backend,
-            eligible: false,
-        }),
-    ))
+    Ok(SubmitResp::of(&row, st.backend, false))
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn persist_scored(
     st: &AppState,
     executor: Option<&EvalExecutorOffer>,
     plan: Option<&ExecutorPlan>,
-    body: SubmitBody,
+    mut row: Submission,
     topic: &TopicDocument,
-    hotkey: String,
-    artifact: String,
-    nonce: String,
-    submission_digest: String,
     verdict: ProofVerdict,
     receipt_json: String,
     backend: EvalBackend,
-) -> Result<(StatusCode, Json<SubmitResp>), (StatusCode, Json<serde_json::Value>)> {
+) -> Result<SubmitResp, ErrResp> {
     let topic_id = topic.id.clone();
     let pass = verdict.pass;
     let primary = primary_from_harness(topic, &verdict.harness);
@@ -725,58 +831,28 @@ async fn persist_scored(
                 st.store.champion_primary(topic).ok().flatten(),
             );
             promoted = live
-                .auto_promote(topic, &submission_digest, pass, primary, bar)
+                .auto_promote(topic, &row.submission_digest, pass, primary, bar)
                 .await;
         }
     }
-    let artifact_digest = artifact.clone();
-    let detail = if pass {
+    stamp_offers(st, executor, plan, &mut row);
+    row.state = if promoted {
+        SubmissionState::Champion
+    } else if pass {
+        SubmissionState::AwaitingAdmin
+    } else {
+        SubmissionState::Rejected
+    };
+    row.receipt_json = Some(receipt_json);
+    row.detail = if pass {
         None
     } else {
         Some(format!("gates={:?}", verdict.failed))
     };
+    row.verdict = Some(verdict);
     let row = st
         .store
-        .insert(Submission {
-            id: String::new(),
-            topic_id: topic_id.clone(),
-            miner_hotkey: hotkey,
-            artifact_digest: artifact,
-            artifact_uri: body.artifact_uri,
-            claim: body.claim,
-            declared_flops: body.declared_flops,
-            architecture: body.architecture,
-            inference_offer_id: st
-                .offer
-                .as_ref()
-                .map(|o| o.offer_id.clone())
-                .unwrap_or_default(),
-            config_commitment: st
-                .offer
-                .as_ref()
-                .map(|o| o.config_commitment.clone())
-                .unwrap_or_default(),
-            executor_offer_id: executor.map(|x| x.offer_id.clone()).unwrap_or_default(),
-            // A live run stamps the configuration it was actually held to
-            // (template, 1x, effective deadline); sim has no plan and no rent.
-            executor_commitment: plan
-                .map(|p| p.config_commitment.clone())
-                .or_else(|| executor.map(|x| x.config_commitment.clone()))
-                .unwrap_or_default(),
-            manifest: body.manifest,
-            nonce,
-            submission_digest,
-            state: if promoted {
-                SubmissionState::Champion
-            } else if pass {
-                SubmissionState::AwaitingAdmin
-            } else {
-                SubmissionState::Rejected
-            },
-            receipt_json: Some(receipt_json),
-            verdict: Some(verdict),
-            detail,
-        })
+        .insert(row)
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
     let _ = st.store.record_topic_run(
         &row.miner_hotkey,
@@ -784,7 +860,7 @@ async fn persist_scored(
         MinerTopicRun {
             pass,
             primary,
-            artifact_digest,
+            artifact_digest: row.artifact_digest.clone(),
             near_duplicate: false,
         },
     );
@@ -792,21 +868,34 @@ async fn persist_scored(
         live.on_persisted(&topic_id, &row.submission_digest, &row.id, promoted)
             .await;
     }
-    Ok((
-        StatusCode::CREATED,
-        Json(SubmitResp {
-            id: row.id,
-            submission_digest: row.submission_digest,
-            topic_id,
-            state: row.state,
-            eval_backend: backend,
-            eligible: pass,
-        }),
-    ))
+    Ok(SubmitResp::of(&row, backend, pass))
 }
 
-async fn list_subs(State(st): State<AppState>) -> impl IntoResponse {
-    let rows = st.store.list().unwrap_or_default();
+/// `GET /v1/submissions` filters. Both optional; `state` is the wire name
+/// (`queued`, `awaiting_admin`, `rejected`, `champion`).
+#[derive(Debug, Default, Deserialize)]
+struct ListQuery {
+    #[serde(default)]
+    state: Option<SubmissionState>,
+    #[serde(default)]
+    topic_id: Option<String>,
+}
+
+/// Newest first. An unknown `state` value is axum's **400**.
+async fn list_subs(State(st): State<AppState>, Query(q): Query<ListQuery>) -> impl IntoResponse {
+    let topic = q
+        .topic_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let rows: Vec<Submission> = st
+        .store
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| q.state.is_none_or(|s| r.state == s))
+        .filter(|r| topic.is_none_or(|t| r.topic_id == t))
+        .collect();
     Json(serde_json::json!({ "items": rows }))
 }
 
@@ -897,6 +986,192 @@ async fn vm_orchestrator_probe(
     report.registered_custom = st.registered_custom();
     report.custom_family_wired = !report.registered_custom.is_empty();
     Ok(Json(report))
+}
+
+/// `POST /v1/admin/proof/queue/drain` body.
+#[derive(Debug, Deserialize)]
+struct DrainBody {
+    /// Topic whose `queued` rows to score.
+    topic_id: String,
+    /// Rows to score this call, oldest first (default 1, floor 1). The reply's
+    /// `remaining` says what is still queued.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// What one drain pass over one topic did.
+#[derive(Debug, Clone, Serialize)]
+pub struct DrainReport {
+    /// Topic drained.
+    pub topic_id: String,
+    /// Rows scored this pass, in queue order, each in its final state.
+    pub drained: Vec<SubmitResp>,
+    /// Rows still `queued` on the topic after this pass.
+    pub remaining: usize,
+    /// Why the pass stopped with rows still queued: the host refused the next
+    /// row (it went back to the queue unscored, nothing rented) or the topic
+    /// was re-published to defer / close mid-pass. `None` when the pass ran
+    /// to its limit or emptied the queue.
+    pub stopped: Option<String>,
+}
+
+impl AppState {
+    /// The topic whose queue may be drained right now: published, open at
+    /// this epoch, and not deferring. A topic that still defers is a **409**
+    /// (lift `constraints.params.defer_scoring` by re-publishing first);
+    /// unknown is **400**, not open **409**. Nothing is touched on refusal.
+    fn drainable_topic(&self, topic_id: &str) -> Result<TopicDocument, ErrResp> {
+        let topic = self
+            .store
+            .topic(topic_id)
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "unknown topic"))?;
+        if !topic.is_open_at(self.epoch) {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "topic is not open; its queued rows stay queued",
+            ));
+        }
+        if topic.constraints.defer_scoring() {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "topic still defers scoring (constraints.params.defer_scoring = \"true\"); re-publish the signed topic without it, then drain",
+            ));
+        }
+        Ok(topic)
+    }
+
+    /// Score up to `limit` `queued` rows of `topic_id`, oldest first, each
+    /// through the exact path a live submit takes ([`score_intake`]), and
+    /// land each result on its row. The topic is re-read before every row so
+    /// a re-publish that defers or closes it mid-pass stops the pass. The
+    /// first host refusal stops the pass too: that row is released back to
+    /// the queue unscored (nothing was rented) and later rows are not tried.
+    pub async fn drain_queue(&self, topic_id: &str, limit: usize) -> DrainReport {
+        let mut report = DrainReport {
+            topic_id: topic_id.to_owned(),
+            drained: Vec::new(),
+            remaining: 0,
+            stopped: None,
+        };
+        for _ in 0..limit {
+            let topic = match self.drainable_topic(topic_id) {
+                Ok(t) => t,
+                Err((_, body)) => {
+                    report.stopped = Some(error_text(&body));
+                    break;
+                }
+            };
+            let Ok(Some(row)) = self.store.claim_next_queued(topic_id) else {
+                break;
+            };
+            let id = row.id.clone();
+            match score_intake(self, row, &topic).await {
+                Ok(resp) => report.drained.push(resp),
+                Err((code, body)) => {
+                    let _ = self.store.release_claim(&id);
+                    report.stopped = Some(format!("{code}: {}", error_text(&body)));
+                    break;
+                }
+            }
+        }
+        report.remaining = self.store.queued(Some(topic_id)).map_or(0, |q| q.len());
+        report
+    }
+
+    /// One pass for a poll loop: drain every open topic that has `queued`
+    /// rows and no longer defers scoring, until each queue is empty or the
+    /// host refuses (those rows stay queued for the next pass). Topics that
+    /// still defer are skipped — lifting the flag is the operator's
+    /// "score now". Returns one report per topic that had queued rows.
+    pub async fn drain_ready_queues(&self) -> Vec<DrainReport> {
+        let mut reports = Vec::new();
+        for topic in self.store.topics().unwrap_or_default() {
+            if !topic.is_open_at(self.epoch) || topic.constraints.defer_scoring() {
+                continue;
+            }
+            let queued = self.store.queued(Some(&topic.id)).map_or(0, |q| q.len());
+            if queued == 0 {
+                continue;
+            }
+            reports.push(self.drain_queue(&topic.id, queued).await);
+        }
+        reports
+    }
+}
+
+fn error_text(body: &Json<serde_json::Value>) -> String {
+    body.0["error"]
+        .as_str()
+        .map_or_else(|| body.0.to_string(), str::to_owned)
+}
+
+/// Operator drain: score the oldest `queued` rows of one topic through the
+/// live path. **200** with a [`DrainReport`]; **503** carrying the report
+/// (plus `error`) when the host refused before a single row scored — the
+/// rows are still queued, nothing was rented. Same bearer as every admin
+/// route; the topic must be open and no longer deferring (**409**).
+async fn drain_queue(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<DrainBody>,
+) -> Result<impl IntoResponse, ErrResp> {
+    if st.admin_hashes.is_empty() {
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "auth_unconfigured"));
+    }
+    if !admin_ok(&headers, &st.admin_hashes) {
+        return Err(err(StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
+    let topic_id = body.topic_id.trim().to_owned();
+    st.drainable_topic(&topic_id)?;
+    let report = st
+        .drain_queue(&topic_id, body.limit.unwrap_or(1).max(1))
+        .await;
+    let mut view = serde_json::to_value(&report)
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "report"))?;
+    if report.drained.is_empty() {
+        if let Some(why) = &report.stopped {
+            view["error"] = serde_json::Value::String(why.clone());
+            return Ok((StatusCode::SERVICE_UNAVAILABLE, Json(view)));
+        }
+    }
+    Ok((StatusCode::OK, Json(view)))
+}
+
+/// Operator: score one `queued` row now (same rules as a drain of one).
+/// **200** with the scored row's reply; **404** unknown; **409** when the
+/// row is not `queued`, is already being scored, or its topic still defers
+/// / is not open; a host refusal is that refusal (**503**) with the row
+/// released back to the queue.
+async fn score_queued(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ErrResp> {
+    if st.admin_hashes.is_empty() {
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "auth_unconfigured"));
+    }
+    if !admin_ok(&headers, &st.admin_hashes) {
+        return Err(err(StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
+    let row = st.store.claim_queued(&id).map_err(|e| match e {
+        proof_store::StoreError::NotFound(_) => err(StatusCode::NOT_FOUND, "not_found"),
+        proof_store::StoreError::Illegal(why) => err(StatusCode::CONFLICT, &why),
+        other => store_err(&other),
+    })?;
+    let topic = match st.drainable_topic(&row.topic_id) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = st.store.release_claim(&id);
+            return Err(e);
+        }
+    };
+    match score_intake(&st, row, &topic).await {
+        Ok(resp) => Ok((StatusCode::OK, Json(resp))),
+        Err(e) => {
+            let _ = st.store.release_claim(&id);
+            Err(e)
+        }
+    }
 }
 
 fn admin_ok(headers: &HeaderMap, hashes: &[String]) -> bool {
@@ -3083,5 +3358,778 @@ mod tests {
         assert_eq!(row["verdict"]["pass"], true, "{row}");
         assert_eq!(row["verdict"]["agent"]["rationale"], "sim stub win");
         assert_eq!(row["verdict"]["failed"].as_array().map(Vec::len), Some(0));
+    }
+
+    // ----- deferred scoring: `queued` rows and the drain -----
+
+    const CUSTOM: &str = "custom-topic-v0";
+    const CUSTOM_ID: &str = "topic_minted_metric";
+
+    /// The signed custom topic of [`app_with_live_scorer`], with
+    /// `constraints.params.defer_scoring` set to `value` when given.
+    fn custom_topic_with_defer(pin: &ProofPin, value: Option<&str>) -> TopicDocument {
+        let mut draft = unsigned_custom_topic(&[], CUSTOM_ID);
+        if let Some(v) = value {
+            draft
+                .constraints
+                .params
+                .insert(proof_task::PARAM_DEFER_SCORING.to_owned(), v.to_owned());
+        }
+        let (topic, _) = seal_topic_with(pin, draft, &[CUSTOM_ID]);
+        topic
+    }
+
+    /// Live Lium host like [`app_with_live_scorer`] — open sealed throughput
+    /// topic `dt-no-ib-v0` plus the custom topic — where the custom topic
+    /// carries `defer_scoring = "true"` when `defer` is set. `custom_baseline`
+    /// false models a host still installing that topic's baseline (no sealed
+    /// vector recorded, so scoring it would be a 503).
+    fn state_with_deferred_custom(
+        live: Arc<dyn LiveScorer>,
+        defer: bool,
+        custom_baseline: bool,
+    ) -> AppState {
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let store = MemoryStore::new();
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (harvest, meas) = seal_topic(&p, unsigned_topic(&recs));
+        store.put_topic(harvest.clone()).expect("topic");
+        store.load_holdout(&harvest.id, recs).expect("holdout");
+        store
+            .set_baseline(&harvest.id, meas.into_sealed())
+            .expect("baseline");
+
+        let mut draft = unsigned_custom_topic(&[], CUSTOM_ID);
+        if defer {
+            draft.constraints.params.insert(
+                proof_task::PARAM_DEFER_SCORING.to_owned(),
+                "true".to_owned(),
+            );
+        }
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (custom, meas) = seal_topic_with(&p, draft, &[CUSTOM_ID]);
+        assert_eq!(custom.constraints.defer_scoring(), defer);
+        store.put_topic(custom.clone()).expect("topic");
+        store.load_holdout(&custom.id, recs).expect("holdout");
+        if custom_baseline {
+            let mut sealed = meas.into_sealed();
+            sealed.custom_value = Some(0.5);
+            store.set_baseline(&custom.id, sealed).expect("baseline");
+        }
+        let executor = test_executor(&p);
+        AppState {
+            store,
+            pin: p,
+            backend: EvalBackend::Lium,
+            live_scorer: Some(live),
+            offer: Some(offer()),
+            executor: executor_slot(Some(executor)),
+            judge_api_key: Some("test-judge-key".into()),
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            vm_probe: None,
+            epoch: 0,
+        }
+    }
+
+    fn custom_submit(label: &str) -> serde_json::Value {
+        submit_body(
+            label,
+            &serde_json::json!({
+                "topic_id": CUSTOM,
+                "artifact_uri": format!("https://example.invalid/{label}.tar"),
+            }),
+        )
+    }
+
+    fn ids_of(v: &serde_json::Value, key: &str) -> Vec<String> {
+        v[key]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    async fn status_of(app: Router) -> serde_json::Value {
+        let (st, status) = json_req(app, "GET", "/v1/status", serde_json::json!({}), None).await;
+        assert_eq!(st, StatusCode::OK);
+        status
+    }
+
+    async fn queued_ids(app: Router, topic: Option<&str>) -> Vec<String> {
+        let uri = match topic {
+            Some(t) => format!("/v1/submissions?state=queued&topic_id={t}"),
+            None => "/v1/submissions?state=queued".to_owned(),
+        };
+        let (st, list) = json_req(app, "GET", &uri, serde_json::json!({}), None).await;
+        assert_eq!(st, StatusCode::OK, "{list}");
+        // The public list is newest first; intake order is what the queue
+        // assertions compare against.
+        let mut ids: Vec<String> = list["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .filter_map(|r| r["id"].as_str().map(str::to_owned))
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Re-publish the custom topic through the admin route with the flag set
+    /// to `value` (`None` removes it). Re-signed under the test topic key.
+    async fn republish_custom(
+        app: Router,
+        pin: &ProofPin,
+        value: Option<&str>,
+    ) -> serde_json::Value {
+        let doc = custom_topic_with_defer(pin, value);
+        let (st, body) = json_req(
+            app,
+            "POST",
+            "/v1/admin/proof/topics",
+            serde_json::to_value(&doc).expect("json"),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        body
+    }
+
+    /// An open topic whose signed document defers scoring accepts the
+    /// submission under every intake gate and persists it `queued`: **201**,
+    /// no scorer call, no persist hook, no stamps, no verdict, no mass. The
+    /// public list and status show it; a retry of the same artefact finds its
+    /// row (**200**) instead of queueing twice; the other open topic scores
+    /// as before.
+    #[tokio::test]
+    async fn a_deferring_topic_queues_submissions_without_scoring() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let app = proof_router(state_with_deferred_custom(scorer.clone(), true, true));
+
+        let status = status_of(app.clone()).await;
+        assert_eq!(ids_of(&status, "deferred_topics"), [CUSTOM], "{status}");
+        assert_eq!(
+            ids_of(&status, "scorable_topics"),
+            ["dt-no-ib-v0"],
+            "a deferring topic is open but not scored right now: {status}"
+        );
+        let mut open = ids_of(&status, "open_topics");
+        open.sort();
+        assert_eq!(open, [CUSTOM, "dt-no-ib-v0"], "{status}");
+        assert_eq!(status["queued_submissions"], 0, "{status}");
+
+        let (st, created) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            custom_submit("deferred-artifact"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_eq!(created["state"], "queued", "{created}");
+        assert_eq!(created["eligible"], false, "{created}");
+        assert_eq!(created["topic_id"], CUSTOM);
+        assert_eq!(created["eval_backend"], "lium");
+        let detail = created["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains("scoring deferred"), "{created}");
+        assert!(detail.contains("defer_scoring"), "{created}");
+        let id = created["id"].as_str().expect("id").to_owned();
+        assert!(id.starts_with("pf_"), "{created}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0, "no run");
+        assert!(scorer.persisted.lock().expect("p").is_empty(), "no hook");
+
+        let (st, row) = json_req(
+            app.clone(),
+            "GET",
+            &format!("/v1/submissions/{id}"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{row}");
+        assert_eq!(row["state"], "queued", "{row}");
+        assert!(row["verdict"].is_null(), "{row}");
+        assert!(row["receipt_json"].is_null(), "{row}");
+        assert_eq!(row["inference_offer_id"], "", "no host stamp yet: {row}");
+        assert_eq!(row["executor_offer_id"], "", "no host stamp yet: {row}");
+        assert_eq!(
+            row["artifact_uri"],
+            "https://example.invalid/deferred-artifact.tar"
+        );
+        assert_eq!(row["declared_flops"], FLOPS_BUDGET_MAX / 2, "{row}");
+        assert!(
+            row["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("scoring deferred"),
+            "{row}"
+        );
+
+        assert_eq!(
+            queued_ids(app.clone(), None).await,
+            std::slice::from_ref(&id)
+        );
+        assert_eq!(
+            queued_ids(app.clone(), Some(CUSTOM)).await,
+            std::slice::from_ref(&id)
+        );
+        assert!(queued_ids(app.clone(), Some("dt-no-ib-v0"))
+            .await
+            .is_empty());
+        let (st, list) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/submissions?state=rejected",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(
+            list["items"].as_array().is_some_and(Vec::is_empty),
+            "{list}"
+        );
+        let (st, _) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/submissions?state=bogus",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "an unknown state filter");
+        assert_eq!(status_of(app.clone()).await["queued_submissions"], 1);
+
+        // The same artefact again is the same queued row, not a second run.
+        let (st, again) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            custom_submit("deferred-artifact"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{again}");
+        assert_eq!(again["id"], id, "{again}");
+        assert_eq!(again["state"], "queued", "{again}");
+        assert!(
+            again["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("already queued"),
+            "{again}"
+        );
+        assert_eq!(queued_ids(app.clone(), None).await.len(), 1);
+        // A different artefact by the same hotkey queues behind it.
+        let (st, second) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            custom_submit("second-artifact"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{second}");
+        assert_ne!(second["id"], id);
+        assert_eq!(queued_ids(app.clone(), None).await.len(), 2);
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0, "still no run");
+
+        // Intake gates still refuse before any row: no locator, over budget.
+        for (label, extra) in [
+            (
+                "no locator",
+                serde_json::json!({ "topic_id": CUSTOM, "artifact_uri": "" }),
+            ),
+            (
+                "over budget",
+                serde_json::json!({
+                    "topic_id": CUSTOM,
+                    "artifact_uri": "https://example.invalid/x.tar",
+                    "declared_flops": u64::MAX,
+                }),
+            ),
+        ] {
+            let (st, body) = json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                submit_body("gated", &extra),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{label}: {body}");
+        }
+        assert_eq!(
+            queued_ids(app.clone(), None).await.len(),
+            2,
+            "no row on a 400"
+        );
+
+        // The other open topic is not deferred and scores right now.
+        let (st, harvest_row) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body("harvest-artifact", &serde_json::json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{harvest_row}");
+        assert_ne!(harvest_row["state"], "queued", "{harvest_row}");
+        assert!(harvest_row["detail"].is_null() || harvest_row["detail"].is_string());
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// The reason the flag exists: a host whose topic cannot be scored yet
+    /// (runner registered but its VM backend not wired, no sealed baseline
+    /// recorded) answers **503** with no row without the flag — and **201**
+    /// `queued` with it. Nothing about host readiness is consulted on the
+    /// queued path.
+    #[tokio::test]
+    async fn a_deferring_topic_queues_even_when_the_host_cannot_score_it() {
+        let refusing = proof_router(state_with_deferred_custom(
+            Arc::new(FamilyStub::unwired(CUSTOM_ID)),
+            false,
+            false,
+        ));
+        let (st, body) = json_req(
+            refusing.clone(),
+            "POST",
+            "/v1/submissions",
+            custom_submit("not-yet"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            queued_ids(refusing, None).await.is_empty(),
+            "no row on a 503"
+        );
+
+        let scorer = Arc::new(FamilyStub::unwired(CUSTOM_ID));
+        let app = proof_router(state_with_deferred_custom(scorer.clone(), true, false));
+        let status = status_of(app.clone()).await;
+        assert_eq!(ids_of(&status, "deferred_topics"), [CUSTOM], "{status}");
+        assert_eq!(
+            ids_of(&status, "scorable_topics"),
+            ["dt-no-ib-v0"],
+            "{status}"
+        );
+        assert!(ids_of(&status, "custom_ready").is_empty(), "{status}");
+        let (st, created) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            custom_submit("not-yet"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_eq!(created["state"], "queued", "{created}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0);
+        assert_eq!(queued_ids(app, Some(CUSTOM)).await.len(), 1);
+    }
+
+    /// A malformed flag is a publish **400** naming the param; a `draft`
+    /// topic that defers is still a submit **400** (deferring is not a
+    /// way around `open`).
+    #[tokio::test]
+    async fn a_malformed_defer_flag_is_a_publish_400_and_draft_stays_400() {
+        let state = state_with_deferred_custom(Arc::new(FamilyStub::win(CUSTOM_ID)), false, true);
+        let pin = state.pin.clone();
+        let app = proof_router(state);
+        // Built past the ceremony helper (which validates): a signed document
+        // whose flag is not a boolean word.
+        let mut bad = custom_topic_with_defer(&pin, None);
+        bad.constraints.params.insert(
+            proof_task::PARAM_DEFER_SCORING.to_owned(),
+            "maybe".to_owned(),
+        );
+        bad.signature = bad.sign_with(&sk()).expect("sign");
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/topics",
+            serde_json::to_value(&bad).expect("json"),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        let msg = body["error"].as_str().unwrap_or_default();
+        assert!(msg.contains("constraints.params.defer_scoring"), "{body}");
+        assert!(msg.contains("\"true\" or \"false\""), "{body}");
+
+        let mut draft = custom_topic_with_defer(&pin, Some("true"));
+        draft.status = TopicStatus::Draft;
+        draft.signature = draft.sign_with(&sk()).expect("sign");
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/topics",
+            serde_json::to_value(&draft).expect("json"),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            custom_submit("draft-artifact"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "topic is not open");
+        let status = status_of(app.clone()).await;
+        assert!(ids_of(&status, "deferred_topics").is_empty(), "{status}");
+        assert!(queued_ids(app, None).await.is_empty());
+    }
+
+    /// The operator path: a drain on a topic that still defers is a **409**
+    /// and touches nothing; once the topic is re-published without the flag
+    /// the queue drains oldest first through the live path — each row keeps
+    /// its id, lands scored with the host stamps and the persist hook fires
+    /// — under the caller's `limit`, until the queue is empty.
+    #[tokio::test]
+    async fn drain_refuses_while_deferred_then_scores_the_queue_in_order() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let state = state_with_deferred_custom(scorer.clone(), true, true);
+        let pin = state.pin.clone();
+        let app = proof_router(state);
+        let mut queued = Vec::new();
+        for label in ["first", "second", "third"] {
+            let (st, created) = json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                custom_submit(label),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{created}");
+            queued.push(created["id"].as_str().expect("id").to_owned());
+        }
+        let drain = serde_json::json!({ "topic_id": CUSTOM });
+
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            drain.clone(),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            drain.clone(),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("still defers scoring"),
+            "{body}"
+        );
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            &format!("/v1/admin/proof/submissions/{}/score", queued[0]),
+            serde_json::json!({}),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{body}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0, "nothing ran");
+        assert_eq!(queued_ids(app.clone(), None).await, queued);
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            serde_json::json!({ "topic_id": "nope-v0" }),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+
+        // Lift the flag: the re-signed document replaces the topic.
+        republish_custom(app.clone(), &pin, None).await;
+        let status = status_of(app.clone()).await;
+        assert!(ids_of(&status, "deferred_topics").is_empty(), "{status}");
+        assert!(
+            ids_of(&status, "scorable_topics").contains(&CUSTOM.to_owned()),
+            "{status}"
+        );
+        assert_eq!(
+            status["queued_submissions"], 3,
+            "the queue survives a re-publish"
+        );
+
+        let (st, report) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            serde_json::json!({ "topic_id": CUSTOM, "limit": 1 }),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{report}");
+        assert_eq!(report["topic_id"], CUSTOM);
+        assert_eq!(
+            report["drained"].as_array().map(Vec::len),
+            Some(1),
+            "{report}"
+        );
+        assert_eq!(
+            report["drained"][0]["id"], queued[0],
+            "oldest first: {report}"
+        );
+        assert_eq!(report["drained"][0]["state"], "champion", "{report}");
+        assert_eq!(report["drained"][0]["eligible"], true, "{report}");
+        assert_eq!(report["remaining"], 2, "{report}");
+        assert!(report["stopped"].is_null(), "{report}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            scorer.persisted.lock().expect("p").clone(),
+            vec![(CUSTOM.to_owned(), queued[0].clone(), true)]
+        );
+        let (st, row) = json_req(
+            app.clone(),
+            "GET",
+            &format!("/v1/submissions/{}", queued[0]),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{row}");
+        assert_eq!(row["state"], "champion", "{row}");
+        assert!(row["verdict"]["pass"].as_bool().unwrap_or(false), "{row}");
+        assert_eq!(row["inference_offer_id"], "master-v0", "judge stamp: {row}");
+        assert_eq!(
+            row["executor_offer_id"], "lium-1x-v0",
+            "executor stamp: {row}"
+        );
+        assert!(
+            row["detail"].is_null(),
+            "a clean pass carries no detail: {row}"
+        );
+        assert_eq!(queued_ids(app.clone(), None).await, queued[1..]);
+
+        // The single-row route scores exactly the row it names.
+        let (st, third) = json_req(
+            app.clone(),
+            "POST",
+            &format!("/v1/admin/proof/submissions/{}/score", queued[2]),
+            serde_json::json!({}),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{third}");
+        assert_eq!(third["id"], queued[2], "{third}");
+        assert_ne!(third["state"], "queued", "{third}");
+        assert_eq!(queued_ids(app.clone(), None).await, [queued[1].clone()]);
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            &format!("/v1/admin/proof/submissions/{}/score", queued[0]),
+            serde_json::json!({}),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::CONFLICT,
+            "a scored row is not queued: {body}"
+        );
+        let (st, _) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/submissions/pf_missing/score",
+            serde_json::json!({}),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+
+        // Default limit is one row; an empty queue is a 200 with nothing drained.
+        let (st, report) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            drain.clone(),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{report}");
+        assert_eq!(report["drained"][0]["id"], queued[1], "{report}");
+        assert_eq!(report["remaining"], 0, "{report}");
+        let (st, report) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            drain,
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{report}");
+        assert!(
+            report["drained"].as_array().is_some_and(Vec::is_empty),
+            "{report}"
+        );
+        assert_eq!(report["remaining"], 0);
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 3);
+        assert_eq!(status_of(app).await["queued_submissions"], 0);
+    }
+
+    /// Fail closed on the drain: a host that cannot score the topic leaves
+    /// every row `queued` (**503**, the report says why, nothing rented) —
+    /// on the drain route, on the single-row route, and in the poll pass —
+    /// and a topic re-published to defer again is skipped by the pass.
+    #[tokio::test]
+    async fn a_drain_the_host_refuses_leaves_the_rows_queued() {
+        let scorer = Arc::new(FamilyStub::unwired(CUSTOM_ID));
+        let state = state_with_deferred_custom(scorer.clone(), true, true);
+        let pin = state.pin.clone();
+        let app = proof_router(state.clone());
+        let (st, created) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            custom_submit("waiting"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        let id = created["id"].as_str().expect("id").to_owned();
+
+        // Still deferring: the poll pass skips the topic entirely.
+        assert!(state.drain_ready_queues().await.is_empty());
+        republish_custom(app.clone(), &pin, None).await;
+
+        let (st, report) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            serde_json::json!({ "topic_id": CUSTOM, "limit": 5 }),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{report}");
+        let why = report["error"].as_str().unwrap_or_default();
+        assert!(why.contains("503") && why.contains("not wired"), "{report}");
+        assert_eq!(report["stopped"], report["error"], "{report}");
+        assert!(
+            report["drained"].as_array().is_some_and(Vec::is_empty),
+            "{report}"
+        );
+        assert_eq!(report["remaining"], 1, "{report}");
+
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            &format!("/v1/admin/proof/submissions/{id}/score"),
+            serde_json::json!({}),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+        let reports = state.drain_ready_queues().await;
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert!(reports[0].drained.is_empty());
+        assert_eq!(reports[0].remaining, 1);
+        assert!(
+            reports[0]
+                .stopped
+                .as_deref()
+                .is_some_and(|s| s.contains("not wired")),
+            "{reports:?}"
+        );
+
+        assert_eq!(
+            scorer.inner.hits.load(Ordering::SeqCst),
+            0,
+            "nothing rented"
+        );
+        assert_eq!(
+            queued_ids(app.clone(), None).await,
+            std::slice::from_ref(&id)
+        );
+        let (_, row) = json_req(
+            app.clone(),
+            "GET",
+            &format!("/v1/submissions/{id}"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(row["state"], "queued", "released back to the queue: {row}");
+
+        // A topic with no queue is a no-op drain; deferring again pauses the pass.
+        let (st, report) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            serde_json::json!({ "topic_id": "dt-no-ib-v0" }),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{report}");
+        assert_eq!(report["remaining"], 0);
+        republish_custom(app.clone(), &pin, Some("true")).await;
+        assert!(state.drain_ready_queues().await.is_empty());
+        let (st, body) = json_req(
+            app,
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            serde_json::json!({ "topic_id": CUSTOM }),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    }
+
+    /// The poll pass the binary runs: it scores the whole queue of a lifted
+    /// topic in order and returns one report per topic that had rows.
+    #[tokio::test]
+    async fn the_poll_pass_drains_a_lifted_topic_in_order() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let state = state_with_deferred_custom(scorer.clone(), true, true);
+        let pin = state.pin.clone();
+        let app = proof_router(state.clone());
+        let mut queued = Vec::new();
+        for label in ["a", "b"] {
+            let (st, created) = json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                custom_submit(label),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{created}");
+            queued.push(created["id"].as_str().expect("id").to_owned());
+        }
+        assert!(
+            state.drain_ready_queues().await.is_empty(),
+            "deferred: skipped"
+        );
+        republish_custom(app.clone(), &pin, None).await;
+        let reports = state.drain_ready_queues().await;
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        let drained: Vec<String> = reports[0].drained.iter().map(|r| r.id.clone()).collect();
+        assert_eq!(drained, queued);
+        assert_eq!(reports[0].remaining, 0);
+        assert!(reports[0].stopped.is_none());
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 2);
+        assert!(state.drain_ready_queues().await.is_empty(), "nothing left");
+        assert!(queued_ids(app, None).await.is_empty());
     }
 }
