@@ -219,6 +219,7 @@ Tunnel writes gitignored `deploy/env/local-tunnel.env` (`BASE_GATEWAY_PUBLIC_URL
 | Staging | CI green on `main` (`deploy-staging.yml`) | `--build-from source` on droplet OK for iteration |
 | Images | Push to `main` (`images.yml`) | Build/push GHCR digests; promote + **commit** `deploy/pins/staging.json` + `deploy/digests/<sha>.json` |
 | Prod | Tag `v*.*.*` (`deploy-prod.yml`) | **`--build-from registry` only** — promote staging→prod pins, pull GHCR digests; no Rust source build on prod hosts |
+| ctx CLI | Tag `v*.*.*`, or `workflow_dispatch tag=vX.Y.Z` (`release-ctx.yml`) | Builds `bins/ctx` from the tagged commit (push) or from the tip of `main` (dispatch — never the tag, never an input), commits on `main` only, no cargo cache, and attaches `ctx-*` archives + `SHA256SUMS.txt` to that Release. Tag = publishing label, build ref = sources; `scripts/install-ctx.sh` refuses a release without the sums. Recipe: [`README.md`](README.md) § `ctx` CLI release |
 
 Ladder: CI → GHCR digests → `deploy/pins/staging.json` (committed by `images.yml`) → tag → preflight (CI + staging pins match tag SHA) → `promote.sh` → `remote-deploy.sh --build-from registry`. Details: [`README.md`](README.md) § Auto CI deploy and § Promotion pipeline.
 

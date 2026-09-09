@@ -32,6 +32,16 @@ ctx challenges
 ctx status
 ```
 
+The installer takes the newest [release](https://github.com/CortexLM/cortex/releases)
+and verifies `ctx-<os>-<arch>.tar.gz` against that release's `SHA256SUMS.txt`.
+It refuses anything unverified: a release published without those files
+stops with a message naming it and installs nothing. To install a specific
+release instead, pin the tag with `CTX_VERSION`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CortexLM/cortex/main/scripts/install-ctx.sh | CTX_VERSION=vX.Y.Z sh
+```
+
 Default gateway is [https://gateway.cortex.foundation](https://gateway.cortex.foundation).
 `--gateway` overrides it for a local stack. `LIUM_API_KEY` is forwarded as
 `X-Lium-Api-Key` and never printed.

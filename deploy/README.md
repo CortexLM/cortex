@@ -126,6 +126,51 @@ combination. Verify locally: `./deploy/scripts/assert-compose-matrix.sh`.
 7. Both prod hosts: `remote-deploy.sh --build-from registry` (pull GHCR `@sha256`, retag to Compose tags, `up --no-build`).
 8. Smoke `/healthz`. `environment: production` (enable required reviewers in GitHub UI).
 
+**`ctx` CLI release (miner installer):** `.github/workflows/release-ctx.yml`
+builds `bins/ctx` for linux / darwin (amd64 + arm64) and windows and attaches
+`ctx-*.tar.gz` / `.zip` plus `SHA256SUMS.txt` to the GitHub Release.
+`scripts/install-ctx.sh` (the `curl … | sh` in the miner docs) installs from
+`releases/latest` — or `CTX_VERSION=vX.Y.Z` — and refuses a release without
+those files, so a release published without this workflow installs nothing.
+The **release tag is a publishing label**; the **build ref is where the
+sources come from**:
+
+| Trigger | Attaches to | Builds from |
+|---------|-------------|-------------|
+| push tag `v*.*.*` | that tag | the tagged commit (must be on `main`) |
+| `workflow_dispatch` | `tag` (must already exist) | the tip of `main` at run time — never an input |
+
+```bash
+# 1. Cut the label on tip (the tag push runs release-ctx from the tagged commit).
+gh release create vX.Y.Z --target main --title "ctx CLI vX.Y.Z" --notes "…"
+# 2. (Re)build ctx from the tip of main and attach it to that existing tag —
+#    also the fix for a release that has no ctx assets.
+gh workflow run release-ctx.yml -f tag=vX.Y.Z
+# 2b. To release an older commit on main, tag that commit instead of dispatching.
+git tag -a vX.Y.Z <sha-on-main> -m "ctx CLI vX.Y.Z" && git push origin vX.Y.Z
+# 3. Confirm the six assets, then install the way a miner does.
+gh run watch && gh release view vX.Y.Z --json assets -q '.assets[].name'
+curl -fsSL https://raw.githubusercontent.com/CortexLM/cortex/main/scripts/install-ctx.sh | sh
+```
+
+A dispatch never checks the tag out: an old tag predates `bins/ctx` and used
+to fail with `package ID specification ctx did not match any packages`. It
+takes no build ref either — a publishing workflow must not check out a
+caller-chosen ref (privileged context, cache poisoning). The `resolve` job
+refuses a build commit that is not on `main` (miners install what this
+publishes; an unmerged branch or a fork is never released) or has no
+`bins/ctx`, refuses a `tag` that does not exist (a typo cannot mint a
+release), builds all five archives cold — no cargo cache — from one resolved
+commit, and appends that commit to the release notes. Runs for the same tag
+queue (`concurrency`) instead of racing on the upload. Any
+`v*.*.*` tag push also triggers `deploy-prod.yml`, whose preflight fails
+closed unless CI is green for that SHA and `deploy/pins/staging.json` carries
+it — a ctx-only label therefore shows a failed `deploy-prod` preflight and
+deploys nothing. `releases/latest` is GitHub's newest non-draft,
+non-prerelease release, ordered by the tagged commit's date rather than the
+publish date — cut labels on tip, and mark experimental labels pre-release to
+keep them off the default install path.
+
 Required GitHub secrets:
 
 | Secret | Purpose |
