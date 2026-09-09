@@ -20,10 +20,37 @@ fn base_url() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Production hosts the live probe must never touch. Compared as a parsed,
+/// lower-cased hostname (DNS is case-insensitive); a mixed-case spelling of
+/// the same host is still production.
+const PROD_HOSTS: &[&str] = &[
+    "gateway.cortex.foundation",
+    "network.cortex.foundation",
+    "chain.joinbase.ai",
+];
+
+/// Host part of `url`, lower-cased, trailing-dot stripped. Bare hosts (no
+/// scheme) are parsed as HTTPS so `GATEWAY.CORTEX.FOUNDATION` still matches.
+fn url_hostname(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url)
+        .ok()
+        .or_else(|| reqwest::Url::parse(&format!("https://{url}")).ok())?;
+    let host = parsed.host_str()?.trim_end_matches('.');
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+fn host_is_listed(host: &str, listed: &str) -> bool {
+    host == listed
+        || (host.len() > listed.len()
+            && host.ends_with(listed)
+            && host.as_bytes()[host.len() - listed.len() - 1] == b'.')
+}
+
 fn is_prod_host(base: &str) -> bool {
-    base.contains("gateway.cortex.foundation")
-        || base.contains("network.cortex.foundation")
-        || base.contains("chain.joinbase.ai")
+    url_hostname(base).is_some_and(|host| PROD_HOSTS.iter().any(|p| host_is_listed(&host, p)))
 }
 
 fn hex64(label: &str) -> String {
@@ -184,4 +211,116 @@ async fn live_host_submit_scores_or_fails_closed() {
             );
         }
     }
+}
+
+#[test]
+fn mixed_case_and_lowercase_production_hosts_are_refused() {
+    for url in [
+        "https://gateway.cortex.foundation/challenge/proof",
+        "https://GATEWAY.CORTEX.FOUNDATION/challenge/proof",
+        "https://Gateway.Cortex.Foundation/challenge/proof",
+        "http://user@Chain.JoinBase.AI:8080/challenge/proof",
+        "https://NETWORK.CORTEX.FOUNDATION./v1",
+        "https://sub.gateway.cortex.foundation:443/challenge/proof",
+        "GATEWAY.CORTEX.FOUNDATION/challenge/proof",
+    ] {
+        assert!(is_prod_host(url), "{url} must be refused as production");
+    }
+}
+
+#[test]
+fn staging_loopback_and_path_lookalikes_are_not_production() {
+    for url in [
+        "http://127.0.0.1:28100",
+        "http://localhost:8100/challenge/proof",
+        "http://staging.api.joinbase.ai/challenge/proof",
+        "http://159.223.159.205/challenge/proof",
+        "https://example.com/gateway.cortex.foundation",
+    ] {
+        assert!(
+            !is_prod_host(url),
+            "{url} must not be refused as production"
+        );
+    }
+}
+
+/// The shell `--probe` path must refuse mixed-case production hosts before
+/// any HTTP client runs. A fake `curl` first on PATH fails the test if the
+/// guard is bypassed.
+#[test]
+fn proof_submit_e2e_script_refuses_mixed_case_production_hosts() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root");
+    let bin =
+        std::env::temp_dir().join(format!("proof-submit-e2e-fake-curl-{}", std::process::id()));
+    std::fs::create_dir_all(&bin).expect("fake curl dir");
+    let curl = bin.join("curl");
+    std::fs::write(&curl, "#!/bin/sh\necho UNEXPECTED_CURL >&2\nexit 99\n").expect("fake curl");
+    let mut perm = std::fs::metadata(&curl).expect("stat").permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(&curl, perm).expect("chmod");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    for url in [
+        "https://GATEWAY.CORTEX.FOUNDATION/challenge/proof",
+        "https://gateway.cortex.foundation/challenge/proof",
+        "http://Chain.JoinBase.AI/challenge/proof",
+        "https://NETWORK.CORTEX.FOUNDATION/challenge/proof",
+    ] {
+        let out = Command::new("bash")
+            .arg(root.join("deploy/scripts/proof-submit-e2e.sh"))
+            .args(["--probe", url])
+            .env("PATH", &path)
+            .current_dir(&root)
+            .output()
+            .expect("run proof-submit-e2e.sh");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            out.status.code().unwrap_or(-1),
+            2,
+            "{url} must exit 2:\n{text}"
+        );
+        assert!(text.contains("refusing production host"), "{url}: {text}");
+        assert!(
+            !text.contains("UNEXPECTED_CURL"),
+            "{url}: curl must not run:\n{text}"
+        );
+    }
+
+    let staging = Command::new("bash")
+        .arg(root.join("deploy/scripts/proof-submit-e2e.sh"))
+        .args(["--probe", "http://staging.api.joinbase.ai/challenge/proof"])
+        .env("PATH", &path)
+        .current_dir(&root)
+        .output()
+        .expect("run proof-submit-e2e.sh staging");
+    let staging_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&staging.stdout),
+        String::from_utf8_lossy(&staging.stderr)
+    );
+    assert_ne!(
+        staging.status.code().unwrap_or(-1),
+        2,
+        "staging must not be refused as production:\n{staging_text}"
+    );
+    assert!(
+        !staging_text.contains("refusing production host"),
+        "staging must not be refused as production:\n{staging_text}"
+    );
+
+    let _ = std::fs::remove_dir_all(bin);
 }

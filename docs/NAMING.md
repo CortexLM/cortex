@@ -107,8 +107,9 @@ not the product name.
 
 ## On-chain and public hostnames
 
-- Live gateway hostname `chain.joinbase.ai` is operator DNS, not a GitHub
-  brand string. Do not retarget it from a docs-only PR.
+- Live gateway hostname `gateway.cortex.foundation` is operator DNS, not a GitHub
+  brand string. `chain.joinbase.ai` is the retired prod host. Do not retarget
+  the live host from a docs-only PR.
 - Subnet netuid and on-chain names stay whatever the chain already uses.
 
 ## Public miner repos (other GitHub repositories)
