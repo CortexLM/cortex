@@ -45,17 +45,42 @@ proof_writable_scratch() {
 
 # Miner BYOK wins on evaluate. Owner key is only for baseline / operator-paid
 # jobs when miner_byok is unset (or baseline with no miner file staged).
+#
+# Evaluate always has a staging dir (guest sets PROOF_MINER_ENV_DIR; if it
+# did not, we create one and copy any already-exported value). Fail closed
+# only when the key is still missing after that — never because the dir
+# env var was unset.
+proof_stage_miner_env_dir() {
+    if [ -n "${PROOF_MINER_ENV_DIR:-}" ]; then
+        mkdir -p "$PROOF_MINER_ENV_DIR"
+        chmod 0700 "$PROOF_MINER_ENV_DIR" 2>/dev/null || true
+        return 0
+    fi
+    if [ -n "${PROOF_SECRETS_DIR:-}" ]; then
+        export PROOF_MINER_ENV_DIR="$PROOF_SECRETS_DIR/miner"
+    else
+        : "${PROOF_WORK_DIR:?PROOF_WORK_DIR is required to stage miner BYOK}"
+        export PROOF_MINER_ENV_DIR="$PROOF_WORK_DIR/miner-env"
+    fi
+    mkdir -p "$PROOF_MINER_ENV_DIR"
+    chmod 0700 "$PROOF_MINER_ENV_DIR"
+}
+
 proof_load_inference_key() {
     local byok_name="${PROOF_PARAM_MINER_BYOK:-}"
     local byok_file=""
     if [ -n "$byok_name" ]; then
-        [ -n "${PROOF_MINER_ENV_DIR:-}" ] || {
-            [ "${PROOF_JOB:-}" = evaluate ] && proof_die "evaluate: miner_byok=$byok_name but PROOF_MINER_ENV_DIR is unset"
-        }
-        if [ -n "${PROOF_MINER_ENV_DIR:-}" ]; then
-            byok_file="$PROOF_MINER_ENV_DIR/$byok_name"
+        proof_stage_miner_env_dir
+        byok_file="$PROOF_MINER_ENV_DIR/$byok_name"
+        if [ ! -r "$byok_file" ]; then
+            # Indirect expansion: the guest may have exported the value
+            # without writing the file. Stage it; never print it.
+            if [ -n "${!byok_name:-}" ]; then
+                printf '%s' "${!byok_name}" > "$byok_file"
+                chmod 0600 "$byok_file"
+            fi
         fi
-        if [ -n "$byok_file" ] && [ -r "$byok_file" ]; then
+        if [ -r "$byok_file" ]; then
             export "$byok_name"="$(tr -d '\n' < "$byok_file")"
             return 0
         fi

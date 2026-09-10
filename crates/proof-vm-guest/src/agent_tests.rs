@@ -892,6 +892,44 @@ EOF
         vec!["inference_key"],
         "PROOF_SECRET_FILES stays the owner's list"
     );
+
+    // Evaluate must stage the same way: PROOF_MINER_ENV_DIR is set and the
+    // file is there. A missing directory variable is not a fail-closed.
+    req.constraints.params.insert(
+        proof_canon::PARAM_MINER_BYOK.into(),
+        "MINER_PROVIDED_API_KEY".into(),
+    );
+    let artefact = archive(&[member("recipe/run.sh", b'0', b"echo hi\n")]);
+    req.artifact_digest = hex::encode(Sha256::digest(&artefact));
+    req.artifact_uri = Some(serve_once(artefact).await);
+    install(
+        &r,
+        "run",
+        r#"
+: "${PROOF_MINER_ENV_DIR:?evaluate must stage a miner env dir}"
+: "${MINER_PROVIDED_API_KEY:?the miner key must be exported}"
+from_file=$(cat "$PROOF_MINER_ENV_DIR/MINER_PROVIDED_API_KEY")
+test "$from_file" = "$MINER_PROVIDED_API_KEY"
+echo '{"primary_value": 0.25, "flops_used": 1}' > "$PROOF_OUTPUT_DIR/report.json"
+"#,
+    );
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::Evaluate {
+                request: req.clone(),
+                checklist_digest: "c".into(),
+                rules_version: 1,
+            }),
+        })
+        .await;
+    let RlmToHost::Done {
+        output: VmJobOutput::Evaluated(run),
+    } = out
+    else {
+        panic!("expected an evaluated run, got {out:?}");
+    };
+    run.report.verify(&req).expect("bound to the request");
+    assert_eq!(run.report.flops_used, Some(1));
     let _ = std::fs::remove_dir_all(&r);
 }
 
@@ -955,6 +993,40 @@ echo '[]' > "$PROOF_OUTPUT_DIR/checklist.json"
             .join(crate::staging::MINER_ENV_SUBDIR)
             .exists(),
         "no key file is written for an unpaid job"
+    );
+
+    // Evaluate on a miner_byok topic still exposes PROOF_MINER_ENV_DIR
+    // when the request carried no values, so the adaptor fails on a
+    // missing file rather than an unset directory variable.
+    let artefact = archive(&[member("recipe/run.sh", b'0', b"echo hi\n")]);
+    let mut empty = req_for(&digest);
+    empty.constraints.params.insert(
+        proof_canon::PARAM_MINER_BYOK.into(),
+        "MINER_PROVIDED_API_KEY".into(),
+    );
+    empty.artifact_digest = hex::encode(Sha256::digest(&artefact));
+    empty.artifact_uri = Some(serve_once(artefact).await);
+    install(
+        &r,
+        "run",
+        r#"
+: "${PROOF_MINER_ENV_DIR:?evaluate miner_byok must set the dir even with empty miner_env}"
+test ! -r "$PROOF_MINER_ENV_DIR/MINER_PROVIDED_API_KEY"
+echo '{"primary_value": 0.1, "flops_used": 1}' > "$PROOF_OUTPUT_DIR/report.json"
+"#,
+    );
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::Evaluate {
+                request: empty,
+                checklist_digest: "c".into(),
+                rules_version: 1,
+            }),
+        })
+        .await;
+    assert!(
+        matches!(out, RlmToHost::Done { .. }),
+        "evaluate still runs with an empty miner env dir: {out:?}"
     );
     let _ = std::fs::remove_dir_all(&r);
 }

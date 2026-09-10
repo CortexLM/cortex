@@ -131,8 +131,12 @@ in miner code or README inside the tar.
 If the topic sets `constraints.params.miner_byok` (`PROOF_PARAM_MINER_BYOK`):
 
 - **evaluate:** export that variable from
-  `$PROOF_MINER_ENV_DIR/$PROOF_PARAM_MINER_BYOK` (`0600`). Missing file →
-  fail closed. **No** owner `PROOF_SECRETS_DIR` fallback.
+  `$PROOF_MINER_ENV_DIR/$PROOF_PARAM_MINER_BYOK` (`0600`). If
+  `PROOF_MINER_ENV_DIR` is unset, the adaptor creates one
+  (`$PROOF_SECRETS_DIR/miner` or `$PROOF_WORK_DIR/miner-env`) and copies an
+  already-exported value into it. Fail closed only when the key is still
+  missing after that staging — never because the dir env var was never
+  set. **No** owner `PROOF_SECRETS_DIR` fallback.
 - **baseline:** use the miner file when it is staged; otherwise the owner
   key `PROOF_SECRETS_DIR/$PROOF_PARAM_INFERENCE_KEY_FILE` into
   `PROOF_PARAM_INFERENCE_KEY_ENV` (operator-paid reference run).
