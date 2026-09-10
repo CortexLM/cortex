@@ -93,7 +93,10 @@ proof_select_harbor_agent() {
         pythonpath="$(printf '%s\n' "$resolved" | sed -n 's/^pythonpath=//p' | head -n1)"
         [ -n "$import_path" ] || return 1
         if [ -n "$pythonpath" ]; then
-            export PYTHONPATH="${pythonpath}${PYTHONPATH:+:$PYTHONPATH}"
+            # Evaluate import env is the staged artefact parent only.
+            # Inherited PYTHONPATH would let a miner import_path name a
+            # module that lives outside the artefact.
+            export PYTHONPATH="$pythonpath"
         fi
         chosen="$import_path"
         source="$label"

@@ -94,6 +94,68 @@ class InspectScanTests(unittest.TestCase):
             self.assertTrue(items["no_tb4_hardcoding"]["pass"])
             self.assertTrue(items["same_seed"]["pass"])
 
+    def test_truncated_scan_fails_off_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            art = root / "artifact"
+            art.mkdir()
+            for i in range(inspect_scan.MAX_FILES):
+                (art / f"a-{i:03d}.txt").write_text("benign\n", encoding="utf-8")
+            (art / "z-forbidden.txt").write_text("no_tb4_hardcoding\n", encoding="utf-8")
+            rules = root / "rules.json"
+            rules.write_text(
+                json.dumps(
+                    [
+                        {"id": "no_eval_short_circuit", "text": "x"},
+                        {"id": "no_tb4_hardcoding", "text": "x"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            out = root / "out"
+            out.mkdir()
+            os.environ["PROOF_RULES_FILE"] = str(rules)
+            os.environ["PROOF_OUTPUT_DIR"] = str(out)
+            os.environ["PROOF_ARTIFACT_DIR"] = str(art)
+            try:
+                self.assertEqual(inspect_scan.main([]), 0)
+            finally:
+                os.environ.pop("PROOF_RULES_FILE", None)
+                os.environ.pop("PROOF_OUTPUT_DIR", None)
+                os.environ.pop("PROOF_ARTIFACT_DIR", None)
+            items = {i["id"]: i for i in json.loads((out / "checklist.json").read_text())}
+            self.assertFalse(items["no_tb4_hardcoding"]["pass"])
+            self.assertFalse(items["no_eval_short_circuit"]["pass"])
+            self.assertIn("incomplete", items["no_tb4_hardcoding"]["evidence"])
+
+    def test_unknown_rule_fails_closed_with_artefact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            art = root / "artifact"
+            art.mkdir()
+            (art / "note.txt").write_text("unrelated\n", encoding="utf-8")
+            rules = root / "rules.json"
+            rules.write_text(
+                json.dumps(
+                    [{"id": "must_provide_reproducible_benchmark", "text": "prove it"}]
+                ),
+                encoding="utf-8",
+            )
+            out = root / "out"
+            out.mkdir()
+            os.environ["PROOF_RULES_FILE"] = str(rules)
+            os.environ["PROOF_OUTPUT_DIR"] = str(out)
+            os.environ["PROOF_ARTIFACT_DIR"] = str(art)
+            try:
+                self.assertEqual(inspect_scan.main([]), 0)
+            finally:
+                os.environ.pop("PROOF_RULES_FILE", None)
+                os.environ.pop("PROOF_OUTPUT_DIR", None)
+                os.environ.pop("PROOF_ARTIFACT_DIR", None)
+            items = {i["id"]: i for i in json.loads((out / "checklist.json").read_text())}
+            self.assertFalse(items["must_provide_reproducible_benchmark"]["pass"])
+            self.assertIn("unknown", items["must_provide_reproducible_benchmark"]["evidence"])
+
 
 if __name__ == "__main__":
     unittest.main()
