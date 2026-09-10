@@ -78,9 +78,10 @@ def load_rules(path: Path) -> list[dict[str, str]]:
 def collect_artefact_text(root: Path | None) -> tuple[str, int, list[str], bool]:
     """Return ``(text, n_scanned, names, incomplete)``.
 
-    ``incomplete`` is true when a file or byte cap stopped the walk before
-    every regular file was considered. Callers must not treat a truncated
-    scan as proof that an off-limits marker is absent.
+    ``incomplete`` is true when a file or byte cap stopped the walk, or a
+    regular file was oversized / unreadable so its contents were not
+    inspected. Callers must not treat that absence as a clean off-limits
+    pass.
     """
     if root is None or not root.is_dir():
         return "", 0, [], False
@@ -103,14 +104,20 @@ def collect_artefact_text(root: Path | None) -> tuple[str, int, list[str], bool]
         try:
             size = path.stat().st_size
         except OSError:
+            incomplete = True
             continue
-        if size == 0 or size > MAX_FILE_BYTES:
+        if size == 0:
+            continue
+        if size > MAX_FILE_BYTES:
+            incomplete = True
             continue
         try:
             data = path.read_bytes()
         except OSError:
+            incomplete = True
             continue
         if b"\x00" in data[:1024]:
+            incomplete = True
             continue
         total += len(data)
         blobs.append(data.decode("utf-8", errors="replace"))

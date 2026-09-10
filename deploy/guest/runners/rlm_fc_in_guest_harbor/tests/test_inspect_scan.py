@@ -8,6 +8,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 sys_path_parent = str(HERE.parent)
@@ -155,6 +156,138 @@ class InspectScanTests(unittest.TestCase):
             items = {i["id"]: i for i in json.loads((out / "checklist.json").read_text())}
             self.assertFalse(items["must_provide_reproducible_benchmark"]["pass"])
             self.assertIn("unknown", items["must_provide_reproducible_benchmark"]["evidence"])
+
+    def _run_inspect(self, art: Path, rules: Path, out: Path) -> dict[str, dict]:
+        os.environ["PROOF_RULES_FILE"] = str(rules)
+        os.environ["PROOF_OUTPUT_DIR"] = str(out)
+        os.environ["PROOF_ARTIFACT_DIR"] = str(art)
+        try:
+            self.assertEqual(inspect_scan.main([]), 0)
+        finally:
+            os.environ.pop("PROOF_RULES_FILE", None)
+            os.environ.pop("PROOF_OUTPUT_DIR", None)
+            os.environ.pop("PROOF_ARTIFACT_DIR", None)
+        return {i["id"]: i for i in json.loads((out / "checklist.json").read_text())}
+
+    def test_oversized_file_fails_off_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            art = root / "artifact"
+            art.mkdir()
+            (art / "ok.py").write_text("class MinerAgent:\n    pass\n", encoding="utf-8")
+            oversized = art / "oversized.txt"
+            payload = ("x" * inspect_scan.MAX_FILE_BYTES) + "\nno_tb4_hardcoding\n"
+            oversized.write_text(payload, encoding="utf-8")
+            rules = root / "rules.json"
+            rules.write_text(
+                json.dumps(
+                    [
+                        {"id": "no_eval_short_circuit", "text": "x"},
+                        {"id": "no_tb4_hardcoding", "text": "x"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            out = root / "out"
+            out.mkdir()
+            items = self._run_inspect(art, rules, out)
+            self.assertFalse(items["no_tb4_hardcoding"]["pass"])
+            self.assertFalse(items["no_eval_short_circuit"]["pass"])
+            self.assertIn("incomplete", items["no_tb4_hardcoding"]["evidence"])
+
+    def test_unreadable_file_fails_off_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            art = root / "artifact"
+            art.mkdir()
+            (art / "ok.py").write_text("class MinerAgent:\n    pass\n", encoding="utf-8")
+            hidden = art / "stat-failed.txt"
+            hidden.write_text("skip_eval\n", encoding="utf-8")
+            rules = root / "rules.json"
+            rules.write_text(
+                json.dumps(
+                    [
+                        {"id": "no_eval_short_circuit", "text": "x"},
+                        {"id": "no_tb4_hardcoding", "text": "x"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            out = root / "out"
+            out.mkdir()
+            real_stat = Path.stat
+            size_lookups = {"n": 0}
+
+            def _stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+                result = real_stat(self, *args, **kwargs)
+                if self.name == "stat-failed.txt":
+                    size_lookups["n"] += 1
+                    # is_file() must succeed so the walker reaches the size lookup.
+                    if size_lookups["n"] > 1:
+                        raise OSError("simulated stat failure")
+                return result
+
+            with patch.object(Path, "stat", _stat):
+                items = self._run_inspect(art, rules, out)
+            self.assertFalse(items["no_eval_short_circuit"]["pass"])
+            self.assertFalse(items["no_tb4_hardcoding"]["pass"])
+            self.assertIn("incomplete", items["no_eval_short_circuit"]["evidence"])
+
+    def test_read_failed_file_fails_off_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            art = root / "artifact"
+            art.mkdir()
+            (art / "ok.py").write_text("class MinerAgent:\n    pass\n", encoding="utf-8")
+            hidden = art / "read-failed.txt"
+            hidden.write_text("tb4_answers\n", encoding="utf-8")
+            rules = root / "rules.json"
+            rules.write_text(
+                json.dumps(
+                    [
+                        {"id": "no_eval_short_circuit", "text": "x"},
+                        {"id": "no_tb4_hardcoding", "text": "x"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            out = root / "out"
+            out.mkdir()
+            real_read = Path.read_bytes
+
+            def _read(self: Path) -> bytes:
+                if self.name == "read-failed.txt":
+                    raise OSError("simulated read failure")
+                return real_read(self)
+
+            with patch.object(Path, "read_bytes", _read):
+                items = self._run_inspect(art, rules, out)
+            self.assertFalse(items["no_tb4_hardcoding"]["pass"])
+            self.assertFalse(items["no_eval_short_circuit"]["pass"])
+            self.assertIn("incomplete", items["no_tb4_hardcoding"]["evidence"])
+
+    def test_binary_file_fails_off_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            art = root / "artifact"
+            art.mkdir()
+            (art / "ok.py").write_text("class MinerAgent:\n    pass\n", encoding="utf-8")
+            (art / "blob.bin").write_bytes(b"\x00no_tb4_hardcoding\n")
+            rules = root / "rules.json"
+            rules.write_text(
+                json.dumps(
+                    [
+                        {"id": "no_eval_short_circuit", "text": "x"},
+                        {"id": "no_tb4_hardcoding", "text": "x"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            out = root / "out"
+            out.mkdir()
+            items = self._run_inspect(art, rules, out)
+            self.assertFalse(items["no_tb4_hardcoding"]["pass"])
+            self.assertIn("incomplete", items["no_tb4_hardcoding"]["evidence"])
 
 
 if __name__ == "__main__":
