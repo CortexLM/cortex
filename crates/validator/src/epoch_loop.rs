@@ -1068,7 +1068,9 @@ mod tests {
                 assert_eq!(sub.payload.uids, vec![0]);
                 assert_eq!(sub.payload.values, vec![65535]);
             }
-            other => panic!("expected SubmitTimelocked of uid0 burn, got {other:?}"),
+            other @ ChainCall::SetWeights(_) => {
+                panic!("expected SubmitTimelocked of uid0 burn, got {other:?}")
+            }
         }
         assert!(dedupe.already_submitted(epoch));
     }
