@@ -39,8 +39,12 @@ ordinary path (topic VM + sister guest). The topic content the operator
 staged (the pack, the harness CLI and agent the adaptor drives, how a trial
 becomes a number) lives **outside git** — on the KVM host, in the baked
 image, and in the signed document — and is recognised by nothing here.
-`deploy/guest/runners/` ships the adaptor **contract and a skeleton only**;
-no adaptor, harness, or scoring rule is committed.
+`deploy/guest/runners/` ships the adaptor **contract**, a fail-closed
+skeleton, and the versioned Harbor reference adaptor
+[`rlm_fc_in_guest_harbor/`](../../deploy/guest/runners/rlm_fc_in_guest_harbor/)
+(bake with `--runner rlm_fc_in_guest_harbor=<that dir>`). Harbor CLI, venv,
+and task packs stay operator artefacts. Proof binaries still compile none of
+that in.
 
 ## Resource caps (Architecte lock)
 
@@ -132,7 +136,7 @@ VMs and experiment VMs:
 | `/sbin/init` (`deploy/guest/init.sh`) + `catatonit` | mounts, cgroup v2, scratch on `/dev/vdb`, run-as user, agent loop | no systemd in the guest |
 | rootless podman + crun + fuse-overlayfs + pasta/slirp4netns + podman-compose | containers **inside** the VM as an unprivileged user (`--run-as-uid 1000`, subuid `100000:65536`), `cgroup_manager = cgroupfs`, store on paths `init.sh` creates and chowns to that user — `graphroot = /var/lib/proof/containers/storage` (scratch disk), `runroot = /run/user/<uid>/containers` (its `XDG_RUNTIME_DIR` tmpfs); never `/var/lib/containers` / `/run/containers` (root-owned, read-only rootfs) | the harness's container runtime; no nested KVM |
 | `--extra-pkgs a,b,c` · `--overlay DIR` · `--chroot-hook SCRIPT` | the operator's harness tooling: Debian packages; a tree copied over the rootfs (a prebuilt venv, a CLI); a script run inside the chroot (build a venv, `pip install <tool>==<pinned>`) | generic hooks — this repo names no harness; pin every version the hook installs, record it in your own manifest |
-| `--runner <id>=<dir>` | adaptor under `/opt/proof/runners/<id>/` | operator capability, **outside git**; contract + skeleton in [`../../deploy/guest/runners/README.md`](../../deploy/guest/runners/README.md) |
+| `--runner <id>=<dir>` | adaptor under `/opt/proof/runners/<id>/` | operator capability; contract + skeleton in [`../../deploy/guest/runners/README.md`](../../deploy/guest/runners/README.md); bake the Harbor reference from [`../../deploy/guest/runners/rlm_fc_in_guest_harbor/`](../../deploy/guest/runners/rlm_fc_in_guest_harbor/) when the topic names that id |
 
 **Size budget.** The baked tree must fit `--budget-mib` (default 2560 MiB;
 the 1.5–2.5 GiB target — minbase + podman stack ≈ 0.6–0.9 GiB, + whatever
@@ -150,9 +154,9 @@ rustup target add x86_64-unknown-linux-musl
 CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release -p proof-vm-guest-agent-bin --target x86_64-unknown-linux-musl
 deploy/guest/bake-rootfs.sh \
   --guest-agent target/x86_64-unknown-linux-musl/release/proof-vm-guest-agent \
-  --runner <id>=/path/outside/git/<your adaptor dir> \   # <id> = what your topics put in baseline_runner
+  --runner rlm_fc_in_guest_harbor=deploy/guest/runners/rlm_fc_in_guest_harbor \
   --extra-pkgs python3-venv,python3-pip,git \             # what your adaptor's harness needs
-  --chroot-hook /path/outside/git/install-harness.sh \    # pins and installs it inside the chroot
+  --chroot-hook /path/outside/git/install-harbor.sh \    # pins Harbor inside the chroot
   --resolver <resolver ip on the allowlist> \
   --check-kernel-config <the guest kernel's .config> \
   --out-dir ./out
@@ -200,8 +204,8 @@ typed from a document.
    carries `experiment_max_vcpus`, `experiment_max_mem_mib`,
    `experiment_disk_mib`, `experiment_image`.
 6. **Topic:** the signed document's `constraints.params` carry the runner id
-   your bake installed (`baseline_runner: <id>` from the `--runner <id>=…`
-   above), `experiment_pack_digest: sha256:<pack>`, the adaptor's
+   your bake installed (`baseline_runner: rlm_fc_in_guest_harbor` from the
+   `--runner` line above when using the in-repo Harbor adaptor), `experiment_pack_digest: sha256:<pack>`, the adaptor's
    `PROOF_PARAM_*` inputs (names that stay distinct after upper-casing and
    `-` → `_`), and any size ask under the ceilings
    (`experiment_vcpus` ≤ 16, `experiment_mem_mib` ≤ 32768; omit them for
@@ -274,11 +278,11 @@ still leak no path, key, or origin (the wire check's `cp` step).
   adaptor's `inspect` entrypoint (topic RLM work); an adaptor that ships
   none leaves its topic unable to reach `Evaluate` until the operator
   provides one — by design, no spend without a green checklist.
-- **No adaptor ships in git.** `deploy/guest/runners/` is the contract and a
-  fail-closed skeleton; the harness CLI, agent, task format, and how a trial
-  becomes `primary_value` are operator artefacts baked with the generic
-  hooks and selected by signed params. A trial without a measurement is
-  never scored from some other value.
+- **Reference adaptor in git, harness CLI not.** `deploy/guest/runners/` is
+  the contract, a fail-closed skeleton, and the Harbor evaluate reference
+  adaptor (`rlm_fc_in_guest_harbor`). The Harbor CLI, venv, and task pack are
+  still operator artefacts baked with the generic hooks. A trial without a
+  measurement is never scored from some other value.
 - **Pack size.** Packs travel in one vsock frame: ≤ 160 MiB uncompressed
   tar. Larger packs need a block-device staging path this protocol version
   does not have; the host refuses them by name.

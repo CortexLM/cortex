@@ -1,0 +1,71 @@
+#!/bin/bash
+# run-harbor — paid Harbor invoke for Baseline / Evaluate.
+#
+# Tasks: $PROOF_PACK_DIR/$PROOF_PARAM_TASKS_DIR (relative, no ..).
+# Agent: miner artefact dir → PYTHONPATH + Harbor -a module:Class
+#        (Harbor does not accept a filesystem path for -a).
+#        Topic PROOF_PARAM_HARBOR_AGENT only for baseline with no miner agent.
+# BYOK: evaluate never falls back to the owner secrets dir.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ADAPTOR="$(cd "$HERE/.." && pwd)"
+# shellcheck source=../lib.sh
+. "$ADAPTOR/lib.sh"
+
+: "${PROOF_OUTPUT_DIR:?}" "${PROOF_WORK_DIR:?}" "${PROOF_JOB:?}"
+mkdir -p "$PROOF_OUTPUT_DIR" "$PROOF_WORK_DIR"
+
+case "$PROOF_JOB" in
+    baseline | evaluate) ;;
+    *) proof_die "run-harbor is for baseline/evaluate, got PROOF_JOB=$PROOF_JOB" ;;
+esac
+
+proof_require_tasks
+proof_writable_scratch
+proof_load_inference_key
+proof_select_harbor_agent >/dev/null
+AGENT_ARG="${PROOF_HARBOR_AGENT_ARG:?proof_select_harbor_agent did not set PROOF_HARBOR_AGENT_ARG}"
+AGENT_SOURCE="${PROOF_HARBOR_AGENT_SOURCE:-}"
+
+proof_start_podman
+
+command -v harbor >/dev/null 2>&1 || proof_die "harbor is not on PATH (operator bake must install it)"
+
+jobs_dir="$PROOF_WORK_DIR/harbor-jobs"
+mkdir -p "$jobs_dir"
+log="$PROOF_WORK_DIR/harbor.run.log"
+
+harbor_cmd=(
+    harbor run
+    --path "$PROOF_TASKS"
+    -a "$AGENT_ARG"
+    --jobs-dir "$jobs_dir"
+    --n-concurrent "${PROOF_PARAM_N_CONCURRENT:-1}"
+    --n-attempts "${PROOF_PARAM_N_ATTEMPTS:-1}"
+    --yes
+)
+if [ -n "${PROOF_MODEL_PIN:-}" ]; then
+    harbor_cmd+=(-m "$PROOF_MODEL_PIN")
+fi
+if [ -n "${PROOF_PARAM_HARBOR_ENVIRONMENT:-}" ]; then
+    harbor_cmd+=(--env "$PROOF_PARAM_HARBOR_ENVIRONMENT")
+fi
+if [ -n "${PROOF_SEED:-}" ]; then
+    # Topic seed is an adaptor input; Harbor has no dedicated --seed flag
+    # on -a. Export it for agents that read the environment. Do not invent a
+    # Harbor plugin API.
+    export PROOF_SEED
+fi
+
+set +e
+"${harbor_cmd[@]}" >"$log" 2>&1
+harbor_exit=$?
+set -e
+
+python3 "$HERE/summarize.py" \
+    --jobs-dir "$jobs_dir" \
+    --log "$log" \
+    --output "$PROOF_OUTPUT_DIR/report.json" \
+    --harbor-exit "$harbor_exit" \
+    --agent "$AGENT_ARG" \
+    --agent-source "$AGENT_SOURCE"

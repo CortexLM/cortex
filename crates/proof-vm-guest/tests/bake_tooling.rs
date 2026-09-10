@@ -1,8 +1,10 @@
-//! The operator bake tooling under `deploy/guest/` stays runnable and
-//! generalist: scripts parse, the bake plans without root and refuses what
-//! it must, rootless podman is pointed at paths init makes writable for the
-//! run-as user, and no harness is named anywhere under `deploy/guest/`.
-//! Nothing here builds an image or runs a container.
+//! The operator bake tooling under `deploy/guest/` stays runnable: scripts
+//! parse, the bake plans without root and refuses what it must, rootless
+//! podman is pointed at paths init makes writable for the run-as user.
+//! Generic guest scripts (`bake-rootfs.sh`, `init.sh`, `agent-loop.sh`) do
+//! not name a harness. A versioned reference adaptor may ship under
+//! `deploy/guest/runners/<id>/`. Nothing here builds an image or runs a
+//! container.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::too_many_lines)]
 
@@ -50,6 +52,24 @@ fn guest_scripts_parse() {
         ("bash", "deploy/guest/bake-rootfs.sh"),
         ("sh", "deploy/guest/init.sh"),
         ("sh", "deploy/guest/agent-loop.sh"),
+        ("bash", "deploy/guest/runners/rlm_fc_in_guest_harbor/run"),
+        (
+            "bash",
+            "deploy/guest/runners/rlm_fc_in_guest_harbor/inspect",
+        ),
+        ("bash", "deploy/guest/runners/rlm_fc_in_guest_harbor/lib.sh"),
+        (
+            "bash",
+            "deploy/guest/runners/rlm_fc_in_guest_harbor/harness/run-harbor",
+        ),
+        (
+            "bash",
+            "deploy/guest/runners/rlm_fc_in_guest_harbor/tests/test_adaptor.sh",
+        ),
+        (
+            "bash",
+            "deploy/guest/runners/rlm_fc_in_guest_harbor/tests/run.sh",
+        ),
     ] {
         let status = Command::new(shell)
             .arg("-n")
@@ -327,38 +347,19 @@ fn podman_storage_points_at_paths_init_makes_writable_for_the_runner() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Zero challenge content in git: nothing under `deploy/guest/` names a
-/// harness, a benchmark, or a task set. Runner ids, packs, harness CLIs,
-/// agents, and scoring rules are operator artefacts staged outside this
-/// repository and selected by signed topic params.
+/// Generic bake/init/agent-loop scripts stay generalist: they do not name a
+/// harness. A versioned **reference adaptor** may ship under
+/// `deploy/guest/runners/<id>/` so operators can bake it; it is not compiled
+/// into any Proof binary. Challenge task lists still do not belong in git.
 #[test]
 fn deploy_guest_names_no_harness_or_benchmark() {
-    let mut files = Vec::new();
-    let mut stack = vec![repo().join("deploy/guest")];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).expect("read_dir").flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else {
-                files.push(p);
-            }
-        }
-    }
-    assert!(files.len() >= 4, "{files:?}");
-    let runners: Vec<_> = files
-        .iter()
-        .filter(|p| p.to_string_lossy().contains("/runners/"))
-        .collect();
-    assert_eq!(
-        runners.len(),
-        1,
-        "only the contract README ships under runners/: {runners:?}"
-    );
-    for f in &files {
-        let lower = std::fs::read_to_string(f)
-            .expect("text file")
-            .to_ascii_lowercase();
+    let generic = [
+        "deploy/guest/bake-rootfs.sh",
+        "deploy/guest/init.sh",
+        "deploy/guest/agent-loop.sh",
+    ];
+    for rel in generic {
+        let lower = read(rel).to_ascii_lowercase();
         for forbidden in [
             "harbor",
             "tb4",
@@ -371,9 +372,34 @@ fn deploy_guest_names_no_harness_or_benchmark() {
         ] {
             assert!(
                 !lower.contains(forbidden),
-                "{} names {forbidden:?}; harness content is operator content, never in git",
-                f.display()
+                "{rel} names {forbidden:?}; generic guest scripts stay harness-agnostic"
             );
         }
     }
+
+    let adaptor = repo().join("deploy/guest/runners/rlm_fc_in_guest_harbor");
+    for required in [
+        "run",
+        "inspect",
+        "README.md",
+        "harness/run-harbor",
+        "harness/summarize.py",
+    ] {
+        let p = adaptor.join(required);
+        assert!(p.is_file(), "reference adaptor missing {}", p.display());
+    }
+    assert!(
+        adaptor.join("run").metadata().unwrap().permissions().mode() & 0o111 != 0,
+        "reference adaptor run must be executable"
+    );
+}
+
+/// The Harbor reference adaptor's unit tests (no Harbor CLI, no podman).
+#[test]
+fn rlm_fc_in_guest_harbor_adaptor_tests() {
+    let status = Command::new("bash")
+        .arg(repo().join("deploy/guest/runners/rlm_fc_in_guest_harbor/tests/run.sh"))
+        .status()
+        .expect("run adaptor tests");
+    assert!(status.success(), "rlm_fc_in_guest_harbor tests failed");
 }

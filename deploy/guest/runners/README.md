@@ -6,15 +6,18 @@ image by the operator (`bake-rootfs.sh --runner <id>=<dir>`) under
 `/opt/proof/runners/<id>/`, where `<id>` is exactly the value the topic puts
 in `constraints.params.in_guest_benchmark_runner` (alias `baseline_runner`;
 shape `[a-z0-9][a-z0-9_-]{1,63}`). No adaptor is compiled into any Proof
-binary and **none ships in this repository**: a topic that names an id this
-image does not carry fails closed (`RlmToHost::Failed` → 503, no row).
+binary. A topic that names an id this image does not carry fails closed
+(`RlmToHost::Failed` → 503, no row). One **versioned reference adaptor**
+ships under [`rlm_fc_in_guest_harbor/`](rlm_fc_in_guest_harbor/) so operators
+can bake Harbor evaluate with miner artefact attach; it is still selected
+only when a signed topic names that runner id.
 
-This directory holds the **contract only**. The harness an adaptor drives —
-its CLI, its agent, its task format, how a trial's output becomes a number —
-is operator content that lives outside git (baked with `--overlay` /
-`--chroot-hook` / `--extra-pkgs`, or shipped inside the topic-pinned pack) and
-is recognised by nothing in this repository. Proof stays generalist: the
-words below are generic knobs; every value is topic data.
+This directory holds the **contract** and, when a live gap needs a bakeable
+fix, a reference adaptor directory named after the runner id. The Harbor
+CLI, its venv, and the task pack stay operator content (`--overlay` /
+`--chroot-hook` / `--extra-pkgs`, or the topic-pinned pack). Proof binaries
+stay generalist: the words below are generic knobs; every value is topic
+data.
 
 The contract lives in `crates/proof-vm-guest/src/runner.rs`; this is the
 operator's view of it.

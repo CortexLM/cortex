@@ -114,8 +114,9 @@ failed / unconfirmed → 503, no row). The guest image is baked with
 run-as-owned scratch paths + `proof-vm-guest-agent` + operator adaptors per
 [`guest/runners/README.md`](guest/runners/README.md), harness tooling via the
 generic `--extra-pkgs` / `--overlay` / `--chroot-hook`) and named after its
-own `sha256sum`; packs, adaptors, and harnesses are operator artefacts,
-never in git (the repo ships the contract and a fail-closed skeleton only).
+own `sha256sum`; packs and the Harbor CLI/venv are operator artefacts. The
+adaptor contract plus the versioned Harbor evaluate reference live under
+[`guest/runners/`](guest/runners/README.md).
 Procedure, RE-LOCK, and limits:
 [`docs/runbooks/proof-experiment-vms.md`](../docs/runbooks/proof-experiment-vms.md).
 

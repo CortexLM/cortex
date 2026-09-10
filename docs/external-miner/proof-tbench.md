@@ -123,6 +123,35 @@ tar -cf recipe.tar recipe/      # uncompressed. No gzip, no zip
 sha256sum recipe.tar            # this is your artifact_digest
 ```
 
+The guest unpacks that tar under `$PROOF_ARTIFACT_DIR`. Evaluate attaches
+your **Harbor agent**, not a silent copy of the operator's `terminus-2`.
+Harbor's `-a` / `--agent` accepts a built-in name or a Python import path
+(`module.path:ClassName`); it does **not** take a filesystem path. The
+adaptor therefore imports your class from the artefact and passes that
+import path as `-a`. Layout after unpack (paths relative to
+`PROOF_ARTIFACT_DIR`):
+
+```
+recipe/
+  agent/            # PREFERRED: Harbor agent (BaseAgent / BaseInstalledAgent)
+    agent.py
+    import_path     # optional: one line `agent.agent:YourClass`
+  run.sh            # optional classic marker; inspect may see it; evaluate does not exec it
+  README.md
+```
+
+If you pack with `tar -cf recipe.tar -C recipe .`, the same `agent/` directory
+sits at the tar root (`$PROOF_ARTIFACT_DIR/agent`). Resolution order:
+`$PROOF_ARTIFACT_DIR/agent`, then `$PROOF_ARTIFACT_DIR/recipe/agent`. A
+`recipe/run.sh` with no Harbor agent dir is **not** scored as a substitute —
+evaluate fails closed rather than falling back to the topic agent. Off-limits
+in the tree (inspect fails the named rule): `no_eval_short_circuit`,
+`no_tb4_hardcoding`.
+
+Env the run sees: `PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`,
+`PROOF_PARAM_*`, `PROOF_PACK_DIR`, `PROOF_ARTIFACT_DIR`, `PROOF_OUTPUT_DIR`,
+`PROOF_WORK_DIR`, and miner BYOK under `PROOF_MINER_ENV_DIR`.
+
 - Serve **that exact file** at `artifact_uri` and keep it. Re-running `tar`
   later produces different bytes (mtimes, member order) and therefore a
   different digest, and the run is refused rather than run on a substitute.
