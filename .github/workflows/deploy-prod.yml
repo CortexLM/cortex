@@ -180,9 +180,15 @@ jobs:
         run: |
           set -euo pipefail
           SHA="${{ needs.preflight.outputs.commit_sha }}"
-          BASE=/tmp/prod-pins-in/deploy
-          test -f "$BASE/pins/prod.json" || { echo "artifact has no deploy/pins/prod.json"; find /tmp/prod-pins-in -type f; exit 1; }
-          test -f "$BASE/digests/${SHA}.json" || { echo "artifact has no deploy/digests/${SHA}.json"; exit 1; }
+          if [[ -f /tmp/prod-pins-in/deploy/pins/prod.json ]]; then
+            BASE=/tmp/prod-pins-in/deploy
+          elif [[ -f /tmp/prod-pins-in/pins/prod.json ]]; then
+            BASE=/tmp/prod-pins-in
+          else
+            echo "unexpected artifact layout:"; find /tmp/prod-pins-in -type f | head -50
+            exit 1
+          fi
+          test -f "$BASE/digests/${SHA}.json" || { echo "artifact has no digests/${SHA}.json"; exit 1; }
           mkdir -p deploy/pins deploy/digests
           cp "$BASE/pins/prod.json" deploy/pins/prod.json
           cp "$BASE/digests/${SHA}.json" "deploy/digests/${SHA}.json"
