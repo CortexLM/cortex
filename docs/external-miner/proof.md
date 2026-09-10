@@ -15,6 +15,7 @@ confirm deployment support with the operator first.
 **Gateway:** [https://gateway.cortex.foundation](https://gateway.cortex.foundation)  
 **CLI:** `ctx proof topics`, then `ctx proof submit` (install:
 [README](./README.md))  
+**Per-topic guides:** [`tbench`](./proof-tbench.md)  
 **Pin:** [`config/proof-pin.toml`](../../config/proof-pin.toml)  
 **Eval image:** `ghcr.io/cortexlm/proof-eval@sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009`
 
@@ -116,6 +117,16 @@ curl -sS https://gateway.cortex.foundation/challenge/proof/v1/proof/topics/dt-no
 Topics are **operator-published** and can be **injected at any time** (operator
 `POST /challenge/proof/v1/admin/proof/topics`). There is no catalog in git.
 `ctx proof topics` is the live list.
+
+Topics that have a written miner guide in this repo:
+
+| Topic | Guide | Family / payout |
+|-------|-------|-----------------|
+| `tbench` | [proof-tbench.md](./proof-tbench.md) | `custom` (`success_rate`) / `discovery` |
+
+A guide is a convenience, not the contract: the signed document returned by
+`ctx proof topics` wins wherever the two disagree, and a topic without a guide
+is submitted to exactly like any other.
 
 Each topic is a signed document. Read at least:
 
