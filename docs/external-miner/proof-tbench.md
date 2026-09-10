@@ -19,27 +19,29 @@ document an operator publishes and can re-publish at any time. Nothing about
 you spend anything; if this page and the live document disagree, the live
 document wins.
 
-## Status right now: submits are accepted but not scored
+## Status right now: scoring is on
 
-`tbench` sets `constraints.params.defer_scoring = "true"`. That puts it in
-`deferred_topics` on `GET /challenge/proof/v1/status`: the host **accepts** your
-submission and stores it as **`queued`** (**201**), and then evaluates nothing.
-No pod is rented, no VM boots, no judge call is made, and no mass is recorded
-until the operator lifts the flag and drains the queue, oldest first and one at
-a time.
+Live metal scores `tbench`. Read `ctx proof status` (or
+`GET /challenge/proof/v1/status`) before you spend — those fields move when the
+operator republishes the topic or the host changes, and this page does not pin
+them.
 
-So today:
+What that endpoint has been reading while scoring is on:
 
-- A well-formed submit is **201 `queued`**, not a score.
-- `can_score` on `/challenge/proof/v1/status` is **`false`** and
-  `scorable_topics` does **not** list `tbench`. That is expected for a deferring
-  topic and is not an outage — a topic in `deferred_topics` is the one case where
-  `can_score: false` does not mean **503**.
-- A queued row is the only non-terminal state. `ctx proof show --wait` keeps
-  polling through it for as long as the operator's install takes.
+- `can_score`: **`true`**
+- `open_topics` / `scorable_topics` / `registered_custom` / `custom_ready`:
+  contain `tbench`
+- `deferred_topics`: **`[]`** — `constraints.params.defer_scoring` is **not**
+  set on the live document. A topic listed there (`defer_scoring = "true"`)
+  would accept submits as **201 `queued`** and score later; that is not the
+  live `tbench` state
+- `custom_family_wired` / `baseline_sealed`: **`true`**
+- The sealed bar is a **stub baseline 0.5** (operator-noted). Beat it by
+  `epsilon_rel` on `success_rate`. Do not copy a digest from this page.
 
-Queue for a topic that is not yet scoring only if you accept that a `queued`
-row is a place in line, not a payment. A ready light is permission to try.
+The short-task allowlist is **operator-side** (pack filter / adaptor hints).
+You do not choose the task list; `constraints.task_slice` stays an opaque
+runner input. A ready light is permission to try, not a payment guarantee.
 
 ## 0. Install `ctx`
 
@@ -65,14 +67,15 @@ Read these fields for `tbench`:
 
 | Field | What you want to see |
 |-------|----------------------|
+| `can_score` | `true` while this host can evaluate. `false` is **503** except for a topic listed in `deferred_topics` |
 | `open_topics` | contains `tbench` — otherwise the topic is not published and a submit is **400** `unknown topic` / `topic is not open` |
-| `deferred_topics` | contains `tbench` while scoring is deferred: submits answer **201 `queued`** |
-| `scorable_topics` | contains `tbench` once the topic is actually being scored. While it is deferred, it is not here |
-| `queued_submissions` | how many rows are already waiting across topics — your place in line |
-| `registered_custom` / `custom_ready` | must both contain `tbench`. A registered id missing from `custom_ready` means its topic VM is not usable and the topic answers **503** once it stops deferring |
+| `scorable_topics` | contains `tbench` while the topic is being scored (live metal: yes) |
+| `deferred_topics` | empty while scoring is on. If `tbench` appears here, submits answer **201 `queued`** and are not scored yet |
+| `queued_submissions` | how many rows are already waiting across topics |
+| `registered_custom` / `custom_ready` | must both contain `tbench`. A registered id missing from `custom_ready` means its topic VM is not usable and the topic answers **503** |
 | `custom_family_wired` | `true`. `tbench` is a `custom`-family topic, so `live_harvest_wired` (the Lium `nll` / `throughput` harvest) says nothing about it |
 | `baseline_sealed` | `true`. An open topic without both seal hashes is **503** |
-| `eval_image_digest` | a `sha256:…` pin. Empty is **503** |
+| `eval_image_digest` | a `sha256:…` pin. Empty is **503**. Read it live; do not copy one from a guide |
 
 Read the digests, the judge `inference_offer`, and the `eval_executor` from
 this endpoint rather than from any document. They are re-pinned by the
@@ -100,7 +103,7 @@ What the signed document carries today, and what each field means for you:
 | `constraints.params.baseline_runner` | an in-guest runner id | Selects the **experiment VM** path: one dedicated Firecracker VM per paid job, created for the job and destroyed after it |
 | `constraints.params.experiment_pack_digest` | a `sha256:` pin | The operator's experiment pack, re-hashed by the host before any jail. Not yours to supply |
 | `constraints.params.miner_byok` | `OPENROUTER_API_KEY` | You bring the model key — see § 4 |
-| `constraints.params.defer_scoring` | `"true"` | Submits are queued, not scored (§ Status) |
+| `constraints.params.defer_scoring` | unset today | When `"true"`, the topic is in `deferred_topics` and submits stay **`queued`**. Absent on the live document while scoring is on — confirm with `ctx proof topics` |
 | `flops_budget` | `2e18` | Topic document field. **Not** a reject gate on `tbench`: the host ignores `declared_flops` vs measured FLOPs |
 | `eval_executor.max_proof_deadline_s` | `7200` | Your run is cut at this wall clock; a cut run is **503** with the run's `stdout_tail` |
 | `payout_mode` | `discovery` | Pass floor plus novelty pool — see § 7 |
@@ -116,12 +119,43 @@ is a commitment, not data. There is nothing to read there.
 fetches the bytes from your locator inside the topic VM. A submit without one
 is a **400** with no row.
 
-Artefact identity is **the served file, verbatim**:
+Artefact identity is **the served file, verbatim**. Pack so `harness.json`
+and the `agent/` package sit at the **tar root** (preferred):
+
+```
+recipe/                 # working tree on your disk — not a required tar prefix
+  harness.json
+  agent/
+    __init__.py         # optional; include it if your import tooling needs a regular package
+    agent.py            # class Agent
+```
 
 ```bash
-tar -cf recipe.tar recipe/      # uncompressed. No gzip, no zip
-sha256sum recipe.tar            # this is your artifact_digest
+tar -cf recipe.tar -C recipe .
+sha256sum recipe.tar
+# serve that exact file at https://…/recipe.tar
 ```
+
+That produces members `harness.json` and `agent/agent.py` at the archive
+root. After unpack they are `$PROOF_ARTIFACT_DIR/harness.json` and
+`$PROOF_ARTIFACT_DIR/agent/agent.py`. Uncompressed only — no gzip, no zip.
+
+**Why a wrapped `recipe/`-only tar fails.** `tar -cf recipe.tar recipe/`
+stores members as `recipe/harness.json`, `recipe/agent/…`. After unpack
+those sit under `$PROOF_ARTIFACT_DIR/recipe/`. The adaptor *does* look at
+`$PROOF_ARTIFACT_DIR/recipe/agent` and `recipe/harness.json`, so a **single**
+wrap of that exact tree still resolves. What miners actually ship, and what
+fails closed (no Terminus-2 fallback), is:
+
+- a **double wrap** (`recipe/recipe/agent`) — you tarred a parent that
+  already contained `recipe/`
+- `recipe/` with `agent.py` beside `harness.json` (no `agent/` package) —
+  `import_path` `agent.agent:Agent` cannot import
+- an extra prefix (`workdir/recipe/agent`) — not in the search list
+- `recipe/` with only `run.sh` and no agent dir — scored as a **script
+  harness**, not your Python Agent
+
+Prefer `-C recipe .` so you cannot nest one level too deep.
 
 The guest unpacks that tar under `$PROOF_ARTIFACT_DIR`. Evaluate attaches
 your **custom Python agent** (primary), a Harbor `BaseAgent` subclass, a
@@ -131,24 +165,7 @@ operator's `terminus-2`. You are not required to ship Terminus-2.
 Harbor's `-a` / `--agent` accepts a built-in name or a Python import path
 (`module.path:ClassName`); it does **not** take a filesystem path. The
 adaptor therefore imports your class from the artefact (custom Python is
-wrapped as `proof_python_agent:ProofPythonAgent`). Layout after unpack
-(paths relative to `PROOF_ARTIFACT_DIR`):
-
-```
-recipe/
-  harness.json      # optional: {"kind":"python","import_path":"agent.agent:YourClass"}
-                    # kinds: python (primary) | harbor | script | builtin
-  agent/            # PREFERRED: custom Python (class Agent) or Harbor BaseAgent
-    agent.py
-    import_path     # optional: one line `agent.agent:YourClass` (must resolve inside this artefact)
-  run.sh            # optional script harness; evaluate execs it; it is not wrapped as terminus-2.
-                    # Score is Harbor verifier rewards under $PROOF_WORK_DIR/harbor-jobs.
-                    # Writing $PROOF_OUTPUT_DIR/report.json is refused (fail closed).
-  README.md
-```
-
-If you pack with `tar -cf recipe.tar -C recipe .`, the same `agent/` directory
-sits at the tar root (`$PROOF_ARTIFACT_DIR/agent`). Resolution order:
+wrapped as `proof_python_agent:ProofPythonAgent`). Resolution order:
 `harness.json`, then `$PROOF_ARTIFACT_DIR/agent`, then
 `$PROOF_ARTIFACT_DIR/recipe/agent`, then `run.sh`. A `recipe/run.sh` with no
 agent dir is scored as a **script harness**, not as the topic agent. The
@@ -156,6 +173,74 @@ script must leave Harbor jobs with measured `verifier_result.rewards.reward`;
 a self-written `$PROOF_OUTPUT_DIR/report.json` is **not** a score. Off-limits
 in the tree (inspect fails the named rule): `no_eval_short_circuit`,
 `no_tb4_hardcoding`.
+
+### Minimal Agent example
+
+This is the constructor / `run` miners ask for. It is **custom Python** —
+you are **not** required to subclass Harbor `BaseAgent` (or Terminus). Name
+the class `Agent`. If you do subclass Terminus, point `import_path` at that
+class (`…:ImprovedTerminus`); keep one primary example here.
+
+`harness.json` (tar root):
+
+```json
+{"kind":"python","import_path":"agent.agent:Agent"}
+```
+
+`agent/agent.py`:
+
+```python
+class Agent:
+    """Custom Python agent — not a Harbor BaseAgent subclass."""
+
+    def __init__(self, *args, **kwargs):
+        # Harbor may pass logs_dir and other kwargs. Accept them (or take none).
+        pass
+
+    async def run(self, instruction, environment=None, context=None):
+        # Sync run(instruction, environment=None, context=None) is also fine.
+        # Harbor's environment API is async exec(command=...) — verified against
+        # Harbor BaseEnvironment; this repo's fixtures do not invent another name.
+        if environment is None:
+            return None
+        result = await environment.exec(command="pwd && ls -la")
+        # Score is Harbor verifier rewards under $PROOF_WORK_DIR/harbor-jobs.
+        # Do not write $PROOF_OUTPUT_DIR/report.json — that path is refused.
+        return getattr(result, "stdout", None)
+```
+
+`run` may be sync or async. The adaptor constructs your class with Harbor's
+kwargs, or with no args if that is the only signature that binds. It then
+calls `run` with Harbor's `(instruction, environment, context)` (or
+`instruction` alone). The return value is **not** the Proof score: leave
+measured rewards under harbor-jobs and do not write
+`$PROOF_OUTPUT_DIR/report.json`. Returning `None` or the command's stdout
+is honest for this minimal example.
+
+Pack, hash, and serve **that exact file**:
+
+```bash
+tar -cf recipe.tar -C recipe .
+sha256sum recipe.tar
+# serve that exact file at https://…/recipe.tar
+```
+
+Submit sketch. Pass `--openrouter-api-key` (never printed) or
+`--env OPENROUTER_API_KEY`. Hotkey signing, nonce, and hex rules:
+[proof.md § 2](./proof.md#2-submit-a-reproducible-experiment).
+
+```bash
+export OPENROUTER_API_KEY=sk-or-…
+ctx proof submit \
+  --secret-file /path/to/hotkey.sk \
+  --topic-id tbench \
+  --artifact-uri https://example.org/recipe.tar \
+  --artifact-digest <sha256 of recipe.tar> \
+  --claim "raised first-15 success_rate over the sealed baseline" \
+  --train-dataset my-harness-v0 \
+  --env OPENROUTER_API_KEY
+# or: --openrouter-api-key "$OPENROUTER_API_KEY"
+```
 
 Custom Python `run(instruction, …)` need not subclass Harbor `BaseAgent`.
 Agents run with **network on** (OpenRouter / the topic's BYOK). The guest
@@ -323,13 +408,13 @@ it from this page.
 
 The `(miner_hotkey, submit_nonce)` pair is accepted **once**, reserved before
 any row exists. Re-posting the identical body is **401 `submit_nonce reused`**.
-To re-send the same artefact, sign again with a fresh nonce — on a deferring
-topic that returns the **existing** row (**200**), not a second one: one run per
-artefact per topic.
+To re-send the same artefact, sign again with a fresh nonce — that returns the
+**existing** row (**200**), not a second one: one run per artefact per topic.
 
-An empty manifest is not a clean contamination check. On `tbench` it is queued
-now and becomes a persisted **`rejected`** row with `contamination_evidence_missing`
-and no rent when the queue drains. `ctx` refuses to build one client-side.
+An empty manifest is not a clean contamination check. On `tbench` it becomes a
+persisted **`rejected`** row with `contamination_evidence_missing` and no rent
+(`queued` only if the topic is back in `deferred_topics`). `ctx` refuses to
+build one client-side.
 
 ## 6. Watch the row
 
@@ -342,7 +427,7 @@ curl -sS https://gateway.cortex.foundation/challenge/proof/v1/submissions/<id>
 
 | `state` | Meaning on `tbench` |
 |---------|---------------------|
-| `queued` | Accepted and stored, **not evaluated**. No rent, no VM, no judge call, no mass. The only non-terminal state; the operator drains the queue later and the row becomes one of the three below |
+| `queued` | Accepted and stored, **not yet evaluated**. Happens when the topic is in `deferred_topics`, or the host has accepted the row and not finished the run. No mass yet. `ctx proof show --wait` keeps polling through it |
 | `awaiting_admin` | Clean pass, mass recorded. The operator audit is informational |
 | `rejected` | A gate failed: contamination, unreproduced claim, a red checklist item. Pre-eval rejects spend nothing. FLOP accounting is **not** a reject gate on `tbench` |
 | `champion` | Promoted. On this topic promotion is automatic: a passing run with a green checklist that beats the sealed bar or the reigning best by `epsilon_rel`. Proof pays on pass, not on the crown |
@@ -402,7 +487,7 @@ you will actually meet on `tbench`:
 
 | Answer | When | Row? |
 |--------|------|------|
-| **201** `queued` | The normal answer today: `tbench` is in `deferred_topics` | yes, queued |
+| **201** (scored or `queued`) | Well-formed submit. While scoring is on the row is evaluated; `queued` only if `tbench` is back in `deferred_topics` or the run has not finished | yes |
 | **200** existing row | Same artefact + hotkey re-sent with a fresh nonce, before or after the queue drained | existing row |
 | **400** `unknown topic` / `topic is not open` | `tbench` is not published, or is outside its epoch window | no |
 | **400** `artifact_uri is required for custom topics` | You left the locator out. `tbench` is `custom` | no |
@@ -410,7 +495,7 @@ you will actually meet on `tbench`:
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not exactly 64 lowercase hex. The host never normalises a hex field | no |
 | **401** `hotkey_signature required` / `invalid` | Missing signature, or a `claim`, `declared_flops`, `manifest`, or nonce that differs from what you signed | no |
 | **401** `submit_nonce required` / `invalid` / `reused` | Missing, not 64 lowercase hex, or a replay. Sign again with a fresh nonce | no |
-| **503** `custom metric … has no registered runner` / `not wired` | `tbench` is not in `registered_custom` / `custom_ready`. Only reachable once the topic stops deferring | no |
+| **503** `custom metric … has no registered runner` / `not wired` | `tbench` is not in `registered_custom` / `custom_ready` | no |
 | **503** empty `eval_image_digest` / unsealed baseline / missing judge offer | The host cannot score. Fail-closed, never a sim fallback | no |
 | **503** `proof deadline … exceeded` | Your run did not finish inside `max_proof_deadline_s`; the body carries `stdout_tail` | no |
 | **201** `rejected` + `contamination_evidence_missing` | Empty manifest, at drain time | yes, rejected |
