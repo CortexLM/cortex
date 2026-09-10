@@ -414,8 +414,10 @@ it from this page.
 
 The `(miner_hotkey, submit_nonce)` pair is accepted **once**, reserved before
 any row exists. Re-posting the identical body is **401 `submit_nonce reused`**.
-To re-send the same artefact, sign again with a fresh nonce — that returns the
-**existing** row (**200**), not a second one: one run per artefact per topic.
+Sign again with a fresh nonce only when you intend a **new** run: while
+scoring is on, that is a second **201** and a second paid evaluation, not
+the existing row. The **200** “already queued / already submitted” answer
+is the deferred path only (`tbench` in `deferred_topics`).
 
 An empty manifest is not a clean contamination check. On `tbench` it becomes a
 persisted **`rejected`** row with `contamination_evidence_missing` and no rent
@@ -494,7 +496,7 @@ you will actually meet on `tbench`:
 | Answer | When | Row? |
 |--------|------|------|
 | **201** (scored) | Well-formed submit while scoring is on: the host scores before it answers, so the row is already `awaiting_admin`, `rejected`, or `champion`. **201 `queued`** only if `tbench` is back in `deferred_topics` | yes |
-| **200** existing row | Same artefact + hotkey re-sent with a fresh nonce, before or after the queue drained | existing row |
+| **200** existing row | Same artefact + hotkey, freshly signed, **only** while `tbench` is in `deferred_topics` (queued or already drained). While scoring is on, a fresh nonce is a new **201** and a second paid run | existing row |
 | **400** `unknown topic` / `topic is not open` | `tbench` is not published, or is outside its epoch window | no |
 | **400** `artifact_uri is required for custom topics` | You left the locator out. `tbench` is `custom` | no |
 | **400** `artifact_digest is the sha256 of empty input …` | You hashed nothing, or an empty tar | no |
@@ -504,7 +506,7 @@ you will actually meet on `tbench`:
 | **503** `custom metric … has no registered runner` / `not wired` | `tbench` is not in `registered_custom` / `custom_ready` | no |
 | **503** empty `eval_image_digest` / unsealed baseline / missing judge offer | The host cannot score. Fail-closed, never a sim fallback | no |
 | **503** `proof deadline … exceeded` | Your run did not finish inside `max_proof_deadline_s`; the body carries `stdout_tail` | no |
-| **201** `rejected` + `contamination_evidence_missing` | Empty manifest, at drain time | yes, rejected |
+| **201** `rejected` + `contamination_evidence_missing` | Empty manifest (immediate while scoring is on; at drain time only if the topic is back in `deferred_topics`) | yes, rejected |
 | **201** `rejected` + red checklist | A topic rule failed on your artefact — before any paid inference | yes, rejected |
 
 Never commit your OpenRouter key or `LIUM_API_KEY`, and never hand anyone a
