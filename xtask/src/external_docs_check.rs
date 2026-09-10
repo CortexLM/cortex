@@ -109,6 +109,10 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
             "claim",
             "payout_mode",
             "discovery",
+            "hotkey_signature",
+            "base-proof-submit-v1",
+            "submit_nonce",
+            "manifest_canonical",
         ],
     ),
 ];

@@ -18,12 +18,15 @@ confirm deployment support with the operator first.
 **Pin:** [`config/proof-pin.toml`](../../config/proof-pin.toml)  
 **Eval image:** `ghcr.io/cortexlm/proof-eval@sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009`
 
-You submit **claim + code + FLOPs + artifact** against a topic. You do
-not bind an offer id. The digest-pinned `proof-eval` image (harvest boots
-it) calls the master's `InferenceOffer` as the RLM **judge** backend.
-No baked Qwen; architecture is not an HF id check.
+You submit **claim + code + FLOPs + artifact** against a topic, signed with
+your miner hotkey. You do not bind an offer id. The digest-pinned
+`proof-eval` image (harvest boots it) calls the master's `InferenceOffer` as
+the RLM **judge** backend. No baked Qwen; architecture is not an HF id
+check.
 
-Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`).
+Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`). That key is **not**
+identity: every submit must carry `hotkey_signature` over
+`base-proof-submit-v1` and a single-use `submit_nonce`.
 
 If `eval_image_digest` is empty the host answers **503**. That is fail-closed,
 not a sim fallback. The pin currently carries the digest above. Do not invent
@@ -185,7 +188,7 @@ ctx proof status          # can_score, inference_offer, eval_executor, eval_imag
 ctx proof topics          # pick an open topic_id; read flops_budget + payout_mode
 
 ctx proof submit \
-  --hotkey <64-hex hotkey> \
+  --secret-file /path/to/hotkey.sk \
   --topic-id <open topic id> \
   --artifact-digest <sha256 of the recipe> \
   --claim "beat sealed baseline holdout NLL by 0.04 at 1.2e18 FLOPs" \
@@ -193,12 +196,75 @@ ctx proof submit \
   --train-dataset my-mix-v0
 ```
 
+`--secret-file` is a 32-byte mini-secret (or 64 hex chars), never a mnemonic.
+`--wallet-name` / `--wallet-dir` / `--wallet-hotkey` load a Bittensor
+wallet the same way `ctx bounty pair` does. `--signature` is a 128-hex
+offline signature. Pass **exactly one** signer — `--secret-file`,
+`--wallet-name`, or `--signature`; `ctx` refuses combinations rather than
+picking one. `--hotkey` is optional when a secret or wallet is loaded
+(derived); with `--signature` it is required and must match, and
+`--submit-nonce` must be the nonce that was signed.
+
+The signature is sr25519 under `base-proof-submit-v1` over these exact
+bytes (`0xff` is a single separator byte; it never occurs inside UTF-8):
+
+```
+hotkey_hex || 0xff || topic_id || 0xff || artifact_digest || 0xff
+  || declared_flops_decimal || 0xff || claim || 0xff
+  || manifest_canonical || 0xff || submit_nonce_hex
+
+manifest_canonical =
+  count(hashes)_decimal   || (0xff || hash)*      hashes   = manifest.train_content_hashes, sorted bytewise
+  || 0xff ||
+  count(datasets)_decimal || (0xff || dataset)*   datasets = manifest.train_dataset_ids,   sorted bytewise
+```
+
+- `hotkey_hex` / `artifact_digest`: exactly 64 lowercase hex, no `0x` —
+  the only spelling the host accepts, so the bytes you sign are the bytes
+  it verifies (any other spelling is a **400**, never a silent rewrite).
+- `declared_flops_decimal`: the integer as ASCII digits.
+- `topic_id` / `claim`: the exact UTF-8 strings you post (the host trims
+  `topic_id` only to look the topic up; it verifies what you sent).
+- `manifest_canonical`: each list's entry count as ASCII digits, then every
+  entry prefixed by `0xff`, entries as exact UTF-8 (duplicates kept, nothing
+  trimmed), sorted bytewise; the two lists joined by `0xff`; a missing list
+  is `0`. `{"train_dataset_ids":["my-mix-v0"]}` is `0 ff 1 ff my-mix-v0`.
+  Order on the wire does not matter; the **contents** do — a signature over
+  one manifest never authorises another.
+- `submit_nonce_hex`: 32 random bytes you choose, as 64 lowercase hex, sent
+  verbatim as `submit_nonce`. The host accepts each `(miner_hotkey,
+  submit_nonce)` pair **once**; a second request with the same pair is
+  **401** `submit_nonce reused`, whatever happened to the first. Draw a
+  fresh nonce for every request (`ctx` does).
+
+`ctx` signs with schnorrkel: signing context `base-sr25519-v1`, message
+`scale(b"base-proof-submit-v1") || scale(payload)` where `scale(x)` is the
+SCALE byte-vector encoding (compact length prefix + bytes). Reference:
+
+```python
+def canonical(xs):
+    xs = sorted(xs)
+    return str(len(xs)).encode() + b"".join(b"\xff" + x.encode() for x in xs)
+
+payload = (hotkey_hex.encode() + b"\xff" + topic_id.encode() + b"\xff"
+           + artifact_digest.encode() + b"\xff" + str(declared_flops).encode()
+           + b"\xff" + claim.encode() + b"\xff"
+           + canonical(train_content_hashes) + b"\xff" + canonical(train_dataset_ids)
+           + b"\xff" + submit_nonce.encode())
+```
+
+`ctx proof sign` prints `miner_hotkey`, `hotkey_signature`, `submit_nonce`,
+and the exact `manifest` to post, without posting. Pass the same
+`--train-dataset` / `--train-hash` / `--manifest-file` you will submit.
+
 `--wait` keeps polling until the row is terminal (`awaiting_admin`,
 `rejected`, or `champion`). A `queued` row is not terminal: on a topic that
 defers scoring, `--wait` keeps polling until the operator drains the queue,
 which can take as long as the operator's install does.
 
-The same submit with `curl`:
+The same submit with `curl` (`miner_hotkey`, `hotkey_signature`,
+`submit_nonce`, and `manifest` from one `ctx proof sign --json` run — the
+manifest is signed, so post the one you signed):
 
 ```bash
 curl -sS -X POST https://gateway.cortex.foundation/challenge/proof/v1/submissions \
@@ -206,6 +272,8 @@ curl -sS -X POST https://gateway.cortex.foundation/challenge/proof/v1/submission
   -H "X-Lium-Api-Key: $LIUM_API_KEY" \
   -d '{
     "miner_hotkey": "<64-hex hotkey>",
+    "hotkey_signature": "<128-hex sr25519>",
+    "submit_nonce": "<64-hex, fresh per request>",
     "topic_id": "<open topic id>",
     "artifact_digest": "<sha256 of the recipe>",
     "claim": "beat sealed baseline holdout NLL by 0.04 at 1.2e18 FLOPs",
@@ -231,13 +299,15 @@ a topic in `deferred_topics`, where they answer **201** `queued`.
 
 | Field | Required | Shape |
 |-------|----------|-------|
-| `miner_hotkey` | yes | 64 hex characters (no `0x`) |
+| `miner_hotkey` | yes | **Exactly** 64 lowercase hex (no `0x`); the sr25519 public key that verifies `hotkey_signature` |
+| `hotkey_signature` | yes | **Exactly** 128 lowercase hex (no `0x`, no uppercase) sr25519 over `base-proof-submit-v1` (payload above). Missing/invalid → **401**. `X-Lium-Api-Key` is not a substitute |
+| `submit_nonce` | yes | **Exactly** 64 lowercase hex (32 random bytes), bound into the signature, accepted once per hotkey. Missing/invalid/reused → **401** |
 | `topic_id` | yes | Open topic id from `ctx proof topics` |
-| `artifact_digest` | yes | SHA-256 hex of the recipe bytes |
-| `claim` | yes | Non-empty string: NL of what improved |
-| `declared_flops` | yes | `u64`, must be `≤ topic.flops_budget` |
-| `manifest.train_content_hashes` | yes (array) | Shard hashes you trained on (may be `[]` if you declare dataset ids) |
-| `manifest.train_dataset_ids` | yes (array) | Corpus ids you trained on (may be `[]` if you declare hashes) |
+| `artifact_digest` | yes | SHA-256 of the recipe bytes as **exactly** 64 lowercase hex (no `0x`) |
+| `claim` | yes | Non-empty string: NL of what improved (bound into the signature) |
+| `declared_flops` | yes | `u64`, must be `≤ topic.flops_budget` (bound into the signature) |
+| `manifest.train_content_hashes` | yes (array) | Shard hashes you trained on (may be `[]` if you declare dataset ids); bound into the signature |
+| `manifest.train_dataset_ids` | yes (array) | Corpus ids you trained on (may be `[]` if you declare hashes); bound into the signature |
 | `artifact_uri` | custom topics: yes | Locator for the same bytes as `artifact_digest`; optional on `nll` / `throughput` |
 
 An empty `manifest` (both arrays empty / omitted) is **not** a clean
@@ -254,7 +324,7 @@ curl -sS https://gateway.cortex.foundation/challenge/proof/v1/submissions/<id>
 
 | `state` | Meaning |
 |---------|---------|
-| `queued` | Accepted and stored, **not yet evaluated**: the topic defers scoring (`constraints.params.defer_scoring`) while the operator finishes its baseline / harness install. No eval, no rent, no judge call, no mass yet; `verdict` is `null` and `detail` says so. The only non-terminal state — the row is scored later, oldest first and one at a time per topic, when the operator lifts the flag and drains the queue, and then becomes one of the three below. Re-sending the same artefact returns the same row (**200**) — before *and* after it is scored: one run per artefact per topic. |
+| `queued` | Accepted and stored, **not yet evaluated**: the topic defers scoring (`constraints.params.defer_scoring`) while the operator finishes its baseline / harness install. No eval, no rent, no judge call, no mass yet; `verdict` is `null` and `detail` says so. The only non-terminal state — the row is scored later, oldest first and one at a time per topic, when the operator lifts the flag and drains the queue, and then becomes one of the three below. Re-sending the same artefact (freshly signed, new `submit_nonce`) returns the same row (**200**) — before *and* after it is scored: one run per artefact per topic. A byte-identical replay of an earlier request is **401** `submit_nonce reused`. |
 | `awaiting_admin` | Clean pass; mass recorded. Operator audit is informational. |
 | `rejected` | Gates failed (contamination, unreproduced claim, NLL miss, red anti-cheat checklist, …). No rent and no paid inference on pre-eval rejects. |
 | `champion` | Promoted: operator crown, or automatic on custom topics when a pass beats the current best by `epsilon_rel` with a green checklist. Proof pays on pass, not on a crown. |
@@ -265,8 +335,10 @@ there is no row to show.
 
 ## HTTP 400 vs 503
 
-A **400** is your request. A **503** is the host. Neither rents a pod.
-Refusals (**400** / **503**) do **not** persist a submission row.
+A **400** is your request. A **401** is a missing, invalid, or replayed
+hotkey signature / `submit_nonce`. A **503** is the host. None of those
+rent a pod. Refusals (**400** / **401** / **503**) do **not** persist a
+submission row.
 
 | Status | When | Stored? | Rented? |
 |--------|------|---------|---------|
@@ -275,7 +347,12 @@ Refusals (**400** / **503**) do **not** persist a submission row.
 | **400** `topic is not open` | Draft / closed / outside epoch window | no | no |
 | **400** `declared_flops exceeds the topic budget` | `declared_flops > topic.flops_budget` | no | no |
 | **400** `artifact_uri is required for custom topics` | Custom topic, no locator | no | no |
-| **400** invalid `miner_hotkey` / `artifact_digest` | Not 64 hex | no | no |
+| **400** invalid `miner_hotkey` / `artifact_digest` | Not exactly 64 lowercase hex (`0x`, uppercase, or whitespace) — the host verifies what you post and never normalises a hex field | no | no |
+| **401** `hotkey_signature required` | Missing / empty `hotkey_signature` | no | no |
+| **401** `hotkey_signature invalid` | Not exactly 128 lowercase hex, or does not verify under `miner_hotkey` for `base-proof-submit-v1` — including a `claim`, `declared_flops`, `manifest`, or `submit_nonce` that differs from what was signed | no | no |
+| **401** `submit_nonce required` | Missing / empty `submit_nonce` | no | no |
+| **401** `submit_nonce invalid` | Not exactly 64 lowercase hex | no | no |
+| **401** `submit_nonce reused` | This `(miner_hotkey, submit_nonce)` pair was already presented with a valid signature: a replay. Sign again with a fresh nonce | no | no |
 | **400** `artifact_digest is the sha256 of empty input …` | The digest of zero bytes or of an empty tar archive: hash the recipe bytes you actually serve at `artifact_uri` | no | no |
 | **503** empty `eval_image_digest` | Digest not pinned | no | no |
 | **503** zero open sealed topics | Nothing to score against | no | no |
@@ -286,7 +363,7 @@ Refusals (**400** / **503**) do **not** persist a submission row.
 | **503** `proof deadline … exceeded` | Your recipe did not finish inside `max_proof_deadline_s`; the body carries the run's `stdout_tail` | no | no (pod torn down) |
 | **503** `custom metric … has no registered runner` / `not wired` | The topic's `custom_id` has no runner on this host, or its topic VM is not configured | no | no |
 | **201** `queued` | Topic in `deferred_topics` (operator still installing its scoring path); every **400** above still applies first | **yes** (queued, scored later) | **no** (not yet) |
-| **200** existing row (`already queued …` / `already submitted … and scored`) | Same artefact + hotkey re-sent to a deferring topic, before or after its row was drained | existing row | **no** |
+| **200** existing row (`already queued …` / `already submitted … and scored`) | Same artefact + hotkey re-sent (freshly signed, new `submit_nonce`) to a deferring topic, before or after its row was drained | existing row | **no** |
 | **201** `rejected` + `contamination_evidence_missing` | Empty manifest | **yes** (rejected) | **no** |
 | **201** `rejected` + contamination | Holdout shard / corpus id in `manifest` | **yes** (rejected) | **no** |
 | **201** `rejected` + `anti-cheat checklist red` | A topic rule failed on your artefact | **yes** (rejected) | **no** (no paid inference) |

@@ -196,16 +196,23 @@ fn locator(label: &str) -> String {
 
 /// A custom-topic submission declaring `declared_flops`; the locator is
 /// required on custom topics, so every body carries one.
+fn fixture_sk() -> [u8; 32] {
+    let mut s = [0x11u8; 32];
+    s[0] = 0x42;
+    s
+}
+
 fn submit_declaring(topic_id: &str, label: &str, declared_flops: u64) -> serde_json::Value {
-    serde_json::json!({
-        "miner_hotkey": digest("miner"),
+    let mut v = serde_json::json!({
         "artifact_digest": digest(label),
         "artifact_uri": locator(label),
         "claim": "placeholder claim",
         "declared_flops": declared_flops,
         "topic_id": topic_id,
         "manifest": { "train_dataset_ids": ["placeholder-corpus"] },
-    })
+    });
+    proof_submit::attach_to_json(&mut v, &fixture_sk()).expect("sign");
+    v
 }
 
 fn submit_body(topic_id: &str, label: &str) -> serde_json::Value {

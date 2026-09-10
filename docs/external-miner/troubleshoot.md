@@ -34,7 +34,8 @@ Install `ctx` from [README](./README.md). Proof miners pay Lium
 |---------|--------------|---------------|
 | `400` missing / unknown / not-open `topic_id` | Topic is not currently open | `ctx proof topics`. The refusal is not a submission |
 | `400` `declared_flops exceeds the topic budget` | `declared_flops > topic.flops_budget` | Cap declared FLOPs at the open topic's budget |
-| `400` invalid hotkey / `artifact_digest` | Not 64 hex | Both must be 64 hex characters |
+| `400` invalid hotkey / `artifact_digest` | Not exactly 64 lowercase hex (`0x`, uppercase, whitespace) | Post the same lowercase bytes you signed; the host never normalises a hex field |
+| `401` `hotkey_signature` / `submit_nonce` required, invalid, or reused | Unsigned, wrong key, a `claim` / `declared_flops` / `manifest` that differs from what was signed, or a replayed `(hotkey, submit_nonce)` | `ctx proof sign` over `base-proof-submit-v1` with a fresh nonce; post the manifest you signed. `X-Lium-Api-Key` is not identity |
 | `rejected` with `contamination_evidence_missing` | Empty `manifest` | Declare `train_content_hashes` or `train_dataset_ids` |
 | `rejected` with contamination / cheat code | Holdout overlap, unreproduced claim, strawman AdamW, … | Read the verdict `cheat_codes`. Contamination rejects without rent |
 | HTTP 503 on submit | Empty `eval_image_digest`, zero open topics, unsealed baseline, harvest down, or missing/closed RLM judge | `ctx proof status` → `can_score`. Live digest is `sha256:78b614a1…`. Empty digest still 503. Do not invent a digest. Nothing was rented |

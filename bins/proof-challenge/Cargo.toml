@@ -38,6 +38,7 @@ tracing = "0.1"
 crypto = { path = "../../crates/crypto" }
 hex = "0.4"
 proof-rlm = { path = "../../crates/proof-rlm", features = ["test-fixtures"] }
+proof-submit = { path = "../../crates/proof-submit" }
 proof-vm-agent = { path = "../../crates/proof-vm-agent", features = ["test-fixtures"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 sha2 = "0.10"
