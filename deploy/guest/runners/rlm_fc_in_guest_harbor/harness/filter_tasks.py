@@ -2,11 +2,16 @@
 """Copy pack tasks that typically finish in under one hour.
 
 Duration is pack metadata plus adaptor-local measured walls (not a compiled
-Proof catalog). A task is excluded when max(declared timeout, pack duration,
-adaptor hint) is ≥ ``max_duration_s`` (default 3600), when a pack
-``filter.json`` deny-list names it (or an alias / ``key-`` prefix), when the
-adaptor ``duration_hints.json`` ``exclude`` list names it, or when it is
-absent from the default short-task allow-list.
+Proof catalog). A task is excluded when a pack ``filter.json`` deny-list names
+it (or an alias / ``key-`` prefix), when the adaptor ``duration_hints.json``
+``exclude`` list names it, when it is absent from the default short-task
+allow-list, or when it is too slow for ``max_duration_s`` (default 3600).
+
+The duration gate reads two different things. An **allow-listed** task was
+measured under an hour, so only a measured wall (``walls_sec`` / adaptor hint)
+may drop it; a pack-declared ``agent_timeout`` is the harness ceiling rather
+than a duration and is ignored for it. Every other task is still excluded when
+max(declared timeout, pack duration, adaptor hint) is ≥ ``max_duration_s``.
 
 Default pack filter (Dev, retained n15 x0017):
 
@@ -329,8 +334,19 @@ def decide(
     name = task_dir.name
     if listed(name, deny):
         return False, "deny-list"
-    if allow and not listed(name, allow):
-        return False, "not on allow-list"
+    if allow:
+        if not listed(name, allow):
+            return False, "not on allow-list"
+        # An allow-list entry is a measured <1h task. A pack ``task.toml``
+        # ``agent_timeout`` is the harness ceiling, not a duration, so it may
+        # not drop one (n15 attempt1: every allowlisted task declared 28800,
+        # the 3600 default then emptied the pack). Only a measured wall does.
+        wall = lookup_named(name, adaptor_hints)
+        if wall is not None and wall >= max_s:
+            return False, f"allow-list wall_s={wall} >= {max_s}"
+        if wall is not None:
+            return True, f"allow-list wall_s={wall}"
+        return True, "allow-list"
     duration = task_duration_s(task_dir, durations_map, adaptor_hints)
     if duration is None:
         if drop_unknown:

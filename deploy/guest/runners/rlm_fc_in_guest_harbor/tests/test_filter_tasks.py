@@ -371,6 +371,129 @@ class FilterTasksTests(unittest.TestCase):
                 self.assertEqual(dropped[name], "deny-list", name)
                 self.assertFalse((dest / name).exists(), name)
 
+    def test_allowlisted_task_survives_pack_agent_timeout_false_floor(self) -> None:
+        # n15 attempt1 (pin 4a04eeb1): every allowlisted task declares
+        # agent_timeout = 28800, which emptied the pack at the 3600 default.
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            for name in filter_tasks.X0017_ALLOW:
+                _task(tasks, name, 28_800)
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            kept = {row["name"] for row in summary["kept"]}
+            self.assertEqual(kept, set(filter_tasks.X0017_ALLOW))
+            for row in summary["kept"]:
+                self.assertEqual(row["reason"], "allow-list")
+
+    def test_deny_list_still_drops_long_tasks_at_a_raised_max(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, KEEP, 28_800)
+            for name in filter_tasks.X0017_EXCLUDE:
+                _task(tasks, name, 600)
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=30_000,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            self.assertEqual(summary["n_kept"], 1)
+            dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
+            for name in filter_tasks.X0017_EXCLUDE:
+                self.assertEqual(dropped[name], "deny-list", name)
+                self.assertFalse((dest / name).exists(), name)
+
+    def test_allowlisted_task_dropped_by_measured_wall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, KEEP, 100)
+            _task(tasks, "fin-saccr-rwa", 100)
+            hints = pack / "hints.json"
+            hints.write_text(
+                json.dumps(
+                    {
+                        "allow": [KEEP, "fin-saccr-rwa"],
+                        "walls_sec": {"fin-saccr-rwa": 5400},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dest = pack / "out"
+            summary = _generic_filter(tasks, dest, pack, hints_path=hints)
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertEqual(summary["kept"][0]["name"], KEEP)
+            self.assertFalse((dest / "fin-saccr-rwa").exists())
+            dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
+            self.assertEqual(dropped["fin-saccr-rwa"], "allow-list wall_s=5400 >= 3600")
+
+    def test_allowlisted_task_kept_with_short_measured_wall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, KEEP, 28_800)
+            hints = pack / "hints.json"
+            hints.write_text(
+                json.dumps({"allow": [KEEP], "walls_sec": {KEEP: 900}}),
+                encoding="utf-8",
+            )
+            dest = pack / "out"
+            summary = _generic_filter(tasks, dest, pack, hints_path=hints)
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertEqual(summary["kept"][0]["reason"], "allow-list wall_s=900")
+
+    def test_pack_durations_do_not_drop_an_allowlisted_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, KEEP, None)
+            (pack / "task_durations.json").write_text(
+                json.dumps({KEEP: 28_800}),
+                encoding="utf-8",
+            )
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertEqual(summary["kept"][0]["name"], KEEP)
+
+    def test_non_allowlisted_task_still_drops_on_declared_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, "quick", 100)
+            _task(tasks, "declared-long", 28_800)
+            dest = pack / "out"
+            summary = _generic_filter(tasks, dest, pack)
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertEqual(summary["kept"][0]["name"], "quick")
+            dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
+            self.assertEqual(dropped["declared-long"], "duration_s=28800 >= 3600")
+
     def test_alias_match_does_not_eat_unrelated_prefix(self) -> None:
         self.assertFalse(filter_tasks.alias_match("cadillac", "cad"))
         self.assertTrue(filter_tasks.alias_match("cad-model", "cad"))
