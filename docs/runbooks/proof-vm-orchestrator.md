@@ -583,12 +583,9 @@ harness refuses to start a live run without the real digest.
    An empty file, an empty tar, gzip, or the digest of nothing are refused
    before any request (exit 2).
 
-The POST is synchronous (the RLM job runs before the 201). The live probe
-declares the topic's whole `flops_budget` (read from `GET
-/v1/proof/topics/<id>`; `--declared-flops N` overrides) so the sister's
-measurement is judged against the budget, not against the token `1` the
-fail-closed probes send — a run over its own declaration is a
-`flops_under_declared` reject, which is the miner rule, not a wire fault.
+The POST is synchronous (the RLM job runs before the 201). `declared_flops`
+is optional (default `0`); custom / agent topics ignore it as a scoring
+gate, so a live probe does not need to declare the topic budget.
 Evidence to collect, in order:
 
 | Step | Where | Must show |
@@ -801,7 +798,8 @@ digest of the real file.
   overwritten by the agent from the sister it booted. An RLM claiming a
   sandbox without a sister is corrected to `false` and the CP refuses the
   report for a `firecracker_required` topic; a sister that measured nothing
-  yields `flops_used: null` → 503, never a substituted number.
+  yields `flops_used: null` as telemetry, never a substituted number, and
+  custom / agent topics do not 503 on that.
 - **Evidence is bound to its job.** The `SisterAttestation` names the
   `topic_id`, `submission_digest`, and `artifact_digest` the host verified
   against the paid job before it built the sister jail (a `SisterRequest`

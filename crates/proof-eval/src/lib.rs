@@ -297,8 +297,8 @@ pub trait LiveScorer: Send + Sync {
     /// `artifact_uri` is the miner-supplied locator of the bytes behind
     /// `artifact_digest` (the runner fetches and digest-checks them); the
     /// digest alone is not enough to retrieve an artefact. `declared_flops`
-    /// is the miner's declaration (already `<=` the topic budget at intake):
-    /// a scorer that measures usage must fail a run that exceeds it.
+    /// travels for signature compat; custom / agent scorers ignore it as a
+    /// gate. Harvest (`nll` / `throughput`) may still fail a run over budget.
     /// `miner_env` is the miner's own BYOK environment, already held to the
     /// signed topic's allowlist at intake — a scorer either hands it to the
     /// guest that runs the miner's code or ignores it, and never substitutes
@@ -964,10 +964,10 @@ pub fn sim_win_document(
 ///
 /// `artifact_uri`, `declared_flops`, and `miner_env` travel to the live
 /// scorer untouched: the miner's locator for the bytes behind
-/// `artifact_digest` (never trusted beyond that), the miner's FLOP
-/// declaration the measured run is held to, and the miner's own BYOK
-/// environment the intake already held to the signed topic's allowlist. The
-/// sim backend runs nothing and reads none of them.
+/// `artifact_digest` (never trusted beyond that), an optional FLOP
+/// declaration (ignored as a gate on custom / agent topics), and the
+/// miner's own BYOK environment the intake already held to the signed
+/// topic's allowlist. The sim backend runs nothing and reads none of them.
 #[allow(clippy::too_many_arguments)]
 pub async fn eval_after_freeze(
     pin: &ProofPin,

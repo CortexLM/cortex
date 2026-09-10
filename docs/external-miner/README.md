@@ -57,7 +57,8 @@ Bundle bytes: [`BUNDLE_SPEC.md`](../BUNDLE_SPEC.md).
 Neither live challenge pays for a published split you can grind:
 
 - Proof scores operator-published topics against a **private per-topic holdout**.
-  You submit a claim + reproducible recipe + `declared_flops` vs `topic_id`.
+  You submit a claim + reproducible recipe vs `topic_id`. `declared_flops`
+  is optional on custom / agent topics.
   The pin has no catalog; `GET /challenge/proof/v1/proof/topics` is the live
   list (operators inject topics at any time). The canary stays
   **off the number you are paid on**. Paid score is the **sum of per-topic**

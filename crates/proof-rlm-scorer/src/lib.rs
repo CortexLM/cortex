@@ -4,8 +4,9 @@
 //!   resolve the topic's `custom_id` in the runner registry (unknown →
 //!   `RunnerUnwired`, 503, no row), load the topic's current rule version
 //!   from the store, inspect → checklist (persisted), red → reject without
-//!   paid inference, green → spend token → evaluate → `custom_value` with
-//!   the runner-measured `flops_used` in the verdict. It is wired through
+//!   paid inference, green → spend token → evaluate → `custom_value`.
+//!   `flops_used` is telemetry when measured, never a cheat/reject gate.
+//!   It is wired through
 //!   `proof_eval::FamilyMux` so no custom topic ever falls back to the
 //!   digest-pinned harvest. Runs hold a per-topic lease from `score` until
 //!   the row is persisted, so promotion is decided and written against the

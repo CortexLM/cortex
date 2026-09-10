@@ -9,9 +9,9 @@
 //!   control plane then refuses the report for a `firecracker_required`
 //!   topic (`ReportError::NotSandboxed`).
 //! - `flops_used` is the sister guest's measurement when a sister ran. A
-//!   sister that measured nothing yields `None`, which the control plane
-//!   refuses against a budget (`ReportError::FlopsMissing`, 503, no row) —
-//!   the RLM's own figure is never substituted for a run it did not perform.
+//!   sister that measured nothing yields `None`; custom / agent topics do
+//!   not refuse that as a bind failure — the RLM's own figure is never
+//!   substituted for a run it did not perform.
 //!
 //! Inspection and rule proposals run no miner code and are passed through.
 
@@ -126,10 +126,9 @@ mod tests {
             report.flops_used, None,
             "a sister that measured nothing is not the RLM's number"
         );
-        assert!(matches!(
-            report.verify(&req),
-            Err(proof_rlm::ReportError::FlopsMissing { .. })
-        ));
+        report
+            .verify(&req)
+            .expect("missing flops_used is not a bind failure");
     }
 
     #[test]

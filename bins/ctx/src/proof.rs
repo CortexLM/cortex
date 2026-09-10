@@ -533,7 +533,7 @@ fn explain_failure(status: u16, message: &str) -> String {
         400 => format!("refused ({message}). Nothing was stored and nothing was rented."),
         401 => format!(
             "unauthorized ({message}). Proof submit requires a hotkey_signature over \
-             {PROOF_SUBMIT_DOMAIN_LABEL} covering topic, artifact, FLOPs, claim, manifest \
+             {PROOF_SUBMIT_DOMAIN_LABEL} covering topic, artifact, declared_flops, claim, manifest \
              and a single-use submit_nonce (X-Lium-Api-Key is not identity)."
         ),
         503 => format!(
@@ -556,17 +556,17 @@ mod tests {
     }
 
     #[test]
-    fn claim_and_declared_flops_are_required_on_the_wire_shape() {
+    fn claim_is_required_declared_flops_is_optional() {
         let input = SubmitInput {
             train_datasets: vec!["my-mix-v0".into()],
             claim: "beat baseline".into(),
-            declared_flops: 1,
+            declared_flops: 0,
             ..SubmitInput::default()
         };
-        let m = build_manifest(&input).expect("declared");
+        let m = build_manifest(&input).expect("manifest");
         assert_eq!(m["train_dataset_ids"][0], "my-mix-v0");
         assert_eq!(input.claim, "beat baseline");
-        assert_eq!(input.declared_flops, 1);
+        assert_eq!(input.declared_flops, 0);
     }
 
     fn signed_input(key: SubmitKey) -> SubmitInput {

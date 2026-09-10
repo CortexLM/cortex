@@ -226,8 +226,10 @@ struct ProofSubmitArgs {
     /// What the recipe achieved (the RLM re-runs this claim).
     #[arg(long, value_name = "TEXT")]
     claim: String,
-    /// FLOPs spent reproducing the recipe. Must be ≤ the topic budget.
-    #[arg(long, value_name = "N")]
+    /// Optional FLOPs declaration (signed for backward compatibility).
+    /// Ignored as a scoring gate on custom / agent topics. Harvest
+    /// (`nll` / `throughput`) still refuses a declaration over the topic budget.
+    #[arg(long, value_name = "N", default_value_t = 0)]
     declared_flops: u64,
     /// Bring-your-own-key variable for topics that ask for one
     /// (`constraints.params.miner_byok`). Repeatable. `--env NAME=value`
@@ -259,8 +261,9 @@ struct ProofSignArgs {
     /// What the recipe achieved (must match the submit body).
     #[arg(long, value_name = "TEXT")]
     claim: String,
-    /// FLOPs spent reproducing the recipe. Must be ≤ the topic budget.
-    #[arg(long, value_name = "N")]
+    /// Optional FLOPs declaration (signed for backward compatibility).
+    /// Ignored as a scoring gate on custom / agent topics.
+    #[arg(long, value_name = "N", default_value_t = 0)]
     declared_flops: u64,
 }
 
@@ -512,6 +515,35 @@ mod tests {
                 assert!(args.key.secret_file.is_some());
                 assert!(args.key.submit_nonce.is_none(), "fresh nonce by default");
                 assert_eq!(args.manifest.train_datasets, ["mix-v0"]);
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proof_submit_omits_declared_flops() {
+        let digest = "ab".repeat(32);
+        let cli = Cli::try_parse_from([
+            "ctx",
+            "proof",
+            "submit",
+            "--secret-file",
+            "/tmp/hotkey.sk",
+            "--topic-id",
+            "tbench",
+            "--artifact-digest",
+            &digest,
+            "--claim",
+            "beat baseline",
+            "--train-dataset",
+            "mix-v0",
+        ])
+        .expect("declared_flops is optional");
+        match cli.cmd {
+            Cmd::Proof {
+                cmd: ProofCmd::Submit(args),
+            } => {
+                assert_eq!(args.declared_flops, 0);
             }
             other => panic!("wrong command: {other:?}"),
         }

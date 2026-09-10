@@ -213,7 +213,6 @@ silence. GET `/v1/submissions/{id}` then includes:
 ```json
 { "error": "topic_id is required" }
 { "error": "unknown topic" }
-{ "error": "declared_flops exceeds the topic budget" }
 { "error": "inference offer missing; refuse scoring" }
 ```
 
@@ -222,7 +221,7 @@ A 2xx/4xx/5xx with an empty `{}` and no `id` / no `error` is a **fail**.
 | HTTP | When | Stored? |
 |------|------|---------|
 | 201 | Sim (or stub) finished judge+harness | yes |
-| 400 | bad/missing/unknown/not-open `topic_id`, bad hex, FLOP over budget | no |
+| 400 | bad/missing/unknown/not-open `topic_id`, bad hex | no |
 | 503 | host cannot score (no open sealed topic, no offer, unpinned Lium, …) | no |
 
 ## Local compose (disposable)

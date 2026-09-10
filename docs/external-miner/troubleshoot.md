@@ -33,7 +33,7 @@ Install `ctx` from [README](./README.md). Proof miners pay Lium
 | Symptom | Likely cause | What to check |
 |---------|--------------|---------------|
 | `400` missing / unknown / not-open `topic_id` | Topic is not currently open | `ctx proof topics`. The refusal is not a submission |
-| `400` `declared_flops exceeds the topic budget` | `declared_flops > topic.flops_budget` | Cap declared FLOPs at the open topic's budget |
+| `400` `declared_flops exceeds the topic budget` | Harvest `nll` / `throughput` only: `declared_flops > topic.flops_budget`. Custom / agent (`tbench`) ignore this gate | Cap declared FLOPs on harvest topics; omit or send `0` on `tbench` |
 | `400` invalid hotkey / `artifact_digest` | Not exactly 64 lowercase hex (`0x`, uppercase, whitespace) | Post the same lowercase bytes you signed; the host never normalises a hex field |
 | `401` `hotkey_signature` / `submit_nonce` required, invalid, or reused | Unsigned, wrong key, a `claim` / `declared_flops` / `manifest` that differs from what was signed, or a replayed `(hotkey, submit_nonce)` | `ctx proof sign` over `base-proof-submit-v1` with a fresh nonce; post the manifest you signed. `X-Lium-Api-Key` is not identity |
 | `rejected` with `contamination_evidence_missing` | Empty `manifest` | Declare `train_content_hashes` or `train_dataset_ids` |

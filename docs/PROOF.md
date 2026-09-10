@@ -298,8 +298,10 @@ Trust-root keygen is the throwaway owner path in
   `primary >= bar * (1 + epsilon_rel)` direction-aware, bar = sealed value or
   reigning best) persists as `champion`; other passes stay `awaiting_admin`.
 - Submit fields miners must send: `claim` (what the recipe achieved),
-  `declared_flops` (≤ topic budget), `artifact_digest` of a **reproducible
-  train/eval recipe** (code under budget, not weights-only), `manifest`
+  `declared_flops` (optional, default `0`, still signed; ignored as a gate
+  on custom / agent topics; harvest `nll` / `throughput` still refuse a
+  declaration over the topic budget), `artifact_digest` of a **reproducible
+  train/eval recipe** (code, not weights-only), `manifest`
   (signed), `submit_nonce` (64 lowercase hex, single use), and
   `hotkey_signature` (exactly 128 lowercase hex sr25519 over
   `base-proof-submit-v1`); on custom topics also `artifact_uri` (the runner
@@ -330,7 +332,7 @@ Semantics, none of which weaken a product rule:
 | Rule | With `defer_scoring = "true"` |
 |------|-------------------------------|
 | Topic status | Stays **`open`**: it needs a sealed baseline to publish, it is listed in `open_topics`, and it is **not** `draft` (a draft is still a submit **400**). |
-| Intake gates | Unchanged: hotkey / digest shape, digest-of-nothing, unknown / not-open topic, `declared_flops` over budget, missing `artifact_uri` on a custom topic are the same **400**s with no row. |
+| Intake gates | Unchanged: hotkey / digest shape, digest-of-nothing, unknown / not-open topic, missing `artifact_uri` on a custom topic, missing/undeclared miner `env` are the same **400**s with no row. Harvest `nll` / `throughput` still 400 `declared_flops` over budget; custom / agent topics ignore that gate. |
 | Host gates | **Not consulted.** The row persists as **`queued`** (**201**) whether or not the host could score it right now — no readiness check, no harvest rent, no topic VM, no judge call, no verdict, no stamps, no topic mass, no emission. |
 | Status | The topic is in `deferred_topics`, **not** in `scorable_topics`; `can_score` keeps its meaning (something is scored right now). `queued_submissions` counts the waiting rows. |
 | Duplicates | One row per frozen digest per topic, for the row's whole life, decided in one atomic store step: the same artefact from the same hotkey again is **200** with the existing row (`detail: already queued …`), and after a drain it is **200** with the *scored* row (`already submitted … and scored`) — two identical submits racing each other yield one row, and a retry never buys a second paid run. |
@@ -547,8 +549,8 @@ open ⇄ evaluating → promoting → open … → closed`. `owner_presend` is a
 `awaiting_owner_keys` probes `PROOF_RLM_OWNER_INFERENCE_KEY_FILE` for
 presence only. `TopicSetup` drives the ceremony over the VM boundary
 (provision → RLM `ProposeRules` → rules vN in DB → `Baseline` job →
-measurement in DB; a baseline measured over the topic `flops_budget` or
-without a measurement is refused) and `mark_sealed` moves `baselining →
+measurement in DB; custom / agent baselines do not refuse on
+`flops_budget` or a missing `flops_used`) and `mark_sealed` moves `baselining →
 open` after the operator seals `custom_value` and re-signs. `mark_sealed`
 is fail-closed: the document must be `status: open`, validate as an open
 topic on this host (sealed baseline, registered `custom_id`, tighten-only
@@ -656,14 +658,11 @@ scorer refuses a request without it; an `artifact_digest` that is the sha256
 of nothing — zero bytes, an empty tar — is a **400** too; the host refuses a
 content-less, compressed, non-tar, or mis-hashed `artifact_tar`, so a guest
 that substitutes an empty tree when its fetch fails can never produce a
-scored run), the topic's
-`flops_budget`, and the miner's `declared_flops` (the runner may enforce it
-as a hard cap). The runner's report must carry its measured `flops_used`,
-which becomes the verdict's usage — a report without one is not evidence
-(**503**, no row); a measurement over the budget (`flops_over_budget`) or
-over the miner's declaration (`flops_under_declared`) is a persisted reject.
-The miner's `declared_flops` is never the enforced usage figure; it is the
-cap the measurement is held to.
+scored run). The topic's `flops_budget` and the miner's `declared_flops`
+travel with the request for signature / harvest compat; custom / agent
+topics do **not** reject on measured `flops_used` vs either figure, and a
+report without a measurement is still evidence. Anti-cheat is the signed
+topic checklist, sister attestation, and miner BYOK env.
 
 ### Runner registry
 
