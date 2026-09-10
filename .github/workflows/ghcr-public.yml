@@ -1,5 +1,7 @@
-# Make GHCR container packages public so paid Phala / unauth pulls work.
-# Packages live under the *base* repo path: ghcr.io/baseintelligence/base/<suffix>
+# Make GHCR container packages public so unauthenticated droplet pulls work.
+# Packages live under the repo path: ghcr.io/<owner>/<repo>/<suffix>.
+# Prod deploys pull digests anonymously (remote-deploy.sh --build-from registry
+# never logs in), so a private package is a broken prod deploy.
 name: ghcr-public
 
 # Manual re-run only. The automatic pass is the `ghcr-public` job in
@@ -21,14 +23,19 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          # Nested image names: ghcr.io/<owner>/base/<suffix> → package name "base/<suffix>"
+          # Nested image names: ghcr.io/<owner>/<repo>/<suffix> → package "<repo>/<suffix>".
+          # Derive the repo segment: the hardcoded "base/" prefix went stale when
+          # the repo was renamed, so every visibility call 404'd and the droplets
+          # were left pulling private packages.
+          repo="${GITHUB_REPOSITORY##*/}"
+          repo="${repo,,}"
           pkgs=(
-            "base/base-attest-helper"
-            "base/gateway"
-            "base/validator"
-            "base/updater"
-            "base/bounty-challenge"
-            "base/proof-challenge"
+            "${repo}/base-attest-helper"
+            "${repo}/gateway"
+            "${repo}/validator"
+            "${repo}/updater"
+            "${repo}/bounty-challenge"
+            "${repo}/proof-challenge"
           )
           ok=0
           # First list packages to Learn exact names (debug)
