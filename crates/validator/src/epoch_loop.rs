@@ -1034,7 +1034,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tick_sealed_uid0_burn_match_submits() {
+    async fn tick_sealed_owner_burn_match_submits() {
         let epoch = 9_010_078u64;
         let (client, chain, trust, merkle_root, _, _) = sealed_match_fixture(epoch).await;
         let submit = CoordinationSubmitConfig {
