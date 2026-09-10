@@ -91,11 +91,30 @@ def should_skip_image(text: str) -> bool:
 
 
 def already_installs_pytest(text: str) -> bool:
-    return bool(INSTALL_PYTEST.search(text))
+    """True only if the **final** stage already installs pytest.
+
+    A builder-stage ``pip install pytest`` does not put pytest on PATH in
+    the runtime image Harbor execs. Checking the whole file would skip
+    the injection layer and score a false zero.
+    """
+    return bool(INSTALL_PYTEST.search(final_stage_text(text)))
 
 
 def looks_python_capable(text: str) -> bool:
     return bool(PYTHONISH.search(text))
+
+
+def final_stage_text(text: str) -> str:
+    """Return the last Dockerfile stage (last ``FROM`` through EOF)."""
+    lines = text.splitlines()
+    start = 0
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if FROM_INSTR.match(line):
+            start = i
+    return "\n".join(lines[start:])
 
 
 def last_user_of_final_stage(text: str) -> str | None:

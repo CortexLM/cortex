@@ -133,6 +133,27 @@ class EnsureVerifierTests(unittest.TestCase):
             ]
             self.assertEqual(users, ["USER root"])
 
+    def test_builder_stage_pytest_does_not_skip_final_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = root / "cad-model" / "environment"
+            env.mkdir(parents=True)
+            df = env / "Dockerfile"
+            df.write_text(
+                "FROM python:3.12-slim AS build\n"
+                "RUN pip install pytest\n"
+                "FROM python:3.12-slim\n"
+                "WORKDIR /app\n",
+                encoding="utf-8",
+            )
+            stats = ensure_verifier.ensure_tree(root)
+            self.assertEqual(stats["dockerfiles_patched"], 1)
+            self.assertEqual(stats["dockerfiles_already"], 0)
+            text = df.read_text(encoding="utf-8")
+            final = ensure_verifier.final_stage_text(text)
+            self.assertIn("pip install --no-cache-dir pytest", final)
+            self.assertGreater(text.rfind("pip install --no-cache-dir pytest"), text.rfind("FROM python:3.12-slim"))
+
 
 if __name__ == "__main__":
     unittest.main()
