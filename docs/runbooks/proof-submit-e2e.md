@@ -111,23 +111,30 @@ curl -sS "$BASE/v1/proof/topics"
 
 Unsigned POST against an open topic is **401** (`hotkey_signature required`).
 Sign with `ctx proof sign` (or `ctx proof submit --secret-file`) over
-`base-proof-submit-v1`. `X-Lium-Api-Key` is not identity.
+`base-proof-submit-v1`. The signature covers topic, artefact, FLOPs, claim,
+the **manifest**, and a fresh 64-hex `submit_nonce`; the host accepts each
+`(hotkey, nonce)` once, so POSTing the same body twice is **401**
+`submit_nonce reused` with no second row (`--probe` asserts this).
+`X-Lium-Api-Key` is not identity.
 
 ```bash
-# Sign locally (never a mnemonic):
+# Sign locally (never a mnemonic). Pass the manifest you will post.
 ctx --json proof sign \
   --secret-file /path/to/hotkey.sk \
   --topic-id dt-no-ib-v0 \
   --artifact-digest bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   --claim "beats the sealed reference under the cap" \
-  --declared-flops 1000000000000
-# → { "miner_hotkey": "<64 hex>", "hotkey_signature": "<128 hex>", "domain": "base-proof-submit-v1" }
+  --declared-flops 1000000000000 \
+  --train-dataset e2e-mix-v0
+# → { "miner_hotkey": "<64 hex>", "hotkey_signature": "<128 hex>",
+#     "submit_nonce": "<64 hex>", "manifest": {...}, "domain": "base-proof-submit-v1" }
 
 curl -sS -X POST "$BASE/v1/submissions" \
   -H 'content-type: application/json' \
   -d '{
     "miner_hotkey": "<64-hex from ctx proof sign>",
     "hotkey_signature": "<128-hex from ctx proof sign>",
+    "submit_nonce": "<64-hex from ctx proof sign>",
     "topic_id": "dt-no-ib-v0",
     "artifact_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "claim": "beats the sealed reference under the cap",

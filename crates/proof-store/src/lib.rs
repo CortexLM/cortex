@@ -104,6 +104,10 @@ pub struct Submission {
     pub manifest: ArtifactManifest,
     /// Digest freeze nonce (hex).
     pub nonce: String,
+    /// Client anti-replay nonce (64 hex) bound into `hotkey_signature`;
+    /// accepted once per hotkey ([`MemoryStore::reserve_submit_nonce`]).
+    #[serde(default)]
+    pub submit_nonce: String,
     /// `sha256(hotkey || 0xff || topic || 0xff || artifact || 0xff || nonce)`.
     pub submission_digest: String,
     /// Lifecycle.
@@ -193,6 +197,8 @@ struct Inner {
     holdouts: BTreeMap<String, Vec<HoldoutRecord>>,
     baselines: BTreeMap<String, SealedBaseline>,
     scores: BTreeMap<String, BTreeMap<String, MinerTopicRun>>,
+    /// Every `(hotkey, submit_nonce)` a verified submit has presented.
+    submit_nonces: BTreeSet<(String, String)>,
 }
 
 impl Inner {
@@ -310,6 +316,17 @@ impl MemoryStore {
                 && g.holdouts.contains_key(&t.id)
                 && g.baselines.contains_key(&t.id)
         }))
+    }
+
+    /// Mark `(hotkey, submit_nonce)` as seen. `Ok(false)` means a verified
+    /// submit already presented that pair: the request is a replay and must
+    /// not reach evaluation or a row. Check-and-insert under one lock, so two
+    /// concurrent replays cannot both pass. Lives as long as the rows do.
+    pub fn reserve_submit_nonce(&self, hotkey: &str, nonce: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .lock()?
+            .submit_nonces
+            .insert((hotkey.to_owned(), nonce.to_owned())))
     }
 
     /// Insert a submission: a scored row in its final state, or a `queued`
@@ -627,6 +644,20 @@ mod tests {
     }
 
     #[test]
+    fn a_submit_nonce_is_reserved_once_per_hotkey() {
+        let st = MemoryStore::new();
+        let nonce = "ab".repeat(32);
+        assert!(st.reserve_submit_nonce("hk-a", &nonce).expect("first"));
+        assert!(!st.reserve_submit_nonce("hk-a", &nonce).expect("replay"));
+        assert!(st
+            .reserve_submit_nonce("hk-b", &nonce)
+            .expect("other hotkey"));
+        assert!(st
+            .reserve_submit_nonce("hk-a", &"cd".repeat(32))
+            .expect("fresh nonce"));
+    }
+
+    #[test]
     fn open_ids_respect_status() {
         let st = MemoryStore::new();
         let mut t = topic();
@@ -655,6 +686,7 @@ mod tests {
             manifest: ArtifactManifest::default(),
             submission_digest: freeze_submission_digest(&hotkey, topic_id, &artifact, &nonce),
             nonce,
+            submit_nonce: "cd".repeat(32),
             state: SubmissionState::Queued,
             receipt_json: None,
             verdict: None,

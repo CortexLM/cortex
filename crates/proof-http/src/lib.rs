@@ -6,7 +6,7 @@
 //! GET  /v1/proof/topics
 //! GET  /v1/proof/topics/{id}
 //! GET  /v1/proof/executor         public EvalExecutorOffer + pin ceilings
-//! POST /v1/submissions            miner submit (topic_id + hotkey_signature required)
+//! POST /v1/submissions            miner submit (topic_id + hotkey_signature + submit_nonce required)
 //! GET  /v1/submissions            ?state=queued&topic_id=… filters
 //! GET  /v1/submissions/{id}
 //! POST /v1/admin/proof/topics     operator publish (signed document)
@@ -58,7 +58,9 @@ use proof_store::{
     freeze_submission_digest, ArtifactManifest, Enqueued, MemoryStore, StoreError, Submission,
     SubmissionState,
 };
-use proof_submit::{parse_hotkey_hex, parse_signature_hex, verify_submit};
+use proof_submit::{
+    parse_hotkey_hex, parse_signature_hex, parse_submit_nonce_hex, verify_submit, SubmitFields,
+};
 use proof_task::{
     resolve_inference, InferenceOffer, MetricFamily, OfferError, ProofPin, TopicDocument,
     TopicError, TopicStatus, CHALLENGE_ID, SCORE_MAX, SCORING_VERSION,
@@ -407,9 +409,13 @@ async fn get_executor(State(st): State<AppState>) -> impl IntoResponse {
 #[derive(Debug, Deserialize)]
 struct SubmitBody {
     miner_hotkey: String,
-    /// sr25519 signature over [`proof_submit::submit_signing_payload`] (128 hex).
+    /// sr25519 signature over [`SubmitFields::signing_payload`] (128 lowercase hex).
     #[serde(default)]
     hotkey_signature: Option<String>,
+    /// Client anti-replay nonce (64 lowercase hex), bound into the signature
+    /// and accepted once per hotkey.
+    #[serde(default)]
+    submit_nonce: Option<String>,
     artifact_digest: String,
     artifact_uri: Option<String>,
     #[serde(default)]
@@ -495,34 +501,45 @@ fn parse_artifact_digest(s: &str) -> Result<String, (StatusCode, Json<serde_json
     Ok(digest)
 }
 
-fn verify_hotkey_signature(
+/// Miner identity for one submit: `hotkey_signature` over every gate input
+/// (topic, artefact, FLOPs, claim, manifest) plus the client `submit_nonce`.
+/// Returns the nonce the caller must reserve before any row or rent.
+fn authenticate_submit(
     hotkey: &str,
     topic_id: &str,
     artifact: &str,
     body: &SubmitBody,
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let sig_hex = body
-        .hotkey_signature
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let sig_hex = body.hotkey_signature.as_deref().filter(|s| !s.is_empty());
     let Some(sig_hex) = sig_hex else {
         return Err(err(StatusCode::UNAUTHORIZED, "hotkey_signature required"));
     };
     let sig = parse_signature_hex(sig_hex)
         .map_err(|_| err(StatusCode::UNAUTHORIZED, "hotkey_signature invalid"))?;
+    let nonce = body.submit_nonce.as_deref().filter(|s| !s.is_empty());
+    let Some(nonce) = nonce else {
+        return Err(err(StatusCode::UNAUTHORIZED, "submit_nonce required"));
+    };
+    parse_submit_nonce_hex(nonce)
+        .map_err(|_| err(StatusCode::UNAUTHORIZED, "submit_nonce invalid"))?;
     let pk = parse_hotkey_hex(hotkey)
         .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid miner_hotkey"))?;
     verify_submit(
         &pk,
-        hotkey,
-        topic_id,
-        artifact,
-        body.declared_flops,
-        &body.claim,
+        &SubmitFields {
+            hotkey_hex: hotkey,
+            topic_id,
+            artifact_digest: artifact,
+            declared_flops: body.declared_flops,
+            claim: &body.claim,
+            train_content_hashes: &body.manifest.train_content_hashes,
+            train_dataset_ids: &body.manifest.train_dataset_ids,
+            submit_nonce_hex: nonce,
+        },
         &sig,
     )
-    .map_err(|_| err(StatusCode::UNAUTHORIZED, "hotkey_signature invalid"))
+    .map_err(|_| err(StatusCode::UNAUTHORIZED, "hotkey_signature invalid"))?;
+    Ok(nonce.to_owned())
 }
 
 fn nonce_from(hotkey: &str, topic_id: &str, digest: &str) -> String {
@@ -556,7 +573,16 @@ async fn submit(
     if !topic.is_open_at(st.epoch) {
         return Err(err(StatusCode::BAD_REQUEST, "topic is not open"));
     }
-    verify_hotkey_signature(&hotkey, &topic_id, &artifact, &body)?;
+    let submit_nonce = authenticate_submit(&hotkey, &topic_id, &artifact, &body)?;
+    // A verified request is single-use, whatever happens to it next: a
+    // replay must never reach evaluation or a second row.
+    if !st
+        .store
+        .reserve_submit_nonce(&hotkey, &submit_nonce)
+        .map_err(|e| store_err(&e))?
+    {
+        return Err(err(StatusCode::UNAUTHORIZED, "submit_nonce reused"));
+    }
     if body.declared_flops > topic.flops_budget {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -597,6 +623,7 @@ async fn submit(
         executor_commitment: String::new(),
         manifest: body.manifest,
         nonce,
+        submit_nonce,
         submission_digest,
         state: SubmissionState::Queued,
         receipt_json: None,
@@ -2233,6 +2260,20 @@ mod tests {
         assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
         assert_eq!(body["error"], "hotkey_signature invalid");
 
+        // The wire format is exactly 128 lowercase hex: no 0x, no uppercase.
+        for mangle in [
+            |s: &str| format!("0x{s}"),
+            |s: &str| s.to_ascii_uppercase(),
+            |s: &str| format!(" {s}"),
+        ] {
+            let mut body_v = submit_body("x", &serde_json::json!({}));
+            let good = body_v["hotkey_signature"].as_str().expect("sig").to_owned();
+            body_v["hotkey_signature"] = serde_json::json!(mangle(&good));
+            let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", body_v, None).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
+            assert_eq!(body["error"], "hotkey_signature invalid");
+        }
+
         let mut other = [0x22u8; 32];
         other[0] = 0x43;
         let other_pk = crypto::public_key_from_mini_secret(&other).expect("other");
@@ -2246,6 +2287,85 @@ mod tests {
             list["items"].as_array().is_some_and(Vec::is_empty),
             "wrong key must not insert: {list}"
         );
+    }
+
+    async fn row_count(app: Router) -> usize {
+        let (_, list) = json_req(app, "GET", "/v1/submissions", serde_json::json!({}), None).await;
+        list["items"].as_array().map_or(usize::MAX, Vec::len)
+    }
+
+    #[tokio::test]
+    async fn submit_nonce_is_required_single_use_and_the_manifest_is_signed() {
+        let app = app_tight_sim();
+
+        let mut no_nonce = submit_body("nonce", &serde_json::json!({}));
+        no_nonce
+            .as_object_mut()
+            .expect("obj")
+            .remove("submit_nonce");
+        let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", no_nonce, None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["error"], "submit_nonce required");
+
+        for bad in [
+            "AB".repeat(32),
+            "ab".repeat(31),
+            format!("0x{}", "ab".repeat(31)),
+        ] {
+            let mut body_v = submit_body("nonce", &serde_json::json!({}));
+            body_v["submit_nonce"] = serde_json::json!(bad);
+            let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", body_v, None).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
+            assert_eq!(body["error"], "submit_nonce invalid");
+        }
+
+        // A signature over one manifest does not authorise another.
+        let mut swapped = submit_body("nonce", &serde_json::json!({}));
+        swapped["manifest"] = serde_json::json!({ "train_dataset_ids": ["leaked-holdout-v0"] });
+        let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", swapped, None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["error"], "hotkey_signature invalid");
+        let mut reordered = submit_body(
+            "nonce",
+            &serde_json::json!({ "manifest": { "train_dataset_ids": ["b-mix", "a-mix"] } }),
+        );
+        assert_eq!(
+            row_count(app.clone()).await,
+            0,
+            "nothing stored before a valid submit"
+        );
+
+        // The same bytes, once: the first is scored, the replay is refused
+        // before evaluation and leaves no second row.
+        let signed = submit_body("nonce", &serde_json::json!({}));
+        let (st, created) =
+            json_req(app.clone(), "POST", "/v1/submissions", signed.clone(), None).await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", signed, None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["error"], "submit_nonce reused");
+        assert_eq!(row_count(app.clone()).await, 1, "replay must not add a row");
+        let id = created["id"].as_str().expect("id");
+        let (_, row) = json_req(
+            app.clone(),
+            "GET",
+            &format!("/v1/submissions/{id}"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(
+            row["submit_nonce"].as_str().map(str::len),
+            Some(64),
+            "row stamps the client nonce: {row}"
+        );
+
+        // A fresh nonce from the same key is a new submission; the canonical
+        // manifest is order-independent so the client may list in any order.
+        reordered["manifest"]["train_dataset_ids"] = serde_json::json!(["a-mix", "b-mix"]);
+        let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", reordered, None).await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        assert_eq!(row_count(app).await, 2);
     }
 
     #[tokio::test]

@@ -26,7 +26,7 @@ check.
 
 Miner pays Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`). That key is **not**
 identity: every submit must carry `hotkey_signature` over
-`base-proof-submit-v1`.
+`base-proof-submit-v1` and a single-use `submit_nonce`.
 
 If `eval_image_digest` is empty the host answers **503**. That is fail-closed,
 not a sim fallback. The pin currently carries the digest above. Do not invent
@@ -202,20 +202,63 @@ wallet the same way `ctx bounty pair` does. `--signature` is a 128-hex
 offline signature. `--hotkey` is optional when a secret or wallet is
 loaded (derived); with `--signature` it is required and must match.
 
-The signature is sr25519 under `base-proof-submit-v1` over:
+The signature is sr25519 under `base-proof-submit-v1` over these exact
+bytes (`0xff` is a single separator byte; it never occurs inside UTF-8):
 
 ```
-hotkey_hex || 0xff || topic_id || 0xff || artifact_digest || 0xff || declared_flops_decimal || 0xff || claim
+hotkey_hex || 0xff || topic_id || 0xff || artifact_digest || 0xff
+  || declared_flops_decimal || 0xff || claim || 0xff
+  || manifest_canonical || 0xff || submit_nonce_hex
+
+manifest_canonical =
+  count(hashes)_decimal   || (0xff || hash)*      hashes   = manifest.train_content_hashes, sorted bytewise
+  || 0xff ||
+  count(datasets)_decimal || (0xff || dataset)*   datasets = manifest.train_dataset_ids,   sorted bytewise
 ```
 
-`ctx proof sign` prints `miner_hotkey` + `hotkey_signature` without posting.
+- `hotkey_hex` / `artifact_digest`: 64 lowercase hex, as posted.
+- `declared_flops_decimal`: the integer as ASCII digits.
+- `claim`: the exact UTF-8 string you post.
+- `manifest_canonical`: each list's entry count as ASCII digits, then every
+  entry prefixed by `0xff`, entries as exact UTF-8 (duplicates kept, nothing
+  trimmed), sorted bytewise; the two lists joined by `0xff`; a missing list
+  is `0`. `{"train_dataset_ids":["my-mix-v0"]}` is `0 ff 1 ff my-mix-v0`.
+  Order on the wire does not matter; the **contents** do — a signature over
+  one manifest never authorises another.
+- `submit_nonce_hex`: 32 random bytes you choose, as 64 lowercase hex, sent
+  verbatim as `submit_nonce`. The host accepts each `(miner_hotkey,
+  submit_nonce)` pair **once**; a second request with the same pair is
+  **401** `submit_nonce reused`, whatever happened to the first. Draw a
+  fresh nonce for every request (`ctx` does).
+
+`ctx` signs with schnorrkel: signing context `base-sr25519-v1`, message
+`scale(b"base-proof-submit-v1") || scale(payload)` where `scale(x)` is the
+SCALE byte-vector encoding (compact length prefix + bytes). Reference:
+
+```python
+def canonical(xs):
+    xs = sorted(xs)
+    return str(len(xs)).encode() + b"".join(b"\xff" + x.encode() for x in xs)
+
+payload = (hotkey_hex.encode() + b"\xff" + topic_id.encode() + b"\xff"
+           + artifact_digest.encode() + b"\xff" + str(declared_flops).encode()
+           + b"\xff" + claim.encode() + b"\xff"
+           + canonical(train_content_hashes) + b"\xff" + canonical(train_dataset_ids)
+           + b"\xff" + submit_nonce.encode())
+```
+
+`ctx proof sign` prints `miner_hotkey`, `hotkey_signature`, `submit_nonce`,
+and the exact `manifest` to post, without posting. Pass the same
+`--train-dataset` / `--train-hash` / `--manifest-file` you will submit.
 
 `--wait` keeps polling until the row is terminal (`awaiting_admin`,
 `rejected`, or `champion`). A `queued` row is not terminal: on a topic that
 defers scoring, `--wait` keeps polling until the operator drains the queue,
 which can take as long as the operator's install does.
 
-The same submit with `curl` (signature from `ctx proof sign --json`):
+The same submit with `curl` (`miner_hotkey`, `hotkey_signature`,
+`submit_nonce`, and `manifest` from one `ctx proof sign --json` run — the
+manifest is signed, so post the one you signed):
 
 ```bash
 curl -sS -X POST https://gateway.cortex.foundation/challenge/proof/v1/submissions \
@@ -224,6 +267,7 @@ curl -sS -X POST https://gateway.cortex.foundation/challenge/proof/v1/submission
   -d '{
     "miner_hotkey": "<64-hex hotkey>",
     "hotkey_signature": "<128-hex sr25519>",
+    "submit_nonce": "<64-hex, fresh per request>",
     "topic_id": "<open topic id>",
     "artifact_digest": "<sha256 of the recipe>",
     "claim": "beat sealed baseline holdout NLL by 0.04 at 1.2e18 FLOPs",
@@ -250,13 +294,14 @@ a topic in `deferred_topics`, where they answer **201** `queued`.
 | Field | Required | Shape |
 |-------|----------|-------|
 | `miner_hotkey` | yes | 64 hex characters (no `0x`); the sr25519 public key that verifies `hotkey_signature` |
-| `hotkey_signature` | yes | 128 lowercase hex sr25519 over `base-proof-submit-v1` (see payload above). Missing/invalid → **401**. `X-Lium-Api-Key` is not a substitute |
+| `hotkey_signature` | yes | **Exactly** 128 lowercase hex (no `0x`, no uppercase) sr25519 over `base-proof-submit-v1` (payload above). Missing/invalid → **401**. `X-Lium-Api-Key` is not a substitute |
+| `submit_nonce` | yes | **Exactly** 64 lowercase hex (32 random bytes), bound into the signature, accepted once per hotkey. Missing/invalid/reused → **401** |
 | `topic_id` | yes | Open topic id from `ctx proof topics` |
 | `artifact_digest` | yes | SHA-256 hex of the recipe bytes |
 | `claim` | yes | Non-empty string: NL of what improved (bound into the signature) |
 | `declared_flops` | yes | `u64`, must be `≤ topic.flops_budget` (bound into the signature) |
-| `manifest.train_content_hashes` | yes (array) | Shard hashes you trained on (may be `[]` if you declare dataset ids) |
-| `manifest.train_dataset_ids` | yes (array) | Corpus ids you trained on (may be `[]` if you declare hashes) |
+| `manifest.train_content_hashes` | yes (array) | Shard hashes you trained on (may be `[]` if you declare dataset ids); bound into the signature |
+| `manifest.train_dataset_ids` | yes (array) | Corpus ids you trained on (may be `[]` if you declare hashes); bound into the signature |
 | `artifact_uri` | custom topics: yes | Locator for the same bytes as `artifact_digest`; optional on `nll` / `throughput` |
 
 An empty `manifest` (both arrays empty / omitted) is **not** a clean
@@ -284,9 +329,10 @@ there is no row to show.
 
 ## HTTP 400 vs 503
 
-A **400** is your request. A **401** is a missing or invalid hotkey
-signature. A **503** is the host. None of those rent a pod. Refusals
-(**400** / **401** / **503**) do **not** persist a submission row.
+A **400** is your request. A **401** is a missing, invalid, or replayed
+hotkey signature / `submit_nonce`. A **503** is the host. None of those
+rent a pod. Refusals (**400** / **401** / **503**) do **not** persist a
+submission row.
 
 | Status | When | Stored? | Rented? |
 |--------|------|---------|---------|
@@ -297,7 +343,10 @@ signature. A **503** is the host. None of those rent a pod. Refusals
 | **400** `artifact_uri is required for custom topics` | Custom topic, no locator | no | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not 64 hex | no | no |
 | **401** `hotkey_signature required` | Missing / empty `hotkey_signature` | no | no |
-| **401** `hotkey_signature invalid` | Signature does not verify under `miner_hotkey` for `base-proof-submit-v1` | no | no |
+| **401** `hotkey_signature invalid` | Not exactly 128 lowercase hex, or does not verify under `miner_hotkey` for `base-proof-submit-v1` — including a `claim`, `declared_flops`, `manifest`, or `submit_nonce` that differs from what was signed | no | no |
+| **401** `submit_nonce required` | Missing / empty `submit_nonce` | no | no |
+| **401** `submit_nonce invalid` | Not exactly 64 lowercase hex | no | no |
+| **401** `submit_nonce reused` | This `(miner_hotkey, submit_nonce)` pair was already presented with a valid signature: a replay. Sign again with a fresh nonce | no | no |
 | **400** `artifact_digest is the sha256 of empty input …` | The digest of zero bytes or of an empty tar archive: hash the recipe bytes you actually serve at `artifact_uri` | no | no |
 | **503** empty `eval_image_digest` | Digest not pinned | no | no |
 | **503** zero open sealed topics | Nothing to score against | no | no |

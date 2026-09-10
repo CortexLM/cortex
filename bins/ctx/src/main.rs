@@ -181,6 +181,24 @@ struct ProofKeyArgs {
     /// 128-hex signature produced by an offline sign.
     #[arg(long, value_name = "HEX")]
     signature: Option<String>,
+    /// 64-hex single-use nonce bound into the signature. Fresh random when
+    /// omitted; required with --signature.
+    #[arg(long, value_name = "HEX64")]
+    submit_nonce: Option<String>,
+}
+
+/// Contamination manifest: the training data you declare. Signed.
+#[derive(Debug, Args)]
+struct ProofManifestArgs {
+    /// Full manifest JSON file, used verbatim.
+    #[arg(long, value_name = "PATH")]
+    manifest_file: Option<PathBuf>,
+    /// Shard content hash you trained on (repeatable).
+    #[arg(long = "train-hash", value_name = "SHA256")]
+    train_hashes: Vec<String>,
+    /// Dataset / corpus id you trained on (repeatable).
+    #[arg(long = "train-dataset", value_name = "ID")]
+    train_datasets: Vec<String>,
 }
 
 /// Artifact and topic arguments for a Proof submit.
@@ -188,6 +206,8 @@ struct ProofKeyArgs {
 struct ProofSubmitArgs {
     #[command(flatten)]
     key: ProofKeyArgs,
+    #[command(flatten)]
+    manifest: ProofManifestArgs,
     /// Open topic id (`ctx proof topics`).
     #[arg(long, value_name = "ID")]
     topic_id: String,
@@ -203,25 +223,19 @@ struct ProofSubmitArgs {
     /// FLOPs spent reproducing the recipe. Must be ≤ the topic budget.
     #[arg(long, value_name = "N")]
     declared_flops: u64,
-    /// Full manifest JSON file, used verbatim.
-    #[arg(long, value_name = "PATH")]
-    manifest_file: Option<PathBuf>,
-    /// Shard content hash you trained on (repeatable).
-    #[arg(long = "train-hash", value_name = "SHA256")]
-    train_hashes: Vec<String>,
-    /// Dataset / corpus id you trained on (repeatable).
-    #[arg(long = "train-dataset", value_name = "ID")]
-    train_datasets: Vec<String>,
     /// Keep polling until the submission stops moving.
     #[arg(long)]
     wait: bool,
 }
 
-/// Fields needed to sign a Proof submit without posting it.
+/// Fields needed to sign a Proof submit without posting it. The manifest is
+/// part of the signed bytes, so pass the same one you will post.
 #[derive(Debug, Args)]
 struct ProofSignArgs {
     #[command(flatten)]
     key: ProofKeyArgs,
+    #[command(flatten)]
+    manifest: ProofManifestArgs,
     /// Open topic id (`ctx proof topics`).
     #[arg(long, value_name = "ID")]
     topic_id: String,
@@ -273,9 +287,9 @@ async fn run_proof(client: &Client, cmd: ProofCmd, json: bool) -> Result<(), Str
                 artifact_uri: args.artifact_uri,
                 claim: args.claim,
                 declared_flops: args.declared_flops,
-                manifest_file: args.manifest_file,
-                train_hashes: args.train_hashes,
-                train_datasets: args.train_datasets,
+                manifest_file: args.manifest.manifest_file,
+                train_hashes: args.manifest.train_hashes,
+                train_datasets: args.manifest.train_datasets,
                 wait: args.wait,
                 key: submit_key(args.key),
             };
@@ -288,9 +302,9 @@ async fn run_proof(client: &Client, cmd: ProofCmd, json: bool) -> Result<(), Str
                 artifact_uri: None,
                 claim: args.claim,
                 declared_flops: args.declared_flops,
-                manifest_file: None,
-                train_hashes: Vec::new(),
-                train_datasets: Vec::new(),
+                manifest_file: args.manifest.manifest_file,
+                train_hashes: args.manifest.train_hashes,
+                train_datasets: args.manifest.train_datasets,
                 wait: false,
                 key: submit_key(args.key),
             };
@@ -310,6 +324,7 @@ fn submit_key(key: ProofKeyArgs) -> SubmitKey {
         wallet_name: key.wallet_name,
         wallet_hotkey: key.wallet_hotkey,
         signature: key.signature,
+        submit_nonce: key.submit_nonce,
     }
 }
 
@@ -477,6 +492,46 @@ mod tests {
             } => {
                 assert!(args.key.hotkey.is_none());
                 assert!(args.key.secret_file.is_some());
+                assert!(args.key.submit_nonce.is_none(), "fresh nonce by default");
+                assert_eq!(args.manifest.train_datasets, ["mix-v0"]);
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proof_sign_takes_the_manifest_and_an_explicit_nonce() {
+        let digest = "ab".repeat(32);
+        let nonce = "cd".repeat(32);
+        let cli = Cli::try_parse_from([
+            "ctx",
+            "proof",
+            "sign",
+            "--secret-file",
+            "/tmp/hotkey.sk",
+            "--submit-nonce",
+            &nonce,
+            "--topic-id",
+            "dt-no-ib-v0",
+            "--artifact-digest",
+            &digest,
+            "--claim",
+            "beat baseline",
+            "--declared-flops",
+            "1",
+            "--train-dataset",
+            "mix-v0",
+            "--train-hash",
+            &digest,
+        ])
+        .expect("parse");
+        match cli.cmd {
+            Cmd::Proof {
+                cmd: ProofCmd::Sign(args),
+            } => {
+                assert_eq!(args.key.submit_nonce.as_deref(), Some(nonce.as_str()));
+                assert_eq!(args.manifest.train_datasets, ["mix-v0"]);
+                assert_eq!(args.manifest.train_hashes, [digest]);
             }
             other => panic!("wrong command: {other:?}"),
         }
