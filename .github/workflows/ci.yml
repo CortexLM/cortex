@@ -1,5 +1,10 @@
 name: ci
 
+# Gate-only workflow: fmt / clippy / test / deny / xtask. It touches no
+# infrastructure. The DigitalOcean staging soak was retired (owner decision,
+# 2026-09-10) — main pushes now go straight to prod through
+# images.yml (GHCR digests → prod pins) and deploy-prod.yml.
+
 on:
   push:
     branches: [main]
@@ -63,111 +68,3 @@ jobs:
 
       - name: compose matrix assertions
         run: bash deploy/scripts/assert-compose-matrix.sh
-
-  # ---------------------------------------------------------------------------
-  # Auto-deploy staging. Lives here rather than in deploy-staging.yml so that
-  # `needs: ci` keeps the CI-green ordering on every push to main.
-  # deploy-staging.yml remains for manual re-deploys.
-  # ---------------------------------------------------------------------------
-  deploy-staging:
-    name: deploy staging ${{ matrix.role }}
-    needs: [ci]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    concurrency:
-      group: deploy-staging-${{ matrix.role }}
-      cancel-in-progress: false
-    strategy:
-      fail-fast: false
-      matrix:
-        role: [master, validator]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install SSH key
-        run: |
-          set -euo pipefail
-          test -n "${{ secrets.STAGING_SSH_KEY }}" || { echo "missing STAGING_SSH_KEY"; exit 1; }
-          mkdir -p ~/.ssh
-          echo "${{ secrets.STAGING_SSH_KEY }}" > ~/.ssh/staging_ed25519
-          chmod 600 ~/.ssh/staging_ed25519
-          echo "StrictHostKeyChecking accept-new" > ~/.ssh/config
-
-      - name: Resolve host
-        id: host
-        run: |
-          set -euo pipefail
-          if [[ "${{ matrix.role }}" == "master" ]]; then
-            h="${{ secrets.STAGING_MASTER_HOST }}"
-          else
-            h="${{ secrets.STAGING_VALIDATOR_HOST }}"
-          fi
-          test -n "$h" || { echo "missing staging host secret for ${{ matrix.role }}"; exit 1; }
-          echo "value=$h" >> "$GITHUB_OUTPUT"
-
-      # Port 22 is closed to everything but the operator IP, and runners get
-      # ephemeral Azure addresses. Open a hole for this runner's own /32 and
-      # close it again in the always() step below.
-      - name: Open firewall for this runner
-        id: fw
-        uses: ./.github/actions/do-firewall
-        with:
-          action: open
-          token: ${{ secrets.DIGITALOCEAN_TOKEN }}
-
-      - name: Deploy
-        run: |
-          set -euo pipefail
-          chmod +x deploy/scripts/remote-deploy.sh
-          export BASE_SSH_IDENTITY="$HOME/.ssh/staging_ed25519"
-          EXTRA=()
-          if [[ "${{ matrix.role }}" == "validator" && -n "${{ secrets.STAGING_MASTER_GATEWAY_URL }}" ]]; then
-            EXTRA+=(--gateway-endpoint "${{ secrets.STAGING_MASTER_GATEWAY_URL }}")
-          fi
-          ./deploy/scripts/remote-deploy.sh \
-            --host "root@${{ steps.host.outputs.value }}" \
-            --role "${{ matrix.role }}" \
-            --env staging \
-            --build-from source \
-            "${EXTRA[@]}"
-
-      # Relies on Docker's own health state, which the compose healthchecks now
-      # report honestly (they used to `|| exit 0` when curl was absent).
-      - name: Smoke health (fail-closed)
-        run: |
-          set -euo pipefail
-          ssh -i "$HOME/.ssh/staging_ed25519" -o BatchMode=yes \
-            "root@${{ steps.host.outputs.value }}" \
-            'cd /opt/base && docker compose ps --format "{{.Service}}\t{{.Status}}"; \
-             for i in $(seq 1 24); do \
-               bad=$(for c in $(docker compose ps -q); do \
-                 st=$(docker inspect -f "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}" "$c"); \
-                 case "$st" in healthy|none) ;; *) echo "$(docker inspect -f "{{.Name}}" "$c")=$st" ;; esac; \
-               done); \
-               if [ -z "$bad" ]; then echo "all containers healthy"; exit 0; fi; \
-               sleep 5; \
-             done; echo "UNHEALTHY: $bad"; exit 1'
-
-      - name: Verify live chain (no fake backend)
-        if: matrix.role == 'validator'
-        run: |
-          set -euo pipefail
-          ssh -i "$HOME/.ssh/staging_ed25519" -o BatchMode=yes \
-            "root@${{ steps.host.outputs.value }}" \
-            'cd /opt/base && logs=$(docker compose logs validator --no-log-prefix --tail 200 2>&1); \
-             echo "$logs" | grep -q "live chain reachable" \
-               || { echo "validator never reached the live chain"; exit 1; }; \
-             echo "$logs" | grep -qi "fake" \
-               && { echo "fake backend present in validator logs"; exit 1; }; \
-             echo "live chain confirmed"'
-
-      - name: Close firewall for this runner
-        if: always() && steps.fw.outputs.ip != ''
-        uses: ./.github/actions/do-firewall
-        with:
-          action: close
-          token: ${{ secrets.DIGITALOCEAN_TOKEN }}
-          ip: ${{ steps.fw.outputs.ip }}
-          firewall-id: ${{ steps.fw.outputs.firewall-id }}
