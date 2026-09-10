@@ -42,7 +42,7 @@ Evaluate discovers, in order:
 |--------|-----------|
 | `python` (primary) | Custom Python class (`Agent` / `ProofAgent` / any class named in `import_path`). Need not subclass Harbor `BaseAgent`. Harbor `-a` is the in-tree wrapper `proof_python_agent:ProofPythonAgent`, which imports **your** class from the artefact only. |
 | `harbor` | Harbor `BaseAgent` / `BaseInstalledAgent` subclass, passed as `-a module:Class` |
-| `script` | Miner executable relative to the artefact. Docker, filtered tasks, and BYOK are already set. Writes `report.json` or a Harbor jobs dir. Never wrapped as `terminus-2`. |
+| `script` | Miner executable relative to the artefact. Docker, filtered tasks, and BYOK are already set. Score is the mean of Harbor `verifier_result.rewards.reward` under `$PROOF_WORK_DIR/harbor-jobs`. A miner-authored `$PROOF_OUTPUT_DIR/report.json` is refused (fail closed). Never wrapped as `terminus-2`. |
 | `builtin` | A Harbor built-in the **miner** opted into. Evaluate refuses a topic built-in when this file is absent. |
 
 Custom Python `run()` may take `instruction` alone or Harbor's

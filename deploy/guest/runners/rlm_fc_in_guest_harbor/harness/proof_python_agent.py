@@ -77,36 +77,70 @@ def load_miner_class(import_path: str, search_root: Path, bound: Path) -> type:
     return cls
 
 
-def _construct(cls: type, *args: Any, **kwargs: Any) -> Any:
+def _bind_form(
+    fn: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> inspect.BoundArguments | None:
+    """Return a bound call form, or None if arguments do not match.
+
+    Uses ``inspect.signature`` only — never invokes ``fn``.
+    """
     try:
-        return cls(*args, **kwargs)
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None
+    try:
+        return sig.bind(*args, **kwargs)
     except TypeError:
-        try:
-            return cls()
-        except TypeError as e:
-            _fail(f"cannot construct {cls.__name__}: {e}")
-    raise AssertionError
+        return None
+
+
+def _select_form(
+    fn: Any, forms: tuple[tuple[tuple[Any, ...], dict[str, Any]], ...]
+) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
+    """Pick the first signature-compatible form without calling ``fn``."""
+    inspectable = True
+    try:
+        inspect.signature(fn)
+    except (TypeError, ValueError):
+        inspectable = False
+    if not inspectable:
+        # Cannot probe arity without a call. Use the first form once.
+        return forms[0] if forms else None
+    for args, kwargs in forms:
+        if _bind_form(fn, args, kwargs) is not None:
+            return args, kwargs
+    return None
+
+
+def _construct(cls: type, *args: Any, **kwargs: Any) -> Any:
+    forms = (
+        (args, dict(kwargs)),
+        ((), {}),
+    )
+    selected = _select_form(cls, forms)
+    if selected is None:
+        _fail(f"cannot construct {cls.__name__}: no compatible signature")
+        raise AssertionError
+    call_args, call_kwargs = selected
+    return cls(*call_args, **call_kwargs)
 
 
 def _call_run(miner: Any, instruction: str, environment: Any, context: Any) -> Any:
     run = getattr(miner, "run", None)
     if run is None or not callable(run):
         _fail(f"{type(miner).__name__} has no callable run()")
-    attempts = (
-        lambda: run(instruction, environment, context),
-        lambda: run(instruction, environment=environment, context=context),
-        lambda: run(instruction, environment),
-        lambda: run(instruction),
+    forms = (
+        ((instruction, environment, context), {}),
+        ((instruction,), {"environment": environment, "context": context}),
+        ((instruction, environment), {}),
+        ((instruction,), {}),
     )
-    last_err: TypeError | None = None
-    for attempt in attempts:
-        try:
-            return attempt()
-        except TypeError as e:
-            last_err = e
-            continue
-    _fail(f"{type(miner).__name__}.run is not callable with Harbor arguments: {last_err}")
-    raise AssertionError
+    selected = _select_form(run, forms)
+    if selected is None:
+        _fail(f"{type(miner).__name__}.run is not callable with Harbor arguments")
+        raise AssertionError
+    call_args, call_kwargs = selected
+    return run(*call_args, **call_kwargs)
 
 
 class ProofPythonAgent(BaseAgent):

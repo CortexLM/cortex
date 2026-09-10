@@ -11,7 +11,9 @@ line does not look like Python (CUDA / MuJoCo / FreeCAD images). Last-stage
 ``FROM scratch`` / distroless images are skipped. Missing pytest on a
 patchable image fails the image build rather than scoring 0.
 
-Rewrites only the destination tree (never the pack).
+Rewrites only the destination tree (never the pack). After the install
+layer's ``USER root``, the previous final-stage ``USER`` is restored so
+patched verifier images do not run as root.
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ INSTALL_PYTEST = re.compile(
     r"apk\s+add[^\n]*\bpy3-pytest\b)"
 )
 LAST_FROM = re.compile(r"(?im)^FROM\s+(\S+)")
+FROM_INSTR = re.compile(r"(?i)^FROM\b")
+USER_INSTR = re.compile(r"(?i)^USER\s+(\S+)")
 PYTHONISH = re.compile(
     r"(?i)\b(python|pip|debian|ubuntu|alpine|fedora|almalinux|rocky|"
     r"bookworm|bullseye|jammy|noble)\b"
@@ -94,6 +98,33 @@ def looks_python_capable(text: str) -> bool:
     return bool(PYTHONISH.search(text))
 
 
+def last_user_of_final_stage(text: str) -> str | None:
+    """Return the last ``USER`` token after the last ``FROM`` (final stage).
+
+    ``USER app:group`` is preserved as ``app:group``. Comments and earlier
+    stages are ignored. No USER in the final stage → ``None`` (image default).
+    """
+    user: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if FROM_INSTR.match(line):
+            user = None
+            continue
+        match = USER_INSTR.match(line)
+        if match:
+            user = match.group(1)
+    return user
+
+
+def render_pytest_layer(restore_user: str | None) -> str:
+    layer = PYTEST_LAYER.rstrip("\n")
+    if restore_user:
+        layer = f"{layer}\nUSER {restore_user}"
+    return layer + "\n"
+
+
 def is_dockerfile(path: Path) -> bool:
     name = path.name.lower()
     return name == "dockerfile" or name.startswith("dockerfile.")
@@ -153,7 +184,11 @@ def patch_dockerfile(path: Path, *, force: bool = False) -> str:
         return "skip-base"
     if not force and not looks_python_capable(text):
         return "skip-nonpython"
-    path.write_text(text.rstrip() + "\n" + PYTEST_LAYER, encoding="utf-8")
+    restore_user = last_user_of_final_stage(text)
+    path.write_text(
+        text.rstrip() + "\n" + render_pytest_layer(restore_user),
+        encoding="utf-8",
+    )
     return "patched"
 
 

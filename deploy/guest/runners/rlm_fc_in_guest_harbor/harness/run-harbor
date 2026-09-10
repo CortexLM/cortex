@@ -62,8 +62,11 @@ if [ "$HARNESS_KIND" = script ]; then
         rm -f "$PROOF_OUTPUT_DIR/report.json"
         proof_die "script harness exited $script_exit; refusing to score a partial or failed run"
     fi
+    # Miner-authored report.json is never a paid score. A script that
+    # self-reports primary_value is fail-closed even if Harbor jobs exist.
     if [ -f "$PROOF_OUTPUT_DIR/report.json" ]; then
-        exit 0
+        rm -f "$PROOF_OUTPUT_DIR/report.json"
+        proof_die "script harness wrote report.json; refusing miner-authored primary_value (score must come from Harbor verifier trials)"
     fi
     summarize_or_die 0
     exit 0

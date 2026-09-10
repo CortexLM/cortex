@@ -85,6 +85,54 @@ class EnsureVerifierTests(unittest.TestCase):
             self.assertEqual(stats["requirements_patched"], 1)
             self.assertIn("pytest", req.read_text(encoding="utf-8").splitlines())
 
+    def test_restores_final_user_after_pytest_layer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = root / "cad-model" / "environment"
+            env.mkdir(parents=True)
+            df = env / "Dockerfile"
+            df.write_text(
+                "FROM python:3.12-slim\nUSER app:group\nWORKDIR /app\n",
+                encoding="utf-8",
+            )
+            stats = ensure_verifier.ensure_tree(root)
+            self.assertEqual(stats["dockerfiles_patched"], 1)
+            text = df.read_text(encoding="utf-8")
+            self.assertIn("USER root\n", text)
+            self.assertGreater(text.rfind("USER app:group"), text.rfind("USER root"))
+            self.assertTrue(text.rstrip().endswith("USER app:group"))
+
+    def test_restores_last_stage_user_not_build_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = root / "quick" / "environment"
+            env.mkdir(parents=True)
+            df = env / "Dockerfile"
+            df.write_text(
+                "FROM python:3.12-slim AS build\nUSER nobody\n"
+                "FROM python:3.12-slim\nUSER app\nWORKDIR /app\n",
+                encoding="utf-8",
+            )
+            ensure_verifier.ensure_tree(root)
+            text = df.read_text(encoding="utf-8")
+            self.assertTrue(text.rstrip().endswith("USER app"))
+            self.assertIn("USER nobody", text)
+
+    def test_no_original_user_does_not_invent_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = root / "quick" / "environment"
+            env.mkdir(parents=True)
+            df = env / "Dockerfile"
+            df.write_text("FROM python:3.12-slim\nWORKDIR /app\n", encoding="utf-8")
+            ensure_verifier.ensure_tree(root)
+            users = [
+                ln.strip()
+                for ln in df.read_text(encoding="utf-8").splitlines()
+                if ln.strip().upper().startswith("USER ")
+            ]
+            self.assertEqual(users, ["USER root"])
+
 
 if __name__ == "__main__":
     unittest.main()

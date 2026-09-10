@@ -141,7 +141,9 @@ recipe/
   agent/            # PREFERRED: custom Python (class Agent) or Harbor BaseAgent
     agent.py
     import_path     # optional: one line `agent.agent:YourClass` (must resolve inside this artefact)
-  run.sh            # optional script harness; evaluate execs it; it is not wrapped as terminus-2
+  run.sh            # optional script harness; evaluate execs it; it is not wrapped as terminus-2.
+                    # Score is Harbor verifier rewards under $PROOF_WORK_DIR/harbor-jobs.
+                    # Writing $PROOF_OUTPUT_DIR/report.json is refused (fail closed).
   README.md
 ```
 
@@ -149,7 +151,9 @@ If you pack with `tar -cf recipe.tar -C recipe .`, the same `agent/` directory
 sits at the tar root (`$PROOF_ARTIFACT_DIR/agent`). Resolution order:
 `harness.json`, then `$PROOF_ARTIFACT_DIR/agent`, then
 `$PROOF_ARTIFACT_DIR/recipe/agent`, then `run.sh`. A `recipe/run.sh` with no
-agent dir is scored as a **script harness**, not as the topic agent. Off-limits
+agent dir is scored as a **script harness**, not as the topic agent. The
+script must leave Harbor jobs with measured `verifier_result.rewards.reward`;
+a self-written `$PROOF_OUTPUT_DIR/report.json` is **not** a score. Off-limits
 in the tree (inspect fails the named rule): `no_eval_short_circuit`,
 `no_tb4_hardcoding`.
 

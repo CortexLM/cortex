@@ -30,6 +30,65 @@ class ProofPythonAgentTests(unittest.TestCase):
         finally:
             os.environ.pop("PROOF_ARTIFACT_DIR", None)
 
+    def test_call_run_body_typeerror_is_not_retried(self) -> None:
+        class Miner:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run(self, instruction, environment=None, context=None):
+                self.calls += 1
+                raise TypeError("paid boom")
+
+        miner = Miner()
+        with self.assertRaises(TypeError) as ctx:
+            proof_python_agent._call_run(miner, "hi", object(), object())
+        self.assertEqual(miner.calls, 1)
+        self.assertEqual(str(ctx.exception), "paid boom")
+
+    def test_construct_body_typeerror_is_not_retried(self) -> None:
+        class Miner:
+            calls = 0
+
+            def __init__(self, *args, **kwargs):
+                type(self).calls += 1
+                raise TypeError("ctor boom")
+
+        with self.assertRaises(TypeError) as ctx:
+            proof_python_agent._construct(Miner, "a", logs_dir="/tmp")
+        self.assertEqual(Miner.calls, 1)
+        self.assertEqual(str(ctx.exception), "ctor boom")
+
+    def test_call_run_selects_instruction_only_before_invoke(self) -> None:
+        class Miner:
+            def run(self, instruction):
+                return f"ok:{instruction}"
+
+        self.assertEqual(
+            proof_python_agent._call_run(Miner(), "hi", object(), object()),
+            "ok:hi",
+        )
+
+    def test_call_run_incompatible_signature_does_not_invoke(self) -> None:
+        class Miner:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run(self, *, only_keyword: str) -> None:
+                self.calls += 1
+
+        miner = Miner()
+        with self.assertRaises(SystemExit):
+            proof_python_agent._call_run(miner, "hi", None, None)
+        self.assertEqual(miner.calls, 0)
+
+    def test_construct_noarg_when_harbor_args_do_not_bind(self) -> None:
+        class Miner:
+            def __init__(self) -> None:
+                self.ok = True
+
+        miner = proof_python_agent._construct(Miner, "logs", logs_dir="/x")
+        self.assertTrue(miner.ok)
+
     def test_refuses_origin_outside_artefact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

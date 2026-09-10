@@ -288,4 +288,81 @@ if grep -q "outside_agent:ExternalAgent" "$WORKDIR/escape.out"; then
 fi
 pass "import_path outside artefact is refused before Harbor"
 
+# --- script harness refuses miner-authored report.json ---
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
+SCRIPT_ART="$WORKDIR/script-self-score"
+mkdir -p "$SCRIPT_ART/recipe"
+cat > "$SCRIPT_ART/recipe/run.sh" <<'EOF'
+#!/bin/bash
+cat > "$PROOF_OUTPUT_DIR/report.json" <<JSON
+{"primary_value": 999999.25, "claim_holds": true}
+JSON
+exit 0
+EOF
+chmod 0755 "$SCRIPT_ART/recipe/run.sh"
+export PROOF_JOB=evaluate
+export PROOF_ARTIFACT_DIR="$SCRIPT_ART"
+SELF_OUT="$WORKDIR/out-self-score"
+mkdir -p "$SELF_OUT"
+export PROOF_OUTPUT_DIR="$SELF_OUT"
+if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/self.out" 2>"$WORKDIR/self.err"; then
+    fail "miner-authored report.json must fail closed"
+fi
+[ ! -f "$SELF_OUT/report.json" ] || fail "must not keep miner-authored report.json"
+grep -qi "miner-authored\\|refusing miner-authored primary_value" "$WORKDIR/self.err" \
+    || fail "must name the self-report refusal"
+pass "script harness refuses miner-authored primary_value"
+
+# --- script harness score comes only from Harbor verifier trials ---
+SCRIPT_JOBS="$WORKDIR/script-jobs"
+mkdir -p "$SCRIPT_JOBS/recipe"
+cat > "$SCRIPT_JOBS/recipe/run.sh" <<'EOF'
+#!/bin/bash
+job="$PROOF_WORK_DIR/harbor-jobs/job1/hello__1"
+mkdir -p "$job"
+cat > "$job/result.json" <<JSON
+{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 0.5}}}
+JSON
+exit 0
+EOF
+chmod 0755 "$SCRIPT_JOBS/recipe/run.sh"
+export PROOF_ARTIFACT_DIR="$SCRIPT_JOBS"
+JOBS_OUT="$WORKDIR/out-script-jobs"
+mkdir -p "$JOBS_OUT"
+export PROOF_OUTPUT_DIR="$JOBS_OUT"
+"$ADAPTOR/harness/run-harbor" || fail "script that writes Harbor jobs must summarize"
+python3 - "$JOBS_OUT/report.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["primary_value"] == 0.5, r
+assert r["evidence"]["harness_kind"] == "script"
+PY
+pass "script harness primary_value is Harbor verifier reward"
+
+# --- script that self-reports AND writes jobs still fails closed ---
+SCRIPT_BOTH="$WORKDIR/script-both"
+mkdir -p "$SCRIPT_BOTH/recipe"
+cat > "$SCRIPT_BOTH/recipe/run.sh" <<'EOF'
+#!/bin/bash
+job="$PROOF_WORK_DIR/harbor-jobs/job1/hello__1"
+mkdir -p "$job"
+cat > "$job/result.json" <<JSON
+{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 1.0}}}
+JSON
+cat > "$PROOF_OUTPUT_DIR/report.json" <<JSON
+{"primary_value": 999999.25, "claim_holds": true}
+JSON
+exit 0
+EOF
+chmod 0755 "$SCRIPT_BOTH/recipe/run.sh"
+export PROOF_ARTIFACT_DIR="$SCRIPT_BOTH"
+BOTH_OUT="$WORKDIR/out-script-both"
+mkdir -p "$BOTH_OUT"
+export PROOF_OUTPUT_DIR="$BOTH_OUT"
+if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/both.out" 2>"$WORKDIR/both.err"; then
+    fail "self-report must fail even when Harbor jobs exist"
+fi
+[ ! -f "$BOTH_OUT/report.json" ] || fail "must not keep report.json after self-report"
+pass "script self-report fails closed even with Harbor jobs"
+
 echo "all adaptor tests passed"
