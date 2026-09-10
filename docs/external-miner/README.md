@@ -41,6 +41,13 @@ Default gateway is [https://gateway.cortex.foundation](https://gateway.cortex.fo
 | Bounty | `bounty` | [bounty.md](./bounty.md) | Real bug reports. Pair with `ctx bounty pair`, then `ctx bounty report`. Cortex reads CortexLM/backend for scoring. **2000 bps** |
 | Proof | `proof` | [proof.md](./proof.md) | Reproducible experiments (claim + code + FLOPs) against **operator-published** topics. Digest-pinned RLM judge (`sha256:78b614a1…`). Empty eval digest → 503. **8000 bps** |
 
+Proof topics are signed documents, not a git catalog, so `ctx proof topics` is
+always the live list. Topics that additionally have a written miner guide here:
+
+| Topic | Guide | What it scores |
+|-------|-------|----------------|
+| `tbench` | [proof-tbench.md](./proof-tbench.md) | `custom` topic on `success_rate`, `discovery` payout, Firecracker sister, miner-supplied model key |
+
 Emission: `bounty` 2000 bps, `proof` 8000 bps (sum 10000). Off challenges have
 no row and earn 0.
 Bundle bytes: [`BUNDLE_SPEC.md`](../BUNDLE_SPEC.md).

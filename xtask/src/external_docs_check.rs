@@ -16,6 +16,8 @@ const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
     ("bounty_challenge", "bounty"),
     ("proof_challenge", "proof"),
     ("proof_dynamic_topics", "operator-published"),
+    // A live topic that has a guide must stay reachable from the index.
+    ("proof_topic_guide", "proof-tbench.md"),
     ("http_submit", "HTTP"),
     ("lium_byok", "X-Lium-Api-Key"),
     ("lium_pay", "Miner pays Lium"),
@@ -52,6 +54,7 @@ const MINER_PAGES: &[&str] = &[
     "README.md",
     "bounty.md",
     "proof.md",
+    "proof-tbench.md",
     "troubleshoot.md",
     "relearn.md",
     "relearn-image.md",
@@ -113,6 +116,24 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
             "base-proof-submit-v1",
             "submit_nonce",
             "manifest_canonical",
+        ],
+    ),
+    (
+        // A live topic needs a miner-readable page, and that page has to keep
+        // saying the things that cost a miner money to learn by losing it.
+        "proof-tbench.md",
+        &[
+            "tbench",
+            "deferred_topics",
+            "queued",
+            "artifact_uri",
+            "submit_nonce",
+            "base-proof-submit-v1",
+            "success_rate",
+            "discovery",
+            "epsilon_rel",
+            "OPENROUTER_API_KEY",
+            "X-Lium-Api-Key",
         ],
     ),
 ];
@@ -323,6 +344,7 @@ fn check_external_miner_docs(
         "relearn-mm.md",
         "bounty.md",
         "proof.md",
+        "proof-tbench.md",
         "troubleshoot.md",
     ] {
         let path = dir.join(required);
@@ -562,7 +584,34 @@ mod tests {
         }
         assert!(!MINER_PAGES.contains(&"validators.md"));
         assert!(MINER_PAGES.contains(&"proof.md"));
+        assert!(MINER_PAGES.contains(&"proof-tbench.md"));
         assert!(MINER_PAGES.contains(&"bounty.md"));
+    }
+
+    /// A per-topic page that stops naming the topic's own gates is worse than
+    /// no page: it reads authoritative while sending a miner at a wall.
+    #[test]
+    fn the_topic_page_keeps_the_topic_gates() {
+        let pins = PAGE_PINS
+            .iter()
+            .find(|(p, _)| *p == "proof-tbench.md")
+            .map(|(_, pins)| *pins)
+            .unwrap_or_default();
+        for needle in [
+            "tbench",
+            "deferred_topics",
+            "queued",
+            "artifact_uri",
+            "submit_nonce",
+            "success_rate",
+            "discovery",
+            "OPENROUTER_API_KEY",
+        ] {
+            assert!(pins.contains(&needle), "topic page must pin {needle:?}");
+        }
+        assert!(EXTERNAL_MINER_PINS
+            .iter()
+            .any(|(n, v)| *n == "proof_topic_guide" && *v == "proof-tbench.md"));
     }
 
     #[test]
