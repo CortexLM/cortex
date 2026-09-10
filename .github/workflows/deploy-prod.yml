@@ -146,7 +146,7 @@ jobs:
           fi
           # Fail here rather than in the deploy job: without the artifact there
           # are no digests to pin, and prod must never fall back to a source build.
-          found=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts" \
+          found=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" \
             --jq "[.artifacts[] | select(.name == \"prod-pins-${SHA}\" and .expired == false)] | length")
           if [[ "$found" -lt 1 ]]; then
             echo "images run $RUN_ID has no live prod-pins-${SHA} artifact"
