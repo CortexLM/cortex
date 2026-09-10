@@ -280,6 +280,15 @@ and the exact `manifest` to post, without posting. Pass the same
 the live topic requires training evidence; omit them on custom / agent
 topics (`tbench`).
 
+When you declare nothing, `ctx` reads the topic from the gateway to find out
+which of those two cases you are in, so that call needs a reachable
+`--gateway` and an open `topic_id` — an unknown topic or an unreachable
+gateway is an error there, never a guess. Signing an empty manifest for a
+topic that *does* require evidence would spend your single-use `submit_nonce`
+on a submission the host then rejects. Declare `--train-dataset` /
+`--train-hash` and no lookup happens: the declaration stands on its own, so
+that signature can be produced offline.
+
 `--wait` keeps polling until the row is terminal (`awaiting_admin`,
 `rejected`, or `champion`). A `queued` row is not terminal: on a topic that
 defers scoring, `--wait` keeps polling until the operator drains the queue,
