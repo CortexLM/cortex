@@ -239,7 +239,7 @@ struct ProofSubmitArgs {
     /// on the row, or echoed back.
     #[arg(long = "env", value_name = "NAME[=VALUE]")]
     env: Vec<String>,
-    /// OpenRouter BYOK for topics that declare `miner_byok = OPENROUTER_API_KEY`
+    /// `OpenRouter` BYOK for topics that declare `miner_byok = OPENROUTER_API_KEY`
     /// (tbench). Sent as `env.OPENROUTER_API_KEY`. Never printed.
     #[arg(
         long,

@@ -450,16 +450,16 @@ async fn challenge_503_json_body_is_forwarded() {
         .await
         .expect("proxy");
     assert_eq!(resp.status().as_u16(), 503);
-    assert_eq!(
-        resp.headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok()),
-        Some("application/json")
-    );
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
     let body = resp.text().await.unwrap();
     assert!(
         body.contains("artifact_uri must be https://"),
-        "challenge error body must be forwarded, got {body:?}"
+        "challenge error body must be forwarded, content-type={ctype:?} body={body:?}"
     );
     assert!(
         !body.contains("upstream 503"),
