@@ -1,0 +1,11 @@
+#!/bin/bash
+# inspect — tick the signed checklist against the artefact. No paid inference.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib.sh
+. "$HERE/lib.sh"
+: "${PROOF_OUTPUT_DIR:?}" "${PROOF_WORK_DIR:?}" "${PROOF_JOB:?}"
+[ "$PROOF_JOB" = inspect ] || proof_die "inspect entrypoint invoked with PROOF_JOB=$PROOF_JOB"
+[ -f "${PROOF_RULES_FILE:?}" ] || proof_die "PROOF_RULES_FILE is missing"
+mkdir -p "$PROOF_OUTPUT_DIR" "$PROOF_WORK_DIR"
+exec python3 "$HERE/inspect_scan.py"

@@ -134,6 +134,8 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
             "epsilon_rel",
             "OPENROUTER_API_KEY",
             "X-Lium-Api-Key",
+            "PROOF_ARTIFACT_DIR",
+            "recipe/agent",
         ],
     ),
 ];

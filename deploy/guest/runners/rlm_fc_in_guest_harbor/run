@@ -1,0 +1,12 @@
+#!/bin/bash
+# run — Proof entrypoint for Baseline / Evaluate (baked as
+# /opt/proof/runners/rlm_fc_in_guest_harbor/run).
+#
+# Exec the in-tree harness. Do not exec a live overlay at
+# /opt/proof/harness/run-harbor: that path is the verified prod gap
+# (ignored PROOF_ARTIFACT_DIR, owner key on miner evaluate).
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+HARNESS="$HERE/harness/run-harbor"
+[ -x "$HARNESS" ] || { echo "rlm_fc_in_guest_harbor: missing $HARNESS" >&2; exit 2; }
+exec "$HARNESS" "$@"
