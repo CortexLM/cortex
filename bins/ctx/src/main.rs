@@ -239,14 +239,11 @@ struct ProofSubmitArgs {
     /// on the row, or echoed back.
     #[arg(long = "env", value_name = "NAME[=VALUE]")]
     env: Vec<String>,
-    /// `OpenRouter` BYOK for topics that declare `miner_byok = OPENROUTER_API_KEY`
-    /// (tbench). Sent as `env.OPENROUTER_API_KEY`. Never printed.
-    #[arg(
-        long,
-        env = "OPENROUTER_API_KEY",
-        hide_env_values = true,
-        value_name = "KEY"
-    )]
+    /// `OpenRouter` BYOK for topics that declare `miner_byok = OPENROUTER_API_KEY`.
+    /// Sent as `env.OPENROUTER_API_KEY` only when this flag is passed — the
+    /// process environment is not read (use `--env OPENROUTER_API_KEY` for
+    /// that). Never printed.
+    #[arg(long, value_name = "KEY")]
     openrouter_api_key: Option<String>,
     /// Keep polling until the submission stops moving.
     #[arg(long)]

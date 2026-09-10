@@ -465,10 +465,12 @@ fn attach_miner_env(body: &mut Value, env: &[(String, String)]) {
     );
 }
 
-/// Merge `--openrouter-api-key` / `OPENROUTER_API_KEY` into the submit `env`
-/// map as `OPENROUTER_API_KEY`. Empty is ignored. A value already present
-/// via `--env` wins so `export OPENROUTER_API_KEY=… --env OPENROUTER_API_KEY`
-/// does not collide. The value is never written into an error string.
+/// Merge an explicit `--openrouter-api-key` into the submit `env` map as
+/// `OPENROUTER_API_KEY`. Empty is ignored. A value already present via
+/// `--env` wins. The process environment is not read here — clap no longer
+/// binds `OPENROUTER_API_KEY`, so a leftover shell export cannot follow
+/// `--gateway` to another host. The value is never written into an error
+/// string.
 #[must_use]
 pub fn merge_openrouter_api_key(
     mut env: Vec<(String, String)>,
@@ -567,7 +569,7 @@ fn explain_failure(status: u16, message: &str) -> String {
             "refused ({message}). Nothing was stored and nothing was rented. \
              A topic that sets constraints.params.miner_byok wants your own key in the \
              submit body: pass `--env <NAME>=<value>` (or bare `--env <NAME>` to read your \
-             shell; `--openrouter-api-key` / OPENROUTER_API_KEY for tbench). Your signed \
+             shell, or `--openrouter-api-key` for OPENROUTER_API_KEY). Your signed \
              submit_nonce is untouched, so you can re-post it."
         ),
         400 => format!("refused ({message}). Nothing was stored and nothing was rented."),
@@ -888,6 +890,13 @@ mod tests {
             vec![("OPENROUTER_API_KEY".to_owned(), "sk-or-test".to_owned())]
         );
         assert!(merge_openrouter_api_key(Vec::new(), None).is_empty());
+        // A leftover process export is not an implicit opt-in.
+        std::env::set_var("OPENROUTER_API_KEY", "sk-or-must-not-attach");
+        assert!(
+            merge_openrouter_api_key(Vec::new(), None).is_empty(),
+            "process OPENROUTER_API_KEY must not be forwarded without the flag"
+        );
+        std::env::remove_var("OPENROUTER_API_KEY");
         assert!(merge_openrouter_api_key(Vec::new(), Some("   ".into())).is_empty());
         let already = merge_openrouter_api_key(
             vec![("OPENROUTER_API_KEY".into(), "from-env-flag".into())],
