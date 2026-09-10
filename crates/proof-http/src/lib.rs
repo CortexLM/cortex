@@ -45,9 +45,10 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
+use proof_canon::MinerEnv;
 use proof_eval::{
     contamination_evidence, custom_ids_ref, eval_after_freeze, force_sim, registered_custom,
-    scoring_readiness, secret_backed_base_url, EvalBackend, EvalError, LiveScorer, MinerEnv,
+    scoring_readiness, secret_backed_base_url, EvalBackend, EvalError, LiveScorer,
 };
 use proof_executor::{require_open_executor, EvalExecutorOffer, ExecutorPlan};
 use proof_score::{
@@ -3771,6 +3772,17 @@ mod tests {
         defer: bool,
         custom_baseline: bool,
     ) -> AppState {
+        state_with_custom_params(live, defer, custom_baseline, &[])
+    }
+
+    /// [`state_with_deferred_custom`] with extra `constraints.params` on the
+    /// custom topic's signed document (the BYOK knobs, in these tests).
+    fn state_with_custom_params(
+        live: Arc<dyn LiveScorer>,
+        defer: bool,
+        custom_baseline: bool,
+        params: &[(&str, &str)],
+    ) -> AppState {
         let p = pin(&format!("sha256:{}", "ab".repeat(32)));
         let store = MemoryStore::new();
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
@@ -3787,6 +3799,12 @@ mod tests {
                 proof_task::PARAM_DEFER_SCORING.to_owned(),
                 "true".to_owned(),
             );
+        }
+        for (k, v) in params {
+            draft
+                .constraints
+                .params
+                .insert((*k).to_owned(), (*v).to_owned());
         }
         let recs = synthetic_holdout(STRATUM_SIZE, 1);
         let (custom, meas) = seal_topic_with(&p, draft, &[CUSTOM_ID]);
@@ -4815,6 +4833,272 @@ mod tests {
             scorer.inner.hits.load(Ordering::SeqCst),
             1,
             "never scored twice"
+        );
+    }
+    // ----- miner BYOK: `env` on the submit body -----
+
+    /// The variable the BYOK topics below declare. A name, never a vendor:
+    /// which variable a topic wants is topic data, not a constant of this
+    /// repository.
+    const BYOK: &str = "MINER_PROVIDED_API_KEY";
+    /// The value a miner posts in these tests. Asserted absent from every
+    /// public answer.
+    const BYOK_VALUE: &str = "miner-supplied-value-not-a-real-key";
+
+    fn byok_submit(label: &str, env: Option<&serde_json::Value>) -> serde_json::Value {
+        let mut extra = serde_json::json!({
+            "topic_id": CUSTOM,
+            "artifact_uri": format!("https://example.invalid/{label}.tar"),
+        });
+        if let Some(env) = env {
+            extra["env"] = env.clone();
+        }
+        submit_body(label, &extra)
+    }
+
+    /// A topic that declares `miner_byok` refuses a submission that omits it
+    /// — with **no row**, **no rent**, and, because `env` is outside the
+    /// signed payload, **without spending the signed `submit_nonce`**: the
+    /// same body plus the key is accepted right after.
+    #[tokio::test]
+    async fn a_topic_that_asks_for_a_key_refuses_a_body_without_one() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let app = proof_router(state_with_custom_params(
+            scorer.clone(),
+            false,
+            true,
+            &[(proof_canon::PARAM_MINER_BYOK, BYOK)],
+        ));
+
+        let body = byok_submit("a", None);
+        let (st, out) = json_req(app.clone(), "POST", "/v1/submissions", body.clone(), None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{out}");
+        let why = out["error"].as_str().unwrap_or_default();
+        assert!(why.contains(BYOK) && why.contains("required"), "{why}");
+        assert!(why.contains("miner_byok"), "names the knob to read: {why}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0, "nothing ran");
+        let (st, list) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/submissions",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(
+            list["items"].as_array().expect("items").is_empty(),
+            "no row"
+        );
+
+        // Same signature, same nonce, now with the key: accepted.
+        let mut retry = body;
+        retry["env"] = serde_json::json!({ BYOK: BYOK_VALUE });
+        let (st, out) = json_req(app, "POST", "/v1/submissions", retry, None).await;
+        assert_eq!(
+            st,
+            StatusCode::CREATED,
+            "the refusal must not have burnt the nonce: {out}"
+        );
+    }
+
+    /// Only what the signed topic declares gets through, and the refusal says
+    /// what the topic does accept without echoing what was sent.
+    #[tokio::test]
+    async fn an_undeclared_variable_is_refused_by_name() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let app = proof_router(state_with_custom_params(
+            scorer.clone(),
+            false,
+            true,
+            &[(proof_canon::PARAM_MINER_BYOK, BYOK)],
+        ));
+        for env in [
+            serde_json::json!({ BYOK: BYOK_VALUE, "SOME_OTHER_TOKEN": "another-value" }),
+            serde_json::json!({ "SOME_OTHER_TOKEN": "another-value" }),
+            serde_json::json!({ "PATH": "/evil/bin" }),
+            serde_json::json!({ "PROOF_SECRETS_DIR": "/tmp/evil" }),
+            serde_json::json!({ BYOK: "" }),
+        ] {
+            let (st, out) = json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                byok_submit("a", Some(&env)),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{env} -> {out}");
+            let why = out.to_string();
+            assert!(
+                !why.contains("another-value") && !why.contains("/evil/bin"),
+                "a refusal never echoes what was sent: {why}"
+            );
+        }
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0);
+
+        // A topic that declares nothing accepts nothing, and says so.
+        let silent = proof_router(state_with_deferred_custom(
+            Arc::new(FamilyStub::win(CUSTOM_ID)),
+            false,
+            true,
+        ));
+        let (st, out) = json_req(
+            silent,
+            "POST",
+            "/v1/submissions",
+            byok_submit("a", Some(&serde_json::json!({ BYOK: BYOK_VALUE }))),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{out}");
+        assert!(
+            out["error"].as_str().unwrap_or_default().contains("(none)"),
+            "{out}"
+        );
+    }
+
+    /// The happy path: the declared value reaches the scorer that runs the
+    /// miner's code, and appears in no answer the host serves.
+    #[tokio::test]
+    async fn the_declared_key_reaches_the_scorer_and_never_a_public_answer() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let app = proof_router(state_with_custom_params(
+            scorer.clone(),
+            false,
+            true,
+            &[(proof_canon::PARAM_MINER_BYOK, BYOK)],
+        ));
+        let (st, out) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            byok_submit("a", Some(&serde_json::json!({ BYOK: BYOK_VALUE }))),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{out}");
+        let id = out["id"].as_str().expect("id").to_owned();
+
+        let envs = scorer.inner.envs();
+        assert_eq!(envs.len(), 1, "one scored run");
+        assert_eq!(
+            envs[0].iter().collect::<Vec<_>>(),
+            vec![(BYOK, BYOK_VALUE)],
+            "the miner's own key reached the run"
+        );
+
+        for uri in [
+            "/v1/submissions".to_owned(),
+            format!("/v1/submissions/{id}"),
+            "/v1/status".to_owned(),
+            "/v1/proof/topics".to_owned(),
+        ] {
+            let (st, body) = json_req(app.clone(), "GET", &uri, serde_json::json!({}), None).await;
+            assert_eq!(st, StatusCode::OK, "{uri}");
+            let dump = body.to_string();
+            assert!(!dump.contains(BYOK_VALUE), "{uri} leaked the key: {dump}");
+        }
+        // The topic document is public and names the *variable*, never a value.
+        let (_, topics) = json_req(
+            app,
+            "GET",
+            &format!("/v1/proof/topics/{CUSTOM}"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        let dump = topics.to_string();
+        assert!(dump.contains(BYOK), "the topic declares the name: {dump}");
+        assert!(!dump.contains(BYOK_VALUE), "{dump}");
+    }
+
+    /// A deferring topic still takes the key: it waits beside the `queued`
+    /// row (never on it) and is handed to the drain that finally scores it.
+    #[tokio::test]
+    async fn a_queued_row_keeps_its_key_for_the_drain() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let state = state_with_custom_params(
+            scorer.clone(),
+            true,
+            true,
+            &[(proof_canon::PARAM_MINER_BYOK, BYOK)],
+        );
+        let store = state.store.clone();
+        let p = state.pin.clone();
+        let app = proof_router(state);
+
+        let (st, out) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            byok_submit("a", Some(&serde_json::json!({ BYOK: BYOK_VALUE }))),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{out}");
+        assert_eq!(out["state"], "queued", "{out}");
+        let digest = out["submission_digest"]
+            .as_str()
+            .expect("digest")
+            .to_owned();
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0, "nothing ran");
+
+        // Held beside the row, not on it.
+        assert_eq!(
+            store
+                .miner_env(&digest)
+                .expect("stash")
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![(BYOK, BYOK_VALUE)]
+        );
+        let (_, list) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/submissions",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert!(!list.to_string().contains(BYOK_VALUE), "{list}");
+
+        // Lift the flag and drain: the key the miner sent is what scores.
+        let mut relisted = custom_topic_with_defer(&p, None);
+        relisted
+            .constraints
+            .params
+            .insert(proof_canon::PARAM_MINER_BYOK.to_owned(), BYOK.to_owned());
+        relisted.signature = relisted.sign_with(&sk()).expect("sign");
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/topics",
+            serde_json::to_value(&relisted).expect("json"),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        let (st, report) = json_req(
+            app,
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            serde_json::json!({ "topic_id": CUSTOM, "limit": 4 }),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{report}");
+        assert_eq!(report["drained"].as_array().expect("drained").len(), 1);
+        let envs = scorer.inner.envs();
+        assert_eq!(
+            envs.last().map(|e| e.iter().collect::<Vec<_>>()),
+            Some(vec![(BYOK, BYOK_VALUE)]),
+            "the drain scored with the key the miner posted"
+        );
+        assert!(!report.to_string().contains(BYOK_VALUE), "{report}");
+        assert!(
+            store.miner_env(&digest).expect("stash").is_empty(),
+            "a scored row does not keep the key"
         );
     }
 }

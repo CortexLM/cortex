@@ -19,6 +19,8 @@ use crate::{GuestAgent, GuestConfig};
 
 const RUNNER: &str = "placeholder_in_guest_runner";
 const SECRET: &str = "owner-key-not-a-real-secret-0123456789";
+/// The miner's own value in the BYOK tests. Never an owner key.
+const MINER_KEY: &str = "miner-supplied-value-not-a-real-key";
 
 fn root(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("proof-vm-guest-agent-{}-{tag}", std::process::id()));
@@ -818,5 +820,141 @@ async fn serve_connection_speaks_frames_until_the_host_hangs_up() {
     server.await.expect("join").expect("clean eof");
     assert_eq!(env::PARAM_PREFIX, "PROOF_PARAM_");
     assert_eq!(crate::runner::JobKind::Evaluate.entrypoint(), "run");
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+/// The miner's own BYOK environment reaches their paid run: exported under
+/// the name the signed topic declared, written to a 0600 file beside it, and
+/// blanked out of everything the guest ships back. It is not part of the
+/// adaptor contract's own `PROOF_…` namespace and it cannot rewrite it.
+#[tokio::test]
+async fn a_miner_byok_variable_reaches_the_paid_run_and_never_travels_back() {
+    let r = root("byok");
+    let a = agent(&r);
+    hello(&a).await;
+    let (tar, digest) = pack();
+    stage(&a, &tar, &digest).await;
+    install(
+        &r,
+        "run",
+        r#"
+: "${MINER_PROVIDED_API_KEY:?the miner key must be exported}"
+from_file=$(cat "$PROOF_MINER_ENV_DIR/MINER_PROVIDED_API_KEY")
+test "$from_file" = "$MINER_PROVIDED_API_KEY"
+test "$PROOF_MINER_ENV_NAMES" = "MINER_PROVIDED_API_KEY"
+echo "leaking $MINER_PROVIDED_API_KEY on stdout"
+cat > "$PROOF_OUTPUT_DIR/report.json" <<EOF
+{"primary_value": 0.5, "flops_used": 1, "evidence": {"note": "called with $MINER_PROVIDED_API_KEY"}}
+EOF
+"#,
+    );
+    let mut req = req_for(&digest);
+    let mut env = proof_rlm::MinerEnv::new();
+    env.insert("MINER_PROVIDED_API_KEY", MINER_KEY);
+    req.miner_env = env;
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::Baseline {
+                request: req.clone(),
+            }),
+        })
+        .await;
+    let RlmToHost::Done {
+        output: VmJobOutput::Baseline(report),
+    } = out
+    else {
+        panic!("expected a baseline report, got {out:?}");
+    };
+    report.verify(&req).expect("bound to the request");
+    assert_eq!(
+        report.evidence["note"],
+        serde_json::json!("called with [REDACTED]"),
+        "the miner's key is blanked in evidence like any other secret"
+    );
+    let dump = serde_json::to_string(&report).expect("json");
+    assert!(!dump.contains(MINER_KEY), "{dump}");
+
+    // The file the adaptor read is private, and it is not one of the owner
+    // key files the host staged at boot.
+    let file = r
+        .join("secrets")
+        .join(crate::staging::MINER_ENV_SUBDIR)
+        .join("MINER_PROVIDED_API_KEY");
+    let mode = std::fs::metadata(&file).expect("file").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("value"),
+        MINER_KEY,
+        "written verbatim for an adaptor that would rather read a file"
+    );
+    assert_eq!(
+        crate::staging::secret_names(&r.join("secrets")),
+        vec!["inference_key"],
+        "PROOF_SECRET_FILES stays the owner's list"
+    );
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+/// Fail-closed at the guest boundary too: a variable that would shadow the
+/// adaptor contract or the base environment refuses the job before the
+/// adaptor is spawned, whatever the control plane accepted.
+#[tokio::test]
+async fn a_byok_variable_never_rewrites_a_guest_fact() {
+    let r = root("byok-shadow");
+    let a = agent(&r);
+    hello(&a).await;
+    let (tar, digest) = pack();
+    stage(&a, &tar, &digest).await;
+    install(
+        &r,
+        "run",
+        "echo '{\"primary_value\": 1.0, \"flops_used\": 1}' > \"$PROOF_OUTPUT_DIR/report.json\"",
+    );
+    for name in ["PATH", "PROOF_JOB", "PROOF_SECRETS_DIR", "lower_case"] {
+        let mut req = req_for(&digest);
+        let mut env = proof_rlm::MinerEnv::new();
+        env.insert(name, MINER_KEY);
+        req.miner_env = env;
+        let err = failed(
+            a.handle(HostToRlm::Run {
+                job: Box::new(VmJob::Baseline { request: req }),
+            })
+            .await,
+        );
+        assert!(err.contains(name), "{err}");
+        assert!(!err.contains(MINER_KEY), "a refusal never quotes it: {err}");
+    }
+    // Inspection ticks rules without spending, so it is handed no key at all.
+    let mut req = req_for(&digest);
+    let mut env = proof_rlm::MinerEnv::new();
+    env.insert("MINER_PROVIDED_API_KEY", MINER_KEY);
+    req.miner_env = env;
+    install(
+        &r,
+        "inspect",
+        r#"
+test -z "${MINER_PROVIDED_API_KEY:-}"
+test -z "${PROOF_MINER_ENV_DIR:-}"
+echo '[]' > "$PROOF_OUTPUT_DIR/checklist.json"
+"#,
+    );
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::Inspect {
+                request: req,
+                rules: rules(),
+            }),
+        })
+        .await;
+    assert!(
+        matches!(out, RlmToHost::Done { .. }),
+        "inspection runs without the key: {out:?}"
+    );
+    assert!(
+        !r.join("secrets")
+            .join(crate::staging::MINER_ENV_SUBDIR)
+            .exists(),
+        "no key file is written for an unpaid job"
+    );
     let _ = std::fs::remove_dir_all(&r);
 }

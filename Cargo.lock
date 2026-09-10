@@ -3770,6 +3770,7 @@ dependencies = [
  "crypto",
  "hex",
  "http-body-util",
+ "proof-canon",
  "proof-eval",
  "proof-executor",
  "proof-score",

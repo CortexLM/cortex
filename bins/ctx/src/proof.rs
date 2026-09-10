@@ -460,15 +460,14 @@ fn ensure_declared(manifest: &Value) -> Result<(), String> {
 pub fn parse_env_args(args: &[String]) -> Result<Vec<(String, String)>, String> {
     let mut out: Vec<(String, String)> = Vec::new();
     for arg in args {
-        let (name, value) = match arg.split_once('=') {
-            Some((n, v)) => (n.trim().to_owned(), v.to_owned()),
-            None => {
-                let name = arg.trim().to_owned();
-                let value = std::env::var(&name).map_err(|_| {
-                    format!("--env {name}: no value given and {name} is not set in this shell")
-                })?;
-                (name, value)
-            }
+        let (name, value) = if let Some((n, v)) = arg.split_once('=') {
+            (n.trim().to_owned(), v.to_owned())
+        } else {
+            let name = arg.trim().to_owned();
+            let value = std::env::var(&name).map_err(|_| {
+                format!("--env {name}: no value given and {name} is not set in this shell")
+            })?;
+            (name, value)
         };
         if name.is_empty() {
             return Err(
@@ -704,7 +703,7 @@ mod tests {
             vec![("A".to_owned(), "b=c".to_owned())]
         );
         let name = format!("CTX_ENV_TEST_{}", std::process::id());
-        let err = parse_env_args(&[name.clone()]).expect_err("not exported");
+        let err = parse_env_args(std::slice::from_ref(&name)).expect_err("not exported");
         assert!(
             err.contains(&name) && err.contains("not set in this shell"),
             "{err}"
@@ -713,7 +712,7 @@ mod tests {
         // own process env to prove the bare form reads it.
         std::env::set_var(&name, " sk-from-shell ");
         assert_eq!(
-            parse_env_args(&[name.clone()]).expect("from shell"),
+            parse_env_args(std::slice::from_ref(&name)).expect("from shell"),
             vec![(name.clone(), "sk-from-shell".to_owned())],
             "trimmed, so a trailing newline from a here-doc is not the key"
         );

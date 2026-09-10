@@ -1717,6 +1717,7 @@ mod tests {
     /// `LiveHarvestUnavailable` — never the custom scorer, never a sim, no
     /// plan to rent under.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn custom_only_mux_scores_custom_and_refuses_the_harvest_families() {
         let mux = FamilyMux::custom_only(Arc::new(OneRunner));
         mux.ready().expect("no host-wide blocker without a harvest");
