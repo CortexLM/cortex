@@ -126,6 +126,8 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
             "tbench",
             "deferred_topics",
             "queued",
+            "scorable_topics",
+            "scorable_topics` contains `tbench",
             "artifact_uri",
             "submit_nonce",
             "base-proof-submit-v1",
@@ -136,6 +138,7 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
             "X-Lium-Api-Key",
             "PROOF_ARTIFACT_DIR",
             "recipe/agent",
+            "rlm_fc_in_guest_harbor",
         ],
     ),
 ];
@@ -603,11 +606,16 @@ mod tests {
             "tbench",
             "deferred_topics",
             "queued",
+            "scorable_topics",
+            "scorable_topics` contains `tbench",
             "artifact_uri",
             "submit_nonce",
             "success_rate",
             "discovery",
             "OPENROUTER_API_KEY",
+            "PROOF_ARTIFACT_DIR",
+            "recipe/agent",
+            "rlm_fc_in_guest_harbor",
         ] {
             assert!(pins.contains(&needle), "topic page must pin {needle:?}");
         }

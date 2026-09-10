@@ -36,9 +36,15 @@ Install `ctx` from [README](./README.md). Proof miners pay Lium
 | `400` `declared_flops exceeds the topic budget` | Harvest `nll` / `throughput` only: `declared_flops > topic.flops_budget`. Custom / agent (`tbench`) ignore this gate | Cap declared FLOPs on harvest topics; omit or send `0` on `tbench` |
 | `400` invalid hotkey / `artifact_digest` | Not exactly 64 lowercase hex (`0x`, uppercase, whitespace) | Post the same lowercase bytes you signed; the host never normalises a hex field |
 | `401` `hotkey_signature` / `submit_nonce` required, invalid, or reused | Unsigned, wrong key, a `claim` / `declared_flops` / `manifest` that differs from what was signed, or a replayed `(hotkey, submit_nonce)` | `ctx proof sign` over `base-proof-submit-v1` with a fresh nonce; post the manifest you signed. `X-Lium-Api-Key` is not identity |
-| `rejected` with `contamination_evidence_missing` | Empty `manifest` | Declare `train_content_hashes` or `train_dataset_ids` |
+| `rejected` with `contamination_evidence_missing` | Empty `manifest` | Declare `train_content_hashes` or `train_dataset_ids`. On `tbench` an honest harness id is enough when you did not train; empty still rejects with no rent |
 | `rejected` with contamination / cheat code | Holdout overlap, unreproduced claim, strawman AdamW, … | Read the verdict `cheat_codes`. Contamination rejects without rent |
 | HTTP 503 on submit | Empty `eval_image_digest`, zero open topics, unsealed baseline, harvest down, or missing/closed RLM judge | `ctx proof status` → `can_score`. Live digest is `sha256:78b614a1…`. Empty digest still 503. Do not invent a digest. Nothing was rented |
+| `201` `queued` on `tbench` | `tbench` is in `deferred_topics` (`defer_scoring=true`) | Read `ctx proof status`. **Live scoring is on**: `can_score=true`, `scorable_topics` contains `tbench`, `deferred_topics=[]`. Queued is not the current path; see [proof-tbench.md](./proof-tbench.md) |
+| `tbench` submit but no OpenRouter traffic | Planned as a network-none sister guest | `tbench` is the **experiment VM** path (`baseline_runner=rlm_fc_in_guest_harbor`) with HTTPS egress. Sister-with-network-none is the other custom path. BYOK `env.OPENROUTER_API_KEY` is required |
+
+`tbench` is **not** deferred-only. Scoring status is live data: `open_topics`,
+`scorable_topics`, `deferred_topics`, `custom_ready`. The topic page is
+[proof-tbench.md](./proof-tbench.md).
 
 ## Off challenges
 

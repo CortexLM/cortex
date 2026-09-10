@@ -46,7 +46,7 @@ always the live list. Topics that additionally have a written miner guide here:
 
 | Topic | Guide | What it scores |
 |-------|-------|----------------|
-| `tbench` | [proof-tbench.md](./proof-tbench.md) | `custom` topic on `success_rate`, `discovery` payout, Firecracker sister, miner-supplied model key |
+| `tbench` | [proof-tbench.md](./proof-tbench.md) | `custom` topic on `success_rate`, `discovery` payout, **scoring on** (experiment VM, not deferred). Miner-supplied OpenRouter key. Read live `ctx proof status` |
 
 Emission: `bounty` 2000 bps, `proof` 8000 bps (sum 10000). Off challenges have
 no row and earn 0.
