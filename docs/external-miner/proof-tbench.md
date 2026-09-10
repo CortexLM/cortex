@@ -433,7 +433,7 @@ curl -sS https://gateway.cortex.foundation/challenge/proof/v1/submissions/<id>
 
 | `state` | Meaning on `tbench` |
 |---------|---------------------|
-| `queued` | Accepted and stored, **not yet evaluated**. Happens when the topic is in `deferred_topics`, or the host has accepted the row and not finished the run. No mass yet. `ctx proof show --wait` keeps polling through it |
+| `queued` | Accepted and stored, **not evaluated**. Only when the topic is in `deferred_topics` (`defer_scoring = "true"`). No rent, no VM, no judge call, no mass. Not an in-progress score: a live (non-deferred) submit waits for scoring and the **201** is already `awaiting_admin`, `rejected`, or `champion`. `ctx proof show --wait` is for a deferred row |
 | `awaiting_admin` | Clean pass, mass recorded. The operator audit is informational |
 | `rejected` | A gate failed: contamination, unreproduced claim, a red checklist item. Pre-eval rejects spend nothing. FLOP accounting is **not** a reject gate on `tbench` |
 | `champion` | Promoted. On this topic promotion is automatic: a passing run with a green checklist that beats the sealed bar or the reigning best by `epsilon_rel`. Proof pays on pass, not on the crown |
@@ -493,7 +493,7 @@ you will actually meet on `tbench`:
 
 | Answer | When | Row? |
 |--------|------|------|
-| **201** (scored or `queued`) | Well-formed submit. While scoring is on the row is evaluated; `queued` only if `tbench` is back in `deferred_topics` or the run has not finished | yes |
+| **201** (scored) | Well-formed submit while scoring is on: the host scores before it answers, so the row is already `awaiting_admin`, `rejected`, or `champion`. **201 `queued`** only if `tbench` is back in `deferred_topics` | yes |
 | **200** existing row | Same artefact + hotkey re-sent with a fresh nonce, before or after the queue drained | existing row |
 | **400** `unknown topic` / `topic is not open` | `tbench` is not published, or is outside its epoch window | no |
 | **400** `artifact_uri is required for custom topics` | You left the locator out. `tbench` is `custom` | no |
