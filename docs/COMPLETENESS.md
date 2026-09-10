@@ -103,9 +103,9 @@ Agent/operator contracts: root [`AGENTS.md`](../AGENTS.md), [`deploy/AGENTS.md`]
 | Staging master | done | Migrated to `/opt/base` CI-managed; old `/opt/gbase` stack torn down. |
 | Staging validator | done | Redeployed from same commit; `bundle gateway signature invalid` resolved. |
 | Prod master | done | Droplet up. Mainnet owner wallet on disk matches SubnetOwnerHotkey; `env-prod.yml` sets `BASE_GATEWAY_REQUIRE_OWNER=1` (`gateway_admin_token` required). Recreate the gateway on droplets after that compose change. |
-| `deploy-staging.yml` | done | Auto on CI green; `--build-from source` for fast iteration; fail-closed health gate. |
-| `deploy-prod.yml` | done | Tag-based (`v*.*.*`); preflight (CI green + `origin/main` staging pins `commit_sha`); fail-closed Spaces backup; `promote.sh --confirm-prod`; `--build-from registry` (GHCR digest pull, no Rust compile on droplet). |
-| `images.yml` pin ladder | done | After GHCR push: write `deploy/digests/<sha>.json`, `promote.sh --env staging` for pin services, commit/push so prod preflight can match. |
+| `deploy-staging.yml` | removed | DigitalOcean staging soak retired (owner decision, 2026-09-10). The staging droplets stay for manual `remote-deploy.sh`; no workflow deploys them. |
+| `deploy-prod.yml` | done | Runs on a green `images` run on `main`, on `v*.*.*` tags, or on dispatch; preflight (SHA on `origin/main` + CI green + live `prod-pins-<sha>` artifact); fail-closed Spaces backup; `--build-from registry` (GHCR digest pull, no Rust compile on droplet). |
+| `images.yml` pin ladder | done | After GHCR push: write `deploy/digests/<sha>.json`, `promote.sh --env prod` for pin services, upload `prod-pins-<sha>`. No push to `main` — branch protection rejects a CI pin commit (GH013). |
 | GitHub secrets | done | Host/SSH/gateway secrets set. Prod promote also needs Spaces: `BASE_BACKUP_ENDPOINT`, `SPACES_ACCESS_KEY_ID` / `SPACES_SECRET_ACCESS_KEY` (fail-closed if absent). |
 
 ## Keys and identity

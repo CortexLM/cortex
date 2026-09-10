@@ -113,29 +113,37 @@ combination. Verify locally: `./deploy/scripts/assert-compose-matrix.sh`.
 
 ### Auto CI deploy
 
-- `.github/workflows/ci.yml` — auto-deploy staging after its `ci` job succeeds on `main`; `deploy-staging.yml` is the manual lane
-- `.github/workflows/deploy-prod.yml` — on push of `v*.*.*` tags from `main` (and manual dispatch with SHA)
+**The DigitalOcean staging soak is retired** (owner decision, 2026-09-10). CI no
+longer deploys staging droplets: `ci.yml` is fmt/clippy/test/deny/xtask only and
+`deploy-staging.yml` is deleted. `deploy/compose/env-staging.yml` stays — it is
+the testnet overlay `local-e2e.sh` builds on, not a CI deploy lane.
 
-**Prod release flow (tag-based):**
-1. CI passes on `main` for commit X.
-2. `images.yml` builds/pushes GHCR digests for X, promotes pin services into `deploy/pins/staging.json`, commits digests + pins to `main`.
-3. Staging droplets may still deploy with `--build-from source` (iteration); the pin ladder is what authorizes prod.
-4. Operator cuts `git tag vX.Y.Z` on commit X and pushes the tag.
-5. `deploy-prod.yml` preflight: CI green for X; `origin/main` staging pins `commit_sha == X`.
-6. Fail-closed Postgres backup (SSH dump on prod master → DO Spaces), then `promote.sh --env prod --confirm-prod` per service.
-7. Both prod hosts: `remote-deploy.sh --build-from registry` (pull GHCR `@sha256`, retag to Compose tags, `up --no-build`).
-8. Smoke `/healthz`. `environment: production` (enable required reviewers in GitHub UI).
+- `.github/workflows/images.yml` — on push to `main`: build/push GHCR digests, then record prod pins as the `prod-pins-<sha>` artifact
+- `.github/workflows/deploy-prod.yml` — on a successful `images` run on `main`, on `v*.*.*` tags, or manual dispatch with a SHA
+
+**Prod deploy flow (every main update):**
+1. CI passes on `main` for commit X; `images.yml` builds/pushes GHCR digests for X.
+2. `images.yml` job `prod-pins` runs `promote.sh --env prod` over those digests and uploads `deploy/pins/prod.json` + `deploy/digests/X.json` as artifact `prod-pins-X`. **Nothing is pushed to `main`** — branch protection (PR + Greptile review) rejects a CI pin commit with GH013.
+3. `deploy-prod.yml` preflight: X is an ancestor of `origin/main`, CI is green for X (it polls, since `ci` and `images` run in parallel), and the `images` run for X has a live `prod-pins-X` artifact.
+4. Fail-closed Postgres backup (SSH dump on prod master → DO Spaces).
+5. Both prod hosts: `remote-deploy.sh --build-from registry` (pull GHCR `@sha256`, retag to Compose tags, `up --no-build`).
+6. Smoke `/healthz` (fail-closed).
+
+`deploy/pins/prod.json` in git is a **template**, not the deployed state: CI
+derives the deployed pins per commit from the GHCR digests and keeps them in the
+run artifact. **Rollback = dispatch `deploy-prod` with the previous good commit
+SHA** (its `images` run artifact is still the pin set for that commit); the
+in-tree `promote.sh --rollback` path stays for local/manual pin work.
+
+Prod hosts pull GHCR anonymously (`remote-deploy.sh` never logs in), so the
+`ghcr-public` job must keep the packages public.
 
 Required GitHub secrets:
 
 | Secret | Purpose |
 |--------|---------|
-| `STAGING_SSH_KEY` | private key for droplet SSH |
-| `STAGING_MASTER_HOST` | public IPv4 of `base-staging` |
-| `STAGING_VALIDATOR_HOST` | public IPv4 of `base-staging-validator` |
-| `STAGING_MASTER_GATEWAY_URL` | optional, default `http://10.116.0.2:8080` |
 | `PROD_HOST` | public IPv4 of `base-prod` |
-| `PROD_SSH_KEY` | optional override of staging key |
+| `PROD_SSH_KEY` | private key for prod droplet SSH (falls back to `STAGING_SSH_KEY`, which is the same operator key) |
 | `PROD_VALIDATOR_HOST` | public IPv4 of `base-prod-validator` |
 | `PROD_MASTER_GATEWAY_URL` | optional, default `http://10.116.0.3:8080` |
 | `BASE_BACKUP_ENDPOINT` | DO Spaces endpoint (e.g. `https://nyc3.digitaloceanspaces.com`) — **required for prod promote (fail-closed)** |
@@ -213,9 +221,11 @@ export BASE_BACKUP_BUCKET=base-backups
   --env staging --service validator \
   --image ghcr.io/org/validator@sha256:<64-hex>
 
-# 3) After staging is healthy, promote same digest to prod
+# 3) Promote a digest to prod
+#    --force-prod skips the staging-digest ladder, which no longer exists:
+#    nothing writes deploy/pins/staging.json since the staging soak was retired.
 ./deploy/scripts/promote.sh \
-  --env prod --service validator --confirm-prod \
+  --env prod --service validator --confirm-prod --force-prod \
   --image ghcr.io/org/validator@sha256:<64-hex>
 
 # 4) Rollback = re-promote previous snapshot
@@ -226,7 +236,11 @@ export BASE_BACKUP_BUCKET=base-backups
 ```
 
 Pin files: `deploy/pins/staging.json`, `deploy/pins/prod.json`.  
-Staging promote **never** writes the prod pin. Prod promote requires staging ladder + `--confirm-prod`.  
-Updater consumes `BASE_UPDATER_DESIRED_IMAGE` (also written to `deploy/pins/<env>.desired.env`).
+Staging promote **never** writes the prod pin; the staging pin file is now only a
+local/manual scratch env (`verify-task-43.sh` exercises it) and no workflow
+writes it. Prod promote still requires `--confirm-prod`.  
+Updater consumes `BASE_UPDATER_DESIRED_IMAGE` (also written to `deploy/pins/<env>.desired.env`).  
+In CI the prod rollback is a `deploy-prod` dispatch on the previous good commit
+SHA, not a pin-file edit — pins are rebuilt from that commit's GHCR digests.
 
 Verify locally: `./deploy/scripts/verify-task-43.sh`
