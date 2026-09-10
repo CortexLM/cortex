@@ -1,0 +1,12 @@
+{
+  "source": "retained n15 x0017 measured wall seconds. Mathis: default pack tasks must be <1h. Keys are Harbor task directory names and short aliases; prefix match is name == key or name starts with key + '-'. Adaptor-local operator measurement, not a compiled Proof catalog.",
+  "walls_sec": {
+    "biped": 18628,
+    "biped-contact-dynamics": 18628,
+    "formal-crypto": 7482,
+    "cad": 4364,
+    "cad-model": 4364,
+    "data-anon": 3964,
+    "data-anonymization": 3964
+  }
+}

@@ -385,6 +385,8 @@ fn deploy_guest_names_no_harness_or_benchmark() {
         "harness/run-harbor",
         "harness/summarize.py",
         "harness/filter_tasks.py",
+        "harness/duration_hints.json",
+        "harness/ensure_verifier.py",
         "harness/rewrite_network.py",
         "harness/proof_python_agent.py",
         "resolve_harness.py",

@@ -161,9 +161,13 @@ use the default Docker bridge; the Firecracker TAP is still allowlisted on
 the host.
 
 The scored task slice is filtered to tasks whose duration metadata is under
-**one hour**. Hour-plus tasks are not in the default scorable pack. You do
+**one hour**. Hour-plus tasks are not in the default scorable pack. A retained
+n=15 trial spent most of its wall on four Harbor ids (`biped` ≈5.2h,
+`formal-crypto`, `cad`, `data-anon`); those names and their Harbor directory
+aliases are filtered out even when `task.toml` has no timeout. You do
 not choose the task list; `constraints.task_slice` remains an opaque runner
-input.
+input. A verifier image that lacks `pytest` on PATH scores 0 rather than
+failing the trial — that is an operator image hole, not a miner contract.
 
 Env the run sees: `PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`,
 `PROOF_PARAM_*`, `PROOF_PACK_DIR`, `PROOF_ARTIFACT_DIR`, `PROOF_OUTPUT_DIR`,

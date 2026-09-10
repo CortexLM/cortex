@@ -1,11 +1,14 @@
 #!/bin/bash
 # run-harbor — paid Harbor / custom-Python / script invoke for Baseline / Evaluate.
 #
-# Tasks: pack copy filtered to duration < max_task_duration_s (default 1h).
+# Tasks: pack copy filtered to duration < max_task_duration_s (default 1h);
+#         n15 x0017 walls (biped/formal-crypto/cad/data-anon) are denied even
+#         without task.toml timeouts.
 # Network: agent path is public (Docker no-network breaks OpenRouter / BYOK).
 # Harness: custom Python primary; Harbor BaseAgent, harness.json, run.sh
 #          accepted. Topic terminus-2 only for baseline with no miner artefact.
 # Runtime: Docker daemon first (rootful overlay); podman API socket fallback.
+# Verifier: pytest injected into filtered-copy environment/verifier images.
 # BYOK: evaluate never falls back to the owner secrets dir.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -25,6 +28,7 @@ proof_require_tasks
 proof_writable_scratch
 proof_filter_tasks
 proof_enable_agent_network
+proof_ensure_verifier
 proof_load_inference_key
 proof_select_harness >/dev/null
 AGENT_ARG="${PROOF_HARBOR_AGENT_ARG:-}"

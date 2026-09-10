@@ -14,6 +14,7 @@ Rewrites only the destination tree (never the pack):
   agent, and verifier tables.
 * Compose / YAML: drop ``network_mode: none|no-network`` so Docker uses
   the default bridge rather than a Harbor policy the daemon cannot honour.
+* JSON: rewrite ``"network_mode": "no-network"`` (Harbor env configs).
 """
 
 from __future__ import annotations
@@ -33,7 +34,11 @@ YAML_MODE = re.compile(
 )
 TOML_SUFFIX = {".toml"}
 YAML_SUFFIX = {".yml", ".yaml"}
+JSON_SUFFIX = {".json"}
 MAX_FILE_BYTES = 1024 * 1024
+JSON_MODE = re.compile(
+    r'(?i)("network_mode"\s*:\s*")(?:no-network|no_network|none|isolated|allowlist)(")'
+)
 
 
 def _fail(msg: str, code: int = 2) -> None:
@@ -51,18 +56,23 @@ def rewrite_yaml(text: str) -> str:
     return YAML_MODE.sub("", text)
 
 
+def rewrite_json(text: str, mode: str) -> str:
+    return JSON_MODE.sub(rf'\1{mode}\2', text)
+
+
 def rewrite_tree(root: Path, mode: str) -> dict[str, int]:
     if not root.is_dir():
         _fail(f"not a directory: {root}")
     n_toml = 0
     n_yaml = 0
+    n_json = 0
     for path in root.rglob("*"):
         if not path.is_file():
             continue
         if ".." in path.parts:
             continue
         suffix = path.suffix.lower()
-        if suffix not in TOML_SUFFIX | YAML_SUFFIX:
+        if suffix not in TOML_SUFFIX | YAML_SUFFIX | JSON_SUFFIX:
             continue
         try:
             if path.stat().st_size > MAX_FILE_BYTES:
@@ -75,12 +85,17 @@ def rewrite_tree(root: Path, mode: str) -> dict[str, int]:
             if updated != original:
                 path.write_text(updated, encoding="utf-8")
                 n_toml += 1
-        else:
+        elif suffix in YAML_SUFFIX:
             updated = rewrite_yaml(original)
             if updated != original:
                 path.write_text(updated, encoding="utf-8")
                 n_yaml += 1
-    return {"toml": n_toml, "yaml": n_yaml}
+        else:
+            updated = rewrite_json(original, mode)
+            if updated != original:
+                path.write_text(updated, encoding="utf-8")
+                n_json += 1
+    return {"toml": n_toml, "yaml": n_yaml, "json": n_json}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -101,7 +116,8 @@ def main(argv: list[str] | None = None) -> int:
     stats = rewrite_tree(Path(args.tasks_dir), mode)
     print(
         f"rewrite_network: set Harbor network_mode={mode} in {stats['toml']} toml, "
-        f"cleared compose isolation in {stats['yaml']} yaml",
+        f"cleared compose isolation in {stats['yaml']} yaml, "
+        f"rewrote {stats['json']} json",
         file=sys.stderr,
     )
     return 0

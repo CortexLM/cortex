@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """Copy pack tasks that typically finish in under one hour.
 
-Duration is pack metadata, not a compiled task catalog. A task is excluded
-when its declared timeout / duration is ≥ ``max_duration_s`` (default 3600),
-when a pack ``filter.json`` deny-list names it, or when a non-empty allow-list
-omits it. Unknown duration is kept unless the pack or topic asks to drop it.
+Duration is pack metadata plus adaptor-local measured walls (not a compiled
+Proof catalog). A task is excluded when max(declared timeout, pack duration,
+adaptor hint) is ≥ ``max_duration_s`` (default 3600), when a pack
+``filter.json`` deny-list names it (or an alias / ``key-`` prefix), or when
+a non-empty allow-list omits it.
+
+Adaptor hints (`duration_hints.json` next to this file) record retained n15
+x0017 walls (biped ≈5.2h, formal-crypto, cad, data-anon). Those names drop
+even when ``task.toml`` has no timeout. Unknown duration with no hint is
+kept unless the pack or topic asks to drop it. Pack ``max_duration_s`` may
+only lower the ceiling.
 
 The copy is written under the work directory; the pack tree is never mutated.
 Zero surviving tasks fails closed.
@@ -21,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_MAX_S = 3600
+DEFAULT_HINTS = Path(__file__).resolve().parent / "duration_hints.json"
 TASK_MARKERS = (
     "task.toml",
     "instruction.md",
@@ -51,6 +59,8 @@ HOURS_KEYS = frozenset(
         "typical_duration_hours",
         "timeout_hours",
         "time_limit_hours",
+        "expert_time_estimate_hours",
+        "time_estimate_hours",
     }
 )
 
@@ -108,6 +118,50 @@ def _is_task_dir(path: Path) -> bool:
     return any((path / marker).is_file() for marker in TASK_MARKERS)
 
 
+def alias_match(name: str, key: str) -> bool:
+    """Exact directory name, or Harbor id prefix (``biped`` → ``biped-…``)."""
+    if not name or not key:
+        return False
+    if name == key:
+        return True
+    if name.startswith(key + "-"):
+        return True
+    if key.startswith(name + "-"):
+        return True
+    return False
+
+
+def lookup_named(name: str, mapping: dict[str, int]) -> int | None:
+    if name in mapping:
+        return mapping[name]
+    best: int | None = None
+    for key, value in mapping.items():
+        if alias_match(name, key):
+            best = value if best is None else max(best, value)
+    return best
+
+
+def load_adaptor_hints(path: Path | None = None) -> dict[str, int]:
+    hints_path = path or DEFAULT_HINTS
+    if not hints_path.is_file():
+        return {}
+    obj = _read_json(hints_path)
+    if not isinstance(obj, dict):
+        _fail(f"{hints_path} must be a JSON object")
+    raw = obj.get("walls_sec")
+    if raw is None:
+        raw = obj.get("durations")
+    if not isinstance(raw, dict):
+        _fail(f"{hints_path} must contain walls_sec or durations object")
+    out: dict[str, int] = {}
+    for key, value in raw.items():
+        if str(key).startswith("_"):
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[str(key)] = int(value)
+    return out
+
+
 def list_task_dirs(tasks_dir: Path) -> list[Path]:
     children = sorted(p for p in tasks_dir.iterdir() if p.is_dir() and _is_task_dir(p))
     if children:
@@ -119,24 +173,35 @@ def list_task_dirs(tasks_dir: Path) -> list[Path]:
     return loose
 
 
-def task_duration_s(task_dir: Path, durations_map: dict[str, int]) -> int | None:
+def task_duration_s(
+    task_dir: Path,
+    durations_map: dict[str, int],
+    adaptor_hints: dict[str, int] | None = None,
+) -> int | None:
     name = task_dir.name
-    if name in durations_map:
-        return durations_map[name]
+    declared: int | None = None
     for rel in ("task.toml", "config.toml", "harbor.toml"):
         parsed = _load_toml(task_dir / rel)
         if parsed:
             found = _collect_durations(parsed)
             if found:
-                return max(found)
-    for rel in ("duration.json", "meta.json"):
-        path = task_dir / rel
-        if path.is_file():
-            obj = _read_json(path)
-            found = _collect_durations(obj)
-            if found:
-                return max(found)
-    return None
+                declared = max(found)
+                break
+    if declared is None:
+        for rel in ("duration.json", "meta.json"):
+            path = task_dir / rel
+            if path.is_file():
+                obj = _read_json(path)
+                found = _collect_durations(obj)
+                if found:
+                    declared = max(found)
+                    break
+    pack_hint = lookup_named(name, durations_map)
+    adaptor_hint = lookup_named(name, adaptor_hints or {})
+    candidates = [x for x in (declared, pack_hint, adaptor_hint) if x is not None]
+    if not candidates:
+        return None
+    return max(candidates)
 
 
 def load_pack_filter(pack_dir: Path, rel: str | None) -> dict[str, Any]:
@@ -192,6 +257,12 @@ def load_durations_map(pack_dir: Path, obj: dict[str, Any]) -> dict[str, int]:
     return out
 
 
+def listed(name: str, names: set[str]) -> bool:
+    if name in names:
+        return True
+    return any(alias_match(name, key) for key in names)
+
+
 def decide(
     task_dir: Path,
     *,
@@ -199,14 +270,15 @@ def decide(
     allow: set[str],
     deny: set[str],
     durations_map: dict[str, int],
+    adaptor_hints: dict[str, int],
     drop_unknown: bool,
 ) -> tuple[bool, str]:
     name = task_dir.name
-    if name in deny:
+    if listed(name, deny):
         return False, "deny-list"
-    if allow and name not in allow:
+    if allow and not listed(name, allow):
         return False, "not on allow-list"
-    duration = task_duration_s(task_dir, durations_map)
+    duration = task_duration_s(task_dir, durations_map, adaptor_hints)
     if duration is None:
         if drop_unknown:
             return False, "unknown duration"
@@ -224,6 +296,7 @@ def filter_tasks(
     max_s: int,
     filter_rel: str | None,
     drop_unknown: bool,
+    hints_path: Path | None = None,
 ) -> dict[str, Any]:
     if not tasks_dir.is_dir():
         _fail(f"no tasks directory {tasks_dir}")
@@ -235,6 +308,7 @@ def filter_tasks(
     allow = {str(x) for x in spec.get("allow", []) if isinstance(x, str) and x}
     deny = {str(x) for x in spec.get("deny", []) if isinstance(x, str) and x}
     durations_map = load_durations_map(pack_dir, spec)
+    adaptor_hints = load_adaptor_hints(hints_path)
     if spec.get("exclude_unknown_duration") is True:
         drop_unknown = True
 
@@ -252,6 +326,7 @@ def filter_tasks(
             allow=allow,
             deny=deny,
             durations_map=durations_map,
+            adaptor_hints=adaptor_hints,
             drop_unknown=drop_unknown,
         )
         row = {"name": task_dir.name, "reason": reason}
@@ -271,6 +346,7 @@ def filter_tasks(
         "filter": spec.get("_path", ""),
         "n_kept": len(kept),
         "n_dropped": len(dropped),
+        "n_adaptor_hints": len(adaptor_hints),
         "kept": kept,
         "dropped": dropped,
     }
@@ -299,6 +375,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         default=os.environ.get("PROOF_PARAM_EXCLUDE_UNKNOWN_DURATION", "") == "true",
     )
+    parser.add_argument(
+        "--hints",
+        default="",
+        help="optional duration_hints.json (default: adaptor-local n15 walls)",
+    )
     args = parser.parse_args(argv)
     pack_dir = Path(args.pack_dir) if args.pack_dir else Path(args.tasks_dir).parent
     max_s = args.max_duration_s
@@ -311,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
         max_s=max_s,
         filter_rel=args.filter_rel.strip() or None,
         drop_unknown=args.drop_unknown,
+        hints_path=Path(args.hints) if args.hints.strip() else None,
     )
     print(
         f"filter_tasks: kept {summary['n_kept']} dropped {summary['n_dropped']} "

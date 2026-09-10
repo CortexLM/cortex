@@ -43,10 +43,17 @@ class RewriteNetworkTests(unittest.TestCase):
             stats = rewrite_network.rewrite_tree(root, "public")
             self.assertEqual(stats["toml"], 1)
             self.assertEqual(stats["yaml"], 1)
+            self.assertEqual(stats.get("json", 0), 0)
             toml = (task / "task.toml").read_text(encoding="utf-8")
             yaml = (task / "docker-compose.yml").read_text(encoding="utf-8")
             self.assertIn('network_mode = "public"', toml)
             self.assertNotIn("network_mode", yaml)
+
+    def test_json_no_network_becomes_public(self) -> None:
+        src = '{"network_mode": "no-network", "other": 1}'
+        out = rewrite_network.rewrite_json(src, "public")
+        self.assertIn('"network_mode": "public"', out)
+        self.assertNotIn("no-network", out)
 
     def test_refuses_non_public_mode(self) -> None:
         with self.assertRaises(SystemExit):

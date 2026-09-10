@@ -18,6 +18,11 @@ export PROOF_PACK_DIR="$WORKDIR/pack"
 export PROOF_HARNESS_SKIP_PODMAN=1
 mkdir -p "$PROOF_WORK_DIR" "$PROOF_OUTPUT_DIR" "$PROOF_PACK_DIR/tasks/hello"
 printf '[agent]\ntimeout_sec = 120\n' > "$PROOF_PACK_DIR/tasks/hello/task.toml"
+# n15 x0017 hour-plus aliases with no timeout must still drop.
+for n15 in biped biped-contact-dynamics formal-crypto cad cad-model data-anon data-anonymization; do
+    mkdir -p "$PROOF_PACK_DIR/tasks/$n15"
+    printf '# leftover long task\n' > "$PROOF_PACK_DIR/tasks/$n15/instruction.md"
+done
 export PROOF_PARAM_TASKS_DIR="tasks"
 
 # --- tasks_dir ---
@@ -36,7 +41,11 @@ proof_require_tasks
 proof_filter_tasks || fail "filter should keep the short task"
 [ -d "$PROOF_TASKS/hello" ] || fail "short task must be kept"
 [ ! -d "$PROOF_TASKS/too-slow" ] || fail "≥1h task must be dropped"
-pass "duration filter keeps <1h tasks and drops ≥1h"
+[ ! -d "$PROOF_TASKS/biped" ] || fail "n15 biped must be dropped without timeout_sec"
+[ ! -d "$PROOF_TASKS/cad-model" ] || fail "n15 cad-model must be dropped"
+[ ! -d "$PROOF_TASKS/formal-crypto" ] || fail "n15 formal-crypto must be dropped"
+[ ! -d "$PROOF_TASKS/data-anonymization" ] || fail "n15 data-anonymization must be dropped"
+pass "duration filter keeps <1h tasks and drops ≥1h plus n15 walls"
 
 # --- agent network rewrite ---
 printf '[environment]\nnetwork_mode = "no-network"\n' > "$PROOF_TASKS/hello/task.toml"
@@ -46,6 +55,17 @@ if grep -q 'no-network' "$PROOF_TASKS/hello/task.toml"; then
     fail "no-network must not remain on the filtered copy"
 fi
 pass "agent network rewritten to public (not no-network)"
+
+# --- pytest in verifier / environment images ---
+mkdir -p "$PROOF_TASKS/hello/environment"
+printf 'FROM python:3.12-slim\nWORKDIR /app\n' > "$PROOF_TASKS/hello/environment/Dockerfile"
+printf 'numpy\n' > "$PROOF_TASKS/hello/environment/requirements.txt"
+proof_ensure_verifier || fail "ensure_verifier should patch the filtered copy"
+grep -q 'pip install --no-cache-dir pytest' "$PROOF_TASKS/hello/environment/Dockerfile" \
+    || fail "environment Dockerfile must install pytest"
+grep -qx 'pytest' "$PROOF_TASKS/hello/environment/requirements.txt" \
+    || fail "environment requirements.txt must list pytest"
+pass "verifier/environment images gain pytest (n15 biped+cad hole)"
 
 # --- BYOK evaluate never owner ---
 export PROOF_JOB=evaluate

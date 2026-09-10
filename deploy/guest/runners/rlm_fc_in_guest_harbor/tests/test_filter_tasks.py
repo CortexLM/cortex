@@ -113,6 +113,136 @@ class FilterTasksTests(unittest.TestCase):
             self.assertEqual(summary["max_duration_s"], 3600)
             self.assertEqual(summary["n_kept"], 1)
 
+    def test_n15_measured_walls_drop_without_timeout(self) -> None:
+        """Retained n15 x0017 dirs drop even when task.toml has no timeout."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, "quick", 600)
+            for name in (
+                "biped",
+                "biped-contact-dynamics",
+                "formal-crypto",
+                "cad",
+                "cad-model",
+                "data-anon",
+                "data-anonymization",
+            ):
+                _task(tasks, name, None)
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertEqual(summary["kept"][0]["name"], "quick")
+            self.assertGreaterEqual(summary["n_dropped"], 7)
+            for name in (
+                "biped",
+                "biped-contact-dynamics",
+                "formal-crypto",
+                "cad",
+                "cad-model",
+                "data-anon",
+                "data-anonymization",
+            ):
+                self.assertFalse((dest / name).exists(), name)
+
+    def test_hint_beats_short_declared_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, "quick", 600)
+            _task(tasks, "biped-contact-dynamics", 120)
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertFalse((dest / "biped-contact-dynamics").exists())
+
+    def test_pack_deny_alias_matches_harbor_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, "quick", 100)
+            _task(tasks, "biped-contact-dynamics", 100)
+            (pack / "filter.json").write_text(
+                json.dumps({"deny": ["biped"]}),
+                encoding="utf-8",
+            )
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertEqual(summary["dropped"][0]["reason"], "deny-list")
+
+    def test_unknown_unhinted_task_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, "mystery", None)
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertEqual(summary["kept"][0]["name"], "mystery")
+
+    def test_expert_time_estimate_hours_drops(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, "quick", 600)
+            d = tasks / "harbor-long"
+            d.mkdir()
+            (d / "task.toml").write_text(
+                "[metadata]\nexpert_time_estimate_hours = 5.0\n",
+                encoding="utf-8",
+            )
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertFalse((dest / "harbor-long").exists())
+
+    def test_alias_match_does_not_eat_unrelated_prefix(self) -> None:
+        self.assertFalse(filter_tasks.alias_match("cadillac", "cad"))
+        self.assertTrue(filter_tasks.alias_match("cad-model", "cad"))
+        self.assertTrue(filter_tasks.alias_match("biped-contact-dynamics", "biped"))
+        self.assertTrue(filter_tasks.alias_match("biped", "biped-contact-dynamics"))
+
 
 if __name__ == "__main__":
     unittest.main()

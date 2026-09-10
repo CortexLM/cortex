@@ -7,6 +7,7 @@ PROOF_RESOLVE_AGENT="${_PROOF_HARBOR_ADAPTOR_DIR}/resolve_agent.py"
 PROOF_RESOLVE_HARNESS="${_PROOF_HARBOR_ADAPTOR_DIR}/resolve_harness.py"
 PROOF_FILTER_TASKS="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/filter_tasks.py"
 PROOF_REWRITE_NETWORK="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/rewrite_network.py"
+PROOF_ENSURE_VERIFIER="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/ensure_verifier.py"
 PROOF_PYTHON_AGENT="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/proof_python_agent.py"
 
 proof_die() {
@@ -111,6 +112,14 @@ proof_enable_agent_network() {
         || proof_die "failed to enable agent network on the filtered task copy"
 }
 
+# Harbor verifier execs pytest inside the task environment image. n15 x0017
+# biped + cad scored 0 because that image had no pytest. Patch the copy.
+proof_ensure_verifier() {
+    : "${PROOF_TASKS:?proof_filter_tasks first}"
+    python3 "$PROOF_ENSURE_VERIFIER" --tasks-dir "$PROOF_TASKS" \
+        || proof_die "failed to ensure pytest in verifier/environment images"
+}
+
 # Resolve the miner harness. Custom Python is primary; Harbor BaseAgent,
 # harness.json, and run.sh are also accepted. Evaluate never falls back to
 # terminus-2 when an artefact was staged.
@@ -213,11 +222,18 @@ proof_start_container_runtime() {
     fi
     if [ -n "$sock" ]; then
         export DOCKER_HOST="unix://$sock"
-        if proof_docker_ok; then
-            echo "rlm_fc_in_guest_harbor: using docker daemon at $DOCKER_HOST" >&2
-            export PROOF_CONTAINER_RUNTIME=docker
-            return 0
-        fi
+        # Socket can exist before the daemon answers; wait rather than
+        # immediately falling through to podman (Harbor env start timeouts).
+        local i
+        for i in $(seq 1 30); do
+            if proof_docker_ok; then
+                echo "rlm_fc_in_guest_harbor: using docker daemon at $DOCKER_HOST" >&2
+                export PROOF_CONTAINER_RUNTIME=docker
+                return 0
+            fi
+            sleep 1
+        done
+        echo "rlm_fc_in_guest_harbor: docker socket at $sock never became ready" >&2
         unset DOCKER_HOST
     fi
     if [ -n "${DOCKER_HOST:-}" ] && proof_docker_ok; then

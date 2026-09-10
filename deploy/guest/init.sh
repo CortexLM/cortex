@@ -100,17 +100,25 @@ if command -v dockerd >/dev/null 2>&1; then
         --iptables=true \
         >"$SCRATCH/dockerd.log" 2>&1 &
     i=0
-    while [ "$i" -lt 50 ]; do
+    while [ "$i" -lt 60 ]; do
+        sock=""
         if [ -S /var/run/docker.sock ]; then
-            chmod 666 /var/run/docker.sock 2>/dev/null || true
-            break
+            sock=/var/run/docker.sock
+        elif [ -S /run/docker.sock ]; then
+            sock=/run/docker.sock
         fi
-        if [ -S /run/docker.sock ]; then
-            chmod 666 /run/docker.sock 2>/dev/null || true
-            break
+        if [ -n "$sock" ]; then
+            chmod 666 "$sock" 2>/dev/null || true
+            if command -v docker >/dev/null 2>&1; then
+                if docker info >/dev/null 2>&1; then
+                    break
+                fi
+            else
+                break
+            fi
         fi
         i=$((i + 1))
-        sleep 0.1
+        sleep 0.5
     done
     if [ ! -S /var/run/docker.sock ] && [ ! -S /run/docker.sock ]; then
         log "container engine did not create a socket; adaptors that need one will fail closed"

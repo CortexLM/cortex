@@ -152,7 +152,7 @@ hardcoded to a benchmark name):
 | Param | Env | Role |
 |-------|------|------|
 | `tasks_dir` | `PROOF_PARAM_TASKS_DIR` | Relative path under the pack. Refused if absolute or contains `..` |
-| `max_task_duration_s` | `PROOF_PARAM_MAX_TASK_DURATION_S` | Drop pack tasks whose duration metadata is ≥ this many seconds (default **3600**). Pack `filter.json` may only **lower** the ceiling. |
+| `max_task_duration_s` | `PROOF_PARAM_MAX_TASK_DURATION_S` | Drop pack tasks whose duration metadata is ≥ this many seconds (default **3600**). Pack `filter.json` may only **lower** the ceiling. Adaptor `duration_hints.json` (n15 x0017 walls) still applies. |
 | `task_filter` | `PROOF_PARAM_TASK_FILTER` | Optional relative pack path to `filter.json` / allow-list |
 | `exclude_unknown_duration` | `PROOF_PARAM_EXCLUDE_UNKNOWN_DURATION` | `true` to drop tasks with no duration metadata |
 | `harbor_agent` | `PROOF_PARAM_HARBOR_AGENT` | Topic built-in for **baseline only** when no miner harness |
@@ -165,16 +165,25 @@ Tasks stay the operator pack. The miner attach surface is the **harness**,
 not the task list. Before Harbor runs, the adaptor copies surviving tasks
 to `$PROOF_WORK_DIR/tasks-filtered` and rewrites Harbor `network_mode` to
 **`public`** on that copy (Docker `no-network` is unsupported on this guest
-and blocked agent OpenRouter calls). Host nftables on the VM TAP remain the
+and blocked agent OpenRouter calls; n15 hit `ValueError network_mode=no-network
+unsupported` on batched-eval-parity). Host nftables on the VM TAP remain the
 egress allowlist; this rewrite does not open the host. A filtered copy with
 zero tasks fails closed.
 
 Operator pack hint (pack content, not compiled in): ship `filter.json` with
-`max_duration_s`, optional `allow` / `deny` directory names, and/or
-`task_durations.json`. Tasks whose `task.toml` `[agent] timeout_sec` (or
-equivalent duration keys) is ≥ 1 hour are dropped even without that file.
+`max_duration_s`, optional `allow` / `deny` directory names (aliases match
+`biped` → `biped-contact-dynamics`), and/or `task_durations.json`. See
+`harness/pack_filter.example.json`. Tasks whose `task.toml` `[agent]
+timeout_sec` (or equivalent) is ≥ 1 hour are dropped even without that file.
+Adaptor `harness/duration_hints.json` records retained n15 x0017 walls so
+`biped` / `formal-crypto` / `cad` / `data-anon` drop even with no timeout.
 Do not put hour-plus tasks in the default scorable pack for `n_concurrent`
 baselines or miner evals.
+
+After the copy, `ensure_verifier.py` injects pytest into environment /
+verifier Dockerfiles so Harbor's verifier cannot score 0 from `pytest:
+command not found` (n15 biped + cad). That is an image/env hole, not a
+true-zero miner reward. Partial pytest assertion failures remain real 0s.
 
 ## Outputs
 
