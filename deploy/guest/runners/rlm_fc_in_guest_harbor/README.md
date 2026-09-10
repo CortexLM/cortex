@@ -190,13 +190,16 @@ from retained n15 x0017:
   `biped-contact-dynamics` / `cad-model` also stay out until verifier pytest
   is proven on metal.
 
-The deny/exclude list wins first, then the allow-list, then duration. An
-allow-listed name was measured under an hour, so only a measured
-`walls_sec` wall ≥ `max_task_duration_s` drops it — a pack `task.toml`
-`agent_timeout` is the harness ceiling, not a duration, and is ignored for
-those tasks (n15 attempt1 on pin `4a04eeb1` declared 28800 on all six and the
-3600 default emptied the pack). Every other task is still dropped on
-max(declared timeout, pack duration, adaptor hint).
+The deny/exclude list wins first, then the allow-list, then duration. A task
+named **exactly** on the allow-list was measured under an hour, so only a
+measured `walls_sec` wall ≥ `max_task_duration_s` drops it — a pack
+`task.toml` `agent_timeout` is the harness ceiling, not a duration, and is
+ignored for those tasks (n15 attempt1 on pin `4a04eeb1` declared 28800 on all
+six and the 3600 default emptied the pack). Every other task is still dropped
+on max(declared timeout, pack duration, adaptor hint), including an alias hit
+such as `cargo-flight-dispatch-extra` (a different task) and an unmeasured
+allow-list entry under a ceiling below 3600 (tighter than what the allow-list
+asserts); those also still honour `exclude_unknown_duration`.
 
 Do not put hour-plus or broken tasks in the default scorable pack for
 `n_concurrent` baselines or miner evals. An empty filtered copy fails closed.

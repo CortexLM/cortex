@@ -480,6 +480,98 @@ class FilterTasksTests(unittest.TestCase):
             self.assertEqual(summary["n_kept"], 1)
             self.assertEqual(summary["kept"][0]["name"], KEEP)
 
+    def test_allow_list_alias_does_not_bypass_the_duration_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, KEEP, 28_800)
+            _task(tasks, f"{KEEP}-extra", 7200)
+            (pack / "task_durations.json").write_text(
+                json.dumps({f"{KEEP}-extra": 7200}),
+                encoding="utf-8",
+            )
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertEqual(summary["kept"][0]["name"], KEEP)
+            dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
+            self.assertEqual(dropped[f"{KEEP}-extra"], "duration_s=7200 >= 3600")
+
+    def test_tightened_ceiling_regates_unmeasured_allowlisted_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, KEEP, 600)
+            _task(tasks, "fin-saccr-rwa", 28_800)
+            (pack / "filter.json").write_text(
+                json.dumps({"max_duration_s": 900}),
+                encoding="utf-8",
+            )
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            self.assertEqual(summary["max_duration_s"], 900)
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertEqual(summary["kept"][0]["reason"], "duration_s=600")
+            dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
+            self.assertEqual(dropped["fin-saccr-rwa"], "duration_s=28800 >= 900")
+
+    def test_tightened_ceiling_honours_exclude_unknown_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, KEEP, 100)
+            _task(tasks, "fin-saccr-rwa", None)
+            (pack / "filter.json").write_text(
+                json.dumps({"max_duration_s": 300, "exclude_unknown_duration": True}),
+                encoding="utf-8",
+            )
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertEqual(summary["kept"][0]["name"], KEEP)
+            dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
+            self.assertEqual(dropped["fin-saccr-rwa"], "unknown duration")
+
+    def test_measured_wall_beats_declared_floor_under_a_tight_ceiling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, KEEP, 28_800)
+            hints = pack / "hints.json"
+            hints.write_text(
+                json.dumps({"allow": [KEEP], "walls_sec": {KEEP: 400}}),
+                encoding="utf-8",
+            )
+            dest = pack / "out"
+            summary = _generic_filter(tasks, dest, pack, max_s=900, hints_path=hints)
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertEqual(summary["kept"][0]["reason"], "allow-list wall_s=400")
+
     def test_non_allowlisted_task_still_drops_on_declared_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pack = Path(tmp)
