@@ -500,7 +500,7 @@ fn is_digest_of_nothing(hex64: &str) -> bool {
 fn parse_artifact_digest(s: &str) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     // Named before the encoding check so a pasted empty-tar digest gets the
     // useful answer whatever its case.
-    if is_digest_of_nothing(s.trim().trim_start_matches("0x")) {
+    if is_digest_of_nothing(&proof_submit::canonical_hex(s)) {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "artifact_digest is the sha256 of empty input (or of an empty tar archive): hash the recipe bytes you ship at artifact_uri",

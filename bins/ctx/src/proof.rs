@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use keystore::{default_wallets_dir, load_hotkey, mini_secret_from_key_file, BittensorWallet};
 use proof_submit::{
-    fresh_submit_nonce_hex, hotkey_hex, manifest_lists, parse_hotkey_hex, parse_signature_hex,
-    parse_submit_nonce_hex, sign_submit, verify_submit, SubmitFields, PROOF_SUBMIT_DOMAIN_LABEL,
+    canonical_hex, fresh_submit_nonce_hex, hotkey_hex, is_lowercase_hex, manifest_lists,
+    parse_hotkey_hex, parse_signature_hex, parse_submit_nonce_hex, sign_submit, verify_submit,
+    SubmitFields, PROOF_SUBMIT_DOMAIN_LABEL,
 };
 use serde_json::{json, Value};
 
@@ -185,7 +186,7 @@ fn resolve_signed(
         .map_err(|_| "manifest lists must be arrays of strings".to_owned())?;
     let nonce = match &input.key.submit_nonce {
         Some(raw) => {
-            let n = raw.trim().to_ascii_lowercase();
+            let n = canonical_hex(raw);
             parse_submit_nonce_hex(&n).map_err(|_| "submit-nonce must be 64 hex characters")?;
             n
         }
@@ -243,7 +244,7 @@ fn resolve_hotkey_and_sig(
             "hotkey",
         )?;
         let pk = parse_hotkey_hex(&hotkey).map_err(|e| e.to_string())?;
-        let sig_hex = hex_sig.trim().trim_start_matches("0x").to_ascii_lowercase();
+        let sig_hex = canonical_hex(hex_sig);
         let sig =
             parse_signature_hex(&sig_hex).map_err(|_| "hotkey_signature invalid".to_owned())?;
         let fields = SubmitFields {
@@ -436,12 +437,14 @@ fn ensure_declared(manifest: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// The one wire form of a 64-hex field, produced by the same `proof-submit`
+/// canonicaliser the host's parser accepts — `ctx` never spells hex itself.
 fn normalize_hex64(s: &str, field: &str) -> Result<String, String> {
-    let t = s.trim().trim_start_matches("0x");
-    if t.len() != 64 || !t.chars().all(|c| c.is_ascii_hexdigit()) {
+    let canonical = canonical_hex(s);
+    if !is_lowercase_hex(&canonical, 64) {
         return Err(format!("{field} must be 64 hex characters"));
     }
-    Ok(t.to_ascii_lowercase())
+    Ok(canonical)
 }
 
 fn print_fields(body: &Value) {
