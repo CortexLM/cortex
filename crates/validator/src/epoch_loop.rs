@@ -97,11 +97,12 @@ pub fn intent_from_match(outcome: &ComparisonOutcome) -> Option<SubmissionIntent
 
 /// Submit Match vector via [`submit_intent`] with per-epoch dedupe.
 ///
-/// Submit only when `latest_sealed` is true, the outcome is Match, and the
-/// vector is not a pure burn to the registered owner / a `validator_permit`
-/// UID at the seal metagraph. Unsealed latest is never a submit path (LKG
-/// on disk is not used). Submit errors are logged and do **not** mark the
-/// epoch (retry next tick).
+/// Submit when `latest_sealed` is true and the outcome is Match — including a
+/// sealed burn-uid0 vector (`uids=[0]`, weight 65535 / `burn_outcome=true`).
+/// A 100% allocation to a **nonzero** registered owner or `validator_permit`
+/// UID is still skipped (Yuma would pay that hotkey). Unsealed latest is never
+/// a submit path (LKG on disk is not used). Submit errors are logged and do
+/// **not** mark the epoch (retry next tick).
 pub fn maybe_submit_match<C, D>(
     outcome: &ComparisonOutcome,
     chain: &C,
@@ -139,7 +140,7 @@ pub fn maybe_submit_match<C, D>(
         warn!(
             event = "validator_submit_skipped_owner_burn",
             epoch = intent.epoch,
-            "submit skipped: pure burn to SubnetOwnerHotkey or validator_permit UID"
+            "submit skipped: pure burn to a nonzero SubnetOwnerHotkey or validator_permit UID"
         );
         return;
     }
@@ -245,13 +246,16 @@ fn record_submit_outcome(
     }
 }
 
-/// True when one UID holds all non-zero mass and that UID is the subnet owner
-/// hotkey or holds `validator_permit` on the seal metagraph.
+/// True when one **nonzero** UID holds all mass and that UID is the subnet
+/// owner hotkey or holds `validator_permit`. UID 0 (burn-uid0) is never skipped.
 #[must_use]
 pub(crate) fn is_burn_to_registered_owner(vector: &[(u16, u16)], mg: &Metagraph) -> bool {
     let Some(uid) = unique_nonzero_uid(vector) else {
         return false;
     };
+    if uid == 0 {
+        return false;
+    }
     let i = usize::from(uid);
     let Some(hotkey) = mg.hotkeys.get(i) else {
         return false;
@@ -292,12 +296,16 @@ fn seal_metagraph<C: ChainClient + ?Sized>(
     chain.metagraph_at(&hash)
 }
 
+/// Skip 100% to a nonzero owner / `validator_permit` UID. Never skip burn-uid0.
 fn should_skip_owner_burn<C: ChainClient + ?Sized>(
     vector: &[(u16, u16)],
     chain: &C,
     metagraph_block: Option<u64>,
 ) -> bool {
-    if unique_nonzero_uid(vector).is_none() {
+    let Some(uid) = unique_nonzero_uid(vector) else {
+        return false;
+    };
+    if uid == 0 {
         return false;
     }
     match seal_metagraph(chain, metagraph_block) {
@@ -910,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn maybe_submit_match_skips_owner_uid0_burn() {
+    fn maybe_submit_match_submits_sealed_uid0_burn() {
         let outcome = ComparisonOutcome::Match {
             epoch: 88,
             local_vector: vec![(0, 65535)],
@@ -920,7 +928,7 @@ mod tests {
         };
         let chain = FakeChain::new(FakeChainConfig {
             current_block: 500,
-            commit_reveal_enabled: true,
+            commit_reveal_enabled: false,
             ..FakeChainConfig::default()
         });
         let submit = CoordinationSubmitConfig {
@@ -939,14 +947,12 @@ mod tests {
             true,
             None,
         );
-        assert!(
-            chain.call_log().is_empty(),
-            "uid0=100% to owner+vali hotkey must not submit"
-        );
-        assert!(
-            !dedupe.already_submitted(88),
-            "owner-burn skip is not a successful submit"
-        );
+        let log = chain.set_weights_log();
+        assert_eq!(log.len(), 1, "sealed uid0=100% must set_weights");
+        assert_eq!(log[0].uids, vec![0]);
+        assert_eq!(log[0].values, vec![65535]);
+        assert_eq!(log[0].version_key, 3);
+        assert!(dedupe.already_submitted(88));
     }
 
     #[test]
@@ -982,8 +988,69 @@ mod tests {
         );
         assert!(
             chain.call_log().is_empty(),
-            "pure burn to a validator_permit UID must not submit"
+            "pure burn to a nonzero validator_permit UID must not submit"
         );
+    }
+
+    #[test]
+    fn owner_burn_exempts_uid0_and_detects_nonzero_permit() {
+        let chain = FakeChain::with_defaults();
+        let hash = chain.block_hash(chain.current_block().unwrap()).unwrap();
+        let mg = chain.metagraph_at(&hash).unwrap();
+        assert!(
+            !is_burn_to_registered_owner(&[(0, 65535)], &mg),
+            "uid0 burn is never treated as a privileged skip"
+        );
+        assert!(!is_burn_to_registered_owner(&[(1, 65535)], &mg));
+        assert!(!is_burn_to_registered_owner(&[(0, 32768), (1, 32767)], &mg));
+        let permit = FakeChain::new(FakeChainConfig {
+            validator_permit: vec![false, true, false],
+            ..FakeChainConfig::default()
+        });
+        let hash = permit.block_hash(permit.current_block().unwrap()).unwrap();
+        let mg = permit.metagraph_at(&hash).unwrap();
+        assert!(is_burn_to_registered_owner(&[(1, 65535)], &mg));
+    }
+
+    #[test]
+    fn maybe_submit_match_refuses_unsealed_uid0_burn() {
+        let outcome = ComparisonOutcome::Match {
+            epoch: 88,
+            local_vector: vec![(0, 65535)],
+            gateway_vector: vec![(0, 65535)],
+            vector_hash: [0x11; 32],
+            merkle_root: [0x22; 32],
+        };
+        let chain = FakeChain::new(FakeChainConfig {
+            current_block: 500,
+            commit_reveal_enabled: false,
+            ..FakeChainConfig::default()
+        });
+        let submit = CoordinationSubmitConfig {
+            netuid: 1,
+            hotkey: vec![0xBBu8; 32],
+            version_key: 3,
+            epoch_length: 360,
+        };
+        let dedupe = EpochSubmitDedupe::new();
+        maybe_submit_match(
+            &outcome,
+            &chain,
+            &ReadyDrand,
+            Some(&submit),
+            &dedupe,
+            false,
+            None,
+        );
+        assert!(
+            chain.set_weights_log().is_empty(),
+            "unsealed uid0=100% must not set_weights"
+        );
+        assert!(
+            chain.call_log().is_empty(),
+            "unsealed uid0=100% must not submit"
+        );
+        assert!(!dedupe.already_submitted(88));
     }
 
     #[test]
@@ -1035,16 +1102,6 @@ mod tests {
             chain.call_log().is_empty(),
             "latest.sealed=false must not submit even with a miner Match vector"
         );
-    }
-
-    #[test]
-    fn owner_burn_detects_uid0_owner_and_ignores_split_vectors() {
-        let chain = FakeChain::with_defaults();
-        let hash = chain.block_hash(chain.current_block().unwrap()).unwrap();
-        let mg = chain.metagraph_at(&hash).unwrap();
-        assert!(is_burn_to_registered_owner(&[(0, 65535)], &mg));
-        assert!(!is_burn_to_registered_owner(&[(1, 65535)], &mg));
-        assert!(!is_burn_to_registered_owner(&[(0, 32768), (1, 32767)], &mg));
     }
 
     #[tokio::test]
@@ -1176,7 +1233,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tick_sealed_owner_burn_match_does_not_submit() {
+    async fn tick_sealed_owner_burn_match_submits() {
         let epoch = 9_010_078u64;
         let (client, chain, trust, merkle_root, _, _) = sealed_match_fixture(epoch).await;
         let submit = CoordinationSubmitConfig {
@@ -1201,11 +1258,19 @@ mod tests {
                 assert_eq!(root, merkle_root);
                 assert_eq!(local_vector, vec![(0, 65535)]);
             }
-            other => panic!("expected Match of owner-burn vector, got {other:?}"),
+            other => panic!("expected Match of uid0 burn vector, got {other:?}"),
         }
-        assert!(
-            chain.call_log().is_empty(),
-            "sealed uid0=100% to owner must not submit"
-        );
+        let log = chain.call_log();
+        assert_eq!(log.len(), 1, "sealed uid0=100% Match must submit");
+        match &log[0] {
+            ChainCall::SubmitTimelocked(sub) => {
+                assert_eq!(sub.payload.uids, vec![0]);
+                assert_eq!(sub.payload.values, vec![65535]);
+            }
+            other @ ChainCall::SetWeights(_) => {
+                panic!("expected SubmitTimelocked of uid0 burn, got {other:?}")
+            }
+        }
+        assert!(dedupe.already_submitted(epoch));
     }
 }
