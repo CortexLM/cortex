@@ -3600,6 +3600,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -3664,6 +3665,7 @@ dependencies = [
  "async-trait",
  "hex",
  "prism-lium-types",
+ "proof-canon",
  "proof-executor",
  "proof-score",
  "proof-store",
@@ -3858,6 +3860,7 @@ name = "proof-store"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "proof-canon",
  "proof-score",
  "proof-task",
  "serde",

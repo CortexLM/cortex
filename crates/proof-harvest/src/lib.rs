@@ -663,11 +663,13 @@ impl LiveScorer for LiumProofHarvest {
         artifact_digest: &str,
         // The digest-pinned image fetches by digest from the artifact store
         // and its agent observes usage against the topic budget; the miner
-        // locator and declaration are custom-family concerns.
+        // locator, declaration, and BYOK env are custom-family concerns —
+        // this harvest runs no miner process to export them to.
         _artifact_uri: Option<&str>,
         _declared_flops: u64,
         holdout: &[HoldoutRecord],
         claim: &str,
+        _miner_env: &proof_eval::MinerEnv,
     ) -> Result<ProofEvalDocument, EvalError> {
         if !pin.can_rent() {
             return Err(EvalError::EvalImageUnpinned);
@@ -780,7 +782,17 @@ mod tests {
         let plan = harvest.plan(pin, topic, executor)?;
         harvest
             .score(
-                pin, topic, offer, &plan, frozen, artifact, None, 1, holdout, claim,
+                pin,
+                topic,
+                offer,
+                &plan,
+                frozen,
+                artifact,
+                None,
+                1,
+                holdout,
+                claim,
+                &proof_eval::MinerEnv::new(),
             )
             .await
     }

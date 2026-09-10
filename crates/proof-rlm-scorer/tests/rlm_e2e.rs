@@ -707,6 +707,7 @@ async fn score(d: &Direct, label: &str) -> Result<ProofEvalDocument, EvalError> 
             d.topic.flops_budget,
             &[],
             "placeholder claim",
+            &proof_rlm::MinerEnv::new(),
         )
         .await
 }
@@ -742,6 +743,7 @@ async fn a_worse_run_never_displaces_the_champion_under_the_topic_lease() {
                 budget,
                 &[],
                 "placeholder claim",
+                &proof_rlm::MinerEnv::new(),
             )
             .await
     });

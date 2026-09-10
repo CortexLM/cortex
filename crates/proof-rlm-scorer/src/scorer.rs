@@ -36,7 +36,8 @@ use proof_eval::{EvalError, LiveScorer, ProofEvalDocument, PROOF_METRICS_SCHEMA}
 use proof_executor::ExecutorPlan;
 use proof_rlm::{
     authorize_spend, decide_promote, ArtifactFile, Checklist, CustomRunReport, CustomRunRequest,
-    Lifecycle, LogFile, PromoteDecision, RlmEvent, RlmState, RuleSet, RunnerError, RunnerRegistry,
+    Lifecycle, LogFile, MinerEnv, PromoteDecision, RlmEvent, RlmState, RuleSet, RunnerError,
+    RunnerRegistry,
 };
 use proof_rlm_store::{ArtefactRow, ChecklistRow, PromotionRow, RlmStore, TransitionRow};
 use proof_score::{AgentVerdict, HarnessMetrics, ProofCheatCode, ProofKind};
@@ -462,6 +463,7 @@ impl RlmScorer {
         artifact_uri: Option<&str>,
         declared_flops: u64,
         claim: &str,
+        miner_env: &MinerEnv,
     ) -> Result<ProofEvalDocument, EvalError> {
         let custom_id = topic.metric.custom_id.trim().to_owned();
         let runner = self
@@ -490,7 +492,11 @@ impl RlmScorer {
             claim,
         )
         .map_err(|e| map_runner(&custom_id, e))?
-        .with_executor_plan(plan.deadline_s, &plan.config_commitment);
+        .with_executor_plan(plan.deadline_s, &plan.config_commitment)
+        // The miner's own BYOK env reaches the guest that runs their code.
+        // The judge offer above carries no key: the operator's inference
+        // credential is staged on the KVM host and never on this path.
+        .with_miner_env(miner_env.clone());
         let inspected = runner
             .inspect(&req, &rules)
             .await
@@ -703,6 +709,7 @@ impl LiveScorer for RlmScorer {
         declared_flops: u64,
         _holdout: &[HoldoutRecord],
         claim: &str,
+        miner_env: &MinerEnv,
     ) -> Result<ProofEvalDocument, EvalError> {
         self.ready_for_topic(topic)?;
         let lease = self.lease(&topic.id).await;
@@ -721,6 +728,7 @@ impl LiveScorer for RlmScorer {
                 artifact_uri,
                 declared_flops,
                 claim,
+                miner_env,
             )
             .await;
         if out.is_ok() {

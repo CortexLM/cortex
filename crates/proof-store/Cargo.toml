@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+proof-canon = { path = "../proof-canon" }
 proof-score = { path = "../proof-score" }
 proof-task = { path = "../proof-task" }
 serde = { version = "1", features = ["derive"] }

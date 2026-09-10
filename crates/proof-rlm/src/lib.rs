@@ -83,6 +83,11 @@ pub use proof_experiment::{
     ExperimentBinding, ExperimentCeilings, ExperimentError, ExperimentPolicy, ExperimentSpec,
     PackRef, VmShape,
 };
+// Miner BYOK: the env a topic lets a miner bring to their own paid run.
+pub use proof_canon::{
+    is_env_name, MinerEnv, MinerEnvError, PARAM_INJECT_MINER_ENV_SISTER, PARAM_MINER_BYOK,
+    PARAM_MINER_ENV_ALLOWLIST,
+};
 
 #[cfg(test)]
 mod tests {

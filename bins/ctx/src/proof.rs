@@ -76,6 +76,9 @@ pub struct SubmitInput {
     pub train_hashes: Vec<String>,
     /// Dataset / corpus ids you trained on.
     pub train_datasets: Vec<String>,
+    /// Bring-your-own-key variables, already resolved to `(NAME, value)`.
+    /// Posted as the body's `env`; not part of the signature.
+    pub env: Vec<(String, String)>,
     /// Poll until the submission reaches a terminal state.
     pub wait: bool,
     /// sr25519 key or offline signature.
@@ -107,6 +110,15 @@ pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Res
     });
     if let Some(uri) = &input.artifact_uri {
         body["artifact_uri"] = Value::String(uri.clone());
+    }
+    if !input.env.is_empty() {
+        body["env"] = Value::Object(
+            input
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect(),
+        );
     }
 
     let reply = client
@@ -437,6 +449,43 @@ fn ensure_declared(manifest: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve `--env` arguments into the `(NAME, value)` pairs the submit body
+/// carries.
+///
+/// `NAME=value` takes the value as written; a bare `NAME` reads it from this
+/// process's environment, which is how a miner passes a key without putting
+/// it in their shell history or in `ps`. A name that is not exported, or an
+/// empty value, is an error here rather than a 400 from the host — and the
+/// message never repeats the value.
+pub fn parse_env_args(args: &[String]) -> Result<Vec<(String, String)>, String> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for arg in args {
+        let (name, value) = match arg.split_once('=') {
+            Some((n, v)) => (n.trim().to_owned(), v.to_owned()),
+            None => {
+                let name = arg.trim().to_owned();
+                let value = std::env::var(&name).map_err(|_| {
+                    format!("--env {name}: no value given and {name} is not set in this shell")
+                })?;
+                (name, value)
+            }
+        };
+        if name.is_empty() {
+            return Err(
+                "--env needs a variable name (NAME=value, or NAME to read your shell)".into(),
+            );
+        }
+        if value.trim().is_empty() {
+            return Err(format!("--env {name}: the value is empty"));
+        }
+        if out.iter().any(|(n, _)| *n == name) {
+            return Err(format!("--env {name} was given twice"));
+        }
+        out.push((name, value.trim().to_owned()));
+    }
+    Ok(out)
+}
+
 /// The one wire form of a 64-hex field, produced by the same `proof-submit`
 /// canonicaliser the host's parser accepts — `ctx` never spells hex itself.
 fn normalize_hex64(s: &str, field: &str) -> Result<String, String> {
@@ -476,6 +525,12 @@ fn topic_list_items(body: &Value) -> Option<&Vec<Value>> {
 
 fn explain_failure(status: u16, message: &str) -> String {
     match status {
+        400 if message.contains("env") => format!(
+            "refused ({message}). Nothing was stored and nothing was rented. \
+             A topic that sets constraints.params.miner_byok wants your own key in the \
+             submit body: pass `--env <NAME>=<value>` (or bare `--env <NAME>` to read your \
+             shell). Your signed submit_nonce is untouched, so you can re-post it."
+        ),
         400 => format!("refused ({message}). Nothing was stored and nothing was rented."),
         401 => format!(
             "unauthorized ({message}). Proof submit requires a hotkey_signature over \
@@ -632,6 +687,113 @@ mod tests {
         let err = resolve_signed(&with_bad_nonce, "dt-no-ib-v0", &"ab".repeat(32), "beat")
             .expect_err("garbage signature");
         assert!(err.contains("hotkey_signature invalid"), "{err}");
+    }
+
+    /// `--env` resolves a value from the flag or from the miner's shell, and
+    /// nothing it refuses ever repeats the value back at them.
+    #[test]
+    fn env_args_take_a_value_or_read_the_shell() {
+        assert!(parse_env_args(&[]).expect("none").is_empty());
+        assert_eq!(
+            parse_env_args(&["MINER_PROVIDED_API_KEY=sk-value".into()]).expect("inline"),
+            vec![("MINER_PROVIDED_API_KEY".to_owned(), "sk-value".to_owned())]
+        );
+        // A value with '=' in it stays whole; only the first '=' splits.
+        assert_eq!(
+            parse_env_args(&["A=b=c".into()]).expect("first split"),
+            vec![("A".to_owned(), "b=c".to_owned())]
+        );
+        let name = format!("CTX_ENV_TEST_{}", std::process::id());
+        let err = parse_env_args(&[name.clone()]).expect_err("not exported");
+        assert!(
+            err.contains(&name) && err.contains("not set in this shell"),
+            "{err}"
+        );
+        // SAFETY-free in this crate: a single-threaded unit test setting its
+        // own process env to prove the bare form reads it.
+        std::env::set_var(&name, " sk-from-shell ");
+        assert_eq!(
+            parse_env_args(&[name.clone()]).expect("from shell"),
+            vec![(name.clone(), "sk-from-shell".to_owned())],
+            "trimmed, so a trailing newline from a here-doc is not the key"
+        );
+        let err = parse_env_args(&[name.clone(), format!("{name}=other")]).expect_err("twice");
+        assert!(err.contains("twice"), "{err}");
+        std::env::remove_var(&name);
+        assert!(parse_env_args(&["=value".into()])
+            .expect_err("no name")
+            .contains("needs a variable name"));
+        for bad in ["A=", "A=   "] {
+            let err = parse_env_args(&[bad.into()]).expect_err(bad);
+            assert!(err.contains("the value is empty"), "{err}");
+        }
+        // A refusal names the variable and never repeats what was passed.
+        let err = parse_env_args(&["A=  ".into()]).expect_err("blank");
+        assert!(!err.contains("sk-"), "{err}");
+    }
+
+    /// The BYOK value goes in `env` on the wire and nowhere near the
+    /// signature: the same key signs the same bytes with or without it.
+    #[test]
+    fn env_is_posted_but_never_signed() {
+        let mut sk = [0x11u8; 32];
+        sk[0] = 0x42;
+        let input = SubmitInput {
+            env: vec![("MINER_PROVIDED_API_KEY".into(), "sk-value".into())],
+            ..signed_input(SubmitKey {
+                hotkey: None,
+                submit_nonce: Some("ab".repeat(32)),
+                ..SubmitKey::default()
+            })
+        };
+        let dir = std::env::temp_dir().join(format!("ctx-proof-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("sk");
+        std::fs::write(&path, hex::encode(sk)).expect("write sk");
+        let with_key = SubmitInput {
+            key: SubmitKey {
+                secret_file: Some(path),
+                submit_nonce: Some("ab".repeat(32)),
+                wallet_hotkey: "default".into(),
+                ..SubmitKey::default()
+            },
+            ..input
+        };
+        let digest = "ab".repeat(32);
+        let signed = resolve_signed(&with_key, "dt-no-ib-v0", &digest, "beat").expect("sign");
+        // The signature verifies against the v1 payload, which has no room
+        // for `env`: the BYOK value is posted beside the signature, not in it.
+        let pk = parse_hotkey_hex(&signed.hotkey).expect("pk");
+        let raw = parse_signature_hex(&signed.signature).expect("sig");
+        let datasets = ["my-mix-v0".to_owned()];
+        verify_submit(
+            &pk,
+            &SubmitFields {
+                hotkey_hex: &signed.hotkey,
+                topic_id: "dt-no-ib-v0",
+                artifact_digest: &digest,
+                declared_flops: 1,
+                claim: "beat",
+                train_content_hashes: &[],
+                train_dataset_ids: &datasets,
+                submit_nonce_hex: &signed.nonce,
+            },
+            &raw,
+        )
+        .expect("the v1 payload verifies with a BYOK value on the body");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A miner who forgot their key gets told how to pass it, and that their
+    /// signed nonce survived.
+    #[test]
+    fn a_missing_byok_explains_the_env_flag() {
+        let msg = explain_failure(400, "env.MINER_PROVIDED_API_KEY is required by this topic");
+        assert!(msg.contains("--env"), "{msg}");
+        assert!(msg.contains("miner_byok"), "{msg}");
+        assert!(msg.contains("submit_nonce is untouched"), "{msg}");
+        let plain = explain_failure(400, "unknown topic");
+        assert!(!plain.contains("--env"), "{plain}");
     }
 
     #[test]

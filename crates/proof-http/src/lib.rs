@@ -47,7 +47,7 @@ use axum::{Json, Router};
 
 use proof_eval::{
     contamination_evidence, custom_ids_ref, eval_after_freeze, force_sim, registered_custom,
-    scoring_readiness, secret_backed_base_url, EvalBackend, EvalError, LiveScorer,
+    scoring_readiness, secret_backed_base_url, EvalBackend, EvalError, LiveScorer, MinerEnv,
 };
 use proof_executor::{require_open_executor, EvalExecutorOffer, ExecutorPlan};
 use proof_score::{
@@ -430,6 +430,14 @@ struct SubmitBody {
     architecture: String,
     #[serde(default)]
     manifest: ArtifactManifest,
+    /// Miner BYOK: `{"<NAME>": "<value>"}` for the variables this topic's
+    /// signed document declares (`constraints.params.miner_byok` /
+    /// `miner_env_allowlist`). Never signed (v1 of the submit payload is
+    /// unchanged), never persisted on the row, never echoed back. A name the
+    /// topic does not declare is a **400** before the signature is checked,
+    /// so a mistake here never burns the single-use `submit_nonce`.
+    #[serde(default)]
+    env: MinerEnv,
 }
 
 /// What a submit — or a drain of one row — answers.
@@ -583,6 +591,15 @@ async fn submit(
     if !topic.is_open_at(st.epoch) {
         return Err(err(StatusCode::BAD_REQUEST, "topic is not open"));
     }
+    // Miner BYOK, held to what the signed topic declares. Checked before the
+    // signature so a body with the wrong variable names is a plain 400 the
+    // miner can fix and re-post: the `submit_nonce` they signed is still
+    // unspent. `env` is not part of the signed payload, so nothing here
+    // weakens the identity check that follows.
+    let miner_env = body
+        .env
+        .accept(&topic.constraints)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
     let submit_nonce = authenticate_submit(&hotkey, &body.topic_id, &artifact, &body)?;
     // A verified request is single-use, whatever happens to it next: a
     // replay must never reach evaluation or a second row.
@@ -646,9 +663,9 @@ async fn submit(
     // host still installing its baseline / harness never rents, boots, or
     // judges for it — and never refuses it either.
     if topic.constraints.defer_scoring() {
-        return queue_deferred(&st, row);
+        return queue_deferred(&st, row, &miner_env);
     }
-    let resp = score_intake(&st, row, &topic).await?;
+    let resp = score_intake(&st, row, &topic, &miner_env).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -660,8 +677,14 @@ async fn submit(
 fn queue_deferred(
     st: &AppState,
     mut row: Submission,
+    miner_env: &MinerEnv,
 ) -> Result<(StatusCode, Json<SubmitResp>), ErrResp> {
     row.detail = Some(DEFERRED_DETAIL.to_owned());
+    // A queued row is scored later, by a drain that has no request body to
+    // read: its BYOK environment waits beside the row, never on it.
+    st.store
+        .stash_miner_env(&row.submission_digest, miner_env)
+        .map_err(|e| store_err(&e))?;
     match st.store.enqueue(row).map_err(|e| store_err(&e))? {
         Enqueued::Inserted(row) => Ok((
             StatusCode::CREATED,
@@ -703,6 +726,7 @@ async fn score_intake(
     st: &AppState,
     row: Submission,
     topic: &TopicDocument,
+    miner_env: &MinerEnv,
 ) -> Result<SubmitResp, ErrResp> {
     // One snapshot of the executor for this request: rotation mid-submit
     // must not score under one offer and stamp another.
@@ -770,6 +794,8 @@ async fn score_intake(
                 field: "contamination_evidence".into(),
             }]
         };
+        // A persisted reject is terminal: the row will never be drained again.
+        let _ = st.store.forget_miner_env(&row.submission_digest);
         return persist_pre_eval_reject(st, executor.as_ref(), row, topic, &failed);
     }
 
@@ -788,6 +814,7 @@ async fn score_intake(
         st.live(),
         st.judge_api_key.as_deref(),
         Some(&sealed),
+        miner_env,
     )
     .await
     .map_err(|e| eval_err(&e))?;
@@ -802,6 +829,8 @@ async fn score_intake(
         &custom_ids_ref(&registered),
     );
     let receipt_json = serde_json::to_string(&eval.receipt).unwrap_or_default();
+    // The run is over: whatever BYOK a `queued` row was holding is spent.
+    let _ = st.store.forget_miner_env(&row.submission_digest);
     persist_scored(
         st,
         executor.as_ref(),
@@ -1155,7 +1184,11 @@ impl AppState {
                 }
             };
             let claim = ClaimGuard::new(self.store.clone(), &row);
-            match score_intake(self, row, &topic).await {
+            let env = self
+                .store
+                .miner_env(&row.submission_digest)
+                .unwrap_or_default();
+            match score_intake(self, row, &topic, &env).await {
                 Ok(resp) => {
                     claim.landed();
                     report.drained.push(resp);
@@ -1303,7 +1336,11 @@ async fn score_queued(
     let row = st.store.claim_queued(&id).map_err(claim_err)?;
     let claim = ClaimGuard::new(st.store.clone(), &row);
     let topic = st.drainable_topic(&row.topic_id)?;
-    let resp = score_intake(&st, row, &topic).await?;
+    let env = st
+        .store
+        .miner_env(&row.submission_digest)
+        .unwrap_or_default();
+    let resp = score_intake(&st, row, &topic, &env).await?;
     claim.landed();
     Ok((StatusCode::OK, Json(resp)))
 }
@@ -1533,6 +1570,8 @@ mod tests {
         reproduced: bool,
         skill: f64,
         hits: AtomicUsize,
+        /// The miner BYOK environment each `score` call was handed.
+        envs: std::sync::Mutex<Vec<MinerEnv>>,
     }
 
     impl StubScorer {
@@ -1541,14 +1580,19 @@ mod tests {
                 reproduced: true,
                 skill: 0.95,
                 hits: AtomicUsize::new(0),
+                envs: std::sync::Mutex::new(Vec::new()),
             }
         }
         fn lose() -> Self {
             Self {
                 reproduced: false,
-                skill: 0.95,
-                hits: AtomicUsize::new(0),
+                ..Self::win()
             }
+        }
+
+        /// What reached the scorer, newest last.
+        fn envs(&self) -> Vec<MinerEnv> {
+            self.envs.lock().expect("envs").clone()
         }
     }
 
@@ -1566,8 +1610,10 @@ mod tests {
             _declared_flops: u64,
             _holdout: &[proof_task::HoldoutRecord],
             _claim: &str,
+            miner_env: &MinerEnv,
         ) -> Result<proof_eval::ProofEvalDocument, EvalError> {
             self.hits.fetch_add(1, Ordering::SeqCst);
+            self.envs.lock().expect("envs").push(miner_env.clone());
             Ok(sim_document(
                 pin,
                 topic,
@@ -2869,6 +2915,7 @@ mod tests {
             declared_flops: u64,
             holdout: &[proof_task::HoldoutRecord],
             claim: &str,
+            miner_env: &MinerEnv,
         ) -> Result<proof_eval::ProofEvalDocument, EvalError> {
             self.ready_for_topic(topic)?;
             if topic.metric.family == MetricFamily::Custom {
@@ -2890,6 +2937,7 @@ mod tests {
                     declared_flops,
                     holdout,
                     claim,
+                    miner_env,
                 )
                 .await?;
             if topic.metric.family == MetricFamily::Custom {

@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+use proof_canon::MinerEnv;
 use proof_score::{MinerTopicRun, ProofVerdict, SealedBaseline};
 use proof_task::{verify_holdout, HoldoutError, HoldoutRecord, TopicDocument, TopicError};
 use serde::{Deserialize, Serialize};
@@ -199,6 +200,11 @@ struct Inner {
     scores: BTreeMap<String, BTreeMap<String, MinerTopicRun>>,
     /// Every `(hotkey, submit_nonce)` a verified submit has presented.
     submit_nonces: BTreeSet<(String, String)>,
+    /// Miner BYOK environments held for `queued` rows, by submission digest.
+    /// Deliberately **not** a [`Submission`] field: rows are serialised to
+    /// every `GET /v1/submissions` answer and a miner's key is not public
+    /// data. See [`MemoryStore::stash_miner_env`].
+    miner_envs: BTreeMap<String, MinerEnv>,
 }
 
 impl Inner {
@@ -327,6 +333,43 @@ impl MemoryStore {
             .lock()?
             .submit_nonces
             .insert((hotkey.to_owned(), nonce.to_owned())))
+    }
+
+    /// Hold the miner BYOK environment a `queued` row needs when its topic
+    /// is drained later, keyed by the row's frozen submission digest.
+    ///
+    /// This is the one place a miner-supplied secret rests on the control
+    /// plane, and it rests **beside** the row rather than inside it: a
+    /// [`Submission`] is serialised to `GET /v1/submissions`, so a key stored
+    /// there would be published. Nothing reads this but the drain
+    /// ([`Self::miner_env`]), and the drain drops it
+    /// ([`Self::forget_miner_env`]) as soon as the row is scored. An empty
+    /// environment is not stored at all.
+    pub fn stash_miner_env(&self, digest: &str, env: &MinerEnv) -> Result<(), StoreError> {
+        if env.is_empty() {
+            return Ok(());
+        }
+        self.lock()?
+            .miner_envs
+            .insert(digest.to_owned(), env.clone());
+        Ok(())
+    }
+
+    /// The stashed environment for a frozen digest (empty when none).
+    pub fn miner_env(&self, digest: &str) -> Result<MinerEnv, StoreError> {
+        Ok(self
+            .lock()?
+            .miner_envs
+            .get(digest)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Drop the stashed environment for a frozen digest. Called once the row
+    /// is scored: a terminal row never needs the key again.
+    pub fn forget_miner_env(&self, digest: &str) -> Result<(), StoreError> {
+        self.lock()?.miner_envs.remove(digest);
+        Ok(())
     }
 
     /// Insert a submission: a scored row in its final state, or a `queued`

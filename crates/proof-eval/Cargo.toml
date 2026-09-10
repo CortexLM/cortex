@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 async-trait = "0.1"
 prism-lium-types = { path = "../prism-lium-types" }
+proof-canon = { path = "../proof-canon" }
 proof-executor = { path = "../proof-executor" }
 proof-score = { path = "../proof-score" }
 proof-store = { path = "../proof-store" }
