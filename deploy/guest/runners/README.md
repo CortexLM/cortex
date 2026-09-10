@@ -50,6 +50,7 @@ happened to be lying around.
 | `PROOF_OUTPUT_DIR`, `PROOF_WORK_DIR` | where to write the answer; scratch on the writable disk |
 | `PROOF_SECRETS_DIR`, `PROOF_SECRET_FILES` | owner key material staged by the KVM host (`PROOF_VM_AGENT_OWNER_KEY_DIR`), by file name. **Read them; never print them** — the agent redacts their values from every log tail and evidence string it sends back, but not from anything you write elsewhere |
 | `PROOF_PARAM_<KEY>` | one per `constraints.params` entry (key upper-cased, `-` → `_`). This is how a topic tells its adaptor which tasks, agent, concurrency, key file, … to use — **the adaptor never hardcodes them**. Two signed names that collide after that mapping (`foo-bar` / `foo_bar`) are refused before anything runs |
+| `PROOF_MINER_ENV_NAMES`, `PROOF_MINER_ENV_DIR` | the **miner's own** keys for this run (paid jobs only), for the variables the signed topic declared in `constraints.params.miner_byok` / `miner_env_allowlist`. Each is exported under its own name and also written to `$PROOF_MINER_ENV_DIR/<NAME>` (0600). Unset when the topic asks for none. Same rule as the owner files: **read them; never print them** — the agent redacts their values from the log tail and evidence it sends back |
 
 `HOME`, `XDG_RUNTIME_DIR`, `PATH`, `LANG` are set for the run-as user;
 nothing else of the agent's environment is inherited. stdout / stderr are
@@ -77,6 +78,18 @@ tasks="$PROOF_PACK_DIR/$tasks_rel"
 if [ -n "${PROOF_PARAM_INFERENCE_KEY_FILE:-}" ]; then
     : "${PROOF_PARAM_INFERENCE_KEY_ENV:?inference_key_env is required with inference_key_file}"
     export "$PROOF_PARAM_INFERENCE_KEY_ENV"="$(tr -d '\n' < "$PROOF_SECRETS_DIR/$PROOF_PARAM_INFERENCE_KEY_FILE")"
+fi
+
+# A topic that makes the *miner* pay for the provider instead (miner_byok).
+# The agent both exports the variable and writes it to a 0600 file named
+# after it; read the file, because that is the form that survives anything
+# the harness does to its own environment. Never echo it, and never fall
+# back to the owner key above — a miner run on the operator's credentials is
+# the one outcome this path exists to prevent.
+if [ -n "${PROOF_PARAM_MINER_BYOK:-}" ]; then
+    byok_file="${PROOF_MINER_ENV_DIR:?miner_byok topic with no miner env staged}/$PROOF_PARAM_MINER_BYOK"
+    [ -r "$byok_file" ] || { echo "the miner did not supply $PROOF_PARAM_MINER_BYOK" >&2; exit 2; }
+    export "$PROOF_PARAM_MINER_BYOK"="$(tr -d '\n' < "$byok_file")"
 fi
 
 # Rootless podman API socket for harnesses that speak to a Docker daemon.

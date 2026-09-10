@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use prism_lium_types::{EvalReceipt, NoScoreGate};
+pub use proof_canon::MinerEnv;
 use proof_executor::{
     executor_plan, require_open_executor, EvalExecutorOffer, ExecutorOfferError, ExecutorPlan,
     HarvestOverrides,
@@ -298,6 +299,10 @@ pub trait LiveScorer: Send + Sync {
     /// digest alone is not enough to retrieve an artefact. `declared_flops`
     /// is the miner's declaration (already `<=` the topic budget at intake):
     /// a scorer that measures usage must fail a run that exceeds it.
+    /// `miner_env` is the miner's own BYOK environment, already held to the
+    /// signed topic's allowlist at intake — a scorer either hands it to the
+    /// guest that runs the miner's code or ignores it, and never substitutes
+    /// the operator's own key for a missing one.
     #[allow(clippy::too_many_arguments)]
     async fn score(
         &self,
@@ -311,6 +316,7 @@ pub trait LiveScorer: Send + Sync {
         declared_flops: u64,
         holdout: &[HoldoutRecord],
         claim: &str,
+        miner_env: &MinerEnv,
     ) -> Result<ProofEvalDocument, EvalError>;
 
     /// Whether this scorer could run right now.
@@ -466,6 +472,7 @@ impl LiveScorer for FamilyMux {
         declared_flops: u64,
         holdout: &[HoldoutRecord],
         claim: &str,
+        miner_env: &MinerEnv,
     ) -> Result<ProofEvalDocument, EvalError> {
         self.route(topic)?
             .score(
@@ -479,6 +486,7 @@ impl LiveScorer for FamilyMux {
                 declared_flops,
                 holdout,
                 claim,
+                miner_env,
             )
             .await
     }
@@ -954,9 +962,12 @@ pub fn sim_win_document(
 
 /// Score only after the submission digest is frozen and a topic is open.
 ///
-/// `artifact_uri` and `declared_flops` travel to the live scorer untouched:
-/// the miner's locator for the bytes behind `artifact_digest` (never trusted
-/// beyond that) and the miner's FLOP declaration the measured run is held to.
+/// `artifact_uri`, `declared_flops`, and `miner_env` travel to the live
+/// scorer untouched: the miner's locator for the bytes behind
+/// `artifact_digest` (never trusted beyond that), the miner's FLOP
+/// declaration the measured run is held to, and the miner's own BYOK
+/// environment the intake already held to the signed topic's allowlist. The
+/// sim backend runs nothing and reads none of them.
 #[allow(clippy::too_many_arguments)]
 pub async fn eval_after_freeze(
     pin: &ProofPin,
@@ -973,6 +984,7 @@ pub async fn eval_after_freeze(
     live: Option<&dyn LiveScorer>,
     judge_api_key: Option<&str>,
     sealed: Option<&SealedBaseline>,
+    miner_env: &MinerEnv,
 ) -> Result<EvalOutcome, EvalError> {
     if frozen_digest.trim().is_empty() || holdout.is_empty() {
         return Err(EvalError::HoldoutSealed);
@@ -1039,6 +1051,7 @@ pub async fn eval_after_freeze(
                     declared_flops,
                     holdout,
                     claim,
+                    miner_env,
                 )
                 .await?;
             plan = Some(resolved);
@@ -1179,6 +1192,7 @@ mod tests {
             _declared_flops: u64,
             _holdout: &[HoldoutRecord],
             _claim: &str,
+            _miner_env: &MinerEnv,
         ) -> Result<ProofEvalDocument, EvalError> {
             Ok(sim_document(
                 pin,
@@ -1216,6 +1230,7 @@ mod tests {
             None,
             None,
             None,
+            &MinerEnv::new(),
         )
         .await
         .expect_err("no digest");
@@ -1239,6 +1254,7 @@ mod tests {
             None,
             None,
             None,
+            &MinerEnv::new(),
         )
         .await
         .expect_err("no harvest");
@@ -1268,6 +1284,7 @@ mod tests {
             Some(&Harvest { reproduced: true }),
             Some("test-judge-key"),
             None,
+            &MinerEnv::new(),
         )
         .await
         .expect("live");
@@ -1475,6 +1492,7 @@ mod tests {
             Some(&Harvest { reproduced: true }),
             Some("test-judge-key"),
             None,
+            &MinerEnv::new(),
         )
         .await
         .expect_err("no executor");
@@ -1499,6 +1517,7 @@ mod tests {
             Some(&Harvest { reproduced: true }),
             Some("test-judge-key"),
             None,
+            &MinerEnv::new(),
         )
         .await
         .expect_err("topic pins another executor");
@@ -1556,6 +1575,7 @@ mod tests {
             _declared_flops: u64,
             _holdout: &[HoldoutRecord],
             _claim: &str,
+            _miner_env: &MinerEnv,
         ) -> Result<ProofEvalDocument, EvalError> {
             self.ready_for_topic(topic)?;
             Err(EvalError::Backend("would run the registered runner".into()))
@@ -1677,6 +1697,7 @@ mod tests {
                 1,
                 &recs,
                 "c",
+                &MinerEnv::new(),
             )
             .await
             .expect_err("unregistered family must not sim or harvest");
@@ -1696,6 +1717,7 @@ mod tests {
     /// `LiveHarvestUnavailable` — never the custom scorer, never a sim, no
     /// plan to rent under.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn custom_only_mux_scores_custom_and_refuses_the_harvest_families() {
         let mux = FamilyMux::custom_only(Arc::new(OneRunner));
         mux.ready().expect("no host-wide blocker without a harvest");
@@ -1731,7 +1753,19 @@ mod tests {
             let plan = executor_plan(&p, Some(&exec), &t, &HarvestOverrides::default())
                 .expect("plan resolved outside the mux");
             let err = mux
-                .score(&p, &t, &offer(), &plan, "d", "a", None, 1, &recs, "c")
+                .score(
+                    &p,
+                    &t,
+                    &offer(),
+                    &plan,
+                    "d",
+                    "a",
+                    None,
+                    1,
+                    &recs,
+                    "c",
+                    &MinerEnv::new(),
+                )
                 .await
                 .expect_err("no harvest to score on");
             assert!(matches!(err, EvalError::LiveHarvestUnavailable), "{err}");
@@ -1766,6 +1800,7 @@ mod tests {
             Some(&mux),
             Some("test-judge-key"),
             None,
+            &MinerEnv::new(),
         )
         .await
         .expect_err("nll needs the harvest");
@@ -1785,6 +1820,7 @@ mod tests {
             Some(&mux),
             Some("test-judge-key"),
             None,
+            &MinerEnv::new(),
         )
         .await
         .expect_err("the stub runner refuses after routing");
@@ -1907,6 +1943,7 @@ mod tests {
             None,
             None,
             Some(&sealed),
+            &MinerEnv::new(),
         )
         .await
         .expect("sim");
@@ -1943,6 +1980,7 @@ mod tests {
             Some(&Harvest { reproduced: true }),
             Some("test-judge-key"),
             Some(&tight_sealed()),
+            &MinerEnv::new(),
         )
         .await
         .expect("live");

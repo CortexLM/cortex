@@ -15,8 +15,10 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use proof_canon::MinerEnv;
 use proof_score::{MinerTopicRun, ProofVerdict, SealedBaseline};
 use proof_task::{verify_holdout, HoldoutError, HoldoutRecord, TopicDocument, TopicError};
 use serde::{Deserialize, Serialize};
@@ -129,6 +131,10 @@ pub enum StoreError {
     /// Unknown submission.
     #[error("unknown submission {0}")]
     NotFound(String),
+    /// The miner BYOK vault could not hold (or place) key material. Never
+    /// carries a value — only what the host could not do.
+    #[error("miner byok vault: {0}")]
+    Vault(String),
     /// Unknown / unpublished topic.
     #[error("unknown topic {0}")]
     UnknownTopic(String),
@@ -175,9 +181,31 @@ impl Enqueued {
 }
 
 /// In-memory store (v0).
+///
+/// Rows and topics live in the process. Miner BYOK material does not, on a
+/// host that configured one: [`MemoryStore::with_miner_byok_vault`] puts it
+/// in `0600` files instead, so a deferred topic's queue can still be drained
+/// after a restart.
 #[derive(Clone, Default)]
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
+    byok: MinerEnvVault,
+}
+
+impl MemoryStore {
+    /// This store, keeping miner BYOK material in `vault` instead of in the
+    /// process. The rest of the state is unchanged.
+    #[must_use]
+    pub fn with_miner_byok_vault(mut self, vault: MinerEnvVault) -> Self {
+        self.byok = vault;
+        self
+    }
+
+    /// The BYOK vault in force (in-process when nothing is configured).
+    #[must_use]
+    pub fn miner_byok_vault(&self) -> &MinerEnvVault {
+        &self.byok
+    }
 }
 
 #[derive(Default)]
@@ -199,6 +227,155 @@ struct Inner {
     scores: BTreeMap<String, BTreeMap<String, MinerTopicRun>>,
     /// Every `(hotkey, submit_nonce)` a verified submit has presented.
     submit_nonces: BTreeSet<(String, String)>,
+    /// Miner BYOK environments, by frozen submission digest, on a host that
+    /// configured no vault directory (tests and local runs). Deliberately
+    /// **not** a [`Submission`] field: rows are serialised to every
+    /// `GET /v1/submissions` answer and a miner's key is not public data.
+    /// A host that sets [`MINER_BYOK_DIR_ENV`] keeps them in
+    /// [`MinerEnvVault`] files instead. See [`MemoryStore::stash_miner_env`].
+    miner_envs: BTreeMap<String, MinerEnv>,
+}
+
+/// Env var naming the directory the control plane keeps miner BYOK material
+/// in between intake and the paid run. Operator state, never git.
+pub const MINER_BYOK_DIR_ENV: &str = "PROOF_MINER_BYOK_DIR";
+
+/// Default vault directory: a runtime path, so a reboot does not leave a
+/// miner's key on disk. Mirrors the guest's own `/run/proof/secrets`.
+pub const DEFAULT_MINER_BYOK_DIR: &str = "/run/proof/miner-byok";
+
+/// Where a miner's BYOK material rests between the submit that carried it
+/// and the paid run that spends it.
+///
+/// One directory per frozen submission digest, `0700`, holding one `0600`
+/// file per variable **named after the variable** — the same shape the guest
+/// stages under `$PROOF_MINER_ENV_DIR`, so "the file the key is read from"
+/// means the same thing on both sides of the VM boundary.
+///
+/// This exists because holding the key in the HTTP process is not enough: a
+/// topic that defers scoring accepts submissions now and evaluates them
+/// after an operator drain, and a control plane that restarted in between
+/// would otherwise reach the paid run with no key at all. Values are never
+/// logged, never part of a [`Submission`], and the directory is removed the
+/// moment the row is terminal.
+#[derive(Debug, Clone, Default)]
+pub struct MinerEnvVault {
+    root: Option<PathBuf>,
+}
+
+impl MinerEnvVault {
+    /// A vault rooted at `root`. Nothing is created until the first write.
+    #[must_use]
+    pub fn at(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: Some(root.into()),
+        }
+    }
+
+    /// The vault [`MINER_BYOK_DIR_ENV`] selects, defaulting to
+    /// [`DEFAULT_MINER_BYOK_DIR`]. An explicitly empty value means "keep it
+    /// in memory" — the CI / local-run stance.
+    #[must_use]
+    pub fn from_env() -> Self {
+        match std::env::var(MINER_BYOK_DIR_ENV) {
+            Ok(dir) if dir.trim().is_empty() => Self::default(),
+            Ok(dir) => Self::at(dir.trim()),
+            Err(_) => Self::at(DEFAULT_MINER_BYOK_DIR),
+        }
+    }
+
+    /// Whether this vault writes files (rather than keeping material in the
+    /// process). Reported at boot; never a gate on its own.
+    #[must_use]
+    pub fn is_file_backed(&self) -> bool {
+        self.root.is_some()
+    }
+
+    /// The vault root, when file-backed.
+    #[must_use]
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    /// `<root>/<digest>` for a frozen digest, refusing anything that is not
+    /// a plain 64-hex name so a crafted digest can never escape the root.
+    fn dir_for(&self, digest: &str) -> Option<PathBuf> {
+        let root = self.root.as_ref()?;
+        let d = digest.trim();
+        let plain = d.len() == 64 && d.bytes().all(|b| b.is_ascii_hexdigit());
+        plain.then(|| root.join(d.to_ascii_lowercase()))
+    }
+
+    /// Persist `env` for `digest`: root and per-submission directory `0700`,
+    /// one `0600` file per variable, written to a temp name and renamed so a
+    /// reader never sees a half-written key. Replaces any earlier copy.
+    fn put(&self, digest: &str, env: &MinerEnv) -> Result<(), StoreError> {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(dir) = self.dir_for(digest) else {
+            return Err(StoreError::Vault(
+                "submission digest is not 64 hex; refusing to place a key under it".into(),
+            ));
+        };
+        let vault = |e: std::io::Error, what: &str| StoreError::Vault(format!("{what}: {e}"));
+        let private = std::fs::Permissions::from_mode(0o700);
+        if let Some(root) = &self.root {
+            std::fs::create_dir_all(root).map_err(|e| vault(e, "create vault root"))?;
+            std::fs::set_permissions(root, private.clone())
+                .map_err(|e| vault(e, "lock vault root"))?;
+        }
+        // Replace wholesale: a re-submit must not leave a stale variable the
+        // topic no longer declares sitting beside the new ones.
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| vault(e, "replace vault entry"))?;
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| vault(e, "create vault entry"))?;
+        std::fs::set_permissions(&dir, private).map_err(|e| vault(e, "lock vault entry"))?;
+        for (name, value) in env.iter() {
+            // `MinerEnv::accept` already held the name to the signed topic's
+            // allowlist, which admits no separator; this is the belt.
+            if !proof_canon::is_env_name(name) {
+                return Err(StoreError::Vault(format!(
+                    "{name:?} is not a variable name"
+                )));
+            }
+            let tmp = dir.join(format!(".{name}.tmp"));
+            std::fs::write(&tmp, value.as_bytes()).map_err(|e| vault(e, "write key"))?;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| vault(e, "lock key"))?;
+            std::fs::rename(&tmp, dir.join(name)).map_err(|e| vault(e, "place key"))?;
+        }
+        Ok(())
+    }
+
+    /// What was persisted for `digest` (empty when nothing was, or when the
+    /// entry is unreadable — the caller's own BYOK gate turns that into the
+    /// refusal, never a run without the key).
+    fn get(&self, digest: &str) -> MinerEnv {
+        let mut env = MinerEnv::new();
+        let Some(dir) = self.dir_for(digest) else {
+            return env;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return env;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !proof_canon::is_env_name(&name) || !entry.path().is_file() {
+                continue;
+            }
+            if let Ok(bytes) = std::fs::read(entry.path()) {
+                env.insert(&name, String::from_utf8_lossy(&bytes).trim());
+            }
+        }
+        env
+    }
+
+    /// Remove everything held for `digest`.
+    fn remove(&self, digest: &str) {
+        if let Some(dir) = self.dir_for(digest) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }
 
 impl Inner {
@@ -327,6 +504,59 @@ impl MemoryStore {
             .lock()?
             .submit_nonces
             .insert((hotkey.to_owned(), nonce.to_owned())))
+    }
+
+    /// Hold the miner BYOK environment the paid run needs, keyed by the row's
+    /// frozen submission digest.
+    ///
+    /// This is the one place a miner-supplied secret rests on the control
+    /// plane, and it rests **beside** the row rather than inside it: a
+    /// [`Submission`] is serialised to `GET /v1/submissions`, so a key stored
+    /// there would be published. On a host with a vault directory it is a
+    /// `0600` file per variable under a `0700` directory
+    /// ([`MinerEnvVault`]) — not a value in this process, so a topic that
+    /// defers scoring can still be drained after a restart. Nothing reads it
+    /// but the scoring path ([`Self::miner_env`]), which drops it
+    /// ([`Self::forget_miner_env`]) as soon as the row is terminal. An empty
+    /// environment is not stored at all.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Vault`] when a configured vault cannot hold the key. The
+    /// caller must refuse the submission rather than accept a key it did not
+    /// keep.
+    pub fn stash_miner_env(&self, digest: &str, env: &MinerEnv) -> Result<(), StoreError> {
+        if env.is_empty() {
+            return Ok(());
+        }
+        if self.byok.is_file_backed() {
+            return self.byok.put(digest, env);
+        }
+        self.lock()?
+            .miner_envs
+            .insert(digest.to_owned(), env.clone());
+        Ok(())
+    }
+
+    /// The stashed environment for a frozen digest (empty when none).
+    pub fn miner_env(&self, digest: &str) -> Result<MinerEnv, StoreError> {
+        if self.byok.is_file_backed() {
+            return Ok(self.byok.get(digest));
+        }
+        Ok(self
+            .lock()?
+            .miner_envs
+            .get(digest)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Drop the stashed environment for a frozen digest. Called once the row
+    /// is scored: a terminal row never needs the key again.
+    pub fn forget_miner_env(&self, digest: &str) -> Result<(), StoreError> {
+        self.byok.remove(digest);
+        self.lock()?.miner_envs.remove(digest);
+        Ok(())
     }
 
     /// Insert a submission: a scored row in its final state, or a `queued`
@@ -850,5 +1080,96 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_string(&state).expect("json"), wire);
         }
+    }
+    /// The vault is where a miner's key rests between the submit that
+    /// carried it and the paid run that spends it: `0700` directory per
+    /// frozen digest, `0600` file per variable named after the variable —
+    /// the same shape the guest stages, so "read the key from its file"
+    /// means one thing on both sides.
+    #[test]
+    fn the_byok_vault_keeps_one_private_file_per_variable() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("proof-byok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let digest = "ab".repeat(32);
+        let store = MemoryStore::new().with_miner_byok_vault(MinerEnvVault::at(&root));
+        assert!(store.miner_byok_vault().is_file_backed());
+
+        let mut env = MinerEnv::new();
+        env.insert("MINER_PROVIDED_API_KEY", "miner-supplied-value");
+        env.insert("MINER_PROVIDED_BASE_URL", "https://example.invalid");
+        store.stash_miner_env(&digest, &env).expect("stashed");
+
+        let dir = root.join(&digest);
+        let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode(&root), 0o700, "the vault root is private");
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("MINER_PROVIDED_API_KEY")), 0o600);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("MINER_PROVIDED_API_KEY")).expect("file"),
+            "miner-supplied-value",
+            "verbatim: the adaptor exports exactly these bytes"
+        );
+        assert_eq!(store.miner_env(&digest).expect("read back"), env);
+
+        // A re-submit replaces the entry rather than layering on it, so a
+        // variable the topic stopped declaring cannot linger.
+        let mut narrower = MinerEnv::new();
+        narrower.insert("MINER_PROVIDED_API_KEY", "rotated-value");
+        store.stash_miner_env(&digest, &narrower).expect("replaced");
+        assert_eq!(store.miner_env(&digest).expect("read back"), narrower);
+        assert!(!dir.join("MINER_PROVIDED_BASE_URL").exists());
+
+        // Terminal rows keep nothing.
+        store.forget_miner_env(&digest).expect("forgotten");
+        assert!(!dir.exists(), "the whole entry is gone");
+        assert!(store.miner_env(&digest).expect("empty").is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Nothing a caller passes can place a key outside the vault root, and a
+    /// host that cannot hold a key says so instead of silently dropping it.
+    #[test]
+    fn the_vault_refuses_anything_that_is_not_a_frozen_digest() {
+        let root = std::env::temp_dir().join(format!("proof-byok-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = MemoryStore::new().with_miner_byok_vault(MinerEnvVault::at(&root));
+        let mut env = MinerEnv::new();
+        env.insert("MINER_PROVIDED_API_KEY", "miner-supplied-value");
+        for bad in ["../escape", "not-hex", "", &"ab".repeat(33), "/etc/passwd"] {
+            let err = store.stash_miner_env(bad, &env).expect_err(bad);
+            assert!(matches!(err, StoreError::Vault(_)), "{bad}: {err}");
+            assert!(
+                !err.to_string().contains("miner-supplied-value"),
+                "a vault error never quotes a key: {err}"
+            );
+            assert!(store.miner_env(bad).expect("nothing").is_empty());
+        }
+        assert!(!root.join("..").join("escape").exists());
+        // An empty environment is not an entry.
+        let digest = "cd".repeat(32);
+        store
+            .stash_miner_env(&digest, &MinerEnv::new())
+            .expect("nothing to hold");
+        assert!(!root.join(&digest).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no vault configured the material stays in the process — the CI /
+    /// local stance — and the boot-time selection is explicit either way.
+    #[test]
+    fn an_unconfigured_vault_keeps_material_in_process() {
+        let store = MemoryStore::new();
+        assert!(!store.miner_byok_vault().is_file_backed());
+        assert!(store.miner_byok_vault().root().is_none());
+        let digest = "ef".repeat(32);
+        let mut env = MinerEnv::new();
+        env.insert("MINER_PROVIDED_API_KEY", "miner-supplied-value");
+        store.stash_miner_env(&digest, &env).expect("in process");
+        assert_eq!(store.miner_env(&digest).expect("read back"), env);
+        store.forget_miner_env(&digest).expect("forgotten");
+        assert!(store.miner_env(&digest).expect("gone").is_empty());
+        assert_eq!(MINER_BYOK_DIR_ENV, "PROOF_MINER_BYOK_DIR");
+        assert!(DEFAULT_MINER_BYOK_DIR.starts_with("/run/"), "runtime path");
     }
 }

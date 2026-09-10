@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use proof_canon::is_custom_id;
+use proof_canon::{is_custom_id, MinerEnv};
 use proof_task::{
     Constraints, InferenceOffer, MetricDirection, MetricFamily, ProofPin, TopicDocument,
 };
@@ -88,6 +88,18 @@ pub struct CustomRunRequest {
     pub declared_flops: u64,
     /// Topic constraints (sandbox flag, model pin, opaque slice / params).
     pub constraints: Constraints,
+    /// Miner BYOK environment: the variables this topic's signed document
+    /// declares (`miner_byok` / `miner_env_allowlist`) carrying the values
+    /// the miner posted with the submission. Empty unless the topic declares
+    /// one — and always empty for a baseline, which is the operator's run.
+    ///
+    /// This is the only secret a run request carries, it belongs to the
+    /// miner, and it travels one way: control plane → the guest that runs
+    /// this submission, which exports it to the miner's own process. Owner
+    /// key material never travels here — the KVM host stages that from its
+    /// own disk and never into a miner guest.
+    #[serde(default, skip_serializing_if = "MinerEnv::is_empty")]
+    pub miner_env: MinerEnv,
     /// Rule version the checklist must tick.
     pub rules_version: u32,
     /// Digest of that rule set.
@@ -174,6 +186,7 @@ impl CustomRunRequest {
             flops_budget: topic.flops_budget,
             declared_flops,
             constraints: topic.constraints.clone(),
+            miner_env: MinerEnv::new(),
             rules_version: rules.version,
             rules_digest: rules.digest(),
             seed: topic.baseline.seed,
@@ -207,6 +220,26 @@ impl CustomRunRequest {
             self.executor_commitment = Some(c.to_owned());
         }
         self
+    }
+
+    /// Bind the miner's own BYOK environment to this run.
+    ///
+    /// The caller has already held `env` to the signed topic's allowlist
+    /// ([`proof_canon::MinerEnv::accept`]); this only carries it. A baseline
+    /// keeps the default (empty): the operator's reference run is never paid
+    /// for with a miner's key.
+    #[must_use]
+    pub fn with_miner_env(mut self, env: MinerEnv) -> Self {
+        self.miner_env = env;
+        self
+    }
+
+    /// Whether the signed topic also forwards the miner env into the sister
+    /// guest that runs the miner's entrypoint
+    /// ([`proof_canon::PARAM_INJECT_MINER_ENV_SISTER`]).
+    #[must_use]
+    pub fn miner_env_in_sister(&self) -> bool {
+        self.constraints.inject_miner_env_sister()
     }
 }
 

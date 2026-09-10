@@ -1035,6 +1035,52 @@ mod tests {
         );
     }
 
+    /// A run request carries exactly one secret — the miner's own BYOK, and
+    /// only when the topic asked for it. It is absent from the wire until
+    /// then, its `Debug` never prints a value, and the operator's judge offer
+    /// still travels without a key or an origin.
+    #[test]
+    fn the_only_secret_a_job_carries_is_the_miners_own() {
+        let plain = request();
+        assert!(plain.miner_env.is_empty());
+        let json = serde_json::to_string(&plain).expect("json");
+        assert!(
+            !json.contains("miner_env"),
+            "absent on the wire until a topic asks: {json}"
+        );
+
+        let mut env = crate::MinerEnv::new();
+        env.insert("MINER_PROVIDED_API_KEY", "miner-supplied-value");
+        let byok = request().with_miner_env(env);
+        let json = serde_json::to_string(&byok).expect("json");
+        assert!(json.contains("MINER_PROVIDED_API_KEY"), "{json}");
+        assert!(json.contains("miner-supplied-value"), "{json}");
+        for forbidden in ["/run/base", "api_key", "127.0.0.1", "base_url"] {
+            assert!(!json.contains(forbidden), "job leaked {forbidden}: {json}");
+        }
+        let back: CustomRunRequest = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back, byok);
+        // Formatting a job never prints the value, however deeply nested.
+        let job = VmJob::Evaluate {
+            request: byok.clone(),
+            checklist_digest: "c".into(),
+            rules_version: 1,
+        };
+        let printed = format!("{job:?}");
+        assert!(!printed.contains("miner-supplied-value"), "{printed}");
+        assert!(printed.contains("MINER_PROVIDED_API_KEY"), "{printed}");
+        assert!(printed.contains("[REDACTED]"), "{printed}");
+
+        // The sister forwarding flag is the topic's, and it is off by default.
+        assert!(!byok.miner_env_in_sister());
+        let mut forwards = byok;
+        forwards.constraints.params.insert(
+            crate::PARAM_INJECT_MINER_ENV_SISTER.to_owned(),
+            "true".to_owned(),
+        );
+        assert!(forwards.miner_env_in_sister());
+    }
+
     #[test]
     fn env_names_are_names_only() {
         assert_eq!(VM_ORCHESTRATOR_URL_ENV, "PROOF_VM_ORCHESTRATOR_URL");

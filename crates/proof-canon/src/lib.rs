@@ -13,6 +13,7 @@
 #![allow(clippy::doc_markdown, clippy::must_use_candidate)]
 
 mod canonical;
+mod miner_env;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -20,6 +21,11 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 
 pub use canonical::canonical_json;
+pub use miner_env::{
+    is_env_name, MinerEnv, MinerEnvError, MAX_ENV_NAME_LEN, MAX_MINER_ENV_VALUE_LEN,
+    MAX_MINER_ENV_VARS, PARAM_INJECT_MINER_ENV_SISTER, PARAM_MINER_BYOK, PARAM_MINER_ENV_ALLOWLIST,
+    RESERVED_ENV_NAMES, RESERVED_ENV_PREFIX,
+};
 
 /// Most anti-cheat rules one topic may carry.
 pub const MAX_CHECKLIST_RULES: usize = 64;
@@ -122,6 +128,7 @@ impl Constraints {
         {
             return bad("params.defer_scoring", "\"true\" or \"false\"");
         }
+        self.validate_miner_env()?;
         Ok(())
     }
 

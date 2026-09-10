@@ -193,6 +193,41 @@ pub struct SisterRequest {
     pub seed: u64,
     /// Opaque topic params (`constraints.params`), exported to the run.
     pub params: BTreeMap<String, String>,
+    /// Miner BYOK environment forwarded into the sister, exported verbatim
+    /// under each name. Filled only when the signed topic sets
+    /// `inject_miner_env_sister`; empty otherwise, and the host never adds
+    /// one of its own — the operator's key material is staged into the RLM
+    /// guest at boot and never reaches a miner guest.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+impl SisterRequest {
+    /// Refuse a forwarded environment that is not the miner's to set.
+    ///
+    /// The RLM guest composes this request, so the host checks it rather
+    /// than trusting it: every name must be a miner environment variable
+    /// ([`proof_rlm::MinerEnv`]'s shape — upper snake case, never `PROOF_…`,
+    /// never one the guest contract already owns) and carry a value. A
+    /// compromised RLM image therefore cannot use this field to rewrite the
+    /// sister's `PATH` or shadow a contract variable.
+    ///
+    /// # Errors
+    ///
+    /// The offending name, without its value.
+    pub fn check_env(&self) -> Result<(), String> {
+        for (name, value) in &self.env {
+            if !proof_rlm::is_env_name(name) {
+                return Err(format!(
+                    "sister env {name:?} is not a miner environment variable"
+                ));
+            }
+            if value.trim().is_empty() {
+                return Err(format!("sister env {name:?} carries no value"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Host → RLM guest on [`SISTER_PORT`]: the answer to a [`SisterRequest`].
@@ -255,6 +290,10 @@ pub enum HostToMiner {
         seed: u64,
         /// Opaque params exported to the run's environment.
         params: BTreeMap<String, String>,
+        /// Miner BYOK environment, relayed verbatim from
+        /// [`SisterRequest::env`] after the host checked its names.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
     },
 }
 
@@ -415,13 +454,40 @@ mod tests {
             declared_flops: req.declared_flops,
             seed: req.seed,
             params: req.constraints.params.clone(),
+            env: BTreeMap::new(),
         };
         let json = serde_json::to_string(&sister).expect("json");
         for forbidden in ["/run/base", "api_key", "127.0.0.1", "base_url"] {
             assert!(!json.contains(forbidden), "{json}");
         }
+        assert!(
+            !json.contains("\"env\""),
+            "a topic that forwards nothing carries no env field: {json}"
+        );
+        sister.check_env().expect("no env is fine");
         let back: SisterRequest = serde_json::from_str(&json).expect("round trip");
         assert_eq!(back, sister);
+
+        // What the RLM guest may forward, and what the host refuses.
+        let mut byok = sister.clone();
+        byok.env
+            .insert("MINER_PROVIDED_API_KEY".into(), "sk-value".into());
+        byok.check_env().expect("a miner variable is forwardable");
+        for (name, value) in [
+            ("PATH", "/evil/bin"),
+            ("PROOF_SECRETS_DIR", "/tmp/evil"),
+            ("lower_case", "x"),
+            ("MINER_PROVIDED_API_KEY", "   "),
+        ] {
+            let mut bad = sister.clone();
+            bad.env.insert(name.into(), value.into());
+            let err = bad.check_env().expect_err("refused");
+            assert!(err.contains(name), "{err}");
+            assert!(
+                !err.contains(value.trim()) || value.trim().is_empty(),
+                "{err}"
+            );
+        }
         let done = MinerToHost::Done {
             exit_code: Some(0),
             timed_out: false,

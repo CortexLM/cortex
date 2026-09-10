@@ -155,18 +155,44 @@ So the inference your run does is billed to **your** OpenRouter account, and the
 operator's own key material is never staged into your guest. `reject_if` on this
 topic names a missing BYOK key explicitly.
 
-Two things to be clear about, because guessing here costs money:
+You send the key in the submit body's `env` map, keyed by the variable the
+topic named:
 
-- **`X-Lium-Api-Key` is not this key, and is not identity.** It is the Lium
-  header from [proof.md](./proof.md), used by the Lium harvest families. It
-  never carries a model-provider key and it never authenticates you.
-- **The submit body has no field for a provider key.** `POST /v1/submissions`
-  takes the fields in § 5 and nothing else; there is no header or parameter on
-  the public API that hands the gateway an OpenRouter key. The delivery path is
-  defined by the topic and the operator's guest image, not by the submit API.
-  Read `constraints.params` on the live topic and confirm the arrangement with
-  the operator **before** you spend — do not invent a channel and do not paste a
-  key into a field that is signed and echoed back.
+```json
+{ "env": { "OPENROUTER_API_KEY": "sk-or-…" } }
+```
+
+With `ctx`, bare `--env OPENROUTER_API_KEY` reads it from your shell so it never
+lands in your shell history or in `ps`; `--env OPENROUTER_API_KEY=sk-or-…`
+passes it inline:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-…
+ctx proof submit … --env OPENROUTER_API_KEY
+```
+
+What the host does with it:
+
+- **Only what the topic declared.** `tbench` names `OPENROUTER_API_KEY` and
+  nothing else, so any other variable is **400**. Nothing is silently dropped.
+- **Omitting it is 400, before you spend.** The refusal names the variable, and
+  because `env` is **not** part of `base-proof-submit-v1`, it is checked before
+  your signature — your `submit_nonce` is untouched and you can re-post the
+  same signed body with the flag added.
+- **It is not echoed back.** The value never appears on your row, in
+  `GET /v1/submissions`, or in `/v1/status`, and it is blanked to `[REDACTED]`
+  in any run log or evidence your own run prints it into.
+- **It is kept in a private file, not a process value**, from the moment it is
+  accepted until your row is terminal — so a topic that queues your row today
+  still has your key when the operator drains it. If the host loses it before
+  the run, your row stays `queued` and the drain answers **503**; it never
+  scores your work on the operator's account.
+
+One thing to be clear about, because guessing here costs money:
+**`X-Lium-Api-Key` is not this key, and is not identity.** It is the Lium
+header from [proof.md](./proof.md), used by the Lium harvest families for
+**compute**. It never carries a model-provider key and it never authenticates
+you. `env` pays for inference; `X-Lium-Api-Key` pays for machines.
 
 Never commit an OpenRouter key, and never put one in your claim, your manifest,
 or a repository you publish as `artifact_uri`.
@@ -192,6 +218,7 @@ That prints `miner_hotkey`, `hotkey_signature`, `submit_nonce`, the exact
 Then submit:
 
 ```bash
+export OPENROUTER_API_KEY=sk-or-…
 ctx proof submit \
   --secret-file /path/to/hotkey.sk \
   --topic-id tbench \
@@ -199,8 +226,13 @@ ctx proof submit \
   --artifact-uri https://example.org/recipe.tar \
   --claim "raised first-15 success_rate over the sealed baseline by 0.08" \
   --declared-flops 1500000000000000000 \
-  --train-dataset my-harness-v0
+  --train-dataset my-harness-v0 \
+  --env OPENROUTER_API_KEY
 ```
+
+`--env` is not part of `ctx proof sign`: the key is posted beside the
+signature, never inside it, so the signed bytes are the same with or without
+it.
 
 Pass **exactly one** signer: `--secret-file` (a 32-byte mini-secret, never a
 mnemonic), `--wallet-name` (a Bittensor wallet), or an offline `--signature`
@@ -220,6 +252,7 @@ Fields the host reads on `POST /challenge/proof/v1/submissions`:
 | `claim` | yes | One English sentence of what improved. Signed |
 | `declared_flops` | yes | `<= 2e18`. Signed, and enforced against the guest's measurement |
 | `manifest.train_content_hashes` / `manifest.train_dataset_ids` | yes | Declare at least one. Signed |
+| `env` | **yes** | `{"OPENROUTER_API_KEY": "sk-or-…"}` — the topic's `miner_byok` variable (§ 4). **Not** signed, never echoed back. Missing → **400** without spending your nonce |
 
 The signature covers the hotkey, `topic_id`, `artifact_digest`,
 `declared_flops`, `claim`, the canonical manifest, and `submit_nonce` — in that

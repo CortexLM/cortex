@@ -11,7 +11,7 @@ use proof_vm_proto::tar::verify_artifact;
 const MAX_NAME_LEN: usize = 128;
 
 /// Smallest secret worth redacting (shorter strings would blank ordinary text).
-const MIN_SECRET_LEN: usize = 8;
+pub const MIN_SECRET_LEN: usize = 8;
 
 /// One staged experiment pack.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +75,40 @@ pub fn stage_secrets(
         std::fs::rename(&tmp, dir.join(name)).map_err(|e| format!("place secret {name}: {e}"))?;
     }
     Ok(files.len())
+}
+
+/// Subdirectory of the guest secrets root holding the **miner's** own BYOK
+/// values, one file per variable.
+///
+/// Kept apart from the owner key material the host stages beside it: these
+/// belong to the miner whose submission is running, they arrive with the job
+/// rather than at boot, and they are not listed in `PROOF_SECRET_FILES`. An
+/// adaptor that would rather read a file than an environment variable finds
+/// them at `$PROOF_MINER_ENV_DIR/<NAME>`.
+pub const MINER_ENV_SUBDIR: &str = "miner";
+
+/// Write one file per miner BYOK variable under
+/// `<secrets_dir>/<MINER_ENV_SUBDIR>/`, 0700 dir and 0600 files owned by the
+/// user the adaptor runs as. Returns the directory.
+///
+/// The names have already been held to the signed topic's allowlist by the
+/// control plane and re-checked by the caller; `safe_name` refuses anything
+/// that is not a plain file name whatever happens upstream.
+pub fn stage_miner_env(
+    secrets_dir: &Path,
+    vars: &[(String, String)],
+    owner: Option<(u32, u32)>,
+) -> Result<PathBuf, String> {
+    // Create / lock down the parent first: on a VM where the host staged no
+    // owner key material it may not exist yet, and it must not be world-readable.
+    stage_secrets(secrets_dir, &[], owner)?;
+    let dir = secrets_dir.join(MINER_ENV_SUBDIR);
+    let files: Vec<StagedFile> = vars
+        .iter()
+        .map(|(name, value)| StagedFile::new(name, value.as_bytes()))
+        .collect();
+    stage_secrets(&dir, &files, owner)?;
+    Ok(dir)
 }
 
 /// The staged secret values (trimmed, long enough to matter) — what the

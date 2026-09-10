@@ -229,6 +229,14 @@ struct ProofSubmitArgs {
     /// FLOPs spent reproducing the recipe. Must be ≤ the topic budget.
     #[arg(long, value_name = "N")]
     declared_flops: u64,
+    /// Bring-your-own-key variable for topics that ask for one
+    /// (`constraints.params.miner_byok`). Repeatable. `--env NAME=value`
+    /// passes the value; bare `--env NAME` reads it from your shell so the
+    /// key never lands in your history. Sent as the submit body's `env`,
+    /// exported to your own run inside the guest, and never signed, stored
+    /// on the row, or echoed back.
+    #[arg(long = "env", value_name = "NAME[=VALUE]")]
+    env: Vec<String>,
     /// Keep polling until the submission stops moving.
     #[arg(long)]
     wait: bool,
@@ -296,6 +304,7 @@ async fn run_proof(client: &Client, cmd: ProofCmd, json: bool) -> Result<(), Str
                 manifest_file: args.manifest.manifest_file,
                 train_hashes: args.manifest.train_hashes,
                 train_datasets: args.manifest.train_datasets,
+                env: proof::parse_env_args(&args.env)?,
                 wait: args.wait,
                 key: submit_key(args.key),
             };
@@ -311,6 +320,9 @@ async fn run_proof(client: &Client, cmd: ProofCmd, json: bool) -> Result<(), Str
                 manifest_file: args.manifest.manifest_file,
                 train_hashes: args.manifest.train_hashes,
                 train_datasets: args.manifest.train_datasets,
+                // `env` is not part of the signed payload, so a detached
+                // signature is the same with or without a BYOK variable.
+                env: Vec::new(),
                 wait: false,
                 key: submit_key(args.key),
             };

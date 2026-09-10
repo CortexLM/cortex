@@ -320,10 +320,77 @@ a topic in `deferred_topics`, where they answer **201** `queued`.
 | `manifest.train_content_hashes` | yes (array) | Shard hashes you trained on (may be `[]` if you declare dataset ids); bound into the signature |
 | `manifest.train_dataset_ids` | yes (array) | Corpus ids you trained on (may be `[]` if you declare hashes); bound into the signature |
 | `artifact_uri` | custom topics: yes | Locator for the same bytes as `artifact_digest`; optional on `nll` / `throughput` |
+| `env` | topics that ask for a key: yes | `{"<NAME>": "<value>"}` — your own API keys for the variables the signed topic declares. See [Bring your own key](#bring-your-own-key-env). **Not** signed |
 
 An empty `manifest` (both arrays empty / omitted) is **not** a clean
 contamination check. It is `contamination_evidence_missing`: the row is
 **rejected** and **no pod is rented**.
+
+### Bring your own key (`env`)
+
+Some topics run your recipe against a paid third-party API. You pay for that
+call, so you supply the key — the operator's own credentials are never used
+for a miner's run, on any topic.
+
+Which variable a topic wants is in its signed document, under
+`constraints.params`:
+
+| Param | Meaning |
+|-------|---------|
+| `miner_byok` | The variable you **must** send. A submission without it is **400** |
+| `miner_env_allowlist` | Comma-separated variables you **may** send. Optional |
+
+Read them from `ctx proof topics --json` or
+`GET /challenge/proof/v1/proof/topics/<id>` before you submit. A topic that
+declares neither takes no `env` at all, and sending one is **400**. `tbench`
+declares `miner_byok = "OPENROUTER_API_KEY"` — see
+[proof-tbench.md § 4](./proof-tbench.md#4-the-model-key-is-yours-byok).
+
+```bash
+ctx proof submit \
+  --topic-id <open topic id> \
+  --artifact-digest <sha256> \
+  --artifact-uri https://example.org/recipe.tar \
+  --claim "beat the sealed baseline" \
+  --declared-flops 1500000000000000000 \
+  --train-dataset my-mix-v0 \
+  --wallet-name miner --wallet-hotkey default \
+  --env OPENROUTER_API_KEY
+```
+
+Bare `--env OPENROUTER_API_KEY` reads the value from your shell, so the key
+never lands in your shell history or in `ps`. `--env NAME=value` passes it
+inline. The flag is repeatable, and over `curl` it is the body's `env`:
+
+```json
+{ "env": { "OPENROUTER_API_KEY": "sk-or-…" } }
+```
+
+What the host does with it:
+
+- **Allowlist, not filter.** A name the signed topic does not declare is a
+  **400** naming what the topic does accept. Nothing is silently dropped.
+- **Checked before your signature.** `env` is not part of
+  `base-proof-submit-v1`, so a rejected `env` does **not** spend your
+  `submit_nonce`: fix the flag and re-post the same signed body.
+- **One way only.** The value is kept in a private file (mode `0600`) from
+  the moment it is accepted, and handed to the guest that runs *your* code —
+  exported there under the name the topic declared and written to a second
+  private file at `$PROOF_MINER_ENV_DIR/<NAME>`, which is what the harness
+  reads at eval time. It is never written to your submission row, never in
+  `GET /v1/submissions`, never in `/v1/status`, and it is blanked out of any
+  run log or evidence your own run prints it into.
+- **Kept only as long as the run needs it.** On a topic that defers scoring,
+  the key waits for the operator's drain and is deleted as soon as your row
+  is terminal. If the host loses it before the run (a restart on an operator
+  who did not configure durable storage), your row stays `queued` and the
+  submit path answers **503** — it never scores your work on someone else's
+  credentials.
+- **Never a substitute for a bad key.** If your key is rejected by the
+  provider, that is your run failing — the host does not fall back to its own.
+
+`X-Lium-Api-Key` is unchanged and unrelated: that header pays for **compute**
+on the Lium executor. `env` pays for whatever the topic's own harness calls.
 
 ## 3. See status
 
@@ -358,6 +425,10 @@ submission row.
 | **400** `topic is not open` | Draft / closed / outside epoch window | no | no |
 | **400** `declared_flops exceeds the topic budget` | `declared_flops > topic.flops_budget` | no | no |
 | **400** `artifact_uri is required for custom topics` | Custom topic, no locator | no | no |
+| **400** `env.<NAME> is required by this topic` | The topic's `miner_byok` variable is missing from `env`. Your `submit_nonce` is **not** spent — re-post the same signed body with `--env <NAME>` | no | no |
+| **400** `env name <NAME> is not declared by this topic` | A variable the signed topic's `miner_byok` / `miner_env_allowlist` does not list. The message names what it does accept | no | no |
+| **400** `env name <NAME> is not a miner environment variable` | Not `[A-Z][A-Z0-9_]{0,63}`, or a name the guest owns (`PROOF_…`, `PATH`, `HOME`, `LANG`, `XDG_RUNTIME_DIR`) | no | no |
+| **400** `env.<NAME> is empty` | The value is blank. Check the variable is exported in the shell you ran `ctx` from | no | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not exactly 64 lowercase hex (`0x`, uppercase, or whitespace) — the host verifies what you post and never normalises a hex field | no | no |
 | **401** `hotkey_signature required` | Missing / empty `hotkey_signature` | no | no |
 | **401** `hotkey_signature invalid` | Not exactly 128 lowercase hex, or does not verify under `miner_hotkey` for `base-proof-submit-v1` — including a `claim`, `declared_flops`, `manifest`, or `submit_nonce` that differs from what was signed | no | no |

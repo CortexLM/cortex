@@ -90,6 +90,11 @@ pub mod env {
     pub const SECRETS_DIR: &str = "PROOF_SECRETS_DIR";
     /// Comma-separated names of the staged secret files.
     pub const SECRET_FILES: &str = "PROOF_SECRET_FILES";
+    /// Directory holding one file per miner BYOK variable (paid runs only).
+    pub const MINER_ENV_DIR: &str = "PROOF_MINER_ENV_DIR";
+    /// Comma-separated names of the miner BYOK variables exported for this
+    /// run. Each is also exported under its own name.
+    pub const MINER_ENV_NAMES: &str = "PROOF_MINER_ENV_NAMES";
     /// Rules JSON the inspector ticks (`inspect`).
     pub const RULES_FILE: &str = "PROOF_RULES_FILE";
     /// Signed topic JSON (`propose_rules`).
@@ -467,6 +472,63 @@ fn job_env(
     Ok(vars)
 }
 
+/// Export the miner's own BYOK environment for a **paid** run: one variable
+/// per name the signed topic declared, plus [`env::MINER_ENV_DIR`] /
+/// [`env::MINER_ENV_NAMES`] and one 0600 file per value under the guest's
+/// secrets root.
+///
+/// Fail-closed and last: the control plane already held these names to the
+/// topic's allowlist, and this checks the shape again and refuses any name
+/// that would shadow something the contract or the base environment already
+/// set. A miner variable can therefore add to what an adaptor sees and never
+/// rewrite it — `PROOF_…`, `PATH`, and the rest stay the guest's own facts.
+///
+/// Returns the values to blank out of everything the guest ships back.
+/// Nothing here is logged: the names travel, the values do not.
+fn inject_miner_env(
+    cfg: &GuestConfig,
+    request: &CustomRunRequest,
+    vars: &mut Vec<(String, String)>,
+) -> Result<Vec<Vec<u8>>, String> {
+    if request.miner_env.is_empty() {
+        return Ok(Vec::new());
+    }
+    let taken: std::collections::BTreeSet<String> = vars
+        .iter()
+        .chain(base_env(cfg).iter())
+        .map(|(k, _)| k.clone())
+        .collect();
+    let mut miner = Vec::with_capacity(request.miner_env.len());
+    for (name, value) in request.miner_env.iter() {
+        if !proof_canon::is_env_name(name) {
+            return Err(format!(
+                "miner env {name:?} is not a variable a miner may bring; the run is refused rather than run with it"
+            ));
+        }
+        if taken.contains(name) {
+            return Err(format!(
+                "miner env {name:?} is already part of the adaptor contract; a miner variable never replaces a guest fact"
+            ));
+        }
+        miner.push((name.to_owned(), value.to_owned()));
+    }
+    let dir = crate::staging::stage_miner_env(&cfg.secrets_dir, &miner, cfg.run_as)?;
+    let names: Vec<&str> = miner.iter().map(|(n, _)| n.as_str()).collect();
+    tracing::info!(
+        names = names.join(",").as_str(),
+        "miner byok environment exported to the adaptor (values not logged)"
+    );
+    vars.push((env::MINER_ENV_DIR.to_owned(), dir.display().to_string()));
+    vars.push((env::MINER_ENV_NAMES.to_owned(), names.join(",")));
+    let secrets = miner
+        .iter()
+        .filter(|(_, v)| v.len() >= crate::staging::MIN_SECRET_LEN)
+        .map(|(_, v)| v.as_bytes().to_vec())
+        .collect();
+    vars.extend(miner);
+    Ok(secrets)
+}
+
 /// Base environment every adaptor gets, regardless of the job.
 fn base_env(cfg: &GuestConfig) -> Vec<(String, String)> {
     let mut vars = vec![
@@ -656,7 +718,11 @@ pub async fn run_paid(
         env::CLAIM_FILE.to_owned(),
         work.join("claim.txt").display().to_string(),
     ));
-    let secrets = secret_values(&cfg.secrets_dir);
+    // The miner's own key reaches their own paid run, and only here:
+    // inspection ticks rules without spending, so it is never given one.
+    let miner_secrets = inject_miner_env(cfg, request, &mut vars)?;
+    let mut secrets = secret_values(&cfg.secrets_dir);
+    secrets.extend(miner_secrets);
     let exec = exec(
         cfg,
         &entry,

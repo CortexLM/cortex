@@ -272,7 +272,10 @@ Trust-root keygen is the throwaway owner path in
   in the submission store **before** any budget check, rent, or row, so an
   identical replay is **401** `submit_nonce reused` and never evaluates
   twice. Missing/unknown/not-open → **400**. Missing/invalid signature or
-  nonce → **401** (no row). `X-Lium-Api-Key` is not identity. Miners do
+  nonce → **401** (no row). `X-Lium-Api-Key` is not identity. An `env` map
+  that does not match the signed topic's `miner_byok` /
+  `miner_env_allowlist` is **400** — checked *before* the signature, so it
+  never spends the nonce (§ Miner BYOK). Miners do
   **not** bind the judge offer or the executor offer. Zero
   open / unsealed baseline / empty digest / missing or closed RLM judge
   backend / missing, closed, or non-`1x` executor / agent down / run cut at
@@ -479,12 +482,46 @@ id shapes shared with `proof-task`).
 | `constraints.model_pin` | `vendor/model[:tag]` every paid call must name (shape-checked only) |
 | `constraints.task_slice` | Opaque label the runner interprets; the control plane does not |
 | `constraints.params` | ≤32 opaque `slug → printable` runner params |
+| `constraints.params.miner_byok` | Comma-separated environment variable names (`[A-Z][A-Z0-9_]{0,63}`) a miner **must** send in the submit body's `env`. A submission missing one is **400** before any row, rent, or paid inference. The topic carries the *name*; the miner carries the value. See § Miner BYOK |
+| `constraints.params.miner_env_allowlist` | Additional variable names a miner **may** send (accepted, never demanded). `miner_byok` is always allowed on top of it |
+| `constraints.params.inject_miner_env_sister` | `"true"` also forwards the miner env into the **sister** guest that runs the miner's entrypoint. Absent / `"false"` keeps it in the runner guest only |
 | `constraints.params.baseline_runner` (synonym `in_guest_benchmark_runner`) | Generic knob (`proof-experiment`): selects an **operator adaptor id** baked into the guest image (e.g. `baseline_runner: operator_adaptor_v0`); the topic's paid jobs then run in **one dedicated experiment VM per job**, sized under a hard 16 vCPU / 32 GiB lock, and score only once the orchestrator confirms that VM destroyed. Values are topic data; no adaptor, harness, or scoring rule ships in git |
 | `constraints.params.experiment_pack_digest` / `experiment_pack_path` | `sha256:` of the pack tar the KVM host stages into that VM (required with a runner; never defaulted) / optional relative locator under the host pack dir |
 | `constraints.params.experiment_vcpus` / `experiment_mem_mib` / `experiment_disk_mib` | The topic's size ask: silent = the operator defaults (lock 16 vCPU / 32 GiB / 32 GiB disk), an ask may go up to the ceilings (lock 16 vCPU / 32 GiB — the default is the ceiling; disk ≥ 16 GiB); over = 503, never a clamp |
 | `checklist` | ≤64 `{id, text}` anti-cheat rules (unique slug ids), version 1 of the rule set |
 | `eval_executor.require_offer_commitment` | 64-hex pin against the live `1x` `EvalExecutorOffer` (`proof-executor`) |
 | `eval_executor.max_proof_deadline_s` | Tighten-only against pin `max_proof_deadline_s_ceiling` (7200 s; the live offer may be shorter) |
+
+### Miner BYOK (`env` on the submit body)
+
+A topic whose harness calls a paid third-party API is paid for by the
+**miner**, never by the operator. The signed topic names the environment
+variables (`miner_byok` / `miner_env_allowlist`); the miner posts the values
+as `env: {"<NAME>": "<value>"}` on `POST /v1/submissions`.
+
+| Rule | Where |
+|------|-------|
+| The allowlist is the signed topic's. An undeclared name is **400**, never a silent drop; a topic that declares nothing accepts no `env` at all | `Constraints::miner_env_allowlist`, `MinerEnv::accept` (`proof-canon`) |
+| Names are `[A-Z][A-Z0-9_]{0,63}`, never `PROOF_…` and never one the guest contract sets (`PATH`, `HOME`, `LANG`, `XDG_RUNTIME_DIR`). Enforced at publish, at intake, and again in the guest | `is_env_name` |
+| `env` is **not** in `base-proof-submit-v1`. It is checked *before* the signature, so a rejected `env` does not spend the miner's single-use `submit_nonce` | `submit` (`proof-http`) |
+| The value never reaches a public answer: not on the `Submission` row, so not in `GET /v1/submissions`, `/v1/status`, or a drain report. `MinerEnv`'s `Debug` prints names and `[REDACTED]`, so it cannot reach a log line by being nested in something formatted | `MinerEnv`, `MemoryStore::stash_miner_env` |
+| **A secure file, not a process value.** At intake the key goes into the vault: `<PROOF_MINER_BYOK_DIR>/<submission_digest>/<NAME>`, directories `0700`, files `0600`, written temp-then-rename, keyed by frozen digest. The scoring path reads it back from there — the same step whether the row is scored now or drained days later, so a control plane that restarted in between still reaches the paid run with the miner's key. Removed the moment the row is terminal | `MinerEnvVault` (`proof-store`) |
+| A vault that cannot hold the key is a **503 with no row**: a key the host did not keep must not be accepted | `submit` (`proof-http`) |
+| A topic that **requires** BYOK and a host that no longer holds it is a **503 with the row untouched** (a drain leaves it `queued`, nothing rented). The operator key is never substituted for a miner's missing one | `score_intake` (`proof-http`) |
+| In the guest it is exported under the declared name for the **paid** job only (`Baseline` / `Evaluate`), written to a 0600 file at `$PROOF_MINER_ENV_DIR/<NAME>` — the same shape as the vault, so the adaptor reads a file on both sides of the VM boundary — listed by name in `$PROOF_MINER_ENV_NAMES`, and added to the redaction set so a run that prints it gets `[REDACTED]` back. Inspection ticks rules without spending and is handed nothing | `inject_miner_env` (`proof-vm-guest`) |
+| Owner key material is a different path entirely: the KVM host reads `PROOF_VM_AGENT_OWNER_KEY_DIR` from its own disk and stages it into the RLM guest at boot. It never travels on a job, and never into a sister or experiment guest as a miner variable | `proof-fc-host` |
+
+Operator knob: `PROOF_MINER_BYOK_DIR` (default `/run/proof/miner-byok` — a
+runtime path, so a reboot never leaves a miner's key on disk). Set it to the
+empty string to keep material in the process; the host warns at boot that a
+restart then loses it and a deferred topic's queue will 503 on drain.
+
+The sister leg is opt-in per topic (`inject_miner_env_sister`) and
+name-checked host-side (`SisterRequest::check_env`) before the relay, so a
+compromised RLM image cannot use it to rewrite a sister's `PATH`.
+
+`X-Lium-Api-Key` is unrelated and unchanged: it pays for **compute** on the
+Lium executor. `env` pays for whatever the topic's own harness calls.
 
 ### Rules → DB, not logs
 

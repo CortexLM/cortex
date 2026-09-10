@@ -100,6 +100,7 @@ pub fn check_request(
             "entrypoint and deadline_s are required".into(),
         ));
     }
+    req.check_env().map_err(HvError::Spec)?;
     Ok(tar)
 }
 
@@ -132,6 +133,10 @@ async fn drive_guest(
         declared_flops: req.declared_flops,
         seed: req.seed,
         params: req.params.clone(),
+        // The miner's own BYOK, name-checked by `check_request`. The host
+        // adds nothing: owner key material is staged into the RLM guest at
+        // boot and never travels to a sister.
+        env: req.env.clone(),
     })
     .await?;
     let budget = Duration::from_secs(req.deadline_s).saturating_add(cfg.deadline_grace);
@@ -288,6 +293,7 @@ mod tests {
             declared_flops: 1,
             seed: 7,
             params: std::collections::BTreeMap::default(),
+            env: std::collections::BTreeMap::default(),
         }
     }
 
