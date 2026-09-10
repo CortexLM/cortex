@@ -55,7 +55,8 @@ use proof_score::{
     MinerTopicRun, ProofKind, ProofVerdict,
 };
 use proof_store::{
-    freeze_submission_digest, ArtifactManifest, MemoryStore, Submission, SubmissionState,
+    freeze_submission_digest, ArtifactManifest, Enqueued, MemoryStore, StoreError, Submission,
+    SubmissionState,
 };
 use proof_task::{
     resolve_inference, InferenceOffer, MetricFamily, OfferError, ProofPin, TopicDocument,
@@ -579,34 +580,44 @@ async fn submit(
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
-/// Persist an intake row as `queued`. A retry of the same artefact by the
-/// same hotkey (same frozen digest) finds its queued row (**200**) instead
-/// of queueing a second paid run.
+/// Persist an intake row as `queued` — one row per frozen digest per topic,
+/// in a single store step. A retry of the same artefact by the same hotkey
+/// (same frozen digest) finds its row (**200**) — still queued, or already
+/// scored after a drain — instead of queueing a second paid run; two
+/// identical submits racing each other yield one row.
 fn queue_deferred(
     st: &AppState,
     mut row: Submission,
 ) -> Result<(StatusCode, Json<SubmitResp>), ErrResp> {
-    if let Some(existing) = st
-        .store
-        .queued_by_digest(&row.topic_id, &row.submission_digest)
-        .map_err(|e| store_err(&e))?
-    {
-        let mut resp = SubmitResp::of(&existing, st.backend, false);
-        resp.detail = Some(format!(
-            "already queued as {}; {DEFERRED_DETAIL}",
-            existing.id
-        ));
-        return Ok((StatusCode::OK, Json(resp)));
-    }
     row.detail = Some(DEFERRED_DETAIL.to_owned());
-    let row = st
-        .store
-        .insert(row)
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "store"))?;
-    Ok((
-        StatusCode::CREATED,
-        Json(SubmitResp::of(&row, st.backend, false)),
-    ))
+    match st.store.enqueue(row).map_err(|e| store_err(&e))? {
+        Enqueued::Inserted(row) => Ok((
+            StatusCode::CREATED,
+            Json(SubmitResp::of(&row, st.backend, false)),
+        )),
+        Enqueued::Existing(existing) => {
+            let eligible = existing.verdict.as_ref().is_some_and(|v| v.pass);
+            let mut resp = SubmitResp::of(&existing, st.backend, eligible);
+            resp.detail = Some(if existing.state == SubmissionState::Queued {
+                format!("already queued as {}; {DEFERRED_DETAIL}", existing.id)
+            } else {
+                format!(
+                    "already submitted as {} and scored ({}); one run per artefact per topic",
+                    existing.id,
+                    state_name(existing.state)
+                )
+            });
+            Ok((StatusCode::OK, Json(resp)))
+        }
+    }
+}
+
+/// Wire name of a state (`queued`, `awaiting_admin`, …).
+fn state_name(state: SubmissionState) -> String {
+    serde_json::to_value(state)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 /// Score one intake row on `topic` and persist the result: host readiness,
@@ -1046,6 +1057,8 @@ impl AppState {
     /// a re-publish that defers or closes it mid-pass stops the pass. The
     /// first host refusal stops the pass too: that row is released back to
     /// the queue unscored (nothing was rented) and later rows are not tried.
+    /// Another drain already holding the topic's claim stops it as well
+    /// (`stopped` names the row in flight) — a topic scores one row at a time.
     pub async fn drain_queue(&self, topic_id: &str, limit: usize) -> DrainReport {
         let mut report = DrainReport {
             topic_id: topic_id.to_owned(),
@@ -1061,14 +1074,22 @@ impl AppState {
                     break;
                 }
             };
-            let Ok(Some(row)) = self.store.claim_next_queued(topic_id) else {
-                break;
+            let row = match self.store.claim_next_queued(topic_id) {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(e) => {
+                    report.stopped = Some(e.to_string());
+                    break;
+                }
             };
-            let id = row.id.clone();
+            let claim = ClaimGuard::new(self.store.clone(), &row);
             match score_intake(self, row, &topic).await {
-                Ok(resp) => report.drained.push(resp),
+                Ok(resp) => {
+                    claim.landed();
+                    report.drained.push(resp);
+                }
                 Err((code, body)) => {
-                    let _ = self.store.release_claim(&id);
+                    drop(claim);
                     report.stopped = Some(format!("{code}: {}", error_text(&body)));
                     break;
                 }
@@ -1105,6 +1126,54 @@ fn error_text(body: &Json<serde_json::Value>) -> String {
         .map_or_else(|| body.0.to_string(), str::to_owned)
 }
 
+/// Holds a topic's queue claim for one row while it scores, and gives it
+/// back on **every** exit that did not land the row: the host refused, the
+/// scorer panicked, or the drain future was dropped (an operator's HTTP
+/// call cut mid-eval, the poll task cancelled). Without it an interrupted
+/// drain would leave the topic "busy" until a restart. [`Self::landed`]
+/// disarms it once the scored row is persisted (which settled the claim
+/// itself); a release is keyed by `(topic, row)`, so a late one can never
+/// drop a claim a later drain took.
+struct ClaimGuard {
+    store: MemoryStore,
+    topic_id: String,
+    id: String,
+    armed: bool,
+}
+
+impl ClaimGuard {
+    fn new(store: MemoryStore, row: &Submission) -> Self {
+        Self {
+            store,
+            topic_id: row.topic_id.clone(),
+            id: row.id.clone(),
+            armed: true,
+        }
+    }
+
+    /// The row landed scored: nothing to give back.
+    fn landed(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ClaimGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.store.release_claim(&self.topic_id, &self.id);
+        }
+    }
+}
+
+fn claim_err(e: StoreError) -> ErrResp {
+    match e {
+        StoreError::NotFound(_) => err(StatusCode::NOT_FOUND, "not_found"),
+        StoreError::Illegal(why) => err(StatusCode::CONFLICT, &why),
+        busy @ StoreError::Busy { .. } => err(StatusCode::CONFLICT, &busy.to_string()),
+        other => store_err(&other),
+    }
+}
+
 /// Operator drain: score the oldest `queued` rows of one topic through the
 /// live path. **200** with a [`DrainReport`]; **503** carrying the report
 /// (plus `error`) when the host refused before a single row scored — the
@@ -1123,6 +1192,9 @@ async fn drain_queue(
     }
     let topic_id = body.topic_id.trim().to_owned();
     st.drainable_topic(&topic_id)?;
+    if let Some(id) = st.store.scoring_row(&topic_id).map_err(|e| store_err(&e))? {
+        return Err(claim_err(StoreError::Busy { topic_id, id }));
+    }
     let report = st
         .drain_queue(&topic_id, body.limit.unwrap_or(1).max(1))
         .await;
@@ -1137,11 +1209,14 @@ async fn drain_queue(
     Ok((StatusCode::OK, Json(view)))
 }
 
-/// Operator: score one `queued` row now (same rules as a drain of one).
+/// Operator: score one `queued` row now (same rules as a drain of one). The
+/// row must be the **head** of its topic's queue — the queue drains oldest
+/// first, and promotion compares each run against the best at that moment.
 /// **200** with the scored row's reply; **404** unknown; **409** when the
-/// row is not `queued`, is already being scored, or its topic still defers
-/// / is not open; a host refusal is that refusal (**503**) with the row
-/// released back to the queue.
+/// row is not `queued`, is not the head (the error names the head), its
+/// topic already has a row in flight, or its topic still defers / is not
+/// open; a host refusal is that refusal (**503**) with the row released
+/// back to the queue.
 async fn score_queued(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -1153,25 +1228,12 @@ async fn score_queued(
     if !admin_ok(&headers, &st.admin_hashes) {
         return Err(err(StatusCode::UNAUTHORIZED, "unauthorized"));
     }
-    let row = st.store.claim_queued(&id).map_err(|e| match e {
-        proof_store::StoreError::NotFound(_) => err(StatusCode::NOT_FOUND, "not_found"),
-        proof_store::StoreError::Illegal(why) => err(StatusCode::CONFLICT, &why),
-        other => store_err(&other),
-    })?;
-    let topic = match st.drainable_topic(&row.topic_id) {
-        Ok(t) => t,
-        Err(e) => {
-            let _ = st.store.release_claim(&id);
-            return Err(e);
-        }
-    };
-    match score_intake(&st, row, &topic).await {
-        Ok(resp) => Ok((StatusCode::OK, Json(resp))),
-        Err(e) => {
-            let _ = st.store.release_claim(&id);
-            Err(e)
-        }
-    }
+    let row = st.store.claim_queued(&id).map_err(claim_err)?;
+    let claim = ClaimGuard::new(st.store.clone(), &row);
+    let topic = st.drainable_topic(&row.topic_id)?;
+    let resp = score_intake(&st, row, &topic).await?;
+    claim.landed();
+    Ok((StatusCode::OK, Json(resp)))
 }
 
 fn admin_ok(headers: &HeaderMap, hashes: &[String]) -> bool {
@@ -3922,8 +3984,10 @@ mod tests {
         );
         assert_eq!(queued_ids(app.clone(), None).await, queued[1..]);
 
-        // The single-row route scores exactly the row it names.
-        let (st, third) = json_req(
+        // The single-row route scores only the head of the queue: naming the
+        // third row while the second is still queued is a 409 that names
+        // the head; naming the head scores exactly that row.
+        let (st, body) = json_req(
             app.clone(),
             "POST",
             &format!("/v1/admin/proof/submissions/{}/score", queued[2]),
@@ -3931,10 +3995,25 @@ mod tests {
             Some("op"),
         )
         .await;
-        assert_eq!(st, StatusCode::OK, "{third}");
-        assert_eq!(third["id"], queued[2], "{third}");
-        assert_ne!(third["state"], "queued", "{third}");
-        assert_eq!(queued_ids(app.clone(), None).await, [queued[1].clone()]);
+        assert_eq!(st, StatusCode::CONFLICT, "out of order: {body}");
+        let msg = body["error"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("not the head") && msg.contains(&queued[1]),
+            "{body}"
+        );
+        assert_eq!(queued_ids(app.clone(), None).await, queued[1..]);
+        let (st, second) = json_req(
+            app.clone(),
+            "POST",
+            &format!("/v1/admin/proof/submissions/{}/score", queued[1]),
+            serde_json::json!({}),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{second}");
+        assert_eq!(second["id"], queued[1], "{second}");
+        assert_ne!(second["state"], "queued", "{second}");
+        assert_eq!(queued_ids(app.clone(), None).await, [queued[2].clone()]);
         let (st, body) = json_req(
             app.clone(),
             "POST",
@@ -3968,7 +4047,7 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{report}");
-        assert_eq!(report["drained"][0]["id"], queued[1], "{report}");
+        assert_eq!(report["drained"][0]["id"], queued[2], "{report}");
         assert_eq!(report["remaining"], 0, "{report}");
         let (st, report) = json_req(
             app.clone(),
@@ -4131,5 +4210,291 @@ mod tests {
         assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 2);
         assert!(state.drain_ready_queues().await.is_empty(), "nothing left");
         assert!(queued_ids(app, None).await.is_empty());
+    }
+
+    /// A topic's queue is scored one row at a time: while one drain holds
+    /// the topic's claim (its head is mid-eval), a second drain — the admin
+    /// route, the single-row route, or the poll pass — gets **409** / a
+    /// `stopped` report and scores nothing, so two rows of one topic never
+    /// run side by side and promotion stays oldest-first. Another topic is
+    /// unaffected. Once the claim is back, the drain proceeds in order.
+    #[tokio::test]
+    async fn a_topic_with_a_row_in_flight_refuses_a_second_drain() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let state = state_with_deferred_custom(scorer.clone(), true, true);
+        let pin = state.pin.clone();
+        let app = proof_router(state.clone());
+        let mut queued = Vec::new();
+        for label in ["head", "next"] {
+            let (st, created) = json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                custom_submit(label),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{created}");
+            queued.push(created["id"].as_str().expect("id").to_owned());
+        }
+        republish_custom(app.clone(), &pin, None).await;
+
+        // Another drain is mid-eval on the head: it holds the topic's claim.
+        let in_flight = state
+            .store
+            .claim_next_queued(CUSTOM)
+            .expect("claim")
+            .expect("head");
+        assert_eq!(in_flight.id, queued[0]);
+
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            serde_json::json!({ "topic_id": CUSTOM, "limit": 5 }),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{body}");
+        let msg = body["error"].as_str().unwrap_or_default();
+        assert!(msg.contains("already has a row being scored"), "{body}");
+        assert!(msg.contains(&queued[0]), "names the row in flight: {body}");
+        for id in &queued {
+            let (st, body) = json_req(
+                app.clone(),
+                "POST",
+                &format!("/v1/admin/proof/submissions/{id}/score"),
+                serde_json::json!({}),
+                Some("op"),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CONFLICT, "{id}: {body}");
+        }
+        let reports = state.drain_ready_queues().await;
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert!(reports[0].drained.is_empty(), "{reports:?}");
+        assert!(
+            reports[0]
+                .stopped
+                .as_deref()
+                .is_some_and(|s| s.contains("already has a row being scored")),
+            "{reports:?}"
+        );
+        assert_eq!(
+            scorer.inner.hits.load(Ordering::SeqCst),
+            0,
+            "nothing else ran"
+        );
+        assert_eq!(queued_ids(app.clone(), None).await, queued);
+
+        // The other topic's queue is independent of this topic's claim.
+        let (st, report) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            serde_json::json!({ "topic_id": "dt-no-ib-v0" }),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{report}");
+
+        // The in-flight drain gives the head back (it was refused): the next
+        // drain scores head then next, in that order.
+        state
+            .store
+            .release_claim(CUSTOM, &in_flight.id)
+            .expect("release");
+        let (st, report) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            serde_json::json!({ "topic_id": CUSTOM, "limit": 5 }),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{report}");
+        let drained: Vec<String> = report["drained"]
+            .as_array()
+            .expect("drained")
+            .iter()
+            .filter_map(|r| r["id"].as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(drained, queued, "oldest first, one at a time");
+        assert_eq!(report["remaining"], 0);
+        assert_eq!(state.store.scoring_row(CUSTOM).expect("q"), None);
+        assert!(queued_ids(app, None).await.is_empty());
+    }
+
+    /// An interrupted drain must not leave its topic busy until a restart:
+    /// dropping the claim guard without landing (a panic, a cancelled poll
+    /// task, an operator HTTP call cut mid-eval) releases the claim; landing
+    /// disarms it; and a stale guard from an earlier drain never drops the
+    /// claim a later drain holds.
+    #[tokio::test]
+    async fn the_claim_guard_releases_on_interruption_and_only_its_own_claim() {
+        let state = state_with_deferred_custom(Arc::new(FamilyStub::win(CUSTOM_ID)), true, true);
+        let app = proof_router(state.clone());
+        for label in ["one", "two"] {
+            let (st, created) = json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                custom_submit(label),
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{created}");
+        }
+        let store = state.store.clone();
+
+        // Interrupted: the guard drops armed and the head is claimable again.
+        let head = store
+            .claim_next_queued(CUSTOM)
+            .expect("claim")
+            .expect("head");
+        assert_eq!(store.scoring_row(CUSTOM).expect("q"), Some(head.id.clone()));
+        {
+            let _guard = ClaimGuard::new(store.clone(), &head);
+            assert!(matches!(
+                store.claim_next_queued(CUSTOM),
+                Err(StoreError::Busy { .. })
+            ));
+        }
+        assert_eq!(
+            store.scoring_row(CUSTOM).expect("q"),
+            None,
+            "released on drop"
+        );
+        assert!(std::panic::catch_unwind(|| {
+            let head = store
+                .claim_next_queued(CUSTOM)
+                .expect("claim")
+                .expect("head");
+            let _guard = ClaimGuard::new(store.clone(), &head);
+            panic!("scorer blew up mid-eval");
+        })
+        .is_err());
+        assert_eq!(
+            store.scoring_row(CUSTOM).expect("q"),
+            None,
+            "released on unwind"
+        );
+
+        // Landed: the guard disarms; the claim was settled by the insert.
+        let head = store
+            .claim_next_queued(CUSTOM)
+            .expect("claim")
+            .expect("head");
+        let guard = ClaimGuard::new(store.clone(), &head);
+        let mut scored = head.clone();
+        scored.state = SubmissionState::AwaitingAdmin;
+        store.insert(scored).expect("land");
+        assert_eq!(store.scoring_row(CUSTOM).expect("q"), None);
+        // A later drain takes the next row before the old guard is gone.
+        let next = store
+            .claim_next_queued(CUSTOM)
+            .expect("claim")
+            .expect("next");
+        assert_ne!(next.id, head.id);
+        guard.landed();
+        assert_eq!(
+            store.scoring_row(CUSTOM).expect("q"),
+            Some(next.id.clone()),
+            "the later claim is untouched"
+        );
+        // Even a stale *armed* guard for the old row cannot drop the new claim.
+        drop(ClaimGuard::new(store.clone(), &head));
+        assert_eq!(store.scoring_row(CUSTOM).expect("q"), Some(next.id));
+    }
+
+    /// Deduplication is one atomic store step: two identical submits racing
+    /// each other yield one queued row (one **201**, one **200**), and a retry
+    /// after the row was drained finds the *scored* row (**200**, its final
+    /// state) — never a second queued row and never a second paid run.
+    #[tokio::test]
+    async fn identical_submits_yield_one_row_for_the_rows_whole_life() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let state = state_with_deferred_custom(scorer.clone(), true, true);
+        let pin = state.pin.clone();
+        let app = proof_router(state.clone());
+
+        let (a, b) = tokio::join!(
+            json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                custom_submit("raced"),
+                None,
+            ),
+            json_req(
+                app.clone(),
+                "POST",
+                "/v1/submissions",
+                custom_submit("raced"),
+                None,
+            ),
+        );
+        let mut codes = [a.0, b.0];
+        codes.sort();
+        assert_eq!(
+            codes,
+            [StatusCode::OK, StatusCode::CREATED],
+            "{} {}",
+            a.1,
+            b.1
+        );
+        assert_eq!(a.1["id"], b.1["id"], "one row: {} {}", a.1, b.1);
+        let id = a.1["id"].as_str().expect("id").to_owned();
+        assert_eq!(
+            queued_ids(app.clone(), None).await,
+            std::slice::from_ref(&id)
+        );
+
+        republish_custom(app.clone(), &pin, None).await;
+        let (st, report) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            serde_json::json!({ "topic_id": CUSTOM }),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{report}");
+        assert_eq!(report["drained"][0]["id"], id, "{report}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 1);
+
+        // Defer again and retry the same artefact: the scored row answers.
+        republish_custom(app.clone(), &pin, Some("true")).await;
+        let (st, again) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            custom_submit("raced"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{again}");
+        assert_eq!(again["id"], id, "{again}");
+        assert_eq!(again["state"], "champion", "{again}");
+        assert_eq!(again["eligible"], true, "{again}");
+        assert!(
+            again["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("already submitted"),
+            "{again}"
+        );
+        assert!(
+            queued_ids(app.clone(), None).await.is_empty(),
+            "no second row"
+        );
+        assert_eq!(status_of(app.clone()).await["queued_submissions"], 0);
+        republish_custom(app.clone(), &pin, None).await;
+        assert!(state.drain_ready_queues().await.is_empty());
+        assert_eq!(
+            scorer.inner.hits.load(Ordering::SeqCst),
+            1,
+            "never scored twice"
+        );
     }
 }

@@ -259,9 +259,11 @@ Trust-root keygen is the throwaway owner path in
   before one row scored — every row stays `queued`, nothing was rented. See
   § Deferred scoring.
 - `POST /v1/admin/proof/submissions/{id}/score` — operator bearer; scores
-  one `queued` row now under the same rules (**404** unknown, **409** not
-  queued / already being scored / topic still deferring, **503** host
-  refusal with the row released back to the queue).
+  one `queued` row now under the same rules. The row must be the **head**
+  of its topic's queue (**404** unknown, **409** not queued / not the head —
+  the error names the head — / topic already has a row in flight / topic
+  still deferring, **503** host refusal with the row released back to the
+  queue).
 - `POST /v1/submissions` **requires** `topic_id`. Missing/unknown/not-open →
   **400**. Miners do **not** bind the judge offer or the executor offer. Zero
   open / unsealed baseline / empty digest / missing or closed RLM judge
@@ -275,7 +277,9 @@ Trust-root keygen is the throwaway owner path in
   the host gates are not consulted: the row persists as **`queued`**
   (**201**, `eligible: false`, `detail` names the deferral) with no eval,
   no rent, no judge call, no stamps, no mass; the same artefact from the
-  same hotkey again is **200** with the existing row.
+  same hotkey again is **200** with the existing row — still queued, or
+  already scored after a drain (one row per frozen digest per topic, decided
+  in one atomic store step).
 - `GET /v1/submissions?state=<queued|awaiting_admin|rejected|champion>&topic_id=<id>`
   — both filters optional; newest first. `GET /v1/submissions/{id}` shows a
   `queued` row with `verdict: null` until it is drained.
@@ -315,7 +319,7 @@ Semantics, none of which weaken a product rule:
 | Intake gates | Unchanged: hotkey / digest shape, digest-of-nothing, unknown / not-open topic, `declared_flops` over budget, missing `artifact_uri` on a custom topic are the same **400**s with no row. |
 | Host gates | **Not consulted.** The row persists as **`queued`** (**201**) whether or not the host could score it right now — no readiness check, no harvest rent, no topic VM, no judge call, no verdict, no stamps, no topic mass, no emission. |
 | Status | The topic is in `deferred_topics`, **not** in `scorable_topics`; `can_score` keeps its meaning (something is scored right now). `queued_submissions` counts the waiting rows. |
-| Duplicates | One `queued` row per frozen digest per topic: the same artefact from the same hotkey again is **200** with the existing id (`detail: already queued …`). |
+| Duplicates | One row per frozen digest per topic, for the row's whole life, decided in one atomic store step: the same artefact from the same hotkey again is **200** with the existing row (`detail: already queued …`), and after a drain it is **200** with the *scored* row (`already submitted … and scored`) — two identical submits racing each other yield one row, and a retry never buys a second paid run. |
 | Drain | A drain of a topic that still defers is **409**, nothing touched. |
 
 **Lifting the flag** is a re-publish: sign the same document without the
@@ -329,17 +333,25 @@ family scorer's promotion / persist hooks), each row keeping its `pf_…` id:
 - automatically, by the binary's poll loop (`PROOF_QUEUE_DRAIN_POLL_SECS`,
   default 60; `0` disables it) — lifting the flag *is* "score now";
 - on demand, with `POST /v1/admin/proof/queue/drain {"topic_id": …, "limit": n}`
-  (default one row per call; the report says what is `remaining`), or one
-  row with `POST /v1/admin/proof/submissions/{id}/score`.
+  (default one row per call; the report says what is `remaining`), or the
+  head of the queue with `POST /v1/admin/proof/submissions/{id}/score`.
 
 Fail-closed on the drain: a host refusal (unwired runner, closed executor,
 no sealed baseline recorded, agent down, …) leaves that row **`queued`** —
 never a reject — and stops the pass (**503** with the reason when nothing
 scored); a contamination / empty-manifest row persists **`rejected`** with no
-rent, exactly as a live submit would. Two concurrent drains never score one
-row twice (a claimed row is skipped until it lands or is released). Re-publishing
-the topic with the flag back on **pauses** the queue mid-pass. `queued` is the
-only non-terminal state; `ctx proof show --wait` keeps polling through it.
+rent, exactly as a live submit would. **A topic holds one claim at a time:**
+while its head is mid-eval, a second drain of that topic (admin route,
+single-row route, or the poll pass) is a **409** / a `stopped` report that
+names the row in flight and scores nothing — two rows of one topic never run
+side by side, so promotion always compares against the best at that moment;
+other topics are independent. The claim is released on every path that does
+not land the row — host refusal, panic, or a drain interrupted mid-eval (an
+operator HTTP call cut, the poll task cancelled) — so an interruption never
+leaves a topic busy until a restart; a late release can never drop a claim a
+later drain took. Re-publishing the topic with the flag back on **pauses**
+the queue mid-pass. `queued` is the only non-terminal state;
+`ctx proof show --wait` keeps polling through it.
 
 ## Example topics (not live)
 
