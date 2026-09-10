@@ -126,7 +126,7 @@ Topics that have a written miner guide in this repo:
 
 | Topic | Guide | Family / payout |
 |-------|-------|-----------------|
-| `tbench` | [proof-tbench.md](./proof-tbench.md) | `custom` (`success_rate`) / `discovery` |
+| `tbench` | [proof-tbench.md](./proof-tbench.md) | `custom` (`success_rate`) / `discovery`. **Scoring is on** (experiment VM). Do not assume it is deferred — read `ctx proof status` |
 
 A guide is a convenience, not the contract: the signed document returned by
 `ctx proof topics` wins wherever the two disagree, and a topic without a guide
