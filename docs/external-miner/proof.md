@@ -366,9 +366,10 @@ ctx proof submit \
   --env OPENROUTER_API_KEY
 ```
 
-Bare `--env OPENROUTER_API_KEY` reads the value from your shell, so the key
-never lands in your shell history or in `ps`. `--env NAME=value` passes it
-inline. The flag is repeatable, and over `curl` it is the body's `env`:
+Pass `--openrouter-api-key` (never printed) or `--env OPENROUTER_API_KEY` to
+read it from your shell. Exporting the variable alone does not attach it.
+`--env NAME=value` passes any BYOK variable inline. `--env` is repeatable,
+and over `curl` it is the body's `env`:
 
 ```json
 { "env": { "OPENROUTER_API_KEY": "sk-or-…" } }
