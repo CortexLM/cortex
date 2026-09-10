@@ -62,6 +62,13 @@ set +e
 harbor_exit=$?
 set -e
 
+# Nonzero Harbor is an incomplete or failed trial set. Do not invoke the
+# summarizer: a leftover report.json would be a successful score.
+if [ "$harbor_exit" -ne 0 ]; then
+    rm -f "$PROOF_OUTPUT_DIR/report.json"
+    proof_die "harbor exited $harbor_exit; refusing to score a partial or failed run"
+fi
+
 python3 "$HERE/summarize.py" \
     --jobs-dir "$jobs_dir" \
     --log "$log" \

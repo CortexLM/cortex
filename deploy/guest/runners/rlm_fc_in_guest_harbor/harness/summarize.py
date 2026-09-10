@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Turn a Harbor jobs directory into Proof ``report.json``.
 
-``primary_value`` is the mean of trial ``verifier_result.rewards.reward``
-values that are finite numbers. A trial with no such field is **no
-measurement** — never another field's value (score, accuracy, job-level
-aggregates) as a substitute. Zero measured trials → exit 2, no report.
+``primary_value`` is the mean of **every** trial
+``verifier_result.rewards.reward`` that is a finite number. A trial with
+no such field is **no measurement** — never another field's value (score,
+accuracy, job-level aggregates) as a substitute. Zero measured trials →
+exit 2, no report. A nonzero Harbor exit is an incomplete run → exit 2,
+no report (do not publish a partial score).
 
-Evidence includes ``trials`` and a redacted ``harbor_run_tail``. Secret
-values from the owner secrets dir and miner BYOK dir are blanked.
+Evidence serializes at most ``MAX_EVIDENCE_TRIALS`` trial rows; the mean
+always uses the full measured set. Secret values from the owner secrets
+dir and miner BYOK dir are blanked.
 """
 
 from __future__ import annotations
@@ -60,12 +63,11 @@ def _load_json(path: Path) -> Any | None:
 
 
 def collect_trials(jobs_dir: Path) -> list[dict[str, Any]]:
+    """Load every measured trial. Do not cap here — the cap is evidence only."""
     trials: list[dict[str, Any]] = []
     if not jobs_dir.is_dir():
         return trials
     for result_path in sorted(jobs_dir.rglob("result.json")):
-        if len(trials) >= MAX_EVIDENCE_TRIALS:
-            break
         obj = _load_json(result_path)
         reward = trial_reward(obj)
         if reward is None:
@@ -171,12 +173,15 @@ def build_report(
     agent_source: str,
 ) -> dict[str, Any]:
     primary = mean_reward(trials)
+    evidence_trials = trials[:MAX_EVIDENCE_TRIALS]
     return {
         "primary_value": primary,
         "claim_holds": True,
         "evidence": {
-            "trials": trials,
+            "trials": evidence_trials,
             "n_measured": len(trials),
+            "n_evidence_trials": len(evidence_trials),
+            "evidence_truncated": len(trials) > MAX_EVIDENCE_TRIALS,
             "mean_reward": primary,
             "harbor_exit": harbor_exit,
             "harbor_run_tail": log_tail,
@@ -195,6 +200,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agent", default="")
     parser.add_argument("--agent-source", default="")
     args = parser.parse_args(argv)
+
+    if args.harbor_exit != 0:
+        _fail(
+            f"harbor exited {args.harbor_exit}; refusing to publish a score "
+            "from a failed or incomplete run"
+        )
 
     jobs_dir = Path(args.jobs_dir)
     trials = collect_trials(jobs_dir)

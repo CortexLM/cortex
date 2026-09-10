@@ -9,19 +9,24 @@ as ``import_path``; a directory is not).
 
 This helper turns an artefact directory into ``module:Class`` so evaluate can
 pass ``-a`` without silently falling back to the topic's built-in agent.
-Miner code is **not** executed: class discovery is AST-only.
+Miner code is **not** executed: class discovery is AST-only. A named
+``import_path`` is resolved in the evaluate import env (artefact parent
+only) and rejected when the origin is outside the staged artefact.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import importlib.machinery
+import os
 import sys
 from pathlib import Path
 
 AGENT_BASES = frozenset({"BaseAgent", "BaseInstalledAgent"})
 MAX_PY_BYTES = 256 * 1024
 MAX_PY_FILES = 64
+_NON_FILE_ORIGINS = frozenset({"built-in", "frozen"})
 
 
 def _fail(msg: str, code: int = 2) -> None:
@@ -48,9 +53,80 @@ def _read_import_path_file(agent_dir: Path) -> str | None:
             )
         if ".." in line or "/" in line or "\\" in line:
             _fail(f"{path} is not a Python import path: {line!r}")
+        _assert_import_origin(line, agent_dir)
         return line
     _fail(f"{path} is empty")
     return None
+
+
+def _containment_root(agent_dir: Path) -> Path:
+    raw = os.environ.get("PROOF_ARTIFACT_DIR", "").strip()
+    if raw:
+        art = Path(raw)
+        if art.is_dir():
+            return art.resolve()
+    return agent_dir.resolve()
+
+
+def _is_inside(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _module_file_candidates(search_root: Path, module_name: str) -> list[Path]:
+    parts = [p for p in module_name.split(".") if p]
+    if not parts or any(p in {".", ".."} or not p.isidentifier() for p in parts):
+        return []
+    base = search_root.joinpath(*parts)
+    return [Path(str(base) + ".py"), base / "__init__.py"]
+
+
+def _resolve_module_origin(module_name: str, search_root: Path) -> Path | None:
+    """Resolve ``module_name`` using only ``search_root`` (no inherited PYTHONPATH).
+
+    Miner code is not executed. PathFinder + on-disk candidates only.
+    """
+    try:
+        spec = importlib.machinery.PathFinder.find_spec(module_name, [str(search_root)])
+    except KeyError:
+        # Parent package is not on sys.modules (implicit namespace / first look).
+        spec = None
+    if spec is not None and isinstance(spec.origin, str) and spec.origin not in _NON_FILE_ORIGINS:
+        origin = Path(spec.origin)
+        if origin.is_file():
+            return origin
+    for candidate in _module_file_candidates(search_root, module_name):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _assert_import_origin(import_path: str, agent_dir: Path) -> None:
+    """Reject ``module:Class`` whose origin is outside the staged artefact."""
+    module_name, sep, class_name = import_path.partition(":")
+    if not sep or not module_name or not class_name:
+        _fail(f"{import_path!r} is not a Python import path module.path:ClassName")
+    if not class_name.isidentifier():
+        _fail(f"{import_path!r} class name is not a Python identifier")
+    search_root = agent_dir.resolve().parent
+    origin = _resolve_module_origin(module_name, search_root)
+    if origin is None:
+        _fail(
+            f"{import_path} does not resolve to a module under {search_root} "
+            "(inherited PYTHONPATH / stdlib / Harbor installs are not miner code)"
+        )
+    bound = _containment_root(agent_dir)
+    if not _is_inside(origin, bound):
+        _fail(
+            f"{import_path} origin {origin.resolve()} is outside staged artefact {bound}"
+        )
+    if not _is_inside(origin, agent_dir) and not _is_inside(origin, search_root):
+        _fail(
+            f"{import_path} origin {origin.resolve()} is outside the evaluate import root"
+        )
 
 
 def _base_attr(node: ast.expr) -> str | None:
@@ -137,6 +213,7 @@ def discover(agent_dir: Path) -> tuple[str, str]:
             f"{agent_dir} has multiple Harbor agent classes ({', '.join(unique_paths)}); "
             "write a one-line import_path file (module.path:ClassName) to choose"
         )
+    _assert_import_origin(discovered[0][0], agent_dir)
     return discovered[0]
 
 
