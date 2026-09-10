@@ -342,7 +342,9 @@ Which variable a topic wants is in its signed document, under
 
 Read them from `ctx proof topics --json` or
 `GET /challenge/proof/v1/proof/topics/<id>` before you submit. A topic that
-declares neither takes no `env` at all, and sending one is **400**.
+declares neither takes no `env` at all, and sending one is **400**. `tbench`
+declares `miner_byok = "OPENROUTER_API_KEY"` — see
+[proof-tbench.md § 4](./proof-tbench.md#4-the-model-key-is-yours-byok).
 
 ```bash
 ctx proof submit \
