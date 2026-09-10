@@ -119,43 +119,41 @@ is a commitment, not data. There is nothing to read there.
 fetches the bytes from your locator inside the topic VM. A submit without one
 is a **400** with no row.
 
-Artefact identity is **the served file, verbatim**. Pack so `harness.json`
-and the `agent/` package sit at the **tar root** (preferred):
+Artefact identity is **the served file's sha256**, verbatim. Uncompressed
+only — no gzip, no zip. Both of these packs work; pick one, hash **that**
+file, and serve **that** file. Re-running `tar` later (mtimes, member
+order) is a different digest.
+
+Working tree on disk:
 
 ```
-recipe/                 # working tree on your disk — not a required tar prefix
-  harness.json
+recipe/
+  harness.json      # optional: {"kind":"python","import_path":"agent.agent:Agent"}
   agent/
-    __init__.py         # optional; include it if your import tooling needs a regular package
-    agent.py            # class Agent
+    agent.py        # class Agent
+    __init__.py     # optional
 ```
+
+**Both layouts** (adaptor looks at `$PROOF_ARTIFACT_DIR/agent` then
+`$PROOF_ARTIFACT_DIR/recipe/agent`):
 
 ```bash
+# A — prefix `recipe/` in the archive (README preferred)
+tar -cf recipe.tar recipe/
+# unpack: $PROOF_ARTIFACT_DIR/recipe/agent/agent.py
+
+# B — contents at tar root
 tar -cf recipe.tar -C recipe .
+# unpack: $PROOF_ARTIFACT_DIR/agent/agent.py
+
 sha256sum recipe.tar
 # serve that exact file at https://…/recipe.tar
 ```
 
-That produces members `harness.json` and `agent/agent.py` at the archive
-root. After unpack they are `$PROOF_ARTIFACT_DIR/harness.json` and
-`$PROOF_ARTIFACT_DIR/agent/agent.py`. Uncompressed only — no gzip, no zip.
-
-**Why a wrapped `recipe/`-only tar fails.** `tar -cf recipe.tar recipe/`
-stores members as `recipe/harness.json`, `recipe/agent/…`. After unpack
-those sit under `$PROOF_ARTIFACT_DIR/recipe/`. The adaptor *does* look at
-`$PROOF_ARTIFACT_DIR/recipe/agent` and `recipe/harness.json`, so a **single**
-wrap of that exact tree still resolves. What miners actually ship, and what
-fails closed (no Terminus-2 fallback), is:
-
-- a **double wrap** (`recipe/recipe/agent`) — you tarred a parent that
-  already contained `recipe/`
-- `recipe/` with `agent.py` beside `harness.json` (no `agent/` package) —
-  `import_path` `agent.agent:Agent` cannot import
-- an extra prefix (`workdir/recipe/agent`) — not in the search list
-- `recipe/` with only `run.sh` and no agent dir — scored as a **script
-  harness**, not your Python Agent
-
-Prefer `-C recipe .` so you cannot nest one level too deep.
+A double wrap (`recipe/recipe/agent`), `agent.py` sitting beside
+`harness.json` with no `agent/` package, or `recipe/run.sh` with no agent
+dir, does not resolve as this Python Agent (the last is a **script
+harness**). Evaluate then fails closed — no Terminus-2 fallback.
 
 The guest unpacks that tar under `$PROOF_ARTIFACT_DIR`. Evaluate attaches
 your **custom Python agent** (primary), a Harbor `BaseAgent` subclass, a
@@ -181,46 +179,54 @@ you are **not** required to subclass Harbor `BaseAgent` (or Terminus). Name
 the class `Agent`. If you do subclass Terminus, point `import_path` at that
 class (`…:ImprovedTerminus`); keep one primary example here.
 
-`harness.json` (tar root):
+`harness.json`:
 
 ```json
 {"kind":"python","import_path":"agent.agent:Agent"}
 ```
 
-`agent/agent.py`:
+The fixture-minimal class (same shape as
+`deploy/guest/runners/rlm_fc_in_guest_harbor/tests/fixtures/python_agent/agent/agent.py`).
+The constructor may be omitted, empty, or `*args, **kwargs` (Harbor may pass
+`logs_dir` and other kwargs; the adaptor binds Harbor's form or falls back
+to no-args):
 
 ```python
 class Agent:
-    """Custom Python agent — not a Harbor BaseAgent subclass."""
-
     def __init__(self, *args, **kwargs):
-        # Harbor may pass logs_dir and other kwargs. Accept them (or take none).
+        pass
+
+    def run(self, instruction, environment=None, **kwargs):
+        return "ok"
+```
+
+When you run a **real terminal command**, prefer **async** `run`. Harbor's
+environment API is `await environment.exec(<str>)` → `ExecResult` (stdout,
+stderr, return_code) — the command is a positional string, not a keyword:
+
+```python
+class Agent:
+    def __init__(self, *args, **kwargs):
         pass
 
     async def run(self, instruction, environment=None, context=None):
-        # Sync run(instruction, environment=None, context=None) is also fine.
-        # Harbor's environment API is async exec(command=...) — verified against
-        # Harbor BaseEnvironment; this repo's fixtures do not invent another name.
         if environment is None:
             return None
-        result = await environment.exec(command="pwd && ls -la")
+        result = await environment.exec("pwd && ls -la")
         # Score is Harbor verifier rewards under $PROOF_WORK_DIR/harbor-jobs.
         # Do not write $PROOF_OUTPUT_DIR/report.json — that path is refused.
         return getattr(result, "stdout", None)
 ```
 
-`run` may be sync or async. The adaptor constructs your class with Harbor's
-kwargs, or with no args if that is the only signature that binds. It then
-calls `run` with Harbor's `(instruction, environment, context)` (or
-`instruction` alone). The return value is **not** the Proof score: leave
-measured rewards under harbor-jobs and do not write
-`$PROOF_OUTPUT_DIR/report.json`. Returning `None` or the command's stdout
-is honest for this minimal example.
+`run` may be sync or async. The return value is **not** the Proof score:
+leave measured rewards under harbor-jobs. Returning `"ok"`, `None`, or the
+command's stdout is honest for this minimal example.
 
-Pack, hash, and serve **that exact file**:
+Pack, hash, and serve **that exact file** (either layout):
 
 ```bash
-tar -cf recipe.tar -C recipe .
+tar -cf recipe.tar recipe/
+# or: tar -cf recipe.tar -C recipe .
 sha256sum recipe.tar
 # serve that exact file at https://…/recipe.tar
 ```

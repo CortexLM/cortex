@@ -129,7 +129,7 @@ Topics that have a written miner guide in this repo:
 | `tbench` | [proof-tbench.md](./proof-tbench.md) | `custom` (`success_rate`) / `discovery` |
 
 For a minimal custom-Python `Agent` constructor/`run` on `tbench` (Harbor
-`environment.exec`, tar-root layout), see
+`environment.exec`, both pack layouts), see
 [proof-tbench.md § Minimal Agent example](./proof-tbench.md#minimal-agent-example).
 
 A guide is a convenience, not the contract: the signed document returned by
