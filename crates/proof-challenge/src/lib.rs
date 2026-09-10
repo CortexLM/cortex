@@ -31,7 +31,9 @@ pub use proof_http::{
     executor_slot, hash_admin_token, proof_router, AppState, ExecutorSlot, VmAgentHealth,
     VmOrchestratorProbe, VmOrchestratorReport,
 };
-pub use proof_store::{ArtifactManifest, MemoryStore};
+pub use proof_store::{
+    ArtifactManifest, MemoryStore, MinerEnvVault, DEFAULT_MINER_BYOK_DIR, MINER_BYOK_DIR_ENV,
+};
 pub use proof_task::{
     HoldoutRecord, InferenceOffer, OfferError, ProofPin, TopicDocument, BASE_MODEL_FAMILY,
     CHALLENGE_ID, CHALLENGE_ID_BYTES as PROOF_ID_BYTES, SCORE_MAX as PROOF_SCORE_MAX,

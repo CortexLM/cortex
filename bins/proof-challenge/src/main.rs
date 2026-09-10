@@ -25,9 +25,9 @@ use prism_lium::LiumClient;
 use proof_challenge::{
     executor_slot, hash_admin_token, parse_holdout_file, proof_router, AppState,
     BaselineMeasurement, EvalBackend, EvalExecutorOffer, GatewayClient, GatewayClientConfig,
-    HarvestOverrides, InferenceOffer, LiveScorer, MemoryStore, ProofEmitter, ProofPin,
-    TopicDocument, VmAgentHealth, VmOrchestratorProbe, VmOrchestratorReport, CHALLENGE_ID,
-    DEFAULT_EMIT_POLL_SECS, SCORING_VERSION,
+    HarvestOverrides, InferenceOffer, LiveScorer, MemoryStore, MinerEnvVault, ProofEmitter,
+    ProofPin, TopicDocument, VmAgentHealth, VmOrchestratorProbe, VmOrchestratorReport,
+    CHALLENGE_ID, DEFAULT_EMIT_POLL_SECS, MINER_BYOK_DIR_ENV, SCORING_VERSION,
 };
 use proof_eval::{custom_ids_ref, registered_custom, FamilyMux};
 use proof_harvest::{HarvestLimits, LiumProofHarvest};
@@ -168,6 +168,26 @@ fn main() -> ExitCode {
     }
 }
 
+/// Where this host keeps miner BYOK material, said out loud at boot.
+///
+/// It belongs in 0600 files rather than in this process: a topic that defers
+/// scoring is drained long after the submit that carried the key, and a
+/// restart in between must not reach the paid run without it.
+fn miner_byok_vault() -> MinerEnvVault {
+    let vault = MinerEnvVault::from_env();
+    if let Some(dir) = vault.root() {
+        tracing::info!(
+            dir = %dir.display(),
+            "miner byok vault (0600 per variable; contents never logged)"
+        );
+    } else {
+        tracing::warn!(
+            "{MINER_BYOK_DIR_ENV} is empty: miner byok material stays in this process and a restart loses it, so a deferred topic's queue will 503 on drain"
+        );
+    }
+    vault
+}
+
 fn run(cli: &Cli) -> Result<(), String> {
     let sk = load_optional_sk(cli.challenge_sk_file.as_deref());
     let pin = load_pin(cli.pin_file.as_deref())?;
@@ -226,7 +246,7 @@ fn run(cli: &Cli) -> Result<(), String> {
     let live_scorer = live_scorer(backend, harvest, rlm_store, &cli.artefact_root, &vm);
     log_live_wiring(backend, live_scorer.as_deref(), &cli.artefact_root);
 
-    let store = MemoryStore::new();
+    let store = MemoryStore::new().with_miner_byok_vault(miner_byok_vault());
     let registered = registered_custom(live_scorer.as_deref());
     match load_topics(&store, &pin, cli.topics_file.as_deref(), &registered) {
         Ok(n) => tracing::info!(topics = n, "signed topics loaded"),

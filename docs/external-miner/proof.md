@@ -360,12 +360,19 @@ What the host does with it:
 - **Checked before your signature.** `env` is not part of
   `base-proof-submit-v1`, so a rejected `env` does **not** spend your
   `submit_nonce`: fix the flag and re-post the same signed body.
-- **One way only.** The value is handed to the guest that runs *your* code
-  and exported there under the name the topic declared (and written to a
-  private file at `$PROOF_MINER_ENV_DIR/<NAME>` for harnesses that prefer to
-  read one). It is never written to your submission row, never in
+- **One way only.** The value is kept in a private file (mode `0600`) from
+  the moment it is accepted, and handed to the guest that runs *your* code —
+  exported there under the name the topic declared and written to a second
+  private file at `$PROOF_MINER_ENV_DIR/<NAME>`, which is what the harness
+  reads at eval time. It is never written to your submission row, never in
   `GET /v1/submissions`, never in `/v1/status`, and it is blanked out of any
   run log or evidence your own run prints it into.
+- **Kept only as long as the run needs it.** On a topic that defers scoring,
+  the key waits for the operator's drain and is deleted as soon as your row
+  is terminal. If the host loses it before the run (a restart on an operator
+  who did not configure durable storage), your row stays `queued` and the
+  submit path answers **503** — it never scores your work on someone else's
+  credentials.
 - **Never a substitute for a bad key.** If your key is rejected by the
   provider, that is your run failing — the host does not fall back to its own.
 

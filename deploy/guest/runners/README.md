@@ -80,12 +80,16 @@ if [ -n "${PROOF_PARAM_INFERENCE_KEY_FILE:-}" ]; then
     export "$PROOF_PARAM_INFERENCE_KEY_ENV"="$(tr -d '\n' < "$PROOF_SECRETS_DIR/$PROOF_PARAM_INFERENCE_KEY_FILE")"
 fi
 
-# A topic that makes the miner pay for the provider instead: their key is
-# already exported under the name the topic declared (miner_byok), so the
-# adaptor only has to insist it is there. Never echo it, and never fall back
-# to the owner key above — a miner run the miner did not pay for is a bug.
+# A topic that makes the *miner* pay for the provider instead (miner_byok).
+# The agent both exports the variable and writes it to a 0600 file named
+# after it; read the file, because that is the form that survives anything
+# the harness does to its own environment. Never echo it, and never fall
+# back to the owner key above — a miner run on the operator's credentials is
+# the one outcome this path exists to prevent.
 if [ -n "${PROOF_PARAM_MINER_BYOK:-}" ]; then
-    eval ": \"\${$PROOF_PARAM_MINER_BYOK:?the miner did not supply their key}\""
+    byok_file="${PROOF_MINER_ENV_DIR:?miner_byok topic with no miner env staged}/$PROOF_PARAM_MINER_BYOK"
+    [ -r "$byok_file" ] || { echo "the miner did not supply $PROOF_PARAM_MINER_BYOK" >&2; exit 2; }
+    export "$PROOF_PARAM_MINER_BYOK"="$(tr -d '\n' < "$byok_file")"
 fi
 
 # Rootless podman API socket for harnesses that speak to a Docker daemon.

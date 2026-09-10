@@ -634,6 +634,15 @@ async fn submit(
 
     let nonce = nonce_from(&hotkey, &topic_id, &artifact);
     let submission_digest = freeze_submission_digest(&hotkey, &topic_id, &artifact, &nonce);
+    // The key goes to the vault before anything can spend it, and the
+    // scoring path reads it back from there — the same step whether this
+    // submission is scored now or drained days later, so there is one place
+    // a miner's key ever lives on this host. A vault that cannot hold it is
+    // a host failure (503, no row): accepting a key we did not keep would
+    // reach the paid run with nothing to authenticate the miner's calls.
+    st.store
+        .stash_miner_env(&submission_digest, &miner_env)
+        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
     // The intake row: every miner-supplied field, frozen digest, no host
     // stamps yet. It is either queued as-is or scored right now.
     let row = Submission {
@@ -664,9 +673,9 @@ async fn submit(
     // host still installing its baseline / harness never rents, boots, or
     // judges for it — and never refuses it either.
     if topic.constraints.defer_scoring() {
-        return queue_deferred(&st, row, &miner_env);
+        return queue_deferred(&st, row);
     }
-    let resp = score_intake(&st, row, &topic, &miner_env).await?;
+    let resp = score_intake(&st, row, &topic).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -678,14 +687,8 @@ async fn submit(
 fn queue_deferred(
     st: &AppState,
     mut row: Submission,
-    miner_env: &MinerEnv,
 ) -> Result<(StatusCode, Json<SubmitResp>), ErrResp> {
     row.detail = Some(DEFERRED_DETAIL.to_owned());
-    // A queued row is scored later, by a drain that has no request body to
-    // read: its BYOK environment waits beside the row, never on it.
-    st.store
-        .stash_miner_env(&row.submission_digest, miner_env)
-        .map_err(|e| store_err(&e))?;
     match st.store.enqueue(row).map_err(|e| store_err(&e))? {
         Enqueued::Inserted(row) => Ok((
             StatusCode::CREATED,
@@ -727,8 +730,34 @@ async fn score_intake(
     st: &AppState,
     row: Submission,
     topic: &TopicDocument,
-    miner_env: &MinerEnv,
 ) -> Result<SubmitResp, ErrResp> {
+    // The miner's own key, read back from the vault it was put in at intake.
+    // A topic that demands one and cannot get it here is a **503** with the
+    // row untouched — a drain leaves it `queued` and nothing is rented. The
+    // alternative, running the miner's evaluation on the operator's
+    // credentials, is the one outcome this whole path exists to prevent.
+    let miner_env = st
+        .store
+        .miner_env(&row.submission_digest)
+        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    if let Some(missing) = topic
+        .constraints
+        .miner_env_required()
+        .into_iter()
+        .find(|n| miner_env.names().iter().all(|have| have != n))
+    {
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!(
+                "this topic runs on the miner's own {missing}, and this host no longer holds the one that was submitted (vault {}); the row is untouched — nothing was rented and the operator key is never substituted",
+                st.store
+                    .miner_byok_vault()
+                    .root()
+                    .map_or_else(|| "in-process".to_owned(), |r| r.display().to_string())
+            ),
+        ));
+    }
+    let miner_env = &miner_env;
     // One snapshot of the executor for this request: rotation mid-submit
     // must not score under one offer and stamp another.
     let executor = st.executor_offer();
@@ -1185,11 +1214,7 @@ impl AppState {
                 }
             };
             let claim = ClaimGuard::new(self.store.clone(), &row);
-            let env = self
-                .store
-                .miner_env(&row.submission_digest)
-                .unwrap_or_default();
-            match score_intake(self, row, &topic, &env).await {
+            match score_intake(self, row, &topic).await {
                 Ok(resp) => {
                     claim.landed();
                     report.drained.push(resp);
@@ -1337,11 +1362,7 @@ async fn score_queued(
     let row = st.store.claim_queued(&id).map_err(claim_err)?;
     let claim = ClaimGuard::new(st.store.clone(), &row);
     let topic = st.drainable_topic(&row.topic_id)?;
-    let env = st
-        .store
-        .miner_env(&row.submission_digest)
-        .unwrap_or_default();
-    let resp = score_intake(&st, row, &topic, &env).await?;
+    let resp = score_intake(&st, row, &topic).await?;
     claim.landed();
     Ok((StatusCode::OK, Json(resp)))
 }
@@ -5100,5 +5121,88 @@ mod tests {
             store.miner_env(&digest).expect("stash").is_empty(),
             "a scored row does not keep the key"
         );
+    }
+    /// A topic that runs on the miner's own key and a host that no longer
+    /// holds the one that was submitted (a restart with nothing on disk, an
+    /// operator who cleared the vault) is a **503** with the row untouched.
+    /// The alternative — scoring the miner's evaluation on the operator's
+    /// credentials — is what this whole path exists to prevent, so it fails
+    /// closed and the drain leaves the row `queued`.
+    #[tokio::test]
+    async fn a_lost_key_refuses_the_run_instead_of_spending_the_owners() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let state = state_with_custom_params(
+            scorer.clone(),
+            true,
+            true,
+            &[(proof_canon::PARAM_MINER_BYOK, BYOK)],
+        );
+        let store = state.store.clone();
+        let p = state.pin.clone();
+        let app = proof_router(state);
+
+        let (st, out) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            byok_submit("a", Some(&serde_json::json!({ BYOK: BYOK_VALUE }))),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{out}");
+        let digest = out["submission_digest"]
+            .as_str()
+            .expect("digest")
+            .to_owned();
+        let id = out["id"].as_str().expect("id").to_owned();
+
+        // The key is gone before the drain reaches it.
+        store.forget_miner_env(&digest).expect("cleared");
+        let mut relisted = custom_topic_with_defer(&p, None);
+        relisted
+            .constraints
+            .params
+            .insert(proof_canon::PARAM_MINER_BYOK.to_owned(), BYOK.to_owned());
+        relisted.signature = relisted.sign_with(&sk()).expect("sign");
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/topics",
+            serde_json::to_value(&relisted).expect("json"),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+
+        let (st, report) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            serde_json::json!({ "topic_id": CUSTOM, "limit": 4 }),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{report}");
+        let why = report.to_string();
+        assert!(why.contains(BYOK), "names what is missing: {why}");
+        assert!(why.contains("operator key is never substituted"), "{why}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0, "nothing ran");
+        assert_eq!(
+            queued_ids(app.clone(), Some(CUSTOM)).await,
+            vec![id.clone()],
+            "the row is still queued, nothing was rented"
+        );
+
+        // Scoring the head directly refuses the same way and releases it.
+        let (st, one) = json_req(
+            app.clone(),
+            "POST",
+            &format!("/v1/admin/proof/submissions/{id}/score"),
+            serde_json::json!({}),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{one}");
+        assert_eq!(queued_ids(app, Some(CUSTOM)).await, vec![id]);
     }
 }

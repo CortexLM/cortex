@@ -505,9 +505,16 @@ as `env: {"<NAME>": "<value>"}` on `POST /v1/submissions`.
 | Names are `[A-Z][A-Z0-9_]{0,63}`, never `PROOF_…` and never one the guest contract sets (`PATH`, `HOME`, `LANG`, `XDG_RUNTIME_DIR`). Enforced at publish, at intake, and again in the guest | `is_env_name` |
 | `env` is **not** in `base-proof-submit-v1`. It is checked *before* the signature, so a rejected `env` does not spend the miner's single-use `submit_nonce` | `submit` (`proof-http`) |
 | The value never reaches a public answer: not on the `Submission` row, so not in `GET /v1/submissions`, `/v1/status`, or a drain report. `MinerEnv`'s `Debug` prints names and `[REDACTED]`, so it cannot reach a log line by being nested in something formatted | `MinerEnv`, `MemoryStore::stash_miner_env` |
-| A `queued` row's environment waits **beside** the row, keyed by frozen digest, and the drain hands it to the same scoring path a live submit takes. It is dropped as soon as the row is terminal | `MemoryStore::{stash,forget}_miner_env` |
-| In the guest it is exported under the declared name for the **paid** job only (`Baseline` / `Evaluate`), written to a 0600 file at `$PROOF_MINER_ENV_DIR/<NAME>`, listed by name in `$PROOF_MINER_ENV_NAMES`, and added to the redaction set so a run that prints it gets `[REDACTED]` back. Inspection ticks rules without spending and is handed nothing | `inject_miner_env` (`proof-vm-guest`) |
+| **A secure file, not a process value.** At intake the key goes into the vault: `<PROOF_MINER_BYOK_DIR>/<submission_digest>/<NAME>`, directories `0700`, files `0600`, written temp-then-rename, keyed by frozen digest. The scoring path reads it back from there — the same step whether the row is scored now or drained days later, so a control plane that restarted in between still reaches the paid run with the miner's key. Removed the moment the row is terminal | `MinerEnvVault` (`proof-store`) |
+| A vault that cannot hold the key is a **503 with no row**: a key the host did not keep must not be accepted | `submit` (`proof-http`) |
+| A topic that **requires** BYOK and a host that no longer holds it is a **503 with the row untouched** (a drain leaves it `queued`, nothing rented). The operator key is never substituted for a miner's missing one | `score_intake` (`proof-http`) |
+| In the guest it is exported under the declared name for the **paid** job only (`Baseline` / `Evaluate`), written to a 0600 file at `$PROOF_MINER_ENV_DIR/<NAME>` — the same shape as the vault, so the adaptor reads a file on both sides of the VM boundary — listed by name in `$PROOF_MINER_ENV_NAMES`, and added to the redaction set so a run that prints it gets `[REDACTED]` back. Inspection ticks rules without spending and is handed nothing | `inject_miner_env` (`proof-vm-guest`) |
 | Owner key material is a different path entirely: the KVM host reads `PROOF_VM_AGENT_OWNER_KEY_DIR` from its own disk and stages it into the RLM guest at boot. It never travels on a job, and never into a sister or experiment guest as a miner variable | `proof-fc-host` |
+
+Operator knob: `PROOF_MINER_BYOK_DIR` (default `/run/proof/miner-byok` — a
+runtime path, so a reboot never leaves a miner's key on disk). Set it to the
+empty string to keep material in the process; the host warns at boot that a
+restart then loses it and a deferred topic's queue will 503 on drain.
 
 The sister leg is opt-in per topic (`inject_miner_env_sister`) and
 name-checked host-side (`SisterRequest::check_env`) before the relay, so a
