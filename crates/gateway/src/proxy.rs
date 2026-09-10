@@ -120,6 +120,11 @@ async fn proxy_inner(
                     st.registry.record_failure(backend.id);
                     last_status = status;
                     last_msg = format!("upstream {status}");
+                    // Lock down before retain: a viewer 5xx is still
+                    // miner-controlled (cookies / CSP / cache).
+                    if is_view_path(&rest) {
+                        apply_view_lockdown(&mut upstream_resp, &st.view_frame_ancestors, &rest);
+                    }
                     // Keep the challenge body: miners need the JSON error
                     // (`artifact_uri must be https://`, …), not a synthetic
                     // `upstream 503 Service Unavailable` string.
