@@ -228,6 +228,10 @@ if [ -n "$RESOLVER" ]; then echo "nameserver $RESOLVER" > "$ROOT/etc/resolv.conf
 echo "== run-as user uid $RUN_AS_UID =="
 chroot "$ROOT" /usr/sbin/groupadd -g "$RUN_AS_UID" runner
 chroot "$ROOT" /usr/sbin/useradd -u "$RUN_AS_UID" -g "$RUN_AS_UID" -d "/home/uid$RUN_AS_UID" -M -s /bin/bash runner
+# docker group so a rootful engine overlay can grant the run-as user the socket
+# without chmod 666. groupadd is a no-op if an overlay already created it.
+chroot "$ROOT" /usr/sbin/groupadd -f docker 2>/dev/null || chroot "$ROOT" /usr/sbin/groupadd docker || true
+chroot "$ROOT" /usr/sbin/usermod -aG docker runner || true
 install -d -m 0755 -o "$RUN_AS_UID" -g "$RUN_AS_UID" "$ROOT/home/uid$RUN_AS_UID"
 echo "runner:100000:65536" > "$ROOT/etc/subuid"
 echo "runner:100000:65536" > "$ROOT/etc/subgid"
@@ -265,13 +269,13 @@ rootless_storage_path = "$PODMAN_GRAPHROOT"
 mount_program = "/usr/bin/fuse-overlayfs"
 EOF
     chmod 0644 "$ROOT/etc/containers/storage.conf"
-    # The docker CLI name many harnesses call: podman's compatibility shim.
+    # The docker CLI name many harnesses call: podman's compatibility shim,
+    # only when an overlay has not already installed a real docker binary.
+    # Do not alias docker-compose to podman-compose: Compose v2 uses
+    # `docker compose` and that alias breaks container start.
     if [ ! -e "$ROOT/usr/bin/docker" ]; then
         printf '#!/bin/sh\nexec podman "$@"\n' > "$ROOT/usr/bin/docker"
         chmod 0755 "$ROOT/usr/bin/docker"
-    fi
-    if [ ! -e "$ROOT/usr/bin/docker-compose" ] && [ -x "$ROOT/usr/bin/podman-compose" ]; then
-        ln -s podman-compose "$ROOT/usr/bin/docker-compose"
     fi
 fi
 

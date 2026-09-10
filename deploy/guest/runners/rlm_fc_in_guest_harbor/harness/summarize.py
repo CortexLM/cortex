@@ -171,6 +171,7 @@ def build_report(
     harbor_exit: int,
     agent: str,
     agent_source: str,
+    harness_kind: str = "",
 ) -> dict[str, Any]:
     primary = mean_reward(trials)
     evidence_trials = trials[:MAX_EVIDENCE_TRIALS]
@@ -187,6 +188,7 @@ def build_report(
             "harbor_run_tail": log_tail,
             "agent": redact(agent, load_redact_values()),
             "agent_source": agent_source,
+            "harness_kind": harness_kind,
         },
     }
 
@@ -199,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--harbor-exit", type=int, default=0)
     parser.add_argument("--agent", default="")
     parser.add_argument("--agent-source", default="")
+    parser.add_argument("--harness-kind", default="")
     args = parser.parse_args(argv)
 
     if args.harbor_exit != 0:
@@ -222,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
         args.harbor_exit,
         args.agent,
         args.agent_source,
+        args.harness_kind,
     )
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)

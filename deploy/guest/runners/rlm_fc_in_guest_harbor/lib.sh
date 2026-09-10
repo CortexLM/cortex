@@ -4,6 +4,11 @@
 
 _PROOF_HARBOR_ADAPTOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROOF_RESOLVE_AGENT="${_PROOF_HARBOR_ADAPTOR_DIR}/resolve_agent.py"
+PROOF_RESOLVE_HARNESS="${_PROOF_HARBOR_ADAPTOR_DIR}/resolve_harness.py"
+PROOF_FILTER_TASKS="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/filter_tasks.py"
+PROOF_REWRITE_NETWORK="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/rewrite_network.py"
+PROOF_ENSURE_VERIFIER="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/ensure_verifier.py"
+PROOF_PYTHON_AGENT="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/proof_python_agent.py"
 
 proof_die() {
     echo "rlm_fc_in_guest_harbor: $*" >&2
@@ -74,76 +79,119 @@ proof_is_harbor_agent_dir() {
     python3 "$PROOF_RESOLVE_AGENT" --dir "$d" --check
 }
 
-# Prints the Harbor -a argument. Exports PROOF_HARBOR_AGENT_SOURCE and
-# PYTHONPATH when the artefact supplies a custom agent. Never falls back to
-# the topic built-in on evaluate when an artefact was staged.
-proof_select_harbor_agent() {
+# Filter pack tasks to those that typically finish under max_task_duration_s
+# (default 3600). Copies into $PROOF_WORK_DIR/tasks-filtered and points
+# PROOF_TASKS at that tree. The pack is never mutated.
+proof_filter_tasks() {
+    : "${PROOF_TASKS:?proof_require_tasks first}"
+    : "${PROOF_WORK_DIR:?PROOF_WORK_DIR is required}"
+    local dest="$PROOF_WORK_DIR/tasks-filtered"
+    local extra=()
+    if [ -n "${PROOF_PARAM_TASK_FILTER:-}" ]; then
+        extra+=(--filter-rel "$PROOF_PARAM_TASK_FILTER")
+    fi
+    if [ "${PROOF_PARAM_EXCLUDE_UNKNOWN_DURATION:-}" = "true" ]; then
+        extra+=(--drop-unknown)
+    fi
+    python3 "$PROOF_FILTER_TASKS" \
+        --tasks-dir "$PROOF_TASKS" \
+        --dest-dir "$dest" \
+        --pack-dir "${PROOF_PACK_DIR:?}" \
+        --max-duration-s "${PROOF_PARAM_MAX_TASK_DURATION_S:-3600}" \
+        ${extra[@]+"${extra[@]}"} \
+        || proof_die "task duration filter failed"
+    PROOF_TASKS="$dest"
+    export PROOF_TASKS
+}
+
+# Agents must reach the internet (OpenRouter / BYOK). Harbor Docker env
+# rejects network_mode=no-network on this guest; rewrite the filtered copy.
+proof_enable_agent_network() {
+    : "${PROOF_TASKS:?proof_filter_tasks first}"
+    python3 "$PROOF_REWRITE_NETWORK" --tasks-dir "$PROOF_TASKS" --mode public \
+        || proof_die "failed to enable agent network on the filtered task copy"
+}
+
+# Harbor verifier execs pytest inside the task environment image. n15 x0017
+# biped + cad scored 0 because that image had no pytest. Patch the copy.
+proof_ensure_verifier() {
+    : "${PROOF_TASKS:?proof_filter_tasks first}"
+    python3 "$PROOF_ENSURE_VERIFIER" --tasks-dir "$PROOF_TASKS" \
+        || proof_die "failed to ensure pytest in verifier/environment images"
+}
+
+# Resolve the miner harness. Custom Python is primary; Harbor BaseAgent,
+# harness.json, and run.sh are also accepted. Evaluate never falls back to
+# terminus-2 when an artefact was staged.
+proof_select_harness() {
     local job="${PROOF_JOB:?PROOF_JOB is required}"
-    local art="${PROOF_ARTIFACT_DIR:-}"
-    local chosen=""
-    local source=""
-    local resolved=""
+    local resolved
+    resolved="$(python3 "$PROOF_RESOLVE_HARNESS")" || proof_die "harness resolve failed"
+    local kind import_path pythonpath wrapper source entry builtin
+    kind="$(printf '%s\n' "$resolved" | sed -n 's/^kind=//p' | head -n1)"
+    import_path="$(printf '%s\n' "$resolved" | sed -n 's/^import_path=//p' | head -n1)"
+    pythonpath="$(printf '%s\n' "$resolved" | sed -n 's/^pythonpath=//p' | head -n1)"
+    wrapper="$(printf '%s\n' "$resolved" | sed -n 's/^wrapper=//p' | head -n1)"
+    source="$(printf '%s\n' "$resolved" | sed -n 's/^source=//p' | head -n1)"
+    entry="$(printf '%s\n' "$resolved" | sed -n 's/^entry=//p' | head -n1)"
+    builtin="$(printf '%s\n' "$resolved" | sed -n 's/^builtin=//p' | head -n1)"
+    [ -n "$kind" ] || proof_die "harness resolve printed no kind"
 
-    _use_artefact_agent() {
-        local dir="$1"
-        local label="$2"
-        resolved="$(python3 "$PROOF_RESOLVE_AGENT" --dir "$dir")" || return 1
-        local import_path pythonpath
-        import_path="$(printf '%s\n' "$resolved" | sed -n 's/^import_path=//p' | head -n1)"
-        pythonpath="$(printf '%s\n' "$resolved" | sed -n 's/^pythonpath=//p' | head -n1)"
-        [ -n "$import_path" ] || return 1
-        if [ -n "$pythonpath" ]; then
-            # Evaluate import env is the staged artefact parent only.
-            # Inherited PYTHONPATH would let a miner import_path name a
-            # module that lives outside the artefact.
-            export PYTHONPATH="$pythonpath"
-        fi
-        chosen="$import_path"
-        source="$label"
-        echo "rlm_fc_in_guest_harbor: using miner Harbor agent at $dir -> -a $import_path" >&2
-        return 0
-    }
-
-    if [ -n "$art" ]; then
-        if proof_is_harbor_agent_dir "$art/agent"; then
-            _use_artefact_agent "$art/agent" "artifact_dir/agent" || proof_die "failed to resolve $art/agent"
-        elif proof_is_harbor_agent_dir "$art/recipe/agent"; then
-            _use_artefact_agent "$art/recipe/agent" "artifact_dir/recipe/agent" || proof_die "failed to resolve $art/recipe/agent"
-        elif [ "$job" = evaluate ]; then
-            if [ -f "$art/recipe/run.sh" ]; then
-                proof_die "evaluate requires a Harbor agent directory at \$PROOF_ARTIFACT_DIR/agent or \$PROOF_ARTIFACT_DIR/recipe/agent (Harbor -a takes module:Class, not a path). recipe/run.sh is a classic marker only — refusing to ignore the staged artefact or wrap it as terminus-2"
-            fi
-            proof_die "evaluate staged an artefact at $art but found no Harbor agent directory at agent/ or recipe/agent; refusing topic agent fallback (that was the scoring gap)"
-        fi
-    elif [ "$job" = evaluate ]; then
-        proof_die "evaluate requires PROOF_ARTIFACT_DIR"
-    fi
-
-    if [ -z "$chosen" ]; then
-        if [ -n "$art" ]; then
-            proof_die "artefact staged at $art has no Harbor agent at agent/ or recipe/agent; topic agent fallback is only for baseline with PROOF_ARTIFACT_DIR unset"
-        fi
-        [ "$job" = evaluate ] && proof_die "evaluate requires a miner Harbor agent (module:Class)"
-        : "${PROOF_PARAM_HARBOR_AGENT:?constraints.params.harbor_agent is required for baseline without a miner agent dir}"
-        chosen="$PROOF_PARAM_HARBOR_AGENT"
-        source="topic"
-        echo "rlm_fc_in_guest_harbor: baseline using topic agent -a $chosen" >&2
-    fi
-
-    if [ "$job" = evaluate ] && [[ "$chosen" != *:* ]]; then
-        proof_die "evaluate -a must be a miner import path (module:Class), not built-in $chosen"
-    fi
-
+    export PROOF_HARNESS_KIND="$kind"
+    export PROOF_HARNESS_ENTRY="$entry"
     export PROOF_HARBOR_AGENT_SOURCE="$source"
-    export PROOF_HARBOR_AGENT_ARG="$chosen"
-    printf '%s\n' "$chosen"
+    export PROOF_HARNESS_WRAPPER="$wrapper"
+
+    case "$kind" in
+        python)
+            [ -n "$import_path" ] || proof_die "python harness missing import_path"
+            [ -f "$PROOF_PYTHON_AGENT" ] || proof_die "missing custom Python wrapper $PROOF_PYTHON_AGENT"
+            # Wrapper lives next to the adaptor; miner code stays the artefact parent.
+            export PYTHONPATH="${_PROOF_HARBOR_ADAPTOR_DIR}/harness:${pythonpath}"
+            export PROOF_MINER_AGENT_IMPORT="$import_path"
+            export PROOF_MINER_AGENT_ROOT="${pythonpath}"
+            export PROOF_HARBOR_AGENT_ARG="proof_python_agent:ProofPythonAgent"
+            echo "rlm_fc_in_guest_harbor: custom Python harness $import_path -> -a proof_python_agent:ProofPythonAgent" >&2
+            ;;
+        harbor)
+            [ -n "$import_path" ] || proof_die "harbor harness missing import_path"
+            export PYTHONPATH="$pythonpath"
+            export PROOF_HARBOR_AGENT_ARG="$import_path"
+            echo "rlm_fc_in_guest_harbor: miner Harbor agent -> -a $import_path" >&2
+            ;;
+        script)
+            [ -n "$entry" ] || proof_die "script harness missing entry"
+            export PROOF_HARBOR_AGENT_ARG=""
+            echo "rlm_fc_in_guest_harbor: script harness $entry (not terminus-2)" >&2
+            ;;
+        builtin)
+            [ -n "$builtin" ] || proof_die "builtin harness missing name"
+            [ "$job" = evaluate ] && [ "$source" = topic ] && \
+                proof_die "evaluate -a must be a miner harness, not built-in $builtin"
+            export PROOF_HARBOR_AGENT_ARG="$builtin"
+            echo "rlm_fc_in_guest_harbor: $source using built-in -a $builtin" >&2
+            ;;
+        *)
+            proof_die "unknown harness kind $kind"
+            ;;
+    esac
+    printf '%s\n' "${PROOF_HARBOR_AGENT_ARG}"
+}
+
+# Prints the Harbor -a argument. Kept for adaptor unit tests.
+proof_select_harbor_agent() {
+    proof_select_harness
+}
+
+# Prefer a live Docker daemon (rootful overlay / host-tools). Fall back to
+# the podman API socket only when Docker is absent. Never alias compose.
+proof_docker_ok() {
+    command -v docker >/dev/null 2>&1 || return 1
+    docker info >/dev/null 2>&1
 }
 
 proof_start_podman() {
-    if [ "${PROOF_HARNESS_SKIP_PODMAN:-}" = 1 ]; then
-        return 0
-    fi
-    command -v podman >/dev/null 2>&1 || proof_die "podman is not on PATH (bake --with-podman)"
+    command -v podman >/dev/null 2>&1 || proof_die "podman is not on PATH (bake --with-podman) and docker is not usable"
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     mkdir -p "$XDG_RUNTIME_DIR/podman"
     local sock="$XDG_RUNTIME_DIR/podman/podman.sock"
@@ -159,4 +207,66 @@ proof_start_podman() {
         sleep 0.1
     done
     proof_die "podman API socket did not appear at $sock"
+}
+
+proof_start_container_runtime() {
+    if [ "${PROOF_HARNESS_SKIP_PODMAN:-}" = 1 ] || [ "${PROOF_HARNESS_SKIP_RUNTIME:-}" = 1 ]; then
+        return 0
+    fi
+    # Rootful docker.sock from init / operator overlay. Native overlay, no fuse.
+    local sock=""
+    if [ -S /var/run/docker.sock ]; then
+        sock=/var/run/docker.sock
+    elif [ -S /run/docker.sock ]; then
+        sock=/run/docker.sock
+    fi
+    if [ -n "$sock" ]; then
+        export DOCKER_HOST="unix://$sock"
+        # Socket can exist before the daemon answers; wait rather than
+        # immediately falling through to podman (Harbor env start timeouts).
+        local i
+        for i in $(seq 1 30); do
+            if proof_docker_ok; then
+                echo "rlm_fc_in_guest_harbor: using docker daemon at $DOCKER_HOST" >&2
+                export PROOF_CONTAINER_RUNTIME=docker
+                return 0
+            fi
+            sleep 1
+        done
+        echo "rlm_fc_in_guest_harbor: docker socket at $sock never became ready" >&2
+        unset DOCKER_HOST
+    fi
+    if [ -n "${DOCKER_HOST:-}" ] && proof_docker_ok; then
+        echo "rlm_fc_in_guest_harbor: using docker via DOCKER_HOST=$DOCKER_HOST" >&2
+        export PROOF_CONTAINER_RUNTIME=docker
+        return 0
+    fi
+    echo "rlm_fc_in_guest_harbor: docker not ready; falling back to podman API socket" >&2
+    proof_start_podman
+    export PROOF_CONTAINER_RUNTIME=podman
+}
+
+proof_run_script_harness() {
+    local art="${PROOF_ARTIFACT_DIR:?script harness requires PROOF_ARTIFACT_DIR}"
+    local rel="${PROOF_HARNESS_ENTRY:?}"
+    case "$rel" in
+        "" | /* | *..*) proof_die "script harness entry must be a relative artefact path: $rel" ;;
+    esac
+    local path="$art/$rel"
+    [ -f "$path" ] || proof_die "script harness missing $path"
+    echo "rlm_fc_in_guest_harbor: exec miner script $rel (not wrapping terminus-2)" >&2
+    (
+        cd "$art"
+        case "$path" in
+            *.sh) bash "$path" ;;
+            *.py) python3 "$path" ;;
+            *)
+                if [ -x "$path" ]; then
+                    "$path"
+                else
+                    proof_die "script harness $rel is not executable"
+                fi
+                ;;
+        esac
+    )
 }

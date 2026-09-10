@@ -134,7 +134,8 @@ VMs and experiment VMs:
 | Debian minbase (`--suite trixie`) | coreutils, iproute2, e2fsprogs, python3, curl, jq | init + adaptors |
 | `proof-vm-guest-agent` (musl) | vsock `:5000`, `proof_vm_proto::guest` | the protocol half |
 | `/sbin/init` (`deploy/guest/init.sh`) + `catatonit` | mounts, cgroup v2, scratch on `/dev/vdb`, run-as user, agent loop | no systemd in the guest |
-| rootless podman + crun + fuse-overlayfs + pasta/slirp4netns + podman-compose | containers **inside** the VM as an unprivileged user (`--run-as-uid 1000`, subuid `100000:65536`), `cgroup_manager = cgroupfs`, store on paths `init.sh` creates and chowns to that user — `graphroot = /var/lib/proof/containers/storage` (scratch disk), `runroot = /run/user/<uid>/containers` (its `XDG_RUNTIME_DIR` tmpfs); never `/var/lib/containers` / `/run/containers` (root-owned, read-only rootfs) | the harness's container runtime; no nested KVM |
+| rootless podman + crun + fuse-overlayfs + pasta/slirp4netns + podman-compose | **fallback** container runtime as an unprivileged user when no rootful engine is overlaid (`--run-as-uid 1000`, subuid `100000:65536`), `cgroup_manager = cgroupfs`, store on paths `init.sh` creates and chowns to that user — `graphroot = /var/lib/proof/containers/storage` (scratch disk), `runroot = /run/user/<uid>/containers` (its `XDG_RUNTIME_DIR` tmpfs); never `/var/lib/containers` / `/run/containers` (root-owned, read-only rootfs) | fallback when Docker is absent; no nested KVM |
+| rootful `dockerd` (operator overlay / host-tools) | `init.sh` bind-mounts `$SCRATCH/docker` onto `/var/lib/docker` and starts `dockerd` when it is on PATH; adaptors prefer `/var/run/docker.sock` and Harbor `--env docker`; native overlay, no fuse. `docker-compose` is **not** aliased to `podman-compose` | the agent eval path; Compose v2 is `docker compose` |
 | `--extra-pkgs a,b,c` · `--overlay DIR` · `--chroot-hook SCRIPT` | the operator's harness tooling: Debian packages; a tree copied over the rootfs (a prebuilt venv, a CLI); a script run inside the chroot (build a venv, `pip install <tool>==<pinned>`) | generic hooks — this repo names no harness; pin every version the hook installs, record it in your own manifest |
 | `--runner <id>=<dir>` | adaptor under `/opt/proof/runners/<id>/` | operator capability; contract + skeleton in [`../../deploy/guest/runners/README.md`](../../deploy/guest/runners/README.md); bake the Harbor reference from [`../../deploy/guest/runners/rlm_fc_in_guest_harbor/`](../../deploy/guest/runners/rlm_fc_in_guest_harbor/) when the topic names that id |
 
@@ -259,16 +260,45 @@ still leak no path, key, or origin (the wire check's `cp` step).
 
 ## Limitations (v1, stated plainly)
 
-- **Rootless podman, not Docker-in-VM.** Firecracker guests have no nested
-  KVM; containers inside the VM are namespaces + cgroups run by an
-  unprivileged user. Harnesses that need Docker-daemon-only features,
-  privileged containers, or `--network host` semantics may behave
-  differently under podman's API socket and pasta/slirp4netns networking.
-  Smoke the harness on the baked image before signing a topic on it.
+- **Docker first, then rootless podman.** Firecracker guests have no nested
+  KVM. Prefer a rootful `dockerd` from the operator overlay (native overlay,
+  Harbor `--env docker`, agents have network for the pinned model / BYOK).
+  `init.sh` starts that daemon when present. `docker-compose` is not aliased
+  to `podman-compose`. Rootless podman + fuse-overlayfs remains the fallback
+  when Docker is absent; harnesses that need Docker-daemon-only features or
+  `--network host` semantics may still differ — smoke the harness on the
+  baked image before signing a topic on it.
+- **Agent network is on.** Harbor `network_mode=no-network` is rewritten to
+  `public` on the filtered task copy so Docker env can start and agents can
+  reach the allowlisted TAP (OpenRouter). The host nftables allowlist on the
+  Firecracker TAP is unchanged. Do not treat guest-internal `public` as open
+  host egress.
+- **Task pack duration filter.** The Harbor adaptor copies only the Dev
+  **default short-task allowlist** from retained n15 x0017 before
+  `n_concurrent` baselines or miner evals (`max_task_duration_s`, default
+  3600). INCLUDE: `cargo-flight-dispatch`, `embedding-drift-monitor`,
+  `bun-sourcemap-leak`, `fin-saccr-rwa`, `foodstuff-beta-activity`,
+  `atrx-vep-crispr`. EXCLUDE >1h: `biped-contact-dynamics` (~5.2h),
+  `formal-crypto` (~2.1h), `cad-model` (~1.2h), `data-anonymization`
+  (~1.1h). EXCLUDE broken until fixed: `batched-eval-parity` (no-network),
+  `ctr-optimization` / `cumulative-layout-shift` (EnvStartTimeout),
+  `distributed-dedup` (tmux), `coq-block-bound` (wall cut);
+  `biped-contact-dynamics` / `cad-model` also stay out until verifier pytest
+  is proven. Pack `filter.json` may only **intersect** that allow-list
+  (further restrict) and may only **lower** the duration ceiling. Example:
+  `harness/pack_filter.example.json`. An empty filtered set fails closed.
+  This does not reseal a stub baseline.
+- **Verifier pytest.** Harbor execs `pytest` inside the task environment /
+  verifier container. Filtered-copy **environment / verifier / tests**
+  Dockerfiles are patched even when FROM is CUDA / MuJoCo / FreeCAD (the
+  n15 `biped-contact-dynamics` and `cad-model` hole). `requirements.txt` in
+  those dirs also gets pytest. Guest-host pytest does not fix that hole.
+  `FROM scratch` / distroless last stages are skipped.
 - **Guest kernel.** The stock microVM kernel config lacks user namespaces /
   overlayfs / fuse / veth / tun; the bake's `--check-kernel-config` names
   what is missing. Until the guest kernel is rebuilt and re-pinned, rootless
-  podman does not start and every in-guest run fails closed.
+  podman does not start. A rootful overlay that ships `dockerd` does not
+  depend on fuse-overlayfs.
 - **`flops_used` is guest-agent-authored.** For a sister run the host relays
   a measurement from a guest it fully controls; for an experiment VM the
   figure comes from the adaptor's `report.json` through the pinned guest

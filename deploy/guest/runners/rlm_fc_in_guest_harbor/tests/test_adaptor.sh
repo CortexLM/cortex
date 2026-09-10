@@ -16,7 +16,15 @@ export PROOF_WORK_DIR="$WORKDIR/work"
 export PROOF_OUTPUT_DIR="$WORKDIR/out"
 export PROOF_PACK_DIR="$WORKDIR/pack"
 export PROOF_HARNESS_SKIP_PODMAN=1
-mkdir -p "$PROOF_WORK_DIR" "$PROOF_OUTPUT_DIR" "$PROOF_PACK_DIR/tasks/hello"
+mkdir -p "$PROOF_WORK_DIR" "$PROOF_OUTPUT_DIR" "$PROOF_PACK_DIR/tasks/cargo-flight-dispatch"
+printf '[agent]\ntimeout_sec = 120\n' > "$PROOF_PACK_DIR/tasks/cargo-flight-dispatch/task.toml"
+# x0017 hour-plus and broken-until-fixed names with no timeout must still drop.
+for drop in \
+    biped biped-contact-dynamics formal-crypto cad cad-model data-anon data-anonymization \
+    batched-eval-parity ctr-optimization cumulative-layout-shift distributed-dedup coq-block-bound; do
+    mkdir -p "$PROOF_PACK_DIR/tasks/$drop"
+    printf '# leftover long or broken task\n' > "$PROOF_PACK_DIR/tasks/$drop/instruction.md"
+done
 export PROOF_PARAM_TASKS_DIR="tasks"
 
 # --- tasks_dir ---
@@ -26,6 +34,45 @@ fi
 export PROOF_PARAM_TASKS_DIR="tasks"
 proof_require_tasks || fail "tasks_dir=tasks should work"
 pass "tasks_dir relative ok, .. refused"
+
+# --- duration filter drops ≥1h tasks ---
+LONG="$PROOF_PACK_DIR/tasks/too-slow"
+mkdir -p "$LONG"
+printf '[agent]\ntimeout_sec = 7200\n' > "$LONG/task.toml"
+proof_require_tasks
+proof_filter_tasks || fail "filter should keep the short task"
+[ -d "$PROOF_TASKS/cargo-flight-dispatch" ] || fail "allowlisted short task must be kept"
+[ ! -d "$PROOF_TASKS/too-slow" ] || fail "≥1h task must be dropped"
+[ ! -d "$PROOF_TASKS/biped" ] || fail "n15 biped must be dropped without timeout_sec"
+[ ! -d "$PROOF_TASKS/cad-model" ] || fail "n15 cad-model must be dropped"
+[ ! -d "$PROOF_TASKS/formal-crypto" ] || fail "n15 formal-crypto must be dropped"
+[ ! -d "$PROOF_TASKS/data-anonymization" ] || fail "n15 data-anonymization must be dropped"
+[ ! -d "$PROOF_TASKS/batched-eval-parity" ] || fail "broken batched-eval-parity must be dropped"
+[ ! -d "$PROOF_TASKS/ctr-optimization" ] || fail "broken ctr-optimization must be dropped"
+[ ! -d "$PROOF_TASKS/cumulative-layout-shift" ] || fail "broken cumulative-layout-shift must be dropped"
+[ ! -d "$PROOF_TASKS/distributed-dedup" ] || fail "broken distributed-dedup must be dropped"
+[ ! -d "$PROOF_TASKS/coq-block-bound" ] || fail "broken coq-block-bound must be dropped"
+pass "default pack keeps x0017 allowlist and drops hour-plus plus broken"
+
+# --- agent network rewrite ---
+printf '[environment]\nnetwork_mode = "no-network"\n' > "$PROOF_TASKS/cargo-flight-dispatch/task.toml"
+proof_enable_agent_network || fail "network rewrite should succeed"
+grep -q 'network_mode = "public"' "$PROOF_TASKS/cargo-flight-dispatch/task.toml" || fail "agent network must be public"
+if grep -q 'no-network' "$PROOF_TASKS/cargo-flight-dispatch/task.toml"; then
+    fail "no-network must not remain on the filtered copy"
+fi
+pass "agent network rewritten to public (not no-network)"
+
+# --- pytest in verifier / environment images ---
+mkdir -p "$PROOF_TASKS/cargo-flight-dispatch/environment"
+printf 'FROM python:3.12-slim\nWORKDIR /app\n' > "$PROOF_TASKS/cargo-flight-dispatch/environment/Dockerfile"
+printf 'numpy\n' > "$PROOF_TASKS/cargo-flight-dispatch/environment/requirements.txt"
+proof_ensure_verifier || fail "ensure_verifier should patch the filtered copy"
+grep -q 'pip install --no-cache-dir pytest' "$PROOF_TASKS/cargo-flight-dispatch/environment/Dockerfile" \
+    || fail "environment Dockerfile must install pytest"
+grep -qx 'pytest' "$PROOF_TASKS/cargo-flight-dispatch/environment/requirements.txt" \
+    || fail "environment requirements.txt must list pytest"
+pass "verifier/environment images gain pytest (n15 biped+cad hole)"
 
 # --- BYOK evaluate never owner ---
 export PROOF_JOB=evaluate
@@ -68,7 +115,23 @@ got="$(proof_select_harbor_agent)" || fail "evaluate should select fixtures/agen
 # Command substitution is a subshell; source/PYTHONPATH are set on a direct call.
 proof_select_harbor_agent >/dev/null
 [ "$PROOF_HARBOR_AGENT_SOURCE" = "artifact_dir/agent" ] || fail "source $PROOF_HARBOR_AGENT_SOURCE"
+[ "$PROOF_HARNESS_KIND" = "harbor" ] || fail "kind $PROOF_HARNESS_KIND"
 pass "evaluate prefers \$PROOF_ARTIFACT_DIR/agent"
+
+PY_ART="$FIXTURES/python_agent"
+export PROOF_ARTIFACT_DIR="$PY_ART"
+got="$(proof_select_harbor_agent)" || fail "evaluate should select custom Python agent"
+[ "$got" = "proof_python_agent:ProofPythonAgent" ] || fail "expected wrapper -a, got $got"
+proof_select_harbor_agent >/dev/null
+[ "$PROOF_HARNESS_KIND" = "python" ] || fail "kind $PROOF_HARNESS_KIND"
+[ "$PROOF_MINER_AGENT_IMPORT" = "agent.agent:Agent" ] || fail "import $PROOF_MINER_AGENT_IMPORT"
+pass "evaluate custom Python uses wrapper, not terminus-2"
+
+JSON_ART="$FIXTURES/harness_json"
+export PROOF_ARTIFACT_DIR="$JSON_ART"
+proof_select_harbor_agent >/dev/null || fail "evaluate should honour harness.json"
+[ "$PROOF_HARNESS_KIND" = "python" ] || fail "harness.json kind $PROOF_HARNESS_KIND"
+pass "evaluate harness.json selects custom Python"
 
 ONLY_RECIPE="$WORKDIR/only-recipe"
 mkdir -p "$ONLY_RECIPE/recipe/agent"
@@ -85,14 +148,15 @@ mkdir -p "$CLASSIC/recipe"
 cp "$FIXTURES/recipe/run.sh" "$CLASSIC/recipe/run.sh"
 export PROOF_ARTIFACT_DIR="$CLASSIC"
 export PROOF_PARAM_HARBOR_AGENT=terminus-2
-if (proof_select_harbor_agent) >"$WORKDIR/classic.out" 2>"$WORKDIR/classic.err"; then
-    fail "evaluate with only recipe/run.sh must fail closed"
+got="$(proof_select_harbor_agent)" || fail "evaluate with recipe/run.sh must accept script harness"
+proof_select_harbor_agent >/dev/null
+[ "$PROOF_HARNESS_KIND" = "script" ] || fail "classic recipe should be script, got $PROOF_HARNESS_KIND"
+[ "$PROOF_HARNESS_ENTRY" = "recipe/run.sh" ] || fail "entry $PROOF_HARNESS_ENTRY"
+[ -z "$got" ] || fail "script harness must not emit a Harbor -a, got $got"
+if [ "${PROOF_HARBOR_AGENT_ARG:-}" = "terminus-2" ]; then
+    fail "must not wrap classic recipe as terminus-2"
 fi
-grep -q "recipe/run.sh" "$WORKDIR/classic.err" || fail "error should name recipe/run.sh"
-if grep -qx "terminus-2" "$WORKDIR/classic.out"; then
-    fail "must not emit terminus-2 for classic recipe"
-fi
-pass "evaluate + recipe/run.sh fails closed (no topic agent)"
+pass "evaluate + recipe/run.sh is a script harness (no terminus-2)"
 
 EMPTY_ART="$WORKDIR/empty-art"
 mkdir -p "$EMPTY_ART"
@@ -100,7 +164,7 @@ export PROOF_ARTIFACT_DIR="$EMPTY_ART"
 if (proof_select_harbor_agent) >/dev/null 2>"$WORKDIR/empty.err"; then
     fail "evaluate with empty artefact must not fall back to topic agent"
 fi
-grep -qi "refusing topic agent fallback\\|no Harbor agent" "$WORKDIR/empty.err" || fail "must explain the scoring gap"
+grep -qi "refusing topic\\|no custom Python\\|no Harbor agent\\|no harness" "$WORKDIR/empty.err" || fail "must explain the scoring gap"
 pass "evaluate empty artefact refuses terminus-2 fallback"
 
 unset PROOF_ARTIFACT_DIR
@@ -110,6 +174,7 @@ got="$(proof_select_harbor_agent)" || fail "baseline without artefact should use
 [ "$got" = "terminus-2" ] || fail "expected terminus-2, got $got"
 proof_select_harbor_agent >/dev/null
 [ "$PROOF_HARBOR_AGENT_SOURCE" = "topic" ] || fail "source should be topic"
+[ "$PROOF_HARNESS_KIND" = "builtin" ] || fail "kind $PROOF_HARNESS_KIND"
 pass "baseline without artefact uses topic agent"
 
 # --- fake harbor end-to-end evaluate ---
@@ -121,16 +186,19 @@ set -euo pipefail
 agent=""
 path=""
 jobs=""
+env=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -a|--agent) agent="$2"; shift 2 ;;
         --path|-p) path="$2"; shift 2 ;;
         --jobs-dir) jobs="$2"; shift 2 ;;
+        --env) env="$2"; shift 2 ;;
         *) shift ;;
     esac
 done
 printf '%s\n' "$agent" > "${PROOF_WORK_DIR}/harbor.agent"
 printf '%s\n' "$path" > "${PROOF_WORK_DIR}/harbor.path"
+printf '%s\n' "$env" > "${PROOF_WORK_DIR}/harbor.env"
 job="$jobs/job1/hello__1"
 mkdir -p "$job"
 cat > "$job/result.json" <<JSON
@@ -154,6 +222,11 @@ export PROOF_OUTPUT_DIR
 [ -f "$PROOF_OUTPUT_DIR/report.json" ] || fail "evaluate must write report.json"
 got_agent="$(cat "$PROOF_WORK_DIR/harbor.agent")"
 [ "$got_agent" = "agent.agent:MinerAgent" ] || fail "harbor -a was $got_agent (miner artefact ignored)"
+got_env="$(cat "$PROOF_WORK_DIR/harbor.env")"
+[ "$got_env" = "docker" ] || fail "harbor --env was $got_env (want docker, not no-network)"
+if grep -q 'no-network' "$PROOF_WORK_DIR/harbor.env"; then
+    fail "must not pass no-network to Harbor docker env"
+fi
 grep -q '"primary_value"' "$PROOF_OUTPUT_DIR/report.json" || fail "report.json missing primary_value"
 python3 - "$PROOF_OUTPUT_DIR/report.json" <<'PY'
 import json, sys
@@ -214,5 +287,82 @@ if grep -q "outside_agent:ExternalAgent" "$WORKDIR/escape.out"; then
     fail "must not emit an escaped import path"
 fi
 pass "import_path outside artefact is refused before Harbor"
+
+# --- script harness refuses miner-authored report.json ---
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
+SCRIPT_ART="$WORKDIR/script-self-score"
+mkdir -p "$SCRIPT_ART/recipe"
+cat > "$SCRIPT_ART/recipe/run.sh" <<'EOF'
+#!/bin/bash
+cat > "$PROOF_OUTPUT_DIR/report.json" <<JSON
+{"primary_value": 999999.25, "claim_holds": true}
+JSON
+exit 0
+EOF
+chmod 0755 "$SCRIPT_ART/recipe/run.sh"
+export PROOF_JOB=evaluate
+export PROOF_ARTIFACT_DIR="$SCRIPT_ART"
+SELF_OUT="$WORKDIR/out-self-score"
+mkdir -p "$SELF_OUT"
+export PROOF_OUTPUT_DIR="$SELF_OUT"
+if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/self.out" 2>"$WORKDIR/self.err"; then
+    fail "miner-authored report.json must fail closed"
+fi
+[ ! -f "$SELF_OUT/report.json" ] || fail "must not keep miner-authored report.json"
+grep -qi "miner-authored\\|refusing miner-authored primary_value" "$WORKDIR/self.err" \
+    || fail "must name the self-report refusal"
+pass "script harness refuses miner-authored primary_value"
+
+# --- script harness score comes only from Harbor verifier trials ---
+SCRIPT_JOBS="$WORKDIR/script-jobs"
+mkdir -p "$SCRIPT_JOBS/recipe"
+cat > "$SCRIPT_JOBS/recipe/run.sh" <<'EOF'
+#!/bin/bash
+job="$PROOF_WORK_DIR/harbor-jobs/job1/hello__1"
+mkdir -p "$job"
+cat > "$job/result.json" <<JSON
+{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 0.5}}}
+JSON
+exit 0
+EOF
+chmod 0755 "$SCRIPT_JOBS/recipe/run.sh"
+export PROOF_ARTIFACT_DIR="$SCRIPT_JOBS"
+JOBS_OUT="$WORKDIR/out-script-jobs"
+mkdir -p "$JOBS_OUT"
+export PROOF_OUTPUT_DIR="$JOBS_OUT"
+"$ADAPTOR/harness/run-harbor" || fail "script that writes Harbor jobs must summarize"
+python3 - "$JOBS_OUT/report.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["primary_value"] == 0.5, r
+assert r["evidence"]["harness_kind"] == "script"
+PY
+pass "script harness primary_value is Harbor verifier reward"
+
+# --- script that self-reports AND writes jobs still fails closed ---
+SCRIPT_BOTH="$WORKDIR/script-both"
+mkdir -p "$SCRIPT_BOTH/recipe"
+cat > "$SCRIPT_BOTH/recipe/run.sh" <<'EOF'
+#!/bin/bash
+job="$PROOF_WORK_DIR/harbor-jobs/job1/hello__1"
+mkdir -p "$job"
+cat > "$job/result.json" <<JSON
+{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 1.0}}}
+JSON
+cat > "$PROOF_OUTPUT_DIR/report.json" <<JSON
+{"primary_value": 999999.25, "claim_holds": true}
+JSON
+exit 0
+EOF
+chmod 0755 "$SCRIPT_BOTH/recipe/run.sh"
+export PROOF_ARTIFACT_DIR="$SCRIPT_BOTH"
+BOTH_OUT="$WORKDIR/out-script-both"
+mkdir -p "$BOTH_OUT"
+export PROOF_OUTPUT_DIR="$BOTH_OUT"
+if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/both.out" 2>"$WORKDIR/both.err"; then
+    fail "self-report must fail even when Harbor jobs exist"
+fi
+[ ! -f "$BOTH_OUT/report.json" ] || fail "must not keep report.json after self-report"
+pass "script self-report fails closed even with Harbor jobs"
 
 echo "all adaptor tests passed"
