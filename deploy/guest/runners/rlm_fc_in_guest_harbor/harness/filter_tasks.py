@@ -2,11 +2,19 @@
 """Copy pack tasks that typically finish in under one hour.
 
 Duration is pack metadata plus adaptor-local measured walls (not a compiled
-Proof catalog). A task is excluded when max(declared timeout, pack duration,
-adaptor hint) is ≥ ``max_duration_s`` (default 3600), when a pack
-``filter.json`` deny-list names it (or an alias / ``key-`` prefix), when the
-adaptor ``duration_hints.json`` ``exclude`` list names it, or when it is
-absent from the default short-task allow-list.
+Proof catalog). A task is excluded when a pack ``filter.json`` deny-list names
+it (or an alias / ``key-`` prefix), when the adaptor ``duration_hints.json``
+``exclude`` list names it, when it is absent from the default short-task
+allow-list, or when it is too slow for ``max_duration_s`` (default 3600).
+
+The duration gate reads two different things. A task named **exactly** on the
+allow-list was measured under an hour, so only a measured wall (``walls_sec`` /
+adaptor hint) may drop it; a pack-declared ``agent_timeout`` is the harness
+ceiling rather than a duration and is ignored for it. Every other task — an
+alias hit, or an unmeasured allow-list entry under a ceiling tighter than the
+``ALLOW_VETTED_UNDER_S`` the allow-list asserts — is still excluded when
+max(declared timeout, pack duration, adaptor hint) is ≥ ``max_duration_s``,
+and still honours ``exclude_unknown_duration``.
 
 Default pack filter (Dev, retained n15 x0017):
 
@@ -38,6 +46,9 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_MAX_S = 3600
+# What an allow-list entry asserts: the adaptor measured that exact task under
+# an hour. A tighter ceiling is outside that assertion.
+ALLOW_VETTED_UNDER_S = DEFAULT_MAX_S
 DEFAULT_HINTS = Path(__file__).resolve().parent / "duration_hints.json"
 TASK_MARKERS = (
     "task.toml",
@@ -329,8 +340,23 @@ def decide(
     name = task_dir.name
     if listed(name, deny):
         return False, "deny-list"
-    if allow and not listed(name, allow):
-        return False, "not on allow-list"
+    if allow:
+        if not listed(name, allow):
+            return False, "not on allow-list"
+        # An exact allow-list entry is a task measured under
+        # ``ALLOW_VETTED_UNDER_S``. A pack ``task.toml`` ``agent_timeout`` is
+        # the harness ceiling, not a duration, so it may not drop one (n15
+        # attempt1: all six declared 28800 and the 3600 default emptied the
+        # pack). A measured wall still may, at any ceiling. An alias hit is a
+        # different task, and a ceiling tighter than the vetting bound is not
+        # covered by the allow-list, so both fall through to the metadata gate.
+        wall = lookup_named(name, adaptor_hints) if name in allow else None
+        if wall is not None:
+            if wall >= max_s:
+                return False, f"allow-list wall_s={wall} >= {max_s}"
+            return True, f"allow-list wall_s={wall}"
+        if name in allow and max_s >= ALLOW_VETTED_UNDER_S:
+            return True, "allow-list"
     duration = task_duration_s(task_dir, durations_map, adaptor_hints)
     if duration is None:
         if drop_unknown:
