@@ -228,8 +228,10 @@ These fail **before any paid inference**. One red item is a persisted
 | Patch the evaluator, the metric path, the pack, or short-circuit scoring | `no_eval_short_circuit`. You do not own `PROOF_PACK_DIR` |
 | Embed an OpenRouter key (`sk-or-…`) in the artefact, the claim, or the manifest | The key is BYOK `env` only. A key in the tree is not how the guest authenticates, and it will leak into the artefacts zip |
 
-Write logs you need to keep under `$PROOF_WORK_DIR` or `$PROOF_OUTPUT_DIR`.
-stdout / stderr are only a 64 KiB rolling tail; they are not the archive.
+Write logs under `$PROOF_WORK_DIR` / `$PROOF_OUTPUT_DIR` while the job
+runs. stdout / stderr are only a 64 KiB rolling tail. Extra files in those
+directories **die with the VM** — they are not copied into the artefacts
+zip.
 
 ### Artefacts zip
 
@@ -239,12 +241,14 @@ The host collects a zip per scored row at
 - your unpacked recipe (`artifact/`)
 - `report.json` (the adaptor's measurement; absent on a pre-spend reject)
 - `checklist.json` (the rule items with evidence)
-- runner logs (`logs/`) — whatever the adaptor wrote under
-  `PROOF_WORK_DIR` / `PROOF_OUTPUT_DIR`, plus harness stdout the guest kept
+- `baseline_ref.json`
+- `logs/runner.log` — the redacted stdout/stderr tail the guest returned.
+  Files you wrote under `PROOF_WORK_DIR` / `PROOF_OUTPUT_DIR` besides
+  `report.json` / `checklist.json` are **not** in this zip.
 
 A red-checklist reject ships no `report.json`. You do not upload this zip;
-the host builds it. Putting secrets in the recipe or in unredacted log
-files puts them in the zip.
+the host builds it. Putting secrets in the recipe still lands them in
+`artifact/`. Do not print keys: the tail is redacted, but the recipe is not.
 
 Your code runs **inside a Firecracker experiment VM the host boots**, against
 the operator's pinned pack. You cannot produce the sandbox attestation
@@ -342,8 +346,10 @@ honest id is enough when you did not train (a harness name such as
 `my-harness-v0` is fine). An **empty** manifest — no
 `train_dataset_ids` and no `train_content_hashes` — is not a clean
 contamination check: on `tbench` it is a persisted **`rejected`** row with
-`contamination_evidence_missing` and **no rent**. `ctx` refuses to build
-one client-side.
+**no rent**. `ctx` refuses to build one client-side and names it
+`contamination_evidence_missing`. The stored row's `verdict.failed` is
+`{"evidence_missing":{"field":"contamination_evidence"}}` — there is no
+stable rejection-code field on the submit response.
 
 That prints `miner_hotkey`, `hotkey_signature`, `submit_nonce`, the exact
 `manifest`, and `domain` (`base-proof-submit-v1`) without posting anything.
@@ -382,7 +388,7 @@ Fields the host reads on `POST /challenge/proof/v1/submissions`:
 | `artifact_uri` | **yes** | Required because `tbench` is a `custom` topic |
 | `claim` | yes | One English sentence of what improved. Signed |
 | `declared_flops` | no | Optional, default `0`. Still bound into the signature if you send it. **Ignored as a scoring gate** on `tbench` |
-| `manifest.train_content_hashes` / `manifest.train_dataset_ids` | yes | Declare at least one. An honest harness id is enough when you did not train. Signed. Empty → `rejected` + `contamination_evidence_missing` |
+| `manifest.train_content_hashes` / `manifest.train_dataset_ids` | yes | Declare at least one. An honest harness id is enough when you did not train. Signed. Empty → `rejected` (`verdict.failed.evidence_missing.field` = `contamination_evidence`; `ctx` names it `contamination_evidence_missing`) |
 | `env` | **yes** | `{"OPENROUTER_API_KEY": "sk-or-…"}` — the topic's `miner_byok` variable (§ 4). **Not** signed, never echoed back. Missing → **400** without spending your nonce |
 
 The signature covers the hotkey, `topic_id`, `artifact_digest`,
@@ -483,7 +489,7 @@ you will actually meet on `tbench`:
 | **503** `custom metric … has no registered runner` / `not wired` | `tbench` is not in `registered_custom` / `custom_ready` | no |
 | **503** empty `eval_image_digest` / unsealed baseline / missing judge offer | The host cannot score. Fail-closed, never a sim fallback | no |
 | **503** `proof deadline … exceeded` | Your run did not finish inside `max_proof_deadline_s`; the body carries `stdout_tail` | no |
-| **201** `rejected` + `contamination_evidence_missing` | Empty manifest | yes, rejected |
+| **201** `rejected` + empty manifest | Empty `train_dataset_ids` and `train_content_hashes`. `ctx` names it `contamination_evidence_missing`; the row's `verdict.failed` is `evidence_missing` / `contamination_evidence` | yes, rejected |
 | **201** `rejected` + red checklist | A topic rule failed on your artefact — before any paid inference | yes, rejected |
 
 Never commit your OpenRouter key or `LIUM_API_KEY`, and never hand anyone a
