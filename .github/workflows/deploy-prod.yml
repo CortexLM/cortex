@@ -141,7 +141,8 @@ jobs:
               --jq '.[0].databaseId // empty' 2>/dev/null || true)
           fi
           if [[ -z "$RUN_ID" ]]; then
-            echo "no successful images run for $SHA — re-run the images workflow on that commit"
+            echo "no successful images run for $SHA"
+            echo "(re-run that commit's images run, or dispatch images.yml on a ref pointing at it)"
             exit 1
           fi
           # Fail here rather than in the deploy job: without the artifact there
@@ -150,7 +151,8 @@ jobs:
             --jq "[.artifacts[] | select(.name == \"prod-pins-${SHA}\" and .expired == false)] | length")
           if [[ "$found" -lt 1 ]]; then
             echo "images run $RUN_ID has no live prod-pins-${SHA} artifact"
-            echo "(artifacts expire — re-run images.yml for this commit to rebuild the pins)"
+            echo "(artifacts expire — re-run that images run, or dispatch images.yml"
+            echo " on a ref pointing at this commit, to rebuild the pins)"
             exit 1
           fi
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"

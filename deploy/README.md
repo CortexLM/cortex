@@ -135,6 +135,11 @@ run artifact. **Rollback = dispatch `deploy-prod` with the previous good commit
 SHA** (its `images` run artifact is still the pin set for that commit); the
 in-tree `promote.sh --rollback` path stays for local/manual pin work.
 
+Artifacts expire. If the pin artifact for the commit you want is gone,
+`deploy-prod` preflight refuses rather than deploying something unpinned — re-run
+that commit's `images` run, or dispatch `images.yml` on a ref pointing at it
+(`prod-pins` runs on manual dispatch too, exactly for this recovery).
+
 Prod hosts pull GHCR anonymously (`remote-deploy.sh` never logs in), so the
 `ghcr-public` job must keep the packages public.
 

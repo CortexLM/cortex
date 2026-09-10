@@ -194,7 +194,11 @@ jobs:
   prod-pins:
     name: record prod pins
     needs: merge-digests
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Also on workflow_dispatch: re-running images for a commit whose pin
+    # artifact expired is the documented prod rollback path, so a manual run
+    # must rebuild the artifact too. Nothing reaches prod from a stray ref —
+    # deploy-prod refuses any SHA that is not an ancestor of origin/main.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -291,7 +295,7 @@ jobs:
   # ---------------------------------------------------------------------------
   ghcr-public:
     needs: merge-digests
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
