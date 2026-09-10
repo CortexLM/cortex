@@ -819,7 +819,11 @@ async fn score_intake(
         .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
 
     let (declared, hits) = contamination_evidence(&row.manifest, &holdout);
-    if !declared || !hits.is_empty() {
+    // Holdout overlap in a declared manifest is always contamination. An empty
+    // manifest is EvidenceMissing only when the topic requires training
+    // evidence (harvest default; custom / agent skip unless the signed
+    // document sets require_training_evidence = "true").
+    if !hits.is_empty() || (topic.requires_training_evidence() && !declared) {
         let failed = if declared {
             vec![GateFail::Contamination]
         } else {
@@ -2588,6 +2592,144 @@ mod tests {
             "contaminated / empty-evidence must not rent a pod"
         );
         let _ = declared_manifest();
+    }
+
+    fn empty_training_extra(topic_id: &str, uri: Option<&str>) -> serde_json::Value {
+        let mut extra = serde_json::json!({
+            "topic_id": topic_id,
+            "manifest": { "train_content_hashes": [], "train_dataset_ids": [] },
+        });
+        if let Some(uri) = uri {
+            extra["artifact_uri"] = serde_json::json!(uri);
+        }
+        extra
+    }
+
+    #[tokio::test]
+    async fn custom_family_accepts_an_empty_training_manifest() {
+        let scorer = Arc::new(FamilyStub::win("topic_minted_metric"));
+        let app = app_with_custom(scorer.clone());
+        let (st, created) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body(
+                "agent-no-train",
+                &empty_training_extra(
+                    "custom-topic-v0",
+                    Some("https://example.invalid/agent-no-train.tar"),
+                ),
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_ne!(created["state"], "rejected", "{created}");
+        assert!(
+            scorer.inner.hits.load(Ordering::SeqCst) >= 1,
+            "empty custom manifest must still reach eval"
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_topic_can_require_training_evidence() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let app = proof_router(state_with_custom_params(
+            scorer.clone(),
+            false,
+            true,
+            &[(proof_task::PARAM_REQUIRE_TRAINING_EVIDENCE, "true")],
+        ));
+        let (st, created) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body(
+                "tight-empty",
+                &empty_training_extra(CUSTOM, Some("https://example.invalid/tight.tar")),
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_eq!(created["state"], "rejected", "{created}");
+        let dump = created.to_string();
+        assert!(
+            dump.contains("contamination_evidence"),
+            "tightened custom must still refuse an empty manifest: {created}"
+        );
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn custom_family_still_rejects_holdout_overlap() {
+        let scorer = Arc::new(FamilyStub::win("topic_minted_metric"));
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let dirty = recs[0].content_sha256.clone();
+        let app = app_with_custom(scorer.clone());
+        let (st, created) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body(
+                "agent-dirty",
+                &serde_json::json!({
+                    "topic_id": "custom-topic-v0",
+                    "artifact_uri": "https://example.invalid/agent-dirty.tar",
+                    "manifest": { "train_content_hashes": [dirty] },
+                }),
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_eq!(created["state"], "rejected", "{created}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn harvest_topic_can_skip_training_evidence() {
+        let scorer = Arc::new(StubScorer::win());
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let mut draft = unsigned_topic(&recs);
+        draft.constraints.params.insert(
+            proof_task::PARAM_REQUIRE_TRAINING_EVIDENCE.to_owned(),
+            "false".to_owned(),
+        );
+        let store = MemoryStore::new();
+        let (topic, meas) = seal_topic(&p, draft);
+        store.put_topic(topic.clone()).expect("topic");
+        store.load_holdout(&topic.id, recs).expect("holdout");
+        store
+            .set_baseline(&topic.id, meas.into_sealed())
+            .expect("baseline");
+        let app = proof_router(AppState {
+            store,
+            pin: p.clone(),
+            backend: EvalBackend::Lium,
+            live_scorer: Some(scorer.clone()),
+            offer: Some(offer()),
+            executor: executor_slot(Some(test_executor(&p))),
+            judge_api_key: Some("test-judge-key".into()),
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            vm_probe: None,
+            epoch: 0,
+        });
+        let (st, created) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            submit_body(
+                "harvest-no-train",
+                &empty_training_extra("dt-no-ib-v0", None),
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+        assert_ne!(created["state"], "rejected", "{created}");
+        assert!(scorer.hits.load(Ordering::SeqCst) >= 1);
     }
 
     #[tokio::test]

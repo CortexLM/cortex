@@ -308,7 +308,12 @@ Trust-root keygen is the throwaway owner path in
   fetches from it).
   The agent verdict (`reproduced`, `claim_holds_public`, cheat codes) is
   filled by the eval image, not the miner.
-- Contamination / empty manifest: persist **rejected** without renting.
+- Contamination (holdout overlap in a declared manifest) persists **rejected**
+  without renting. An empty training manifest is the same reject **only** on
+  topics that require training evidence (harvest `nll` / `throughput` by
+  default, or any topic with `constraints.params.require_training_evidence =
+  "true"`). Custom / agent topics skip that empty-manifest gate unless they
+  tighten; do not invent fake dataset ids.
 
 Miner-facing: [`external-miner/proof.md`](./external-miner/proof.md).
 
@@ -326,6 +331,15 @@ switch is topic data, signed like every other binding:
 (`params` values are strings — quote it in YAML too: `defer_scoring: "true"`.
 `"false"` and an absent key are the same thing; any other spelling is a
 publish **400** naming `constraints.params.defer_scoring`.)
+
+A sibling boolean word, `require_training_evidence`, is the empty-manifest
+gate. Absent: harvest (`nll` / `throughput`) require declared training
+hashes or dataset ids; `custom` / agent topics skip (no training step).
+`"true"` tightens — even a custom topic then rejects an empty manifest.
+`"false"` skips on any family (a topic that does not train). Holdout
+overlap in a *declared* manifest is always contamination. Any other spelling
+is a publish **400** naming `constraints.params.require_training_evidence`.
+Absent and `"false"` are **not** the same: absent follows the family default.
 
 Semantics, none of which weaken a product rule:
 
@@ -355,7 +369,8 @@ family scorer's promotion / persist hooks), each row keeping its `pf_…` id:
 Fail-closed on the drain: a host refusal (unwired runner, closed executor,
 no sealed baseline recorded, agent down, …) leaves that row **`queued`** —
 never a reject — and stops the pass (**503** with the reason when nothing
-scored); a contamination / empty-manifest row persists **`rejected`** with no
+scored); a contamination row, or an empty-manifest row on a topic that
+requires training evidence, persists **`rejected`** with no
 rent, exactly as a live submit would. **A topic holds one claim at a time:**
 while its head is mid-eval, a second drain of that topic (admin route,
 single-row route, or the poll pass) is a **409** / a `stopped` report that

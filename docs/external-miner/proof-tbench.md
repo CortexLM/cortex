@@ -243,7 +243,6 @@ ctx proof submit \
   --artifact-uri https://example.org/recipe.tar \
   --artifact-digest <sha256 of recipe.tar> \
   --claim "raised first-15 success_rate over the sealed baseline" \
-  --train-dataset my-harness-v0 \
   --env OPENROUTER_API_KEY
 # or: --openrouter-api-key "$OPENROUTER_API_KEY"
 ```
@@ -360,12 +359,12 @@ ctx proof sign \
   --topic-id tbench \
   --artifact-digest <sha256 of recipe.tar> \
   --claim "raised first-15 success_rate over the sealed baseline by 0.08" \
-  --train-dataset my-harness-v0 \
   --json
 ```
 
 That prints `miner_hotkey`, `hotkey_signature`, `submit_nonce`, the exact
-`manifest`, and `domain` (`base-proof-submit-v1`) without posting anything.
+`manifest` (empty training lists — `tbench` has no training step), and
+`domain` (`base-proof-submit-v1`) without posting anything.
 Then submit:
 
 ```bash
@@ -376,7 +375,6 @@ ctx proof submit \
   --artifact-digest <sha256 of recipe.tar> \
   --artifact-uri https://example.org/recipe.tar \
   --claim "raised first-15 success_rate over the sealed baseline by 0.08" \
-  --train-dataset my-harness-v0 \
   --env OPENROUTER_API_KEY
 ```
 
@@ -401,7 +399,7 @@ Fields the host reads on `POST /challenge/proof/v1/submissions`:
 | `artifact_uri` | **yes** | Required because `tbench` is a `custom` topic |
 | `claim` | yes | One English sentence of what improved. Signed |
 | `declared_flops` | no | Optional, default `0`. Still bound into the signature if you send it. **Ignored as a scoring gate** on `tbench` |
-| `manifest.train_content_hashes` / `manifest.train_dataset_ids` | yes | Declare at least one. Signed |
+| `manifest.train_content_hashes` / `manifest.train_dataset_ids` | **no** | `tbench` is a custom agent topic with no training step. Omit `--train-dataset` / `--train-hash`. Do not invent a harness id as a fake corpus. Signed (empty lists are fine) |
 | `env` | **yes** | `{"OPENROUTER_API_KEY": "sk-or-…"}` — the topic's `miner_byok` variable (§ 4). **Not** signed, never echoed back. Missing → **400** without spending your nonce |
 
 The signature covers the hotkey, `topic_id`, `artifact_digest`,
@@ -419,10 +417,12 @@ scoring is on, that is a second **201** and a second paid evaluation, not
 the existing row. The **200** “already queued / already submitted” answer
 is the deferred path only (`tbench` in `deferred_topics`).
 
-An empty manifest is not a clean contamination check. On `tbench` it becomes a
-persisted **`rejected`** row with `contamination_evidence_missing` and no rent
-(`queued` only if the topic is back in `deferred_topics`). `ctx` refuses to
-build one client-side.
+`tbench` does not require training evidence. An empty manifest is a clean
+submit: `ctx` will not ask you for `--train-dataset`, and the host will not
+reject you for omitting it. Do not invent a harness id as a fake dataset.
+Holdout overlap in a *declared* manifest is still contamination: a persisted
+**`rejected`** row with no rent (immediate while scoring is on, at drain time
+only if the topic is back in `deferred_topics`).
 
 ## 6. Watch the row
 
@@ -506,7 +506,7 @@ you will actually meet on `tbench`:
 | **503** `custom metric … has no registered runner` / `not wired` | `tbench` is not in `registered_custom` / `custom_ready` | no |
 | **503** empty `eval_image_digest` / unsealed baseline / missing judge offer | The host cannot score. Fail-closed, never a sim fallback | no |
 | **503** `proof deadline … exceeded` | Your run did not finish inside `max_proof_deadline_s`; the body carries `stdout_tail` | no |
-| **201** `rejected` + `contamination_evidence_missing` | Empty manifest (immediate while scoring is on; at drain time only if the topic is back in `deferred_topics`) | yes, rejected |
+| **201** `rejected` + contamination | You declared a holdout shard / corpus id in `manifest` (immediate while scoring is on; at drain time only if the topic is back in `deferred_topics`) | yes, rejected |
 | **201** `rejected` + red checklist | A topic rule failed on your artefact — before any paid inference | yes, rejected |
 
 Never commit your OpenRouter key or `LIUM_API_KEY`, and never hand anyone a

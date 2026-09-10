@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use keystore::{default_wallets_dir, load_hotkey, mini_secret_from_key_file, BittensorWallet};
 use proof_submit::{
-    canonical_hex, fresh_submit_nonce_hex, hotkey_hex, is_lowercase_hex, manifest_lists,
-    parse_hotkey_hex, parse_signature_hex, parse_submit_nonce_hex, sign_submit, verify_submit,
-    SubmitFields, PROOF_SUBMIT_DOMAIN_LABEL,
+    canonical_hex, declared_manifest, fresh_submit_nonce_hex, hotkey_hex, is_lowercase_hex,
+    manifest_declares_training, manifest_lists, parse_hotkey_hex, parse_signature_hex,
+    parse_submit_nonce_hex, sign_submit, verify_submit, SubmitFields, PROOF_SUBMIT_DOMAIN_LABEL,
 };
 use serde_json::{json, Value};
 
@@ -97,7 +97,12 @@ pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Res
     if claim.is_empty() {
         return Err("claim is required (what the recipe achieved)".into());
     }
-    let signed = resolve_signed(input, topic_id, &digest, claim)?;
+    let Some(require_training) = fetch_topic_training_required(client, topic_id).await? else {
+        return Err(format!(
+            "unknown topic {topic_id:?} (ctx proof topics lists currently open ids)"
+        ));
+    };
+    let signed = resolve_signed(input, topic_id, &digest, claim, require_training)?;
     let body = submit_wire_body(input, &signed, topic_id, &digest, claim);
 
     let reply = client
@@ -134,7 +139,11 @@ pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Res
 
 /// Print `miner_hotkey`, `hotkey_signature`, `submit_nonce`, and the exact
 /// `manifest` to post, without posting.
-pub fn print_signature(input: &SubmitInput, json_out: bool) -> Result<(), String> {
+pub async fn print_signature(
+    client: &Client,
+    input: &SubmitInput,
+    json_out: bool,
+) -> Result<(), String> {
     let digest = normalize_hex64(&input.artifact_digest, "artifact-digest")?;
     let topic_id = input.topic_id.trim();
     if topic_id.is_empty() {
@@ -144,7 +153,12 @@ pub fn print_signature(input: &SubmitInput, json_out: bool) -> Result<(), String
     if claim.is_empty() {
         return Err("claim is required".into());
     }
-    let signed = resolve_signed(input, topic_id, &digest, claim)?;
+    let require_training = fetch_topic_training_required(client, topic_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+    let signed = resolve_signed(input, topic_id, &digest, claim, require_training)?;
     if json_out {
         println!(
             "{}",
@@ -171,8 +185,9 @@ fn resolve_signed(
     topic_id: &str,
     digest: &str,
     claim: &str,
+    require_training: bool,
 ) -> Result<SignedSubmit, String> {
-    let manifest = build_manifest(input)?;
+    let manifest = build_manifest(input, require_training)?;
     let (hashes, datasets) = manifest_lists(&json!({ "manifest": manifest }))
         .map_err(|_| "manifest lists must be arrays of strings".to_owned())?;
     let nonce = match &input.key.submit_nonce {
@@ -377,55 +392,30 @@ fn is_queued(body: &Value) -> bool {
     body.get("state").and_then(Value::as_str) == Some("queued")
 }
 
-fn build_manifest(input: &SubmitInput) -> Result<Value, String> {
-    if let Some(path) = &input.manifest_file {
-        let text =
-            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        let value: Value =
-            serde_json::from_str(&text).map_err(|e| format!("manifest JSON: {e}"))?;
-        ensure_declared(&value)?;
-        return Ok(value);
-    }
-    let hashes: Vec<&str> = input
-        .train_hashes
-        .iter()
-        .map(String::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .collect();
-    let datasets: Vec<&str> = input
-        .train_datasets
-        .iter()
-        .map(String::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .collect();
-    if hashes.is_empty() && datasets.is_empty() {
+/// The manifest to sign: `--manifest-file` verbatim when given, else the
+/// `--train-hash` / `--train-dataset` lists.
+///
+/// The empty-manifest rule is checked once on the result, so a file and the
+/// flags cannot drift apart. A topic that needs training evidence is refused
+/// here, before a nonce is spent; one with no training step signs the empty
+/// lists as they are.
+fn build_manifest(input: &SubmitInput, require_training: bool) -> Result<Value, String> {
+    let manifest = match &input.manifest_file {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("read {}: {e}", path.display()))?;
+            serde_json::from_str(&text).map_err(|e| format!("manifest JSON: {e}"))?
+        }
+        None => declared_manifest(&input.train_hashes, &input.train_datasets),
+    };
+    if require_training && !manifest_declares_training(&manifest) {
         return Err(
             "contamination_evidence_missing: declare train-hash or train-dataset \
-             (an empty manifest is not a clean check)"
+             (an empty manifest is not a clean check on this topic)"
                 .into(),
         );
     }
-    Ok(json!({
-        "train_content_hashes": hashes,
-        "train_dataset_ids": datasets,
-    }))
-}
-
-fn ensure_declared(manifest: &Value) -> Result<(), String> {
-    let hashes = manifest
-        .get("train_content_hashes")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    let datasets = manifest
-        .get("train_dataset_ids")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    if hashes == 0 && datasets == 0 {
-        return Err(
-            "contamination_evidence_missing: the manifest declared nothing to check".into(),
-        );
-    }
-    Ok(())
+    Ok(manifest)
 }
 
 /// Wire JSON for `POST /v1/submissions`. `env` is posted beside the
@@ -488,6 +478,37 @@ pub fn merge_openrouter_api_key(
     }
     env.push(("OPENROUTER_API_KEY".to_owned(), value.to_owned()));
     env
+}
+
+fn topic_requires_training_evidence(topic: &Value) -> bool {
+    let param = topic
+        .pointer("/constraints/params/require_training_evidence")
+        .and_then(Value::as_str)
+        .map(str::trim);
+    match param {
+        Some(p) if p.eq_ignore_ascii_case("true") => true,
+        Some(p) if p.eq_ignore_ascii_case("false") => false,
+        _ => topic.pointer("/metric/family").and_then(Value::as_str) != Some("custom"),
+    }
+}
+
+async fn fetch_topic_training_required(
+    client: &Client,
+    topic_id: &str,
+) -> Result<Option<bool>, String> {
+    let reply = client
+        .get(&challenge_path(
+            "proof",
+            &format!("/v1/proof/topics/{topic_id}"),
+        ))
+        .await?;
+    if reply.status == 404 {
+        return Ok(None);
+    }
+    if !reply.ok() {
+        return Err(explain_failure(reply.status, &reply.message()));
+    }
+    Ok(Some(topic_requires_training_evidence(&reply.body)))
 }
 
 /// Resolve `--env` arguments into the `(NAME, value)` pairs the submit body
@@ -601,9 +622,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_manifest_is_contamination_evidence_missing() {
-        let err = build_manifest(&SubmitInput::default()).expect_err("empty");
+    fn empty_manifest_depends_on_whether_the_topic_requires_training() {
+        let err = build_manifest(&SubmitInput::default(), true).expect_err("empty");
         assert!(err.contains("contamination_evidence_missing"), "{err}");
+        let empty = build_manifest(&SubmitInput::default(), false).expect("agent topic");
+        assert_eq!(empty["train_content_hashes"], json!([]));
+        assert_eq!(empty["train_dataset_ids"], json!([]));
+        let mut sk = [0x11u8; 32];
+        sk[0] = 0x42;
+        let dir = std::env::temp_dir().join(format!(
+            "ctx-proof-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("sk");
+        std::fs::write(&path, hex::encode(sk)).expect("write sk");
+        let input = SubmitInput {
+            topic_id: "tbench".into(),
+            artifact_digest: "ab".repeat(32),
+            claim: "beat".into(),
+            key: SubmitKey {
+                secret_file: Some(path),
+                wallet_hotkey: "default".into(),
+                ..SubmitKey::default()
+            },
+            ..SubmitInput::default()
+        };
+        let signed = resolve_signed(&input, "tbench", &"ab".repeat(32), "beat", false)
+            .expect("empty custom manifest signs");
+        assert_eq!(signed.manifest["train_dataset_ids"], json!([]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn topic_json_training_evidence_follows_family_and_param() {
+        let harvest = json!({"metric": {"family": "throughput"}});
+        assert!(topic_requires_training_evidence(&harvest));
+        let nll = json!({"metric": {"family": "nll"}});
+        assert!(topic_requires_training_evidence(&nll));
+        let custom = json!({"metric": {"family": "custom"}});
+        assert!(!topic_requires_training_evidence(&custom));
+        let tight = json!({
+            "metric": {"family": "custom"},
+            "constraints": {"params": {"require_training_evidence": "true"}}
+        });
+        assert!(topic_requires_training_evidence(&tight));
+        let skip = json!({
+            "metric": {"family": "nll"},
+            "constraints": {"params": {"require_training_evidence": "false"}}
+        });
+        assert!(!topic_requires_training_evidence(&skip));
     }
 
     #[test]
@@ -614,7 +686,7 @@ mod tests {
             declared_flops: 0,
             ..SubmitInput::default()
         };
-        let m = build_manifest(&input).expect("manifest");
+        let m = build_manifest(&input, true).expect("manifest");
         assert_eq!(m["train_dataset_ids"][0], "my-mix-v0");
         assert_eq!(input.claim, "beat baseline");
         assert_eq!(input.declared_flops, 0);
@@ -653,7 +725,7 @@ mod tests {
             ..SubmitKey::default()
         });
         let digest = "ab".repeat(32);
-        let signed = resolve_signed(&input, "dt-no-ib-v0", &digest, "beat").expect("sign");
+        let signed = resolve_signed(&input, "dt-no-ib-v0", &digest, "beat", true).expect("sign");
         assert_eq!(signed.hotkey, hotkey_hex(&sk).expect("pk"));
         parse_submit_nonce_hex(&signed.nonce).expect("fresh 64-hex nonce");
         assert_eq!(signed.manifest["train_dataset_ids"][0], "my-mix-v0");
@@ -679,7 +751,7 @@ mod tests {
         assert!(verify_submit(&pk, &tampered, &raw).is_err());
 
         // A second run never reuses the nonce.
-        let again = resolve_signed(&input, "dt-no-ib-v0", &digest, "beat").expect("sign");
+        let again = resolve_signed(&input, "dt-no-ib-v0", &digest, "beat", true).expect("sign");
         assert_ne!(again.nonce, signed.nonce);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -687,8 +759,8 @@ mod tests {
     #[test]
     fn missing_signer_is_rejected() {
         let input = signed_input(SubmitKey::default());
-        let err =
-            resolve_signed(&input, "dt-no-ib-v0", &"ab".repeat(32), "beat").expect_err("unsigned");
+        let err = resolve_signed(&input, "dt-no-ib-v0", &"ab".repeat(32), "beat", true)
+            .expect_err("unsigned");
         assert!(err.contains("base-proof-submit-v1"), "{err}");
     }
 
@@ -709,7 +781,7 @@ mod tests {
             wallet_name: Some("miner".into()),
             ..SubmitKey::default()
         });
-        let err = resolve_signed(&input, "dt-no-ib-v0", &"ab".repeat(32), "beat")
+        let err = resolve_signed(&input, "dt-no-ib-v0", &"ab".repeat(32), "beat", true)
             .expect_err("two signers");
         assert!(err.contains("one signer"), "{err}");
     }
@@ -721,8 +793,8 @@ mod tests {
             signature: Some("cd".repeat(64)),
             ..SubmitKey::default()
         });
-        let err =
-            resolve_signed(&input, "dt-no-ib-v0", &"ab".repeat(32), "beat").expect_err("no nonce");
+        let err = resolve_signed(&input, "dt-no-ib-v0", &"ab".repeat(32), "beat", true)
+            .expect_err("no nonce");
         assert!(err.contains("submit-nonce"), "{err}");
         let mut with_bad_nonce = signed_input(SubmitKey {
             hotkey: Some("ab".repeat(32)),
@@ -730,12 +802,24 @@ mod tests {
             submit_nonce: Some("zz".repeat(32)),
             ..SubmitKey::default()
         });
-        let err = resolve_signed(&with_bad_nonce, "dt-no-ib-v0", &"ab".repeat(32), "beat")
-            .expect_err("bad nonce");
+        let err = resolve_signed(
+            &with_bad_nonce,
+            "dt-no-ib-v0",
+            &"ab".repeat(32),
+            "beat",
+            true,
+        )
+        .expect_err("bad nonce");
         assert!(err.contains("64 hex"), "{err}");
         with_bad_nonce.key.submit_nonce = Some("ab".repeat(32));
-        let err = resolve_signed(&with_bad_nonce, "dt-no-ib-v0", &"ab".repeat(32), "beat")
-            .expect_err("garbage signature");
+        let err = resolve_signed(
+            &with_bad_nonce,
+            "dt-no-ib-v0",
+            &"ab".repeat(32),
+            "beat",
+            true,
+        )
+        .expect_err("garbage signature");
         assert!(err.contains("hotkey_signature invalid"), "{err}");
     }
 
@@ -810,7 +894,7 @@ mod tests {
             ..input
         };
         let digest = "ab".repeat(32);
-        let signed = resolve_signed(&with_key, "dt-no-ib-v0", &digest, "beat").expect("sign");
+        let signed = resolve_signed(&with_key, "dt-no-ib-v0", &digest, "beat", true).expect("sign");
         // The signature verifies against the v1 payload, which has no room
         // for `env`: the BYOK value is posted beside the signature, not in it.
         let pk = parse_hotkey_hex(&signed.hotkey).expect("pk");

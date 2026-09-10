@@ -36,7 +36,7 @@ Install `ctx` from [README](./README.md). Proof miners pay Lium
 | `400` `declared_flops exceeds the topic budget` | Harvest `nll` / `throughput` only: `declared_flops > topic.flops_budget`. Custom / agent (`tbench`) ignore this gate | Cap declared FLOPs on harvest topics; omit or send `0` on `tbench` |
 | `400` invalid hotkey / `artifact_digest` | Not exactly 64 lowercase hex (`0x`, uppercase, whitespace) | Post the same lowercase bytes you signed; the host never normalises a hex field |
 | `401` `hotkey_signature` / `submit_nonce` required, invalid, or reused | Unsigned, wrong key, a `claim` / `declared_flops` / `manifest` that differs from what was signed, or a replayed `(hotkey, submit_nonce)` | `ctx proof sign` over `base-proof-submit-v1` with a fresh nonce; post the manifest you signed. `X-Lium-Api-Key` is not identity |
-| `rejected` with `contamination_evidence_missing` | Empty `manifest` | Declare `train_content_hashes` or `train_dataset_ids` |
+| `rejected` with `contamination_evidence_missing` | Empty `manifest` on a topic that requires training evidence | Harvest (`nll` / `throughput`): declare `train_content_hashes` or `train_dataset_ids`. Custom / agent (`tbench`): omit `--train-dataset`; do not invent a fake id |
 | `rejected` with contamination / cheat code | Holdout overlap, unreproduced claim, strawman AdamW, … | Read the verdict `cheat_codes`. Contamination rejects without rent |
 | HTTP 503 on submit | Empty `eval_image_digest`, zero open topics, unsealed baseline, harvest down, or missing/closed RLM judge | `ctx proof status` → `can_score`. Live digest is `sha256:78b614a1…`. Empty digest still 503. Do not invent a digest. Nothing was rented |
 

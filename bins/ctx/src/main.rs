@@ -199,10 +199,15 @@ struct ProofManifestArgs {
     /// Full manifest JSON file, used verbatim.
     #[arg(long, value_name = "PATH")]
     manifest_file: Option<PathBuf>,
-    /// Shard content hash you trained on (repeatable).
+    /// Shard content hash you trained on (repeatable). Same optionality as
+    /// `--train-dataset`: required only when the live topic needs training
+    /// evidence.
     #[arg(long = "train-hash", value_name = "SHA256")]
     train_hashes: Vec<String>,
-    /// Dataset / corpus id you trained on (repeatable).
+    /// Dataset / corpus id you trained on (repeatable). Required on harvest
+    /// (`nll` / `throughput`) topics that need training evidence; omit on
+    /// custom / agent topics with no training step (`tbench`). Do not invent
+    /// a fake id.
     #[arg(long = "train-dataset", value_name = "ID")]
     train_datasets: Vec<String>,
 }
@@ -338,7 +343,7 @@ async fn run_proof(client: &Client, cmd: ProofCmd, json: bool) -> Result<(), Str
                 wait: false,
                 key: submit_key(args.key),
             };
-            proof::print_signature(&input, json)
+            proof::print_signature(client, &input, json).await
         }
         ProofCmd::Show { id, wait } => proof::show(client, &id, wait, json).await,
         ProofCmd::Status => catalog::print_status(client, Some("proof"), json).await,
@@ -544,15 +549,15 @@ mod tests {
             &digest,
             "--claim",
             "beat baseline",
-            "--train-dataset",
-            "mix-v0",
         ])
-        .expect("declared_flops is optional");
+        .expect("declared_flops and train-dataset are optional");
         match cli.cmd {
             Cmd::Proof {
                 cmd: ProofCmd::Submit(args),
             } => {
                 assert_eq!(args.declared_flops, 0);
+                assert!(args.manifest.train_datasets.is_empty());
+                assert!(args.manifest.train_hashes.is_empty());
             }
             other => panic!("wrong command: {other:?}"),
         }

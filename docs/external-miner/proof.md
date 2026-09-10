@@ -276,7 +276,9 @@ payload = (hotkey_hex.encode() + b"\xff" + topic_id.encode() + b"\xff"
 
 `ctx proof sign` prints `miner_hotkey`, `hotkey_signature`, `submit_nonce`,
 and the exact `manifest` to post, without posting. Pass the same
-`--train-dataset` / `--train-hash` / `--manifest-file` you will submit.
+`--train-dataset` / `--train-hash` / `--manifest-file` you will submit when
+the live topic requires training evidence; omit them on custom / agent
+topics (`tbench`).
 
 `--wait` keeps polling until the row is terminal (`awaiting_admin`,
 `rejected`, or `champion`). A `queued` row is not terminal: on a topic that
@@ -329,14 +331,21 @@ a topic in `deferred_topics`, where they answer **201** `queued`.
 | `artifact_digest` | yes | SHA-256 of the recipe bytes as **exactly** 64 lowercase hex (no `0x`) |
 | `claim` | yes | Non-empty string: NL of what improved (bound into the signature) |
 | `declared_flops` | no | `u64`, default `0`, bound into the signature. Ignored as a scoring gate on custom / agent topics. Harvest `nll` / `throughput`: must be `≤ topic.flops_budget` |
-| `manifest.train_content_hashes` | yes (array) | Shard hashes you trained on (may be `[]` if you declare dataset ids); bound into the signature |
-| `manifest.train_dataset_ids` | yes (array) | Corpus ids you trained on (may be `[]` if you declare hashes); bound into the signature |
+| `manifest.train_content_hashes` | when the topic requires training evidence | Shard hashes you trained on (may be `[]` if you declare dataset ids); bound into the signature. Omit both lists on custom / agent topics (`tbench`) |
+| `manifest.train_dataset_ids` | when the topic requires training evidence | Corpus ids you trained on (may be `[]` if you declare hashes); bound into the signature. Do not invent a fake id |
 | `artifact_uri` | custom topics: yes | Locator for the same bytes as `artifact_digest`; optional on `nll` / `throughput` |
 | `env` | topics that ask for a key: yes | `{"<NAME>": "<value>"}` — your own API keys for the variables the signed topic declares. See [Bring your own key](#bring-your-own-key-env). **Not** signed |
 
 An empty `manifest` (both arrays empty / omitted) is **not** a clean
-contamination check. It is `contamination_evidence_missing`: the row is
-**rejected** and **no pod is rented**.
+contamination check on a topic that **requires training evidence** — harvest
+`nll` / `throughput` by default, or any topic whose signed
+`constraints.params.require_training_evidence` is `"true"`. That is
+`contamination_evidence_missing`: the row is **rejected** and **no pod is
+rented**. Custom / agent topics (`tbench`) have no training step: omit
+`--train-dataset` / `--train-hash`, send empty arrays, and do not invent a
+harness id as a fake corpus. Holdout overlap in a *declared* manifest is
+always contamination, on every family. `ctx proof submit` / `ctx proof sign`
+read the live topic and only insist on a declaration when that topic needs one.
 
 ### Bring your own key (`env`)
 
@@ -351,6 +360,7 @@ Which variable a topic wants is in its signed document, under
 |-------|---------|
 | `miner_byok` | The variable you **must** send. A submission without it is **400** |
 | `miner_env_allowlist` | Comma-separated variables you **may** send. Optional |
+| `require_training_evidence` | `"true"`: empty manifest is `contamination_evidence_missing`. `"false"`: skip. Absent: harvest (`nll` / `throughput`) require a declaration, custom / agent (`tbench`) skip |
 
 Read them from `ctx proof topics --json` or
 `GET /challenge/proof/v1/proof/topics/<id>` before you submit. A topic that
@@ -364,8 +374,6 @@ ctx proof submit \
   --artifact-digest <sha256> \
   --artifact-uri https://example.org/recipe.tar \
   --claim "beat the sealed baseline" \
-  --declared-flops 1500000000000000000 \
-  --train-dataset my-mix-v0 \
   --wallet-name miner --wallet-hotkey default \
   --env OPENROUTER_API_KEY
 ```
@@ -459,12 +467,13 @@ submission row.
 | **503** `custom metric … has no registered runner` / `not wired` | The topic's `custom_id` has no runner on this host, or its topic VM is not configured | no | no |
 | **201** `queued` | Topic in `deferred_topics` (operator still installing its scoring path); every **400** above still applies first | **yes** (queued, scored later) | **no** (not yet) |
 | **200** existing row (`already queued …` / `already submitted … and scored`) | Same artefact + hotkey re-sent (freshly signed, new `submit_nonce`) to a deferring topic, before or after its row was drained | existing row | **no** |
-| **201** `rejected` + `contamination_evidence_missing` | Empty manifest | **yes** (rejected) | **no** |
+| **201** `rejected` + `contamination_evidence_missing` | Empty manifest on a topic that requires training evidence (harvest default; custom / agent only if `require_training_evidence = "true"`) | **yes** (rejected) | **no** |
 | **201** `rejected` + contamination | Holdout shard / corpus id in `manifest` | **yes** (rejected) | **no** |
 | **201** `rejected` + `anti-cheat checklist red` | A topic rule failed on your artefact | **yes** (rejected) | **no** (no paid inference) |
 
-Contamination (including empty evidence) is a **reject, no rent**. It is
-not a 400 and not a 503. A red anti-cheat checklist is the same shape: a
+Holdout overlap is a **reject, no rent**. An empty manifest is the same
+shape **only** when the topic requires training evidence. It is not a 400
+and not a 503. A red anti-cheat checklist is the same shape: a
 persisted reject with no spend.
 
 ## Agent verdict (RLM judge)
