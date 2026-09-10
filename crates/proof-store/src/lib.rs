@@ -23,10 +23,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-/// Submission lifecycle.
+/// Submission lifecycle. Wire names are the snake_case of the variant
+/// (`queued`, `awaiting_admin`, `rejected`, `champion`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubmissionState {
+    /// Accepted and persisted on an open topic whose signed document defers
+    /// scoring (`constraints.params.defer_scoring = "true"`). Nothing has
+    /// run: no harvest rent, no topic VM, no judge call, no verdict, no
+    /// topic mass. The only non-terminal state — the row moves on when the
+    /// operator lifts the flag and the queue is drained (FIFO by id).
+    Queued,
     /// Eval finished; waiting operator audit (informational).
     AwaitingAdmin,
     /// Rejected (gates / integrity).
@@ -57,7 +64,7 @@ impl ArtifactManifest {
 }
 
 /// One miner submission against one topic.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Submission {
     /// Stable id (`pf_` + 16 hex).
     pub id: String,
@@ -124,12 +131,43 @@ pub enum StoreError {
     /// Illegal state transition.
     #[error("illegal state {0}")]
     Illegal(String),
+    /// A drain already holds this topic's one in-flight claim.
+    #[error(
+        "topic {topic_id} already has a row being scored ({id}); a topic's queue drains one row at a time, oldest first — retry when it lands"
+    )]
+    Busy {
+        /// Topic whose queue is being drained.
+        topic_id: String,
+        /// The row in flight.
+        id: String,
+    },
     /// Topic document failed verification.
     #[error("topic: {0}")]
     Topic(#[from] TopicError),
     /// Holdout file did not match the topic commitment.
     #[error("holdout: {0}")]
     Holdout(#[from] HoldoutError),
+}
+
+/// What [`MemoryStore::enqueue`] did with an intake row.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Enqueued {
+    /// No row on that topic had this frozen digest: the row was inserted
+    /// `queued` under a fresh id.
+    Inserted(Submission),
+    /// A row on that topic already carries this frozen digest — queued,
+    /// scored, or rejected — and is returned unchanged. Nothing was inserted.
+    Existing(Submission),
+}
+
+impl Enqueued {
+    /// The row, either way.
+    #[must_use]
+    pub fn row(&self) -> &Submission {
+        match self {
+            Self::Inserted(r) | Self::Existing(r) => r,
+        }
+    }
 }
 
 /// In-memory store (v0).
@@ -142,10 +180,36 @@ pub struct MemoryStore {
 struct Inner {
     next: u64,
     submissions: BTreeMap<String, Submission>,
+    /// The one `queued` row per topic a drain is scoring right now
+    /// (`topic_id → row id`). One entry per topic is the invariant that
+    /// keeps a topic's queue oldest-first and one-at-a-time — promotion
+    /// compares each run against the best *at that moment*, so two rows of
+    /// one topic must never score side by side — and keeps two concurrent
+    /// drains from renting twice for one row. Cleared when the scored row
+    /// lands ([`MemoryStore::insert`]) or the drain gives the row back
+    /// ([`MemoryStore::release_claim`]).
+    scoring: BTreeMap<String, String>,
     topics: BTreeMap<String, TopicDocument>,
     holdouts: BTreeMap<String, Vec<HoldoutRecord>>,
     baselines: BTreeMap<String, SealedBaseline>,
     scores: BTreeMap<String, BTreeMap<String, MinerTopicRun>>,
+}
+
+impl Inner {
+    /// Next `pf_…` id. Monotonic, so id order is intake order.
+    fn mint_id(&mut self) -> String {
+        let n = self.next;
+        self.next = self.next.saturating_add(1);
+        format!("pf_{n:016x}")
+    }
+
+    /// The oldest `queued` row on `topic_id` (rows iterate in id order).
+    fn queue_head(&self, topic_id: &str) -> Option<Submission> {
+        self.submissions
+            .values()
+            .find(|r| r.state == SubmissionState::Queued && r.topic_id == topic_id)
+            .cloned()
+    }
 }
 
 impl MemoryStore {
@@ -248,16 +312,54 @@ impl MemoryStore {
         }))
     }
 
-    /// Insert a scored submission in its final state.
+    /// Insert a submission: a scored row in its final state, or a `queued`
+    /// row awaiting a drain. An empty id mints the next `pf_…` (ids are
+    /// monotonic, so id order is intake order); a row that carries its id
+    /// replaces the stored one — that is how a drained `queued` row lands
+    /// scored — and settles the topic's claim when it is on this row.
     pub fn insert(&self, mut row: Submission) -> Result<Submission, StoreError> {
         let mut g = self.lock()?;
         if row.id.is_empty() {
-            let n = g.next;
-            g.next = g.next.saturating_add(1);
-            row.id = format!("pf_{n:016x}");
+            row.id = g.mint_id();
+        }
+        if g.scoring.get(&row.topic_id) == Some(&row.id) {
+            g.scoring.remove(&row.topic_id);
         }
         g.submissions.insert(row.id.clone(), row.clone());
         Ok(row)
+    }
+
+    /// Queue an intake row **once per frozen digest per topic**, atomically:
+    /// under one lock, a row on `row.topic_id` that already carries
+    /// `row.submission_digest` — `queued`, scored, or rejected — is returned
+    /// as [`Enqueued::Existing`] and nothing is inserted; otherwise the row
+    /// is minted an id and stored `queued` ([`Enqueued::Inserted`]). Two
+    /// concurrent identical submits therefore yield one row, and a retry
+    /// after the row was drained finds the scored row rather than queueing a
+    /// second paid run. The caller must pass an empty id.
+    pub fn enqueue(&self, mut row: Submission) -> Result<Enqueued, StoreError> {
+        if !row.id.is_empty() {
+            return Err(StoreError::Illegal(
+                "enqueue mints the id; pass an empty one".into(),
+            ));
+        }
+        if row.state != SubmissionState::Queued {
+            return Err(StoreError::Illegal(
+                "enqueue takes a queued intake row".into(),
+            ));
+        }
+        let mut g = self.lock()?;
+        if let Some(existing) = g
+            .submissions
+            .values()
+            .find(|r| r.topic_id == row.topic_id && r.submission_digest == row.submission_digest)
+            .cloned()
+        {
+            return Ok(Enqueued::Existing(existing));
+        }
+        row.id = g.mint_id();
+        g.submissions.insert(row.id.clone(), row.clone());
+        Ok(Enqueued::Inserted(row))
     }
 
     /// Fetch one row.
@@ -275,6 +377,89 @@ impl MemoryStore {
         let mut rows: Vec<_> = g.submissions.values().cloned().collect();
         rows.sort_by(|a, b| b.id.cmp(&a.id));
         Ok(rows)
+    }
+
+    /// `queued` rows, oldest first (the drain order), on one topic or all.
+    /// Rows a drain is scoring right now are still `queued` and still listed.
+    pub fn queued(&self, topic_id: Option<&str>) -> Result<Vec<Submission>, StoreError> {
+        Ok(self
+            .lock()?
+            .submissions
+            .values()
+            .filter(|r| r.state == SubmissionState::Queued)
+            .filter(|r| topic_id.is_none_or(|t| r.topic_id == t))
+            .cloned()
+            .collect())
+    }
+
+    /// The row a drain is scoring on `topic_id` right now, if any.
+    pub fn scoring_row(&self, topic_id: &str) -> Result<Option<String>, StoreError> {
+        Ok(self.lock()?.scoring.get(topic_id).cloned())
+    }
+
+    /// Claim the head of `topic_id`'s queue — its oldest `queued` row — for
+    /// this caller to score. `None` when the queue is empty;
+    /// [`StoreError::Busy`] while another drain holds the topic's claim, so
+    /// two drains never score two rows of one topic side by side (nor one
+    /// row twice). Atomic under the store lock.
+    pub fn claim_next_queued(&self, topic_id: &str) -> Result<Option<Submission>, StoreError> {
+        let mut g = self.lock()?;
+        if let Some(id) = g.scoring.get(topic_id) {
+            return Err(StoreError::Busy {
+                topic_id: topic_id.to_owned(),
+                id: id.clone(),
+            });
+        }
+        let head = g.queue_head(topic_id);
+        if let Some(row) = &head {
+            g.scoring.insert(topic_id.to_owned(), row.id.clone());
+        }
+        Ok(head)
+    }
+
+    /// Claim one `queued` row by id. It must be the head of its topic's
+    /// queue (the queue drains oldest first — [`StoreError::Illegal`] names
+    /// the head otherwise), not already scored ([`StoreError::Illegal`]),
+    /// and its topic must have no row in flight ([`StoreError::Busy`]).
+    pub fn claim_queued(&self, id: &str) -> Result<Submission, StoreError> {
+        let mut g = self.lock()?;
+        let row = g
+            .submissions
+            .get(id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(id.to_owned()))?;
+        if row.state != SubmissionState::Queued {
+            return Err(StoreError::Illegal(format!(
+                "submission {id} is {:?}, not queued",
+                row.state
+            )));
+        }
+        if let Some(in_flight) = g.scoring.get(&row.topic_id) {
+            return Err(StoreError::Busy {
+                topic_id: row.topic_id.clone(),
+                id: in_flight.clone(),
+            });
+        }
+        if let Some(head) = g.queue_head(&row.topic_id).filter(|h| h.id != id) {
+            return Err(StoreError::Illegal(format!(
+                "submission {id} is not the head of topic {}'s queue; it drains oldest first — score {} first",
+                row.topic_id, head.id
+            )));
+        }
+        g.scoring.insert(row.topic_id.clone(), id.to_owned());
+        Ok(row)
+    }
+
+    /// Give a claimed row back unscored (the host refused, or the drain was
+    /// interrupted): it stays `queued` and the next drain may claim it
+    /// again. A no-op unless `id` is the row holding `topic_id`'s claim, so
+    /// a late release can never drop a claim another drain took since.
+    pub fn release_claim(&self, topic_id: &str, id: &str) -> Result<(), StoreError> {
+        let mut g = self.lock()?;
+        if g.scoring.get(topic_id).is_some_and(|held| held == id) {
+            g.scoring.remove(topic_id);
+        }
+        Ok(())
     }
 
     /// Persist one topic attempt for a hotkey so emission can run WTA / discovery.
@@ -448,5 +633,190 @@ mod tests {
         t.status = TopicStatus::Draft;
         st.put_topic(t).expect("topic");
         assert!(st.open_ids(0).expect("ids").is_empty());
+    }
+
+    fn queued_row(topic_id: &str, label: &str) -> Submission {
+        let hotkey = "aa".repeat(32);
+        let artifact = format!("{label:0>64}");
+        let nonce = format!("nonce-{label}");
+        Submission {
+            id: String::new(),
+            topic_id: topic_id.into(),
+            miner_hotkey: hotkey.clone(),
+            artifact_digest: artifact.clone(),
+            artifact_uri: Some("https://example.invalid/a.tar".into()),
+            claim: "claim".into(),
+            declared_flops: 1,
+            architecture: String::new(),
+            inference_offer_id: String::new(),
+            config_commitment: String::new(),
+            executor_offer_id: String::new(),
+            executor_commitment: String::new(),
+            manifest: ArtifactManifest::default(),
+            submission_digest: freeze_submission_digest(&hotkey, topic_id, &artifact, &nonce),
+            nonce,
+            state: SubmissionState::Queued,
+            receipt_json: None,
+            verdict: None,
+            detail: Some("scoring deferred".into()),
+        }
+    }
+
+    /// The queue is FIFO by id and a topic has **one** claim at a time: while
+    /// its head is in flight nothing else on that topic can be claimed (not
+    /// the next row, not the same row again); other topics are independent.
+    /// Landing the scored row (same id) or releasing the claim frees the
+    /// topic; a release names its row, so it never drops a newer claim.
+    #[test]
+    fn a_topic_drains_one_row_at_a_time_oldest_first() {
+        let st = MemoryStore::new();
+        let first = st.insert(queued_row("t", "1")).expect("first");
+        let second = st.insert(queued_row("t", "2")).expect("second");
+        let other = st.insert(queued_row("u", "3")).expect("other topic");
+        assert!(first.id < second.id, "ids are monotonic");
+        let ids = |rows: Vec<Submission>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(st.queued(None).expect("all")),
+            [first.id.clone(), second.id.clone(), other.id.clone()]
+        );
+        assert_eq!(
+            ids(st.queued(Some("t")).expect("t")),
+            [first.id.clone(), second.id.clone()]
+        );
+        assert_eq!(st.scoring_row("t").expect("q"), None);
+
+        // The second row is not the head: it cannot be scored out of order.
+        let err = st.claim_queued(&second.id).expect_err("not the head");
+        assert!(
+            matches!(&err, StoreError::Illegal(m) if m.contains(&first.id)),
+            "{err}"
+        );
+
+        let claimed = st.claim_next_queued("t").expect("claim").expect("row");
+        assert_eq!(claimed.id, first.id, "oldest first");
+        assert_eq!(st.scoring_row("t").expect("q"), Some(first.id.clone()));
+        assert!(
+            matches!(st.claim_next_queued("t"), Err(StoreError::Busy { ref id, .. }) if *id == first.id),
+            "a second drain on the same topic is busy, not the next row"
+        );
+        assert!(
+            matches!(st.claim_queued(&first.id), Err(StoreError::Busy { .. })),
+            "the in-flight row cannot be claimed twice"
+        );
+        assert!(
+            matches!(st.claim_queued(&second.id), Err(StoreError::Busy { .. })),
+            "nor the row behind it"
+        );
+        assert_eq!(
+            st.claim_next_queued("u").expect("claim").map(|r| r.id),
+            Some(other.id.clone()),
+            "another topic's queue is independent"
+        );
+        assert_eq!(
+            st.queued(Some("t")).expect("still listed").len(),
+            2,
+            "claimed rows are still queued to readers"
+        );
+
+        // A release names its row: releasing the wrong id changes nothing.
+        st.release_claim("t", &second.id).expect("release");
+        assert_eq!(st.scoring_row("t").expect("q"), Some(first.id.clone()));
+        st.release_claim("t", &first.id).expect("release");
+        assert_eq!(st.scoring_row("t").expect("q"), None);
+        assert_eq!(
+            st.claim_next_queued("t").expect("claim").map(|r| r.id),
+            Some(first.id.clone()),
+            "a released head is claimable again, still first"
+        );
+
+        let mut scored = claimed;
+        scored.state = SubmissionState::AwaitingAdmin;
+        let landed = st.insert(scored).expect("land");
+        assert_eq!(landed.id, first.id, "the scored row keeps its id");
+        assert_eq!(
+            st.get(&first.id).expect("get").state,
+            SubmissionState::AwaitingAdmin
+        );
+        assert_eq!(
+            st.scoring_row("t").expect("q"),
+            None,
+            "landing settles the claim"
+        );
+        assert!(
+            matches!(st.claim_queued(&first.id), Err(StoreError::Illegal(_))),
+            "a scored row is not queued"
+        );
+        assert!(matches!(
+            st.claim_queued("pf_missing"),
+            Err(StoreError::NotFound(_))
+        ));
+        assert_eq!(
+            ids(st.queued(Some("t")).expect("t")),
+            std::slice::from_ref(&second.id)
+        );
+        // Now the second row is the head and can be named directly.
+        assert_eq!(st.claim_queued(&second.id).expect("head").id, second.id);
+        // A stale release from the first row's drain must not free it.
+        st.release_claim("t", &first.id).expect("stale release");
+        assert_eq!(st.scoring_row("t").expect("q"), Some(second.id));
+    }
+
+    /// `enqueue` is the deferred path's one atomic step: one row per frozen
+    /// digest per topic for the row's whole life — a duplicate finds the
+    /// queued row, and a retry after the row was scored finds the scored row
+    /// (never a second paid run); the same digest on another topic is its
+    /// own row.
+    #[test]
+    fn enqueue_is_idempotent_per_topic_and_digest_for_the_rows_whole_life() {
+        let st = MemoryStore::new();
+        let Enqueued::Inserted(row) = st.enqueue(queued_row("t", "1")).expect("enqueue") else {
+            panic!("first enqueue inserts");
+        };
+        assert!(row.id.starts_with("pf_"));
+        assert_eq!(st.queued(Some("t")).expect("q").len(), 1);
+
+        let again = st.enqueue(queued_row("t", "1")).expect("enqueue");
+        assert_eq!(again, Enqueued::Existing(row.clone()));
+        assert_eq!(again.row().id, row.id);
+        assert_eq!(st.queued(Some("t")).expect("q").len(), 1, "no second row");
+
+        let Enqueued::Inserted(elsewhere) = st.enqueue(queued_row("u", "1")).expect("enqueue")
+        else {
+            panic!("another topic is another row");
+        };
+        assert_ne!(elsewhere.id, row.id);
+
+        let mut scored = row.clone();
+        scored.state = SubmissionState::Rejected;
+        st.insert(scored.clone()).expect("land");
+        let after = st.enqueue(queued_row("t", "1")).expect("enqueue");
+        assert_eq!(
+            after,
+            Enqueued::Existing(scored),
+            "a retry after scoring finds the scored row, not a new queued one"
+        );
+        assert!(st.queued(Some("t")).expect("q").is_empty());
+
+        let mut with_id = queued_row("t", "9");
+        with_id.id = "pf_given".into();
+        assert!(matches!(st.enqueue(with_id), Err(StoreError::Illegal(_))));
+        let mut not_queued = queued_row("t", "9");
+        not_queued.state = SubmissionState::AwaitingAdmin;
+        assert!(matches!(
+            st.enqueue(not_queued),
+            Err(StoreError::Illegal(_))
+        ));
+    }
+
+    #[test]
+    fn submission_states_have_snake_case_wire_names() {
+        for (state, wire) in [
+            (SubmissionState::Queued, "\"queued\""),
+            (SubmissionState::AwaitingAdmin, "\"awaiting_admin\""),
+            (SubmissionState::Rejected, "\"rejected\""),
+            (SubmissionState::Champion, "\"champion\""),
+        ] {
+            assert_eq!(serde_json::to_string(&state).expect("json"), wire);
+        }
     }
 }

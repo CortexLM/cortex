@@ -131,6 +131,16 @@ struct Cli {
     /// Seconds between emitter ticks.
     #[arg(long, env = "PROOF_EMIT_POLL_SECS", default_value_t = DEFAULT_EMIT_POLL_SECS)]
     emit_poll_secs: u64,
+    /// Seconds between queue-drain passes: `queued` rows of every open topic
+    /// that no longer defers scoring are scored oldest first, one at a time,
+    /// through the live path. `0` disables the loop — the queue then drains
+    /// only through `POST /v1/admin/proof/queue/drain`.
+    #[arg(
+        long,
+        env = "PROOF_QUEUE_DRAIN_POLL_SECS",
+        default_value_t = DEFAULT_QUEUE_DRAIN_POLL_SECS
+    )]
+    queue_drain_poll_secs: u64,
     /// Persisted scored-epoch watermark (survives process restart).
     #[arg(
         long,
@@ -248,7 +258,51 @@ fn run(cli: &Cli) -> Result<(), String> {
         vm_probe: Some(vm),
         epoch: 0,
     };
+    if cli.queue_drain_poll_secs == 0 {
+        tracing::info!(
+            "queue drain loop disabled (PROOF_QUEUE_DRAIN_POLL_SECS=0); queued rows score only \
+             through POST /v1/admin/proof/queue/drain"
+        );
+    } else {
+        rt.spawn(run_queue_drainer(
+            state.clone(),
+            Duration::from_secs(cli.queue_drain_poll_secs),
+        ));
+    }
     rt.block_on(serve(cli.bind, state))
+}
+
+/// Default seconds between queue-drain passes.
+const DEFAULT_QUEUE_DRAIN_POLL_SECS: u64 = 60;
+
+/// Score the `queued` rows of every open topic that no longer defers scoring
+/// (`constraints.params.defer_scoring` lifted by a re-publish), oldest first,
+/// one at a time, through the same path a live submit takes. A topic that
+/// still defers is never touched; a host that cannot score leaves the rows
+/// queued and says why, once per pass. Lifting the flag is the operator's
+/// "score now".
+async fn run_queue_drainer(state: AppState, poll: Duration) {
+    loop {
+        tokio::time::sleep(poll).await;
+        for report in state.drain_ready_queues().await {
+            let scored: Vec<&str> = report.drained.iter().map(|r| r.id.as_str()).collect();
+            if let Some(why) = &report.stopped {
+                tracing::warn!(
+                    topic_id = %report.topic_id,
+                    scored = ?scored,
+                    remaining = report.remaining,
+                    "queue drain stopped: {why}; the remaining rows stay queued for the next pass"
+                );
+            } else {
+                tracing::info!(
+                    topic_id = %report.topic_id,
+                    scored = ?scored,
+                    remaining = report.remaining,
+                    "queue drained"
+                );
+            }
+        }
+    }
 }
 
 fn build_live_scorer(

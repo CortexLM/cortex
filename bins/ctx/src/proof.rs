@@ -8,8 +8,15 @@ use serde_json::{json, Value};
 use crate::api::{challenge_path, Client};
 use crate::catalog::{compact, find};
 
-/// States a submission does not move out of on its own.
+/// States a submission does not move out of on its own. `queued` is the one
+/// non-terminal state: the topic defers scoring and the operator drains the
+/// queue later, so `--wait` keeps polling through it.
 const TERMINAL_STATES: [&str; 3] = ["awaiting_admin", "rejected", "champion"];
+
+/// What a `queued` row means for the miner.
+const QUEUED_HINT: &str =
+    "Scoring is deferred on this topic: the row is queued (no eval, no rent yet) \
+     and is scored in order once the operator lifts the flag and drains the queue.";
 
 /// Poll interval for `--wait`.
 const POLL_SECS: u64 = 20;
@@ -83,6 +90,9 @@ pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Res
     if !json_out {
         println!("Proof submission accepted");
         print_fields(&reply.body);
+        if is_queued(&reply.body) {
+            println!("  {QUEUED_HINT}");
+        }
         println!();
         println!("Track it:");
         println!("  ctx proof show {id}");
@@ -157,12 +167,19 @@ async fn poll(client: &Client, id: &str, wait: bool, json_out: bool) -> Result<(
         if !json_out {
             println!("proof {id}  state={state}");
             print_fields(&reply.body);
+            if is_queued(&reply.body) {
+                println!("  {QUEUED_HINT}");
+            }
         }
         if !wait || TERMINAL_STATES.contains(&state) {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(POLL_SECS)).await;
     }
+}
+
+fn is_queued(body: &Value) -> bool {
+    body.get("state").and_then(Value::as_str) == Some("queued")
 }
 
 fn build_manifest(input: &SubmitInput) -> Result<Value, String> {
@@ -234,6 +251,7 @@ fn print_fields(body: &Value) {
         "eval_backend",
         "eligible",
         "submission_digest",
+        "detail",
         "error",
     ] {
         if let Some(v) = body.get(field) {
@@ -291,6 +309,16 @@ mod tests {
         assert!(normalize_hex64("abcd", "hotkey").is_err());
         let ok = "a".repeat(64);
         assert_eq!(normalize_hex64(&ok, "hotkey").unwrap(), ok);
+    }
+
+    #[test]
+    fn queued_is_the_only_non_terminal_state() {
+        assert!(!TERMINAL_STATES.contains(&"queued"));
+        assert!(is_queued(&serde_json::json!({ "state": "queued" })));
+        assert!(!is_queued(
+            &serde_json::json!({ "state": "awaiting_admin" })
+        ));
+        assert!(!is_queued(&serde_json::json!({})));
     }
 
     #[test]
