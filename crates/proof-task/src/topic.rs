@@ -970,6 +970,16 @@ impl TopicDocument {
             && self.valid_until_epoch.is_none_or(|u| epoch <= u)
     }
 
+    /// Whether an empty training manifest is a pre-eval reject.
+    ///
+    /// Harvest default yes; `custom` skip. `require_training_evidence` overrides.
+    #[must_use]
+    pub fn requires_training_evidence(&self) -> bool {
+        self.constraints
+            .training_evidence_param()
+            .unwrap_or(self.metric.family != MetricFamily::Custom)
+    }
+
     /// Slice id bound into this topic's measurements.
     pub fn slice_id(&self) -> String {
         format!("{}-{}", crate::HOLDOUT_SLICE_PREFIX, self.id)
@@ -1364,6 +1374,25 @@ mod tests {
             custom_id: custom_id.into(),
         };
         doc
+    }
+
+    #[test]
+    fn training_evidence_defaults_by_family_and_honors_the_param() {
+        assert!(nll_topic().requires_training_evidence());
+        assert!(dt_no_ib().requires_training_evidence());
+        assert!(!custom_topic("agent_pass_rate").requires_training_evidence());
+        let mut tight = custom_topic("agent_pass_rate");
+        tight
+            .constraints
+            .params
+            .insert(crate::PARAM_REQUIRE_TRAINING_EVIDENCE.into(), "true".into());
+        assert!(tight.requires_training_evidence());
+        let mut skip = nll_topic();
+        skip.constraints.params.insert(
+            crate::PARAM_REQUIRE_TRAINING_EVIDENCE.into(),
+            "false".into(),
+        );
+        assert!(!skip.requires_training_evidence());
     }
 
     /// A custom metric id is topic data: any well-formed id drafts. Opening

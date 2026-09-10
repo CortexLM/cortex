@@ -52,7 +52,7 @@ pub(crate) use proof_canon::is_http_origin;
 pub use proof_canon::{
     canonical_json, is_custom_id, is_hex64, is_model_pin, is_opaque_param, is_slug, ChecklistRule,
     Constraints, MAX_CHECKLIST_RULES, MAX_CONSTRAINT_PARAMS, MAX_RULE_TEXT_LEN,
-    PARAM_DEFER_SCORING,
+    PARAM_DEFER_SCORING, PARAM_REQUIRE_TRAINING_EVIDENCE,
 };
 pub use proof_holdout::{
     contamination, holdout_commitment, synthetic_holdout, verify_holdout, HoldoutError,
