@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use keystore::{default_wallets_dir, load_hotkey, mini_secret_from_key_file, BittensorWallet};
 use proof_submit::{
-    canonical_hex, fresh_submit_nonce_hex, hotkey_hex, is_lowercase_hex, manifest_lists,
-    parse_hotkey_hex, parse_signature_hex, parse_submit_nonce_hex, sign_submit, verify_submit,
-    SubmitFields, PROOF_SUBMIT_DOMAIN_LABEL,
+    canonical_hex, declared_manifest, fresh_submit_nonce_hex, hotkey_hex, is_lowercase_hex,
+    manifest_declares_training, manifest_lists, parse_hotkey_hex, parse_signature_hex,
+    parse_submit_nonce_hex, sign_submit, verify_submit, SubmitFields, PROOF_SUBMIT_DOMAIN_LABEL,
 };
 use serde_json::{json, Value};
 
@@ -392,58 +392,30 @@ fn is_queued(body: &Value) -> bool {
     body.get("state").and_then(Value::as_str) == Some("queued")
 }
 
+/// The manifest to sign: `--manifest-file` verbatim when given, else the
+/// `--train-hash` / `--train-dataset` lists.
+///
+/// The empty-manifest rule is checked once on the result, so a file and the
+/// flags cannot drift apart. A topic that needs training evidence is refused
+/// here, before a nonce is spent; one with no training step signs the empty
+/// lists as they are.
 fn build_manifest(input: &SubmitInput, require_training: bool) -> Result<Value, String> {
-    if let Some(path) = &input.manifest_file {
-        let text =
-            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        let value: Value =
-            serde_json::from_str(&text).map_err(|e| format!("manifest JSON: {e}"))?;
-        ensure_declared(&value, require_training)?;
-        return Ok(value);
-    }
-    let hashes: Vec<&str> = input
-        .train_hashes
-        .iter()
-        .map(String::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .collect();
-    let datasets: Vec<&str> = input
-        .train_datasets
-        .iter()
-        .map(String::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .collect();
-    if require_training && hashes.is_empty() && datasets.is_empty() {
+    let manifest = match &input.manifest_file {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("read {}: {e}", path.display()))?;
+            serde_json::from_str(&text).map_err(|e| format!("manifest JSON: {e}"))?
+        }
+        None => declared_manifest(&input.train_hashes, &input.train_datasets),
+    };
+    if require_training && !manifest_declares_training(&manifest) {
         return Err(
             "contamination_evidence_missing: declare train-hash or train-dataset \
              (an empty manifest is not a clean check on this topic)"
                 .into(),
         );
     }
-    Ok(json!({
-        "train_content_hashes": hashes,
-        "train_dataset_ids": datasets,
-    }))
-}
-
-fn ensure_declared(manifest: &Value, require_training: bool) -> Result<(), String> {
-    if !require_training {
-        return Ok(());
-    }
-    let hashes = manifest
-        .get("train_content_hashes")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    let datasets = manifest
-        .get("train_dataset_ids")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    if hashes == 0 && datasets == 0 {
-        return Err(
-            "contamination_evidence_missing: the manifest declared nothing to check".into(),
-        );
-    }
-    Ok(())
+    Ok(manifest)
 }
 
 /// Wire JSON for `POST /v1/submissions`. `env` is posted beside the

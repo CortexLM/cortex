@@ -238,6 +238,45 @@ pub fn manifest_lists(
     ))
 }
 
+/// The manifest a submit body carries, built from the two declared lists.
+///
+/// The write counterpart of [`manifest_lists`]. Blank entries are dropped —
+/// a shell that expanded an empty variable declared nothing — and both lists
+/// are always present, so an empty declaration is the explicit `[]` / `[]`
+/// that [`SubmitFields::signing_payload`] already had a canonical form for.
+#[must_use]
+pub fn declared_manifest(train_hashes: &[String], train_datasets: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "train_content_hashes": declared(train_hashes),
+        "train_dataset_ids": declared(train_datasets),
+    })
+}
+
+fn declared(raw: &[String]) -> Vec<&str> {
+    raw.iter()
+        .map(String::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .collect()
+}
+
+/// Whether a manifest declares any training evidence to check for
+/// contamination.
+///
+/// `false` is the empty manifest. That is a clean submit on a topic with no
+/// training step and `contamination_evidence_missing` on one that trains —
+/// which of the two is the topic's call, not this crate's.
+#[must_use]
+pub fn manifest_declares_training(manifest: &serde_json::Value) -> bool {
+    ["train_content_hashes", "train_dataset_ids"]
+        .iter()
+        .any(|key| {
+            manifest
+                .get(key)
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|list| !list.is_empty())
+        })
+}
+
 fn string_list(v: Option<&serde_json::Value>) -> Result<Vec<String>, SubmitSigError> {
     let Some(v) = v else {
         return Ok(Vec::new());
@@ -327,6 +366,50 @@ mod tests {
     }
 
     const NONCE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// `declared_manifest` is the write side of `manifest_lists`: what it
+    /// builds is what the reader gets back, blanks dropped.
+    #[test]
+    fn declared_manifest_round_trips_through_manifest_lists() {
+        let hashes = ["  ".to_owned(), "aa".repeat(32)];
+        let datasets = ["my-mix-v0".to_owned(), String::new()];
+        let manifest = declared_manifest(&hashes, &datasets);
+        let (got_hashes, got_datasets) =
+            manifest_lists(&serde_json::json!({ "manifest": manifest })).expect("lists");
+        assert_eq!(got_hashes, vec!["aa".repeat(32)]);
+        assert_eq!(got_datasets, vec!["my-mix-v0".to_owned()]);
+    }
+
+    /// Both lists are always present, so an empty declaration is explicit
+    /// `[]` / `[]` rather than a missing key.
+    #[test]
+    fn declared_manifest_is_empty_lists_not_missing_keys() {
+        let manifest = declared_manifest(&[], &[]);
+        assert_eq!(manifest["train_content_hashes"], serde_json::json!([]));
+        assert_eq!(manifest["train_dataset_ids"], serde_json::json!([]));
+        assert!(!manifest_declares_training(&manifest));
+    }
+
+    /// Either list carries the evidence; a missing, empty, or non-array
+    /// manifest declares nothing.
+    #[test]
+    fn manifest_declares_training_needs_one_non_empty_list() {
+        assert!(manifest_declares_training(&serde_json::json!({
+            "train_content_hashes": ["aa"],
+            "train_dataset_ids": [],
+        })));
+        assert!(manifest_declares_training(&serde_json::json!({
+            "train_dataset_ids": ["my-mix-v0"],
+        })));
+        assert!(!manifest_declares_training(&serde_json::json!({})));
+        assert!(!manifest_declares_training(&serde_json::json!({
+            "train_content_hashes": [],
+            "train_dataset_ids": [],
+        })));
+        assert!(!manifest_declares_training(&serde_json::json!({
+            "train_dataset_ids": "my-mix-v0",
+        })));
+    }
 
     fn fields<'a>(
         hotkey: &'a str,
