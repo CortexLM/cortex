@@ -5,19 +5,26 @@ Duration is pack metadata plus adaptor-local measured walls (not a compiled
 Proof catalog). A task is excluded when max(declared timeout, pack duration,
 adaptor hint) is ≥ ``max_duration_s`` (default 3600), when a pack
 ``filter.json`` deny-list names it (or an alias / ``key-`` prefix), when the
-adaptor ``duration_hints.json`` ``exclude`` list names it, or when a
-non-empty allow-list omits it.
+adaptor ``duration_hints.json`` ``exclude`` list names it, or when it is
+absent from the default short-task allow-list.
 
-Adaptor ``exclude`` is the Dev list from retained n15 x0017 (always denied
-in the default pack): ``biped-contact-dynamics`` (~5.2h), ``formal-crypto``
-(~2.1h), ``cad-model`` (~1.2h), ``data-anonymization`` (~1.1h). Short
-aliases still match. ``walls_sec`` drops the same ids even when
-``task.toml`` has no timeout. Unknown duration with no hint is kept unless
-the pack or topic asks to drop it. Pack ``max_duration_s`` may only lower
-the ceiling.
+Default pack filter (Dev, retained n15 x0017):
 
-The copy is written under the work directory; the pack tree is never mutated.
-Zero surviving tasks fails closed.
+* **allow** (must be <1h): ``cargo-flight-dispatch``,
+  ``embedding-drift-monitor``, ``bun-sourcemap-leak``, ``fin-saccr-rwa``,
+  ``foodstuff-beta-activity``, ``atrx-vep-crispr``.
+* **exclude >1h**: ``biped-contact-dynamics`` (~5.2h), ``formal-crypto``
+  (~2.1h), ``cad-model`` (~1.2h), ``data-anonymization`` (~1.1h).
+* **exclude broken until fixed**: ``batched-eval-parity`` (no-network),
+  ``ctr-optimization`` and ``cumulative-layout-shift`` (EnvStartTimeout),
+  ``distributed-dedup`` (tmux), ``coq-block-bound`` (wall cut).
+  ``biped-contact-dynamics`` / ``cad-model`` also stay out until verifier
+  pytest is proven on metal.
+
+Pack ``filter.json`` ``allow`` may only **intersect** the adaptor allow-list
+(further restrict). It cannot add hour-plus or broken ids. Pack
+``max_duration_s`` may only lower the ceiling. Empty filtered set fails
+closed.
 """
 
 from __future__ import annotations
@@ -144,20 +151,37 @@ def lookup_named(name: str, mapping: dict[str, int]) -> int | None:
     return best
 
 
-# Canonical Harbor directory names from retained n15 x0017 (Dev). Always
-# denied in the default pack. Aliases still match via alias_match.
-X0017_EXCLUDE = (
+# Dev default short-task filter from retained n15 x0017.
+X0017_ALLOW = (
+    "cargo-flight-dispatch",
+    "embedding-drift-monitor",
+    "bun-sourcemap-leak",
+    "fin-saccr-rwa",
+    "foodstuff-beta-activity",
+    "atrx-vep-crispr",
+)
+X0017_EXCLUDE_LONG = (
     "biped-contact-dynamics",
     "formal-crypto",
     "cad-model",
     "data-anonymization",
 )
+X0017_EXCLUDE_BROKEN = (
+    "batched-eval-parity",
+    "ctr-optimization",
+    "cumulative-layout-shift",
+    "distributed-dedup",
+    "coq-block-bound",
+)
+X0017_EXCLUDE = X0017_EXCLUDE_LONG + X0017_EXCLUDE_BROKEN
 
 
-def load_adaptor_spec(path: Path | None = None) -> tuple[dict[str, int], set[str]]:
+def load_adaptor_spec(
+    path: Path | None = None,
+) -> tuple[dict[str, int], set[str], set[str]]:
     hints_path = path or DEFAULT_HINTS
     if not hints_path.is_file():
-        return {}, set()
+        return {}, set(), set()
     obj = _read_json(hints_path)
     if not isinstance(obj, dict):
         _fail(f"{hints_path} must be a JSON object")
@@ -179,11 +203,15 @@ def load_adaptor_spec(path: Path | None = None) -> tuple[dict[str, int], set[str
         listed_names = obj.get(field)
         if isinstance(listed_names, list):
             exclude.update(str(x) for x in listed_names if isinstance(x, str) and x.strip())
-    return walls, exclude
+    allow: set[str] = set()
+    raw_allow = obj.get("allow")
+    if isinstance(raw_allow, list):
+        allow.update(str(x) for x in raw_allow if isinstance(x, str) and x.strip())
+    return walls, exclude, allow
 
 
 def load_adaptor_hints(path: Path | None = None) -> dict[str, int]:
-    walls, _exclude = load_adaptor_spec(path)
+    walls, _exclude, _allow = load_adaptor_spec(path)
     return walls
 
 
@@ -333,8 +361,10 @@ def filter_tasks(
     allow = {str(x) for x in spec.get("allow", []) if isinstance(x, str) and x}
     deny = {str(x) for x in spec.get("deny", []) if isinstance(x, str) and x}
     durations_map = load_durations_map(pack_dir, spec)
-    adaptor_hints, adaptor_exclude = load_adaptor_spec(hints_path)
+    adaptor_hints, adaptor_exclude, adaptor_allow = load_adaptor_spec(hints_path)
     deny = deny | adaptor_exclude
+    if adaptor_allow:
+        allow = (allow & adaptor_allow) if allow else set(adaptor_allow)
     if spec.get("exclude_unknown_duration") is True:
         drop_unknown = True
 
@@ -374,6 +404,7 @@ def filter_tasks(
         "n_dropped": len(dropped),
         "n_adaptor_hints": len(adaptor_hints),
         "n_adaptor_exclude": len(adaptor_exclude),
+        "n_adaptor_allow": len(adaptor_allow),
         "kept": kept,
         "dropped": dropped,
     }

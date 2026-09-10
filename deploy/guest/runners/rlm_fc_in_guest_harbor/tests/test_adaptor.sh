@@ -16,12 +16,14 @@ export PROOF_WORK_DIR="$WORKDIR/work"
 export PROOF_OUTPUT_DIR="$WORKDIR/out"
 export PROOF_PACK_DIR="$WORKDIR/pack"
 export PROOF_HARNESS_SKIP_PODMAN=1
-mkdir -p "$PROOF_WORK_DIR" "$PROOF_OUTPUT_DIR" "$PROOF_PACK_DIR/tasks/hello"
-printf '[agent]\ntimeout_sec = 120\n' > "$PROOF_PACK_DIR/tasks/hello/task.toml"
-# n15 x0017 hour-plus aliases with no timeout must still drop.
-for n15 in biped biped-contact-dynamics formal-crypto cad cad-model data-anon data-anonymization; do
-    mkdir -p "$PROOF_PACK_DIR/tasks/$n15"
-    printf '# leftover long task\n' > "$PROOF_PACK_DIR/tasks/$n15/instruction.md"
+mkdir -p "$PROOF_WORK_DIR" "$PROOF_OUTPUT_DIR" "$PROOF_PACK_DIR/tasks/cargo-flight-dispatch"
+printf '[agent]\ntimeout_sec = 120\n' > "$PROOF_PACK_DIR/tasks/cargo-flight-dispatch/task.toml"
+# x0017 hour-plus and broken-until-fixed names with no timeout must still drop.
+for drop in \
+    biped biped-contact-dynamics formal-crypto cad cad-model data-anon data-anonymization \
+    batched-eval-parity ctr-optimization cumulative-layout-shift distributed-dedup coq-block-bound; do
+    mkdir -p "$PROOF_PACK_DIR/tasks/$drop"
+    printf '# leftover long or broken task\n' > "$PROOF_PACK_DIR/tasks/$drop/instruction.md"
 done
 export PROOF_PARAM_TASKS_DIR="tasks"
 
@@ -39,31 +41,36 @@ mkdir -p "$LONG"
 printf '[agent]\ntimeout_sec = 7200\n' > "$LONG/task.toml"
 proof_require_tasks
 proof_filter_tasks || fail "filter should keep the short task"
-[ -d "$PROOF_TASKS/hello" ] || fail "short task must be kept"
+[ -d "$PROOF_TASKS/cargo-flight-dispatch" ] || fail "allowlisted short task must be kept"
 [ ! -d "$PROOF_TASKS/too-slow" ] || fail "≥1h task must be dropped"
 [ ! -d "$PROOF_TASKS/biped" ] || fail "n15 biped must be dropped without timeout_sec"
 [ ! -d "$PROOF_TASKS/cad-model" ] || fail "n15 cad-model must be dropped"
 [ ! -d "$PROOF_TASKS/formal-crypto" ] || fail "n15 formal-crypto must be dropped"
 [ ! -d "$PROOF_TASKS/data-anonymization" ] || fail "n15 data-anonymization must be dropped"
-pass "duration filter keeps <1h tasks and drops ≥1h plus n15 walls"
+[ ! -d "$PROOF_TASKS/batched-eval-parity" ] || fail "broken batched-eval-parity must be dropped"
+[ ! -d "$PROOF_TASKS/ctr-optimization" ] || fail "broken ctr-optimization must be dropped"
+[ ! -d "$PROOF_TASKS/cumulative-layout-shift" ] || fail "broken cumulative-layout-shift must be dropped"
+[ ! -d "$PROOF_TASKS/distributed-dedup" ] || fail "broken distributed-dedup must be dropped"
+[ ! -d "$PROOF_TASKS/coq-block-bound" ] || fail "broken coq-block-bound must be dropped"
+pass "default pack keeps x0017 allowlist and drops hour-plus plus broken"
 
 # --- agent network rewrite ---
-printf '[environment]\nnetwork_mode = "no-network"\n' > "$PROOF_TASKS/hello/task.toml"
+printf '[environment]\nnetwork_mode = "no-network"\n' > "$PROOF_TASKS/cargo-flight-dispatch/task.toml"
 proof_enable_agent_network || fail "network rewrite should succeed"
-grep -q 'network_mode = "public"' "$PROOF_TASKS/hello/task.toml" || fail "agent network must be public"
-if grep -q 'no-network' "$PROOF_TASKS/hello/task.toml"; then
+grep -q 'network_mode = "public"' "$PROOF_TASKS/cargo-flight-dispatch/task.toml" || fail "agent network must be public"
+if grep -q 'no-network' "$PROOF_TASKS/cargo-flight-dispatch/task.toml"; then
     fail "no-network must not remain on the filtered copy"
 fi
 pass "agent network rewritten to public (not no-network)"
 
 # --- pytest in verifier / environment images ---
-mkdir -p "$PROOF_TASKS/hello/environment"
-printf 'FROM python:3.12-slim\nWORKDIR /app\n' > "$PROOF_TASKS/hello/environment/Dockerfile"
-printf 'numpy\n' > "$PROOF_TASKS/hello/environment/requirements.txt"
+mkdir -p "$PROOF_TASKS/cargo-flight-dispatch/environment"
+printf 'FROM python:3.12-slim\nWORKDIR /app\n' > "$PROOF_TASKS/cargo-flight-dispatch/environment/Dockerfile"
+printf 'numpy\n' > "$PROOF_TASKS/cargo-flight-dispatch/environment/requirements.txt"
 proof_ensure_verifier || fail "ensure_verifier should patch the filtered copy"
-grep -q 'pip install --no-cache-dir pytest' "$PROOF_TASKS/hello/environment/Dockerfile" \
+grep -q 'pip install --no-cache-dir pytest' "$PROOF_TASKS/cargo-flight-dispatch/environment/Dockerfile" \
     || fail "environment Dockerfile must install pytest"
-grep -qx 'pytest' "$PROOF_TASKS/hello/environment/requirements.txt" \
+grep -qx 'pytest' "$PROOF_TASKS/cargo-flight-dispatch/environment/requirements.txt" \
     || fail "environment requirements.txt must list pytest"
 pass "verifier/environment images gain pytest (n15 biped+cad hole)"
 

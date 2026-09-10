@@ -152,7 +152,7 @@ hardcoded to a benchmark name):
 | Param | Env | Role |
 |-------|------|------|
 | `tasks_dir` | `PROOF_PARAM_TASKS_DIR` | Relative path under the pack. Refused if absolute or contains `..` |
-| `max_task_duration_s` | `PROOF_PARAM_MAX_TASK_DURATION_S` | Drop pack tasks whose duration metadata is ≥ this many seconds (default **3600**). Pack `filter.json` may only **lower** the ceiling. Adaptor `duration_hints.json` (n15 x0017 walls) still applies. |
+| `max_task_duration_s` | `PROOF_PARAM_MAX_TASK_DURATION_S` | Drop pack tasks whose duration metadata is ≥ this many seconds (default **3600**). Pack `filter.json` may only **lower** the ceiling. Adaptor `duration_hints.json` default allow/exclude (n15 x0017) still applies. |
 | `task_filter` | `PROOF_PARAM_TASK_FILTER` | Optional relative pack path to `filter.json` / allow-list |
 | `exclude_unknown_duration` | `PROOF_PARAM_EXCLUDE_UNKNOWN_DURATION` | `true` to drop tasks with no duration metadata |
 | `harbor_agent` | `PROOF_PARAM_HARBOR_AGENT` | Topic built-in for **baseline only** when no miner harness |
@@ -173,14 +173,25 @@ zero tasks fails closed.
 Operator pack hint (pack content, not compiled in): ship `filter.json` with
 `max_duration_s`, optional `allow` / `deny` directory names (aliases match
 `biped` → `biped-contact-dynamics`), and/or `task_durations.json`. See
-`harness/pack_filter.example.json`. Tasks whose `task.toml` `[agent]
-timeout_sec` (or equivalent) is ≥ 1 hour are dropped even without that file.
-Adaptor `harness/duration_hints.json` **exclude** is the Dev list from
-retained n15 x0017, always denied in the default pack:
-`biped-contact-dynamics` (~5.2h), `formal-crypto` (~2.1h), `cad-model`
-(~1.2h), `data-anonymization` (~1.1h). Short aliases still match. Pack
-`filter.json` cannot re-include them. Do not put hour-plus tasks in the
-default scorable pack for `n_concurrent` baselines or miner evals.
+`harness/pack_filter.example.json`. Pack `allow` may only **intersect** the
+adaptor default allow-list (further restrict). It cannot add names.
+
+Adaptor `harness/duration_hints.json` is the Dev default short-task filter
+from retained n15 x0017:
+
+- **allow (<1h):** `cargo-flight-dispatch`, `embedding-drift-monitor`,
+  `bun-sourcemap-leak`, `fin-saccr-rwa`, `foodstuff-beta-activity`,
+  `atrx-vep-crispr`
+- **exclude >1h:** `biped-contact-dynamics` (~5.2h), `formal-crypto`
+  (~2.1h), `cad-model` (~1.2h), `data-anonymization` (~1.1h)
+- **exclude broken until fixed:** `batched-eval-parity` (no-network),
+  `ctr-optimization` / `cumulative-layout-shift` (EnvStartTimeout),
+  `distributed-dedup` (tmux), `coq-block-bound` (wall cut).
+  `biped-contact-dynamics` / `cad-model` also stay out until verifier pytest
+  is proven on metal.
+
+Do not put hour-plus or broken tasks in the default scorable pack for
+`n_concurrent` baselines or miner evals. An empty filtered copy fails closed.
 
 After the copy, `ensure_verifier.py` injects pytest into environment /
 verifier / tests Dockerfiles even when FROM is not `python:*` (n15

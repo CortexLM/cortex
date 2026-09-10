@@ -273,18 +273,21 @@ still leak no path, key, or origin (the wire check's `cp` step).
   reach the allowlisted TAP (OpenRouter). The host nftables allowlist on the
   Firecracker TAP is unchanged. Do not treat guest-internal `public` as open
   host egress.
-- **Task pack duration filter.** The Harbor adaptor drops pack tasks whose
-  duration metadata is ≥ 1 hour (`max_task_duration_s`, default 3600) before
-  `n_concurrent` baselines or miner evals. Adaptor-local
-  `harness/duration_hints.json` **exclude** is the Dev list from retained
-  n15 x0017, always denied: `biped-contact-dynamics` (~5.2h / 18628s),
-  `formal-crypto` (~2.1h / 7482s), `cad-model` (~1.2h / 4364s),
-  `data-anonymization` (~1.1h / 3964s). Short aliases still match. Pack
-  `filter.json` cannot re-include them. Ship pack `filter.json` /
-  `task_durations.json` as operator pack content (example:
-  `harness/pack_filter.example.json`). Pack `max_duration_s` may only lower
-  the ceiling. An empty filtered set fails closed. This does not reseal a
-  stub baseline.
+- **Task pack duration filter.** The Harbor adaptor copies only the Dev
+  **default short-task allowlist** from retained n15 x0017 before
+  `n_concurrent` baselines or miner evals (`max_task_duration_s`, default
+  3600). INCLUDE: `cargo-flight-dispatch`, `embedding-drift-monitor`,
+  `bun-sourcemap-leak`, `fin-saccr-rwa`, `foodstuff-beta-activity`,
+  `atrx-vep-crispr`. EXCLUDE >1h: `biped-contact-dynamics` (~5.2h),
+  `formal-crypto` (~2.1h), `cad-model` (~1.2h), `data-anonymization`
+  (~1.1h). EXCLUDE broken until fixed: `batched-eval-parity` (no-network),
+  `ctr-optimization` / `cumulative-layout-shift` (EnvStartTimeout),
+  `distributed-dedup` (tmux), `coq-block-bound` (wall cut);
+  `biped-contact-dynamics` / `cad-model` also stay out until verifier pytest
+  is proven. Pack `filter.json` may only **intersect** that allow-list
+  (further restrict) and may only **lower** the duration ceiling. Example:
+  `harness/pack_filter.example.json`. An empty filtered set fails closed.
+  This does not reseal a stub baseline.
 - **Verifier pytest.** Harbor execs `pytest` inside the task environment /
   verifier container. Filtered-copy **environment / verifier / tests**
   Dockerfiles are patched even when FROM is CUDA / MuJoCo / FreeCAD (the

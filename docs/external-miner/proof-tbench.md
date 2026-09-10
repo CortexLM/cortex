@@ -160,15 +160,20 @@ mode is unsupported on this runtime and blocked model calls. Task containers
 use the default Docker bridge; the Firecracker TAP is still allowlisted on
 the host.
 
-The scored task slice is filtered to tasks whose duration metadata is under
-**one hour**. Hour-plus tasks are not in the default scorable pack. A retained
-n=15 trial spent most of its wall on four Harbor ids that are **always
-excluded** from the default pack: `biped-contact-dynamics` (~5.2h),
-`formal-crypto` (~2.1h), `cad-model` (~1.2h), `data-anonymization` (~1.1h).
-You do not choose the task list; `constraints.task_slice` remains an opaque
-runner input. A verifier image that lacks `pytest` on PATH scores 0 rather
-than failing the trial — that is an operator image hole, not a miner
-contract (`biped-contact-dynamics` and `cad-model` hit this on n15).
+The scored task slice is the operator's **default short-task allowlist**
+(tasks that finished under one hour on retained n15 x0017):
+`cargo-flight-dispatch`, `embedding-drift-monitor`, `bun-sourcemap-leak`,
+`fin-saccr-rwa`, `foodstuff-beta-activity`, `atrx-vep-crispr`. Hour-plus
+Harbor ids are excluded (`biped-contact-dynamics` ~5.2h, `formal-crypto`
+~2.1h, `cad-model` ~1.2h, `data-anonymization` ~1.1h), as are tasks that
+broke that run until they are fixed (`batched-eval-parity` no-network,
+`ctr-optimization` / `cumulative-layout-shift` EnvStartTimeout,
+`distributed-dedup` tmux, `coq-block-bound` wall cut). You do not choose
+the task list; `constraints.task_slice` remains an opaque runner input. A
+verifier image that lacks `pytest` on PATH scores 0 rather than failing the
+trial — that is an operator image hole, not a miner contract
+(`biped-contact-dynamics` and `cad-model` hit this on n15 and stay out of
+the default pack until that image is proven).
 
 Env the run sees: `PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`,
 `PROOF_PARAM_*`, `PROOF_PACK_DIR`, `PROOF_ARTIFACT_DIR`, `PROOF_OUTPUT_DIR`,

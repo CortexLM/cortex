@@ -1,11 +1,35 @@
 {
-  "source": "Dev exclude list from retained n15 x0017. Mathis: default pack tasks must be <1h. Canonical Harbor directory names are exclude (always denied). walls_sec are measured walls plus short aliases; prefix match is name == key or name starts with key + '-'. Adaptor-local operator measurement, not a compiled Proof catalog.",
+  "source": "Dev default short-task filter from retained n15 x0017. allow = <1h INCLUDE for the default pack. exclude = hour-plus plus broken-until-fixed. Pack filter.json may only further restrict allow, never expand it. Adaptor-local operator measurement, not a compiled Proof catalog.",
+  "allow": [
+    "cargo-flight-dispatch",
+    "embedding-drift-monitor",
+    "bun-sourcemap-leak",
+    "fin-saccr-rwa",
+    "foodstuff-beta-activity",
+    "atrx-vep-crispr"
+  ],
   "exclude": [
     "biped-contact-dynamics",
     "formal-crypto",
     "cad-model",
-    "data-anonymization"
+    "data-anonymization",
+    "batched-eval-parity",
+    "ctr-optimization",
+    "cumulative-layout-shift",
+    "distributed-dedup",
+    "coq-block-bound"
   ],
+  "notes": {
+    "biped-contact-dynamics": ">1h (~5.2h); verifier pytest missing until fixed",
+    "formal-crypto": ">1h (~2.1h)",
+    "cad-model": ">1h (~1.2h); verifier pytest missing until fixed",
+    "data-anonymization": ">1h (~1.1h)",
+    "batched-eval-parity": "broken: network_mode=no-network unsupported",
+    "ctr-optimization": "broken: EnvironmentStartTimeout",
+    "cumulative-layout-shift": "broken: EnvironmentStartTimeout",
+    "distributed-dedup": "broken: tmux send-keys mid-trial",
+    "coq-block-bound": "broken: wall cut"
+  },
   "walls_sec": {
     "biped-contact-dynamics": 18628,
     "biped": 18628,
