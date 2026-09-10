@@ -512,9 +512,29 @@ async fn last_upstream_503_body_is_returned_after_retry() {
         .expect("proxy");
     assert_eq!(resp.status().as_u16(), 503);
     let body = resp.text().await.unwrap();
+    assert_eq!(
+        first
+            .received_requests()
+            .await
+            .expect("first saw traffic")
+            .len(),
+        1
+    );
+    assert_eq!(
+        second
+            .received_requests()
+            .await
+            .expect("second saw traffic")
+            .len(),
+        1
+    );
     assert!(
-        body.contains("first backend") || body.contains("artifact_uri must be https://"),
-        "expected an upstream JSON body, got {body:?}"
+        body.contains("artifact_uri must be https://"),
+        "expected the last upstream JSON body, got {body:?}"
+    );
+    assert!(
+        !body.contains("first backend"),
+        "must not return the first 503 after a successful retry, got {body:?}"
     );
     assert!(
         !body.contains("upstream 503"),

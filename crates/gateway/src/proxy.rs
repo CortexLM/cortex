@@ -140,7 +140,12 @@ async fn proxy_inner(
         }
     }
 
-    if let Some(resp) = last_error_resp {
+    if let Some(mut resp) = last_error_resp {
+        // Same floor as 2xx: a miner-controlled viewer 5xx must not carry
+        // Set-Cookie / weak CSP / public cache through the gateway.
+        if is_view_path(&rest) {
+            apply_view_lockdown(&mut resp, &st.view_frame_ancestors, &rest);
+        }
         return resp;
     }
     (last_status, last_msg).into_response()
