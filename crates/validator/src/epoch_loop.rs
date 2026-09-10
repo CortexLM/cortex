@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bundle::LocalTrustRoot;
-use chain::ChainClient;
+use chain::{ChainClient, ChainError, Metagraph};
 use dissent::{SubmissionIntent, SubmissionSource};
 use submit::{
     submit_intent, DrandClient, ReadyDrand, SubmitConfig, SubmitError, SubmitOutcome, SystemClock,
@@ -99,8 +99,10 @@ pub fn intent_from_match(outcome: &ComparisonOutcome) -> Option<SubmissionIntent
 ///
 /// Submit when `latest_sealed` is true and the outcome is Match — including a
 /// sealed burn-uid0 vector (`uids=[0]`, weight 65535 / `burn_outcome=true`).
-/// Unsealed latest is never a submit path (LKG on disk is not used). Submit
-/// errors are logged and do **not** mark the epoch (retry next tick).
+/// A 100% allocation to a **nonzero** registered owner or `validator_permit`
+/// UID is still skipped (Yuma would pay that hotkey). Unsealed latest is never
+/// a submit path (LKG on disk is not used). Submit errors are logged and do
+/// **not** mark the epoch (retry next tick).
 pub fn maybe_submit_match<C, D>(
     outcome: &ComparisonOutcome,
     chain: &C,
@@ -108,6 +110,7 @@ pub fn maybe_submit_match<C, D>(
     submit: Option<&CoordinationSubmitConfig>,
     dedupe: &EpochSubmitDedupe,
     latest_sealed: bool,
+    metagraph_block: Option<u64>,
 ) where
     C: ChainClient + ?Sized,
     D: DrandClient + ?Sized,
@@ -130,6 +133,14 @@ pub fn maybe_submit_match<C, D>(
             event = "validator_submit_deduped",
             epoch = intent.epoch,
             "submit skipped: epoch already submitted"
+        );
+        return;
+    }
+    if should_skip_owner_burn(&intent.vector, chain, metagraph_block) {
+        warn!(
+            event = "validator_submit_skipped_owner_burn",
+            epoch = intent.epoch,
+            "submit skipped: pure burn to a nonzero SubnetOwnerHotkey or validator_permit UID"
         );
         return;
     }
@@ -231,6 +242,80 @@ fn record_submit_outcome(
                     "submit_intent failed (will retry next tick)"
                 );
             }
+        }
+    }
+}
+
+/// True when one **nonzero** UID holds all mass and that UID is the subnet
+/// owner hotkey or holds `validator_permit`. UID 0 (burn-uid0) is never skipped.
+#[must_use]
+pub(crate) fn is_burn_to_registered_owner(vector: &[(u16, u16)], mg: &Metagraph) -> bool {
+    let Some(uid) = unique_nonzero_uid(vector) else {
+        return false;
+    };
+    if uid == 0 {
+        return false;
+    }
+    let i = usize::from(uid);
+    let Some(hotkey) = mg.hotkeys.get(i) else {
+        return false;
+    };
+    if !mg.owner_hotkey.is_empty() && hotkey == &mg.owner_hotkey {
+        return true;
+    }
+    mg.validator_permit.get(i).copied().unwrap_or(false)
+}
+
+fn unique_nonzero_uid(vector: &[(u16, u16)]) -> Option<u16> {
+    let mut found = None;
+    for (uid, weight) in vector {
+        if *weight == 0 {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(*uid);
+    }
+    found
+}
+
+fn seal_metagraph<C: ChainClient + ?Sized>(
+    chain: &C,
+    metagraph_block: Option<u64>,
+) -> Result<Metagraph, ChainError> {
+    if let Some(block) = metagraph_block {
+        if let Ok(hash) = chain.block_hash(block) {
+            if let Ok(mg) = chain.metagraph_at(&hash) {
+                return Ok(mg);
+            }
+        }
+    }
+    let tip = chain.current_block()?;
+    let hash = chain.block_hash(tip)?;
+    chain.metagraph_at(&hash)
+}
+
+/// Skip 100% to a nonzero owner / `validator_permit` UID. Never skip burn-uid0.
+fn should_skip_owner_burn<C: ChainClient + ?Sized>(
+    vector: &[(u16, u16)],
+    chain: &C,
+    metagraph_block: Option<u64>,
+) -> bool {
+    let Some(uid) = unique_nonzero_uid(vector) else {
+        return false;
+    };
+    if uid == 0 {
+        return false;
+    }
+    match seal_metagraph(chain, metagraph_block) {
+        Ok(mg) => is_burn_to_registered_owner(vector, &mg),
+        Err(e) => {
+            warn!(
+                error = %e,
+                "submit skipped: cannot read seal metagraph for owner-burn check"
+            );
+            true
         }
     }
 }
@@ -344,7 +429,15 @@ where
         }
         Err(e) => no_submission_from_fetch(e),
     };
-    record_compare_outcome(&outcome, chain, drand, submit, dedupe, true);
+    record_compare_outcome(
+        &outcome,
+        chain,
+        drand,
+        submit,
+        dedupe,
+        true,
+        latest.metagraph_block,
+    );
     Ok(Some(outcome))
 }
 
@@ -365,6 +458,7 @@ fn record_compare_outcome<C, D>(
     submit: Option<&CoordinationSubmitConfig>,
     dedupe: &EpochSubmitDedupe,
     latest_sealed: bool,
+    metagraph_block: Option<u64>,
 ) where
     C: ChainClient,
     D: DrandClient + ?Sized,
@@ -394,7 +488,15 @@ fn record_compare_outcome<C, D>(
                 gateway_vector_len = gateway_vector.len(),
                 "{line}"
             );
-            maybe_submit_match(outcome, chain, drand, submit, dedupe, latest_sealed);
+            maybe_submit_match(
+                outcome,
+                chain,
+                drand,
+                submit,
+                dedupe,
+                latest_sealed,
+                metagraph_block,
+            );
         }
         ComparisonOutcome::VectorMismatch { epoch, .. } => {
             warn!(epoch, "coordination compare VectorMismatch");
@@ -769,7 +871,15 @@ mod tests {
         };
         let dedupe = EpochSubmitDedupe::new();
 
-        maybe_submit_match(&outcome, &chain, &ReadyDrand, Some(&submit), &dedupe, true);
+        maybe_submit_match(
+            &outcome,
+            &chain,
+            &ReadyDrand,
+            Some(&submit),
+            &dedupe,
+            true,
+            None,
+        );
         let log = chain.call_log();
         assert_eq!(log.len(), 1, "exactly one extrinsic after first Match");
         match &log[0] {
@@ -791,7 +901,15 @@ mod tests {
         assert!(dedupe.already_submitted(epoch));
 
         // Second attempt: dedupe must suppress another extrinsic.
-        maybe_submit_match(&outcome, &chain, &ReadyDrand, Some(&submit), &dedupe, true);
+        maybe_submit_match(
+            &outcome,
+            &chain,
+            &ReadyDrand,
+            Some(&submit),
+            &dedupe,
+            true,
+            None,
+        );
         assert_eq!(
             chain.call_log().len(),
             1,
@@ -820,13 +938,78 @@ mod tests {
             epoch_length: 360,
         };
         let dedupe = EpochSubmitDedupe::new();
-        maybe_submit_match(&outcome, &chain, &ReadyDrand, Some(&submit), &dedupe, true);
+        maybe_submit_match(
+            &outcome,
+            &chain,
+            &ReadyDrand,
+            Some(&submit),
+            &dedupe,
+            true,
+            None,
+        );
         let log = chain.set_weights_log();
         assert_eq!(log.len(), 1, "sealed uid0=100% must set_weights");
         assert_eq!(log[0].uids, vec![0]);
         assert_eq!(log[0].values, vec![65535]);
         assert_eq!(log[0].version_key, 3);
         assert!(dedupe.already_submitted(88));
+    }
+
+    #[test]
+    fn maybe_submit_match_skips_validator_permit_pure_burn() {
+        let outcome = ComparisonOutcome::Match {
+            epoch: 9,
+            local_vector: vec![(1, 65535)],
+            gateway_vector: vec![(1, 65535)],
+            vector_hash: [0x11; 32],
+            merkle_root: [0x22; 32],
+        };
+        let chain = FakeChain::new(FakeChainConfig {
+            current_block: 500,
+            validator_permit: vec![false, true, false],
+            commit_reveal_enabled: true,
+            ..FakeChainConfig::default()
+        });
+        let submit = CoordinationSubmitConfig {
+            netuid: 1,
+            hotkey: vec![0xBBu8; 32],
+            version_key: 3,
+            epoch_length: 360,
+        };
+        let dedupe = EpochSubmitDedupe::new();
+        maybe_submit_match(
+            &outcome,
+            &chain,
+            &ReadyDrand,
+            Some(&submit),
+            &dedupe,
+            true,
+            None,
+        );
+        assert!(
+            chain.call_log().is_empty(),
+            "pure burn to a nonzero validator_permit UID must not submit"
+        );
+    }
+
+    #[test]
+    fn owner_burn_exempts_uid0_and_detects_nonzero_permit() {
+        let chain = FakeChain::with_defaults();
+        let hash = chain.block_hash(chain.current_block().unwrap()).unwrap();
+        let mg = chain.metagraph_at(&hash).unwrap();
+        assert!(
+            !is_burn_to_registered_owner(&[(0, 65535)], &mg),
+            "uid0 burn is never treated as a privileged skip"
+        );
+        assert!(!is_burn_to_registered_owner(&[(1, 65535)], &mg));
+        assert!(!is_burn_to_registered_owner(&[(0, 32768), (1, 32767)], &mg));
+        let permit = FakeChain::new(FakeChainConfig {
+            validator_permit: vec![false, true, false],
+            ..FakeChainConfig::default()
+        });
+        let hash = permit.block_hash(permit.current_block().unwrap()).unwrap();
+        let mg = permit.metagraph_at(&hash).unwrap();
+        assert!(is_burn_to_registered_owner(&[(1, 65535)], &mg));
     }
 
     #[test]
@@ -850,7 +1033,15 @@ mod tests {
             epoch_length: 360,
         };
         let dedupe = EpochSubmitDedupe::new();
-        maybe_submit_match(&outcome, &chain, &ReadyDrand, Some(&submit), &dedupe, false);
+        maybe_submit_match(
+            &outcome,
+            &chain,
+            &ReadyDrand,
+            Some(&submit),
+            &dedupe,
+            false,
+            None,
+        );
         assert!(
             chain.set_weights_log().is_empty(),
             "unsealed uid0=100% must not set_weights"
@@ -873,7 +1064,7 @@ mod tests {
         };
         let chain = FakeChain::with_defaults();
         let dedupe = EpochSubmitDedupe::new();
-        maybe_submit_match(&outcome, &chain, &ReadyDrand, None, &dedupe, true);
+        maybe_submit_match(&outcome, &chain, &ReadyDrand, None, &dedupe, true, None);
         assert!(chain.call_log().is_empty());
     }
 
@@ -898,7 +1089,15 @@ mod tests {
             epoch_length: 360,
         };
         let dedupe = EpochSubmitDedupe::new();
-        maybe_submit_match(&outcome, &chain, &ReadyDrand, Some(&submit), &dedupe, false);
+        maybe_submit_match(
+            &outcome,
+            &chain,
+            &ReadyDrand,
+            Some(&submit),
+            &dedupe,
+            false,
+            None,
+        );
         assert!(
             chain.call_log().is_empty(),
             "latest.sealed=false must not submit even with a miner Match vector"

@@ -20,7 +20,7 @@ trust-root check, which is the point.
 
 If you skip verification, a bad gateway can publish fake weights. That is the job: consensus check on a sealed result, not a second eval farm.
 
-Unsealed or decode-error latest is a **burn vector** (`sealed: false`, uid 0 = 100%). Do not treat that as a real seal. Do not submit it, and do not submit a previously verified seal (LKG) while latest is unsealed. A **sealed** Match (`sealed: true`, matching digest) MUST still be submitted, including burn-uid0 (`uids: [0]`, `weights: [1.0]`, `burn_outcome=true`) when there are no miner scores.
+Unsealed or decode-error latest is a **burn vector** (`sealed: false`, uid 0 = 100%). Do not treat that as a real seal. Do not submit it, and do not submit a previously verified seal (LKG) while latest is unsealed. A **sealed** burn-uid0 Match (`uids: [0]`, `weights: [1.0]`, `burn_outcome=true`) MUST still be submitted on-chain. A sealed 100% allocation to a nonzero owner or validator-permit UID must not be submitted — Yuma would pay that hotkey, which is not a burn.
 
 ## Not your job
 
