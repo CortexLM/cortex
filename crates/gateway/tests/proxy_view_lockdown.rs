@@ -203,3 +203,68 @@ async fn png_view_allows_cross_origin_resource_policy() {
 
     let _ = shutdown.send(());
 }
+
+/// A viewer 5xx is still miner-controlled HTML. Forward the body, but apply
+/// the same cookie / CSP / cache floor as a 200 — otherwise a failing
+/// upstream can plant `Set-Cookie` and a weak CSP.
+#[tokio::test]
+async fn view_503_is_forwarded_but_still_sandboxed() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/view/run1/index.html"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .insert_header("content-type", "text/html; charset=utf-8")
+                .insert_header("content-security-policy", "default-src *")
+                .insert_header("set-cookie", "session=evil; Path=/")
+                .insert_header("cache-control", "public, max-age=3600")
+                .set_body_string("<html><script>alert(1)</script>miner error</html>"),
+        )
+        .mount(&upstream)
+        .await;
+
+    let reg = Registry::shared(RegistryConfig {
+        failure_threshold: 2,
+        cooldown: Duration::from_millis(120),
+    });
+    reg.create(&CreateBackend {
+        challenge_id: "design".into(),
+        base_url: upstream.uri(),
+        weight: 1,
+    })
+    .unwrap();
+
+    let (addr, shutdown) = spawn_gateway(reg).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "http://{addr}/challenge/design/v1/view/run1/index.html"
+        ))
+        .send()
+        .await
+        .expect("proxy view 503");
+    assert_eq!(resp.status().as_u16(), 503);
+    let headers = resp.headers().clone();
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("miner error"),
+        "challenge 503 body must be forwarded, got {body:?}"
+    );
+    assert!(
+        !body.contains("upstream 503"),
+        "must not collapse to a synthetic status string: {body:?}"
+    );
+    assert!(headers.get("set-cookie").is_none());
+    let csp = headers
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(csp.starts_with("sandbox;"), "{csp}");
+    assert!(!csp.contains("allow-scripts"), "{csp}");
+    assert!(!csp.contains("allow-same-origin"), "{csp}");
+    assert_eq!(
+        headers.get("cache-control").and_then(|v| v.to_str().ok()),
+        Some("private, no-store")
+    );
+    let _ = shutdown.send(());
+}

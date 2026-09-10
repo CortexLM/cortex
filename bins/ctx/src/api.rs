@@ -21,6 +21,16 @@ const TIMEOUT_SECS: u64 = 60;
 const KEYED_HTTP_REFUSAL: &str =
     "refusing to send X-Lium-Api-Key over http:// — keyed calls require an https:// gateway";
 
+/// Same floor as [`KEYED_HTTP_REFUSAL`] for Proof BYOK `env` on the body.
+const ENV_HTTP_REFUSAL: &str =
+    "refusing to send submit env over http:// — miner BYOK requires an https:// gateway";
+
+fn body_has_env(body: &Value) -> bool {
+    body.get("env")
+        .and_then(Value::as_object)
+        .is_some_and(|m| !m.is_empty())
+}
+
 fn is_https_url(url: &str) -> bool {
     url.get(..8)
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
@@ -107,7 +117,13 @@ impl Client {
     }
 
     /// POST JSON to a gateway path.
+    ///
+    /// A non-empty submit `env` (miner BYOK) is refused on `http://` so the
+    /// values never go out in cleartext — same floor as `X-Lium-Api-Key`.
     pub async fn post(&self, path: &str, body: &Value) -> Result<Reply, String> {
+        if body_has_env(body) && !is_https_url(&self.base) {
+            return Err(ENV_HTTP_REFUSAL.to_owned());
+        }
         self.send(self.http.post(self.url(path)).json(body)).await
     }
 
@@ -186,6 +202,23 @@ mod tests {
         let c = Client::new("http://127.0.0.1:8090", None).expect("http without key");
         assert_eq!(c.gateway(), "http://127.0.0.1:8090");
         assert!(c.lium_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn http_gateway_refuses_submit_env() {
+        let c = Client::new("http://127.0.0.1:8090", None).expect("http without key");
+        let body = serde_json::json!({"env": {"OPENROUTER_API_KEY": "sk-or-test"}});
+        let Err(err) = c.post("/challenge/proof/v1/submissions", &body).await else {
+            panic!("http + env must fail closed");
+        };
+        assert!(
+            err.contains("https://"),
+            "error must name https as the requirement: {err}"
+        );
+        assert!(
+            !err.contains("sk-or-test"),
+            "must not echo the API key: {err}"
+        );
     }
 
     #[test]

@@ -222,9 +222,10 @@ topic named:
 { "env": { "OPENROUTER_API_KEY": "sk-or-…" } }
 ```
 
-With `ctx`, bare `--env OPENROUTER_API_KEY` reads it from your shell so it never
-lands in your shell history or in `ps`; `--env OPENROUTER_API_KEY=sk-or-…`
-passes it inline:
+With `ctx`, pass `--openrouter-api-key` (never printed) or bare
+`--env OPENROUTER_API_KEY` to read it from your shell so it never lands in
+your history. Exporting the variable alone does **not** attach it — that
+would send a leftover key to every topic and every `--gateway`.
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-…
@@ -288,9 +289,9 @@ ctx proof submit \
   --env OPENROUTER_API_KEY
 ```
 
-`--env` is not part of `ctx proof sign`: the key is posted beside the
-signature, never inside it, so the signed bytes are the same with or without
-it.
+`--openrouter-api-key` / `--env` is not part of `ctx proof sign`: the key is
+posted beside the signature, never inside it, so the signed bytes are the
+same with or without it.
 
 Pass **exactly one** signer: `--secret-file` (a 32-byte mini-secret, never a
 mnemonic), `--wallet-name` (a Bittensor wallet), or an offline `--signature`
