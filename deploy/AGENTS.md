@@ -213,15 +213,26 @@ Validator logs should show `Match epoch=` then `Match → submit_intent` / `subm
 
 Tunnel writes gitignored `deploy/env/local-tunnel.env` (`BASE_GATEWAY_PUBLIC_URL`). Co-located validator stays on `http://gateway:8080`; external clients use the tunnel URL. Host probe ports default to `2808x` (avoid staging SSH on `1808x`).
 
-## CI: staging vs prod
+## CI: prod only
+
+**No CI staging lane.** The DigitalOcean staging soak was retired (owner
+decision, 2026-09-10): `deploy-staging.yml` is deleted and `ci.yml` deploys
+nothing. The staging droplets and `deploy/compose/env-staging.yml` remain for
+manual `remote-deploy.sh` work and for `local-e2e.sh`.
 
 | Lane | Trigger | Build stance |
 |------|---------|--------------|
-| Staging | CI green on `main` (`deploy-staging.yml`) | `--build-from source` on droplet OK for iteration |
-| Images | Push to `main` (`images.yml`) | Build/push GHCR digests; promote + **commit** `deploy/pins/staging.json` + `deploy/digests/<sha>.json` |
-| Prod | Tag `v*.*.*` (`deploy-prod.yml`) | **`--build-from registry` only** — promote staging→prod pins, pull GHCR digests; no Rust source build on prod hosts |
+| CI | Push / PR on `main` (`ci.yml`) | fmt · clippy · test · deny · xtask — no droplet is touched |
+| Images | Push to `main` (`images.yml`) | Build/push GHCR digests; `promote.sh --env prod` over those digests; publish `deploy/pins/prod.json` + `deploy/digests/<sha>.json` as artifact `prod-pins-<sha>` |
+| Prod | Green `images` run on `main`, `v*.*.*` tag, or dispatch (`deploy-prod.yml`) | **`--build-from registry` only** — pull GHCR digests; no Rust source build on prod hosts |
 
-Ladder: CI → GHCR digests → `deploy/pins/staging.json` (committed by `images.yml`) → tag → preflight (CI + staging pins match tag SHA) → `promote.sh` → `remote-deploy.sh --build-from registry`. Details: [`README.md`](README.md) § Auto CI deploy and § Promotion pipeline.
+Ladder: CI green + GHCR digests → prod pins artifact → preflight (SHA on
+`origin/main`, CI green, artifact live) → fail-closed Spaces backup →
+`remote-deploy.sh --build-from registry`. **CI never pushes pins to `main`** —
+branch protection (PR + Greptile review) rejects it with GH013, which is why
+pins travel as a run artifact. Rollback = dispatch `deploy-prod` with the
+previous good commit SHA. Details: [`README.md`](README.md) § Auto CI deploy and
+§ Promotion pipeline.
 
 ## Secrets / age
 
@@ -230,13 +241,13 @@ Ladder: CI → GHCR digests → `deploy/pins/staging.json` (committed by `images
 - Runtime secret files (wallets, keys): mode **0400**, owner **uid 65532**.
 - Helpers: `age-encrypt-env.sh`, `age-push-env.sh`. Checklist: [`docs/OPERATOR_SECURITY.md`](../docs/OPERATOR_SECURITY.md).
 
-## First prod tag checklist
+## Prod deploy checklist
 
-1. Staging healthy on the exact commit you will tag; `deploy/pins/staging.json` `commit_sha` matches that SHA.
+1. `ci` and `images` both green on the commit; the `images` run published `prod-pins-<sha>`.
 2. Digests recorded / promoted for services you will ship (`promote.sh`, `verify-task-43.sh` locally if needed).
 3. Age identity + env ages present on both prod hosts; wallets hotkeys under `deploy/secrets/wallets/` (0400 / 65532).
 4. Mainnet owner wallet on disk matches SubnetOwnerHotkey; `env-prod.yml` sets `BASE_GATEWAY_REQUIRE_OWNER=1` (`gateway_admin_token` required). Recreate the gateway on droplets after compose changes.
-5. Cut `vX.Y.Z` on `main`, push tag; pass `deploy-prod` preflight + `environment: production` reviewers.
+5. Merging to `main` deploys prod once `images` is green; a `vX.Y.Z` tag or a `deploy-prod` dispatch re-deploys the same digests.
 6. Smoke `/healthz` on both prod hosts; confirm `evil-gateway` absent.
 
 ## Out of scope for agents (ops)

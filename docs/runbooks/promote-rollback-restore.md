@@ -1,6 +1,10 @@
 # Runbook: promote, rollback, restore
 
-Digest-pinned rollouts for staging → prod. Updater behaviour: crate `updater` (D14). Compose layout: [`../../deploy/README.md`](../../deploy/README.md).
+Digest-pinned rollouts to prod. Updater behaviour: crate `updater` (D14). Compose layout: [`../../deploy/README.md`](../../deploy/README.md).
+
+The DigitalOcean staging soak was retired on 2026-09-10: nothing gates prod on a
+prior staging deploy. CI green on the commit plus the fail-closed prod smoke is
+the gate, and rollback is a `deploy-prod` dispatch on the previous good SHA.
 
 **Self-update of the updater is an operator one-shot, never automatic in prod.**
 
@@ -10,7 +14,7 @@ Digest-pinned rollouts for staging → prod. Updater behaviour: crate `updater` 
 
 - [ ] CI green on the commit you are promoting.
 - [ ] Images built and pushed as `repo@sha256:<64 hex>` only.
-- [ ] Staging has run the new digest long enough to pass `/readyz` and smoke checks.
+- [ ] The digest you are promoting was built by `images.yml` for that exact commit.
 - [ ] You have SSH to the target host and age identity already on the box (R11).
 - [ ] Postgres volume is healthy.
 
@@ -103,7 +107,7 @@ docker compose stop validator gateway updater
 docker compose --profile master up -d   # on master; omit profile on pure validators
 ```
 
-Prod must stay on the last good digest until staging proves the fix.
+Prod must stay on the last good digest until a fix lands on `main` and its `images` run is green.
 
 ---
 

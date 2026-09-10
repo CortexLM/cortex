@@ -2,9 +2,10 @@ name: images
 
 # Build service images, push by commit SHA + branch tag, record digests as an artifact.
 # Digests-only pins are consumed by deploy/scripts/promote.sh.
-# After merge: promote pin services into deploy/pins/staging.json and commit so
-# deploy-prod preflight can match staging.json.commit_sha to the image SHA.
-# Service images use GHCR.
+# After merge: promote pin services into deploy/pins/prod.json and publish the
+# result as the `prod-pins-<sha>` artifact that deploy-prod.yml consumes.
+# Nothing is pushed to main: main is protected (PR + Greptile review required),
+# so a pin commit from CI is rejected with GH013. Service images use GHCR.
 
 on:
   push:
@@ -15,7 +16,7 @@ on:
       - "deploy/Dockerfile"
       - "deploy/attest-helper/**"
       # Ops scripts (promote/remote-deploy/burn-seal) — keep the
-      # digest → staging-pin ladder reachable for ops-only commits.
+      # digest → prod-pin ladder reachable for ops-only commits.
       - "deploy/scripts/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -185,25 +186,26 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Close the staging → prod ladder: write deploy/digests/<sha>.json and promote
-  # pin services into deploy/pins/staging.json, then commit/push to origin/main.
-  # Staging droplet deploy remains --build-from source (deploy-staging / ci.yml).
+  # Digest → prod pin ladder. Writes deploy/digests/<sha>.json and promotes the
+  # pin services into deploy/pins/prod.json, then publishes both as the
+  # `prod-pins-<sha>` artifact. deploy-prod.yml downloads that artifact instead
+  # of reading pins from git: main is protected, so CI cannot push a pin commit.
   # ---------------------------------------------------------------------------
-  update-staging-pins:
-    name: update · commit staging pins
+  prod-pins:
+    name: record prod pins
     needs: merge-digests
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Also on workflow_dispatch: re-running images for a commit whose pin
+    # artifact expired is the documented prod rollback path, so a manual run
+    # must rebuild the artifact too. Nothing reaches prod from a stray ref —
+    # deploy-prod refuses any SHA that is not an ancestor of origin/main.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download merged digests
         uses: actions/download-artifact@v4
@@ -211,7 +213,7 @@ jobs:
           name: base-image-digests-${{ github.sha }}
           path: /tmp/digests-in
 
-      - name: Record digests + promote staging pins
+      - name: Record digests + promote prod pins
         run: |
           set -euo pipefail
           SHA="${{ github.sha }}"
@@ -229,72 +231,62 @@ jobs:
           cp "$SRC" "deploy/digests/${SHA}.json"
           echo "Recorded digest manifest: deploy/digests/${SHA}.json"
           chmod +x deploy/scripts/promote.sh
-          # Snapshot the full current staging release once. Sequential
-          # promote.sh calls overwrite `previous` per service and would
-          # otherwise leave a mixed rollback (new images + one old).
-          python3 -c '
-          import json
-          p = json.load(open("deploy/pins/staging.json"))
-          prev = {
-              "commit_sha": p.get("commit_sha"),
-              "services": p.get("services") or {},
-              "updated_at": p.get("updated_at"),
-          }
-          with open("/tmp/staging-previous.json", "w", encoding="utf-8") as f:
-              json.dump(prev, f, indent=2, sort_keys=True)
-              f.write("\n")
-          print("captured previous staging release", prev.get("commit_sha"))
-          '
-          # Pin services only (validator/gateway/updater/live challenges).
-          # --skip-backup: this job records CI digests; Spaces/PG backup runs at
-          # prod promote (deploy-prod.yml, fail-closed).
+          # --force-prod skips the staging-digest ladder check: the staging soak
+          # was retired, so deploy/pins/staging.json is no longer written by any
+          # workflow and comparing against it would pin prod to a dead lane.
+          # --skip-backup: this job only records pins into an artifact and never
+          # deploys; the fail-closed Postgres backup runs in deploy-prod.yml.
           for svc in validator gateway updater bounty-challenge proof-challenge; do
             IMAGE=$(python3 -c '
           import json, sys
           d = json.load(open(sys.argv[1]))
-          meta = d["images"][sys.argv[2]]
-          print(meta["image"])
+          print(d["images"][sys.argv[2]]["image"])
           ' "deploy/digests/${SHA}.json" "$svc")
-            echo "staging promote $svc → $IMAGE"
+            echo "prod pin $svc → $IMAGE"
             ./deploy/scripts/promote.sh \
-              --env staging \
+              --env prod \
               --service "$svc" \
               --image "$IMAGE" \
+              --confirm-prod \
+              --force-prod \
               --commit "$SHA" \
               --skip-backup
           done
           python3 -c '
           import json, sys
-          p = json.load(open("deploy/pins/staging.json"))
-          prev = json.load(open("/tmp/staging-previous.json"))
-          p["previous"] = prev
-          with open("deploy/pins/staging.json", "w", encoding="utf-8") as f:
-              json.dump(p, f, indent=2, sort_keys=True)
-              f.write("\n")
+          p = json.load(open("deploy/pins/prod.json"))
           assert p["commit_sha"] == sys.argv[1], (p["commit_sha"], sys.argv[1])
           for s in ("validator", "gateway", "updater", "bounty-challenge", "proof-challenge"):
               assert s in p["services"], s
               assert p["services"][s]["digest"].startswith("sha256:")
-              assert s in prev["services"], s
-              assert prev["services"][s]["digest"].startswith("sha256:")
-          print("staging pins ok", p["commit_sha"], "previous", prev.get("commit_sha"))
+          print("prod pins ok", p["commit_sha"])
           ' "$SHA"
 
-      - name: Commit and push staging pins
+      - name: Stage pins artifact
         run: |
           set -euo pipefail
           SHA="${{ github.sha }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "deploy/digests/${SHA}.json" deploy/pins/staging.json
-          if git diff --cached --quiet; then
-            echo "No pin/digest changes to commit"
-            exit 0
-          fi
-          git commit -m "deploy: staging pins for ${SHA}"
-          # Rebase onto latest main in case another pin commit landed.
-          git pull --rebase origin main
-          git push origin HEAD:main
+          STAGE="/tmp/prod-pins-artifact"
+          mkdir -p "$STAGE/deploy/pins" "$STAGE/deploy/digests"
+          cp deploy/pins/prod.json "$STAGE/deploy/pins/prod.json"
+          cp "deploy/digests/${SHA}.json" "$STAGE/deploy/digests/${SHA}.json"
+          python3 - >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          pin = json.load(open("deploy/pins/prod.json", encoding="utf-8"))
+          sha = pin["commit_sha"]
+          out = [f"### prod pins for `{sha}`", "", "| service | digest |", "| --- | --- |"]
+          for svc in sorted(pin["services"]):
+              out.append(f"| {svc} | `{pin['services'][svc]['digest']}` |")
+          out += ["", f"deploy-prod.yml consumes these as artifact `prod-pins-{sha}`."]
+          print("\n".join(out))
+          PY
+
+      - name: Upload prod pins artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-pins-${{ github.sha }}
+          path: /tmp/prod-pins-artifact
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Make GHCR packages public so unauthenticated / Phala pulls work. Lives here
@@ -303,7 +295,7 @@ jobs:
   # ---------------------------------------------------------------------------
   ghcr-public:
     needs: merge-digests
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -315,14 +307,19 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          # Nested image names: ghcr.io/<owner>/base/<suffix> → package name "base/<suffix>"
+          # Nested image names: ghcr.io/<owner>/<repo>/<suffix> → package "<repo>/<suffix>".
+          # Derive the repo segment: the hardcoded "base/" prefix went stale when
+          # the repo was renamed, so every visibility call 404'd and the droplets
+          # were left pulling private packages.
+          repo="${GITHUB_REPOSITORY##*/}"
+          repo="${repo,,}"
           pkgs=(
-            "base/base-attest-helper"
-            "base/gateway"
-            "base/validator"
-            "base/updater"
-            "base/bounty-challenge"
-            "base/proof-challenge"
+            "${repo}/base-attest-helper"
+            "${repo}/gateway"
+            "${repo}/validator"
+            "${repo}/updater"
+            "${repo}/bounty-challenge"
+            "${repo}/proof-challenge"
           )
           ok=0
           # First list packages to Learn exact names (debug)

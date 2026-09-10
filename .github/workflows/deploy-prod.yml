@@ -1,32 +1,48 @@
 name: deploy-prod
 
-# Promote digest-pinned images to prod droplets on signed version tags.
+# Promote digest-pinned images to prod droplets.
 #
-# Trigger: push tag v*.*.* (cut from main) or manual workflow_dispatch.
-# Triggers on version tags only — never on branch pushes.
+# The DigitalOcean staging soak was retired (owner decision, 2026-09-10): there
+# is no staging deploy lane and no staging pin file to match against. Every
+# green `images` run on main deploys prod, and version tags / manual dispatch
+# remain available for re-deploys and rollbacks.
+#
+# Triggers:
+#   - workflow_run: `images` completed successfully on main (the normal path)
+#   - push tag v*.*.* (cut from main)
+#   - workflow_dispatch with an explicit commit_sha (rollback = an older SHA)
 #
 # Steps:
-#   1. Preflight — CI green for the tag SHA; origin/main staging pins carry
-#      that commit_sha (ladder tip may be a later pin-commit on main).
-#   2. Fail-closed Postgres backup to DO Spaces, then promote.sh --env prod
-#      --confirm-prod for each pin service (staging.json → prod.json).
+#   1. Preflight — the SHA is on origin/main, CI is green for it, and the
+#      `images` run for that SHA published a `prod-pins-<sha>` artifact.
+#   2. Fail-closed Postgres backup to DO Spaces.
 #   3. Deploy master + validator with remote-deploy.sh --build-from registry
 #      (GHCR digest pull + retag; no Rust compile on the droplet).
 #   4. Smoke /healthz (fail-closed).
+#
+# Prod pins are never committed: main is protected (PR + Greptile review), so a
+# pin commit from CI is rejected with GH013. deploy/pins/prod.json in git is a
+# template — the deployed pins are the `prod-pins-<sha>` artifact built by
+# images.yml from the GHCR digests of that exact commit.
 
 on:
+  workflow_run:
+    workflows: [images]
+    types: [completed]
+    branches: [main]
   push:
     tags:
       - "v*.*.*"
   workflow_dispatch:
     inputs:
       commit_sha:
-        description: "Commit SHA to deploy (must have passed staging)"
+        description: "Commit SHA on main to deploy (defaults to the ref's SHA)"
         required: false
 
 permissions:
-  contents: write
+  contents: read
   packages: read
+  actions: read
 
 concurrency:
   group: deploy-prod
@@ -35,9 +51,14 @@ concurrency:
 jobs:
   preflight:
     name: preflight checks
+    if: >-
+      github.event_name != 'workflow_run'
+      || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     outputs:
       commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+      images_run_id: ${{ steps.images.outputs.run_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,65 +67,102 @@ jobs:
 
       - name: Resolve commit SHA
         id: resolve
+        env:
+          INPUT_SHA: ${{ github.event.inputs.commit_sha }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          if [[ -n "${{ github.event.inputs.commit_sha }}" ]]; then
-            SHA="${{ github.event.inputs.commit_sha }}"
+          if [[ -n "${INPUT_SHA:-}" ]]; then
+            SHA="$INPUT_SHA"
+          elif [[ -n "${RUN_SHA:-}" ]]; then
+            SHA="$RUN_SHA"
           elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
             SHA=$(git rev-list -n 1 "$GITHUB_REF")
           else
             SHA="$GITHUB_SHA"
           fi
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "not a full commit SHA: $SHA"; exit 1; }
           echo "commit_sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "Resolved commit: $SHA"
 
-      - name: Verify CI succeeded for this SHA
+      - name: Verify the commit is on origin/main
+        run: |
+          set -euo pipefail
+          SHA="${{ steps.resolve.outputs.commit_sha }}"
+          git fetch --quiet origin main
+          # Prod only ever runs code that is merged: a tag cut off main, a stale
+          # branch SHA, or a hand-typed dispatch input is refused here.
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "commit $SHA is not an ancestor of origin/main — refusing to deploy prod"
+            exit 1
+          fi
+          echo "$SHA is on origin/main"
+
+      - name: Wait for CI green on this SHA
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           SHA="${{ steps.resolve.outputs.commit_sha }}"
-          # Check that the ci workflow passed for this commit on main
-          conclusion=$(gh run list \
-            --workflow ci.yml \
-            --branch main \
-            --commit "$SHA" \
-            --status completed \
-            --json conclusion \
-            --jq '.[0].conclusion // empty' 2>/dev/null || true)
-          if [[ "$conclusion" != "success" ]]; then
-            echo "CI has not passed for commit $SHA on main (conclusion: ${conclusion:-none})"
-            echo "Failing — prod deploy requires a green CI run for this exact commit."
-            exit 1
-          fi
-          echo "CI passed for $SHA"
+          # images.yml and ci.yml run in parallel on a main push, so the CI run
+          # for this SHA may still be going when the images run completes.
+          for i in $(seq 1 60); do
+            conclusion=$(gh run list \
+              --workflow ci.yml \
+              --commit "$SHA" \
+              --status completed \
+              --json conclusion \
+              --jq '.[0].conclusion // empty' 2>/dev/null || true)
+            case "$conclusion" in
+              success) echo "CI passed for $SHA"; exit 0 ;;
+              "") echo "waiting for a completed ci run on $SHA ($i/60)"; sleep 30 ;;
+              *) echo "CI concluded '$conclusion' for $SHA — refusing to deploy prod"; exit 1 ;;
+            esac
+          done
+          echo "no completed ci run for $SHA within 30 minutes — refusing to deploy prod"
+          exit 1
 
-      - name: Verify staging pins exist for this SHA
+      - name: Locate the images run that published prod pins
+        id: images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
           SHA="${{ steps.resolve.outputs.commit_sha }}"
-          # Pin commits land on origin/main after images.yml; the tag may point at
-          # the image SHA while staging.json lives on a later pin commit.
-          git fetch origin main
-          if ! git show origin/main:deploy/pins/staging.json > /tmp/staging-pins.json 2>/dev/null; then
-            echo "deploy/pins/staging.json not found on origin/main — staging pins must be committed first"
+          if [[ -n "${EVENT_RUN_ID:-}" ]]; then
+            RUN_ID="$EVENT_RUN_ID"
+          else
+            RUN_ID=$(gh run list \
+              --workflow images.yml \
+              --commit "$SHA" \
+              --status success \
+              --json databaseId \
+              --jq '.[0].databaseId // empty' 2>/dev/null || true)
+          fi
+          if [[ -z "$RUN_ID" ]]; then
+            echo "no successful images run for $SHA"
+            echo "(re-run that commit's images run, or dispatch images.yml on a ref pointing at it)"
             exit 1
           fi
-          pin_sha=$(python3 -c \
-            "import json; print(json.load(open('/tmp/staging-pins.json')).get('commit_sha',''))")
-          if [[ "$pin_sha" != "$SHA" ]]; then
-            echo "Staging pins commit_sha=$pin_sha, expected $SHA"
-            echo "Staging must record digests for this commit before promoting to prod."
+          # Fail here rather than in the deploy job: without the artifact there
+          # are no digests to pin, and prod must never fall back to a source build.
+          found=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" \
+            --jq "[.artifacts[] | select(.name == \"prod-pins-${SHA}\" and .expired == false)] | length")
+          if [[ "$found" -lt 1 ]]; then
+            echo "images run $RUN_ID has no live prod-pins-${SHA} artifact"
+            echo "(artifacts expire — re-run that images run, or dispatch images.yml"
+            echo " on a ref pointing at this commit, to rebuild the pins)"
             exit 1
           fi
-          echo "Staging pins on origin/main match commit $SHA"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "prod pins come from images run $RUN_ID"
 
-  promote:
-    name: promote staging → prod pins
+  backup:
+    name: prod pins + fail-closed backup
     needs: preflight
     runs-on: ubuntu-latest
-    outputs:
-      pins_artifact: prod-pins-${{ needs.preflight.outputs.commit_sha }}
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -112,18 +170,42 @@ jobs:
           ref: ${{ needs.preflight.outputs.commit_sha }}
           fetch-depth: 0
 
-      - name: Load staging pins from origin/main
+      - name: Download prod pins from the images run
+        uses: actions/download-artifact@v4
+        with:
+          name: prod-pins-${{ needs.preflight.outputs.commit_sha }}
+          path: /tmp/prod-pins-in
+          run-id: ${{ needs.preflight.outputs.images_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Validate pins against this commit
         run: |
           set -euo pipefail
-          git fetch origin main
-          git show origin/main:deploy/pins/staging.json > deploy/pins/staging.json
-          # Digests manifest (optional pulls for prism/attest-helper) when present.
           SHA="${{ needs.preflight.outputs.commit_sha }}"
-          if git show "origin/main:deploy/digests/${SHA}.json" > "deploy/digests/${SHA}.json" 2>/dev/null; then
-            echo "Loaded deploy/digests/${SHA}.json from origin/main"
+          if [[ -f /tmp/prod-pins-in/deploy/pins/prod.json ]]; then
+            BASE=/tmp/prod-pins-in/deploy
+          elif [[ -f /tmp/prod-pins-in/pins/prod.json ]]; then
+            BASE=/tmp/prod-pins-in
           else
-            echo "WARNING: deploy/digests/${SHA}.json missing on origin/main"
+            echo "unexpected artifact layout:"; find /tmp/prod-pins-in -type f | head -50
+            exit 1
           fi
+          test -f "$BASE/digests/${SHA}.json" || { echo "artifact has no digests/${SHA}.json"; exit 1; }
+          mkdir -p deploy/pins deploy/digests
+          cp "$BASE/pins/prod.json" deploy/pins/prod.json
+          cp "$BASE/digests/${SHA}.json" "deploy/digests/${SHA}.json"
+          python3 - "$SHA" <<'PY'
+          import json, re, sys
+          sha = sys.argv[1]
+          pin = json.load(open("deploy/pins/prod.json", encoding="utf-8"))
+          assert pin["commit_sha"] == sha, (pin["commit_sha"], sha)
+          for svc in ("validator", "gateway", "updater", "bounty-challenge", "proof-challenge"):
+              digest = pin["services"][svc]["digest"]
+              assert re.fullmatch(r"sha256:[0-9a-f]{64}", digest), (svc, digest)
+              hexpart = digest.split(":", 1)[1]
+              assert not re.fullmatch(r"0+1?", hexpart), (svc, digest)
+          print("prod pins validated for", sha)
+          PY
 
       - name: Fail-closed — require Spaces backup credentials
         env:
@@ -137,8 +219,8 @@ jobs:
           [[ -n "${AWS_ACCESS_KEY_ID:-}" ]] || missing+=("SPACES_ACCESS_KEY_ID (or AWS_ACCESS_KEY_ID)")
           [[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]] || missing+=("SPACES_SECRET_ACCESS_KEY (or AWS_SECRET_ACCESS_KEY)")
           if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "Prod promote is fail-closed: missing GitHub secrets: ${missing[*]}"
-            echo "Set DO Spaces credentials before cutting a prod tag."
+            echo "Prod deploy is fail-closed: missing GitHub secrets: ${missing[*]}"
+            echo "Set DO Spaces credentials before deploying prod."
             echo "See deploy/README.md § Promotion pipeline (BASE_BACKUP_ENDPOINT + Spaces keys)."
             echo "Postgres dump runs on the prod master host via SSH; Spaces upload runs here."
             exit 1
@@ -210,7 +292,7 @@ jobs:
           echo "backup_uri=$URI" >> "$GITHUB_OUTPUT"
           echo "Backup ok: $URI ($BYTES bytes, sha256=$SUM)"
 
-      - name: Close firewall for promote runner
+      - name: Close firewall for this runner
         if: always() && steps.fw.outputs.ip != ''
         uses: ./.github/actions/do-firewall
         with:
@@ -219,41 +301,6 @@ jobs:
           ip: ${{ steps.fw.outputs.ip }}
           firewall-id: ${{ steps.fw.outputs.firewall-id }}
 
-      - name: Promote each service staging → prod
-        run: |
-          set -euo pipefail
-          SHA="${{ needs.preflight.outputs.commit_sha }}"
-          chmod +x deploy/scripts/promote.sh
-          # Backup already succeeded above (fail-closed). promote.sh --skip-backup
-          # is used only because Postgres is not reachable as PGHOST from the runner;
-          # we never skip the Spaces backup step itself.
-          mapfile -t SERVICES < <(python3 -c '
-          import json
-          for s in sorted(json.load(open("deploy/pins/staging.json"))["services"]):
-              print(s)
-          ')
-          for svc in "${SERVICES[@]}"; do
-            IMAGE=$(python3 -c '
-          import json, sys
-          meta = json.load(open("deploy/pins/staging.json"))["services"][sys.argv[1]]
-          img = meta.get("image") or ""
-          digest = meta["digest"]
-          if "/" in img and "@sha256:" in img:
-              print(img)
-          else:
-              print(f"ghcr.io/baseintelligence/base/{sys.argv[1]}@{digest}")
-          ' "$svc")
-            echo "Promoting $svc → $IMAGE"
-            ./deploy/scripts/promote.sh \
-              --env prod \
-              --service "$svc" \
-              --image "$IMAGE" \
-              --confirm-prod \
-              --commit "$SHA" \
-              --skip-backup
-          done
-          python3 -c 'import json; p=json.load(open("deploy/pins/prod.json")); assert p["commit_sha"]; print(p["commit_sha"], list(p["services"]))'
-
       - name: Stage pins artifact
         run: |
           set -euo pipefail
@@ -261,55 +308,18 @@ jobs:
           STAGE="/tmp/prod-pins-artifact"
           mkdir -p "$STAGE/deploy/pins" "$STAGE/deploy/digests"
           cp deploy/pins/prod.json "$STAGE/deploy/pins/prod.json"
-          cp deploy/pins/staging.json "$STAGE/deploy/pins/staging.json"
-          if [[ -f "deploy/digests/${SHA}.json" ]]; then
-            cp "deploy/digests/${SHA}.json" "$STAGE/deploy/digests/${SHA}.json"
-          fi
+          cp "deploy/digests/${SHA}.json" "$STAGE/deploy/digests/${SHA}.json"
 
-      - name: Upload promoted pins artifact
+      - name: Upload deployed pins artifact
         uses: actions/upload-artifact@v4
         with:
-          name: prod-pins-${{ needs.preflight.outputs.commit_sha }}
+          name: deployed-prod-pins-${{ needs.preflight.outputs.commit_sha }}
           path: /tmp/prod-pins-artifact
           if-no-files-found: error
 
-      - name: Commit prod pins to origin/main
-        run: |
-          set -euo pipefail
-          SHA="${{ needs.preflight.outputs.commit_sha }}"
-          mkdir -p /tmp/prod-pin-commit
-          cp deploy/pins/prod.json /tmp/prod-pin-commit/prod.json
-          if [[ -f "deploy/digests/${SHA}.json" ]]; then
-            cp "deploy/digests/${SHA}.json" "/tmp/prod-pin-commit/${SHA}.json"
-          fi
-          git fetch origin main
-          # Earlier steps rewrite deploy/pins/* and drop deploy/digests/<sha>.json
-          # into the worktree (all preserved under /tmp/prod-pin-commit). Reset so
-          # the checkout to origin/main cannot fail on a dirty tree.
-          git reset --hard HEAD
-          git clean -fd deploy/pins deploy/digests
-          git checkout -B main origin/main
-          cp /tmp/prod-pin-commit/prod.json deploy/pins/prod.json
-          if [[ -f "/tmp/prod-pin-commit/${SHA}.json" ]]; then
-            mkdir -p deploy/digests
-            cp "/tmp/prod-pin-commit/${SHA}.json" "deploy/digests/${SHA}.json"
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add deploy/pins/prod.json
-          if [[ -f "deploy/digests/${SHA}.json" ]]; then
-            git add "deploy/digests/${SHA}.json"
-          fi
-          if git diff --cached --quiet; then
-            echo "No pin changes to commit"
-            exit 0
-          fi
-          git commit -m "deploy: promote prod pins for ${SHA}"
-          git push origin main
-
   deploy:
     name: deploy prod ${{ matrix.role }}
-    needs: [preflight, promote]
+    needs: [preflight, backup]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -326,13 +336,13 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.commit_sha }}
 
-      - name: Download promoted pins
+      - name: Download deployed pins
         uses: actions/download-artifact@v4
         with:
-          name: prod-pins-${{ needs.preflight.outputs.commit_sha }}
+          name: deployed-prod-pins-${{ needs.preflight.outputs.commit_sha }}
           path: /tmp/prod-pins
 
-      - name: Install promoted pins into tree
+      - name: Install pins into tree
         run: |
           set -euo pipefail
           SHA="${{ needs.preflight.outputs.commit_sha }}"
@@ -346,10 +356,7 @@ jobs:
           fi
           mkdir -p deploy/pins deploy/digests
           cp "$BASE/pins/prod.json" deploy/pins/prod.json
-          cp "$BASE/pins/staging.json" deploy/pins/staging.json
-          if [[ -f "$BASE/digests/${SHA}.json" ]]; then
-            cp "$BASE/digests/${SHA}.json" "deploy/digests/${SHA}.json"
-          fi
+          cp "$BASE/digests/${SHA}.json" "deploy/digests/${SHA}.json"
           python3 -c '
           import json, re
           p = json.load(open("deploy/pins/prod.json"))

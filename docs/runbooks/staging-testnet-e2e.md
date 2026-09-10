@@ -6,7 +6,7 @@ End-to-end testnet 541 procedure on the 2-host staging pair.
 
 - Staging master (`base-staging`, 68.183.23.51 / 10.116.0.2) running master role
 - Staging validator (`base-staging-validator`, 142.93.197.253 / 10.116.0.4) running validator role
-- Both deployed from the same `main` commit via `deploy-staging.yml` or manual `remote-deploy.sh`
+- Both deployed from the same `main` commit via manual `remote-deploy.sh` (the `deploy-staging.yml` lane was retired on 2026-09-10 — staging is operator-driven now)
 - `deploy/secrets/bounty_sk`, `deploy/secrets/proof_sk`, and `deploy/secrets/gateway_sk` present on master (mode 0400, uid 65532)
 - `deploy/env/*.env` materialized on both hosts (mode 0600)
 
@@ -96,13 +96,15 @@ cargo run -p xtask -- metadata-snapshot --check
 
 ## Deploying a new commit to staging
 
-1. Push to `main` — `ci.yml` runs, then `deploy-staging.yml` auto-deploys both hosts.
-2. Or manual:
-   ```bash
-   ./deploy/scripts/remote-deploy.sh --host root@68.183.23.51 --role master --env staging --build-from source
-   ./deploy/scripts/remote-deploy.sh --host root@142.93.197.253 --role validator --env staging --build-from source
-   ```
-3. Post-deploy: CI checks validator `/healthz` (fail-closed) and greps for `Match epoch=` within 180s.
+No workflow deploys staging any more — run it by hand from the commit you want:
+
+```bash
+./deploy/scripts/remote-deploy.sh --host root@68.183.23.51 --role master --env staging --build-from source
+./deploy/scripts/remote-deploy.sh --host root@142.93.197.253 --role validator --env staging --build-from source
+```
+
+Then check the validator yourself: `/healthz` up and a `Match epoch=` line in
+`docker compose logs validator` (CI used to assert both after its auto-deploy).
 
 ## Rollback
 
