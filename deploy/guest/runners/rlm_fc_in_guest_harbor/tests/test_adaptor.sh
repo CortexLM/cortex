@@ -17,6 +17,7 @@ export PROOF_OUTPUT_DIR="$WORKDIR/out"
 export PROOF_PACK_DIR="$WORKDIR/pack"
 export PROOF_HARNESS_SKIP_PODMAN=1
 mkdir -p "$PROOF_WORK_DIR" "$PROOF_OUTPUT_DIR" "$PROOF_PACK_DIR/tasks/hello"
+printf '[agent]\ntimeout_sec = 120\n' > "$PROOF_PACK_DIR/tasks/hello/task.toml"
 export PROOF_PARAM_TASKS_DIR="tasks"
 
 # --- tasks_dir ---
@@ -26,6 +27,25 @@ fi
 export PROOF_PARAM_TASKS_DIR="tasks"
 proof_require_tasks || fail "tasks_dir=tasks should work"
 pass "tasks_dir relative ok, .. refused"
+
+# --- duration filter drops ≥1h tasks ---
+LONG="$PROOF_PACK_DIR/tasks/too-slow"
+mkdir -p "$LONG"
+printf '[agent]\ntimeout_sec = 7200\n' > "$LONG/task.toml"
+proof_require_tasks
+proof_filter_tasks || fail "filter should keep the short task"
+[ -d "$PROOF_TASKS/hello" ] || fail "short task must be kept"
+[ ! -d "$PROOF_TASKS/too-slow" ] || fail "≥1h task must be dropped"
+pass "duration filter keeps <1h tasks and drops ≥1h"
+
+# --- agent network rewrite ---
+printf '[environment]\nnetwork_mode = "no-network"\n' > "$PROOF_TASKS/hello/task.toml"
+proof_enable_agent_network || fail "network rewrite should succeed"
+grep -q 'network_mode = "public"' "$PROOF_TASKS/hello/task.toml" || fail "agent network must be public"
+if grep -q 'no-network' "$PROOF_TASKS/hello/task.toml"; then
+    fail "no-network must not remain on the filtered copy"
+fi
+pass "agent network rewritten to public (not no-network)"
 
 # --- BYOK evaluate never owner ---
 export PROOF_JOB=evaluate
@@ -68,7 +88,23 @@ got="$(proof_select_harbor_agent)" || fail "evaluate should select fixtures/agen
 # Command substitution is a subshell; source/PYTHONPATH are set on a direct call.
 proof_select_harbor_agent >/dev/null
 [ "$PROOF_HARBOR_AGENT_SOURCE" = "artifact_dir/agent" ] || fail "source $PROOF_HARBOR_AGENT_SOURCE"
+[ "$PROOF_HARNESS_KIND" = "harbor" ] || fail "kind $PROOF_HARNESS_KIND"
 pass "evaluate prefers \$PROOF_ARTIFACT_DIR/agent"
+
+PY_ART="$FIXTURES/python_agent"
+export PROOF_ARTIFACT_DIR="$PY_ART"
+got="$(proof_select_harbor_agent)" || fail "evaluate should select custom Python agent"
+[ "$got" = "proof_python_agent:ProofPythonAgent" ] || fail "expected wrapper -a, got $got"
+proof_select_harbor_agent >/dev/null
+[ "$PROOF_HARNESS_KIND" = "python" ] || fail "kind $PROOF_HARNESS_KIND"
+[ "$PROOF_MINER_AGENT_IMPORT" = "agent.agent:Agent" ] || fail "import $PROOF_MINER_AGENT_IMPORT"
+pass "evaluate custom Python uses wrapper, not terminus-2"
+
+JSON_ART="$FIXTURES/harness_json"
+export PROOF_ARTIFACT_DIR="$JSON_ART"
+proof_select_harbor_agent >/dev/null || fail "evaluate should honour harness.json"
+[ "$PROOF_HARNESS_KIND" = "python" ] || fail "harness.json kind $PROOF_HARNESS_KIND"
+pass "evaluate harness.json selects custom Python"
 
 ONLY_RECIPE="$WORKDIR/only-recipe"
 mkdir -p "$ONLY_RECIPE/recipe/agent"
@@ -85,14 +121,15 @@ mkdir -p "$CLASSIC/recipe"
 cp "$FIXTURES/recipe/run.sh" "$CLASSIC/recipe/run.sh"
 export PROOF_ARTIFACT_DIR="$CLASSIC"
 export PROOF_PARAM_HARBOR_AGENT=terminus-2
-if (proof_select_harbor_agent) >"$WORKDIR/classic.out" 2>"$WORKDIR/classic.err"; then
-    fail "evaluate with only recipe/run.sh must fail closed"
+got="$(proof_select_harbor_agent)" || fail "evaluate with recipe/run.sh must accept script harness"
+proof_select_harbor_agent >/dev/null
+[ "$PROOF_HARNESS_KIND" = "script" ] || fail "classic recipe should be script, got $PROOF_HARNESS_KIND"
+[ "$PROOF_HARNESS_ENTRY" = "recipe/run.sh" ] || fail "entry $PROOF_HARNESS_ENTRY"
+[ -z "$got" ] || fail "script harness must not emit a Harbor -a, got $got"
+if [ "${PROOF_HARBOR_AGENT_ARG:-}" = "terminus-2" ]; then
+    fail "must not wrap classic recipe as terminus-2"
 fi
-grep -q "recipe/run.sh" "$WORKDIR/classic.err" || fail "error should name recipe/run.sh"
-if grep -qx "terminus-2" "$WORKDIR/classic.out"; then
-    fail "must not emit terminus-2 for classic recipe"
-fi
-pass "evaluate + recipe/run.sh fails closed (no topic agent)"
+pass "evaluate + recipe/run.sh is a script harness (no terminus-2)"
 
 EMPTY_ART="$WORKDIR/empty-art"
 mkdir -p "$EMPTY_ART"
@@ -100,7 +137,7 @@ export PROOF_ARTIFACT_DIR="$EMPTY_ART"
 if (proof_select_harbor_agent) >/dev/null 2>"$WORKDIR/empty.err"; then
     fail "evaluate with empty artefact must not fall back to topic agent"
 fi
-grep -qi "refusing topic agent fallback\\|no Harbor agent" "$WORKDIR/empty.err" || fail "must explain the scoring gap"
+grep -qi "refusing topic\\|no custom Python\\|no Harbor agent\\|no harness" "$WORKDIR/empty.err" || fail "must explain the scoring gap"
 pass "evaluate empty artefact refuses terminus-2 fallback"
 
 unset PROOF_ARTIFACT_DIR
@@ -110,6 +147,7 @@ got="$(proof_select_harbor_agent)" || fail "baseline without artefact should use
 [ "$got" = "terminus-2" ] || fail "expected terminus-2, got $got"
 proof_select_harbor_agent >/dev/null
 [ "$PROOF_HARBOR_AGENT_SOURCE" = "topic" ] || fail "source should be topic"
+[ "$PROOF_HARNESS_KIND" = "builtin" ] || fail "kind $PROOF_HARNESS_KIND"
 pass "baseline without artefact uses topic agent"
 
 # --- fake harbor end-to-end evaluate ---
@@ -121,16 +159,19 @@ set -euo pipefail
 agent=""
 path=""
 jobs=""
+env=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -a|--agent) agent="$2"; shift 2 ;;
         --path|-p) path="$2"; shift 2 ;;
         --jobs-dir) jobs="$2"; shift 2 ;;
+        --env) env="$2"; shift 2 ;;
         *) shift ;;
     esac
 done
 printf '%s\n' "$agent" > "${PROOF_WORK_DIR}/harbor.agent"
 printf '%s\n' "$path" > "${PROOF_WORK_DIR}/harbor.path"
+printf '%s\n' "$env" > "${PROOF_WORK_DIR}/harbor.env"
 job="$jobs/job1/hello__1"
 mkdir -p "$job"
 cat > "$job/result.json" <<JSON
@@ -154,6 +195,11 @@ export PROOF_OUTPUT_DIR
 [ -f "$PROOF_OUTPUT_DIR/report.json" ] || fail "evaluate must write report.json"
 got_agent="$(cat "$PROOF_WORK_DIR/harbor.agent")"
 [ "$got_agent" = "agent.agent:MinerAgent" ] || fail "harbor -a was $got_agent (miner artefact ignored)"
+got_env="$(cat "$PROOF_WORK_DIR/harbor.env")"
+[ "$got_env" = "docker" ] || fail "harbor --env was $got_env (want docker, not no-network)"
+if grep -q 'no-network' "$PROOF_WORK_DIR/harbor.env"; then
+    fail "must not pass no-network to Harbor docker env"
+fi
 grep -q '"primary_value"' "$PROOF_OUTPUT_DIR/report.json" || fail "report.json missing primary_value"
 python3 - "$PROOF_OUTPUT_DIR/report.json" <<'PY'
 import json, sys

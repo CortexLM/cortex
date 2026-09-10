@@ -65,7 +65,7 @@ else
     log "no /dev/vdb scratch drive; using a tmpfs (runs will be memory-bound)"
     mount -t tmpfs tmpfs "$SCRATCH"
 fi
-mkdir -p "$SCRATCH/packs" "$SCRATCH/work" "$SCRATCH/home" "$SCRATCH/containers/storage"
+mkdir -p "$SCRATCH/packs" "$SCRATCH/work" "$SCRATCH/home" "$SCRATCH/containers/storage" "$SCRATCH/docker"
 chown "$PROOF_GUEST_RUN_AS_UID:$PROOF_GUEST_RUN_AS_GID" "$SCRATCH/work" "$SCRATCH/home" "$SCRATCH/containers" "$SCRATCH/containers/storage"
 chmod 755 "$SCRATCH/packs"
 # The run-as user's home (and its rootless container store) live on scratch.
@@ -84,6 +84,38 @@ chmod 700 "/run/user/$PROOF_GUEST_RUN_AS_UID"
 # Owner key material: tmpfs, handed to the run-as user by the agent.
 mkdir -p /run/proof/secrets
 chmod 700 /run/proof/secrets
+
+# Rootful container engine from an operator overlay: store on scratch (the
+# rootfs is read-only) and start the daemon so adaptors can talk to the
+# socket. Single-tenant guest: the run-as user needs the socket. If no
+# engine is baked, this is a no-op and the adaptor may start a rootless
+# fallback.
+if command -v dockerd >/dev/null 2>&1; then
+    mkdir -p /var/lib/docker /run/docker
+    mount --bind "$SCRATCH/docker" /var/lib/docker 2>/dev/null || true
+    dockerd \
+        --data-root /var/lib/docker \
+        --exec-root /run/docker \
+        --pidfile /run/docker.pid \
+        --iptables=true \
+        >"$SCRATCH/dockerd.log" 2>&1 &
+    i=0
+    while [ "$i" -lt 50 ]; do
+        if [ -S /var/run/docker.sock ]; then
+            chmod 666 /var/run/docker.sock 2>/dev/null || true
+            break
+        fi
+        if [ -S /run/docker.sock ]; then
+            chmod 666 /run/docker.sock 2>/dev/null || true
+            break
+        fi
+        i=$((i + 1))
+        sleep 0.1
+    done
+    if [ ! -S /var/run/docker.sock ] && [ ! -S /run/docker.sock ]; then
+        log "container engine did not create a socket; adaptors that need one will fail closed"
+    fi
+fi
 
 export PROOF_GUEST_SCRATCH="$SCRATCH"
 LOOP=/usr/local/sbin/proof-agent-loop

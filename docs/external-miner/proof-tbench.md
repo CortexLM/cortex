@@ -124,29 +124,46 @@ sha256sum recipe.tar            # this is your artifact_digest
 ```
 
 The guest unpacks that tar under `$PROOF_ARTIFACT_DIR`. Evaluate attaches
-your **Harbor agent**, not a silent copy of the operator's `terminus-2`.
+your **custom Python agent** (primary), a Harbor `BaseAgent` subclass, a
+`harness.json` kind, or a `run.sh` script — not a silent copy of the
+operator's `terminus-2`. You are not required to ship Terminus-2.
+
 Harbor's `-a` / `--agent` accepts a built-in name or a Python import path
 (`module.path:ClassName`); it does **not** take a filesystem path. The
-adaptor therefore imports your class from the artefact and passes that
-import path as `-a`. Layout after unpack (paths relative to
-`PROOF_ARTIFACT_DIR`):
+adaptor therefore imports your class from the artefact (custom Python is
+wrapped as `proof_python_agent:ProofPythonAgent`). Layout after unpack
+(paths relative to `PROOF_ARTIFACT_DIR`):
 
 ```
 recipe/
-  agent/            # PREFERRED: Harbor agent (BaseAgent / BaseInstalledAgent)
+  harness.json      # optional: {"kind":"python","import_path":"agent.agent:YourClass"}
+                    # kinds: python (primary) | harbor | script | builtin
+  agent/            # PREFERRED: custom Python (class Agent) or Harbor BaseAgent
     agent.py
     import_path     # optional: one line `agent.agent:YourClass` (must resolve inside this artefact)
-  run.sh            # optional classic marker; inspect may see it; evaluate does not exec it
+  run.sh            # optional script harness; evaluate execs it; it is not wrapped as terminus-2
   README.md
 ```
 
 If you pack with `tar -cf recipe.tar -C recipe .`, the same `agent/` directory
 sits at the tar root (`$PROOF_ARTIFACT_DIR/agent`). Resolution order:
-`$PROOF_ARTIFACT_DIR/agent`, then `$PROOF_ARTIFACT_DIR/recipe/agent`. A
-`recipe/run.sh` with no Harbor agent dir is **not** scored as a substitute —
-evaluate fails closed rather than falling back to the topic agent. Off-limits
+`harness.json`, then `$PROOF_ARTIFACT_DIR/agent`, then
+`$PROOF_ARTIFACT_DIR/recipe/agent`, then `run.sh`. A `recipe/run.sh` with no
+agent dir is scored as a **script harness**, not as the topic agent. Off-limits
 in the tree (inspect fails the named rule): `no_eval_short_circuit`,
 `no_tb4_hardcoding`.
+
+Custom Python `run(instruction, …)` need not subclass Harbor `BaseAgent`.
+Agents run with **network on** (OpenRouter / the topic's BYOK). The guest
+eval path does not apply Harbor `network_mode=no-network` to Docker — that
+mode is unsupported on this runtime and blocked model calls. Task containers
+use the default Docker bridge; the Firecracker TAP is still allowlisted on
+the host.
+
+The scored task slice is filtered to tasks whose duration metadata is under
+**one hour**. Hour-plus tasks are not in the default scorable pack. You do
+not choose the task list; `constraints.task_slice` remains an opaque runner
+input.
 
 Env the run sees: `PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`,
 `PROOF_PARAM_*`, `PROOF_PACK_DIR`, `PROOF_ARTIFACT_DIR`, `PROOF_OUTPUT_DIR`,

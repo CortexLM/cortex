@@ -136,6 +136,8 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
             "X-Lium-Api-Key",
             "PROOF_ARTIFACT_DIR",
             "recipe/agent",
+            "harness.json",
+            "custom Python",
         ],
     ),
 ];

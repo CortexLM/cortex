@@ -15,6 +15,12 @@ import resolve_agent  # noqa: E402
 
 
 class ResolveAgentTests(unittest.TestCase):
+    def test_custom_python_agent_class(self) -> None:
+        d = HERE / "fixtures" / "python_agent" / "agent"
+        info = resolve_agent.inspect_agent(d)
+        self.assertEqual(info["import_path"], "agent.agent:Agent")
+        self.assertEqual(info["kind"], "python")
+
     def test_top_level_agent_dir(self) -> None:
         d = HERE / "fixtures" / "agent"
         path, pythonpath = resolve_agent.discover(d)

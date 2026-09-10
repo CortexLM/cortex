@@ -9,9 +9,11 @@ as ``import_path``; a directory is not).
 
 This helper turns an artefact directory into ``module:Class`` so evaluate can
 pass ``-a`` without silently falling back to the topic's built-in agent.
-Miner code is **not** executed: class discovery is AST-only. A named
-``import_path`` is resolved in the evaluate import env (artefact parent
-only) and rejected when the origin is outside the staged artefact.
+Custom Python (``Agent`` / ``ProofAgent``) is the primary path; Harbor
+``BaseAgent`` subclasses still resolve. Miner code is **not** executed:
+class discovery is AST-only. A named ``import_path`` is resolved in the
+evaluate import env (artefact parent only) and rejected when the origin is
+outside the staged artefact.
 """
 
 from __future__ import annotations
@@ -24,6 +26,8 @@ import sys
 from pathlib import Path
 
 AGENT_BASES = frozenset({"BaseAgent", "BaseInstalledAgent"})
+# Custom Python primary path: miners need not subclass Harbor BaseAgent.
+AGENT_CLASS_NAMES = frozenset({"Agent", "ProofAgent", "CustomAgent"})
 MAX_PY_BYTES = 256 * 1024
 MAX_PY_FILES = 64
 _NON_FILE_ORIGINS = frozenset({"built-in", "frozen"})
@@ -139,16 +143,27 @@ def _base_attr(node: ast.expr) -> str | None:
     return None
 
 
-def _agent_classes(tree: ast.AST) -> list[str]:
-    found: list[str] = []
+def _agent_classes(tree: ast.AST) -> list[tuple[str, str]]:
+    """Return ``(class_name, kind)`` where kind is ``harbor`` or ``python``."""
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
             continue
+        kind = None
         for base in node.bases:
             attr = _base_attr(base)
             if attr in AGENT_BASES:
-                found.append(node.name)
+                kind = "harbor"
                 break
+        if kind is None and node.name in AGENT_CLASS_NAMES:
+            kind = "python"
+        if kind is None:
+            continue
+        if node.name in seen:
+            continue
+        seen.add(node.name)
+        found.append((node.name, kind))
     return found
 
 
@@ -163,14 +178,15 @@ def _module_name(agent_dir: Path, py_file: Path) -> str:
     return pkg + "." + ".".join(parts)
 
 
-def discover(agent_dir: Path) -> tuple[str, str]:
-    """Return ``(import_path, pythonpath_parent)``."""
+def inspect_agent(agent_dir: Path) -> dict[str, str]:
+    """Return ``import_path``, ``pythonpath``, and ``kind`` (``harbor`` / ``python``)."""
     if not agent_dir.is_dir():
         _fail(f"not a directory: {agent_dir}")
     parent = str(agent_dir.parent.resolve())
     named = _read_import_path_file(agent_dir)
     if named is not None:
-        return named, parent
+        kind = _kind_for_import_path(agent_dir, named)
+        return {"import_path": named, "pythonpath": parent, "kind": kind}
 
     py_files = sorted(
         p
@@ -179,11 +195,11 @@ def discover(agent_dir: Path) -> tuple[str, str]:
     )[:MAX_PY_FILES]
     if not py_files:
         _fail(
-            f"{agent_dir} is not a Harbor agent directory "
-            "(no import_path file and no .py). Harbor -a does not take a path."
+            f"{agent_dir} is not a Python agent directory "
+            "(no import_path file and no .py). Pass module:Class, not a path."
         )
 
-    discovered: list[tuple[str, str]] = []
+    discovered: list[tuple[str, str, str]] = []
     for py_file in py_files:
         try:
             size = py_file.stat().st_size
@@ -199,22 +215,60 @@ def discover(agent_dir: Path) -> tuple[str, str]:
             tree = ast.parse(src, filename=str(py_file))
         except SyntaxError:
             continue
-        for cls in _agent_classes(tree):
-            discovered.append((_module_name(agent_dir, py_file) + ":" + cls, parent))
+        for cls, kind in _agent_classes(tree):
+            discovered.append(
+                (_module_name(agent_dir, py_file) + ":" + cls, parent, kind)
+            )
 
     if not discovered:
         _fail(
-            f"{agent_dir} has Python files but no BaseAgent / BaseInstalledAgent "
-            "subclass and no import_path file. Harbor -a needs module:Class."
+            f"{agent_dir} has Python files but no custom Agent / ProofAgent class "
+            "and no Harbor BaseAgent subclass, and no import_path file."
         )
     unique_paths = sorted({item[0] for item in discovered})
     if len(unique_paths) > 1:
         _fail(
-            f"{agent_dir} has multiple Harbor agent classes ({', '.join(unique_paths)}); "
+            f"{agent_dir} has multiple agent classes ({', '.join(unique_paths)}); "
             "write a one-line import_path file (module.path:ClassName) to choose"
         )
-    _assert_import_origin(discovered[0][0], agent_dir)
-    return discovered[0]
+    import_path, pythonpath, kind = discovered[0]
+    _assert_import_origin(import_path, agent_dir)
+    return {"import_path": import_path, "pythonpath": pythonpath, "kind": kind}
+
+
+def _kind_for_import_path(agent_dir: Path, import_path: str) -> str:
+    module_name, _, class_name = import_path.partition(":")
+    parts = [p for p in module_name.split(".") if p]
+    if not parts:
+        return "python"
+    # Prefer a file inside the agent dir matching the last module part.
+    candidates = [
+        agent_dir / (parts[-1] + ".py"),
+        agent_dir / parts[-1] / "__init__.py",
+        agent_dir / "agent.py",
+    ]
+    if len(parts) >= 2:
+        candidates.insert(0, agent_dir / (parts[-1] + ".py"))
+    for py_file in candidates:
+        if not py_file.is_file():
+            continue
+        try:
+            tree = ast.parse(
+                py_file.read_text(encoding="utf-8", errors="replace"),
+                filename=str(py_file),
+            )
+        except (OSError, SyntaxError):
+            continue
+        for cls, kind in _agent_classes(tree):
+            if cls == class_name:
+                return kind
+    return "python"
+
+
+def discover(agent_dir: Path) -> tuple[str, str]:
+    """Return ``(import_path, pythonpath_parent)``."""
+    info = inspect_agent(agent_dir)
+    return info["import_path"], info["pythonpath"]
 
 
 def is_agent_dir(agent_dir: Path) -> bool:
@@ -227,7 +281,7 @@ def is_agent_dir(agent_dir: Path) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dir", required=True, help="candidate Harbor agent directory")
+    parser.add_argument("--dir", required=True, help="candidate miner agent directory")
     parser.add_argument(
         "--check",
         action="store_true",
