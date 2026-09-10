@@ -276,19 +276,21 @@ still leak no path, key, or origin (the wire check's `cp` step).
 - **Task pack duration filter.** The Harbor adaptor drops pack tasks whose
   duration metadata is ≥ 1 hour (`max_task_duration_s`, default 3600) before
   `n_concurrent` baselines or miner evals. Adaptor-local
-  `harness/duration_hints.json` records retained n15 x0017 walls (biped
-  ≈18628s, formal-crypto ≈7482s, cad ≈4364s, data-anon ≈3964s) and their
-  Harbor directory aliases; those drop even without `task.toml` timeouts.
-  Ship pack `filter.json` / `task_durations.json` as operator pack content
-  (example: `harness/pack_filter.example.json`). Pack `max_duration_s` may
-  only lower the ceiling. An empty filtered set fails closed. This does not
-  reseal a stub baseline.
+  `harness/duration_hints.json` **exclude** is the Dev list from retained
+  n15 x0017, always denied: `biped-contact-dynamics` (~5.2h / 18628s),
+  `formal-crypto` (~2.1h / 7482s), `cad-model` (~1.2h / 4364s),
+  `data-anonymization` (~1.1h / 3964s). Short aliases still match. Pack
+  `filter.json` cannot re-include them. Ship pack `filter.json` /
+  `task_durations.json` as operator pack content (example:
+  `harness/pack_filter.example.json`). Pack `max_duration_s` may only lower
+  the ceiling. An empty filtered set fails closed. This does not reseal a
+  stub baseline.
 - **Verifier pytest.** Harbor execs `pytest` inside the task environment /
-  verifier container. Filtered-copy Dockerfiles and
-  `environment`/`verifier`/`tests` `requirements.txt` files that lack pytest
-  get it injected so a missing binary cannot score reward 0. Guest-host
-  pytest does not fix that hole. `FROM scratch` / distroless last stages are
-  skipped.
+  verifier container. Filtered-copy **environment / verifier / tests**
+  Dockerfiles are patched even when FROM is CUDA / MuJoCo / FreeCAD (the
+  n15 `biped-contact-dynamics` and `cad-model` hole). `requirements.txt` in
+  those dirs also gets pytest. Guest-host pytest does not fix that hole.
+  `FROM scratch` / distroless last stages are skipped.
 - **Guest kernel.** The stock microVM kernel config lacks user namespaces /
   overlayfs / fuse / veth / tun; the bake's `--check-kernel-config` names
   what is missing. Until the guest kernel is rebuilt and re-pinned, rootless

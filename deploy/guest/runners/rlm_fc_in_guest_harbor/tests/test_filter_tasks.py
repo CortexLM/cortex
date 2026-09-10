@@ -237,6 +237,68 @@ class FilterTasksTests(unittest.TestCase):
             self.assertEqual(summary["n_kept"], 1)
             self.assertFalse((dest / "harbor-long").exists())
 
+    def test_x0017_canonical_exclude_matches_dev_list(self) -> None:
+        walls, exclude = filter_tasks.load_adaptor_spec()
+        self.assertEqual(tuple(sorted(exclude)), tuple(sorted(filter_tasks.X0017_EXCLUDE)))
+        self.assertEqual(
+            set(filter_tasks.X0017_EXCLUDE),
+            {
+                "biped-contact-dynamics",
+                "formal-crypto",
+                "cad-model",
+                "data-anonymization",
+            },
+        )
+        for name in filter_tasks.X0017_EXCLUDE:
+            self.assertGreaterEqual(walls.get(name, 0), 3600, name)
+
+    def test_x0017_exclude_is_deny_even_without_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, "quick", 600)
+            for name in filter_tasks.X0017_EXCLUDE:
+                _task(tasks, name, None)
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            self.assertEqual(summary["n_kept"], 1)
+            dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
+            for name in filter_tasks.X0017_EXCLUDE:
+                self.assertEqual(dropped[name], "deny-list", name)
+                self.assertFalse((dest / name).exists(), name)
+
+    def test_pack_allow_cannot_reinclude_x0017(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, "quick", 100)
+            _task(tasks, "cad-model", 100)
+            (pack / "filter.json").write_text(
+                json.dumps({"allow": ["quick", "cad-model"]}),
+                encoding="utf-8",
+            )
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            self.assertEqual(summary["n_kept"], 1)
+            self.assertFalse((dest / "cad-model").exists())
+            self.assertEqual(summary["dropped"][0]["reason"], "deny-list")
+
     def test_alias_match_does_not_eat_unrelated_prefix(self) -> None:
         self.assertFalse(filter_tasks.alias_match("cadillac", "cad"))
         self.assertTrue(filter_tasks.alias_match("cad-model", "cad"))

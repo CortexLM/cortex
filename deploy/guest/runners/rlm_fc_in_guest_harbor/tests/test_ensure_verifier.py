@@ -54,6 +54,26 @@ class EnsureVerifierTests(unittest.TestCase):
             self.assertEqual(stats["dockerfiles_skipped"], 1)
             self.assertNotIn("pip install", df.read_text(encoding="utf-8"))
 
+    def test_env_dockerfile_without_python_hint_still_gets_pytest(self) -> None:
+        """biped/cad Harbor env images are often CUDA/MuJoCo, not python:*."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("biped-contact-dynamics", "cad-model"):
+                env = root / name / "environment"
+                env.mkdir(parents=True)
+                df = env / "Dockerfile"
+                df.write_text(
+                    "FROM ghcr.io/example/mujoco-runtime:latest\nWORKDIR /app\n",
+                    encoding="utf-8",
+                )
+            stats = ensure_verifier.ensure_tree(root)
+            self.assertEqual(stats["dockerfiles_patched"], 2)
+            for name in ("biped-contact-dynamics", "cad-model"):
+                text = (root / name / "environment" / "Dockerfile").read_text(
+                    encoding="utf-8"
+                )
+                self.assertIn("pip install --no-cache-dir pytest", text)
+
     def test_requirements_txt_appends_pytest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

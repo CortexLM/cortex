@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Patch filtered-copy Dockerfiles so Harbor verifiers have pytest on PATH.
 
-Retained n15 x0017: biped and cad scored reward 0.0 because verifier stdout
-was ``pytest: command not found``. Harbor execs pytest inside the task
-environment / verifier container, not the guest host. A guest-image pytest
-does not fix that hole.
+Retained n15 x0017: ``biped-contact-dynamics`` and ``cad-model`` scored
+reward 0.0 because verifier stdout was ``pytest: command not found``. Harbor
+execs pytest inside the task environment / verifier container, not the guest
+host. A guest-image pytest does not fix that hole.
 
-Rewrites only the destination tree (never the pack). Last-stage ``FROM scratch``
-/ distroless images are skipped (pip cannot run there). Missing pytest on a
-Python-capable image fails the image build rather than scoring 0.
+Environment, verifier, and tests Dockerfiles are patched even when the FROM
+line does not look like Python (CUDA / MuJoCo / FreeCAD images). Last-stage
+``FROM scratch`` / distroless images are skipped. Missing pytest on a
+patchable image fails the image build rather than scoring 0.
+
+Rewrites only the destination tree (never the pack).
 """
 
 from __future__ import annotations
@@ -31,6 +34,8 @@ PYTHONISH = re.compile(
     r"bookworm|bullseye|jammy|noble)\b"
 )
 SKIP_BASE = re.compile(r"(?i)^(scratch|gcr\.io/distroless/|distroless)")
+ENV_DIR_NAMES = frozenset({"environment", "verifier", "tests"})
+PYTEST_MARKERS = ("pytest.ini", "conftest.py", "pyproject.toml")
 REQ_REL = (
     "environment/requirements.txt",
     "verifier/requirements.txt",
@@ -106,7 +111,36 @@ def iter_dockerfiles(root: Path) -> list[Path]:
     return sorted(found)
 
 
-def patch_dockerfile(path: Path) -> str:
+def is_env_dockerfile(path: Path, task_dir: Path) -> bool:
+    try:
+        rel = path.relative_to(task_dir)
+    except ValueError:
+        return False
+    parts = {p.lower() for p in rel.parts[:-1]}
+    if parts & ENV_DIR_NAMES:
+        return True
+    return path.name.lower() == "dockerfile" and len(rel.parts) == 1
+
+
+def task_has_pytest_tests(task_dir: Path) -> bool:
+    for folder in ("tests", "verifier"):
+        d = task_dir / folder
+        if not d.is_dir():
+            continue
+        for marker in PYTEST_MARKERS:
+            if (d / marker).is_file():
+                return True
+        try:
+            for py in d.rglob("*.py"):
+                name = py.name.lower()
+                if name.startswith("test_") or name.endswith("_test.py"):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def patch_dockerfile(path: Path, *, force: bool = False) -> str:
     try:
         if path.stat().st_size > MAX_FILE_BYTES:
             return "too-large"
@@ -117,7 +151,7 @@ def patch_dockerfile(path: Path) -> str:
         return "already"
     if should_skip_image(text):
         return "skip-base"
-    if not looks_python_capable(text):
+    if not force and not looks_python_capable(text):
         return "skip-nonpython"
     path.write_text(text.rstrip() + "\n" + PYTEST_LAYER, encoding="utf-8")
     return "patched"
@@ -140,6 +174,13 @@ def patch_requirements(path: Path) -> str:
     return "patched"
 
 
+def iter_task_dirs(root: Path) -> list[Path]:
+    children = sorted(
+        p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")
+    )
+    return children if children else [root]
+
+
 def ensure_tree(root: Path) -> dict[str, int]:
     if not root.is_dir():
         _fail(f"not a directory: {root}")
@@ -150,15 +191,17 @@ def ensure_tree(root: Path) -> dict[str, int]:
         "requirements_patched": 0,
         "requirements_already": 0,
     }
-    for path in iter_dockerfiles(root):
-        result = patch_dockerfile(path)
-        if result == "patched":
-            stats["dockerfiles_patched"] += 1
-        elif result == "already":
-            stats["dockerfiles_already"] += 1
-        else:
-            stats["dockerfiles_skipped"] += 1
-    for task_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+    for task_dir in iter_task_dirs(root):
+        has_tests = task_has_pytest_tests(task_dir)
+        for path in iter_dockerfiles(task_dir):
+            force = is_env_dockerfile(path, task_dir) or has_tests
+            result = patch_dockerfile(path, force=force)
+            if result == "patched":
+                stats["dockerfiles_patched"] += 1
+            elif result == "already":
+                stats["dockerfiles_already"] += 1
+            else:
+                stats["dockerfiles_skipped"] += 1
         for rel in REQ_REL:
             path = task_dir / rel
             if not path.is_file():

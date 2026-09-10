@@ -175,15 +175,18 @@ Operator pack hint (pack content, not compiled in): ship `filter.json` with
 `biped` → `biped-contact-dynamics`), and/or `task_durations.json`. See
 `harness/pack_filter.example.json`. Tasks whose `task.toml` `[agent]
 timeout_sec` (or equivalent) is ≥ 1 hour are dropped even without that file.
-Adaptor `harness/duration_hints.json` records retained n15 x0017 walls so
-`biped` / `formal-crypto` / `cad` / `data-anon` drop even with no timeout.
-Do not put hour-plus tasks in the default scorable pack for `n_concurrent`
-baselines or miner evals.
+Adaptor `harness/duration_hints.json` **exclude** is the Dev list from
+retained n15 x0017, always denied in the default pack:
+`biped-contact-dynamics` (~5.2h), `formal-crypto` (~2.1h), `cad-model`
+(~1.2h), `data-anonymization` (~1.1h). Short aliases still match. Pack
+`filter.json` cannot re-include them. Do not put hour-plus tasks in the
+default scorable pack for `n_concurrent` baselines or miner evals.
 
 After the copy, `ensure_verifier.py` injects pytest into environment /
-verifier Dockerfiles so Harbor's verifier cannot score 0 from `pytest:
-command not found` (n15 biped + cad). That is an image/env hole, not a
-true-zero miner reward. Partial pytest assertion failures remain real 0s.
+verifier / tests Dockerfiles even when FROM is not `python:*` (n15
+`biped-contact-dynamics` + `cad-model` scored 0 from `pytest: command not
+found`). That is an image/env hole, not a true-zero miner reward. Partial
+pytest assertion failures remain real 0s.
 
 ## Outputs
 

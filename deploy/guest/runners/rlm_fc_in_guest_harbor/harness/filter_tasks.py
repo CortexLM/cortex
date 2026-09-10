@@ -4,14 +4,17 @@
 Duration is pack metadata plus adaptor-local measured walls (not a compiled
 Proof catalog). A task is excluded when max(declared timeout, pack duration,
 adaptor hint) is ≥ ``max_duration_s`` (default 3600), when a pack
-``filter.json`` deny-list names it (or an alias / ``key-`` prefix), or when
-a non-empty allow-list omits it.
+``filter.json`` deny-list names it (or an alias / ``key-`` prefix), when the
+adaptor ``duration_hints.json`` ``exclude`` list names it, or when a
+non-empty allow-list omits it.
 
-Adaptor hints (`duration_hints.json` next to this file) record retained n15
-x0017 walls (biped ≈5.2h, formal-crypto, cad, data-anon). Those names drop
-even when ``task.toml`` has no timeout. Unknown duration with no hint is
-kept unless the pack or topic asks to drop it. Pack ``max_duration_s`` may
-only lower the ceiling.
+Adaptor ``exclude`` is the Dev list from retained n15 x0017 (always denied
+in the default pack): ``biped-contact-dynamics`` (~5.2h), ``formal-crypto``
+(~2.1h), ``cad-model`` (~1.2h), ``data-anonymization`` (~1.1h). Short
+aliases still match. ``walls_sec`` drops the same ids even when
+``task.toml`` has no timeout. Unknown duration with no hint is kept unless
+the pack or topic asks to drop it. Pack ``max_duration_s`` may only lower
+the ceiling.
 
 The copy is written under the work directory; the pack tree is never mutated.
 Zero surviving tasks fails closed.
@@ -141,25 +144,47 @@ def lookup_named(name: str, mapping: dict[str, int]) -> int | None:
     return best
 
 
-def load_adaptor_hints(path: Path | None = None) -> dict[str, int]:
+# Canonical Harbor directory names from retained n15 x0017 (Dev). Always
+# denied in the default pack. Aliases still match via alias_match.
+X0017_EXCLUDE = (
+    "biped-contact-dynamics",
+    "formal-crypto",
+    "cad-model",
+    "data-anonymization",
+)
+
+
+def load_adaptor_spec(path: Path | None = None) -> tuple[dict[str, int], set[str]]:
     hints_path = path or DEFAULT_HINTS
     if not hints_path.is_file():
-        return {}
+        return {}, set()
     obj = _read_json(hints_path)
     if not isinstance(obj, dict):
         _fail(f"{hints_path} must be a JSON object")
     raw = obj.get("walls_sec")
     if raw is None:
         raw = obj.get("durations")
+    if raw is None:
+        raw = {}
     if not isinstance(raw, dict):
-        _fail(f"{hints_path} must contain walls_sec or durations object")
-    out: dict[str, int] = {}
+        _fail(f"{hints_path} walls_sec/durations must be an object")
+    walls: dict[str, int] = {}
     for key, value in raw.items():
         if str(key).startswith("_"):
             continue
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            out[str(key)] = int(value)
-    return out
+            walls[str(key)] = int(value)
+    exclude: set[str] = set()
+    for field in ("exclude", "deny"):
+        listed_names = obj.get(field)
+        if isinstance(listed_names, list):
+            exclude.update(str(x) for x in listed_names if isinstance(x, str) and x.strip())
+    return walls, exclude
+
+
+def load_adaptor_hints(path: Path | None = None) -> dict[str, int]:
+    walls, _exclude = load_adaptor_spec(path)
+    return walls
 
 
 def list_task_dirs(tasks_dir: Path) -> list[Path]:
@@ -308,7 +333,8 @@ def filter_tasks(
     allow = {str(x) for x in spec.get("allow", []) if isinstance(x, str) and x}
     deny = {str(x) for x in spec.get("deny", []) if isinstance(x, str) and x}
     durations_map = load_durations_map(pack_dir, spec)
-    adaptor_hints = load_adaptor_hints(hints_path)
+    adaptor_hints, adaptor_exclude = load_adaptor_spec(hints_path)
+    deny = deny | adaptor_exclude
     if spec.get("exclude_unknown_duration") is True:
         drop_unknown = True
 
@@ -347,6 +373,7 @@ def filter_tasks(
         "n_kept": len(kept),
         "n_dropped": len(dropped),
         "n_adaptor_hints": len(adaptor_hints),
+        "n_adaptor_exclude": len(adaptor_exclude),
         "kept": kept,
         "dropped": dropped,
     }
