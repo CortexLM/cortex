@@ -135,7 +135,7 @@ import path as `-a`. Layout after unpack (paths relative to
 recipe/
   agent/            # PREFERRED: Harbor agent (BaseAgent / BaseInstalledAgent)
     agent.py
-    import_path     # optional: one line `agent.agent:YourClass`
+    import_path     # optional: one line `agent.agent:YourClass` (must resolve inside this artefact)
   run.sh            # optional classic marker; inspect may see it; evaluate does not exec it
   README.md
 ```

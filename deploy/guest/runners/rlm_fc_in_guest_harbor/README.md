@@ -34,7 +34,8 @@ Harbor **does not** accept a filesystem path for `-a`. This adaptor therefore
 A one-line `import_path` file inside the agent dir (contents
 `module.path:ClassName`) wins when several classes exist. A built-in name in
 that file is refused: that would ignore miner code the same way `terminus-2`
-did.
+did. The named module is resolved in the evaluate import env (artefact
+parent only) and **rejected** if its origin is outside the staged artefact.
 
 ## Agent selection (miner attach surface)
 
@@ -81,7 +82,9 @@ Off-limits in the artefact (inspect fails the named rule):
 - `no_eval_short_circuit` (and `skip_eval` / `skip_verifier` / `always_pass_eval` / `short_circuit_eval`)
 - `no_tb4_hardcoding` (and `tb4_answers` / `hardcoded_tb4`)
 
-Do not quote those markers in miner code or README inside the tar.
+A file/byte-limit truncation marks the scan incomplete and fails those
+off-limits rules. Unknown rule ids fail closed. Do not quote those markers
+in miner code or README inside the tar.
 
 ## BYOK
 
@@ -137,8 +140,10 @@ the task list.
 }
 ```
 
-`primary_value` is the mean of Harbor trial `verifier_result.rewards.reward`
-only. No measured trial → fail closed, no invented number.
+`primary_value` is the mean of **every** Harbor trial
+`verifier_result.rewards.reward`. Evidence may truncate the serialized
+trial list; the mean does not. No measured trial, or a nonzero Harbor
+exit, → fail closed, no invented number and no leftover `report.json`.
 
 `inspect` writes `$PROOF_OUTPUT_DIR/checklist.json` (no Harbor, no keys).
 

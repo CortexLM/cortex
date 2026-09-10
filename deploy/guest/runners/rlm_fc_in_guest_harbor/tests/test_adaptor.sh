@@ -164,4 +164,55 @@ assert "terminus-2" not in json.dumps(r)
 PY
 pass "evaluate run-harbor passes miner -a, not terminus-2"
 
+# --- nonzero Harbor exit must not write a successful report ---
+cat > "$FAKE_BIN/harbor" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+jobs=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --jobs-dir) jobs="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+job="$jobs/job1/hello__1"
+mkdir -p "$job"
+cat > "$job/result.json" <<JSON
+{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 0.6}}}
+JSON
+exit 23
+EOF
+chmod 0755 "$FAKE_BIN/harbor"
+PARTIAL_OUT="$WORKDIR/out-partial"
+mkdir -p "$PARTIAL_OUT"
+export PROOF_OUTPUT_DIR="$PARTIAL_OUT"
+export PROOF_JOB=evaluate
+export PROOF_ARTIFACT_DIR="$FIXTURES"
+if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/partial.out" 2>"$WORKDIR/partial.err"; then
+    fail "nonzero harbor exit must fail closed"
+fi
+[ ! -f "$PARTIAL_OUT/report.json" ] || fail "must not write report.json after harbor exit 23"
+grep -qi "harbor exited 23\\|refusing to score" "$WORKDIR/partial.err" || fail "must name the harbor failure"
+pass "nonzero harbor exit fails closed (no report)"
+
+# --- import_path naming a module only on inherited PYTHONPATH ---
+ESCAPE="$WORKDIR/escape"
+mkdir -p "$ESCAPE/artifact/agent" "$ESCAPE/external"
+printf 'outside_agent:ExternalAgent\n' > "$ESCAPE/artifact/agent/import_path"
+cat > "$ESCAPE/external/outside_agent.py" <<'PY'
+from harbor.agents.base import BaseAgent
+class ExternalAgent(BaseAgent):
+    pass
+PY
+export PROOF_JOB=evaluate
+export PROOF_ARTIFACT_DIR="$ESCAPE/artifact"
+export PYTHONPATH="$ESCAPE/external${PYTHONPATH:+:$PYTHONPATH}"
+if (proof_select_harbor_agent) >"$WORKDIR/escape.out" 2>"$WORKDIR/escape.err"; then
+    fail "import_path outside the artefact must fail before Harbor"
+fi
+if grep -q "outside_agent:ExternalAgent" "$WORKDIR/escape.out"; then
+    fail "must not emit an escaped import path"
+fi
+pass "import_path outside artefact is refused before Harbor"
+
 echo "all adaptor tests passed"
