@@ -35,7 +35,7 @@ whitepaper's research vision and current code: [implementation comparison](WHITE
 | Health endpoints (`/healthz`, `/readyz`, `/metrics`) | done | |
 | Attestation (`/v1/attest/*`) | done | Real Intel DCAP via `dcap-qvl` when built `--features dcap` (the container default). Verified against live Intel PCS; a tampered quote yields `CryptoInvalid`. Mock verifiers remain for tests only. |
 | Bundle fetch + `compare_bundle` | done | Continuous coordination loop. |
-| Match → `submit_intent` | done | `spawn_coordination_loop` submits on Match with per-epoch in-memory dedupe; CR enabled → timelocked path (never downgrades to `set_weights`). Requires validator signing key. Last verified seal may be persisted (`BASE_VALIDATOR_LKG_PATH`, default `/var/lib/base/last-sealed.bundle`) but unsealed `/v1/weights/latest` is not a submit path (no LKG resubmit). Pure burn to the registered owner / a `validator_permit` UID is not submitted. |
+| Match → `submit_intent` | done | `spawn_coordination_loop` submits on Match with per-epoch in-memory dedupe; CR enabled → timelocked path (never downgrades to `set_weights`). Requires validator signing key. Last verified seal may be persisted (`BASE_VALIDATOR_LKG_PATH`, default `/var/lib/base/last-sealed.bundle`) but unsealed `/v1/weights/latest` is not a submit path (no LKG resubmit). A sealed Match, including burn-uid0 / `burn_outcome=true`, is submitted. |
 | `set_weights` / `submit_timelocked_weights` | done | Live `set_weights` (CR off) + `commit_timelocked_mechanism_weights` with Drand TLE ciphertext (CR on / CRV4). Signing key via `keystore`. |
 | Chain backend | done | Live only. `FakeChain` was removed from `bins/validator`; there is no switch left to misconfigure. |
 
