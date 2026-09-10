@@ -219,6 +219,16 @@ fn submit_body(topic_id: &str, label: &str) -> serde_json::Value {
     submit_declaring(topic_id, label, 1)
 }
 
+fn no_flop_gate(row: &serde_json::Value) {
+    let codes = row["verdict"]["agent"]["cheat_codes"].to_string();
+    assert!(!codes.contains("flops_over_budget"), "{codes}");
+    assert!(!codes.contains("flops_under_declared"), "{codes}");
+    let failed = row["verdict"]["failed"].to_string();
+    assert!(!failed.contains("flops_over_budget"), "{failed}");
+    assert_ne!(row["state"], "rejected", "{row}");
+    assert_eq!(row["verdict"]["agent"]["verdict"], "clean", "{row}");
+}
+
 fn zip_names(path: &std::path::Path) -> Vec<String> {
     let bytes = std::fs::read(path).unwrap();
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
@@ -536,16 +546,6 @@ async fn custom_topics_ignore_flop_accounting() {
     } = stack(true);
     let tid = topic.id.clone();
     let budget = topic.flops_budget;
-
-    fn no_flop_gate(row: &serde_json::Value) {
-        let codes = row["verdict"]["agent"]["cheat_codes"].to_string();
-        assert!(!codes.contains("flops_over_budget"), "{codes}");
-        assert!(!codes.contains("flops_under_declared"), "{codes}");
-        let failed = row["verdict"]["failed"].to_string();
-        assert!(!failed.contains("flops_over_budget"), "{failed}");
-        assert_ne!(row["state"], "rejected", "{row}");
-        assert_eq!(row["verdict"]["agent"]["verdict"], "clean", "{row}");
-    }
 
     orchestrator.set_flops_used(Some(budget + 1));
     let (st, created) = json_req(
