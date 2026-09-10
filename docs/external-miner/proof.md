@@ -199,8 +199,11 @@ ctx proof submit \
 `--secret-file` is a 32-byte mini-secret (or 64 hex chars), never a mnemonic.
 `--wallet-name` / `--wallet-dir` / `--wallet-hotkey` load a Bittensor
 wallet the same way `ctx bounty pair` does. `--signature` is a 128-hex
-offline signature. `--hotkey` is optional when a secret or wallet is
-loaded (derived); with `--signature` it is required and must match.
+offline signature. Pass **exactly one** signer — `--secret-file`,
+`--wallet-name`, or `--signature`; `ctx` refuses combinations rather than
+picking one. `--hotkey` is optional when a secret or wallet is loaded
+(derived); with `--signature` it is required and must match, and
+`--submit-nonce` must be the nonce that was signed.
 
 The signature is sr25519 under `base-proof-submit-v1` over these exact
 bytes (`0xff` is a single separator byte; it never occurs inside UTF-8):
@@ -216,9 +219,12 @@ manifest_canonical =
   count(datasets)_decimal || (0xff || dataset)*   datasets = manifest.train_dataset_ids,   sorted bytewise
 ```
 
-- `hotkey_hex` / `artifact_digest`: 64 lowercase hex, as posted.
+- `hotkey_hex` / `artifact_digest`: exactly 64 lowercase hex, no `0x` —
+  the only spelling the host accepts, so the bytes you sign are the bytes
+  it verifies (any other spelling is a **400**, never a silent rewrite).
 - `declared_flops_decimal`: the integer as ASCII digits.
-- `claim`: the exact UTF-8 string you post.
+- `topic_id` / `claim`: the exact UTF-8 strings you post (the host trims
+  `topic_id` only to look the topic up; it verifies what you sent).
 - `manifest_canonical`: each list's entry count as ASCII digits, then every
   entry prefixed by `0xff`, entries as exact UTF-8 (duplicates kept, nothing
   trimmed), sorted bytewise; the two lists joined by `0xff`; a missing list
@@ -293,11 +299,11 @@ a topic in `deferred_topics`, where they answer **201** `queued`.
 
 | Field | Required | Shape |
 |-------|----------|-------|
-| `miner_hotkey` | yes | 64 hex characters (no `0x`); the sr25519 public key that verifies `hotkey_signature` |
+| `miner_hotkey` | yes | **Exactly** 64 lowercase hex (no `0x`); the sr25519 public key that verifies `hotkey_signature` |
 | `hotkey_signature` | yes | **Exactly** 128 lowercase hex (no `0x`, no uppercase) sr25519 over `base-proof-submit-v1` (payload above). Missing/invalid → **401**. `X-Lium-Api-Key` is not a substitute |
 | `submit_nonce` | yes | **Exactly** 64 lowercase hex (32 random bytes), bound into the signature, accepted once per hotkey. Missing/invalid/reused → **401** |
 | `topic_id` | yes | Open topic id from `ctx proof topics` |
-| `artifact_digest` | yes | SHA-256 hex of the recipe bytes |
+| `artifact_digest` | yes | SHA-256 of the recipe bytes as **exactly** 64 lowercase hex (no `0x`) |
 | `claim` | yes | Non-empty string: NL of what improved (bound into the signature) |
 | `declared_flops` | yes | `u64`, must be `≤ topic.flops_budget` (bound into the signature) |
 | `manifest.train_content_hashes` | yes (array) | Shard hashes you trained on (may be `[]` if you declare dataset ids); bound into the signature |
@@ -341,7 +347,7 @@ submission row.
 | **400** `topic is not open` | Draft / closed / outside epoch window | no | no |
 | **400** `declared_flops exceeds the topic budget` | `declared_flops > topic.flops_budget` | no | no |
 | **400** `artifact_uri is required for custom topics` | Custom topic, no locator | no | no |
-| **400** invalid `miner_hotkey` / `artifact_digest` | Not 64 hex | no | no |
+| **400** invalid `miner_hotkey` / `artifact_digest` | Not exactly 64 lowercase hex (`0x`, uppercase, or whitespace) — the host verifies what you post and never normalises a hex field | no | no |
 | **401** `hotkey_signature required` | Missing / empty `hotkey_signature` | no | no |
 | **401** `hotkey_signature invalid` | Not exactly 128 lowercase hex, or does not verify under `miner_hotkey` for `base-proof-submit-v1` — including a `claim`, `declared_flops`, `manifest`, or `submit_nonce` that differs from what was signed | no | no |
 | **401** `submit_nonce required` | Missing / empty `submit_nonce` | no | no |

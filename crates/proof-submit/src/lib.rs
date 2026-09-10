@@ -184,15 +184,25 @@ pub fn verify_submit(
     )?)
 }
 
-fn is_lower_hex(s: &str, len: usize) -> bool {
+/// Exactly `len` lowercase hex characters: no `0x`, no uppercase, no
+/// whitespace. Every hex field on the submit wire uses this form, so the
+/// bytes a miner signs are the bytes the host verifies — nothing is
+/// normalised in between.
+pub fn is_lowercase_hex(s: &str, len: usize) -> bool {
     s.len() == len
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Client-side helper: the canonical wire form of a hex field a human may
+/// have pasted with `0x`, uppercase, or surrounding whitespace.
+pub fn canonical_hex(raw: &str) -> String {
+    raw.trim().trim_start_matches("0x").to_ascii_lowercase()
+}
+
 /// Decode exactly 128 lowercase hex (no `0x`) into a 64-byte sr25519 signature.
 pub fn parse_signature_hex(raw: &str) -> Result<[u8; 64], SubmitSigError> {
-    if !is_lower_hex(raw, SIGNATURE_HEX_LEN) {
+    if !is_lowercase_hex(raw, SIGNATURE_HEX_LEN) {
         return Err(SubmitSigError::InvalidSignature);
     }
     let bytes = hex::decode(raw).map_err(|_| SubmitSigError::InvalidSignature)?;
@@ -201,20 +211,19 @@ pub fn parse_signature_hex(raw: &str) -> Result<[u8; 64], SubmitSigError> {
 
 /// Decode exactly 64 lowercase hex (no `0x`) into a 32-byte `submit_nonce`.
 pub fn parse_submit_nonce_hex(raw: &str) -> Result<[u8; 32], SubmitSigError> {
-    if !is_lower_hex(raw, SUBMIT_NONCE_HEX_LEN) {
+    if !is_lowercase_hex(raw, SUBMIT_NONCE_HEX_LEN) {
         return Err(SubmitSigError::InvalidNonce);
     }
     let bytes = hex::decode(raw).map_err(|_| SubmitSigError::InvalidNonce)?;
     <[u8; 32]>::try_from(bytes).map_err(|_| SubmitSigError::InvalidNonce)
 }
 
-/// Decode 64-hex (optional `0x`) into a 32-byte public key.
+/// Decode exactly 64 lowercase hex (no `0x`) into a 32-byte public key.
 pub fn parse_hotkey_hex(raw: &str) -> Result<[u8; 32], SubmitSigError> {
-    let t = raw.trim().trim_start_matches("0x");
-    if t.len() != 64 || !t.chars().all(|c| c.is_ascii_hexdigit()) {
+    if !is_lowercase_hex(raw, 64) {
         return Err(SubmitSigError::InvalidHotkey);
     }
-    let bytes = hex::decode(t).map_err(|_| SubmitSigError::InvalidHotkey)?;
+    let bytes = hex::decode(raw).map_err(|_| SubmitSigError::InvalidHotkey)?;
     <[u8; 32]>::try_from(bytes).map_err(|_| SubmitSigError::InvalidHotkey)
 }
 
@@ -246,6 +255,12 @@ fn string_list(v: Option<&serde_json::Value>) -> Result<Vec<String>, SubmitSigEr
 
 /// Sign a submit JSON object in place: sets `miner_hotkey`,
 /// `hotkey_signature`, and — when absent — a fresh `submit_nonce`.
+///
+/// The signature covers exactly the strings left in the body. The one
+/// field a human may have pasted loosely, `artifact_digest`, is rewritten to
+/// its canonical wire form (64 lowercase hex, no `0x`) **before** signing, so
+/// the bytes posted and the bytes signed are the same; `topic_id` and
+/// `claim` are signed verbatim.
 pub fn attach_to_json(
     body: &mut serde_json::Value,
     secret: &[u8; 32],
@@ -263,7 +278,12 @@ pub fn attach_to_json(
             .unwrap_or("")
             .to_owned()
     };
-    let (topic_id, artifact, claim) = (text("topic_id"), text("artifact_digest"), text("claim"));
+    let (topic_id, claim) = (text("topic_id"), text("claim"));
+    let artifact = canonical_hex(&text("artifact_digest"));
+    obj.insert(
+        "artifact_digest".into(),
+        serde_json::Value::String(artifact.clone()),
+    );
     let declared = obj
         .get("declared_flops")
         .and_then(serde_json::Value::as_u64)
@@ -443,6 +463,52 @@ mod tests {
         let fresh = fresh_submit_nonce_hex();
         assert!(parse_submit_nonce_hex(&fresh).is_ok());
         assert_ne!(fresh, fresh_submit_nonce_hex());
+
+        let hotkey = hotkey_hex(&sk()).expect("pk");
+        assert!(parse_hotkey_hex(&hotkey).is_ok());
+        assert!(parse_hotkey_hex(&hotkey.to_ascii_uppercase()).is_err());
+        assert!(parse_hotkey_hex(&format!("0x{hotkey}")).is_err());
+        assert_eq!(
+            canonical_hex(&format!(" 0x{} ", hotkey.to_ascii_uppercase())),
+            hotkey
+        );
+    }
+
+    #[test]
+    fn attach_to_json_signs_the_canonical_digest_it_posts() {
+        let loose = format!("0x{}", "AB".repeat(32));
+        let mut body = serde_json::json!({
+            "topic_id": " dt-no-ib-v0 ",
+            "artifact_digest": loose,
+            "declared_flops": 1u64,
+            "claim": "beat",
+        });
+        attach_to_json(&mut body, &sk()).expect("attach");
+        // The posted digest is the canonical form, and that is what was signed.
+        assert_eq!(body["artifact_digest"], "ab".repeat(32));
+        let hotkey = body["miner_hotkey"].as_str().expect("hk").to_owned();
+        let pk = parse_hotkey_hex(&hotkey).expect("pk");
+        let sig =
+            parse_signature_hex(body["hotkey_signature"].as_str().expect("sig")).expect("hex");
+        let nonce = body["submit_nonce"].as_str().expect("nonce").to_owned();
+        let digest = "ab".repeat(32);
+        // topic_id is signed verbatim: whatever string is posted.
+        let fields = SubmitFields {
+            hotkey_hex: &hotkey,
+            topic_id: " dt-no-ib-v0 ",
+            artifact_digest: &digest,
+            declared_flops: 1,
+            claim: "beat",
+            train_content_hashes: &[],
+            train_dataset_ids: &[],
+            submit_nonce_hex: &nonce,
+        };
+        verify_submit(&pk, &fields, &sig).expect("verify canonical");
+        let trimmed = SubmitFields {
+            topic_id: "dt-no-ib-v0",
+            ..fields
+        };
+        assert!(verify_submit(&pk, &trimmed, &sig).is_err());
     }
 
     #[test]

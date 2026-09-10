@@ -59,7 +59,8 @@ use proof_store::{
     SubmissionState,
 };
 use proof_submit::{
-    parse_hotkey_hex, parse_signature_hex, parse_submit_nonce_hex, verify_submit, SubmitFields,
+    is_lowercase_hex, parse_hotkey_hex, parse_signature_hex, parse_submit_nonce_hex, verify_submit,
+    SubmitFields,
 };
 use proof_task::{
     resolve_inference, InferenceOffer, MetricFamily, OfferError, ProofPin, TopicDocument,
@@ -471,12 +472,18 @@ pub const DEFERRED_DETAIL: &str = "scoring deferred until the topic is ready: th
 
 type ErrResp = (StatusCode, Json<serde_json::Value>);
 
+/// Exactly 64 lowercase hex, no `0x`, no whitespace. The wire form **is** the
+/// signed form: the host never normalises a hex field before verifying it,
+/// so a value a miner did not sign byte for byte is refused as their
+/// request, not silently rewritten into a signature mismatch.
 fn parse_hex64(s: &str, field: &str) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    let t = s.trim().trim_start_matches("0x");
-    if t.len() != 64 || !t.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(err(StatusCode::BAD_REQUEST, &format!("invalid {field}")));
+    if !is_lowercase_hex(s, 64) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid {field}: exactly 64 lowercase hex, no 0x"),
+        ));
     }
-    Ok(t.to_ascii_lowercase())
+    Ok(s.to_owned())
 }
 
 /// A digest of **nothing** is not an artefact digest: the sha256 of zero
@@ -491,19 +498,22 @@ fn is_digest_of_nothing(hex64: &str) -> bool {
 }
 
 fn parse_artifact_digest(s: &str) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    let digest = parse_hex64(s, "artifact_digest")?;
-    if is_digest_of_nothing(&digest) {
+    // Named before the encoding check so a pasted empty-tar digest gets the
+    // useful answer whatever its case.
+    if is_digest_of_nothing(s.trim().trim_start_matches("0x")) {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "artifact_digest is the sha256 of empty input (or of an empty tar archive): hash the recipe bytes you ship at artifact_uri",
         ));
     }
-    Ok(digest)
+    parse_hex64(s, "artifact_digest")
 }
 
 /// Miner identity for one submit: `hotkey_signature` over every gate input
 /// (topic, artefact, FLOPs, claim, manifest) plus the client `submit_nonce`.
-/// Returns the nonce the caller must reserve before any row or rent.
+/// Verified over the strings exactly as posted (`hotkey` and `artifact` are
+/// already in their only accepted form). Returns the nonce the caller must
+/// reserve before any row or rent.
 fn authenticate_submit(
     hotkey: &str,
     topic_id: &str,
@@ -573,7 +583,7 @@ async fn submit(
     if !topic.is_open_at(st.epoch) {
         return Err(err(StatusCode::BAD_REQUEST, "topic is not open"));
     }
-    let submit_nonce = authenticate_submit(&hotkey, &topic_id, &artifact, &body)?;
+    let submit_nonce = authenticate_submit(&hotkey, &body.topic_id, &artifact, &body)?;
     // A verified request is single-use, whatever happens to it next: a
     // replay must never reach evaluation or a second row.
     if !st
@@ -2364,6 +2374,60 @@ mod tests {
         // manifest is order-independent so the client may list in any order.
         reordered["manifest"]["train_dataset_ids"] = serde_json::json!(["a-mix", "b-mix"]);
         let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", reordered, None).await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        assert_eq!(row_count(app).await, 2);
+    }
+
+    /// The host verifies the bytes that were posted. Hex fields have one
+    /// accepted spelling, so a value the signer did not see byte for byte is
+    /// a 400 about the request, never a 401 from silent normalisation; and a
+    /// `topic_id` is signed verbatim (the host trims only to look it up).
+    #[tokio::test]
+    async fn hex_fields_have_one_wire_form_and_strings_are_verified_verbatim() {
+        let app = app_tight_sim();
+        let signed = submit_body("wire", &serde_json::json!({}));
+        let hotkey = signed["miner_hotkey"].as_str().expect("hk").to_owned();
+        let wire_digest = signed["artifact_digest"]
+            .as_str()
+            .expect("digest")
+            .to_owned();
+        for (field, value) in [
+            ("miner_hotkey", hotkey.to_ascii_uppercase()),
+            ("miner_hotkey", format!("0x{hotkey}")),
+            ("artifact_digest", wire_digest.to_ascii_uppercase()),
+            ("artifact_digest", format!("0x{wire_digest}")),
+            ("artifact_digest", format!(" {wire_digest}")),
+        ] {
+            let mut body_v = signed.clone();
+            body_v[field] = serde_json::json!(value);
+            let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", body_v, None).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{field}: {body}");
+            let error = body["error"].as_str().unwrap_or_default();
+            assert!(
+                error.starts_with(&format!("invalid {field}")) && error.contains("lowercase"),
+                "{field}: {body}"
+            );
+        }
+        assert_eq!(row_count(app.clone()).await, 0);
+
+        // Signed with whitespace around the topic id, posted the same way.
+        let padded = submit_body(
+            "padded",
+            &serde_json::json!({ "topic_id": "  dt-no-ib-v0\n" }),
+        );
+        assert_eq!(padded["topic_id"], "  dt-no-ib-v0\n");
+        let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", padded, None).await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        assert_eq!(body["topic_id"], "dt-no-ib-v0");
+
+        // A loosely pasted digest is canonicalised by the signing helper
+        // before signing, so what it posts verifies.
+        let loose = submit_body(
+            "loose",
+            &serde_json::json!({ "artifact_digest": format!("0x{}", digest("loose").to_ascii_uppercase()) }),
+        );
+        assert_eq!(loose["artifact_digest"], digest("loose"));
+        let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", loose, None).await;
         assert_eq!(st, StatusCode::CREATED, "{body}");
         assert_eq!(row_count(app).await, 2);
     }

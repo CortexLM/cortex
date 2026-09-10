@@ -215,11 +215,26 @@ fn resolve_signed(
     })
 }
 
+/// Exactly one signer. The CLI already refuses combinations; this guards
+/// library callers so a wallet is never silently shadowed by another key.
+fn single_signer(key: &SubmitKey) -> Result<(), String> {
+    let sources = usize::from(key.signature.is_some())
+        + usize::from(key.secret_file.is_some())
+        + usize::from(key.wallet_name.is_some());
+    if sources > 1 {
+        return Err(
+            "pass one signer: --signature, --secret-file, or --wallet-name (not several)".into(),
+        );
+    }
+    Ok(())
+}
+
 /// `fields.hotkey_hex` is filled in here from `--hotkey` / the loaded secret.
 fn resolve_hotkey_and_sig(
     key: &SubmitKey,
     fields: SubmitFields<'_>,
 ) -> Result<(String, String), String> {
+    single_signer(key)?;
     if let Some(hex_sig) = &key.signature {
         let hotkey = normalize_hex64(
             key.hotkey
@@ -577,6 +592,18 @@ mod tests {
             &serde_json::json!({ "state": "awaiting_admin" })
         ));
         assert!(!is_queued(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn two_signers_are_refused_before_any_key_is_read() {
+        let input = signed_input(SubmitKey {
+            secret_file: Some("/nonexistent/hotkey.sk".into()),
+            wallet_name: Some("miner".into()),
+            ..SubmitKey::default()
+        });
+        let err = resolve_signed(&input, "dt-no-ib-v0", &"ab".repeat(32), "beat")
+            .expect_err("two signers");
+        assert!(err.contains("one signer"), "{err}");
     }
 
     #[test]

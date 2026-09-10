@@ -160,26 +160,32 @@ enum BountyCmd {
     Status,
 }
 
-/// Miner sr25519 key for a Proof submit (`base-proof-submit-v1`).
+/// Miner sr25519 key for a Proof submit (`base-proof-submit-v1`). Exactly one
+/// signer: `--secret-file`, `--wallet-name`, or an offline `--signature`.
 #[derive(Debug, Args)]
 struct ProofKeyArgs {
     /// 64-hex miner hotkey. Optional when a secret file or wallet is loaded.
     #[arg(long, value_name = "HEX64")]
     hotkey: Option<String>,
     /// 32-byte hotkey mini-secret file. Never a mnemonic.
-    #[arg(long, value_name = "PATH")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["wallet_name", "wallet_dir", "signature"]
+    )]
     secret_file: Option<PathBuf>,
-    /// Bittensor wallets directory.
-    #[arg(long, value_name = "PATH")]
+    /// Bittensor wallets directory (with --wallet-name).
+    #[arg(long, value_name = "PATH", requires = "wallet_name")]
     wallet_dir: Option<PathBuf>,
     /// Wallet name to sign with.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", conflicts_with = "signature")]
     wallet_name: Option<String>,
     /// Hotkey file inside that wallet.
     #[arg(long, default_value = "default", value_name = "NAME")]
     wallet_hotkey: String,
-    /// 128-hex signature produced by an offline sign.
-    #[arg(long, value_name = "HEX")]
+    /// 128-hex signature produced by an offline sign; needs --hotkey and the
+    /// --submit-nonce that was signed.
+    #[arg(long, value_name = "HEX", requires_all = ["hotkey", "submit_nonce"])]
     signature: Option<String>,
     /// 64-hex single-use nonce bound into the signature. Fresh random when
     /// omitted; required with --signature.
@@ -497,6 +503,78 @@ mod tests {
             }
             other => panic!("wrong command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn proof_signer_sources_are_mutually_exclusive() {
+        let digest = "ab".repeat(32);
+        let base = [
+            "ctx",
+            "proof",
+            "sign",
+            "--topic-id",
+            "dt-no-ib-v0",
+            "--artifact-digest",
+            digest.as_str(),
+            "--claim",
+            "beat",
+            "--declared-flops",
+            "1",
+        ];
+        let with = |extra: &[&str]| {
+            let mut argv: Vec<&str> = base.to_vec();
+            argv.extend_from_slice(extra);
+            Cli::try_parse_from(argv)
+        };
+        assert!(with(&["--secret-file", "/tmp/a.sk"]).is_ok());
+        assert!(with(&["--wallet-name", "miner"]).is_ok());
+        assert!(
+            with(&["--secret-file", "/tmp/a.sk", "--wallet-name", "miner"]).is_err(),
+            "two signers must be refused, not silently ordered"
+        );
+        assert!(with(&["--secret-file", "/tmp/a.sk", "--wallet-dir", "/w"]).is_err());
+        assert!(
+            with(&["--wallet-dir", "/w"]).is_err(),
+            "a wallet dir without a wallet name signs nothing"
+        );
+        let sig = "cd".repeat(64);
+        let nonce = "ef".repeat(32);
+        assert!(
+            with(&["--signature", &sig]).is_err(),
+            "needs hotkey + nonce"
+        );
+        assert!(with(&["--signature", &sig, "--hotkey", &digest]).is_err());
+        assert!(with(&[
+            "--signature",
+            &sig,
+            "--hotkey",
+            &digest,
+            "--submit-nonce",
+            &nonce
+        ])
+        .is_ok());
+        assert!(with(&[
+            "--signature",
+            &sig,
+            "--hotkey",
+            &digest,
+            "--submit-nonce",
+            &nonce,
+            "--secret-file",
+            "/tmp/a.sk"
+        ])
+        .is_err());
+        assert!(with(&[
+            "--signature",
+            &sig,
+            "--hotkey",
+            &digest,
+            "--submit-nonce",
+            &nonce,
+            "--wallet-name",
+            "miner"
+        ])
+        .is_err());
     }
 
     #[test]
