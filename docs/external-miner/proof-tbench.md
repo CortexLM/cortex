@@ -191,13 +191,13 @@ topic named:
 { "env": { "OPENROUTER_API_KEY": "sk-or-…" } }
 ```
 
-With `ctx`, bare `--env OPENROUTER_API_KEY` reads it from your shell so it never
-lands in your shell history or in `ps`; `--env OPENROUTER_API_KEY=sk-or-…`
-passes it inline:
+With `ctx`, export `OPENROUTER_API_KEY` (or pass `--openrouter-api-key`; the
+value is never printed). Bare `--env OPENROUTER_API_KEY` also reads it from
+your shell so it never lands in your shell history or in `ps`:
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-…
-ctx proof submit … --env OPENROUTER_API_KEY
+ctx proof submit …
 ```
 
 What the host does with it:
@@ -253,13 +253,12 @@ ctx proof submit \
   --artifact-digest <sha256 of recipe.tar> \
   --artifact-uri https://example.org/recipe.tar \
   --claim "raised first-15 success_rate over the sealed baseline by 0.08" \
-  --train-dataset my-harness-v0 \
-  --env OPENROUTER_API_KEY
+  --train-dataset my-harness-v0
 ```
 
-`--env` is not part of `ctx proof sign`: the key is posted beside the
-signature, never inside it, so the signed bytes are the same with or without
-it.
+`OPENROUTER_API_KEY` / `--openrouter-api-key` is not part of `ctx proof sign`:
+the key is posted beside the signature, never inside it, so the signed bytes
+are the same with or without it.
 
 Pass **exactly one** signer: `--secret-file` (a 32-byte mini-secret, never a
 mnemonic), `--wallet-name` (a Bittensor wallet), or an offline `--signature`

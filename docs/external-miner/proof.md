@@ -362,13 +362,13 @@ ctx proof submit \
   --claim "beat the sealed baseline" \
   --declared-flops 1500000000000000000 \
   --train-dataset my-mix-v0 \
-  --wallet-name miner --wallet-hotkey default \
-  --env OPENROUTER_API_KEY
+  --wallet-name miner --wallet-hotkey default
 ```
 
-Bare `--env OPENROUTER_API_KEY` reads the value from your shell, so the key
-never lands in your shell history or in `ps`. `--env NAME=value` passes it
-inline. The flag is repeatable, and over `curl` it is the body's `env`:
+Export `OPENROUTER_API_KEY` (or pass `--openrouter-api-key`; never printed),
+or use `--env OPENROUTER_API_KEY` to read it from your shell so the key never
+lands in your history. `--env NAME=value` passes any BYOK variable inline.
+`--env` is repeatable, and over `curl` it is the body's `env`:
 
 ```json
 { "env": { "OPENROUTER_API_KEY": "sk-or-…" } }

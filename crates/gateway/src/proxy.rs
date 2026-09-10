@@ -89,6 +89,7 @@ async fn proxy_inner(
 
     let mut last_status = StatusCode::BAD_GATEWAY;
     let mut last_msg = String::from("no upstream attempt");
+    let mut last_error_resp: Option<Response> = None;
     let mut attempted = Vec::new();
 
     for _ in 0..2 {
@@ -119,6 +120,10 @@ async fn proxy_inner(
                     st.registry.record_failure(backend.id);
                     last_status = status;
                     last_msg = format!("upstream {status}");
+                    // Keep the challenge body: miners need the JSON error
+                    // (`artifact_uri must be https://`, …), not a synthetic
+                    // `upstream 503 Service Unavailable` string.
+                    last_error_resp = Some(upstream_resp);
                     continue;
                 }
                 st.registry.record_success(backend.id);
@@ -135,6 +140,9 @@ async fn proxy_inner(
         }
     }
 
+    if let Some(resp) = last_error_resp {
+        return resp;
+    }
     (last_status, last_msg).into_response()
 }
 

@@ -415,3 +415,110 @@ async fn s3_registry_api_neither_sets_nor_returns_signing_key() {
 
     let _ = shutdown.send(());
 }
+
+/// A challenge 503 JSON body must reach the miner. Collapsing 5xx to a
+/// synthetic `upstream {status}` string hid Proof submit errors
+/// (`artifact_uri must be https://`, tar-header failures, …).
+#[tokio::test]
+async fn challenge_503_json_body_is_forwarded() {
+    let upstream = MockServer::start().await;
+    let err = r#"{"error":"backend: runner backend: topic-vm orchestrator: artifact_uri must be https://"}"#;
+    Mock::given(method("POST"))
+        .and(path("/v1/submissions"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .insert_header("content-type", "application/json")
+                .set_body_string(err),
+        )
+        .mount(&upstream)
+        .await;
+
+    let reg = fast_registry();
+    reg.create(&CreateBackend {
+        challenge_id: "proof".into(),
+        base_url: upstream.uri(),
+        weight: 1,
+    })
+    .unwrap();
+
+    let (addr, shutdown) = spawn_gateway(reg).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/challenge/proof/v1/submissions"))
+        .json(&serde_json::json!({"topic_id": "tbench"}))
+        .send()
+        .await
+        .expect("proxy");
+    assert_eq!(resp.status().as_u16(), 503);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("artifact_uri must be https://"),
+        "challenge error body must be forwarded, got {body:?}"
+    );
+    assert!(
+        !body.contains("upstream 503"),
+        "must not collapse to a synthetic status string: {body:?}"
+    );
+    let _ = shutdown.send(());
+}
+
+/// Multi-backend 5xx retry still records failures, but the last upstream
+/// body (not a synthetic string) is what the client sees.
+#[tokio::test]
+async fn last_upstream_503_body_is_returned_after_retry() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/submissions"))
+        .respond_with(ResponseTemplate::new(503).set_body_string(r#"{"error":"first backend"}"#))
+        .mount(&first)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/submissions"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .set_body_string(r#"{"error":"artifact_uri must be https:// to a tar"}"#),
+        )
+        .mount(&second)
+        .await;
+
+    let reg = fast_registry();
+    reg.create(&CreateBackend {
+        challenge_id: "proof".into(),
+        base_url: first.uri(),
+        weight: 1,
+    })
+    .unwrap();
+    reg.create(&CreateBackend {
+        challenge_id: "proof".into(),
+        base_url: second.uri(),
+        weight: 1,
+    })
+    .unwrap();
+
+    let (addr, shutdown) = spawn_gateway(reg).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/challenge/proof/v1/submissions"))
+        .json(&serde_json::json!({"topic_id": "tbench"}))
+        .send()
+        .await
+        .expect("proxy");
+    assert_eq!(resp.status().as_u16(), 503);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("first backend") || body.contains("artifact_uri must be https://"),
+        "expected an upstream JSON body, got {body:?}"
+    );
+    assert!(
+        !body.contains("upstream 503"),
+        "must not collapse to a synthetic status string: {body:?}"
+    );
+    let _ = shutdown.send(());
+}

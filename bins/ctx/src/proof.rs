@@ -98,28 +98,7 @@ pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Res
         return Err("claim is required (what the recipe achieved)".into());
     }
     let signed = resolve_signed(input, topic_id, &digest, claim)?;
-    let mut body = json!({
-        "miner_hotkey": signed.hotkey,
-        "hotkey_signature": signed.signature,
-        "submit_nonce": signed.nonce,
-        "topic_id": topic_id,
-        "artifact_digest": digest,
-        "claim": claim,
-        "declared_flops": input.declared_flops,
-        "manifest": signed.manifest,
-    });
-    if let Some(uri) = &input.artifact_uri {
-        body["artifact_uri"] = Value::String(uri.clone());
-    }
-    if !input.env.is_empty() {
-        body["env"] = Value::Object(
-            input
-                .env
-                .iter()
-                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                .collect(),
-        );
-    }
+    let body = submit_wire_body(input, &signed, topic_id, &digest, claim);
 
     let reply = client
         .post(&challenge_path(challenge.id, "/v1/submissions"), &body)
@@ -449,6 +428,66 @@ fn ensure_declared(manifest: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Wire JSON for `POST /v1/submissions`. `env` is posted beside the
+/// signature, never inside it.
+fn submit_wire_body(
+    input: &SubmitInput,
+    signed: &SignedSubmit,
+    topic_id: &str,
+    digest: &str,
+    claim: &str,
+) -> Value {
+    let mut body = json!({
+        "miner_hotkey": signed.hotkey,
+        "hotkey_signature": signed.signature,
+        "submit_nonce": signed.nonce,
+        "topic_id": topic_id,
+        "artifact_digest": digest,
+        "claim": claim,
+        "declared_flops": input.declared_flops,
+        "manifest": signed.manifest,
+    });
+    if let Some(uri) = &input.artifact_uri {
+        body["artifact_uri"] = Value::String(uri.clone());
+    }
+    attach_miner_env(&mut body, &input.env);
+    body
+}
+
+fn attach_miner_env(body: &mut Value, env: &[(String, String)]) {
+    if env.is_empty() {
+        return;
+    }
+    body["env"] = Value::Object(
+        env.iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect(),
+    );
+}
+
+/// Merge `--openrouter-api-key` / `OPENROUTER_API_KEY` into the submit `env`
+/// map as `OPENROUTER_API_KEY`. Empty is ignored. A value already present
+/// via `--env` wins so `export OPENROUTER_API_KEY=… --env OPENROUTER_API_KEY`
+/// does not collide. The value is never written into an error string.
+#[must_use]
+pub fn merge_openrouter_api_key(
+    mut env: Vec<(String, String)>,
+    openrouter_api_key: Option<String>,
+) -> Vec<(String, String)> {
+    let Some(raw) = openrouter_api_key else {
+        return env;
+    };
+    let value = raw.trim();
+    if value.is_empty() {
+        return env;
+    }
+    if env.iter().any(|(n, _)| n == "OPENROUTER_API_KEY") {
+        return env;
+    }
+    env.push(("OPENROUTER_API_KEY".to_owned(), value.to_owned()));
+    env
+}
+
 /// Resolve `--env` arguments into the `(NAME, value)` pairs the submit body
 /// carries.
 ///
@@ -528,7 +567,8 @@ fn explain_failure(status: u16, message: &str) -> String {
             "refused ({message}). Nothing was stored and nothing was rented. \
              A topic that sets constraints.params.miner_byok wants your own key in the \
              submit body: pass `--env <NAME>=<value>` (or bare `--env <NAME>` to read your \
-             shell). Your signed submit_nonce is untouched, so you can re-post it."
+             shell; `--openrouter-api-key` / OPENROUTER_API_KEY for tbench). Your signed \
+             submit_nonce is untouched, so you can re-post it."
         ),
         400 => format!("refused ({message}). Nothing was stored and nothing was rented."),
         401 => format!(
@@ -536,11 +576,20 @@ fn explain_failure(status: u16, message: &str) -> String {
              {PROOF_SUBMIT_DOMAIN_LABEL} covering topic, artifact, declared_flops, claim, manifest \
              and a single-use submit_nonce (X-Lium-Api-Key is not identity)."
         ),
-        503 => format!(
-            "HTTP 503: {message}\n  The host cannot score right now (empty eval digest, \
-             missing/closed RLM judge backend, no open topics, or an unsealed baseline). \
-             Nothing was stored, nothing was rented."
-        ),
+        503 => {
+            let mut out = format!(
+                "HTTP 503: {message}\n  The host cannot score right now (empty eval digest, \
+                 missing/closed RLM judge backend, no open topics, or an unsealed baseline). \
+                 Nothing was stored, nothing was rented."
+            );
+            if message.starts_with("upstream ") {
+                out.push_str(
+                    " The gateway may have hidden the challenge error body; \
+                     artifact_uri must be https:// to a tar whose sha256 is artifact_digest.",
+                );
+            }
+            out
+        }
         other => format!("HTTP {other}: {message}"),
     }
 }
@@ -789,10 +838,77 @@ mod tests {
     fn a_missing_byok_explains_the_env_flag() {
         let msg = explain_failure(400, "env.MINER_PROVIDED_API_KEY is required by this topic");
         assert!(msg.contains("--env"), "{msg}");
+        assert!(msg.contains("--openrouter-api-key"), "{msg}");
         assert!(msg.contains("miner_byok"), "{msg}");
         assert!(msg.contains("submit_nonce is untouched"), "{msg}");
         let plain = explain_failure(400, "unknown topic");
         assert!(!plain.contains("--env"), "{plain}");
+    }
+
+    #[test]
+    fn submit_body_omits_env_when_absent_and_includes_openrouter_when_set() {
+        let signed = SignedSubmit {
+            hotkey: "ab".repeat(32),
+            signature: "cd".repeat(64),
+            nonce: "ef".repeat(32),
+            manifest: json!({"train_dataset_ids": ["my-mix-v0"]}),
+        };
+        let digest = "ab".repeat(32);
+        let base = SubmitInput {
+            topic_id: "tbench".into(),
+            artifact_digest: digest.clone(),
+            artifact_uri: Some("https://example.org/recipe.tar".into()),
+            claim: "beat".into(),
+            declared_flops: 1,
+            ..SubmitInput::default()
+        };
+        let absent = submit_wire_body(&base, &signed, "tbench", &digest, "beat");
+        assert!(absent.get("env").is_none(), "{absent}");
+        assert_eq!(absent["artifact_uri"], "https://example.org/recipe.tar");
+        assert_eq!(absent["topic_id"], "tbench");
+        let present = submit_wire_body(
+            &SubmitInput {
+                env: vec![("OPENROUTER_API_KEY".into(), "sk-or-test".into())],
+                ..base
+            },
+            &signed,
+            "tbench",
+            &digest,
+            "beat",
+        );
+        assert_eq!(present["env"]["OPENROUTER_API_KEY"], "sk-or-test");
+        assert!(present.get("hotkey_signature").is_some());
+    }
+
+    #[test]
+    fn openrouter_flag_merges_into_env_without_echoing_the_key() {
+        let merged = merge_openrouter_api_key(Vec::new(), Some("sk-or-test".into()));
+        assert_eq!(
+            merged,
+            vec![("OPENROUTER_API_KEY".to_owned(), "sk-or-test".to_owned())]
+        );
+        assert!(merge_openrouter_api_key(Vec::new(), None).is_empty());
+        assert!(merge_openrouter_api_key(Vec::new(), Some("   ".into())).is_empty());
+        let already = merge_openrouter_api_key(
+            vec![("OPENROUTER_API_KEY".into(), "from-env-flag".into())],
+            Some("from-dedicated".into()),
+        );
+        assert_eq!(already[0].1, "from-env-flag");
+        let trimmed = merge_openrouter_api_key(Vec::new(), Some(" sk-or-pad ".into()));
+        assert_eq!(trimmed[0].1, "sk-or-pad");
+    }
+
+    #[test]
+    fn opaque_gateway_503_hints_stripped_body_and_https_artifact() {
+        let msg = explain_failure(503, "upstream 503 Service Unavailable");
+        assert!(msg.contains("hidden the challenge error body"), "{msg}");
+        assert!(msg.contains("artifact_uri must be https://"), "{msg}");
+        let real = explain_failure(
+            503,
+            "backend: runner backend: artifact_uri must be https://",
+        );
+        assert!(!real.contains("hidden the challenge error body"), "{real}");
+        assert!(real.contains("artifact_uri must be https://"), "{real}");
     }
 
     #[test]

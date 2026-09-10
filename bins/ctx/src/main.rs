@@ -239,6 +239,15 @@ struct ProofSubmitArgs {
     /// on the row, or echoed back.
     #[arg(long = "env", value_name = "NAME[=VALUE]")]
     env: Vec<String>,
+    /// OpenRouter BYOK for topics that declare `miner_byok = OPENROUTER_API_KEY`
+    /// (tbench). Sent as `env.OPENROUTER_API_KEY`. Never printed.
+    #[arg(
+        long,
+        env = "OPENROUTER_API_KEY",
+        hide_env_values = true,
+        value_name = "KEY"
+    )]
+    openrouter_api_key: Option<String>,
     /// Keep polling until the submission stops moving.
     #[arg(long)]
     wait: bool,
@@ -307,7 +316,10 @@ async fn run_proof(client: &Client, cmd: ProofCmd, json: bool) -> Result<(), Str
                 manifest_file: args.manifest.manifest_file,
                 train_hashes: args.manifest.train_hashes,
                 train_datasets: args.manifest.train_datasets,
-                env: proof::parse_env_args(&args.env)?,
+                env: proof::merge_openrouter_api_key(
+                    proof::parse_env_args(&args.env)?,
+                    args.openrouter_api_key,
+                ),
                 wait: args.wait,
                 key: submit_key(args.key),
             };
