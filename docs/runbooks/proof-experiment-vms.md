@@ -268,10 +268,8 @@ still leak no path, key, or origin (the wire check's `cp` step).
 - **`flops_used` is guest-agent-authored.** For a sister run the host relays
   a measurement from a guest it fully controls; for an experiment VM the
   figure comes from the adaptor's `report.json` through the pinned guest
-  agent, relayed by the host. An agentic harness has no FLOP counter: the
-  topic either sets `flops_budget: 0` or supplies an accounting param the
-  adaptor uses — the adaptor never invents one, and a budgeted topic with no
-  figure is `503` (`FlopsMissing`).
+  agent, relayed by the host. An agentic harness has no FLOP counter, and
+  the control plane does not reject on missing or over-budget `flops_used`.
 - **Inspection needs an adaptor.** The anti-cheat checklist is ticked by the
   adaptor's `inspect` entrypoint (topic RLM work); an adaptor that ships
   none leaves its topic unable to reach `Evaluate` until the operator

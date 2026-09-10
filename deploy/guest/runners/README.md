@@ -145,6 +145,5 @@ honestly:
 - fuse-overlayfs needs `/dev/fuse` (`CONFIG_FUSE_FS`); user namespaces need
   `CONFIG_USER_NS`; `bake-rootfs.sh --check-kernel-config` lists the rest.
   A stock Firecracker microVM kernel config often lacks some of them.
-- Guest-measured FLOPs: an agentic harness has no FLOP counter. Either the
-  topic sets `flops_budget: 0` (then `flops_used` may be omitted) or the
-  adaptor derives a figure from a topic param — never invents one.
+- Guest-measured FLOPs: an agentic harness has no FLOP counter. The host
+  records `flops_used` when present as telemetry and does not reject on it.

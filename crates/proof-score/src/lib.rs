@@ -434,7 +434,10 @@ pub fn judge_topic(
     if agent.contamination || !contamination_hits.is_empty() {
         failed.push(GateFail::Contamination);
     }
-    if agent.flops_used > topic.flops_budget {
+    // FLOP-budget accounting is a harvest (`nll` / `throughput`) gate.
+    // Custom / agent topics judge the signed checklist and sister
+    // attestation, never a hardcoded TFLOP cap.
+    if topic.metric.family != MetricFamily::Custom && agent.flops_used > topic.flops_budget {
         failed.push(GateFail::FlopsOverBudget {
             used: agent.flops_used,
             budget: topic.flops_budget,
@@ -731,6 +734,55 @@ mod tests {
             .failed
             .iter()
             .any(|f| matches!(f, GateFail::EvidenceMissing { field } if field == "custom_value")));
+        assert_eq!(v.lattice, 0);
+    }
+
+    #[test]
+    fn custom_family_does_not_fail_on_flop_budget() {
+        let mut topic = nll_topic();
+        topic.metric.family = MetricFamily::Custom;
+        topic.metric.custom_id = "agent_success_rate".into();
+        topic.metric.primary = "success_rate".into();
+        topic.metric.direction = MetricDirection::Max;
+        topic.metric.epsilon_rel = 0.05;
+        topic.flops_budget = 1;
+        let mut harness = nll_harness(1.0);
+        harness.custom_value = Some(1.0);
+        let mut sealed = flat_nll(3.0);
+        sealed.custom_value = Some(0.5);
+        let v = judge_topic(
+            &topic,
+            &clean_agent(&topic.id, MetricFamily::Custom, 1_000_000),
+            &harness,
+            &sealed,
+            &[],
+            &["agent_success_rate"],
+        );
+        assert!(
+            !v.failed
+                .iter()
+                .any(|f| matches!(f, GateFail::FlopsOverBudget { .. })),
+            "{:?}",
+            v.failed
+        );
+        assert!(v.pass, "{:?}", v.failed);
+    }
+
+    #[test]
+    fn nll_family_still_fails_over_flop_budget() {
+        let topic = nll_topic();
+        let v = judge_topic(
+            &topic,
+            &clean_agent(&topic.id, MetricFamily::Nll, FLOPS_BUDGET_MAX + 1),
+            &nll_harness(1.0),
+            &flat_nll(3.0),
+            &[],
+            &[],
+        );
+        assert!(v
+            .failed
+            .iter()
+            .any(|f| matches!(f, GateFail::FlopsOverBudget { .. })));
         assert_eq!(v.lattice, 0);
     }
 

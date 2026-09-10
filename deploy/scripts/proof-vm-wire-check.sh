@@ -45,8 +45,9 @@
 #                         nothing — empty input, empty tar — is refused)
 #   --no-fetch-check      submit-probe --expect 2xx: skip fetching --artifact-uri from this host to compare its
 #                         sha256 with artifact_digest (only when the URI is reachable from the RLM VM but not here)
-#   --declared-flops N    submit-probe declaration, positive integer (default: 1 for fail-closed probes; the
-#                         topic's flops_budget for --expect 2xx so a real run is not rejected flops_under_declared)
+#   --declared-flops N    submit-probe declaration, non-negative integer (default: 0). Custom / agent
+#                         topics ignore it as a scoring gate; harvest nll/throughput still refuse
+#                         a declaration over the topic budget.
 #   --wait SECS           submit-probe --expect 201: how long the synchronous POST may take (default 900)
 #
 # Exit: 0 all PASS, 1 any FAIL, 2 refused (production host / unsafe request).
@@ -791,24 +792,12 @@ submit_probe() {
     exit 2
   fi
   resolve_cp || return 0
-  # A real run measures FLOPs in the sister and the CP rejects a run over its
-  # declaration (flops_under_declared). The fail-closed probes never run, so
-  # they declare 1; a live run declares the topic's whole budget unless told
-  # otherwise (over the budget is a 400 before anything runs).
-  local flops="${DECLARED_FLOPS:-1}"
-  if [[ -z "$DECLARED_FLOPS" && "$EXPECT" =~ ^2 ]]; then
-    http GET "$CP/v1/proof/topics/$TOPIC" ""
-    flops="$(jget "$HTTP_BODY" flops_budget)"
-    if [[ "$HTTP_CODE" != "200" || ! "$flops" =~ ^[0-9]+$ || "$flops" == "0" ]]; then
-      fail "cannot read flops_budget of topic $TOPIC (HTTP $HTTP_CODE); pass --declared-flops N for the live run"
-      return 0
-    fi
-    LOG "live run declares the topic budget: declared_flops=$flops"
-  fi
-  # Zero is never a useful declaration: any measured usage would be
-  # flops_under_declared, so a live probe could only end rejected.
-  if [[ ! "$flops" =~ ^[0-9]+$ || "$flops" == "0" ]]; then
-    RED "--declared-flops must be a positive integer (got '$flops'); a live run measuring anything above the declaration is rejected flops_under_declared"
+  # Custom / agent topics ignore declared_flops as a scoring gate, so probes
+  # default to 0. A live harvest nll/throughput run still needs a declaration
+  # ≤ the topic budget; pass --declared-flops N if that path is under test.
+  local flops="${DECLARED_FLOPS:-0}"
+  if [[ ! "$flops" =~ ^[0-9]+$ ]]; then
+    RED "--declared-flops must be a non-negative integer (got '$flops')"
     exit 1
   fi
   local hotkey hex uri_field="" body code sig signed nonce

@@ -101,7 +101,7 @@ What the signed document carries today, and what each field means for you:
 | `constraints.params.experiment_pack_digest` | a `sha256:` pin | The operator's experiment pack, re-hashed by the host before any jail. Not yours to supply |
 | `constraints.params.miner_byok` | `OPENROUTER_API_KEY` | You bring the model key — see § 4 |
 | `constraints.params.defer_scoring` | `"true"` | Submits are queued, not scored (§ Status) |
-| `flops_budget` | `2e18` | `declared_flops` must be `<=` this |
+| `flops_budget` | `2e18` | Topic document field. **Not** a reject gate on `tbench`: the host ignores `declared_flops` vs measured FLOPs |
 | `eval_executor.max_proof_deadline_s` | `7200` | Your run is cut at this wall clock; a cut run is **503** with the run's `stdout_tail` |
 | `payout_mode` | `discovery` | Pass floor plus novelty pool — see § 7 |
 | `baseline` | sealed | `script_sha256` + `metrics_commitment`, seed `42`. You never see the recipe, only the commitments |
@@ -137,10 +137,10 @@ sha256sum recipe.tar            # this is your artifact_digest
 Your code runs **inside a Firecracker guest the host boots**, against the
 operator's pinned experiment pack. You cannot produce the sandbox attestation
 yourself and you do not need to: the host — not the harness, not the RLM —
-stamps it, along with the `flops_used` the guest measured. That measured figure,
-not your `declared_flops`, is what the verdict carries, and it must stay within
-both the topic budget (`flops_over_budget`) and your own declaration
-(`flops_under_declared`). Declare what you will actually use.
+stamps it. A guest-measured `flops_used` may appear on the verdict as
+telemetry. **`tbench` does not reject or cheat-code on `declared_flops` vs
+measured FLOPs** — anti-cheat is the signed topic checklist, sister
+attestation, BYOK env, and hotkey signature, not a hardcoded TFLOP budget.
 
 ## 4. The model key is yours (BYOK)
 
@@ -208,7 +208,6 @@ ctx proof sign \
   --topic-id tbench \
   --artifact-digest <sha256 of recipe.tar> \
   --claim "raised first-15 success_rate over the sealed baseline by 0.08" \
-  --declared-flops 1500000000000000000 \
   --train-dataset my-harness-v0 \
   --json
 ```
@@ -225,7 +224,6 @@ ctx proof submit \
   --artifact-digest <sha256 of recipe.tar> \
   --artifact-uri https://example.org/recipe.tar \
   --claim "raised first-15 success_rate over the sealed baseline by 0.08" \
-  --declared-flops 1500000000000000000 \
   --train-dataset my-harness-v0 \
   --env OPENROUTER_API_KEY
 ```
@@ -250,14 +248,15 @@ Fields the host reads on `POST /challenge/proof/v1/submissions`:
 | `artifact_digest` | yes | sha256 of the exact file you serve; not the digest of nothing |
 | `artifact_uri` | **yes** | Required because `tbench` is a `custom` topic |
 | `claim` | yes | One English sentence of what improved. Signed |
-| `declared_flops` | yes | `<= 2e18`. Signed, and enforced against the guest's measurement |
+| `declared_flops` | no | Optional, default `0`. Still bound into the signature if you send it. **Ignored as a scoring gate** on `tbench` |
 | `manifest.train_content_hashes` / `manifest.train_dataset_ids` | yes | Declare at least one. Signed |
 | `env` | **yes** | `{"OPENROUTER_API_KEY": "sk-or-…"}` — the topic's `miner_byok` variable (§ 4). **Not** signed, never echoed back. Missing → **400** without spending your nonce |
 
 The signature covers the hotkey, `topic_id`, `artifact_digest`,
-`declared_flops`, `claim`, the canonical manifest, and `submit_nonce` — in that
-order, under the `base-proof-submit-v1` domain. `artifact_uri` is **not** signed.
-The exact byte layout and the Python reference are in
+`declared_flops` (optional, default `0`), `claim`, the canonical manifest, and
+`submit_nonce` — in that order, under the `base-proof-submit-v1` domain.
+`artifact_uri` is **not** signed. The exact byte layout and the Python reference
+are in
 [proof.md § 2](./proof.md#2-submit-a-reproducible-experiment); do not re-derive
 it from this page.
 
@@ -284,7 +283,7 @@ curl -sS https://gateway.cortex.foundation/challenge/proof/v1/submissions/<id>
 |---------|---------------------|
 | `queued` | Accepted and stored, **not evaluated**. No rent, no VM, no judge call, no mass. The only non-terminal state; the operator drains the queue later and the row becomes one of the three below |
 | `awaiting_admin` | Clean pass, mass recorded. The operator audit is informational |
-| `rejected` | A gate failed: contamination, unreproduced claim, a red checklist item, FLOPs over budget or over your declaration. Pre-eval rejects spend nothing |
+| `rejected` | A gate failed: contamination, unreproduced claim, a red checklist item. Pre-eval rejects spend nothing. FLOP accounting is **not** a reject gate on `tbench` |
 | `champion` | Promoted. On this topic promotion is automatic: a passing run with a green checklist that beats the sealed bar or the reigning best by `epsilon_rel`. Proof pays on pass, not on the crown |
 
 Runs on one topic are scored and crowned one at a time against the best at that
@@ -348,7 +347,6 @@ you will actually meet on `tbench`:
 | **400** `artifact_uri is required for custom topics` | You left the locator out. `tbench` is `custom` | no |
 | **400** `artifact_digest is the sha256 of empty input …` | You hashed nothing, or an empty tar | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not exactly 64 lowercase hex. The host never normalises a hex field | no |
-| **400** `declared_flops exceeds the topic budget` | Over `2e18` | no |
 | **401** `hotkey_signature required` / `invalid` | Missing signature, or a `claim`, `declared_flops`, `manifest`, or nonce that differs from what you signed | no |
 | **401** `submit_nonce required` / `invalid` / `reused` | Missing, not 64 lowercase hex, or a replay. Sign again with a fresh nonce | no |
 | **503** `custom metric … has no registered runner` / `not wired` | `tbench` is not in `registered_custom` / `custom_ready`. Only reachable once the topic stops deferring | no |

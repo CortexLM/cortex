@@ -292,9 +292,8 @@ async fn production_hosts_are_refused_case_insensitively_before_any_request() {
             "{cp}: no request may go out:\n{text}"
         );
     }
-    // A zero (or non-numeric) declaration can only end rejected
-    // (flops_under_declared): refused before any request, live run or not.
-    for bad in ["0", "abc", "-1"] {
+    // A non-numeric declaration is refused before any request.
+    for bad in ["abc", "-1"] {
         let (code, text) = tokio::task::spawn_blocking(move || {
             run_script_env(
                 &[
@@ -316,7 +315,7 @@ async fn production_hosts_are_refused_case_insensitively_before_any_request() {
         .expect("join");
         assert_eq!(code, 1, "--declared-flops {bad} must be refused:\n{text}");
         assert!(
-            text.contains("--declared-flops must be a positive integer"),
+            text.contains("--declared-flops must be a non-negative integer"),
             "{bad}: {text}"
         );
         assert!(

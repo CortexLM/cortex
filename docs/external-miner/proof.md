@@ -19,8 +19,9 @@ confirm deployment support with the operator first.
 **Pin:** [`config/proof-pin.toml`](../../config/proof-pin.toml)  
 **Eval image:** `ghcr.io/cortexlm/proof-eval@sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009`
 
-You submit **claim + code + FLOPs + artifact** against a topic, signed with
-your miner hotkey. You do not bind an offer id. The digest-pinned
+You submit **claim + code + artifact** against a topic, signed with
+your miner hotkey. `declared_flops` is optional (signature compat). You do
+not bind an offer id. The digest-pinned
 `proof-eval` image (harvest boots it) calls the master's `InferenceOffer` as
 the RLM **judge** backend. No baked Qwen; architecture is not an HF id
 check.
@@ -41,10 +42,13 @@ time). You submit **against that `topic_id`**:
 
 1. a **claim** (natural language: what improved, under which constraints)
 2. a **code artifact** (reproducible recipe — code + lockfile / entrypoint)
-3. **declared FLOPs** (must be `≤ topic.flops_budget`)
+3. **`declared_flops`** (optional; still bound into the signature). Custom /
+   agent topics (`tbench`) **ignore** it as a scoring gate. Harvest
+   `nll` / `throughput` still refuse a declaration over `topic.flops_budget`
 
-The artifact contract requires a recipe reproducible under the topic's FLOP /
-wall budget. **A weight dump alone is not an artifact.** The intended judge
+The artifact contract requires a recipe the judge can re-run. Custom / agent
+topics (`tbench`) do not apply a hardcoded FLOP budget. Harvest
+`nll` / `throughput` still score under the topic's FLOP / wall budget. **A weight dump alone is not an artifact.** The intended judge
 re-runs that recipe and a separate harness measures holdout loss or throughput.
 The current Python image does not yet implement arbitrary recipe reproduction;
 its static checks and model measurements are only part of that design.
@@ -62,8 +66,8 @@ status). It never leaks holdout records, teacher hosts, origins, or keys.
 Muon, token superposition, and “decentralized training without InfiniBand”
 are *examples* of solutions or of topics — they are not the product.
 
-Pass gates (reproduced, no contamination, under budget, beat epsilon) are
-fail-closed. The implemented **payout calculation** after a pass depends on the
+Pass gates (reproduced, no contamination, signed-topic checklist, beat epsilon)
+are fail-closed. Custom / agent topics do not apply a hardcoded FLOP budget. The implemented **payout calculation** after a pass depends on the
 topic's `payout_mode`. The score is the **sum of per-topic** masses over
 currently `open` ids, not a mean of binary lattices. A skipped topic is 0 on
 that topic. Zero open topics → the host cannot score (`503`), not a paid 0.
@@ -138,7 +142,7 @@ Each topic is a signed document. Read at least:
 | `checklist` | Anti-cheat rules `[{id, text}]` the topic's RLM ticks over your artefact **before any paid inference** |
 | `eval_executor` | Executor commitment (`require_offer_commitment`, tighten-only `max_proof_deadline_s`) |
 | `metric.family` | `nll` \| `throughput` \| `custom` (`metric.custom_id` names the metric; it is topic data) |
-| `flops_budget` | Hard cap. `declared_flops` must be `≤` this |
+| `flops_budget` | Harvest (`nll` / `throughput`) hard cap: `declared_flops` must be `≤` this. Custom / agent topics ignore FLOP accounting as a reject gate |
 | `epsilon_nll` / `epsilon_topic_max_regress` / throughput knobs | Pass-rule epsilons. A topic may **tighten** a pin floor, never loosen it |
 | `payout_mode` | `wta` or `discovery` |
 | `validation` | English pass contract `{score_on, accept_if, reject_if}` |
@@ -163,7 +167,8 @@ Each topic is a signed document. Read at least:
 ```
 
 Read `statement` + `validation` before you train. English does not override
-FLOP / wall / contamination gates.
+contamination gates or harvest-family FLOP / wall gates. Custom / agent
+topics use the signed checklist, not a hardcoded FLOP budget.
 
 ### Pin floors (a topic may tighten only)
 
@@ -183,8 +188,9 @@ are paid on**. You never see the records.
 
 ## 2. Submit a reproducible experiment
 
-Build a recipe the judge can re-run: code, lockfile, and entrypoint, under
-the topic's FLOP (and for throughput, wall) budget. Hash that tree. That hash
+Build a recipe the judge can re-run: code, lockfile, and entrypoint. Harvest
+`nll` / `throughput` topics still score under the topic's FLOP (and for
+throughput, wall) budget; custom / agent topics do not. Hash that tree. That hash
 is `artifact_digest`. `artifact_uri` is a locator (git URL, object URL) for
 the same bytes: optional on `nll` / `throughput` (the image fetches by
 digest), **required on custom topics** (the topic's runner fetches from it
@@ -296,8 +302,10 @@ curl -sS -X POST https://gateway.cortex.foundation/challenge/proof/v1/submission
   }'
 ```
 
-`claim` and `declared_flops` are **required**. The control plane scores a
-claim against public numbers and checks FLOPs against the topic budget.
+`claim` is **required**. `declared_flops` is optional (default `0`, still
+bound into the signature). Custom / agent topics ignore it as a scoring
+gate; harvest `nll` / `throughput` still refuse a declaration over the topic
+budget.
 
 Poll `GET /challenge/proof/v1/submissions/{id}`. While `can_score` is
 `false` (empty digest, missing/closed RLM judge backend, incomplete pin+topic
@@ -316,7 +324,7 @@ a topic in `deferred_topics`, where they answer **201** `queued`.
 | `topic_id` | yes | Open topic id from `ctx proof topics` |
 | `artifact_digest` | yes | SHA-256 of the recipe bytes as **exactly** 64 lowercase hex (no `0x`) |
 | `claim` | yes | Non-empty string: NL of what improved (bound into the signature) |
-| `declared_flops` | yes | `u64`, must be `≤ topic.flops_budget` (bound into the signature) |
+| `declared_flops` | no | `u64`, default `0`, bound into the signature. Ignored as a scoring gate on custom / agent topics. Harvest `nll` / `throughput`: must be `≤ topic.flops_budget` |
 | `manifest.train_content_hashes` | yes (array) | Shard hashes you trained on (may be `[]` if you declare dataset ids); bound into the signature |
 | `manifest.train_dataset_ids` | yes (array) | Corpus ids you trained on (may be `[]` if you declare hashes); bound into the signature |
 | `artifact_uri` | custom topics: yes | Locator for the same bytes as `artifact_digest`; optional on `nll` / `throughput` |
@@ -423,7 +431,7 @@ submission row.
 | **400** `topic_id is required` | Missing `topic_id` | no | no |
 | **400** `unknown topic` | `topic_id` not published | no | no |
 | **400** `topic is not open` | Draft / closed / outside epoch window | no | no |
-| **400** `declared_flops exceeds the topic budget` | `declared_flops > topic.flops_budget` | no | no |
+| **400** `declared_flops exceeds the topic budget` | Harvest `nll` / `throughput` only: `declared_flops > topic.flops_budget`. Custom / agent topics do not 400 on this | no | no |
 | **400** `artifact_uri is required for custom topics` | Custom topic, no locator | no | no |
 | **400** `env.<NAME> is required by this topic` | The topic's `miner_byok` variable is missing from `env`. Your `submit_nonce` is **not** spent — re-post the same signed body with `--env <NAME>` | no | no |
 | **400** `env name <NAME> is not declared by this topic` | A variable the signed topic's `miner_byok` / `miner_env_allowlist` does not list. The message names what it does accept | no | no |
@@ -467,7 +475,7 @@ and the constraints, and must emit:
 | `claim_holds_public` | bool | Public-split numbers match the claim |
 | `contamination` | bool | Holdout fingerprints in the recipe / data |
 | `canary_hit` | bool | Off-score. Recorded, never a fail by itself |
-| `flops_used` / `flops_budget` | u64 | Measured by the judge / runner vs the topic budget. Your `declared_flops` is never the enforced usage figure; on custom topics the runner's measurement is the verdict's usage, over budget is `flops_over_budget`, and over your own declaration is `flops_under_declared` |
+| `flops_used` / `flops_budget` | u64 | Telemetry when the runner measured usage. Custom / agent topics do **not** reject on this vs `declared_flops` or the topic budget. Harvest `nll` / `throughput` may still fail `flops_over_budget` |
 | `cheat_codes` | list | See below |
 | `rationale` | string | Audit text (truncated) |
 | `topic_id` / `family` | echo | Must match the submission |
@@ -482,8 +490,8 @@ a win:
 | Code | Meaning |
 |------|---------|
 | `unreproduced_claim` | Could not re-run the claimed recipe to the claimed result |
-| `flops_over_budget` | Run spent more FLOPs than the topic budget |
-| `flops_under_declared` | Run spent more FLOPs than your `declared_flops` (custom topics: the runner's measurement is held to your declaration) |
+| `flops_over_budget` | Harvest `nll` / `throughput` only: run spent more FLOPs than the topic budget. **Not emitted** on custom / agent topics |
+| `flops_under_declared` | Harvest leftover: run spent more FLOPs than `declared_flops`. **Not emitted** on custom / agent topics |
 | `strawman_adamw` | Compared against a weaker / different AdamW than the sealed recipe |
 | `fake_optimizer` | Optimizer named Muon / TSP (etc.) but the code is AdamW |
 | `contamination` | Training data overlapped the holdout |
@@ -547,8 +555,8 @@ cleanup failure is a 503 for you, never a score), the VM has only the operator's
 egress allowlist (the topic says which registries / model providers), and
 the host — not the harness — stamps `sandboxed` on your report. Read the
 topic's `params` in `ctx proof topics`: they name the harness inputs
-(tasks, agent, model, concurrency) and any `flops_used` accounting the topic
-applies; a topic with `flops_budget: 0` measures no FLOPs on this path.
+(tasks, agent, model, concurrency). Custom / agent topics do **not** apply
+hardcoded `flops_used` accounting; anti-cheat is the signed checklist.
 
 **Anti-cheat checklist — every rule in the topic's `checklist` (current
 version) must pass before a single paid inference call is made.** Read the
@@ -568,11 +576,9 @@ runner forwards the fetched file unchanged and the host re-hashes exactly
 those bytes before it boots your sister guest; it refuses gzip, non-tar
 bytes, a tree with no file content, or bytes that do not hash to your
 `artifact_digest` — a run never starts on a substitute or re-encoded
-artefact. The runner also measures your run's FLOPs; that
-measurement (not `declared_flops`) is what the verdict carries, and it must
-stay within both the topic budget (`flops_over_budget`) and your own
-`declared_flops` (`flops_under_declared`) — declare what you will use, up to
-the budget. The runner may enforce your declaration as a hard cap.
+artefact. A guest-measured `flops_used` may appear on the verdict as telemetry.
+Custom / agent topics do **not** reject on that figure vs `declared_flops` or
+the topic budget.
 
 A clean pass that beats the current best (sealed value or reigning best) by
 `epsilon_rel` is promoted automatically: the row is `champion` and the

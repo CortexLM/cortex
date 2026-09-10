@@ -611,7 +611,10 @@ async fn submit(
     {
         return Err(err(StatusCode::UNAUTHORIZED, "submit_nonce reused"));
     }
-    if body.declared_flops > topic.flops_budget {
+    // Harvest (`nll` / `throughput`) still refuses a declaration over the
+    // topic budget. Custom / agent topics ignore `declared_flops` as a gate
+    // — it stays on the wire for signature compat and is never a reject.
+    if topic.metric.family != MetricFamily::Custom && body.declared_flops > topic.flops_budget {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "declared_flops exceeds the topic budget",
@@ -4056,35 +4059,45 @@ mod tests {
         assert_eq!(queued_ids(app.clone(), None).await.len(), 2);
         assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0, "still no run");
 
-        // Intake gates still refuse before any row: no locator, over budget.
-        for (label, extra) in [
-            (
-                "no locator",
-                serde_json::json!({ "topic_id": CUSTOM, "artifact_uri": "" }),
+        // Intake gates still refuse a custom row without a locator. FLOP
+        // declarations are ignored on custom topics, even u64::MAX.
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            submit_body(
+                "gated",
+                &serde_json::json!({ "topic_id": CUSTOM, "artifact_uri": "" }),
             ),
-            (
-                "over budget",
-                serde_json::json!({
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "no locator: {body}");
+        let (st, huge) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            submit_body(
+                "huge-flops",
+                &serde_json::json!({
                     "topic_id": CUSTOM,
                     "artifact_uri": "https://example.invalid/x.tar",
                     "declared_flops": u64::MAX,
                 }),
             ),
-        ] {
-            let (st, body) = json_req(
-                app.clone(),
-                "POST",
-                "/v1/submissions",
-                submit_body("gated", &extra),
-                None,
-            )
-            .await;
-            assert_eq!(st, StatusCode::BAD_REQUEST, "{label}: {body}");
-        }
+            None,
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::CREATED,
+            "custom ignores declared_flops: {huge}"
+        );
+        assert_eq!(huge["state"], "queued", "{huge}");
         assert_eq!(
             queued_ids(app.clone(), None).await.len(),
-            2,
-            "no row on a 400"
+            3,
+            "over-budget declaration still queued on custom"
         );
 
         // The other open topic is not deferred and scores right now.
