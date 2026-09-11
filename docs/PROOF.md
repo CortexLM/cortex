@@ -650,7 +650,9 @@ vsock before any job, the guest agent (`proof-vm-guest-agent`, this
 repository) execs the operator adaptor for that runner id with the
 experiment pack, the fetched-and-verified artefact, the model pin, and every
 topic param, and the host attests the run as `experiment_vm` for that VM,
-topic, submission, and artefact; the VM is destroyed after the job. No
+topic, submission, and artefact; the VM is destroyed after a successful job
+and retained (stopped, jail kept on the KVM host for root-cause analysis)
+after a failed one. No
 adaptor, pack, or value is defaulted anywhere: no runner selected, no
 adaptor baked, no pack staged, no report, or a non-finite value is a failed
 job. Runbook [`runbooks/proof-experiment-vms.md`](runbooks/proof-experiment-vms.md).

@@ -485,7 +485,8 @@ struct TopicVm {
     template: VmTemplate,
     /// Per-experiment VM policy (`PROOF_EXPERIMENT_VM_*`: ceilings, image)
     /// for topics whose signed params select an in-guest runner — one
-    /// dedicated VM per paid job, destroyed after it.
+    /// dedicated VM per paid job, destroyed after a successful job and
+    /// retained on the KVM host after a failed one.
     experiments: ExperimentPolicy,
     /// The env selected the live `FirecrackerOrchestrator` (URL + bearer
     /// file env, https). False = `UnwiredVmOrchestrator`, which refuses
