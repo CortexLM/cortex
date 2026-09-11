@@ -1,7 +1,11 @@
 //! Postgres [`RlmStore`] over `crates/db` migration `0020_proof_rlm.sql`.
 //!
-//! Plain runtime `sqlx::query` (no compile-time database). Append-only
-//! tables are inserted, never updated; "current" is always the newest row.
+//! Plain runtime `sqlx::query` (no compile-time database). Journal tables are
+//! inserted, never updated; "current" is always the newest row.
+//! `proof_artefact` is keyed by `(topic_id, submission_id)` and a collision
+//! replaces the zip metadata. `proof_checklist` is keyed by
+//! `submission_digest` and a re-inspect of the same digest replaces the
+//! latest inspection (`created_at` stays the original row).
 
 use async_trait::async_trait;
 use db::PgPool;
@@ -10,8 +14,8 @@ use proof_task::{ChecklistRule, TopicDocument};
 use serde_json::Value;
 
 use crate::{
-    check_artefact, check_promotion, check_rules, replay, ArtefactRow, BaselineRow, ChecklistRow,
-    PromotionRow, RlmStore, StoreError, TransitionRow,
+    check_artefact, check_promotion, check_rules, parse_row_id, replay, ArtefactRow, BaselineRow,
+    ChecklistRow, PromotionRow, RlmStore, StoreError, TransitionRow,
 };
 
 /// Postgres-backed store.
@@ -237,7 +241,13 @@ impl RlmStore for PgRlmStore {
     async fn put_checklist(&self, row: &ChecklistRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO proof_checklist (submission_digest, topic_id, rules_version, green, failed_ids, document) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (submission_digest) DO UPDATE SET \
+               topic_id = EXCLUDED.topic_id, \
+               rules_version = EXCLUDED.rules_version, \
+               green = EXCLUDED.green, \
+               failed_ids = EXCLUDED.failed_ids, \
+               document = EXCLUDED.document",
         )
         .bind(&row.submission_digest)
         .bind(&row.topic_id)
@@ -347,9 +357,18 @@ impl RlmStore for PgRlmStore {
 
     async fn put_artefact(&self, row: &ArtefactRow) -> Result<(), StoreError> {
         check_artefact(row)?;
-        sqlx::query(
+        let conflicted: bool = sqlx::query_scalar(
             "INSERT INTO proof_artefact (topic_id, submission_id, submission_digest, path, sha256, bytes, \
-             primary_value, checklist_green, promoted) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             primary_value, checklist_green, promoted) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+             ON CONFLICT (topic_id, submission_id) DO UPDATE SET \
+               submission_digest = EXCLUDED.submission_digest, \
+               path = EXCLUDED.path, \
+               sha256 = EXCLUDED.sha256, \
+               bytes = EXCLUDED.bytes, \
+               primary_value = EXCLUDED.primary_value, \
+               checklist_green = EXCLUDED.checklist_green, \
+               promoted = EXCLUDED.promoted \
+             RETURNING (xmax <> 0)",
         )
         .bind(&row.topic_id)
         .bind(&row.submission_id)
@@ -360,8 +379,16 @@ impl RlmStore for PgRlmStore {
         .bind(row.primary_value)
         .bind(row.checklist_green)
         .bind(row.promoted)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
+        if conflicted {
+            tracing::warn!(
+                topic_id = %row.topic_id,
+                submission_id = %row.submission_id,
+                sha256 = %row.sha256,
+                "proof_artefact collision: replaced metadata for existing (topic_id, submission_id)"
+            );
+        }
         Ok(())
     }
 
@@ -388,6 +415,14 @@ impl RlmStore for PgRlmStore {
                 })
             })
             .collect()
+    }
+
+    async fn max_artefact_numeric_id(&self) -> Result<Option<u64>, StoreError> {
+        let id: Option<String> =
+            sqlx::query_scalar("SELECT MAX(submission_id) FROM proof_artefact")
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(id.as_deref().and_then(parse_row_id))
     }
 
     async fn record_promotion(&self, row: &PromotionRow) -> Result<(), StoreError> {

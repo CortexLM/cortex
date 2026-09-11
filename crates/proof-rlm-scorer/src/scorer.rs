@@ -447,13 +447,14 @@ impl RlmScorer {
             .registry
             .resolve(&custom_id)
             .map_err(|e| map_runner(&custom_id, e))?;
-        // The runner can only retrieve the artefact from the miner's locator;
-        // intake refuses a custom submission without one, and so does this
-        // path rather than hand the runner a request it cannot act on.
+        // Custom intake accepts an upload (preferred) or a miner URI
+        // (compat). Evaluate of `proof-artefact://{digest}` is PR #285
+        // vsock inject (`bc-bf177788`); proof-http fail-closes live
+        // evaluate with 503. URI-only still GETs https:// inside the VM
+        // (64 MiB cap, unchanged).
         let Some(artifact_uri) = artifact_uri.map(str::trim).filter(|u| !u.is_empty()) else {
             return Err(EvalError::Backend(
-                "custom submission carries no artifact_uri; the runner cannot retrieve the artefact"
-                    .into(),
+                "custom submission carries no artefact (upload or artifact_uri)".into(),
             ));
         };
         let rules = self.rules_for(topic).await?;
@@ -708,15 +709,28 @@ impl LiveScorer for RlmScorer {
                 miner_env,
             )
             .await;
-        if out.is_ok() {
-            // The lease now belongs to the pending run: promotion is decided
-            // and persisted under it, then it is released in `on_persisted`.
-            self.hold(frozen_digest, lease);
-        } else {
-            // No row will follow a refusal, so the verdict phase is over now.
-            self.apply_logged(topic, RlmEvent::VerdictRecorded, "refused; no row")
-                .await;
-            drop(lease);
+        match &out {
+            Ok(_) => {
+                // The lease now belongs to the pending run: promotion is
+                // decided and persisted under it, then it is released in
+                // `on_persisted`.
+                self.hold(frozen_digest, lease);
+            }
+            Err(err) => {
+                // The miner sees this string in the 503 body and nowhere
+                // else; keep it in the host journal too so a failed paid run
+                // can be traced without the miner's copy.
+                tracing::error!(
+                    topic_id = %topic.id,
+                    frozen_digest,
+                    error = %err,
+                    "evaluate refused; no row"
+                );
+                // No row will follow a refusal, so the verdict phase is over now.
+                self.apply_logged(topic, RlmEvent::VerdictRecorded, "refused; no row")
+                    .await;
+                drop(lease);
+            }
         }
         out
     }

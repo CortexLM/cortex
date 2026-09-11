@@ -31,6 +31,7 @@
 )]
 
 use rand_core::{OsRng, RngCore};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Signature domain for miner Proof submits (`POST /v1/submissions`).
@@ -44,6 +45,15 @@ pub const SUBMIT_NONCE_HEX_LEN: usize = 64;
 
 /// Hex length of a `hotkey_signature` (64 bytes).
 pub const SIGNATURE_HEX_LEN: usize = 128;
+
+/// Hard cap on uploaded artefact bytes at Proof intake (5 MiB).
+pub const MAX_ARTEFACT_BYTES: usize = 5 * 1024 * 1024;
+
+/// SHA-256 hex of `bytes` (the wire form of `artifact_digest`).
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
 
 /// Why a submit signature cannot be built or checked.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

@@ -189,6 +189,11 @@ pub trait RlmStore: Send + Sync {
     async fn rules_at(&self, topic_id: &str, version: u32) -> Result<Option<RuleSet>, StoreError>;
 
     /// Persist a submission's checklist.
+    ///
+    /// A row that already exists for `submission_digest` is replaced
+    /// (topic_id / rules_version / green / failed_ids / document) so a miner
+    /// resubmit of the same artefact after a false anti-cheat reject can
+    /// store the latest inspection. Postgres keeps the original `created_at`.
     async fn put_checklist(&self, row: &ChecklistRow) -> Result<(), StoreError>;
     /// A submission's checklist.
     async fn checklist(&self, submission_digest: &str) -> Result<Option<ChecklistRow>, StoreError>;
@@ -204,9 +209,15 @@ pub trait RlmStore: Send + Sync {
     async fn baseline(&self, topic_id: &str) -> Result<Option<BaselineRow>, StoreError>;
 
     /// Persist artefact metadata.
+    ///
+    /// A row that already exists for `(topic_id, submission_id)` is replaced
+    /// (path / sha256 / bytes / digest / primary / checklist / promoted) so a
+    /// rare allocator collision still stores the zip that now sits on disk.
     async fn put_artefact(&self, row: &ArtefactRow) -> Result<(), StoreError>;
     /// Every artefact of a topic, oldest first.
     async fn artefacts(&self, topic_id: &str) -> Result<Vec<ArtefactRow>, StoreError>;
+    /// Highest numeric `pf_` id among persisted artefact rows, if any.
+    async fn max_artefact_numeric_id(&self) -> Result<Option<u64>, StoreError>;
 
     /// Append a promotion event.
     async fn record_promotion(&self, row: &PromotionRow) -> Result<(), StoreError>;
@@ -216,9 +227,16 @@ pub trait RlmStore: Send + Sync {
     async fn promotions(&self, topic_id: &str) -> Result<Vec<PromotionRow>, StoreError>;
 }
 
-fn is_row_id(id: &str) -> bool {
+/// Numeric id from `pf_` + 16 hex. `None` if the string is not a store row id.
+#[must_use]
+pub fn parse_row_id(id: &str) -> Option<u64> {
     id.strip_prefix("pf_")
-        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .filter(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .and_then(|h| u64::from_str_radix(h, 16).ok())
+}
+
+fn is_row_id(id: &str) -> bool {
+    parse_row_id(id).is_some()
 }
 
 fn check_artefact(row: &ArtefactRow) -> Result<(), StoreError> {
@@ -314,5 +332,14 @@ mod tests {
             previous_best: None,
         };
         assert!(check_promotion(&promo).is_err());
+    }
+
+    #[test]
+    fn parse_row_id_reads_zero_padded_hex() {
+        assert_eq!(parse_row_id("pf_0000000000000000"), Some(0));
+        assert_eq!(parse_row_id("pf_00000000000000ff"), Some(0xff));
+        assert_eq!(parse_row_id("pf_0000000000000001"), Some(1));
+        assert!(parse_row_id("pf_1").is_none());
+        assert!(parse_row_id("nope").is_none());
     }
 }

@@ -20,10 +20,14 @@
 //! A topic whose signed `constraints.params` select an **in-guest runner**
 //! (`proof_experiment`: runner id + pinned pack digest, optional size) runs
 //! each paid job in a **dedicated experiment VM** instead — one VM per
-//! experiment, created for the job and destroyed after it, sized under the
-//! operator ceilings ([`run_paid_job`]). Parallel experiments are parallel
-//! VMs, never containers sharing one VM. Nothing here knows what the runner
-//! or the pack are; both are topic data resolved inside the guest.
+//! experiment, created for the job and stopped after it (destroyed when the
+//! job succeeded and its report passed final verification, **retained** on
+//! the KVM host when it failed or the `Evaluated` report failed binding /
+//! sandbox checks, so the guest console and `report.json` scratch survive
+//! for root-cause analysis), sized under the operator ceilings
+//! ([`run_paid_job`]). Parallel experiments are
+//! parallel VMs, never containers sharing one VM. Nothing here knows what
+//! the runner or the pack are; both are topic data resolved inside the guest.
 
 use std::sync::Arc;
 
@@ -36,8 +40,8 @@ use serde::{Deserialize, Serialize};
 use crate::gate::SpendToken;
 use crate::rules::RuleSet;
 use crate::runner::{
-    CustomRunReport, CustomRunRequest, CustomRunner, InspectOutcome, RunOutcome, RunnerError,
-    SandboxPolicy,
+    CustomRunReport, CustomRunRequest, CustomRunner, InspectOutcome, ReportError, RunOutcome,
+    RunnerError, SandboxPolicy,
 };
 
 /// Env var naming the orchestrator base URL (operator state, never git).
@@ -147,7 +151,10 @@ impl TopicVmSpec {
         }
     }
 
-    /// Spec for one experiment VM of `topic`: always destroyed after its job.
+    /// Spec for one experiment VM of `topic`. The teardown after its job
+    /// picks the policy from the outcome ([`run_paid_job`]: destroy on
+    /// success, retain on failure); this create-time `retain` only governs
+    /// how the agent reaps the VM should its process die outside a teardown.
     #[must_use]
     pub fn for_experiment(
         topic_id: &str,
@@ -296,17 +303,21 @@ pub enum VmError {
     /// The job's output was not the shape the job asked for.
     #[error("topic-vm returned the wrong output for {0}")]
     WrongOutput(&'static str),
+    /// The job returned a document that is not evidence (binding / sandbox).
+    #[error("run report: {0}")]
+    Report(#[from] ReportError),
     /// The topic's in-guest experiment binding is malformed or over a ceiling.
     #[error("experiment vm: {0}")]
     Experiment(#[from] ExperimentError),
-    /// An experiment VM was not confirmed destroyed after its paid job. The
-    /// job's outcome is withheld: nothing is scored while the VM may still
-    /// hold host capacity.
+    /// An experiment VM was not confirmed destroyed after its **successful**
+    /// paid job. The job's outcome is withheld: nothing is scored while the
+    /// VM may still hold host capacity. (A job that failed returns its own
+    /// error; a retain that was not confirmed is logged, never scored.)
     #[error("experiment vm {vm_id} not confirmed destroyed after its job ({reason}); the outcome is withheld, not scored — reconcile the vm on the KVM host")]
     TeardownUnconfirmed {
         /// The VM the orchestrator did not confirm gone.
         vm_id: String,
-        /// What the orchestrator answered (and the job's own failure, if any).
+        /// What the orchestrator answered.
         reason: String,
     },
 }
@@ -372,6 +383,7 @@ impl TopicVmOrchestrator for UnwiredVmOrchestrator {
 fn map_vm(e: VmError) -> RunnerError {
     match e {
         VmError::NotWired(m) => RunnerError::NotWired(m),
+        VmError::Report(e) => RunnerError::Report(e),
         other => RunnerError::Backend(other.to_string()),
     }
 }
@@ -395,20 +407,29 @@ impl CustomRunRequest {
 /// before. A topic that does gets **one dedicated experiment VM for this
 /// job**: created from `policy` (its image, or the RLM `template`'s; sized
 /// by the topic's ask under the ceilings — an ask over a ceiling is refused,
-/// never clamped), handed the job, then **destroyed** whatever the outcome.
-/// The KVM host stages the pinned pack at boot and attests the run as
-/// `experiment_vm`; the guest resolves the runner id itself. Non-paid jobs
-/// always run in `topic_vm`.
+/// never clamped), handed the job, then **stopped** whatever the outcome —
+/// [`RetainPolicy::Destroy`] after a successful job whose report passes final
+/// verification, [`RetainPolicy::Retain`] after a failed one **or** an
+/// `Evaluated` report that fails binding / sandbox checks, so the guest
+/// console and `report.json` scratch land under the host's retain dir
+/// (`PROOF_VM_AGENT_RETAIN_DIR`) for root-cause analysis instead of vanishing
+/// with the jail. A retained VM is never
+/// reused and holds no capacity slot. The KVM host stages the pinned pack at
+/// boot and attests the run as `experiment_vm`; the guest resolves the runner
+/// id itself. Non-paid jobs always run in `topic_vm`.
 ///
 /// # Errors
 ///
 /// [`VmError::Experiment`] for a malformed / over-ceiling binding (before
-/// any VM exists), else whatever the orchestrator returned. The outcome is
-/// returned **only when the orchestrator confirms the VM destroyed**
-/// (`teardown` → `Ok(true)`): an unconfirmed (`Ok(false)`) or failed
-/// teardown is [`VmError::TeardownUnconfirmed`] even for a successful run —
-/// fail-closed, so a result is never scored while its VM may still consume
-/// host capacity. A job that failed *and* leaked its VM names both.
+/// any VM exists), else whatever the orchestrator returned. A successful
+/// outcome is returned **only when the orchestrator confirms the VM
+/// destroyed** (`teardown` → `Ok(true)`): an unconfirmed (`Ok(false)`) or
+/// failed teardown is [`VmError::TeardownUnconfirmed`] even for a successful
+/// run — fail-closed, so a result is never scored while its VM may still
+/// consume host capacity. A failed job returns **its own error** whatever
+/// the retain answered (nothing is scored either way); a retain the
+/// orchestrator did not confirm is logged with the VM id for the operator
+/// to reconcile, never folded into the miner-visible failure.
 pub async fn run_paid_job(
     orchestrator: &dyn TopicVmOrchestrator,
     policy: &ExperimentPolicy,
@@ -441,35 +462,68 @@ pub async fn run_paid_job(
         },
     );
     spec.validate()?;
+    let submission = request.submission_digest.clone();
+    let verify = request.clone();
     let vm = orchestrator.create(&spec).await?;
     tracing::info!(
         topic_id = %vm.topic_id, vm_id = %vm.vm_id, runner = %binding.runner,
         pack = %binding.pack.digest, vcpus = shape.vcpus, mem_mib = shape.mem_mib,
         disk_mib = shape.disk_mib, "experiment vm created for one paid job"
     );
-    let outcome = orchestrator.run(&vm, job).await;
-    let destroyed = match orchestrator.teardown(&vm, RetainPolicy::Destroy).await {
+    let outcome = match orchestrator.run(&vm, job).await {
+        Ok(VmJobOutput::Evaluated(out)) => match out.report.verify(&verify) {
+            Ok(()) => Ok(VmJobOutput::Evaluated(out)),
+            Err(e) => Err(VmError::Report(e)),
+        },
+        Ok(VmJobOutput::Baseline(r)) => match r.verify(&verify) {
+            Ok(()) => Ok(VmJobOutput::Baseline(r)),
+            Err(e) => Err(VmError::Report(e)),
+        },
+        Ok(_) => Err(VmError::WrongOutput("paid")),
+        Err(e) => Err(e),
+    };
+    // A failed job — including an Evaluated report that fails final
+    // verification — keeps its jail (guest console, report.json scratch) on
+    // the KVM host for root-cause analysis; a successful one that passed
+    // those checks frees it. Either way the VM is stopped and never reused.
+    let (policy, verb) = if outcome.is_ok() {
+        (RetainPolicy::Destroy, "destroy")
+    } else {
+        (RetainPolicy::Retain, "retain")
+    };
+    let ended = match orchestrator.teardown(&vm, policy).await {
         Ok(true) => Ok(()),
-        Ok(false) => Err("the orchestrator did not confirm the destroy".to_owned()),
+        Ok(false) => Err(format!("the orchestrator did not confirm the {verb}")),
         Err(e) => Err(format!("teardown failed: {e}")),
     };
-    match (outcome, destroyed) {
-        (outcome, Ok(())) => {
+    match (outcome, ended) {
+        (Ok(output), Ok(())) => {
             tracing::info!(vm_id = %vm.vm_id, "experiment vm destroyed after its job");
-            outcome
+            Ok(output)
         }
-        (outcome, Err(teardown)) => {
+        (Ok(_), Err(teardown)) => {
             tracing::error!(
                 vm_id = %vm.vm_id, topic_id = %vm.topic_id,
                 "experiment vm not confirmed destroyed; withholding the job outcome: {teardown}"
             );
             Err(VmError::TeardownUnconfirmed {
                 vm_id: vm.vm_id.clone(),
-                reason: match outcome {
-                    Ok(_) => teardown,
-                    Err(job) => format!("{teardown}; the job itself failed: {job}"),
-                },
+                reason: teardown,
             })
+        }
+        (Err(job), Ok(())) => {
+            tracing::error!(
+                vm_id = %vm.vm_id, topic_id = %vm.topic_id, %submission, error = %job,
+                "experiment vm job failed; vm retained on the kvm host for root-cause analysis"
+            );
+            Err(job)
+        }
+        (Err(job), Err(teardown)) => {
+            tracing::error!(
+                vm_id = %vm.vm_id, topic_id = %vm.topic_id, %submission, error = %job,
+                "experiment vm job failed and the vm was not confirmed retained ({teardown}); reconcile it on the kvm host"
+            );
+            Err(job)
         }
     }
 }
@@ -696,7 +750,7 @@ mod tests {
     async fn a_report_that_escaped_the_sandbox_is_not_evidence() {
         let orch = FakeOrchestrator::new(0.8);
         orch.set_sandboxed(false);
-        let runner = VmBackedRunner::new(orch, pinned_template());
+        let runner = VmBackedRunner::new(orch.clone(), pinned_template());
         let req = request();
         let err = runner
             .evaluate(&req, &token_for(&req))
@@ -706,6 +760,69 @@ mod tests {
             err,
             RunnerError::Report(crate::runner::ReportError::NotSandboxed)
         ));
+        assert!(orch.teardowns().is_empty(), "topic vm is not torn down");
+    }
+
+    /// An experiment-backed evaluate that returns `Ok(Evaluated)` with a
+    /// report that fails final verification (`sandboxed=false` on a
+    /// `firecracker_required` topic) must **retain** the jail. Policy used to
+    /// follow `orchestrator.run(...).is_ok()` alone, so this Destroyed the
+    /// evidence before `VmBackedRunner::evaluate` rejected the report.
+    #[tokio::test]
+    async fn an_invalid_evaluated_report_retains_the_experiment_vm() {
+        use crate::fixtures::experiment_request;
+        let orch = FakeOrchestrator::new(0.8);
+        orch.set_sandboxed(false);
+        let runner = VmBackedRunner::new(orch.clone(), pinned_template());
+        let req = experiment_request(None);
+        let err = runner
+            .evaluate(&req, &token_for(&req))
+            .await
+            .expect_err("unsandboxed report is not evidence");
+        assert!(matches!(
+            err,
+            RunnerError::Report(crate::runner::ReportError::NotSandboxed)
+        ));
+        let downs = orch.teardowns();
+        assert_eq!(downs.len(), 1, "the experiment vm is stopped");
+        assert_eq!(
+            downs[0].1,
+            RetainPolicy::Retain,
+            "final-verification failure keeps the jail for RCA"
+        );
+        assert_eq!(
+            orch.vms().len(),
+            1,
+            "the topic vm only; a retained vm is stopped"
+        );
+        assert_eq!(orch.experiments().len(), 1);
+
+        orch.set_sandboxed(false);
+        let topic_vm = orch
+            .attach(&req.topic_id)
+            .await
+            .expect("attach")
+            .expect("topic vm");
+        let err = run_paid_job(
+            orch.as_ref(),
+            &ExperimentPolicy::default(),
+            &pinned_template(),
+            &topic_vm,
+            VmJob::Baseline {
+                request: req.clone(),
+            },
+        )
+        .await
+        .expect_err("unsandboxed baseline is not evidence");
+        assert!(matches!(
+            err,
+            VmError::Report(crate::runner::ReportError::NotSandboxed)
+        ));
+        assert_eq!(
+            orch.teardowns().last().map(|(_, p)| *p),
+            Some(RetainPolicy::Retain),
+            "a failed baseline verify retains too"
+        );
     }
 
     /// Every job names its topic (the orchestrator's hard bind), the paid
@@ -843,8 +960,10 @@ mod tests {
     }
 
     /// An ask over the operator ceiling is refused before any VM exists, a
-    /// job that fails inside the experiment VM still destroys it, and a topic
-    /// that selects no runner keeps the topic-VM path untouched.
+    /// job that fails inside the experiment VM still stops it — **retained**
+    /// on the host so its console and scratch survive for root-cause
+    /// analysis, never destroyed — and a topic that selects no runner keeps
+    /// the topic-VM path untouched.
     #[tokio::test]
     async fn experiment_vms_fail_closed_and_are_never_left_behind() {
         use crate::fixtures::experiment_request;
@@ -870,9 +989,18 @@ mod tests {
         orch.set_fail_run(false);
         assert_eq!(orch.experiments().len(), 1);
         let downs = orch.teardowns();
-        assert_eq!(downs.len(), 1, "destroyed despite the failure");
-        assert_eq!(downs[0].1, RetainPolicy::Destroy);
-        assert_eq!(orch.vms().len(), 1, "the topic vm only");
+        assert_eq!(downs.len(), 1, "torn down despite the failure");
+        assert_eq!(downs[0].0.vm_id, "vm-1");
+        assert_eq!(
+            downs[0].1,
+            RetainPolicy::Retain,
+            "a failed job keeps its jail on the host for root-cause analysis"
+        );
+        assert_eq!(
+            orch.vms().len(),
+            1,
+            "the topic vm only; a retained vm is stopped"
+        );
 
         let plain = request();
         let out = runner
@@ -946,8 +1074,10 @@ mod tests {
     /// A paid run is scored only once its experiment VM is **confirmed**
     /// destroyed. `Ok(false)` and a teardown error both withhold a
     /// successful outcome (fail-closed: the VM may still hold capacity), the
-    /// error names the VM, a job that failed *and* leaked names both, and a
-    /// confirmed destroy scores again. Nothing here is warn-only.
+    /// error names the VM, a job that failed keeps **its own** error even
+    /// when its retain is not confirmed (the leak is logged for the host to
+    /// reconcile, never hidden behind a teardown error), and a confirmed
+    /// destroy scores again. Nothing here is warn-only.
     #[tokio::test]
     async fn a_paid_run_is_withheld_unless_its_experiment_vm_is_confirmed_destroyed() {
         use crate::fixtures::experiment_request;
@@ -992,9 +1122,17 @@ mod tests {
             .await
             .expect_err("job failed and the vm leaked");
         let msg = err.to_string();
-        assert!(msg.contains("injected transport error"), "{msg}");
-        assert!(msg.contains("the job itself failed"), "{msg}");
-        assert!(msg.contains("injected run failure"), "{msg}");
+        assert!(
+            msg.contains("injected run failure"),
+            "the job's own failure is the error: {msg}"
+        );
+        assert!(
+            !msg.contains("injected transport error") && !msg.contains("withheld"),
+            "an unconfirmed retain never hides the real failure: {msg}"
+        );
+        let (leaked, policy) = orch.teardowns().pop().expect("teardown attempted");
+        assert_eq!(leaked.vm_id, "vm-3");
+        assert_eq!(policy, RetainPolicy::Retain, "a failed job asks to retain");
         orch.set_fail_run(false);
 
         let direct = run_paid_job(

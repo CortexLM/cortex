@@ -87,7 +87,8 @@ pub struct TopicSetup {
     /// RLM VM image + sizes.
     pub template: VmTemplate,
     /// Per-experiment VM policy: a topic whose params select an in-guest
-    /// runner measures its baseline in a dedicated VM, destroyed afterwards.
+    /// runner measures its baseline in a dedicated VM, destroyed afterwards
+    /// (retained on the host for root-cause analysis when the run failed).
     pub experiments: ExperimentPolicy,
     /// `askUser`-style owner hook.
     pub owner: Arc<dyn OwnerHook>,
@@ -232,7 +233,8 @@ impl TopicSetup {
 
     /// Baseline shaped exactly like a miner run, persisted: inside the topic
     /// VM, or — when the topic's params select an in-guest runner — inside
-    /// one dedicated experiment VM created for it and destroyed after it.
+    /// one dedicated experiment VM created for it and stopped after it
+    /// (destroyed on success, retained for root-cause analysis on failure).
     async fn baseline(
         &self,
         topic: &TopicDocument,

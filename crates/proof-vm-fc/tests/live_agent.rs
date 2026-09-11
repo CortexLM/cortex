@@ -46,8 +46,9 @@ fn spec(template: VmTemplate) -> TopicVmSpec {
 /// one experiment VM per paid job on the agent (beside its RLM VM, sized by
 /// the topic under the lock ceilings, carrying the pack pin), the host's
 /// `experiment_vm` attestation stamps the report, and the VM is destroyed
-/// after the job. A second evaluation is a second VM, and a topic that
-/// selects nothing keeps the sister path.
+/// after a successful job (retained after a failed one). A second
+/// evaluation is a second VM, and a topic that selects nothing keeps the
+/// sister path.
 #[tokio::test]
 async fn an_experiment_topic_gets_one_attested_vm_per_paid_job_over_the_wire() {
     use proof_rlm::fixtures::experiment_request;
@@ -109,6 +110,8 @@ async fn an_experiment_topic_gets_one_attested_vm_per_paid_job_over_the_wire() {
 
     // The host stops attesting: the report comes back unsandboxed and the
     // client refuses it for a firecracker_required topic — no substitute.
+    // The failed job's VM is stopped and **retained** on the host (console
+    // and scratch kept for root-cause analysis), and frees its capacity slot.
     hv.set_experiment_attests(false);
     let err = runner
         .evaluate(&req, &token_for(&req))
@@ -119,7 +122,16 @@ async fn an_experiment_topic_gets_one_attested_vm_per_paid_job_over_the_wire() {
             .contains("without the host's sister-guest attestation"),
         "{err}"
     );
-    assert_eq!(hv.teardowns().len(), 3, "still destroyed after the failure");
+    let downs = hv.teardowns();
+    assert_eq!(downs.len(), 3, "still torn down after the failure");
+    assert_eq!(downs[2].0, hv.boots()[3].vm_id);
+    assert_eq!(
+        downs[2].1,
+        RetainPolicy::Retain,
+        "a failed paid job retains its experiment vm for RCA"
+    );
+    assert_eq!(agent.state.running_experiments().await, 0);
+    assert_eq!(agent.state.running().await.len(), 1, "the topic vm only");
     hv.set_experiment_attests(true);
 
     // The attestation must be about the VM the job was dispatched to.

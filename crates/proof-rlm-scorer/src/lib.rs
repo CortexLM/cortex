@@ -38,10 +38,11 @@ mod scorer;
 mod setup;
 
 pub use artefact::{
-    artefact_path, is_safe_entry_path, ArtefactBundle, ArtefactError, ArtefactManifest,
-    ArtefactStore, BaselineRef, BestRef, PublicEvent, WrittenArtefact, ARTEFACT_MANIFEST_SCHEMA,
-    ARTEFACT_ROOT_ENV, ARTIFACT_DIR, BASELINE_REF_FILE, BEST_FILE, CHECKLIST_FILE,
-    DEFAULT_ARTEFACT_ROOT, EVENTS_FILE, LOGS_DIR, MANIFEST_FILE, MAX_ENTRY_PATH, REPORT_FILE,
+    artefact_path, is_safe_entry_path, max_zip_numeric_id, ArtefactBundle, ArtefactError,
+    ArtefactManifest, ArtefactStore, BaselineRef, BestRef, PublicEvent, WrittenArtefact,
+    ARTEFACT_MANIFEST_SCHEMA, ARTEFACT_ROOT_ENV, ARTIFACT_DIR, BASELINE_REF_FILE, BEST_FILE,
+    CHECKLIST_FILE, DEFAULT_ARTEFACT_ROOT, EVENTS_FILE, LOGS_DIR, MANIFEST_FILE, MAX_ENTRY_PATH,
+    REPORT_FILE,
 };
 pub use scorer::{RlmScorer, DEFAULT_LEASE_TTL};
 pub use setup::{SetupError, SetupOutcome, TopicSetup};

@@ -32,7 +32,8 @@ pub use proof_http::{
     VmOrchestratorProbe, VmOrchestratorReport,
 };
 pub use proof_store::{
-    ArtifactManifest, MemoryStore, MinerEnvVault, DEFAULT_MINER_BYOK_DIR, MINER_BYOK_DIR_ENV,
+    ArtefactVault, ArtifactManifest, MemoryStore, MinerEnvVault, ARTEFACT_STAGING_DIR_ENV,
+    DEFAULT_ARTEFACT_STAGING_DIR, DEFAULT_MINER_BYOK_DIR, MINER_BYOK_DIR_ENV,
 };
 pub use proof_task::{
     HoldoutRecord, InferenceOffer, OfferError, ProofPin, TopicDocument, BASE_MODEL_FAMILY,
