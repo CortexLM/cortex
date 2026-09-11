@@ -280,25 +280,33 @@ impl AgentState {
             %vm_id, topic_id = %record.handle.topic_id, ?policy,
             "waiter gone; harvesting experiment vm"
         );
-        let confirmed = match self.inner.hypervisor.teardown(booted, policy).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(%vm_id, "abandoned experiment teardown: {e}");
-                false
+        let mut confirmed = false;
+        for _ in 0..3 {
+            match self.inner.hypervisor.teardown(booted, policy).await {
+                Ok(true) => {
+                    confirmed = true;
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => tracing::error!(%vm_id, "abandoned experiment teardown: {e}"),
             }
-        };
-        if !confirmed {
-            return;
         }
         let mut vms = self.inner.vms.write().await;
-        match policy {
-            RetainPolicy::Destroy => {
-                vms.remove(vm_id);
-            }
-            RetainPolicy::Retain => {
-                if let Some(e) = vms.get_mut(vm_id) {
-                    e.record.state = VmState::Retained;
+        if confirmed {
+            match policy {
+                RetainPolicy::Destroy => {
+                    vms.remove(vm_id);
                 }
+                RetainPolicy::Retain => {
+                    if let Some(e) = vms.get_mut(vm_id) {
+                        e.record.state = VmState::Retained;
+                    }
+                }
+            }
+        } else {
+            tracing::error!(%vm_id, "abandoned experiment teardown never confirmed");
+            if let Some(e) = vms.get_mut(vm_id) {
+                e.record.state = VmState::Crashed;
             }
         }
     }

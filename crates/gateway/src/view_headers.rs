@@ -25,9 +25,7 @@ pub fn viewer_headers(frame_ancestors: &str) -> Vec<(&'static str, String)> {
         ("Cross-Origin-Opener-Policy", "same-origin".into()),
         (
             "Permissions-Policy",
-            "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), \
-             microphone=(), payment=(), usb=()"
-                .into(),
+            "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()".into(),
         ),
         ("Cache-Control", "private, no-store".into()),
     ]

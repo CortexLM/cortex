@@ -1052,6 +1052,167 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn abandoned_teardown_retries_then_frees_capacity() {
+        use proof_rlm::fixtures::experiment_request;
+        let hv = FakeHypervisor::new(0.5);
+        hv.set_job_delay(Some(std::time::Duration::from_millis(200)));
+        hv.set_teardown_fails(2);
+        let auth = Arc::new(BearerAuth::from_file(&token_file("teardown-retry", TOKEN)));
+        let state = AgentState::with_max_experiment_vms(hv.clone(), auth, 1);
+        let app = agent_router(state.clone());
+        let _topic = create(&app).await;
+        let req = experiment_request(Some(8));
+        let (status, exp): (StatusCode, VmRecord) = call(
+            &app,
+            "POST",
+            paths::VMS,
+            Some(TOKEN),
+            Some(
+                serde_json::to_value(CreateVmRequest {
+                    spec: experiment_spec(&req),
+                })
+                .expect("json"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let evaluate = serde_json::to_value(RunJobRequest {
+            topic_id: req.topic_id.clone(),
+            job: VmJob::Evaluate {
+                request: req.clone(),
+                checklist_digest: token_for(&req).checklist_digest().to_owned(),
+                rules_version: 1,
+            },
+        })
+        .expect("json");
+        let job_req = Request::builder()
+            .method("POST")
+            .uri(paths::vm_jobs(&exp.handle.vm_id))
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(evaluate.to_string()))
+            .expect("request");
+        let waiter = tokio::spawn(app.clone().oneshot(job_req));
+        let started = tokio::time::Instant::now();
+        loop {
+            if !hv.jobs().is_empty() {
+                break;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        waiter.abort();
+        let _ = waiter.await;
+        let harvested = tokio::time::Instant::now();
+        loop {
+            if state.running_experiments().await == 0 {
+                break;
+            }
+            assert!(
+                harvested.elapsed() < std::time::Duration::from_secs(2),
+                "capacity still held after teardown retries"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(hv.teardowns().len(), 1);
+        let (status, _): (StatusCode, VmRecord) = call(
+            &app,
+            "POST",
+            paths::VMS,
+            Some(TOKEN),
+            Some(
+                serde_json::to_value(CreateVmRequest {
+                    spec: experiment_spec(&req),
+                })
+                .expect("json"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "replacement must not 503");
+    }
+
+    #[tokio::test]
+    async fn abandoned_teardown_error_marks_crashed_and_frees_capacity() {
+        use proof_rlm::fixtures::experiment_request;
+        let hv = FakeHypervisor::new(0.5);
+        hv.set_job_delay(Some(std::time::Duration::from_millis(200)));
+        hv.set_teardown_fails(8);
+        hv.set_teardown_errors(true);
+        let auth = Arc::new(BearerAuth::from_file(&token_file("teardown-err", TOKEN)));
+        let state = AgentState::with_max_experiment_vms(hv.clone(), auth, 1);
+        let app = agent_router(state.clone());
+        let _topic = create(&app).await;
+        let req = experiment_request(Some(8));
+        let (status, exp): (StatusCode, VmRecord) = call(
+            &app,
+            "POST",
+            paths::VMS,
+            Some(TOKEN),
+            Some(
+                serde_json::to_value(CreateVmRequest {
+                    spec: experiment_spec(&req),
+                })
+                .expect("json"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let evaluate = serde_json::to_value(RunJobRequest {
+            topic_id: req.topic_id.clone(),
+            job: VmJob::Evaluate {
+                request: req.clone(),
+                checklist_digest: token_for(&req).checklist_digest().to_owned(),
+                rules_version: 1,
+            },
+        })
+        .expect("json");
+        let job_req = Request::builder()
+            .method("POST")
+            .uri(paths::vm_jobs(&exp.handle.vm_id))
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(evaluate.to_string()))
+            .expect("request");
+        let waiter = tokio::spawn(app.clone().oneshot(job_req));
+        let started = tokio::time::Instant::now();
+        loop {
+            if !hv.jobs().is_empty() {
+                break;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        waiter.abort();
+        let _ = waiter.await;
+        let harvested = tokio::time::Instant::now();
+        loop {
+            if state.running_experiments().await == 0 {
+                break;
+            }
+            assert!(
+                harvested.elapsed() < std::time::Duration::from_secs(2),
+                "crashed experiment still counted as running"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(hv.teardowns().is_empty());
+        let (status, _): (StatusCode, VmRecord) = call(
+            &app,
+            "POST",
+            paths::VMS,
+            Some(TOKEN),
+            Some(
+                serde_json::to_value(CreateVmRequest {
+                    spec: experiment_spec(&req),
+                })
+                .expect("json"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "crashed must free capacity");
+    }
+
+    #[tokio::test]
     async fn waiter_drop_on_a_topic_vm_job_does_not_teardown_the_vm() {
         let hv = FakeHypervisor::new(0.5);
         hv.set_job_delay(Some(std::time::Duration::from_millis(300)));

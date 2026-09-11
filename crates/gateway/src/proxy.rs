@@ -92,8 +92,12 @@ async fn proxy_inner(
         }
     };
 
-    // Body buffered: spawn so a miner hang-up does not abort Proof evaluate.
-    match tokio::spawn(async move {
+    // Only Proof POST /v1/submissions detaches: evaluate is sync. GET and
+    // other challenges cancel with the caller so a stall cannot pin tasks.
+    let detach = challenge_id == "proof"
+        && method == Method::POST
+        && normalize_proxy_path(&rest) == "v1/submissions";
+    let hop = async move {
         let mut last_status = StatusCode::BAD_GATEWAY;
         let mut last_msg = String::from("no upstream attempt");
         let mut last_error_resp: Option<Response> = None;
@@ -165,11 +169,14 @@ async fn proxy_inner(
             return error_response;
         }
         (last_status, last_msg).into_response()
-    })
-    .await
-    {
-        Ok(upstream_response) => upstream_response,
-        Err(_) => (StatusCode::BAD_GATEWAY, "proxy task failed").into_response(),
+    };
+    if detach {
+        match tokio::spawn(hop).await {
+            Ok(upstream_response) => upstream_response,
+            Err(_) => (StatusCode::BAD_GATEWAY, "proxy task failed").into_response(),
+        }
+    } else {
+        hop.await
     }
 }
 
@@ -276,8 +283,8 @@ pub fn normalize_proxy_path(rest: &str) -> String {
 /// when the HTTP client collapses `.` before dialing the challenge upstream.
 #[must_use]
 pub fn is_admin_path(rest: &str) -> bool {
-    let rest_norm = normalize_proxy_path(rest);
-    rest_norm.starts_with("v1/admin/") || rest_norm == "v1/admin"
+    let n = normalize_proxy_path(rest);
+    n.starts_with("v1/admin/") || n == "v1/admin"
 }
 
 /// Report bodies are operator-local. POST submit stays on the miner path.
@@ -286,11 +293,8 @@ pub fn is_admin_path(rest: &str) -> bool {
 /// status/headers (and whether a row exists) through the public gateway.
 #[must_use]
 pub fn is_blocked_report_read(method: &Method, rest: &str) -> bool {
-    if *method == Method::POST {
-        return false;
-    }
-    let rest_norm = normalize_proxy_path(rest);
-    rest_norm == "v1/reports" || rest_norm.starts_with("v1/reports/")
+    let n = normalize_proxy_path(rest);
+    *method != Method::POST && (n == "v1/reports" || n.starts_with("v1/reports/"))
 }
 
 /// Miner-controlled viewer paths (`/challenge/{id}/v1/view/{run}/{page}`).
@@ -354,6 +358,21 @@ mod tests {
             upstream_url("http://127.0.0.1:9/", "/v1/score", None),
             "http://127.0.0.1:9/v1/score"
         );
+    }
+
+    #[test]
+    fn only_proof_submit_post_detaches_after_the_body() {
+        let detach = |cid: &str, method: Method, rest: &str| {
+            cid == "proof"
+                && method == Method::POST
+                && normalize_proxy_path(rest) == "v1/submissions"
+        };
+        assert!(detach("proof", Method::POST, "v1/submissions"));
+        assert!(detach("proof", Method::POST, "/v1/submissions"));
+        assert!(!detach("proof", Method::GET, "v1/submissions"));
+        assert!(!detach("proof", Method::POST, "v1/status"));
+        assert!(!detach("bounty", Method::POST, "v1/submissions"));
+        assert!(!detach("proof", Method::POST, "v1/submissions/pf"));
     }
 
     #[test]

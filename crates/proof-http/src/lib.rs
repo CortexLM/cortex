@@ -60,7 +60,7 @@ use proof_score::{
 };
 use proof_store::{
     freeze_submission_digest, is_staged_artefact_uri, staged_artefact_uri, ArtifactManifest,
-    Enqueued, MemoryStore, StoreError, Submission, SubmissionState, MAX_ARTEFACT_BYTES,
+    Enqueued, LiveEval, MemoryStore, StoreError, Submission, SubmissionState, MAX_ARTEFACT_BYTES,
 };
 use proof_submit::{
     is_lowercase_hex, parse_hotkey_hex, parse_signature_hex, parse_submit_nonce_hex, verify_submit,
@@ -712,17 +712,52 @@ async fn submit(
     //
     // Evaluate is not cancelled if the miner hangs up after this body was
     // accepted: axum drops the handler on disconnect, a spawned task is not
-    // dropped. A client that holds still gets **201-after-score**.
+    // dropped. A client that holds still gets **201-after-score**. A retry
+    // of the same frozen digest must not start a second paid run.
     let staged_digest = row.artifact_digest.clone();
     let staged_hotkey = row.miner_hotkey.clone();
     let staged_nonce = row.submit_nonce.clone();
     let staged_env = row.submission_digest.clone();
+    let topic_id = row.topic_id.clone();
+    match st
+        .store
+        .claim_live_eval(&topic_id, &staged_env)
+        .map_err(|e| store_err(&e))?
+    {
+        LiveEval::Existing(existing) => {
+            let existing = *existing;
+            let _ = st
+                .store
+                .forget_artefact(&staged_digest, &staged_hotkey, &staged_nonce);
+            let _ = st.store.release_miner_env(&staged_env);
+            let eligible = existing.verdict.as_ref().is_some_and(|v| v.pass);
+            let mut resp = SubmitResp::of(&existing, st.backend, eligible);
+            resp.detail = Some(format!(
+                "already submitted as {} and scored ({}); one run per artefact per topic",
+                existing.id,
+                state_name(existing.state)
+            ));
+            return Ok((StatusCode::OK, Json(resp)));
+        }
+        LiveEval::InFlight => {
+            let _ = st
+                .store
+                .forget_artefact(&staged_digest, &staged_hotkey, &staged_nonce);
+            let _ = st.store.release_miner_env(&staged_env);
+            return Err(err(
+                StatusCode::CONFLICT,
+                "evaluation in flight for this artefact",
+            ));
+        }
+        LiveEval::Claimed => {}
+    }
     after_body_accepted({
         let st = st.clone();
         async move {
             match score_intake(&st, row, &topic).await {
                 Ok(resp) => Ok((StatusCode::CREATED, Json(resp))),
                 Err(e) => {
+                    let _ = st.store.release_live_eval(&topic_id, &staged_env);
                     let _ = st
                         .store
                         .forget_artefact(&staged_digest, &staged_hotkey, &staged_nonce);
@@ -2628,7 +2663,7 @@ mod tests {
         assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
         assert_eq!(body["error"], "hotkey_signature invalid");
         let mut reordered = submit_body(
-            "nonce",
+            "nonce-b",
             &serde_json::json!({ "manifest": { "train_dataset_ids": ["b-mix", "a-mix"] } }),
         );
         assert_eq!(
@@ -2662,8 +2697,15 @@ mod tests {
             "row stamps the client nonce: {row}"
         );
 
-        // A fresh nonce from the same key is a new submission; the canonical
-        // manifest is order-independent so the client may list in any order.
+        // A fresh nonce on the same artefact is not a second paid run.
+        let again = submit_body("nonce", &serde_json::json!({}));
+        let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", again, None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(row_count(app.clone()).await, 1);
+
+        // A fresh nonce from the same key on another artefact is a new
+        // submission; the canonical manifest is order-independent so the
+        // client may list in any order.
         reordered["manifest"]["train_dataset_ids"] = serde_json::json!(["a-mix", "b-mix"]);
         let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", reordered, None).await;
         assert_eq!(st, StatusCode::CREATED, "{body}");
@@ -4614,6 +4656,35 @@ mod tests {
         assert_eq!(v["state"], "awaiting_admin", "{v}");
         assert_eq!(scorer.hits.load(Ordering::SeqCst), 1);
         assert_eq!(store.list().expect("list").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_retry_same_artefact_does_not_double_eval() {
+        let (app, store, scorer) = app_delayed_lium(Duration::from_millis(250));
+        let body = submit_body("same-artefact", &serde_json::json!({}));
+        let first = tokio::spawn(post_submit(app.clone(), body.clone()));
+        let started = tokio::time::Instant::now();
+        loop {
+            if scorer.hits.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "evaluate never started"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let retry = submit_body("same-artefact", &serde_json::json!({}));
+        let resp = post_submit(app, retry).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "retry must not start a second run"
+        );
+        assert_eq!(scorer.hits.load(Ordering::SeqCst), 1);
+        let _ = first.await;
+        assert_eq!(store.list().expect("list").len(), 1);
+        assert_eq!(scorer.hits.load(Ordering::SeqCst), 1);
     }
 
     // ----- deferred scoring: `queued` rows and the drain -----

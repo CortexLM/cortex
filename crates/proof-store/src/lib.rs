@@ -192,6 +192,18 @@ impl Enqueued {
     }
 }
 
+/// Outcome of claiming a live evaluate for one frozen digest on one topic.
+#[derive(Debug)]
+pub enum LiveEval {
+    /// This caller owns the evaluate; it must [`MemoryStore::release_live_eval`]
+    /// if scoring fails before persist.
+    Claimed,
+    /// Another live evaluate of this digest is already running (no row yet).
+    InFlight,
+    /// A row for this digest already exists (queued, scored, or rejected).
+    Existing(Box<Submission>),
+}
+
 /// In-memory store (v0).
 ///
 /// Rows and topics live in the process. Miner BYOK material does not, on a
@@ -247,6 +259,9 @@ struct Inner {
     /// lands ([`MemoryStore::insert`]) or the drain gives the row back
     /// ([`MemoryStore::release_claim`]).
     scoring: BTreeMap<String, String>,
+    /// Live evaluate in flight, keyed by `(topic_id, digest)`. A retry of
+    /// the same frozen artefact must not start a second paid run.
+    live_eval: BTreeSet<(String, String)>,
     topics: BTreeMap<String, TopicDocument>,
     holdouts: BTreeMap<String, Vec<HoldoutRecord>>,
     baselines: BTreeMap<String, SealedBaseline>,
@@ -930,6 +945,8 @@ impl MemoryStore {
         if g.scoring.get(&row.topic_id) == Some(&row.id) {
             g.scoring.remove(&row.topic_id);
         }
+        g.live_eval
+            .remove(&(row.topic_id.clone(), row.submission_digest.clone()));
         g.submissions.insert(row.id.clone(), row.clone());
         Ok(row)
     }
@@ -965,6 +982,34 @@ impl MemoryStore {
         row.id = g.mint_id();
         g.submissions.insert(row.id.clone(), row.clone());
         Ok(Enqueued::Inserted(row))
+    }
+
+    /// Atomically claim a live evaluate of `digest` on `topic_id`. A
+    /// disconnect-then-retry with a fresh nonce shares the frozen digest
+    /// and must not start a second paid run.
+    pub fn claim_live_eval(&self, topic_id: &str, digest: &str) -> Result<LiveEval, StoreError> {
+        let mut g = self.lock()?;
+        if let Some(existing) = g
+            .submissions
+            .values()
+            .find(|r| r.topic_id == topic_id && r.submission_digest == digest)
+            .cloned()
+        {
+            return Ok(LiveEval::Existing(Box::new(existing)));
+        }
+        let key = (topic_id.to_owned(), digest.to_owned());
+        if !g.live_eval.insert(key) {
+            return Ok(LiveEval::InFlight);
+        }
+        Ok(LiveEval::Claimed)
+    }
+
+    /// Drop a live-eval claim that did not persist a row (host 503 / abort).
+    pub fn release_live_eval(&self, topic_id: &str, digest: &str) -> Result<(), StoreError> {
+        self.lock()?
+            .live_eval
+            .remove(&(topic_id.to_owned(), digest.to_owned()));
+        Ok(())
     }
 
     /// Fetch one row.
@@ -1449,6 +1494,37 @@ mod tests {
         assert!(matches!(
             st.enqueue(not_queued),
             Err(StoreError::Illegal(_))
+        ));
+    }
+
+    #[test]
+    fn claim_live_eval_is_exclusive_per_topic_and_digest() {
+        let st = MemoryStore::new();
+        let row = queued_row("t", "d1");
+        let digest = row.submission_digest.clone();
+        assert!(matches!(
+            st.claim_live_eval("t", &digest).expect("claim"),
+            LiveEval::Claimed
+        ));
+        assert!(matches!(
+            st.claim_live_eval("t", &digest).expect("inflight"),
+            LiveEval::InFlight
+        ));
+        let other = queued_row("t", "d2");
+        assert!(matches!(
+            st.claim_live_eval("t", &other.submission_digest)
+                .expect("other digest"),
+            LiveEval::Claimed
+        ));
+        st.release_live_eval("t", &digest).expect("release");
+        assert!(matches!(
+            st.claim_live_eval("t", &digest).expect("reclaim"),
+            LiveEval::Claimed
+        ));
+        let landed = st.insert(row).expect("insert");
+        assert!(matches!(
+            st.claim_live_eval("t", &digest).expect("existing"),
+            LiveEval::Existing(e) if e.id == landed.id
         ));
     }
 

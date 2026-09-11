@@ -595,6 +595,43 @@ async fn drop_after_body_does_not_cancel_upstream() {
     let _ = shutdown.send(());
 }
 
+/// GET and non-Proof traffic cancel with the miner: a stall must not keep
+/// an unbounded detached upstream hop.
+#[tokio::test]
+async fn get_drop_cancels_stalled_upstream() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/status"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
+        .mount(&upstream)
+        .await;
+
+    let reg = fast_registry();
+    reg.create(&CreateBackend {
+        challenge_id: "proof".into(),
+        base_url: upstream.uri(),
+        weight: 1,
+    })
+    .unwrap();
+
+    let (addr, shutdown) = spawn_gateway(reg).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(80))
+        .build()
+        .expect("client");
+    let send = client
+        .get(format!("http://{addr}/challenge/proof/v1/status"))
+        .send();
+    let _ = tokio::time::timeout(Duration::from_millis(200), send).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let n = upstream.received_requests().await.expect("mock").len();
+    assert!(
+        n <= 1,
+        "GET must not keep retrying a stall after disconnect: {n}"
+    );
+    let _ = shutdown.send(());
+}
+
 /// The proxy client has no short reqwest timeout: a slow evaluate (here
 /// 2 s, live is minutes) must still return.
 #[tokio::test]
