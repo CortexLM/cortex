@@ -3805,12 +3805,14 @@ dependencies = [
 name = "proof-fc-harvest"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "libc",
  "proof-rlm",
  "proof-vm-agent",
  "proof-vm-proto",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
 ]
@@ -3958,6 +3960,7 @@ version = "0.1.0"
 dependencies = [
  "proof-task",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

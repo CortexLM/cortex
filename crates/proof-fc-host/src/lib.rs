@@ -36,7 +36,6 @@
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 
 pub mod config;
-pub mod images;
 pub mod jail;
 pub mod net;
 pub mod shell;
@@ -62,9 +61,10 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 pub use config::{EgressAllow, HostConfig, Proto};
-pub use images::ImageCache;
 pub use jail::JailGuard;
 pub use net::NetPlan;
+pub use proof_fc_harvest::images;
+pub use proof_fc_harvest::images::ImageCache;
 pub use shell::{RecordingShell, Shell, SystemShell};
 pub use sister::SisterCtx;
 
