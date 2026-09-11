@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+libc = "0.2"
 proof-rlm = { path = "../proof-rlm" }
 proof-vm-agent = { path = "../proof-vm-agent" }
 proof-vm-proto = { path = "../proof-vm-proto" }

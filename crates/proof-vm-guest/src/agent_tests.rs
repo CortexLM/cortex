@@ -989,3 +989,55 @@ echo '[]' > "$PROOF_OUTPUT_DIR/checklist.json"
     );
     let _ = std::fs::remove_dir_all(&r);
 }
+
+/// A paid run must not answer `Done` when the pre-Done durability barrier
+/// cannot open/sync the work tree (report.json sitting in page cache is not
+/// enough).
+#[tokio::test]
+async fn paid_run_fails_closed_when_work_tree_cannot_be_synced() {
+    let r = root("sync-fail");
+    let a = agent(&r);
+    hello(&a).await;
+    let (tar, digest) = pack();
+    stage(&a, &tar, &digest).await;
+    install(
+        &r,
+        "run",
+        r#"
+echo '{"primary_value": 0.73}' > "$PROOF_OUTPUT_DIR/report.json"
+touch "$PROOF_WORK_DIR/blocked"
+chmod 000 "$PROOF_WORK_DIR/blocked"
+"#,
+    );
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::Baseline {
+                request: req_for(&digest),
+            }),
+        })
+        .await,
+    );
+    assert!(
+        err.contains("sync"),
+        "durability failure must prevent Done, got {err}"
+    );
+    let artefact = archive(&[member("recipe/run.sh", b'0', b"echo hi\n")]);
+    let mut eval = req_for(&digest);
+    eval.artifact_digest = hex::encode(Sha256::digest(&artefact));
+    eval.artifact_uri = Some(serve_once(artefact).await);
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::Evaluate {
+                request: eval,
+                checklist_digest: "c".into(),
+                rules_version: 1,
+            }),
+        })
+        .await,
+    );
+    assert!(
+        err.contains("sync"),
+        "evaluate must also refuse Done after a failed flush, got {err}"
+    );
+    let _ = std::fs::remove_dir_all(&r);
+}

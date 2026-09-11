@@ -3720,6 +3720,7 @@ dependencies = [
 name = "proof-fc-harvest"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "proof-rlm",
  "proof-vm-agent",
  "proof-vm-proto",

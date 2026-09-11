@@ -194,5 +194,77 @@ class SummarizeJobTests(unittest.TestCase):
             self.assertEqual(payload["n_measured"], 6)
 
 
+    def test_missing_args_is_fail_closed_no_stdin(self) -> None:
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT)],
+            check=False,
+            capture_output=True,
+            text=True,
+            input='{"primary_value": 0.99}\n',
+            timeout=5,
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("JOBDIR or job.out is required", proc.stderr)
+        self.assertIn("refusing stdin", proc.stderr)
+        self.assertNotIn("0.99", proc.stdout)
+
+    def test_writes_custom_value_and_summary_under_jobdir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            jobdir = Path(tmp) / "n15-a21f9618-shortpack"
+            jobdir.mkdir()
+            (jobdir / "job.out").write_text(json.dumps(NESTED_EVALUATED), encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "--jobdir", str(jobdir)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            cv = (jobdir / "custom_value.txt").read_text(encoding="utf-8").strip()
+            self.assertEqual(cv, "0.0")
+            summary = (jobdir / "summary.txt").read_text(encoding="utf-8")
+            self.assertIn("primary_value=0.0", summary)
+            self.assertIn("n_measured=6", summary)
+            self.assertIn("cv=0", summary)
+            self.assertIn("ok=True", summary)
+
+    def test_missing_job_out_is_fail_closed_no_custom_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            jobdir = Path(tmp) / "empty-job"
+            jobdir.mkdir()
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "--jobdir", str(jobdir)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("no job.out", proc.stderr)
+            self.assertFalse((jobdir / "custom_value.txt").exists())
+            self.assertFalse((jobdir / "summary.txt").exists())
+
+    def test_incomplete_job_out_writes_summary_not_custom_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            jobdir = Path(tmp) / "archived"
+            jobdir.mkdir()
+            (jobdir / "job.out").write_text(
+                json.dumps({"output": {"output": "archived", "body": None}}),
+                encoding="utf-8",
+            )
+            (jobdir / "custom_value.txt").write_text("stale\n", encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "--jobdir", str(jobdir)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertFalse((jobdir / "custom_value.txt").exists())
+            summary = (jobdir / "summary.txt").read_text(encoding="utf-8")
+            self.assertIn("ok=False", summary)
+            self.assertIn("reason=", summary)
+
+
 if __name__ == "__main__":
     unittest.main()
