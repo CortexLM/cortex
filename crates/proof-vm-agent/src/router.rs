@@ -44,6 +44,9 @@ const MAX_VM_ID_LEN: usize = 63;
 
 /// Pause between abandoned-experiment teardown retries.
 const TEARDOWN_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
+/// Hard cap on those retries so a persistent hypervisor error cannot spin
+/// an untracked task forever after the VM is already [`VmState::Crashed`].
+const MAX_TEARDOWN_ATTEMPTS: u8 = 8;
 
 /// Experiment VMs one host runs at once unless the operator says otherwise.
 /// Each may be as large as the ceilings (lock 16 vCPU / 32 GiB), so this is a
@@ -273,8 +276,9 @@ impl AgentState {
     /// is retained for RCA.
     ///
     /// A failed or unconfirmed teardown never leaves [`VmState::Running`]:
-    /// the record is [`VmState::Crashed`] (capacity free) and the policy is
-    /// retried until the hypervisor confirms a terminal state.
+    /// the record is [`VmState::Crashed`] (capacity free) and teardown is
+    /// retried a bounded number of times until the hypervisor confirms a
+    /// terminal state.
     async fn harvest_abandoned(
         &self,
         record: &VmRecord,
@@ -295,7 +299,7 @@ impl AgentState {
             %vm_id, topic_id = %record.handle.topic_id, ?policy,
             "waiter gone; harvesting experiment vm"
         );
-        loop {
+        for _ in 0..MAX_TEARDOWN_ATTEMPTS {
             let confirmed = match self.inner.hypervisor.teardown(booted, policy).await {
                 Ok(c) => c,
                 Err(e) => {
@@ -344,6 +348,7 @@ impl AgentState {
                 Some(_) => {}
             }
         }
+        tracing::error!(%vm_id, "abandoned experiment teardown never confirmed");
     }
 
     /// The running, alive **topic** VM bound to `topic_id`, if any.

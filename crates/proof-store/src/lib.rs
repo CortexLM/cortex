@@ -775,13 +775,17 @@ impl MemoryStore {
     /// share of the first miner's credentials. [`Self::release_miner_env`]
     /// drops one ref and deletes only when none remain and no row still names it.
     ///
+    /// Returns whether this call incremented `env_refs`. An empty `env` is
+    /// always `Ok(false)` and must not be paired with a later release that
+    /// would drop another request's vault.
+    ///
     /// # Errors
     ///
     /// [`StoreError::Vault`] when a configured vault cannot hold the key.
     /// [`StoreError::EnvConflict`] when the slot is occupied with a different env.
-    pub fn claim_miner_env(&self, digest: &str, env: &MinerEnv) -> Result<(), StoreError> {
+    pub fn claim_miner_env(&self, digest: &str, env: &MinerEnv) -> Result<bool, StoreError> {
         if env.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         let mut g = self.lock()?;
         let existing = if self.byok.is_file_backed() {
@@ -806,7 +810,7 @@ impl MemoryStore {
             .unwrap_or(0)
             .saturating_add(1);
         g.env_refs.insert(digest.to_owned(), next);
-        Ok(())
+        Ok(true)
     }
 
     /// Drop one in-flight claim. The vault entry stays if another claim is
@@ -1728,6 +1732,27 @@ mod tests {
         );
         store.release_miner_env(&digest).expect("last holder");
         assert!(store.miner_env(&digest).expect("gone").is_empty());
+    }
+
+    #[test]
+    fn an_empty_claim_does_not_take_a_ref() {
+        let store = MemoryStore::new();
+        let digest = "ef".repeat(32);
+        let mut env = MinerEnv::new();
+        env.insert("MINER_PROVIDED_API_KEY", "held");
+        assert!(store.claim_miner_env(&digest, &env).expect("create"));
+        assert!(
+            !store
+                .claim_miner_env(&digest, &MinerEnv::new())
+                .expect("empty"),
+            "omitting env must not increment refs"
+        );
+        assert_eq!(store.miner_env(&digest).expect("still held"), env);
+        store.release_miner_env(&digest).expect("owner");
+        assert!(
+            store.miner_env(&digest).expect("gone").is_empty(),
+            "one real claim, one release, no leftover empty-claim ref"
+        );
     }
 
     #[test]

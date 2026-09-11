@@ -71,6 +71,8 @@ pub struct FakeHypervisor {
     teardown_fails: AtomicUsize,
     /// When set, a failing teardown is `Err` rather than `Ok(false)`.
     teardown_errors: AtomicBool,
+    /// Every teardown call, including failures.
+    teardown_attempts: AtomicUsize,
 }
 
 impl FakeHypervisor {
@@ -100,6 +102,7 @@ impl FakeHypervisor {
             teardowns: Mutex::new(Vec::new()),
             teardown_fails: AtomicUsize::new(0),
             teardown_errors: AtomicBool::new(false),
+            teardown_attempts: AtomicUsize::new(0),
         })
     }
 
@@ -193,6 +196,10 @@ impl FakeHypervisor {
 
     pub fn teardowns(&self) -> Vec<(String, RetainPolicy)> {
         self.teardowns.lock().unwrap().clone()
+    }
+
+    pub fn teardown_attempts(&self) -> usize {
+        self.teardown_attempts.load(Ordering::SeqCst)
     }
 
     /// Next `n` teardowns fail without recording a release (VM stays alive).
@@ -375,6 +382,7 @@ impl Hypervisor for FakeHypervisor {
     }
 
     async fn teardown(&self, vm: &BootedVm, policy: RetainPolicy) -> Result<bool, HvError> {
+        self.teardown_attempts.fetch_add(1, Ordering::SeqCst);
         let left = self.teardown_fails.load(Ordering::SeqCst);
         if left > 0 {
             self.teardown_fails.store(left - 1, Ordering::SeqCst);

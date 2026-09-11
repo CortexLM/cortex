@@ -1297,6 +1297,20 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(hv.teardowns().is_empty());
+        // Capacity is free after the first failed teardown; the harvest task
+        // still has a bounded number of retries. Wait for it to stop.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let attempts = hv.teardown_attempts();
+        assert!(
+            attempts > 0 && attempts <= 8,
+            "teardown must stop after the bound: {attempts}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert_eq!(
+            hv.teardown_attempts(),
+            attempts,
+            "a crashed vm must not keep calling teardown"
+        );
         let (status, _): (StatusCode, VmRecord) = call(
             &app,
             "POST",

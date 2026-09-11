@@ -648,7 +648,8 @@ async fn submit(
     // Atomic claim: exclusive-create plus an in-flight ref. A concurrent
     // submit of the same digest cannot both own rollback; abort releases
     // one ref and deletes only when none remain and no row still names it.
-    st.store
+    let env_held = st
+        .store
         .claim_miner_env(&submission_digest, &miner_env)
         .map_err(|e| match e {
             conflict @ StoreError::EnvConflict => err(StatusCode::CONFLICT, &conflict.to_string()),
@@ -660,7 +661,9 @@ async fn submit(
             st.store
                 .stash_artefact(&artifact, &hotkey, &submit_nonce, bytes)
                 .map_err(|e| {
-                    let _ = st.store.release_miner_env(&submission_digest);
+                    if env_held {
+                        let _ = st.store.release_miner_env(&submission_digest);
+                    }
                     err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string())
                 })?,
         );
@@ -707,7 +710,9 @@ async fn submit(
         return queue_deferred(&st, row);
     }
     // One live evaluation per frozen digest. A disconnect-then-retry with a
-    // fresh nonce shares this digest and waits for the first result.
+    // fresh nonce shares this digest and is told immediately: 409 while
+    // in flight, 200 once a row exists. Waiting here would hold a gateway
+    // detached-submit permit for the original eval's whole duration.
     // Evaluate is not cancelled if the miner hangs up after this body was
     // accepted: axum drops the handler on disconnect, a spawned task is not.
     let staged_digest = row.artifact_digest.clone();
@@ -721,12 +726,15 @@ async fn submit(
         .map_err(|e| store_err(&e))?
     {
         LiveEval::Existing(existing) => {
-            drop_retry_staging(&st, &row);
+            drop_retry_staging(&st, &row, env_held);
             return Ok(already_submitted(&st, &existing));
         }
         LiveEval::InFlight => {
-            drop_retry_staging(&st, &row);
-            return wait_live_eval(&st, &topic_id, &staged_env).await;
+            drop_retry_staging(&st, &row, env_held);
+            return Err(err(
+                StatusCode::CONFLICT,
+                "evaluation in flight for this artefact",
+            ));
         }
         LiveEval::Claimed | LiveEval::Vacant => {}
     }
@@ -782,11 +790,13 @@ impl Drop for LiveEvalGuard {
     }
 }
 
-fn drop_retry_staging(st: &AppState, row: &Submission) {
+fn drop_retry_staging(st: &AppState, row: &Submission, env_held: bool) {
     let _ = st
         .store
         .forget_artefact(&row.artifact_digest, &row.miner_hotkey, &row.submit_nonce);
-    let _ = st.store.release_miner_env(&row.submission_digest);
+    if env_held {
+        let _ = st.store.release_miner_env(&row.submission_digest);
+    }
 }
 
 fn already_submitted(st: &AppState, existing: &Submission) -> (StatusCode, Json<SubmitResp>) {
@@ -802,31 +812,6 @@ fn already_submitted(st: &AppState, existing: &Submission) -> (StatusCode, Json<
         )
     });
     (StatusCode::OK, Json(resp))
-}
-
-async fn wait_live_eval(
-    st: &AppState,
-    topic_id: &str,
-    digest: &str,
-) -> Result<(StatusCode, Json<SubmitResp>), ErrResp> {
-    loop {
-        match st
-            .store
-            .live_eval(topic_id, digest)
-            .map_err(|e| store_err(&e))?
-        {
-            LiveEval::Existing(row) => return Ok(already_submitted(st, &row)),
-            LiveEval::InFlight | LiveEval::Claimed => {
-                tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
-            }
-            LiveEval::Vacant => {
-                return Err(err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "scoring task failed",
-                ))
-            }
-        }
-    }
 }
 
 /// Persist an intake row as `queued` — one row per frozen digest per topic,
@@ -3362,6 +3347,13 @@ mod tests {
                 ..Self::win(custom_id)
             }
         }
+
+        fn delayed(custom_id: &str, d: Duration) -> Self {
+            Self {
+                inner: StubScorer::delayed(d),
+                ..Self::win(custom_id)
+            }
+        }
     }
 
     #[async_trait]
@@ -4713,10 +4705,11 @@ mod tests {
         }
         let retry = submit_body("same-artefact", &serde_json::json!({}));
         let resp = post_submit(app, retry).await;
-        assert_eq!(resp.status(), StatusCode::OK, "idempotent retry");
-        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
-        assert_eq!(v["state"], "awaiting_admin", "{v}");
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "retry must not start a second run or hold a proxy slot"
+        );
         assert_eq!(scorer.hits.load(Ordering::SeqCst), 1);
         let first = first.await.expect("first");
         assert_eq!(first.status(), StatusCode::CREATED);
@@ -6438,6 +6431,51 @@ mod tests {
         assert_eq!(list["items"].as_array().expect("items").len(), 1, "{list}");
         assert!(!list.to_string().contains(BYOK_VALUE), "{list}");
         assert!(!list.to_string().contains(other), "{list}");
+    }
+
+    #[tokio::test]
+    async fn optional_byok_retry_without_env_does_not_drop_the_original() {
+        let scorer = Arc::new(FamilyStub::delayed(CUSTOM_ID, Duration::from_millis(250)));
+        let state = state_with_custom_params(
+            scorer.clone(),
+            false,
+            true,
+            &[(proof_canon::PARAM_MINER_ENV_ALLOWLIST, BYOK)],
+        );
+        let app = proof_router(state);
+        let first_body = byok_submit("opt-byok", Some(&serde_json::json!({ BYOK: BYOK_VALUE })));
+        let first = tokio::spawn({
+            let app = app.clone();
+            async move { json_req(app, "POST", "/v1/submissions", first_body, None).await }
+        });
+        let started = tokio::time::Instant::now();
+        loop {
+            if scorer.inner.hits.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "evaluate never started"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (st, body) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            byok_submit("opt-byok", None),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{body}");
+        let (st, first) = first.await.expect("first");
+        assert_eq!(st, StatusCode::CREATED, "{first}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            scorer.inner.envs()[0].iter().collect::<Vec<_>>(),
+            vec![(BYOK, BYOK_VALUE)],
+            "retry without env must not drop the original vault"
+        );
     }
 
     /// A topic that runs on the miner's own key and a host that no longer
