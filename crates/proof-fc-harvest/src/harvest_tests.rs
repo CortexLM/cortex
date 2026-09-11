@@ -12,7 +12,10 @@ use proof_vm_agent::HvError;
 use proof_vm_proto::guest::{encode_frame, read_frame, RlmToHost};
 use tokio::io::AsyncWriteExt;
 
-use super::{from_work_tree, recv_job_or_harvest, try_from_jail, POLL_INTERVAL, SCRATCH_TREE};
+use super::{
+    from_work_tree, harvest_from_jail, recv_job_or_harvest, try_from_jail, HARBOR_JOBS,
+    HARVEST_WORK, POLL_INTERVAL, SCRATCH_TREE,
+};
 
 fn tree(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("proof-fc-harvest-{}-{tag}", std::process::id()));
@@ -25,6 +28,32 @@ fn plant(work: &Path, kind: &str, seq: &str, body: &str) {
     let dir = work.join(format!("{seq}-{kind}")).join("output");
     std::fs::create_dir_all(&dir).expect("output");
     std::fs::write(dir.join("report.json"), body).expect("report");
+}
+
+fn plant_trial(work: &Path, seq_kind: &str, job: &str, trial: &str, reward: &str) {
+    let dir = work
+        .join(seq_kind)
+        .join(HARBOR_JOBS)
+        .join(job)
+        .join(trial)
+        .join("verifier");
+    std::fs::create_dir_all(&dir).expect("trial");
+    let trial_dir = dir.parent().expect("trial dir");
+    std::fs::write(
+        trial_dir.join("result.json"),
+        format!(
+            r#"{{"trial_name":"{trial}","verifier_result":{{"rewards":{{"reward":{reward}}}}}}}"#
+        ),
+    )
+    .expect("result.json");
+    std::fs::write(dir.join("reward.txt"), reward).expect("reward.txt");
+}
+
+/// Guest report that claims Harbor finished (n15 shape: 6/6, atrx at 0).
+fn harbor_report_n2(primary: &str) -> String {
+    format!(
+        r#"{{"primary_value": {primary}, "claim_holds": false, "evidence": {{"n_measured": 2, "harbor_exit": 0, "trials": [{{"name": "task-hard", "reward": 0.0}}, {{"name": "atrx", "reward": 0.0}}]}}}}"#
+    )
 }
 
 #[test]
@@ -244,5 +273,119 @@ async fn a_dead_vsock_harvests_immediately_when_report_is_on_disk() {
         panic!("expected Evaluated, got {got:?}");
     };
     assert!((run.report.primary_value - 0.73).abs() < 1e-12);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn harvest_work_lagging_guest_trial_files_is_refused() {
+    let root = tree("lag");
+    let overlay = root.join(SCRATCH_TREE).join("work");
+    let dump = root.join(HARVEST_WORK);
+    plant(&overlay, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&overlay, "0001-evaluate", "run", "task-hard", "0");
+    plant_trial(&overlay, "0001-evaluate", "run", "atrx", "0");
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    let atrx = dump
+        .join("0001-evaluate")
+        .join(HARBOR_JOBS)
+        .join("run")
+        .join("atrx")
+        .join("verifier");
+    std::fs::create_dir_all(&atrx).expect("empty atrx verifier");
+    let err = harvest_from_jail(&root, &root, &evaluate_job()).expect_err("incomplete dump");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("harvest-work incomplete"),
+        "expected fail-closed, got {msg}"
+    );
+    assert!(try_from_jail(&root, &root, &evaluate_job()).is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn complete_overlay_without_a_dump_still_harvests() {
+    let root = tree("overlay-only");
+    let overlay = root.join(SCRATCH_TREE).join("work");
+    plant(&overlay, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&overlay, "0001-evaluate", "run", "task-hard", "0");
+    plant_trial(&overlay, "0001-evaluate", "run", "atrx", "0");
+    let out = harvest_from_jail(&root, &root, &evaluate_job()).expect("overlay harvest");
+    let VmJobOutput::Evaluated(run) = out else {
+        panic!("{out:?}");
+    };
+    assert!((run.report.primary_value - 0.0).abs() < 1e-12);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn dump_only_missing_trial_reward_txt_is_refused() {
+    let root = tree("dump-miss");
+    let dump = root.join(HARVEST_WORK);
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    let atrx = dump
+        .join("0001-evaluate")
+        .join(HARBOR_JOBS)
+        .join("run")
+        .join("atrx");
+    std::fs::create_dir_all(atrx.join("verifier")).expect("empty atrx");
+    std::fs::write(atrx.join("result.json"), r#"{"trial_name":"atrx"}"#).expect("result");
+    let err = from_work_tree(&dump, &root, &evaluate_job()).expect_err("incomplete dump");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("harvest-work incomplete"),
+        "expected fail-closed, got {msg}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn dump_only_complete_trials_matching_n_measured_harvests() {
+    let root = tree("dump-ok");
+    let dump = root.join(HARVEST_WORK);
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    plant_trial(&dump, "0001-evaluate", "run", "atrx", "0");
+    let out = from_work_tree(&dump, &root, &evaluate_job()).expect("complete dump");
+    let VmJobOutput::Evaluated(run) = out else {
+        panic!("{out:?}");
+    };
+    assert!((run.report.primary_value - 0.0).abs() < 1e-12);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn vsock_drop_does_not_publish_when_harvest_work_lags_guest() {
+    let root = tree("nosync");
+    let overlay = root.join(SCRATCH_TREE).join("work");
+    let dump = root.join(HARVEST_WORK);
+    plant(&overlay, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&overlay, "0001-evaluate", "run", "task-hard", "0");
+    plant_trial(&overlay, "0001-evaluate", "run", "atrx", "0");
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    std::fs::create_dir_all(
+        dump.join("0001-evaluate")
+            .join(HARBOR_JOBS)
+            .join("run")
+            .join("atrx")
+            .join("verifier"),
+    )
+    .expect("empty atrx verifier");
+    let err = recv_job_or_harvest(
+        async { Err(HvError::Guest("broken pipe".into())) },
+        &root,
+        &root,
+        &evaluate_job(),
+        Duration::from_secs(30),
+    )
+    .await
+    .expect_err("must not publish");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("harvest-work incomplete"),
+        "expected harvest fail-closed, got {msg}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
