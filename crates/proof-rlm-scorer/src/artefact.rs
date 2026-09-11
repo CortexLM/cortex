@@ -779,17 +779,12 @@ mod tests {
         let root = tmp("max-zip");
         std::fs::create_dir_all(root.join("topic-a")).expect("a");
         std::fs::create_dir_all(root.join("topic-b")).expect("b");
-        std::fs::write(root.join("topic-a").join("pf_0000000000000001.zip"), b"a")
-            .expect("zip 1");
-        std::fs::write(root.join("topic-b").join("pf_00000000000000ff.zip"), b"b")
-            .expect("zip ff");
+        std::fs::write(root.join("topic-a").join("pf_0000000000000001.zip"), b"a").expect("zip 1");
+        std::fs::write(root.join("topic-b").join("pf_00000000000000ff.zip"), b"b").expect("zip ff");
         std::fs::write(root.join("topic-a").join("best.json"), b"{}").expect("best");
         std::fs::write(root.join("not-a-topic.zip"), b"x").expect("root zip");
         assert_eq!(max_zip_numeric_id(&root), Some(0xff));
-        assert_eq!(
-            ArtefactStore::new(&root).max_zip_numeric_id(),
-            Some(0xff)
-        );
+        assert_eq!(ArtefactStore::new(&root).max_zip_numeric_id(), Some(0xff));
         assert_eq!(max_zip_numeric_id(&root.join("missing")), None);
         let _ = std::fs::remove_dir_all(&root);
     }

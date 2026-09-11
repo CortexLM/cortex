@@ -1018,9 +1018,13 @@ mod tests {
     #[tokio::test]
     async fn seed_pf_allocator_starts_at_zero_without_existing_ids() {
         let store = MemoryStore::new();
-        seed_pf_allocator(&store, &MemoryRlmStore::new(), Path::new("/no/such/artefacts"))
-            .await
-            .expect("seed");
+        seed_pf_allocator(
+            &store,
+            &MemoryRlmStore::new(),
+            Path::new("/no/such/artefacts"),
+        )
+        .await
+        .expect("seed");
         let row = store
             .insert(proof_store::Submission {
                 id: String::new(),
@@ -1063,8 +1067,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(root.join("topic-b")).expect("dir");
-        std::fs::write(root.join("topic-b").join("pf_000000000000000a.zip"), b"z")
-            .expect("zip");
+        std::fs::write(root.join("topic-b").join("pf_000000000000000a.zip"), b"z").expect("zip");
         let store = MemoryStore::new();
         seed_pf_allocator(&store, &rlm, &root).await.expect("seed");
         let row = store
