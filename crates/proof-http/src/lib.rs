@@ -644,22 +644,28 @@ async fn submit(
 
     let nonce = nonce_from(&hotkey, &topic_id, &artifact);
     let submission_digest = freeze_submission_digest(&hotkey, &topic_id, &artifact, &nonce);
-    // The key goes to the vault before anything can spend it, and the
-    // scoring path reads it back from there — the same step whether this
-    // submission is scored now or drained days later, so there is one place
-    // a miner's key ever lives on this host. A vault that cannot hold it is
-    // a host failure (503, no row): accepting a key we did not keep would
-    // reach the paid run with nothing to authenticate the miner's calls.
-    st.store
-        .stash_miner_env(&submission_digest, &miner_env)
-        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    // One vault entry per frozen digest. A retry of a queued artefact uses
+    // a new submit_nonce but the same digest — do not replace or roll back
+    // the key the queued row already holds.
+    let env_already_held = !st
+        .store
+        .miner_env(&submission_digest)
+        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?
+        .is_empty();
+    if !env_already_held {
+        st.store
+            .stash_miner_env(&submission_digest, &miner_env)
+            .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    }
     let mut artifact_staged = None;
     if let Some(bytes) = uploaded.as_ref() {
         artifact_staged = Some(
             st.store
                 .stash_artefact(&artifact, &hotkey, &submit_nonce, bytes)
                 .map_err(|e| {
-                    let _ = st.store.forget_miner_env(&submission_digest);
+                    if !env_already_held {
+                        let _ = st.store.forget_miner_env(&submission_digest);
+                    }
                     err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string())
                 })?,
         );
@@ -718,7 +724,9 @@ async fn submit(
             let _ = st
                 .store
                 .forget_artefact(&staged_digest, &staged_hotkey, &staged_nonce);
-            let _ = st.store.forget_miner_env(&staged_env);
+            if !env_already_held {
+                let _ = st.store.forget_miner_env(&staged_env);
+            }
             Err(e)
         }
     }
@@ -5632,6 +5640,86 @@ mod tests {
             std::fs::read_dir(&byok_root).map_or(0, |d| d.filter_map(Result::ok).count());
         assert_eq!(leftover, 0, "BYOK must not remain after a staging 503");
         let _ = std::fs::remove_dir_all(&byok_root);
+        let _ = std::fs::remove_file(&art_file);
+    }
+
+    /// A deferred retry of the same artefact (new nonce, same frozen digest)
+    /// must not wipe the BYOK the queued row already holds when this retry's
+    /// upload cannot be staged.
+    #[tokio::test]
+    async fn a_retry_staging_503_does_not_erase_queued_byok() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let pid = std::process::id();
+        let art_file = std::env::temp_dir().join(format!("proof-art-retry-{pid}"));
+        let _ = std::fs::remove_file(&art_file);
+        std::fs::write(&art_file, b"not-a-dir").expect("file not a dir");
+        let mut state = state_with_custom_params(
+            scorer.clone(),
+            true,
+            true,
+            &[(proof_canon::PARAM_MINER_BYOK, BYOK)],
+        );
+        state.store = state
+            .store
+            .with_artefact_vault(proof_store::ArtefactVault::at(&art_file));
+        let store = state.store.clone();
+        let app = proof_router(state);
+        let bytes = recipe_tar();
+        let artifact_digest = hex::encode(Sha256::digest(&bytes));
+        let env = serde_json::json!({ BYOK: BYOK_VALUE });
+        let (st, out) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            submit_body(
+                "queued",
+                &serde_json::json!({
+                    "topic_id": CUSTOM,
+                    "artifact_digest": artifact_digest,
+                    "artifact_uri": "https://example.invalid/queued.tar",
+                    "env": env,
+                }),
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{out}");
+        assert_eq!(out["state"], "queued", "{out}");
+        let digest = out["submission_digest"]
+            .as_str()
+            .expect("digest")
+            .to_owned();
+        assert_eq!(
+            store
+                .miner_env(&digest)
+                .expect("held")
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![(BYOK, BYOK_VALUE)]
+        );
+
+        let retry = submit_body(
+            "retry",
+            &serde_json::json!({
+                "topic_id": CUSTOM,
+                "artifact_digest": artifact_digest,
+                "env": env,
+            }),
+        );
+        let (st, out) = multipart_req(app.clone(), &retry, Some(&bytes)).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{out}");
+        assert_eq!(
+            store
+                .miner_env(&digest)
+                .expect("kept")
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![(BYOK, BYOK_VALUE)],
+            "retry staging 503 must not drop the queued row's key"
+        );
+        let (st, list) = json_req(app, "GET", "/v1/submissions", serde_json::json!({}), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(list["items"].as_array().expect("items").len(), 1, "{list}");
         let _ = std::fs::remove_file(&art_file);
     }
     /// A topic that runs on the miner's own key and a host that no longer

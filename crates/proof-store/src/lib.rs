@@ -547,14 +547,11 @@ impl ArtefactVault {
     }
 
     fn remove(&self, digest: &str, hotkey: &str, nonce: &str) {
+        // Unlink this nonce only. The digest/hotkey dirs are shared by other
+        // in-flight uploads of the same artefact; rmdir would 503 a sibling
+        // that had created the dir but not yet written its tmp file.
         if let Some(path) = self.path_for(digest, hotkey, nonce) {
             let _ = std::fs::remove_file(&path);
-            if let Some(hotkey_dir) = path.parent() {
-                let _ = std::fs::remove_dir(hotkey_dir);
-                if let Some(digest_dir) = hotkey_dir.parent() {
-                    let _ = std::fs::remove_dir(digest_dir);
-                }
-            }
         }
     }
 }
@@ -1559,6 +1556,44 @@ mod tests {
                 .as_deref(),
             Some(b"miner-b".as_slice())
         );
+    }
+
+    #[test]
+    fn artefact_forget_does_not_drop_a_sibling_nonce() {
+        let root = std::env::temp_dir().join(format!("proof-art-sib-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let digest = "ab".repeat(32);
+        let hotkey = "ef".repeat(32);
+        let n1 = "11".repeat(32);
+        let n2 = "22".repeat(32);
+        let store = MemoryStore::new().with_artefact_vault(ArtefactVault::at(&root));
+        store
+            .stash_artefact(&digest, &hotkey, &n1, b"one")
+            .expect("n1");
+        store
+            .stash_artefact(&digest, &hotkey, &n2, b"two")
+            .expect("n2");
+        store
+            .forget_artefact(&digest, &hotkey, &n1)
+            .expect("drop n1");
+        assert_eq!(
+            store
+                .artefact_bytes(&digest, &hotkey, &n2)
+                .expect("n2")
+                .as_deref(),
+            Some(b"two".as_slice())
+        );
+        store
+            .stash_artefact(&digest, &hotkey, &n1, b"one-again")
+            .expect("n1 restaged after sibling cleanup");
+        assert_eq!(
+            store
+                .artefact_bytes(&digest, &hotkey, &n1)
+                .expect("n1")
+                .as_deref(),
+            Some(b"one-again".as_slice())
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
