@@ -5,8 +5,9 @@ Not on the guest `run` path. Copy onto a retained jail on the KVM host.
 `summarize_job.py` unwraps orchestrator `job.out` (`RunJobResponse.output` →
 adjacent-tagged `VmJobOutput`, including `body.report` on evaluated jobs)
 so `primary_value=` / `n_measured=` / `cv=` print for **any** job directory.
-There is no baked `JOBDIR` (the metal n15 copy hardcoded
-`/var/lib/proof/pathc-baseline-n15/...`).
+There is no baked `JOBDIR` and no Harbor job id (`n15-…`). Discovery
+walks for `job.out` and prefers the newest file that unwraps a finite
+`primary_value`, so a stale metal job name cannot empty `cv=`.
 
 ```bash
 python3 summarize_job.py --jobdir /path/to/retained/jail

@@ -49,6 +49,30 @@ fn plant_trial(work: &Path, seq_kind: &str, job: &str, trial: &str, reward: &str
     std::fs::write(dir.join("reward.txt"), reward).expect("reward.txt");
 }
 
+fn plant_job_snapshot(work: &Path, seq_kind: &str, job: &str, n_running: u64, finished_at: &str) {
+    let p = work
+        .join(seq_kind)
+        .join(HARBOR_JOBS)
+        .join(job)
+        .join("result.json");
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).expect("job");
+    }
+    let finished = if finished_at == "null" {
+        "null".to_owned()
+    } else {
+        format!("\"{finished_at}\"")
+    };
+    std::fs::write(
+        p,
+        format!(
+            r#"{{"n_running":{n_running},"n_completed":{},"finished_at":{finished}}}"#,
+            if n_running == 0 { 6 } else { 5 }
+        ),
+    )
+    .expect("job result");
+}
+
 /// Guest report that claims Harbor finished (n15 shape: 6/6, atrx at 0).
 fn harbor_report_n2(primary: &str) -> String {
     format!(
@@ -386,6 +410,89 @@ async fn vsock_drop_does_not_publish_when_harvest_work_lags_guest() {
     assert!(
         msg.contains("harvest-work incomplete"),
         "expected harvest fail-closed, got {msg}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn dump_only_stale_n_running_is_refused_even_with_trial_files() {
+    let root = tree("nrun");
+    let dump = root.join(HARVEST_WORK);
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(
+        &dump,
+        "0001-evaluate",
+        "run",
+        "atrx-vep-crispr__Xs5jyyz",
+        "0",
+    );
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    plant_job_snapshot(&dump, "0001-evaluate", "run", 1, "null");
+    let err = from_work_tree(&dump, &root, &evaluate_job()).expect_err("stale snapshot");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("harvest-work incomplete"),
+        "expected fail-closed, got {msg}"
+    );
+    assert!(
+        msg.contains("n_running"),
+        "expected n_running in refuse, got {msg}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn dump_only_finished_snapshot_with_measured_rewards_harvests() {
+    let root = tree("nfin");
+    let dump = root.join(HARVEST_WORK);
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(
+        &dump,
+        "0001-evaluate",
+        "run",
+        "atrx-vep-crispr__Xs5jyyz",
+        "0",
+    );
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    plant_job_snapshot(&dump, "0001-evaluate", "run", 0, "2026-09-11T00:00:00Z");
+    let out = from_work_tree(&dump, &root, &evaluate_job()).expect("finished snapshot");
+    let VmJobOutput::Evaluated(run) = out else {
+        panic!("{out:?}");
+    };
+    assert!((run.report.primary_value - 0.0).abs() < 1e-12);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn overlay_finished_dump_still_n_running_is_refused() {
+    let root = tree("race");
+    let overlay = root.join(SCRATCH_TREE).join("work");
+    let dump = root.join(HARVEST_WORK);
+    plant(&overlay, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(
+        &overlay,
+        "0001-evaluate",
+        "run",
+        "atrx-vep-crispr__Xs5jyyz",
+        "0",
+    );
+    plant_trial(&overlay, "0001-evaluate", "run", "task-hard", "0");
+    plant_job_snapshot(&overlay, "0001-evaluate", "run", 0, "2026-09-11T00:00:00Z");
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(
+        &dump,
+        "0001-evaluate",
+        "run",
+        "atrx-vep-crispr__Xs5jyyz",
+        "0",
+    );
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    plant_job_snapshot(&dump, "0001-evaluate", "run", 1, "null");
+    let err = harvest_from_jail(&root, &root, &evaluate_job()).expect_err("stale dump");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("harvest-work incomplete"),
+        "expected fail-closed, got {msg}"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

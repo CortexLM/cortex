@@ -12,11 +12,13 @@
 //! `proof-fc-host` after `Run` when recv fails — tips via `BUILD_FROM=source`
 //! of `proof-vm-orchestrator`, no guest rebake.
 //!
-//! **Fail-closed on an incomplete harvest copy.** Retained n15: the guest
-//! tree had every trial `result.json` + `verifier/reward.txt` (finished 6/6)
-//! while `{jail_dir}/harvest-work` lagged (empty atrx verifier). Publishing
-//! `report.json`'s `primary_value` from that partial copy is refused — never
-//! a silent 0.0 from an incomplete host dump.
+//! **Fail-closed on a stale harvest copy.** Retained `tbench-x0002`: guest
+//! `/work/.../atrx-vep-crispr__Xs5jyyz/` already had `verifier/reward.txt=0`
+//! and a full trial result (`finished_at` set, `n_completed=6`,
+//! `n_running=0`). Host `{jail_dir}/harvest-work` was a Done≈finish-second
+//! snapshot (`finished_at=null`, `n_running=1`, empty atrx verifier).
+//! Publishing `report.json`'s `primary_value` from that dump is refused.
+//! Guest already wrote `reward.txt` — this is not an adaptor always-write.
 
 #![allow(clippy::missing_errors_doc)]
 
@@ -214,18 +216,35 @@ fn harvest_lagging_guest(guest: &Path, harvest: &Path) -> Option<String> {
             !p.is_file() || std::fs::metadata(&p).map_or(true, |m| m.len() == 0)
         })
         .collect::<Vec<_>>();
-    if missing.is_empty() {
+    let mut reasons: Vec<String> = Vec::new();
+    if !missing.is_empty() {
+        let shown: Vec<String> = missing
+            .iter()
+            .take(8)
+            .map(|p| p.display().to_string())
+            .collect();
+        reasons.push(format!(
+            "{} trial file(s) missing, e.g. {}",
+            missing.len(),
+            shown.join(", ")
+        ));
+    }
+    for rel in harbor_job_result_rels(guest) {
+        if job_snapshot_finished(&guest.join(&rel))
+            && job_snapshot_stale_or_missing(&harvest.join(&rel))
+        {
+            reasons.push(format!(
+                "{} still n_running>0 or finished_at=null on the harvest copy",
+                rel.display()
+            ));
+        }
+    }
+    if reasons.is_empty() {
         return None;
     }
-    let shown: Vec<String> = missing
-        .iter()
-        .take(8)
-        .map(|p| p.display().to_string())
-        .collect();
     Some(format!(
-        "harvest-work incomplete vs guest ({} trial file(s) missing, e.g. {}); refusing to publish a partial copy",
-        missing.len(),
-        shown.join(", ")
+        "harvest-work incomplete vs guest ({}); refusing to publish a partial copy",
+        reasons.join("; ")
     ))
 }
 
@@ -241,7 +260,99 @@ fn guest_trial_files(work: &Path) -> Vec<PathBuf> {
             }
         }
     }
+    out.extend(harbor_job_result_rels(work));
     out
+}
+
+fn harbor_job_dirs(work: &Path) -> Vec<PathBuf> {
+    let mut jobs = Vec::new();
+    for root in harbor_jobs_roots(work) {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                jobs.push(p);
+            }
+        }
+    }
+    jobs.sort();
+    jobs
+}
+
+fn harbor_job_result_rels(work: &Path) -> Vec<PathBuf> {
+    harbor_job_dirs(work)
+        .into_iter()
+        .filter_map(|job| {
+            let p = job.join("result.json");
+            p.is_file()
+                .then(|| p.strip_prefix(work).ok().map(Path::to_path_buf))
+                .flatten()
+        })
+        .collect()
+}
+
+fn load_json(path: &Path) -> Option<serde_json::Value> {
+    let body = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&body).ok()
+}
+
+fn is_harbor_job_snapshot(v: &serde_json::Value) -> bool {
+    if v.get("trial_name").is_some() || v.get("verifier_result").is_some() {
+        return false;
+    }
+    v.get("n_running").is_some() || v.get("finished_at").is_some() || v.get("n_completed").is_some()
+}
+
+fn snapshot_n_running(v: &serde_json::Value) -> Option<u64> {
+    v.get("n_running").and_then(serde_json::Value::as_u64)
+}
+
+fn snapshot_finished_at_null(v: &serde_json::Value) -> bool {
+    match v.get("finished_at") {
+        Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::String(s)) => s.is_empty(),
+        None => is_harbor_job_snapshot(v),
+        Some(_) => false,
+    }
+}
+
+fn job_snapshot_stale(v: &serde_json::Value) -> bool {
+    is_harbor_job_snapshot(v)
+        && (snapshot_n_running(v).is_some_and(|n| n > 0) || snapshot_finished_at_null(v))
+}
+
+fn job_snapshot_finished(path: &Path) -> bool {
+    load_json(path).is_some_and(|v| is_harbor_job_snapshot(&v) && !job_snapshot_stale(&v))
+}
+
+fn job_snapshot_stale_or_missing(path: &Path) -> bool {
+    match load_json(path) {
+        None => true,
+        Some(v) => !is_harbor_job_snapshot(&v) || job_snapshot_stale(&v),
+    }
+}
+
+fn refuse_stale_harbor_snapshot(work_root: &Path) -> Result<(), HvError> {
+    for job in harbor_job_dirs(work_root) {
+        let path = job.join("result.json");
+        if !path.is_file() {
+            continue;
+        }
+        let Some(v) = load_json(&path) else {
+            continue;
+        };
+        if !job_snapshot_stale(&v) {
+            continue;
+        }
+        let n_running = snapshot_n_running(&v).unwrap_or(0);
+        return Err(HvError::Guest(format!(
+            "harvest-work incomplete vs guest ({} n_running={n_running}, finished_at null); refusing to publish a stale snapshot",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn harbor_jobs_roots(work: &Path) -> Vec<PathBuf> {
@@ -265,32 +376,23 @@ fn harbor_jobs_roots(work: &Path) -> Vec<PathBuf> {
 
 fn harbor_trial_dirs(work: &Path) -> Vec<PathBuf> {
     let mut trials = Vec::new();
-    for jobs in harbor_jobs_roots(work) {
-        let Ok(jobs_entries) = std::fs::read_dir(&jobs) else {
+    for job_dir in harbor_job_dirs(work) {
+        let Ok(children) = std::fs::read_dir(&job_dir) else {
             continue;
         };
-        for job in jobs_entries.flatten() {
-            let job_dir = job.path();
-            if !job_dir.is_dir() {
+        for child in children.flatten() {
+            let trial = child.path();
+            if !trial.is_dir() {
                 continue;
             }
-            let Ok(children) = std::fs::read_dir(&job_dir) else {
-                continue;
+            let name = match trial.file_name() {
+                Some(n) => n.to_string_lossy(),
+                None => continue,
             };
-            for child in children.flatten() {
-                let trial = child.path();
-                if !trial.is_dir() {
-                    continue;
-                }
-                let name = match trial.file_name() {
-                    Some(n) => n.to_string_lossy(),
-                    None => continue,
-                };
-                if name == "agent" || name == "verifier" || name == "artifacts" {
-                    continue;
-                }
-                trials.push(trial);
+            if name == "agent" || name == "verifier" || name == "artifacts" {
+                continue;
             }
+            trials.push(trial);
         }
     }
     trials.sort();
@@ -312,9 +414,31 @@ fn evidence_trial_names(evidence: &BTreeMap<String, serde_json::Value>) -> Vec<S
         .collect()
 }
 
+fn trial_dir_matches(dir: &Path, name: &str) -> bool {
+    let Some(n) = dir.file_name() else {
+        return false;
+    };
+    let n = n.to_string_lossy();
+    n == name || n.starts_with(&format!("{name}__")) || n.starts_with(&format!("{name}-"))
+}
+
+fn trial_has_measured_reward(result_path: &Path) -> bool {
+    load_json(result_path)
+        .as_ref()
+        .and_then(|v| v.get("verifier_result"))
+        .and_then(|vr| vr.get("rewards"))
+        .and_then(|r| r.get("reward"))
+        .and_then(serde_json::Value::as_f64)
+        .is_some_and(f64::is_finite)
+}
+
 fn trial_files_present(trial_dir: &Path) -> bool {
-    trial_dir.join("result.json").is_file()
-        && trial_dir.join("verifier").join("reward.txt").is_file()
+    let result = trial_dir.join("result.json");
+    let reward = trial_dir.join("verifier").join("reward.txt");
+    result.is_file()
+        && trial_has_measured_reward(&result)
+        && reward.is_file()
+        && std::fs::metadata(&reward).is_ok_and(|m| m.len() > 0)
 }
 
 fn refuse_incomplete_harbor_jobs(
@@ -339,14 +463,11 @@ fn refuse_incomplete_harbor_jobs(
         claimed
     };
     for name in &names {
-        let dir = dirs.iter().find(|d| {
-            d.file_name()
-                .is_some_and(|n| n.to_string_lossy() == name.as_str())
-        });
+        let dir = dirs.iter().find(|d| trial_dir_matches(d, name));
         match dir {
             Some(d) if trial_files_present(d) => {}
             Some(_) => missing.push(format!(
-                "{name} (missing result.json and/or verifier/reward.txt)"
+                "{name} (missing measured reward on result.json and/or verifier/reward.txt)"
             )),
             None => missing.push(format!("{name} (trial dir missing from harvest copy)")),
         }
@@ -455,6 +576,7 @@ fn reconstruct(
         ));
     }
     refuse_incomplete_harbor_jobs(work_root, &guest.evidence)?;
+    refuse_stale_harbor_snapshot(work_root)?;
     let mut evidence = guest.evidence;
     if let Ok(Some(binding)) = request.experiment() {
         evidence

@@ -141,19 +141,47 @@ def load_job_out(path: Path) -> Any:
         raise SystemExit(f"summarize_job: cannot parse {path}: {exc}") from exc
 
 
+def job_out_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def job_out_unwraps(path: Path) -> bool:
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return False
+    report = extract_report(obj)
+    return report is not None and _is_finite_number(report.get("primary_value"))
+
+
+def select_job_out(found: list[Path]) -> Path:
+    """Newest ``job.out`` that unwraps a finite primary; never a baked job id."""
+    ranked = sorted(
+        found,
+        key=lambda p: (
+            job_out_unwraps(p),
+            job_out_mtime(p),
+            -len(p.parts),
+            str(p),
+        ),
+        reverse=True,
+    )
+    return ranked[0]
+
+
 def find_job_out(jobdir: Path) -> Path:
     """Locate ``job.out`` under any retained jail / job directory."""
     if jobdir.is_file():
         return jobdir
     if not jobdir.is_dir():
         raise SystemExit(f"summarize_job: jobdir is not a file or directory: {jobdir}")
-    direct = jobdir / JOB_OUT_NAME
-    if direct.is_file():
-        return direct
     found: list[Path] = []
     try:
         for path in jobdir.rglob(JOB_OUT_NAME):
-            if path.is_file():
+            if path.is_file() and path not in found:
                 found.append(path)
                 if len(found) >= 64:
                     break
@@ -161,8 +189,7 @@ def find_job_out(jobdir: Path) -> Path:
         raise SystemExit(f"summarize_job: cannot walk {jobdir}: {exc}") from exc
     if not found:
         raise SystemExit(f"summarize_job: no {JOB_OUT_NAME} under {jobdir}")
-    found.sort(key=lambda p: (len(p.parts), str(p)))
-    return found[0]
+    return select_job_out(found)
 
 
 def summarize(obj: Any) -> dict[str, Any]:

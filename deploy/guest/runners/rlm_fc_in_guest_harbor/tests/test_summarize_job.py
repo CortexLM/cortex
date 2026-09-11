@@ -78,6 +78,31 @@ class SummarizeJobTests(unittest.TestCase):
         self.assertNotIn("/var/lib/proof/", src)
         self.assertNotIn("JOBDIR =", src)
         self.assertNotIn("pathc-baseline-n15", src)
+        self.assertNotIn("n15-11346778", src)
+
+    def test_does_not_stick_to_stale_harbor_job_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            jobdir = Path(tmp)
+            stale = jobdir / "harbor-jobs" / "n15-11346778-dead"
+            stale.mkdir(parents=True)
+            (stale / "job.out").write_text(
+                json.dumps({"id": "n15-11346778-dead", "output": {"output": "archived"}}),
+                encoding="utf-8",
+            )
+            fresh = jobdir / "orch"
+            fresh.mkdir()
+            (fresh / "job.out").write_text(json.dumps(NESTED_BASELINE), encoding="utf-8")
+            found = summarize_job.find_job_out(jobdir)
+            self.assertEqual(found, fresh / "job.out")
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "--jobdir", str(jobdir)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("primary_value=0.73", proc.stdout)
+            self.assertIn("cv=0", proc.stdout)
 
     def test_nested_baseline_job_out(self) -> None:
         summary = summarize_job.summarize(NESTED_BASELINE)
