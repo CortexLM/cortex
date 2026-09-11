@@ -152,6 +152,7 @@ is gone, that unique destination exists, and it is not nested. What is there:
 |------------------------------|------|
 | `console.log` | Guest console: init, `proof-vm-guest-agent`, pack staging, the adaptor's redacted tail |
 | `root/scratch.ext4` | The VM's writable disk — the fetched artefact tree, harness jobs, `report.json` if the adaptor wrote one (`mount -o ro,loop` to read) |
+| `harvest-work/` | Host `debugfs` dump of guest `/work`. If this tree lags the guest overlay (missing trial `result.json` / `verifier/reward.txt`, or Harbor `n_running>0` / `finished_at=null` on the dump while the guest finished), harvest refuses rather than publishing `report.json`. Guest writes those files; do not treat a lagging dump as a missing guest `reward.txt`. |
 | `root/vm-config.json`, `net.nft` | What the VM was booted with (the `root/` copies of the kernel and the pinned rootfs sit beside them) |
 
 Pair it with the CP journal line `evaluate refused; no row` (topic, frozen
@@ -369,6 +370,14 @@ still leak no path, key, or origin (the wire check's `cp` step).
   adaptor (`rlm_fc_in_guest_harbor`). The Harbor CLI, venv, and task pack are
   still operator artefacts baked with the generic hooks. A trial without a
   measurement is never scored from some other value.
+- **Incomplete harvest-work dump.** Host reconstruction (`proof-fc-harvest`)
+  refuses when `{jail}/harvest-work` is a stale snapshot of guest `/work`:
+  missing trial `result.json` / `verifier/reward.txt`, or Harbor job
+  `n_running>0` / `finished_at=null` on the artefact used for scoring
+  (retained `tbench-x0002`: guest atrx finished with `reward.txt=0` and
+  `n_completed=6`; the dump still had `n_running=1` and an empty verifier).
+  Do not publish that copy. Guest already writes `reward.txt`; this is not
+  an adaptor always-write. Overlay-only (no dump) still harvests.
 - **Pack size.** Packs travel in one vsock frame: ≤ 160 MiB uncompressed
   tar. Larger packs need a block-device staging path this protocol version
   does not have; the host refuses them by name.

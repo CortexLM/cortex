@@ -280,6 +280,14 @@ Optional overlay layout if you still ship harness files under
 behavior is in that copy. The in-tree `run` does not exec the old overlay.
 
 `tests/` is CI-only; omit it on metal if you want a smaller copy.
+`host/summarize_job.py` is a KVM-host RCA helper (nested orch `job.out`);
+it is not the guest `run` path. Pass `--jobdir <any-dir>` — no baked
+`JOBDIR`.
+
+Host harvest (`proof-fc-harvest`) refuses when `{jail}/harvest-work` lags
+the guest overlay (missing trial `result.json` / `verifier/reward.txt` the
+guest already wrote). That is fail-closed, not an adaptor rewrite of
+`reward.txt`.
 
 Topic params must name this runner id and a relative `tasks_dir` inside the
 pinned pack. Re-pin `experiment_pack_digest` when the pack tar bytes change.
