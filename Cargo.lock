@@ -3878,6 +3878,7 @@ dependencies = [
  "proof-store",
  "proof-submit",
  "proof-task",
+ "proof-vm-proto",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

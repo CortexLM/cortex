@@ -453,6 +453,7 @@ submission row.
 | **400** `declared_flops exceeds the topic budget` | Harvest `nll` / `throughput` only: `declared_flops > topic.flops_budget`. Custom / agent topics do not 400 on this | no | no |
 | **400** `artifact required` | Custom topic, no upload and no `artifact_uri` | no | no |
 | **400** `artifact exceeds 5 MiB` / `artifact is empty` / `artifact_digest does not match uploaded bytes` | Upload oversize, empty, or digest mismatch | no | no |
+| **400** `artifact is not a tar archive` / `artifact is gzip-compressed; upload an uncompressed tar` / `artifact carries no file content` | Upload is gzip, not a tar, or a tar with no file bytes | no | no |
 | **400** `env.<NAME> is required by this topic` | The topic's `miner_byok` variable is missing from `env`. Your `submit_nonce` is **not** spent — re-post the same signed body with `--env <NAME>` | no | no |
 | **400** `env name <NAME> is not declared by this topic` | A variable the signed topic's `miner_byok` / `miner_env_allowlist` does not list. The message names what it does accept | no | no |
 | **400** `env name <NAME> is not a miner environment variable` | Not `[A-Z][A-Z0-9_]{0,63}`, or a name the guest owns (`PROOF_…`, `PATH`, `HOME`, `LANG`, `XDG_RUNTIME_DIR`) | no | no |

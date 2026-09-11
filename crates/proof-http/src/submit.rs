@@ -8,6 +8,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use serde_json::{Map, Value};
 
 use proof_store::MAX_ARTEFACT_BYTES;
+use proof_vm_proto::tar::{require_content, TarError};
 use sha2::{Digest, Sha256};
 
 use super::{err, ErrResp, SubmitBody};
@@ -139,7 +140,8 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Intake gates on uploaded artefact bytes: empty, oversize, digest-of-nothing,
-/// mismatch vs the signed `artifact_digest`.
+/// mismatch vs the signed `artifact_digest`, then tar shape (gzip / not a tar
+/// / no file content). Digest-of-nothing and mismatch stay named as today.
 pub fn accept_uploaded(
     bytes: &[u8],
     claimed: &str,
@@ -164,5 +166,19 @@ pub fn accept_uploaded(
             "artifact_digest does not match uploaded bytes",
         ));
     }
-    Ok(())
+    match require_content(bytes) {
+        Ok(_) => Ok(()),
+        Err(TarError::Gzip) => Err(err(
+            StatusCode::BAD_REQUEST,
+            "artifact is gzip-compressed; upload an uncompressed tar",
+        )),
+        Err(TarError::Malformed(_) | TarError::Digest { .. }) => Err(err(
+            StatusCode::BAD_REQUEST,
+            "artifact is not a tar archive",
+        )),
+        Err(TarError::NoContent) => Err(err(
+            StatusCode::BAD_REQUEST,
+            "artifact carries no file content",
+        )),
+    }
 }

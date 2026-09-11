@@ -657,8 +657,11 @@ async fn submit(
     if let Some(bytes) = uploaded.as_ref() {
         artifact_staged = Some(
             st.store
-                .stash_artefact(&artifact, &submit_nonce, bytes)
-                .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?,
+                .stash_artefact(&artifact, &hotkey, &submit_nonce, bytes)
+                .map_err(|e| {
+                    let _ = st.store.forget_miner_env(&submission_digest);
+                    err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string())
+                })?,
         );
     }
     // Bytes win: a staged upload is identified by the internal locator so
@@ -706,11 +709,16 @@ async fn submit(
     // The nonce is already spent; a retry uses a new nonce (new vault key).
     // Drain keeps staging on error so a queued row can still be scored.
     let staged_digest = row.artifact_digest.clone();
+    let staged_hotkey = row.miner_hotkey.clone();
     let staged_nonce = row.submit_nonce.clone();
+    let staged_env = row.submission_digest.clone();
     match score_intake(&st, row, &topic).await {
         Ok(resp) => Ok((StatusCode::CREATED, Json(resp))),
         Err(e) => {
-            let _ = st.store.forget_artefact(&staged_digest, &staged_nonce);
+            let _ = st
+                .store
+                .forget_artefact(&staged_digest, &staged_hotkey, &staged_nonce);
+            let _ = st.store.forget_miner_env(&staged_env);
             Err(e)
         }
     }
@@ -727,6 +735,7 @@ fn queue_deferred(
 ) -> Result<(StatusCode, Json<SubmitResp>), ErrResp> {
     row.detail = Some(DEFERRED_DETAIL.to_owned());
     let digest = row.artifact_digest.clone();
+    let hotkey = row.miner_hotkey.clone();
     let nonce = row.submit_nonce.clone();
     match st.store.enqueue(row).map_err(|e| store_err(&e))? {
         Enqueued::Inserted(row) => Ok((
@@ -734,7 +743,7 @@ fn queue_deferred(
             Json(SubmitResp::of(&row, st.backend, false)),
         )),
         Enqueued::Existing(existing) => {
-            let _ = st.store.forget_artefact(&digest, &nonce);
+            let _ = st.store.forget_artefact(&digest, &hotkey, &nonce);
             let eligible = existing.verdict.as_ref().is_some_and(|v| v.pass);
             let mut resp = SubmitResp::of(&existing, st.backend, eligible);
             resp.detail = Some(if existing.state == SubmissionState::Queued {
@@ -870,9 +879,9 @@ async fn score_intake(
         };
         // A persisted reject is terminal: the row will never be drained again.
         let _ = st.store.forget_miner_env(&row.submission_digest);
-        let _ = st
-            .store
-            .forget_artefact(&row.artifact_digest, &row.submit_nonce);
+        let _ =
+            st.store
+                .forget_artefact(&row.artifact_digest, &row.miner_hotkey, &row.submit_nonce);
         return persist_pre_eval_reject(st, executor.as_ref(), row, topic, &failed);
     }
 
@@ -914,7 +923,7 @@ async fn score_intake(
     let _ = st.store.forget_miner_env(&row.submission_digest);
     let _ = st
         .store
-        .forget_artefact(&row.artifact_digest, &row.submit_nonce);
+        .forget_artefact(&row.artifact_digest, &row.miner_hotkey, &row.submit_nonce);
     persist_scored(
         st,
         executor.as_ref(),
@@ -1499,6 +1508,12 @@ mod tests {
         let mut h = Sha256::new();
         h.update(label.as_bytes());
         hex::encode(h.finalize())
+    }
+
+    /// Uncompressed ustar with file content — the shape intake accepts.
+    fn recipe_tar() -> Vec<u8> {
+        use proof_vm_proto::tar::fixtures::{archive, member};
+        archive(&[member("recipe/run.sh", b'0', b"echo recipe\n")])
     }
 
     fn sk() -> [u8; 32] {
@@ -3551,8 +3566,8 @@ mod tests {
     async fn upload_only_custom_submit_stages_bytes_and_records_internal_locator() {
         let scorer = Arc::new(FamilyStub::win("topic_minted_metric"));
         let app = app_with_custom(scorer.clone());
-        let bytes = b"recipe-tar-not-empty";
-        let artifact_digest = hex::encode(Sha256::digest(bytes));
+        let bytes = recipe_tar();
+        let artifact_digest = hex::encode(Sha256::digest(&bytes));
         let fields = submit_body(
             "upload-only",
             &serde_json::json!({
@@ -3560,7 +3575,7 @@ mod tests {
                 "artifact_digest": artifact_digest,
             }),
         );
-        let (st, created) = multipart_req(app.clone(), &fields, Some(bytes)).await;
+        let (st, created) = multipart_req(app.clone(), &fields, Some(&bytes)).await;
         assert_eq!(st, StatusCode::CREATED, "{created}");
         let id = created["id"].as_str().expect("id");
         let (st, row) = json_req(
@@ -3610,8 +3625,8 @@ mod tests {
     async fn upload_wins_over_miner_uri_and_mismatch_or_oversize_or_empty_is_400() {
         let scorer = Arc::new(FamilyStub::win("topic_minted_metric"));
         let app = app_with_custom(scorer.clone());
-        let bytes = b"bytes-win-artefact";
-        let artifact_digest = hex::encode(Sha256::digest(bytes));
+        let bytes = recipe_tar();
+        let artifact_digest = hex::encode(Sha256::digest(&bytes));
         let fields = submit_body(
             "both",
             &serde_json::json!({
@@ -3620,7 +3635,7 @@ mod tests {
                 "artifact_uri": "https://example.invalid/ignored.tar",
             }),
         );
-        let (st, created) = multipart_req(app.clone(), &fields, Some(bytes)).await;
+        let (st, created) = multipart_req(app.clone(), &fields, Some(&bytes)).await;
         assert_eq!(st, StatusCode::CREATED, "{created}");
         let id = created["id"].as_str().expect("id");
         let (_, row) = json_req(
@@ -3643,7 +3658,7 @@ mod tests {
                 "artifact_digest": digest("mismatch"),
             }),
         );
-        let (st, body) = multipart_req(app.clone(), &mismatch, Some(bytes)).await;
+        let (st, body) = multipart_req(app.clone(), &mismatch, Some(&bytes)).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(
             body["error"],
@@ -3679,6 +3694,51 @@ mod tests {
                 .contains("sha256 of empty input"),
             "{body}"
         );
+
+        let not_tar = b"recipe-tar-not-empty";
+        let not_tar_digest = hex::encode(Sha256::digest(not_tar));
+        let garbage = submit_body(
+            "not-a-tar",
+            &serde_json::json!({
+                "topic_id": "custom-topic-v0",
+                "artifact_digest": not_tar_digest,
+            }),
+        );
+        let (st, body) = multipart_req(app.clone(), &garbage, Some(not_tar)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "artifact is not a tar archive");
+
+        let gzip = [0x1fu8, 0x8b, 0x08, 0x00, 0, 0, 0, 0];
+        let gzip_digest = hex::encode(Sha256::digest(gzip));
+        let gz = submit_body(
+            "gzip",
+            &serde_json::json!({
+                "topic_id": "custom-topic-v0",
+                "artifact_digest": gzip_digest,
+            }),
+        );
+        let (st, body) = multipart_req(app.clone(), &gz, Some(&gzip)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(
+            body["error"],
+            "artifact is gzip-compressed; upload an uncompressed tar"
+        );
+
+        let hollow = {
+            use proof_vm_proto::tar::fixtures::{archive, member};
+            archive(&[member("recipe/empty", b'0', b"")])
+        };
+        let hollow_digest = hex::encode(Sha256::digest(&hollow));
+        let empty_files = submit_body(
+            "hollow",
+            &serde_json::json!({
+                "topic_id": "custom-topic-v0",
+                "artifact_digest": hollow_digest,
+            }),
+        );
+        let (st, body) = multipart_req(app.clone(), &empty_files, Some(&hollow)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "artifact carries no file content");
 
         let over = vec![b'x'; proof_store::MAX_ARTEFACT_BYTES + 1];
         let over_digest = hex::encode(Sha256::digest(&over));
@@ -5526,6 +5586,53 @@ mod tests {
             store.miner_env(&digest).expect("stash").is_empty(),
             "a scored row does not keep the key"
         );
+    }
+
+    /// Staging 503 after BYOK is held rolls the key back: no row, vault empty.
+    #[tokio::test]
+    async fn a_failed_artefact_stage_does_not_orphan_byok() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let pid = std::process::id();
+        let byok_root = std::env::temp_dir().join(format!("proof-byok-orphan-{pid}"));
+        let art_file = std::env::temp_dir().join(format!("proof-art-notdir-{pid}"));
+        let _ = std::fs::remove_dir_all(&byok_root);
+        let _ = std::fs::remove_file(&art_file);
+        std::fs::write(&art_file, b"not-a-dir").expect("file not a dir");
+        let mut state = state_with_custom_params(
+            scorer.clone(),
+            false,
+            true,
+            &[(proof_canon::PARAM_MINER_BYOK, BYOK)],
+        );
+        state.store = state
+            .store
+            .with_miner_byok_vault(proof_store::MinerEnvVault::at(&byok_root))
+            .with_artefact_vault(proof_store::ArtefactVault::at(&art_file));
+        let app = proof_router(state);
+        let bytes = recipe_tar();
+        let artifact_digest = hex::encode(Sha256::digest(&bytes));
+        let fields = submit_body(
+            "stage-fail",
+            &serde_json::json!({
+                "topic_id": CUSTOM,
+                "artifact_digest": artifact_digest,
+                "env": { BYOK: BYOK_VALUE },
+            }),
+        );
+        let (st, out) = multipart_req(app.clone(), &fields, Some(&bytes)).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{out}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0, "nothing ran");
+        let (st, list) = json_req(app, "GET", "/v1/submissions", serde_json::json!({}), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(
+            list["items"].as_array().expect("items").is_empty(),
+            "no row: {list}"
+        );
+        let leftover =
+            std::fs::read_dir(&byok_root).map_or(0, |d| d.filter_map(Result::ok).count());
+        assert_eq!(leftover, 0, "BYOK must not remain after a staging 503");
+        let _ = std::fs::remove_dir_all(&byok_root);
+        let _ = std::fs::remove_file(&art_file);
     }
     /// A topic that runs on the miner's own key and a host that no longer
     /// holds the one that was submitted (a restart with nothing on disk, an
