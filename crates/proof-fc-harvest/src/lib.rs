@@ -7,7 +7,10 @@
 //! 1. `{jail_root}/scratch-tree/work/…` (host overlay of guest `/var/lib/proof`)
 //! 2. else a **fresh** `debugfs -c -R 'rdump /work …'` of
 //!    `{jail_root}/scratch.ext4` into `{jail_dir}/harvest-work` (never a
-//!    leftover dump from an earlier job on a reused VM).
+//!    leftover dump from an earlier job or an earlier incomplete recovery
+//!    on the same jail). Each attempt invalidates any retained `harvest-work`
+//!    and re-dumps; `debugfs rdump /work` lands at `{dest}/work`, which is
+//!    the tree used for reconstruction.
 //!
 //! Only the highest-numbered matching work directory counts. Called from
 //! `proof-fc-host` after `Run` when recv fails — tips via `BUILD_FROM=source`
@@ -182,7 +185,21 @@ fn work_root(jail_root: &Path, jail_dir: &Path) -> Option<PathBuf> {
         return None;
     }
     let dest = jail_dir.join(HARVEST_WORK);
+    // An early recovery can leave a nonempty harvest-work before the guest
+    // writes report.json. Never return that tree: drop it and re-dump so a
+    // later completed scratch.ext4 is what we reconstruct from.
+    let _ = std::fs::remove_dir_all(&dest);
     dump_ext4_work(&image, &dest).ok()?;
+    work_tree_from_dump(dest)
+}
+
+/// `debugfs rdump /work dest` copies the directory named `work` into `dest`.
+/// Overlay harvest uses `{scratch-tree}/work` itself; keep the same shape.
+fn work_tree_from_dump(dest: PathBuf) -> Option<PathBuf> {
+    let nested = dest.join("work");
+    if nested.is_dir() {
+        return Some(nested);
+    }
     dest.is_dir().then_some(dest)
 }
 
@@ -209,10 +226,7 @@ fn assert_harvest_sync(jail_root: &Path, jail_dir: &Path, job: &VmJob) -> Result
 fn harvest_lagging_guest(guest: &Path, harvest: &Path) -> Option<String> {
     let missing = guest_trial_files(guest)
         .into_iter()
-        .filter(|rel| {
-            let p = harvest.join(rel);
-            !p.is_file() || std::fs::metadata(&p).map_or(true, |m| m.len() == 0)
-        })
+        .filter(|rel| !non_empty_file(&harvest.join(rel)))
         .collect::<Vec<_>>();
     let mut reasons: Vec<String> = Vec::new();
     if !missing.is_empty() {
@@ -251,7 +265,7 @@ fn guest_trial_files(work: &Path) -> Vec<PathBuf> {
     for trial in harbor_trial_dirs(work) {
         for rel in ["result.json", "verifier/reward.txt"] {
             let p = trial.join(rel);
-            if p.is_file() {
+            if non_empty_file(&p) {
                 if let Ok(rel_path) = p.strip_prefix(work) {
                     out.push(rel_path.to_path_buf());
                 }
@@ -446,6 +460,9 @@ fn trial_has_measured_reward(result_path: &Path) -> bool {
         .is_some_and(f64::is_finite)
 }
 
+/// Per-trial evidence is complete only when both files are non-empty and
+/// `result.json` parses as JSON with a finite `verifier_result.rewards.reward`.
+/// Zero-byte, truncated, or reward-less payloads are incomplete (fail-closed).
 fn trial_files_present(trial_dir: &Path) -> bool {
     let result = trial_dir.join("result.json");
     let reward = trial_dir.join("verifier").join("reward.txt");
@@ -500,11 +517,21 @@ fn refuse_incomplete_harbor_jobs(
     )))
 }
 
+fn debugfs_bin() -> &'static str {
+    if Path::new("/usr/sbin/debugfs").is_file() {
+        "/usr/sbin/debugfs"
+    } else if Path::new("/sbin/debugfs").is_file() {
+        "/sbin/debugfs"
+    } else {
+        "debugfs"
+    }
+}
+
 fn dump_ext4_work(image: &Path, dest: &Path) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(dest);
     std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
     let spec = format!("rdump /work {}", dest.display());
-    let out = std::process::Command::new("debugfs")
+    let out = std::process::Command::new(debugfs_bin())
         .args(["-c", "-R", &spec, &image.display().to_string()])
         .output()
         .map_err(|e| format!("debugfs: {e}"))?;

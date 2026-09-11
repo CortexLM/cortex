@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::{
     from_work_tree, harvest_from_jail, recv_job_or_harvest, try_from_jail, HARBOR_JOBS,
-    HARVEST_WORK, POLL_INTERVAL, SCRATCH_TREE,
+    HARVEST_WORK, POLL_INTERVAL, SCRATCH_IN_JAIL, SCRATCH_TREE,
 };
 
 fn tree(tag: &str) -> PathBuf {
@@ -526,12 +526,8 @@ fn leftover_harvest_work_is_not_reused_for_a_later_job() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-#[test]
-fn dump_only_empty_trial_files_are_refused() {
-    let root = tree("empty");
-    let dump = root.join(HARVEST_WORK);
-    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.73"));
-    let trial = dump
+fn plant_empty_atrx_trial(work: &Path) {
+    let trial = work
         .join("0001-evaluate")
         .join(HARBOR_JOBS)
         .join("run")
@@ -539,12 +535,171 @@ fn dump_only_empty_trial_files_are_refused() {
     std::fs::create_dir_all(trial.join("verifier")).expect("verifier");
     std::fs::write(trial.join("result.json"), "").expect("empty result");
     std::fs::write(trial.join("verifier").join("reward.txt"), "").expect("empty reward");
+}
+
+fn assert_incomplete_not_scored(err: &HvError, primary: &str) {
+    let msg = err.to_string();
+    assert!(
+        msg.contains("harvest-work incomplete"),
+        "expected fail-closed, got {msg}"
+    );
+    assert!(
+        !msg.contains(primary),
+        "must not publish the report score, got {msg}"
+    );
+}
+
+#[test]
+fn dump_only_empty_trial_files_are_refused() {
+    let root = tree("empty");
+    let dump = root.join(HARVEST_WORK);
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.73"));
+    plant_empty_atrx_trial(&dump);
     plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
     let err = from_work_tree(&dump, &root, &evaluate_job()).expect_err("empty files");
+    assert_incomplete_not_scored(&err, "0.73");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Truncated `result.json` is not a finite `verifier_result.rewards.reward`.
+#[test]
+fn dump_only_truncated_result_json_is_refused() {
+    let root = tree("trunc");
+    let dump = root.join(HARVEST_WORK);
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.73"));
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    let trial = dump
+        .join("0001-evaluate")
+        .join(HARBOR_JOBS)
+        .join("run")
+        .join("atrx");
+    std::fs::create_dir_all(trial.join("verifier")).expect("verifier");
+    std::fs::write(trial.join("result.json"), r#"{"trial_name":"atrx""#).expect("truncated");
+    std::fs::write(trial.join("verifier").join("reward.txt"), "0").expect("reward");
+    let err = from_work_tree(&dump, &root, &evaluate_job()).expect_err("truncated json");
+    assert_incomplete_not_scored(&err, "0.73");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn e2fs_bin(names: &[&str]) -> Option<PathBuf> {
+    for n in names {
+        let p = Path::new(n);
+        if p.is_file() {
+            return Some(p.to_path_buf());
+        }
+    }
+    None
+}
+
+fn write_scratch_ext4(jail_root: &Path, work_tree: &Path) {
+    let mkfs = e2fs_bin(&["/usr/sbin/mkfs.ext4", "/sbin/mkfs.ext4"])
+        .expect("mkfs.ext4 required for scratch.ext4 harvest tests");
+    let stage = jail_root.join("mkfs-src");
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage).expect("stage");
+    let status = std::process::Command::new("cp")
+        .arg("-a")
+        .arg(work_tree)
+        .arg(stage.join("work"))
+        .status()
+        .expect("cp");
+    assert!(status.success(), "cp work tree for mkfs");
+    let img = jail_root.join(SCRATCH_IN_JAIL);
+    let trunc = std::process::Command::new("truncate")
+        .args(["-s", "16M"])
+        .arg(&img)
+        .status()
+        .expect("truncate");
+    assert!(trunc.success(), "truncate scratch.ext4");
+    let out = std::process::Command::new(&mkfs)
+        .args(["-F", "-d"])
+        .arg(&stage)
+        .arg(&img)
+        .output()
+        .expect("mkfs.ext4");
     assert!(
-        err.to_string().contains("harvest-work incomplete"),
-        "got {err}"
+        out.status.success(),
+        "mkfs.ext4 -d failed: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    let _ = std::fs::remove_dir_all(&stage);
+}
+
+/// P1: dump-only recovery of a scratch image with zero-byte trial files
+/// must refuse, not publish `report.json`'s `primary_value`.
+#[test]
+fn dump_from_scratch_empty_trial_files_are_refused() {
+    let root = tree("empty-img");
+    let src = root.join("src-work");
+    plant(&src, "evaluate", "0001", &harbor_report_n2("0.73"));
+    plant_empty_atrx_trial(&src);
+    plant_trial(&src, "0001-evaluate", "run", "task-hard", "0");
+    write_scratch_ext4(&root, &src);
+    let err = harvest_from_jail(&root, &root, &evaluate_job()).expect_err("empty files");
+    assert_incomplete_not_scored(&err, "0.73");
+    assert!(try_from_jail(&root, &root, &evaluate_job()).is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// P1: an early nonempty `harvest-work` must not hide a later completed
+/// `scratch.ext4`. Recovery invalidates the retained dump and re-dumps.
+#[test]
+fn retained_harvest_work_is_refreshed_from_scratch_ext4() {
+    let root = tree("refresh");
+    let stale = root.join(HARVEST_WORK);
+    plant(
+        &stale,
+        "evaluate",
+        "0001",
+        r#"{"primary_value": 0.11, "claim_holds": false, "evidence": {"harbor_exit": 0}}"#,
+    );
+    let src = root.join("src-work");
+    plant(
+        &src,
+        "evaluate",
+        "0001",
+        r#"{"primary_value": 0.73, "claim_holds": true, "evidence": {"harbor_exit": 0}}"#,
+    );
+    write_scratch_ext4(&root, &src);
+    let out = harvest_from_jail(&root, &root, &evaluate_job()).expect("fresh dump");
+    let VmJobOutput::Evaluated(run) = out else {
+        panic!("{out:?}");
+    };
+    assert!(
+        (run.report.primary_value - 0.73).abs() < 1e-12,
+        "stale harvest-work 0.11 must not win over scratch.ext4 0.73, got {}",
+        run.report.primary_value
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// P1: first dump before `report.json` exists; a later harvest must see the
+/// report now in the image instead of the retained incomplete dump.
+#[test]
+fn early_incomplete_dump_does_not_hide_later_scratch_report() {
+    let root = tree("early");
+    let src = root.join("src-work");
+    std::fs::create_dir_all(src.join("placeholder")).expect("empty work");
+    std::fs::write(src.join("placeholder").join("keep"), b"x").expect("keep");
+    write_scratch_ext4(&root, &src);
+    assert!(
+        harvest_from_jail(&root, &root, &evaluate_job()).is_err(),
+        "no report yet"
+    );
+    assert!(root.join(HARVEST_WORK).is_dir(), "early dump retained");
+    let later = root.join("src-work-later");
+    plant(
+        &later,
+        "evaluate",
+        "0001",
+        r#"{"primary_value": 0.73, "claim_holds": true, "evidence": {"harbor_exit": 0}}"#,
+    );
+    write_scratch_ext4(&root, &later);
+    let out = harvest_from_jail(&root, &root, &evaluate_job()).expect("re-dump");
+    let VmJobOutput::Evaluated(run) = out else {
+        panic!("{out:?}");
+    };
+    assert!((run.report.primary_value - 0.73).abs() < 1e-12);
     let _ = std::fs::remove_dir_all(&root);
 }
 
