@@ -333,8 +333,8 @@ impl GuestAgent {
         let pack = self.pack.lock().await.clone();
         let pack = staging::pack_for(pack.as_ref(), &adaptor.binding.pack)?;
         let work = self.work_dir(kind);
-        let result = async {
-            let artifact = match kind {
+        let fetched = async {
+            match kind {
                 JobKind::Evaluate => {
                     let dir =
                         fetch::fetch_artifact(request, &work, self.cfg.allow_plain_http, injected)
@@ -343,34 +343,36 @@ impl GuestAgent {
                                 "evaluate needs the miner's artifact_uri; the request carries none"
                                     .to_owned()
                             })?;
-                    Some(dir)
+                    Ok(Some(dir))
                 }
                 // The baseline is the topic's own reference run: the pack is its
                 // input, an artefact only if the topic serves one.
                 JobKind::Baseline | JobKind::Inspect | JobKind::ProposeRules => {
-                    fetch::fetch_artifact(request, &work, self.cfg.allow_plain_http, injected)
-                        .await?
+                    fetch::fetch_artifact(request, &work, self.cfg.allow_plain_http, injected).await
                 }
-            };
-            runner::run_paid(
-                &self.cfg,
-                &adaptor,
-                request,
-                kind,
-                &pack,
-                &work,
-                artifact.as_deref(),
-            )
-            .await
+            }
         }
         .await;
-        // run_paid already seals `work` on the exec path. Fetch/resolve
-        // failures still need this job dir on the virtio-blk — never
-        // work_root (stale siblings).
-        if result.is_err() {
-            let _ = runner::persist_work(&work);
-        }
-        result
+        let artifact = match fetched {
+            Ok(a) => a,
+            Err(e) => {
+                // Fetch/resolve never entered run_paid; seal this job dir
+                // (never work_root — stale siblings). Exec-path failures
+                // are already flushed inside run_paid.
+                let _ = runner::persist_work(&work);
+                return Err(e);
+            }
+        };
+        runner::run_paid(
+            &self.cfg,
+            &adaptor,
+            request,
+            kind,
+            &pack,
+            &work,
+            artifact.as_deref(),
+        )
+        .await
     }
 }
 
