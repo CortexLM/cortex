@@ -166,9 +166,12 @@ The guest unpacks that tar under `$PROOF_ARTIFACT_DIR`. Evaluate attaches
 your **custom Python agent** (primary), a Harbor `BaseAgent` subclass, a
 `harness.json` kind, or a `run.sh` script — not a silent copy of the
 operator's `terminus-2`. You are not required to ship Terminus-2. A
-**prompt-only subclass of `terminus-2`** (same agent, your prompt) is a
-legitimate evaluate harness when you name that class in `harness.json` /
-`import_path`. That is not an eval short-circuit.
+**prompt-only subclass of `terminus-2`** (same agent, your prompt) is not
+an eval short-circuit: inspect does not fail it. That path only **runs**
+when the guest Harbor overlay exposes Terminus-2 as an importable class
+you can subclass (Harbor is an operator overlay, not in this repo). Name
+that class in `harness.json` / `import_path`. Custom Python `class Agent`
+does not depend on that overlay and is the primary path.
 
 Harbor's `-a` / `--agent` accepts a built-in name or a Python import path
 (`module.path:ClassName`); it does **not** take a filesystem path. The
@@ -190,8 +193,11 @@ What fails: `skip_eval`, `skip_verifier`, `always_pass_eval`,
 This is the constructor / `run` miners ask for. It is **custom Python** —
 you are **not** required to subclass Harbor `BaseAgent` (or Terminus). Name
 the class `Agent`. If you do subclass Terminus — including a prompt-only
-`terminus-2` subclass — point `import_path` at that class
-(`…:ImprovedTerminus`); keep one primary example here.
+`terminus-2` subclass — import it from the **guest Harbor overlay** (not
+from this repo) and point `import_path` at that class
+(`…:ImprovedTerminus`). If that overlay does not expose a subclassable
+Terminus-2, evaluate fails at import rather than scoring; use custom
+Python `class Agent` instead. Keep one primary example here.
 
 `harness.json`:
 
@@ -491,7 +497,7 @@ are the contract; the ids published today are:
 |---------|----------------------|
 | `same_seed` | Every paid call and every scored episode uses the topic baseline seed. No per-miner reseeding |
 | `no_tb4_hardcoding` | Your harness must not hardcode task ids, answers, fixtures, or success paths. Only the signed topic carries `task_slice`. Inspect fails on cheat markers `tb4_answers` / `hardcoded_tb4`, not because a README names this rule id |
-| `no_eval_short_circuit` | The evaluator, the metric path, and the sandbox are untouched — no short-circuiting the checklist or the scoring. Inspect fails on `skip_eval` / `skip_verifier` / `always_pass_eval` / `short_circuit_eval`, not because a README names this rule id. A prompt-only `terminus-2` subclass is not a short-circuit |
+| `no_eval_short_circuit` | The evaluator, the metric path, and the sandbox are untouched — no short-circuiting the checklist or the scoring. Inspect fails on `skip_eval` / `skip_verifier` / `always_pass_eval` / `short_circuit_eval`, not because a README names this rule id. A prompt-only `terminus-2` subclass is not a short-circuit; whether it **imports** depends on the guest Harbor overlay (not in this repo) |
 | `miner_byok_openrouter` | You supply the OpenRouter key for the pinned model; operator keys are never injected into your guest |
 | `firecracker_sister` | Your code runs only in the Firecracker guest the host booted, and the report must carry that attestation |
 | `artefacts_zip` | Scored artefacts persist as a zip under the topic's artefact root, per submission |
