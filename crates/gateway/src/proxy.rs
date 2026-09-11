@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
 use bytes::Bytes;
-use gateway_core::proxy_detach::{detach_proof, is_proof_submit, normalize_proxy_path};
+use gateway_core::proxy_detach::{detach_proof, is_proof_submit};
 
 use crate::api::GatewayState;
 use gateway_registry::RegistryError;
