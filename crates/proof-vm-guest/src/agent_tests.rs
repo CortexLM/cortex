@@ -823,6 +823,37 @@ async fn serve_connection_speaks_frames_until_the_host_hangs_up() {
     let _ = std::fs::remove_dir_all(&r);
 }
 
+/// After `handle(Run)` the `Done` write hits a broken pipe: the session is
+/// still Ok. The guest does not open a new host vsock (the host never
+/// listens on `v.sock_5000`); host harvest reads `report.json`.
+#[tokio::test]
+async fn a_broken_pipe_on_done_is_ok_host_harvest_recovers() {
+    let r = root("retry");
+    let a = agent(&r);
+    hello(&a).await;
+    let (mut host, guest) = tokio::io::duplex(1 << 20);
+    let server = {
+        let a = a.clone();
+        tokio::spawn(async move { a.serve_connection(guest).await })
+    };
+    write_frame(
+        &mut host,
+        &HostToRlm::Run {
+            job: Box::new(VmJob::Archive {
+                topic_id: "topic-a".into(),
+            }),
+        },
+    )
+    .await
+    .expect("job");
+    drop(host);
+    server
+        .await
+        .expect("join")
+        .expect("ok; host harvest recovers");
+    let _ = std::fs::remove_dir_all(&r);
+}
+
 /// The miner's own BYOK environment reaches their paid run: exported under
 /// the name the signed topic declared, written to a 0600 file beside it, and
 /// blanked out of everything the guest ships back. It is not part of the

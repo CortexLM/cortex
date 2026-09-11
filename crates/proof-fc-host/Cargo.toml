@@ -12,6 +12,7 @@ publish = false
 async-trait = "0.1"
 hex = "0.4"
 proof-rlm = { path = "../proof-rlm" }
+proof-fc-harvest = { path = "../proof-fc-harvest" }
 proof-vm-agent = { path = "../proof-vm-agent" }
 proof-vm-proto = { path = "../proof-vm-proto" }
 serde = { version = "1", features = ["derive"] }

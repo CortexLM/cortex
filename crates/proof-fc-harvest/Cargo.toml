@@ -1,0 +1,25 @@
+[package]
+name = "proof-fc-harvest"
+description = "Host-side scratch harvest for Proof experiment/topic VMs: reconstruct Evaluated/Baseline from guest report.json when vsock drops Done. Used by proof-fc-host; tips without a guest image rebake."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+proof-rlm = { path = "../proof-rlm" }
+proof-vm-agent = { path = "../proof-vm-agent" }
+proof-vm-proto = { path = "../proof-vm-proto" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+proof-rlm = { path = "../proof-rlm", features = ["test-fixtures"] }
+tokio = { version = "1", features = ["io-util", "macros", "rt", "time", "test-util"] }
+
+[lints]
+workspace = true
