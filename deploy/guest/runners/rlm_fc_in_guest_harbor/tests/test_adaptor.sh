@@ -224,11 +224,12 @@ done
 printf '%s\n' "$agent" > "${PROOF_WORK_DIR}/harbor.agent"
 printf '%s\n' "$path" > "${PROOF_WORK_DIR}/harbor.path"
 printf '%s\n' "$env" > "${PROOF_WORK_DIR}/harbor.env"
-job="$jobs/job1/hello__1"
-mkdir -p "$job"
+job="$jobs/job1/cargo-flight-dispatch__1"
+mkdir -p "$job/verifier"
 cat > "$job/result.json" <<JSON
-{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 1.0}}}
+{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 1.0}}}
 JSON
+printf '1.0\n' > "$job/verifier/reward.txt"
 EOF
 chmod 0755 "$FAKE_BIN/harbor" "$ADAPTOR/run" "$ADAPTOR/inspect" "$ADAPTOR/harness/run-harbor"
 
@@ -290,7 +291,7 @@ grep -q "harbor exited 7" "$WORKDIR/die.err" || fail "must name harbor exit"
 grep -q "line-99" "$WORKDIR/die.err" || fail "proof_die_harbor must print log tail"
 pass "proof_die_harbor prints harbor.run.log tail on stderr"
 
-# --- nonzero Harbor exit must not write a successful report ---
+# --- nonzero Harbor exit still scores already-measured trials ---
 cat > "$FAKE_BIN/harbor" <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -301,29 +302,86 @@ while [ $# -gt 0 ]; do
         *) shift ;;
     esac
 done
-job="$jobs/job1/hello__1"
-mkdir -p "$job"
+job="$jobs/job1/cargo-flight-dispatch__1"
+mkdir -p "$job/verifier"
 cat > "$job/result.json" <<JSON
-{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 0.6}}}
+{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 0.6}}}
 JSON
-echo "TypeError: Can't instantiate abstract class ProofPythonAgent without an implementation for abstract method 'setup'"
+printf '0.6\n' > "$job/verifier/reward.txt"
+echo "harbor: timeout after deadline"
 exit 23
 EOF
 chmod 0755 "$FAKE_BIN/harbor"
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
 PARTIAL_OUT="$WORKDIR/out-partial"
 mkdir -p "$PARTIAL_OUT"
 export PROOF_OUTPUT_DIR="$PARTIAL_OUT"
 export PROOF_JOB=evaluate
 export PROOF_ARTIFACT_DIR="$FIXTURES"
-if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/partial.out" 2>"$WORKDIR/partial.err"; then
-    fail "nonzero harbor exit must fail closed"
+"$ADAPTOR/harness/run-harbor" >"$WORKDIR/partial.out" 2>"$WORKDIR/partial.err" \
+    || fail "nonzero harbor with measured trials must still summarize"
+python3 - "$PARTIAL_OUT/report.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["primary_value"] == 0.6, r
+assert r["evidence"]["n_measured"] == 1
+assert r["evidence"]["harbor_exit"] == 23
+assert r["evidence"]["harbor_incomplete"] is True
+PY
+grep -qi "harbor exited 23" "$WORKDIR/partial.err" || fail "must name the harbor exit"
+grep -qi "scored already-measured" "$WORKDIR/partial.err" || fail "must say measured trials scored"
+pass "nonzero harbor exit scores already-measured trials"
+
+# --- unfinished Harbor snapshot + reward.txt-only is fail-closed ---
+cat > "$FAKE_BIN/harbor" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+jobs=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --jobs-dir) jobs="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+job="$jobs/job1"
+mkdir -p "$job/cargo-flight-dispatch__1/verifier"
+cat > "$job/result.json" <<JSON
+{"finished_at": null, "n_running": 1, "n_completed": 1}
+JSON
+printf '1.0\n' > "$job/cargo-flight-dispatch__1/verifier/reward.txt"
+exit 143
+EOF
+chmod 0755 "$FAKE_BIN/harbor"
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
+TXT_OUT="$WORKDIR/out-reward-txt"
+mkdir -p "$TXT_OUT"
+export PROOF_OUTPUT_DIR="$TXT_OUT"
+if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/txt-only.out" 2>"$WORKDIR/txt-only.err"; then
+    fail "reward.txt-only / unfinished snapshot must fail closed"
 fi
-[ ! -f "$PARTIAL_OUT/report.json" ] || fail "must not write report.json after harbor exit 23"
-grep -qi "harbor exited 23\\|refusing to score" "$WORKDIR/partial.err" || fail "must name the harbor failure"
-grep -qi "Can't instantiate abstract class ProofPythonAgent" "$WORKDIR/partial.err" \
+[ ! -f "$TXT_OUT/report.json" ] || fail "must not publish from unfinished Harbor snapshot"
+pass "incomplete Harbor (stale snapshot / reward.txt-only) fails closed"
+
+# --- nonzero Harbor with zero measured trials stays fail-closed ---
+cat > "$FAKE_BIN/harbor" <<'EOF'
+#!/bin/bash
+echo "TypeError: Can't instantiate abstract class ProofPythonAgent without an implementation for abstract method 'setup'"
+exit 23
+EOF
+chmod 0755 "$FAKE_BIN/harbor"
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
+EMPTY_OUT="$WORKDIR/out-empty-nonzero"
+mkdir -p "$EMPTY_OUT"
+export PROOF_OUTPUT_DIR="$EMPTY_OUT"
+if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/empty-nz.out" 2>"$WORKDIR/empty-nz.err"; then
+    fail "nonzero harbor with no trials must fail closed"
+fi
+[ ! -f "$EMPTY_OUT/report.json" ] || fail "must not write report.json when n_measured=0"
+grep -qi "harbor exited 23" "$WORKDIR/empty-nz.err" || fail "must name the harbor failure"
+grep -qi "Can't instantiate abstract class ProofPythonAgent" "$WORKDIR/empty-nz.err" \
     || fail "503 stderr must carry harbor.run.log tail (setup TypeError)"
-grep -qi "harbor.run.log" "$WORKDIR/partial.err" || fail "must label the log tail"
-pass "nonzero harbor exit fails closed (no report) and emits log tail"
+grep -qi "harbor.run.log" "$WORKDIR/empty-nz.err" || fail "must label the log tail"
+pass "nonzero harbor with n_measured=0 fails closed and emits log tail"
 
 # --- import_path naming a module only on inherited PYTHONPATH ---
 ESCAPE="$WORKDIR/escape"
@@ -345,7 +403,7 @@ if grep -q "outside_agent:ExternalAgent" "$WORKDIR/escape.out"; then
 fi
 pass "import_path outside artefact is refused before Harbor"
 
-# --- script harness refuses miner-authored report.json ---
+# --- script harness refuses miner-authored report.json (no Harbor jobs) ---
 rm -rf "$PROOF_WORK_DIR/harbor-jobs"
 SCRIPT_ART="$WORKDIR/script-self-score"
 mkdir -p "$SCRIPT_ART/recipe"
@@ -363,23 +421,25 @@ SELF_OUT="$WORKDIR/out-self-score"
 mkdir -p "$SELF_OUT"
 export PROOF_OUTPUT_DIR="$SELF_OUT"
 if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/self.out" 2>"$WORKDIR/self.err"; then
-    fail "miner-authored report.json must fail closed"
+    fail "miner-authored report.json with n_measured=0 must fail closed"
 fi
 [ ! -f "$SELF_OUT/report.json" ] || fail "must not keep miner-authored report.json"
-grep -qi "miner-authored\\|refusing miner-authored primary_value" "$WORKDIR/self.err" \
-    || fail "must name the self-report refusal"
-pass "script harness refuses miner-authored primary_value"
+grep -qi "miner-authored\\|no measured Harbor trials" "$WORKDIR/self.err" \
+    || fail "must name the self-report refusal or empty measurement"
+pass "script harness refuses miner-authored primary_value when n_measured=0"
 
 # --- script harness score comes only from Harbor verifier trials ---
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
 SCRIPT_JOBS="$WORKDIR/script-jobs"
 mkdir -p "$SCRIPT_JOBS/recipe"
 cat > "$SCRIPT_JOBS/recipe/run.sh" <<'EOF'
 #!/bin/bash
-job="$PROOF_WORK_DIR/harbor-jobs/job1/hello__1"
-mkdir -p "$job"
+job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
+mkdir -p "$job/verifier"
 cat > "$job/result.json" <<JSON
-{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 0.5}}}
+{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 0.5}}}
 JSON
+printf '0.5\n' > "$job/verifier/reward.txt"
 exit 0
 EOF
 chmod 0755 "$SCRIPT_JOBS/recipe/run.sh"
@@ -396,16 +456,18 @@ assert r["evidence"]["harness_kind"] == "script"
 PY
 pass "script harness primary_value is Harbor verifier reward"
 
-# --- script that self-reports AND writes jobs still fails closed ---
+# --- self-report is ignored; Harbor trials still score ---
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
 SCRIPT_BOTH="$WORKDIR/script-both"
 mkdir -p "$SCRIPT_BOTH/recipe"
 cat > "$SCRIPT_BOTH/recipe/run.sh" <<'EOF'
 #!/bin/bash
-job="$PROOF_WORK_DIR/harbor-jobs/job1/hello__1"
-mkdir -p "$job"
+job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
+mkdir -p "$job/verifier"
 cat > "$job/result.json" <<JSON
-{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 1.0}}}
+{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 1.0}}}
 JSON
+printf '1.0\n' > "$job/verifier/reward.txt"
 cat > "$PROOF_OUTPUT_DIR/report.json" <<JSON
 {"primary_value": 999999.25, "claim_holds": true}
 JSON
@@ -416,10 +478,244 @@ export PROOF_ARTIFACT_DIR="$SCRIPT_BOTH"
 BOTH_OUT="$WORKDIR/out-script-both"
 mkdir -p "$BOTH_OUT"
 export PROOF_OUTPUT_DIR="$BOTH_OUT"
-if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/both.out" 2>"$WORKDIR/both.err"; then
-    fail "self-report must fail even when Harbor jobs exist"
+"$ADAPTOR/harness/run-harbor" >"$WORKDIR/both.out" 2>"$WORKDIR/both.err" \
+    || fail "Harbor trials must still score after discarding miner report.json"
+python3 - "$BOTH_OUT/report.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["primary_value"] == 1.0, r
+assert r["primary_value"] != 999999.25
+assert r["evidence"]["n_measured"] == 1
+PY
+grep -qi "discarded miner-authored" "$WORKDIR/both.err" \
+    || fail "must log that miner report.json was discarded"
+pass "script self-report is ignored; Harbor verifier reward is the score"
+
+# --- x0020: Harbor finished; miner postamble TypeError must not discard trials ---
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
+SCRIPT_POSTAMBLE="$WORKDIR/script-postamble"
+mkdir -p "$SCRIPT_POSTAMBLE/recipe"
+cat > "$SCRIPT_POSTAMBLE/recipe/run.sh" <<'EOF'
+#!/bin/bash
+# Harbor finished; postamble then raises (retained x0020).
+i=1
+while [ "$i" -le 8 ]; do
+    job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__${i}"
+    mkdir -p "$job/verifier"
+    if [ "$i" -eq 1 ]; then
+        reward=1.0
+    else
+        reward=0.0
+    fi
+    cat > "$job/result.json" <<JSON
+{"trial_name": "cargo-flight-dispatch__${i}", "verifier_result": {"rewards": {"reward": ${reward}}}}
+JSON
+    printf '%s\n' "$reward" > "$job/verifier/reward.txt"
+    i=$((i + 1))
+done
+python3 -c 'raise TypeError("postamble")'
+EOF
+chmod 0755 "$SCRIPT_POSTAMBLE/recipe/run.sh"
+export PROOF_ARTIFACT_DIR="$SCRIPT_POSTAMBLE"
+POST_OUT="$WORKDIR/out-script-postamble"
+mkdir -p "$POST_OUT"
+export PROOF_OUTPUT_DIR="$POST_OUT"
+"$ADAPTOR/harness/run-harbor" >"$WORKDIR/postamble.out" 2>"$WORKDIR/postamble.err" \
+    || fail "postamble TypeError must not discard already-measured Harbor trials"
+python3 - "$POST_OUT/report.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["evidence"]["n_measured"] == 8, r
+assert abs(r["primary_value"] - 0.125) < 1e-9, r
+assert r["evidence"]["harbor_exit"] != 0
+PY
+grep -qi "scored already-measured" "$WORKDIR/postamble.err" \
+    || fail "must say measured trials scored after script exit"
+pass "x0020 postamble TypeError still scores n_measured=8 (mean 0.125)"
+
+# --- script harness evaluates only filtered PROOF_TASKS ---
+# Reset a recording harbor so --path rewrite is visible.
+cat > "$FAKE_BIN/harbor" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+path=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --path|-p) path="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+printf '%s\n' "$path" > "${PROOF_WORK_DIR}/script.harbor-path"
+# Miner asked for the pack path; wrapper must have rewritten it.
+ls "$path" > "${PROOF_WORK_DIR}/script.harbor-ls" || true
+exit 0
+EOF
+chmod 0755 "$FAKE_BIN/harbor"
+SCRIPT_FILTER="$WORKDIR/script-filter"
+mkdir -p "$SCRIPT_FILTER/recipe"
+cat > "$SCRIPT_FILTER/recipe/run.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+ls "$PROOF_PACK_DIR/$PROOF_PARAM_TASKS_DIR" > "$PROOF_WORK_DIR/script.pack-tasks"
+ls "$PROOF_TASKS" > "$PROOF_WORK_DIR/script.proof-tasks"
+if [ -L "$PROOF_PACK_DIR/$PROOF_PARAM_TASKS_DIR" ]; then
+    echo SYMLINK > "$PROOF_WORK_DIR/script.tasks-link"
+else
+    echo COPY > "$PROOF_WORK_DIR/script.tasks-link"
 fi
-[ ! -f "$BOTH_OUT/report.json" ] || fail "must not keep report.json after self-report"
-pass "script self-report fails closed even with Harbor jobs"
+printf '%s\n' "${PROOF_HARBOR_REAL-UNSET}" > "$PROOF_WORK_DIR/script.harbor-real"
+ls -1 "$PROOF_PACK_DIR" > "$PROOF_WORK_DIR/script.pack-root"
+# Bypass: miners historically pass the unfiltered pack tasks dir.
+harbor run --path "$PROOF_PACK_DIR/$PROOF_PARAM_TASKS_DIR" --jobs-dir "$PROOF_WORK_DIR/harbor-jobs" -a x --env docker --yes
+# Write a complete filtered trial so summarize succeeds.
+job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
+mkdir -p "$job/verifier"
+cat > "$job/result.json" <<JSON
+{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 0.25}}}
+JSON
+printf '0.25\n' > "$job/verifier/reward.txt"
+exit 0
+EOF
+chmod 0755 "$SCRIPT_FILTER/recipe/run.sh"
+# Pack-view is only the filtered tasks dir (no original-pack siblings).
+mkdir -p "$PROOF_PACK_DIR/unfiltered-original"
+printf 'biped\n' > "$PROOF_PACK_DIR/unfiltered-original/hint"
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
+export PROOF_ARTIFACT_DIR="$SCRIPT_FILTER"
+FILTER_OUT="$WORKDIR/out-script-filter"
+mkdir -p "$FILTER_OUT"
+export PROOF_OUTPUT_DIR="$FILTER_OUT"
+"$ADAPTOR/harness/run-harbor" || fail "script harness with filtered tasks must summarize"
+# Filtered set from this fixture pack: cargo-flight-dispatch only.
+grep -qx "cargo-flight-dispatch" "$PROOF_WORK_DIR/script.proof-tasks" \
+    || fail "PROOF_TASKS must contain the allowlisted short task"
+if grep -qx "too-slow" "$PROOF_WORK_DIR/script.proof-tasks" \
+    || grep -qx "biped" "$PROOF_WORK_DIR/script.proof-tasks" \
+    || grep -qx "batched-eval-parity" "$PROOF_WORK_DIR/script.proof-tasks"; then
+    fail "PROOF_TASKS must not include filtered-out pack tasks"
+fi
+# Pack view: $PROOF_PACK_DIR/tasks is the same filtered tree.
+grep -qx "cargo-flight-dispatch" "$PROOF_WORK_DIR/script.pack-tasks" \
+    || fail "pack-view tasks must be the filtered set"
+if grep -qx "too-slow" "$PROOF_WORK_DIR/script.pack-tasks" \
+    || grep -qx "batched-eval-parity" "$PROOF_WORK_DIR/script.pack-tasks"; then
+    fail "script must not see unfiltered \$PROOF_PACK_DIR/tasks"
+fi
+got_path="$(cat "$PROOF_WORK_DIR/script.harbor-path")"
+echo "$got_path" | grep -q "tasks-filtered" \
+    || fail "harbor --path was $got_path (want tasks-filtered, not the unfiltered pack)"
+if echo "$got_path" | grep -q "/pack/tasks$"; then
+    fail "harbor wrapper must not pass the unfiltered pack tasks dir"
+fi
+grep -qx "COPY" "$PROOF_WORK_DIR/script.tasks-link" \
+    || fail "pack-view tasks must be a materialized copy, not a symlink to the original pack"
+grep -qx "UNSET" "$PROOF_WORK_DIR/script.harbor-real" \
+    || fail "PROOF_HARBOR_REAL must not be exported to the miner script"
+grep -qx "tasks" "$PROOF_WORK_DIR/script.pack-root" \
+    || fail "pack-view must expose the filtered tasks dir"
+if grep -qx "unfiltered-original" "$PROOF_WORK_DIR/script.pack-root"; then
+    fail "pack-view must not copy original-pack siblings (Harbor --path recover)"
+fi
+python3 - "$FILTER_OUT/report.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["primary_value"] == 0.25, r
+assert r["evidence"]["harness_kind"] == "script"
+PY
+pass "script harness is bound to filtered PROOF_TASKS (pack view + harbor --path wrap)"
+
+# --- script timeout with reward.txt-only is fail-closed ---
+SCRIPT_TIMEOUT="$WORKDIR/script-timeout"
+mkdir -p "$SCRIPT_TIMEOUT/recipe"
+cat > "$SCRIPT_TIMEOUT/recipe/run.sh" <<'EOF'
+#!/bin/bash
+job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
+mkdir -p "$job/verifier"
+printf '0.4\n' > "$job/verifier/reward.txt"
+exit 143
+EOF
+chmod 0755 "$SCRIPT_TIMEOUT/recipe/run.sh"
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
+export PROOF_ARTIFACT_DIR="$SCRIPT_TIMEOUT"
+TO_OUT="$WORKDIR/out-script-timeout"
+mkdir -p "$TO_OUT"
+export PROOF_OUTPUT_DIR="$TO_OUT"
+if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/timeout.out" 2>"$WORKDIR/timeout.err"; then
+    fail "script timeout with reward.txt-only must fail closed"
+fi
+[ ! -f "$TO_OUT/report.json" ] || fail "must not publish miner-writable reward.txt-only"
+pass "script harness timeout with reward.txt-only fails closed"
+
+# --- excluded trial names cannot be scored even if the miner writes them ---
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
+SCRIPT_BYPASS="$WORKDIR/script-bypass"
+mkdir -p "$SCRIPT_BYPASS/recipe"
+cat > "$SCRIPT_BYPASS/recipe/run.sh" <<'EOF'
+#!/bin/bash
+kept="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
+drop="$PROOF_WORK_DIR/harbor-jobs/job1/biped__1"
+mkdir -p "$kept/verifier" "$drop/verifier"
+cat > "$kept/result.json" <<JSON
+{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 0.5}}}
+JSON
+printf '0.5\n' > "$kept/verifier/reward.txt"
+cat > "$drop/result.json" <<JSON
+{"trial_name": "biped__1", "verifier_result": {"rewards": {"reward": 0.99}}}
+JSON
+printf '0.99\n' > "$drop/verifier/reward.txt"
+exit 0
+EOF
+chmod 0755 "$SCRIPT_BYPASS/recipe/run.sh"
+export PROOF_ARTIFACT_DIR="$SCRIPT_BYPASS"
+BY_OUT="$WORKDIR/out-script-bypass"
+mkdir -p "$BY_OUT"
+export PROOF_OUTPUT_DIR="$BY_OUT"
+"$ADAPTOR/harness/run-harbor" || fail "filtered-name scoring must still succeed"
+python3 - "$BY_OUT/report.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["primary_value"] == 0.5, r
+assert r["evidence"]["n_measured"] == 1, r
+assert all("biped" not in t["name"] for t in r["evidence"]["trials"]), r
+PY
+pass "summarize drops excluded task names (biped) even if miner wrote them"
+
+# --- partial filtered set (one of two allowlisted tasks) is fail-closed ---
+TWO_PACK="$WORKDIR/two-pack"
+mkdir -p "$TWO_PACK/tasks/cargo-flight-dispatch" "$TWO_PACK/tasks/embedding-drift-monitor"
+printf '[agent]\ntimeout_sec = 120\n' > "$TWO_PACK/tasks/cargo-flight-dispatch/task.toml"
+printf '[agent]\ntimeout_sec = 120\n' > "$TWO_PACK/tasks/embedding-drift-monitor/task.toml"
+export PROOF_PACK_DIR="$TWO_PACK"
+unset PROOF_TASKS || true
+proof_require_tasks
+proof_filter_tasks || fail "two-task pack should filter"
+[ -d "$PROOF_TASKS/cargo-flight-dispatch" ] || fail "two-pack must keep cargo"
+[ -d "$PROOF_TASKS/embedding-drift-monitor" ] || fail "two-pack must keep embedding"
+SCRIPT_PARTIAL="$WORKDIR/script-partial"
+mkdir -p "$SCRIPT_PARTIAL/recipe"
+cat > "$SCRIPT_PARTIAL/recipe/run.sh" <<'EOF'
+#!/bin/bash
+# Favourable score on one filtered task; skip the rest (P1 partial mean).
+job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
+mkdir -p "$job/verifier"
+cat > "$job/result.json" <<JSON
+{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 1.0}}}
+JSON
+printf '1.0\n' > "$job/verifier/reward.txt"
+exit 143
+EOF
+chmod 0755 "$SCRIPT_PARTIAL/recipe/run.sh"
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
+export PROOF_ARTIFACT_DIR="$SCRIPT_PARTIAL"
+PARTIAL_SET_OUT="$WORKDIR/out-script-partial-set"
+mkdir -p "$PARTIAL_SET_OUT"
+export PROOF_OUTPUT_DIR="$PARTIAL_SET_OUT"
+if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/partial-set.out" 2>"$WORKDIR/partial-set.err"; then
+    fail "subset of filtered tasks must fail closed"
+fi
+[ ! -f "$PARTIAL_SET_OUT/report.json" ] || fail "must not publish a partial filtered-set mean"
+grep -qi "incomplete vs filtered\\|no complete Harbor trials" "$WORKDIR/partial-set.err" \
+    || fail "must name incomplete filtered set: $(cat "$WORKDIR/partial-set.err")"
+pass "partial filtered task set fails closed (no subset mean)"
 
 echo "all adaptor tests passed"

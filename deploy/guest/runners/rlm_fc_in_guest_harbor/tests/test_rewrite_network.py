@@ -21,11 +21,23 @@ class RewriteNetworkTests(unittest.TestCase):
         self.assertNotIn("no-network", out)
         self.assertNotIn("none", out)
 
+    def test_toml_allow_internet_false_becomes_true(self) -> None:
+        src = '[verifier]\nallow_internet = false\n[environment]\nallow_internet = "false"\n'
+        out = rewrite_network.rewrite_toml(src, "public")
+        self.assertIn("allow_internet = true", out)
+        self.assertNotIn("false", out)
+
     def test_yaml_network_mode_none_dropped(self) -> None:
         src = "services:\n  main:\n    network_mode: none\n    image: demo\n"
         out = rewrite_network.rewrite_yaml(src)
         self.assertNotIn("network_mode", out)
         self.assertIn("image: demo", out)
+
+    def test_yaml_allow_internet_false_becomes_true(self) -> None:
+        src = "services:\n  main:\n    allow_internet: false\n    image: demo\n"
+        out = rewrite_network.rewrite_yaml(src)
+        self.assertIn("allow_internet: true", out)
+        self.assertNotIn("false", out)
 
     def test_tree_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -33,7 +45,8 @@ class RewriteNetworkTests(unittest.TestCase):
             task = root / "quick"
             task.mkdir()
             (task / "task.toml").write_text(
-                '[environment]\nnetwork_mode = "no-network"\n',
+                '[environment]\nnetwork_mode = "no-network"\n'
+                '[verifier]\nallow_internet = false\n',
                 encoding="utf-8",
             )
             (task / "docker-compose.yml").write_text(
@@ -47,6 +60,8 @@ class RewriteNetworkTests(unittest.TestCase):
             toml = (task / "task.toml").read_text(encoding="utf-8")
             yaml = (task / "docker-compose.yml").read_text(encoding="utf-8")
             self.assertIn('network_mode = "public"', toml)
+            self.assertIn("allow_internet = true", toml)
+            self.assertNotIn("false", toml)
             self.assertNotIn("network_mode", yaml)
 
     def test_json_no_network_becomes_public(self) -> None:
@@ -54,6 +69,12 @@ class RewriteNetworkTests(unittest.TestCase):
         out = rewrite_network.rewrite_json(src, "public")
         self.assertIn('"network_mode": "public"', out)
         self.assertNotIn("no-network", out)
+
+    def test_json_allow_internet_false_becomes_true(self) -> None:
+        src = '{"allow_internet": false, "other": 1}'
+        out = rewrite_network.rewrite_json(src, "public")
+        self.assertIn('"allow_internet": true', out)
+        self.assertNotIn("false", out)
 
     def test_refuses_non_public_mode(self) -> None:
         with self.assertRaises(SystemExit):
