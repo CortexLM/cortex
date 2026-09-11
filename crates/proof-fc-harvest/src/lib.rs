@@ -263,7 +263,7 @@ fn copy_tree_into(src: &Path, dest: &Path, seen: &mut HashSet<(u64, u64)>) -> Re
         std::fs::symlink_metadata(src).map_err(|e| format!("stat {}: {e}", src.display()))?;
     if src_meta.file_type().is_symlink() {
         return Err(format!(
-            "directory symlink {} (refusing to follow adaptor-controlled link)",
+            "symlink {} (refusing to follow adaptor-controlled link)",
             src.display()
         ));
     }
@@ -276,17 +276,14 @@ fn copy_tree_into(src: &Path, dest: &Path, seen: &mut HashSet<(u64, u64)>) -> Re
         let e = e.map_err(|e| format!("read {}: {e}", src.display()))?;
         let from = e.path();
         let to = dest.join(e.file_name());
+        // `symlink_metadata` does not follow. Never call `metadata()` here:
+        // that would dereference adaptor-controlled links (`leak -> /etc/shadow`).
         let meta = std::fs::symlink_metadata(&from)
             .map_err(|err| format!("stat {}: {err}", from.display()))?;
         if meta.file_type().is_symlink() {
-            // Fail closed: never recurse into a directory symlink
-            // (`child/ancestor-link -> ..` would otherwise ELOOP).
-            if std::fs::metadata(&from).is_ok_and(|m| m.is_dir()) {
-                continue;
-            }
-            std::fs::copy(&from, &to)
-                .map_err(|err| format!("copy {} → {}: {err}", from.display(), to.display()))?;
-        } else if meta.is_dir() {
+            continue;
+        }
+        if meta.is_dir() {
             copy_tree_into(&from, &to, seen)?;
         } else {
             std::fs::copy(&from, &to)

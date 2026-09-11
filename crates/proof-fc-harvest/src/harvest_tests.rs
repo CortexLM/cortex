@@ -415,6 +415,84 @@ fn cyclic_dir_symlink_does_not_block_harvest_of_complete_overlay() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Adaptor-controlled regular-file symlink (`leak ->` a host secret) must
+/// not be followed: `std::fs::copy` would otherwise copy target bytes into
+/// `{jail}/harvest-work`. Skip the link; never dereference it.
+#[test]
+fn regular_file_symlink_is_not_followed_during_harvest_copy() {
+    let root = tree("file-link");
+    let overlay = root.join(SCRATCH_TREE).join("work");
+    plant(&overlay, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&overlay, "0001-evaluate", "run", "task-hard", "0");
+    plant_trial(&overlay, "0001-evaluate", "run", "atrx", "0");
+    let marker = b"HARVEST-MUST-NOT-COPY-THIS-SECRET";
+    let secret = root.join("host-secret");
+    std::fs::write(&secret, marker).expect("secret");
+    std::os::unix::fs::symlink(&secret, overlay.join("leak")).expect("file symlink");
+    let outside = root.join("outside-secret");
+    std::fs::write(&outside, marker).expect("relative secret");
+    std::os::unix::fs::symlink("../outside-secret", overlay.join("escape")).expect("rel link");
+    let dest = root.join("copy-dest");
+    copy_tree(&overlay, &dest).expect("copy must skip file symlinks");
+    assert!(
+        dest.join("0001-evaluate")
+            .join("output")
+            .join("report.json")
+            .is_file(),
+        "complete tree must still be copied"
+    );
+    assert!(
+        std::fs::symlink_metadata(dest.join("leak")).is_err(),
+        "file symlink must not be copied or followed"
+    );
+    assert!(
+        std::fs::symlink_metadata(dest.join("escape")).is_err(),
+        "relative file symlink must not be copied or followed"
+    );
+    assert!(
+        !tree_contains_bytes(&dest, marker),
+        "harvest dest must not contain the symlink target bytes"
+    );
+    let out = harvest_from_jail(&root, &root, &evaluate_job()).expect("overlay harvest");
+    let VmJobOutput::Evaluated(run) = out else {
+        panic!("{out:?}");
+    };
+    assert!((run.report.primary_value - 0.0).abs() < 1e-12);
+    let harvest = root.join(HARVEST_WORK);
+    assert!(
+        std::fs::symlink_metadata(harvest.join("leak")).is_err(),
+        "harvest-work must not materialize the leak link"
+    );
+    assert!(
+        !tree_contains_bytes(&harvest, marker),
+        "harvest-work must not contain the symlink target bytes"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn tree_contains_bytes(dir: &Path, needle: &[u8]) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let Ok(meta) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            if tree_contains_bytes(&p, needle) {
+                return true;
+            }
+        } else if std::fs::read(&p).is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle)) {
+            return true;
+        }
+    }
+    false
+}
+
 #[test]
 fn complete_overlay_without_a_dump_still_harvests() {
     let root = tree("overlay-only");
