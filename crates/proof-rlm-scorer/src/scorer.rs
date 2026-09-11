@@ -447,13 +447,14 @@ impl RlmScorer {
             .registry
             .resolve(&custom_id)
             .map_err(|e| map_runner(&custom_id, e))?;
-        // The runner can only retrieve the artefact from the miner's locator;
-        // intake refuses a custom submission without one, and so does this
-        // path rather than hand the runner a request it cannot act on.
+        // Custom intake now accepts an upload (preferred) or a miner URI
+        // (compat). Evaluate still needs a locator on the request: upload
+        // path records `proof-artefact://{digest}` (vault on the CP). Guest
+        // fetch of that scheme is FIXME(PR-B) vsock inject — URI-only
+        // still GETs https:// inside the VM (64 MiB cap, unchanged).
         let Some(artifact_uri) = artifact_uri.map(str::trim).filter(|u| !u.is_empty()) else {
             return Err(EvalError::Backend(
-                "custom submission carries no artifact_uri; the runner cannot retrieve the artefact"
-                    .into(),
+                "custom submission carries no artefact (upload or artifact_uri)".into(),
             ));
         };
         let rules = self.rules_for(topic).await?;
