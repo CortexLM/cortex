@@ -477,6 +477,11 @@ fn job_env(
 /// [`env::MINER_ENV_NAMES`] and one 0600 file per value under the guest's
 /// secrets root.
 ///
+/// Evaluate on a `miner_byok` topic always gets [`env::MINER_ENV_DIR`] even
+/// when the request carried no values: the adaptor then fails closed on a
+/// **missing key file**, never because the directory variable was unset.
+/// Baseline with an empty map still skips (operator-paid; owner key path).
+///
 /// Fail-closed and last: the control plane already held these names to the
 /// topic's allowlist, and this checks the shape again and refuses any name
 /// that would shadow something the contract or the base environment already
@@ -488,9 +493,12 @@ fn job_env(
 fn inject_miner_env(
     cfg: &GuestConfig,
     request: &CustomRunRequest,
+    kind: JobKind,
     vars: &mut Vec<(String, String)>,
 ) -> Result<Vec<Vec<u8>>, String> {
-    if request.miner_env.is_empty() {
+    let evaluate_needs_dir =
+        kind == JobKind::Evaluate && !request.constraints.miner_env_required().is_empty();
+    if request.miner_env.is_empty() && !evaluate_needs_dir {
         return Ok(Vec::new());
     }
     let taken: std::collections::BTreeSet<String> = vars
@@ -514,10 +522,12 @@ fn inject_miner_env(
     }
     let dir = crate::staging::stage_miner_env(&cfg.secrets_dir, &miner, cfg.run_as)?;
     let names: Vec<&str> = miner.iter().map(|(n, _)| n.as_str()).collect();
-    tracing::info!(
-        names = names.join(",").as_str(),
-        "miner byok environment exported to the adaptor (values not logged)"
-    );
+    if !names.is_empty() {
+        tracing::info!(
+            names = names.join(",").as_str(),
+            "miner byok environment exported to the adaptor (values not logged)"
+        );
+    }
     vars.push((env::MINER_ENV_DIR.to_owned(), dir.display().to_string()));
     vars.push((env::MINER_ENV_NAMES.to_owned(), names.join(",")));
     let secrets = miner
@@ -758,7 +768,7 @@ pub async fn run_paid(
     ));
     // The miner's own key reaches their own paid run, and only here:
     // inspection ticks rules without spending, so it is never given one.
-    let miner_secrets = inject_miner_env(cfg, request, &mut vars)?;
+    let miner_secrets = inject_miner_env(cfg, request, kind, &mut vars)?;
     let mut secrets = secret_values(&cfg.secrets_dir);
     secrets.extend(miner_secrets);
     let exec = exec(
