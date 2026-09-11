@@ -211,7 +211,7 @@ fn harvest_lagging_guest(guest: &Path, harvest: &Path) -> Option<String> {
         .into_iter()
         .filter(|rel| {
             let p = harvest.join(rel);
-            !p.is_file() || std::fs::metadata(&p).map(|m| m.len() == 0).unwrap_or(true)
+            !p.is_file() || std::fs::metadata(&p).map_or(true, |m| m.len() == 0)
         })
         .collect::<Vec<_>>();
     if missing.is_empty() {

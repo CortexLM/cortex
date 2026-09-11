@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Host RCA helper: extract ``primary_value`` / trial counts from orch ``job.out``.
 
-Metal pathc-baseline-n15 copied a local ``summarize_job.py`` that looked for
-``primary_value`` on the wrong object and printed empty ``cv=``. Orchestrator
-``POST /v1/vms/{id}/jobs`` answers with adjacent-tagged
-``VmJobOutput`` nested under ``RunJobResponse.output``:
+A metal copy of this helper looked for ``primary_value`` on the wrong
+object and printed empty ``cv=``. Orchestrator ``POST /v1/vms/{id}/jobs``
+answers with adjacent-tagged ``VmJobOutput`` nested under
+``RunJobResponse.output``:
 
     {"output": {"output": "baseline", "body": {CustomRunReport…}}}
 
@@ -15,7 +15,7 @@ unset and exits 2.
 
 Copy from this tree onto a retained jail; do not treat a metal-only copy as
 canonical. Pass ``--jobdir <any-dir>`` (or a path to ``job.out``); there is
-no baked ``JOBDIR`` / ``pathc-baseline-n15`` default.
+no baked ``JOBDIR`` default.
 """
 
 from __future__ import annotations

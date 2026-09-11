@@ -75,9 +75,9 @@ DONE_WRAP = {
 class SummarizeJobTests(unittest.TestCase):
     def test_source_has_no_baked_jobdir(self) -> None:
         src = SCRIPT.read_text(encoding="utf-8")
-        self.assertNotIn("pathc-baseline-n15", src)
-        self.assertNotIn("/var/lib/proof/pathc", src)
+        self.assertNotIn("/var/lib/proof/", src)
         self.assertNotIn("JOBDIR =", src)
+        self.assertNotIn("pathc-baseline-n15", src)
 
     def test_nested_baseline_job_out(self) -> None:
         summary = summarize_job.summarize(NESTED_BASELINE)
