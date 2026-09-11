@@ -272,9 +272,12 @@ fn declared(raw: &[String]) -> Vec<&str> {
 /// Whether a manifest declares any training evidence to check for
 /// contamination.
 ///
-/// `false` is the empty manifest. That is a clean submit on a topic with no
-/// training step and `contamination_evidence_missing` on one that trains —
-/// which of the two is the topic's call, not this crate's.
+/// `false` is the empty manifest — missing lists, empty lists, or lists
+/// whose every entry is empty after trim. That matches the host's
+/// `ArtifactManifest::is_declared` gate: a nonempty array of blanks is not
+/// a declaration. It is a clean submit on a topic with no training step and
+/// `contamination_evidence_missing` on one that trains — which of the two
+/// is the topic's call, not this crate's. Signed list values stay verbatim.
 #[must_use]
 pub fn manifest_declares_training(manifest: &serde_json::Value) -> bool {
     ["train_content_hashes", "train_dataset_ids"]
@@ -283,7 +286,10 @@ pub fn manifest_declares_training(manifest: &serde_json::Value) -> bool {
             manifest
                 .get(key)
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|list| !list.is_empty())
+                .is_some_and(|list| {
+                    list.iter()
+                        .any(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
+                })
         })
 }
 
@@ -400,8 +406,8 @@ mod tests {
         assert!(!manifest_declares_training(&manifest));
     }
 
-    /// Either list carries the evidence; a missing, empty, or non-array
-    /// manifest declares nothing.
+    /// Either list carries the evidence; a missing, empty, non-array, or
+    /// whitespace-only list declares nothing (host `is_declared` trim).
     #[test]
     fn manifest_declares_training_needs_one_non_empty_list() {
         assert!(manifest_declares_training(&serde_json::json!({
@@ -411,6 +417,9 @@ mod tests {
         assert!(manifest_declares_training(&serde_json::json!({
             "train_dataset_ids": ["my-mix-v0"],
         })));
+        assert!(manifest_declares_training(&serde_json::json!({
+            "train_dataset_ids": [" ", "my-mix-v0"],
+        })));
         assert!(!manifest_declares_training(&serde_json::json!({})));
         assert!(!manifest_declares_training(&serde_json::json!({
             "train_content_hashes": [],
@@ -418,6 +427,13 @@ mod tests {
         })));
         assert!(!manifest_declares_training(&serde_json::json!({
             "train_dataset_ids": "my-mix-v0",
+        })));
+        assert!(!manifest_declares_training(&serde_json::json!({
+            "train_dataset_ids": [" "],
+        })));
+        assert!(!manifest_declares_training(&serde_json::json!({
+            "train_content_hashes": [""],
+            "train_dataset_ids": ["  ", "\t", "\n"],
         })));
     }
 

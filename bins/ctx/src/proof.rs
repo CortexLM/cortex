@@ -101,12 +101,8 @@ pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Res
     if claim.is_empty() {
         return Err("claim is required (what the recipe achieved)".into());
     }
-    let Some(require_training) = fetch_topic_training_required(client, topic_id).await? else {
-        return Err(format!(
-            "unknown topic {topic_id:?} (ctx proof topics lists currently open ids)"
-        ));
-    };
-    let signed = resolve_signed(input, topic_id, &digest, claim, require_training)?;
+    let manifest = signed_manifest(client, input, topic_id).await?;
+    let signed = resolve_signed(input, topic_id, &digest, claim, manifest)?;
     let body = submit_wire_body(input, &signed, topic_id, &digest, claim);
 
     let reply = if let Some(bytes) = artifact_bytes {
@@ -167,12 +163,8 @@ pub async fn print_signature(
     if claim.is_empty() {
         return Err("claim is required".into());
     }
-    let require_training = fetch_topic_training_required(client, topic_id)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(false);
-    let signed = resolve_signed(input, topic_id, &digest, claim, require_training)?;
+    let manifest = signed_manifest(client, input, topic_id).await?;
+    let signed = resolve_signed(input, topic_id, &digest, claim, manifest)?;
     if json_out {
         println!(
             "{}",
@@ -199,9 +191,8 @@ fn resolve_signed(
     topic_id: &str,
     digest: &str,
     claim: &str,
-    require_training: bool,
+    manifest: Value,
 ) -> Result<SignedSubmit, String> {
-    let manifest = build_manifest(input, require_training)?;
     let (hashes, datasets) = manifest_lists(&json!({ "manifest": manifest }))
         .map_err(|_| "manifest lists must be arrays of strings".to_owned())?;
     let nonce = match &input.key.submit_nonce {
@@ -406,23 +397,41 @@ fn is_queued(body: &Value) -> bool {
     body.get("state").and_then(Value::as_str) == Some("queued")
 }
 
-/// The manifest to sign: `--manifest-file` verbatim when given, else the
+/// The manifest bytes: `--manifest-file` verbatim when given, else the
 /// `--train-hash` / `--train-dataset` lists.
-///
-/// The empty-manifest rule is checked once on the result, so a file and the
-/// flags cannot drift apart. A topic that needs training evidence is refused
-/// here, before a nonce is spent; one with no training step signs the empty
-/// lists as they are.
-fn build_manifest(input: &SubmitInput, require_training: bool) -> Result<Value, String> {
-    let manifest = match &input.manifest_file {
+fn build_manifest(input: &SubmitInput) -> Result<Value, String> {
+    match &input.manifest_file {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| format!("read {}: {e}", path.display()))?;
-            serde_json::from_str(&text).map_err(|e| format!("manifest JSON: {e}"))?
+            serde_json::from_str(&text).map_err(|e| format!("manifest JSON: {e}"))
         }
-        None => declared_manifest(&input.train_hashes, &input.train_datasets),
-    };
-    if require_training && !manifest_declares_training(&manifest) {
+        None => Ok(declared_manifest(
+            &input.train_hashes,
+            &input.train_datasets,
+        )),
+    }
+}
+
+/// The manifest to sign, checked against the live topic's training-evidence
+/// policy.
+///
+/// The topic is read **only** when the manifest declares nothing. That is the
+/// one case where the policy changes the answer, and the one where guessing
+/// costs the miner something: the host reserves the single-use `submit_nonce`
+/// before it rejects an empty manifest it required, so neither `submit` nor
+/// `sign` may assume evidence is optional. A declaration stands on its own —
+/// an offline signature or an operator probe that declares one needs no
+/// reachable gateway. Checking the finished manifest also means
+/// `--manifest-file` and the flags cannot drift to different answers.
+async fn signed_manifest(
+    client: &Client,
+    input: &SubmitInput,
+    topic_id: &str,
+) -> Result<Value, String> {
+    let manifest = build_manifest(input)?;
+    if !manifest_declares_training(&manifest) && require_training_evidence(client, topic_id).await?
+    {
         return Err(
             "contamination_evidence_missing: declare train-hash or train-dataset \
              (an empty manifest is not a clean check on this topic)"
@@ -550,23 +559,25 @@ fn topic_requires_training_evidence(topic: &Value) -> bool {
     }
 }
 
-async fn fetch_topic_training_required(
-    client: &Client,
-    topic_id: &str,
-) -> Result<Option<bool>, String> {
-    let reply = client
-        .get(&challenge_path(
-            "proof",
-            &format!("/v1/proof/topics/{topic_id}"),
-        ))
-        .await?;
+/// The live topic's training-evidence policy, read once for both `submit` and
+/// `sign`.
+///
+/// Neither guesses it. Signing an empty manifest for a topic that does require
+/// evidence yields a submission the host rejects only *after* it has reserved
+/// the single-use `submit_nonce`, so an unknown topic or an unreachable
+/// gateway is an error here rather than a permissive default.
+async fn require_training_evidence(client: &Client, topic_id: &str) -> Result<bool, String> {
+    let path = format!("/v1/proof/topics/{topic_id}");
+    let reply = client.get(&challenge_path("proof", &path)).await?;
     if reply.status == 404 {
-        return Ok(None);
+        return Err(format!(
+            "unknown topic {topic_id:?} (ctx proof topics lists currently open ids)"
+        ));
     }
     if !reply.ok() {
         return Err(explain_failure(reply.status, &reply.message()));
     }
-    Ok(Some(topic_requires_training_evidence(&reply.body)))
+    Ok(topic_requires_training_evidence(&reply.body))
 }
 
 /// Resolve `--env` arguments into the `(NAME, value)` pairs the submit body
@@ -680,13 +691,14 @@ fn explain_failure(status: u16, message: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The empty manifest is a legal set of bytes to build; whether it may be
+    /// *signed* is the topic's call, not `build_manifest`'s.
     #[test]
-    fn empty_manifest_depends_on_whether_the_topic_requires_training() {
-        let err = build_manifest(&SubmitInput::default(), true).expect_err("empty");
-        assert!(err.contains("contamination_evidence_missing"), "{err}");
-        let empty = build_manifest(&SubmitInput::default(), false).expect("agent topic");
+    fn an_empty_manifest_builds_as_explicit_empty_lists() {
+        let empty = build_manifest(&SubmitInput::default()).expect("empty builds");
         assert_eq!(empty["train_content_hashes"], json!([]));
         assert_eq!(empty["train_dataset_ids"], json!([]));
+        assert!(!manifest_declares_training(&empty));
         let mut sk = [0x11u8; 32];
         sk[0] = 0x42;
         let dir = std::env::temp_dir().join(format!(
@@ -711,9 +723,96 @@ mod tests {
             },
             ..SubmitInput::default()
         };
-        let signed = resolve_signed(&input, "tbench", &"ab".repeat(32), "beat", false)
+        let empty = build_manifest(&input).expect("empty builds");
+        let signed = resolve_signed(&input, "tbench", &"ab".repeat(32), "beat", empty)
             .expect("empty custom manifest signs");
         assert_eq!(signed.manifest["train_dataset_ids"], json!([]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The live topic decides whether an empty manifest may be signed, and it
+    /// is read only when there is nothing declared. A topic that requires
+    /// evidence is refused here rather than at the host, which would have
+    /// reserved the single-use nonce first.
+    #[tokio::test]
+    async fn an_empty_manifest_asks_the_topic_and_a_declared_one_does_not() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let gateway = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/challenge/proof/v1/proof/topics/needs-evidence"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "metric": {"family": "custom"},
+                "constraints": {"params": {"require_training_evidence": "true"}},
+            })))
+            .mount(&gateway)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/challenge/proof/v1/proof/topics/tbench"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "metric": {"family": "custom"},
+            })))
+            .mount(&gateway)
+            .await;
+        let client = Client::new(&gateway.uri(), None).expect("client");
+
+        let err = signed_manifest(&client, &SubmitInput::default(), "needs-evidence")
+            .await
+            .expect_err("topic requires evidence");
+        assert!(err.contains("contamination_evidence_missing"), "{err}");
+        let ok = signed_manifest(&client, &SubmitInput::default(), "tbench")
+            .await
+            .expect("custom topic skips");
+        assert!(!manifest_declares_training(&ok));
+
+        // A declaration stands on its own: an unknown topic on a gateway that
+        // serves nothing for it is never consulted, so this cannot fail.
+        let declared = SubmitInput {
+            train_datasets: vec!["my-mix-v0".into()],
+            ..SubmitInput::default()
+        };
+        let signed = signed_manifest(&client, &declared, "no-such-topic")
+            .await
+            .expect("a declared manifest needs no lookup");
+        assert_eq!(signed["train_dataset_ids"][0], "my-mix-v0");
+
+        // A nonempty array of blanks is undeclared after trim (host
+        // `is_declared`). Skipping the lookup here would burn the nonce.
+        let dir = std::env::temp_dir().join(format!(
+            "ctx-proof-ws-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("manifest.json");
+        std::fs::write(
+            &path,
+            json!({
+                "train_content_hashes": ["", "  "],
+                "train_dataset_ids": [" "],
+            })
+            .to_string(),
+        )
+        .expect("write");
+        let whitespace = SubmitInput {
+            manifest_file: Some(path),
+            ..SubmitInput::default()
+        };
+        assert!(!manifest_declares_training(
+            &build_manifest(&whitespace).expect("whitespace file parses")
+        ));
+        let err = signed_manifest(&client, &whitespace, "needs-evidence")
+            .await
+            .expect_err("whitespace-only is undeclared");
+        assert!(err.contains("contamination_evidence_missing"), "{err}");
+        let err = signed_manifest(&client, &whitespace, "no-such-topic")
+            .await
+            .expect_err("undeclared + unknown topic stays fail-closed");
+        assert!(err.contains("unknown topic"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -745,10 +844,15 @@ mod tests {
             declared_flops: 0,
             ..SubmitInput::default()
         };
-        let m = build_manifest(&input, true).expect("manifest");
+        let m = build_manifest(&input).expect("manifest");
         assert_eq!(m["train_dataset_ids"][0], "my-mix-v0");
         assert_eq!(input.claim, "beat baseline");
         assert_eq!(input.declared_flops, 0);
+    }
+
+    /// The manifest a signing test declares, built the way `submit` does.
+    fn manifest_of(input: &SubmitInput) -> Value {
+        build_manifest(input).expect("manifest")
     }
 
     fn signed_input(key: SubmitKey) -> SubmitInput {
@@ -784,7 +888,8 @@ mod tests {
             ..SubmitKey::default()
         });
         let digest = "ab".repeat(32);
-        let signed = resolve_signed(&input, "dt-no-ib-v0", &digest, "beat", true).expect("sign");
+        let signed = resolve_signed(&input, "dt-no-ib-v0", &digest, "beat", manifest_of(&input))
+            .expect("sign");
         assert_eq!(signed.hotkey, hotkey_hex(&sk).expect("pk"));
         parse_submit_nonce_hex(&signed.nonce).expect("fresh 64-hex nonce");
         assert_eq!(signed.manifest["train_dataset_ids"][0], "my-mix-v0");
@@ -810,7 +915,8 @@ mod tests {
         assert!(verify_submit(&pk, &tampered, &raw).is_err());
 
         // A second run never reuses the nonce.
-        let again = resolve_signed(&input, "dt-no-ib-v0", &digest, "beat", true).expect("sign");
+        let again = resolve_signed(&input, "dt-no-ib-v0", &digest, "beat", manifest_of(&input))
+            .expect("sign");
         assert_ne!(again.nonce, signed.nonce);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -818,8 +924,14 @@ mod tests {
     #[test]
     fn missing_signer_is_rejected() {
         let input = signed_input(SubmitKey::default());
-        let err = resolve_signed(&input, "dt-no-ib-v0", &"ab".repeat(32), "beat", true)
-            .expect_err("unsigned");
+        let err = resolve_signed(
+            &input,
+            "dt-no-ib-v0",
+            &"ab".repeat(32),
+            "beat",
+            manifest_of(&input),
+        )
+        .expect_err("unsigned");
         assert!(err.contains("base-proof-submit-v1"), "{err}");
     }
 
@@ -840,8 +952,14 @@ mod tests {
             wallet_name: Some("miner".into()),
             ..SubmitKey::default()
         });
-        let err = resolve_signed(&input, "dt-no-ib-v0", &"ab".repeat(32), "beat", true)
-            .expect_err("two signers");
+        let err = resolve_signed(
+            &input,
+            "dt-no-ib-v0",
+            &"ab".repeat(32),
+            "beat",
+            manifest_of(&input),
+        )
+        .expect_err("two signers");
         assert!(err.contains("one signer"), "{err}");
     }
 
@@ -852,8 +970,14 @@ mod tests {
             signature: Some("cd".repeat(64)),
             ..SubmitKey::default()
         });
-        let err = resolve_signed(&input, "dt-no-ib-v0", &"ab".repeat(32), "beat", true)
-            .expect_err("no nonce");
+        let err = resolve_signed(
+            &input,
+            "dt-no-ib-v0",
+            &"ab".repeat(32),
+            "beat",
+            manifest_of(&input),
+        )
+        .expect_err("no nonce");
         assert!(err.contains("submit-nonce"), "{err}");
         let mut with_bad_nonce = signed_input(SubmitKey {
             hotkey: Some("ab".repeat(32)),
@@ -866,7 +990,7 @@ mod tests {
             "dt-no-ib-v0",
             &"ab".repeat(32),
             "beat",
-            true,
+            manifest_of(&with_bad_nonce),
         )
         .expect_err("bad nonce");
         assert!(err.contains("64 hex"), "{err}");
@@ -876,7 +1000,7 @@ mod tests {
             "dt-no-ib-v0",
             &"ab".repeat(32),
             "beat",
-            true,
+            manifest_of(&with_bad_nonce),
         )
         .expect_err("garbage signature");
         assert!(err.contains("hotkey_signature invalid"), "{err}");
@@ -953,7 +1077,14 @@ mod tests {
             ..input
         };
         let digest = "ab".repeat(32);
-        let signed = resolve_signed(&with_key, "dt-no-ib-v0", &digest, "beat", true).expect("sign");
+        let signed = resolve_signed(
+            &with_key,
+            "dt-no-ib-v0",
+            &digest,
+            "beat",
+            manifest_of(&with_key),
+        )
+        .expect("sign");
         // The signature verifies against the v1 payload, which has no room
         // for `env`: the BYOK value is posted beside the signature, not in it.
         let pk = parse_hotkey_hex(&signed.hotkey).expect("pk");
