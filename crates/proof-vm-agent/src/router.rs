@@ -27,7 +27,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use proof_rlm::{RetainPolicy, VmHandle};
+use proof_rlm::{RetainPolicy, VmHandle, VmJob, VmJobOutput};
 use proof_vm_proto::{
     bind_evidence, paths, AgentHealth, CreateVmRequest, ErrorBody, ErrorCode, RunJobRequest,
     RunJobResponse, TeardownRequest, TeardownResponse, VmRecord, VmState, API_VERSION,
@@ -260,17 +260,23 @@ impl AgentState {
     /// Waiter gone after the job finished: harvest already happened (the
     /// hypervisor ran to completion). Tear down an **experiment** VM so it
     /// does not sit billed; keep the topic VM for the next job.
+    ///
+    /// `verified` is the same split as [`proof_rlm::run_paid_job`]: Destroy
+    /// only when the stamped report would pass control-plane verification.
+    /// Agent-level `Ok` is not enough — a missing sister stamps
+    /// `sandboxed=false` and the CP then rejects `NotSandboxed`; that jail
+    /// is retained for RCA.
     async fn harvest_abandoned(
         &self,
         record: &VmRecord,
         booted: &BootedVm,
-        job_ok: bool,
+        verified: bool,
         _job: OwnedMutexGuard<()>,
     ) {
         if record.experiment.is_none() {
             return;
         }
-        let policy = if job_ok {
+        let policy = if verified {
             RetainPolicy::Destroy
         } else {
             RetainPolicy::Retain
@@ -477,6 +483,24 @@ fn not_running(vm_id: &str, state: VmState) -> AgentError {
     )
 }
 
+/// Destroy on abandon only when a holding control plane would have accepted
+/// the stamped report. Matches [`proof_rlm::run_paid_job`].
+#[must_use]
+fn verified_paid_report(result: &Result<RunJobResponse, AgentError>, job: &VmJob) -> bool {
+    let Ok(resp) = result else {
+        return false;
+    };
+    match (job, &resp.output) {
+        (VmJob::Evaluate { request, .. }, VmJobOutput::Evaluated(out)) => {
+            out.report.verify(request).is_ok()
+        }
+        (VmJob::Baseline { request }, VmJobOutput::Baseline(report)) => {
+            report.verify(request).is_ok()
+        }
+        _ => false,
+    }
+}
+
 async fn run_job(
     State(state): State<AgentState>,
     Path(vm_id): Path<String>,
@@ -496,13 +520,15 @@ async fn run_job(
         return Err(not_running(&vm_id, reaped.state));
     }
     // Body accepted: do not cancel the hypervisor job if the CP waiter
-    // drops. Harvest the outcome; an experiment VM is then torn down,
-    // a topic VM is kept.
+    // drops. Harvest the outcome; an experiment VM is then torn down
+    // (Destroy only after the stamped report would pass CP verification;
+    // otherwise Retain), a topic VM is kept.
     let (tx, rx) = tokio::sync::oneshot::channel();
     let state_bg = state.clone();
     let record_bg = record.clone();
     let booted_bg = booted.clone();
     let vm_id_bg = vm_id.clone();
+    let job = body.job.clone();
     tokio::spawn(async move {
         let (result, guard) = execute_job(
             state_bg.clone(),
@@ -515,8 +541,9 @@ async fn run_job(
         .await;
         if let Err(result) = tx.send(result) {
             if let Some(g) = guard {
+                let verified = verified_paid_report(&result, &job);
                 state_bg
-                    .harvest_abandoned(&record_bg, &booted_bg, result.is_ok(), g)
+                    .harvest_abandoned(&record_bg, &booted_bg, verified, g)
                     .await;
             }
         }

@@ -1032,7 +1032,7 @@ mod tests {
         assert_eq!(
             hv.teardowns(),
             vec![(exp.handle.vm_id.clone(), RetainPolicy::Destroy)],
-            "abandoned experiment vm is destroyed"
+            "verified abandoned experiment vm is destroyed"
         );
         assert_eq!(state.running_experiments().await, 0);
         let (status, attached): (StatusCode, VmRecord) = call(
@@ -1049,6 +1049,97 @@ mod tests {
             .teardowns()
             .iter()
             .all(|(id, _)| id != &topic.handle.vm_id));
+    }
+
+    #[tokio::test]
+    async fn abandoned_unverified_experiment_vm_is_retained() {
+        use proof_rlm::fixtures::experiment_request;
+        let hv = FakeHypervisor::new(0.5);
+        hv.set_job_delay(Some(std::time::Duration::from_millis(300)));
+        hv.set_experiment_attests(false);
+        let auth = Arc::new(BearerAuth::from_file(&token_file("waiter-retain", TOKEN)));
+        let state = AgentState::with_max_experiment_vms(hv.clone(), auth, 2);
+        let app = agent_router(state.clone());
+        let topic = create(&app).await;
+        let req = experiment_request(Some(8));
+        let (status, exp): (StatusCode, VmRecord) = call(
+            &app,
+            "POST",
+            paths::VMS,
+            Some(TOKEN),
+            Some(
+                serde_json::to_value(CreateVmRequest {
+                    spec: experiment_spec(&req),
+                })
+                .expect("json"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let evaluate = serde_json::to_value(RunJobRequest {
+            topic_id: req.topic_id.clone(),
+            job: VmJob::Evaluate {
+                request: req.clone(),
+                checklist_digest: token_for(&req).checklist_digest().to_owned(),
+                rules_version: 1,
+            },
+        })
+        .expect("json");
+        let job_req = Request::builder()
+            .method("POST")
+            .uri(paths::vm_jobs(&exp.handle.vm_id))
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(evaluate.to_string()))
+            .expect("request");
+        let waiter = tokio::spawn(app.clone().oneshot(job_req));
+        let started = tokio::time::Instant::now();
+        loop {
+            if !hv.jobs().is_empty() {
+                break;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "evaluate never started"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        waiter.abort();
+        let _ = waiter.await;
+        let harvested = tokio::time::Instant::now();
+        loop {
+            if !hv.teardowns().is_empty() {
+                break;
+            }
+            assert!(
+                harvested.elapsed() < std::time::Duration::from_secs(2),
+                "abandoned experiment vm was not harvested: jobs={:?} teardowns={:?}",
+                hv.jobs(),
+                hv.teardowns()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(hv.jobs().len(), 1, "job must be harvested, not cancelled");
+        assert_eq!(
+            hv.teardowns(),
+            vec![(exp.handle.vm_id.clone(), RetainPolicy::Retain)],
+            "unsandboxed report must keep the jail for RCA"
+        );
+        assert_eq!(
+            state.running_experiments().await,
+            0,
+            "retain frees capacity"
+        );
+        let (status, attached): (StatusCode, VmRecord) = call(
+            &app,
+            "GET",
+            &paths::vm_by_topic("topic-a"),
+            Some(TOKEN),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(attached.handle.vm_id, topic.handle.vm_id, "topic vm stays");
     }
 
     #[tokio::test]
