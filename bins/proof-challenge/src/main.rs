@@ -23,11 +23,12 @@ use challenge_keys::load_challenge_secret;
 use clap::Parser;
 use prism_lium::LiumClient;
 use proof_challenge::{
-    executor_slot, hash_admin_token, parse_holdout_file, proof_router, AppState,
+    executor_slot, hash_admin_token, parse_holdout_file, proof_router, AppState, ArtefactVault,
     BaselineMeasurement, EvalBackend, EvalExecutorOffer, GatewayClient, GatewayClientConfig,
     HarvestOverrides, InferenceOffer, LiveScorer, MemoryStore, MinerEnvVault, ProofEmitter,
     ProofPin, TopicDocument, VmAgentHealth, VmOrchestratorProbe, VmOrchestratorReport,
-    CHALLENGE_ID, DEFAULT_EMIT_POLL_SECS, MINER_BYOK_DIR_ENV, SCORING_VERSION,
+    ARTEFACT_STAGING_DIR_ENV, CHALLENGE_ID, DEFAULT_EMIT_POLL_SECS, MINER_BYOK_DIR_ENV,
+    SCORING_VERSION,
 };
 use proof_eval::{custom_ids_ref, registered_custom, FamilyMux};
 use proof_harvest::{HarvestLimits, LiumProofHarvest};
@@ -188,6 +189,21 @@ fn miner_byok_vault() -> MinerEnvVault {
     vault
 }
 
+fn artefact_vault() -> ArtefactVault {
+    let vault = ArtefactVault::from_env();
+    if let Some(dir) = vault.root() {
+        tracing::info!(
+            dir = %dir.display(),
+            "artefact staging vault (0600 files; contents never logged)"
+        );
+    } else {
+        tracing::warn!(
+            "{ARTEFACT_STAGING_DIR_ENV} is empty: uploaded artefacts stay in this process and a restart loses them"
+        );
+    }
+    vault
+}
+
 fn run(cli: &Cli) -> Result<(), String> {
     let sk = load_optional_sk(cli.challenge_sk_file.as_deref());
     let pin = load_pin(cli.pin_file.as_deref())?;
@@ -243,7 +259,9 @@ fn run(cli: &Cli) -> Result<(), String> {
     // One topic-VM orchestrator per process: the runner registry drives it
     // and the admin probe reports on the same client (bearer file, pin, CA).
     let vm = Arc::new(topic_vm_orchestrator());
-    let store = MemoryStore::new().with_miner_byok_vault(miner_byok_vault());
+    let store = MemoryStore::new()
+        .with_miner_byok_vault(miner_byok_vault())
+        .with_artefact_vault(artefact_vault());
     rt.block_on(seed_pf_allocator(
         &store,
         rlm_store.as_ref(),
@@ -1040,6 +1058,7 @@ mod tests {
                 miner_hotkey: "aa".repeat(32),
                 artifact_digest: "11".repeat(32),
                 artifact_uri: None,
+                artifact_staged: None,
                 claim: "c".into(),
                 declared_flops: 1,
                 architecture: String::new(),
@@ -1085,6 +1104,7 @@ mod tests {
                 miner_hotkey: "aa".repeat(32),
                 artifact_digest: "11".repeat(32),
                 artifact_uri: None,
+                artifact_staged: None,
                 claim: "c".into(),
                 declared_flops: 1,
                 architecture: String::new(),

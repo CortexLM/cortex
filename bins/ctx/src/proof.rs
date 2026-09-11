@@ -7,12 +7,13 @@ use keystore::{default_wallets_dir, load_hotkey, mini_secret_from_key_file, Bitt
 use proof_submit::{
     canonical_hex, declared_manifest, fresh_submit_nonce_hex, hotkey_hex, is_lowercase_hex,
     manifest_declares_training, manifest_lists, parse_hotkey_hex, parse_signature_hex,
-    parse_submit_nonce_hex, sign_submit, verify_submit, SubmitFields, PROOF_SUBMIT_DOMAIN_LABEL,
+    parse_submit_nonce_hex, sha256_hex, sign_submit, verify_submit, SubmitFields,
+    MAX_ARTEFACT_BYTES, PROOF_SUBMIT_DOMAIN_LABEL,
 };
 use serde_json::{json, Value};
 
-use crate::api::{challenge_path, Client};
 use crate::catalog::{compact, find};
+use ctx_client::{challenge_path, Client};
 
 /// States a submission does not move out of on its own. `queued` is the one
 /// non-terminal state: the topic defers scoring and the operator drains the
@@ -64,6 +65,9 @@ pub struct SubmitInput {
     pub topic_id: String,
     /// SHA-256 hex of the artifact you are submitting.
     pub artifact_digest: String,
+    /// Local uncompressed tar to upload (≤5 MiB). Digest is hashed from this
+    /// file when `artifact_digest` is empty.
+    pub artifact: Option<PathBuf>,
     /// Optional locator for the artifact.
     pub artifact_uri: Option<String>,
     /// Public claim the RLM re-runs (what you say the recipe achieved).
@@ -88,7 +92,7 @@ pub struct SubmitInput {
 /// POST a Proof submission and print the reply.
 pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Result<(), String> {
     let challenge = find("proof").ok_or_else(|| "proof is not a live challenge".to_owned())?;
-    let digest = normalize_hex64(&input.artifact_digest, "artifact-digest")?;
+    let (digest, artifact_bytes) = resolve_artifact(input)?;
     let topic_id = input.topic_id.trim();
     if topic_id.is_empty() {
         return Err("topic-id is required (ctx proof topics lists currently open ids)".into());
@@ -105,9 +109,19 @@ pub async fn submit(client: &Client, input: &SubmitInput, json_out: bool) -> Res
     let signed = resolve_signed(input, topic_id, &digest, claim, require_training)?;
     let body = submit_wire_body(input, &signed, topic_id, &digest, claim);
 
-    let reply = client
-        .post(&challenge_path(challenge.id, "/v1/submissions"), &body)
-        .await?;
+    let reply = if let Some(bytes) = artifact_bytes {
+        client
+            .post_multipart(
+                &challenge_path(challenge.id, "/v1/submissions"),
+                &body,
+                bytes,
+            )
+            .await?
+    } else {
+        client
+            .post(&challenge_path(challenge.id, "/v1/submissions"), &body)
+            .await?
+    };
     if json_out {
         println!("{}", reply.body);
     }
@@ -444,6 +458,35 @@ fn submit_wire_body(
     body
 }
 
+fn resolve_artifact(input: &SubmitInput) -> Result<(String, Option<Vec<u8>>), String> {
+    match &input.artifact {
+        Some(path) => {
+            let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+            if bytes.is_empty() {
+                return Err("artifact is empty".into());
+            }
+            if bytes.len() > MAX_ARTEFACT_BYTES {
+                return Err("artifact exceeds 5 MiB".into());
+            }
+            let got = sha256_hex(&bytes);
+            let declared = input.artifact_digest.trim();
+            if !declared.is_empty() {
+                let want = normalize_hex64(declared, "artifact-digest")?;
+                if want != got {
+                    return Err(
+                        "artifact-digest does not match --artifact (sha256 of the file)".into(),
+                    );
+                }
+            }
+            Ok((got, Some(bytes)))
+        }
+        None => {
+            let digest = normalize_hex64(&input.artifact_digest, "artifact-digest")?;
+            Ok((digest, None))
+        }
+    }
+}
+
 fn attach_miner_env(body: &mut Value, env: &[(String, String)]) {
     if env.is_empty() {
         return;
@@ -608,7 +651,8 @@ fn explain_failure(status: u16, message: &str) -> String {
             if message.starts_with("upstream ") {
                 out.push_str(
                     " The gateway may have hidden the challenge error body; \
-                     artifact_uri must be https:// to a tar whose sha256 is artifact_digest.",
+                     upload with --artifact (≤5 MiB), or artifact_uri must be https:// \
+                     to a tar whose sha256 is artifact_digest.",
                 );
             }
             out
@@ -995,6 +1039,7 @@ mod tests {
     fn opaque_gateway_503_hints_stripped_body_and_https_artifact() {
         let msg = explain_failure(503, "upstream 503 Service Unavailable");
         assert!(msg.contains("hidden the challenge error body"), "{msg}");
+        assert!(msg.contains("--artifact"), "{msg}");
         assert!(msg.contains("artifact_uri must be https://"), "{msg}");
         let real = explain_failure(
             503,
@@ -1016,5 +1061,36 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["id"], "dt-no-ib-v0");
         assert_eq!(items[1]["id"], "muon-vs-adamw-10m-v0");
+    }
+
+    #[test]
+    fn resolve_artifact_hashes_the_file_and_refuses_empty_or_mismatch() {
+        let dir = std::env::temp_dir().join(format!("ctx-art-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("recipe.tar");
+        std::fs::write(&path, b"recipe-tar-not-empty").expect("write");
+        let got = resolve_artifact(&SubmitInput {
+            artifact: Some(path.clone()),
+            ..SubmitInput::default()
+        })
+        .expect("hash");
+        assert_eq!(got.0, sha256_hex(b"recipe-tar-not-empty"));
+        assert_eq!(got.1.as_deref(), Some(b"recipe-tar-not-empty".as_slice()));
+        let err = resolve_artifact(&SubmitInput {
+            artifact: Some(path),
+            artifact_digest: "aa".repeat(32),
+            ..SubmitInput::default()
+        })
+        .expect_err("mismatch");
+        assert!(err.contains("does not match"), "{err}");
+        let empty = dir.join("empty.tar");
+        std::fs::write(&empty, b"").expect("empty");
+        let err = resolve_artifact(&SubmitInput {
+            artifact: Some(empty),
+            ..SubmitInput::default()
+        })
+        .expect_err("empty");
+        assert!(err.contains("empty"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
