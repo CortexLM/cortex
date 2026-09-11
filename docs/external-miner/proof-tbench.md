@@ -123,16 +123,14 @@ is a commitment, not data. There is nothing to read there.
 ## 3. Build and upload the artefact
 
 `tbench` is a `custom` topic: **upload the uncompressed tar** (≤5 MiB) with
-`ctx proof submit --artifact recipe.tar`. `artifact_uri` is optional compat
-— a miner-hosted locator the runner can still fetch. A submit with neither
-an upload nor a URI is a **400** `artifact required` with no row. When both
+`ctx proof submit --artifact recipe.tar`. That upload path is **end-to-end**:
+the gateway stages the bytes, records `proof-artefact://{digest}` on the row,
+and the KVM host injects those exact bytes into the experiment guest over
+vsock. The guest verifies the digest and tar and **does not** HTTP-fetch a
+miner URL. `artifact_uri` is optional compat — a miner-hosted locator the
+runner can still fetch (`https://`, 64 MiB cap). A submit with neither an
+upload nor a URI is a **400** `artifact required` with no row. When both
 are sent, the uploaded bytes win.
-
-Live evaluate of an upload records `proof-artefact://` and answers **503**
-until vsock inject
-([#285](https://github.com/CortexLM/cortex/pull/285)); score now with
-URI-only `https://` (no upload). A topic in `deferred_topics` still accepts
-the upload as **201** `queued`.
 
 Artefact identity is **the served file's sha256**, verbatim. Uncompressed
 only — no gzip, no zip. Both of these packs work; pick one, hash **that**
@@ -303,9 +301,9 @@ Env the run sees: `PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`,
 
 - Prefer `ctx proof submit --artifact recipe.tar` (gateway intake cap **5 MiB**).
   Re-running `tar` later produces different bytes (mtimes, member order) and
-  therefore a different digest. Live evaluate of that upload is **503** until
-  [#285](https://github.com/CortexLM/cortex/pull/285); URI-only `https://`
-  still scores, and `deferred_topics` still **201** `queued`.
+  therefore a different digest. Evaluate injects the staged file over vsock;
+  you do not need to host it. A topic in `deferred_topics` still **201**
+  `queued`.
 - URI-only compat: serve **that exact file** at `artifact_uri` and keep it.
   The guest streams it under a hard **64 MiB** cap (not the gateway upload
   cap). The host re-hashes exactly the bytes the runner fetched before it
@@ -535,7 +533,7 @@ you will actually meet on `tbench`:
 | **400** `unknown topic` / `topic is not open` | `tbench` is not published, or is outside its epoch window | no |
 | **400** `artifact required` | You left both the upload and the locator out. `tbench` is `custom` | no |
 | **400** `artifact is not a tar archive` / gzip / no file content | The upload is not an uncompressed tar with file bytes | no |
-| **503** staged artefact / `proof-artefact://` | Live evaluate of an upload: inject is [#285](https://github.com/CortexLM/cortex/pull/285). Score now URI-only | live: no; deferred: queued |
+| **503** staged artefact missing / digest mismatch | Upload evaluate: the host no longer holds matching vault bytes. The row is untouched | live: no; deferred: queued |
 | **400** `artifact_digest is the sha256 of empty input …` | You hashed nothing, or an empty tar | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not exactly 64 lowercase hex. The host never normalises a hex field | no |
 | **401** `hotkey_signature required` / `invalid` | Missing signature, or a `claim`, `declared_flops`, `manifest`, or nonce that differs from what you signed | no |

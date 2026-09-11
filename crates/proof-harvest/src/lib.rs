@@ -670,6 +670,7 @@ impl LiveScorer for LiumProofHarvest {
         holdout: &[HoldoutRecord],
         claim: &str,
         _miner_env: &proof_eval::MinerEnv,
+        _artifact_tar: Option<&[u8]>,
     ) -> Result<ProofEvalDocument, EvalError> {
         if !pin.can_rent() {
             return Err(EvalError::EvalImageUnpinned);

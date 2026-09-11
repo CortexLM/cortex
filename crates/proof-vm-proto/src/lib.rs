@@ -22,9 +22,11 @@
 //! A topic whose signed params select an **in-guest runner**
 //! (`proof_experiment`) gets a dedicated **experiment VM** per paid job
 //! instead of a sister: the host boots it from the pinned image, stages the
-//! pinned experiment pack over vsock ([`guest::HostToRlm::StagePack`]), runs
-//! the one job, and attests the run with [`GuestMode::ExperimentVm`] before
-//! the VM is destroyed. Same binding, same fail-closed checks.
+//! pinned experiment pack over vsock ([`guest::HostToRlm::StagePack`]), injects
+//! a miner upload when the job names `proof-artefact://`
+//! ([`guest::HostToRlm::StageArtifact`]), runs the one job, and attests the
+//! run with [`GuestMode::ExperimentVm`] before the VM is destroyed. Same
+//! binding, same fail-closed checks.
 //!
 //! Nothing here names a benchmark, a model, or a repository.
 

@@ -63,9 +63,9 @@ pub use rules::{
     CheckItem, Checklist, ChecklistError, RuleSet, RuleSource, CHECKLIST_SCHEMA, MAX_EVIDENCE_LEN,
 };
 pub use runner::{
-    ArtifactFile, CustomRunReport, CustomRunRequest, CustomRunner, InspectOutcome, JudgeRef,
-    LogFile, ReportError, RunOutcome, RunnerError, RunnerRegistry, SandboxPolicy,
-    RUN_REPORT_SCHEMA, RUN_REQUEST_SCHEMA,
+    is_staged_artifact_uri, ArtifactFile, ArtifactTarB64, CustomRunReport, CustomRunRequest,
+    CustomRunner, InspectOutcome, JudgeRef, LogFile, ReportError, RunOutcome, RunnerError,
+    RunnerRegistry, SandboxPolicy, RUN_REPORT_SCHEMA, RUN_REQUEST_SCHEMA, STAGED_ARTEFACT_SCHEME,
 };
 pub use state::{
     await_owner_keys, owner_presend, transition, FileKeysProbe, HookError, Lifecycle, NoOwnerHook,

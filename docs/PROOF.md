@@ -308,12 +308,14 @@ Trust-root keygen is the throwaway owner path in
   (preferred, ≤5 MiB) or `artifact_uri` (compat). Neither is **400**
   `artifact required`. Uploaded bytes win when both are sent.
   Uploaded tars are staged under `PROOF_ARTEFACT_STAGING_DIR` and the row
-  records `proof-artefact://{digest}`. Live evaluate of that scheme is
-  **503** until vsock inject (PR [#285](https://github.com/CortexLM/cortex/pull/285)
-  `bc-bf177788`); this host stages only. URI-only `https://` still scores.
-  Deferred topics accept the upload as **201** `queued`. Gzip / non-tar /
-  content-less uploads are **400** with no row. The agent verdict
-  (`reproduced`, `claim_holds_public`, cheat codes) is
+  records `proof-artefact://{digest}` for evaluate. The KVM host reads the
+  vault and injects those exact bytes into the guest over vsock (`StageArtifact`
+  then `Run`); the guest verifies them with `verify_artifact` and never
+  HTTP-fetches that scheme. URI-only (`https://…`) still GETs inside the VM
+  (64 MiB cap). Missing vault / digest mismatch / empty / oversize is **503**
+  with the row untouched — never invented bytes. Gzip / non-tar /
+  content-less uploads are **400** with no row.
+  The agent verdict (`reproduced`, `claim_holds_public`, cheat codes) is
   filled by the eval image, not the miner.
 - Contamination (holdout overlap in a declared manifest) persists **rejected**
   without renting. An empty training manifest is the same reject **only** on
@@ -611,11 +613,13 @@ control plane only probes its copy for presence), and gives it an nftables
 egress allowlist (empty = no egress). Every paid run (`Baseline`,
 `Evaluate`) that the RLM asks for happens in a **sister** Firecracker guest
 with **no network**: the RLM ships the artefact bytes it already inspected
-over vsock — **the exact bytes it fetched from `artifact_uri`, verbatim**
-(`artifact_digest` is the sha256 of that served file; the guest runs
-`proof_vm_proto::tar::verify_artifact` on what it received and never re-tars
-the tree, never substitutes one — a fetch that fails or does not verify is
-`RlmToHost::Failed`, 503, no row), the host runs the same check and boots
+over vsock — **the exact bytes it obtained, verbatim** (HTTP `artifact_uri`
+on the URI-only path, or a vsock `StageArtifact` inject of gateway-vault
+bytes for `proof-artefact://`; `artifact_digest` is the sha256 of those
+bytes; the guest runs `proof_vm_proto::tar::verify_artifact` on what it
+received and never re-tars the tree, never substitutes one — a fetch or
+inject that fails or does not verify is `RlmToHost::Failed`, 503, no row),
+the host runs the same check and boots
 the sister from its own pinned image, holds it to the topic deadline,
 destroys it, and writes the `SisterAttestation`. The
 agent then **stamps** the report: `sandboxed` is `true` only when a sister
@@ -677,10 +681,12 @@ govern the harvest rent; on the custom path each run request records the
 resolved executor plan's deadline (tighter of topic and plan) and
 `config_commitment` as provenance, and the row stamps `executor_commitment`
 like every other scored row. The run request also carries the miner's
-`artifact_uri` (`artifact_digest` is the sha256 of the **file** served
-there — an uncompressed tar of the recipe tree; the runner fetches it inside
-the VM, verifies the bytes as received against `artifact_digest`, and
-forwards them verbatim, and the KVM host runs the same check
+`artifact_uri` (`artifact_digest` is the sha256 of the **file** — an
+uncompressed tar of the recipe tree). On a miner-hosted `https://` locator
+the runner fetches it inside the VM; on `proof-artefact://` the host injects
+the gateway-vault bytes over vsock and the guest must not HTTP-fetch. Either
+path verifies the bytes as received against `artifact_digest` and forwards
+them verbatim, and the KVM host runs the same check
 (`proof_vm_proto::tar::verify_artifact`) before it boots a sister: one
 identity, never a re-tar of the tree, which would hash differently. A
 custom submission without a locator is a **400** at intake, no row, and the
@@ -688,7 +694,7 @@ scorer refuses a request without it; an `artifact_digest` that is the sha256
 of nothing — zero bytes, an empty tar — is a **400** too; the host refuses a
 content-less, compressed, non-tar, or mis-hashed `artifact_tar`, so a guest
 that substitutes an empty tree when its fetch fails can never produce a
-scored run). The topic's `flops_budget` and the miner's `declared_flops`
+scored run. The topic's `flops_budget` and the miner's `declared_flops`
 travel with the request for signature / harvest compat; custom / agent
 topics do **not** reject on measured `flops_used` vs either figure, and a
 report without a measurement is still evidence. Anti-cheat is the signed

@@ -196,16 +196,17 @@ Build a recipe the judge can re-run: code, lockfile, and entrypoint. Harvest
 `nll` / `throughput` topics still score under the topic's FLOP (and for
 throughput, wall) budget; custom / agent topics do not. Hash that tree. That hash
 is `artifact_digest`. Upload the uncompressed tar (≤5 MiB) as multipart
-part `artifact` — preferred on custom / `tbench`. `artifact_uri` is an
+part `artifact` — preferred on custom / `tbench`. That upload is the
+evaluate path: the gateway stages the bytes and the KVM host injects them
+into the guest over vsock (no miner HTTPS). `artifact_uri` is an
 optional compat locator (git URL, object URL) for the same bytes: optional
 on `nll` / `throughput`, and optional on custom topics when you upload.
 A custom topic with neither upload nor URI is a **400** `artifact required`.
 When both are sent, the uploaded bytes win (the URI is ignored for identity).
-Live evaluate of an upload records `proof-artefact://` and answers **503**
-until vsock inject ([#285](https://github.com/CortexLM/cortex/pull/285));
-score now with URI-only `https://` (no upload). A topic in `deferred_topics`
-still accepts the upload as **201** `queued`. Gzip, a non-tar body, or a tar
-with no file content is **400** with no row.
+A topic in `deferred_topics` still accepts the upload as **201** `queued`.
+Gzip, a non-tar body, or a tar with no file content is **400** with no row.
+Missing vault / digest mismatch / empty / oversize at evaluate is **503**
+with the row untouched — never invented bytes.
 
 The **claim** is one English sentence of what improved. The RLM re-runs the
 code against the public split and checks the claim against those public
@@ -478,7 +479,7 @@ submission row.
 | **503** missing / closed / non-`1x` executor | Live `eval_executor` cannot rent the `1x` machine | no | no |
 | **503** `proof deadline … exceeded` | Your recipe did not finish inside `max_proof_deadline_s`; the body carries the run's `stdout_tail` | no | no (pod torn down) |
 | **503** `custom metric … has no registered runner` / `not wired` | The topic's `custom_id` has no runner on this host, or its topic VM is not configured | no | no |
-| **503** staged artefact / `proof-artefact://` | Live evaluate of an upload-only custom submit: this host stages bytes only; guest inject is [#285](https://github.com/CortexLM/cortex/pull/285). Score now with URI-only `https://` (no upload). Deferred topics still **201** `queued` | live: no; deferred: queued | no |
+| **503** staged artefact missing / digest mismatch | Upload-only evaluate: the host no longer holds matching vault bytes (missing, empty, oversize, or digest mismatch). The row is untouched — nothing was rented and no bytes are invented | live: no; deferred: queued | no |
 | **201** `queued` | Topic in `deferred_topics` (operator still installing its scoring path); every **400** above still applies first | **yes** (queued, scored later) | **no** (not yet) |
 | **200** existing row (`already queued …` / `already submitted … and scored`) | Same artefact + hotkey re-sent (freshly signed, new `submit_nonce`) to a deferring topic, before or after its row was drained | existing row | **no** |
 | **201** `rejected` + `contamination_evidence_missing` | Empty manifest on a topic that requires training evidence (harvest default; custom / agent only if `require_training_evidence = "true"`) | **yes** (rejected) | **no** |
@@ -555,9 +556,10 @@ by the runner registered on the host under `metric.custom_id`; nothing
 about it is compiled into the network. The topic's RLM runs in its own
 Firecracker microVM on a dedicated KVM host, and **your code runs in a
 separate ("sister") Firecracker guest beside it that has no network
-interface**: the RLM fetches the file at `artifact_uri`, checks it against
-your `artifact_digest`, inspects it, and ships **those exact bytes** into the
-sister over vsock. Plan for an offline run —
+interface**: the RLM obtains the artefact (HTTP `artifact_uri` on the
+URI-only path, or a vsock inject of gateway-staged bytes when you uploaded),
+checks it against your `artifact_digest`, inspects it, and ships **those
+exact bytes** into the sister over vsock. Plan for an offline run —
 nothing your code does at run time can reach the internet, the RLM, or the
 host. The host (not the RLM) stamps `sandboxed` on your report from the
 guest it booted, and the `flops_used` your verdict carries is what that
@@ -578,7 +580,8 @@ baked into the VM image by the operator — nothing about it lives in the
 network repo), against the experiment pack the topic pins by digest —
 16 vCPU / 32 GiB RAM unless the topic asks for less (that lock is a hard
 maximum on every host), with at least 16 GiB of writable disk (32 GiB by
-default). Upload the recipe at the gateway (`--artifact`, ≤5 MiB). A
+default). Upload the recipe at the gateway (`--artifact`, ≤5 MiB): evaluate
+injects those staged bytes over vsock, so you do not host a fetch URL. A
 miner-hosted `artifact_uri` is still fetched inside the VM (streamed, cut
 at 64 MiB) when you did not upload. The bytes are checked against
 `artifact_digest` before anything runs, the
@@ -608,9 +611,7 @@ compat path (the runner fetches that file inside the topic VM); when you
 upload, those bytes win and the URI is ignored for identity. The host
 refuses gzip, non-tar bytes, a tree with no file content, or bytes that do
 not hash to your `artifact_digest` — a run never starts on a substitute or
-re-encoded artefact. Live evaluate of an upload is **503** until
-[#285](https://github.com/CortexLM/cortex/pull/285) inject; URI-only `https://`
-still scores. A guest-measured `flops_used` may appear on the
+re-encoded artefact. A guest-measured `flops_used` may appear on the
 verdict as telemetry. Custom / agent topics do **not** reject on that
 figure vs `declared_flops` or the topic budget.
 
