@@ -144,6 +144,70 @@ class SummarizeTests(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 2)
             self.assertFalse((root / "report.json").exists())
 
+    def test_nonzero_harbor_exit_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "t__1"
+            trial.mkdir(parents=True)
+            (trial / "result.json").write_text(
+                '{"trial_name":"t__1","verifier_result":{"rewards":{"reward":0.6}}}',
+                encoding="utf-8",
+            )
+            out = root / "report.json"
+            with self.assertRaises(SystemExit) as ctx:
+                summarize.main(
+                    [
+                        "--jobs-dir",
+                        str(root / "jobs"),
+                        "--output",
+                        str(out),
+                        "--harbor-exit",
+                        "23",
+                    ]
+                )
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertFalse(out.exists())
+
+    def test_scores_every_measured_trial_beyond_evidence_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            for i in range(260):
+                trial = jobs / "job" / f"trial-{i:03d}"
+                trial.mkdir(parents=True)
+                reward = 100.0 if i >= 256 else 0.0
+                (trial / "result.json").write_text(
+                    json.dumps(
+                        {
+                            "trial_name": f"trial-{i:03d}",
+                            "verifier_result": {"rewards": {"reward": reward}},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            trials = summarize.collect_trials(jobs)
+            self.assertEqual(len(trials), 260)
+            expected = (4.0 * 100.0) / 260.0
+            self.assertAlmostEqual(summarize.mean_reward(trials), expected)
+            out = root / "report.json"
+            rc = summarize.main(
+                [
+                    "--jobs-dir",
+                    str(jobs),
+                    "--output",
+                    str(out),
+                    "--harbor-exit",
+                    "0",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            report = json.loads(out.read_text(encoding="utf-8"))
+            self.assertAlmostEqual(report["primary_value"], expected)
+            self.assertEqual(report["evidence"]["n_measured"], 260)
+            self.assertEqual(len(report["evidence"]["trials"]), 256)
+            self.assertTrue(report["evidence"]["evidence_truncated"])
+            self.assertTrue(report["claim_holds"])
+
 
 if __name__ == "__main__":
     unittest.main()

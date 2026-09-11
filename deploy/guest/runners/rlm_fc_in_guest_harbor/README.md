@@ -13,40 +13,79 @@ thin adaptor that `exec`'d it) **ignored `$PROOF_ARTIFACT_DIR`** on evaluate
 **owner** key from `PROOF_SECRETS_DIR`. Inspect already saw the artefact;
 evaluate did not use the miner code. That gap is the bug this adaptor closes.
 
+The evaluate path is **not** Terminus-2-only. Custom Python is the primary
+miner harness; Harbor `BaseAgent` subclasses, an explicit `harness.json`, and
+a classic `run.sh` are also accepted. Built-in names such as `terminus-2` are
+used only for **baseline** with no miner artefact, or when the miner names
+one in `harness.json`.
+
+## Miner harness interface
+
+Evaluate discovers, in order:
+
+1. `$PROOF_ARTIFACT_DIR/harness.json` (also `recipe/harness.json`,
+   `agent/harness.json`, `recipe/agent/harness.json`)
+2. A Python agent directory at `$PROOF_ARTIFACT_DIR/agent/` then
+   `$PROOF_ARTIFACT_DIR/recipe/agent/`
+3. A script at `run.sh` / `recipe/run.sh` / `harness.sh`
+
+`harness.json`:
+
+```json
+{ "kind": "python", "import_path": "agent.agent:YourClass" }
+{ "kind": "harbor", "import_path": "agent.agent:YourClass" }
+{ "kind": "script", "entry": "recipe/run.sh" }
+{ "kind": "builtin", "name": "oracle" }
+```
+
+| `kind` | What runs |
+|--------|-----------|
+| `python` (primary) | Custom Python class (`Agent` / `ProofAgent` / any class named in `import_path`). Need not subclass Harbor `BaseAgent`. Harbor `-a` is the in-tree wrapper `proof_python_agent:ProofPythonAgent`, which imports **your** class from the artefact only. |
+| `harbor` | Harbor `BaseAgent` / `BaseInstalledAgent` subclass, passed as `-a module:Class` |
+| `script` | Miner executable relative to the artefact. Docker, filtered tasks, and BYOK are already set. Score is the mean of Harbor `verifier_result.rewards.reward` under `$PROOF_WORK_DIR/harbor-jobs`. A miner-authored `$PROOF_OUTPUT_DIR/report.json` is refused (fail closed). Never wrapped as `terminus-2`. |
+| `builtin` | A Harbor built-in the **miner** opted into. Evaluate refuses a topic built-in when this file is absent. |
+
+Custom Python `run()` may take `instruction` alone or Harbor's
+`(instruction, environment, context)`. Discovery is AST-only; miner code is
+not executed until the paid run.
+
 ## What Harbor `-a` actually accepts
 
 Verified against Harbor CLI (`-a` / `--agent`) and `AgentFactory`:
 
 | Value | Meaning |
 |-------|---------|
-| Built-in name | `terminus-2`, `oracle`, `claude-code`, … |
+| Built-in name | `terminus-2`, `oracle`, `claude-code`, … (baseline / explicit `harness.json` only) |
 | Python import path | `module.path:ClassName` (subclass of `BaseAgent` / `BaseInstalledAgent`) |
 | ACP shorthand | `acp:opencode@…` |
 
 Harbor **does not** accept a filesystem path for `-a`. This adaptor therefore
 **does not** pass `-a $PROOF_ARTIFACT_DIR/agent`. On evaluate it:
 
-1. Detects a Harbor agent directory in the unpacked artefact (AST scan, no
-   miner code executed at resolve time).
-2. Puts the parent of that directory on `PYTHONPATH`.
-3. Passes `-a module.path:ClassName` so Harbor imports the miner's class.
+1. Detects a Python / Harbor agent directory in the unpacked artefact (AST
+   scan, no miner code executed at resolve time).
+2. Puts the parent of that directory on `PYTHONPATH` (plus this adaptor's
+   `harness/` dir when the custom-Python wrapper is used).
+3. Passes `-a module.path:ClassName` or `-a proof_python_agent:ProofPythonAgent`.
 
 A one-line `import_path` file inside the agent dir (contents
 `module.path:ClassName`) wins when several classes exist. A built-in name in
 that file is refused: that would ignore miner code the same way `terminus-2`
-did.
+did. The named module is resolved in the evaluate import env (artefact
+parent only) and **rejected** if its origin is outside the staged artefact.
 
 ## Agent selection (miner attach surface)
 
-| Job | Artefact | What `-a` is |
-|-----|----------|----------------|
-| `evaluate` | `$PROOF_ARTIFACT_DIR/agent/` is a Harbor agent dir | that import path |
-| `evaluate` | else `$PROOF_ARTIFACT_DIR/recipe/agent/` | that import path |
-| `evaluate` | `$PROOF_ARTIFACT_DIR/recipe/run.sh` only | **fail closed** — classic recipe marker is not a Harbor `-a` target; do not wrap it as `terminus-2` |
-| `evaluate` | artefact staged, neither agent dir | **fail closed** — never the topic agent |
+| Job | Artefact | What runs |
+|-----|----------|-----------|
+| `evaluate` | custom Python at `agent/` / `recipe/agent/` | wrapper `-a proof_python_agent:ProofPythonAgent` |
+| `evaluate` | Harbor `BaseAgent` dir | that import path |
+| `evaluate` | `harness.json` | the named kind |
+| `evaluate` | `$PROOF_ARTIFACT_DIR/recipe/run.sh` only | **script harness** — not wrapped as `terminus-2` |
+| `evaluate` | artefact staged, nothing matching | **fail closed** — never the topic agent |
 | `baseline` | `PROOF_ARTIFACT_DIR` unset | topic `PROOF_PARAM_HARBOR_AGENT` (operator pack agent, e.g. `terminus-2`) |
-| `baseline` | artefact has a Harbor agent dir | that import path (same resolution) |
-| `baseline` | artefact staged but no agent dir | **fail closed** — topic fallback is only when no miner artefact is staged |
+| `baseline` | artefact has a miner harness | that harness (same resolution) |
+| `baseline` | artefact staged but no harness | **fail closed** — topic fallback is only when no miner artefact is staged |
 
 ## Miner artefact (uncompressed tar)
 
@@ -57,17 +96,19 @@ file). After unpack, paths are relative to `$PROOF_ARTIFACT_DIR`.
 
 ```
 recipe/
-  agent/            # Harbor agent this adaptor passes to `harbor run -a`
-    agent.py        # class …(BaseAgent) or BaseInstalledAgent
+  harness.json      # optional: explicit kind (python | harbor | script | builtin)
+  agent/            # PREFERRED: custom Python (class Agent) or Harbor BaseAgent
+    agent.py
     import_path     # optional: one line `agent.agent:ClassName`
-  run.sh            # optional classic marker; inspect may see it; evaluate does not exec it
+  run.sh            # optional script harness; evaluate execs it, does not wrap terminus-2
   README.md
 ```
 
 **Tar root** if you pack with `tar -cf recipe.tar -C recipe .`:
 
 ```
-agent/              # same Harbor agent dir, at the unpack root
+agent/              # same agent dir, at the unpack root
+harness.json
 recipe/run.sh       # optional
 README.md
 ```
@@ -76,12 +117,15 @@ Resolution order after unpack: `$PROOF_ARTIFACT_DIR/agent` then
 `$PROOF_ARTIFACT_DIR/recipe/agent`. Be explicit which layout you hash and
 serve; re-tarring changes the digest.
 
-Off-limits in the artefact (inspect fails the named rule):
+Off-limits **cheat markers** in the artefact (inspect fails the named rule):
 
-- `no_eval_short_circuit` (and `skip_eval` / `skip_verifier` / `always_pass_eval` / `short_circuit_eval`)
-- `no_tb4_hardcoding` (and `tb4_answers` / `hardcoded_tb4`)
+- `no_eval_short_circuit` on `skip_eval` / `skip_verifier` / `always_pass_eval` / `short_circuit_eval`
+- `no_tb4_hardcoding` on `tb4_answers` / `hardcoded_tb4`
 
-Do not quote those markers in miner code or README inside the tar.
+The rule-id strings themselves are not markers. A README or comment that
+names `no_eval_short_circuit` / `no_tb4_hardcoding` is compliance language,
+not a fail. A file/byte-limit truncation marks the scan incomplete and
+fails those off-limits rules. Unknown rule ids fail closed.
 
 ## BYOK
 
@@ -109,14 +153,63 @@ hardcoded to a benchmark name):
 | Param | Env | Role |
 |-------|------|------|
 | `tasks_dir` | `PROOF_PARAM_TASKS_DIR` | Relative path under the pack. Refused if absolute or contains `..` |
-| `harbor_agent` | `PROOF_PARAM_HARBOR_AGENT` | Topic built-in for **baseline only** when no artefact agent |
+| `max_task_duration_s` | `PROOF_PARAM_MAX_TASK_DURATION_S` | Drop pack tasks whose duration metadata is ≥ this many seconds (default **3600**). Pack `filter.json` may only **lower** the ceiling. Adaptor `duration_hints.json` default allow/exclude (n15 x0017) still applies. An **allow-listed** task is gated on its measured wall only — see below. |
+| `task_filter` | `PROOF_PARAM_TASK_FILTER` | Optional relative pack path to `filter.json` / allow-list |
+| `exclude_unknown_duration` | `PROOF_PARAM_EXCLUDE_UNKNOWN_DURATION` | `true` to drop tasks with no duration metadata |
+| `harbor_agent` | `PROOF_PARAM_HARBOR_AGENT` | Topic built-in for **baseline only** when no miner harness |
 | `miner_byok` | `PROOF_PARAM_MINER_BYOK` | Miner key name |
 | `inference_key_file` / `inference_key_env` | owner key for baseline when miner_byok is unused |
 | `n_concurrent` / `n_attempts` | Harbor `--n-concurrent` / `--n-attempts` (default `1`) |
-| `harbor_environment` | `PROOF_PARAM_HARBOR_ENVIRONMENT` | Passed as Harbor `--env` (e.g. `docker` / `podman`) when set |
+| `harbor_environment` | `PROOF_PARAM_HARBOR_ENVIRONMENT` | Passed as Harbor `--env` (default **`docker`**). `no-network` / `none` are ignored — agents need the internet. |
 
-Tasks stay the operator pack. The miner attach surface is the **agent**, not
-the task list.
+Tasks stay the operator pack. The miner attach surface is the **harness**,
+not the task list. Before Harbor runs, the adaptor copies surviving tasks
+to `$PROOF_WORK_DIR/tasks-filtered` and rewrites Harbor `network_mode` to
+**`public`** on that copy (Docker `no-network` is unsupported on this guest
+and blocked agent OpenRouter calls; n15 hit `ValueError network_mode=no-network
+unsupported` on batched-eval-parity). Host nftables on the VM TAP remain the
+egress allowlist; this rewrite does not open the host. A filtered copy with
+zero tasks fails closed.
+
+Operator pack hint (pack content, not compiled in): ship `filter.json` with
+`max_duration_s`, optional `allow` / `deny` directory names (aliases match
+`biped` → `biped-contact-dynamics`), and/or `task_durations.json`. See
+`harness/pack_filter.example.json`. Pack `allow` may only **intersect** the
+adaptor default allow-list (further restrict). It cannot add names.
+
+Adaptor `harness/duration_hints.json` is the Dev default short-task filter
+from retained n15 x0017:
+
+- **allow (<1h):** `cargo-flight-dispatch`, `embedding-drift-monitor`,
+  `bun-sourcemap-leak`, `fin-saccr-rwa`, `foodstuff-beta-activity`,
+  `atrx-vep-crispr`
+- **exclude >1h:** `biped-contact-dynamics` (~5.2h), `formal-crypto`
+  (~2.1h), `cad-model` (~1.2h), `data-anonymization` (~1.1h)
+- **exclude broken until fixed:** `batched-eval-parity` (no-network),
+  `ctr-optimization` / `cumulative-layout-shift` (EnvStartTimeout),
+  `distributed-dedup` (tmux), `coq-block-bound` (wall cut).
+  `biped-contact-dynamics` / `cad-model` also stay out until verifier pytest
+  is proven on metal.
+
+The deny/exclude list wins first, then the allow-list, then duration. A task
+named **exactly** on the allow-list was measured under an hour, so only a
+measured `walls_sec` wall ≥ `max_task_duration_s` drops it — a pack
+`task.toml` `agent_timeout` is the harness ceiling, not a duration, and is
+ignored for those tasks (n15 attempt1 on pin `4a04eeb1` declared 28800 on all
+six and the 3600 default emptied the pack). Every other task is still dropped
+on max(declared timeout, pack duration, adaptor hint), including an alias hit
+such as `cargo-flight-dispatch-extra` (a different task) and an unmeasured
+allow-list entry under a ceiling below 3600 (tighter than what the allow-list
+asserts); those also still honour `exclude_unknown_duration`.
+
+Do not put hour-plus or broken tasks in the default scorable pack for
+`n_concurrent` baselines or miner evals. An empty filtered copy fails closed.
+
+After the copy, `ensure_verifier.py` injects pytest into environment /
+verifier / tests Dockerfiles even when FROM is not `python:*` (n15
+`biped-contact-dynamics` + `cad-model` scored 0 from `pytest: command not
+found`). That is an image/env hole, not a true-zero miner reward. Partial
+pytest assertion failures remain real 0s.
 
 ## Outputs
 
@@ -131,14 +224,17 @@ the task list.
     "n_measured": 1,
     "mean_reward": 0.73,
     "harbor_run_tail": "…",
-    "agent": "agent.agent:MinerAgent",
-    "agent_source": "artifact_dir/recipe/agent"
+    "agent": "proof_python_agent:ProofPythonAgent",
+    "agent_source": "artifact_dir/recipe/agent",
+    "harness_kind": "python"
   }
 }
 ```
 
-`primary_value` is the mean of Harbor trial `verifier_result.rewards.reward`
-only. No measured trial → fail closed, no invented number.
+`primary_value` is the mean of **every** Harbor trial
+`verifier_result.rewards.reward`. Evidence may truncate the serialized
+trial list; the mean does not. No measured trial, or a nonzero Harbor
+exit, → fail closed, no invented number and no leftover `report.json`.
 
 `inspect` writes `$PROOF_OUTPUT_DIR/checklist.json` (no Harbor, no keys).
 
@@ -184,6 +280,17 @@ Optional overlay layout if you still ship harness files under
 behavior is in that copy. The in-tree `run` does not exec the old overlay.
 
 `tests/` is CI-only; omit it on metal if you want a smaller copy.
+`host/summarize_job.py` is a KVM-host RCA helper (nested orch `job.out`);
+it is not the guest `run` path. Pass `--jobdir <any-dir>` — no baked
+`JOBDIR`. It writes `custom_value.txt` and `summary.txt` under JOBDIR.
+`host/run-n15` waits for Harbor `curl.pid` / `job.out` (including `--restart`)
+and always invokes that helper.
+
+Host harvest (`proof-fc-harvest`) refreshes `{jail}/harvest-work` after
+vsock `Done` until trial `result.json` / `verifier/reward.txt` and Harbor
+`n_running` / `stats.n_running_trials` would pass fail-closed checks. Dump-only
+reconstruct that still lags refuses. That is not an adaptor rewrite of
+`reward.txt`.
 
 Topic params must name this runner id and a relative `tasks_dir` inside the
 pinned pack. Re-pin `experiment_pack_digest` when the pack tar bytes change.
@@ -192,10 +299,17 @@ pinned pack. Re-pin `experiment_pack_digest` when the pack tar bytes change.
 
 - `TMPDIR` / `TMP` / `TEMP` → `$PROOF_WORK_DIR/tmp` (`/var/tmp` is often not
   writable on the RO rootfs).
-- Rootless `podman system service` + `DOCKER_HOST` so Harbor's default Docker
-  environment talks to the guest's podman API socket (same pattern as
-  `deploy/guest/runners/README.md`).
-- `PROOF_HARNESS_SKIP_PODMAN=1` skips that socket (unit tests).
+- **Docker first.** If `dockerd` / `/var/run/docker.sock` is present (rootful
+  overlay + host-tools), the adaptor uses that daemon and Harbor
+  `--env docker`. Native overlay; no fuse budget. `init.sh` bind-mounts the
+  engine store onto the scratch drive and starts `dockerd` when it is on
+  PATH.
+- Rootless `podman system service` + `DOCKER_HOST` is the fallback when
+  Docker is absent, so Harbor's Docker environment can still talk to an API
+  socket (same pattern as `deploy/guest/runners/README.md`).
+- `docker-compose` is **not** aliased to `podman-compose`.
+- `PROOF_HARNESS_SKIP_PODMAN=1` (or `PROOF_HARNESS_SKIP_RUNTIME=1`) skips
+  the socket (unit tests).
 
 ## Miner-facing guide
 

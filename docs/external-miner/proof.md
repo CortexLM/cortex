@@ -128,6 +128,10 @@ Topics that have a written miner guide in this repo:
 |-------|-------|-----------------|
 | `tbench` | [proof-tbench.md](./proof-tbench.md) | `custom` (`success_rate`) / `discovery` |
 
+For a minimal custom-Python `Agent` constructor/`run` on `tbench` (Harbor
+`environment.exec`, both pack layouts), see
+[proof-tbench.md § Minimal Agent example](./proof-tbench.md#minimal-agent-example).
+
 A guide is a convenience, not the contract: the signed document returned by
 `ctx proof topics` wins wherever the two disagree, and a topic without a guide
 is submitted to exactly like any other.
@@ -191,10 +195,17 @@ are paid on**. You never see the records.
 Build a recipe the judge can re-run: code, lockfile, and entrypoint. Harvest
 `nll` / `throughput` topics still score under the topic's FLOP (and for
 throughput, wall) budget; custom / agent topics do not. Hash that tree. That hash
-is `artifact_digest`. `artifact_uri` is a locator (git URL, object URL) for
-the same bytes: optional on `nll` / `throughput` (the image fetches by
-digest), **required on custom topics** (the topic's runner fetches from it
-inside the topic VM and checks the digest; without one the submit is a 400).
+is `artifact_digest`. Upload the uncompressed tar (≤5 MiB) as multipart
+part `artifact` — preferred on custom / `tbench`. `artifact_uri` is an
+optional compat locator (git URL, object URL) for the same bytes: optional
+on `nll` / `throughput`, and optional on custom topics when you upload.
+A custom topic with neither upload nor URI is a **400** `artifact required`.
+When both are sent, the uploaded bytes win (the URI is ignored for identity).
+Live evaluate of an upload records `proof-artefact://` and answers **503**
+until vsock inject ([#285](https://github.com/CortexLM/cortex/pull/285));
+score now with URI-only `https://` (no upload). A topic in `deferred_topics`
+still accepts the upload as **201** `queued`. Gzip, a non-tar body, or a tar
+with no file content is **400** with no row.
 
 The **claim** is one English sentence of what improved. The RLM re-runs the
 code against the public split and checks the claim against those public
@@ -207,7 +218,7 @@ ctx proof topics          # pick an open topic_id; read flops_budget + payout_mo
 ctx proof submit \
   --secret-file /path/to/hotkey.sk \
   --topic-id <open topic id> \
-  --artifact-digest <sha256 of the recipe> \
+  --artifact recipe.tar \
   --claim "beat sealed baseline holdout NLL by 0.04 at 1.2e18 FLOPs" \
   --declared-flops 1500000000000000000 \
   --train-dataset my-mix-v0
@@ -272,7 +283,9 @@ payload = (hotkey_hex.encode() + b"\xff" + topic_id.encode() + b"\xff"
 
 `ctx proof sign` prints `miner_hotkey`, `hotkey_signature`, `submit_nonce`,
 and the exact `manifest` to post, without posting. Pass the same
-`--train-dataset` / `--train-hash` / `--manifest-file` you will submit.
+`--train-dataset` / `--train-hash` / `--manifest-file` you will submit when
+the live topic requires training evidence; omit them on custom / agent
+topics (`tbench`).
 
 `--wait` keeps polling until the row is terminal (`awaiting_admin`,
 `rejected`, or `champion`). A `queued` row is not terminal: on a topic that
@@ -316,6 +329,10 @@ a topic in `deferred_topics`, where they answer **201** `queued`.
 
 `POST https://gateway.cortex.foundation/challenge/proof/v1/submissions`
 
+Preferred: **multipart** with the same fields as form parts plus part
+`artifact` = the uncompressed tar (≤5 MiB). `ctx proof submit --artifact`
+does this. JSON + `artifact_uri` remains a compat path.
+
 | Field | Required | Shape |
 |-------|----------|-------|
 | `miner_hotkey` | yes | **Exactly** 64 lowercase hex (no `0x`); the sr25519 public key that verifies `hotkey_signature` |
@@ -325,14 +342,21 @@ a topic in `deferred_topics`, where they answer **201** `queued`.
 | `artifact_digest` | yes | SHA-256 of the recipe bytes as **exactly** 64 lowercase hex (no `0x`) |
 | `claim` | yes | Non-empty string: NL of what improved (bound into the signature) |
 | `declared_flops` | no | `u64`, default `0`, bound into the signature. Ignored as a scoring gate on custom / agent topics. Harvest `nll` / `throughput`: must be `≤ topic.flops_budget` |
-| `manifest.train_content_hashes` | yes (array) | Shard hashes you trained on (may be `[]` if you declare dataset ids); bound into the signature |
-| `manifest.train_dataset_ids` | yes (array) | Corpus ids you trained on (may be `[]` if you declare hashes); bound into the signature |
-| `artifact_uri` | custom topics: yes | Locator for the same bytes as `artifact_digest`; optional on `nll` / `throughput` |
+| `manifest.train_content_hashes` | when the topic requires training evidence | Shard hashes you trained on (may be `[]` if you declare dataset ids); bound into the signature. Omit both lists on custom / agent topics (`tbench`) |
+| `manifest.train_dataset_ids` | when the topic requires training evidence | Corpus ids you trained on (may be `[]` if you declare hashes); bound into the signature. Do not invent a fake id |
+| `artifact_uri` | custom: optional | Compat locator; omit when you upload `artifact`. Required on neither: **400** `artifact required`. Optional on `nll` / `throughput` |
 | `env` | topics that ask for a key: yes | `{"<NAME>": "<value>"}` — your own API keys for the variables the signed topic declares. See [Bring your own key](#bring-your-own-key-env). **Not** signed |
 
 An empty `manifest` (both arrays empty / omitted) is **not** a clean
-contamination check. It is `contamination_evidence_missing`: the row is
-**rejected** and **no pod is rented**.
+contamination check on a topic that **requires training evidence** — harvest
+`nll` / `throughput` by default, or any topic whose signed
+`constraints.params.require_training_evidence` is `"true"`. That is
+`contamination_evidence_missing`: the row is **rejected** and **no pod is
+rented**. Custom / agent topics (`tbench`) have no training step: omit
+`--train-dataset` / `--train-hash`, send empty arrays, and do not invent a
+harness id as a fake corpus. Holdout overlap in a *declared* manifest is
+always contamination, on every family. `ctx proof submit` / `ctx proof sign`
+read the live topic and only insist on a declaration when that topic needs one.
 
 ### Bring your own key (`env`)
 
@@ -347,6 +371,7 @@ Which variable a topic wants is in its signed document, under
 |-------|---------|
 | `miner_byok` | The variable you **must** send. A submission without it is **400** |
 | `miner_env_allowlist` | Comma-separated variables you **may** send. Optional |
+| `require_training_evidence` | `"true"`: empty manifest is `contamination_evidence_missing`. `"false"`: skip. Absent: harvest (`nll` / `throughput`) require a declaration, custom / agent (`tbench`) skip |
 
 Read them from `ctx proof topics --json` or
 `GET /challenge/proof/v1/proof/topics/<id>` before you submit. A topic that
@@ -360,15 +385,14 @@ ctx proof submit \
   --artifact-digest <sha256> \
   --artifact-uri https://example.org/recipe.tar \
   --claim "beat the sealed baseline" \
-  --declared-flops 1500000000000000000 \
-  --train-dataset my-mix-v0 \
   --wallet-name miner --wallet-hotkey default \
   --env OPENROUTER_API_KEY
 ```
 
-Bare `--env OPENROUTER_API_KEY` reads the value from your shell, so the key
-never lands in your shell history or in `ps`. `--env NAME=value` passes it
-inline. The flag is repeatable, and over `curl` it is the body's `env`:
+Pass `--openrouter-api-key` (never printed) or `--env OPENROUTER_API_KEY` to
+read it from your shell. Exporting the variable alone does not attach it.
+`--env NAME=value` passes any BYOK variable inline. `--env` is repeatable,
+and over `curl` it is the body's `env`:
 
 ```json
 { "env": { "OPENROUTER_API_KEY": "sk-or-…" } }
@@ -432,7 +456,9 @@ submission row.
 | **400** `unknown topic` | `topic_id` not published | no | no |
 | **400** `topic is not open` | Draft / closed / outside epoch window | no | no |
 | **400** `declared_flops exceeds the topic budget` | Harvest `nll` / `throughput` only: `declared_flops > topic.flops_budget`. Custom / agent topics do not 400 on this | no | no |
-| **400** `artifact_uri is required for custom topics` | Custom topic, no locator | no | no |
+| **400** `artifact required` | Custom topic, no upload and no `artifact_uri` | no | no |
+| **400** `artifact exceeds 5 MiB` / `artifact is empty` / `artifact_digest does not match uploaded bytes` | Upload oversize, empty, or digest mismatch | no | no |
+| **400** `artifact is not a tar archive` / `artifact is gzip-compressed; upload an uncompressed tar` / `artifact carries no file content` | Upload is gzip, not a tar, or a tar with no file bytes | no | no |
 | **400** `env.<NAME> is required by this topic` | The topic's `miner_byok` variable is missing from `env`. Your `submit_nonce` is **not** spent — re-post the same signed body with `--env <NAME>` | no | no |
 | **400** `env name <NAME> is not declared by this topic` | A variable the signed topic's `miner_byok` / `miner_env_allowlist` does not list. The message names what it does accept | no | no |
 | **400** `env name <NAME> is not a miner environment variable` | Not `[A-Z][A-Z0-9_]{0,63}`, or a name the guest owns (`PROOF_…`, `PATH`, `HOME`, `LANG`, `XDG_RUNTIME_DIR`) | no | no |
@@ -443,7 +469,7 @@ submission row.
 | **401** `submit_nonce required` | Missing / empty `submit_nonce` | no | no |
 | **401** `submit_nonce invalid` | Not exactly 64 lowercase hex | no | no |
 | **401** `submit_nonce reused` | This `(miner_hotkey, submit_nonce)` pair was already presented with a valid signature: a replay. Sign again with a fresh nonce | no | no |
-| **400** `artifact_digest is the sha256 of empty input …` | The digest of zero bytes or of an empty tar archive: hash the recipe bytes you actually serve at `artifact_uri` | no | no |
+| **400** `artifact_digest is the sha256 of empty input …` | The digest of zero bytes or of an empty tar archive: hash the recipe bytes you actually upload (or serve at `artifact_uri`) | no | no |
 | **503** empty `eval_image_digest` | Digest not pinned | no | no |
 | **503** zero open sealed topics | Nothing to score against | no | no |
 | **503** unsealed baseline | Topic open without both seal hashes | no | no |
@@ -452,14 +478,16 @@ submission row.
 | **503** missing / closed / non-`1x` executor | Live `eval_executor` cannot rent the `1x` machine | no | no |
 | **503** `proof deadline … exceeded` | Your recipe did not finish inside `max_proof_deadline_s`; the body carries the run's `stdout_tail` | no | no (pod torn down) |
 | **503** `custom metric … has no registered runner` / `not wired` | The topic's `custom_id` has no runner on this host, or its topic VM is not configured | no | no |
+| **503** staged artefact / `proof-artefact://` | Live evaluate of an upload-only custom submit: this host stages bytes only; guest inject is [#285](https://github.com/CortexLM/cortex/pull/285). Score now with URI-only `https://` (no upload). Deferred topics still **201** `queued` | live: no; deferred: queued | no |
 | **201** `queued` | Topic in `deferred_topics` (operator still installing its scoring path); every **400** above still applies first | **yes** (queued, scored later) | **no** (not yet) |
 | **200** existing row (`already queued …` / `already submitted … and scored`) | Same artefact + hotkey re-sent (freshly signed, new `submit_nonce`) to a deferring topic, before or after its row was drained | existing row | **no** |
-| **201** `rejected` + `contamination_evidence_missing` | Empty manifest | **yes** (rejected) | **no** |
+| **201** `rejected` + `contamination_evidence_missing` | Empty manifest on a topic that requires training evidence (harvest default; custom / agent only if `require_training_evidence = "true"`) | **yes** (rejected) | **no** |
 | **201** `rejected` + contamination | Holdout shard / corpus id in `manifest` | **yes** (rejected) | **no** |
 | **201** `rejected` + `anti-cheat checklist red` | A topic rule failed on your artefact | **yes** (rejected) | **no** (no paid inference) |
 
-Contamination (including empty evidence) is a **reject, no rent**. It is
-not a 400 and not a 503. A red anti-cheat checklist is the same shape: a
+Holdout overlap is a **reject, no rent**. An empty manifest is the same
+shape **only** when the topic requires training evidence. It is not a 400
+and not a 503. A red anti-cheat checklist is the same shape: a
 persisted reject with no spend.
 
 ## Agent verdict (RLM judge)
@@ -542,14 +570,18 @@ exported to your run's environment).
 Some topics select an **in-guest runner** instead: their
 `constraints.params` carry `baseline_runner` (or `in_guest_benchmark_runner`)
 and `experiment_pack_digest`. For such a topic your submission runs in **one
-dedicated Firecracker VM created for that job and destroyed after it**,
+dedicated Firecracker VM created for that job and stopped after it** (destroyed
+once it scored; the VM of a run that failed is kept stopped on the operator's
+host so the failure can be traced — it is never reused for another job),
 inside the operator's harness (a container runtime and benchmark adaptor
 baked into the VM image by the operator — nothing about it lives in the
 network repo), against the experiment pack the topic pins by digest —
 16 vCPU / 32 GiB RAM unless the topic asks for less (that lock is a hard
 maximum on every host), with at least 16 GiB of writable disk (32 GiB by
-default). Your artefact is still fetched from `artifact_uri` (streamed, cut
-at 64 MiB) and checked against `artifact_digest` before anything runs, the
+default). Upload the recipe at the gateway (`--artifact`, ≤5 MiB). A
+miner-hosted `artifact_uri` is still fetched inside the VM (streamed, cut
+at 64 MiB) when you did not upload. The bytes are checked against
+`artifact_digest` before anything runs, the
 result is recorded only once that VM is confirmed destroyed (an operator
 cleanup failure is a 503 for you, never a score), the VM has only the operator's
 egress allowlist (the topic says which registries / model providers), and
@@ -565,20 +597,22 @@ duplicated, or evidence-less item is a persisted `rejected` row with no
 spend. The rules may be re-versioned by the topic's RLM; the version you were
 ticked against is recorded with your row.
 
-`artifact_uri` is required: the runner fetches the bytes from it inside the
-topic VM and checks the digest, so a submission the runner cannot retrieve is
-a **400** with no row. Serve an **uncompressed** tar of your recipe tree
-(`tar -cf recipe.tar recipe/`, then `sha256sum recipe.tar` is your
-`artifact_digest`) — the digest is of **that file**, byte for byte, not of
-the tree: re-running `tar` later produces a different file (mtimes, member
-order) with a different digest, so keep and serve the file you hashed. The
-runner forwards the fetched file unchanged and the host re-hashes exactly
-those bytes before it boots your sister guest; it refuses gzip, non-tar
-bytes, a tree with no file content, or bytes that do not hash to your
-`artifact_digest` — a run never starts on a substitute or re-encoded
-artefact. A guest-measured `flops_used` may appear on the verdict as telemetry.
-Custom / agent topics do **not** reject on that figure vs `declared_flops` or
-the topic budget.
+Upload the **uncompressed** tar of your recipe tree (`tar -cf recipe.tar
+recipe/`, then `sha256sum recipe.tar` is your `artifact_digest`) with
+`ctx proof submit --artifact recipe.tar`. The digest is of **that file**,
+byte for byte, not of the tree: re-running `tar` later produces a different
+file (mtimes, member order) with a different digest, so keep the file you
+hashed. A custom topic with neither an upload nor `artifact_uri` is a
+**400** `artifact required` with no row. JSON + `artifact_uri` remains a
+compat path (the runner fetches that file inside the topic VM); when you
+upload, those bytes win and the URI is ignored for identity. The host
+refuses gzip, non-tar bytes, a tree with no file content, or bytes that do
+not hash to your `artifact_digest` — a run never starts on a substitute or
+re-encoded artefact. Live evaluate of an upload is **503** until
+[#285](https://github.com/CortexLM/cortex/pull/285) inject; URI-only `https://`
+still scores. A guest-measured `flops_used` may appear on the
+verdict as telemetry. Custom / agent topics do **not** reject on that
+figure vs `declared_flops` or the topic budget.
 
 A clean pass that beats the current best (sealed value or reigning best) by
 `epsilon_rel` is promoted automatically: the row is `champion` and the

@@ -198,9 +198,65 @@ pub enum ArtefactError {
     Io(String),
 }
 
-fn is_row_id(id: &str) -> bool {
+fn parse_row_numeric(id: &str) -> Option<u64> {
     id.strip_prefix("pf_")
-        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .filter(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .and_then(|h| u64::from_str_radix(h, 16).ok())
+}
+
+fn is_row_id(id: &str) -> bool {
+    parse_row_numeric(id).is_some()
+}
+
+/// Highest numeric `pf_` id among `{root}/{topic_id}/{submission_id}.zip`.
+///
+/// Missing root or no matching files → `Ok(None)`. A root or topic directory
+/// that exists but cannot be enumerated is [`ArtefactError::Io`]: skipping it
+/// would under-seed the allocator and reuse a live `pf_` id.
+pub fn max_zip_numeric_id(root: &Path) -> Result<Option<u64>, ArtefactError> {
+    let topics = match std::fs::read_dir(root) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(ArtefactError::Io(format!(
+                "read artefact root {}: {e}",
+                root.display()
+            )));
+        }
+    };
+    let mut max = None;
+    for topic in topics {
+        let topic = topic.map_err(|e| {
+            ArtefactError::Io(format!("read artefact root {}: {e}", root.display()))
+        })?;
+        let ft = topic
+            .file_type()
+            .map_err(|e| ArtefactError::Io(format!("stat {}: {e}", topic.path().display())))?;
+        if !ft.is_dir() {
+            continue;
+        }
+        let files = std::fs::read_dir(topic.path()).map_err(|e| {
+            ArtefactError::Io(format!("read topic dir {}: {e}", topic.path().display()))
+        })?;
+        for file in files {
+            let file = file
+                .map_err(|e| ArtefactError::Io(format!("read {}: {e}", topic.path().display())))?;
+            let ft = file
+                .file_type()
+                .map_err(|e| ArtefactError::Io(format!("stat {}: {e}", file.path().display())))?;
+            if !ft.is_file() {
+                continue;
+            }
+            let name = file.file_name();
+            let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".zip")) else {
+                continue;
+            };
+            if let Some(n) = parse_row_numeric(stem) {
+                max = Some(max.map_or(n, |m: u64| m.max(n)));
+            }
+        }
+    }
+    Ok(max)
 }
 
 /// Relative, no `.`/`..` segments, conservative charset, bounded length.
@@ -384,6 +440,16 @@ impl ArtefactStore {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Highest numeric `pf_` id among zip basenames under this root.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtefactError::Io`] when the root or a topic directory exists but
+    /// cannot be enumerated.
+    pub fn max_zip_numeric_id(&self) -> Result<Option<u64>, ArtefactError> {
+        max_zip_numeric_id(&self.root)
     }
 
     fn topic_dir(&self, topic_id: &str) -> Result<PathBuf, ArtefactError> {
@@ -730,5 +796,61 @@ mod tests {
             Path::new("/artefacts")
         );
         assert_eq!(ARTEFACT_ROOT_ENV, "PROOF_ARTEFACT_ROOT");
+    }
+
+    #[test]
+    fn max_zip_numeric_id_reads_pf_basenames_across_topic_dirs() {
+        let root = tmp("max-zip");
+        std::fs::create_dir_all(root.join("topic-a")).expect("a");
+        std::fs::create_dir_all(root.join("topic-b")).expect("b");
+        std::fs::write(root.join("topic-a").join("pf_0000000000000001.zip"), b"a").expect("zip 1");
+        std::fs::write(root.join("topic-b").join("pf_00000000000000ff.zip"), b"b").expect("zip ff");
+        std::fs::write(root.join("topic-a").join("best.json"), b"{}").expect("best");
+        std::fs::write(root.join("not-a-topic.zip"), b"x").expect("root zip");
+        assert_eq!(max_zip_numeric_id(&root).expect("scan"), Some(0xff));
+        assert_eq!(
+            ArtefactStore::new(&root)
+                .max_zip_numeric_id()
+                .expect("scan"),
+            Some(0xff)
+        );
+        assert_eq!(
+            max_zip_numeric_id(&root.join("missing")).expect("missing is empty"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn max_zip_numeric_id_fails_closed_when_the_root_cannot_be_read() {
+        let root = tmp("unreadable-root");
+        let not_a_dir = root.join("file");
+        std::fs::write(&not_a_dir, b"x").expect("file");
+        let err = max_zip_numeric_id(&not_a_dir).expect_err("root scan");
+        assert!(
+            matches!(err, ArtefactError::Io(_)),
+            "a non-directory root must not look like an empty artefact tree: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn max_zip_numeric_id_fails_closed_when_a_topic_dir_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp("unreadable-topic");
+        std::fs::create_dir_all(root.join("topic-a")).expect("a");
+        std::fs::create_dir_all(root.join("topic-b")).expect("b");
+        std::fs::write(root.join("topic-a").join("pf_0000000000000001.zip"), b"a").expect("zip 1");
+        std::fs::write(root.join("topic-b").join("pf_00000000000000ff.zip"), b"b").expect("zip ff");
+        let topic_b = root.join("topic-b");
+        let restore = std::fs::metadata(&topic_b).expect("meta").permissions();
+        std::fs::set_permissions(&topic_b, std::fs::Permissions::from_mode(0o000)).expect("lock");
+        let result = max_zip_numeric_id(&root);
+        let _ = std::fs::set_permissions(&topic_b, restore);
+        assert!(
+            result.is_err(),
+            "unreadable topic dir must not under-seed: {result:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

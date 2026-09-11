@@ -384,6 +384,13 @@ fn deploy_guest_names_no_harness_or_benchmark() {
         "README.md",
         "harness/run-harbor",
         "harness/summarize.py",
+        "harness/filter_tasks.py",
+        "harness/duration_hints.json",
+        "harness/pack_filter.example.json",
+        "harness/ensure_verifier.py",
+        "harness/rewrite_network.py",
+        "harness/proof_python_agent.py",
+        "resolve_harness.py",
     ] {
         let p = adaptor.join(required);
         assert!(p.is_file(), "reference adaptor missing {}", p.display());
@@ -391,6 +398,31 @@ fn deploy_guest_names_no_harness_or_benchmark() {
     assert!(
         adaptor.join("run").metadata().unwrap().permissions().mode() & 0o111 != 0,
         "reference adaptor run must be executable"
+    );
+}
+
+/// Rootful overlay path: init starts a container engine when one is present;
+/// bake does not alias `docker-compose` to `podman-compose` (that alias
+/// breaks Compose v2 / Harbor docker env).
+#[test]
+fn guest_prefers_real_docker_and_does_not_alias_compose() {
+    let bake_sh = read("deploy/guest/bake-rootfs.sh");
+    let init_sh = read("deploy/guest/init.sh");
+    assert!(
+        !bake_sh.contains("ln -s podman-compose"),
+        "docker-compose must not be aliased to podman-compose"
+    );
+    assert!(
+        bake_sh.contains("Do not alias docker-compose to podman-compose"),
+        "bake must document why the compose alias is gone"
+    );
+    assert!(
+        init_sh.contains("command -v dockerd"),
+        "init starts a rootful engine when dockerd is on PATH"
+    );
+    assert!(
+        init_sh.contains("$SCRATCH/docker"),
+        "engine store must live on the scratch drive, not the read-only rootfs"
     );
 }
 

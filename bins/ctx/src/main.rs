@@ -8,7 +8,6 @@
 
 #![forbid(unsafe_code)]
 
-mod api;
 mod bounty;
 mod catalog;
 mod proof;
@@ -18,8 +17,8 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
-use api::{Client, DEFAULT_GATEWAY};
 use bounty::Signer;
+use ctx_client::{Client, DEFAULT_GATEWAY};
 use proof::{SubmitInput, SubmitKey};
 
 /// Cortex subnet CLI.
@@ -199,10 +198,15 @@ struct ProofManifestArgs {
     /// Full manifest JSON file, used verbatim.
     #[arg(long, value_name = "PATH")]
     manifest_file: Option<PathBuf>,
-    /// Shard content hash you trained on (repeatable).
+    /// Shard content hash you trained on (repeatable). Same optionality as
+    /// `--train-dataset`: required only when the live topic needs training
+    /// evidence.
     #[arg(long = "train-hash", value_name = "SHA256")]
     train_hashes: Vec<String>,
-    /// Dataset / corpus id you trained on (repeatable).
+    /// Dataset / corpus id you trained on (repeatable). Required on harvest
+    /// (`nll` / `throughput`) topics that need training evidence; omit on
+    /// custom / agent topics with no training step (`tbench`). Do not invent
+    /// a fake id.
     #[arg(long = "train-dataset", value_name = "ID")]
     train_datasets: Vec<String>,
 }
@@ -217,10 +221,16 @@ struct ProofSubmitArgs {
     /// Open topic id (`ctx proof topics`).
     #[arg(long, value_name = "ID")]
     topic_id: String,
-    /// SHA-256 hex of the artifact you are submitting.
+    /// SHA-256 hex of the artifact. Optional when `--artifact` is given
+    /// (hashed from the file). Must match the file when both are set.
     #[arg(long, value_name = "SHA256")]
-    artifact_digest: String,
-    /// Optional locator for the artifact (git url, object URL).
+    artifact_digest: Option<String>,
+    /// Uncompressed tar (≤5 MiB) uploaded as multipart `artifact`. Preferred
+    /// over `--artifact-uri` on custom / tbench topics.
+    #[arg(long, value_name = "PATH")]
+    artifact: Option<PathBuf>,
+    /// Optional locator for the artifact (git url, object URL). Compat path;
+    /// omit when `--artifact` is given.
     #[arg(long, value_name = "URL")]
     artifact_uri: Option<String>,
     /// What the recipe achieved (the RLM re-runs this claim).
@@ -239,6 +249,12 @@ struct ProofSubmitArgs {
     /// on the row, or echoed back.
     #[arg(long = "env", value_name = "NAME[=VALUE]")]
     env: Vec<String>,
+    /// `OpenRouter` BYOK for topics that declare `miner_byok = OPENROUTER_API_KEY`.
+    /// Sent as `env.OPENROUTER_API_KEY` only when this flag is passed — the
+    /// process environment is not read (use `--env OPENROUTER_API_KEY` for
+    /// that). Never printed.
+    #[arg(long, value_name = "KEY")]
+    openrouter_api_key: Option<String>,
     /// Keep polling until the submission stops moving.
     #[arg(long)]
     wait: bool,
@@ -300,14 +316,18 @@ async fn run_proof(client: &Client, cmd: ProofCmd, json: bool) -> Result<(), Str
         ProofCmd::Submit(args) => {
             let input = SubmitInput {
                 topic_id: args.topic_id,
-                artifact_digest: args.artifact_digest,
+                artifact_digest: args.artifact_digest.unwrap_or_default(),
+                artifact: args.artifact,
                 artifact_uri: args.artifact_uri,
                 claim: args.claim,
                 declared_flops: args.declared_flops,
                 manifest_file: args.manifest.manifest_file,
                 train_hashes: args.manifest.train_hashes,
                 train_datasets: args.manifest.train_datasets,
-                env: proof::parse_env_args(&args.env)?,
+                env: proof::merge_openrouter_api_key(
+                    proof::parse_env_args(&args.env)?,
+                    args.openrouter_api_key,
+                ),
                 wait: args.wait,
                 key: submit_key(args.key),
             };
@@ -317,6 +337,7 @@ async fn run_proof(client: &Client, cmd: ProofCmd, json: bool) -> Result<(), Str
             let input = SubmitInput {
                 topic_id: args.topic_id,
                 artifact_digest: args.artifact_digest,
+                artifact: None,
                 artifact_uri: None,
                 claim: args.claim,
                 declared_flops: args.declared_flops,
@@ -329,7 +350,7 @@ async fn run_proof(client: &Client, cmd: ProofCmd, json: bool) -> Result<(), Str
                 wait: false,
                 key: submit_key(args.key),
             };
-            proof::print_signature(&input, json)
+            proof::print_signature(client, &input, json).await
         }
         ProofCmd::Show { id, wait } => proof::show(client, &id, wait, json).await,
         ProofCmd::Status => catalog::print_status(client, Some("proof"), json).await,
@@ -535,15 +556,45 @@ mod tests {
             &digest,
             "--claim",
             "beat baseline",
-            "--train-dataset",
-            "mix-v0",
         ])
-        .expect("declared_flops is optional");
+        .expect("declared_flops and train-dataset are optional");
         match cli.cmd {
             Cmd::Proof {
                 cmd: ProofCmd::Submit(args),
             } => {
                 assert_eq!(args.declared_flops, 0);
+                assert!(args.manifest.train_datasets.is_empty());
+                assert!(args.manifest.train_hashes.is_empty());
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proof_submit_accepts_artifact_path_without_digest() {
+        let cli = Cli::try_parse_from([
+            "ctx",
+            "proof",
+            "submit",
+            "--secret-file",
+            "/tmp/hotkey.sk",
+            "--topic-id",
+            "tbench",
+            "--artifact",
+            "/tmp/recipe.tar",
+            "--claim",
+            "beat baseline",
+        ])
+        .expect("parse");
+        match cli.cmd {
+            Cmd::Proof {
+                cmd: ProofCmd::Submit(args),
+            } => {
+                assert!(args.artifact_digest.is_none());
+                assert_eq!(
+                    args.artifact.as_deref(),
+                    Some(std::path::Path::new("/tmp/recipe.tar"))
+                );
             }
             other => panic!("wrong command: {other:?}"),
         }

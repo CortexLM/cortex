@@ -95,12 +95,18 @@ if [ -n "${PROOF_PARAM_MINER_BYOK:-}" ]; then
     export "$PROOF_PARAM_MINER_BYOK"="$(tr -d '\n' < "$byok_file")"
 fi
 
-# Rootless podman API socket for harnesses that speak to a Docker daemon.
+# Rootful docker when an overlay shipped dockerd; otherwise a rootless
+# API socket for harnesses that speak to a Docker daemon. Do not alias
+# docker-compose to podman-compose — Compose v2 is `docker compose`.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-mkdir -p "$XDG_RUNTIME_DIR/podman"
-podman system service --time=0 "unix://$XDG_RUNTIME_DIR/podman/podman.sock" > "$PROOF_WORK_DIR/podman-service.log" 2>&1 &
-trap 'kill $! 2>/dev/null || true' EXIT
-export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/podman/podman.sock"
+if [ -S /var/run/docker.sock ]; then
+    export DOCKER_HOST="unix:///var/run/docker.sock"
+elif command -v podman >/dev/null 2>&1; then
+    mkdir -p "$XDG_RUNTIME_DIR/podman"
+    podman system service --time=0 "unix://$XDG_RUNTIME_DIR/podman/podman.sock" > "$PROOF_WORK_DIR/podman-service.log" 2>&1 &
+    trap 'kill $! 2>/dev/null || true' EXIT
+    export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/podman/podman.sock"
+fi
 
 # OPERATOR: invoke your harness here over "$tasks" with the topic's params
 #           (agent, model = "${PROOF_MODEL_PIN:-}", concurrency, ...),
@@ -136,11 +142,14 @@ honestly:
 - Image pulls need egress: the registry hosts must be on the KVM host's
   `PROOF_VM_AGENT_EGRESS_ALLOW` (and a resolver, `--resolver` at bake +
   `:53/udp` on the allowlist). Nothing is pre-pulled into the image.
-- A harness that talks to a Docker daemon needs the podman API socket:
-  `podman system service --time=0 unix://$XDG_RUNTIME_DIR/podman/podman.sock &`
+- A harness that talks to a Docker daemon should prefer a live `dockerd`
+  (`DOCKER_HOST=unix:///var/run/docker.sock`) when the operator overlay
+  ships one (rootful, native overlay, no fuse). Otherwise start a podman
+  API socket: `podman system service --time=0 unix://$XDG_RUNTIME_DIR/podman/podman.sock &`
   and `DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock` (the skeleton
-  does this). `docker` resolves to a podman shim; `docker-compose` to
-  `podman-compose` when installed. Harnesses relying on Docker-only API
+  does this). `docker` may resolve to a podman shim when no real docker
+  binary is present. Do **not** alias `docker-compose` to `podman-compose`;
+  Compose v2 is `docker compose`. Harnesses relying on Docker-only API
   features may still differ; verify with the harness's own smoke run on the
   baked image **before** signing a topic on it.
 - Rootless networking is user-mode (pasta / slirp4netns): fine for pulls and

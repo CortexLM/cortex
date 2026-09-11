@@ -4,6 +4,9 @@
 //! `/challenge/{challenge_id}/v1/...`, so one base URL covers both live
 //! challenges.
 
+#![forbid(unsafe_code)]
+#![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
+
 use std::time::Duration;
 
 use serde_json::Value;
@@ -20,6 +23,16 @@ const TIMEOUT_SECS: u64 = 60;
 /// Clear fail-closed message when a miner key would go out over cleartext HTTP.
 const KEYED_HTTP_REFUSAL: &str =
     "refusing to send X-Lium-Api-Key over http:// — keyed calls require an https:// gateway";
+
+/// Same floor as [`KEYED_HTTP_REFUSAL`] for Proof BYOK `env` on the body.
+const ENV_HTTP_REFUSAL: &str =
+    "refusing to send submit env over http:// — miner BYOK requires an https:// gateway";
+
+fn body_has_env(body: &Value) -> bool {
+    body.get("env")
+        .and_then(Value::as_object)
+        .is_some_and(|m| !m.is_empty())
+}
 
 fn is_https_url(url: &str) -> bool {
     url.get(..8)
@@ -106,9 +119,47 @@ impl Client {
         self.send(self.http.get(self.url(path))).await
     }
 
-    /// POST JSON to a gateway path.
+    /// POST JSON or multipart to a gateway path.
+    ///
+    /// A non-empty submit `env` (miner BYOK) is refused on `http://` so the
+    /// values never go out in cleartext — same floor as `X-Lium-Api-Key`.
     pub async fn post(&self, path: &str, body: &Value) -> Result<Reply, String> {
+        if body_has_env(body) && !is_https_url(&self.base) {
+            return Err(ENV_HTTP_REFUSAL.to_owned());
+        }
         self.send(self.http.post(self.url(path)).json(body)).await
+    }
+
+    /// POST multipart fields plus an `artifact` part (uncompressed tar).
+    pub async fn post_multipart(
+        &self,
+        path: &str,
+        fields: &Value,
+        artifact: Vec<u8>,
+    ) -> Result<Reply, String> {
+        if body_has_env(fields) && !is_https_url(&self.base) {
+            return Err(ENV_HTTP_REFUSAL.to_owned());
+        }
+        let mut form = reqwest::multipart::Form::new();
+        if let Some(obj) = fields.as_object() {
+            for (k, v) in obj {
+                let text = match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                form = form.text(k.clone(), text);
+            }
+        }
+        let part = reqwest::multipart::Part::bytes(artifact)
+            .file_name("artifact.tar")
+            .mime_str("application/octet-stream")
+            .map_err(|e| format!("multipart: {e}"))?;
+        self.send(
+            self.http
+                .post(self.url(path))
+                .multipart(form.part("artifact", part)),
+        )
+        .await
     }
 
     fn url(&self, path: &str) -> String {
@@ -186,6 +237,23 @@ mod tests {
         let c = Client::new("http://127.0.0.1:8090", None).expect("http without key");
         assert_eq!(c.gateway(), "http://127.0.0.1:8090");
         assert!(c.lium_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn http_gateway_refuses_submit_env() {
+        let c = Client::new("http://127.0.0.1:8090", None).expect("http without key");
+        let body = serde_json::json!({"env": {"OPENROUTER_API_KEY": "sk-or-test"}});
+        let Err(err) = c.post("/challenge/proof/v1/submissions", &body).await else {
+            panic!("http + env must fail closed");
+        };
+        assert!(
+            err.contains("https://"),
+            "error must name https as the requirement: {err}"
+        );
+        assert!(
+            !err.contains("sk-or-test"),
+            "must not echo the API key: {err}"
+        );
     }
 
     #[test]

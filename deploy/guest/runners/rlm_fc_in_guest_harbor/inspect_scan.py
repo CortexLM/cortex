@@ -2,9 +2,14 @@
 """Tick a Proof checklist against the unpacked miner artefact. No inference.
 
 Reads ``PROOF_RULES_FILE`` (a ``RuleSet`` object or a ``[{id, text}]`` array)
-and writes ``checklist.json``. Off-limits markers ``no_eval_short_circuit``
-and ``no_tb4_hardcoding`` fail those rules when they appear in the artefact
-tree. Host-side rules are answered with evidence, not left blank (a missing
+and writes ``checklist.json``. Cheat markers (``skip_eval``,
+``tb4_answers``, …) fail the named rules ``no_eval_short_circuit`` /
+``no_tb4_hardcoding`` when they appear in the artefact tree. The rule-id
+strings themselves are **not** markers: a README or comment that names the
+rule is compliance language, not a fail. A file/byte-limit truncation
+marks the scan incomplete and **fails** those off-limits rules —
+truncated absence is not a clean pass. Unknown rule IDs fail closed.
+Host-side rules are answered with evidence, not left blank (a missing
 item is recorded red). Secret file contents are never printed.
 """
 
@@ -21,15 +26,16 @@ MAX_FILES = 256
 MAX_EVIDENCE = 2000
 MAX_TOTAL_BYTES = 2 * 1024 * 1024
 
+# Real cheat markers only. Do **not** put the rule ids
+# (``no_eval_short_circuit``, ``no_tb4_hardcoding``) here: miners who name
+# the rule in a README or comment are documenting compliance, not cheating.
 OFF_LIMITS_SHORT_CIRCUIT = (
-    "no_eval_short_circuit",
     "skip_eval",
     "skip_verifier",
     "always_pass_eval",
     "short_circuit_eval",
 )
 OFF_LIMITS_TB4 = (
-    "no_tb4_hardcoding",
     "tb4_answers",
     "hardcoded_tb4",
 )
@@ -72,23 +78,31 @@ def load_rules(path: Path) -> list[dict[str, str]]:
     return out
 
 
-def collect_artefact_text(root: Path | None) -> tuple[str, int, list[str]]:
+def collect_artefact_text(root: Path | None) -> tuple[str, int, list[str], bool]:
+    """Return ``(text, n_scanned, names, incomplete)``.
+
+    ``incomplete`` is true when a file or byte cap stopped the walk before
+    every regular file was considered. Callers must not treat a truncated
+    scan as proof that an off-limits marker is absent.
+    """
     if root is None or not root.is_dir():
-        return "", 0, []
+        return "", 0, [], False
     blobs: list[str] = []
     names: list[str] = []
     total = 0
     n_files = 0
+    incomplete = False
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
         if ".." in Path(rel).parts:
             continue
+        if n_files >= MAX_FILES or total >= MAX_TOTAL_BYTES:
+            incomplete = True
+            break
         names.append(rel)
         n_files += 1
-        if n_files > MAX_FILES or total > MAX_TOTAL_BYTES:
-            break
         try:
             size = path.stat().st_size
         except OSError:
@@ -103,11 +117,30 @@ def collect_artefact_text(root: Path | None) -> tuple[str, int, list[str]]:
             continue
         total += len(data)
         blobs.append(data.decode("utf-8", errors="replace"))
-    return "\n".join(blobs).lower(), n_files, names
+    return "\n".join(blobs).lower(), n_files, names, incomplete
 
 
-def _contains_any(haystack: str, needles: tuple[str, ...]) -> list[str]:
-    return [n for n in needles if n.lower() in haystack]
+def _off_limits_hits(
+    artefact_text: str, names_joined: str, needles: tuple[str, ...]
+) -> list[str]:
+    """Needles found in artefact text or file names (order preserved)."""
+    found: list[str] = []
+    for needle in needles:
+        key = needle.lower()
+        if key in artefact_text or key in names_joined:
+            found.append(needle)
+    return found
+
+
+def _off_limits_incomplete(rid: str, n_files: int) -> dict[str, Any]:
+    return {
+        "id": rid,
+        "pass": False,
+        "evidence": _clip(
+            f"artefact scan incomplete (file/byte limit); cannot treat absence "
+            f"of off-limits markers as clean ({n_files} files scanned)"
+        ),
+    }
 
 
 def tick_rule(
@@ -116,14 +149,15 @@ def tick_rule(
     n_files: int,
     names: list[str],
     has_artefact: bool,
+    incomplete: bool = False,
 ) -> dict[str, Any]:
     rid = rule["id"]
     joined_names = " ".join(names).lower()
 
     if rid == "no_eval_short_circuit":
-        hits = _contains_any(artefact_text, OFF_LIMITS_SHORT_CIRCUIT)
-        name_hits = [n for n in ("no_eval_short_circuit",) if n in joined_names]
-        hits = hits or name_hits
+        hits = _off_limits_hits(
+            artefact_text, joined_names, OFF_LIMITS_SHORT_CIRCUIT
+        )
         if hits:
             return {
                 "id": rid,
@@ -132,6 +166,8 @@ def tick_rule(
                     f"off-limits eval short-circuit marker in artefact: {', '.join(hits)}"
                 ),
             }
+        if incomplete:
+            return _off_limits_incomplete(rid, n_files)
         return {
             "id": rid,
             "pass": True,
@@ -141,7 +177,7 @@ def tick_rule(
         }
 
     if rid == "no_tb4_hardcoding":
-        hits = _contains_any(artefact_text, OFF_LIMITS_TB4)
+        hits = _off_limits_hits(artefact_text, joined_names, OFF_LIMITS_TB4)
         if hits:
             return {
                 "id": rid,
@@ -150,6 +186,8 @@ def tick_rule(
                     f"off-limits tb4 hardcoding marker in artefact: {', '.join(hits)}"
                 ),
             }
+        if incomplete:
+            return _off_limits_incomplete(rid, n_files)
         return {
             "id": rid,
             "pass": True,
@@ -184,20 +222,12 @@ def tick_rule(
             ),
         }
 
-    if not has_artefact:
-        return {
-            "id": rid,
-            "pass": False,
-            "evidence": _clip(
-                f"rule {rid}: no artefact tree staged for inspect (PROOF_ARTIFACT_DIR unset or empty)"
-            ),
-        }
     return {
         "id": rid,
-        "pass": True,
+        "pass": False,
         "evidence": _clip(
-            f"rule {rid}: artefact present ({n_files} files); no paid inference; "
-            "no off-limits short-circuit/tb4 markers beyond the dedicated probes"
+            f"rule {rid}: unsupported/unknown rule id; inspect fails closed "
+            f"(artefact_present={has_artefact}, files={n_files})"
         ),
     }
 
@@ -213,10 +243,11 @@ def main(argv: list[str] | None = None) -> int:
     artefact_raw = os.environ.get("PROOF_ARTIFACT_DIR", "")
     artefact_dir = Path(artefact_raw) if artefact_raw else None
     has_artefact = artefact_dir is not None and artefact_dir.is_dir()
-    text, n_files, names = collect_artefact_text(artefact_dir)
+    text, n_files, names, incomplete = collect_artefact_text(artefact_dir)
 
     items = [
-        tick_rule(rule, text, n_files, names, has_artefact) for rule in load_rules(rules_path)
+        tick_rule(rule, text, n_files, names, has_artefact, incomplete)
+        for rule in load_rules(rules_path)
     ]
     out = output_dir / "checklist.json"
     out.write_text(json.dumps(items, indent=2) + "\n", encoding="utf-8")

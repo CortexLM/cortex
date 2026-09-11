@@ -2,10 +2,11 @@
 
 Operator procedure for topics whose **signed params select an in-guest
 runner**: their `Baseline` and `Evaluate` jobs run **inside a dedicated
-Firecracker microVM created for that one job and destroyed after it**, by an
-operator adaptor baked into the guest image, against an experiment pack the
-topic pins by digest. Parallel experiments are parallel VMs — never several
-harness trials sharing one VM. This extends
+Firecracker microVM created for that one job and stopped after it** —
+destroyed when the job succeeded, **retained** on the KVM host when it failed
+(§ Retained jails) — by an operator adaptor baked into the guest image,
+against an experiment pack the topic pins by digest. Parallel experiments
+are parallel VMs — never several harness trials sharing one VM. This extends
 [`proof-vm-orchestrator.md`](proof-vm-orchestrator.md) (the KVM host, the
 topic VM, the sister path, TLS, egress — all of which still apply); read that
 first. Product spec: [`../PROOF.md`](../PROOF.md) § Isolation boundary.
@@ -99,6 +100,7 @@ POST /v1/vms/{id}/jobs {Baseline|Evaluate} ──▶ bind: job runner/pack == vm
                                       attest experiment_vm (this vm, this job) ◀────── Done
   bind_evidence ✓ · sandboxed ✓ ◀──   stamp sandboxed / flops_used
 DELETE /v1/vms/{id} destroy      ──▶  jail + scratch gone
+  (job failed: … retain)         ──▶  jail moved under PROOF_VM_AGENT_RETAIN_DIR
 ```
 
 - The spec is public data: runner id, pack digest, sizes. No host path, no
@@ -114,15 +116,61 @@ DELETE /v1/vms/{id} destroy      ──▶  jail + scratch gone
   the guest agent reported (see Limitations). The CP refuses an attestation
   for another VM than the one it dispatched to, an unbound one, and a
   `firecracker_required` run without one.
-- Destroy runs whatever the outcome, and the outcome is returned **only when
-  the orchestrator confirms the VM destroyed**: a `DELETE` that fails or
-  answers anything but a confirmed destroy makes the job
+- The VM is torn down whatever the outcome; the **policy follows the
+  outcome**. A successful job is `destroy`, and its outcome is returned
+  **only when the orchestrator confirms the VM destroyed**: a `DELETE` that
+  fails or answers anything but a confirmed destroy makes the job
   `VmError::TeardownUnconfirmed` (503, no row, no baseline) even when the
   run itself succeeded — a result is never scored while its VM may still
   hold host capacity. The error names the VM; reconcile it on the KVM host
   (`GET /v1/health` `experiment_vms`, `/srv/jailer/firecracker/<topic>-x<n>`)
   before treating the topic as scoring again. The agent frees the capacity
   slot when the host confirms.
+- A **failed** job (guest `Failed`, deadline cut, missing attestation, …) is
+  `retain`: the CP returns the job's own error (503, no row — the miner sees
+  the real failure, never a teardown error in its place) and the host moves
+  the jail under `PROOF_VM_AGENT_RETAIN_DIR` (§ Retained jails). A retain
+  the orchestrator did not confirm is logged on the CP with the VM id
+  (`experiment vm job failed and the vm was not confirmed retained`) for
+  the operator to reconcile; nothing is scored either way.
+
+## Retained jails (failed paid jobs)
+
+The experiment VM of a paid job that failed is **kept, stopped**, for
+root-cause analysis: `DELETE /v1/vms/{id}` with `retain` kills the process,
+tears the TAP + nftables table down, and moves
+`/srv/jailer/firecracker/<topic>-x<n>` to
+`PROOF_VM_AGENT_RETAIN_DIR/<topic>-x<n>` (default
+`/var/lib/proof-vm/retained`) when that name is free. If a prior retain
+already occupies that path (a restarted agent reissues deterministic ids
+from 1), the jail lands at `<topic>-x<n>-<stamp>` — GNU `mv` into an
+existing directory would nest it as `<id>/<id>` and still report success,
+mixing old and new evidence. Success is confirmed only when the source
+is gone, that unique destination exists, and it is not nested. What is there:
+
+| Path under the retained jail | What |
+|------------------------------|------|
+| `console.log` | Guest console: init, `proof-vm-guest-agent`, pack staging, the adaptor's redacted tail |
+| `root/scratch.ext4` | The VM's writable disk — the fetched artefact tree, harness jobs, `report.json` if the adaptor wrote one (`mount -o ro,loop` to read) |
+| `harvest-work/` | Host `debugfs` dump of guest `/work`. A vsock `Done` **refreshes** this tree from the guest overlay (or a new `rdump`) until trial `result.json` / `verifier/reward.txt` and Harbor `n_running=0` / `stats.n_running_trials` / `finished_at` would pass fail-closed checks (`reward.txt` can land ~12s before `result.json`). Dump-only reconstruct without a complete overlay still refuses. Guest writes those files; do not treat a lagging dump as a missing guest `reward.txt`. |
+| `root/vm-config.json`, `net.nft` | What the VM was booted with (the `root/` copies of the kernel and the pinned rootfs sit beside them) |
+
+Pair it with the CP journal line `evaluate refused; no row` (topic, frozen
+digest, the same error string the miner's 503 body carried) to walk from a
+miner's failed submission to the guest evidence. Key material is not in the
+jail: owner keys and miner BYOK files are staged on the guest's tmpfs
+(`/run/proof/secrets`) and die with the VM, and the console tail is the
+redacted one — but the scratch holds whatever the harness and the miner's
+code wrote, so treat a retained jail as operator-only evidence, never
+something to publish or hand back. The agent keeps the record
+as `retained` (not running: it holds no capacity slot and never answers
+`attach`); `GET /v1/health` `vms` counts it until the agent restarts. Scratch
+files are sparse, so a retained jail costs what the run wrote plus the rootfs
+copy, but nothing prunes the directory: after the RCA, `rm -rf` the retained
+jail (or the whole directory) on the KVM host, and budget the disk for a few
+failed runs at `experiment_disk_mib`. A VM whose **process died** outside a
+teardown is still reaped per the spec's create-time policy (`destroy` for
+experiment VMs), like a topic VM.
 
 ## The guest image (bake)
 
@@ -134,7 +182,8 @@ VMs and experiment VMs:
 | Debian minbase (`--suite trixie`) | coreutils, iproute2, e2fsprogs, python3, curl, jq | init + adaptors |
 | `proof-vm-guest-agent` (musl) | vsock `:5000`, `proof_vm_proto::guest` | the protocol half |
 | `/sbin/init` (`deploy/guest/init.sh`) + `catatonit` | mounts, cgroup v2, scratch on `/dev/vdb`, run-as user, agent loop | no systemd in the guest |
-| rootless podman + crun + fuse-overlayfs + pasta/slirp4netns + podman-compose | containers **inside** the VM as an unprivileged user (`--run-as-uid 1000`, subuid `100000:65536`), `cgroup_manager = cgroupfs`, store on paths `init.sh` creates and chowns to that user — `graphroot = /var/lib/proof/containers/storage` (scratch disk), `runroot = /run/user/<uid>/containers` (its `XDG_RUNTIME_DIR` tmpfs); never `/var/lib/containers` / `/run/containers` (root-owned, read-only rootfs) | the harness's container runtime; no nested KVM |
+| rootless podman + crun + fuse-overlayfs + pasta/slirp4netns + podman-compose | **fallback** container runtime as an unprivileged user when no rootful engine is overlaid (`--run-as-uid 1000`, subuid `100000:65536`), `cgroup_manager = cgroupfs`, store on paths `init.sh` creates and chowns to that user — `graphroot = /var/lib/proof/containers/storage` (scratch disk), `runroot = /run/user/<uid>/containers` (its `XDG_RUNTIME_DIR` tmpfs); never `/var/lib/containers` / `/run/containers` (root-owned, read-only rootfs) | fallback when Docker is absent; no nested KVM |
+| rootful `dockerd` (operator overlay / host-tools) | `init.sh` bind-mounts `$SCRATCH/docker` onto `/var/lib/docker` and starts `dockerd` when it is on PATH; adaptors prefer `/var/run/docker.sock` and Harbor `--env docker`; native overlay, no fuse. `docker-compose` is **not** aliased to `podman-compose` | the agent eval path; Compose v2 is `docker compose` |
 | `--extra-pkgs a,b,c` · `--overlay DIR` · `--chroot-hook SCRIPT` | the operator's harness tooling: Debian packages; a tree copied over the rootfs (a prebuilt venv, a CLI); a script run inside the chroot (build a venv, `pip install <tool>==<pinned>`) | generic hooks — this repo names no harness; pin every version the hook installs, record it in your own manifest |
 | `--runner <id>=<dir>` | adaptor under `/opt/proof/runners/<id>/` | operator capability; contract + skeleton in [`../../deploy/guest/runners/README.md`](../../deploy/guest/runners/README.md); bake the Harbor reference from [`../../deploy/guest/runners/rlm_fc_in_guest_harbor/`](../../deploy/guest/runners/rlm_fc_in_guest_harbor/) when the topic names that id |
 
@@ -233,14 +282,23 @@ spend**. Use `proof-vm-wire-check.sh submit-probe --topic <id> --expect
 | `PROOF_EXPERIMENT_VM_MAX_VCPUS=32` or `PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB=65536` (above the lock) | the process **does not boot**: `experiment max_vcpus 32 is above the lock 16 (… the lock is not an operator knob …)`; `proof-vm-wire-check.sh all` fails the knob | — |
 | `experiment_disk_mib: 8192` (under the 16 GiB floor) | 503 `experiment disk_mib 8192 is below the minimum 16384` | nothing created |
 | host ceiling lower than the CP's | 503 `orchestrator 400 … BadSpec: experiment … exceeds the ceiling` | no jail |
-| two params that collide as env names (`foo-bar` + `foo_bar`) | 503 `constraints.params "foo-bar" and "foo_bar" both map to PROOF_PARAM_FOO_BAR` | `experiment vm booted` → guest `Failed` before the adaptor runs → destroyed |
-| `artifact_uri` streams past 64 MiB (no / wrong `Content-Length`) | 503 `artifact at … is larger than 67108864 bytes (aborted after …)` | fetch cut mid-stream inside the VM; destroyed |
+| two params that collide as env names (`foo-bar` + `foo_bar`) | 503 `constraints.params "foo-bar" and "foo_bar" both map to PROOF_PARAM_FOO_BAR` | `experiment vm booted` → guest `Failed` before the adaptor runs → retained |
+| `artifact_uri` streams past 64 MiB (no / wrong `Content-Length`) | 503 `artifact at … is larger than 67108864 bytes (aborted after …)` | fetch cut mid-stream inside the VM; retained |
 | `DELETE /v1/vms/{id}` fails or is not confirmed after a **successful** run | 503 `experiment vm <topic>-x<n> not confirmed destroyed after its job (…); the outcome is withheld, not scored` — no row, no baseline | the VM is still listed by the agent (`experiment_vms` ≥ 1); reconcile it by hand |
+| `DELETE /v1/vms/{id}` (`retain`) fails or is not confirmed after a **failed** run | 503 with the job's own error — no row | CP journal `experiment vm job failed and the vm was not confirmed retained (…); reconcile it on the kvm host`; the VM is still listed by the agent |
 | `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS` reached | 503 `orchestrator 503 … Capacity: this host runs N of at most N experiment vms` | no boot |
-| runner id not baked (`/opt/proof/runners/<id>/run` missing) | 503 `runner … is not installed in this guest image` | `experiment vm booted` → guest `Failed` → destroyed; **no value reported** |
-| adaptor writes no `report.json` / non-finite value / outlives the deadline | 503 with the adaptor's exit + redacted tail / `cut at the deadline of Ns` | destroyed |
-| `artifact_uri` unreachable from the VM or bytes ≠ `artifact_digest` (evaluate) | 503 `artifact fetch … refusing to run a substitute` | destroyed; no sister, no attestation |
-| guest agent absent from the image (old RLM image) | 503 `pack staging answered …` / boot timeout | boot fails, jail released |
+| runner id not baked (`/opt/proof/runners/<id>/run` missing) | 503 `runner … is not installed in this guest image` | `experiment vm booted` → guest `Failed` → retained; **no value reported** |
+| run report `sandboxed=false` on a `firecracker_required` topic | 503 `run report says miner code ran outside the Firecracker guest` | retained (final verification is part of the job outcome used for teardown policy) |
+| adaptor writes no `report.json` / non-finite value / outlives the deadline | 503 with the adaptor's exit + redacted tail / `cut at the deadline of Ns` | retained (read `console.log` and `root/scratch.ext4` under `PROOF_VM_AGENT_RETAIN_DIR/<topic>-x<n>`) |
+| `artifact_uri` unreachable from the VM or bytes ≠ `artifact_digest` (evaluate) | 503 `artifact fetch … refusing to run a substitute` | retained; no sister, no attestation |
+| guest agent absent from the image (old RLM image) | 503 `pack staging answered …` / boot timeout | boot fails, jail released (nothing to retain: the VM never existed) |
+
+Every 503 row above that reached the scorer also leaves a CP journal line
+`evaluate refused; no row` (topic, frozen digest, the same error string the
+miner's 503 body carried); the rows marked **retained** add `experiment vm
+job failed; vm retained on the kvm host for root-cause analysis` naming the
+VM. A failed-run jail is **kept** until the operator removes it (§ Retained
+jails).
 
 Happy path evidence (one baseline or one submission):
 
@@ -259,16 +317,45 @@ still leak no path, key, or origin (the wire check's `cp` step).
 
 ## Limitations (v1, stated plainly)
 
-- **Rootless podman, not Docker-in-VM.** Firecracker guests have no nested
-  KVM; containers inside the VM are namespaces + cgroups run by an
-  unprivileged user. Harnesses that need Docker-daemon-only features,
-  privileged containers, or `--network host` semantics may behave
-  differently under podman's API socket and pasta/slirp4netns networking.
-  Smoke the harness on the baked image before signing a topic on it.
+- **Docker first, then rootless podman.** Firecracker guests have no nested
+  KVM. Prefer a rootful `dockerd` from the operator overlay (native overlay,
+  Harbor `--env docker`, agents have network for the pinned model / BYOK).
+  `init.sh` starts that daemon when present. `docker-compose` is not aliased
+  to `podman-compose`. Rootless podman + fuse-overlayfs remains the fallback
+  when Docker is absent; harnesses that need Docker-daemon-only features or
+  `--network host` semantics may still differ — smoke the harness on the
+  baked image before signing a topic on it.
+- **Agent network is on.** Harbor `network_mode=no-network` is rewritten to
+  `public` on the filtered task copy so Docker env can start and agents can
+  reach the allowlisted TAP (OpenRouter). The host nftables allowlist on the
+  Firecracker TAP is unchanged. Do not treat guest-internal `public` as open
+  host egress.
+- **Task pack duration filter.** The Harbor adaptor copies only the Dev
+  **default short-task allowlist** from retained n15 x0017 before
+  `n_concurrent` baselines or miner evals (`max_task_duration_s`, default
+  3600). INCLUDE: `cargo-flight-dispatch`, `embedding-drift-monitor`,
+  `bun-sourcemap-leak`, `fin-saccr-rwa`, `foodstuff-beta-activity`,
+  `atrx-vep-crispr`. EXCLUDE >1h: `biped-contact-dynamics` (~5.2h),
+  `formal-crypto` (~2.1h), `cad-model` (~1.2h), `data-anonymization`
+  (~1.1h). EXCLUDE broken until fixed: `batched-eval-parity` (no-network),
+  `ctr-optimization` / `cumulative-layout-shift` (EnvStartTimeout),
+  `distributed-dedup` (tmux), `coq-block-bound` (wall cut);
+  `biped-contact-dynamics` / `cad-model` also stay out until verifier pytest
+  is proven. Pack `filter.json` may only **intersect** that allow-list
+  (further restrict) and may only **lower** the duration ceiling. Example:
+  `harness/pack_filter.example.json`. An empty filtered set fails closed.
+  This does not reseal a stub baseline.
+- **Verifier pytest.** Harbor execs `pytest` inside the task environment /
+  verifier container. Filtered-copy **environment / verifier / tests**
+  Dockerfiles are patched even when FROM is CUDA / MuJoCo / FreeCAD (the
+  n15 `biped-contact-dynamics` and `cad-model` hole). `requirements.txt` in
+  those dirs also gets pytest. Guest-host pytest does not fix that hole.
+  `FROM scratch` / distroless last stages are skipped.
 - **Guest kernel.** The stock microVM kernel config lacks user namespaces /
   overlayfs / fuse / veth / tun; the bake's `--check-kernel-config` names
   what is missing. Until the guest kernel is rebuilt and re-pinned, rootless
-  podman does not start and every in-guest run fails closed.
+  podman does not start. A rootful overlay that ships `dockerd` does not
+  depend on fuse-overlayfs.
 - **`flops_used` is guest-agent-authored.** For a sister run the host relays
   a measurement from a guest it fully controls; for an experiment VM the
   figure comes from the adaptor's `report.json` through the pinned guest
@@ -283,6 +370,17 @@ still leak no path, key, or origin (the wire check's `cp` step).
   adaptor (`rlm_fc_in_guest_harbor`). The Harbor CLI, venv, and task pack are
   still operator artefacts baked with the generic hooks. A trial without a
   measurement is never scored from some other value.
+- **Incomplete harvest-work dump.** Host reconstruction (`proof-fc-harvest`)
+  refreshes `{jail}/harvest-work` from the guest overlay (or a new `debugfs`
+  `rdump`) after vsock `Done` until the dump would pass fail-closed checks:
+  missing trial `result.json` / `verifier/reward.txt`, or Harbor job
+  `n_running>0` / `stats.n_running_trials` / `finished_at=null` (retained
+  `tbench-x0002` / metal shortpack a21f: guest atrx finished with
+  `reward.txt` and `result.json`; the dump still had `n_running=1` and no
+  atrx `result.json` because `reward.txt` can land ~12s earlier). Dump-only
+  reconstruct without a complete overlay still refuses. Guest already writes
+  `reward.txt`; this is not an adaptor always-write. The vsock score is
+  kept (`host_harvest` is not invented on a successful `Done`).
 - **Pack size.** Packs travel in one vsock frame: ≤ 160 MiB uncompressed
   tar. Larger packs need a block-device staging path this protocol version
   does not have; the host refuses them by name.

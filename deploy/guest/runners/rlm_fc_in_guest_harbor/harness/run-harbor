@@ -1,10 +1,14 @@
 #!/bin/bash
-# run-harbor — paid Harbor invoke for Baseline / Evaluate.
+# run-harbor — paid Harbor / custom-Python / script invoke for Baseline / Evaluate.
 #
-# Tasks: $PROOF_PACK_DIR/$PROOF_PARAM_TASKS_DIR (relative, no ..).
-# Agent: miner artefact dir → PYTHONPATH + Harbor -a module:Class
-#        (Harbor does not accept a filesystem path for -a).
-#        Topic PROOF_PARAM_HARBOR_AGENT only for baseline with no miner agent.
+# Tasks: pack copy filtered to duration < max_task_duration_s (default 1h);
+#         n15 x0017 walls (biped/formal-crypto/cad/data-anon) are denied even
+#         without task.toml timeouts.
+# Network: agent path is public (Docker no-network breaks OpenRouter / BYOK).
+# Harness: custom Python primary; Harbor BaseAgent, harness.json, run.sh
+#          accepted. Topic terminus-2 only for baseline with no miner artefact.
+# Runtime: Docker daemon first (rootful overlay); podman API socket fallback.
+# Verifier: pytest injected into filtered-copy environment/verifier images.
 # BYOK: evaluate never falls back to the owner secrets dir.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -22,18 +26,61 @@ esac
 
 proof_require_tasks
 proof_writable_scratch
+proof_filter_tasks
+proof_enable_agent_network
+proof_ensure_verifier
 proof_load_inference_key
-proof_select_harbor_agent >/dev/null
-AGENT_ARG="${PROOF_HARBOR_AGENT_ARG:?proof_select_harbor_agent did not set PROOF_HARBOR_AGENT_ARG}"
+proof_select_harness >/dev/null
+AGENT_ARG="${PROOF_HARBOR_AGENT_ARG:-}"
 AGENT_SOURCE="${PROOF_HARBOR_AGENT_SOURCE:-}"
+HARNESS_KIND="${PROOF_HARNESS_KIND:?proof_select_harness did not set PROOF_HARNESS_KIND}"
 
-proof_start_podman
-
-command -v harbor >/dev/null 2>&1 || proof_die "harbor is not on PATH (operator bake must install it)"
+proof_start_container_runtime
 
 jobs_dir="$PROOF_WORK_DIR/harbor-jobs"
 mkdir -p "$jobs_dir"
 log="$PROOF_WORK_DIR/harbor.run.log"
+
+summarize_or_die() {
+    local harbor_exit="$1"
+    python3 "$HERE/summarize.py" \
+        --jobs-dir "$jobs_dir" \
+        --log "$log" \
+        --output "$PROOF_OUTPUT_DIR/report.json" \
+        --harbor-exit "$harbor_exit" \
+        --agent "${AGENT_ARG:-$HARNESS_KIND}" \
+        --agent-source "$AGENT_SOURCE" \
+        --harness-kind "$HARNESS_KIND"
+}
+
+if [ "$HARNESS_KIND" = script ]; then
+    set +e
+    proof_run_script_harness >"$log" 2>&1
+    script_exit=$?
+    set -e
+    if [ "$script_exit" -ne 0 ]; then
+        rm -f "$PROOF_OUTPUT_DIR/report.json"
+        proof_die "script harness exited $script_exit; refusing to score a partial or failed run"
+    fi
+    # Miner-authored report.json is never a paid score. A script that
+    # self-reports primary_value is fail-closed even if Harbor jobs exist.
+    if [ -f "$PROOF_OUTPUT_DIR/report.json" ]; then
+        rm -f "$PROOF_OUTPUT_DIR/report.json"
+        proof_die "script harness wrote report.json; refusing miner-authored primary_value (score must come from Harbor verifier trials)"
+    fi
+    summarize_or_die 0
+    exit 0
+fi
+
+command -v harbor >/dev/null 2>&1 || proof_die "harbor is not on PATH (operator bake must install it)"
+
+# Default Docker env. Topic may set harbor_environment; never pass a Harbor
+# no-network policy — rewrite_network already set task.toml to public.
+harbor_env="${PROOF_PARAM_HARBOR_ENVIRONMENT:-docker}"
+if [ "$harbor_env" = "no-network" ] || [ "$harbor_env" = "none" ]; then
+    echo "rlm_fc_in_guest_harbor: ignoring harbor_environment=$harbor_env (agents need network)" >&2
+    harbor_env=docker
+fi
 
 harbor_cmd=(
     harbor run
@@ -42,18 +89,13 @@ harbor_cmd=(
     --jobs-dir "$jobs_dir"
     --n-concurrent "${PROOF_PARAM_N_CONCURRENT:-1}"
     --n-attempts "${PROOF_PARAM_N_ATTEMPTS:-1}"
+    --env "$harbor_env"
     --yes
 )
 if [ -n "${PROOF_MODEL_PIN:-}" ]; then
     harbor_cmd+=(-m "$PROOF_MODEL_PIN")
 fi
-if [ -n "${PROOF_PARAM_HARBOR_ENVIRONMENT:-}" ]; then
-    harbor_cmd+=(--env "$PROOF_PARAM_HARBOR_ENVIRONMENT")
-fi
 if [ -n "${PROOF_SEED:-}" ]; then
-    # Topic seed is an adaptor input; Harbor has no dedicated --seed flag
-    # on -a. Export it for agents that read the environment. Do not invent a
-    # Harbor plugin API.
     export PROOF_SEED
 fi
 
@@ -62,10 +104,11 @@ set +e
 harbor_exit=$?
 set -e
 
-python3 "$HERE/summarize.py" \
-    --jobs-dir "$jobs_dir" \
-    --log "$log" \
-    --output "$PROOF_OUTPUT_DIR/report.json" \
-    --harbor-exit "$harbor_exit" \
-    --agent "$AGENT_ARG" \
-    --agent-source "$AGENT_SOURCE"
+# Nonzero Harbor is an incomplete or failed trial set. Do not invoke the
+# summarizer: a leftover report.json would be a successful score.
+if [ "$harbor_exit" -ne 0 ]; then
+    rm -f "$PROOF_OUTPUT_DIR/report.json"
+    proof_die "harbor exited $harbor_exit; refusing to score a partial or failed run"
+fi
+
+summarize_or_die "$harbor_exit"

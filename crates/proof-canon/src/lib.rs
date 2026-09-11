@@ -48,6 +48,19 @@ pub const MAX_CONSTRAINT_PARAMS: usize = 32;
 /// every param, that travels in the signed document — never host state.
 pub const PARAM_DEFER_SCORING: &str = "defer_scoring";
 
+/// `constraints.params` key that **requires a non-empty training manifest**.
+///
+/// Harvest families (`nll` / `throughput`) already require declared
+/// `train_content_hashes` or `train_dataset_ids` — that is the contamination
+/// evidence for a training recipe. Custom / agent topics have no training
+/// step, so an empty manifest is accepted unless this flag is `"true"`.
+/// `"false"` skips the empty-manifest gate on any family (a topic that
+/// does not train). Holdout overlap in a *declared* manifest is always a
+/// contamination reject, flag or not. `"false"` and an absent key are
+/// **not** the same: absent follows the family default. Any other spelling
+/// is a publish reject.
+pub const PARAM_REQUIRE_TRAINING_EVIDENCE: &str = "require_training_evidence";
+
 /// Why a shared shape is malformed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShapeError {
@@ -121,12 +134,14 @@ impl Constraints {
         {
             return bad("params", "<=32 slug keys with printable values");
         }
-        if self
-            .params
-            .get(PARAM_DEFER_SCORING)
-            .is_some_and(|v| parse_bool_param(v).is_none())
-        {
-            return bad("params.defer_scoring", "\"true\" or \"false\"");
+        for key in [PARAM_DEFER_SCORING, PARAM_REQUIRE_TRAINING_EVIDENCE] {
+            if self
+                .params
+                .get(key)
+                .is_some_and(|v| parse_bool_param(v).is_none())
+            {
+                return bad(&format!("params.{key}"), "\"true\" or \"false\"");
+            }
         }
         self.validate_miner_env()?;
         Ok(())
@@ -142,6 +157,17 @@ impl Constraints {
             .get(PARAM_DEFER_SCORING)
             .and_then(|v| parse_bool_param(v))
             .unwrap_or(false)
+    }
+
+    /// Explicit `require_training_evidence` param (`Some(true/false)`), or
+    /// `None` when the key is absent or — for a document that skipped
+    /// [`Self::validate_shape`] — malformed. The family default lives on the
+    /// topic document, not here: this crate does not name metric families.
+    #[must_use]
+    pub fn training_evidence_param(&self) -> Option<bool> {
+        self.params
+            .get(PARAM_REQUIRE_TRAINING_EVIDENCE)
+            .and_then(|v| parse_bool_param(v))
     }
 }
 
@@ -513,6 +539,33 @@ mod tests {
         };
         other.validate_shape().expect("other params are opaque");
         assert!(!other.defer_scoring());
+        assert!(other.training_evidence_param().is_none());
+    }
+
+    /// `require_training_evidence` is the same boolean-word shape as
+    /// `defer_scoring`. Absent is not `"false"`: the topic document applies
+    /// a family default. A typo is a publish reject.
+    #[test]
+    fn require_training_evidence_is_a_boolean_param() {
+        let with = |v: &str| Constraints {
+            params: BTreeMap::from([(PARAM_REQUIRE_TRAINING_EVIDENCE.to_owned(), v.to_owned())]),
+            ..Constraints::default()
+        };
+        assert!(Constraints::default().training_evidence_param().is_none());
+        for (value, want) in [("true", true), (" TRUE ", true), ("false", false)] {
+            let c = with(value);
+            c.validate_shape().expect(value);
+            assert_eq!(c.training_evidence_param(), Some(want), "{value:?}");
+        }
+        for bad in ["yes", "1", "maybe"] {
+            let c = with(bad);
+            let err = c.validate_shape().expect_err(bad);
+            assert_eq!(
+                err.field, "constraints.params.require_training_evidence",
+                "{bad:?}"
+            );
+            assert!(c.training_evidence_param().is_none(), "{bad:?}");
+        }
     }
 
     #[test]

@@ -1,0 +1,28 @@
+{
+  "max_duration_s": 3600,
+  "allow": [
+    "cargo-flight-dispatch",
+    "embedding-drift-monitor",
+    "bun-sourcemap-leak",
+    "fin-saccr-rwa",
+    "foodstuff-beta-activity",
+    "atrx-vep-crispr"
+  ],
+  "deny": [
+    "biped-contact-dynamics",
+    "formal-crypto",
+    "cad-model",
+    "data-anonymization",
+    "batched-eval-parity",
+    "ctr-optimization",
+    "cumulative-layout-shift",
+    "distributed-dedup",
+    "coq-block-bound"
+  ],
+  "durations": {
+    "biped-contact-dynamics": 18628,
+    "formal-crypto": 7482,
+    "cad-model": 4364,
+    "data-anonymization": 3964
+  }
+}

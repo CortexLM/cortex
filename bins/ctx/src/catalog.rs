@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::api::{challenge_path, Client};
+use ctx_client::{challenge_path, Client};
 
 /// One live challenge as miners see it.
 #[derive(Debug)]

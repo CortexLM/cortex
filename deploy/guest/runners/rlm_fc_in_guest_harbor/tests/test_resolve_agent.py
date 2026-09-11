@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,12 @@ import resolve_agent  # noqa: E402
 
 
 class ResolveAgentTests(unittest.TestCase):
+    def test_custom_python_agent_class(self) -> None:
+        d = HERE / "fixtures" / "python_agent" / "agent"
+        info = resolve_agent.inspect_agent(d)
+        self.assertEqual(info["import_path"], "agent.agent:Agent")
+        self.assertEqual(info["kind"], "python")
+
     def test_top_level_agent_dir(self) -> None:
         d = HERE / "fixtures" / "agent"
         path, pythonpath = resolve_agent.discover(d)
@@ -63,6 +70,63 @@ class ResolveAgentTests(unittest.TestCase):
             recipe.mkdir()
             (recipe / "run.sh").write_text("#!/bin/sh\necho classic\n", encoding="utf-8")
             self.assertFalse(resolve_agent.is_agent_dir(recipe))
+
+    def test_import_path_outside_artefact_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artefact = root / "artifact"
+            agent = artefact / "agent"
+            external = root / "external"
+            agent.mkdir(parents=True)
+            external.mkdir()
+            (external / "outside_agent.py").write_text(
+                "from harbor.agents.base import BaseAgent\n"
+                "class ExternalAgent(BaseAgent):\n    pass\n",
+                encoding="utf-8",
+            )
+            (agent / "import_path").write_text("outside_agent:ExternalAgent\n", encoding="utf-8")
+            old_pp = os.environ.get("PYTHONPATH")
+            os.environ["PYTHONPATH"] = str(external)
+            os.environ["PROOF_ARTIFACT_DIR"] = str(artefact)
+            try:
+                with self.assertRaises(SystemExit) as ctx:
+                    resolve_agent.discover(agent)
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertFalse(resolve_agent.is_agent_dir(agent))
+            finally:
+                os.environ.pop("PROOF_ARTIFACT_DIR", None)
+                if old_pp is None:
+                    os.environ.pop("PYTHONPATH", None)
+                else:
+                    os.environ["PYTHONPATH"] = old_pp
+
+    def test_stdlib_import_path_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = Path(tmp) / "agent"
+            agent.mkdir()
+            (agent / "import_path").write_text("json:JSONDecoder\n", encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx:
+                resolve_agent.discover(agent)
+            self.assertEqual(ctx.exception.code, 2)
+
+    def test_import_path_inside_artefact_still_resolves(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artefact = Path(tmp) / "artifact"
+            agent = artefact / "agent"
+            agent.mkdir(parents=True)
+            (agent / "agent.py").write_text(
+                "from harbor.agents.base import BaseAgent\n"
+                "class InsideAgent(BaseAgent):\n    pass\n",
+                encoding="utf-8",
+            )
+            (agent / "import_path").write_text("agent.agent:InsideAgent\n", encoding="utf-8")
+            os.environ["PROOF_ARTIFACT_DIR"] = str(artefact)
+            try:
+                path, pythonpath = resolve_agent.discover(agent)
+            finally:
+                os.environ.pop("PROOF_ARTIFACT_DIR", None)
+            self.assertEqual(path, "agent.agent:InsideAgent")
+            self.assertEqual(Path(pythonpath), artefact.resolve())
 
 
 if __name__ == "__main__":

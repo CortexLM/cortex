@@ -15,6 +15,11 @@ use bytes::Bytes;
 use crate::api::GatewayState;
 use gateway_registry::RegistryError;
 
+/// Challenge proxy body cap: 16 MiB so a 5 MiB artefact upload plus
+/// multipart JSON fields always pass through to Proof.
+const PROXY_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+const _: () = assert!(PROXY_MAX_BODY_BYTES >= 5 * 1024 * 1024 + 512 * 1024);
+
 /// Hop-by-hop headers that must not be forwarded (RFC 7230).
 fn is_hop_by_hop(name: &HeaderName) -> bool {
     matches!(
@@ -80,7 +85,7 @@ async fn proxy_inner(
             .into_response();
     }
     let headers = req.headers().clone();
-    let body = match axum::body::to_bytes(req.into_body(), 16 * 1024 * 1024).await {
+    let body = match axum::body::to_bytes(req.into_body(), PROXY_MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
             return (StatusCode::BAD_REQUEST, format!("failed to read body: {e}")).into_response();
@@ -89,6 +94,7 @@ async fn proxy_inner(
 
     let mut last_status = StatusCode::BAD_GATEWAY;
     let mut last_msg = String::from("no upstream attempt");
+    let mut last_error_resp: Option<Response> = None;
     let mut attempted = Vec::new();
 
     for _ in 0..2 {
@@ -119,6 +125,15 @@ async fn proxy_inner(
                     st.registry.record_failure(backend.id);
                     last_status = status;
                     last_msg = format!("upstream {status}");
+                    // Lock down before retain: a viewer 5xx is still
+                    // miner-controlled (cookies / CSP / cache).
+                    if is_view_path(&rest) {
+                        apply_view_lockdown(&mut upstream_resp, &st.view_frame_ancestors, &rest);
+                    }
+                    // Keep the challenge body: miners need the JSON error
+                    // (`artifact_uri must be https://`, …), not a synthetic
+                    // `upstream 503 Service Unavailable` string.
+                    last_error_resp = Some(upstream_resp);
                     continue;
                 }
                 st.registry.record_success(backend.id);
@@ -135,6 +150,14 @@ async fn proxy_inner(
         }
     }
 
+    if let Some(mut resp) = last_error_resp {
+        // Same floor as 2xx: a miner-controlled viewer 5xx must not carry
+        // Set-Cookie / weak CSP / public cache through the gateway.
+        if is_view_path(&rest) {
+            apply_view_lockdown(&mut resp, &st.view_frame_ancestors, &rest);
+        }
+        return resp;
+    }
     (last_status, last_msg).into_response()
 }
 
