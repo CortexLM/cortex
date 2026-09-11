@@ -22,5 +22,8 @@ proof-submit = { path = "../../crates/proof-submit" }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
+[dev-dependencies]
+wiremock = "0.6"
+
 [lints]
 workspace = true

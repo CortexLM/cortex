@@ -1299,6 +1299,7 @@ dependencies = [
  "proof-submit",
  "serde_json",
  "tokio",
+ "wiremock",
 ]
 
 [[package]]
