@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""filter_tasks.py: default x0017 short-task allowlist; drop ≥1h and broken."""
+"""filter_tasks.py: first15 via TASK_SLICE; shortpack only when explicit."""
 
 from __future__ import annotations
 
@@ -35,6 +35,15 @@ def _generic_filter(tasks: Path, dest: Path, pack: Path, **kwargs):
     kwargs.setdefault("filter_rel", None)
     kwargs.setdefault("drop_unknown", False)
     kwargs.setdefault("max_s", 3600)
+    kwargs.setdefault("mode", filter_tasks.MODE_SHORTPACK)
+    return filter_tasks.filter_tasks(tasks, dest, pack_dir=pack, **kwargs)
+
+
+def _shortpack(tasks: Path, dest: Path, pack: Path, **kwargs):
+    kwargs.setdefault("filter_rel", None)
+    kwargs.setdefault("drop_unknown", False)
+    kwargs.setdefault("max_s", 3600)
+    kwargs.setdefault("mode", filter_tasks.MODE_SHORTPACK)
     return filter_tasks.filter_tasks(tasks, dest, pack_dir=pack, **kwargs)
 
 
@@ -113,14 +122,7 @@ class FilterTasksTests(unittest.TestCase):
             ):
                 _task(tasks, name, None)
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             self.assertEqual(summary["n_kept"], 1)
             self.assertEqual(summary["kept"][0]["name"], KEEP)
             self.assertGreaterEqual(summary["n_dropped"], 7)
@@ -143,14 +145,7 @@ class FilterTasksTests(unittest.TestCase):
             _task(tasks, KEEP, 600)
             _task(tasks, "biped-contact-dynamics", 120)
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             self.assertEqual(summary["n_kept"], 1)
             self.assertFalse((dest / "biped-contact-dynamics").exists())
             self.assertEqual(summary["kept"][0]["name"], KEEP)
@@ -200,14 +195,18 @@ class FilterTasksTests(unittest.TestCase):
             self.assertFalse((dest / "harbor-long").exists())
 
     def test_x0017_default_allow_and_exclude_match_dev_list(self) -> None:
-        walls, exclude, allow = filter_tasks.load_adaptor_spec()
+        walls, exclude, allow, infra = filter_tasks.load_adaptor_spec()
         self.assertEqual(tuple(sorted(allow)), tuple(sorted(filter_tasks.X0017_ALLOW)))
         self.assertEqual(tuple(sorted(exclude)), tuple(sorted(filter_tasks.X0017_EXCLUDE)))
+        self.assertEqual(tuple(sorted(infra)), tuple(sorted(filter_tasks.X0017_EXCLUDE_BROKEN)))
         self.assertEqual(len(filter_tasks.X0017_ALLOW), 6)
         for name in filter_tasks.X0017_EXCLUDE_LONG:
             self.assertGreaterEqual(walls.get(name, 0), 3600, name)
         for name in filter_tasks.X0017_EXCLUDE_BROKEN:
             self.assertIn(name, exclude)
+            self.assertIn(name, infra)
+        for name in filter_tasks.X0017_EXCLUDE_LONG:
+            self.assertNotIn(name, infra)
 
     def test_default_pack_keeps_only_allowlisted_short_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -220,14 +219,7 @@ class FilterTasksTests(unittest.TestCase):
                 _task(tasks, name, None)
             _task(tasks, "mystery", 100)
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             kept = {row["name"] for row in summary["kept"]}
             self.assertEqual(kept, set(filter_tasks.X0017_ALLOW))
             self.assertFalse((dest / "mystery").exists())
@@ -242,14 +234,7 @@ class FilterTasksTests(unittest.TestCase):
             _task(tasks, KEEP, 600)
             _task(tasks, "mystery", None)
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             self.assertEqual(summary["n_kept"], 1)
             self.assertEqual(summary["kept"][0]["name"], KEEP)
             dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
@@ -264,14 +249,7 @@ class FilterTasksTests(unittest.TestCase):
             for name in filter_tasks.X0017_EXCLUDE_BROKEN:
                 _task(tasks, name, 120)
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             self.assertEqual(summary["n_kept"], 1)
             dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
             for name in filter_tasks.X0017_EXCLUDE_BROKEN:
@@ -289,14 +267,7 @@ class FilterTasksTests(unittest.TestCase):
                 encoding="utf-8",
             )
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             self.assertEqual(summary["n_kept"], 1)
             self.assertFalse((dest / "mystery").exists())
 
@@ -312,14 +283,7 @@ class FilterTasksTests(unittest.TestCase):
                 encoding="utf-8",
             )
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             self.assertEqual(summary["n_kept"], 1)
             self.assertFalse((dest / "cad-model").exists())
             self.assertEqual(summary["dropped"][0]["reason"], "deny-list")
@@ -336,14 +300,7 @@ class FilterTasksTests(unittest.TestCase):
                 encoding="utf-8",
             )
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             self.assertEqual(summary["n_kept"], 1)
             self.assertEqual(summary["kept"][0]["name"], KEEP)
             self.assertFalse((dest / "bun-sourcemap-leak").exists())
@@ -357,14 +314,7 @@ class FilterTasksTests(unittest.TestCase):
             for name in filter_tasks.X0017_EXCLUDE_LONG:
                 _task(tasks, name, None)
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             self.assertEqual(summary["n_kept"], 1)
             dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
             for name in filter_tasks.X0017_EXCLUDE_LONG:
@@ -381,14 +331,7 @@ class FilterTasksTests(unittest.TestCase):
             for name in filter_tasks.X0017_ALLOW:
                 _task(tasks, name, 28_800)
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             kept = {row["name"] for row in summary["kept"]}
             self.assertEqual(kept, set(filter_tasks.X0017_ALLOW))
             for row in summary["kept"]:
@@ -403,14 +346,7 @@ class FilterTasksTests(unittest.TestCase):
             for name in filter_tasks.X0017_EXCLUDE:
                 _task(tasks, name, 600)
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=30_000,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack, max_s=30_000)
             self.assertEqual(summary["n_kept"], 1)
             dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
             for name in filter_tasks.X0017_EXCLUDE:
@@ -469,14 +405,7 @@ class FilterTasksTests(unittest.TestCase):
                 encoding="utf-8",
             )
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             self.assertEqual(summary["n_kept"], 1)
             self.assertEqual(summary["kept"][0]["name"], KEEP)
 
@@ -492,14 +421,7 @@ class FilterTasksTests(unittest.TestCase):
                 encoding="utf-8",
             )
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             self.assertEqual(summary["n_kept"], 1)
             self.assertEqual(summary["kept"][0]["name"], KEEP)
             dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
@@ -517,14 +439,7 @@ class FilterTasksTests(unittest.TestCase):
                 encoding="utf-8",
             )
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             self.assertEqual(summary["max_duration_s"], 900)
             self.assertEqual(summary["n_kept"], 1)
             self.assertEqual(summary["kept"][0]["reason"], "duration_s=600")
@@ -543,14 +458,7 @@ class FilterTasksTests(unittest.TestCase):
                 encoding="utf-8",
             )
             dest = pack / "out"
-            summary = filter_tasks.filter_tasks(
-                tasks,
-                dest,
-                pack_dir=pack,
-                max_s=3600,
-                filter_rel=None,
-                drop_unknown=False,
-            )
+            summary = _shortpack(tasks, dest, pack)
             self.assertEqual(summary["n_kept"], 1)
             self.assertEqual(summary["kept"][0]["name"], KEEP)
             dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
@@ -585,6 +493,139 @@ class FilterTasksTests(unittest.TestCase):
             self.assertEqual(summary["kept"][0]["name"], "quick")
             dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
             self.assertEqual(dropped["declared-long"], "duration_s=28800 >= 3600")
+
+    def test_first15_keeps_hour_plus_and_drops_infra_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            for name in filter_tasks.X0017_ALLOW:
+                _task(tasks, name, 28_800)
+            for name in filter_tasks.X0017_EXCLUDE_LONG:
+                _task(tasks, name, None)
+            for name in filter_tasks.X0017_EXCLUDE_BROKEN:
+                _task(tasks, name, 120)
+            _task(tasks, "mystery", 100)
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+                mode=filter_tasks.MODE_FIRST15,
+            )
+            self.assertEqual(summary["mode"], "first15")
+            kept = {row["name"] for row in summary["kept"]}
+            expected = set(filter_tasks.X0017_ALLOW) | set(
+                filter_tasks.X0017_EXCLUDE_LONG
+            ) | {"mystery"}
+            self.assertEqual(kept, expected)
+            self.assertEqual(summary["n_kept"], 11)
+            dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
+            for name in filter_tasks.X0017_EXCLUDE_BROKEN:
+                self.assertEqual(dropped[name], "deny-list", name)
+                self.assertFalse((dest / name).exists(), name)
+            for name in filter_tasks.X0017_EXCLUDE_LONG:
+                self.assertTrue((dest / name).is_dir(), name)
+
+    def test_first15_ignores_adaptor_and_pack_allow_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, KEEP, 28_800)
+            _task(tasks, "biped-contact-dynamics", None)
+            _task(tasks, "batched-eval-parity", 100)
+            (pack / "filter.json").write_text(
+                json.dumps({"allow": [KEEP]}),
+                encoding="utf-8",
+            )
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+                mode="first15",
+            )
+            kept = {row["name"] for row in summary["kept"]}
+            self.assertEqual(kept, {KEEP, "biped-contact-dynamics"})
+            self.assertFalse((dest / "batched-eval-parity").exists())
+
+    def test_default_mode_is_first15_not_shortpack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, KEEP, 600)
+            _task(tasks, "mystery", 100)
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+            )
+            self.assertEqual(summary["mode"], "first15")
+            kept = {row["name"] for row in summary["kept"]}
+            self.assertEqual(kept, {KEEP, "mystery"})
+
+    def test_tb4_first_15_slice_skips_shortpack_allow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            for name in filter_tasks.X0017_ALLOW:
+                _task(tasks, name, 28_800)
+            for name in filter_tasks.X0017_EXCLUDE_LONG:
+                _task(tasks, name, None)
+            for name in filter_tasks.X0017_EXCLUDE_BROKEN:
+                _task(tasks, name, 120)
+            _task(tasks, "mystery", 100)
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+                task_slice="tb4-first-15",
+            )
+            self.assertEqual(summary["mode"], "first15")
+            self.assertEqual(summary["task_slice"], "tb4-first-15")
+            kept = {row["name"] for row in summary["kept"]}
+            expected = set(filter_tasks.X0017_ALLOW) | set(
+                filter_tasks.X0017_EXCLUDE_LONG
+            ) | {"mystery"}
+            self.assertEqual(kept, expected)
+            dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
+            for name in filter_tasks.X0017_EXCLUDE_BROKEN:
+                self.assertEqual(dropped[name], "deny-list", name)
+
+    def test_unknown_mode_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            _task(tasks, KEEP, 100)
+            dest = pack / "out"
+            with self.assertRaises(SystemExit):
+                filter_tasks.filter_tasks(
+                    tasks,
+                    dest,
+                    pack_dir=pack,
+                    max_s=3600,
+                    filter_rel=None,
+                    drop_unknown=False,
+                    mode="allow6",
+                )
 
     def test_alias_match_does_not_eat_unrelated_prefix(self) -> None:
         self.assertFalse(filter_tasks.alias_match("cadillac", "cad"))

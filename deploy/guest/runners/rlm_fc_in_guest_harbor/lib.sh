@@ -43,6 +43,21 @@ proof_die() {
     exit 2
 }
 
+# True when a comma list names OPENROUTER_API_KEY after the same trim
+# proof-canon uses (whitespace around each name). A glob of raw commas
+# would miss ``OTHER_KEY, OPENROUTER_API_KEY``.
+proof_csv_has_openrouter() {
+    local rest="${1}," part
+    while [ -n "$rest" ]; do
+        part="${rest%%,*}"
+        rest="${rest#*,}"
+        part="${part#"${part%%[![:space:]]*}"}"
+        part="${part%"${part##*[![:space:]]}"}"
+        [ "$part" = "OPENROUTER_API_KEY" ] && return 0
+    done
+    return 1
+}
+
 # Harbor nonzero with no complete filtered set: persist work, then put
 # the log tail on stderr so the guest rolling tail / gateway 503 carries
 # the real error. Already-measured complete trials still score when the
@@ -146,14 +161,23 @@ proof_is_harbor_agent_dir() {
     python3 "$PROOF_RESOLVE_AGENT" --dir "$d" --check
 }
 
-# Filter pack tasks to those that typically finish under max_task_duration_s
-# (default 3600). Copies into $PROOF_WORK_DIR/tasks-filtered and points
-# PROOF_TASKS at that tree. The pack is never mutated.
+# Filter pack tasks. Honor PROOF_TASK_SLICE / first-15: do not apply the
+# shortpack allow-list for a measured first-15 baseline (INFRA excludes
+# only). Shortpack only when PROOF_TASK_FILTER / params.task_filter_mode
+# is explicitly shortpack. See filter_tasks.py.
 proof_filter_tasks() {
     : "${PROOF_TASKS:?proof_require_tasks first}"
     : "${PROOF_WORK_DIR:?PROOF_WORK_DIR is required}"
     local dest="$PROOF_WORK_DIR/tasks-filtered"
     local extra=()
+    if [ -n "${PROOF_TASK_FILTER:-}" ]; then
+        extra+=(--mode "$PROOF_TASK_FILTER")
+    elif [ -n "${PROOF_PARAM_TASK_FILTER_MODE:-}" ]; then
+        extra+=(--mode "$PROOF_PARAM_TASK_FILTER_MODE")
+    fi
+    if [ -n "${PROOF_TASK_SLICE:-}" ]; then
+        extra+=(--task-slice "$PROOF_TASK_SLICE")
+    fi
     if [ -n "${PROOF_PARAM_TASK_FILTER:-}" ]; then
         extra+=(--filter-rel "$PROOF_PARAM_TASK_FILTER")
     fi

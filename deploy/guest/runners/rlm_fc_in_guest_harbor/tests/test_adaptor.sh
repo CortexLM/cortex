@@ -8,6 +8,14 @@ ADAPTOR="$(cd "$(dirname "$0")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 
+# --- OpenRouter CSV trim (canon miner_byok whitespace) ---
+proof_csv_has_openrouter "OPENROUTER_API_KEY" || fail "bare OPENROUTER_API_KEY"
+proof_csv_has_openrouter "OTHER_KEY, OPENROUTER_API_KEY" || fail "space after comma must still match"
+proof_csv_has_openrouter " OPENROUTER_API_KEY " || fail "padded name must match"
+proof_csv_has_openrouter "OTHER_KEY" && fail "OTHER_KEY is not OpenRouter"
+proof_csv_has_openrouter "" && fail "empty is not OpenRouter"
+pass "proof_csv_has_openrouter trims comma-list names"
+
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/harbor-adaptor-XXXXXX")"
 cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT
@@ -27,6 +35,8 @@ for drop in \
 done
 export PROOF_PARAM_TASKS_DIR="tasks"
 
+# --- duration filter: shortpack (Dev n15 6-task allow-list) ---
+export PROOF_TASK_FILTER=shortpack
 # --- tasks_dir ---
 if (export PROOF_PARAM_TASKS_DIR=".."; proof_require_tasks) 2>/dev/null; then
     fail "tasks_dir=.. must be refused"
@@ -53,6 +63,39 @@ proof_filter_tasks || fail "filter should keep the short task"
 [ ! -d "$PROOF_TASKS/distributed-dedup" ] || fail "broken distributed-dedup must be dropped"
 [ ! -d "$PROOF_TASKS/coq-block-bound" ] || fail "broken coq-block-bound must be dropped"
 pass "default pack keeps x0017 allowlist and drops hour-plus plus broken"
+
+# --- first15: INFRA excludes only (measured TB4 first-15) ---
+export PROOF_TASK_FILTER=first15
+export PROOF_PARAM_TASKS_DIR="tasks"
+proof_require_tasks || fail "tasks_dir=tasks should work after mode switch"
+proof_filter_tasks || fail "first15 filter should keep hour-plus plus short tasks"
+[ -d "$PROOF_TASKS/cargo-flight-dispatch" ] || fail "first15 must keep short tasks"
+[ -d "$PROOF_TASKS/biped-contact-dynamics" ] || fail "first15 must keep hour-plus biped"
+[ -d "$PROOF_TASKS/cad-model" ] || fail "first15 must keep hour-plus cad-model"
+[ -d "$PROOF_TASKS/too-slow" ] || fail "first15 must not duration-drop too-slow"
+[ ! -d "$PROOF_TASKS/batched-eval-parity" ] || fail "first15 infra must drop batched-eval-parity"
+[ ! -d "$PROOF_TASKS/ctr-optimization" ] || fail "first15 infra must drop ctr-optimization"
+[ ! -d "$PROOF_TASKS/cumulative-layout-shift" ] || fail "first15 infra must drop cumulative-layout-shift"
+pass "first15 keeps first-15 minus INFRA (not the shortpack allow-list)"
+
+# --- first15 via PROOF_TASK_SLICE (measured baseline; ignore shortpack allow) ---
+unset PROOF_TASK_FILTER || true
+unset PROOF_PARAM_TASK_FILTER_MODE || true
+export PROOF_TASK_SLICE=tb4-first-15
+export PROOF_PARAM_TASKS_DIR="tasks"
+proof_require_tasks || fail "tasks_dir=tasks should work for slice"
+proof_filter_tasks || fail "tb4-first-15 slice should keep hour-plus plus short tasks"
+[ -d "$PROOF_TASKS/cargo-flight-dispatch" ] || fail "slice first15 must keep short tasks"
+[ -d "$PROOF_TASKS/biped-contact-dynamics" ] || fail "slice first15 must keep hour-plus biped"
+[ -d "$PROOF_TASKS/cad-model" ] || fail "slice first15 must keep hour-plus cad-model"
+[ -d "$PROOF_TASKS/too-slow" ] || fail "slice first15 must not duration-drop too-slow"
+[ ! -d "$PROOF_TASKS/batched-eval-parity" ] || fail "slice first15 infra must drop batched-eval-parity"
+[ ! -d "$PROOF_TASKS/ctr-optimization" ] || fail "slice first15 infra must drop ctr-optimization"
+pass "PROOF_TASK_SLICE=tb4-first-15 skips the shortpack allow-list"
+unset PROOF_TASK_SLICE || true
+export PROOF_TASK_FILTER=shortpack
+proof_require_tasks
+proof_filter_tasks || fail "restore shortpack for later adaptor tests"
 
 # --- agent network rewrite ---
 printf '[environment]\nnetwork_mode = "no-network"\n' > "$PROOF_TASKS/cargo-flight-dispatch/task.toml"
@@ -212,18 +255,21 @@ agent=""
 path=""
 jobs=""
 env=""
+model=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -a|--agent) agent="$2"; shift 2 ;;
         --path|-p) path="$2"; shift 2 ;;
         --jobs-dir) jobs="$2"; shift 2 ;;
         --env) env="$2"; shift 2 ;;
+        -m|--model) model="$2"; shift 2 ;;
         *) shift ;;
     esac
 done
 printf '%s\n' "$agent" > "${PROOF_WORK_DIR}/harbor.agent"
 printf '%s\n' "$path" > "${PROOF_WORK_DIR}/harbor.path"
 printf '%s\n' "$env" > "${PROOF_WORK_DIR}/harbor.env"
+printf '%s\n' "$model" > "${PROOF_WORK_DIR}/harbor.model"
 job="$jobs/job1/cargo-flight-dispatch__1"
 mkdir -p "$job/verifier"
 cat > "$job/result.json" <<JSON
@@ -237,6 +283,7 @@ export PATH="$FAKE_BIN:$PATH"
 export PROOF_JOB=evaluate
 export PROOF_ARTIFACT_DIR="$FIXTURES"
 export PROOF_MODEL_PIN="moonshotai/kimi-k3"
+export PROOF_PARAM_MODEL="openrouter/moonshotai/kimi-k3"
 export PROOF_PARAM_MINER_BYOK=OPENROUTER_API_KEY
 printf 'miner-secret-key' > "$PROOF_MINER_ENV_DIR/OPENROUTER_API_KEY"
 chmod 0600 "$PROOF_MINER_ENV_DIR/OPENROUTER_API_KEY"
@@ -248,6 +295,8 @@ export PROOF_OUTPUT_DIR
 [ -f "$PROOF_OUTPUT_DIR/report.json" ] || fail "evaluate must write report.json"
 got_agent="$(cat "$PROOF_WORK_DIR/harbor.agent")"
 [ "$got_agent" = "agent.agent:MinerAgent" ] || fail "harbor -a was $got_agent (miner artefact ignored)"
+got_model="$(cat "$PROOF_WORK_DIR/harbor.model")"
+[ "$got_model" = "openrouter/moonshotai/kimi-k3" ] || fail "harbor -m stripped OpenRouter prefix: $got_model"
 got_env="$(cat "$PROOF_WORK_DIR/harbor.env")"
 [ "$got_env" = "docker" ] || fail "harbor --env was $got_env (want docker, not no-network)"
 if grep -q 'no-network' "$PROOF_WORK_DIR/harbor.env"; then
@@ -261,7 +310,36 @@ assert r["primary_value"] == 1.0
 assert r["evidence"]["agent"] == "agent.agent:MinerAgent"
 assert "terminus-2" not in json.dumps(r)
 PY
-pass "evaluate run-harbor passes miner -a, not terminus-2"
+pass "evaluate run-harbor passes miner -a and full OpenRouter -m"
+
+# OpenRouter + vendor/model pin only (no params.model) fails closed.
+unset PROOF_PARAM_MODEL || true
+export PROOF_MODEL_PIN="moonshotai/kimi-k3"
+export PROOF_PARAM_MINER_BYOK=OPENROUTER_API_KEY
+if "$ADAPTOR/harness/run-harbor" 2>"$WORKDIR/openrouter-pin.err"; then
+    fail "OpenRouter with vendor/model pin must fail closed"
+fi
+grep -q "provider prefix" "$WORKDIR/openrouter-pin.err" \
+    || fail "must name provider prefix: $(cat "$WORKDIR/openrouter-pin.err")"
+export PROOF_PARAM_MODEL="openrouter/moonshotai/kimi-k3"
+pass "OpenRouter Harbor -m without provider prefix fails closed"
+
+# miner_byok of another name must not skip the prefix guard when
+# inference_key_env is OPENROUTER_API_KEY.
+unset PROOF_PARAM_MODEL || true
+export PROOF_MODEL_PIN="moonshotai/kimi-k3"
+export PROOF_PARAM_MINER_BYOK=OTHER_KEY
+export PROOF_PARAM_INFERENCE_KEY_ENV=OPENROUTER_API_KEY
+printf 'other-key' > "$PROOF_MINER_ENV_DIR/OTHER_KEY"
+chmod 0600 "$PROOF_MINER_ENV_DIR/OTHER_KEY"
+if "$ADAPTOR/harness/run-harbor" 2>"$WORKDIR/openrouter-env.err"; then
+    fail "OpenRouter inference_key_env with vendor/model pin must fail closed"
+fi
+grep -q "provider prefix" "$WORKDIR/openrouter-env.err" \
+    || fail "must name provider prefix when only inference_key_env is OpenRouter: $(cat "$WORKDIR/openrouter-env.err")"
+export PROOF_PARAM_MODEL="openrouter/moonshotai/kimi-k3"
+export PROOF_PARAM_MINER_BYOK=OPENROUTER_API_KEY
+pass "OpenRouter prefix guard inspects inference_key_env even when miner_byok is other"
 
 # --- persist work helper (retain-on-fail durability) ---
 proof_persist_work || fail "proof_persist_work must succeed on a writable work dir"

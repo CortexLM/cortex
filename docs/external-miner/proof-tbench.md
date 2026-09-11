@@ -290,20 +290,16 @@ mode is unsupported on this runtime and blocked model calls. Task containers
 use the default Docker bridge; the Firecracker TAP is still allowlisted on
 the host.
 
-The scored task slice is the operator's **default short-task allowlist**
-(tasks that finished under one hour on retained n15 x0017):
-`cargo-flight-dispatch`, `embedding-drift-monitor`, `bun-sourcemap-leak`,
-`fin-saccr-rwa`, `foodstuff-beta-activity`, `atrx-vep-crispr`. Hour-plus
-Harbor ids are excluded (`biped-contact-dynamics` ~5.2h, `formal-crypto`
-~2.1h, `cad-model` ~1.2h, `data-anonymization` ~1.1h), as are tasks that
-broke that run until they are fixed (`batched-eval-parity` no-network,
-`ctr-optimization` / `cumulative-layout-shift` EnvStartTimeout,
-`distributed-dedup` tmux, `coq-block-bound` wall cut). You do not choose
-the task list; `constraints.task_slice` remains an opaque runner input. A
-verifier image that lacks `pytest` on PATH scores 0 rather than failing the
-trial — that is an operator image hole, not a miner contract
-(`biped-contact-dynamics` and `cad-model` hit this on n15 and stay out of
-the default pack until that image is proven).
+The scored task slice is the topic's `constraints.task_slice` (today
+`tb4-first-15`). The in-guest adaptor honors `PROOF_TASK_SLICE` / first-15:
+it **keeps that first-15 set** and drops only **INFRA** Harbor ids (known
+broken `batched-eval-parity`, `ctr-optimization`, `cumulative-layout-shift`,
+and other broken-until-fixed ids). It does **not** apply the six-task Dev
+shortpack allow-list on that slice. Shortpack is only when the operator
+explicitly sets `PROOF_TASK_FILTER=shortpack` (or signs
+`constraints.params.task_filter_mode=shortpack`). You do not choose the task
+list. A verifier image that lacks `pytest` on PATH scores 0 rather than failing
+the trial — that is an operator image hole, not a miner contract.
 
 Env the run sees: `PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`,
 `PROOF_PARAM_*`, `PROOF_PACK_DIR`, `PROOF_ARTIFACT_DIR`, `PROOF_OUTPUT_DIR`,
@@ -333,8 +329,16 @@ attestation, BYOK env, and hotkey signature, not a hardcoded TFLOP budget.
 
 ## 4. The model key is yours (BYOK)
 
-The topic pins `moonshotai/kimi-k3` and sets
-`constraints.params.miner_byok = "OPENROUTER_API_KEY"`. Its checklist rule
+The topic pins `moonshotai/kimi-k3` (`constraints.model_pin`, canon
+`vendor/model` only) and names the Harbor / LiteLLM id in
+`constraints.params.model` (`openrouter/moonshotai/kimi-k3`).
+`constraints.params.miner_byok = "OPENROUTER_API_KEY"`. Paid Harbor /
+terminus-2 / LiteLLM calls must name **`openrouter/moonshotai/kimi-k3`**
+(the `openrouter/` provider prefix is required; a two-segment pin
+`moonshotai/kimi-k3` is a BadRequestError and scores 0). The in-guest adaptor
+uses `PROOF_PARAM_MODEL` for Harbor `-m` and fails closed on an OpenRouter
+path if that id has no provider prefix — it does not rewrite `model_pin`.
+Its checklist rule
 `miner_byok_openrouter` reads:
 
 > miner supplies `OPENROUTER_API_KEY` (BYOK) for `moonshotai/kimi-k3`; operator

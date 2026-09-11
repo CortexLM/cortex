@@ -1,9 +1,11 @@
 #!/bin/bash
 # run-harbor — paid Harbor / custom-Python / script invoke for Baseline / Evaluate.
 #
-# Tasks: pack copy filtered to duration < max_task_duration_s (default 1h);
-#         n15 x0017 walls (biped/formal-crypto/cad/data-anon) are denied even
-#         without task.toml timeouts.
+# Tasks: pack copy. Honor PROOF_TASK_SLICE / first-15 (INFRA excludes
+# only, no shortpack allow-list). ``PROOF_TASK_FILTER=shortpack`` is
+# explicit Dev n15 6-task allow-list. Harbor -m is
+# ``PROOF_PARAM_MODEL`` else ``PROOF_MODEL_PIN``; OpenRouter fails closed
+# without an ``openrouter/`` provider prefix.
 # Network: agent path is public (Docker no-network breaks OpenRouter / BYOK).
 #          allow_internet=false is rewritten to true on the filtered copy.
 # Harness: custom Python primary; Harbor BaseAgent, harness.json, run.sh
@@ -114,8 +116,33 @@ harbor_cmd=(
     --env "$harbor_env"
     --yes
 )
-if [ -n "${PROOF_MODEL_PIN:-}" ]; then
-    harbor_cmd+=(-m "$PROOF_MODEL_PIN")
+# Canon model_pin is vendor/model only. Harbor/LiteLLM -m is params.model
+# (PROOF_PARAM_MODEL) falling back to the pin. OpenRouter fails closed
+# unless the id already has the openrouter/ provider prefix. Inspect
+# miner_byok and inference_key_env independently (a non-OpenRouter BYOK
+# name must not skip the prefix guard when inference_key_env is
+# OPENROUTER_API_KEY).
+MODEL="${PROOF_PARAM_MODEL:-${PROOF_MODEL_PIN:-}}"
+if [ -n "$MODEL" ]; then
+    _openrouter=0
+    if proof_csv_has_openrouter "${PROOF_PARAM_MINER_BYOK:-}"; then
+        _openrouter=1
+    fi
+    if proof_csv_has_openrouter "${PROOF_PARAM_INFERENCE_KEY_ENV:-}"; then
+        _openrouter=1
+    fi
+    if [ "$_openrouter" -eq 1 ]; then
+        case "$MODEL" in
+            openrouter/*) ;;
+            *)
+                proof_die "OpenRouter Harbor -m needs a provider prefix (params.model=openrouter/...), got a vendor/model pin"
+                ;;
+        esac
+    fi
+    unset _openrouter
+    export PROOF_HARBOR_MODEL="$MODEL"
+    harbor_cmd+=(-m "$MODEL")
+    echo "rlm_fc_in_guest_harbor: harbor -m $MODEL" >&2
 fi
 if [ -n "${PROOF_SEED:-}" ]; then
     export PROOF_SEED

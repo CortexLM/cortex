@@ -242,6 +242,15 @@ class ProofPythonAgentTests(unittest.TestCase):
 
         self.assertIsNone(proof_python_agent._call_setup(Miner(), object()))
 
+    def test_restores_openrouter_prefix_on_stripped_harbor_model_name(self) -> None:
+        kwargs = {"model_name": "moonshotai/kimi-k3"}
+        os.environ["PROOF_HARBOR_MODEL"] = "openrouter/moonshotai/kimi-k3"
+        try:
+            proof_python_agent._restore_model_kwargs(kwargs)
+        finally:
+            os.environ.pop("PROOF_HARBOR_MODEL", None)
+        self.assertEqual(kwargs["model_name"], "openrouter/moonshotai/kimi-k3")
+
 
 if __name__ == "__main__":
     unittest.main()
