@@ -232,14 +232,12 @@ impl GuestAgent {
             HostToRlm::Run { job } => {
                 let _one = self.job.lock().await;
                 match self.run(*job).await {
-                    // Paid success already flushed the job tree in run_paid.
-                    // Do not walk work_root again (retained earlier jobs).
+                    // Never persist work_root here: a stale sibling from an
+                    // earlier job (or Archive, which has no tree) must not
+                    // turn this result into Failed. Each job seals its own
+                    // directory in `run` / `run_paid`.
                     Ok(output) => RlmToHost::Done { output },
                     Err(error) => {
-                        // Retain-on-fail (tbench-x0004): inspect/fetch and
-                        // jobs that died before run_paid's persist still
-                        // need work_root on the virtio-blk.
-                        let _ = runner::persist_work(&self.cfg.work_root);
                         tracing::warn!("job failed: {error}");
                         RlmToHost::Failed { error }
                     }
@@ -284,37 +282,40 @@ impl GuestAgent {
             }
             VmJob::Inspect { request, rules } => {
                 let work = self.work_dir(JobKind::Inspect);
-                let adaptor = runner::Adaptor::resolve(&self.cfg.runners_dir, &request)?;
-                let artifact = fetch::fetch_artifact(
-                    &request,
-                    &work,
-                    self.cfg.allow_plain_http,
-                    injected.as_ref(),
-                )
-                .await?;
-                let out = runner::inspect(
-                    &self.cfg,
-                    &adaptor,
-                    &request,
-                    &rules,
-                    &work,
-                    artifact.as_deref(),
-                )
-                .await?;
-                Ok(VmJobOutput::Inspected(out))
+                let result = async {
+                    let adaptor = runner::Adaptor::resolve(&self.cfg.runners_dir, &request)?;
+                    let artifact = fetch::fetch_artifact(
+                        &request,
+                        &work,
+                        self.cfg.allow_plain_http,
+                        injected.as_ref(),
+                    )
+                    .await?;
+                    let out = runner::inspect(
+                        &self.cfg,
+                        &adaptor,
+                        &request,
+                        &rules,
+                        &work,
+                        artifact.as_deref(),
+                    )
+                    .await?;
+                    Ok(VmJobOutput::Inspected(out))
+                }
+                .await;
+                seal_job(&work, result)
             }
             VmJob::ProposeRules {
                 topic,
                 current_version,
             } => {
                 let work = self.work_dir(JobKind::ProposeRules);
-                let rules =
-                    runner::propose_rules(&self.cfg, &topic, current_version, &work).await?;
-                Ok(VmJobOutput::Rules(rules))
+                let result = runner::propose_rules(&self.cfg, &topic, current_version, &work).await;
+                seal_job(&work, result.map(VmJobOutput::Rules))
             }
             VmJob::Archive { .. } => {
-                // Outputs already live under `work_root` on the writable
-                // disk, which the host retains or destroys with the VM.
+                // No work directory and no completion sync. The host
+                // retains or destroys the writable disk with the VM.
                 Ok(VmJobOutput::Archived)
             }
         }
@@ -332,33 +333,56 @@ impl GuestAgent {
         let pack = self.pack.lock().await.clone();
         let pack = staging::pack_for(pack.as_ref(), &adaptor.binding.pack)?;
         let work = self.work_dir(kind);
-        let artifact = match kind {
-            JobKind::Evaluate => {
-                let dir =
+        let result = async {
+            let artifact = match kind {
+                JobKind::Evaluate => {
+                    let dir =
+                        fetch::fetch_artifact(request, &work, self.cfg.allow_plain_http, injected)
+                            .await?
+                            .ok_or_else(|| {
+                                "evaluate needs the miner's artifact_uri; the request carries none"
+                                    .to_owned()
+                            })?;
+                    Some(dir)
+                }
+                // The baseline is the topic's own reference run: the pack is its
+                // input, an artefact only if the topic serves one.
+                JobKind::Baseline | JobKind::Inspect | JobKind::ProposeRules => {
                     fetch::fetch_artifact(request, &work, self.cfg.allow_plain_http, injected)
                         .await?
-                        .ok_or_else(|| {
-                            "evaluate needs the miner's artifact_uri; the request carries none"
-                                .to_owned()
-                        })?;
-                Some(dir)
-            }
-            // The baseline is the topic's own reference run: the pack is its
-            // input, an artefact only if the topic serves one.
-            JobKind::Baseline | JobKind::Inspect | JobKind::ProposeRules => {
-                fetch::fetch_artifact(request, &work, self.cfg.allow_plain_http, injected).await?
-            }
-        };
-        runner::run_paid(
-            &self.cfg,
-            &adaptor,
-            request,
-            kind,
-            &pack,
-            &work,
-            artifact.as_deref(),
-        )
-        .await
+                }
+            };
+            runner::run_paid(
+                &self.cfg,
+                &adaptor,
+                request,
+                kind,
+                &pack,
+                &work,
+                artifact.as_deref(),
+            )
+            .await
+        }
+        .await;
+        // run_paid already seals `work` on the exec path. Fetch/resolve
+        // failures still need this job dir on the virtio-blk — never
+        // work_root (stale siblings).
+        if result.is_err() {
+            let _ = runner::persist_work(&work);
+        }
+        result
+    }
+}
+
+/// Flush one job tree. Success is fail-closed (no Done if sync fails).
+/// Failure is best-effort so the job error stays the job error.
+fn seal_job<T>(work: &Path, result: Result<T, String>) -> Result<T, String> {
+    match result {
+        Ok(v) => runner::persist_work(work).map(|()| v),
+        Err(e) => {
+            let _ = runner::persist_work(work);
+            Err(e)
+        }
     }
 }
 

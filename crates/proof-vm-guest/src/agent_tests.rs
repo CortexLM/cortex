@@ -855,6 +855,53 @@ echo '[{"id": "rlm_rule_x", "text": "an adaptor-written rule"}]' > "$PROOF_OUTPU
     let _ = std::fs::remove_dir_all(&r);
 }
 
+/// A leftover unsyncable entry under the shared work root (earlier failed
+/// job on a reused topic VM) must not turn Archive — or any later success
+/// that does not own that path — into Failed.
+#[tokio::test]
+async fn archive_and_later_jobs_ignore_stale_unsyncable_siblings() {
+    let r = root("stale-sibling");
+    let a = agent(&r);
+    hello(&a).await;
+    let work = r.join("work");
+    std::fs::create_dir_all(&work).expect("work root");
+    std::os::unix::fs::symlink("/no/such-proof-stale-entry", work.join("dangling"))
+        .expect("dangling sibling");
+    let archived = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::Archive {
+                topic_id: "topic-a".into(),
+            }),
+        })
+        .await;
+    assert_eq!(
+        archived,
+        RlmToHost::Done {
+            output: VmJobOutput::Archived
+        },
+        "Archive creates no work; a stale sibling must not be synced"
+    );
+    let (tar, digest) = pack();
+    stage(&a, &tar, &digest).await;
+    install(
+        &r,
+        "run",
+        "echo '{\"primary_value\": 0.5}' > \"$PROOF_OUTPUT_DIR/report.json\"",
+    );
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::Baseline {
+                request: req_for(&digest),
+            }),
+        })
+        .await;
+    assert!(
+        matches!(out, RlmToHost::Done { .. }),
+        "paid success must flush only its job dir, not the dangling sibling: {out:?}"
+    );
+    let _ = std::fs::remove_dir_all(&r);
+}
+
 /// Framing over a stream, as the host drives it: hello, staging, a job, EOF.
 #[tokio::test]
 async fn serve_connection_speaks_frames_until_the_host_hangs_up() {
