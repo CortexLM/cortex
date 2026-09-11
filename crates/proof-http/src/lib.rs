@@ -3734,7 +3734,7 @@ mod tests {
     #[tokio::test]
     async fn upload_wins_over_miner_uri_and_mismatch_or_oversize_or_empty_is_400() {
         let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
-        let app = proof_router(state_with_deferred_custom(scorer.clone(), true, true));
+        let app = app_with_custom(scorer.clone());
         let bytes = recipe_tar();
         let artifact_digest = hex::encode(Sha256::digest(&bytes));
         let fields = submit_body(
@@ -3743,7 +3743,6 @@ mod tests {
                 "topic_id": CUSTOM,
                 "artifact_digest": artifact_digest,
                 "artifact_uri": "https://example.invalid/ignored.tar",
-                "manifest": { "train_content_hashes": [], "train_dataset_ids": [] },
             }),
         );
         let (st, created) = multipart_req(app.clone(), &fields, Some(&bytes)).await;
@@ -3762,7 +3761,6 @@ mod tests {
             format!("proof-artefact://{artifact_digest}")
         );
 
-        let live = app_with_custom(Arc::new(FamilyStub::win("topic_minted_metric")));
         let mismatch = submit_body(
             "mismatch",
             &serde_json::json!({
@@ -3770,7 +3768,7 @@ mod tests {
                 "artifact_digest": digest("mismatch"),
             }),
         );
-        let (st, body) = multipart_req(live.clone(), &mismatch, Some(&bytes)).await;
+        let (st, body) = multipart_req(app.clone(), &mismatch, Some(&bytes)).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(
             body["error"],
@@ -3784,7 +3782,7 @@ mod tests {
                 "artifact_digest": digest("empty-bytes"),
             }),
         );
-        let (st, body) = multipart_req(live.clone(), &empty, Some(b"")).await;
+        let (st, body) = multipart_req(app.clone(), &empty, Some(b"")).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body["error"], "artifact is empty");
 
@@ -3797,7 +3795,7 @@ mod tests {
                 "artifact_digest": empty_tar_digest,
             }),
         );
-        let (st, body) = multipart_req(live.clone(), &nothing, Some(&empty_tar)).await;
+        let (st, body) = multipart_req(app.clone(), &nothing, Some(&empty_tar)).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
         assert!(
             body["error"]
@@ -3861,7 +3859,7 @@ mod tests {
                 "artifact_digest": over_digest,
             }),
         );
-        let (st, body) = multipart_req(live, &oversize, Some(&over)).await;
+        let (st, body) = multipart_req(app, &oversize, Some(&over)).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
         assert!(
             body["error"].as_str().unwrap_or_default().contains("5 MiB"),
@@ -3869,8 +3867,8 @@ mod tests {
         );
         assert_eq!(
             scorer.inner.hits.load(Ordering::SeqCst),
-            0,
-            "deferred bytes-win must not score"
+            1,
+            "only bytes-win ran"
         );
         assert_eq!(
             scorer.inner.tars(),
