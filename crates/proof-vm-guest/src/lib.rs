@@ -232,11 +232,13 @@ impl GuestAgent {
             HostToRlm::Run { job } => {
                 let _one = self.job.lock().await;
                 match self.run(*job).await {
-                    Ok(output) => match runner::persist_work(&self.cfg.work_root) {
-                        Ok(()) => RlmToHost::Done { output },
-                        Err(error) => RlmToHost::Failed { error },
-                    },
+                    // Paid success already flushed the job tree in run_paid.
+                    // Do not walk work_root again (retained earlier jobs).
+                    Ok(output) => RlmToHost::Done { output },
                     Err(error) => {
+                        // Retain-on-fail (tbench-x0004): inspect/fetch and
+                        // jobs that died before run_paid's persist still
+                        // need work_root on the virtio-blk.
                         let _ = runner::persist_work(&self.cfg.work_root);
                         tracing::warn!("job failed: {error}");
                         RlmToHost::Failed { error }

@@ -153,17 +153,24 @@ def _call_run(miner: Any, instruction: str, environment: Any, context: Any) -> A
 
 
 def _call_setup(miner: Any, environment: Any) -> Any:
-    """Harbor ``BaseAgent.setup(environment)`` is required; miners may omit it."""
+    """Harbor ``BaseAgent.setup(environment)`` is required; miners may omit it.
+
+    A miner that *defines* setup must be callable with Harbor's environment
+    (positional or keyword-only). Silently skipping an incompatible hook
+    would report setup success without running miner init.
+    """
     setup = getattr(miner, "setup", None)
     if setup is None or not callable(setup):
         return None
     forms = (
         ((environment,), {}),
+        ((), {"environment": environment}),
         ((), {}),
     )
     selected = _select_form(setup, forms)
     if selected is None:
-        return None
+        _fail(f"{type(miner).__name__}.setup is not callable with Harbor arguments")
+        raise AssertionError
     call_args, call_kwargs = selected
     return setup(*call_args, **call_kwargs)
 

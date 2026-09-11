@@ -210,6 +210,32 @@ class ProofPythonAgentTests(unittest.TestCase):
         asyncio.run(proof_python_agent._await_maybe(proof_python_agent._call_setup(miner, env)))
         self.assertIs(miner.seen, env)
 
+    def test_setup_keyword_only_environment_is_called(self) -> None:
+        class Miner:
+            def __init__(self) -> None:
+                self.seen = None
+
+            def setup(self, *, environment):
+                self.seen = environment
+
+        miner = Miner()
+        env = object()
+        proof_python_agent._call_setup(miner, env)
+        self.assertIs(miner.seen, env)
+
+    def test_setup_incompatible_signature_fails_closed(self) -> None:
+        class Miner:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def setup(self, *, only_keyword: str) -> None:
+                self.calls += 1
+
+        miner = Miner()
+        with self.assertRaises(SystemExit):
+            proof_python_agent._call_setup(miner, object())
+        self.assertEqual(miner.calls, 0)
+
     def test_setup_noop_when_miner_has_none(self) -> None:
         class Miner:
             pass
