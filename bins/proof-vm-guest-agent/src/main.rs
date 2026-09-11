@@ -137,6 +137,11 @@ async fn serve_vsock(agent: Arc<GuestAgent>, port: u32) -> Result<(), String> {
                 tracing::debug!(cid = peer.cid(), port = peer.port(), "host connected");
                 let agent = agent.clone();
                 tokio::spawn(async move {
+                    // Host harvest recovers a dropped Done: this guest is the
+                    // *listen* side of RLM_JOB_PORT (Firecracker UDS `v.sock`).
+                    // The host never binds `v.sock_5000`; only sister
+                    // (`v.sock_5001`) is a guest→host listener. Do not reconnect
+                    // to CID 2 / port 5000 — that connect has nowhere to land.
                     if let Err(e) = agent.serve_connection(stream).await {
                         tracing::warn!("host connection ended with an error: {e}");
                     }

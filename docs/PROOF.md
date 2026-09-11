@@ -304,9 +304,16 @@ Trust-root keygen is the throwaway owner path in
   train/eval recipe** (code, not weights-only), `manifest`
   (signed), `submit_nonce` (64 lowercase hex, single use), and
   `hotkey_signature` (exactly 128 lowercase hex sr25519 over
-  `base-proof-submit-v1`); on custom topics also `artifact_uri` (the runner
-  fetches from it).
-  The agent verdict (`reproduced`, `claim_holds_public`, cheat codes) is
+  `base-proof-submit-v1`); on custom topics an artefact — multipart upload
+  (preferred, ≤5 MiB) or `artifact_uri` (compat). Neither is **400**
+  `artifact required`. Uploaded bytes win when both are sent.
+  Uploaded tars are staged under `PROOF_ARTEFACT_STAGING_DIR` and the row
+  records `proof-artefact://{digest}`. Live evaluate of that scheme is
+  **503** until vsock inject (PR [#285](https://github.com/CortexLM/cortex/pull/285)
+  `bc-bf177788`); this host stages only. URI-only `https://` still scores.
+  Deferred topics accept the upload as **201** `queued`. Gzip / non-tar /
+  content-less uploads are **400** with no row. The agent verdict
+  (`reproduced`, `claim_holds_public`, cheat codes) is
   filled by the eval image, not the miner.
 - Contamination (holdout overlap in a declared manifest) persists **rejected**
   without renting. An empty training manifest is the same reject **only** on
@@ -346,7 +353,7 @@ Semantics, none of which weaken a product rule:
 | Rule | With `defer_scoring = "true"` |
 |------|-------------------------------|
 | Topic status | Stays **`open`**: it needs a sealed baseline to publish, it is listed in `open_topics`, and it is **not** `draft` (a draft is still a submit **400**). |
-| Intake gates | Unchanged: hotkey / digest shape, digest-of-nothing, unknown / not-open topic, missing `artifact_uri` on a custom topic, missing/undeclared miner `env` are the same **400**s with no row. Harvest `nll` / `throughput` still 400 `declared_flops` over budget; custom / agent topics ignore that gate. |
+| Intake gates | Unchanged: hotkey / digest shape, digest-of-nothing, unknown / not-open topic, missing artefact (no upload and no `artifact_uri`) on a custom topic, missing/undeclared miner `env` are the same **400**s with no row. Harvest `nll` / `throughput` still 400 `declared_flops` over budget; custom / agent topics ignore that gate. |
 | Host gates | **Not consulted.** The row persists as **`queued`** (**201**) whether or not the host could score it right now — no readiness check, no harvest rent, no topic VM, no judge call, no verdict, no stamps, no topic mass, no emission. |
 | Status | The topic is in `deferred_topics`, **not** in `scorable_topics`; `can_score` keeps its meaning (something is scored right now). `queued_submissions` counts the waiting rows. |
 | Duplicates | One row per frozen digest per topic, for the row's whole life, decided in one atomic store step: the same artefact from the same hotkey again is **200** with the existing row (`detail: already queued …`), and after a drain it is **200** with the *scored* row (`already submitted … and scored`) — two identical submits racing each other yield one row, and a retry never buys a second paid run. |
@@ -551,8 +558,15 @@ evidence and passes. Every checklist (red or green), every lifecycle
 transition, the baseline measurement, artefact metadata, and every promotion
 event land in the DB (`proof_checklist`, `proof_lifecycle_event`,
 `proof_baseline_measurement`, `proof_artefact`, `proof_promotion_event`,
-`proof_topic_version`). Tables are append-only for `base_app`; "current
-best" is the newest promotion row. `BASE_DATABASE_URL` selects Postgres; a
+`proof_topic_version`). Journal tables are append-only for `base_app`;
+"current best" is the newest promotion row. `proof_artefact` is keyed by
+`(topic_id, submission_id)` and a collision replaces zip metadata (path,
+sha256, bytes, digest, primary, checklist, promoted) so a restarted
+in-memory allocator cannot leave a stale sha next to a rewritten zip.
+`proof_checklist` is keyed by `submission_digest` and a re-inspect of the
+same digest replaces the latest inspection (`created_at` stays the original
+row) so a miner resubmit after a false anti-cheat reject is not a 503.
+`BASE_DATABASE_URL` selects Postgres; a
 configured-but-unreachable database is fatal, an unset one falls back to the
 in-memory store with a warning.
 
@@ -646,7 +660,11 @@ vsock before any job, the guest agent (`proof-vm-guest-agent`, this
 repository) execs the operator adaptor for that runner id with the
 experiment pack, the fetched-and-verified artefact, the model pin, and every
 topic param, and the host attests the run as `experiment_vm` for that VM,
-topic, submission, and artefact; the VM is destroyed after the job. No
+topic, submission, and artefact; the VM is destroyed after a successful job
+whose report passed final verification and retained (stopped, jail kept
+on the KVM host for root-cause analysis) after a failed one or an
+`Evaluated` report that fails binding / sandbox checks (occupied retain
+destinations land at `<vm-id>-<stamp>` rather than nesting). No
 adaptor, pack, or value is defaulted anywhere: no runner selected, no
 adaptor baked, no pack staged, no report, or a non-finite value is a failed
 job. Runbook [`runbooks/proof-experiment-vms.md`](runbooks/proof-experiment-vms.md).

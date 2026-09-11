@@ -628,6 +628,44 @@ async fn kill_group(pid: Option<u32>) {
         .await;
 }
 
+fn sync_file(path: &Path) -> Result<(), String> {
+    std::fs::File::open(path)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| format!("sync {}: {e}", path.display()))
+}
+
+fn sync_tree(root: &Path) -> Result<(), String> {
+    if !root.is_dir() {
+        return Err(format!("sync {}: not a directory", root.display()));
+    }
+    let mut stack = vec![root.to_path_buf()];
+    let mut dirs = Vec::new();
+    while let Some(d) = stack.pop() {
+        dirs.push(d.clone());
+        let entries = std::fs::read_dir(&d).map_err(|e| format!("read {}: {e}", d.display()))?;
+        for e in entries {
+            let e = e.map_err(|e| format!("read {}: {e}", d.display()))?;
+            let p = e.path();
+            let meta = std::fs::symlink_metadata(&p)
+                .map_err(|err| format!("sync {}: {err}", p.display()))?;
+            if meta.file_type().is_symlink() {
+                if std::fs::metadata(&p).is_ok_and(|m| m.is_dir()) {
+                    continue;
+                }
+                sync_file(&p)?;
+            } else if meta.is_dir() {
+                stack.push(p);
+            } else {
+                sync_file(&p)?;
+            }
+        }
+    }
+    for d in dirs {
+        sync_file(&d)?;
+    }
+    Ok(())
+}
+
 fn read_output_doc<T: for<'de> Deserialize<'de>>(path: &Path, what: &str) -> Result<T, String> {
     let meta = std::fs::metadata(path)
         .map_err(|_| format!("adaptor wrote no {what} ({})", path.display()))?;
@@ -734,13 +772,23 @@ pub async fn run_paid(
     if exec.timed_out {
         return Err(describe(&exec, &secrets, request.sandbox.deadline_s));
     }
-    let report: RunnerReport = read_output_doc(&output.join("report.json"), "report.json")
-        .map_err(|e| {
-            format!(
-                "{e} ({})",
-                describe(&exec, &secrets, request.sandbox.deadline_s)
-            )
-        })?;
+    // Push Harbor trial files + the adaptor's report to the virtio-blk
+    // before Done: debugfs can otherwise dump reward.txt ~12s before
+    // result.json (metal tbench-x0002 / a21f). Do not send Done if this
+    // durability barrier fails — a host that harvests immediately would
+    // otherwise see an incomplete tree after a claimed completion.
+    // A missing report.json is still the adaptor-wrote-nothing error below.
+    sync_tree(work)?;
+    let report_path = output.join("report.json");
+    if report_path.exists() {
+        sync_file(&report_path)?;
+    }
+    let report: RunnerReport = read_output_doc(&report_path, "report.json").map_err(|e| {
+        format!(
+            "{e} ({})",
+            describe(&exec, &secrets, request.sandbox.deadline_s)
+        )
+    })?;
     if !report.primary_value.is_finite() {
         return Err("report.json primary_value is not finite".into());
     }
@@ -938,4 +986,36 @@ pub async fn propose_rules(
     }
     validate_rules(&rules).map_err(|e| format!("rules.json {}: {}", e.field, e.why))?;
     Ok(rules)
+}
+
+#[cfg(test)]
+mod sync_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::{sync_file, sync_tree};
+    use std::path::Path;
+
+    #[test]
+    fn sync_file_reports_open_failure() {
+        let err = sync_file(Path::new("/no/such/proof-vm-guest-sync-file")).unwrap_err();
+        assert!(err.contains("sync"), "{err}");
+        assert!(err.contains("no/such/proof-vm-guest-sync-file"), "{err}");
+    }
+
+    #[test]
+    fn sync_tree_reports_missing_root() {
+        let err = sync_tree(Path::new("/no/such/proof-vm-guest-sync-tree")).unwrap_err();
+        assert!(err.contains("sync"), "{err}");
+    }
+
+    #[test]
+    fn sync_tree_syncs_a_real_tree() {
+        let d = std::env::temp_dir().join(format!("proof-vm-guest-sync-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("a"), b"x").unwrap();
+        std::fs::write(d.join("sub").join("b"), b"y").unwrap();
+        sync_tree(&d).expect("sync");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

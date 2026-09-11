@@ -10,8 +10,8 @@ use proof_rlm::{Lifecycle, RuleSet};
 use proof_task::TopicDocument;
 
 use crate::{
-    check_artefact, check_promotion, check_rules, replay, ArtefactRow, BaselineRow, ChecklistRow,
-    PromotionRow, RlmStore, StoreError, TransitionRow,
+    check_artefact, check_promotion, check_rules, parse_row_id, replay, ArtefactRow, BaselineRow,
+    ChecklistRow, PromotionRow, RlmStore, StoreError, TransitionRow,
 };
 
 #[derive(Default)]
@@ -89,6 +89,7 @@ impl RlmStore for MemoryRlmStore {
     }
 
     async fn put_checklist(&self, row: &ChecklistRow) -> Result<(), StoreError> {
+        // Same digest may be re-inspected (miner resubmit). Overwrite.
         self.lock()?
             .checklists
             .insert(row.submission_digest.clone(), row.clone());
@@ -139,6 +140,14 @@ impl RlmStore for MemoryRlmStore {
         check_artefact(row)?;
         let mut g = self.lock()?;
         let rows = g.artefacts.entry(row.topic_id.clone()).or_default();
+        if rows.iter().any(|a| a.submission_id == row.submission_id) {
+            tracing::warn!(
+                topic_id = %row.topic_id,
+                submission_id = %row.submission_id,
+                sha256 = %row.sha256,
+                "proof_artefact collision: replaced metadata for existing (topic_id, submission_id)"
+            );
+        }
         rows.retain(|a| a.submission_id != row.submission_id);
         rows.push(row.clone());
         Ok(())
@@ -151,6 +160,16 @@ impl RlmStore for MemoryRlmStore {
             .get(topic_id)
             .cloned()
             .unwrap_or_default())
+    }
+
+    async fn max_artefact_numeric_id(&self) -> Result<Option<u64>, StoreError> {
+        Ok(self
+            .lock()?
+            .artefacts
+            .values()
+            .flatten()
+            .filter_map(|a| parse_row_id(&a.submission_id))
+            .max())
     }
 
     async fn record_promotion(&self, row: &PromotionRow) -> Result<(), StoreError> {

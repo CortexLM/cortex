@@ -823,6 +823,37 @@ async fn serve_connection_speaks_frames_until_the_host_hangs_up() {
     let _ = std::fs::remove_dir_all(&r);
 }
 
+/// After `handle(Run)` the `Done` write hits a broken pipe: the session is
+/// still Ok. The guest does not open a new host vsock (the host never
+/// listens on `v.sock_5000`); host harvest reads `report.json`.
+#[tokio::test]
+async fn a_broken_pipe_on_done_is_ok_host_harvest_recovers() {
+    let r = root("retry");
+    let a = agent(&r);
+    hello(&a).await;
+    let (mut host, guest) = tokio::io::duplex(1 << 20);
+    let server = {
+        let a = a.clone();
+        tokio::spawn(async move { a.serve_connection(guest).await })
+    };
+    write_frame(
+        &mut host,
+        &HostToRlm::Run {
+            job: Box::new(VmJob::Archive {
+                topic_id: "topic-a".into(),
+            }),
+        },
+    )
+    .await
+    .expect("job");
+    drop(host);
+    server
+        .await
+        .expect("join")
+        .expect("ok; host harvest recovers");
+    let _ = std::fs::remove_dir_all(&r);
+}
+
 /// The miner's own BYOK environment reaches their paid run: exported under
 /// the name the signed topic declared, written to a 0600 file beside it, and
 /// blanked out of everything the guest ships back. It is not part of the
@@ -955,6 +986,58 @@ echo '[]' > "$PROOF_OUTPUT_DIR/checklist.json"
             .join(crate::staging::MINER_ENV_SUBDIR)
             .exists(),
         "no key file is written for an unpaid job"
+    );
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+/// A paid run must not answer `Done` when the pre-Done durability barrier
+/// cannot open/sync the work tree (report.json sitting in page cache is not
+/// enough).
+#[tokio::test]
+async fn paid_run_fails_closed_when_work_tree_cannot_be_synced() {
+    let r = root("sync-fail");
+    let a = agent(&r);
+    hello(&a).await;
+    let (tar, digest) = pack();
+    stage(&a, &tar, &digest).await;
+    install(
+        &r,
+        "run",
+        r#"
+echo '{"primary_value": 0.73}' > "$PROOF_OUTPUT_DIR/report.json"
+touch "$PROOF_WORK_DIR/blocked"
+chmod 000 "$PROOF_WORK_DIR/blocked"
+"#,
+    );
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::Baseline {
+                request: req_for(&digest),
+            }),
+        })
+        .await,
+    );
+    assert!(
+        err.contains("sync"),
+        "durability failure must prevent Done, got {err}"
+    );
+    let artefact = archive(&[member("recipe/run.sh", b'0', b"echo hi\n")]);
+    let mut eval = req_for(&digest);
+    eval.artifact_digest = hex::encode(Sha256::digest(&artefact));
+    eval.artifact_uri = Some(serve_once(artefact).await);
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::Evaluate {
+                request: eval,
+                checklist_digest: "c".into(),
+                rules_version: 1,
+            }),
+        })
+        .await,
+    );
+    assert!(
+        err.contains("sync"),
+        "evaluate must also refuse Done after a failed flush, got {err}"
     );
     let _ = std::fs::remove_dir_all(&r);
 }

@@ -117,14 +117,15 @@ Resolution order after unpack: `$PROOF_ARTIFACT_DIR/agent` then
 `$PROOF_ARTIFACT_DIR/recipe/agent`. Be explicit which layout you hash and
 serve; re-tarring changes the digest.
 
-Off-limits in the artefact (inspect fails the named rule):
+Off-limits **cheat markers** in the artefact (inspect fails the named rule):
 
-- `no_eval_short_circuit` (and `skip_eval` / `skip_verifier` / `always_pass_eval` / `short_circuit_eval`)
-- `no_tb4_hardcoding` (and `tb4_answers` / `hardcoded_tb4`)
+- `no_eval_short_circuit` on `skip_eval` / `skip_verifier` / `always_pass_eval` / `short_circuit_eval`
+- `no_tb4_hardcoding` on `tb4_answers` / `hardcoded_tb4`
 
-A file/byte-limit truncation marks the scan incomplete and fails those
-off-limits rules. Unknown rule ids fail closed. Do not quote those markers
-in miner code or README inside the tar.
+The rule-id strings themselves are not markers. A README or comment that
+names `no_eval_short_circuit` / `no_tb4_hardcoding` is compliance language,
+not a fail. A file/byte-limit truncation marks the scan incomplete and
+fails those off-limits rules. Unknown rule ids fail closed.
 
 ## BYOK
 
@@ -279,6 +280,17 @@ Optional overlay layout if you still ship harness files under
 behavior is in that copy. The in-tree `run` does not exec the old overlay.
 
 `tests/` is CI-only; omit it on metal if you want a smaller copy.
+`host/summarize_job.py` is a KVM-host RCA helper (nested orch `job.out`);
+it is not the guest `run` path. Pass `--jobdir <any-dir>` — no baked
+`JOBDIR`. It writes `custom_value.txt` and `summary.txt` under JOBDIR.
+`host/run-n15` waits for Harbor `curl.pid` / `job.out` (including `--restart`)
+and always invokes that helper.
+
+Host harvest (`proof-fc-harvest`) refreshes `{jail}/harvest-work` after
+vsock `Done` until trial `result.json` / `verifier/reward.txt` and Harbor
+`n_running` / `stats.n_running_trials` would pass fail-closed checks. Dump-only
+reconstruct that still lags refuses. That is not an adaptor rewrite of
+`reward.txt`.
 
 Topic params must name this runner id and a relative `tasks_dir` inside the
 pinned pack. Re-pin `experiment_pack_digest` when the pack tar bytes change.

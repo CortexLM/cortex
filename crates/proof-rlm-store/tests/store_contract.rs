@@ -62,6 +62,14 @@ async fn contract(store: &dyn RlmStore) {
     assert_eq!(store.checklist(&digest).await.unwrap().unwrap(), row);
     assert!(store.checklist(&"cd".repeat(32)).await.unwrap().is_none());
 
+    // Same digest may be re-inspected (miner resubmit after a false
+    // anti-cheat reject). Upsert overwrites green / failed_ids / document.
+    let green_row = ChecklistRow::from_checklist(&green(&v1, &digest), &v1);
+    assert!(green_row.green);
+    assert!(green_row.failed_ids.is_empty());
+    store.put_checklist(&green_row).await.unwrap();
+    assert_eq!(store.checklist(&digest).await.unwrap().unwrap(), green_row);
+
     // Lifecycle replays from appended rows.
     assert!(store.lifecycle(&t.id).await.unwrap().is_none());
     for (from, event, to) in [
@@ -130,6 +138,7 @@ async fn contract(store: &dyn RlmStore) {
     ));
 
     // Artefact metadata and the promotion continuum.
+    assert!(store.max_artefact_numeric_id().await.unwrap().is_none());
     let art = ArtefactRow {
         topic_id: t.id.clone(),
         submission_id: "pf_0000000000000001".into(),
@@ -152,6 +161,24 @@ async fn contract(store: &dyn RlmStore) {
         Err(StoreError::Malformed(_))
     ));
     assert_eq!(store.artefacts(&t.id).await.unwrap(), vec![art.clone()]);
+    assert_eq!(store.max_artefact_numeric_id().await.unwrap(), Some(1));
+
+    let mut replaced = art.clone();
+    replaced.submission_digest = "cd".repeat(32);
+    replaced.sha256 = "cd".repeat(32);
+    replaced.bytes = 2_048;
+    replaced.primary_value = Some(0.9);
+    replaced.checklist_green = false;
+    replaced.promoted = false;
+    store.put_artefact(&replaced).await.unwrap();
+    let got = store.artefacts(&t.id).await.unwrap();
+    assert_eq!(got.len(), 1, "PK stays one row");
+    assert_eq!(got[0].sha256, "cd".repeat(32));
+    assert_eq!(got[0].submission_digest, "cd".repeat(32));
+    assert_eq!(got[0].bytes, 2_048);
+    assert_eq!(got[0].primary_value, Some(0.9));
+    assert!(!got[0].checklist_green);
+    assert!(!got[0].promoted);
 
     assert!(store.best(&t.id).await.unwrap().is_none());
     let first = PromotionRow {
@@ -203,5 +230,62 @@ async fn postgres_store_honours_the_contract_when_a_database_is_present() {
     }
     let pool = db::test_pool().await.expect("isolated migrated schema");
     contract(&PgRlmStore::new(pool.pool().clone())).await;
+    pool.drop_schema().await.expect("drop schema");
+}
+
+#[tokio::test]
+async fn postgres_app_role_replaces_artefact_metadata_on_conflict() {
+    if std::env::var_os("DATABASE_URL").is_none() {
+        eprintln!("DATABASE_URL unset; skipping the Postgres conflict upsert");
+        return;
+    }
+    let pool = db::test_pool().await.expect("isolated migrated schema");
+    let store = PgRlmStore::new(pool.app_pool().await.expect("app"));
+    let art = ArtefactRow {
+        topic_id: "topic-a".into(),
+        submission_id: "pf_0000000000000000".into(),
+        submission_digest: "ab".repeat(32),
+        path: "/artefacts/topic-a/pf_0000000000000000.zip".into(),
+        sha256: "aa".repeat(32),
+        bytes: 10,
+        primary_value: Some(0.1),
+        checklist_green: true,
+        promoted: false,
+    };
+    store.put_artefact(&art).await.unwrap();
+    let mut again = art.clone();
+    again.sha256 = "bb".repeat(32);
+    again.submission_digest = "cd".repeat(32);
+    store.put_artefact(&again).await.unwrap();
+    let got = store.artefacts("topic-a").await.unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].sha256, "bb".repeat(32));
+    assert_eq!(got[0].submission_digest, "cd".repeat(32));
+    assert_eq!(store.max_artefact_numeric_id().await.unwrap(), Some(0));
+    pool.drop_schema().await.expect("drop schema");
+}
+
+#[tokio::test]
+async fn postgres_app_role_replaces_checklist_on_conflict() {
+    if std::env::var_os("DATABASE_URL").is_none() {
+        eprintln!("DATABASE_URL unset; skipping the Postgres checklist upsert");
+        return;
+    }
+    let pool = db::test_pool().await.expect("isolated migrated schema");
+    let store = PgRlmStore::new(pool.app_pool().await.expect("app"));
+    let digest = "ab".repeat(32);
+    let rules = rules();
+    let mut red = green(&rules, &digest);
+    red.items[0].pass = false;
+    let red_row = ChecklistRow::from_checklist(&red, &rules);
+    assert!(!red_row.green);
+    store.put_checklist(&red_row).await.unwrap();
+    let green_row = ChecklistRow::from_checklist(&green(&rules, &digest), &rules);
+    assert!(green_row.green);
+    store.put_checklist(&green_row).await.unwrap();
+    let got = store.checklist(&digest).await.unwrap().unwrap();
+    assert_eq!(got, green_row);
+    assert!(got.green);
+    assert!(got.failed_ids.is_empty());
     pool.drop_schema().await.expect("drop schema");
 }

@@ -42,7 +42,7 @@ const EXTERNAL_MINER_PINS: &[(&str, &str)] = &[
 ///
 /// The value is read from `bins/ctx`, so the docs and the binary's default
 /// cannot drift apart.
-const GATEWAY_CONST_FILE: &str = "bins/ctx/src/api.rs";
+const GATEWAY_CONST_FILE: &str = "crates/ctx-client/src/lib.rs";
 
 /// Const declaration the host is parsed out of.
 const GATEWAY_CONST_PREFIX: &str = "pub const DEFAULT_GATEWAY: &str =";
@@ -116,6 +116,8 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
             "base-proof-submit-v1",
             "submit_nonce",
             "manifest_canonical",
+            "--artifact",
+            "artifact required",
         ],
     ),
     (
@@ -129,6 +131,8 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
             "artifact_uri",
             "submit_nonce",
             "base-proof-submit-v1",
+            "--artifact",
+            "artifact required",
             "success_rate",
             "discovery",
             "epsilon_rel",

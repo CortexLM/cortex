@@ -17,8 +17,8 @@ use bounty_challenge_task::{
 use keystore::{load_hotkey, mini_secret_from_key_file, BittensorWallet};
 use serde_json::{json, Value};
 
-use crate::api::{challenge_path, Client};
 use crate::catalog::compact;
+use ctx_client::{challenge_path, Client};
 
 /// Challenge id for the bounty routes.
 const BOUNTY: &str = "bounty";

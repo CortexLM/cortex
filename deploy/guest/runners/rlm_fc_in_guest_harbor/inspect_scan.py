@@ -2,13 +2,15 @@
 """Tick a Proof checklist against the unpacked miner artefact. No inference.
 
 Reads ``PROOF_RULES_FILE`` (a ``RuleSet`` object or a ``[{id, text}]`` array)
-and writes ``checklist.json``. Off-limits markers ``no_eval_short_circuit``
-and ``no_tb4_hardcoding`` fail those rules when they appear in the artefact
-tree. A file/byte-limit truncation marks the scan incomplete and **fails**
-those off-limits rules — truncated absence is not a clean pass. Unknown
-rule IDs fail closed. Host-side rules are answered with evidence, not left
-blank (a missing item is recorded red). Secret file contents are never
-printed.
+and writes ``checklist.json``. Cheat markers (``skip_eval``,
+``tb4_answers``, …) fail the named rules ``no_eval_short_circuit`` /
+``no_tb4_hardcoding`` when they appear in the artefact tree. The rule-id
+strings themselves are **not** markers: a README or comment that names the
+rule is compliance language, not a fail. A file/byte-limit truncation
+marks the scan incomplete and **fails** those off-limits rules —
+truncated absence is not a clean pass. Unknown rule IDs fail closed.
+Host-side rules are answered with evidence, not left blank (a missing
+item is recorded red). Secret file contents are never printed.
 """
 
 from __future__ import annotations
@@ -24,15 +26,16 @@ MAX_FILES = 256
 MAX_EVIDENCE = 2000
 MAX_TOTAL_BYTES = 2 * 1024 * 1024
 
+# Real cheat markers only. Do **not** put the rule ids
+# (``no_eval_short_circuit``, ``no_tb4_hardcoding``) here: miners who name
+# the rule in a README or comment are documenting compliance, not cheating.
 OFF_LIMITS_SHORT_CIRCUIT = (
-    "no_eval_short_circuit",
     "skip_eval",
     "skip_verifier",
     "always_pass_eval",
     "short_circuit_eval",
 )
 OFF_LIMITS_TB4 = (
-    "no_tb4_hardcoding",
     "tb4_answers",
     "hardcoded_tb4",
 )
@@ -117,8 +120,16 @@ def collect_artefact_text(root: Path | None) -> tuple[str, int, list[str], bool]
     return "\n".join(blobs).lower(), n_files, names, incomplete
 
 
-def _contains_any(haystack: str, needles: tuple[str, ...]) -> list[str]:
-    return [n for n in needles if n.lower() in haystack]
+def _off_limits_hits(
+    artefact_text: str, names_joined: str, needles: tuple[str, ...]
+) -> list[str]:
+    """Needles found in artefact text or file names (order preserved)."""
+    found: list[str] = []
+    for needle in needles:
+        key = needle.lower()
+        if key in artefact_text or key in names_joined:
+            found.append(needle)
+    return found
 
 
 def _off_limits_incomplete(rid: str, n_files: int) -> dict[str, Any]:
@@ -144,9 +155,9 @@ def tick_rule(
     joined_names = " ".join(names).lower()
 
     if rid == "no_eval_short_circuit":
-        hits = _contains_any(artefact_text, OFF_LIMITS_SHORT_CIRCUIT)
-        name_hits = [n for n in ("no_eval_short_circuit",) if n in joined_names]
-        hits = hits or name_hits
+        hits = _off_limits_hits(
+            artefact_text, joined_names, OFF_LIMITS_SHORT_CIRCUIT
+        )
         if hits:
             return {
                 "id": rid,
@@ -166,7 +177,7 @@ def tick_rule(
         }
 
     if rid == "no_tb4_hardcoding":
-        hits = _contains_any(artefact_text, OFF_LIMITS_TB4)
+        hits = _off_limits_hits(artefact_text, joined_names, OFF_LIMITS_TB4)
         if hits:
             return {
                 "id": rid,

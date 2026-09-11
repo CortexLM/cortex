@@ -900,7 +900,7 @@ $0 submit-probe --cp $cp --topic $topic --expect 503 --reason 'orchestrator unre
 #
 # 6. Unknown / closed topic → 400 (no row); a custom topic without artifact_uri → 400 (no row).
 $0 submit-probe --cp $cp --topic does-not-exist --expect 400 --reason 'unknown topic'
-$0 submit-probe --cp $cp --topic $topic --expect 400 --no-artifact-uri --reason artifact_uri
+$0 submit-probe --cp $cp --topic $topic --expect 400 --no-artifact-uri --reason 'artifact required'
 #
 # 7. A digest of nothing (sha256 of zero bytes / of an empty tar) → 400 (no row): the CP never
 #    scores the empty-artefact stub; the KVM host refuses a content-less tar before any sister too.

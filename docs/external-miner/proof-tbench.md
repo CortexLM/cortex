@@ -8,6 +8,13 @@ to `proof` (**8000 bps**) exactly as [proof.md](./proof.md) describes, with
 document asks for, what its anti-cheat checklist ticks, and what a submit
 answers today.
 
+**`tbench` is Proof Firecracker, not Lium.** Inspect and evaluate run inside
+the host's dedicated experiment VMs (one Firecracker guest per paid job).
+The Lium harvest (`nll` / `throughput`, `X-Lium-Api-Key`,
+`live_harvest_wired`) does not score this topic. A red checklist with
+`flops_used = 0` / `custom_value = null` is Proof FC inspect refusing
+evaluate — not a Lium rent failure.
+
 **Gateway:** [https://gateway.cortex.foundation](https://gateway.cortex.foundation)  
 **Live topic:** `GET /challenge/proof/v1/proof/topics/tbench` (or `ctx proof topics`)  
 **Generic submit contract:** [proof.md](./proof.md) — signing payload, manifest,
@@ -100,7 +107,7 @@ What the signed document carries today, and what each field means for you:
 | `constraints.task_slice` | `tb4-first-15` | The scored slice. It is an opaque runner input: the task content is not in this repository and must not be in your code |
 | `constraints.model_pin` | `moonshotai/kimi-k3` | Every paid model call in your run must name exactly this model |
 | `constraints.firecracker_required` | `true` | A run without the host's sister-guest attestation is not evidence: **503**, no row, no host fallback |
-| `constraints.params.baseline_runner` | an in-guest runner id | Selects the **experiment VM** path: one dedicated Firecracker VM per paid job, created for the job and destroyed after it |
+| `constraints.params.baseline_runner` | an in-guest runner id | Selects the **experiment VM** path: one dedicated Firecracker VM per paid job, created for the job and stopped after it (destroyed once it scored; kept stopped on the operator's host when the run failed, never reused) |
 | `constraints.params.experiment_pack_digest` | a `sha256:` pin | The operator's experiment pack, re-hashed by the host before any jail. Not yours to supply |
 | `constraints.params.miner_byok` | `OPENROUTER_API_KEY` | You bring the model key — see § 4 |
 | `constraints.params.defer_scoring` | unset today | When `"true"`, the topic is in `deferred_topics` and submits stay **`queued`**. Absent on the live document while scoring is on — confirm with `ctx proof topics` |
@@ -113,11 +120,19 @@ What the signed document carries today, and what each field means for you:
 `GET /v1/proof/topics` never returns holdout records, and `holdout_commitment`
 is a commitment, not data. There is nothing to read there.
 
-## 3. Build and serve the artefact
+## 3. Build and upload the artefact
 
-`tbench` is a `custom` topic, so **`artifact_uri` is required** — the runner
-fetches the bytes from your locator inside the topic VM. A submit without one
-is a **400** with no row.
+`tbench` is a `custom` topic: **upload the uncompressed tar** (≤5 MiB) with
+`ctx proof submit --artifact recipe.tar`. `artifact_uri` is optional compat
+— a miner-hosted locator the runner can still fetch. A submit with neither
+an upload nor a URI is a **400** `artifact required` with no row. When both
+are sent, the uploaded bytes win.
+
+Live evaluate of an upload records `proof-artefact://` and answers **503**
+until vsock inject
+([#285](https://github.com/CortexLM/cortex/pull/285)); score now with
+URI-only `https://` (no upload). A topic in `deferred_topics` still accepts
+the upload as **201** `queued`.
 
 Artefact identity is **the served file's sha256**, verbatim. Uncompressed
 only — no gzip, no zip. Both of these packs work; pick one, hash **that**
@@ -158,7 +173,13 @@ harness**). Evaluate then fails closed — no Terminus-2 fallback.
 The guest unpacks that tar under `$PROOF_ARTIFACT_DIR`. Evaluate attaches
 your **custom Python agent** (primary), a Harbor `BaseAgent` subclass, a
 `harness.json` kind, or a `run.sh` script — not a silent copy of the
-operator's `terminus-2`. You are not required to ship Terminus-2.
+operator's `terminus-2`. You are not required to ship Terminus-2. A
+**prompt-only subclass of `terminus-2`** (same agent, your prompt) is not
+an eval short-circuit: inspect does not fail it. That path only **runs**
+when the guest Harbor overlay exposes Terminus-2 as an importable class
+you can subclass (Harbor is an operator overlay, not in this repo). Name
+that class in `harness.json` / `import_path`. Custom Python `class Agent`
+does not depend on that overlay and is the primary path.
 
 Harbor's `-a` / `--agent` accepts a built-in name or a Python import path
 (`module.path:ClassName`); it does **not** take a filesystem path. The
@@ -168,16 +189,23 @@ wrapped as `proof_python_agent:ProofPythonAgent`). Resolution order:
 `$PROOF_ARTIFACT_DIR/recipe/agent`, then `run.sh`. A `recipe/run.sh` with no
 agent dir is scored as a **script harness**, not as the topic agent. The
 script must leave Harbor jobs with measured `verifier_result.rewards.reward`;
-a self-written `$PROOF_OUTPUT_DIR/report.json` is **not** a score. Off-limits
-in the tree (inspect fails the named rule): `no_eval_short_circuit`,
-`no_tb4_hardcoding`.
+a self-written `$PROOF_OUTPUT_DIR/report.json` is **not** a score. Inspect
+ticks `no_eval_short_circuit` / `no_tb4_hardcoding` on **cheat markers**, not
+on the rule ids. Naming those ids in a README or comment is not a fail.
+What fails: `skip_eval`, `skip_verifier`, `always_pass_eval`,
+`short_circuit_eval` (short-circuit) and `tb4_answers`, `hardcoded_tb4`
+(tb4 hardcoding).
 
 ### Minimal Agent example
 
 This is the constructor / `run` miners ask for. It is **custom Python** —
 you are **not** required to subclass Harbor `BaseAgent` (or Terminus). Name
-the class `Agent`. If you do subclass Terminus, point `import_path` at that
-class (`…:ImprovedTerminus`); keep one primary example here.
+the class `Agent`. If you do subclass Terminus — including a prompt-only
+`terminus-2` subclass — import it from the **guest Harbor overlay** (not
+from this repo) and point `import_path` at that class
+(`…:ImprovedTerminus`). If that overlay does not expose a subclassable
+Terminus-2, evaluate fails at import rather than scoring; use custom
+Python `class Agent` instead. Keep one primary example here.
 
 `harness.json`:
 
@@ -228,7 +256,7 @@ Pack, hash, and serve **that exact file** (either layout):
 tar -cf recipe.tar recipe/
 # or: tar -cf recipe.tar -C recipe .
 sha256sum recipe.tar
-# serve that exact file at https://…/recipe.tar
+# upload that exact file (preferred), or serve it at artifact_uri
 ```
 
 Submit sketch. Pass `--openrouter-api-key` (never printed) or
@@ -240,11 +268,11 @@ export OPENROUTER_API_KEY=sk-or-…
 ctx proof submit \
   --secret-file /path/to/hotkey.sk \
   --topic-id tbench \
-  --artifact-uri https://example.org/recipe.tar \
-  --artifact-digest <sha256 of recipe.tar> \
+  --artifact recipe.tar \
   --claim "raised first-15 success_rate over the sealed baseline" \
   --env OPENROUTER_API_KEY
 # or: --openrouter-api-key "$OPENROUTER_API_KEY"
+# compat: --artifact-uri https://example.org/recipe.tar --artifact-digest <sha256>
 ```
 
 Custom Python `run(instruction, …)` need not subclass Harbor `BaseAgent`.
@@ -273,16 +301,19 @@ Env the run sees: `PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`,
 `PROOF_PARAM_*`, `PROOF_PACK_DIR`, `PROOF_ARTIFACT_DIR`, `PROOF_OUTPUT_DIR`,
 `PROOF_WORK_DIR`, and miner BYOK under `PROOF_MINER_ENV_DIR`.
 
-- Serve **that exact file** at `artifact_uri` and keep it. Re-running `tar`
-  later produces different bytes (mtimes, member order) and therefore a
-  different digest, and the run is refused rather than run on a substitute.
-- The host re-hashes exactly the bytes the runner fetched before it boots your
-  guest, and refuses gzip, non-tar bytes, an archive with no file content, or
-  bytes that do not match your `artifact_digest`.
+- Prefer `ctx proof submit --artifact recipe.tar` (gateway intake cap **5 MiB**).
+  Re-running `tar` later produces different bytes (mtimes, member order) and
+  therefore a different digest. Live evaluate of that upload is **503** until
+  [#285](https://github.com/CortexLM/cortex/pull/285); URI-only `https://`
+  still scores, and `deferred_topics` still **201** `queued`.
+- URI-only compat: serve **that exact file** at `artifact_uri` and keep it.
+  The guest streams it under a hard **64 MiB** cap (not the gateway upload
+  cap). The host re-hashes exactly the bytes the runner fetched before it
+  boots your guest, and refuses gzip, non-tar bytes, an archive with no
+  file content, or bytes that do not match your `artifact_digest`.
 - A digest of nothing — the sha256 of zero bytes or of an empty tar — is a
-  **400** with no row, whatever case you spell it in.
-- On the experiment-VM path the guest agent streams your artefact under a hard
-  **64 MiB** cap. Ship a recipe, not a weight dump.
+  **400** with no row, whatever case you spell it in. Ship a recipe, not a
+  weight dump.
 
 Your code runs **inside a Firecracker guest the host boots**, against the
 operator's pinned experiment pack. You cannot produce the sandbox attestation
@@ -395,8 +426,9 @@ Fields the host reads on `POST /challenge/proof/v1/submissions`:
 | `hotkey_signature` | yes | Exactly 128 lowercase hex, sr25519 over `base-proof-submit-v1` |
 | `submit_nonce` | yes | Exactly 64 lowercase hex, 32 fresh random bytes, **single-use per hotkey** |
 | `topic_id` | yes | `tbench` |
-| `artifact_digest` | yes | sha256 of the exact file you serve; not the digest of nothing |
-| `artifact_uri` | **yes** | Required because `tbench` is a `custom` topic |
+| `artifact_digest` | yes | sha256 of the exact file you upload (or serve); not the digest of nothing |
+| `artifact` (multipart) | **preferred** | Uncompressed tar ≤5 MiB. `ctx proof submit --artifact` |
+| `artifact_uri` | optional | Compat locator; omit when you upload. Neither upload nor URI → **400** `artifact required` |
 | `claim` | yes | One English sentence of what improved. Signed |
 | `declared_flops` | no | Optional, default `0`. Still bound into the signature if you send it. **Ignored as a scoring gate** on `tbench` |
 | `manifest.train_content_hashes` / `manifest.train_dataset_ids` | **no** | `tbench` is a custom agent topic with no training step. Omit `--train-dataset` / `--train-hash`. Do not invent a harness id as a fake corpus. Signed (empty lists are fine) |
@@ -437,7 +469,7 @@ curl -sS https://gateway.cortex.foundation/challenge/proof/v1/submissions/<id>
 |---------|---------------------|
 | `queued` | Accepted and stored, **not evaluated**. Only when the topic is in `deferred_topics` (`defer_scoring = "true"`). No rent, no VM, no judge call, no mass. Not an in-progress score: a live (non-deferred) submit waits for scoring and the **201** is already `awaiting_admin`, `rejected`, or `champion`. `ctx proof show --wait` is for a deferred row |
 | `awaiting_admin` | Clean pass, mass recorded. The operator audit is informational |
-| `rejected` | A gate failed: contamination, unreproduced claim, a red checklist item. Pre-eval rejects spend nothing. FLOP accounting is **not** a reject gate on `tbench` |
+| `rejected` | A gate failed: contamination, unreproduced claim, a red checklist item. Pre-eval rejects spend nothing: **evaluate is skipped**, so `flops_used = 0` / `custom_value = null` is expected. FLOP accounting is **not** a reject gate on `tbench` |
 | `champion` | Promoted. On this topic promotion is automatic: a passing run with a green checklist that beats the sealed bar or the reigning best by `epsilon_rel`. Proof pays on pass, not on the crown |
 
 Runs on one topic are scored and crowned one at a time against the best at that
@@ -467,14 +499,17 @@ and is not a payment path.
 
 The topic carries a `checklist` of rules `[{id, text}]`. They are ticked over
 your artefact **before any paid inference**: one red, missing, duplicated, or
-evidence-less item is a persisted `rejected` row with **no spend**. The rule
-texts in the live topic are the contract; the ids published today are:
+evidence-less item is a persisted `rejected` row with **no spend**. Evaluate
+never runs in that case — `flops_used = 0` and `custom_value = null` are
+expected, not a missing Harbor trial. This inspect is Proof Firecracker
+(the in-guest Harbor adaptor), not Lium. The rule texts in the live topic
+are the contract; the ids published today are:
 
 | Rule id | What it holds you to |
 |---------|----------------------|
 | `same_seed` | Every paid call and every scored episode uses the topic baseline seed. No per-miner reseeding |
-| `no_tb4_hardcoding` | Your harness must not hardcode task ids, answers, fixtures, or success paths. Only the signed topic carries `task_slice` |
-| `no_eval_short_circuit` | The evaluator, the metric path, and the sandbox are untouched — no short-circuiting the checklist or the scoring |
+| `no_tb4_hardcoding` | Your harness must not hardcode task ids, answers, fixtures, or success paths. Only the signed topic carries `task_slice`. Inspect fails on cheat markers `tb4_answers` / `hardcoded_tb4`, not because a README names this rule id |
+| `no_eval_short_circuit` | The evaluator, the metric path, and the sandbox are untouched — no short-circuiting the checklist or the scoring. Inspect fails on `skip_eval` / `skip_verifier` / `always_pass_eval` / `short_circuit_eval`, not because a README names this rule id. A prompt-only `terminus-2` subclass is not a short-circuit; whether it **imports** depends on the guest Harbor overlay (not in this repo) |
 | `miner_byok_openrouter` | You supply the OpenRouter key for the pinned model; operator keys are never injected into your guest |
 | `firecracker_sister` | Your code runs only in the Firecracker guest the host booted, and the report must carry that attestation |
 | `artefacts_zip` | Scored artefacts persist as a zip under the topic's artefact root, per submission |
@@ -498,7 +533,9 @@ you will actually meet on `tbench`:
 | **201** (scored) | Well-formed submit while scoring is on: the host scores before it answers, so the row is already `awaiting_admin`, `rejected`, or `champion`. **201 `queued`** only if `tbench` is back in `deferred_topics` | yes |
 | **200** existing row | Same artefact + hotkey, freshly signed, **only** while `tbench` is in `deferred_topics` (queued or already drained). While scoring is on, a fresh nonce is a new **201** and a second paid run | existing row |
 | **400** `unknown topic` / `topic is not open` | `tbench` is not published, or is outside its epoch window | no |
-| **400** `artifact_uri is required for custom topics` | You left the locator out. `tbench` is `custom` | no |
+| **400** `artifact required` | You left both the upload and the locator out. `tbench` is `custom` | no |
+| **400** `artifact is not a tar archive` / gzip / no file content | The upload is not an uncompressed tar with file bytes | no |
+| **503** staged artefact / `proof-artefact://` | Live evaluate of an upload: inject is [#285](https://github.com/CortexLM/cortex/pull/285). Score now URI-only | live: no; deferred: queued |
 | **400** `artifact_digest is the sha256 of empty input …` | You hashed nothing, or an empty tar | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not exactly 64 lowercase hex. The host never normalises a hex field | no |
 | **401** `hotkey_signature required` / `invalid` | Missing signature, or a `claim`, `declared_flops`, `manifest`, or nonce that differs from what you signed | no |
@@ -507,7 +544,7 @@ you will actually meet on `tbench`:
 | **503** empty `eval_image_digest` / unsealed baseline / missing judge offer | The host cannot score. Fail-closed, never a sim fallback | no |
 | **503** `proof deadline … exceeded` | Your run did not finish inside `max_proof_deadline_s`; the body carries `stdout_tail` | no |
 | **201** `rejected` + contamination | You declared a holdout shard / corpus id in `manifest` (immediate while scoring is on; at drain time only if the topic is back in `deferred_topics`) | yes, rejected |
-| **201** `rejected` + red checklist | A topic rule failed on your artefact — before any paid inference | yes, rejected |
+| **201** `rejected` + red checklist | A topic rule failed on your artefact — **before any paid inference**. Evaluate is skipped on purpose: `flops_used = 0`, `custom_value = null`, and `cheat_codes` such as `other` are the expected shape of that skip, not a Lium/harvest miss | yes, rejected |
 
 Never commit your OpenRouter key or `LIUM_API_KEY`, and never hand anyone a
 mnemonic or a challenge signing key. If something fails, see
