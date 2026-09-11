@@ -794,6 +794,7 @@ mod tests {
                 holdout,
                 claim,
                 &proof_eval::MinerEnv::new(),
+                None,
             )
             .await
     }

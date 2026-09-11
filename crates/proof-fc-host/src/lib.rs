@@ -1058,7 +1058,7 @@ mod tests {
         assert_eq!(bytes, tar);
     }
 
-    /// Host injects vault bytes over vsock (StageArtifact then Run) and the
+    /// Host injects vault bytes over vsock (`StageArtifact` then `Run`) and the
     /// guest never sees a miner HTTPS fetch. Stand-in + fake guest, no FC.
     #[tokio::test]
     async fn staged_artefact_is_injected_over_vsock_before_run() {
