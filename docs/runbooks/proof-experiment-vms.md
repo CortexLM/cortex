@@ -141,7 +141,12 @@ root-cause analysis: `DELETE /v1/vms/{id}` with `retain` kills the process,
 tears the TAP + nftables table down, and moves
 `/srv/jailer/firecracker/<topic>-x<n>` to
 `PROOF_VM_AGENT_RETAIN_DIR/<topic>-x<n>` (default
-`/var/lib/proof-vm/retained`). What is there:
+`/var/lib/proof-vm/retained`) when that name is free. If a prior retain
+already occupies that path (a restarted agent reissues deterministic ids
+from 1), the jail lands at `<topic>-x<n>-<stamp>` — GNU `mv` into an
+existing directory would nest it as `<id>/<id>` and still report success,
+mixing old and new evidence. Success is confirmed only when the source
+is gone, that unique destination exists, and it is not nested. What is there:
 
 | Path under the retained jail | What |
 |------------------------------|------|
@@ -282,6 +287,7 @@ spend**. Use `proof-vm-wire-check.sh submit-probe --topic <id> --expect
 | `DELETE /v1/vms/{id}` (`retain`) fails or is not confirmed after a **failed** run | 503 with the job's own error — no row | CP journal `experiment vm job failed and the vm was not confirmed retained (…); reconcile it on the kvm host`; the VM is still listed by the agent |
 | `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS` reached | 503 `orchestrator 503 … Capacity: this host runs N of at most N experiment vms` | no boot |
 | runner id not baked (`/opt/proof/runners/<id>/run` missing) | 503 `runner … is not installed in this guest image` | `experiment vm booted` → guest `Failed` → retained; **no value reported** |
+| run report `sandboxed=false` on a `firecracker_required` topic | 503 `run report says miner code ran outside the Firecracker guest` | retained (final verification is part of the job outcome used for teardown policy) |
 | adaptor writes no `report.json` / non-finite value / outlives the deadline | 503 with the adaptor's exit + redacted tail / `cut at the deadline of Ns` | retained (read `console.log` and `root/scratch.ext4` under `PROOF_VM_AGENT_RETAIN_DIR/<topic>-x<n>`) |
 | `artifact_uri` unreachable from the VM or bytes ≠ `artifact_digest` (evaluate) | 503 `artifact fetch … refusing to run a substitute` | retained; no sister, no attestation |
 | guest agent absent from the image (old RLM image) | 503 `pack staging answered …` / boot timeout | boot fails, jail released (nothing to retain: the VM never existed) |

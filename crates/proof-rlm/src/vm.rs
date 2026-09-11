@@ -21,9 +21,11 @@
 //! (`proof_experiment`: runner id + pinned pack digest, optional size) runs
 //! each paid job in a **dedicated experiment VM** instead — one VM per
 //! experiment, created for the job and stopped after it (destroyed when the
-//! job succeeded, **retained** on the KVM host when it failed, so the guest
-//! console and `report.json` scratch survive for root-cause analysis), sized
-//! under the operator ceilings ([`run_paid_job`]). Parallel experiments are
+//! job succeeded and its report passed final verification, **retained** on
+//! the KVM host when it failed or the `Evaluated` report failed binding /
+//! sandbox checks, so the guest console and `report.json` scratch survive
+//! for root-cause analysis), sized under the operator ceilings
+//! ([`run_paid_job`]). Parallel experiments are
 //! parallel VMs, never containers sharing one VM. Nothing here knows what
 //! the runner or the pack are; both are topic data resolved inside the guest.
 
@@ -38,8 +40,8 @@ use serde::{Deserialize, Serialize};
 use crate::gate::SpendToken;
 use crate::rules::RuleSet;
 use crate::runner::{
-    CustomRunReport, CustomRunRequest, CustomRunner, InspectOutcome, RunOutcome, RunnerError,
-    SandboxPolicy,
+    CustomRunReport, CustomRunRequest, CustomRunner, InspectOutcome, ReportError, RunOutcome,
+    RunnerError, SandboxPolicy,
 };
 
 /// Env var naming the orchestrator base URL (operator state, never git).
@@ -301,6 +303,9 @@ pub enum VmError {
     /// The job's output was not the shape the job asked for.
     #[error("topic-vm returned the wrong output for {0}")]
     WrongOutput(&'static str),
+    /// The job returned a document that is not evidence (binding / sandbox).
+    #[error("run report: {0}")]
+    Report(#[from] ReportError),
     /// The topic's in-guest experiment binding is malformed or over a ceiling.
     #[error("experiment vm: {0}")]
     Experiment(#[from] ExperimentError),
@@ -378,6 +383,7 @@ impl TopicVmOrchestrator for UnwiredVmOrchestrator {
 fn map_vm(e: VmError) -> RunnerError {
     match e {
         VmError::NotWired(m) => RunnerError::NotWired(m),
+        VmError::Report(e) => RunnerError::Report(e),
         other => RunnerError::Backend(other.to_string()),
     }
 }
@@ -402,10 +408,12 @@ impl CustomRunRequest {
 /// job**: created from `policy` (its image, or the RLM `template`'s; sized
 /// by the topic's ask under the ceilings — an ask over a ceiling is refused,
 /// never clamped), handed the job, then **stopped** whatever the outcome —
-/// [`RetainPolicy::Destroy`] after a successful job, [`RetainPolicy::Retain`]
-/// after a failed one, so the guest console and `report.json` scratch land
-/// under the host's retain dir (`PROOF_VM_AGENT_RETAIN_DIR`) for root-cause
-/// analysis instead of vanishing with the jail. A retained VM is never
+/// [`RetainPolicy::Destroy`] after a successful job whose report passes final
+/// verification, [`RetainPolicy::Retain`] after a failed one **or** an
+/// `Evaluated` report that fails binding / sandbox checks, so the guest
+/// console and `report.json` scratch land under the host's retain dir
+/// (`PROOF_VM_AGENT_RETAIN_DIR`) for root-cause analysis instead of vanishing
+/// with the jail. A retained VM is never
 /// reused and holds no capacity slot. The KVM host stages the pinned pack at
 /// boot and attests the run as `experiment_vm`; the guest resolves the runner
 /// id itself. Non-paid jobs always run in `topic_vm`.
@@ -455,16 +463,24 @@ pub async fn run_paid_job(
     );
     spec.validate()?;
     let submission = request.submission_digest.clone();
+    let verify = request.clone();
     let vm = orchestrator.create(&spec).await?;
     tracing::info!(
         topic_id = %vm.topic_id, vm_id = %vm.vm_id, runner = %binding.runner,
         pack = %binding.pack.digest, vcpus = shape.vcpus, mem_mib = shape.mem_mib,
         disk_mib = shape.disk_mib, "experiment vm created for one paid job"
     );
-    let outcome = orchestrator.run(&vm, job).await;
-    // A failed job keeps its jail (guest console, report.json scratch) on the
-    // KVM host for root-cause analysis; a successful one frees it. Either
-    // way the VM is stopped and never reused.
+    let outcome = match orchestrator.run(&vm, job).await {
+        Ok(VmJobOutput::Evaluated(out)) => match out.report.verify(&verify) {
+            Ok(()) => Ok(VmJobOutput::Evaluated(out)),
+            Err(e) => Err(VmError::Report(e)),
+        },
+        other => other,
+    };
+    // A failed job — including an Evaluated report that fails final
+    // verification — keeps its jail (guest console, report.json scratch) on
+    // the KVM host for root-cause analysis; a successful one that passed
+    // those checks frees it. Either way the VM is stopped and never reused.
     let (policy, verb) = if outcome.is_ok() {
         (RetainPolicy::Destroy, "destroy")
     } else {
@@ -729,7 +745,7 @@ mod tests {
     async fn a_report_that_escaped_the_sandbox_is_not_evidence() {
         let orch = FakeOrchestrator::new(0.8);
         orch.set_sandboxed(false);
-        let runner = VmBackedRunner::new(orch, pinned_template());
+        let runner = VmBackedRunner::new(orch.clone(), pinned_template());
         let req = request();
         let err = runner
             .evaluate(&req, &token_for(&req))
@@ -739,6 +755,42 @@ mod tests {
             err,
             RunnerError::Report(crate::runner::ReportError::NotSandboxed)
         ));
+        assert!(orch.teardowns().is_empty(), "topic vm is not torn down");
+    }
+
+    /// An experiment-backed evaluate that returns `Ok(Evaluated)` with a
+    /// report that fails final verification (`sandboxed=false` on a
+    /// `firecracker_required` topic) must **retain** the jail. Policy used to
+    /// follow `orchestrator.run(...).is_ok()` alone, so this Destroyed the
+    /// evidence before `VmBackedRunner::evaluate` rejected the report.
+    #[tokio::test]
+    async fn an_invalid_evaluated_report_retains_the_experiment_vm() {
+        use crate::fixtures::experiment_request;
+        let orch = FakeOrchestrator::new(0.8);
+        orch.set_sandboxed(false);
+        let runner = VmBackedRunner::new(orch.clone(), pinned_template());
+        let req = experiment_request(None);
+        let err = runner
+            .evaluate(&req, &token_for(&req))
+            .await
+            .expect_err("unsandboxed report is not evidence");
+        assert!(matches!(
+            err,
+            RunnerError::Report(crate::runner::ReportError::NotSandboxed)
+        ));
+        let downs = orch.teardowns();
+        assert_eq!(downs.len(), 1, "the experiment vm is stopped");
+        assert_eq!(
+            downs[0].1,
+            RetainPolicy::Retain,
+            "final-verification failure keeps the jail for RCA"
+        );
+        assert_eq!(
+            orch.vms().len(),
+            1,
+            "the topic vm only; a retained vm is stopped"
+        );
+        assert_eq!(orch.experiments().len(), 1);
     }
 
     /// Every job names its topic (the orchestrator's hard bind), the paid
