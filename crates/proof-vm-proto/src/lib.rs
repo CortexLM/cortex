@@ -152,7 +152,7 @@ pub const JOB_BODY_LIMIT: usize = 8 * 1024 * 1024;
 
 const _: () = assert!(JOB_BODY_LIMIT >= 8 * 1024 * 1024);
 const _: () =
-    assert!(JOB_BODY_LIMIT >= 4 * ((guest::MAX_STAGED_ARTIFACT_TAR_BYTES + 2) / 3) + 512 * 1024);
+    assert!(JOB_BODY_LIMIT >= 4 * guest::MAX_STAGED_ARTIFACT_TAR_BYTES.div_ceil(3) + 512 * 1024);
 
 /// `POST /v1/vms/{vm_id}/jobs` body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
