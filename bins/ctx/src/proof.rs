@@ -776,6 +776,44 @@ mod tests {
             .await
             .expect("a declared manifest needs no lookup");
         assert_eq!(signed["train_dataset_ids"][0], "my-mix-v0");
+
+        // A nonempty array of blanks is undeclared after trim (host
+        // `is_declared`). Skipping the lookup here would burn the nonce.
+        let dir = std::env::temp_dir().join(format!(
+            "ctx-proof-ws-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("manifest.json");
+        std::fs::write(
+            &path,
+            json!({
+                "train_content_hashes": ["", "  "],
+                "train_dataset_ids": [" "],
+            })
+            .to_string(),
+        )
+        .expect("write");
+        let whitespace = SubmitInput {
+            manifest_file: Some(path),
+            ..SubmitInput::default()
+        };
+        assert!(!manifest_declares_training(
+            &build_manifest(&whitespace).expect("whitespace file parses")
+        ));
+        let err = signed_manifest(&client, &whitespace, "needs-evidence")
+            .await
+            .expect_err("whitespace-only is undeclared");
+        assert!(err.contains("contamination_evidence_missing"), "{err}");
+        let err = signed_manifest(&client, &whitespace, "no-such-topic")
+            .await
+            .expect_err("undeclared + unknown topic stays fail-closed");
+        assert!(err.contains("unknown topic"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
