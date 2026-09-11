@@ -30,8 +30,9 @@
 
 #![allow(clippy::missing_errors_doc)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -254,14 +255,39 @@ fn work_tree_from_dump(dest: PathBuf) -> Option<PathBuf> {
 }
 
 fn copy_tree(src: &Path, dest: &Path) -> Result<(), String> {
+    copy_tree_into(src, dest, &mut HashSet::new())
+}
+
+fn copy_tree_into(src: &Path, dest: &Path, seen: &mut HashSet<(u64, u64)>) -> Result<(), String> {
+    let src_meta =
+        std::fs::symlink_metadata(src).map_err(|e| format!("stat {}: {e}", src.display()))?;
+    if src_meta.file_type().is_symlink() {
+        return Err(format!(
+            "directory symlink {} (refusing to follow adaptor-controlled link)",
+            src.display()
+        ));
+    }
+    if src_meta.is_dir() && !seen.insert((src_meta.dev(), src_meta.ino())) {
+        return Ok(());
+    }
     std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
     let entries = std::fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))?;
     for e in entries {
         let e = e.map_err(|e| format!("read {}: {e}", src.display()))?;
         let from = e.path();
         let to = dest.join(e.file_name());
-        if from.is_dir() {
-            copy_tree(&from, &to)?;
+        let meta = std::fs::symlink_metadata(&from)
+            .map_err(|err| format!("stat {}: {err}", from.display()))?;
+        if meta.file_type().is_symlink() {
+            // Fail closed: never recurse into a directory symlink
+            // (`child/ancestor-link -> ..` would otherwise ELOOP).
+            if std::fs::metadata(&from).is_ok_and(|m| m.is_dir()) {
+                continue;
+            }
+            std::fs::copy(&from, &to)
+                .map_err(|err| format!("copy {} → {}: {err}", from.display(), to.display()))?;
+        } else if meta.is_dir() {
+            copy_tree_into(&from, &to, seen)?;
         } else {
             std::fs::copy(&from, &to)
                 .map_err(|err| format!("copy {} → {}: {err}", from.display(), to.display()))?;

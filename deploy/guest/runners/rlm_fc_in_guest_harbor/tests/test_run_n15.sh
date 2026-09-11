@@ -77,6 +77,25 @@ echo "$out" | grep -qv 'N15 RESTART' || fail "non-restart must not log N15 RESTA
 grep -q '0.5' "$JOB2/custom_value.txt" || fail "custom_value.txt from waited job"
 pass "orphaned curl.pid is waited then summarized"
 
+# --- leftover curl.pid of an unrelated live process must not block summarize ---
+JOB4="$WORKDIR/stale-pid"
+mkdir -p "$JOB4"
+sleep 60 &
+STALE_PID=$!
+echo "$STALE_PID" >"$JOB4/curl.pid"
+printf '%s\n' '{"output":{"output":"baseline","body":{"primary_value":0.25,"evidence":{"n_measured":1,"trials":[{"name":"a","reward":0.25}]}}}}' >"$JOB4/job.out"
+echo 200 >"$JOB4/job_http"
+export N15_WAIT_SECS=2
+started=$(date +%s)
+out="$("$RUN_N15" "$JOB4" 2>&1)" || fail "stale curl.pid with job.out should summarize: $out"
+elapsed=$(( $(date +%s) - started ))
+kill -9 "$STALE_PID" 2>/dev/null || true
+wait "$STALE_PID" 2>/dev/null || true
+[ "$elapsed" -lt 8 ] || fail "must not wait on unrelated pid past N15_WAIT_SECS: ${elapsed}s: $out"
+[ -f "$JOB4/summary.txt" ] || fail "must write summary despite stale curl.pid"
+[ -f "$JOB4/custom_value.txt" ] || fail "must write custom_value despite stale curl.pid"
+pass "stale unrelated curl.pid does not block summarize"
+
 # --- missing job.out fails closed ---
 JOB3="$WORKDIR/no-job"
 mkdir -p "$JOB3"

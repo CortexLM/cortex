@@ -59,23 +59,34 @@ log() {
     printf '%s\n' "$*"
 }
 
+job_out_present() {
+    [ -f "$JOBDIR/job.out" ] && return 0
+    find "$JOBDIR" -name job.out -type f -print -quit 2>/dev/null | grep -q .
+}
+
 # Wait for a curl we started (or a leftover pid file) even if it is not our child.
+# Bound by N15_WAIT_SECS. A numeric leftover pid of an unrelated live process
+# must not block summarization when job.out is already present.
 wait_curl_pid() {
     local pidfile="$JOBDIR/curl.pid"
     [ -f "$pidfile" ] || return 0
+    if job_out_present; then
+        return 0
+    fi
     local pid
     pid="$(tr -d '[:space:]' < "$pidfile" || true)"
     case "$pid" in
         ''|*[!0-9]*) return 0 ;;
     esac
+    local n=0
     while kill -0 "$pid" 2>/dev/null; do
+        n=$((n + 1))
+        if [ "$n" -ge "$WAIT_SECS" ]; then
+            echo "run-n15: curl.pid $pid still live after ${WAIT_SECS}s; continuing" >&2
+            return 0
+        fi
         sleep 1
     done
-}
-
-job_out_present() {
-    [ -f "$JOBDIR/job.out" ] && return 0
-    find "$JOBDIR" -name job.out -type f -print -quit 2>/dev/null | grep -q .
 }
 
 wait_job_out() {

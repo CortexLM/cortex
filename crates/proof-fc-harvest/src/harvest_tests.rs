@@ -14,7 +14,7 @@ use proof_vm_proto::guest::{encode_frame, read_frame, RlmToHost};
 use tokio::io::AsyncWriteExt;
 
 use super::{
-    from_work_tree, harvest_from_jail, recv_job_or_harvest, try_from_jail, HARBOR_JOBS,
+    copy_tree, from_work_tree, harvest_from_jail, recv_job_or_harvest, try_from_jail, HARBOR_JOBS,
     HARVEST_WORK, POLL_INTERVAL, SCRATCH_IN_JAIL, SCRATCH_TREE,
 };
 
@@ -374,6 +374,44 @@ fn harvest_work_lagging_guest_trial_files_is_refreshed_from_overlay() {
         refreshed.is_file() && std::fs::metadata(&refreshed).expect("meta").len() > 0,
         "stale dump must be replaced from overlay"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Adaptor-controlled `child/ancestor-link -> ..` must not recurse until
+/// ELOOP and fail a completed overlay harvest.
+#[test]
+fn cyclic_dir_symlink_does_not_block_harvest_of_complete_overlay() {
+    let root = tree("cycle");
+    let overlay = root.join(SCRATCH_TREE).join("work");
+    plant(&overlay, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&overlay, "0001-evaluate", "run", "task-hard", "0");
+    plant_trial(&overlay, "0001-evaluate", "run", "atrx", "0");
+    let child = overlay.join("child");
+    std::fs::create_dir_all(&child).expect("child");
+    std::os::unix::fs::symlink("..", child.join("ancestor-link")).expect("cycle");
+    let dest = root.join("copy-dest");
+    let started = std::time::Instant::now();
+    copy_tree(&overlay, &dest).expect("copy must not follow the dir symlink");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "copy_tree must not walk a dir-symlink cycle"
+    );
+    assert!(
+        dest.join("0001-evaluate")
+            .join("output")
+            .join("report.json")
+            .is_file(),
+        "complete tree must still be copied"
+    );
+    assert!(
+        !dest.join("child").join("ancestor-link").exists(),
+        "directory symlink must not be followed or recreated as a directory"
+    );
+    let out = harvest_from_jail(&root, &root, &evaluate_job()).expect("overlay harvest");
+    let VmJobOutput::Evaluated(run) = out else {
+        panic!("{out:?}");
+    };
+    assert!((run.report.primary_value - 0.0).abs() < 1e-12);
     let _ = std::fs::remove_dir_all(&root);
 }
 
