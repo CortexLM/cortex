@@ -51,6 +51,13 @@ class ResolveHarborModelTests(unittest.TestCase):
                 inference_key_env="OPENROUTER_API_KEY",
             )
 
+    def test_openrouter_csv_trims_whitespace_around_names(self) -> None:
+        with self.assertRaises(SystemExit):
+            resolve_model.resolve_harbor_model(
+                model_pin="moonshotai/kimi-k3",
+                miner_byok="OTHER_KEY, OPENROUTER_API_KEY",
+            )
+
     def test_does_not_rewrite_pin_for_non_openrouter_keys(self) -> None:
         got = resolve_model.resolve_harbor_model(
             model_pin="moonshotai/kimi-k3",

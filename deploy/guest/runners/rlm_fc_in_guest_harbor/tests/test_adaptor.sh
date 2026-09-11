@@ -8,6 +8,14 @@ ADAPTOR="$(cd "$(dirname "$0")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 
+# --- OpenRouter CSV trim (canon miner_byok whitespace) ---
+proof_csv_has_openrouter "OPENROUTER_API_KEY" || fail "bare OPENROUTER_API_KEY"
+proof_csv_has_openrouter "OTHER_KEY, OPENROUTER_API_KEY" || fail "space after comma must still match"
+proof_csv_has_openrouter " OPENROUTER_API_KEY " || fail "padded name must match"
+proof_csv_has_openrouter "OTHER_KEY" && fail "OTHER_KEY is not OpenRouter"
+proof_csv_has_openrouter "" && fail "empty is not OpenRouter"
+pass "proof_csv_has_openrouter trims comma-list names"
+
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/harbor-adaptor-XXXXXX")"
 cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT

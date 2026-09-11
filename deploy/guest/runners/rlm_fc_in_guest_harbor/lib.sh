@@ -43,6 +43,21 @@ proof_die() {
     exit 2
 }
 
+# True when a comma list names OPENROUTER_API_KEY after the same trim
+# proof-canon uses (whitespace around each name). A glob of raw commas
+# would miss ``OTHER_KEY, OPENROUTER_API_KEY``.
+proof_csv_has_openrouter() {
+    local rest="${1}," part
+    while [ -n "$rest" ]; do
+        part="${rest%%,*}"
+        rest="${rest#*,}"
+        part="${part#"${part%%[![:space:]]*}"}"
+        part="${part%"${part##*[![:space:]]}"}"
+        [ "$part" = "OPENROUTER_API_KEY" ] && return 0
+    done
+    return 1
+}
+
 # Harbor nonzero with no complete filtered set: persist work, then put
 # the log tail on stderr so the guest rolling tail / gateway 503 carries
 # the real error. Already-measured complete trials still score when the

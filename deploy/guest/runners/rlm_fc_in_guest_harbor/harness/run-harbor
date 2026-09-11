@@ -125,12 +125,12 @@ harbor_cmd=(
 MODEL="${PROOF_PARAM_MODEL:-${PROOF_MODEL_PIN:-}}"
 if [ -n "$MODEL" ]; then
     _openrouter=0
-    case ",${PROOF_PARAM_MINER_BYOK:-}," in
-        *,OPENROUTER_API_KEY,*) _openrouter=1 ;;
-    esac
-    case ",${PROOF_PARAM_INFERENCE_KEY_ENV:-}," in
-        *,OPENROUTER_API_KEY,*) _openrouter=1 ;;
-    esac
+    if proof_csv_has_openrouter "${PROOF_PARAM_MINER_BYOK:-}"; then
+        _openrouter=1
+    fi
+    if proof_csv_has_openrouter "${PROOF_PARAM_INFERENCE_KEY_ENV:-}"; then
+        _openrouter=1
+    fi
     if [ "$_openrouter" -eq 1 ]; then
         case "$MODEL" in
             openrouter/*) ;;
