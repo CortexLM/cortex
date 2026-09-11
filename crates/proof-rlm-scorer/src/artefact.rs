@@ -822,32 +822,35 @@ mod tests {
     }
 
     #[test]
-    fn max_zip_numeric_id_fails_closed_when_the_tree_cannot_be_enumerated() {
-        let root = tmp("unreadable");
+    fn max_zip_numeric_id_fails_closed_when_the_root_cannot_be_read() {
+        let root = tmp("unreadable-root");
         let not_a_dir = root.join("file");
         std::fs::write(&not_a_dir, b"x").expect("file");
+        let err = max_zip_numeric_id(&not_a_dir).expect_err("root scan");
         assert!(
-            max_zip_numeric_id(&not_a_dir).is_err(),
-            "a non-directory root must not look like an empty artefact tree"
+            matches!(err, ArtefactError::Io(_)),
+            "a non-directory root must not look like an empty artefact tree: {err}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
+    #[test]
+    fn max_zip_numeric_id_fails_closed_when_a_topic_dir_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp("unreadable-topic");
         std::fs::create_dir_all(root.join("topic-a")).expect("a");
         std::fs::create_dir_all(root.join("topic-b")).expect("b");
         std::fs::write(root.join("topic-a").join("pf_0000000000000001.zip"), b"a").expect("zip 1");
         std::fs::write(root.join("topic-b").join("pf_00000000000000ff.zip"), b"b").expect("zip ff");
         let topic_b = root.join("topic-b");
         let restore = std::fs::metadata(&topic_b).expect("meta").permissions();
-        let mut locked = restore.clone();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut locked, 0o000);
-        std::fs::set_permissions(&topic_b, locked).expect("lock");
+        std::fs::set_permissions(&topic_b, std::fs::Permissions::from_mode(0o000)).expect("lock");
         let result = max_zip_numeric_id(&root);
         let _ = std::fs::set_permissions(&topic_b, restore);
-        if std::fs::read_dir(&topic_b).is_err() {
-            assert!(
-                result.is_err(),
-                "unreadable topic dir must not under-seed: {result:?}"
-            );
-        }
+        assert!(
+            result.is_err(),
+            "unreadable topic dir must not under-seed: {result:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -1126,6 +1126,34 @@ mod tests {
         let _ = std::fs::remove_file(&root);
     }
 
+    #[tokio::test]
+    async fn seed_pf_allocator_refuses_boot_when_a_topic_dir_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "proof-seed-topic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("topic-a")).expect("a");
+        std::fs::create_dir_all(root.join("topic-b")).expect("b");
+        std::fs::write(root.join("topic-a").join("pf_0000000000000001.zip"), b"a").expect("zip");
+        std::fs::write(root.join("topic-b").join("pf_00000000000000ff.zip"), b"b").expect("zip");
+        let topic_b = root.join("topic-b");
+        let restore = std::fs::metadata(&topic_b).expect("meta").permissions();
+        std::fs::set_permissions(&topic_b, std::fs::Permissions::from_mode(0o000)).expect("lock");
+        let err = seed_pf_allocator(&MemoryStore::new(), &MemoryRlmStore::new(), &root).await;
+        let _ = std::fs::set_permissions(&topic_b, restore);
+        let err = err.expect_err("incomplete topic scan must refuse boot");
+        assert!(
+            err.contains("artefact root") || err.contains("topic dir"),
+            "boot error must name the scan: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn scored_epoch_file_defaults_to_the_artifacts_volume() {
         assert_eq!(
