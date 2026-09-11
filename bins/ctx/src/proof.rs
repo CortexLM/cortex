@@ -459,32 +459,26 @@ fn submit_wire_body(
 }
 
 fn resolve_artifact(input: &SubmitInput) -> Result<(String, Option<Vec<u8>>), String> {
-    match &input.artifact {
-        Some(path) => {
-            let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-            if bytes.is_empty() {
-                return Err("artifact is empty".into());
-            }
-            if bytes.len() > MAX_ARTEFACT_BYTES {
-                return Err("artifact exceeds 5 MiB".into());
-            }
-            let got = sha256_hex(&bytes);
-            let declared = input.artifact_digest.trim();
-            if !declared.is_empty() {
-                let want = normalize_hex64(declared, "artifact-digest")?;
-                if want != got {
-                    return Err(
-                        "artifact-digest does not match --artifact (sha256 of the file)".into(),
-                    );
-                }
-            }
-            Ok((got, Some(bytes)))
-        }
-        None => {
-            let digest = normalize_hex64(&input.artifact_digest, "artifact-digest")?;
-            Ok((digest, None))
+    let Some(path) = &input.artifact else {
+        let digest = normalize_hex64(&input.artifact_digest, "artifact-digest")?;
+        return Ok((digest, None));
+    };
+    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    if bytes.is_empty() {
+        return Err("artifact is empty".into());
+    }
+    if bytes.len() > MAX_ARTEFACT_BYTES {
+        return Err("artifact exceeds 5 MiB".into());
+    }
+    let got = sha256_hex(&bytes);
+    let declared = input.artifact_digest.trim();
+    if !declared.is_empty() {
+        let want = normalize_hex64(declared, "artifact-digest")?;
+        if want != got {
+            return Err("artifact-digest does not match --artifact (sha256 of the file)".into());
         }
     }
+    Ok((got, Some(bytes)))
 }
 
 fn attach_miner_env(body: &mut Value, env: &[(String, String)]) {
