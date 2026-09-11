@@ -114,6 +114,108 @@ class ProofPythonAgentTests(unittest.TestCase):
                 if sys.path[0] == str(ext):
                     sys.path.pop(0)
 
+    def test_setup_is_async_and_harbor_abc_concrete(self) -> None:
+        """Pin 8704: Harbor ABC TypeError without abstract method setup."""
+        import abc
+        import asyncio
+        import inspect
+        from typing import Any
+
+        self.assertTrue(
+            inspect.iscoroutinefunction(proof_python_agent.ProofPythonAgent.setup),
+            "Harbor BaseAgent.setup is async; a sync method is not enough",
+        )
+
+        class HarborBaseAgent(abc.ABC):
+            @staticmethod
+            @abc.abstractmethod
+            def name() -> str:
+                raise NotImplementedError
+
+            @abc.abstractmethod
+            def version(self) -> str | None:
+                raise NotImplementedError
+
+            @abc.abstractmethod
+            async def setup(self, environment: Any) -> None:
+                raise NotImplementedError
+
+            @abc.abstractmethod
+            async def run(
+                self,
+                instruction: str,
+                environment: Any = None,
+                context: Any = None,
+            ) -> Any:
+                raise NotImplementedError
+
+        class MissingSetup(HarborBaseAgent):
+            @staticmethod
+            def name() -> str:
+                return "x"
+
+            def version(self) -> str | None:
+                return "1"
+
+            async def run(
+                self,
+                instruction: str,
+                environment: Any = None,
+                context: Any = None,
+            ) -> Any:
+                return None
+
+        with self.assertRaises(TypeError) as ctx:
+            MissingSetup()
+        self.assertIn("setup", str(ctx.exception).lower())
+
+        class WithSetup(HarborBaseAgent):
+            name = staticmethod(proof_python_agent.ProofPythonAgent.name)
+            version = proof_python_agent.ProofPythonAgent.version
+            setup = proof_python_agent.ProofPythonAgent.setup
+            run = proof_python_agent.ProofPythonAgent.run
+
+            def __init__(self) -> None:
+                self._miner = type("M", (), {})()
+
+        WithSetup()
+
+        art = HERE / "fixtures" / "python_agent"
+        os.environ["PROOF_ARTIFACT_DIR"] = str(art)
+        os.environ["PROOF_MINER_AGENT_IMPORT"] = "agent.agent:Agent"
+        os.environ["PROOF_MINER_AGENT_ROOT"] = str(art)
+        try:
+            agent = proof_python_agent.ProofPythonAgent()
+            asyncio.run(agent.setup(object()))
+        finally:
+            os.environ.pop("PROOF_ARTIFACT_DIR", None)
+            os.environ.pop("PROOF_MINER_AGENT_IMPORT", None)
+            os.environ.pop("PROOF_MINER_AGENT_ROOT", None)
+
+    def test_setup_delegates_to_miner_when_present(self) -> None:
+        import asyncio
+
+        class Miner:
+            def __init__(self) -> None:
+                self.seen = None
+
+            async def setup(self, environment):
+                self.seen = environment
+
+            def run(self, instruction):
+                return instruction
+
+        miner = Miner()
+        env = object()
+        asyncio.run(proof_python_agent._await_maybe(proof_python_agent._call_setup(miner, env)))
+        self.assertIs(miner.seen, env)
+
+    def test_setup_noop_when_miner_has_none(self) -> None:
+        class Miner:
+            pass
+
+        self.assertIsNone(proof_python_agent._call_setup(Miner(), object()))
+
 
 if __name__ == "__main__":
     unittest.main()

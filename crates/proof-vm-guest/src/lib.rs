@@ -232,8 +232,12 @@ impl GuestAgent {
             HostToRlm::Run { job } => {
                 let _one = self.job.lock().await;
                 match self.run(*job).await {
-                    Ok(output) => RlmToHost::Done { output },
+                    Ok(output) => match runner::persist_work(&self.cfg.work_root) {
+                        Ok(()) => RlmToHost::Done { output },
+                        Err(error) => RlmToHost::Failed { error },
+                    },
                     Err(error) => {
+                        let _ = runner::persist_work(&self.cfg.work_root);
                         tracing::warn!("job failed: {error}");
                         RlmToHost::Failed { error }
                     }

@@ -10,8 +10,47 @@ PROOF_REWRITE_NETWORK="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/rewrite_network.py"
 PROOF_ENSURE_VERIFIER="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/ensure_verifier.py"
 PROOF_PYTHON_AGENT="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/proof_python_agent.py"
 
+# Last N lines of harbor.run.log on a 503. Metal tbench-x0004 truncated
+# the TypeError so the gateway body only said "harbor exited 1".
+PROOF_HARBOR_LOG_TAIL_LINES="${PROOF_HARBOR_LOG_TAIL_LINES:-80}"
+
+# Commit $PROOF_WORK_DIR to the virtio-blk before the guest reports
+# Done/fail. Retain-on-fail of tbench-x0004 needed e2fsck -fy before
+# work/ (harbor.run.log, tasks-filtered) was visible.
+proof_persist_work() {
+    local dir="${PROOF_WORK_DIR:-}"
+    [ -n "$dir" ] && [ -d "$dir" ] || return 0
+    # GNU sync -f = syncfs on that filesystem. Fall back to a global sync.
+    sync -f "$dir" 2>/dev/null || sync 2>/dev/null || true
+    return 0
+}
+
+proof_harbor_log_tail() {
+    local log_file="${1:-}"
+    local n="${PROOF_HARBOR_LOG_TAIL_LINES:-80}"
+    if [ -n "$log_file" ] && [ -f "$log_file" ]; then
+        echo "--- harbor.run.log (last ${n} lines) ---"
+        tail -n "$n" "$log_file" || true
+    else
+        echo "(harbor.run.log missing)"
+    fi
+}
+
 proof_die() {
+    proof_persist_work
     echo "rlm_fc_in_guest_harbor: $*" >&2
+    exit 2
+}
+
+# Harbor nonzero: persist work, then put the log tail on stderr so the
+# guest rolling tail / gateway 503 carries the real error.
+proof_die_harbor() {
+    local harbor_exit="$1"
+    local log_file="${2:-}"
+    proof_persist_work
+    echo "rlm_fc_in_guest_harbor: harbor exited ${harbor_exit}; refusing to score a partial or failed run" >&2
+    echo "rlm_fc_in_guest_harbor: last ${PROOF_HARBOR_LOG_TAIL_LINES:-80} lines of harbor.run.log:" >&2
+    proof_harbor_log_tail "$log_file" >&2
     exit 2
 }
 

@@ -1193,3 +1193,39 @@ chmod 000 "$PROOF_WORK_DIR/blocked"
     );
     let _ = std::fs::remove_dir_all(&r);
 }
+
+/// A deadline cut must still flush work/ before Failed. Metal tbench-x0004
+/// retain looked empty until e2fsck replayed the journal; a chmod-000
+/// file makes that persist fail closed instead of a timeout with nothing
+/// on disk.
+#[tokio::test]
+async fn deadline_cut_still_persists_work_tree() {
+    let r = root("sync-timeout");
+    let a = agent(&r);
+    hello(&a).await;
+    let (tar, digest) = pack();
+    stage(&a, &tar, &digest).await;
+    install(
+        &r,
+        "run",
+        r#"
+echo harbor > "$PROOF_WORK_DIR/harbor.run.log"
+touch "$PROOF_WORK_DIR/blocked"
+chmod 000 "$PROOF_WORK_DIR/blocked"
+sleep 30
+"#,
+    );
+    let mut short = req_for(&digest);
+    short.sandbox.deadline_s = 6;
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::Baseline { request: short }),
+        })
+        .await,
+    );
+    assert!(
+        err.contains("sync"),
+        "timeout must persist work before Failed, got {err}"
+    );
+    let _ = std::fs::remove_dir_all(&r);
+}

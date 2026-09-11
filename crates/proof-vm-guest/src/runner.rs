@@ -673,7 +673,24 @@ fn sync_tree(root: &Path) -> Result<(), String> {
     for d in dirs {
         sync_file(&d)?;
     }
+    // Best-effort syncfs so retain-on-fail of the virtio-blk image does
+    // not need e2fsck journal replay to see work/ (metal tbench-x0004).
+    let _ = std::process::Command::new("sync")
+        .arg("-f")
+        .arg(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     Ok(())
+}
+
+/// Flush `root` before Done or Failed. Missing dir is a no-op (no job yet).
+pub(crate) fn persist_work(root: &Path) -> Result<(), String> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    sync_tree(root)
 }
 
 fn read_output_doc<T: for<'de> Deserialize<'de>>(path: &Path, what: &str) -> Result<T, String> {
@@ -779,20 +796,14 @@ pub async fn run_paid(
         Duration::from_secs(request.sandbox.deadline_s),
     )
     .await?;
+    // Also on timeout / adaptor-fail: retain-on-fail of tbench-x0004
+    // looked empty until e2fsck replayed the journal. Do not send Done
+    // if this barrier fails (metal tbench-x0002 / a21f).
+    persist_work(work)?;
     if exec.timed_out {
         return Err(describe(&exec, &secrets, request.sandbox.deadline_s));
     }
-    // Push Harbor trial files + the adaptor's report to the virtio-blk
-    // before Done: debugfs can otherwise dump reward.txt ~12s before
-    // result.json (metal tbench-x0002 / a21f). Do not send Done if this
-    // durability barrier fails — a host that harvests immediately would
-    // otherwise see an incomplete tree after a claimed completion.
-    // A missing report.json is still the adaptor-wrote-nothing error below.
-    sync_tree(work)?;
     let report_path = output.join("report.json");
-    if report_path.exists() {
-        sync_file(&report_path)?;
-    }
     let report: RunnerReport = read_output_doc(&report_path, "report.json").map_err(|e| {
         format!(
             "{e} ({})",
@@ -1002,7 +1013,7 @@ pub async fn propose_rules(
 mod sync_tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{sync_file, sync_tree};
+    use super::{persist_work, sync_file, sync_tree};
     use std::path::Path;
 
     #[test]
@@ -1019,13 +1030,18 @@ mod sync_tests {
     }
 
     #[test]
+    fn persist_work_skips_missing_root() {
+        persist_work(Path::new("/no/such-proof-vm-guest-persist")).expect("missing is ok");
+    }
+
+    #[test]
     fn sync_tree_syncs_a_real_tree() {
         let d = std::env::temp_dir().join(format!("proof-vm-guest-sync-ok-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("sub")).unwrap();
         std::fs::write(d.join("a"), b"x").unwrap();
         std::fs::write(d.join("sub").join("b"), b"y").unwrap();
-        sync_tree(&d).expect("sync");
+        persist_work(&d).expect("persist");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

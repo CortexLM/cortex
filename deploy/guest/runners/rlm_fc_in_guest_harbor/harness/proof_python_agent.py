@@ -4,7 +4,10 @@
 Harbor's ``-a`` needs ``module.path:ClassName``. Miners are not required to
 subclass Harbor ``BaseAgent``. This module is the primary evaluate target:
 it imports the miner class named by ``PROOF_MINER_AGENT_IMPORT`` from the
-staged artefact only and delegates ``run``. Built-in names such as
+staged artefact only and delegates ``setup`` / ``run``. Harbor's
+``BaseAgent`` is an ABC: pin 8704 failed every trial with
+``Can't instantiate abstract class ProofPythonAgent without an
+implementation for abstract method 'setup'``. Built-in names such as
 ``terminus-2`` are never loaded here.
 """
 
@@ -125,6 +128,12 @@ def _construct(cls: type, *args: Any, **kwargs: Any) -> Any:
     return cls(*call_args, **call_kwargs)
 
 
+async def _await_maybe(result: Any) -> Any:
+    if inspect.isawaitable(result) or asyncio.isfuture(result):
+        return await result
+    return result
+
+
 def _call_run(miner: Any, instruction: str, environment: Any, context: Any) -> Any:
     run = getattr(miner, "run", None)
     if run is None or not callable(run):
@@ -141,6 +150,22 @@ def _call_run(miner: Any, instruction: str, environment: Any, context: Any) -> A
         raise AssertionError
     call_args, call_kwargs = selected
     return run(*call_args, **call_kwargs)
+
+
+def _call_setup(miner: Any, environment: Any) -> Any:
+    """Harbor ``BaseAgent.setup(environment)`` is required; miners may omit it."""
+    setup = getattr(miner, "setup", None)
+    if setup is None or not callable(setup):
+        return None
+    forms = (
+        ((environment,), {}),
+        ((), {}),
+    )
+    selected = _select_form(setup, forms)
+    if selected is None:
+        return None
+    call_args, call_kwargs = selected
+    return setup(*call_args, **call_kwargs)
 
 
 class ProofPythonAgent(BaseAgent):
@@ -163,10 +188,11 @@ class ProofPythonAgent(BaseAgent):
         cls = load_miner_class(import_path, search, bound)
         self._miner = _construct(cls, *args, **kwargs)
 
+    async def setup(self, environment: Any = None, **kwargs: Any) -> Any:
+        # Harbor ABC (abstract ``setup``). A miner without setup is a no-op so
+        # custom Python stays valid; a miner that implements it is delegated.
+        del kwargs
+        return await _await_maybe(_call_setup(self._miner, environment))
+
     async def run(self, instruction: str, environment: Any = None, context: Any = None) -> Any:
-        result = _call_run(self._miner, instruction, environment, context)
-        if inspect.isawaitable(result):
-            return await result
-        if asyncio.isfuture(result):
-            return await result
-        return result
+        return await _await_maybe(_call_run(self._miner, instruction, environment, context))
