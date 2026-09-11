@@ -18,6 +18,7 @@ use gateway_registry::RegistryError;
 /// Challenge proxy body cap: 16 MiB so a 5 MiB artefact upload plus
 /// multipart JSON fields always pass through to Proof.
 const PROXY_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+const _: () = assert!(PROXY_MAX_BODY_BYTES >= 5 * 1024 * 1024 + 512 * 1024);
 
 /// Hop-by-hop headers that must not be forwarded (RFC 7230).
 fn is_hop_by_hop(name: &HeaderName) -> bool {
@@ -387,11 +388,6 @@ mod tests {
         assert!(!is_view_path("v1/admin/view"));
         assert!(is_view_png_path("v1/view/abc/index.png"));
         assert!(!is_view_png_path("v1/view/abc/index.html"));
-    }
-
-    #[test]
-    fn proxy_body_cap_covers_five_mib_artefact_plus_multipart() {
-        assert!(PROXY_MAX_BODY_BYTES >= 5 * 1024 * 1024 + 512 * 1024);
     }
 
     #[test]
