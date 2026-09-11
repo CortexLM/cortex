@@ -344,7 +344,7 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
     no_locator["artifact_uri"] = serde_json::Value::Null;
     let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", no_locator).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["error"], "artifact_uri is required for custom topics");
+    assert_eq!(body["error"], "artifact required");
     assert!(orchestrator.jobs().is_empty(), "no job without a locator");
 
     // 1. Green checklist, primary 0.70 > 0.50 * 1.02: scored and crowned.

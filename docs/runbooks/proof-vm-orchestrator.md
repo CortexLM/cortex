@@ -519,7 +519,7 @@ without `--allow-live-run`.
 | write other bytes into the CP bearer file | no | `refused the bearer` (agent 401 → CP 503) | `agent_error: … refused the bearer` |
 | `PROOF_RLM_VM_IMAGE_DIGEST=` | yes | `PROOF_RLM_VM_IMAGE_DIGEST` … `image_digest is missing or out of range` | `ready: false`, `image_digest: ""` |
 | `systemctl stop proof-vm-orchestrator` on the KVM host | no | `orchestrator unreachable` (route named, agent address never) | `agent_error: … unreachable` |
-| unknown / closed topic → `--expect 400 --reason 'unknown topic'`; custom topic without a locator → `--expect 400 --no-artifact-uri --reason artifact_uri` | no | 400, explicit error, no row | — |
+| unknown / closed topic → `--expect 400 --reason 'unknown topic'`; custom topic without a locator or upload → `--expect 400 --no-artifact-uri --reason 'artifact required'` | no | 400, explicit error, no row | — |
 | digest of nothing → `--expect 400 --artifact-digest $(sha256sum </dev/null | cut -d' ' -f1) --reason 'sha256 of empty input'` (the sha256 of zero bytes; the empty-tar digest, `head -c 10240 /dev/zero | sha256sum`, is refused the same way) | no | 400, explicit error, no row — the CP never scores a digest of nothing | — |
 
 After each row `docker compose logs proof-challenge` must show no
