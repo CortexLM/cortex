@@ -962,11 +962,7 @@ fn staged_artefact_bytes(st: &AppState, row: &Submission) -> Result<Option<Vec<u
     }
     let vault = st
         .store
-        .artefact_bytes(
-            &row.artifact_digest,
-            &row.miner_hotkey,
-            &row.submit_nonce,
-        )
+        .artefact_bytes(&row.artifact_digest, &row.miner_hotkey, &row.submit_nonce)
         .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
     let Some(bytes) = vault else {
         return Err(err(

@@ -142,6 +142,18 @@ pub struct VmRecord {
     pub experiment: Option<ExperimentSpec>,
 }
 
+/// JSON body ceiling for [`paths::vm_jobs`] (`POST /v1/vms/{vm_id}/jobs`).
+///
+/// A gateway-capped 5 MiB staged tar is ~6.99 MiB as standard base64 inside
+/// [`VmJob`], plus the job envelope. Axum's default 2 MiB JSON limit would
+/// 413 near-cap uploads before `run_job`. The decoded artefact cap stays
+/// [`guest::MAX_STAGED_ARTIFACT_TAR_BYTES`].
+pub const JOB_BODY_LIMIT: usize = 8 * 1024 * 1024;
+
+const _: () = assert!(JOB_BODY_LIMIT >= 8 * 1024 * 1024);
+const _: () =
+    assert!(JOB_BODY_LIMIT >= 4 * ((guest::MAX_STAGED_ARTIFACT_TAR_BYTES + 2) / 3) + 512 * 1024);
+
 /// `POST /v1/vms/{vm_id}/jobs` body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunJobRequest {
@@ -498,6 +510,11 @@ mod tests {
         assert_eq!(ErrorCode::EvidenceMismatch.status(), 502);
         assert_eq!(DEFAULT_AGENT_PORT, 8200);
         assert_eq!(API_VERSION, 1);
+        assert_eq!(JOB_BODY_LIMIT, 8 * 1024 * 1024);
+        assert!(
+            JOB_BODY_LIMIT > 2 * 1024 * 1024,
+            "must exceed Axum's default JSON body limit"
+        );
         assert!(serde_json::to_string(&VmState::Crashed)
             .expect("json")
             .contains("crashed"));

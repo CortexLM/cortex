@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -31,6 +31,7 @@ use proof_rlm::{RetainPolicy, VmHandle};
 use proof_vm_proto::{
     bind_evidence, paths, AgentHealth, CreateVmRequest, ErrorBody, ErrorCode, RunJobRequest,
     RunJobResponse, TeardownRequest, TeardownResponse, VmRecord, VmState, API_VERSION,
+    JOB_BODY_LIMIT,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
@@ -534,7 +535,10 @@ pub fn agent_router(state: AgentState) -> Router {
         .route(paths::HEALTH, get(health))
         .route(paths::VMS, post(create_vm))
         .route("/v1/vms/by-topic/{topic_id}", get(attach))
-        .route("/v1/vms/{vm_id}/jobs", post(run_job))
+        .route(
+            "/v1/vms/{vm_id}/jobs",
+            post(run_job).layer(DefaultBodyLimit::max(JOB_BODY_LIMIT)),
+        )
         .route("/v1/vms/{vm_id}", axum::routing::delete(teardown))
         .layer(middleware::from_fn_with_state(
             state.clone(),
