@@ -404,7 +404,7 @@ echo '{"primary_value": 0.61, "flops_used": 3}' > "$PROOF_OUTPUT_DIR/report.json
         })
         .await;
     assert!(
-        matches!(mismatch, RlmToHost::Failed { error } if error.contains("does not verify")),
+        matches!(mismatch, RlmToHost::Failed { ref error } if error.contains("does not verify")),
         "{mismatch:?}"
     );
     let _ = std::fs::remove_dir_all(&r);

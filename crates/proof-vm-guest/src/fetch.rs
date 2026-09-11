@@ -130,6 +130,7 @@ pub async fn download_capped(uri: &str, max: usize) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
 
     #[test]
     fn only_https_by_default_and_no_locator_is_no_artifact() {
