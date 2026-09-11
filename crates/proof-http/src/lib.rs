@@ -2828,17 +2828,22 @@ mod tests {
             true,
             true,
         );
-        for manifest in [
-            serde_json::json!({}),
-            serde_json::json!({
-                "manifest": { "train_content_hashes": [dirty_hash] }
-            }),
+        // Distinct artefacts: the same digest is one live eval, so empty
+        // evidence and holdout overlap must not share a frozen digest.
+        for (label, manifest) in [
+            ("junk-empty", serde_json::json!({})),
+            (
+                "junk-dirty",
+                serde_json::json!({
+                    "manifest": { "train_content_hashes": [dirty_hash] }
+                }),
+            ),
         ] {
             let empty_evidence = serde_json::json!({ "manifest": { "train_dataset_ids": [] } });
             let body = if manifest.as_object().is_some_and(serde_json::Map::is_empty) {
-                submit_body("junk", &empty_evidence)
+                submit_body(label, &empty_evidence)
             } else {
-                submit_body("junk", &manifest)
+                submit_body(label, &manifest)
             };
             let (st, created) = json_req(app.clone(), "POST", "/v1/submissions", body, None).await;
             assert_eq!(st, StatusCode::CREATED, "{created}");
