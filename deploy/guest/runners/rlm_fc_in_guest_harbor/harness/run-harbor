@@ -1,9 +1,8 @@
 #!/bin/bash
 # run-harbor — paid Harbor / custom-Python / script invoke for Baseline / Evaluate.
 #
-# Tasks: pack copy filtered to duration < max_task_duration_s (default 1h);
-#         n15 x0017 walls (biped/formal-crypto/cad/data-anon) are denied even
-#         without task.toml timeouts.
+# Tasks: pack copy. Default filter is measured first-15 (INFRA excludes
+# only). ``PROOF_TASK_FILTER=shortpack`` is the Dev n15 6-task allow-list.
 # Network: agent path is public (Docker no-network breaks OpenRouter / BYOK).
 #          allow_internet=false is rewritten to true on the filtered copy.
 # Harness: custom Python primary; Harbor BaseAgent, harness.json, run.sh
@@ -114,8 +113,13 @@ harbor_cmd=(
     --env "$harbor_env"
     --yes
 )
-if [ -n "${PROOF_MODEL_PIN:-}" ]; then
-    harbor_cmd+=(-m "$PROOF_MODEL_PIN")
+# Full LiteLLM id for Harbor / terminus-2. Never pass a stripped
+# ``vendor/model`` when the topic named ``openrouter/vendor/model``.
+harbor_model="$(python3 "$HERE/resolve_model.py")"
+if [ -n "$harbor_model" ]; then
+    export PROOF_HARBOR_MODEL="$harbor_model"
+    harbor_cmd+=(-m "$harbor_model")
+    echo "rlm_fc_in_guest_harbor: harbor -m $harbor_model" >&2
 fi
 if [ -n "${PROOF_SEED:-}" ]; then
     export PROOF_SEED

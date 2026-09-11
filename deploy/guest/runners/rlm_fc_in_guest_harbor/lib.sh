@@ -146,14 +146,16 @@ proof_is_harbor_agent_dir() {
     python3 "$PROOF_RESOLVE_AGENT" --dir "$d" --check
 }
 
-# Filter pack tasks to those that typically finish under max_task_duration_s
-# (default 3600). Copies into $PROOF_WORK_DIR/tasks-filtered and points
-# PROOF_TASKS at that tree. The pack is never mutated.
+# Filter pack tasks. Default is measured first-15 (INFRA excludes only).
+# Owner opt-in ``PROOF_TASK_FILTER=shortpack`` (or params.task_filter_mode)
+# keeps the Dev n15 6-task allow-list. See filter_tasks.py.
 proof_filter_tasks() {
     : "${PROOF_TASKS:?proof_require_tasks first}"
     : "${PROOF_WORK_DIR:?PROOF_WORK_DIR is required}"
     local dest="$PROOF_WORK_DIR/tasks-filtered"
     local extra=()
+    local mode="${PROOF_TASK_FILTER:-${PROOF_PARAM_TASK_FILTER_MODE:-first15}}"
+    extra+=(--mode "$mode")
     if [ -n "${PROOF_PARAM_TASK_FILTER:-}" ]; then
         extra+=(--filter-rel "$PROOF_PARAM_TASK_FILTER")
     fi

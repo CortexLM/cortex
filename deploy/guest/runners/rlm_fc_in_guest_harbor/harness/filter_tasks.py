@@ -1,38 +1,42 @@
 #!/usr/bin/env python3
-"""Copy pack tasks that typically finish in under one hour.
+"""Copy pack tasks for Harbor evaluate / baseline.
 
-Duration is pack metadata plus adaptor-local measured walls (not a compiled
-Proof catalog). A task is excluded when a pack ``filter.json`` deny-list names
-it (or an alias / ``key-`` prefix), when the adaptor ``duration_hints.json``
-``exclude`` list names it, when it is absent from the default short-task
-allow-list, or when it is too slow for ``max_duration_s`` (default 3600).
+Two owner-selected modes (``PROOF_TASK_FILTER`` / ``--mode``, also topic
+``constraints.params.task_filter_mode`` → ``PROOF_PARAM_TASK_FILTER_MODE``):
 
-The duration gate reads two different things. A task named **exactly** on the
-allow-list was measured under an hour, so only a measured wall (``walls_sec`` /
-adaptor hint) may drop it; a pack-declared ``agent_timeout`` is the harness
-ceiling rather than a duration and is ignored for it. Every other task — an
-alias hit, or an unmeasured allow-list entry under a ceiling tighter than the
-``ALLOW_VETTED_UNDER_S`` the allow-list asserts — is still excluded when
-max(declared timeout, pack duration, adaptor hint) is ≥ ``max_duration_s``,
-and still honours ``exclude_unknown_duration``.
+* **first15** (default, measured TB4 first-15 baseline): keep the pack's
+  first-15 set. Drop **INFRA-only** excludes (known broken cls / ctr /
+  batched, plus the other broken-until-fixed Harbor ids). No shortpack
+  allow-list. No duration / hour-plus wall gate — those would collapse
+  first-15 to the 6-task Dev shortpack.
+* **shortpack**: Dev n15 x0017 6-task allow-list plus hour-plus and broken
+  excludes. Pack ``filter.json`` ``allow`` may only **intersect** that
+  allow-list (further restrict). Pack ``max_duration_s`` may only lower
+  the ceiling.
 
-Default pack filter (Dev, retained n15 x0017):
+A task is always excluded when a pack ``filter.json`` deny-list names it
+(or an alias / ``key-`` prefix). Empty filtered set fails closed.
 
-* **allow** (must be <1h): ``cargo-flight-dispatch``,
+Shortpack duration gate (not used in first15): a task named **exactly** on
+the allow-list was measured under an hour, so only a measured wall
+(``walls_sec`` / adaptor hint) may drop it; a pack-declared ``agent_timeout``
+is the harness ceiling rather than a duration and is ignored for it.
+
+Adaptor ``duration_hints.json`` (operator measurement, not a compiled Proof
+catalog):
+
+* **allow** (shortpack only, must be <1h): ``cargo-flight-dispatch``,
   ``embedding-drift-monitor``, ``bun-sourcemap-leak``, ``fin-saccr-rwa``,
   ``foodstuff-beta-activity``, ``atrx-vep-crispr``.
-* **exclude >1h**: ``biped-contact-dynamics`` (~5.2h), ``formal-crypto``
-  (~2.1h), ``cad-model`` (~1.2h), ``data-anonymization`` (~1.1h).
-* **exclude broken until fixed**: ``batched-eval-parity`` (no-network),
-  ``ctr-optimization`` and ``cumulative-layout-shift`` (EnvStartTimeout),
-  ``distributed-dedup`` (tmux), ``coq-block-bound`` (wall cut).
-  ``biped-contact-dynamics`` / ``cad-model`` also stay out until verifier
-  pytest is proven on metal.
-
-Pack ``filter.json`` ``allow`` may only **intersect** the adaptor allow-list
-(further restrict). It cannot add hour-plus or broken ids. Pack
-``max_duration_s`` may only lower the ceiling. Empty filtered set fails
-closed.
+* **exclude >1h** (shortpack): ``biped-contact-dynamics`` (~5.2h),
+  ``formal-crypto`` (~2.1h), ``cad-model`` (~1.2h), ``data-anonymization``
+  (~1.1h).
+* **infra / broken until fixed** (both modes): ``batched-eval-parity``
+  (no-network), ``ctr-optimization`` and ``cumulative-layout-shift``
+  (EnvStartTimeout), ``distributed-dedup`` (tmux), ``coq-block-bound``
+  (wall cut). ``biped-contact-dynamics`` / ``cad-model`` also stay out of
+  **shortpack** until verifier pytest is proven on metal; first15 keeps
+  them (hour-plus is not INFRA).
 """
 
 from __future__ import annotations
@@ -50,6 +54,9 @@ DEFAULT_MAX_S = 3600
 # an hour. A tighter ceiling is outside that assertion.
 ALLOW_VETTED_UNDER_S = DEFAULT_MAX_S
 DEFAULT_HINTS = Path(__file__).resolve().parent / "duration_hints.json"
+MODE_FIRST15 = "first15"
+MODE_SHORTPACK = "shortpack"
+FILTER_MODES = frozenset({MODE_FIRST15, MODE_SHORTPACK})
 TASK_MARKERS = (
     "task.toml",
     "instruction.md",
@@ -187,12 +194,21 @@ X0017_EXCLUDE_BROKEN = (
 X0017_EXCLUDE = X0017_EXCLUDE_LONG + X0017_EXCLUDE_BROKEN
 
 
+def parse_mode(raw: str | None) -> str:
+    text = (raw or "").strip().lower()
+    if not text:
+        return MODE_FIRST15
+    if text not in FILTER_MODES:
+        _fail(f"task filter mode must be first15 or shortpack, got {raw!r}")
+    return text
+
+
 def load_adaptor_spec(
     path: Path | None = None,
-) -> tuple[dict[str, int], set[str], set[str]]:
+) -> tuple[dict[str, int], set[str], set[str], set[str]]:
     hints_path = path or DEFAULT_HINTS
     if not hints_path.is_file():
-        return {}, set(), set()
+        return {}, set(), set(), set(X0017_EXCLUDE_BROKEN)
     obj = _read_json(hints_path)
     if not isinstance(obj, dict):
         _fail(f"{hints_path} must be a JSON object")
@@ -218,11 +234,17 @@ def load_adaptor_spec(
     raw_allow = obj.get("allow")
     if isinstance(raw_allow, list):
         allow.update(str(x) for x in raw_allow if isinstance(x, str) and x.strip())
-    return walls, exclude, allow
+    infra: set[str] = set()
+    raw_infra = obj.get("infra_exclude")
+    if isinstance(raw_infra, list):
+        infra.update(str(x) for x in raw_infra if isinstance(x, str) and x.strip())
+    if not infra:
+        infra = set(X0017_EXCLUDE_BROKEN)
+    return walls, exclude, allow, infra
 
 
 def load_adaptor_hints(path: Path | None = None) -> dict[str, int]:
-    walls, _exclude, _allow = load_adaptor_spec(path)
+    walls, _exclude, _allow, _infra = load_adaptor_spec(path)
     return walls
 
 
@@ -336,10 +358,14 @@ def decide(
     durations_map: dict[str, int],
     adaptor_hints: dict[str, int],
     drop_unknown: bool,
+    skip_duration: bool = False,
+    keep_reason: str = "",
 ) -> tuple[bool, str]:
     name = task_dir.name
     if listed(name, deny):
         return False, "deny-list"
+    if skip_duration:
+        return True, keep_reason or "first15"
     if allow:
         if not listed(name, allow):
             return False, "not on allow-list"
@@ -376,22 +402,33 @@ def filter_tasks(
     filter_rel: str | None,
     drop_unknown: bool,
     hints_path: Path | None = None,
+    mode: str | None = None,
 ) -> dict[str, Any]:
     if not tasks_dir.is_dir():
         _fail(f"no tasks directory {tasks_dir}")
+    mode = parse_mode(mode)
     spec = load_pack_filter(pack_dir, filter_rel)
-    if isinstance(spec.get("max_duration_s"), (int, float)):
+    if mode == MODE_SHORTPACK and isinstance(spec.get("max_duration_s"), (int, float)):
         packed_max = int(spec["max_duration_s"])
         if packed_max > 0:
             max_s = min(max_s, packed_max)
     allow = {str(x) for x in spec.get("allow", []) if isinstance(x, str) and x}
     deny = {str(x) for x in spec.get("deny", []) if isinstance(x, str) and x}
     durations_map = load_durations_map(pack_dir, spec)
-    adaptor_hints, adaptor_exclude, adaptor_allow = load_adaptor_spec(hints_path)
-    deny = deny | adaptor_exclude
-    if adaptor_allow:
-        allow = (allow & adaptor_allow) if allow else set(adaptor_allow)
-    if spec.get("exclude_unknown_duration") is True:
+    adaptor_hints, adaptor_exclude, adaptor_allow, adaptor_infra = load_adaptor_spec(
+        hints_path
+    )
+    skip_duration = mode == MODE_FIRST15
+    if mode == MODE_FIRST15:
+        # Measured first-15: INFRA excludes only. Pack deny still applies.
+        # Never the shortpack allow-list (adaptor or pack).
+        allow = set()
+        deny = deny | adaptor_infra
+    else:
+        deny = deny | adaptor_exclude
+        if adaptor_allow:
+            allow = (allow & adaptor_allow) if allow else set(adaptor_allow)
+    if spec.get("exclude_unknown_duration") is True and not skip_duration:
         drop_unknown = True
 
     dest_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -410,6 +447,8 @@ def filter_tasks(
             durations_map=durations_map,
             adaptor_hints=adaptor_hints,
             drop_unknown=drop_unknown,
+            skip_duration=skip_duration,
+            keep_reason=mode,
         )
         row = {"name": task_dir.name, "reason": reason}
         if not ok:
@@ -425,12 +464,14 @@ def filter_tasks(
         )
     summary = {
         "max_duration_s": max_s,
+        "mode": mode,
         "filter": spec.get("_path", ""),
         "n_kept": len(kept),
         "n_dropped": len(dropped),
         "n_adaptor_hints": len(adaptor_hints),
         "n_adaptor_exclude": len(adaptor_exclude),
-        "n_adaptor_allow": len(adaptor_allow),
+        "n_adaptor_allow": 0 if skip_duration else len(adaptor_allow),
+        "n_adaptor_infra": len(adaptor_infra),
         "kept": kept,
         "dropped": dropped,
     }
@@ -464,6 +505,14 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="optional duration_hints.json (default: adaptor-local n15 walls)",
     )
+    parser.add_argument(
+        "--mode",
+        default=os.environ.get(
+            "PROOF_TASK_FILTER",
+            os.environ.get("PROOF_PARAM_TASK_FILTER_MODE", MODE_FIRST15),
+        ),
+        help="first15 (measured baseline, default) or shortpack (Dev n15 allow-list)",
+    )
     args = parser.parse_args(argv)
     pack_dir = Path(args.pack_dir) if args.pack_dir else Path(args.tasks_dir).parent
     max_s = args.max_duration_s
@@ -477,10 +526,11 @@ def main(argv: list[str] | None = None) -> int:
         filter_rel=args.filter_rel.strip() or None,
         drop_unknown=args.drop_unknown,
         hints_path=Path(args.hints) if args.hints.strip() else None,
+        mode=args.mode,
     )
     print(
-        f"filter_tasks: kept {summary['n_kept']} dropped {summary['n_dropped']} "
-        f"max_duration_s={summary['max_duration_s']}",
+        f"filter_tasks: mode={summary['mode']} kept {summary['n_kept']} "
+        f"dropped {summary['n_dropped']} max_duration_s={summary['max_duration_s']}",
         file=sys.stderr,
     )
     return 0

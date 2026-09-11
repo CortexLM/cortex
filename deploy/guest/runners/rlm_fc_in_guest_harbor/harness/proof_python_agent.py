@@ -115,6 +115,22 @@ def _select_form(
     return None
 
 
+def _restore_model_kwargs(kwargs: dict[str, Any]) -> None:
+    """Keep the full OpenRouter / LiteLLM id if Harbor passed a stripped suffix."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from resolve_model import from_env, restore_model_name
+
+    full = os.environ.get("PROOF_HARBOR_MODEL", "").strip() or from_env()
+    restored = restore_model_name(
+        kwargs.get("model_name") if isinstance(kwargs.get("model_name"), str) else None,
+        full,
+    )
+    if restored:
+        kwargs["model_name"] = restored
+
+
 def _construct(cls: type, *args: Any, **kwargs: Any) -> Any:
     forms = (
         (args, dict(kwargs)),
@@ -186,6 +202,7 @@ class ProofPythonAgent(BaseAgent):
         return "1"
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        _restore_model_kwargs(kwargs)
         super().__init__(*args, **kwargs)
         import_path = os.environ.get("PROOF_MINER_AGENT_IMPORT", "").strip()
         if not import_path:

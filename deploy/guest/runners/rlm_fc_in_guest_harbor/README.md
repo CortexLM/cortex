@@ -157,8 +157,10 @@ hardcoded to a benchmark name):
 | Param | Env | Role |
 |-------|------|------|
 | `tasks_dir` | `PROOF_PARAM_TASKS_DIR` | Relative path under the pack. Refused if absolute or contains `..` |
-| `max_task_duration_s` | `PROOF_PARAM_MAX_TASK_DURATION_S` | Drop pack tasks whose duration metadata is ≥ this many seconds (default **3600**). Pack `filter.json` may only **lower** the ceiling. Adaptor `duration_hints.json` default allow/exclude (n15 x0017) still applies. An **allow-listed** task is gated on its measured wall only — see below. |
-| `task_filter` | `PROOF_PARAM_TASK_FILTER` | Optional relative pack path to `filter.json` / allow-list |
+| `max_task_duration_s` | `PROOF_PARAM_MAX_TASK_DURATION_S` | **shortpack only.** Drop pack tasks whose duration metadata is ≥ this many seconds (default **3600**). Pack `filter.json` may only **lower** the ceiling. Ignored in **first15**. |
+| `task_filter` | `PROOF_PARAM_TASK_FILTER` | Optional relative pack path to `filter.json` / allow-list. In **first15** a pack allow-list is ignored (INFRA excludes still apply). |
+| `task_filter_mode` | `PROOF_PARAM_TASK_FILTER_MODE` / `PROOF_TASK_FILTER` | `first15` (default) or `shortpack`. Owner job selects the measured TB4 first-15 baseline vs the Dev n15 6-task shortpack. |
+| `model` | `PROOF_PARAM_MODEL` | Optional full LiteLLM id (`openrouter/vendor/model`). Wins over `PROOF_MODEL_PIN` for Harbor `-m` when it is the pin plus a provider prefix. Never stripped. |
 | `exclude_unknown_duration` | `PROOF_PARAM_EXCLUDE_UNKNOWN_DURATION` | `true` to drop tasks with no duration metadata |
 | `harbor_agent` | `PROOF_PARAM_HARBOR_AGENT` | Topic built-in for **baseline only** when no miner harness |
 | `miner_byok` | `PROOF_PARAM_MINER_BYOK` | Miner key name |
@@ -178,29 +180,43 @@ is mapped to `true` on the same copy (Harbor treats that pin as
 egress allowlist; this rewrite does not open the host. A filtered copy with
 zero tasks fails closed.
 
+### Task filter modes (Owner job)
+
+`PROOF_TASK_FILTER` / `constraints.params.task_filter_mode` (`PROOF_PARAM_TASK_FILTER_MODE`):
+
+| Mode | Who sets it | What is kept |
+|------|-------------|--------------|
+| **`first15`** (default) | Measured TB4 **first-15** baseline / evaluate | The pack's first-15 set minus **INFRA-only** excludes (`batched-eval-parity`, `ctr-optimization`, `cumulative-layout-shift`, plus other broken-until-fixed Harbor ids). **No** 6-task allow-list. Hour-plus tasks stay. |
+| **`shortpack`** | Dev n15 / explicit Owner opt-in | Adaptor `duration_hints.json` **allow=6** (`cargo-flight-dispatch`, `embedding-drift-monitor`, `bun-sourcemap-leak`, `fin-saccr-rwa`, `foodstuff-beta-activity`, `atrx-vep-crispr`) plus hour-plus and broken excludes |
+
+Defaulting to `first15` is the fail-safe for a measured baseline: a missing
+flag must not silently score the 6-task shortpack. Set
+`PROOF_TASK_FILTER=shortpack` (or sign `task_filter_mode=shortpack`) for the
+Dev n15 pack.
+
 Operator pack hint (pack content, not compiled in): ship `filter.json` with
 `max_duration_s`, optional `allow` / `deny` directory names (aliases match
 `biped` → `biped-contact-dynamics`), and/or `task_durations.json`. See
 `harness/pack_filter.example.json`. Pack `allow` may only **intersect** the
-adaptor default allow-list (further restrict). It cannot add names.
+adaptor default allow-list in **shortpack** (further restrict). It cannot add
+names. **first15 ignores pack allow.**
 
-Adaptor `harness/duration_hints.json` is the Dev default short-task filter
-from retained n15 x0017:
+Adaptor `harness/duration_hints.json` records the Dev shortpack and INFRA
+lists from retained n15 x0017 (operator measurement, not a compiled Proof
+catalog):
 
-- **allow (<1h):** `cargo-flight-dispatch`, `embedding-drift-monitor`,
-  `bun-sourcemap-leak`, `fin-saccr-rwa`, `foodstuff-beta-activity`,
-  `atrx-vep-crispr`
-- **exclude >1h:** `biped-contact-dynamics` (~5.2h), `formal-crypto`
+- **allow (<1h, shortpack only):** `cargo-flight-dispatch`,
+  `embedding-drift-monitor`, `bun-sourcemap-leak`, `fin-saccr-rwa`,
+  `foodstuff-beta-activity`, `atrx-vep-crispr`
+- **exclude >1h (shortpack):** `biped-contact-dynamics` (~5.2h), `formal-crypto`
   (~2.1h), `cad-model` (~1.2h), `data-anonymization` (~1.1h)
-- **exclude broken until fixed:** `batched-eval-parity` (no-network),
+- **infra / broken until fixed (both modes):** `batched-eval-parity` (no-network),
   `ctr-optimization` / `cumulative-layout-shift` (EnvStartTimeout),
   `distributed-dedup` (tmux), `coq-block-bound` (wall cut).
-  `biped-contact-dynamics` / `cad-model` also stay out until verifier pytest
-  is proven on metal.
 
-The deny/exclude list wins first, then the allow-list, then duration. A task
-named **exactly** on the allow-list was measured under an hour, so only a
-measured `walls_sec` wall ≥ `max_task_duration_s` drops it — a pack
+In **shortpack**, the deny/exclude list wins first, then the allow-list, then
+duration. A task named **exactly** on the allow-list was measured under an hour,
+so only a measured `walls_sec` wall ≥ `max_task_duration_s` drops it — a pack
 `task.toml` `agent_timeout` is the harness ceiling, not a duration, and is
 ignored for those tasks (n15 attempt1 on pin `4a04eeb1` declared 28800 on all
 six and the 3600 default emptied the pack). Every other task is still dropped
@@ -209,8 +225,22 @@ such as `cargo-flight-dispatch-extra` (a different task) and an unmeasured
 allow-list entry under a ceiling below 3600 (tighter than what the allow-list
 asserts); those also still honour `exclude_unknown_duration`.
 
-Do not put hour-plus or broken tasks in the default scorable pack for
-`n_concurrent` baselines or miner evals. An empty filtered copy fails closed.
+Do not put hour-plus or broken tasks in the **shortpack** scorable set. An empty
+filtered copy fails closed.
+
+### Harbor model id (OpenRouter)
+
+Harbor `-m` / terminus-2 / LiteLLM must receive the **full** OpenRouter id
+(`openrouter/moonshotai/kimi-k3`), never a stripped `vendor/model`. The adaptor
+resolves `constraints.params.model` (`PROOF_PARAM_MODEL`) over
+`PROOF_MODEL_PIN` when the param is the pin plus an `openrouter/` prefix, and
+prepends `openrouter/` when `miner_byok` / `inference_key_env` is
+`OPENROUTER_API_KEY` and the id still has no provider. `ProofPythonAgent`
+restores that prefix if Harbor passed the suffix as `model_name`. The signed
+`PROOF_MODEL_PIN` is not rewritten.
+
+A 3-segment pin (`openrouter/vendor/model`) is a valid `constraints.model_pin`
+shape (`proof-canon::is_model_pin`).
 
 After the copy, `ensure_verifier.py` injects pytest into environment /
 verifier / tests Dockerfiles even when FROM is not `python:*` (n15

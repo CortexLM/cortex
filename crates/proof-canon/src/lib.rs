@@ -95,8 +95,8 @@ pub struct Constraints {
     /// the topic's isolated VM, never on the control-plane host.
     #[serde(skip_serializing_if = "<&bool as std::ops::Not>::not")]
     pub firecracker_required: bool,
-    /// Provider model id (`vendor/model[:tag]`) every paid inference call
-    /// made by the runner or the miner harness must name.
+    /// Provider model id (`vendor/model[:tag]`, or `openrouter/vendor/model[:tag]`)
+    /// every paid inference call made by the runner or the miner harness must name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_pin: Option<String>,
     /// Opaque task-slice label the runner interprets (the control plane does not).
@@ -121,7 +121,10 @@ impl Constraints {
             })
         };
         if !self.model_pin.as_deref().is_none_or(is_model_pin) {
-            return bad("model_pin", "vendor/model[:tag]");
+            return bad(
+                "model_pin",
+                "provider/model[:tag] (OpenRouter: openrouter/vendor/model)",
+            );
         }
         if !self.task_slice.as_deref().is_none_or(is_opaque_param) {
             return bad("task_slice", "single printable line, <=256 chars");
@@ -393,12 +396,20 @@ fn is_segment(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
 }
 
-/// `vendor/model` provider model id, optional `:tag`. Shape only — the model
-/// itself is topic data, never a default anywhere in this repository.
+/// Slash-separated provider model id, optional `:tag`. Shape only — the
+/// model itself is topic data, never a default anywhere in this repository.
+///
+/// Two or more segments: `vendor/model`, LiteLLM/OpenRouter
+/// `openrouter/vendor/model`, optional `:tag` on the last segment. A single
+/// slash-less name is not a pin (that would drop the provider).
 pub fn is_model_pin(s: &str) -> bool {
     let (name, tag) = s.split_once(':').unwrap_or((s, "x"));
-    matches!(name.trim().split_once('/'), Some((v, m)) if is_segment(v) && is_segment(m))
-        && is_segment(tag)
+    let name = name.trim();
+    if name.is_empty() || name.starts_with('/') || name.ends_with('/') || name.contains("//") {
+        return false;
+    }
+    let n = name.split('/').count();
+    (2..=8).contains(&n) && name.split('/').all(is_segment) && is_segment(tag)
 }
 
 /// Opaque runner-facing text (task slice label, constraint param): printable,
@@ -430,10 +441,25 @@ mod tests {
         assert!(is_slug("dt-no-ib-v0") && !is_slug("has_underscore"));
         assert!(is_custom_id("staging_fc_colo_test") && !is_slug("staging_fc_colo_test"));
         assert!(is_slug("staging-fc-colo-test") && is_custom_id("staging-fc-colo-test"));
-        for good in ["vendor/model", "vendor/model-2.5:thinking", "a/b"] {
+        for good in [
+            "vendor/model",
+            "vendor/model-2.5:thinking",
+            "a/b",
+            "a/b/c",
+            "openrouter/moonshotai/kimi-k3",
+            "openrouter/moonshotai/kimi-k3:thinking",
+        ] {
             assert!(is_model_pin(good), "{good}");
         }
-        for bad in ["", "model", "/model", "vendor/", "a/b/c", "a b/c", "a/b:"] {
+        for bad in [
+            "",
+            "model",
+            "/model",
+            "vendor/",
+            "a b/c",
+            "a/b:",
+            "openrouter/",
+        ] {
             assert!(!is_model_pin(bad), "{bad:?}");
         }
         assert!(is_opaque_param("0..20"));
