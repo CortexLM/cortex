@@ -89,6 +89,7 @@ impl RlmStore for MemoryRlmStore {
     }
 
     async fn put_checklist(&self, row: &ChecklistRow) -> Result<(), StoreError> {
+        // Same digest may be re-inspected (miner resubmit). Overwrite.
         self.lock()?
             .checklists
             .insert(row.submission_digest.clone(), row.clone());

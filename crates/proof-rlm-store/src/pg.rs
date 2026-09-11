@@ -3,7 +3,9 @@
 //! Plain runtime `sqlx::query` (no compile-time database). Journal tables are
 //! inserted, never updated; "current" is always the newest row.
 //! `proof_artefact` is keyed by `(topic_id, submission_id)` and a collision
-//! replaces the zip metadata.
+//! replaces the zip metadata. `proof_checklist` is keyed by
+//! `submission_digest` and a re-inspect of the same digest replaces the
+//! latest inspection (`created_at` stays the original row).
 
 use async_trait::async_trait;
 use db::PgPool;
@@ -239,7 +241,13 @@ impl RlmStore for PgRlmStore {
     async fn put_checklist(&self, row: &ChecklistRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO proof_checklist (submission_digest, topic_id, rules_version, green, failed_ids, document) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (submission_digest) DO UPDATE SET \
+               topic_id = EXCLUDED.topic_id, \
+               rules_version = EXCLUDED.rules_version, \
+               green = EXCLUDED.green, \
+               failed_ids = EXCLUDED.failed_ids, \
+               document = EXCLUDED.document",
         )
         .bind(&row.submission_digest)
         .bind(&row.topic_id)
