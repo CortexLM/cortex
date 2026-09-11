@@ -14,8 +14,8 @@ use proof_vm_proto::guest::{encode_frame, read_frame, RlmToHost};
 use tokio::io::AsyncWriteExt;
 
 use super::{
-    copy_tree, from_work_tree, harvest_from_jail, recv_job_or_harvest, try_from_jail, HARBOR_JOBS,
-    HARVEST_WORK, POLL_INTERVAL, SCRATCH_IN_JAIL, SCRATCH_TREE,
+    copy_regular_nofollow, copy_tree, from_work_tree, harvest_from_jail, recv_job_or_harvest,
+    try_from_jail, HARBOR_JOBS, HARVEST_WORK, POLL_INTERVAL, SCRATCH_IN_JAIL, SCRATCH_TREE,
 };
 
 fn tree(tag: &str) -> PathBuf {
@@ -466,6 +466,134 @@ fn regular_file_symlink_is_not_followed_during_harvest_copy() {
     assert!(
         !tree_contains_bytes(&harvest, marker),
         "harvest-work must not contain the symlink target bytes"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `O_NOFOLLOW` open path: a symlink at open time must not be followed,
+/// even when the caller skipped a prior `symlink_metadata` check (TOCTOU).
+/// Fail-closed: error, dest must not contain the target bytes.
+#[test]
+fn copy_regular_nofollow_does_not_follow_symlink_at_open() {
+    let root = tree("nofollow-open");
+    let marker = b"HARVEST-MUST-NOT-COPY-THIS-SECRET";
+    let secret = root.join("host-secret");
+    std::fs::write(&secret, marker).expect("secret");
+    let src = root.join("entry");
+    std::os::unix::fs::symlink(&secret, &src).expect("symlink");
+    let dest = root.join("out");
+    let err = copy_regular_nofollow(&src, &dest).expect_err("must not follow symlink");
+    assert!(
+        err.contains("symlink") || err.contains("ELOOP"),
+        "expected ELOOP/symlink refuse, got {err}"
+    );
+    assert!(
+        !dest.exists() || std::fs::read(&dest).is_ok_and(|b| b != marker),
+        "dest must not contain the symlink target bytes"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn copy_regular_nofollow_copies_a_regular_file() {
+    let root = tree("nofollow-reg");
+    let src = root.join("entry");
+    std::fs::write(&src, b"guest-bytes").expect("src");
+    let dest = root.join("out");
+    copy_regular_nofollow(&src, &dest).expect("regular file");
+    assert_eq!(std::fs::read(&dest).expect("dest"), b"guest-bytes");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// FIFO at open must fail closed without blocking (`O_NONBLOCK` + `fstat`).
+#[test]
+fn copy_regular_nofollow_rejects_fifo_without_blocking() {
+    let root = tree("nofollow-fifo");
+    let fifo = root.join("pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo");
+    assert!(status.success(), "mkfifo");
+    let dest = root.join("out");
+    let started = std::time::Instant::now();
+    let err = copy_regular_nofollow(&fifo, &dest).expect_err("fifo");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "must not block on a FIFO with no writer"
+    );
+    assert!(
+        err.contains("regular file") || err.contains("open"),
+        "expected special-file refuse, got {err}"
+    );
+    assert!(!dest.exists(), "FIFO must not create dest");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Models the check-then-use race as tightly as practical: a swapper thread
+/// replaces a regular file with a symlink to a host secret while copies run.
+/// `O_NOFOLLOW` must never land the secret bytes in dest (fail-closed on
+/// `ELOOP` is OK; following the link is not).
+#[test]
+fn copy_regular_nofollow_toctou_swap_cannot_leak_host_bytes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let root = tree("nofollow-toctou");
+    let marker = b"HARVEST-MUST-NOT-COPY-THIS-SECRET";
+    let secret = root.join("host-secret");
+    std::fs::write(&secret, marker).expect("secret");
+    let src = root.join("entry");
+    std::fs::write(&src, b"benign").expect("regular");
+    let dest_dir = root.join("outs");
+    std::fs::create_dir_all(&dest_dir).expect("outs");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let stop = Arc::clone(&stop);
+        let src = src.clone();
+        let secret = secret.clone();
+        std::thread::spawn(move || {
+            let mut i = 0u32;
+            while !stop.load(Ordering::Relaxed) {
+                let _ = std::fs::remove_file(&src);
+                if i.is_multiple_of(2) {
+                    let _ = std::fs::write(&src, b"benign");
+                } else {
+                    let _ = std::os::unix::fs::symlink(&secret, &src);
+                }
+                i = i.wrapping_add(1);
+            }
+        })
+    };
+
+    let mut leaked = false;
+    for i in 0..1500u32 {
+        let dest = dest_dir.join(format!("{i}"));
+        match copy_regular_nofollow(&src, &dest) {
+            Ok(()) => {
+                if std::fs::read(&dest).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker))
+                {
+                    leaked = true;
+                    break;
+                }
+            }
+            Err(_) => {
+                if dest.exists()
+                    && std::fs::read(&dest)
+                        .is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker))
+                {
+                    leaked = true;
+                    break;
+                }
+            }
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    let _ = swapper.join();
+    assert!(
+        !leaked,
+        "O_NOFOLLOW copy must not follow a TOCTOU symlink swap into host-readable bytes"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -31,8 +31,10 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::collections::{BTreeMap, HashSet};
+use std::fs::OpenOptions;
 use std::future::Future;
-use std::os::unix::fs::MetadataExt;
+use std::io;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -286,11 +288,56 @@ fn copy_tree_into(src: &Path, dest: &Path, seen: &mut HashSet<(u64, u64)>) -> Re
         if meta.is_dir() {
             copy_tree_into(&from, &to, seen)?;
         } else {
-            std::fs::copy(&from, &to)
-                .map_err(|err| format!("copy {} → {}: {err}", from.display(), to.display()))?;
+            // Guest can swap this path to a symlink after the lstat above.
+            // Freeze the inode with `O_NOFOLLOW` and copy from that fd only —
+            // never path-based `std::fs::copy` (follows a replacement link).
+            copy_regular_nofollow(&from, &to)?;
         }
     }
     Ok(())
+}
+
+/// Copy a regular file through an `O_NOFOLLOW` fd so a symlink swap after
+/// `symlink_metadata` cannot follow into host-readable content.
+///
+/// Open fails with `ELOOP` if the last component is a symlink. The opened
+/// descriptor is then `fstat`'d: non-regular files (FIFO, device, dir) are
+/// rejected. `O_NONBLOCK` keeps a FIFO open from hanging the harvest.
+fn copy_regular_nofollow(from: &Path, to: &Path) -> Result<(), String> {
+    let mut src = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(from)
+        .map_err(|e| open_nofollow_err(from, &e))?;
+    let meta = src
+        .metadata()
+        .map_err(|e| format!("fstat {}: {e}", from.display()))?;
+    if !meta.file_type().is_file() {
+        return Err(format!(
+            "not a regular file {} (refusing to copy adaptor-controlled special file)",
+            from.display()
+        ));
+    }
+    let mut dest = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(to)
+        .map_err(|e| format!("create {}: {e}", to.display()))?;
+    io::copy(&mut src, &mut dest)
+        .map_err(|e| format!("copy {} → {}: {e}", from.display(), to.display()))?;
+    Ok(())
+}
+
+fn open_nofollow_err(path: &Path, err: &io::Error) -> String {
+    if err.raw_os_error() == Some(libc::ELOOP) {
+        format!(
+            "symlink {} (refusing to follow adaptor-controlled link)",
+            path.display()
+        )
+    } else {
+        format!("open {}: {err}", path.display())
+    }
 }
 
 fn dump_matches_evidence(
