@@ -257,6 +257,52 @@ impl AgentState {
         }
     }
 
+    /// Waiter gone after the job finished: harvest already happened (the
+    /// hypervisor ran to completion). Tear down an **experiment** VM so it
+    /// does not sit billed; keep the topic VM for the next job.
+    async fn harvest_abandoned(
+        &self,
+        record: &VmRecord,
+        booted: &BootedVm,
+        job_ok: bool,
+        _job: OwnedMutexGuard<()>,
+    ) {
+        if record.experiment.is_none() {
+            return;
+        }
+        let policy = if job_ok {
+            RetainPolicy::Destroy
+        } else {
+            RetainPolicy::Retain
+        };
+        let vm_id = &record.handle.vm_id;
+        tracing::info!(
+            %vm_id, topic_id = %record.handle.topic_id, ?policy,
+            "waiter gone; harvesting experiment vm"
+        );
+        let confirmed = match self.inner.hypervisor.teardown(booted, policy).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(%vm_id, "abandoned experiment teardown: {e}");
+                false
+            }
+        };
+        if !confirmed {
+            return;
+        }
+        let mut vms = self.inner.vms.write().await;
+        match policy {
+            RetainPolicy::Destroy => {
+                vms.remove(vm_id);
+            }
+            RetainPolicy::Retain => {
+                if let Some(e) = vms.get_mut(vm_id) {
+                    e.record.state = VmState::Retained;
+                }
+            }
+        }
+    }
+
     /// The running, alive **topic** VM bound to `topic_id`, if any.
     /// Experiment VMs are never it: they belong to one job, not the topic.
     async fn live_vm_for(&self, topic_id: &str) -> Option<VmRecord> {
@@ -441,26 +487,74 @@ async fn run_job(
         let reaped = state.reap(&record, &booted, guard).await;
         return Err(not_running(&vm_id, reaped.state));
     }
+    // Body accepted: do not cancel the hypervisor job if the CP waiter
+    // drops. Harvest the outcome; an experiment VM is then torn down,
+    // a topic VM is kept.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let state_bg = state.clone();
+    let record_bg = record.clone();
+    let booted_bg = booted.clone();
+    let vm_id_bg = vm_id.clone();
+    tokio::spawn(async move {
+        let (result, guard) = execute_job(
+            state_bg.clone(),
+            record_bg.clone(),
+            booted_bg.clone(),
+            body,
+            vm_id_bg,
+            guard,
+        )
+        .await;
+        if let Err(result) = tx.send(result) {
+            if let Some(g) = guard {
+                state_bg
+                    .harvest_abandoned(&record_bg, &booted_bg, result.is_ok(), g)
+                    .await;
+            }
+        }
+    });
+    match rx.await {
+        Ok(r) => r.map(Json),
+        Err(_) => Err(AgentError::new(ErrorCode::Backend, "job task failed")),
+    }
+}
+
+async fn execute_job(
+    state: AgentState,
+    record: VmRecord,
+    booted: BootedVm,
+    body: RunJobRequest,
+    vm_id: String,
+    guard: OwnedMutexGuard<()>,
+) -> (
+    Result<RunJobResponse, AgentError>,
+    Option<OwnedMutexGuard<()>>,
+) {
     let outcome = match state.inner.hypervisor.run_job(&booted, &body.job).await {
         Ok(outcome) => outcome,
         Err(e) => {
-            // A guest that died under the job is reaped now, while we hold it.
             if !state.inner.hypervisor.alive(&booted).await {
                 state.reap(&record, &booted, guard).await;
+                return (Err(e.into()), None);
             }
-            return Err(e.into());
+            return (Err(e.into()), Some(guard));
         }
     };
     if !output_matches(&body.job, &outcome.output) {
-        return Err(AgentError::new(
-            ErrorCode::WrongOutput,
-            "guest answered with another output shape",
-        ));
+        return (
+            Err(AgentError::new(
+                ErrorCode::WrongOutput,
+                "guest answered with another output shape",
+            )),
+            Some(guard),
+        );
     }
-    // Evidence for one job never stamps another: the attestation and the
-    // report must name this job's topic, submission, and artefact.
-    bind_evidence(&body.job, &outcome.output, outcome.sister.as_ref())
-        .map_err(|e| AgentError::new(ErrorCode::EvidenceMismatch, e.to_string()))?;
+    if let Err(e) = bind_evidence(&body.job, &outcome.output, outcome.sister.as_ref()) {
+        return (
+            Err(AgentError::new(ErrorCode::EvidenceMismatch, e.to_string())),
+            Some(guard),
+        );
+    }
     if let Some(s) = &outcome.sister {
         tracing::info!(
             %vm_id, sister = %s.sister_vm_id, submission = %s.submission_digest,
@@ -469,12 +563,15 @@ async fn run_job(
         );
     }
     let output = stamp_output(outcome.output, outcome.sister.as_ref());
-    Ok(Json(RunJobResponse {
-        topic_id: record.handle.topic_id,
-        vm_id,
-        output,
-        sister: outcome.sister,
-    }))
+    (
+        Ok(RunJobResponse {
+            topic_id: record.handle.topic_id,
+            vm_id,
+            output,
+            sister: outcome.sister,
+        }),
+        Some(guard),
+    )
 }
 
 async fn teardown(

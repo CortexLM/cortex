@@ -271,6 +271,7 @@ ctx proof submit \
   --env OPENROUTER_API_KEY
 # or: --openrouter-api-key "$OPENROUTER_API_KEY"
 # compat: --artifact-uri https://example.org/recipe.tar --artifact-digest <sha256>
+# evaluate is sync (minutes): default wait 7200 s; `--submit-timeout-secs 0` waits
 ```
 
 Custom Python `run(instruction, …)` need not subclass Harbor `BaseAgent`.

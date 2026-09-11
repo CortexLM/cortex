@@ -36,6 +36,7 @@
     clippy::too_many_arguments
 )]
 
+use std::future::Future;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use async_trait::async_trait;
@@ -708,19 +709,45 @@ async fn submit(
     // Live submit: a 503/401 after staging must not leave bytes on disk.
     // The nonce is already spent; a retry uses a new nonce (new vault key).
     // Drain keeps staging on error so a queued row can still be scored.
+    //
+    // Evaluate is not cancelled if the miner hangs up after this body was
+    // accepted: axum drops the handler on disconnect, a spawned task is not
+    // dropped. A client that holds still gets **201-after-score**.
     let staged_digest = row.artifact_digest.clone();
     let staged_hotkey = row.miner_hotkey.clone();
     let staged_nonce = row.submit_nonce.clone();
     let staged_env = row.submission_digest.clone();
-    match score_intake(&st, row, &topic).await {
-        Ok(resp) => Ok((StatusCode::CREATED, Json(resp))),
-        Err(e) => {
-            let _ = st
-                .store
-                .forget_artefact(&staged_digest, &staged_hotkey, &staged_nonce);
-            let _ = st.store.release_miner_env(&staged_env);
-            Err(e)
+    after_body_accepted({
+        let st = st.clone();
+        async move {
+            match score_intake(&st, row, &topic).await {
+                Ok(resp) => Ok((StatusCode::CREATED, Json(resp))),
+                Err(e) => {
+                    let _ = st
+                        .store
+                        .forget_artefact(&staged_digest, &staged_hotkey, &staged_nonce);
+                    let _ = st.store.release_miner_env(&staged_env);
+                    Err(e)
+                }
+            }
         }
+    })
+    .await
+}
+
+/// Run `work` even if the HTTP client drops. Axum cancels the handler
+/// future on disconnect; a spawned task is not cancelled, so evaluate
+/// still persists. When the client holds, this awaits the result so
+/// submit stays **201-after-score**.
+async fn after_body_accepted<T: Send + 'static>(
+    work: impl Future<Output = Result<T, ErrResp>> + Send + 'static,
+) -> Result<T, ErrResp> {
+    match tokio::spawn(work).await {
+        Ok(r) => r,
+        Err(_) => Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "scoring task failed",
+        )),
     }
 }
 
@@ -1540,6 +1567,7 @@ pub fn hash_admin_token(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use axum::body::Body;
@@ -1718,6 +1746,9 @@ mod tests {
         envs: std::sync::Mutex<Vec<MinerEnv>>,
         /// Length of staged artefact bytes each `score` call was handed (`None` = URI-only).
         tars: std::sync::Mutex<Vec<Option<usize>>>,
+        /// Extra wait inside `score` so disconnect tests can drop the client
+        /// after the body is accepted and evaluate has started.
+        delay: Option<Duration>,
     }
 
     impl StubScorer {
@@ -1728,11 +1759,18 @@ mod tests {
                 hits: AtomicUsize::new(0),
                 envs: std::sync::Mutex::new(Vec::new()),
                 tars: std::sync::Mutex::new(Vec::new()),
+                delay: None,
             }
         }
         fn lose() -> Self {
             Self {
                 reproduced: false,
+                ..Self::win()
+            }
+        }
+        fn delayed(d: Duration) -> Self {
+            Self {
+                delay: Some(d),
                 ..Self::win()
             }
         }
@@ -1771,6 +1809,9 @@ mod tests {
                 .lock()
                 .expect("tars")
                 .push(artifact_tar.map(<[u8]>::len));
+            if let Some(d) = self.delay {
+                tokio::time::sleep(d).await;
+            }
             Ok(sim_document(
                 pin,
                 topic,
@@ -4478,6 +4519,101 @@ mod tests {
         assert_eq!(row["verdict"]["pass"], true, "{row}");
         assert_eq!(row["verdict"]["agent"]["rationale"], "sim stub win");
         assert_eq!(row["verdict"]["failed"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// Live Lium host + delayed harvest stub. The store is shared so a
+    /// dropped submit can still be observed after evaluate finishes.
+    fn app_delayed_lium(delay: Duration) -> (Router, MemoryStore, Arc<StubScorer>) {
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let store = MemoryStore::new();
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (topic, meas) = seal_topic_with(&p, unsigned_topic(&recs), &[]);
+        store.put_topic(topic.clone()).expect("topic");
+        store.load_holdout(&topic.id, recs).expect("holdout");
+        store
+            .set_baseline(&topic.id, meas.into_sealed())
+            .expect("baseline");
+        let scorer = Arc::new(StubScorer::delayed(delay));
+        let app = proof_router(AppState {
+            store: store.clone(),
+            pin: p.clone(),
+            backend: EvalBackend::Lium,
+            live_scorer: Some(scorer.clone()),
+            offer: Some(offer()),
+            executor: executor_slot(Some(test_executor(&p))),
+            judge_api_key: Some("test-judge-key".into()),
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            vm_probe: None,
+            epoch: 0,
+        });
+        (app, store, scorer)
+    }
+
+    async fn post_submit(app: Router, body: serde_json::Value) -> axum::http::Response<Body> {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/submissions")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("req");
+        app.oneshot(req).await.expect("resp")
+    }
+
+    #[tokio::test]
+    async fn submit_drop_after_accept_still_persists_the_score() {
+        let (app, store, scorer) = app_delayed_lium(Duration::from_millis(250));
+        let body = submit_body("drop-persist", &serde_json::json!({}));
+        let waiter = tokio::spawn(post_submit(app, body));
+        let started = tokio::time::Instant::now();
+        loop {
+            if scorer.hits.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "evaluate never started"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        waiter.abort();
+        let _ = waiter.await;
+        let landed = tokio::time::Instant::now();
+        loop {
+            let rows = store.list().expect("list");
+            if rows.len() == 1 {
+                assert_eq!(scorer.hits.load(Ordering::SeqCst), 1, "evaluate must run");
+                assert_eq!(
+                    rows[0].state,
+                    SubmissionState::AwaitingAdmin,
+                    "{:?}",
+                    rows[0]
+                );
+                assert!(
+                    rows[0].verdict.as_ref().is_some_and(|v| v.pass),
+                    "score must land: {:?}",
+                    rows[0]
+                );
+                return;
+            }
+            assert!(
+                landed.elapsed() < Duration::from_secs(2),
+                "row did not persist after client drop: {rows:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_holding_the_client_is_201_after_score() {
+        let (app, store, scorer) = app_delayed_lium(Duration::from_millis(80));
+        let body = submit_body("hold-sync-201", &serde_json::json!({}));
+        let resp = post_submit(app, body).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(v["state"], "awaiting_admin", "{v}");
+        assert_eq!(scorer.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(store.list().expect("list").len(), 1);
     }
 
     // ----- deferred scoring: `queued` rows and the drain -----

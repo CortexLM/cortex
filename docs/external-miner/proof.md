@@ -302,6 +302,13 @@ that signature can be produced offline.
 defers scoring, `--wait` keeps polling until the operator drains the queue,
 which can take as long as the operator's install does.
 
+Live (non-deferred) evaluate is **synchronous** and can run for minutes
+(`tbench`). `ctx proof submit` waits up to **7200 s** for that POST
+(`CTX_PROOF_SUBMIT_TIMEOUT_SECS` / `--submit-timeout-secs`; `0` waits until
+the host answers). GET routes stay on ~60 s. A client that hangs up after
+the body is accepted does not cancel scoring: the row still lands, and a
+client that holds still gets **201-after-score**.
+
 The same submit with `curl` (`miner_hotkey`, `hotkey_signature`,
 `submit_nonce`, and `manifest` from one `ctx proof sign --json` run — the
 manifest is signed, so post the one you signed):

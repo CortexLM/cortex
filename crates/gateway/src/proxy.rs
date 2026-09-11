@@ -92,73 +92,85 @@ async fn proxy_inner(
         }
     };
 
-    let mut last_status = StatusCode::BAD_GATEWAY;
-    let mut last_msg = String::from("no upstream attempt");
-    let mut last_error_resp: Option<Response> = None;
-    let mut attempted = Vec::new();
+    // Body buffered: spawn so a miner hang-up does not abort Proof evaluate.
+    match tokio::spawn(async move {
+        let mut last_status = StatusCode::BAD_GATEWAY;
+        let mut last_msg = String::from("no upstream attempt");
+        let mut last_error_resp: Option<Response> = None;
+        let mut attempted = Vec::new();
 
-    for _ in 0..2 {
-        let backend = match st.registry.pick(&challenge_id) {
-            Ok(b) => b,
-            Err(RegistryError::NoBackends(_)) => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    format!("no healthy backends for challenge_id={challenge_id}"),
-                )
-                    .into_response();
+        for _ in 0..2 {
+            let backend = match st.registry.pick(&challenge_id) {
+                Ok(b) => b,
+                Err(RegistryError::NoBackends(_)) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!("no healthy backends for challenge_id={challenge_id}"),
+                    )
+                        .into_response();
+                }
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+                }
+            };
+
+            if attempted.contains(&backend.id) {
+                break;
             }
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-            }
-        };
+            attempted.push(backend.id);
 
-        if attempted.contains(&backend.id) {
-            break;
-        }
-        attempted.push(backend.id);
-
-        let url = upstream_url(&backend.base_url, &rest, query.as_deref());
-        match forward(&st.client, method.clone(), &url, &headers, body.clone()).await {
-            ForwardResult::Ok(mut upstream_resp) => {
-                let status = upstream_resp.status();
-                if status.is_server_error() {
-                    st.registry.record_failure(backend.id);
-                    last_status = status;
-                    last_msg = format!("upstream {status}");
-                    // Lock down before retain: a viewer 5xx is still
-                    // miner-controlled (cookies / CSP / cache).
+            let url = upstream_url(&backend.base_url, &rest, query.as_deref());
+            match forward(&st.client, method.clone(), &url, &headers, body.clone()).await {
+                ForwardResult::Ok(mut upstream_resp) => {
+                    let status = upstream_resp.status();
+                    if status.is_server_error() {
+                        st.registry.record_failure(backend.id);
+                        last_status = status;
+                        last_msg = format!("upstream {status}");
+                        // Lock down before retain: a viewer 5xx is still
+                        // miner-controlled (cookies / CSP / cache).
+                        if is_view_path(&rest) {
+                            apply_view_lockdown(
+                                &mut upstream_resp,
+                                &st.view_frame_ancestors,
+                                &rest,
+                            );
+                        }
+                        // Keep the challenge body: miners need the JSON error
+                        // (`artifact_uri must be https://`, …), not a synthetic
+                        // `upstream 503 Service Unavailable` string.
+                        last_error_resp = Some(upstream_resp);
+                        continue;
+                    }
+                    st.registry.record_success(backend.id);
                     if is_view_path(&rest) {
                         apply_view_lockdown(&mut upstream_resp, &st.view_frame_ancestors, &rest);
                     }
-                    // Keep the challenge body: miners need the JSON error
-                    // (`artifact_uri must be https://`, …), not a synthetic
-                    // `upstream 503 Service Unavailable` string.
-                    last_error_resp = Some(upstream_resp);
-                    continue;
+                    return upstream_resp;
                 }
-                st.registry.record_success(backend.id);
-                if is_view_path(&rest) {
-                    apply_view_lockdown(&mut upstream_resp, &st.view_frame_ancestors, &rest);
+                ForwardResult::Err(msg) => {
+                    st.registry.record_failure(backend.id);
+                    last_status = StatusCode::BAD_GATEWAY;
+                    last_msg = msg;
                 }
-                return upstream_resp;
-            }
-            ForwardResult::Err(msg) => {
-                st.registry.record_failure(backend.id);
-                last_status = StatusCode::BAD_GATEWAY;
-                last_msg = msg;
             }
         }
-    }
 
-    if let Some(mut resp) = last_error_resp {
-        // Same floor as 2xx: a miner-controlled viewer 5xx must not carry
-        // Set-Cookie / weak CSP / public cache through the gateway.
-        if is_view_path(&rest) {
-            apply_view_lockdown(&mut resp, &st.view_frame_ancestors, &rest);
+        if let Some(mut resp) = last_error_resp {
+            // Same floor as 2xx: a miner-controlled viewer 5xx must not carry
+            // Set-Cookie / weak CSP / public cache through the gateway.
+            if is_view_path(&rest) {
+                apply_view_lockdown(&mut resp, &st.view_frame_ancestors, &rest);
+            }
+            return resp;
         }
-        return resp;
+        (last_status, last_msg).into_response()
+    })
+    .await
+    {
+        Ok(resp) => resp,
+        Err(_) => (StatusCode::BAD_GATEWAY, "proxy task failed").into_response(),
     }
-    (last_status, last_msg).into_response()
 }
 
 /// Join base URL, remaining path, and optional query.

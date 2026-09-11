@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 use bounty::Signer;
-use ctx_client::{Client, DEFAULT_GATEWAY};
+use ctx_client::{Client, DEFAULT_GATEWAY, DEFAULT_SUBMIT_TIMEOUT_SECS};
 use proof::{SubmitInput, SubmitKey};
 
 /// Cortex subnet CLI.
@@ -52,6 +52,16 @@ struct Cli {
         value_name = "KEY"
     )]
     lium_api_key: Option<String>,
+    /// Proof POST / multipart wait in seconds. Evaluate is synchronous and
+    /// can run for minutes. `0` waits until the host answers.
+    #[arg(
+        long,
+        global = true,
+        env = "CTX_PROOF_SUBMIT_TIMEOUT_SECS",
+        default_value_t = DEFAULT_SUBMIT_TIMEOUT_SECS,
+        value_name = "SECS"
+    )]
+    submit_timeout_secs: u64,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -296,7 +306,8 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
-    let client = Client::new(&cli.gateway, cli.lium_api_key)?;
+    let client =
+        Client::with_submit_timeout_secs(&cli.gateway, cli.lium_api_key, cli.submit_timeout_secs)?;
     match cli.cmd {
         Cmd::Status { challenge } => {
             catalog::print_status(&client, challenge.as_deref(), cli.json).await
@@ -505,6 +516,29 @@ mod tests {
             "inline"
         );
         assert!(text_arg(None, None, "--body").is_err());
+    }
+
+    #[test]
+    fn proof_submit_timeout_flag_defaults_to_7200_and_zero_waits() {
+        let digest = "ab".repeat(32);
+        let cli = Cli::try_parse_from([
+            "ctx",
+            "proof",
+            "submit",
+            "--secret-file",
+            "/tmp/hotkey.sk",
+            "--topic-id",
+            "tbench",
+            "--artifact-digest",
+            &digest,
+            "--claim",
+            "beat baseline",
+        ])
+        .expect("parse");
+        assert_eq!(cli.submit_timeout_secs, DEFAULT_SUBMIT_TIMEOUT_SECS);
+        let cli = Cli::try_parse_from(["ctx", "--submit-timeout-secs", "0", "proof", "status"])
+            .expect("parse");
+        assert_eq!(cli.submit_timeout_secs, 0);
     }
 
     #[test]

@@ -17,8 +17,15 @@ use serde_json::Value;
 /// with `--gateway` only when you run your own stack.
 pub const DEFAULT_GATEWAY: &str = "https://gateway.cortex.foundation";
 
-/// Per-request timeout. Submits rent nothing synchronously, so this is short.
-const TIMEOUT_SECS: u64 = 60;
+/// GET / status / topic-list timeout. These routes return immediately.
+pub const DEFAULT_GET_TIMEOUT_SECS: u64 = 60;
+
+/// Proof POST / multipart default. Evaluate is **synchronous** and can run
+/// for minutes (tbench); a client-wide 60 s timeout drops the TCP stream,
+/// the gateway cancels upstream, and the host is left with an orphan
+/// experiment VM and no score. `0` (via [`Client::with_submit_timeout_secs`])
+/// waits until the host answers.
+pub const DEFAULT_SUBMIT_TIMEOUT_SECS: u64 = 7200;
 
 /// Clear fail-closed message when a miner key would go out over cleartext HTTP.
 const KEYED_HTTP_REFUSAL: &str =
@@ -74,6 +81,9 @@ pub struct Client {
     base: String,
     lium_key: Option<String>,
     http: reqwest::Client,
+    /// Proof submit POST / multipart timeout. `None` = wait until the host
+    /// answers (`--submit-timeout-secs 0` / `CTX_PROOF_SUBMIT_TIMEOUT_SECS=0`).
+    submit_timeout: Option<Duration>,
 }
 
 impl Client {
@@ -82,7 +92,22 @@ impl Client {
     /// A Lium API key is attached only on `https://`. `http://` plus a key is
     /// refused so the header never goes out in cleartext. Redirects are never
     /// followed, so a 302 to `http://` cannot resend `X-Lium-Api-Key`.
+    ///
+    /// Proof submits use [`DEFAULT_SUBMIT_TIMEOUT_SECS`]. There is **no**
+    /// client-wide reqwest timeout: tbench evaluate is synchronous.
     pub fn new(gateway: &str, lium_key: Option<String>) -> Result<Self, String> {
+        Self::with_submit_timeout_secs(gateway, lium_key, DEFAULT_SUBMIT_TIMEOUT_SECS)
+    }
+
+    /// [`Self::new`] with an explicit Proof submit wait.
+    ///
+    /// `submit_timeout_secs == 0` waits until the host answers. GET routes
+    /// stay on [`DEFAULT_GET_TIMEOUT_SECS`].
+    pub fn with_submit_timeout_secs(
+        gateway: &str,
+        lium_key: Option<String>,
+        submit_timeout_secs: u64,
+    ) -> Result<Self, String> {
         let base = gateway.trim().trim_end_matches('/').to_owned();
         if !(is_https_url(&base) || is_http_url(&base)) {
             return Err(format!(
@@ -95,8 +120,10 @@ impl Client {
         }
         // Default reqwest policy resends headers (including X-Lium-Api-Key) to
         // any Location, including http://. Never auto-follow.
+        // No client-wide `.timeout(...)`: GET and Proof POST set per-request
+        // budgets. A total timeout of 60 s is what orphaned metal experiment
+        // VMs (Broken pipe at t=60, no score).
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(TIMEOUT_SECS))
             .user_agent(concat!("ctx/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -105,6 +132,8 @@ impl Client {
             base,
             lium_key,
             http,
+            submit_timeout: (submit_timeout_secs > 0)
+                .then(|| Duration::from_secs(submit_timeout_secs)),
         })
     }
 
@@ -116,18 +145,26 @@ impl Client {
 
     /// GET a gateway path (`/v1/...` or `/challenge/...`).
     pub async fn get(&self, path: &str) -> Result<Reply, String> {
-        self.send(self.http.get(self.url(path))).await
+        self.send(
+            self.http
+                .get(self.url(path))
+                .timeout(Duration::from_secs(DEFAULT_GET_TIMEOUT_SECS)),
+        )
+        .await
     }
 
     /// POST JSON or multipart to a gateway path.
     ///
     /// A non-empty submit `env` (miner BYOK) is refused on `http://` so the
     /// values never go out in cleartext — same floor as `X-Lium-Api-Key`.
+    /// Proof `/v1/submissions` uses the submit timeout; other POSTs use the
+    /// GET budget.
     pub async fn post(&self, path: &str, body: &Value) -> Result<Reply, String> {
         if body_has_env(body) && !is_https_url(&self.base) {
             return Err(ENV_HTTP_REFUSAL.to_owned());
         }
-        self.send(self.http.post(self.url(path)).json(body)).await
+        self.send(self.with_post_timeout(path, self.http.post(self.url(path)).json(body)))
+            .await
     }
 
     /// POST multipart fields plus an `artifact` part (uncompressed tar).
@@ -155,15 +192,37 @@ impl Client {
             .mime_str("application/octet-stream")
             .map_err(|e| format!("multipart: {e}"))?;
         self.send(
-            self.http
-                .post(self.url(path))
-                .multipart(form.part("artifact", part)),
+            self.with_post_timeout(
+                path,
+                self.http
+                    .post(self.url(path))
+                    .multipart(form.part("artifact", part)),
+            ),
         )
         .await
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
+    }
+
+    fn with_post_timeout(
+        &self,
+        path: &str,
+        req: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        match self.post_timeout(path) {
+            Some(d) => req.timeout(d),
+            None => req,
+        }
+    }
+
+    fn post_timeout(&self, path: &str) -> Option<Duration> {
+        if is_proof_submit_path(path) {
+            self.submit_timeout
+        } else {
+            Some(Duration::from_secs(DEFAULT_GET_TIMEOUT_SECS))
+        }
     }
 
     async fn send(&self, req: reqwest::RequestBuilder) -> Result<Reply, String> {
@@ -199,6 +258,12 @@ impl Client {
 #[must_use]
 pub fn challenge_path(challenge_id: &str, suffix: &str) -> String {
     format!("/challenge/{challenge_id}{suffix}")
+}
+
+fn is_proof_submit_path(path: &str) -> bool {
+    let p = path.trim();
+    let p = p.split_once('?').map_or(p, |(head, _)| head);
+    p.ends_with("/v1/submissions")
 }
 
 #[cfg(test)]
@@ -338,5 +403,65 @@ mod tests {
         );
         drop(source);
         drop(target);
+    }
+
+    #[test]
+    fn http_client_is_built_without_a_total_timeout() {
+        let src = include_str!("lib.rs");
+        let builder = src
+            .split("reqwest::Client::builder()")
+            .nth(1)
+            .expect("builder");
+        let builder = builder.split(".build()").next().expect("build");
+        assert!(
+            !builder.contains(".timeout("),
+            "do not set a client-wide reqwest timeout (tbench evaluate is sync): {builder}"
+        );
+        assert_eq!(DEFAULT_GET_TIMEOUT_SECS, 60);
+        assert_eq!(DEFAULT_SUBMIT_TIMEOUT_SECS, 7200);
+    }
+
+    #[test]
+    fn proof_submit_timeout_zero_means_wait() {
+        let c = Client::with_submit_timeout_secs(DEFAULT_GATEWAY, None, 0).expect("client");
+        assert!(c.submit_timeout.is_none());
+        let c = Client::new(DEFAULT_GATEWAY, None).expect("client");
+        assert_eq!(c.submit_timeout, Some(Duration::from_secs(7200)));
+        assert!(is_proof_submit_path("/challenge/proof/v1/submissions"));
+        assert!(is_proof_submit_path("/v1/submissions"));
+        assert!(!is_proof_submit_path("/challenge/bounty/v1/reports"));
+        assert!(!is_proof_submit_path("/v1/weights/latest"));
+        assert!(!is_proof_submit_path("/challenge/proof/v1/submissions/pf"));
+    }
+
+    /// A Proof POST that takes longer than the old 60 s client-wide timeout
+    /// would have been cut. This mock only waits 1.2 s (CI), but the client
+    /// is built with **no** total timeout — the 7200 s budget is per-request.
+    #[tokio::test]
+    async fn proof_post_is_not_bound_by_a_client_wide_timeout() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/challenge/proof/v1/submissions"))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_delay(Duration::from_millis(1200))
+                    .set_body_json(serde_json::json!({"id": "ok", "state": "awaiting_admin"})),
+            )
+            .mount(&server)
+            .await;
+
+        let c = Client::with_submit_timeout_secs(&server.uri(), None, 5).expect("client");
+        let reply = c
+            .post(
+                "/challenge/proof/v1/submissions",
+                &serde_json::json!({"claim": "x"}),
+            )
+            .await
+            .expect("response");
+        assert_eq!(reply.status, 201, "{:?}", reply.body);
+        drop(server);
     }
 }

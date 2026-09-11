@@ -290,7 +290,14 @@ Trust-root keygen is the throwaway owner path in
   no rent, no judge call, no stamps, no mass; the same artefact from the
   same hotkey again is **200** with the existing row — still queued, or
   already scored after a drain (one row per frozen digest per topic, decided
-  in one atomic store step).
+  in one atomic store step). Live evaluate is **synchronous** (minutes on
+  `tbench`): after the body is accepted, a miner hang-up does **not** cancel
+  scoring (the row still lands); a client that holds still gets
+  **201-after-score**. `ctx` Proof POST default wait is 7200 s
+  (`CTX_PROOF_SUBMIT_TIMEOUT_SECS` / `--submit-timeout-secs`; `0` waits).
+  GET stays ~60 s. The gateway spawns the upstream hop after buffering the
+  body (no client-wide proxy timeout). The KVM agent harvests a job whose
+  waiter dropped and tears down that **experiment** VM (keeps the topic VM).
 - `GET /v1/submissions?state=<queued|awaiting_admin|rejected|champion>&topic_id=<id>`
   — both filters optional; newest first. `GET /v1/submissions/{id}` shows a
   `queued` row with `verdict: null` until it is drained.
