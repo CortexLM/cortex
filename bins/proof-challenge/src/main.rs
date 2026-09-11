@@ -677,7 +677,9 @@ async fn resolve_rlm_store(cli: &Cli) -> Result<Arc<dyn RlmStore>, String> {
 
 /// Raise the in-memory `pf_…` allocator past every id already used as
 /// artefact metadata (Postgres) or a zip basename under `PROOF_ARTEFACT_ROOT`.
-/// A fresh store with neither still mints from 0.
+/// A fresh store with neither still mints from 0. An unreadable artefact
+/// tree is fatal: skipping it would under-seed and collide with a zip the
+/// scan could not see.
 async fn seed_pf_allocator(
     store: &MemoryStore,
     rlm: &dyn RlmStore,
@@ -687,7 +689,12 @@ async fn seed_pf_allocator(
         .max_artefact_numeric_id()
         .await
         .map_err(|e| format!("seed pf ids from rlm store: {e}"))?;
-    let from_disk = max_zip_numeric_id(artefact_root);
+    let from_disk = max_zip_numeric_id(artefact_root).map_err(|e| {
+        format!(
+            "seed pf ids from artefact root {}: {e}",
+            artefact_root.display()
+        )
+    })?;
     let Some(used) = [from_pg, from_disk].into_iter().flatten().max() else {
         tracing::info!("pf id allocator starts at 0 (no existing artefacts)");
         return Ok(());
@@ -1096,6 +1103,27 @@ mod tests {
             .expect("mint");
         assert_eq!(row.id, "pf_000000000000000b");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn seed_pf_allocator_refuses_boot_when_the_artefact_scan_fails() {
+        let root = std::env::temp_dir().join(format!(
+            "proof-seed-notdir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::write(&root, b"not a directory").expect("file");
+        let err = seed_pf_allocator(&MemoryStore::new(), &MemoryRlmStore::new(), &root)
+            .await
+            .expect_err("incomplete scan must refuse boot");
+        assert!(
+            err.contains("artefact root"),
+            "boot error must name the scan: {err}"
+        );
+        let _ = std::fs::remove_file(&root);
     }
 
     #[test]
