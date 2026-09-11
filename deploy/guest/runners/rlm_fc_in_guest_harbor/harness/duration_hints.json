@@ -1,5 +1,5 @@
 {
-  "source": "Measured first-15 default uses infra_exclude only (no allow-list). shortpack (PROOF_TASK_FILTER=shortpack) uses allow = <1h INCLUDE from retained n15 x0017 plus exclude = hour-plus plus broken-until-fixed. Pack filter.json may only further restrict shortpack allow, never expand it. Adaptor-local operator measurement, not a compiled Proof catalog.",
+  "source": "Measured first-15 (PROOF_TASK_SLICE=tb4-first-15) uses infra_exclude only (no allow-list). shortpack (PROOF_TASK_FILTER=shortpack, explicit only) uses allow = <1h INCLUDE from retained n15 x0017 plus exclude = hour-plus plus broken-until-fixed. Pack filter.json may only further restrict shortpack allow, never expand it. Adaptor-local operator measurement, not a compiled Proof catalog.",
   "allow": [
     "cargo-flight-dispatch",
     "embedding-drift-monitor",

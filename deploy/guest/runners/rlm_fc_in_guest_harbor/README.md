@@ -159,8 +159,8 @@ hardcoded to a benchmark name):
 | `tasks_dir` | `PROOF_PARAM_TASKS_DIR` | Relative path under the pack. Refused if absolute or contains `..` |
 | `max_task_duration_s` | `PROOF_PARAM_MAX_TASK_DURATION_S` | **shortpack only.** Drop pack tasks whose duration metadata is ≥ this many seconds (default **3600**). Pack `filter.json` may only **lower** the ceiling. Ignored in **first15**. |
 | `task_filter` | `PROOF_PARAM_TASK_FILTER` | Optional relative pack path to `filter.json` / allow-list. In **first15** a pack allow-list is ignored (INFRA excludes still apply). |
-| `task_filter_mode` | `PROOF_PARAM_TASK_FILTER_MODE` / `PROOF_TASK_FILTER` | `first15` (default) or `shortpack`. Owner job selects the measured TB4 first-15 baseline vs the Dev n15 6-task shortpack. |
-| `model` | `PROOF_PARAM_MODEL` | Optional full LiteLLM id (`openrouter/vendor/model`). Wins over `PROOF_MODEL_PIN` for Harbor `-m` when it is the pin plus a provider prefix. Never stripped. |
+| `task_filter_mode` | `PROOF_PARAM_TASK_FILTER_MODE` / `PROOF_TASK_FILTER` | `first15` (default) or `shortpack`. Shortpack only when explicitly requested. `PROOF_TASK_SLICE=tb4-first-15` also selects first15 (no shortpack allow-list). |
+| `model` | `PROOF_PARAM_MODEL` | Harbor / LiteLLM id (`openrouter/vendor/model`). Harbor `-m` is `PROOF_PARAM_MODEL` falling back to `PROOF_MODEL_PIN`. Canon `model_pin` stays `vendor/model`. An OpenRouter path fails closed unless the id already has the `openrouter/` provider prefix. |
 | `exclude_unknown_duration` | `PROOF_PARAM_EXCLUDE_UNKNOWN_DURATION` | `true` to drop tasks with no duration metadata |
 | `harbor_agent` | `PROOF_PARAM_HARBOR_AGENT` | Topic built-in for **baseline only** when no miner harness |
 | `miner_byok` | `PROOF_PARAM_MINER_BYOK` | Miner key name |
@@ -182,17 +182,19 @@ zero tasks fails closed.
 
 ### Task filter modes (Owner job)
 
-`PROOF_TASK_FILTER` / `constraints.params.task_filter_mode` (`PROOF_PARAM_TASK_FILTER_MODE`):
+`PROOF_TASK_FILTER` / `constraints.params.task_filter_mode` (`PROOF_PARAM_TASK_FILTER_MODE`).
+`PROOF_TASK_SLICE=tb4-first-15` (measured baseline) is honored even when those
+flags are unset: **no** 6-task allow-list, INFRA excludes only.
 
 | Mode | Who sets it | What is kept |
 |------|-------------|--------------|
-| **`first15`** (default) | Measured TB4 **first-15** baseline / evaluate | The pack's first-15 set minus **INFRA-only** excludes (`batched-eval-parity`, `ctr-optimization`, `cumulative-layout-shift`, plus other broken-until-fixed Harbor ids). **No** 6-task allow-list. Hour-plus tasks stay. |
-| **`shortpack`** | Dev n15 / explicit Owner opt-in | Adaptor `duration_hints.json` **allow=6** (`cargo-flight-dispatch`, `embedding-drift-monitor`, `bun-sourcemap-leak`, `fin-saccr-rwa`, `foodstuff-beta-activity`, `atrx-vep-crispr`) plus hour-plus and broken excludes |
+| **`first15`** (default) | Measured TB4 **first-15** baseline / `PROOF_TASK_SLICE=tb4-first-15` | The pack's first-15 set minus **INFRA-only** excludes (`batched-eval-parity`, `ctr-optimization`, `cumulative-layout-shift`, plus other broken-until-fixed Harbor ids). **No** 6-task allow-list. Hour-plus tasks stay. |
+| **`shortpack`** | Explicit Owner opt-in only | Adaptor `duration_hints.json` **allow=6** (`cargo-flight-dispatch`, `embedding-drift-monitor`, `bun-sourcemap-leak`, `fin-saccr-rwa`, `foodstuff-beta-activity`, `atrx-vep-crispr`) plus hour-plus and broken excludes |
 
 Defaulting to `first15` is the fail-safe for a measured baseline: a missing
 flag must not silently score the 6-task shortpack. Set
-`PROOF_TASK_FILTER=shortpack` (or sign `task_filter_mode=shortpack`) for the
-Dev n15 pack.
+`PROOF_TASK_FILTER=shortpack` (or sign `task_filter_mode=shortpack`) only when
+you want the Dev n15 pack.
 
 Operator pack hint (pack content, not compiled in): ship `filter.json` with
 `max_duration_s`, optional `allow` / `deny` directory names (aliases match
@@ -230,17 +232,16 @@ filtered copy fails closed.
 
 ### Harbor model id (OpenRouter)
 
-Harbor `-m` / terminus-2 / LiteLLM must receive the **full** OpenRouter id
-(`openrouter/moonshotai/kimi-k3`), never a stripped `vendor/model`. The adaptor
-resolves `constraints.params.model` (`PROOF_PARAM_MODEL`) over
-`PROOF_MODEL_PIN` when the param is the pin plus an `openrouter/` prefix, and
-prepends `openrouter/` when `miner_byok` / `inference_key_env` is
-`OPENROUTER_API_KEY` and the id still has no provider. `ProofPythonAgent`
-restores that prefix if Harbor passed the suffix as `model_name`. The signed
-`PROOF_MODEL_PIN` is not rewritten.
-
-A 3-segment pin (`openrouter/vendor/model`) is a valid `constraints.model_pin`
-shape (`proof-canon::is_model_pin`).
+Harbor `-m` / terminus-2 / LiteLLM must receive the **full** OpenRouter /
+LiteLLM id (`openrouter/moonshotai/kimi-k3`), never a stripped `vendor/model`.
+The adaptor sets `MODEL="${PROOF_PARAM_MODEL:-$PROOF_MODEL_PIN}"` and passes
+`-m "$MODEL"`. Set `params.model` to the Harbor/LiteLLM id; leave
+`constraints.model_pin` as canon `vendor/model` (`proof-canon` rejects
+`a/b/c`). An OpenRouter path (`miner_byok` / `inference_key_env` =
+`OPENROUTER_API_KEY`) **fails closed** unless that id already has the
+`openrouter/` provider prefix — the adaptor does not rewrite the pin.
+`ProofPythonAgent` restores that prefix if Harbor passed the suffix as
+`model_name`.
 
 After the copy, `ensure_verifier.py` injects pytest into environment /
 verifier / tests Dockerfiles even when FROM is not `python:*` (n15

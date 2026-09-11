@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""filter_tasks.py: default x0017 short-task allowlist; drop ≥1h and broken."""
+"""filter_tasks.py: first15 via TASK_SLICE; shortpack only when explicit."""
 
 from __future__ import annotations
 
@@ -575,6 +575,39 @@ class FilterTasksTests(unittest.TestCase):
             self.assertEqual(summary["mode"], "first15")
             kept = {row["name"] for row in summary["kept"]}
             self.assertEqual(kept, {KEEP, "mystery"})
+
+    def test_tb4_first_15_slice_skips_shortpack_allow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            tasks = pack / "tasks"
+            tasks.mkdir()
+            for name in filter_tasks.X0017_ALLOW:
+                _task(tasks, name, 28_800)
+            for name in filter_tasks.X0017_EXCLUDE_LONG:
+                _task(tasks, name, None)
+            for name in filter_tasks.X0017_EXCLUDE_BROKEN:
+                _task(tasks, name, 120)
+            _task(tasks, "mystery", 100)
+            dest = pack / "out"
+            summary = filter_tasks.filter_tasks(
+                tasks,
+                dest,
+                pack_dir=pack,
+                max_s=3600,
+                filter_rel=None,
+                drop_unknown=False,
+                task_slice="tb4-first-15",
+            )
+            self.assertEqual(summary["mode"], "first15")
+            self.assertEqual(summary["task_slice"], "tb4-first-15")
+            kept = {row["name"] for row in summary["kept"]}
+            expected = set(filter_tasks.X0017_ALLOW) | set(
+                filter_tasks.X0017_EXCLUDE_LONG
+            ) | {"mystery"}
+            self.assertEqual(kept, expected)
+            dropped = {row["name"]: row["reason"] for row in summary["dropped"]}
+            for name in filter_tasks.X0017_EXCLUDE_BROKEN:
+                self.assertEqual(dropped[name], "deny-list", name)
 
     def test_unknown_mode_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

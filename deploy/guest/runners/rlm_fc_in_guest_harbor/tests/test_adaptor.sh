@@ -69,6 +69,22 @@ proof_filter_tasks || fail "first15 filter should keep hour-plus plus short task
 [ ! -d "$PROOF_TASKS/ctr-optimization" ] || fail "first15 infra must drop ctr-optimization"
 [ ! -d "$PROOF_TASKS/cumulative-layout-shift" ] || fail "first15 infra must drop cumulative-layout-shift"
 pass "first15 keeps first-15 minus INFRA (not the shortpack allow-list)"
+
+# --- first15 via PROOF_TASK_SLICE (measured baseline; ignore shortpack allow) ---
+unset PROOF_TASK_FILTER || true
+unset PROOF_PARAM_TASK_FILTER_MODE || true
+export PROOF_TASK_SLICE=tb4-first-15
+export PROOF_PARAM_TASKS_DIR="tasks"
+proof_require_tasks || fail "tasks_dir=tasks should work for slice"
+proof_filter_tasks || fail "tb4-first-15 slice should keep hour-plus plus short tasks"
+[ -d "$PROOF_TASKS/cargo-flight-dispatch" ] || fail "slice first15 must keep short tasks"
+[ -d "$PROOF_TASKS/biped-contact-dynamics" ] || fail "slice first15 must keep hour-plus biped"
+[ -d "$PROOF_TASKS/cad-model" ] || fail "slice first15 must keep hour-plus cad-model"
+[ -d "$PROOF_TASKS/too-slow" ] || fail "slice first15 must not duration-drop too-slow"
+[ ! -d "$PROOF_TASKS/batched-eval-parity" ] || fail "slice first15 infra must drop batched-eval-parity"
+[ ! -d "$PROOF_TASKS/ctr-optimization" ] || fail "slice first15 infra must drop ctr-optimization"
+pass "PROOF_TASK_SLICE=tb4-first-15 skips the shortpack allow-list"
+unset PROOF_TASK_SLICE || true
 export PROOF_TASK_FILTER=shortpack
 proof_require_tasks
 proof_filter_tasks || fail "restore shortpack for later adaptor tests"
@@ -287,6 +303,18 @@ assert r["evidence"]["agent"] == "agent.agent:MinerAgent"
 assert "terminus-2" not in json.dumps(r)
 PY
 pass "evaluate run-harbor passes miner -a and full OpenRouter -m"
+
+# OpenRouter + vendor/model pin only (no params.model) fails closed.
+unset PROOF_PARAM_MODEL || true
+export PROOF_MODEL_PIN="moonshotai/kimi-k3"
+export PROOF_PARAM_MINER_BYOK=OPENROUTER_API_KEY
+if "$ADAPTOR/harness/run-harbor" 2>"$WORKDIR/openrouter-pin.err"; then
+    fail "OpenRouter with vendor/model pin must fail closed"
+fi
+grep -q "provider prefix" "$WORKDIR/openrouter-pin.err" \
+    || fail "must name provider prefix: $(cat "$WORKDIR/openrouter-pin.err")"
+export PROOF_PARAM_MODEL="openrouter/moonshotai/kimi-k3"
+pass "OpenRouter Harbor -m without provider prefix fails closed"
 
 # --- persist work helper (retain-on-fail durability) ---
 proof_persist_work || fail "proof_persist_work must succeed on a writable work dir"

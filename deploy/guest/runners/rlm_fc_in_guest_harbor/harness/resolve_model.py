@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Resolve the Harbor / LiteLLM model id. Never strip a provider prefix.
+"""Harbor / LiteLLM model id: ``PROOF_PARAM_MODEL`` else ``PROOF_MODEL_PIN``.
 
-Retained tbench-x0025: job params had ``model=openrouter/moonshotai/kimi-k3``
-but Harbor ``-m`` used ``PROOF_MODEL_PIN=moonshotai/kimi-k3``. LiteLLM then
-treated ``moonshotai`` as the provider (``litellm.BadRequestError``) and every
-trial scored 0.
-
-Prefer ``constraints.params.model`` (LiteLLM id) when it is the pin plus a
-provider prefix. When the topic pays OpenRouter (``OPENROUTER_API_KEY``) and
-the id still has no ``openrouter/`` prefix, add that prefix for Harbor / the
-agent / LiteLLM. The signed ``PROOF_MODEL_PIN`` is not rewritten.
+Canon ``constraints.model_pin`` is ``vendor/model`` only (``proof-canon``
+rejects ``a/b/c``). The guest injects the Harbor/LiteLLM id as
+``PROOF_PARAM_MODEL`` (e.g. ``openrouter/moonshotai/kimi-k3``). Harbor ``-m``
+is ``MODEL="${PROOF_PARAM_MODEL:-$PROOF_MODEL_PIN}"``. An OpenRouter path
+(``miner_byok`` / ``inference_key_env`` = ``OPENROUTER_API_KEY``) fails closed
+unless that id already has the ``openrouter/`` provider prefix — the pin is
+not rewritten.
 """
 
 from __future__ import annotations
@@ -21,26 +19,36 @@ OPENROUTER_KEY = "OPENROUTER_API_KEY"
 OPENROUTER_PREFIX = "openrouter/"
 
 
+def _fail(msg: str, code: int = 2) -> None:
+    print(msg, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def _openrouter_path(miner_byok: str, inference_key_env: str) -> bool:
+    for raw in (miner_byok, inference_key_env):
+        for part in (raw or "").split(","):
+            if part.strip() == OPENROUTER_KEY:
+                return True
+    return False
+
+
 def resolve_harbor_model(
     model_pin: str = "",
     param_model: str = "",
     miner_byok: str = "",
     inference_key_env: str = "",
 ) -> str:
-    pin = (model_pin or "").strip()
-    param = (param_model or "").strip()
-    if param and pin:
-        if param == pin or param.endswith("/" + pin):
-            model = param
-        elif pin.endswith("/" + param):
-            model = pin
-        else:
-            model = param
-    else:
-        model = param or pin
-    key = (miner_byok or "").strip() or (inference_key_env or "").strip()
-    if key == OPENROUTER_KEY and model and not model.startswith(OPENROUTER_PREFIX):
-        model = OPENROUTER_PREFIX + model
+    # MODEL="${PROOF_PARAM_MODEL:-$PROOF_MODEL_PIN}"
+    model = (param_model or "").strip() or (model_pin or "").strip()
+    if not model:
+        return ""
+    if _openrouter_path(miner_byok, inference_key_env) and not model.startswith(
+        OPENROUTER_PREFIX
+    ):
+        _fail(
+            "OpenRouter Harbor -m needs a provider prefix "
+            "(params.model=openrouter/...), got a vendor/model pin"
+        )
     return model
 
 

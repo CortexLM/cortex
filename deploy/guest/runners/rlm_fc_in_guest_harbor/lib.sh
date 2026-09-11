@@ -146,16 +146,23 @@ proof_is_harbor_agent_dir() {
     python3 "$PROOF_RESOLVE_AGENT" --dir "$d" --check
 }
 
-# Filter pack tasks. Default is measured first-15 (INFRA excludes only).
-# Owner opt-in ``PROOF_TASK_FILTER=shortpack`` (or params.task_filter_mode)
-# keeps the Dev n15 6-task allow-list. See filter_tasks.py.
+# Filter pack tasks. Honor PROOF_TASK_SLICE / first-15: do not apply the
+# shortpack allow-list for a measured first-15 baseline (INFRA excludes
+# only). Shortpack only when PROOF_TASK_FILTER / params.task_filter_mode
+# is explicitly shortpack. See filter_tasks.py.
 proof_filter_tasks() {
     : "${PROOF_TASKS:?proof_require_tasks first}"
     : "${PROOF_WORK_DIR:?PROOF_WORK_DIR is required}"
     local dest="$PROOF_WORK_DIR/tasks-filtered"
     local extra=()
-    local mode="${PROOF_TASK_FILTER:-${PROOF_PARAM_TASK_FILTER_MODE:-first15}}"
-    extra+=(--mode "$mode")
+    if [ -n "${PROOF_TASK_FILTER:-}" ]; then
+        extra+=(--mode "$PROOF_TASK_FILTER")
+    elif [ -n "${PROOF_PARAM_TASK_FILTER_MODE:-}" ]; then
+        extra+=(--mode "$PROOF_PARAM_TASK_FILTER_MODE")
+    fi
+    if [ -n "${PROOF_TASK_SLICE:-}" ]; then
+        extra+=(--task-slice "$PROOF_TASK_SLICE")
+    fi
     if [ -n "${PROOF_PARAM_TASK_FILTER:-}" ]; then
         extra+=(--filter-rel "$PROOF_PARAM_TASK_FILTER")
     fi

@@ -291,11 +291,12 @@ use the default Docker bridge; the Firecracker TAP is still allowlisted on
 the host.
 
 The scored task slice is the topic's `constraints.task_slice` (today
-`tb4-first-15`). The in-guest adaptor **keeps that first-15 set** and drops
-only **INFRA** Harbor ids (known broken `batched-eval-parity`,
-`ctr-optimization`, `cumulative-layout-shift`, and other broken-until-fixed
-ids). It does **not** reduce the slice to the six-task Dev shortpack unless
-the operator sets `PROOF_TASK_FILTER=shortpack` (or signs
+`tb4-first-15`). The in-guest adaptor honors `PROOF_TASK_SLICE` / first-15:
+it **keeps that first-15 set** and drops only **INFRA** Harbor ids (known
+broken `batched-eval-parity`, `ctr-optimization`, `cumulative-layout-shift`,
+and other broken-until-fixed ids). It does **not** apply the six-task Dev
+shortpack allow-list on that slice. Shortpack is only when the operator
+explicitly sets `PROOF_TASK_FILTER=shortpack` (or signs
 `constraints.params.task_filter_mode=shortpack`). You do not choose the task
 list. A verifier image that lacks `pytest` on PATH scores 0 rather than failing
 the trial — that is an operator image hole, not a miner contract.
@@ -328,13 +329,16 @@ attestation, BYOK env, and hotkey signature, not a hardcoded TFLOP budget.
 
 ## 4. The model key is yours (BYOK)
 
-The topic pins `moonshotai/kimi-k3` (or the full LiteLLM id
-`openrouter/moonshotai/kimi-k3`) and sets
+The topic pins `moonshotai/kimi-k3` (`constraints.model_pin`, canon
+`vendor/model` only) and names the Harbor / LiteLLM id in
+`constraints.params.model` (`openrouter/moonshotai/kimi-k3`).
 `constraints.params.miner_byok = "OPENROUTER_API_KEY"`. Paid Harbor /
 terminus-2 / LiteLLM calls must name **`openrouter/moonshotai/kimi-k3`**
-(the `openrouter/` provider prefix is required; a stripped `moonshotai/kimi-k3`
-is a BadRequestError and scores 0). The in-guest adaptor preserves that full
-id. Its checklist rule
+(the `openrouter/` provider prefix is required; a two-segment pin
+`moonshotai/kimi-k3` is a BadRequestError and scores 0). The in-guest adaptor
+uses `PROOF_PARAM_MODEL` for Harbor `-m` and fails closed on an OpenRouter
+path if that id has no provider prefix — it does not rewrite `model_pin`.
+Its checklist rule
 `miner_byok_openrouter` reads:
 
 > miner supplies `OPENROUTER_API_KEY` (BYOK) for `moonshotai/kimi-k3`; operator

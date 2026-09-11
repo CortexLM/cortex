@@ -2,17 +2,20 @@
 """Copy pack tasks for Harbor evaluate / baseline.
 
 Two owner-selected modes (``PROOF_TASK_FILTER`` / ``--mode``, also topic
-``constraints.params.task_filter_mode`` → ``PROOF_PARAM_TASK_FILTER_MODE``):
+``constraints.params.task_filter_mode`` → ``PROOF_PARAM_TASK_FILTER_MODE``).
+``PROOF_TASK_SLICE`` (``tb4-first-15`` / first-15) is honored: it does
+**not** apply the shortpack allow-list.
 
-* **first15** (default, measured TB4 first-15 baseline): keep the pack's
-  first-15 set. Drop **INFRA-only** excludes (known broken cls / ctr /
-  batched, plus the other broken-until-fixed Harbor ids). No shortpack
-  allow-list. No duration / hour-plus wall gate — those would collapse
-  first-15 to the 6-task Dev shortpack.
-* **shortpack**: Dev n15 x0017 6-task allow-list plus hour-plus and broken
-  excludes. Pack ``filter.json`` ``allow`` may only **intersect** that
-  allow-list (further restrict). Pack ``max_duration_s`` may only lower
-  the ceiling.
+* **first15** (default, measured TB4 first-15 baseline, also when
+  ``PROOF_TASK_SLICE`` is first-15): keep the pack's first-15 set. Drop
+  **INFRA-only** excludes (known broken cls / ctr / batched, plus the other
+  broken-until-fixed Harbor ids). No shortpack allow-list. No duration /
+  hour-plus wall gate — those would collapse first-15 to the 6-task Dev
+  shortpack.
+* **shortpack**: only when explicitly requested. Dev n15 x0017 6-task
+  allow-list plus hour-plus and broken excludes. Pack ``filter.json``
+  ``allow`` may only **intersect** that allow-list (further restrict).
+  Pack ``max_duration_s`` may only lower the ceiling.
 
 A task is always excluded when a pack ``filter.json`` deny-list names it
 (or an alias / ``key-`` prefix). Empty filtered set fails closed.
@@ -194,13 +197,32 @@ X0017_EXCLUDE_BROKEN = (
 X0017_EXCLUDE = X0017_EXCLUDE_LONG + X0017_EXCLUDE_BROKEN
 
 
-def parse_mode(raw: str | None) -> str:
-    text = (raw or "").strip().lower()
+def is_first15_slice(task_slice: str | None) -> bool:
+    """Measured first-15 labels (``tb4-first-15``, ``first-15``, …)."""
+    text = (task_slice or "").strip().lower().replace("_", "-")
     if not text:
+        return False
+    if text in {"first-15", "first15"}:
+        return True
+    return text.endswith("-first-15") or text.endswith("-first15") or "first-15" in text
+
+
+def resolve_filter_mode(mode: str | None, task_slice: str | None = None) -> str:
+    """Shortpack only when explicitly requested; first-15 slice skips allow-list."""
+    explicit = (mode or "").strip().lower()
+    if explicit == MODE_SHORTPACK:
+        return MODE_SHORTPACK
+    if explicit == MODE_FIRST15:
         return MODE_FIRST15
-    if text not in FILTER_MODES:
-        _fail(f"task filter mode must be first15 or shortpack, got {raw!r}")
-    return text
+    if explicit:
+        _fail(f"task filter mode must be first15 or shortpack, got {mode!r}")
+    if is_first15_slice(task_slice):
+        return MODE_FIRST15
+    return MODE_FIRST15
+
+
+def parse_mode(raw: str | None) -> str:
+    return resolve_filter_mode(raw, None)
 
 
 def load_adaptor_spec(
@@ -403,10 +425,11 @@ def filter_tasks(
     drop_unknown: bool,
     hints_path: Path | None = None,
     mode: str | None = None,
+    task_slice: str | None = None,
 ) -> dict[str, Any]:
     if not tasks_dir.is_dir():
         _fail(f"no tasks directory {tasks_dir}")
-    mode = parse_mode(mode)
+    mode = resolve_filter_mode(mode, task_slice)
     spec = load_pack_filter(pack_dir, filter_rel)
     if mode == MODE_SHORTPACK and isinstance(spec.get("max_duration_s"), (int, float)):
         packed_max = int(spec["max_duration_s"])
@@ -465,6 +488,7 @@ def filter_tasks(
     summary = {
         "max_duration_s": max_s,
         "mode": mode,
+        "task_slice": (task_slice or "").strip(),
         "filter": spec.get("_path", ""),
         "n_kept": len(kept),
         "n_dropped": len(dropped),
@@ -507,11 +531,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--mode",
-        default=os.environ.get(
-            "PROOF_TASK_FILTER",
-            os.environ.get("PROOF_PARAM_TASK_FILTER_MODE", MODE_FIRST15),
-        ),
-        help="first15 (measured baseline, default) or shortpack (Dev n15 allow-list)",
+        default=os.environ.get("PROOF_TASK_FILTER")
+        or os.environ.get("PROOF_PARAM_TASK_FILTER_MODE")
+        or "",
+        help="first15 (measured baseline, default) or shortpack (Dev n15 allow-list; explicit only)",
+    )
+    parser.add_argument(
+        "--task-slice",
+        default=os.environ.get("PROOF_TASK_SLICE", ""),
+        help="signed task_slice (tb4-first-15 skips the shortpack allow-list)",
     )
     args = parser.parse_args(argv)
     pack_dir = Path(args.pack_dir) if args.pack_dir else Path(args.tasks_dir).parent
@@ -527,6 +555,7 @@ def main(argv: list[str] | None = None) -> int:
         drop_unknown=args.drop_unknown,
         hints_path=Path(args.hints) if args.hints.strip() else None,
         mode=args.mode,
+        task_slice=args.task_slice,
     )
     print(
         f"filter_tasks: mode={summary['mode']} kept {summary['n_kept']} "

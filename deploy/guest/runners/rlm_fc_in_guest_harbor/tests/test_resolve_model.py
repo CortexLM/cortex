@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Harbor/LiteLLM model id: never strip openrouter/."""
+"""Harbor/LiteLLM model id: PARAM_MODEL else PIN; OpenRouter fail-closed."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import resolve_model  # noqa: E402
 
 
 class ResolveHarborModelTests(unittest.TestCase):
-    def test_prefers_param_model_with_openrouter_prefix(self) -> None:
+    def test_prefers_param_model_over_pin(self) -> None:
         got = resolve_model.resolve_harbor_model(
             model_pin="moonshotai/kimi-k3",
             param_model="openrouter/moonshotai/kimi-k3",
@@ -22,28 +22,28 @@ class ResolveHarborModelTests(unittest.TestCase):
         )
         self.assertEqual(got, "openrouter/moonshotai/kimi-k3")
 
-    def test_does_not_strip_already_prefixed_pin(self) -> None:
-        got = resolve_model.resolve_harbor_model(
-            model_pin="openrouter/moonshotai/kimi-k3",
-            miner_byok="OPENROUTER_API_KEY",
-        )
-        self.assertEqual(got, "openrouter/moonshotai/kimi-k3")
-
-    def test_prepends_openrouter_when_byok_and_pin_has_no_provider(self) -> None:
+    def test_falls_back_to_pin_when_param_unset(self) -> None:
         got = resolve_model.resolve_harbor_model(
             model_pin="moonshotai/kimi-k3",
-            miner_byok="OPENROUTER_API_KEY",
+            miner_byok="SOME_OTHER_KEY",
         )
-        self.assertEqual(got, "openrouter/moonshotai/kimi-k3")
+        self.assertEqual(got, "moonshotai/kimi-k3")
 
-    def test_prepends_when_inference_key_env_is_openrouter(self) -> None:
-        got = resolve_model.resolve_harbor_model(
-            model_pin="moonshotai/kimi-k3",
-            inference_key_env="OPENROUTER_API_KEY",
-        )
-        self.assertEqual(got, "openrouter/moonshotai/kimi-k3")
+    def test_openrouter_without_provider_prefix_fails_closed(self) -> None:
+        with self.assertRaises(SystemExit):
+            resolve_model.resolve_harbor_model(
+                model_pin="moonshotai/kimi-k3",
+                miner_byok="OPENROUTER_API_KEY",
+            )
 
-    def test_does_not_prepend_for_non_openrouter_keys(self) -> None:
+    def test_openrouter_inference_key_env_without_prefix_fails_closed(self) -> None:
+        with self.assertRaises(SystemExit):
+            resolve_model.resolve_harbor_model(
+                model_pin="moonshotai/kimi-k3",
+                inference_key_env="OPENROUTER_API_KEY",
+            )
+
+    def test_does_not_rewrite_pin_for_non_openrouter_keys(self) -> None:
         got = resolve_model.resolve_harbor_model(
             model_pin="moonshotai/kimi-k3",
             miner_byok="SOME_OTHER_KEY",

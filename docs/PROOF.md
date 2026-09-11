@@ -512,8 +512,9 @@ id shapes shared with `proof-task`).
 |-------|---------|
 | `metric.custom_id` | Topic-minted metric id, `[a-z0-9][a-z0-9_-]{1,63}` (underscores allowed — a separate namespace from the topic `id`, which is a hyphen slug `[a-z0-9][a-z0-9-]{1,62}`; nothing maps one onto the other). Draft with any; open needs a runner registered under **exactly** this id (`PROOF_VM_RUNNER_CUSTOM_IDS`, byte-for-byte: `_` ≠ `-`). A miss names the registered hyphen / underscore twin when there is one |
 | `constraints.firecracker_required` | Miner code runs only inside a Firecracker guest under the topic VM |
-| `constraints.model_pin` | `vendor/model[:tag]` or `openrouter/vendor/model[:tag]` every paid call must name (shape-checked only; extra path segments are the LiteLLM provider prefix) |
-| `constraints.task_slice` | Opaque label the runner interprets; the control plane does not |
+| `constraints.model_pin` | `vendor/model[:tag]` every paid call must name (shape-checked only; `proof-canon` rejects `a/b/c`) |
+| `constraints.params.model` | Harbor / LiteLLM id (`openrouter/vendor/model`). The guest injects it as `PROOF_PARAM_MODEL`. Canon `model_pin` stays two-segment; do not put the LiteLLM id in `model_pin` |
+| `constraints.task_slice` | Opaque label the runner interprets; the control plane does not. Harbor honors `tb4-first-15` / first-15 by **not** applying the shortpack allow-list (INFRA excludes only) |
 | `constraints.params` | ≤32 opaque `slug → printable` runner params |
 | `constraints.params.miner_byok` | Comma-separated environment variable names (`[A-Z][A-Z0-9_]{0,63}`) a miner **must** send in the submit body's `env`. A submission missing one is **400** before any row, rent, or paid inference. The topic carries the *name*; the miner carries the value. See § Miner BYOK |
 | `constraints.params.miner_env_allowlist` | Additional variable names a miner **may** send (accepted, never demanded). `miner_byok` is always allowed on top of it |
