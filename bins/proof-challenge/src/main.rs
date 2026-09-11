@@ -35,7 +35,7 @@ use proof_rlm::{
     ExperimentPolicy, RunnerRegistry, TopicVmOrchestrator, UnwiredVmOrchestrator, VmBackedRunner,
     VmTemplate, RLM_VM_IMAGE_DIGEST_ENV, VM_ORCHESTRATOR_TOKEN_FILE_ENV, VM_ORCHESTRATOR_URL_ENV,
 };
-use proof_rlm_scorer::{ArtefactStore, RlmScorer};
+use proof_rlm_scorer::{max_zip_numeric_id, ArtefactStore, RlmScorer};
 use proof_rlm_store::{MemoryRlmStore, PgRlmStore, RlmStore};
 use proof_vm_fc::{parse_custom_ids, FirecrackerOrchestrator, VM_RUNNER_CUSTOM_IDS_ENV};
 use tokio::net::TcpListener;
@@ -243,10 +243,14 @@ fn run(cli: &Cli) -> Result<(), String> {
     // One topic-VM orchestrator per process: the runner registry drives it
     // and the admin probe reports on the same client (bearer file, pin, CA).
     let vm = Arc::new(topic_vm_orchestrator());
+    let store = MemoryStore::new().with_miner_byok_vault(miner_byok_vault());
+    rt.block_on(seed_pf_allocator(
+        &store,
+        rlm_store.as_ref(),
+        &cli.artefact_root,
+    ))?;
     let live_scorer = live_scorer(backend, harvest, rlm_store, &cli.artefact_root, &vm);
     log_live_wiring(backend, live_scorer.as_deref(), &cli.artefact_root);
-
-    let store = MemoryStore::new().with_miner_byok_vault(miner_byok_vault());
     let registered = registered_custom(live_scorer.as_deref());
     match load_topics(&store, &pin, cli.topics_file.as_deref(), &registered) {
         Ok(n) => tracing::info!(topics = n, "signed topics loaded"),
@@ -671,6 +675,40 @@ async fn resolve_rlm_store(cli: &Cli) -> Result<Arc<dyn RlmStore>, String> {
     Ok(Arc::new(PgRlmStore::new(pool)))
 }
 
+/// Raise the in-memory `pf_…` allocator past every id already used as
+/// artefact metadata (Postgres) or a zip basename under `PROOF_ARTEFACT_ROOT`.
+/// A fresh store with neither still mints from 0. An unreadable artefact
+/// tree is fatal: skipping it would under-seed and collide with a zip the
+/// scan could not see.
+async fn seed_pf_allocator(
+    store: &MemoryStore,
+    rlm: &dyn RlmStore,
+    artefact_root: &Path,
+) -> Result<(), String> {
+    let from_pg = rlm
+        .max_artefact_numeric_id()
+        .await
+        .map_err(|e| format!("seed pf ids from rlm store: {e}"))?;
+    let from_disk = max_zip_numeric_id(artefact_root).map_err(|e| {
+        format!(
+            "seed pf ids from artefact root {}: {e}",
+            artefact_root.display()
+        )
+    })?;
+    let Some(used) = [from_pg, from_disk].into_iter().flatten().max() else {
+        tracing::info!("pf id allocator starts at 0 (no existing artefacts)");
+        return Ok(());
+    };
+    store.seed_next_id(used).map_err(|e| e.to_string())?;
+    tracing::info!(
+        used,
+        from_pg,
+        from_disk,
+        "pf id allocator seeded past existing artefacts"
+    );
+    Ok(())
+}
+
 fn load_inference_api_key(path: Option<&Path>) -> Option<String> {
     let p = path?;
     std::fs::read_to_string(p)
@@ -968,6 +1006,152 @@ mod tests {
     fn emit_poll_secs_defaults_to_the_bounty_cadence() {
         assert_eq!(cli().emit_poll_secs, DEFAULT_EMIT_POLL_SECS);
         assert_eq!(DEFAULT_EMIT_POLL_SECS, 120);
+    }
+
+    fn artefact_row(submission_id: &str) -> proof_rlm_store::ArtefactRow {
+        proof_rlm_store::ArtefactRow {
+            topic_id: "topic-a".into(),
+            submission_id: submission_id.into(),
+            submission_digest: "ab".repeat(32),
+            path: format!("/artefacts/topic-a/{submission_id}.zip"),
+            sha256: "aa".repeat(32),
+            bytes: 1,
+            primary_value: None,
+            checklist_green: false,
+            promoted: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn seed_pf_allocator_starts_at_zero_without_existing_ids() {
+        let store = MemoryStore::new();
+        seed_pf_allocator(
+            &store,
+            &MemoryRlmStore::new(),
+            Path::new("/no/such/artefacts"),
+        )
+        .await
+        .expect("seed");
+        let row = store
+            .insert(proof_store::Submission {
+                id: String::new(),
+                topic_id: "t".into(),
+                miner_hotkey: "aa".repeat(32),
+                artifact_digest: "11".repeat(32),
+                artifact_uri: None,
+                claim: "c".into(),
+                declared_flops: 1,
+                architecture: String::new(),
+                inference_offer_id: String::new(),
+                config_commitment: String::new(),
+                executor_offer_id: String::new(),
+                executor_commitment: String::new(),
+                manifest: proof_store::ArtifactManifest::default(),
+                submission_digest: "dd".repeat(32),
+                nonce: "n".into(),
+                submit_nonce: "ee".repeat(32),
+                state: proof_store::SubmissionState::Queued,
+                receipt_json: None,
+                verdict: None,
+                detail: None,
+            })
+            .expect("mint");
+        assert_eq!(row.id, "pf_0000000000000000");
+    }
+
+    #[tokio::test]
+    async fn seed_pf_allocator_takes_the_max_of_store_and_disk() {
+        let rlm = MemoryRlmStore::new();
+        rlm.put_artefact(&artefact_row("pf_0000000000000001"))
+            .await
+            .expect("pg row");
+        let root = std::env::temp_dir().join(format!(
+            "proof-seed-disk-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("topic-b")).expect("dir");
+        std::fs::write(root.join("topic-b").join("pf_000000000000000a.zip"), b"z").expect("zip");
+        let store = MemoryStore::new();
+        seed_pf_allocator(&store, &rlm, &root).await.expect("seed");
+        let row = store
+            .insert(proof_store::Submission {
+                id: String::new(),
+                topic_id: "t".into(),
+                miner_hotkey: "aa".repeat(32),
+                artifact_digest: "11".repeat(32),
+                artifact_uri: None,
+                claim: "c".into(),
+                declared_flops: 1,
+                architecture: String::new(),
+                inference_offer_id: String::new(),
+                config_commitment: String::new(),
+                executor_offer_id: String::new(),
+                executor_commitment: String::new(),
+                manifest: proof_store::ArtifactManifest::default(),
+                submission_digest: "dd".repeat(32),
+                nonce: "n".into(),
+                submit_nonce: "ee".repeat(32),
+                state: proof_store::SubmissionState::Queued,
+                receipt_json: None,
+                verdict: None,
+                detail: None,
+            })
+            .expect("mint");
+        assert_eq!(row.id, "pf_000000000000000b");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn seed_pf_allocator_refuses_boot_when_the_artefact_scan_fails() {
+        let root = std::env::temp_dir().join(format!(
+            "proof-seed-notdir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::write(&root, b"not a directory").expect("file");
+        let err = seed_pf_allocator(&MemoryStore::new(), &MemoryRlmStore::new(), &root)
+            .await
+            .expect_err("incomplete scan must refuse boot");
+        assert!(
+            err.contains("artefact root"),
+            "boot error must name the scan: {err}"
+        );
+        let _ = std::fs::remove_file(&root);
+    }
+
+    #[tokio::test]
+    async fn seed_pf_allocator_refuses_boot_when_a_topic_dir_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "proof-seed-topic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("topic-a")).expect("a");
+        std::fs::create_dir_all(root.join("topic-b")).expect("b");
+        std::fs::write(root.join("topic-a").join("pf_0000000000000001.zip"), b"a").expect("zip");
+        std::fs::write(root.join("topic-b").join("pf_00000000000000ff.zip"), b"b").expect("zip");
+        let topic_b = root.join("topic-b");
+        let restore = std::fs::metadata(&topic_b).expect("meta").permissions();
+        std::fs::set_permissions(&topic_b, std::fs::Permissions::from_mode(0o000)).expect("lock");
+        let err = seed_pf_allocator(&MemoryStore::new(), &MemoryRlmStore::new(), &root).await;
+        let _ = std::fs::set_permissions(&topic_b, restore);
+        let err = err.expect_err("incomplete topic scan must refuse boot");
+        assert!(
+            err.contains("artefact root") || err.contains("topic dir"),
+            "boot error must name the scan: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

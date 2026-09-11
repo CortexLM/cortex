@@ -3646,6 +3646,7 @@ dependencies = [
  "proof-rlm",
  "proof-rlm-scorer",
  "proof-rlm-store",
+ "proof-store",
  "proof-submit",
  "proof-task",
  "proof-vm-agent",
@@ -3860,6 +3861,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
