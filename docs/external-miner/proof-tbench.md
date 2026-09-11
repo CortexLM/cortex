@@ -295,16 +295,17 @@ Env the run sees: `PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`,
 `PROOF_PARAM_*`, `PROOF_PACK_DIR`, `PROOF_ARTIFACT_DIR`, `PROOF_OUTPUT_DIR`,
 `PROOF_WORK_DIR`, and miner BYOK under `PROOF_MINER_ENV_DIR`.
 
-- Serve **that exact file** at `artifact_uri` and keep it. Re-running `tar`
-  later produces different bytes (mtimes, member order) and therefore a
-  different digest, and the run is refused rather than run on a substitute.
-- The host re-hashes exactly the bytes the runner fetched before it boots your
-  guest, and refuses gzip, non-tar bytes, an archive with no file content, or
-  bytes that do not match your `artifact_digest`.
+- Prefer `ctx proof submit --artifact recipe.tar` (gateway intake cap **5 MiB**).
+  Re-running `tar` later produces different bytes (mtimes, member order) and
+  therefore a different digest.
+- URI-only compat: serve **that exact file** at `artifact_uri` and keep it.
+  The guest streams it under a hard **64 MiB** cap (not the gateway upload
+  cap). The host re-hashes exactly the bytes the runner fetched before it
+  boots your guest, and refuses gzip, non-tar bytes, an archive with no
+  file content, or bytes that do not match your `artifact_digest`.
 - A digest of nothing — the sha256 of zero bytes or of an empty tar — is a
-  **400** with no row, whatever case you spell it in.
-- On the experiment-VM path the guest agent streams your artefact under a hard
-  **64 MiB** cap. Ship a recipe, not a weight dump.
+  **400** with no row, whatever case you spell it in. Ship a recipe, not a
+  weight dump.
 
 Your code runs **inside a Firecracker guest the host boots**, against the
 operator's pinned experiment pack. You cannot produce the sandbox attestation
