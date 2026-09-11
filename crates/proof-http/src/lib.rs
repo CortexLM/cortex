@@ -649,14 +649,12 @@ async fn submit(
 
     let nonce = nonce_from(&hotkey, &topic_id, &artifact);
     let submission_digest = freeze_submission_digest(&hotkey, &topic_id, &artifact, &nonce);
-    // In-flight ref on this frozen digest. Concurrent retries share the
-    // vault entry; abort releases one ref and deletes only if nothing
-    // queued still names it.
-    if !miner_env.is_empty() {
-        st.store
-            .claim_miner_env(&submission_digest, &miner_env)
-            .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
-    }
+    // Atomic claim: exclusive-create plus an in-flight ref. A concurrent
+    // submit of the same digest cannot both own rollback; abort releases
+    // one ref and deletes only when none remain and no row still names it.
+    st.store
+        .claim_miner_env(&submission_digest, &miner_env)
+        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
     let mut artifact_staged = None;
     if let Some(bytes) = uploaded.as_ref() {
         artifact_staged = Some(
@@ -742,7 +740,10 @@ fn queue_deferred(
     let hotkey = row.miner_hotkey.clone();
     let nonce = row.submit_nonce.clone();
     let env_digest = row.submission_digest.clone();
-    let enqueued = st.store.enqueue(row).map_err(|e| store_err(&e))?;
+    let enqueued = st.store.enqueue(row).map_err(|e| {
+        let _ = st.store.release_miner_env(&env_digest);
+        store_err(&e)
+    })?;
     let _ = st.store.release_miner_env(&env_digest);
     match enqueued {
         Enqueued::Inserted(row) => Ok((
@@ -5878,6 +5879,114 @@ mod tests {
         let (st, list) = json_req(app, "GET", "/v1/submissions", serde_json::json!({}), None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(list["items"].as_array().expect("items").len(), 1, "{list}");
+        let _ = std::fs::remove_file(&art_file);
+    }
+
+    /// Two concurrent valid submits, same frozen digest, different nonces:
+    /// URI queues, multipart staging 503. The failed request must not
+    /// forget BYOK the queued sibling needs, or drain is a 503 with the
+    /// row still queued and no evaluation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_same_digest_different_nonce_staging_503_keeps_queued_byok() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let pid = std::process::id();
+        let art_file = std::env::temp_dir().join(format!("proof-art-race-{pid}"));
+        let _ = std::fs::remove_file(&art_file);
+        std::fs::write(&art_file, b"not-a-dir").expect("file not a dir");
+        let mut state = state_with_custom_params(
+            scorer.clone(),
+            true,
+            true,
+            &[(proof_canon::PARAM_MINER_BYOK, BYOK)],
+        );
+        state.store = state
+            .store
+            .with_artefact_vault(proof_store::ArtefactVault::at(&art_file));
+        let store = state.store.clone();
+        let p = state.pin.clone();
+        let app = proof_router(state);
+        let bytes = recipe_tar();
+        let artifact_digest = hex::encode(Sha256::digest(&bytes));
+        let env = serde_json::json!({ BYOK: BYOK_VALUE });
+        let uri = submit_body(
+            "race-uri",
+            &serde_json::json!({
+                "topic_id": CUSTOM,
+                "artifact_digest": artifact_digest,
+                "artifact_uri": "https://example.invalid/race.tar",
+                "env": env,
+            }),
+        );
+        let upload = submit_body(
+            "race-upload",
+            &serde_json::json!({
+                "topic_id": CUSTOM,
+                "artifact_digest": artifact_digest,
+                "env": env,
+            }),
+        );
+        let ((st_uri, out_uri), (st_up, out_up)) = tokio::join!(
+            json_req(app.clone(), "POST", "/v1/submissions", uri, None),
+            multipart_req(app.clone(), &upload, Some(&bytes)),
+        );
+        assert_eq!(st_uri, StatusCode::CREATED, "{out_uri}");
+        assert_eq!(out_uri["state"], "queued", "{out_uri}");
+        assert_eq!(st_up, StatusCode::SERVICE_UNAVAILABLE, "{out_up}");
+        let digest = out_uri["submission_digest"]
+            .as_str()
+            .expect("digest")
+            .to_owned();
+        assert_eq!(
+            store
+                .miner_env(&digest)
+                .expect("held")
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![(BYOK, BYOK_VALUE)],
+            "staging 503 must not drop the queued sibling's key"
+        );
+        let (st, list) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/submissions",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(list["items"].as_array().expect("items").len(), 1, "{list}");
+
+        let mut relisted = custom_topic_with_defer(&p, None);
+        relisted
+            .constraints
+            .params
+            .insert(proof_canon::PARAM_MINER_BYOK.to_owned(), BYOK.to_owned());
+        relisted.signature = relisted.sign_with(&sk()).expect("sign");
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/admin/proof/topics",
+            serde_json::to_value(&relisted).expect("json"),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        let (st, report) = json_req(
+            app,
+            "POST",
+            "/v1/admin/proof/queue/drain",
+            serde_json::json!({ "topic_id": CUSTOM, "limit": 4 }),
+            Some("op"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{report}");
+        assert_eq!(report["remaining"], 0, "{report}");
+        assert_eq!(report["drained"].as_array().expect("drained").len(), 1);
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 1);
+        assert!(
+            store.miner_env(&digest).expect("scored").is_empty(),
+            "terminal drain forgets the key"
+        );
         let _ = std::fs::remove_file(&art_file);
     }
     /// A topic that runs on the miner's own key and a host that no longer
