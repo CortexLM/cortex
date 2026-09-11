@@ -4,8 +4,9 @@
 //! reigning best, whichever is better (`proof_score::novelty_bar`). Direction
 //! comes from the topic, so a `min` metric promotes on a lower primary.
 
-use proof_score::relative_win;
 use proof_task::MetricDirection;
+
+use crate::relative_win;
 use serde::{Deserialize, Serialize};
 
 /// Why a run was not promoted.

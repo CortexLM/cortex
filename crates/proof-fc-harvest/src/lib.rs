@@ -30,6 +30,8 @@
 
 #![allow(clippy::missing_errors_doc)]
 
+pub mod images;
+
 use std::collections::{BTreeMap, HashSet};
 use std::fs::OpenOptions;
 use std::future::Future;

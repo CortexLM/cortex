@@ -22,9 +22,11 @@
 //! A topic whose signed params select an **in-guest runner**
 //! (`proof_experiment`) gets a dedicated **experiment VM** per paid job
 //! instead of a sister: the host boots it from the pinned image, stages the
-//! pinned experiment pack over vsock ([`guest::HostToRlm::StagePack`]), runs
-//! the one job, and attests the run with [`GuestMode::ExperimentVm`] before
-//! the VM is destroyed. Same binding, same fail-closed checks.
+//! pinned experiment pack over vsock ([`guest::HostToRlm::StagePack`]), injects
+//! a miner upload when the job names `proof-artefact://`
+//! ([`guest::HostToRlm::StageArtifact`]), runs the one job, and attests the
+//! run with [`GuestMode::ExperimentVm`] before the VM is destroyed. Same
+//! binding, same fail-closed checks.
 //!
 //! Nothing here names a benchmark, a model, or a repository.
 
@@ -139,6 +141,18 @@ pub struct VmRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experiment: Option<ExperimentSpec>,
 }
+
+/// JSON body ceiling for [`paths::vm_jobs`] (`POST /v1/vms/{vm_id}/jobs`).
+///
+/// A gateway-capped 5 MiB staged tar is ~6.99 MiB as standard base64 inside
+/// [`VmJob`], plus the job envelope. Axum's default 2 MiB JSON limit would
+/// 413 near-cap uploads before `run_job`. The decoded artefact cap stays
+/// [`guest::MAX_STAGED_ARTIFACT_TAR_BYTES`].
+pub const JOB_BODY_LIMIT: usize = 8 * 1024 * 1024;
+
+const _: () = assert!(JOB_BODY_LIMIT >= 8 * 1024 * 1024);
+const _: () =
+    assert!(JOB_BODY_LIMIT >= 4 * guest::MAX_STAGED_ARTIFACT_TAR_BYTES.div_ceil(3) + 512 * 1024);
 
 /// `POST /v1/vms/{vm_id}/jobs` body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -496,6 +510,7 @@ mod tests {
         assert_eq!(ErrorCode::EvidenceMismatch.status(), 502);
         assert_eq!(DEFAULT_AGENT_PORT, 8200);
         assert_eq!(API_VERSION, 1);
+        assert_eq!(JOB_BODY_LIMIT, 8 * 1024 * 1024);
         assert!(serde_json::to_string(&VmState::Crashed)
             .expect("json")
             .contains("crashed"));

@@ -302,7 +302,10 @@ pub trait LiveScorer: Send + Sync {
     /// `miner_env` is the miner's own BYOK environment, already held to the
     /// signed topic's allowlist at intake — a scorer either hands it to the
     /// guest that runs the miner's code or ignores it, and never substitutes
-    /// the operator's own key for a missing one.
+    /// the operator's own key for a missing one. `artifact_tar` is the
+    /// gateway-vault bytes when the locator is `proof-artefact://` (upload
+    /// path); URI-only submits pass `None` and the guest still fetches
+    /// `https://`.
     #[allow(clippy::too_many_arguments)]
     async fn score(
         &self,
@@ -317,6 +320,7 @@ pub trait LiveScorer: Send + Sync {
         holdout: &[HoldoutRecord],
         claim: &str,
         miner_env: &MinerEnv,
+        artifact_tar: Option<&[u8]>,
     ) -> Result<ProofEvalDocument, EvalError>;
 
     /// Whether this scorer could run right now.
@@ -473,6 +477,7 @@ impl LiveScorer for FamilyMux {
         holdout: &[HoldoutRecord],
         claim: &str,
         miner_env: &MinerEnv,
+        artifact_tar: Option<&[u8]>,
     ) -> Result<ProofEvalDocument, EvalError> {
         self.route(topic)?
             .score(
@@ -487,6 +492,7 @@ impl LiveScorer for FamilyMux {
                 holdout,
                 claim,
                 miner_env,
+                artifact_tar,
             )
             .await
     }
@@ -962,12 +968,14 @@ pub fn sim_win_document(
 
 /// Score only after the submission digest is frozen and a topic is open.
 ///
-/// `artifact_uri`, `declared_flops`, and `miner_env` travel to the live
-/// scorer untouched: the miner's locator for the bytes behind
+/// `artifact_uri`, `declared_flops`, `miner_env`, and `artifact_tar` travel
+/// to the live scorer untouched: the miner's locator for the bytes behind
 /// `artifact_digest` (never trusted beyond that), an optional FLOP
-/// declaration (ignored as a gate on custom / agent topics), and the
-/// miner's own BYOK environment the intake already held to the signed
-/// topic's allowlist. The sim backend runs nothing and reads none of them.
+/// declaration (ignored as a gate on custom / agent topics), the miner's
+/// own BYOK environment the intake already held to the signed topic's
+/// allowlist, and the gateway-vault bytes when the locator is
+/// `proof-artefact://` (URI-only leaves this `None`). The sim backend runs
+/// nothing and reads none of them.
 #[allow(clippy::too_many_arguments)]
 pub async fn eval_after_freeze(
     pin: &ProofPin,
@@ -985,6 +993,7 @@ pub async fn eval_after_freeze(
     judge_api_key: Option<&str>,
     sealed: Option<&SealedBaseline>,
     miner_env: &MinerEnv,
+    artifact_tar: Option<&[u8]>,
 ) -> Result<EvalOutcome, EvalError> {
     if frozen_digest.trim().is_empty() || holdout.is_empty() {
         return Err(EvalError::HoldoutSealed);
@@ -1052,6 +1061,7 @@ pub async fn eval_after_freeze(
                     holdout,
                     claim,
                     miner_env,
+                    artifact_tar,
                 )
                 .await?;
             plan = Some(resolved);
@@ -1193,6 +1203,7 @@ mod tests {
             _holdout: &[HoldoutRecord],
             _claim: &str,
             _miner_env: &MinerEnv,
+            _artifact_tar: Option<&[u8]>,
         ) -> Result<ProofEvalDocument, EvalError> {
             Ok(sim_document(
                 pin,
@@ -1231,6 +1242,7 @@ mod tests {
             None,
             None,
             &MinerEnv::new(),
+            None,
         )
         .await
         .expect_err("no digest");
@@ -1255,6 +1267,7 @@ mod tests {
             None,
             None,
             &MinerEnv::new(),
+            None,
         )
         .await
         .expect_err("no harvest");
@@ -1285,6 +1298,7 @@ mod tests {
             Some("test-judge-key"),
             None,
             &MinerEnv::new(),
+            None,
         )
         .await
         .expect("live");
@@ -1493,6 +1507,7 @@ mod tests {
             Some("test-judge-key"),
             None,
             &MinerEnv::new(),
+            None,
         )
         .await
         .expect_err("no executor");
@@ -1518,6 +1533,7 @@ mod tests {
             Some("test-judge-key"),
             None,
             &MinerEnv::new(),
+            None,
         )
         .await
         .expect_err("topic pins another executor");
@@ -1576,6 +1592,7 @@ mod tests {
             _holdout: &[HoldoutRecord],
             _claim: &str,
             _miner_env: &MinerEnv,
+            _artifact_tar: Option<&[u8]>,
         ) -> Result<ProofEvalDocument, EvalError> {
             self.ready_for_topic(topic)?;
             Err(EvalError::Backend("would run the registered runner".into()))
@@ -1698,6 +1715,7 @@ mod tests {
                 &recs,
                 "c",
                 &MinerEnv::new(),
+                None,
             )
             .await
             .expect_err("unregistered family must not sim or harvest");
@@ -1765,6 +1783,7 @@ mod tests {
                     &recs,
                     "c",
                     &MinerEnv::new(),
+                    None,
                 )
                 .await
                 .expect_err("no harvest to score on");
@@ -1801,6 +1820,7 @@ mod tests {
             Some("test-judge-key"),
             None,
             &MinerEnv::new(),
+            None,
         )
         .await
         .expect_err("nll needs the harvest");
@@ -1821,6 +1841,7 @@ mod tests {
             Some("test-judge-key"),
             None,
             &MinerEnv::new(),
+            None,
         )
         .await
         .expect_err("the stub runner refuses after routing");
@@ -1944,6 +1965,7 @@ mod tests {
             None,
             Some(&sealed),
             &MinerEnv::new(),
+            None,
         )
         .await
         .expect("sim");
@@ -1981,6 +2003,7 @@ mod tests {
             Some("test-judge-key"),
             Some(&tight_sealed()),
             &MinerEnv::new(),
+            None,
         )
         .await
         .expect("live");
