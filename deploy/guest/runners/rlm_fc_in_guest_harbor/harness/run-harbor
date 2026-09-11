@@ -118,19 +118,28 @@ harbor_cmd=(
 )
 # Canon model_pin is vendor/model only. Harbor/LiteLLM -m is params.model
 # (PROOF_PARAM_MODEL) falling back to the pin. OpenRouter fails closed
-# unless the id already has the openrouter/ provider prefix.
+# unless the id already has the openrouter/ provider prefix. Inspect
+# miner_byok and inference_key_env independently (a non-OpenRouter BYOK
+# name must not skip the prefix guard when inference_key_env is
+# OPENROUTER_API_KEY).
 MODEL="${PROOF_PARAM_MODEL:-${PROOF_MODEL_PIN:-}}"
 if [ -n "$MODEL" ]; then
-    case "${PROOF_PARAM_MINER_BYOK:-${PROOF_PARAM_INFERENCE_KEY_ENV:-}}" in
-        OPENROUTER_API_KEY)
-            case "$MODEL" in
-                openrouter/*) ;;
-                *)
-                    proof_die "OpenRouter Harbor -m needs a provider prefix (params.model=openrouter/...), got a vendor/model pin"
-                    ;;
-            esac
-            ;;
+    _openrouter=0
+    case ",${PROOF_PARAM_MINER_BYOK:-}," in
+        *,OPENROUTER_API_KEY,*) _openrouter=1 ;;
     esac
+    case ",${PROOF_PARAM_INFERENCE_KEY_ENV:-}," in
+        *,OPENROUTER_API_KEY,*) _openrouter=1 ;;
+    esac
+    if [ "$_openrouter" -eq 1 ]; then
+        case "$MODEL" in
+            openrouter/*) ;;
+            *)
+                proof_die "OpenRouter Harbor -m needs a provider prefix (params.model=openrouter/...), got a vendor/model pin"
+                ;;
+        esac
+    fi
+    unset _openrouter
     export PROOF_HARBOR_MODEL="$MODEL"
     harbor_cmd+=(-m "$MODEL")
     echo "rlm_fc_in_guest_harbor: harbor -m $MODEL" >&2

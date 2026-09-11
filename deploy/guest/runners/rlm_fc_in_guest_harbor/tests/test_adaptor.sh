@@ -316,6 +316,23 @@ grep -q "provider prefix" "$WORKDIR/openrouter-pin.err" \
 export PROOF_PARAM_MODEL="openrouter/moonshotai/kimi-k3"
 pass "OpenRouter Harbor -m without provider prefix fails closed"
 
+# miner_byok of another name must not skip the prefix guard when
+# inference_key_env is OPENROUTER_API_KEY.
+unset PROOF_PARAM_MODEL || true
+export PROOF_MODEL_PIN="moonshotai/kimi-k3"
+export PROOF_PARAM_MINER_BYOK=OTHER_KEY
+export PROOF_PARAM_INFERENCE_KEY_ENV=OPENROUTER_API_KEY
+printf 'other-key' > "$PROOF_MINER_ENV_DIR/OTHER_KEY"
+chmod 0600 "$PROOF_MINER_ENV_DIR/OTHER_KEY"
+if "$ADAPTOR/harness/run-harbor" 2>"$WORKDIR/openrouter-env.err"; then
+    fail "OpenRouter inference_key_env with vendor/model pin must fail closed"
+fi
+grep -q "provider prefix" "$WORKDIR/openrouter-env.err" \
+    || fail "must name provider prefix when only inference_key_env is OpenRouter: $(cat "$WORKDIR/openrouter-env.err")"
+export PROOF_PARAM_MODEL="openrouter/moonshotai/kimi-k3"
+export PROOF_PARAM_MINER_BYOK=OPENROUTER_API_KEY
+pass "OpenRouter prefix guard inspects inference_key_env even when miner_byok is other"
+
 # --- persist work helper (retain-on-fail durability) ---
 proof_persist_work || fail "proof_persist_work must succeed on a writable work dir"
 pass "proof_persist_work flushes a real work dir"
