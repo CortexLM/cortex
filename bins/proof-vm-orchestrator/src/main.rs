@@ -18,8 +18,9 @@
 //! (`--experiment-max-*`, lock 16 vCPU / 32 GiB RAM; disk ≥ 16 GiB, 32 GiB
 //! by default), fed
 //! the topic-pinned pack from `--experiment-pack-dir` (re-hashed here, staged
-//! over vsock), at most `--max-experiment-vms` at once, destroyed after the
-//! job. What runs inside is topic data; nothing here names it.
+//! over vsock), at most `--max-experiment-vms` at once, destroyed after a
+//! successful job and retained under `--retain-dir` after a failed one. What
+//! runs inside is topic data; nothing here names it.
 //!
 //! Fail-closed at boot: malformed kernel / sister image pins exit 1, a
 //! non-loopback bind without a TLS certificate + key exits 1, a certificate

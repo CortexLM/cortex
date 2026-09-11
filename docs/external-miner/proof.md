@@ -556,7 +556,9 @@ exported to your run's environment).
 Some topics select an **in-guest runner** instead: their
 `constraints.params` carry `baseline_runner` (or `in_guest_benchmark_runner`)
 and `experiment_pack_digest`. For such a topic your submission runs in **one
-dedicated Firecracker VM created for that job and destroyed after it**,
+dedicated Firecracker VM created for that job and stopped after it** (destroyed
+once it scored; the VM of a run that failed is kept stopped on the operator's
+host so the failure can be traced — it is never reused for another job),
 inside the operator's harness (a container runtime and benchmark adaptor
 baked into the VM image by the operator — nothing about it lives in the
 network repo), against the experiment pack the topic pins by digest —

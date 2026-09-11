@@ -10,8 +10,9 @@
 //! Two kinds of VM share the routes. A **topic VM** (the RLM) is unique per
 //! `topic_id` (a second create is 409) and is what `attach` returns. An
 //! **experiment VM** (`spec.experiment` set) is created for one paid job and
-//! destroyed after it: any number may exist per topic, they never answer
-//! `attach`, and their count is held under the host's
+//! torn down after it (destroyed, or retained for audit when the control
+//! plane says the job failed): any number may exist per topic, they never
+//! answer `attach`, and their running count is held under the host's
 //! [`max_experiment_vms`](AgentState::with_max_experiment_vms) capacity —
 //! parallel experiments are parallel VMs, and the host says when it is full
 //! (503 `capacity`) instead of oversubscribing itself.

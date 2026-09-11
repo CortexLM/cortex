@@ -691,6 +691,125 @@ async fn score(d: &Direct, label: &str) -> Result<ProofEvalDocument, EvalError> 
         .await
 }
 
+/// A `tracing` subscriber that keeps every event as `(level, "field=value …")`
+/// so a test can read what the host journal would hold. No dependency: the
+/// `tracing` crate the scorer already logs through is enough.
+#[derive(Default)]
+struct LogCapture {
+    lines: Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>,
+    ids: std::sync::atomic::AtomicU64,
+}
+
+struct Flatten<'a>(&'a mut String);
+
+impl tracing::field::Visit for Flatten<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        let _ = write!(self.0, "{}={value:?} ", field.name());
+    }
+}
+
+impl tracing::Subscriber for LogCapture {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        let n = self.ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tracing::span::Id::from_u64(n + 1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut line = String::new();
+        event.record(&mut Flatten(&mut line));
+        self.lines
+            .lock()
+            .unwrap()
+            .push((*event.metadata().level(), line));
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// A paid run that fails **after a green inspection** is a refusal with no
+/// row — and the refusal is written to the host journal. The miner's 503
+/// body is otherwise the only place that error string lives, so the host
+/// logs it with the topic and the submission digest before the lifecycle
+/// note `refused; no row`; the lease is released and the next run scores.
+#[tokio::test]
+async fn a_refused_paid_run_is_host_logged_with_its_error() {
+    use tracing::instrument::WithSubscriber;
+    let d = direct("refused-log", None);
+    // Inspection is green; the paid run comes back claiming no sandbox,
+    // which the runner refuses on a `firecracker_required` topic.
+    d.orchestrator.set_sandboxed(false);
+    let capture = LogCapture::default();
+    let lines = capture.lines.clone();
+    let err = score(&d, "fail")
+        .with_subscriber(capture)
+        .await
+        .expect_err("an unsandboxed paid run is not evidence");
+    let text = err.to_string();
+    assert!(text.contains("outside the Firecracker guest"), "{text}");
+    assert_eq!(
+        d.orchestrator
+            .jobs()
+            .iter()
+            .filter(|j| matches!(j, VmJob::Evaluate { .. }))
+            .count(),
+        1,
+        "the paid run was attempted after the green inspect"
+    );
+    assert_eq!(d.scorer.pending_len(), 0, "no bundle awaits a row");
+
+    // The verdict phase closed with the refusal note; the topic is open again.
+    let lc = d
+        .rlm_store
+        .lifecycle(&d.topic.id)
+        .await
+        .unwrap()
+        .expect("lifecycle");
+    assert_eq!(lc.state, RlmState::Open);
+    let last = lc.history.last().expect("a transition");
+    assert_eq!(last.event, RlmEvent::VerdictRecorded);
+    assert_eq!(last.note, "refused; no row");
+
+    // The host journal holds the same string the miner's 503 body carries,
+    // at error level, naming the topic and the submission digest.
+    let logged = lines.lock().unwrap().clone();
+    let refusal = logged
+        .iter()
+        .find(|(level, line)| {
+            *level == tracing::Level::ERROR && line.contains("evaluate refused; no row")
+        })
+        .unwrap_or_else(|| panic!("no refusal in the journal: {logged:?}"));
+    assert!(
+        refusal.1.contains(&format!("topic_id={}", d.topic.id)),
+        "{refusal:?}"
+    );
+    assert!(
+        refusal.1.contains("frozen_digest=\"digest-fail\""),
+        "{refusal:?}"
+    );
+    assert!(
+        refusal.1.contains("outside the Firecracker guest"),
+        "the error string reaches the journal: {refusal:?}"
+    );
+
+    // The lease was released with the refusal: the next run scores.
+    d.orchestrator.set_sandboxed(true);
+    let doc = score(&d, "ok").await.expect("the topic is not stuck");
+    assert_eq!(doc.harness.custom_value, Some(0.7));
+    assert_eq!(d.scorer.pending_len(), 1);
+    let _ = std::fs::remove_dir_all(&d.root);
+}
+
 /// Two runs decided against the same old bar: the second cannot score until
 /// the first is persisted, its decision then sees the new best, and a moved
 /// best pointer refuses a crown that was decided before it moved.

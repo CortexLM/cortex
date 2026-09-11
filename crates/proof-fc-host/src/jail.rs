@@ -258,20 +258,41 @@ pub async fn destroy(cfg: &HostConfig, shell: &dyn Shell, id: &str) -> Result<()
 }
 
 /// Move the jail under `retain_dir` for audit (scratch, console, config).
+/// `{id}` when free; `{id}-{nanos}` if occupied so GNU `mv` cannot nest into
+/// a prior retain (agent restart reissues ids). `mv -T` plus source-gone /
+/// dest-exists / not-`<dest>/<id>` — success only then.
 ///
 /// # Errors
 ///
 /// [`HvError::Backend`].
 pub async fn retain(cfg: &HostConfig, shell: &dyn Shell, id: &str) -> Result<PathBuf, HvError> {
-    let dest = cfg.retain_dir.join(id);
     sh(
         shell,
         "mkdir",
         &["-p", &cfg.retain_dir.display().to_string()],
     )
     .await?;
+    let dest = {
+        let d = cfg.retain_dir.join(id);
+        if d.exists() {
+            let n = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |t| t.as_nanos());
+            let d = cfg.retain_dir.join(format!("{id}-{n}"));
+            if d.exists() {
+                return Err(HvError::Backend("retain dest reused".into()));
+            }
+            d
+        } else {
+            d
+        }
+    };
     let src = cfg.jail_dir(id).display().to_string();
-    sh(shell, "mv", &[&src, &dest.display().to_string()]).await?;
+    let dest_s = dest.display().to_string();
+    sh(shell, "mv", &["-T", &src, &dest_s]).await?;
+    sh(shell, "test", &["-d", &dest_s]).await?;
+    sh(shell, "test", &["!", "-e", &src]).await?;
+    sh(shell, "test", &["!", "-e", &format!("{dest_s}/{id}")]).await?;
     Ok(dest)
 }
 
@@ -431,6 +452,7 @@ mod tests {
         c.chroot_base =
             std::env::temp_dir().join(format!("proof-fc-jail-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&c.chroot_base);
+        c.retain_dir = c.chroot_base.join("retained");
         c.kernel = PathBuf::from("/var/lib/proof-vm/vmlinux");
         c.uplink = "eno1".into();
         c
@@ -543,7 +565,68 @@ mod tests {
         assert!(flat
             .iter()
             .any(|l| l == &format!("rm -rf {}", c.jail_dir("topic-a-0001").display())));
-        assert!(flat.iter().any(|l| l.starts_with("mv ")));
+        let src = c.jail_dir("topic-a-0001").display().to_string();
+        let dest_s = dest.display().to_string();
+        assert!(
+            flat.iter().any(|l| l == &format!("mv -T {src} {dest_s}")),
+            "{flat:?}"
+        );
+        assert!(
+            flat.iter().any(|l| l == &format!("test -d {dest_s}")),
+            "confirm dest exists: {flat:?}"
+        );
+        assert!(
+            flat.iter().any(|l| l == &format!("test ! -e {src}")),
+            "confirm source gone: {flat:?}"
+        );
+        assert!(
+            flat.iter()
+                .any(|l| l == &format!("test ! -e {dest_s}/topic-a-0001")),
+            "confirm not nested: {flat:?}"
+        );
+        let _ = std::fs::remove_dir_all(&c.chroot_base);
+    }
+
+    /// GNU `mv` into an occupied `<retain>/<id>` would nest the new jail as
+    /// `<retain>/<id>/<id>` and still report success. After an agent restart
+    /// `mint_vm_id` reissues the same id, so that dest is often occupied.
+    /// Retain must land at a unique sibling and leave the old dest intact.
+    #[tokio::test]
+    async fn retain_does_not_nest_into_an_existing_destination() {
+        let c = cfg("retain-collide");
+        let id = "topic-a-0001";
+        let jail = c.jail_dir(id);
+        std::fs::create_dir_all(jail.join("root")).expect("jail");
+        std::fs::write(jail.join("console.log"), b"new jail").expect("console");
+        let old = c.retain_dir.join(id);
+        std::fs::create_dir_all(&old).expect("old retain");
+        std::fs::write(old.join("console.log"), b"old jail").expect("old console");
+
+        let dest = retain(&c, &crate::shell::SystemShell, id)
+            .await
+            .expect("unique sibling");
+        assert_ne!(dest, old, "must not reuse the occupied name");
+        assert!(
+            dest.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("topic-a-0001-")),
+            "sibling of the occupied id: {}",
+            dest.display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(old.join("console.log")).expect("old"),
+            "old jail"
+        );
+        assert!(
+            !old.join(id).exists(),
+            "GNU mv must not nest the new jail under the old dest"
+        );
+        assert!(!jail.exists(), "source gone");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("console.log")).expect("new"),
+            "new jail"
+        );
+        assert!(dest.join("root").is_dir(), "new jail contents at dest");
         let _ = std::fs::remove_dir_all(&c.chroot_base);
     }
 
