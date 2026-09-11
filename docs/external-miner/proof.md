@@ -201,6 +201,11 @@ optional compat locator (git URL, object URL) for the same bytes: optional
 on `nll` / `throughput`, and optional on custom topics when you upload.
 A custom topic with neither upload nor URI is a **400** `artifact required`.
 When both are sent, the uploaded bytes win (the URI is ignored for identity).
+Live evaluate of an upload records `proof-artefact://` and answers **503**
+until vsock inject ([#285](https://github.com/CortexLM/cortex/pull/285));
+score now with URI-only `https://` (no upload). A topic in `deferred_topics`
+still accepts the upload as **201** `queued`. Gzip, a non-tar body, or a tar
+with no file content is **400** with no row.
 
 The **claim** is one English sentence of what improved. The RLM re-runs the
 code against the public split and checks the claim against those public
@@ -473,6 +478,7 @@ submission row.
 | **503** missing / closed / non-`1x` executor | Live `eval_executor` cannot rent the `1x` machine | no | no |
 | **503** `proof deadline … exceeded` | Your recipe did not finish inside `max_proof_deadline_s`; the body carries the run's `stdout_tail` | no | no (pod torn down) |
 | **503** `custom metric … has no registered runner` / `not wired` | The topic's `custom_id` has no runner on this host, or its topic VM is not configured | no | no |
+| **503** staged artefact / `proof-artefact://` | Live evaluate of an upload-only custom submit: this host stages bytes only; guest inject is [#285](https://github.com/CortexLM/cortex/pull/285). Score now with URI-only `https://` (no upload). Deferred topics still **201** `queued` | live: no; deferred: queued | no |
 | **201** `queued` | Topic in `deferred_topics` (operator still installing its scoring path); every **400** above still applies first | **yes** (queued, scored later) | **no** (not yet) |
 | **200** existing row (`already queued …` / `already submitted … and scored`) | Same artefact + hotkey re-sent (freshly signed, new `submit_nonce`) to a deferring topic, before or after its row was drained | existing row | **no** |
 | **201** `rejected` + `contamination_evidence_missing` | Empty manifest on a topic that requires training evidence (harvest default; custom / agent only if `require_training_evidence = "true"`) | **yes** (rejected) | **no** |
@@ -602,7 +608,9 @@ compat path (the runner fetches that file inside the topic VM); when you
 upload, those bytes win and the URI is ignored for identity. The host
 refuses gzip, non-tar bytes, a tree with no file content, or bytes that do
 not hash to your `artifact_digest` — a run never starts on a substitute or
-re-encoded artefact. A guest-measured `flops_used` may appear on the
+re-encoded artefact. Live evaluate of an upload is **503** until
+[#285](https://github.com/CortexLM/cortex/pull/285) inject; URI-only `https://`
+still scores. A guest-measured `flops_used` may appear on the
 verdict as telemetry. Custom / agent topics do **not** reject on that
 figure vs `declared_flops` or the topic budget.
 

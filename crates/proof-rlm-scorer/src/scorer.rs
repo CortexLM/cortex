@@ -447,11 +447,11 @@ impl RlmScorer {
             .registry
             .resolve(&custom_id)
             .map_err(|e| map_runner(&custom_id, e))?;
-        // Custom intake now accepts an upload (preferred) or a miner URI
-        // (compat). Evaluate still needs a locator on the request: upload
-        // path records `proof-artefact://{digest}` (vault on the CP). Guest
-        // fetch of that scheme is FIXME(PR-B) vsock inject — URI-only
-        // still GETs https:// inside the VM (64 MiB cap, unchanged).
+        // Custom intake accepts an upload (preferred) or a miner URI
+        // (compat). Evaluate of `proof-artefact://{digest}` is PR #285
+        // vsock inject (`bc-bf177788`); proof-http fail-closes live
+        // evaluate with 503. URI-only still GETs https:// inside the VM
+        // (64 MiB cap, unchanged).
         let Some(artifact_uri) = artifact_uri.map(str::trim).filter(|u| !u.is_empty()) else {
             return Err(EvalError::Backend(
                 "custom submission carries no artefact (upload or artifact_uri)".into(),

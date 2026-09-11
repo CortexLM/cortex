@@ -128,6 +128,12 @@ is a commitment, not data. There is nothing to read there.
 an upload nor a URI is a **400** `artifact required` with no row. When both
 are sent, the uploaded bytes win.
 
+Live evaluate of an upload records `proof-artefact://` and answers **503**
+until vsock inject
+([#285](https://github.com/CortexLM/cortex/pull/285)); score now with
+URI-only `https://` (no upload). A topic in `deferred_topics` still accepts
+the upload as **201** `queued`.
+
 Artefact identity is **the served file's sha256**, verbatim. Uncompressed
 only — no gzip, no zip. Both of these packs work; pick one, hash **that**
 file, and serve **that** file. Re-running `tar` later (mtimes, member
@@ -297,7 +303,9 @@ Env the run sees: `PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`,
 
 - Prefer `ctx proof submit --artifact recipe.tar` (gateway intake cap **5 MiB**).
   Re-running `tar` later produces different bytes (mtimes, member order) and
-  therefore a different digest.
+  therefore a different digest. Live evaluate of that upload is **503** until
+  [#285](https://github.com/CortexLM/cortex/pull/285); URI-only `https://`
+  still scores, and `deferred_topics` still **201** `queued`.
 - URI-only compat: serve **that exact file** at `artifact_uri` and keep it.
   The guest streams it under a hard **64 MiB** cap (not the gateway upload
   cap). The host re-hashes exactly the bytes the runner fetched before it
@@ -527,6 +535,7 @@ you will actually meet on `tbench`:
 | **400** `unknown topic` / `topic is not open` | `tbench` is not published, or is outside its epoch window | no |
 | **400** `artifact required` | You left both the upload and the locator out. `tbench` is `custom` | no |
 | **400** `artifact is not a tar archive` / gzip / no file content | The upload is not an uncompressed tar with file bytes | no |
+| **503** staged artefact / `proof-artefact://` | Live evaluate of an upload: inject is [#285](https://github.com/CortexLM/cortex/pull/285). Score now URI-only | live: no; deferred: queued |
 | **400** `artifact_digest is the sha256 of empty input …` | You hashed nothing, or an empty tar | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not exactly 64 lowercase hex. The host never normalises a hex field | no |
 | **401** `hotkey_signature required` / `invalid` | Missing signature, or a `claim`, `declared_flops`, `manifest`, or nonce that differs from what you signed | no |

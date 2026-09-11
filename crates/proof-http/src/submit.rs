@@ -8,7 +8,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use serde_json::{Map, Value};
 
 use proof_store::MAX_ARTEFACT_BYTES;
-use proof_vm_proto::tar::{require_content, TarError};
+use proof_vm_proto::tar::{verify_artifact, TarError};
 use sha2::{Digest, Sha256};
 
 use super::{err, ErrResp, SubmitBody};
@@ -140,8 +140,9 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Intake gates on uploaded artefact bytes: empty, oversize, digest-of-nothing,
-/// mismatch vs the signed `artifact_digest`, then tar shape (gzip / not a tar
-/// / no file content). Digest-of-nothing and mismatch stay named as today.
+/// then [`verify_artifact`] — uncompressed tar with file content whose SHA-256
+/// is the signed `artifact_digest`. Gzip / non-tar / content-less / mismatch
+/// are **400** with no row, before auth spends the nonce.
 pub fn accept_uploaded(
     bytes: &[u8],
     claimed: &str,
@@ -160,25 +161,23 @@ pub fn accept_uploaded(
             "artifact_digest is the sha256 of empty input (or of an empty tar archive): hash the recipe bytes you upload (or ship at artifact_uri)",
         ));
     }
-    if got != claimed {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "artifact_digest does not match uploaded bytes",
-        ));
-    }
-    match require_content(bytes) {
+    match verify_artifact(bytes, claimed) {
         Ok(_) => Ok(()),
         Err(TarError::Gzip) => Err(err(
             StatusCode::BAD_REQUEST,
             "artifact is gzip-compressed; upload an uncompressed tar",
         )),
-        Err(TarError::Malformed(_) | TarError::Digest { .. }) => Err(err(
+        Err(TarError::Malformed(_)) => Err(err(
             StatusCode::BAD_REQUEST,
             "artifact is not a tar archive",
         )),
         Err(TarError::NoContent) => Err(err(
             StatusCode::BAD_REQUEST,
             "artifact carries no file content",
+        )),
+        Err(TarError::Digest { .. }) => Err(err(
+            StatusCode::BAD_REQUEST,
+            "artifact_digest does not match uploaded bytes",
         )),
     }
 }

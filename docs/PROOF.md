@@ -308,9 +308,12 @@ Trust-root keygen is the throwaway owner path in
   (preferred, ≤5 MiB) or `artifact_uri` (compat). Neither is **400**
   `artifact required`. Uploaded bytes win when both are sent.
   Uploaded tars are staged under `PROOF_ARTEFACT_STAGING_DIR` and the row
-  records `proof-artefact://{digest}` for evaluate. FIXME(PR-B): inject
-  those staged bytes into the guest over vsock (URI-only still fetches).
-  The agent verdict (`reproduced`, `claim_holds_public`, cheat codes) is
+  records `proof-artefact://{digest}`. Live evaluate of that scheme is
+  **503** until vsock inject (PR [#285](https://github.com/CortexLM/cortex/pull/285)
+  `bc-bf177788`); this host stages only. URI-only `https://` still scores.
+  Deferred topics accept the upload as **201** `queued`. Gzip / non-tar /
+  content-less uploads are **400** with no row. The agent verdict
+  (`reproduced`, `claim_holds_public`, cheat codes) is
   filled by the eval image, not the miner.
 - Contamination (holdout overlap in a declared manifest) persists **rejected**
   without renting. An empty training manifest is the same reject **only** on
