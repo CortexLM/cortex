@@ -511,10 +511,6 @@ mod tests {
         assert_eq!(DEFAULT_AGENT_PORT, 8200);
         assert_eq!(API_VERSION, 1);
         assert_eq!(JOB_BODY_LIMIT, 8 * 1024 * 1024);
-        assert!(
-            JOB_BODY_LIMIT > 2 * 1024 * 1024,
-            "must exceed Axum's default JSON body limit"
-        );
         assert!(serde_json::to_string(&VmState::Crashed)
             .expect("json")
             .contains("crashed"));
