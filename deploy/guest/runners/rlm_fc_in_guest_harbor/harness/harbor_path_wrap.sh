@@ -1,10 +1,14 @@
 #!/bin/bash
-# Force Harbor --path onto the filtered $PROOF_TASKS tree.
-# Installed first on PATH for the script harness only. The real binary is
-# $PROOF_HARBOR_REAL (captured before this wrapper is prepended).
+# Force Harbor --path onto the filtered task tree.
+# Generated copies bake `real` and `tasks` so the miner env does not need
+# (and must not receive) PROOF_HARBOR_REAL. Unit tests may set the env vars.
 set -euo pipefail
-real="${PROOF_HARBOR_REAL:?PROOF_HARBOR_REAL is the wrapped harbor binary}"
-tasks="${PROOF_TASKS:?PROOF_TASKS is the filtered task tree}"
+real="${real:-${PROOF_HARBOR_REAL-}}"
+tasks="${tasks:-${PROOF_TASKS-}}"
+if [ -z "$real" ] || [ -z "$tasks" ]; then
+    echo "rlm_fc_in_guest_harbor: harbor wrapper missing real binary or filtered tasks" >&2
+    exit 2
+fi
 args=()
 have_path=0
 is_run=0

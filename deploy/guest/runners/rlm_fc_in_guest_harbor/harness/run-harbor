@@ -51,7 +51,8 @@ summarize_or_die() {
         --harbor-exit "$harbor_exit" \
         --agent "${AGENT_ARG:-$HARNESS_KIND}" \
         --agent-source "$AGENT_SOURCE" \
-        --harness-kind "$HARNESS_KIND"
+        --harness-kind "$HARNESS_KIND" \
+        --allow-tasks-dir "$PROOF_TASKS"
 }
 
 if [ "$HARNESS_KIND" = script ]; then

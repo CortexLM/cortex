@@ -101,13 +101,38 @@ def _trial_name(obj: Any, trial_dir: Path) -> str:
     return trial_dir.name
 
 
-def collect_trials(jobs_dir: Path) -> list[dict[str, Any]]:
+def allowed_task_names(tasks_dir: Path) -> frozenset[str]:
+    """Directory names on the filtered task copy (the only scorable ids)."""
+    if not tasks_dir.is_dir():
+        return frozenset()
+    return frozenset(p.name for p in tasks_dir.iterdir() if p.is_dir())
+
+
+def trial_matches_allow(name: str, allow: frozenset[str]) -> bool:
+    """Harbor trial ids are ``<task>`` or ``<task>__<attempt>``."""
+    if not allow:
+        return True
+    if name in allow:
+        return True
+    sep = name.rfind("__")
+    if sep > 0 and name[:sep] in allow:
+        return True
+    return False
+
+
+def collect_trials(
+    jobs_dir: Path, allow: frozenset[str] | None = None
+) -> list[dict[str, Any]]:
     """Load every measured trial. Do not cap here — the cap is evidence only.
 
     Prefer ``result.json`` ``verifier_result.rewards.reward``. If that is
     absent (incomplete Harbor: timeout/kill, ``finished_at=null``), use
     ``verifier/reward.txt`` in the same trial directory. One row per trial
     dir — never double-count JSON + txt.
+
+    When ``allow`` is a non-empty set, trials whose name is not a filtered
+    task (or ``task__attempt``) are dropped so a script that ran the
+    unfiltered pack cannot score excluded ids.
     """
     by_dir: dict[str, dict[str, Any]] = {}
     if not jobs_dir.is_dir():
@@ -138,7 +163,14 @@ def collect_trials(jobs_dir: Path) -> list[dict[str, Any]]:
             continue
         add(trial_dir, reward, trial_dir.name)
 
-    return [by_dir[k] for k in sorted(by_dir)]
+    rows = [by_dir[k] for k in sorted(by_dir)]
+    if not allow:
+        return rows
+    return [
+        t
+        for t in rows
+        if trial_matches_allow(str(t["name"]), allow)
+    ]
 
 
 def load_redact_values() -> list[str]:
@@ -265,10 +297,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agent", default="")
     parser.add_argument("--agent-source", default="")
     parser.add_argument("--harness-kind", default="")
+    parser.add_argument(
+        "--allow-tasks-dir",
+        default="",
+        help="filtered task copy; trials not named after these dirs are dropped",
+    )
     args = parser.parse_args(argv)
 
     jobs_dir = Path(args.jobs_dir)
-    trials = collect_trials(jobs_dir)
+    allow: frozenset[str] | None = None
+    if args.allow_tasks_dir:
+        allow = allowed_task_names(Path(args.allow_tasks_dir))
+        if not allow:
+            _fail(
+                f"allow-tasks-dir {args.allow_tasks_dir} has no task directories; "
+                "refusing to invent a primary_value"
+            )
+    trials = collect_trials(jobs_dir, allow)
     if not trials:
         _fail(
             f"no measured Harbor trials under {jobs_dir} "

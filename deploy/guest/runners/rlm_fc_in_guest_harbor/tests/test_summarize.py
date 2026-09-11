@@ -312,6 +312,80 @@ class SummarizeTests(unittest.TestCase):
             self.assertTrue(report["evidence"]["evidence_truncated"])
             self.assertTrue(report["claim_holds"])
 
+    def test_allow_tasks_dir_drops_excluded_trial_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            allow = root / "tasks"
+            (allow / "cargo-flight-dispatch").mkdir(parents=True)
+            kept = jobs / "job" / "cargo-flight-dispatch__1"
+            dropped = jobs / "job" / "biped__1"
+            kept.mkdir(parents=True)
+            dropped.mkdir(parents=True)
+            (kept / "result.json").write_text(
+                json.dumps(
+                    {
+                        "trial_name": "cargo-flight-dispatch__1",
+                        "verifier_result": {"rewards": {"reward": 0.5}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (dropped / "result.json").write_text(
+                json.dumps(
+                    {
+                        "trial_name": "biped__1",
+                        "verifier_result": {"rewards": {"reward": 0.99}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            trials = summarize.collect_trials(
+                jobs, summarize.allowed_task_names(allow)
+            )
+            self.assertEqual(len(trials), 1)
+            self.assertAlmostEqual(trials[0]["reward"], 0.5)
+            out = root / "report.json"
+            rc = summarize.main(
+                [
+                    "--jobs-dir",
+                    str(jobs),
+                    "--output",
+                    str(out),
+                    "--allow-tasks-dir",
+                    str(allow),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            report = json.loads(out.read_text(encoding="utf-8"))
+            self.assertAlmostEqual(report["primary_value"], 0.5)
+            self.assertEqual(report["evidence"]["n_measured"], 1)
+
+    def test_allow_tasks_dir_only_excluded_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            allow = root / "tasks"
+            (allow / "cargo-flight-dispatch").mkdir(parents=True)
+            trial = jobs / "job" / "biped__1"
+            trial.mkdir(parents=True)
+            (trial / "verifier").mkdir()
+            (trial / "verifier" / "reward.txt").write_text("0.99\n", encoding="utf-8")
+            out = root / "report.json"
+            with self.assertRaises(SystemExit) as ctx:
+                summarize.main(
+                    [
+                        "--jobs-dir",
+                        str(jobs),
+                        "--output",
+                        str(out),
+                        "--allow-tasks-dir",
+                        str(allow),
+                    ]
+                )
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertFalse(out.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

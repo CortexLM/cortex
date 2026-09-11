@@ -313,10 +313,12 @@ proof_start_container_runtime() {
     export PROOF_CONTAINER_RUNTIME=podman
 }
 
-# Workdir view of the pack whose tasks_dir is the filtered copy, plus a
-# Harbor CLI wrapper that rewrites --path to $PROOF_TASKS. The real pack
-# is never mutated. Script harness only — Harbor -a already uses
-# --path "$PROOF_TASKS".
+# Materialized workdir view of the pack whose tasks_dir is the filtered
+# copy (never a symlink to the original pack). Harbor CLI wrapper rewrites
+# --path to $PROOF_TASKS. The real pack is not mutated and its path is not
+# exported to the miner. Script harness only — Harbor -a already uses
+# --path "$PROOF_TASKS". Summarize still drops trial names outside the
+# filtered set (the PATH wrapper is not a same-uid sandbox).
 proof_script_bind_filtered_tasks() {
     : "${PROOF_TASKS:?proof_filter_tasks first}"
     : "${PROOF_PACK_DIR:?}"
@@ -330,13 +332,14 @@ proof_script_bind_filtered_tasks() {
         [ -e "$item" ] || continue
         name="$(basename "$item")"
         if [ "$name" = "$PROOF_PARAM_TASKS_DIR" ]; then
-            ln -s "$PROOF_TASKS" "$view/$name"
+            cp -a "$PROOF_TASKS" "$view/$name"
         else
-            ln -s "$item" "$view/$name"
+            cp -a "$item" "$view/$name"
         fi
     done
     export PROOF_PACK_DIR="$view"
     export PROOF_TASKS
+    unset PROOF_HARBOR_REAL || true
     echo "rlm_fc_in_guest_harbor: script harness bound to filtered PROOF_TASKS=$PROOF_TASKS" >&2
 
     local wrap_dir="$PROOF_WORK_DIR/bin"
@@ -345,8 +348,12 @@ proof_script_bind_filtered_tasks() {
         local real
         real="$(command -v harbor)"
         if [ "$real" != "$wrap_dir/harbor" ] && [ -f "$PROOF_HARBOR_PATH_WRAP" ]; then
-            export PROOF_HARBOR_REAL="$real"
-            cp "$PROOF_HARBOR_PATH_WRAP" "$wrap_dir/harbor"
+            {
+                printf '%s\n' '#!/bin/bash' 'set -euo pipefail'
+                printf 'real=%q\n' "$real"
+                printf 'tasks=%q\n' "$PROOF_TASKS"
+                tail -n +2 "$PROOF_HARBOR_PATH_WRAP"
+            } > "$wrap_dir/harbor"
             chmod 0755 "$wrap_dir/harbor"
             export PATH="$wrap_dir:$PATH"
             echo "rlm_fc_in_guest_harbor: wrapping harbor so --path is always \$PROOF_TASKS" >&2

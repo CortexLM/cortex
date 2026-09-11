@@ -224,10 +224,10 @@ done
 printf '%s\n' "$agent" > "${PROOF_WORK_DIR}/harbor.agent"
 printf '%s\n' "$path" > "${PROOF_WORK_DIR}/harbor.path"
 printf '%s\n' "$env" > "${PROOF_WORK_DIR}/harbor.env"
-job="$jobs/job1/hello__1"
+job="$jobs/job1/cargo-flight-dispatch__1"
 mkdir -p "$job"
 cat > "$job/result.json" <<JSON
-{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 1.0}}}
+{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 1.0}}}
 JSON
 EOF
 chmod 0755 "$FAKE_BIN/harbor" "$ADAPTOR/run" "$ADAPTOR/inspect" "$ADAPTOR/harness/run-harbor"
@@ -301,10 +301,10 @@ while [ $# -gt 0 ]; do
         *) shift ;;
     esac
 done
-job="$jobs/job1/hello__1"
+job="$jobs/job1/cargo-flight-dispatch__1"
 mkdir -p "$job/verifier"
 cat > "$job/result.json" <<JSON
-{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 0.6}}}
+{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 0.6}}}
 JSON
 printf '0.6\n' > "$job/verifier/reward.txt"
 echo "harbor: timeout after deadline"
@@ -343,11 +343,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 job="$jobs/job1"
-mkdir -p "$job/hello__1/verifier"
+mkdir -p "$job/cargo-flight-dispatch__1/verifier"
 cat > "$job/result.json" <<JSON
 {"finished_at": null, "n_running": 1, "n_completed": 1}
 JSON
-printf '1.0\n' > "$job/hello__1/verifier/reward.txt"
+printf '1.0\n' > "$job/cargo-flight-dispatch__1/verifier/reward.txt"
 exit 143
 EOF
 chmod 0755 "$FAKE_BIN/harbor"
@@ -437,10 +437,10 @@ SCRIPT_JOBS="$WORKDIR/script-jobs"
 mkdir -p "$SCRIPT_JOBS/recipe"
 cat > "$SCRIPT_JOBS/recipe/run.sh" <<'EOF'
 #!/bin/bash
-job="$PROOF_WORK_DIR/harbor-jobs/job1/hello__1"
+job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
 mkdir -p "$job"
 cat > "$job/result.json" <<JSON
-{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 0.5}}}
+{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 0.5}}}
 JSON
 exit 0
 EOF
@@ -464,10 +464,10 @@ SCRIPT_BOTH="$WORKDIR/script-both"
 mkdir -p "$SCRIPT_BOTH/recipe"
 cat > "$SCRIPT_BOTH/recipe/run.sh" <<'EOF'
 #!/bin/bash
-job="$PROOF_WORK_DIR/harbor-jobs/job1/hello__1"
+job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
 mkdir -p "$job"
 cat > "$job/result.json" <<JSON
-{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 1.0}}}
+{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 1.0}}}
 JSON
 cat > "$PROOF_OUTPUT_DIR/report.json" <<JSON
 {"primary_value": 999999.25, "claim_holds": true}
@@ -499,20 +499,15 @@ mkdir -p "$SCRIPT_POSTAMBLE/recipe"
 cat > "$SCRIPT_POSTAMBLE/recipe/run.sh" <<'EOF'
 #!/bin/bash
 # Harbor finished; postamble then raises (retained x0020).
-i=0
-while [ "$i" -lt 8 ]; do
-    job="$PROOF_WORK_DIR/harbor-jobs/job1/task-${i}__1"
+i=1
+while [ "$i" -le 8 ]; do
+    job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__${i}"
     mkdir -p "$job/verifier"
-    case "$i" in
-        0) printf '1.0\n' > "$job/verifier/reward.txt" ;;
-        1) printf '0.0\n' > "$job/verifier/reward.txt" ;;
-        2) printf '0.0\n' > "$job/verifier/reward.txt" ;;
-        3) printf '0.0\n' > "$job/verifier/reward.txt" ;;
-        4) printf '0.0\n' > "$job/verifier/reward.txt" ;;
-        5) printf '0.0\n' > "$job/verifier/reward.txt" ;;
-        6) printf '0.0\n' > "$job/verifier/reward.txt" ;;
-        7) printf '0.0\n' > "$job/verifier/reward.txt" ;;
-    esac
+    if [ "$i" -eq 1 ]; then
+        printf '1.0\n' > "$job/verifier/reward.txt"
+    else
+        printf '0.0\n' > "$job/verifier/reward.txt"
+    fi
     i=$((i + 1))
 done
 python3 -c 'raise TypeError("postamble")'
@@ -560,13 +555,19 @@ cat > "$SCRIPT_FILTER/recipe/run.sh" <<'EOF'
 set -euo pipefail
 ls "$PROOF_PACK_DIR/$PROOF_PARAM_TASKS_DIR" > "$PROOF_WORK_DIR/script.pack-tasks"
 ls "$PROOF_TASKS" > "$PROOF_WORK_DIR/script.proof-tasks"
+if [ -L "$PROOF_PACK_DIR/$PROOF_PARAM_TASKS_DIR" ]; then
+    echo SYMLINK > "$PROOF_WORK_DIR/script.tasks-link"
+else
+    echo COPY > "$PROOF_WORK_DIR/script.tasks-link"
+fi
+printf '%s\n' "${PROOF_HARBOR_REAL-UNSET}" > "$PROOF_WORK_DIR/script.harbor-real"
 # Bypass: miners historically pass the unfiltered pack tasks dir.
 harbor run --path "$PROOF_PACK_DIR/$PROOF_PARAM_TASKS_DIR" --jobs-dir "$PROOF_WORK_DIR/harbor-jobs" -a x --env docker --yes
 # Write a measured trial so summarize succeeds.
-job="$PROOF_WORK_DIR/harbor-jobs/job1/hello__1"
+job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
 mkdir -p "$job"
 cat > "$job/result.json" <<JSON
-{"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 0.25}}}
+{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 0.25}}}
 JSON
 exit 0
 EOF
@@ -598,6 +599,10 @@ echo "$got_path" | grep -q "tasks-filtered" \
 if echo "$got_path" | grep -q "/pack/tasks$"; then
     fail "harbor wrapper must not pass the unfiltered pack tasks dir"
 fi
+grep -qx "COPY" "$PROOF_WORK_DIR/script.tasks-link" \
+    || fail "pack-view tasks must be a materialized copy, not a symlink to the original pack"
+grep -qx "UNSET" "$PROOF_WORK_DIR/script.harbor-real" \
+    || fail "PROOF_HARBOR_REAL must not be exported to the miner script"
 python3 - "$FILTER_OUT/report.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1]))
@@ -611,7 +616,7 @@ SCRIPT_TIMEOUT="$WORKDIR/script-timeout"
 mkdir -p "$SCRIPT_TIMEOUT/recipe"
 cat > "$SCRIPT_TIMEOUT/recipe/run.sh" <<'EOF'
 #!/bin/bash
-job="$PROOF_WORK_DIR/harbor-jobs/job1/hello__1"
+job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
 mkdir -p "$job/verifier"
 printf '0.4\n' > "$job/verifier/reward.txt"
 exit 143
@@ -631,5 +636,33 @@ assert r["evidence"]["n_measured"] == 1
 assert r["evidence"]["harbor_exit"] == 143
 PY
 pass "script harness timeout still scores verifier/reward.txt"
+
+# --- excluded trial names cannot be scored even if the miner writes them ---
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
+SCRIPT_BYPASS="$WORKDIR/script-bypass"
+mkdir -p "$SCRIPT_BYPASS/recipe"
+cat > "$SCRIPT_BYPASS/recipe/run.sh" <<'EOF'
+#!/bin/bash
+kept="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
+drop="$PROOF_WORK_DIR/harbor-jobs/job1/biped__1"
+mkdir -p "$kept/verifier" "$drop/verifier"
+printf '0.5\n' > "$kept/verifier/reward.txt"
+printf '0.99\n' > "$drop/verifier/reward.txt"
+exit 0
+EOF
+chmod 0755 "$SCRIPT_BYPASS/recipe/run.sh"
+export PROOF_ARTIFACT_DIR="$SCRIPT_BYPASS"
+BY_OUT="$WORKDIR/out-script-bypass"
+mkdir -p "$BY_OUT"
+export PROOF_OUTPUT_DIR="$BY_OUT"
+"$ADAPTOR/harness/run-harbor" || fail "filtered-name scoring must still succeed"
+python3 - "$BY_OUT/report.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["primary_value"] == 0.5, r
+assert r["evidence"]["n_measured"] == 1, r
+assert all("biped" not in t["name"] for t in r["evidence"]["trials"]), r
+PY
+pass "summarize drops excluded task names (biped) even if miner wrote them"
 
 echo "all adaptor tests passed"
