@@ -45,7 +45,6 @@
 )]
 
 mod gate;
-mod promote;
 mod rules;
 mod runner;
 mod state;
@@ -58,14 +57,14 @@ mod vm;
 pub mod fixtures;
 
 pub use gate::{authorize_spend, GateError, SpendToken};
-pub use promote::{decide_promote, KeepReason, PromoteDecision};
+pub use proof_score::{decide_promote, KeepReason, PromoteDecision};
 pub use rules::{
     CheckItem, Checklist, ChecklistError, RuleSet, RuleSource, CHECKLIST_SCHEMA, MAX_EVIDENCE_LEN,
 };
 pub use runner::{
-    ArtifactFile, CustomRunReport, CustomRunRequest, CustomRunner, InspectOutcome, JudgeRef,
-    LogFile, ReportError, RunOutcome, RunnerError, RunnerRegistry, SandboxPolicy,
-    RUN_REPORT_SCHEMA, RUN_REQUEST_SCHEMA,
+    is_staged_artifact_uri, ArtifactFile, ArtifactTarB64, CustomRunReport, CustomRunRequest,
+    CustomRunner, InspectOutcome, JudgeRef, LogFile, ReportError, RunOutcome, RunnerError,
+    RunnerRegistry, SandboxPolicy, RUN_REPORT_SCHEMA, RUN_REQUEST_SCHEMA, STAGED_ARTEFACT_SCHEME,
 };
 pub use state::{
     await_owner_keys, owner_presend, transition, FileKeysProbe, HookError, Lifecycle, NoOwnerHook,
@@ -99,7 +98,6 @@ mod tests {
     fn no_challenge_content_is_compiled_in() {
         let sources = [
             include_str!("gate.rs"),
-            include_str!("promote.rs"),
             include_str!("rules.rs"),
             include_str!("runner.rs"),
             include_str!("state.rs"),

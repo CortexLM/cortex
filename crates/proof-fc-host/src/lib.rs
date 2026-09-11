@@ -11,7 +11,9 @@
 //! 3. execs Firecracker through the jailer ([`jail`]), waits for the RLM
 //!    guest agent on vsock, and stages the owner key material from the
 //!    host's own directory — the control plane never sees it ([`vsock`]);
-//! 4. runs jobs over vsock; while a **paid** job runs it listens for the
+//! 4. runs jobs over vsock (a `proof-artefact://` locator is injected as
+//!    [`HostToRlm::StageArtifact`] from the vault bytes on the job, never a
+//!    miner HTTPS fetch); while a **paid** job runs it listens for the
 //!    RLM's sister request and boots a second microVM with **no network**
 //!    for the miner artefact — for that job's topic, submission, and
 //!    artefact only — then attests that run ([`sister`]);
@@ -34,7 +36,6 @@
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 
 pub mod config;
-pub mod images;
 pub mod jail;
 pub mod net;
 pub mod shell;
@@ -51,8 +52,8 @@ use async_trait::async_trait;
 use proof_rlm::{RetainPolicy, TopicVmSpec, VmJob};
 use proof_vm_agent::{BootedVm, HvError, Hypervisor, JobOutcome};
 use proof_vm_proto::guest::{
-    check_version, HostToRlm, RlmToHost, SisterAnswer, SisterRequest, StagedFile, RLM_JOB_PORT,
-    SISTER_PORT,
+    check_version, HostToRlm, RlmToHost, SisterAnswer, SisterRequest, StagedFile,
+    MAX_STAGED_ARTIFACT_TAR_BYTES, RLM_JOB_PORT, SISTER_PORT,
 };
 use proof_vm_proto::{EvidenceBinding, SisterAttestation, API_VERSION};
 use tokio::net::UnixListener;
@@ -60,9 +61,10 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 pub use config::{EgressAllow, HostConfig, Proto};
-pub use images::ImageCache;
 pub use jail::JailGuard;
 pub use net::NetPlan;
+pub use proof_fc_harvest::images;
+pub use proof_fc_harvest::images::ImageCache;
 pub use shell::{RecordingShell, Shell, SystemShell};
 pub use sister::SisterCtx;
 
@@ -89,6 +91,61 @@ pub struct FirecrackerHypervisor {
 fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Vault bytes a job wants injected over vsock. A `proof-artefact://`
+/// locator with no bytes is refused here — never a miner HTTPS fetch, never
+/// invented content.
+fn staged_artifact_bytes(job: &VmJob) -> Result<Option<(String, Vec<u8>)>, HvError> {
+    let Some(req) = job.request() else {
+        return Ok(None);
+    };
+    let bytes = req
+        .artifact_tar_bytes()
+        .map_err(|e| HvError::Guest(e.to_string()))?;
+    match bytes {
+        Some(b) => Ok(Some((req.artifact_digest.clone(), b))),
+        None if req.is_staged_locator() => Err(HvError::Guest(
+            "staged artefact locator with no vault bytes; refusing to invent".into(),
+        )),
+        None => Ok(None),
+    }
+}
+
+async fn inject_staged_artifact(
+    ch: &mut vsock::GuestChannel,
+    timeout: Duration,
+    digest: &str,
+    tar: &[u8],
+) -> Result<(), HvError> {
+    if tar.is_empty() || tar.len() > MAX_STAGED_ARTIFACT_TAR_BYTES {
+        return Err(HvError::Guest(
+            "staged artefact is empty or oversize; refusing to invent bytes".into(),
+        ));
+    }
+    proof_vm_proto::tar::verify_artifact(tar, digest)
+        .map_err(|e| HvError::Guest(format!("staged artefact does not verify: {e}")))?;
+    ch.send(&HostToRlm::StageArtifact {
+        digest: digest.to_owned(),
+        artifact_tar: StagedFile::new("artifact.tar", tar),
+    })
+    .await?;
+    match ch.recv_within::<RlmToHost>(timeout).await? {
+        RlmToHost::ArtifactStaged { digest: got, bytes }
+            if got.trim().eq_ignore_ascii_case(digest.trim()) && bytes == tar.len() as u64 =>
+        {
+            tracing::info!(digest, bytes, "miner artefact staged into guest");
+            Ok(())
+        }
+        RlmToHost::ArtifactStaged { digest: got, bytes } => Err(HvError::Guest(format!(
+            "guest staged artefact {got} ({bytes} bytes), the host sent {digest} ({} bytes)",
+            tar.len()
+        ))),
+        RlmToHost::Failed { error } => Err(HvError::Guest(format!("artefact staging: {error}"))),
+        other => Err(HvError::Guest(format!(
+            "artefact staging answered {other:?}"
+        ))),
+    }
 }
 
 impl FirecrackerHypervisor {
@@ -428,6 +485,11 @@ impl Hypervisor for FirecrackerHypervisor {
                 .ok_or_else(|| HvError::Backend(format!("vm {} is not running here", vm.vm_id)))?;
             live.root.clone()
         };
+        let inject = staged_artifact_bytes(job)?;
+        let run_job = match &inject {
+            Some(_) => job.clone().without_artifact_tar(),
+            None => job.clone(),
+        };
         // Only a paid job may ask for a sister, and only for its own identities.
         let paid = EvidenceBinding::of_job(job);
         let listener = vsock::listen(&root, SISTER_PORT)?;
@@ -455,10 +517,14 @@ impl Hypervisor for FirecrackerHypervisor {
         let jail_dir = root
             .parent()
             .map_or_else(|| root.clone(), Path::to_path_buf);
+        let inject_timeout = self.ctx.cfg.boot_timeout;
         let answer = async {
             let mut ch = vsock::GuestChannel::connect(&root, RLM_JOB_PORT).await?;
+            if let Some((digest, tar)) = inject.as_ref() {
+                inject_staged_artifact(&mut ch, inject_timeout, digest, tar).await?;
+            }
             ch.send(&HostToRlm::Run {
-                job: Box::new(job.clone()),
+                job: Box::new(run_job),
             })
             .await?;
             proof_fc_harvest::recv_job_or_harvest(ch.recv(), &root, &jail_dir, job, budget).await
@@ -514,6 +580,8 @@ mod tests {
 
     use super::*;
     use proof_rlm::fixtures::{pinned_template, request};
+    use proof_vm_proto::tar::fixtures::{archive, member};
+    use sha2::{Digest, Sha256};
 
     fn cfg(tag: &str) -> HostConfig {
         let mut c = HostConfig::defaults();
@@ -950,6 +1018,136 @@ mod tests {
             shell.calls()
         );
         assert!(hv.alive(&vm).await, "the topic VM outlives its failed job");
+        assert!(hv
+            .teardown(&vm, RetainPolicy::Destroy)
+            .await
+            .expect("teardown"));
+        let _ = std::fs::remove_dir_all(c.chroot_base.parent().unwrap_or(&c.chroot_base));
+    }
+
+    #[test]
+    fn a_staged_locator_without_vault_bytes_refuses_to_invent() {
+        let mut req = request();
+        req.artifact_uri = Some(format!("proof-artefact://{}", req.artifact_digest));
+        let job = VmJob::Evaluate {
+            request: req.clone(),
+            checklist_digest: "c".into(),
+            rules_version: 1,
+        };
+        let err = staged_artifact_bytes(&job).expect_err("no bytes");
+        assert!(err.to_string().contains("refusing to invent"), "{err}");
+        let uri_only = VmJob::Evaluate {
+            request: request(),
+            checklist_digest: "c".into(),
+            rules_version: 1,
+        };
+        assert_eq!(staged_artifact_bytes(&uri_only).expect("uri-only"), None);
+        let tar = archive(&[member("recipe/run.sh", b'0', b"echo hi\n")]);
+        let digest = hex::encode(Sha256::digest(&tar));
+        let mut uploaded = request();
+        uploaded.artifact_digest = digest.clone();
+        uploaded.artifact_uri = Some(format!("proof-artefact://{digest}"));
+        uploaded = uploaded.with_artifact_tar(&tar);
+        let job = VmJob::Evaluate {
+            request: uploaded,
+            checklist_digest: "c".into(),
+            rules_version: 1,
+        };
+        let (got, bytes) = staged_artifact_bytes(&job).expect("bytes").expect("some");
+        assert_eq!(got, digest);
+        assert_eq!(bytes, tar);
+    }
+
+    /// Host injects vault bytes over vsock (`StageArtifact` then `Run`) and the
+    /// guest never sees a miner HTTPS fetch. Stand-in + fake guest, no FC.
+    #[tokio::test]
+    async fn staged_artefact_is_injected_over_vsock_before_run() {
+        use proof_vm_proto::guest::{read_frame, write_frame};
+        let c = stand_in_host("inject");
+        let tar = archive(&[member("recipe/run.sh", b'0', b"echo hi\n")]);
+        let digest = hex::encode(Sha256::digest(&tar));
+        let mut req = request();
+        req.artifact_digest = digest.clone();
+        req.artifact_uri = Some(format!("proof-artefact://{digest}"));
+        req = req.with_artifact_tar(&tar);
+        let spec = TopicVmSpec::for_topic(&req.topic_id, pinned_template(), req.sandbox.clone());
+        let shell = Arc::new(RecordingShell::default());
+        let hv = FirecrackerHypervisor::with_shell(c.clone(), shell.clone()).expect("config");
+        let guest = tokio::spawn({
+            let root = c.jail_root("topic-a-0005");
+            let want = tar.clone();
+            let want_digest = digest.clone();
+            let submission = req.submission_digest.clone();
+            async move {
+                let listener = bind_when_ready(&root).await;
+                let mut stream = accept_vsock(&listener).await;
+                let hello: HostToRlm = read_frame(&mut stream).await.expect("hello");
+                assert!(matches!(hello, HostToRlm::Hello { .. }));
+                write_frame(
+                    stream.get_mut(),
+                    &RlmToHost::Ready {
+                        agent: "fake-rlm-guest-inject".into(),
+                        api_version: API_VERSION,
+                    },
+                )
+                .await
+                .expect("ready");
+                let mut stream = accept_vsock(&listener).await;
+                let HostToRlm::StageArtifact {
+                    digest: got,
+                    artifact_tar,
+                } = read_frame(&mut stream).await.expect("inject")
+                else {
+                    panic!("expected stage_artifact");
+                };
+                assert_eq!(got, want_digest);
+                assert_eq!(artifact_tar.bytes().expect("b64"), want);
+                write_frame(
+                    stream.get_mut(),
+                    &RlmToHost::ArtifactStaged {
+                        digest: got.clone(),
+                        bytes: want.len() as u64,
+                    },
+                )
+                .await
+                .expect("staged");
+                let HostToRlm::Run { job } = read_frame(&mut stream).await.expect("job") else {
+                    panic!("expected a job");
+                };
+                assert!(
+                    job.request()
+                        .is_some_and(|r| r.artifact_tar.is_none() && r.is_staged_locator()),
+                    "Run must not duplicate the inject payload: {job:?}"
+                );
+                let rules = proof_rlm::fixtures::rules();
+                write_frame(
+                    stream.get_mut(),
+                    &RlmToHost::Done {
+                        output: proof_rlm::VmJobOutput::Inspected(proof_rlm::InspectOutcome {
+                            checklist: proof_rlm::Checklist::new(&rules, &submission, &got),
+                            artifact: vec![],
+                        }),
+                    },
+                )
+                .await
+                .expect("done");
+                *job
+            }
+        });
+        let vm = hv
+            .boot_verified("topic-a-0005", &spec, c.image_dir.join("rlm.ext4"))
+            .await
+            .expect("boot");
+        let job = VmJob::Inspect {
+            request: req.clone(),
+            rules: proof_rlm::fixtures::rules(),
+        };
+        hv.run_job(&vm, &job).await.expect("inject + inspect");
+        let handed = guest.await.expect("guest");
+        assert!(
+            matches!(&handed, VmJob::Inspect { request, .. } if request.artifact_uri == req.artifact_uri && request.artifact_tar.is_none()),
+            "guest was handed the staged locator without vault bytes in Run"
+        );
         assert!(hv
             .teardown(&vm, RetainPolicy::Destroy)
             .await

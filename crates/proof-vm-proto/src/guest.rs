@@ -6,7 +6,7 @@
 //!
 //! | Port | Direction | Purpose |
 //! |------|-----------|---------|
-//! | [`RLM_JOB_PORT`] | host → RLM guest | [`HostToRlm`] / [`RlmToHost`]: hello, secret staging, pack staging (experiment VMs), jobs |
+//! | [`RLM_JOB_PORT`] | host → RLM guest | [`HostToRlm`] / [`RlmToHost`]: hello, secret staging, pack staging (experiment VMs), artefact inject (`proof-artefact://`), jobs |
 //! | [`SISTER_PORT`] | RLM guest → host | [`SisterRequest`] / [`SisterAnswer`]: "run this artefact in a sister guest" |
 //! | [`MINER_PORT`] | host → miner guest | [`HostToMiner`] / [`MinerToHost`]: the run itself |
 //!
@@ -43,6 +43,10 @@ pub const MAX_FRAME_BYTES: u32 = 256 * 1024 * 1024;
 /// for the base64 envelope). Bigger packs need a block-device staging path,
 /// which this protocol version does not have; the host refuses them by name.
 pub const MAX_PACK_TAR_BYTES: usize = 160 * 1024 * 1024;
+/// Largest miner artefact the host injects over vsock for a staged
+/// `proof-artefact://` upload (one [`HostToRlm::StageArtifact`] frame).
+/// Matches the gateway intake cap (`proof_store::MAX_ARTEFACT_BYTES`).
+pub const MAX_STAGED_ARTIFACT_TAR_BYTES: usize = 5 * 1024 * 1024;
 
 /// One file staged into a guest (owner key material, artefact members, outputs).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +112,19 @@ pub enum HostToRlm {
         /// The pack tar, verbatim (`StagedFile` named `pack.tar`).
         pack_tar: StagedFile,
     },
+    /// Miner artefact the control plane staged at intake (`proof-artefact://`
+    /// locator). The host read the vault bytes, verified them against
+    /// `digest` (64 hex, the job's `artifact_digest`), and injects them
+    /// verbatim so the guest must **not** HTTP-fetch that scheme. Sent on
+    /// the job connection before [`HostToRlm::Run`]; a guest that got none
+    /// and whose job names `proof-artefact://` fails closed (never invents
+    /// bytes, never fetches). URI-only jobs (`https://…`) skip this frame.
+    StageArtifact {
+        /// 64-hex sha256 the tar must hash to (`artifact_digest`).
+        digest: String,
+        /// The artefact tar, verbatim (`StagedFile` named `artifact.tar`).
+        artifact_tar: StagedFile,
+    },
     /// Run one job. Answered by [`RlmToHost::Done`] or [`RlmToHost::Failed`].
     Run {
         /// The work (public data only).
@@ -139,6 +156,14 @@ pub enum RlmToHost {
         /// Bytes of the tar as received.
         bytes: u64,
     },
+    /// Answer to `StageArtifact`: the artefact verified against `digest`
+    /// (uncompressed tar with content) and is held for the following job.
+    ArtifactStaged {
+        /// 64-hex sha256 the guest verified (must echo the request).
+        digest: String,
+        /// Bytes of the tar as received.
+        bytes: u64,
+    },
     /// Job finished.
     Done {
         /// The document. Paid outputs are re-stamped by the host.
@@ -156,16 +181,17 @@ pub enum RlmToHost {
 /// ships the bytes so the sister needs no network.
 ///
 /// **Artefact identity is the served file, verbatim** ([`crate::tar`]). The
-/// guest fetched `artifact_uri`, ran [`crate::tar::verify_artifact`] on the
-/// bytes as received against the job's `artifact_digest`, inspected a copy,
-/// and puts **those exact bytes** in `artifact_tar`. It must not re-tar the
-/// tree: tar metadata and member order change under re-encoding even when
-/// every file is identical, so the host's re-hash would refuse it. A fetch
-/// that fails or does not verify is a failed job (`RlmToHost::Failed`),
-/// never a substitute artefact: the host refuses a `SisterRequest` whose
-/// tar does not hash to the paid digest, is compressed, is not a tar, or
-/// carries no file content — a digest that matches an empty tree is not
-/// evidence of anything.
+/// guest obtained the bytes — HTTP `artifact_uri` on the URI-only path, or
+/// a [`HostToRlm::StageArtifact`] inject for `proof-artefact://` — ran
+/// [`crate::tar::verify_artifact`] on those bytes against the job's
+/// `artifact_digest`, inspected a copy, and puts **those exact bytes** in
+/// `artifact_tar`. It must not re-tar the tree: tar metadata and member
+/// order change under re-encoding even when every file is identical, so the
+/// host's re-hash would refuse it. A fetch or inject that fails or does not
+/// verify is a failed job (`RlmToHost::Failed`), never a substitute
+/// artefact: the host refuses a `SisterRequest` whose tar does not hash to
+/// the paid digest, is compressed, is not a tar, or carries no file content
+/// — a digest that matches an empty tree is not evidence of anything.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SisterRequest {
     /// Must equal the RLM VM's bound topic.
@@ -525,5 +551,35 @@ mod tests {
         // base64 grows bytes by 4/3; the cap must still encode as one frame.
         let envelope = MAX_PACK_TAR_BYTES / 3 * 4 + 1024;
         assert!(envelope < MAX_FRAME_BYTES as usize, "{envelope}");
+        assert_eq!(MAX_STAGED_ARTIFACT_TAR_BYTES, 5 * 1024 * 1024);
+        let staged_envelope = MAX_STAGED_ARTIFACT_TAR_BYTES / 3 * 4 + 1024;
+        assert!(
+            staged_envelope < MAX_FRAME_BYTES as usize,
+            "{staged_envelope}"
+        );
+    }
+
+    /// Staged-upload inject is one frame each way, names the digest, and
+    /// never carries a host vault path.
+    #[test]
+    fn artifact_staging_frames_round_trip_and_name_the_digest() {
+        let digest = "ab".repeat(32);
+        let stage = HostToRlm::StageArtifact {
+            digest: digest.clone(),
+            artifact_tar: StagedFile::new("artifact.tar", b"artefact bytes"),
+        };
+        let json = serde_json::to_string(&stage).expect("json");
+        assert!(json.contains("\"type\":\"stage_artifact\""), "{json}");
+        assert!(
+            !json.contains("/run/proof"),
+            "no host vault path travels: {json}"
+        );
+        let back: HostToRlm = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back, stage);
+        let staged = RlmToHost::ArtifactStaged { digest, bytes: 14 };
+        let json = serde_json::to_string(&staged).expect("json");
+        assert!(json.contains("\"type\":\"artifact_staged\""), "{json}");
+        let back: RlmToHost = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back, staged);
     }
 }

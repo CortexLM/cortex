@@ -68,8 +68,9 @@ mod tests {
     use proof_rlm::fixtures::{pinned_template, request, rules, token_for};
     use proof_rlm::{RetainPolicy, TopicVmSpec, VmJob, VmJobOutput};
     use proof_vm_proto::{
-        paths, AgentHealth, CreateVmRequest, ErrorBody, ErrorCode, RunJobRequest, RunJobResponse,
-        TeardownRequest, TeardownResponse, VmRecord, VmState,
+        guest::MAX_STAGED_ARTIFACT_TAR_BYTES, paths, AgentHealth, CreateVmRequest, ErrorBody,
+        ErrorCode, RunJobRequest, RunJobResponse, TeardownRequest, TeardownResponse, VmRecord,
+        VmState, JOB_BODY_LIMIT,
     };
     use tower::ServiceExt;
 
@@ -108,6 +109,20 @@ mod tests {
         let parsed = serde_json::from_slice(&bytes)
             .unwrap_or_else(|e| panic!("{status} body {:?}: {e}", String::from_utf8_lossy(&bytes)));
         (status, parsed)
+    }
+
+    async fn post_bytes(app: &axum::Router, path: &str, body: Vec<u8>) -> (StatusCode, Vec<u8>) {
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .expect("request");
+        let resp = app.clone().oneshot(req).await.expect("response");
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        (status, bytes.to_vec())
     }
 
     fn spec() -> TopicVmSpec {
@@ -282,6 +297,65 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_near_cap_staged_artefact_job_is_not_413() {
+        let hv = FakeHypervisor::new(0.8);
+        let (app, _) = app(hv.clone(), "job-body-limit");
+        let rec = create(&app).await;
+        let tar = vec![0x61u8; MAX_STAGED_ARTIFACT_TAR_BYTES];
+        let req = request().with_artifact_tar(&tar);
+        let body = serde_json::to_vec(&RunJobRequest {
+            topic_id: req.topic_id.clone(),
+            job: VmJob::Inspect {
+                request: req.clone(),
+                rules: rules(),
+            },
+        })
+        .expect("json");
+        assert!(
+            body.len() > 2 * 1024 * 1024,
+            "payload must exceed Axum's default 2 MiB JSON limit: {}",
+            body.len()
+        );
+        assert!(
+            body.len() <= JOB_BODY_LIMIT,
+            "encoded 5 MiB artefact plus envelope must fit JOB_BODY_LIMIT: {} > {JOB_BODY_LIMIT}",
+            body.len()
+        );
+        let (status, bytes) = post_bytes(&app, &paths::vm_jobs(&rec.handle.vm_id), body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "near-cap staged artefact must reach run_job, not 413: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let out: RunJobResponse = serde_json::from_slice(&bytes).expect("response");
+        assert!(matches!(out.output, VmJobOutput::Inspected(_)));
+        let jobs = hv.jobs();
+        assert_eq!(jobs.len(), 1, "run_job must run once");
+        let got = match &jobs[0].1 {
+            VmJob::Inspect { request, .. } => request.artifact_tar_bytes().expect("b64"),
+            other => panic!("expected inspect, got {other:?}"),
+        };
+        assert_eq!(
+            got.as_ref().map(Vec::len),
+            Some(MAX_STAGED_ARTIFACT_TAR_BYTES)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_job_body_over_the_limit_is_413() {
+        let (app, _) = app(FakeHypervisor::new(0.5), "job-body-over");
+        let rec = create(&app).await;
+        let (status, _) = post_bytes(
+            &app,
+            &paths::vm_jobs(&rec.handle.vm_id),
+            vec![b'x'; JOB_BODY_LIMIT + 1],
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     /// A job or teardown that names another topic than the VM's never reaches

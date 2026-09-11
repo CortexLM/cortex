@@ -6,7 +6,9 @@
 //! the owner key material (kept under a tmpfs directory, never echoed),
 //! `StagePack` hands an experiment VM the topic-pinned pack (verified with
 //! `proof_vm_proto::tar::verify_artifact` before it is unpacked on the
-//! writable disk), and `Run` carries one job. The agent is generic: it knows
+//! writable disk), `StageArtifact` injects a miner upload (`proof-artefact://`)
+//! so the guest must not HTTP-fetch that scheme, and `Run` carries one job.
+//! The agent is generic: it knows
 //! the protocol, the filesystem layout, and how to **exec an operator
 //! adaptor** — never a benchmark, a dataset, a model, or a result.
 //!
@@ -53,7 +55,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 
 pub use runner::{JobKind, RunnerReport};
-pub use staging::StagedPack;
+pub use staging::{StagedArtifact, StagedPack};
 
 /// Agent name reported on `Ready`.
 pub const AGENT_NAME: &str = concat!("proof-vm-guest-agent/", env!("CARGO_PKG_VERSION"));
@@ -109,6 +111,8 @@ pub struct GuestAgent {
     cfg: GuestConfig,
     binding: Mutex<Option<Binding>>,
     pack: Mutex<Option<StagedPack>>,
+    /// Miner artefact injected for the next job (`proof-artefact://`).
+    artifact: Mutex<Option<StagedArtifact>>,
     /// One job at a time (the host enforces the same).
     job: Mutex<()>,
     seq: std::sync::atomic::AtomicU64,
@@ -122,6 +126,7 @@ impl GuestAgent {
             cfg,
             binding: Mutex::new(None),
             pack: Mutex::new(None),
+            artifact: Mutex::new(None),
             job: Mutex::new(()),
             seq: std::sync::atomic::AtomicU64::new(1),
         })
@@ -207,6 +212,23 @@ impl GuestAgent {
                     },
                 }
             }
+            HostToRlm::StageArtifact {
+                digest,
+                artifact_tar,
+            } => match staging::stage_artifact(&digest, &artifact_tar) {
+                Ok(art) => {
+                    tracing::info!(digest = %art.digest, bytes = art.bytes.len(), "miner artefact staged");
+                    let answer = RlmToHost::ArtifactStaged {
+                        digest: art.digest.clone(),
+                        bytes: art.bytes.len() as u64,
+                    };
+                    *self.artifact.lock().await = Some(art);
+                    answer
+                }
+                Err(e) => RlmToHost::Failed {
+                    error: format!("stage artefact: {e}"),
+                },
+            },
             HostToRlm::Run { job } => {
                 let _one = self.job.lock().await;
                 match self.run(*job).await {
@@ -239,20 +261,31 @@ impl GuestAgent {
 
     async fn run(&self, job: VmJob) -> Result<VmJobOutput, String> {
         self.check_topic(job.topic_id()).await?;
+        // One inject per job: the host stages then Runs on this connection.
+        let injected = self.artifact.lock().await.take();
         match job {
             VmJob::Baseline { request } => {
-                let report = self.paid(&request, JobKind::Baseline).await?;
+                let report = self
+                    .paid(&request, JobKind::Baseline, injected.as_ref())
+                    .await?;
                 Ok(VmJobOutput::Baseline(report.report))
             }
             VmJob::Evaluate { request, .. } => {
-                let run = self.paid(&request, JobKind::Evaluate).await?;
+                let run = self
+                    .paid(&request, JobKind::Evaluate, injected.as_ref())
+                    .await?;
                 Ok(VmJobOutput::Evaluated(run))
             }
             VmJob::Inspect { request, rules } => {
                 let work = self.work_dir(JobKind::Inspect);
                 let adaptor = runner::Adaptor::resolve(&self.cfg.runners_dir, &request)?;
-                let artifact =
-                    fetch::fetch_artifact(&request, &work, self.cfg.allow_plain_http).await?;
+                let artifact = fetch::fetch_artifact(
+                    &request,
+                    &work,
+                    self.cfg.allow_plain_http,
+                    injected.as_ref(),
+                )
+                .await?;
                 let out = runner::inspect(
                     &self.cfg,
                     &adaptor,
@@ -287,6 +320,7 @@ impl GuestAgent {
         &self,
         request: &CustomRunRequest,
         kind: JobKind,
+        injected: Option<&StagedArtifact>,
     ) -> Result<proof_rlm::RunOutcome, String> {
         let adaptor = runner::Adaptor::resolve(&self.cfg.runners_dir, request)?;
         let pack = self.pack.lock().await.clone();
@@ -294,18 +328,19 @@ impl GuestAgent {
         let work = self.work_dir(kind);
         let artifact = match kind {
             JobKind::Evaluate => {
-                let dir = fetch::fetch_artifact(request, &work, self.cfg.allow_plain_http)
-                    .await?
-                    .ok_or_else(|| {
-                        "evaluate needs the miner's artifact_uri; the request carries none"
-                            .to_owned()
-                    })?;
+                let dir =
+                    fetch::fetch_artifact(request, &work, self.cfg.allow_plain_http, injected)
+                        .await?
+                        .ok_or_else(|| {
+                            "evaluate needs the miner's artifact_uri; the request carries none"
+                                .to_owned()
+                        })?;
                 Some(dir)
             }
             // The baseline is the topic's own reference run: the pack is its
             // input, an artefact only if the topic serves one.
             JobKind::Baseline | JobKind::Inspect | JobKind::ProposeRules => {
-                fetch::fetch_artifact(request, &work, self.cfg.allow_plain_http).await?
+                fetch::fetch_artifact(request, &work, self.cfg.allow_plain_http, injected).await?
             }
         };
         runner::run_paid(
