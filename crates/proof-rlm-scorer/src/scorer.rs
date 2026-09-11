@@ -441,24 +441,29 @@ impl RlmScorer {
         declared_flops: u64,
         claim: &str,
         miner_env: &MinerEnv,
+        artifact_tar: Option<&[u8]>,
     ) -> Result<ProofEvalDocument, EvalError> {
         let custom_id = topic.metric.custom_id.trim().to_owned();
         let runner = self
             .registry
             .resolve(&custom_id)
             .map_err(|e| map_runner(&custom_id, e))?;
-        // Custom intake now accepts an upload (preferred) or a miner URI
-        // (compat). Evaluate still needs a locator on the request: upload
-        // path records `proof-artefact://{digest}` (vault on the CP). Guest
-        // fetch of that scheme is FIXME(PR-B) vsock inject — URI-only
-        // still GETs https:// inside the VM (64 MiB cap, unchanged).
+        // Custom intake accepts an upload (preferred) or a miner URI (compat).
+        // Upload records `proof-artefact://{digest}` and the vault bytes
+        // travel here for vsock inject. URI-only still GETs https:// inside
+        // the VM (64 MiB cap, unchanged).
         let Some(artifact_uri) = artifact_uri.map(str::trim).filter(|u| !u.is_empty()) else {
             return Err(EvalError::Backend(
                 "custom submission carries no artefact (upload or artifact_uri)".into(),
             ));
         };
+        if proof_rlm::is_staged_artifact_uri(artifact_uri) && artifact_tar.is_none() {
+            return Err(EvalError::Backend(
+                "staged artefact locator with no vault bytes; refusing to invent".into(),
+            ));
+        }
         let rules = self.rules_for(topic).await?;
-        let req = CustomRunRequest::from_topic(
+        let mut req = CustomRunRequest::from_topic(
             topic,
             pin,
             offer,
@@ -471,10 +476,10 @@ impl RlmScorer {
         )
         .map_err(|e| map_runner(&custom_id, e))?
         .with_executor_plan(plan.deadline_s, &plan.config_commitment)
-        // The miner's own BYOK env reaches the guest that runs their code.
-        // The judge offer above carries no key: the operator's inference
-        // credential is staged on the KVM host and never on this path.
         .with_miner_env(miner_env.clone());
+        if let Some(bytes) = artifact_tar {
+            req = req.with_artifact_tar(bytes);
+        }
         let inspected = runner
             .inspect(&req, &rules)
             .await
@@ -688,6 +693,7 @@ impl LiveScorer for RlmScorer {
         _holdout: &[HoldoutRecord],
         claim: &str,
         miner_env: &MinerEnv,
+        artifact_tar: Option<&[u8]>,
     ) -> Result<ProofEvalDocument, EvalError> {
         self.ready_for_topic(topic)?;
         let lease = self.lease(&topic.id).await;
@@ -707,6 +713,7 @@ impl LiveScorer for RlmScorer {
                 declared_flops,
                 claim,
                 miner_env,
+                artifact_tar,
             )
             .await;
         match &out {

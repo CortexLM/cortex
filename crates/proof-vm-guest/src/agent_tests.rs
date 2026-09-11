@@ -330,6 +330,86 @@ echo '{"primary_value": 0.5, "flops_used": 7}' > "$PROOF_OUTPUT_DIR/report.json"
     let _ = std::fs::remove_dir_all(&r);
 }
 
+/// Upload path: the host injects vault bytes over vsock; the guest skips
+/// HTTP and still verifies digest + tar before the adaptor runs.
+#[tokio::test]
+async fn a_staged_inject_skips_http_and_verifies_the_digest() {
+    let r = root("inject");
+    let a = agent(&r);
+    hello(&a).await;
+    let (pack_tar, pack_digest) = pack();
+    stage(&a, &pack_tar, &pack_digest).await;
+    let artefact = archive(&[member("recipe/run.sh", b'0', b"echo hi\n")]);
+    let digest = hex::encode(Sha256::digest(&artefact));
+    let mut eval = req_for(&pack_digest);
+    eval.artifact_digest = digest.clone();
+    eval.artifact_uri = Some(format!("proof-artefact://{digest}"));
+    install(
+        &r,
+        "run",
+        r#"
+test -f "$PROOF_ARTIFACT_DIR/recipe/run.sh"
+test -f "$PROOF_WORK_DIR/artifact.tar"
+echo '{"primary_value": 0.61, "flops_used": 3}' > "$PROOF_OUTPUT_DIR/report.json"
+"#,
+    );
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::Evaluate {
+                request: eval.clone(),
+                checklist_digest: "c".into(),
+                rules_version: 1,
+            }),
+        })
+        .await,
+    );
+    assert!(
+        err.contains("needs a host inject") || err.contains("proof-artefact"),
+        "{err}"
+    );
+    let staged = a
+        .handle(HostToRlm::StageArtifact {
+            digest: digest.clone(),
+            artifact_tar: StagedFile::new("artifact.tar", &artefact),
+        })
+        .await;
+    assert_eq!(
+        staged,
+        RlmToHost::ArtifactStaged {
+            digest: digest.clone(),
+            bytes: artefact.len() as u64
+        }
+    );
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::Evaluate {
+                request: eval.clone(),
+                checklist_digest: "c".into(),
+                rules_version: 1,
+            }),
+        })
+        .await;
+    let RlmToHost::Done {
+        output: VmJobOutput::Evaluated(run),
+    } = out
+    else {
+        panic!("expected an evaluated run, got {out:?}");
+    };
+    run.report.verify(&eval).expect("bound");
+    assert!((run.report.primary_value - 0.61).abs() < 1e-12);
+    let mismatch = a
+        .handle(HostToRlm::StageArtifact {
+            digest: "00".repeat(32),
+            artifact_tar: StagedFile::new("artifact.tar", &artefact),
+        })
+        .await;
+    assert!(
+        matches!(mismatch, RlmToHost::Failed { error } if error.contains("does not verify")),
+        "{mismatch:?}"
+    );
+    let _ = std::fs::remove_dir_all(&r);
+}
+
 /// A run that writes no report, a non-finite value, or outlives its deadline
 /// is a failed job — with the (redacted) tail as the reason, never a number.
 #[tokio::test]

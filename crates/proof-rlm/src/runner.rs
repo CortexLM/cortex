@@ -24,6 +24,51 @@ use crate::rules::{Checklist, RuleSet};
 /// Only accepted `schema_version` of a run request.
 pub const RUN_REQUEST_SCHEMA: u32 = 1;
 
+/// Internal locator scheme for artefacts staged at gateway intake
+/// (`proof_store::STAGED_ARTEFACT_SCHEME`). The KVM host injects vault
+/// bytes over vsock; the guest must not HTTP-fetch this scheme.
+pub const STAGED_ARTEFACT_SCHEME: &str = "proof-artefact";
+
+/// Whether `uri` is a staged-vault locator (not a miner-hosted fetch).
+#[must_use]
+pub fn is_staged_artifact_uri(uri: &str) -> bool {
+    uri.trim()
+        .to_ascii_lowercase()
+        .starts_with(&format!("{STAGED_ARTEFACT_SCHEME}://"))
+}
+
+/// Exact uploaded artefact bytes on the wire (standard base64). `Debug`
+/// never prints the payload.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactTarB64(String);
+
+impl ArtifactTarB64 {
+    /// Encode `bytes`.
+    #[must_use]
+    pub fn encode(bytes: &[u8]) -> Self {
+        Self(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            bytes,
+        ))
+    }
+
+    /// Decode the bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`RunnerError::Backend`] on bad base64.
+    pub fn decode(&self) -> Result<Vec<u8>, RunnerError> {
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &self.0)
+            .map_err(|e| RunnerError::Backend(format!("staged artefact: {e}")))
+    }
+}
+
+impl std::fmt::Debug for ArtifactTarB64 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ArtifactTarB64(<redacted>)")
+    }
+}
+
 /// Only accepted `schema_version` of a run report.
 pub const RUN_REPORT_SCHEMA: u32 = 1;
 
@@ -75,8 +120,16 @@ pub struct CustomRunRequest {
     /// inside the topic VM, verifies the bytes as received against
     /// `artifact_digest`, and forwards them **verbatim** to the sister (never
     /// a re-tar of the tree); it is never trusted beyond that. Empty /
-    /// whitespace is `None`.
+    /// whitespace is `None`. A `proof-artefact://{digest}` locator means
+    /// the miner uploaded bytes: the host injects [`Self::artifact_tar`]
+    /// over vsock and the guest must not HTTP-fetch this scheme.
     pub artifact_uri: Option<String>,
+    /// Exact uploaded artefact bytes when the miner posted them (gateway
+    /// vault). Present only for `proof-artefact://` locators. The KVM host
+    /// injects these over vsock before `Run`; URI-only submits leave this
+    /// `None` and the guest still GETs `https://` (64 MiB cap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_tar: Option<ArtifactTarB64>,
     /// Miner claim (English).
     pub claim: String,
     /// FLOPs one run may spend (the topic's signed `flops_budget`). Carried
@@ -182,6 +235,7 @@ impl CustomRunRequest {
                 .map(str::trim)
                 .filter(|u| !u.is_empty())
                 .map(str::to_owned),
+            artifact_tar: None,
             claim: claim.to_owned(),
             flops_budget: topic.flops_budget,
             declared_flops,
@@ -232,6 +286,45 @@ impl CustomRunRequest {
     pub fn with_miner_env(mut self, env: MinerEnv) -> Self {
         self.miner_env = env;
         self
+    }
+
+    /// Bind uploaded artefact bytes (gateway vault) for vsock inject.
+    ///
+    /// Empty input is ignored — never invent bytes. The host still verifies
+    /// the tar against `artifact_digest` before any guest sees it.
+    #[must_use]
+    pub fn with_artifact_tar(mut self, bytes: &[u8]) -> Self {
+        if !bytes.is_empty() {
+            self.artifact_tar = Some(ArtifactTarB64::encode(bytes));
+        }
+        self
+    }
+
+    /// Drop vault bytes so the `Run` frame does not duplicate an inject.
+    #[must_use]
+    pub fn without_artifact_tar(mut self) -> Self {
+        self.artifact_tar = None;
+        self
+    }
+
+    /// Whether the locator is a staged-vault scheme the guest must not fetch.
+    #[must_use]
+    pub fn is_staged_locator(&self) -> bool {
+        self.artifact_uri
+            .as_deref()
+            .is_some_and(is_staged_artifact_uri)
+    }
+
+    /// Decoded vault bytes, if this request carries them.
+    ///
+    /// # Errors
+    ///
+    /// [`RunnerError::Backend`] on bad base64.
+    pub fn artifact_tar_bytes(&self) -> Result<Option<Vec<u8>>, RunnerError> {
+        self.artifact_tar
+            .as_ref()
+            .map(ArtifactTarB64::decode)
+            .transpose()
     }
 
     /// Whether the signed topic also forwards the miner env into the sister
@@ -559,6 +652,25 @@ mod tests {
         )
         .expect("request");
         assert_eq!(blank.artifact_uri, None, "whitespace is no locator");
+        assert!(blank.artifact_tar.is_none());
+        let staged = request().with_artifact_tar(b"recipe-tar-bytes");
+        assert!(staged.artifact_tar.is_some());
+        assert_eq!(
+            staged.artifact_tar_bytes().expect("b64"),
+            Some(b"recipe-tar-bytes".to_vec())
+        );
+        assert!(
+            format!("{staged:?}").contains("ArtifactTarB64(<redacted>)"),
+            "vault bytes never debug-print"
+        );
+        assert!(!format!("{staged:?}").contains("recipe-tar-bytes"));
+        let uri = format!("{STAGED_ARTEFACT_SCHEME}://{}", "ab".repeat(32));
+        assert!(is_staged_artifact_uri(&uri));
+        assert!(!is_staged_artifact_uri("https://example.invalid/a.tar"));
+        let mut loc = request();
+        loc.artifact_uri = Some(uri);
+        assert!(loc.is_staged_locator());
+        assert!(!request().is_staged_locator());
     }
 
     /// Custom / agent reports do not require a FLOP measurement and do not

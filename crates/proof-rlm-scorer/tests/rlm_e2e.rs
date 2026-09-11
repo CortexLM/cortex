@@ -687,6 +687,7 @@ async fn score(d: &Direct, label: &str) -> Result<ProofEvalDocument, EvalError> 
             &[],
             "placeholder claim",
             &proof_rlm::MinerEnv::new(),
+            None,
         )
         .await
 }
@@ -842,6 +843,7 @@ async fn a_worse_run_never_displaces_the_champion_under_the_topic_lease() {
                 &[],
                 "placeholder claim",
                 &proof_rlm::MinerEnv::new(),
+                None,
             )
             .await
     });

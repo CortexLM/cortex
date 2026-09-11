@@ -414,7 +414,8 @@ pub const ARTEFACT_STAGING_DIR_ENV: &str = "PROOF_ARTEFACT_STAGING_DIR";
 pub const DEFAULT_ARTEFACT_STAGING_DIR: &str = "/run/proof/artefact-stage";
 
 /// Internal locator recorded on a row when the miner uploaded bytes.
-/// Evaluate (PR B) reads the vault; the guest must not fetch this scheme.
+/// Evaluate reads the vault and the KVM host injects the bytes over vsock;
+/// the guest must not HTTP-fetch this scheme.
 pub const STAGED_ARTEFACT_SCHEME: &str = "proof-artefact";
 
 /// `proof-artefact://{digest}` for a 64-hex digest.
@@ -439,7 +440,7 @@ pub fn is_staged_artefact_uri(uri: &str) -> bool {
 /// One `0700` directory per artefact digest, one `0600` file per submit
 /// nonce (the request's unique token, known before the row id is minted).
 /// Bytes never go in postgres or on the public row; [`Submission::artifact_staged`]
-/// holds the host path for evaluate / PR B vsock inject.
+/// holds the host path for evaluate vsock inject.
 #[derive(Debug, Clone, Default)]
 pub struct ArtefactVault {
     root: Option<PathBuf>,

@@ -196,7 +196,9 @@ Build a recipe the judge can re-run: code, lockfile, and entrypoint. Harvest
 `nll` / `throughput` topics still score under the topic's FLOP (and for
 throughput, wall) budget; custom / agent topics do not. Hash that tree. That hash
 is `artifact_digest`. Upload the uncompressed tar (≤5 MiB) as multipart
-part `artifact` — preferred on custom / `tbench`. `artifact_uri` is an
+part `artifact` — preferred on custom / `tbench`. That upload is the
+evaluate path: the gateway stages the bytes and the KVM host injects them
+into the guest over vsock (no miner HTTPS). `artifact_uri` is an
 optional compat locator (git URL, object URL) for the same bytes: optional
 on `nll` / `throughput`, and optional on custom topics when you upload.
 A custom topic with neither upload nor URI is a **400** `artifact required`.
@@ -548,9 +550,10 @@ by the runner registered on the host under `metric.custom_id`; nothing
 about it is compiled into the network. The topic's RLM runs in its own
 Firecracker microVM on a dedicated KVM host, and **your code runs in a
 separate ("sister") Firecracker guest beside it that has no network
-interface**: the RLM fetches the file at `artifact_uri`, checks it against
-your `artifact_digest`, inspects it, and ships **those exact bytes** into the
-sister over vsock. Plan for an offline run —
+interface**: the RLM obtains the artefact (HTTP `artifact_uri` on the
+URI-only path, or a vsock inject of gateway-staged bytes when you uploaded),
+checks it against your `artifact_digest`, inspects it, and ships **those
+exact bytes** into the sister over vsock. Plan for an offline run —
 nothing your code does at run time can reach the internet, the RLM, or the
 host. The host (not the RLM) stamps `sandboxed` on your report from the
 guest it booted, and the `flops_used` your verdict carries is what that
@@ -571,7 +574,8 @@ baked into the VM image by the operator — nothing about it lives in the
 network repo), against the experiment pack the topic pins by digest —
 16 vCPU / 32 GiB RAM unless the topic asks for less (that lock is a hard
 maximum on every host), with at least 16 GiB of writable disk (32 GiB by
-default). Upload the recipe at the gateway (`--artifact`, ≤5 MiB). A
+default). Upload the recipe at the gateway (`--artifact`, ≤5 MiB): evaluate
+injects those staged bytes over vsock, so you do not host a fetch URL. A
 miner-hosted `artifact_uri` is still fetched inside the VM (streamed, cut
 at 64 MiB) when you did not upload. The bytes are checked against
 `artifact_digest` before anything runs, the

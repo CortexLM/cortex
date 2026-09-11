@@ -1,5 +1,7 @@
-//! What the host stages into the guest: owner key material (tmpfs) and the
-//! experiment pack (writable disk), both by name-checked files only.
+//! What the host stages into the guest: owner key material (tmpfs), the
+//! experiment pack (writable disk), and a miner artefact inject
+//! (`proof-artefact://`, held for the next job), all by name-checked files
+//! only.
 
 use std::path::{Path, PathBuf};
 
@@ -232,6 +234,61 @@ pub fn stage_pack(root: &Path, digest: &str, pack_tar: &StagedFile) -> Result<St
     })
 }
 
+/// One staged miner artefact (verified, held for the next job).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedArtifact {
+    /// 64-hex sha256 the bytes verified against.
+    pub digest: String,
+    /// The tar, verbatim.
+    pub bytes: Vec<u8>,
+}
+
+/// Verify `artifact_tar` against `digest` (64 hex) and hold the bytes.
+/// Empty / oversize / mismatch / not a contentful uncompressed tar fails
+/// closed — never a substitute.
+pub fn stage_artifact(digest: &str, artifact_tar: &StagedFile) -> Result<StagedArtifact, String> {
+    let want = digest.trim().to_ascii_lowercase();
+    if want.len() != 64 || !want.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("artefact digest {digest:?} is not 64 hex"));
+    }
+    let bytes = artifact_tar.bytes().map_err(|e| e.to_string())?;
+    if bytes.is_empty() {
+        return Err("staged artefact is empty; refusing to invent bytes".into());
+    }
+    if bytes.len() > proof_vm_proto::guest::MAX_STAGED_ARTIFACT_TAR_BYTES {
+        return Err(format!(
+            "staged artefact is {} bytes (1..={}); refusing to invent bytes",
+            bytes.len(),
+            proof_vm_proto::guest::MAX_STAGED_ARTIFACT_TAR_BYTES
+        ));
+    }
+    verify_artifact(&bytes, &want).map_err(|e| format!("staged artefact does not verify: {e}"))?;
+    Ok(StagedArtifact {
+        digest: want,
+        bytes,
+    })
+}
+
+/// The injected artefact, iff it is the one the job names.
+pub fn artifact_for(
+    staged: Option<&StagedArtifact>,
+    want_digest: &str,
+) -> Result<StagedArtifact, String> {
+    let Some(art) = staged else {
+        return Err(
+            "no artefact staged in this vm; a proof-artefact:// locator needs a host inject".into(),
+        );
+    };
+    let want = want_digest.trim().to_ascii_lowercase();
+    if !art.digest.eq_ignore_ascii_case(&want) {
+        return Err(format!(
+            "staged artefact is {}, the job names {want}",
+            art.digest
+        ));
+    }
+    Ok(art.clone())
+}
+
 /// The staged pack, iff it is the one the topic pins.
 pub fn pack_for(staged: Option<&StagedPack>, want: &PackRef) -> Result<StagedPack, String> {
     let Some(pack) = staged else {
@@ -351,5 +408,33 @@ mod tests {
             .expect_err("none")
             .contains("no experiment pack staged"));
         let _ = std::fs::remove_dir_all(&r);
+    }
+
+    #[test]
+    fn staged_artefacts_verify_and_bind_to_the_job_digest() {
+        use proof_vm_proto::guest::MAX_STAGED_ARTIFACT_TAR_BYTES;
+        let tar = archive(&[member("recipe/run.sh", b'0', b"echo hi\n")]);
+        let hex = hex::encode(Sha256::digest(&tar));
+        let staged = stage_artifact(&hex, &StagedFile::new("artifact.tar", &tar)).expect("staged");
+        assert_eq!(staged.digest, hex);
+        assert_eq!(staged.bytes, tar);
+        assert_eq!(artifact_for(Some(&staged), &hex).expect("same").bytes, tar);
+        assert!(artifact_for(Some(&staged), &"00".repeat(32))
+            .expect_err("other")
+            .contains("the job names"));
+        assert!(artifact_for(None, &hex)
+            .expect_err("none")
+            .contains("needs a host inject"));
+        assert!(stage_artifact("latest", &StagedFile::new("artifact.tar", &tar)).is_err());
+        assert!(stage_artifact(&hex, &StagedFile::new("artifact.tar", b""))
+            .expect_err("empty")
+            .contains("empty"));
+        let err = stage_artifact(&"00".repeat(32), &StagedFile::new("artifact.tar", &tar))
+            .expect_err("mismatch");
+        assert!(err.contains("does not verify"), "{err}");
+        let huge = vec![1u8; MAX_STAGED_ARTIFACT_TAR_BYTES + 1];
+        let err =
+            stage_artifact(&hex, &StagedFile::new("artifact.tar", &huge)).expect_err("oversize");
+        assert!(err.contains("refusing to invent"), "{err}");
     }
 }

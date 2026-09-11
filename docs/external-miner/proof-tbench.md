@@ -123,9 +123,13 @@ is a commitment, not data. There is nothing to read there.
 ## 3. Build and upload the artefact
 
 `tbench` is a `custom` topic: **upload the uncompressed tar** (≤5 MiB) with
-`ctx proof submit --artifact recipe.tar`. `artifact_uri` is optional compat
-— a miner-hosted locator the runner can still fetch. A submit with neither
-an upload nor a URI is a **400** `artifact required` with no row. When both
+`ctx proof submit --artifact recipe.tar`. That upload path is **end-to-end**:
+the gateway stages the bytes, records `proof-artefact://{digest}` on the row,
+and the KVM host injects those exact bytes into the experiment guest over
+vsock. The guest verifies the digest and tar and **does not** HTTP-fetch a
+miner URL. `artifact_uri` is optional compat — a miner-hosted locator the
+runner can still fetch (`https://`, 64 MiB cap). A submit with neither an
+upload nor a URI is a **400** `artifact required` with no row. When both
 are sent, the uploaded bytes win.
 
 Artefact identity is **the served file's sha256**, verbatim. Uncompressed
@@ -297,7 +301,8 @@ Env the run sees: `PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`,
 
 - Prefer `ctx proof submit --artifact recipe.tar` (gateway intake cap **5 MiB**).
   Re-running `tar` later produces different bytes (mtimes, member order) and
-  therefore a different digest.
+  therefore a different digest. Evaluate injects the staged file over vsock;
+  you do not need to host it.
 - URI-only compat: serve **that exact file** at `artifact_uri` and keep it.
   The guest streams it under a hard **64 MiB** cap (not the gateway upload
   cap). The host re-hashes exactly the bytes the runner fetched before it

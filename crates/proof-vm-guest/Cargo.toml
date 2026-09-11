@@ -1,6 +1,6 @@
 [package]
 name = "proof-vm-guest"
-description = "Guest side of the Proof topic-VM protocol (proof-vm-proto::guest), run inside the RLM / experiment microVM: answers hello, keeps owner key material in tmpfs, verifies and unpacks the staged experiment pack, and runs every job through an operator-installed runner adaptor resolved from the topic's params. It never reports a value it did not measure: no runner selected, no adaptor installed, no pack, no report = the job fails. Transport-agnostic (vsock or stdio); no benchmark, dataset, model, or runner is named here."
+description = "Guest side of the Proof topic-VM protocol (proof-vm-proto::guest), run inside the RLM / experiment microVM: answers hello, keeps owner key material in tmpfs, verifies and unpacks the staged experiment pack, accepts a vsock artefact inject for proof-artefact:// locators (skips HTTP), and runs every job through an operator-installed runner adaptor resolved from the topic's params. It never reports a value it did not measure: no runner selected, no adaptor installed, no pack, no report = the job fails. Transport-agnostic (vsock or stdio); no benchmark, dataset, model, or runner is named here."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
