@@ -4,6 +4,9 @@
 //! `/challenge/{challenge_id}/v1/...`, so one base URL covers both live
 //! challenges.
 
+#![forbid(unsafe_code)]
+#![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
+
 use std::time::Duration;
 
 use serde_json::Value;
@@ -116,7 +119,7 @@ impl Client {
         self.send(self.http.get(self.url(path))).await
     }
 
-    /// POST JSON to a gateway path.
+    /// POST JSON or multipart to a gateway path.
     ///
     /// A non-empty submit `env` (miner BYOK) is refused on `http://` so the
     /// values never go out in cleartext — same floor as `X-Lium-Api-Key`.
@@ -125,6 +128,38 @@ impl Client {
             return Err(ENV_HTTP_REFUSAL.to_owned());
         }
         self.send(self.http.post(self.url(path)).json(body)).await
+    }
+
+    /// POST multipart fields plus an `artifact` part (uncompressed tar).
+    pub async fn post_multipart(
+        &self,
+        path: &str,
+        fields: &Value,
+        artifact: Vec<u8>,
+    ) -> Result<Reply, String> {
+        if body_has_env(fields) && !is_https_url(&self.base) {
+            return Err(ENV_HTTP_REFUSAL.to_owned());
+        }
+        let mut form = reqwest::multipart::Form::new();
+        if let Some(obj) = fields.as_object() {
+            for (k, v) in obj {
+                let text = match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                form = form.text(k.clone(), text);
+            }
+        }
+        let part = reqwest::multipart::Part::bytes(artifact)
+            .file_name("artifact.tar")
+            .mime_str("application/octet-stream")
+            .map_err(|e| format!("multipart: {e}"))?;
+        self.send(
+            self.http
+                .post(self.url(path))
+                .multipart(form.part("artifact", part)),
+        )
+        .await
     }
 
     fn url(&self, path: &str) -> String {

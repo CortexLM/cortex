@@ -76,8 +76,16 @@ pub struct Submission {
     pub miner_hotkey: String,
     /// SHA-256 hex of the miner artifact.
     pub artifact_digest: String,
-    /// Optional locator (git url, object URL).
+    /// Optional locator (miner-hosted URL, or `proof-artefact://{digest}` when
+    /// the miner uploaded bytes). Uploaded bytes win over a URI for identity.
     pub artifact_uri: Option<String>,
+    /// Host path of staged upload bytes (`PROOF_ARTEFACT_STAGING_DIR`, keyed
+    /// by digest + miner hotkey + submit nonce). Never the artefact bytes,
+    /// never postgres. Omitted on URI-only submits. Never serialised on GET
+    /// so miners do not see host paths (even while `Some` between intake
+    /// and evaluate).
+    #[serde(default, skip_serializing)]
+    pub artifact_staged: Option<String>,
     /// Human claim string.
     pub claim: String,
     /// Declared FLOP budget (must be ≤ topic).
@@ -190,6 +198,7 @@ impl Enqueued {
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
     byok: MinerEnvVault,
+    artefacts: ArtefactVault,
 }
 
 impl MemoryStore {
@@ -205,6 +214,19 @@ impl MemoryStore {
     #[must_use]
     pub fn miner_byok_vault(&self) -> &MinerEnvVault {
         &self.byok
+    }
+
+    /// This store, staging uploaded artefact bytes in `vault`.
+    #[must_use]
+    pub fn with_artefact_vault(mut self, vault: ArtefactVault) -> Self {
+        self.artefacts = vault;
+        self
+    }
+
+    /// The artefact staging vault in force (in-process when nothing is configured).
+    #[must_use]
+    pub fn artefact_vault(&self) -> &ArtefactVault {
+        &self.artefacts
     }
 }
 
@@ -234,6 +256,13 @@ struct Inner {
     /// A host that sets [`MINER_BYOK_DIR_ENV`] keeps them in
     /// [`MinerEnvVault`] files instead. See [`MemoryStore::stash_miner_env`].
     miner_envs: BTreeMap<String, MinerEnv>,
+    /// In-flight claims on a frozen digest's BYOK entry. A concurrent retry
+    /// increments this; abort decrements and deletes only at zero with no row.
+    env_refs: BTreeMap<String, u32>,
+    /// Uploaded artefact bytes, keyed by `(digest, hotkey, submit_nonce)`,
+    /// when the host configured no staging directory. Nonce is unique per
+    /// miner, not globally — two miners can share a nonce.
+    staged_artefacts: BTreeMap<(String, String, String), Vec<u8>>,
 }
 
 /// Env var naming the directory the control plane keeps miner BYOK material
@@ -374,6 +403,158 @@ impl MinerEnvVault {
     fn remove(&self, digest: &str) {
         if let Some(dir) = self.dir_for(digest) {
             let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// Hard cap on uploaded artefact bytes at Proof intake (5 MiB).
+pub const MAX_ARTEFACT_BYTES: usize = 5 * 1024 * 1024;
+
+/// Env var naming the directory the control plane stages uploaded artefact
+/// bytes in. Operator state, never git. Empty = keep bytes in process.
+pub const ARTEFACT_STAGING_DIR_ENV: &str = "PROOF_ARTEFACT_STAGING_DIR";
+
+/// Default staging directory: a runtime path, so a reboot does not leave
+/// miner tars on disk.
+pub const DEFAULT_ARTEFACT_STAGING_DIR: &str = "/run/proof/artefact-stage";
+
+/// Internal locator recorded on a row when the miner uploaded bytes.
+/// Evaluate (PR B) reads the vault; the guest must not fetch this scheme.
+pub const STAGED_ARTEFACT_SCHEME: &str = "proof-artefact";
+
+/// `proof-artefact://{digest}` for a 64-hex digest.
+#[must_use]
+pub fn staged_artefact_uri(digest: &str) -> String {
+    format!(
+        "{STAGED_ARTEFACT_SCHEME}://{}",
+        digest.trim().to_ascii_lowercase()
+    )
+}
+
+/// Whether `uri` is a staged-vault locator (not a miner-hosted fetch).
+#[must_use]
+pub fn is_staged_artefact_uri(uri: &str) -> bool {
+    uri.trim()
+        .to_ascii_lowercase()
+        .starts_with(&format!("{STAGED_ARTEFACT_SCHEME}://"))
+}
+
+/// Where uploaded artefact bytes rest between intake and evaluate.
+///
+/// Path is `root/{digest}/{hotkey}/{nonce}` — all 64-hex, `0700` dirs,
+/// `0600` file. Nonce is unique per miner, not globally, so identity is
+/// `(digest, hotkey, nonce)` and two miners cannot share or clobber a file.
+/// Bytes never go in postgres or on the public row; [`Submission::artifact_staged`]
+/// holds the host path for evaluate / PR B vsock inject.
+#[derive(Debug, Clone, Default)]
+pub struct ArtefactVault {
+    root: Option<PathBuf>,
+}
+
+impl ArtefactVault {
+    /// A vault rooted at `root`. Nothing is created until the first write.
+    #[must_use]
+    pub fn at(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: Some(root.into()),
+        }
+    }
+
+    /// The vault [`ARTEFACT_STAGING_DIR_ENV`] selects, defaulting to
+    /// [`DEFAULT_ARTEFACT_STAGING_DIR`]. An explicitly empty value means
+    /// "keep it in memory" — the CI / local-run stance.
+    #[must_use]
+    pub fn from_env() -> Self {
+        match std::env::var(ARTEFACT_STAGING_DIR_ENV) {
+            Ok(dir) if dir.trim().is_empty() => Self::default(),
+            Ok(dir) => Self::at(dir.trim()),
+            Err(_) => Self::at(DEFAULT_ARTEFACT_STAGING_DIR),
+        }
+    }
+
+    /// Whether this vault writes files.
+    #[must_use]
+    pub fn is_file_backed(&self) -> bool {
+        self.root.is_some()
+    }
+
+    /// The vault root, when file-backed.
+    #[must_use]
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    fn path_for(&self, digest: &str, hotkey: &str, nonce: &str) -> Option<PathBuf> {
+        let root = self.root.as_ref()?;
+        let hex64 = |s: &str| {
+            let s = s.trim();
+            s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+        };
+        let d = digest.trim();
+        let h = hotkey.trim();
+        let n = nonce.trim();
+        (hex64(d) && hex64(h) && hex64(n)).then(|| {
+            root.join(d.to_ascii_lowercase())
+                .join(h.to_ascii_lowercase())
+                .join(n.to_ascii_lowercase())
+        })
+    }
+
+    fn put(
+        &self,
+        digest: &str,
+        hotkey: &str,
+        nonce: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf, StoreError> {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(path) = self.path_for(digest, hotkey, nonce) else {
+            return Err(StoreError::Vault(
+                "artefact digest/hotkey/nonce is not 64 hex; refusing to stage".into(),
+            ));
+        };
+        let vault = |e: std::io::Error, what: &str| StoreError::Vault(format!("{what}: {e}"));
+        let private = std::fs::Permissions::from_mode(0o700);
+        if let Some(root) = &self.root {
+            std::fs::create_dir_all(root).map_err(|e| vault(e, "create artefact vault root"))?;
+            std::fs::set_permissions(root, private.clone())
+                .map_err(|e| vault(e, "lock artefact vault root"))?;
+        }
+        let hotkey_dir = path
+            .parent()
+            .ok_or_else(|| StoreError::Vault("artefact vault path has no parent".into()))?;
+        std::fs::create_dir_all(hotkey_dir).map_err(|e| vault(e, "create artefact vault entry"))?;
+        if let Some(digest_dir) = hotkey_dir.parent() {
+            std::fs::set_permissions(digest_dir, private.clone())
+                .map_err(|e| vault(e, "lock artefact digest dir"))?;
+        }
+        std::fs::set_permissions(hotkey_dir, private)
+            .map_err(|e| vault(e, "lock artefact vault entry"))?;
+        let tmp = hotkey_dir.join(format!(".{}.tmp", nonce.trim().to_ascii_lowercase()));
+        std::fs::write(&tmp, bytes).map_err(|e| vault(e, "write artefact"))?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| vault(e, "lock artefact"))?;
+        std::fs::rename(&tmp, &path).map_err(|e| vault(e, "place artefact"))?;
+        Ok(path)
+    }
+
+    fn get(&self, digest: &str, hotkey: &str, nonce: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        let Some(path) = self.path_for(digest, hotkey, nonce) else {
+            return Ok(None);
+        };
+        match std::fs::read(&path) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StoreError::Vault(format!("read artefact: {e}"))),
+        }
+    }
+
+    fn remove(&self, digest: &str, hotkey: &str, nonce: &str) {
+        // Unlink this nonce only. The digest/hotkey dirs are shared by other
+        // in-flight uploads of the same artefact; rmdir would 503 a sibling
+        // that had created the dir but not yet written its tmp file.
+        if let Some(path) = self.path_for(digest, hotkey, nonce) {
+            let _ = std::fs::remove_file(&path);
         }
     }
 }
@@ -557,6 +738,62 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Hold `env` for `digest`, incrementing an in-flight ref. The first
+    /// claim writes the vault; a concurrent claim of the same digest does
+    /// not overwrite. [`Self::release_miner_env`] drops one ref and deletes
+    /// only when none remain and no row still names this digest.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Vault`] when a configured vault cannot hold the key.
+    pub fn claim_miner_env(&self, digest: &str, env: &MinerEnv) -> Result<(), StoreError> {
+        if env.is_empty() {
+            return Ok(());
+        }
+        let mut g = self.lock()?;
+        let first = g.env_refs.get(digest).copied().unwrap_or(0) == 0;
+        if first {
+            if self.byok.is_file_backed() {
+                self.byok.put(digest, env)?;
+            } else {
+                g.miner_envs.insert(digest.to_owned(), env.clone());
+            }
+        }
+        let next = g
+            .env_refs
+            .get(digest)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        g.env_refs.insert(digest.to_owned(), next);
+        Ok(())
+    }
+
+    /// Drop one in-flight claim. The vault entry stays if another claim is
+    /// live or a row already carries this digest.
+    pub fn release_miner_env(&self, digest: &str) -> Result<(), StoreError> {
+        let mut g = self.lock()?;
+        let Some(n) = g.env_refs.get_mut(digest) else {
+            return Ok(());
+        };
+        *n = n.saturating_sub(1);
+        if *n > 0 {
+            return Ok(());
+        }
+        g.env_refs.remove(digest);
+        let has_row = g
+            .submissions
+            .values()
+            .any(|r| r.submission_digest == digest);
+        if has_row {
+            return Ok(());
+        }
+        g.miner_envs.remove(digest);
+        drop(g);
+        self.byok.remove(digest);
+        Ok(())
+    }
+
     /// The stashed environment for a frozen digest (empty when none).
     pub fn miner_env(&self, digest: &str) -> Result<MinerEnv, StoreError> {
         if self.byok.is_file_backed() {
@@ -574,7 +811,90 @@ impl MemoryStore {
     /// is scored: a terminal row never needs the key again.
     pub fn forget_miner_env(&self, digest: &str) -> Result<(), StoreError> {
         self.byok.remove(digest);
-        self.lock()?.miner_envs.remove(digest);
+        let mut g = self.lock()?;
+        g.miner_envs.remove(digest);
+        g.env_refs.remove(digest);
+        Ok(())
+    }
+
+    /// Stage uploaded artefact bytes. Identity is `(digest, hotkey, nonce)`
+    /// so two miners cannot share or clobber a file. Returns the host path
+    /// (or `memory:digest/hotkey/nonce`).
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Vault`] when the bytes cannot be held. The caller must
+    /// refuse the submission rather than accept bytes it did not keep.
+    pub fn stash_artefact(
+        &self,
+        digest: &str,
+        hotkey: &str,
+        nonce: &str,
+        bytes: &[u8],
+    ) -> Result<String, StoreError> {
+        if bytes.is_empty() {
+            return Err(StoreError::Vault("artifact is empty".into()));
+        }
+        if bytes.len() > MAX_ARTEFACT_BYTES {
+            return Err(StoreError::Vault("artifact exceeds 5 MiB".into()));
+        }
+        if self.artefacts.is_file_backed() {
+            return Ok(self
+                .artefacts
+                .put(digest, hotkey, nonce, bytes)?
+                .display()
+                .to_string());
+        }
+        self.lock()?.staged_artefacts.insert(
+            (
+                digest.to_ascii_lowercase(),
+                hotkey.to_ascii_lowercase(),
+                nonce.to_ascii_lowercase(),
+            ),
+            bytes.to_vec(),
+        );
+        Ok(format!(
+            "memory:{}/{}/{}",
+            digest.to_ascii_lowercase(),
+            hotkey.to_ascii_lowercase(),
+            nonce.to_ascii_lowercase()
+        ))
+    }
+
+    /// Staged bytes for `(digest, hotkey, nonce)`, if any.
+    pub fn artefact_bytes(
+        &self,
+        digest: &str,
+        hotkey: &str,
+        nonce: &str,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        if self.artefacts.is_file_backed() {
+            return self.artefacts.get(digest, hotkey, nonce);
+        }
+        Ok(self
+            .lock()?
+            .staged_artefacts
+            .get(&(
+                digest.to_ascii_lowercase(),
+                hotkey.to_ascii_lowercase(),
+                nonce.to_ascii_lowercase(),
+            ))
+            .cloned())
+    }
+
+    /// Drop staged bytes for `(digest, hotkey, nonce)`.
+    pub fn forget_artefact(
+        &self,
+        digest: &str,
+        hotkey: &str,
+        nonce: &str,
+    ) -> Result<(), StoreError> {
+        self.artefacts.remove(digest, hotkey, nonce);
+        self.lock()?.staged_artefacts.remove(&(
+            digest.to_ascii_lowercase(),
+            hotkey.to_ascii_lowercase(),
+            nonce.to_ascii_lowercase(),
+        ));
         Ok(())
     }
 
@@ -925,6 +1245,7 @@ mod tests {
             miner_hotkey: hotkey.clone(),
             artifact_digest: artifact.clone(),
             artifact_uri: Some("https://example.invalid/a.tar".into()),
+            artifact_staged: None,
             claim: "claim".into(),
             declared_flops: 1,
             architecture: String::new(),
@@ -1213,5 +1534,204 @@ mod tests {
         assert!(store.miner_env(&digest).expect("gone").is_empty());
         assert_eq!(MINER_BYOK_DIR_ENV, "PROOF_MINER_BYOK_DIR");
         assert!(DEFAULT_MINER_BYOK_DIR.starts_with("/run/"), "runtime path");
+    }
+
+    #[test]
+    fn claim_release_keeps_env_while_another_claim_or_row_holds_it() {
+        let store = MemoryStore::new();
+        let digest = "ab".repeat(32);
+        let mut env = MinerEnv::new();
+        env.insert("MINER_PROVIDED_API_KEY", "miner-supplied-value");
+        store.claim_miner_env(&digest, &env).expect("first");
+        store.claim_miner_env(&digest, &env).expect("second");
+        store.release_miner_env(&digest).expect("one abort");
+        assert_eq!(store.miner_env(&digest).expect("shared"), env);
+        store.release_miner_env(&digest).expect("last abort");
+        assert!(
+            store.miner_env(&digest).expect("gone").is_empty(),
+            "zero refs and no row drops the entry"
+        );
+
+        store.claim_miner_env(&digest, &env).expect("claimed");
+        let mut row = queued_row("t", "1");
+        row.submission_digest = digest.clone();
+        store.insert(row).expect("queued");
+        store.release_miner_env(&digest).expect("inflight done");
+        assert_eq!(
+            store.miner_env(&digest).expect("row holds it"),
+            env,
+            "a queued row keeps the key after the submitter releases"
+        );
+        store.forget_miner_env(&digest).expect("terminal");
+        assert!(store.miner_env(&digest).expect("cleared").is_empty());
+    }
+
+    #[test]
+    fn the_artefact_vault_keeps_one_private_file_per_submit() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("proof-art-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let digest = "ab".repeat(32);
+        let hotkey = "ef".repeat(32);
+        let nonce = "cd".repeat(32);
+        let store = MemoryStore::new().with_artefact_vault(ArtefactVault::at(&root));
+        let path = store
+            .stash_artefact(&digest, &hotkey, &nonce, b"recipe-tar-bytes")
+            .expect("staged");
+        let meta = std::fs::metadata(&path).expect("file");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        let dir = std::path::Path::new(&path).parent().expect("dir");
+        assert_eq!(
+            std::fs::metadata(dir).expect("dir").permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            store
+                .artefact_bytes(&digest, &hotkey, &nonce)
+                .expect("read")
+                .as_deref(),
+            Some(b"recipe-tar-bytes".as_slice())
+        );
+        store
+            .forget_artefact(&digest, &hotkey, &nonce)
+            .expect("gone");
+        assert!(store
+            .artefact_bytes(&digest, &hotkey, &nonce)
+            .expect("none")
+            .is_none());
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(ARTEFACT_STAGING_DIR_ENV, "PROOF_ARTEFACT_STAGING_DIR");
+        assert_eq!(MAX_ARTEFACT_BYTES, 5 * 1024 * 1024);
+        assert!(is_staged_artefact_uri(&staged_artefact_uri(&digest)));
+        assert!(!is_staged_artefact_uri("https://example.invalid/a.tar"));
+    }
+
+    #[test]
+    fn artefact_vault_isolates_two_miners_with_the_same_digest_and_nonce() {
+        let digest = "ab".repeat(32);
+        let nonce = "cd".repeat(32);
+        let a = "11".repeat(32);
+        let b = "22".repeat(32);
+        let store = MemoryStore::new();
+        store
+            .stash_artefact(&digest, &a, &nonce, b"miner-a")
+            .expect("a");
+        store
+            .stash_artefact(&digest, &b, &nonce, b"miner-b")
+            .expect("b");
+        assert_eq!(
+            store
+                .artefact_bytes(&digest, &a, &nonce)
+                .expect("a")
+                .as_deref(),
+            Some(b"miner-a".as_slice())
+        );
+        assert_eq!(
+            store
+                .artefact_bytes(&digest, &b, &nonce)
+                .expect("b")
+                .as_deref(),
+            Some(b"miner-b".as_slice())
+        );
+        store
+            .forget_artefact(&digest, &a, &nonce)
+            .expect("forget a");
+        assert!(store
+            .artefact_bytes(&digest, &a, &nonce)
+            .expect("a gone")
+            .is_none());
+        assert_eq!(
+            store
+                .artefact_bytes(&digest, &b, &nonce)
+                .expect("b kept")
+                .as_deref(),
+            Some(b"miner-b".as_slice())
+        );
+    }
+
+    #[test]
+    fn artefact_forget_does_not_drop_a_sibling_nonce() {
+        let root = std::env::temp_dir().join(format!("proof-art-sib-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let digest = "ab".repeat(32);
+        let hotkey = "ef".repeat(32);
+        let n1 = "11".repeat(32);
+        let n2 = "22".repeat(32);
+        let store = MemoryStore::new().with_artefact_vault(ArtefactVault::at(&root));
+        store
+            .stash_artefact(&digest, &hotkey, &n1, b"one")
+            .expect("n1");
+        store
+            .stash_artefact(&digest, &hotkey, &n2, b"two")
+            .expect("n2");
+        store
+            .forget_artefact(&digest, &hotkey, &n1)
+            .expect("drop n1");
+        assert_eq!(
+            store
+                .artefact_bytes(&digest, &hotkey, &n2)
+                .expect("n2")
+                .as_deref(),
+            Some(b"two".as_slice())
+        );
+        store
+            .stash_artefact(&digest, &hotkey, &n1, b"one-again")
+            .expect("n1 restaged after sibling cleanup");
+        assert_eq!(
+            store
+                .artefact_bytes(&digest, &hotkey, &n1)
+                .expect("n1")
+                .as_deref(),
+            Some(b"one-again".as_slice())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn artefact_vault_refuses_empty_oversize_and_bad_keys() {
+        let store = MemoryStore::new();
+        let digest = "ab".repeat(32);
+        let hotkey = "ef".repeat(32);
+        let nonce = "cd".repeat(32);
+        assert!(matches!(
+            store.stash_artefact(&digest, &hotkey, &nonce, b""),
+            Err(StoreError::Vault(_))
+        ));
+        let big = vec![1u8; MAX_ARTEFACT_BYTES + 1];
+        assert!(matches!(
+            store.stash_artefact(&digest, &hotkey, &nonce, &big),
+            Err(StoreError::Vault(_))
+        ));
+        store
+            .stash_artefact(&digest, &hotkey, &nonce, b"ok")
+            .expect("in process");
+        assert_eq!(
+            store
+                .artefact_bytes(&digest, &hotkey, &nonce)
+                .expect("read")
+                .as_deref(),
+            Some(b"ok".as_slice())
+        );
+        let rooted = MemoryStore::new().with_artefact_vault(ArtefactVault::at("/tmp/proof-art-x"));
+        assert!(matches!(
+            rooted.stash_artefact("../escape", &hotkey, &nonce, b"x"),
+            Err(StoreError::Vault(_))
+        ));
+        assert!(matches!(
+            rooted.stash_artefact(&digest, "../escape", &nonce, b"x"),
+            Err(StoreError::Vault(_))
+        ));
+    }
+
+    #[test]
+    fn staged_path_is_never_on_the_public_row() {
+        let mut row = queued_row("t", "1");
+        row.artifact_staged = Some("/run/proof/artefact-stage/ab/cd".into());
+        let v = serde_json::to_value(&row).expect("json");
+        assert!(
+            v.get("artifact_staged").is_none(),
+            "host path must not leak: {v}"
+        );
+        assert_eq!(v["artifact_uri"], "https://example.invalid/a.tar");
     }
 }

@@ -304,9 +304,16 @@ Trust-root keygen is the throwaway owner path in
   train/eval recipe** (code, not weights-only), `manifest`
   (signed), `submit_nonce` (64 lowercase hex, single use), and
   `hotkey_signature` (exactly 128 lowercase hex sr25519 over
-  `base-proof-submit-v1`); on custom topics also `artifact_uri` (the runner
-  fetches from it).
-  The agent verdict (`reproduced`, `claim_holds_public`, cheat codes) is
+  `base-proof-submit-v1`); on custom topics an artefact — multipart upload
+  (preferred, ≤5 MiB) or `artifact_uri` (compat). Neither is **400**
+  `artifact required`. Uploaded bytes win when both are sent.
+  Uploaded tars are staged under `PROOF_ARTEFACT_STAGING_DIR` and the row
+  records `proof-artefact://{digest}`. Live evaluate of that scheme is
+  **503** until vsock inject (PR [#285](https://github.com/CortexLM/cortex/pull/285)
+  `bc-bf177788`); this host stages only. URI-only `https://` still scores.
+  Deferred topics accept the upload as **201** `queued`. Gzip / non-tar /
+  content-less uploads are **400** with no row. The agent verdict
+  (`reproduced`, `claim_holds_public`, cheat codes) is
   filled by the eval image, not the miner.
 - Contamination (holdout overlap in a declared manifest) persists **rejected**
   without renting. An empty training manifest is the same reject **only** on
@@ -346,7 +353,7 @@ Semantics, none of which weaken a product rule:
 | Rule | With `defer_scoring = "true"` |
 |------|-------------------------------|
 | Topic status | Stays **`open`**: it needs a sealed baseline to publish, it is listed in `open_topics`, and it is **not** `draft` (a draft is still a submit **400**). |
-| Intake gates | Unchanged: hotkey / digest shape, digest-of-nothing, unknown / not-open topic, missing `artifact_uri` on a custom topic, missing/undeclared miner `env` are the same **400**s with no row. Harvest `nll` / `throughput` still 400 `declared_flops` over budget; custom / agent topics ignore that gate. |
+| Intake gates | Unchanged: hotkey / digest shape, digest-of-nothing, unknown / not-open topic, missing artefact (no upload and no `artifact_uri`) on a custom topic, missing/undeclared miner `env` are the same **400**s with no row. Harvest `nll` / `throughput` still 400 `declared_flops` over budget; custom / agent topics ignore that gate. |
 | Host gates | **Not consulted.** The row persists as **`queued`** (**201**) whether or not the host could score it right now — no readiness check, no harvest rent, no topic VM, no judge call, no verdict, no stamps, no topic mass, no emission. |
 | Status | The topic is in `deferred_topics`, **not** in `scorable_topics`; `can_score` keeps its meaning (something is scored right now). `queued_submissions` counts the waiting rows. |
 | Duplicates | One row per frozen digest per topic, for the row's whole life, decided in one atomic store step: the same artefact from the same hotkey again is **200** with the existing row (`detail: already queued …`), and after a drain it is **200** with the *scored* row (`already submitted … and scored`) — two identical submits racing each other yield one row, and a retry never buys a second paid run. |

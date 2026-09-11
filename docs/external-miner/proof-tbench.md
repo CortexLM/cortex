@@ -120,11 +120,19 @@ What the signed document carries today, and what each field means for you:
 `GET /v1/proof/topics` never returns holdout records, and `holdout_commitment`
 is a commitment, not data. There is nothing to read there.
 
-## 3. Build and serve the artefact
+## 3. Build and upload the artefact
 
-`tbench` is a `custom` topic, so **`artifact_uri` is required** — the runner
-fetches the bytes from your locator inside the topic VM. A submit without one
-is a **400** with no row.
+`tbench` is a `custom` topic: **upload the uncompressed tar** (≤5 MiB) with
+`ctx proof submit --artifact recipe.tar`. `artifact_uri` is optional compat
+— a miner-hosted locator the runner can still fetch. A submit with neither
+an upload nor a URI is a **400** `artifact required` with no row. When both
+are sent, the uploaded bytes win.
+
+Live evaluate of an upload records `proof-artefact://` and answers **503**
+until vsock inject
+([#285](https://github.com/CortexLM/cortex/pull/285)); score now with
+URI-only `https://` (no upload). A topic in `deferred_topics` still accepts
+the upload as **201** `queued`.
 
 Artefact identity is **the served file's sha256**, verbatim. Uncompressed
 only — no gzip, no zip. Both of these packs work; pick one, hash **that**
@@ -248,7 +256,7 @@ Pack, hash, and serve **that exact file** (either layout):
 tar -cf recipe.tar recipe/
 # or: tar -cf recipe.tar -C recipe .
 sha256sum recipe.tar
-# serve that exact file at https://…/recipe.tar
+# upload that exact file (preferred), or serve it at artifact_uri
 ```
 
 Submit sketch. Pass `--openrouter-api-key` (never printed) or
@@ -260,11 +268,11 @@ export OPENROUTER_API_KEY=sk-or-…
 ctx proof submit \
   --secret-file /path/to/hotkey.sk \
   --topic-id tbench \
-  --artifact-uri https://example.org/recipe.tar \
-  --artifact-digest <sha256 of recipe.tar> \
+  --artifact recipe.tar \
   --claim "raised first-15 success_rate over the sealed baseline" \
   --env OPENROUTER_API_KEY
 # or: --openrouter-api-key "$OPENROUTER_API_KEY"
+# compat: --artifact-uri https://example.org/recipe.tar --artifact-digest <sha256>
 ```
 
 Custom Python `run(instruction, …)` need not subclass Harbor `BaseAgent`.
@@ -293,16 +301,19 @@ Env the run sees: `PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`,
 `PROOF_PARAM_*`, `PROOF_PACK_DIR`, `PROOF_ARTIFACT_DIR`, `PROOF_OUTPUT_DIR`,
 `PROOF_WORK_DIR`, and miner BYOK under `PROOF_MINER_ENV_DIR`.
 
-- Serve **that exact file** at `artifact_uri` and keep it. Re-running `tar`
-  later produces different bytes (mtimes, member order) and therefore a
-  different digest, and the run is refused rather than run on a substitute.
-- The host re-hashes exactly the bytes the runner fetched before it boots your
-  guest, and refuses gzip, non-tar bytes, an archive with no file content, or
-  bytes that do not match your `artifact_digest`.
+- Prefer `ctx proof submit --artifact recipe.tar` (gateway intake cap **5 MiB**).
+  Re-running `tar` later produces different bytes (mtimes, member order) and
+  therefore a different digest. Live evaluate of that upload is **503** until
+  [#285](https://github.com/CortexLM/cortex/pull/285); URI-only `https://`
+  still scores, and `deferred_topics` still **201** `queued`.
+- URI-only compat: serve **that exact file** at `artifact_uri` and keep it.
+  The guest streams it under a hard **64 MiB** cap (not the gateway upload
+  cap). The host re-hashes exactly the bytes the runner fetched before it
+  boots your guest, and refuses gzip, non-tar bytes, an archive with no
+  file content, or bytes that do not match your `artifact_digest`.
 - A digest of nothing — the sha256 of zero bytes or of an empty tar — is a
-  **400** with no row, whatever case you spell it in.
-- On the experiment-VM path the guest agent streams your artefact under a hard
-  **64 MiB** cap. Ship a recipe, not a weight dump.
+  **400** with no row, whatever case you spell it in. Ship a recipe, not a
+  weight dump.
 
 Your code runs **inside a Firecracker guest the host boots**, against the
 operator's pinned experiment pack. You cannot produce the sandbox attestation
@@ -415,8 +426,9 @@ Fields the host reads on `POST /challenge/proof/v1/submissions`:
 | `hotkey_signature` | yes | Exactly 128 lowercase hex, sr25519 over `base-proof-submit-v1` |
 | `submit_nonce` | yes | Exactly 64 lowercase hex, 32 fresh random bytes, **single-use per hotkey** |
 | `topic_id` | yes | `tbench` |
-| `artifact_digest` | yes | sha256 of the exact file you serve; not the digest of nothing |
-| `artifact_uri` | **yes** | Required because `tbench` is a `custom` topic |
+| `artifact_digest` | yes | sha256 of the exact file you upload (or serve); not the digest of nothing |
+| `artifact` (multipart) | **preferred** | Uncompressed tar ≤5 MiB. `ctx proof submit --artifact` |
+| `artifact_uri` | optional | Compat locator; omit when you upload. Neither upload nor URI → **400** `artifact required` |
 | `claim` | yes | One English sentence of what improved. Signed |
 | `declared_flops` | no | Optional, default `0`. Still bound into the signature if you send it. **Ignored as a scoring gate** on `tbench` |
 | `manifest.train_content_hashes` / `manifest.train_dataset_ids` | **no** | `tbench` is a custom agent topic with no training step. Omit `--train-dataset` / `--train-hash`. Do not invent a harness id as a fake corpus. Signed (empty lists are fine) |
@@ -521,7 +533,9 @@ you will actually meet on `tbench`:
 | **201** (scored) | Well-formed submit while scoring is on: the host scores before it answers, so the row is already `awaiting_admin`, `rejected`, or `champion`. **201 `queued`** only if `tbench` is back in `deferred_topics` | yes |
 | **200** existing row | Same artefact + hotkey, freshly signed, **only** while `tbench` is in `deferred_topics` (queued or already drained). While scoring is on, a fresh nonce is a new **201** and a second paid run | existing row |
 | **400** `unknown topic` / `topic is not open` | `tbench` is not published, or is outside its epoch window | no |
-| **400** `artifact_uri is required for custom topics` | You left the locator out. `tbench` is `custom` | no |
+| **400** `artifact required` | You left both the upload and the locator out. `tbench` is `custom` | no |
+| **400** `artifact is not a tar archive` / gzip / no file content | The upload is not an uncompressed tar with file bytes | no |
+| **503** staged artefact / `proof-artefact://` | Live evaluate of an upload: inject is [#285](https://github.com/CortexLM/cortex/pull/285). Score now URI-only | live: no; deferred: queued |
 | **400** `artifact_digest is the sha256 of empty input …` | You hashed nothing, or an empty tar | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not exactly 64 lowercase hex. The host never normalises a hex field | no |
 | **401** `hotkey_signature required` / `invalid` | Missing signature, or a `claim`, `declared_flops`, `manifest`, or nonce that differs from what you signed | no |
