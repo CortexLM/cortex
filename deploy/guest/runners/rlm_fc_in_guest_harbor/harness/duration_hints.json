@@ -24,7 +24,7 @@
     "formal-crypto": ">1h (~2.1h)",
     "cad-model": ">1h (~1.2h); verifier pytest missing until fixed",
     "data-anonymization": ">1h (~1.1h)",
-    "batched-eval-parity": "broken: network_mode=no-network unsupported",
+    "batched-eval-parity": "broken: allow_internet=false maps to Harbor no-network; filter still excludes",
     "ctr-optimization": "broken: EnvironmentStartTimeout",
     "cumulative-layout-shift": "broken: EnvironmentStartTimeout",
     "distributed-dedup": "broken: tmux send-keys mid-trial",

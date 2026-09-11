@@ -5,6 +5,7 @@
 #         n15 x0017 walls (biped/formal-crypto/cad/data-anon) are denied even
 #         without task.toml timeouts.
 # Network: agent path is public (Docker no-network breaks OpenRouter / BYOK).
+#          allow_internet=false is rewritten to true on the filtered copy.
 # Harness: custom Python primary; Harbor BaseAgent, harness.json, run.sh
 #          accepted. Topic terminus-2 only for baseline with no miner artefact.
 # Runtime: Docker daemon first (rootful overlay); podman API socket fallback.
@@ -58,17 +59,24 @@ if [ "$HARNESS_KIND" = script ]; then
     proof_run_script_harness >"$log" 2>&1
     script_exit=$?
     set -e
-    if [ "$script_exit" -ne 0 ]; then
-        rm -f "$PROOF_OUTPUT_DIR/report.json"
-        proof_die "script harness exited $script_exit; refusing to score a partial or failed run"
-    fi
+    proof_persist_work
     # Miner-authored report.json is never a paid score. A script that
     # self-reports primary_value is fail-closed even if Harbor jobs exist.
     if [ -f "$PROOF_OUTPUT_DIR/report.json" ]; then
         rm -f "$PROOF_OUTPUT_DIR/report.json"
         proof_die "script harness wrote report.json; refusing miner-authored primary_value (score must come from Harbor verifier trials)"
     fi
-    summarize_or_die 0
+    set +e
+    summarize_or_die "$script_exit"
+    sum_exit=$?
+    set -e
+    if [ "$sum_exit" -ne 0 ]; then
+        rm -f "$PROOF_OUTPUT_DIR/report.json"
+        if [ "$script_exit" -ne 0 ]; then
+            proof_die "script harness exited $script_exit; no measured Harbor trials"
+        fi
+        proof_die "no measured Harbor trials; refusing to invent a primary_value"
+    fi
     exit 0
 fi
 
@@ -106,11 +114,20 @@ set -e
 # Flush before fail so retain-on-fail sees harbor.run.log without e2fsck.
 proof_persist_work
 
-# Nonzero Harbor is an incomplete or failed trial set. Do not invoke the
-# summarizer: a leftover report.json would be a successful score.
-if [ "$harbor_exit" -ne 0 ]; then
-    rm -f "$PROOF_OUTPUT_DIR/report.json"
-    proof_die_harbor "$harbor_exit" "$log"
-fi
-
+# Timeout / kill / nonzero still scores already-measured trials
+# (verifier/reward.txt or verifier_result.rewards.reward). Fail-closed
+# only when n_measured==0 — never invent a primary_value.
+set +e
 summarize_or_die "$harbor_exit"
+sum_exit=$?
+set -e
+if [ "$sum_exit" -ne 0 ]; then
+    rm -f "$PROOF_OUTPUT_DIR/report.json"
+    if [ "$harbor_exit" -ne 0 ]; then
+        proof_die_harbor "$harbor_exit" "$log"
+    fi
+    proof_die "no measured Harbor trials; refusing to invent a primary_value"
+fi
+if [ "$harbor_exit" -ne 0 ]; then
+    echo "rlm_fc_in_guest_harbor: harbor exited ${harbor_exit}; scored already-measured trials" >&2
+fi

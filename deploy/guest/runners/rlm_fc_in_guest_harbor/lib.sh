@@ -9,6 +9,7 @@ PROOF_FILTER_TASKS="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/filter_tasks.py"
 PROOF_REWRITE_NETWORK="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/rewrite_network.py"
 PROOF_ENSURE_VERIFIER="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/ensure_verifier.py"
 PROOF_PYTHON_AGENT="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/proof_python_agent.py"
+PROOF_HARBOR_PATH_WRAP="${_PROOF_HARBOR_ADAPTOR_DIR}/harness/harbor_path_wrap.sh"
 
 # Last N lines of harbor.run.log on a 503. Metal tbench-x0004 truncated
 # the TypeError so the gateway body only said "harbor exited 1".
@@ -42,13 +43,15 @@ proof_die() {
     exit 2
 }
 
-# Harbor nonzero: persist work, then put the log tail on stderr so the
-# guest rolling tail / gateway 503 carries the real error.
+# Harbor nonzero with n_measured==0: persist work, then put the log tail
+# on stderr so the guest rolling tail / gateway 503 carries the real error.
+# Already-measured trials are scored by summarize.py; this is only the
+# fail-closed path when nothing was measured.
 proof_die_harbor() {
     local harbor_exit="$1"
     local log_file="${2:-}"
     proof_persist_work
-    echo "rlm_fc_in_guest_harbor: harbor exited ${harbor_exit}; refusing to score a partial or failed run" >&2
+    echo "rlm_fc_in_guest_harbor: harbor exited ${harbor_exit}; no measured trials to score" >&2
     echo "rlm_fc_in_guest_harbor: last ${PROOF_HARBOR_LOG_TAIL_LINES:-80} lines of harbor.run.log:" >&2
     proof_harbor_log_tail "$log_file" >&2
     exit 2
@@ -310,6 +313,47 @@ proof_start_container_runtime() {
     export PROOF_CONTAINER_RUNTIME=podman
 }
 
+# Workdir view of the pack whose tasks_dir is the filtered copy, plus a
+# Harbor CLI wrapper that rewrites --path to $PROOF_TASKS. The real pack
+# is never mutated. Script harness only — Harbor -a already uses
+# --path "$PROOF_TASKS".
+proof_script_bind_filtered_tasks() {
+    : "${PROOF_TASKS:?proof_filter_tasks first}"
+    : "${PROOF_PACK_DIR:?}"
+    : "${PROOF_WORK_DIR:?}"
+    : "${PROOF_PARAM_TASKS_DIR:?}"
+    local view="$PROOF_WORK_DIR/pack-view"
+    rm -rf "$view"
+    mkdir -p "$view"
+    local item name
+    for item in "$PROOF_PACK_DIR"/*; do
+        [ -e "$item" ] || continue
+        name="$(basename "$item")"
+        if [ "$name" = "$PROOF_PARAM_TASKS_DIR" ]; then
+            ln -s "$PROOF_TASKS" "$view/$name"
+        else
+            ln -s "$item" "$view/$name"
+        fi
+    done
+    export PROOF_PACK_DIR="$view"
+    export PROOF_TASKS
+    echo "rlm_fc_in_guest_harbor: script harness bound to filtered PROOF_TASKS=$PROOF_TASKS" >&2
+
+    local wrap_dir="$PROOF_WORK_DIR/bin"
+    mkdir -p "$wrap_dir"
+    if command -v harbor >/dev/null 2>&1; then
+        local real
+        real="$(command -v harbor)"
+        if [ "$real" != "$wrap_dir/harbor" ] && [ -f "$PROOF_HARBOR_PATH_WRAP" ]; then
+            export PROOF_HARBOR_REAL="$real"
+            cp "$PROOF_HARBOR_PATH_WRAP" "$wrap_dir/harbor"
+            chmod 0755 "$wrap_dir/harbor"
+            export PATH="$wrap_dir:$PATH"
+            echo "rlm_fc_in_guest_harbor: wrapping harbor so --path is always \$PROOF_TASKS" >&2
+        fi
+    fi
+}
+
 proof_run_script_harness() {
     local art="${PROOF_ARTIFACT_DIR:?script harness requires PROOF_ARTIFACT_DIR}"
     local rel="${PROOF_HARNESS_ENTRY:?}"
@@ -320,6 +364,7 @@ proof_run_script_harness() {
     [ -f "$path" ] || proof_die "script harness missing $path"
     echo "rlm_fc_in_guest_harbor: exec miner script $rel (not wrapping terminus-2)" >&2
     (
+        proof_script_bind_filtered_tasks
         cd "$art"
         case "$path" in
             *.sh) bash "$path" ;;

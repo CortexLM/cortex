@@ -144,7 +144,7 @@ class SummarizeTests(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 2)
             self.assertFalse((root / "report.json").exists())
 
-    def test_nonzero_harbor_exit_is_fail_closed(self) -> None:
+    def test_nonzero_harbor_exit_still_scores_measured_trials(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             trial = root / "jobs" / "job" / "t__1"
@@ -154,6 +154,28 @@ class SummarizeTests(unittest.TestCase):
                 encoding="utf-8",
             )
             out = root / "report.json"
+            rc = summarize.main(
+                [
+                    "--jobs-dir",
+                    str(root / "jobs"),
+                    "--output",
+                    str(out),
+                    "--harbor-exit",
+                    "23",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            report = json.loads(out.read_text(encoding="utf-8"))
+            self.assertAlmostEqual(report["primary_value"], 0.6)
+            self.assertEqual(report["evidence"]["n_measured"], 1)
+            self.assertEqual(report["evidence"]["harbor_exit"], 23)
+            self.assertTrue(report["evidence"]["harbor_incomplete"])
+
+    def test_nonzero_harbor_exit_with_zero_trials_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "jobs").mkdir()
+            out = root / "report.json"
             with self.assertRaises(SystemExit) as ctx:
                 summarize.main(
                     [
@@ -162,11 +184,93 @@ class SummarizeTests(unittest.TestCase):
                         "--output",
                         str(out),
                         "--harbor-exit",
-                        "23",
+                        "143",
                     ]
                 )
             self.assertEqual(ctx.exception.code, 2)
             self.assertFalse(out.exists())
+
+    def test_reward_txt_without_result_json_is_a_measurement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job1" / "hello__1"
+            (trial / "verifier").mkdir(parents=True)
+            (trial / "verifier" / "reward.txt").write_text("1.0\n", encoding="utf-8")
+            trials = summarize.collect_trials(root / "jobs")
+            self.assertEqual(len(trials), 1)
+            self.assertAlmostEqual(trials[0]["reward"], 1.0)
+            self.assertEqual(trials[0]["name"], "hello__1")
+
+    def test_incomplete_job_finished_at_null_scores_reward_txt(self) -> None:
+        """Retained x0020: job snapshot unfinished, rewards already on disk."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = root / "jobs" / "job1"
+            job.mkdir(parents=True)
+            (job / "result.json").write_text(
+                json.dumps(
+                    {
+                        "finished_at": None,
+                        "n_running": 1,
+                        "n_completed": 7,
+                        "stats": {"n_running_trials": 1},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rewards = [1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.5]
+            for i, reward in enumerate(rewards):
+                trial = job / f"task-{i}__1"
+                (trial / "verifier").mkdir(parents=True)
+                (trial / "verifier" / "reward.txt").write_text(
+                    f"{reward}\n", encoding="utf-8"
+                )
+            trials = summarize.collect_trials(root / "jobs")
+            self.assertEqual(len(trials), 7)
+            self.assertAlmostEqual(summarize.mean_reward(trials), sum(rewards) / 7.0)
+            out = root / "report.json"
+            rc = summarize.main(
+                [
+                    "--jobs-dir",
+                    str(root / "jobs"),
+                    "--output",
+                    str(out),
+                    "--harbor-exit",
+                    "143",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            report = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(report["evidence"]["n_measured"], 7)
+            self.assertAlmostEqual(report["primary_value"], sum(rewards) / 7.0)
+            self.assertEqual(report["evidence"]["harbor_exit"], 143)
+
+    def test_reward_txt_does_not_double_count_result_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "t__1"
+            (trial / "verifier").mkdir(parents=True)
+            (trial / "result.json").write_text(
+                json.dumps(
+                    {
+                        "trial_name": "t__1",
+                        "verifier_result": {"rewards": {"reward": 0.25}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (trial / "verifier" / "reward.txt").write_text("0.99\n", encoding="utf-8")
+            trials = summarize.collect_trials(root / "jobs")
+            self.assertEqual(len(trials), 1)
+            self.assertAlmostEqual(trials[0]["reward"], 0.25)
+
+    def test_non_numeric_reward_txt_is_not_a_measurement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "t__1"
+            (trial / "verifier").mkdir(parents=True)
+            (trial / "verifier" / "reward.txt").write_text("nan\n", encoding="utf-8")
+            self.assertEqual(summarize.collect_trials(root / "jobs"), [])
 
     def test_scores_every_measured_trial_beyond_evidence_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

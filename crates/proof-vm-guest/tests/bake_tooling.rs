@@ -64,6 +64,10 @@ fn guest_scripts_parse() {
         ),
         (
             "bash",
+            "deploy/guest/runners/rlm_fc_in_guest_harbor/harness/harbor_path_wrap.sh",
+        ),
+        (
+            "bash",
             "deploy/guest/runners/rlm_fc_in_guest_harbor/tests/test_adaptor.sh",
         ),
         (
@@ -390,6 +394,7 @@ fn deploy_guest_names_no_harness_or_benchmark() {
         "harness/ensure_verifier.py",
         "harness/rewrite_network.py",
         "harness/proof_python_agent.py",
+        "harness/harbor_path_wrap.sh",
         "resolve_harness.py",
     ] {
         let p = adaptor.join(required);

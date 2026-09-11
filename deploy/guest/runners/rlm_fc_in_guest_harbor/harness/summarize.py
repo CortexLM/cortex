@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Turn a Harbor jobs directory into Proof ``report.json``.
 
-``primary_value`` is the mean of **every** trial
-``verifier_result.rewards.reward`` that is a finite number. A trial with
-no such field is **no measurement** — never another field's value (score,
-accuracy, job-level aggregates) as a substitute. Zero measured trials →
-exit 2, no report. A nonzero Harbor exit is an incomplete run → exit 2,
-no report (do not publish a partial score).
+``primary_value`` is the mean of **every** trial that has a measured
+reward: a finite ``verifier_result.rewards.reward`` in ``result.json``,
+or a finite number in ``verifier/reward.txt`` when JSON is missing
+(timeout / kill can leave ``finished_at=null`` with rewards already on
+disk). A trial with neither is **no measurement** — never another
+field's value (score, accuracy, job-level aggregates) as a substitute.
 
-Evidence serializes at most ``MAX_EVIDENCE_TRIALS`` trial rows; the mean
-always uses the full measured set. Secret values from the owner secrets
-dir and miner BYOK dir are blanked.
+Zero measured trials → exit 2, no report (do not invent a primary_value).
+A nonzero Harbor exit is **not** fail-closed by itself: already-measured
+trials still score; ``harbor_exit`` stays in evidence.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from typing import Any
 
 MAX_TAIL_CHARS = 8 * 1024
 MAX_EVIDENCE_TRIALS = 256
+MAX_REWARD_TXT_BYTES = 64 * 1024
 REDACTED = "[REDACTED]"
 
 
@@ -53,6 +54,36 @@ def trial_reward(obj: Any) -> float | None:
     return None
 
 
+def reward_from_txt(path: Path) -> float | None:
+    """Parse ``verifier/reward.txt`` (a single finite number). Never invent."""
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_REWARD_TXT_BYTES:
+            return None
+        raw = path.read_bytes().strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    line = ""
+    for candidate in text.splitlines():
+        line = candidate.strip()
+        if line:
+            break
+    if not line:
+        return None
+    try:
+        value = float(line)
+    except ValueError:
+        return None
+    if math.isfinite(value):
+        return float(value)
+    return None
+
+
 def _load_json(path: Path) -> Any | None:
     try:
         if path.stat().st_size > 8 * 1024 * 1024:
@@ -62,21 +93,52 @@ def _load_json(path: Path) -> Any | None:
         return None
 
 
+def _trial_name(obj: Any, trial_dir: Path) -> str:
+    if isinstance(obj, dict):
+        name = obj.get("trial_name")
+        if isinstance(name, str) and name:
+            return name
+    return trial_dir.name
+
+
 def collect_trials(jobs_dir: Path) -> list[dict[str, Any]]:
-    """Load every measured trial. Do not cap here — the cap is evidence only."""
-    trials: list[dict[str, Any]] = []
+    """Load every measured trial. Do not cap here — the cap is evidence only.
+
+    Prefer ``result.json`` ``verifier_result.rewards.reward``. If that is
+    absent (incomplete Harbor: timeout/kill, ``finished_at=null``), use
+    ``verifier/reward.txt`` in the same trial directory. One row per trial
+    dir — never double-count JSON + txt.
+    """
+    by_dir: dict[str, dict[str, Any]] = {}
     if not jobs_dir.is_dir():
-        return trials
+        return []
+
+    def add(trial_dir: Path, reward: float, name: str) -> None:
+        key = str(trial_dir)
+        if key in by_dir:
+            return
+        by_dir[key] = {"name": name, "reward": reward}
+
     for result_path in sorted(jobs_dir.rglob("result.json")):
         obj = _load_json(result_path)
         reward = trial_reward(obj)
         if reward is None:
             continue
-        name = obj.get("trial_name") if isinstance(obj, dict) else None
-        if not isinstance(name, str) or not name:
-            name = result_path.parent.name
-        trials.append({"name": name, "reward": reward})
-    return trials
+        trial_dir = result_path.parent
+        add(trial_dir, reward, _trial_name(obj, trial_dir))
+
+    for reward_path in sorted(jobs_dir.rglob("reward.txt")):
+        if reward_path.parent.name != "verifier":
+            continue
+        trial_dir = reward_path.parent.parent
+        if str(trial_dir) in by_dir:
+            continue
+        reward = reward_from_txt(reward_path)
+        if reward is None:
+            continue
+        add(trial_dir, reward, trial_dir.name)
+
+    return [by_dir[k] for k in sorted(by_dir)]
 
 
 def load_redact_values() -> list[str]:
@@ -185,6 +247,7 @@ def build_report(
             "evidence_truncated": len(trials) > MAX_EVIDENCE_TRIALS,
             "mean_reward": primary,
             "harbor_exit": harbor_exit,
+            "harbor_incomplete": harbor_exit != 0,
             "harbor_run_tail": log_tail,
             "agent": redact(agent, load_redact_values()),
             "agent_source": agent_source,
@@ -204,18 +267,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--harness-kind", default="")
     args = parser.parse_args(argv)
 
-    if args.harbor_exit != 0:
-        _fail(
-            f"harbor exited {args.harbor_exit}; refusing to publish a score "
-            "from a failed or incomplete run"
-        )
-
     jobs_dir = Path(args.jobs_dir)
     trials = collect_trials(jobs_dir)
     if not trials:
         _fail(
             f"no measured Harbor trials under {jobs_dir} "
-            "(need verifier_result.rewards.reward); refusing to invent a primary_value"
+            "(need verifier_result.rewards.reward or verifier/reward.txt); "
+            "refusing to invent a primary_value"
         )
     secrets = load_redact_values()
     log_path = Path(args.log) if args.log else None
@@ -232,6 +290,12 @@ def main(argv: list[str] | None = None) -> int:
     dumped = json.dumps(report, indent=2, sort_keys=True)
     dumped = redact(dumped, secrets)
     out.write_text(dumped + "\n", encoding="utf-8")
+    n = len(trials)
+    print(
+        f"summarize: n_measured={n} primary_value={report['primary_value']} "
+        f"harbor_exit={args.harbor_exit}",
+        file=sys.stderr,
+    )
     return 0
 
 

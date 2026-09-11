@@ -42,7 +42,7 @@ Evaluate discovers, in order:
 |--------|-----------|
 | `python` (primary) | Custom Python class (`Agent` / `ProofAgent` / any class named in `import_path`). Need not subclass Harbor `BaseAgent`. Harbor `-a` is the in-tree wrapper `proof_python_agent:ProofPythonAgent`, which imports **your** class from the artefact only. |
 | `harbor` | Harbor `BaseAgent` / `BaseInstalledAgent` subclass, passed as `-a module:Class` |
-| `script` | Miner executable relative to the artefact. Docker, filtered tasks, and BYOK are already set. Score is the mean of Harbor `verifier_result.rewards.reward` under `$PROOF_WORK_DIR/harbor-jobs`. A miner-authored `$PROOF_OUTPUT_DIR/report.json` is refused (fail closed). Never wrapped as `terminus-2`. |
+| `script` | Miner executable relative to the artefact. Docker, **filtered** tasks, and BYOK are already set. The script sees `$PROOF_TASKS` (and `$PROOF_PACK_DIR/<tasks_dir>` rebound to that copy). `harbor run --path` is rewritten onto the filtered tree so a miner that names `$PROOF_PACK_DIR/tasks` cannot evaluate the unfiltered pack. Score is the mean of measured Harbor rewards (`verifier_result.rewards.reward` or `verifier/reward.txt`) under `$PROOF_WORK_DIR/harbor-jobs`. A miner-authored `$PROOF_OUTPUT_DIR/report.json` is refused (fail closed). Never wrapped as `terminus-2`. |
 | `builtin` | A Harbor built-in the **miner** opted into. Evaluate refuses a topic built-in when this file is absent. |
 
 Custom Python `run()` may take `instruction` alone or Harbor's
@@ -171,7 +171,10 @@ not the task list. Before Harbor runs, the adaptor copies surviving tasks
 to `$PROOF_WORK_DIR/tasks-filtered` and rewrites Harbor `network_mode` to
 **`public`** on that copy (Docker `no-network` is unsupported on this guest
 and blocked agent OpenRouter calls; n15 hit `ValueError network_mode=no-network
-unsupported` on batched-eval-parity). Host nftables on the VM TAP remain the
+unsupported` on batched-eval-parity). `allow_internet = false` in task.toml
+is mapped to `true` on the same copy (Harbor treats that pin as
+`network_mode=no-network`). The default duration filter still **excludes**
+`batched-eval-parity` and the other broken names. Host nftables on the VM TAP remain the
 egress allowlist; this rewrite does not open the host. A filtered copy with
 zero tasks fails closed.
 
@@ -235,10 +238,13 @@ pytest assertion failures remain real 0s.
 }
 ```
 
-`primary_value` is the mean of **every** Harbor trial
-`verifier_result.rewards.reward`. Evidence may truncate the serialized
-trial list; the mean does not. No measured trial, or a nonzero Harbor
-exit, → fail closed, no invented number and no leftover `report.json`.
+`primary_value` is the mean of **every** measured Harbor trial reward
+(`verifier_result.rewards.reward`, or `verifier/reward.txt` when JSON is
+missing). Evidence may truncate the serialized trial list; the mean does
+not. `n_measured == 0` → fail closed, no invented number and no leftover
+`report.json`. A nonzero Harbor exit (timeout / kill / incomplete
+`finished_at=null`) still scores already-measured trials; `harbor_exit`
+stays in evidence. Miner-authored `report.json` is still refused.
 
 `inspect` writes `$PROOF_OUTPUT_DIR/checklist.json` (no Harbor, no keys).
 

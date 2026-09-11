@@ -11,10 +11,13 @@ isolation boundary.
 Rewrites only the destination tree (never the pack):
 
 * ``task.toml`` / ``*.toml``: ``network_mode = "public"`` on environment,
-  agent, and verifier tables.
+  agent, and verifier tables; ``allow_internet = false`` → ``true``
+  (Harbor maps that pin to ``network_mode=no-network``).
 * Compose / YAML: drop ``network_mode: none|no-network`` so Docker uses
-  the default bridge rather than a Harbor policy the daemon cannot honour.
-* JSON: rewrite ``"network_mode": "no-network"`` (Harbor env configs).
+  the default bridge rather than a Harbor policy the daemon cannot honour;
+  ``allow_internet: false`` → ``true``.
+* JSON: rewrite ``"network_mode": "no-network"`` and
+  ``"allow_internet": false``.
 """
 
 from __future__ import annotations
@@ -28,9 +31,15 @@ TOML_MODE = re.compile(
     r'(?im)^(?P<indent>\s*)network_mode\s*=\s*(?P<q>["\']?)'
     r'(?:no-network|no_network|none|isolated|allowlist)(?P=q)\s*$'
 )
+TOML_ALLOW_INTERNET = re.compile(
+    r'(?im)^(?P<indent>\s*)allow_internet\s*=\s*(?P<q>["\']?)false(?P=q)\s*$'
+)
 YAML_MODE = re.compile(
     r'(?im)^(?P<indent>\s*)network_mode\s*:\s*(?P<q>["\']?)'
     r'(?:no-network|no_network|none|isolated)(?P=q)\s*$'
+)
+YAML_ALLOW_INTERNET = re.compile(
+    r'(?im)^(?P<indent>\s*)allow_internet\s*:\s*(?P<q>["\']?)false(?P=q)\s*$'
 )
 TOML_SUFFIX = {".toml"}
 YAML_SUFFIX = {".yml", ".yaml"}
@@ -39,6 +48,7 @@ MAX_FILE_BYTES = 1024 * 1024
 JSON_MODE = re.compile(
     r'(?i)("network_mode"\s*:\s*")(?:no-network|no_network|none|isolated|allowlist)(")'
 )
+JSON_ALLOW_INTERNET = re.compile(r'(?i)("allow_internet"\s*:\s*)false\b')
 
 
 def _fail(msg: str, code: int = 2) -> None:
@@ -47,17 +57,24 @@ def _fail(msg: str, code: int = 2) -> None:
 
 
 def rewrite_toml(text: str, mode: str) -> str:
-    return TOML_MODE.sub(rf'\g<indent>network_mode = "{mode}"', text)
+    text = TOML_MODE.sub(rf'\g<indent>network_mode = "{mode}"', text)
+    if mode == "public":
+        text = TOML_ALLOW_INTERNET.sub(r'\g<indent>allow_internet = true', text)
+    return text
 
 
 def rewrite_yaml(text: str) -> str:
     # Drop the isolation pin so Compose uses bridge. Do not invent Harbor
     # network_mode keys that Docker Compose would treat as a Docker mode.
-    return YAML_MODE.sub("", text)
+    text = YAML_MODE.sub("", text)
+    return YAML_ALLOW_INTERNET.sub(r'\g<indent>allow_internet: true', text)
 
 
 def rewrite_json(text: str, mode: str) -> str:
-    return JSON_MODE.sub(rf'\1{mode}\2', text)
+    text = JSON_MODE.sub(rf'\1{mode}\2', text)
+    if mode == "public":
+        text = JSON_ALLOW_INTERNET.sub(r'\1true', text)
+    return text
 
 
 def rewrite_tree(root: Path, mode: str) -> dict[str, int]:

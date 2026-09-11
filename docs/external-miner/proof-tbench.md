@@ -186,8 +186,12 @@ wrapped as `proof_python_agent:ProofPythonAgent`). Resolution order:
 `harness.json`, then `$PROOF_ARTIFACT_DIR/agent`, then
 `$PROOF_ARTIFACT_DIR/recipe/agent`, then `run.sh`. A `recipe/run.sh` with no
 agent dir is scored as a **script harness**, not as the topic agent. The
-script must leave Harbor jobs with measured `verifier_result.rewards.reward`;
-a self-written `$PROOF_OUTPUT_DIR/report.json` is **not** a score. Inspect
+script must leave Harbor jobs with measured rewards
+(`verifier_result.rewards.reward` or `verifier/reward.txt`). Evaluate uses
+the **filtered** task set only (`$PROOF_TASKS`); `$PROOF_PACK_DIR/tasks` is
+rebound to that copy and `harbor run --path` is rewritten onto it — do not
+iterate the unfiltered pack. A self-written `$PROOF_OUTPUT_DIR/report.json`
+is **not** a score. Inspect
 ticks `no_eval_short_circuit` / `no_tb4_hardcoding` on **cheat markers**, not
 on the rule ids. Naming those ids in a README or comment is not a fail.
 What fails: `skip_eval`, `skip_verifier`, `always_pass_eval`,
