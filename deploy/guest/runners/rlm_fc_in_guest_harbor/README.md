@@ -122,7 +122,8 @@ Off-limits in the artefact (inspect fails the named rule):
 - `no_eval_short_circuit` (and `skip_eval` / `skip_verifier` / `always_pass_eval` / `short_circuit_eval`)
 - `no_tb4_hardcoding` (and `tb4_answers` / `hardcoded_tb4`)
 
-A file/byte-limit truncation marks the scan incomplete and fails those
+A file/byte-limit truncation, or a regular file that is oversized,
+unreadable, or binary, marks the scan incomplete and fails those
 off-limits rules. Unknown rule ids fail closed. Do not quote those markers
 in miner code or README inside the tar.
 
