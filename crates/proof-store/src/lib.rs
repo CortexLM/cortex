@@ -402,6 +402,25 @@ impl MemoryStore {
         Self::default()
     }
 
+    /// Raise the `pf_…` allocator so the next mint is strictly greater than
+    /// `used`. Never decreases `next`. A fresh store starts at 0; seeding
+    /// after a restart with the highest already-used id (`pf_{used:016x}`)
+    /// makes the next mint `used + 1`.
+    pub fn advance_next_at_least(&self, used: u64) -> Result<(), StoreError> {
+        let mut g = self.lock()?;
+        let floor = used.saturating_add(1);
+        if g.next < floor {
+            g.next = floor;
+        }
+        Ok(())
+    }
+
+    /// Seed the allocator from a used numeric id. Same as
+    /// [`MemoryStore::advance_next_at_least`].
+    pub fn seed_next_id(&self, used: u64) -> Result<(), StoreError> {
+        self.advance_next_at_least(used)
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>, StoreError> {
         self.inner.lock().map_err(|_| StoreError::Poison)
     }
@@ -922,6 +941,29 @@ mod tests {
             verdict: None,
             detail: Some("scoring deferred".into()),
         }
+    }
+
+    #[test]
+    fn a_fresh_store_mints_from_zero() {
+        let st = MemoryStore::new();
+        let first = st.insert(queued_row("t", "1")).expect("mint");
+        assert_eq!(first.id, "pf_0000000000000000");
+        let second = st.insert(queued_row("t", "2")).expect("mint");
+        assert_eq!(second.id, "pf_0000000000000001");
+    }
+
+    #[test]
+    fn seeding_advances_mint_past_existing_ids() {
+        let st = MemoryStore::new();
+        st.seed_next_id(0).expect("used pf_0");
+        let first = st.insert(queued_row("t", "1")).expect("mint");
+        assert_eq!(first.id, "pf_0000000000000001");
+        st.advance_next_at_least(0).expect("never decreases");
+        let second = st.insert(queued_row("t", "2")).expect("mint");
+        assert_eq!(second.id, "pf_0000000000000002");
+        st.seed_next_id(0xff).expect("used pf_ff");
+        let third = st.insert(queued_row("t", "3")).expect("mint");
+        assert_eq!(third.id, "pf_0000000000000100");
     }
 
     /// The queue is FIFO by id and a topic has **one** claim at a time: while

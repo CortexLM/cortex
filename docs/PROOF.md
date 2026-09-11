@@ -551,8 +551,12 @@ evidence and passes. Every checklist (red or green), every lifecycle
 transition, the baseline measurement, artefact metadata, and every promotion
 event land in the DB (`proof_checklist`, `proof_lifecycle_event`,
 `proof_baseline_measurement`, `proof_artefact`, `proof_promotion_event`,
-`proof_topic_version`). Tables are append-only for `base_app`; "current
-best" is the newest promotion row. `BASE_DATABASE_URL` selects Postgres; a
+`proof_topic_version`). Journal tables are append-only for `base_app`;
+"current best" is the newest promotion row. `proof_artefact` is keyed by
+`(topic_id, submission_id)` and a collision replaces zip metadata (path,
+sha256, bytes, digest, primary, checklist, promoted) so a restarted
+in-memory allocator cannot leave a stale sha next to a rewritten zip.
+`BASE_DATABASE_URL` selects Postgres; a
 configured-but-unreachable database is fatal, an unset one falls back to the
 in-memory store with a warning.
 

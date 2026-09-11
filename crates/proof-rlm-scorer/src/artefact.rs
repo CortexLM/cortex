@@ -198,9 +198,45 @@ pub enum ArtefactError {
     Io(String),
 }
 
-fn is_row_id(id: &str) -> bool {
+fn parse_row_numeric(id: &str) -> Option<u64> {
     id.strip_prefix("pf_")
-        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .filter(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .and_then(|h| u64::from_str_radix(h, 16).ok())
+}
+
+fn is_row_id(id: &str) -> bool {
+    parse_row_numeric(id).is_some()
+}
+
+/// Highest numeric `pf_` id among `{root}/{topic_id}/{submission_id}.zip`.
+///
+/// Missing root or no matching files → `None`. Non-zip names and malformed
+/// ids are ignored so a leftover file cannot crash a restart.
+#[must_use]
+pub fn max_zip_numeric_id(root: &Path) -> Option<u64> {
+    let topics = std::fs::read_dir(root).ok()?;
+    let mut max = None;
+    for topic in topics.flatten() {
+        if !topic.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(topic.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            if !file.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
+            let name = file.file_name();
+            let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".zip")) else {
+                continue;
+            };
+            if let Some(n) = parse_row_numeric(stem) {
+                max = Some(max.map_or(n, |m: u64| m.max(n)));
+            }
+        }
+    }
+    max
 }
 
 /// Relative, no `.`/`..` segments, conservative charset, bounded length.
@@ -384,6 +420,12 @@ impl ArtefactStore {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Highest numeric `pf_` id among zip basenames under this root.
+    #[must_use]
+    pub fn max_zip_numeric_id(&self) -> Option<u64> {
+        max_zip_numeric_id(&self.root)
     }
 
     fn topic_dir(&self, topic_id: &str) -> Result<PathBuf, ArtefactError> {
@@ -730,5 +772,25 @@ mod tests {
             Path::new("/artefacts")
         );
         assert_eq!(ARTEFACT_ROOT_ENV, "PROOF_ARTEFACT_ROOT");
+    }
+
+    #[test]
+    fn max_zip_numeric_id_reads_pf_basenames_across_topic_dirs() {
+        let root = tmp("max-zip");
+        std::fs::create_dir_all(root.join("topic-a")).expect("a");
+        std::fs::create_dir_all(root.join("topic-b")).expect("b");
+        std::fs::write(root.join("topic-a").join("pf_0000000000000001.zip"), b"a")
+            .expect("zip 1");
+        std::fs::write(root.join("topic-b").join("pf_00000000000000ff.zip"), b"b")
+            .expect("zip ff");
+        std::fs::write(root.join("topic-a").join("best.json"), b"{}").expect("best");
+        std::fs::write(root.join("not-a-topic.zip"), b"x").expect("root zip");
+        assert_eq!(max_zip_numeric_id(&root), Some(0xff));
+        assert_eq!(
+            ArtefactStore::new(&root).max_zip_numeric_id(),
+            Some(0xff)
+        );
+        assert_eq!(max_zip_numeric_id(&root.join("missing")), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
