@@ -143,6 +143,10 @@ pub enum StoreError {
     /// carries a value — only what the host could not do.
     #[error("miner byok vault: {0}")]
     Vault(String),
+    /// This frozen digest already holds a different miner environment.
+    /// Never carries a value — only that the two claims conflict.
+    #[error("miner byok for this frozen digest is already held with a different environment")]
+    EnvConflict,
     /// Unknown / unpublished topic.
     #[error("unknown topic {0}")]
     UnknownTopic(String),
@@ -419,7 +423,8 @@ pub const ARTEFACT_STAGING_DIR_ENV: &str = "PROOF_ARTEFACT_STAGING_DIR";
 pub const DEFAULT_ARTEFACT_STAGING_DIR: &str = "/run/proof/artefact-stage";
 
 /// Internal locator recorded on a row when the miner uploaded bytes.
-/// Evaluate (PR B) reads the vault; the guest must not fetch this scheme.
+/// Evaluate reads the vault and the KVM host injects the bytes over vsock;
+/// the guest must not HTTP-fetch this scheme.
 pub const STAGED_ARTEFACT_SCHEME: &str = "proof-artefact";
 
 /// `proof-artefact://{digest}` for a 64-hex digest.
@@ -445,7 +450,7 @@ pub fn is_staged_artefact_uri(uri: &str) -> bool {
 /// `0600` file. Nonce is unique per miner, not globally, so identity is
 /// `(digest, hotkey, nonce)` and two miners cannot share or clobber a file.
 /// Bytes never go in postgres or on the public row; [`Submission::artifact_staged`]
-/// holds the host path for evaluate / PR B vsock inject.
+/// holds the host path for evaluate vsock inject.
 #[derive(Debug, Clone, Default)]
 pub struct ArtefactVault {
     root: Option<PathBuf>,
@@ -718,7 +723,8 @@ impl MemoryStore {
     /// defers scoring can still be drained after a restart. Nothing reads it
     /// but the scoring path ([`Self::miner_env`]), which drops it
     /// ([`Self::forget_miner_env`]) as soon as the row is terminal. An empty
-    /// environment is not stored at all.
+    /// environment is not stored at all. Submit uses [`Self::claim_miner_env`]
+    /// so two concurrent holders of the same digest cannot both roll it back.
     ///
     /// # Errors
     ///
@@ -738,26 +744,36 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Hold `env` for `digest`, incrementing an in-flight ref. The first
-    /// claim writes the vault; a concurrent claim of the same digest does
-    /// not overwrite. [`Self::release_miner_env`] drops one ref and deletes
-    /// only when none remain and no row still names this digest.
+    /// Atomically hold BYOK for `digest`. Inserts `env` only when the slot is
+    /// empty (never replaces). A concurrent claim of the **same** environment
+    /// increments an in-flight ref. A later claim of a *different* environment
+    /// for the same digest is [`StoreError::EnvConflict`] — never a silent
+    /// share of the first miner's credentials. [`Self::release_miner_env`]
+    /// drops one ref and deletes only when none remain and no row still names it.
     ///
     /// # Errors
     ///
     /// [`StoreError::Vault`] when a configured vault cannot hold the key.
+    /// [`StoreError::EnvConflict`] when the slot is occupied with a different env.
     pub fn claim_miner_env(&self, digest: &str, env: &MinerEnv) -> Result<(), StoreError> {
         if env.is_empty() {
             return Ok(());
         }
         let mut g = self.lock()?;
-        let first = g.env_refs.get(digest).copied().unwrap_or(0) == 0;
-        if first {
-            if self.byok.is_file_backed() {
-                self.byok.put(digest, env)?;
-            } else {
-                g.miner_envs.insert(digest.to_owned(), env.clone());
+        let existing = if self.byok.is_file_backed() {
+            let got = self.byok.get(digest);
+            (!got.is_empty()).then_some(got)
+        } else {
+            g.miner_envs.get(digest).cloned()
+        };
+        if let Some(held) = existing {
+            if &held != env {
+                return Err(StoreError::EnvConflict);
             }
+        } else if self.byok.is_file_backed() {
+            self.byok.put(digest, env)?;
+        } else {
+            g.miner_envs.insert(digest.to_owned(), env.clone());
         }
         let next = g
             .env_refs
@@ -789,8 +805,9 @@ impl MemoryStore {
             return Ok(());
         }
         g.miner_envs.remove(digest);
-        drop(g);
-        self.byok.remove(digest);
+        if self.byok.is_file_backed() {
+            self.byok.remove(digest);
+        }
         Ok(())
     }
 
@@ -810,10 +827,12 @@ impl MemoryStore {
     /// Drop the stashed environment for a frozen digest. Called once the row
     /// is scored: a terminal row never needs the key again.
     pub fn forget_miner_env(&self, digest: &str) -> Result<(), StoreError> {
-        self.byok.remove(digest);
         let mut g = self.lock()?;
         g.miner_envs.remove(digest);
         g.env_refs.remove(digest);
+        if self.byok.is_file_backed() {
+            self.byok.remove(digest);
+        }
         Ok(())
     }
 
@@ -1534,6 +1553,80 @@ mod tests {
         assert!(store.miner_env(&digest).expect("gone").is_empty());
         assert_eq!(MINER_BYOK_DIR_ENV, "PROOF_MINER_BYOK_DIR");
         assert!(DEFAULT_MINER_BYOK_DIR.starts_with("/run/"), "runtime path");
+    }
+
+    /// Two concurrent claims of the same frozen digest (different submit
+    /// nonces in HTTP) both hold the entry. One release — a staging 503 —
+    /// must not drop the key the other holder still needs.
+    #[test]
+    fn concurrent_same_digest_claims_survive_a_sibling_release() {
+        let store = MemoryStore::new();
+        let digest = "ab".repeat(32);
+        let mut env = MinerEnv::new();
+        env.insert("MINER_PROVIDED_API_KEY", "miner-supplied-value");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let a = {
+            let store = store.clone();
+            let env = env.clone();
+            let digest = digest.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                store.claim_miner_env(&digest, &env).expect("claim a");
+                barrier.wait();
+                store.release_miner_env(&digest).expect("staging 503");
+            })
+        };
+        let b = {
+            let store = store.clone();
+            let env = env.clone();
+            let digest = digest.clone();
+            std::thread::spawn(move || {
+                store.claim_miner_env(&digest, &env).expect("claim b");
+                barrier.wait();
+            })
+        };
+        a.join().expect("a");
+        b.join().expect("b");
+        assert_eq!(
+            store
+                .miner_env(&digest)
+                .expect("kept")
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![("MINER_PROVIDED_API_KEY", "miner-supplied-value")],
+            "the queued holder still has the key after the sibling rolled back"
+        );
+        store.release_miner_env(&digest).expect("last holder");
+        assert!(store.miner_env(&digest).expect("gone").is_empty());
+    }
+
+    #[test]
+    fn claim_miner_env_does_not_replace_an_occupied_slot() {
+        let store = MemoryStore::new();
+        let digest = "cd".repeat(32);
+        let mut first = MinerEnv::new();
+        first.insert("MINER_PROVIDED_API_KEY", "first");
+        let mut second = MinerEnv::new();
+        second.insert("MINER_PROVIDED_API_KEY", "second");
+        store.claim_miner_env(&digest, &first).expect("create");
+        let err = store
+            .claim_miner_env(&digest, &second)
+            .expect_err("conflict");
+        assert!(matches!(err, StoreError::EnvConflict), "{err}");
+        assert!(
+            !err.to_string().contains("first") && !err.to_string().contains("second"),
+            "a conflict never quotes a key: {err}"
+        );
+        assert_eq!(
+            store
+                .miner_env(&digest)
+                .expect("first")
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![("MINER_PROVIDED_API_KEY", "first")]
+        );
+        store.release_miner_env(&digest).expect("last holder");
+        assert!(store.miner_env(&digest).expect("gone").is_empty());
     }
 
     #[test]

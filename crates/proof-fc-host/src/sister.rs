@@ -19,10 +19,10 @@ use proof_vm_proto::{EvidenceBinding, SisterAttestation, API_VERSION};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{HostConfig, MAX_ARTIFACT_TAR_BYTES};
-use crate::images::{image_path, ImageCache};
 use crate::jail::{JailGuard, VmBoot};
 use crate::shell::Shell;
 use crate::vsock::GuestChannel;
+use proof_fc_harvest::images::{image_path, ImageCache};
 
 /// Longest jail id the jailer accepts.
 const MAX_JAIL_ID: usize = 64;

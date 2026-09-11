@@ -176,12 +176,12 @@ impl HostConfig {
     ///
     /// [`HvError::Spec`].
     pub fn validate(&self) -> Result<(), HvError> {
-        if crate::images::digest_hex(&self.kernel_digest).is_none() {
+        if proof_fc_harvest::images::digest_hex(&self.kernel_digest).is_none() {
             return Err(HvError::Spec(
                 "kernel_digest must be sha256:<64 hex> (do not invent one)".into(),
             ));
         }
-        if crate::images::digest_hex(&self.sister_image_digest).is_none() {
+        if proof_fc_harvest::images::digest_hex(&self.sister_image_digest).is_none() {
             return Err(HvError::Spec(
                 "sister_image_digest must be sha256:<64 hex> (do not invent one)".into(),
             ));

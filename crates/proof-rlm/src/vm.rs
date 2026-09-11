@@ -259,6 +259,41 @@ impl VmJob {
         }
     }
 
+    /// The run request a job carries, if it carries one.
+    #[must_use]
+    pub fn request(&self) -> Option<&CustomRunRequest> {
+        match self {
+            Self::Baseline { request }
+            | Self::Inspect { request, .. }
+            | Self::Evaluate { request, .. } => Some(request),
+            Self::ProposeRules { .. } | Self::Archive { .. } => None,
+        }
+    }
+
+    /// Strip vault bytes from a job the host already injected over vsock.
+    #[must_use]
+    pub fn without_artifact_tar(self) -> Self {
+        match self {
+            Self::Baseline { request } => Self::Baseline {
+                request: request.without_artifact_tar(),
+            },
+            Self::Inspect { request, rules } => Self::Inspect {
+                request: request.without_artifact_tar(),
+                rules,
+            },
+            Self::Evaluate {
+                request,
+                checklist_digest,
+                rules_version,
+            } => Self::Evaluate {
+                request: request.without_artifact_tar(),
+                checklist_digest,
+                rules_version,
+            },
+            other => other,
+        }
+    }
+
     /// Whether the job runs miner code and the topic demands the guest.
     #[must_use]
     pub fn requires_firecracker(&self) -> bool {
