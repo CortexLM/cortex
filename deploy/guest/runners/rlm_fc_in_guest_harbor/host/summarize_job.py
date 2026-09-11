@@ -148,25 +148,47 @@ def job_out_mtime(path: Path) -> float:
         return 0.0
 
 
-def job_out_unwraps(path: Path) -> bool:
+def job_out_primary(path: Path) -> float | None:
     try:
         obj = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeError):
-        return False
+        return None
     report = extract_report(obj)
-    return report is not None and _is_finite_number(report.get("primary_value"))
+    if report is None:
+        return None
+    value = report.get("primary_value")
+    if _is_finite_number(value):
+        return float(value)
+    return None
+
+
+def job_out_unwraps(path: Path) -> bool:
+    return job_out_primary(path) is not None
 
 
 def select_job_out(found: list[Path]) -> Path:
-    """Newest ``job.out`` that unwraps a finite primary; never a baked job id."""
+    """Newest ``job.out`` that unwraps; refuse when several disagree."""
+    scored: list[tuple[Path, float]] = []
+    for path in found:
+        primary = job_out_primary(path)
+        if primary is not None:
+            scored.append((path, primary))
+    if len(scored) > 1:
+        distinct = {round(primary, 12) for _, primary in scored}
+        if len(distinct) > 1:
+            listed = ", ".join(str(path) for path, _ in scored)
+            print(
+                "summarize_job: multiple job.out unwrap different "
+                f"primary_value ({listed}); pass an explicit path",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+    if scored:
+        scored.sort(key=lambda item: (job_out_mtime(item[0]), -len(item[0].parts)), reverse=True)
+        return scored[0][0]
     ranked = sorted(
         found,
-        key=lambda p: (
-            job_out_unwraps(p),
-            job_out_mtime(p),
-            -len(p.parts),
-            str(p),
-        ),
+        key=lambda p: (job_out_mtime(p), -len(p.parts), str(p)),
         reverse=True,
     )
     return ranked[0]

@@ -104,6 +104,35 @@ class SummarizeJobTests(unittest.TestCase):
             self.assertIn("primary_value=0.73", proc.stdout)
             self.assertIn("cv=0", proc.stdout)
 
+    def test_ambiguous_unwrapping_job_out_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            jobdir = Path(tmp)
+            alpha = jobdir / "alpha"
+            beta = jobdir / "beta"
+            alpha.mkdir()
+            beta.mkdir()
+            other = dict(NESTED_BASELINE)
+            other["output"] = {
+                "output": "baseline",
+                "body": {
+                    "primary_value": 0.11,
+                    "evidence": {"n_measured": 1, "trials": [{"name": "x", "reward": 0.11}]},
+                },
+            }
+            (alpha / "job.out").write_text(json.dumps(NESTED_BASELINE), encoding="utf-8")
+            (beta / "job.out").write_text(json.dumps(other), encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx:
+                summarize_job.find_job_out(jobdir)
+            self.assertEqual(ctx.exception.code, 2)
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "--jobdir", str(jobdir)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("multiple job.out", proc.stderr)
+
     def test_nested_baseline_job_out(self) -> None:
         summary = summarize_job.summarize(NESTED_BASELINE)
         self.assertTrue(summary["ok"])

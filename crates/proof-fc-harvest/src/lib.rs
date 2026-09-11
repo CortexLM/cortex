@@ -5,8 +5,9 @@
 //! baseline}/output/` on `scratch.ext4` before the guest sends `Done`. The
 //! host sees that file as:
 //! 1. `{jail_root}/scratch-tree/work/…` (host overlay of guest `/var/lib/proof`)
-//! 2. else `debugfs -c -R 'rdump /work …'` on `{jail_root}/scratch.ext4`
-//!    into `{jail_dir}/harvest-work`
+//! 2. else a **fresh** `debugfs -c -R 'rdump /work …'` of
+//!    `{jail_root}/scratch.ext4` into `{jail_dir}/harvest-work` (never a
+//!    leftover dump from an earlier job on a reused VM).
 //!
 //! Only the highest-numbered matching work directory counts. Called from
 //! `proof-fc-host` after `Run` when recv fails — tips via `BUILD_FROM=source`
@@ -176,14 +177,11 @@ fn work_root(jail_root: &Path, jail_dir: &Path) -> Option<PathBuf> {
     if overlay.is_dir() {
         return Some(overlay);
     }
-    let dest = jail_dir.join(HARVEST_WORK);
-    if dest.is_dir() {
-        return Some(dest);
-    }
     let image = jail_root.join(SCRATCH_IN_JAIL);
     if !image.is_file() {
         return None;
     }
+    let dest = jail_dir.join(HARVEST_WORK);
     dump_ext4_work(&image, &dest).ok()?;
     dest.is_dir().then_some(dest)
 }
@@ -414,12 +412,28 @@ fn evidence_trial_names(evidence: &BTreeMap<String, serde_json::Value>) -> Vec<S
         .collect()
 }
 
+fn trial_logical_name(dir: &Path) -> Option<String> {
+    load_json(&dir.join("result.json"))
+        .as_ref()
+        .and_then(|v| v.get("trial_name"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
 fn trial_dir_matches(dir: &Path, name: &str) -> bool {
     let Some(n) = dir.file_name() else {
         return false;
     };
     let n = n.to_string_lossy();
-    n == name || n.starts_with(&format!("{name}__")) || n.starts_with(&format!("{name}-"))
+    if n == name || n.starts_with(&format!("{name}__")) || n.starts_with(&format!("{name}-")) {
+        return true;
+    }
+    trial_logical_name(dir).as_deref() == Some(name)
+}
+
+fn non_empty_file(path: &Path) -> bool {
+    path.is_file() && std::fs::metadata(path).is_ok_and(|m| m.len() > 0)
 }
 
 fn trial_has_measured_reward(result_path: &Path) -> bool {
@@ -435,10 +449,7 @@ fn trial_has_measured_reward(result_path: &Path) -> bool {
 fn trial_files_present(trial_dir: &Path) -> bool {
     let result = trial_dir.join("result.json");
     let reward = trial_dir.join("verifier").join("reward.txt");
-    result.is_file()
-        && trial_has_measured_reward(&result)
-        && reward.is_file()
-        && std::fs::metadata(&reward).is_ok_and(|m| m.len() > 0)
+    non_empty_file(&result) && trial_has_measured_reward(&result) && non_empty_file(&reward)
 }
 
 fn refuse_incomplete_harbor_jobs(

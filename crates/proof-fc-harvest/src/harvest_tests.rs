@@ -176,6 +176,17 @@ fn evaluate_job() -> VmJob {
     }
 }
 
+fn evaluate_job_other() -> VmJob {
+    let mut request = experiment_request(None);
+    request.submission_digest = "digest-b".into();
+    request.artifact_digest = "cd".repeat(32);
+    VmJob::Evaluate {
+        request,
+        checklist_digest: "c".into(),
+        rules_version: 1,
+    }
+}
+
 fn archived() -> RlmToHost {
     RlmToHost::Done {
         output: VmJobOutput::Archived,
@@ -494,5 +505,71 @@ fn overlay_finished_dump_still_n_running_is_refused() {
         msg.contains("harvest-work incomplete"),
         "expected fail-closed, got {msg}"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn leftover_harvest_work_is_not_reused_for_a_later_job() {
+    let root = tree("reuse");
+    let dump = root.join(HARVEST_WORK);
+    plant(
+        &dump,
+        "evaluate",
+        "0001",
+        r#"{"primary_value": 0.73, "claim_holds": true, "evidence": {"harbor_exit": 0}}"#,
+    );
+    assert!(
+        harvest_from_jail(&root, &root, &evaluate_job_other()).is_err(),
+        "leftover dump without overlay/image must not score job B"
+    );
+    assert!(try_from_jail(&root, &root, &evaluate_job_other()).is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn dump_only_empty_trial_files_are_refused() {
+    let root = tree("empty");
+    let dump = root.join(HARVEST_WORK);
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.73"));
+    let trial = dump
+        .join("0001-evaluate")
+        .join(HARBOR_JOBS)
+        .join("run")
+        .join("atrx");
+    std::fs::create_dir_all(trial.join("verifier")).expect("verifier");
+    std::fs::write(trial.join("result.json"), "").expect("empty result");
+    std::fs::write(trial.join("verifier").join("reward.txt"), "").expect("empty reward");
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    let err = from_work_tree(&dump, &root, &evaluate_job()).expect_err("empty files");
+    assert!(
+        err.to_string().contains("harvest-work incomplete"),
+        "got {err}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn dump_only_matches_result_json_trial_name() {
+    let root = tree("logical");
+    let dump = root.join(HARVEST_WORK);
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&dump, "0001-evaluate", "run", "generated-id-9f", "0");
+    let result = dump
+        .join("0001-evaluate")
+        .join(HARBOR_JOBS)
+        .join("run")
+        .join("generated-id-9f")
+        .join("result.json");
+    std::fs::write(
+        result,
+        r#"{"trial_name":"atrx","verifier_result":{"rewards":{"reward":0.0}}}"#,
+    )
+    .expect("logical name");
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    let out = from_work_tree(&dump, &root, &evaluate_job()).expect("logical name");
+    let VmJobOutput::Evaluated(run) = out else {
+        panic!("{out:?}");
+    };
+    assert!((run.report.primary_value - 0.0).abs() < 1e-12);
     let _ = std::fs::remove_dir_all(&root);
 }
