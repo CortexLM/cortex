@@ -97,6 +97,31 @@ proof_load_inference_key || fail "evaluate with miner BYOK file should load"
 [ "${OPENROUTER_API_KEY:-}" = "miner-secret-key" ] || fail "evaluate loaded owner key instead of miner"
 pass "evaluate BYOK prefers miner file"
 
+# --- evaluate with DIR unset stages from exported env (not "DIR is unset") ---
+unset PROOF_MINER_ENV_DIR || true
+unset OPENROUTER_API_KEY || true
+export OPENROUTER_API_KEY="exported-miner-key"
+proof_load_inference_key || fail "evaluate should stage BYOK from the exported env var"
+[ "${OPENROUTER_API_KEY:-}" = "exported-miner-key" ] || fail "evaluate did not keep the exported key"
+[ -n "${PROOF_MINER_ENV_DIR:-}" ] || fail "evaluate must set PROOF_MINER_ENV_DIR after staging"
+[ -r "$PROOF_MINER_ENV_DIR/OPENROUTER_API_KEY" ] || fail "evaluate must write the staged file"
+pass "evaluate unset DIR stages from exported OPENROUTER_API_KEY"
+
+# --- evaluate with DIR unset and no key fails on missing key, not unset DIR ---
+unset PROOF_MINER_ENV_DIR || true
+unset OPENROUTER_API_KEY || true
+rm -f "$PROOF_SECRETS_DIR/miner/OPENROUTER_API_KEY" "$PROOF_WORK_DIR/miner-env/OPENROUTER_API_KEY"
+if err="$(proof_load_inference_key 2>&1)"; then
+    fail "evaluate without a key must fail closed"
+fi
+echo "$err" | grep -q "PROOF_MINER_ENV_DIR is unset" && fail "must not fail because DIR was unset: $err"
+echo "$err" | grep -q "miner did not supply OPENROUTER_API_KEY" || fail "must name the missing key: $err"
+pass "evaluate missing key fails closed after staging (not unset DIR)"
+
+# Restore the dir later tests write into.
+export PROOF_MINER_ENV_DIR="$WORKDIR/miner-env"
+mkdir -p "$PROOF_MINER_ENV_DIR"
+
 # --- BYOK baseline without miner file uses owner ---
 export PROOF_JOB=baseline
 unset OPENROUTER_API_KEY || true

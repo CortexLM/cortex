@@ -90,7 +90,17 @@ fi
 # back to the owner key above — a miner run on the operator's credentials is
 # the one outcome this path exists to prevent.
 if [ -n "${PROOF_PARAM_MINER_BYOK:-}" ]; then
-    byok_file="${PROOF_MINER_ENV_DIR:?miner_byok topic with no miner env staged}/$PROOF_PARAM_MINER_BYOK"
+    # Always stage a dir, then fail closed only if the key is still missing.
+    if [ -z "${PROOF_MINER_ENV_DIR:-}" ]; then
+        export PROOF_MINER_ENV_DIR="${PROOF_SECRETS_DIR:-$PROOF_WORK_DIR}/miner"
+        mkdir -p "$PROOF_MINER_ENV_DIR"
+        chmod 0700 "$PROOF_MINER_ENV_DIR"
+    fi
+    byok_file="$PROOF_MINER_ENV_DIR/$PROOF_PARAM_MINER_BYOK"
+    if [ ! -r "$byok_file" ] && [ -n "${!PROOF_PARAM_MINER_BYOK:-}" ]; then
+        printf '%s' "${!PROOF_PARAM_MINER_BYOK}" > "$byok_file"
+        chmod 0600 "$byok_file"
+    fi
     [ -r "$byok_file" ] || { echo "the miner did not supply $PROOF_PARAM_MINER_BYOK" >&2; exit 2; }
     export "$PROOF_PARAM_MINER_BYOK"="$(tr -d '\n' < "$byok_file")"
 fi
