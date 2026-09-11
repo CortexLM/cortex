@@ -143,6 +143,10 @@ pub enum StoreError {
     /// carries a value — only what the host could not do.
     #[error("miner byok vault: {0}")]
     Vault(String),
+    /// This frozen digest already holds a different miner environment.
+    /// Never carries a value — only that the two claims conflict.
+    #[error("miner byok for this frozen digest is already held with a different environment")]
+    EnvConflict,
     /// Unknown / unpublished topic.
     #[error("unknown topic {0}")]
     UnknownTopic(String),
@@ -741,29 +745,35 @@ impl MemoryStore {
     }
 
     /// Atomically hold BYOK for `digest`. Inserts `env` only when the slot is
-    /// empty (never replaces). A concurrent claim of the same frozen digest
-    /// increments an in-flight ref. [`Self::release_miner_env`] drops one
-    /// ref and deletes only when none remain and no row still names it.
+    /// empty (never replaces). A concurrent claim of the **same** environment
+    /// increments an in-flight ref. A later claim of a *different* environment
+    /// for the same digest is [`StoreError::EnvConflict`] — never a silent
+    /// share of the first miner's credentials. [`Self::release_miner_env`]
+    /// drops one ref and deletes only when none remain and no row still names it.
     ///
     /// # Errors
     ///
     /// [`StoreError::Vault`] when a configured vault cannot hold the key.
+    /// [`StoreError::EnvConflict`] when the slot is occupied with a different env.
     pub fn claim_miner_env(&self, digest: &str, env: &MinerEnv) -> Result<(), StoreError> {
         if env.is_empty() {
             return Ok(());
         }
         let mut g = self.lock()?;
-        let held = if self.byok.is_file_backed() {
-            !self.byok.get(digest).is_empty()
+        let existing = if self.byok.is_file_backed() {
+            let got = self.byok.get(digest);
+            (!got.is_empty()).then_some(got)
         } else {
-            g.miner_envs.contains_key(digest)
+            g.miner_envs.get(digest).cloned()
         };
-        if !held {
-            if self.byok.is_file_backed() {
-                self.byok.put(digest, env)?;
-            } else {
-                g.miner_envs.insert(digest.to_owned(), env.clone());
+        if let Some(held) = existing {
+            if &held != env {
+                return Err(StoreError::EnvConflict);
             }
+        } else if self.byok.is_file_backed() {
+            self.byok.put(digest, env)?;
+        } else {
+            g.miner_envs.insert(digest.to_owned(), env.clone());
         }
         let next = g
             .env_refs
@@ -1599,7 +1609,14 @@ mod tests {
         let mut second = MinerEnv::new();
         second.insert("MINER_PROVIDED_API_KEY", "second");
         store.claim_miner_env(&digest, &first).expect("create");
-        store.claim_miner_env(&digest, &second).expect("hold");
+        let err = store
+            .claim_miner_env(&digest, &second)
+            .expect_err("conflict");
+        assert!(matches!(err, StoreError::EnvConflict), "{err}");
+        assert!(
+            !err.to_string().contains("first") && !err.to_string().contains("second"),
+            "a conflict never quotes a key: {err}"
+        );
         assert_eq!(
             store
                 .miner_env(&digest)
@@ -1608,9 +1625,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("MINER_PROVIDED_API_KEY", "first")]
         );
-        store.release_miner_env(&digest).expect("one holder left");
-        assert!(!store.miner_env(&digest).expect("still held").is_empty());
-        store.forget_miner_env(&digest).expect("terminal");
+        store.release_miner_env(&digest).expect("last holder");
         assert!(store.miner_env(&digest).expect("gone").is_empty());
     }
 

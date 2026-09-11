@@ -649,7 +649,10 @@ async fn submit(
     // one ref and deletes only when none remain and no row still names it.
     st.store
         .claim_miner_env(&submission_digest, &miner_env)
-        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+        .map_err(|e| match e {
+            conflict @ StoreError::EnvConflict => err(StatusCode::CONFLICT, &conflict.to_string()),
+            other => err(StatusCode::SERVICE_UNAVAILABLE, &other.to_string()),
+        })?;
     let mut artifact_staged = None;
     if let Some(bytes) = uploaded.as_ref() {
         artifact_staged = Some(
@@ -1412,6 +1415,7 @@ fn claim_err(e: StoreError) -> ErrResp {
     match e {
         StoreError::NotFound(_) => err(StatusCode::NOT_FOUND, "not_found"),
         StoreError::Illegal(why) => err(StatusCode::CONFLICT, &why),
+        conflict @ StoreError::EnvConflict => err(StatusCode::CONFLICT, &conflict.to_string()),
         busy @ StoreError::Busy { .. } => err(StatusCode::CONFLICT, &busy.to_string()),
         other => store_err(&other),
     }
@@ -6128,6 +6132,70 @@ mod tests {
         );
         let _ = std::fs::remove_file(&art_file);
     }
+
+    /// Same frozen digest, two authenticated nonces, two different BYOK
+    /// values: the occupied slot is a **409**, never a run on the other
+    /// miner's credentials. The first env stays; the error never quotes it.
+    #[tokio::test]
+    async fn a_conflicting_byok_claim_is_409_and_does_not_score_the_other_key() {
+        let scorer = Arc::new(FamilyStub::win(CUSTOM_ID));
+        let state = state_with_custom_params(
+            scorer.clone(),
+            true,
+            true,
+            &[(proof_canon::PARAM_MINER_BYOK, BYOK)],
+        );
+        let store = state.store.clone();
+        let app = proof_router(state);
+        let artifact = digest("shared-artefact");
+        let other = "other-miner-supplied-value-not-a-real-key";
+        let first = submit_body(
+            "byok-first",
+            &serde_json::json!({
+                "topic_id": CUSTOM,
+                "artifact_digest": artifact,
+                "artifact_uri": "https://example.invalid/shared.tar",
+                "env": { BYOK: BYOK_VALUE },
+            }),
+        );
+        let second = submit_body(
+            "byok-second",
+            &serde_json::json!({
+                "topic_id": CUSTOM,
+                "artifact_digest": artifact,
+                "artifact_uri": "https://example.invalid/shared.tar",
+                "env": { BYOK: other },
+            }),
+        );
+        let (st, out) = json_req(app.clone(), "POST", "/v1/submissions", first, None).await;
+        assert_eq!(st, StatusCode::CREATED, "{out}");
+        assert_eq!(out["state"], "queued", "{out}");
+        let frozen = out["submission_digest"]
+            .as_str()
+            .expect("digest")
+            .to_owned();
+        let (st, conflict) = json_req(app.clone(), "POST", "/v1/submissions", second, None).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{conflict}");
+        let why = conflict["error"].as_str().unwrap_or_default();
+        assert!(why.contains("different environment"), "{why}");
+        assert!(!why.contains(BYOK_VALUE) && !why.contains(other), "{why}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 0, "nothing ran");
+        assert_eq!(
+            store
+                .miner_env(&frozen)
+                .expect("held")
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![(BYOK, BYOK_VALUE)],
+            "the queued row still holds the first miner's key"
+        );
+        let (st, list) = json_req(app, "GET", "/v1/submissions", serde_json::json!({}), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(list["items"].as_array().expect("items").len(), 1, "{list}");
+        assert!(!list.to_string().contains(BYOK_VALUE), "{list}");
+        assert!(!list.to_string().contains(other), "{list}");
+    }
+
     /// A topic that runs on the miner's own key and a host that no longer
     /// holds the one that was submitted (a restart with nothing on disk, an
     /// operator who cleared the vault) is a **503** with the row untouched.
