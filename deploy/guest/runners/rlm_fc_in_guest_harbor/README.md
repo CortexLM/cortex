@@ -117,14 +117,15 @@ Resolution order after unpack: `$PROOF_ARTIFACT_DIR/agent` then
 `$PROOF_ARTIFACT_DIR/recipe/agent`. Be explicit which layout you hash and
 serve; re-tarring changes the digest.
 
-Off-limits in the artefact (inspect fails the named rule):
+Off-limits **cheat markers** in the artefact (inspect fails the named rule):
 
-- `no_eval_short_circuit` (and `skip_eval` / `skip_verifier` / `always_pass_eval` / `short_circuit_eval`)
-- `no_tb4_hardcoding` (and `tb4_answers` / `hardcoded_tb4`)
+- `no_eval_short_circuit` on `skip_eval` / `skip_verifier` / `always_pass_eval` / `short_circuit_eval`
+- `no_tb4_hardcoding` on `tb4_answers` / `hardcoded_tb4`
 
-A file/byte-limit truncation marks the scan incomplete and fails those
-off-limits rules. Unknown rule ids fail closed. Do not quote those markers
-in miner code or README inside the tar.
+The rule-id strings themselves are not markers. A README or comment that
+names `no_eval_short_circuit` / `no_tb4_hardcoding` is compliance language,
+not a fail. A file/byte-limit truncation marks the scan incomplete and
+fails those off-limits rules. Unknown rule ids fail closed.
 
 ## BYOK
 

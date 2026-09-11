@@ -8,6 +8,13 @@ to `proof` (**8000 bps**) exactly as [proof.md](./proof.md) describes, with
 document asks for, what its anti-cheat checklist ticks, and what a submit
 answers today.
 
+**`tbench` is Proof Firecracker, not Lium.** Inspect and evaluate run inside
+the host's dedicated experiment VMs (one Firecracker guest per paid job).
+The Lium harvest (`nll` / `throughput`, `X-Lium-Api-Key`,
+`live_harvest_wired`) does not score this topic. A red checklist with
+`flops_used = 0` / `custom_value = null` is Proof FC inspect refusing
+evaluate — not a Lium rent failure.
+
 **Gateway:** [https://gateway.cortex.foundation](https://gateway.cortex.foundation)  
 **Live topic:** `GET /challenge/proof/v1/proof/topics/tbench` (or `ctx proof topics`)  
 **Generic submit contract:** [proof.md](./proof.md) — signing payload, manifest,
@@ -158,7 +165,13 @@ harness**). Evaluate then fails closed — no Terminus-2 fallback.
 The guest unpacks that tar under `$PROOF_ARTIFACT_DIR`. Evaluate attaches
 your **custom Python agent** (primary), a Harbor `BaseAgent` subclass, a
 `harness.json` kind, or a `run.sh` script — not a silent copy of the
-operator's `terminus-2`. You are not required to ship Terminus-2.
+operator's `terminus-2`. You are not required to ship Terminus-2. A
+**prompt-only subclass of `terminus-2`** (same agent, your prompt) is not
+an eval short-circuit: inspect does not fail it. That path only **runs**
+when the guest Harbor overlay exposes Terminus-2 as an importable class
+you can subclass (Harbor is an operator overlay, not in this repo). Name
+that class in `harness.json` / `import_path`. Custom Python `class Agent`
+does not depend on that overlay and is the primary path.
 
 Harbor's `-a` / `--agent` accepts a built-in name or a Python import path
 (`module.path:ClassName`); it does **not** take a filesystem path. The
@@ -168,16 +181,23 @@ wrapped as `proof_python_agent:ProofPythonAgent`). Resolution order:
 `$PROOF_ARTIFACT_DIR/recipe/agent`, then `run.sh`. A `recipe/run.sh` with no
 agent dir is scored as a **script harness**, not as the topic agent. The
 script must leave Harbor jobs with measured `verifier_result.rewards.reward`;
-a self-written `$PROOF_OUTPUT_DIR/report.json` is **not** a score. Off-limits
-in the tree (inspect fails the named rule): `no_eval_short_circuit`,
-`no_tb4_hardcoding`.
+a self-written `$PROOF_OUTPUT_DIR/report.json` is **not** a score. Inspect
+ticks `no_eval_short_circuit` / `no_tb4_hardcoding` on **cheat markers**, not
+on the rule ids. Naming those ids in a README or comment is not a fail.
+What fails: `skip_eval`, `skip_verifier`, `always_pass_eval`,
+`short_circuit_eval` (short-circuit) and `tb4_answers`, `hardcoded_tb4`
+(tb4 hardcoding).
 
 ### Minimal Agent example
 
 This is the constructor / `run` miners ask for. It is **custom Python** —
 you are **not** required to subclass Harbor `BaseAgent` (or Terminus). Name
-the class `Agent`. If you do subclass Terminus, point `import_path` at that
-class (`…:ImprovedTerminus`); keep one primary example here.
+the class `Agent`. If you do subclass Terminus — including a prompt-only
+`terminus-2` subclass — import it from the **guest Harbor overlay** (not
+from this repo) and point `import_path` at that class
+(`…:ImprovedTerminus`). If that overlay does not expose a subclassable
+Terminus-2, evaluate fails at import rather than scoring; use custom
+Python `class Agent` instead. Keep one primary example here.
 
 `harness.json`:
 
@@ -437,7 +457,7 @@ curl -sS https://gateway.cortex.foundation/challenge/proof/v1/submissions/<id>
 |---------|---------------------|
 | `queued` | Accepted and stored, **not evaluated**. Only when the topic is in `deferred_topics` (`defer_scoring = "true"`). No rent, no VM, no judge call, no mass. Not an in-progress score: a live (non-deferred) submit waits for scoring and the **201** is already `awaiting_admin`, `rejected`, or `champion`. `ctx proof show --wait` is for a deferred row |
 | `awaiting_admin` | Clean pass, mass recorded. The operator audit is informational |
-| `rejected` | A gate failed: contamination, unreproduced claim, a red checklist item. Pre-eval rejects spend nothing. FLOP accounting is **not** a reject gate on `tbench` |
+| `rejected` | A gate failed: contamination, unreproduced claim, a red checklist item. Pre-eval rejects spend nothing: **evaluate is skipped**, so `flops_used = 0` / `custom_value = null` is expected. FLOP accounting is **not** a reject gate on `tbench` |
 | `champion` | Promoted. On this topic promotion is automatic: a passing run with a green checklist that beats the sealed bar or the reigning best by `epsilon_rel`. Proof pays on pass, not on the crown |
 
 Runs on one topic are scored and crowned one at a time against the best at that
@@ -467,14 +487,17 @@ and is not a payment path.
 
 The topic carries a `checklist` of rules `[{id, text}]`. They are ticked over
 your artefact **before any paid inference**: one red, missing, duplicated, or
-evidence-less item is a persisted `rejected` row with **no spend**. The rule
-texts in the live topic are the contract; the ids published today are:
+evidence-less item is a persisted `rejected` row with **no spend**. Evaluate
+never runs in that case — `flops_used = 0` and `custom_value = null` are
+expected, not a missing Harbor trial. This inspect is Proof Firecracker
+(the in-guest Harbor adaptor), not Lium. The rule texts in the live topic
+are the contract; the ids published today are:
 
 | Rule id | What it holds you to |
 |---------|----------------------|
 | `same_seed` | Every paid call and every scored episode uses the topic baseline seed. No per-miner reseeding |
-| `no_tb4_hardcoding` | Your harness must not hardcode task ids, answers, fixtures, or success paths. Only the signed topic carries `task_slice` |
-| `no_eval_short_circuit` | The evaluator, the metric path, and the sandbox are untouched — no short-circuiting the checklist or the scoring |
+| `no_tb4_hardcoding` | Your harness must not hardcode task ids, answers, fixtures, or success paths. Only the signed topic carries `task_slice`. Inspect fails on cheat markers `tb4_answers` / `hardcoded_tb4`, not because a README names this rule id |
+| `no_eval_short_circuit` | The evaluator, the metric path, and the sandbox are untouched — no short-circuiting the checklist or the scoring. Inspect fails on `skip_eval` / `skip_verifier` / `always_pass_eval` / `short_circuit_eval`, not because a README names this rule id. A prompt-only `terminus-2` subclass is not a short-circuit; whether it **imports** depends on the guest Harbor overlay (not in this repo) |
 | `miner_byok_openrouter` | You supply the OpenRouter key for the pinned model; operator keys are never injected into your guest |
 | `firecracker_sister` | Your code runs only in the Firecracker guest the host booted, and the report must carry that attestation |
 | `artefacts_zip` | Scored artefacts persist as a zip under the topic's artefact root, per submission |
@@ -507,7 +530,7 @@ you will actually meet on `tbench`:
 | **503** empty `eval_image_digest` / unsealed baseline / missing judge offer | The host cannot score. Fail-closed, never a sim fallback | no |
 | **503** `proof deadline … exceeded` | Your run did not finish inside `max_proof_deadline_s`; the body carries `stdout_tail` | no |
 | **201** `rejected` + contamination | You declared a holdout shard / corpus id in `manifest` (immediate while scoring is on; at drain time only if the topic is back in `deferred_topics`) | yes, rejected |
-| **201** `rejected` + red checklist | A topic rule failed on your artefact — before any paid inference | yes, rejected |
+| **201** `rejected` + red checklist | A topic rule failed on your artefact — **before any paid inference**. Evaluate is skipped on purpose: `flops_used = 0`, `custom_value = null`, and `cheat_codes` such as `other` are the expected shape of that skip, not a Lium/harvest miss | yes, rejected |
 
 Never commit your OpenRouter key or `LIUM_API_KEY`, and never hand anyone a
 mnemonic or a challenge signing key. If something fails, see
