@@ -16,13 +16,17 @@
 //! `proof-fc-host` after `Run` when recv fails — tips via `BUILD_FROM=source`
 //! of `proof-vm-orchestrator`, no guest rebake.
 //!
-//! **Fail-closed on a stale harvest copy.** Retained `tbench-x0002`: guest
-//! `/work/.../atrx-vep-crispr__Xs5jyyz/` already had `verifier/reward.txt=0`
-//! and a full trial result (`finished_at` set, `n_completed=6`,
-//! `n_running=0`). Host `{jail_dir}/harvest-work` was a Done≈finish-second
-//! snapshot (`finished_at=null`, `n_running=1`, empty atrx verifier).
-//! Publishing `report.json`'s `primary_value` from that dump is refused.
-//! Guest already wrote `reward.txt` — this is not an adaptor always-write.
+//! **Fail-closed / refresh on a stale harvest copy.** Retained `tbench-x0002`
+//! and metal shortpack a21f: guest `/work/.../atrx…/` already had
+//! `verifier/reward.txt` and a full trial `result.json` (`finished_at` set,
+//! `n_completed=6`, `n_running=0`). Host `{jail_dir}/harvest-work` was a
+//! Done≈finish-second `debugfs` snapshot (`finished_at=null`, `n_running=1`
+//! / `stats.n_running_trials`, atrx `result.json` missing — `reward.txt`
+//! can land ~12s earlier). A vsock `Done` still **refreshes** that dump
+//! from the overlay / a new `rdump` until those checks would pass; the vsock
+//! score is kept (`host_harvest` is not invented). Dump-only reconstruct
+//! without a complete overlay still refuses. Guest already wrote
+//! `reward.txt` — this is not an adaptor always-write.
 
 #![allow(clippy::missing_errors_doc)]
 
@@ -54,6 +58,8 @@ const MAX_REPORT_BYTES: u64 = 8 * 1024 * 1024;
 pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// After a report is on disk, wait this long for a real `Done`.
 pub const DONE_GRACE: Duration = Duration::from_secs(5);
+/// Re-dump / overlay-copy attempts after vsock `Done` (debugfs race ~12s).
+pub const REFRESH_ATTEMPTS: u32 = 8;
 
 #[derive(Debug, Deserialize)]
 struct GuestReport {
@@ -116,7 +122,7 @@ where
             biased;
             result = &mut recv => {
                 return match result {
-                    Ok(msg) => Ok(msg),
+                    Ok(msg) => after_vsock(msg, jail_root, jail_dir, job).await,
                     Err(e) => or_err(jail_root, jail_dir, job, e),
                 };
             }
@@ -131,6 +137,50 @@ where
             }
         }
     }
+}
+
+async fn after_vsock(
+    msg: RlmToHost,
+    jail_root: &Path,
+    jail_dir: &Path,
+    job: &VmJob,
+) -> Result<RlmToHost, HvError> {
+    let RlmToHost::Done { output } = &msg else {
+        return Ok(msg);
+    };
+    match job {
+        VmJob::Evaluate { .. } | VmJob::Baseline { .. } => {}
+        VmJob::Inspect { .. } | VmJob::ProposeRules { .. } | VmJob::Archive { .. } => {
+            return Ok(msg);
+        }
+    }
+    let evidence = report_from_output(output).map(|r| r.evidence.clone());
+    if let Err(e) = refresh_dump_until_complete(jail_root, jail_dir, job, evidence.as_ref()).await {
+        tracing::warn!(
+            "vsock Done; harvest-work still incomplete after refresh ({e}); keeping vsock score"
+        );
+        let dest = jail_dir.join(HARVEST_WORK);
+        if dump_stale_on_disk(&dest) {
+            let _ = std::fs::remove_dir_all(&dest);
+        }
+    }
+    Ok(msg)
+}
+
+fn report_from_output(output: &VmJobOutput) -> Option<&CustomRunReport> {
+    match output {
+        VmJobOutput::Baseline(report) => Some(report),
+        VmJobOutput::Evaluated(run) => Some(&run.report),
+        VmJobOutput::Inspected(_) | VmJobOutput::Rules(_) | VmJobOutput::Archived => None,
+    }
+}
+
+fn dump_stale_on_disk(dump: &Path) -> bool {
+    if !dump.is_dir() {
+        return false;
+    }
+    let work = work_tree_from_dump(dump.to_path_buf()).unwrap_or_else(|| dump.to_path_buf());
+    refuse_stale_harbor_snapshot(&work).is_err() || reward_without_result(&work).is_err()
 }
 
 fn or_err(
@@ -168,7 +218,7 @@ fn harvest_from_jail(
     jail_dir: &Path,
     job: &VmJob,
 ) -> Result<VmJobOutput, HvError> {
-    assert_harvest_sync(jail_root, jail_dir, job)?;
+    refresh_dump_once(jail_root, jail_dir, job, None)?;
     let work = work_root(jail_root, jail_dir).ok_or_else(|| {
         HvError::Guest("no guest work overlay or harvest-work dump to reconstruct from".into())
     })?;
@@ -203,23 +253,124 @@ fn work_tree_from_dump(dest: PathBuf) -> Option<PathBuf> {
     dest.is_dir().then_some(dest)
 }
 
-/// Refuse when `{jail_dir}/harvest-work` lags the guest overlay (missing
-/// trial `result.json` / `verifier/reward.txt` the guest tree has).
-fn assert_harvest_sync(jail_root: &Path, jail_dir: &Path, job: &VmJob) -> Result<(), HvError> {
+fn copy_tree(src: &Path, dest: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
+    let entries = std::fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))?;
+    for e in entries {
+        let e = e.map_err(|e| format!("read {}: {e}", src.display()))?;
+        let from = e.path();
+        let to = dest.join(e.file_name());
+        if from.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)
+                .map_err(|err| format!("copy {} → {}: {err}", from.display(), to.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn dump_matches_evidence(
+    work: &Path,
+    evidence: &BTreeMap<String, serde_json::Value>,
+) -> Result<(), HvError> {
+    refuse_incomplete_harbor_jobs(work, evidence)?;
+    refuse_stale_harbor_snapshot(work)?;
+    reward_without_result(work)
+}
+
+fn check_dump(
+    work: &Path,
+    evidence: Option<&BTreeMap<String, serde_json::Value>>,
+) -> Result<(), HvError> {
+    if let Some(ev) = evidence {
+        dump_matches_evidence(work, ev)
+    } else {
+        refuse_stale_harbor_snapshot(work)?;
+        reward_without_result(work)
+    }
+}
+
+fn reward_without_result(work: &Path) -> Result<(), HvError> {
+    let mut missing = Vec::new();
+    for trial in harbor_trial_dirs(work) {
+        let result = trial.join("result.json");
+        let reward = trial.join("verifier").join("reward.txt");
+        if non_empty_file(&reward) && !trial_has_measured_reward(&result) {
+            let name = trial
+                .file_name()
+                .map_or_else(|| "trial".into(), |n| n.to_string_lossy().into_owned());
+            missing.push(name);
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(HvError::Guest(format!(
+        "harvest-work incomplete vs guest (reward.txt without measured result.json: {}); refusing to publish a partial copy",
+        missing.join(", ")
+    )))
+}
+
+fn refresh_dump_once(
+    jail_root: &Path,
+    jail_dir: &Path,
+    job: &VmJob,
+    evidence: Option<&BTreeMap<String, serde_json::Value>>,
+) -> Result<(), HvError> {
     match job {
         VmJob::Evaluate { .. } | VmJob::Baseline { .. } => {}
         VmJob::Inspect { .. } | VmJob::ProposeRules { .. } | VmJob::Archive { .. } => {
             return Ok(());
         }
     }
+    let dest = jail_dir.join(HARVEST_WORK);
     let overlay = jail_root.join(SCRATCH_TREE).join("work");
-    let dumped = jail_dir.join(HARVEST_WORK);
-    if overlay.is_dir() && dumped.is_dir() {
-        if let Some(why) = harvest_lagging_guest(&overlay, &dumped) {
+    if overlay.is_dir() {
+        let _ = std::fs::remove_dir_all(&dest);
+        copy_tree(&overlay, &dest)
+            .map_err(|e| HvError::Guest(format!("refresh harvest-work from overlay: {e}")))?;
+        let work = work_tree_from_dump(dest)
+            .ok_or_else(|| HvError::Guest("refresh harvest-work wrote no work tree".into()))?;
+        if let Some(why) = harvest_lagging_guest(&overlay, &work) {
             return Err(HvError::Guest(why));
         }
+        return check_dump(&work, evidence);
     }
-    Ok(())
+    let image = jail_root.join(SCRATCH_IN_JAIL);
+    if !image.is_file() {
+        return Ok(());
+    }
+    let _ = std::fs::remove_dir_all(&dest);
+    dump_ext4_work(&image, &dest).map_err(HvError::Guest)?;
+    let work = work_tree_from_dump(dest)
+        .ok_or_else(|| HvError::Guest("debugfs dumped no work tree into harvest-work".into()))?;
+    check_dump(&work, evidence)
+}
+
+async fn refresh_dump_until_complete(
+    jail_root: &Path,
+    jail_dir: &Path,
+    job: &VmJob,
+    evidence: Option<&BTreeMap<String, serde_json::Value>>,
+) -> Result<(), HvError> {
+    let mut last: Option<HvError> = None;
+    for i in 0..REFRESH_ATTEMPTS {
+        match refresh_dump_once(jail_root, jail_dir, job, evidence) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    attempt = i + 1,
+                    "harvest-work dump incomplete ({e}); retrying"
+                );
+                last = Some(e);
+                if i + 1 < REFRESH_ATTEMPTS {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                }
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| HvError::Guest("harvest-work refresh failed".into())))
 }
 
 /// Relative Harbor trial files on `guest` missing from `harvest`.
@@ -314,11 +465,32 @@ fn is_harbor_job_snapshot(v: &serde_json::Value) -> bool {
     if v.get("trial_name").is_some() || v.get("verifier_result").is_some() {
         return false;
     }
-    v.get("n_running").is_some() || v.get("finished_at").is_some() || v.get("n_completed").is_some()
+    if v.get("n_running").is_some()
+        || v.get("finished_at").is_some()
+        || v.get("n_completed").is_some()
+    {
+        return true;
+    }
+    v.get("stats").is_some_and(|s| {
+        s.get("n_running_trials").is_some()
+            || s.get("n_running").is_some()
+            || s.get("n_completed").is_some()
+    })
 }
 
 fn snapshot_n_running(v: &serde_json::Value) -> Option<u64> {
-    v.get("n_running").and_then(serde_json::Value::as_u64)
+    v.get("n_running")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            v.get("stats")
+                .and_then(|s| s.get("n_running_trials"))
+                .and_then(serde_json::Value::as_u64)
+        })
+        .or_else(|| {
+            v.get("stats")
+                .and_then(|s| s.get("n_running"))
+                .and_then(serde_json::Value::as_u64)
+        })
 }
 
 fn snapshot_finished_at_null(v: &serde_json::Value) -> bool {
@@ -615,6 +787,7 @@ fn reconstruct(
     }
     refuse_incomplete_harbor_jobs(work_root, &guest.evidence)?;
     refuse_stale_harbor_snapshot(work_root)?;
+    reward_without_result(work_root)?;
     let mut evidence = guest.evidence;
     if let Ok(Some(binding)) = request.experiment() {
         evidence

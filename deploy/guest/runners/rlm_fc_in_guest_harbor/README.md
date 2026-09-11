@@ -282,11 +282,14 @@ behavior is in that copy. The in-tree `run` does not exec the old overlay.
 `tests/` is CI-only; omit it on metal if you want a smaller copy.
 `host/summarize_job.py` is a KVM-host RCA helper (nested orch `job.out`);
 it is not the guest `run` path. Pass `--jobdir <any-dir>` — no baked
-`JOBDIR`.
+`JOBDIR`. It writes `custom_value.txt` and `summary.txt` under JOBDIR.
+`host/run-n15` waits for Harbor `curl.pid` / `job.out` (including `--restart`)
+and always invokes that helper.
 
-Host harvest (`proof-fc-harvest`) refuses when `{jail}/harvest-work` lags
-the guest overlay (missing trial `result.json` / `verifier/reward.txt` the
-guest already wrote). That is fail-closed, not an adaptor rewrite of
+Host harvest (`proof-fc-harvest`) refreshes `{jail}/harvest-work` after
+vsock `Done` until trial `result.json` / `verifier/reward.txt` and Harbor
+`n_running` / `stats.n_running_trials` would pass fail-closed checks. Dump-only
+reconstruct that still lags refuses. That is not an adaptor rewrite of
 `reward.txt`.
 
 Topic params must name this runner id and a relative `tasks_dir` inside the

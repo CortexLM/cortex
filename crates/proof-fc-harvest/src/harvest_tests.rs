@@ -3,11 +3,12 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use proof_rlm::fixtures::{experiment_request, request};
-use proof_rlm::{VmJob, VmJobOutput};
+use proof_rlm::{CustomRunReport, RunOutcome, VmJob, VmJobOutput, RUN_REPORT_SCHEMA};
 use proof_vm_agent::HvError;
 use proof_vm_proto::guest::{encode_frame, read_frame, RlmToHost};
 use tokio::io::AsyncWriteExt;
@@ -71,6 +72,36 @@ fn plant_job_snapshot(work: &Path, seq_kind: &str, job: &str, n_running: u64, fi
         ),
     )
     .expect("job result");
+}
+
+fn plant_job_snapshot_stats(
+    work: &Path,
+    seq_kind: &str,
+    job: &str,
+    n_running_trials: u64,
+    finished_at: &str,
+) {
+    let p = work
+        .join(seq_kind)
+        .join(HARBOR_JOBS)
+        .join(job)
+        .join("result.json");
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).expect("job");
+    }
+    let finished = if finished_at == "null" {
+        "null".to_owned()
+    } else {
+        format!("\"{finished_at}\"")
+    };
+    std::fs::write(
+        p,
+        format!(
+            r#"{{"stats":{{"n_running_trials":{n_running_trials},"n_completed":{}}},"finished_at":{finished}}}"#,
+            if n_running_trials == 0 { 6 } else { 5 }
+        ),
+    )
+    .expect("job stats snapshot");
 }
 
 /// Guest report that claims Harbor finished (n15 shape: 6/6, atrx at 0).
@@ -312,7 +343,7 @@ async fn a_dead_vsock_harvests_immediately_when_report_is_on_disk() {
 }
 
 #[test]
-fn harvest_work_lagging_guest_trial_files_is_refused() {
+fn harvest_work_lagging_guest_trial_files_is_refreshed_from_overlay() {
     let root = tree("lag");
     let overlay = root.join(SCRATCH_TREE).join("work");
     let dump = root.join(HARVEST_WORK);
@@ -328,13 +359,21 @@ fn harvest_work_lagging_guest_trial_files_is_refused() {
         .join("atrx")
         .join("verifier");
     std::fs::create_dir_all(&atrx).expect("empty atrx verifier");
-    let err = harvest_from_jail(&root, &root, &evaluate_job()).expect_err("incomplete dump");
-    let msg = err.to_string();
+    let out = harvest_from_jail(&root, &root, &evaluate_job()).expect("overlay refresh");
+    let VmJobOutput::Evaluated(run) = out else {
+        panic!("{out:?}");
+    };
+    assert!((run.report.primary_value - 0.0).abs() < 1e-12);
+    let refreshed = dump
+        .join("0001-evaluate")
+        .join(HARBOR_JOBS)
+        .join("run")
+        .join("atrx")
+        .join("result.json");
     assert!(
-        msg.contains("harvest-work incomplete"),
-        "expected fail-closed, got {msg}"
+        refreshed.is_file() && std::fs::metadata(&refreshed).expect("meta").len() > 0,
+        "stale dump must be replaced from overlay"
     );
-    assert!(try_from_jail(&root, &root, &evaluate_job()).is_none());
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -391,7 +430,7 @@ fn dump_only_complete_trials_matching_n_measured_harvests() {
 }
 
 #[tokio::test]
-async fn vsock_drop_does_not_publish_when_harvest_work_lags_guest() {
+async fn vsock_drop_refreshes_dump_from_overlay_when_guest_finished() {
     let root = tree("nosync");
     let overlay = root.join(SCRATCH_TREE).join("work");
     let dump = root.join(HARVEST_WORK);
@@ -408,7 +447,7 @@ async fn vsock_drop_does_not_publish_when_harvest_work_lags_guest() {
             .join("verifier"),
     )
     .expect("empty atrx verifier");
-    let err = recv_job_or_harvest(
+    let got = recv_job_or_harvest(
         async { Err(HvError::Guest("broken pipe".into())) },
         &root,
         &root,
@@ -416,11 +455,22 @@ async fn vsock_drop_does_not_publish_when_harvest_work_lags_guest() {
         Duration::from_secs(30),
     )
     .await
-    .expect_err("must not publish");
-    let msg = err.to_string();
+    .expect("overlay refresh");
+    let RlmToHost::Done {
+        output: VmJobOutput::Evaluated(run),
+    } = got
+    else {
+        panic!("expected Evaluated, got {got:?}");
+    };
+    assert!((run.report.primary_value - 0.0).abs() < 1e-12);
     assert!(
-        msg.contains("harvest-work incomplete"),
-        "expected harvest fail-closed, got {msg}"
+        dump.join("0001-evaluate")
+            .join(HARBOR_JOBS)
+            .join("run")
+            .join("atrx")
+            .join("result.json")
+            .is_file(),
+        "stale dump must be refreshed from overlay"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -475,7 +525,7 @@ fn dump_only_finished_snapshot_with_measured_rewards_harvests() {
 }
 
 #[test]
-fn overlay_finished_dump_still_n_running_is_refused() {
+fn overlay_finished_dump_still_n_running_is_refreshed() {
     let root = tree("race");
     let overlay = root.join(SCRATCH_TREE).join("work");
     let dump = root.join(HARVEST_WORK);
@@ -499,11 +549,25 @@ fn overlay_finished_dump_still_n_running_is_refused() {
     );
     plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
     plant_job_snapshot(&dump, "0001-evaluate", "run", 1, "null");
-    let err = harvest_from_jail(&root, &root, &evaluate_job()).expect_err("stale dump");
-    let msg = err.to_string();
+    let out = harvest_from_jail(&root, &root, &evaluate_job()).expect("refresh dump");
+    let VmJobOutput::Evaluated(run) = out else {
+        panic!("{out:?}");
+    };
+    assert!((run.report.primary_value - 0.0).abs() < 1e-12);
+    let snap = std::fs::read_to_string(
+        dump.join("0001-evaluate")
+            .join(HARBOR_JOBS)
+            .join("run")
+            .join("result.json"),
+    )
+    .expect("refreshed snapshot");
     assert!(
-        msg.contains("harvest-work incomplete"),
-        "expected fail-closed, got {msg}"
+        snap.contains("\"n_running\":0") || snap.contains("\"n_running_trials\":0"),
+        "dump must not stay n_running=1, got {snap}"
+    );
+    assert!(
+        !snap.contains("\"finished_at\":null"),
+        "dump must not stay finished_at=null, got {snap}"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -726,5 +790,151 @@ fn dump_only_matches_result_json_trial_name() {
         panic!("{out:?}");
     };
     assert!((run.report.primary_value - 0.0).abs() < 1e-12);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn dump_only_reward_txt_without_result_json_is_refused() {
+    let root = tree("reward-only");
+    let dump = root.join(HARVEST_WORK);
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    let atrx = dump
+        .join("0001-evaluate")
+        .join(HARBOR_JOBS)
+        .join("run")
+        .join("atrx");
+    std::fs::create_dir_all(atrx.join("verifier")).expect("atrx");
+    std::fs::write(atrx.join("verifier").join("reward.txt"), "0").expect("reward");
+    let err = from_work_tree(&dump, &root, &evaluate_job()).expect_err("missing result.json");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("harvest-work incomplete"),
+        "expected fail-closed, got {msg}"
+    );
+    assert!(
+        msg.contains("result.json") || msg.contains("n_measured"),
+        "must name the missing trial result, got {msg}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn dump_only_stats_n_running_trials_is_refused() {
+    let root = tree("nrun-stats");
+    let dump = root.join(HARVEST_WORK);
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&dump, "0001-evaluate", "run", "atrx", "0");
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    plant_job_snapshot_stats(&dump, "0001-evaluate", "run", 1, "null");
+    let err = from_work_tree(&dump, &root, &evaluate_job()).expect_err("stale stats");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("harvest-work incomplete"),
+        "expected fail-closed, got {msg}"
+    );
+    assert!(
+        msg.contains("n_running"),
+        "expected n_running in refuse, got {msg}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn vsock_done_n2() -> RlmToHost {
+    let req = experiment_request(None);
+    let mut evidence = BTreeMap::new();
+    evidence.insert("n_measured".into(), serde_json::json!(2));
+    evidence.insert("harbor_exit".into(), serde_json::json!(0));
+    evidence.insert(
+        "trials".into(),
+        serde_json::json!([
+            {"name": "task-hard", "reward": 0.0},
+            {"name": "atrx", "reward": 0.0}
+        ]),
+    );
+    RlmToHost::Done {
+        output: VmJobOutput::Evaluated(RunOutcome {
+            report: CustomRunReport {
+                schema_version: RUN_REPORT_SCHEMA,
+                topic_id: req.topic_id,
+                custom_id: req.custom_id,
+                submission_digest: req.submission_digest,
+                artifact_digest: req.artifact_digest,
+                rules_version: req.rules_version,
+                primary_value: 0.0,
+                claim_holds: true,
+                sandboxed: true,
+                flops_used: None,
+                evidence,
+            },
+            logs: vec![],
+        }),
+    }
+}
+
+/// Happy-path vsock Done must still refresh a Done≈finish dump (a21f):
+/// atrx `result.json` missing, job-level `n_running=1`. Score stays the vsock
+/// report (no `host_harvest`).
+#[tokio::test]
+async fn vsock_done_refreshes_stale_dump_keeps_vsock_score() {
+    let root = tree("done-refresh");
+    let overlay = root.join(SCRATCH_TREE).join("work");
+    let dump = root.join(HARVEST_WORK);
+    plant(&overlay, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&overlay, "0001-evaluate", "run", "task-hard", "0");
+    plant_trial(&overlay, "0001-evaluate", "run", "atrx", "0");
+    plant_job_snapshot(&overlay, "0001-evaluate", "run", 0, "2026-09-11T09:22:22Z");
+    plant(&dump, "evaluate", "0001", &harbor_report_n2("0.0"));
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    let atrx = dump
+        .join("0001-evaluate")
+        .join(HARBOR_JOBS)
+        .join("run")
+        .join("atrx");
+    std::fs::create_dir_all(atrx.join("verifier")).expect("atrx");
+    std::fs::write(atrx.join("verifier").join("reward.txt"), "0").expect("reward");
+    plant_job_snapshot(&dump, "0001-evaluate", "run", 1, "null");
+    let done = vsock_done_n2();
+    let got = recv_job_or_harvest(
+        async { Ok(done) },
+        &root,
+        &root,
+        &evaluate_job(),
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("vsock Done");
+    let RlmToHost::Done {
+        output: VmJobOutput::Evaluated(run),
+    } = got
+    else {
+        panic!("expected Evaluated, got {got:?}");
+    };
+    assert!((run.report.primary_value - 0.0).abs() < 1e-12);
+    assert!(
+        !run.report.evidence.contains_key("host_harvest"),
+        "vsock Done must not be rewritten as a harvest reconstruct"
+    );
+    let refreshed = dump
+        .join("0001-evaluate")
+        .join(HARBOR_JOBS)
+        .join("run")
+        .join("atrx")
+        .join("result.json");
+    assert!(
+        refreshed.is_file() && std::fs::metadata(&refreshed).expect("meta").len() > 0,
+        "Done must copy overlay atrx result.json onto harvest-work"
+    );
+    let snap = std::fs::read_to_string(
+        dump.join("0001-evaluate")
+            .join(HARBOR_JOBS)
+            .join("run")
+            .join("result.json"),
+    )
+    .expect("job snapshot");
+    assert!(
+        !snap.contains("\"finished_at\":null"),
+        "dump must not stay finished_at=null, got {snap}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -1,0 +1,126 @@
+#!/bin/bash
+# Host n15 wrapper: wait for Harbor/orch curl, then summarize.
+#
+# Metal shortpack a21f: run.log stopped at N15 RESTART, curl was orphaned,
+# summarize never ran → no summary.txt / custom_value.txt. This script always
+# waits for curl.pid / job.out and always invokes summarize_job.py.
+# Restart path still logs job_http + DONE.
+#
+# Not on the guest `run` path. No baked JOBDIR / Harbor job id.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+usage() {
+    echo "usage: run-n15 [--restart] JOBDIR" >&2
+    echo "  JOBDIR or --jobdir is required. Waits for Harbor curl/job.out, then summarizes." >&2
+    exit 2
+}
+
+RESTART=0
+ARG_JOBDIR=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --restart) RESTART=1; shift ;;
+        --jobdir)
+            [ $# -ge 2 ] || usage
+            ARG_JOBDIR="$2"
+            shift 2
+            ;;
+        -h|--help) usage ;;
+        --) shift; break ;;
+        -*)
+            echo "run-n15: unknown flag $1" >&2
+            usage
+            ;;
+        *)
+            if [ -n "$ARG_JOBDIR" ]; then
+                echo "run-n15: extra argument $1" >&2
+                usage
+            fi
+            ARG_JOBDIR="$1"
+            shift
+            ;;
+    esac
+done
+
+JOBDIR="${ARG_JOBDIR:-${JOBDIR:-}}"
+if [ -z "$JOBDIR" ]; then
+    echo "run-n15: JOBDIR is required (fail closed)" >&2
+    usage
+fi
+if [ ! -d "$JOBDIR" ]; then
+    echo "run-n15: JOBDIR is not a directory: $JOBDIR" >&2
+    exit 2
+fi
+
+WAIT_SECS="${N15_WAIT_SECS:-3600}"
+log() {
+    printf '%s\n' "$*" | tee -a "$JOBDIR/run.log" >/dev/null
+    printf '%s\n' "$*"
+}
+
+# Wait for a curl we started (or a leftover pid file) even if it is not our child.
+wait_curl_pid() {
+    local pidfile="$JOBDIR/curl.pid"
+    [ -f "$pidfile" ] || return 0
+    local pid
+    pid="$(tr -d '[:space:]' < "$pidfile" || true)"
+    case "$pid" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 1
+    done
+}
+
+job_out_present() {
+    [ -f "$JOBDIR/job.out" ] && return 0
+    find "$JOBDIR" -name job.out -type f -print -quit 2>/dev/null | grep -q .
+}
+
+wait_job_out() {
+    local n=0
+    while ! job_out_present; do
+        n=$((n + 1))
+        if [ "$n" -ge "$WAIT_SECS" ]; then
+            echo "run-n15: job.out never appeared under $JOBDIR" >&2
+            exit 2
+        fi
+        sleep 1
+    done
+}
+
+read_job_http() {
+    if [ -f "$JOBDIR/job_http" ]; then
+        tr -d '[:space:]' < "$JOBDIR/job_http" || true
+    elif [ -n "${JOB_HTTP:-}" ]; then
+        printf '%s' "$JOB_HTTP"
+    else
+        printf ''
+    fi
+}
+
+# Optional operator hook: JOBDIR/curl.sh starts Harbor/orch and must write
+# job.out (and optionally job_http). We record the pid and wait — never orphan.
+start_curl_if_needed() {
+    if job_out_present; then
+        return 0
+    fi
+    if [ ! -x "$JOBDIR/curl.sh" ] && [ ! -f "$JOBDIR/curl.sh" ]; then
+        return 0
+    fi
+    bash "$JOBDIR/curl.sh" >"$JOBDIR/curl.out" 2>&1 &
+    echo $! >"$JOBDIR/curl.pid"
+}
+
+start_curl_if_needed
+wait_curl_pid
+wait_job_out
+
+if [ "$RESTART" -eq 1 ]; then
+    log "N15 RESTART"
+fi
+http="$(read_job_http)"
+log "job_http=${http} DONE"
+
+python3 "$HERE/summarize_job.py" --jobdir "$JOBDIR"

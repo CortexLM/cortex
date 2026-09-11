@@ -634,6 +634,31 @@ fn sync_file(path: &Path) {
     }
 }
 
+fn sync_tree(root: &Path) {
+    if !root.is_dir() {
+        return;
+    }
+    let mut stack = vec![root.to_path_buf()];
+    let mut dirs = Vec::new();
+    while let Some(d) = stack.pop() {
+        dirs.push(d.clone());
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                sync_file(&p);
+            }
+        }
+    }
+    for d in dirs {
+        sync_file(&d);
+    }
+}
+
 fn read_output_doc<T: for<'de> Deserialize<'de>>(path: &Path, what: &str) -> Result<T, String> {
     let meta = std::fs::metadata(path)
         .map_err(|_| format!("adaptor wrote no {what} ({})", path.display()))?;
@@ -740,8 +765,10 @@ pub async fn run_paid(
     if exec.timed_out {
         return Err(describe(&exec, &secrets, request.sandbox.deadline_s));
     }
-    // Push the adaptor's report to the virtio-blk before Done, so a host
-    // scratch harvest can see it if vsock then drops.
+    // Push Harbor trial files + the adaptor's report to the virtio-blk
+    // before Done: debugfs can otherwise dump reward.txt ~12s before
+    // result.json (metal tbench-x0002 / a21f).
+    sync_tree(work);
     sync_file(&output.join("report.json"));
     let report: RunnerReport = read_output_doc(&output.join("report.json"), "report.json")
         .map_err(|e| {

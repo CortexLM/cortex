@@ -10,8 +10,9 @@ answers with adjacent-tagged ``VmJobOutput`` nested under
 
 Evaluated jobs wrap the report once more (``body.report``). This script
 unwraps those layers (and ``RlmToHost::Done``) so ``cv=`` / ``n_measured``
-print. It does **not** invent a score: incomplete / missing primary stays
-unset and exits 2.
+print, then writes ``custom_value.txt`` and ``summary.txt`` under JOBDIR.
+It does **not** invent a score: incomplete / missing primary stays unset
+and exits 2. JOBDIR or a ``job.out`` path is required (no stdin hang).
 
 Copy from this tree onto a retained jail; do not treat a metal-only copy as
 canonical. Pass ``--jobdir <any-dir>`` (or a path to ``job.out``); there is
@@ -30,6 +31,11 @@ from typing import Any
 VM_OUTPUT_TAGS = frozenset(
     {"baseline", "evaluated", "inspected", "rules", "archived"}
 )
+
+
+def _die(msg: str, code: int = 2) -> None:
+    print(msg, file=sys.stderr)
+    raise SystemExit(code)
 
 
 def _is_finite_number(value: Any) -> bool:
@@ -138,7 +144,7 @@ def load_job_out(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeError) as exc:
-        raise SystemExit(f"summarize_job: cannot parse {path}: {exc}") from exc
+        _die(f"summarize_job: cannot parse {path}: {exc}")
 
 
 def job_out_mtime(path: Path) -> float:
@@ -177,12 +183,10 @@ def select_job_out(found: list[Path]) -> Path:
         distinct = {round(primary, 12) for _, primary in scored}
         if len(distinct) > 1:
             listed = ", ".join(str(path) for path, _ in scored)
-            print(
+            _die(
                 "summarize_job: multiple job.out unwrap different "
-                f"primary_value ({listed}); pass an explicit path",
-                file=sys.stderr,
+                f"primary_value ({listed}); pass an explicit path"
             )
-            raise SystemExit(2)
     if scored:
         scored.sort(key=lambda item: (job_out_mtime(item[0]), -len(item[0].parts)), reverse=True)
         return scored[0][0]
@@ -199,7 +203,7 @@ def find_job_out(jobdir: Path) -> Path:
     if jobdir.is_file():
         return jobdir
     if not jobdir.is_dir():
-        raise SystemExit(f"summarize_job: jobdir is not a file or directory: {jobdir}")
+        _die(f"summarize_job: jobdir is not a file or directory: {jobdir}")
     found: list[Path] = []
     try:
         for path in jobdir.rglob(JOB_OUT_NAME):
@@ -208,9 +212,9 @@ def find_job_out(jobdir: Path) -> Path:
                 if len(found) >= 64:
                     break
     except OSError as exc:
-        raise SystemExit(f"summarize_job: cannot walk {jobdir}: {exc}") from exc
+        _die(f"summarize_job: cannot walk {jobdir}: {exc}")
     if not found:
-        raise SystemExit(f"summarize_job: no {JOB_OUT_NAME} under {jobdir}")
+        _die(f"summarize_job: no {JOB_OUT_NAME} under {jobdir}")
     return select_job_out(found)
 
 
@@ -249,12 +253,57 @@ def print_run_log(summary: dict[str, Any]) -> None:
     print(f"cv={cv}")
 
 
+def resolve_jobdir(job_out: Path | None, jobdir: Path | None) -> Path | None:
+    """Directory that receives ``custom_value.txt`` / ``summary.txt``."""
+    if jobdir is not None:
+        return jobdir if jobdir.is_dir() else (jobdir.parent if jobdir.is_file() else jobdir)
+    if job_out is None:
+        return None
+    return job_out if job_out.is_dir() else job_out.parent
+
+
+def format_summary_txt(summary: dict[str, Any]) -> str:
+    pv = summary.get("primary_value")
+    n = summary.get("n_measured")
+    cv = format_cv(summary.get("cv") if isinstance(summary.get("cv"), float) else None)
+    harbor = summary.get("harbor_exit")
+    lines = [
+        f"primary_value={pv if pv is not None else ''}",
+        f"n_measured={n if n is not None else ''}",
+        f"cv={cv}",
+        f"n_trials={summary.get('n_trials', '')}",
+        f"harbor_exit={harbor if harbor is not None else ''}",
+        f"ok={summary.get('ok')}",
+    ]
+    if not summary.get("ok"):
+        lines.append(f"reason={summary.get('reason', '')}")
+    return "\n".join(lines) + "\n"
+
+
+def write_jobdir_files(jobdir: Path, summary: dict[str, Any]) -> None:
+    """Write ``custom_value.txt`` and ``summary.txt`` under JOBDIR. Fail closed."""
+    try:
+        jobdir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _die(f"summarize_job: cannot create {jobdir}: {exc}")
+    summary_path = jobdir / "summary.txt"
+    cv_path = jobdir / "custom_value.txt"
+    try:
+        summary_path.write_text(format_summary_txt(summary), encoding="utf-8")
+        if summary.get("ok") and _is_finite_number(summary.get("primary_value")):
+            cv_path.write_text(f"{float(summary['primary_value'])}\n", encoding="utf-8")
+        elif cv_path.exists():
+            cv_path.unlink()
+    except OSError as exc:
+        _die(f"summarize_job: cannot write under {jobdir}: {exc}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "job_out",
         nargs="?",
-        help="path to orch job.out (JSON) or a directory that contains one. Default: stdin",
+        help="path to orch job.out (JSON) or a directory that contains one (required unless --jobdir)",
     )
     parser.add_argument(
         "--jobdir",
@@ -270,17 +319,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.job_out and args.jobdir:
         print("summarize_job: pass job.out or --jobdir, not both", file=sys.stderr)
         return 2
+    if not args.job_out and args.jobdir is None:
+        print(
+            "summarize_job: JOBDIR or job.out is required (refusing stdin)",
+            file=sys.stderr,
+        )
+        return 2
+    job_out_arg = Path(args.job_out) if args.job_out else None
+    jobdir = resolve_jobdir(job_out_arg, args.jobdir)
     if args.job_out:
-        obj = load_job_out(find_job_out(Path(args.job_out)))
-    elif args.jobdir:
-        obj = load_job_out(find_job_out(args.jobdir))
+        obj = load_job_out(find_job_out(job_out_arg if job_out_arg is not None else Path(".")))
     else:
-        try:
-            obj = json.load(sys.stdin)
-        except json.JSONDecodeError as exc:
-            print(f"summarize_job: stdin is not JSON: {exc}", file=sys.stderr)
-            return 2
+        obj = load_job_out(find_job_out(args.jobdir))
     summary = summarize(obj)
+    if jobdir is not None:
+        write_jobdir_files(jobdir, summary)
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
     else:
