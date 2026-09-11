@@ -36,6 +36,7 @@
     clippy::too_many_arguments
 )]
 
+use std::future::Future;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use async_trait::async_trait;
@@ -59,7 +60,7 @@ use proof_score::{
 };
 use proof_store::{
     freeze_submission_digest, is_staged_artefact_uri, staged_artefact_uri, ArtifactManifest,
-    Enqueued, MemoryStore, StoreError, Submission, SubmissionState, MAX_ARTEFACT_BYTES,
+    Enqueued, LiveEval, MemoryStore, StoreError, Submission, SubmissionState, MAX_ARTEFACT_BYTES,
 };
 use proof_submit::{
     is_lowercase_hex, parse_hotkey_hex, parse_signature_hex, parse_submit_nonce_hex, verify_submit,
@@ -647,7 +648,8 @@ async fn submit(
     // Atomic claim: exclusive-create plus an in-flight ref. A concurrent
     // submit of the same digest cannot both own rollback; abort releases
     // one ref and deletes only when none remain and no row still names it.
-    st.store
+    let env_held = st
+        .store
         .claim_miner_env(&submission_digest, &miner_env)
         .map_err(|e| match e {
             conflict @ StoreError::EnvConflict => err(StatusCode::CONFLICT, &conflict.to_string()),
@@ -659,7 +661,9 @@ async fn submit(
             st.store
                 .stash_artefact(&artifact, &hotkey, &submit_nonce, bytes)
                 .map_err(|e| {
-                    let _ = st.store.release_miner_env(&submission_digest);
+                    if env_held {
+                        let _ = st.store.release_miner_env(&submission_digest);
+                    }
                     err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string())
                 })?,
         );
@@ -705,23 +709,109 @@ async fn submit(
     if topic.constraints.defer_scoring() {
         return queue_deferred(&st, row);
     }
-    // Live submit: a 503/401 after staging must not leave bytes on disk.
-    // The nonce is already spent; a retry uses a new nonce (new vault key).
-    // Drain keeps staging on error so a queued row can still be scored.
+    // One live evaluation per frozen digest. A disconnect-then-retry with a
+    // fresh nonce shares this digest and is told immediately: 409 while
+    // in flight, 200 once a row exists. Waiting here would hold a gateway
+    // detached-submit permit for the original eval's whole duration.
+    // Evaluate is not cancelled if the miner hangs up after this body was
+    // accepted: axum drops the handler on disconnect, a spawned task is not.
     let staged_digest = row.artifact_digest.clone();
     let staged_hotkey = row.miner_hotkey.clone();
     let staged_nonce = row.submit_nonce.clone();
     let staged_env = row.submission_digest.clone();
-    match score_intake(&st, row, &topic).await {
-        Ok(resp) => Ok((StatusCode::CREATED, Json(resp))),
-        Err(e) => {
-            let _ = st
-                .store
-                .forget_artefact(&staged_digest, &staged_hotkey, &staged_nonce);
-            let _ = st.store.release_miner_env(&staged_env);
-            Err(e)
+    let topic_id = row.topic_id.clone();
+    match st
+        .store
+        .claim_live_eval(&topic_id, &staged_env)
+        .map_err(|e| store_err(&e))?
+    {
+        LiveEval::Existing(existing) => {
+            drop_retry_staging(&st, &row, env_held);
+            return Ok(already_submitted(&st, &existing));
         }
+        LiveEval::InFlight => {
+            drop_retry_staging(&st, &row, env_held);
+            return Err(err(
+                StatusCode::CONFLICT,
+                "evaluation in flight for this artefact",
+            ));
+        }
+        LiveEval::Claimed | LiveEval::Vacant => {}
     }
+    after_body_accepted({
+        let st = st.clone();
+        async move {
+            let _claim = LiveEvalGuard {
+                store: st.store.clone(),
+                topic_id,
+                digest: staged_env.clone(),
+            };
+            match score_intake(&st, row, &topic).await {
+                Ok(resp) => Ok((StatusCode::CREATED, Json(resp))),
+                Err(e) => {
+                    let _ = st
+                        .store
+                        .forget_artefact(&staged_digest, &staged_hotkey, &staged_nonce);
+                    let _ = st.store.release_miner_env(&staged_env);
+                    Err(e)
+                }
+            }
+        }
+    })
+    .await
+}
+
+/// Run `work` even if the HTTP client drops. Axum cancels the handler
+/// future on disconnect; a spawned task is not cancelled, so evaluate
+/// still persists. When the client holds, this awaits the result so
+/// submit stays **201-after-score**.
+async fn after_body_accepted<T: Send + 'static>(
+    work: impl Future<Output = Result<T, ErrResp>> + Send + 'static,
+) -> Result<T, ErrResp> {
+    match tokio::spawn(work).await {
+        Ok(r) => r,
+        Err(_) => Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "scoring task failed",
+        )),
+    }
+}
+
+/// Releases the live-eval claim if scoring ends without [`MemoryStore::insert`].
+struct LiveEvalGuard {
+    store: MemoryStore,
+    topic_id: String,
+    digest: String,
+}
+
+impl Drop for LiveEvalGuard {
+    fn drop(&mut self) {
+        let _ = self.store.release_live_eval(&self.topic_id, &self.digest);
+    }
+}
+
+fn drop_retry_staging(st: &AppState, row: &Submission, env_held: bool) {
+    let _ = st
+        .store
+        .forget_artefact(&row.artifact_digest, &row.miner_hotkey, &row.submit_nonce);
+    if env_held {
+        let _ = st.store.release_miner_env(&row.submission_digest);
+    }
+}
+
+fn already_submitted(st: &AppState, existing: &Submission) -> (StatusCode, Json<SubmitResp>) {
+    let eligible = existing.verdict.as_ref().is_some_and(|v| v.pass);
+    let mut resp = SubmitResp::of(existing, st.backend, eligible);
+    resp.detail = Some(if existing.state == SubmissionState::Queued {
+        format!("already queued as {}; {DEFERRED_DETAIL}", existing.id)
+    } else {
+        format!(
+            "already submitted as {} and scored ({}); one run per artefact per topic",
+            existing.id,
+            state_name(existing.state)
+        )
+    });
+    (StatusCode::OK, Json(resp))
 }
 
 /// Persist an intake row as `queued` — one row per frozen digest per topic,
@@ -750,18 +840,7 @@ fn queue_deferred(
         )),
         Enqueued::Existing(existing) => {
             let _ = st.store.forget_artefact(&digest, &hotkey, &nonce);
-            let eligible = existing.verdict.as_ref().is_some_and(|v| v.pass);
-            let mut resp = SubmitResp::of(&existing, st.backend, eligible);
-            resp.detail = Some(if existing.state == SubmissionState::Queued {
-                format!("already queued as {}; {DEFERRED_DETAIL}", existing.id)
-            } else {
-                format!(
-                    "already submitted as {} and scored ({}); one run per artefact per topic",
-                    existing.id,
-                    state_name(existing.state)
-                )
-            });
-            Ok((StatusCode::OK, Json(resp)))
+            Ok(already_submitted(st, &existing))
         }
     }
 }
@@ -1540,6 +1619,7 @@ pub fn hash_admin_token(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use axum::body::Body;
@@ -1718,6 +1798,9 @@ mod tests {
         envs: std::sync::Mutex<Vec<MinerEnv>>,
         /// Length of staged artefact bytes each `score` call was handed (`None` = URI-only).
         tars: std::sync::Mutex<Vec<Option<usize>>>,
+        /// Extra wait inside `score` so disconnect tests can drop the client
+        /// after the body is accepted and evaluate has started.
+        delay: Option<Duration>,
     }
 
     impl StubScorer {
@@ -1728,11 +1811,18 @@ mod tests {
                 hits: AtomicUsize::new(0),
                 envs: std::sync::Mutex::new(Vec::new()),
                 tars: std::sync::Mutex::new(Vec::new()),
+                delay: None,
             }
         }
         fn lose() -> Self {
             Self {
                 reproduced: false,
+                ..Self::win()
+            }
+        }
+        fn delayed(d: Duration) -> Self {
+            Self {
+                delay: Some(d),
                 ..Self::win()
             }
         }
@@ -1771,6 +1861,9 @@ mod tests {
                 .lock()
                 .expect("tars")
                 .push(artifact_tar.map(<[u8]>::len));
+            if let Some(d) = self.delay {
+                tokio::time::sleep(d).await;
+            }
             Ok(sim_document(
                 pin,
                 topic,
@@ -2587,7 +2680,7 @@ mod tests {
         assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
         assert_eq!(body["error"], "hotkey_signature invalid");
         let mut reordered = submit_body(
-            "nonce",
+            "nonce-b",
             &serde_json::json!({ "manifest": { "train_dataset_ids": ["b-mix", "a-mix"] } }),
         );
         assert_eq!(
@@ -2621,8 +2714,15 @@ mod tests {
             "row stamps the client nonce: {row}"
         );
 
-        // A fresh nonce from the same key is a new submission; the canonical
-        // manifest is order-independent so the client may list in any order.
+        // A fresh nonce on the same artefact is not a second paid run.
+        let again = submit_body("nonce", &serde_json::json!({}));
+        let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", again, None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(row_count(app.clone()).await, 1);
+
+        // A fresh nonce from the same key on another artefact is a new
+        // submission; the canonical manifest is order-independent so the
+        // client may list in any order.
         reordered["manifest"]["train_dataset_ids"] = serde_json::json!(["a-mix", "b-mix"]);
         let (st, body) = json_req(app.clone(), "POST", "/v1/submissions", reordered, None).await;
         assert_eq!(st, StatusCode::CREATED, "{body}");
@@ -2745,17 +2845,22 @@ mod tests {
             true,
             true,
         );
-        for manifest in [
-            serde_json::json!({}),
-            serde_json::json!({
-                "manifest": { "train_content_hashes": [dirty_hash] }
-            }),
+        // Distinct artefacts: the same digest is one live eval, so empty
+        // evidence and holdout overlap must not share a frozen digest.
+        for (label, manifest) in [
+            ("junk-empty", serde_json::json!({})),
+            (
+                "junk-dirty",
+                serde_json::json!({
+                    "manifest": { "train_content_hashes": [dirty_hash] }
+                }),
+            ),
         ] {
             let empty_evidence = serde_json::json!({ "manifest": { "train_dataset_ids": [] } });
             let body = if manifest.as_object().is_some_and(serde_json::Map::is_empty) {
-                submit_body("junk", &empty_evidence)
+                submit_body(label, &empty_evidence)
             } else {
-                submit_body("junk", &manifest)
+                submit_body(label, &manifest)
             };
             let (st, created) = json_req(app.clone(), "POST", "/v1/submissions", body, None).await;
             assert_eq!(st, StatusCode::CREATED, "{created}");
@@ -3239,6 +3344,13 @@ mod tests {
         fn unwired(custom_id: &str) -> Self {
             Self {
                 wired: false,
+                ..Self::win(custom_id)
+            }
+        }
+
+        fn delayed(custom_id: &str, d: Duration) -> Self {
+            Self {
+                inner: StubScorer::delayed(d),
                 ..Self::win(custom_id)
             }
         }
@@ -4478,6 +4590,131 @@ mod tests {
         assert_eq!(row["verdict"]["pass"], true, "{row}");
         assert_eq!(row["verdict"]["agent"]["rationale"], "sim stub win");
         assert_eq!(row["verdict"]["failed"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// Live Lium host + delayed harvest stub. The store is shared so a
+    /// dropped submit can still be observed after evaluate finishes.
+    fn app_delayed_lium(delay: Duration) -> (Router, MemoryStore, Arc<StubScorer>) {
+        let p = pin(&format!("sha256:{}", "ab".repeat(32)));
+        let store = MemoryStore::new();
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (topic, meas) = seal_topic_with(&p, unsigned_topic(&recs), &[]);
+        store.put_topic(topic.clone()).expect("topic");
+        store.load_holdout(&topic.id, recs).expect("holdout");
+        store
+            .set_baseline(&topic.id, meas.into_sealed())
+            .expect("baseline");
+        let scorer = Arc::new(StubScorer::delayed(delay));
+        let app = proof_router(AppState {
+            store: store.clone(),
+            pin: p.clone(),
+            backend: EvalBackend::Lium,
+            live_scorer: Some(scorer.clone()),
+            offer: Some(offer()),
+            executor: executor_slot(Some(test_executor(&p))),
+            judge_api_key: Some("test-judge-key".into()),
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            vm_probe: None,
+            epoch: 0,
+        });
+        (app, store, scorer)
+    }
+
+    async fn post_submit(app: Router, body: serde_json::Value) -> axum::http::Response<Body> {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/submissions")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("req");
+        app.oneshot(req).await.expect("resp")
+    }
+
+    #[tokio::test]
+    async fn submit_drop_after_accept_still_persists_the_score() {
+        let (app, store, scorer) = app_delayed_lium(Duration::from_millis(250));
+        let body = submit_body("drop-persist", &serde_json::json!({}));
+        let waiter = tokio::spawn(post_submit(app, body));
+        let started = tokio::time::Instant::now();
+        loop {
+            if scorer.hits.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "evaluate never started"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        waiter.abort();
+        let _ = waiter.await;
+        let landed = tokio::time::Instant::now();
+        loop {
+            let rows = store.list().expect("list");
+            if rows.len() == 1 {
+                assert_eq!(scorer.hits.load(Ordering::SeqCst), 1, "evaluate must run");
+                assert_eq!(
+                    rows[0].state,
+                    SubmissionState::AwaitingAdmin,
+                    "{:?}",
+                    rows[0]
+                );
+                assert!(
+                    rows[0].verdict.as_ref().is_some_and(|v| v.pass),
+                    "score must land: {:?}",
+                    rows[0]
+                );
+                return;
+            }
+            assert!(
+                landed.elapsed() < Duration::from_secs(2),
+                "row did not persist after client drop: {rows:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_holding_the_client_is_201_after_score() {
+        let (app, store, scorer) = app_delayed_lium(Duration::from_millis(80));
+        let body = submit_body("hold-sync-201", &serde_json::json!({}));
+        let resp = post_submit(app, body).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(v["state"], "awaiting_admin", "{v}");
+        assert_eq!(scorer.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(store.list().expect("list").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_retry_same_artefact_does_not_double_eval() {
+        let (app, store, scorer) = app_delayed_lium(Duration::from_millis(250));
+        let body = submit_body("same-artefact", &serde_json::json!({}));
+        let first = tokio::spawn(post_submit(app.clone(), body.clone()));
+        let started = tokio::time::Instant::now();
+        loop {
+            if scorer.hits.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "evaluate never started"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let retry = submit_body("same-artefact", &serde_json::json!({}));
+        let resp = post_submit(app, retry).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "retry must not start a second run or hold a proxy slot"
+        );
+        assert_eq!(scorer.hits.load(Ordering::SeqCst), 1);
+        let first = first.await.expect("first");
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(store.list().expect("list").len(), 1);
+        assert_eq!(scorer.hits.load(Ordering::SeqCst), 1);
     }
 
     // ----- deferred scoring: `queued` rows and the drain -----
@@ -6194,6 +6431,51 @@ mod tests {
         assert_eq!(list["items"].as_array().expect("items").len(), 1, "{list}");
         assert!(!list.to_string().contains(BYOK_VALUE), "{list}");
         assert!(!list.to_string().contains(other), "{list}");
+    }
+
+    #[tokio::test]
+    async fn optional_byok_retry_without_env_does_not_drop_the_original() {
+        let scorer = Arc::new(FamilyStub::delayed(CUSTOM_ID, Duration::from_millis(250)));
+        let state = state_with_custom_params(
+            scorer.clone(),
+            false,
+            true,
+            &[(proof_canon::PARAM_MINER_ENV_ALLOWLIST, BYOK)],
+        );
+        let app = proof_router(state);
+        let first_body = byok_submit("opt-byok", Some(&serde_json::json!({ BYOK: BYOK_VALUE })));
+        let first = tokio::spawn({
+            let app = app.clone();
+            async move { json_req(app, "POST", "/v1/submissions", first_body, None).await }
+        });
+        let started = tokio::time::Instant::now();
+        loop {
+            if scorer.inner.hits.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "evaluate never started"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (st, body) = json_req(
+            app,
+            "POST",
+            "/v1/submissions",
+            byok_submit("opt-byok", None),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{body}");
+        let (st, first) = first.await.expect("first");
+        assert_eq!(st, StatusCode::CREATED, "{first}");
+        assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            scorer.inner.envs()[0].iter().collect::<Vec<_>>(),
+            vec![(BYOK, BYOK_VALUE)],
+            "retry without env must not drop the original vault"
+        );
     }
 
     /// A topic that runs on the miner's own key and a host that no longer

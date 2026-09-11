@@ -27,7 +27,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use proof_rlm::{RetainPolicy, VmHandle};
+use proof_rlm::{RetainPolicy, VmHandle, VmJob, VmJobOutput};
 use proof_vm_proto::{
     bind_evidence, paths, AgentHealth, CreateVmRequest, ErrorBody, ErrorCode, RunJobRequest,
     RunJobResponse, TeardownRequest, TeardownResponse, VmRecord, VmState, API_VERSION,
@@ -41,6 +41,12 @@ use crate::stamp::{output_matches, stamp_output};
 
 /// Longest `vm_id` the agent mints (jailer ids are capped at 64 chars).
 const MAX_VM_ID_LEN: usize = 63;
+
+/// Pause between abandoned-experiment teardown retries.
+const TEARDOWN_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
+/// Hard cap on those retries so a persistent hypervisor error cannot spin
+/// an untracked task forever after the VM is already [`VmState::Crashed`].
+const MAX_TEARDOWN_ATTEMPTS: u8 = 8;
 
 /// Experiment VMs one host runs at once unless the operator says otherwise.
 /// Each may be as large as the ceilings (lock 16 vCPU / 32 GiB), so this is a
@@ -99,6 +105,8 @@ struct VmEntry {
     booted: BootedVm,
     /// One job (or teardown) at a time per VM.
     lock: Arc<Mutex<()>>,
+    /// Retryable harvest policy after a waiter drop; `None` when none pending.
+    cleanup: Option<RetainPolicy>,
 }
 
 struct Inner {
@@ -257,6 +265,92 @@ impl AgentState {
         }
     }
 
+    /// Waiter gone after the job finished: harvest already happened (the
+    /// hypervisor ran to completion). Tear down an **experiment** VM so it
+    /// does not sit billed; keep the topic VM for the next job.
+    ///
+    /// `verified` is the same split as [`proof_rlm::run_paid_job`]: Destroy
+    /// only when the stamped report would pass control-plane verification.
+    /// Agent-level `Ok` is not enough — a missing sister stamps
+    /// `sandboxed=false` and the CP then rejects `NotSandboxed`; that jail
+    /// is retained for RCA.
+    ///
+    /// A failed or unconfirmed teardown never leaves [`VmState::Running`]:
+    /// the record is [`VmState::Crashed`] (capacity free) and teardown is
+    /// retried a bounded number of times until the hypervisor confirms a
+    /// terminal state.
+    async fn harvest_abandoned(
+        &self,
+        record: &VmRecord,
+        booted: &BootedVm,
+        verified: bool,
+        _job: OwnedMutexGuard<()>,
+    ) {
+        if record.experiment.is_none() {
+            return;
+        }
+        let policy = if verified {
+            RetainPolicy::Destroy
+        } else {
+            RetainPolicy::Retain
+        };
+        let vm_id = record.handle.vm_id.clone();
+        tracing::info!(
+            %vm_id, topic_id = %record.handle.topic_id, ?policy,
+            "waiter gone; harvesting experiment vm"
+        );
+        for _ in 0..MAX_TEARDOWN_ATTEMPTS {
+            let confirmed = match self.inner.hypervisor.teardown(booted, policy).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(%vm_id, "abandoned experiment teardown: {e}");
+                    false
+                }
+            };
+            if confirmed {
+                let mut vms = self.inner.vms.write().await;
+                match policy {
+                    RetainPolicy::Destroy => {
+                        vms.remove(&vm_id);
+                    }
+                    RetainPolicy::Retain => {
+                        if let Some(e) = vms.get_mut(&vm_id) {
+                            e.record.state = VmState::Retained;
+                            e.cleanup = None;
+                        }
+                    }
+                }
+                return;
+            }
+            {
+                let mut vms = self.inner.vms.write().await;
+                match vms.get_mut(&vm_id) {
+                    Some(e) => {
+                        if e.record.state == VmState::Running {
+                            e.record.state = VmState::Crashed;
+                        }
+                        e.cleanup = Some(policy);
+                    }
+                    None => return,
+                }
+            }
+            tokio::time::sleep(TEARDOWN_RETRY).await;
+            let vms = self.inner.vms.read().await;
+            match vms.get(&vm_id) {
+                Some(e)
+                    if e.cleanup.is_none()
+                        || e.record.state == VmState::Destroyed
+                        || e.record.state == VmState::Retained =>
+                {
+                    return;
+                }
+                None => return,
+                Some(_) => {}
+            }
+        }
+        tracing::error!(%vm_id, "abandoned experiment teardown never confirmed");
+    }
+
     /// The running, alive **topic** VM bound to `topic_id`, if any.
     /// Experiment VMs are never it: they belong to one job, not the topic.
     async fn live_vm_for(&self, topic_id: &str) -> Option<VmRecord> {
@@ -399,6 +493,7 @@ async fn create_vm(
             record: record.clone(),
             booted,
             lock: Arc::new(Mutex::new(())),
+            cleanup: None,
         },
     );
     Ok((StatusCode::CREATED, Json(record)))
@@ -423,6 +518,24 @@ fn not_running(vm_id: &str, state: VmState) -> AgentError {
     )
 }
 
+/// Destroy on abandon only when a holding control plane would have accepted
+/// the stamped report. Matches [`proof_rlm::run_paid_job`].
+#[must_use]
+fn verified_paid_report(result: &Result<RunJobResponse, AgentError>, job: &VmJob) -> bool {
+    let Ok(resp) = result else {
+        return false;
+    };
+    match (job, &resp.output) {
+        (VmJob::Evaluate { request, .. }, VmJobOutput::Evaluated(out)) => {
+            out.report.verify(request).is_ok()
+        }
+        (VmJob::Baseline { request }, VmJobOutput::Baseline(report)) => {
+            report.verify(request).is_ok()
+        }
+        _ => false,
+    }
+}
+
 async fn run_job(
     State(state): State<AgentState>,
     Path(vm_id): Path<String>,
@@ -441,26 +554,77 @@ async fn run_job(
         let reaped = state.reap(&record, &booted, guard).await;
         return Err(not_running(&vm_id, reaped.state));
     }
+    // Body accepted: do not cancel the hypervisor job if the CP waiter
+    // drops. Harvest the outcome; an experiment VM is then torn down
+    // (Destroy only after the stamped report would pass CP verification;
+    // otherwise Retain), a topic VM is kept.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let state_bg = state.clone();
+    let record_bg = record.clone();
+    let booted_bg = booted.clone();
+    let vm_id_bg = vm_id.clone();
+    let job = body.job.clone();
+    tokio::spawn(async move {
+        let (result, guard) = execute_job(
+            state_bg.clone(),
+            record_bg.clone(),
+            booted_bg.clone(),
+            body,
+            vm_id_bg,
+            guard,
+        )
+        .await;
+        if let Err(result) = tx.send(result) {
+            if let Some(g) = guard {
+                let verified = verified_paid_report(&result, &job);
+                state_bg
+                    .harvest_abandoned(&record_bg, &booted_bg, verified, g)
+                    .await;
+            }
+        }
+    });
+    match rx.await {
+        Ok(r) => r.map(Json),
+        Err(_) => Err(AgentError::new(ErrorCode::Backend, "job task failed")),
+    }
+}
+
+async fn execute_job(
+    state: AgentState,
+    record: VmRecord,
+    booted: BootedVm,
+    body: RunJobRequest,
+    vm_id: String,
+    guard: OwnedMutexGuard<()>,
+) -> (
+    Result<RunJobResponse, AgentError>,
+    Option<OwnedMutexGuard<()>>,
+) {
     let outcome = match state.inner.hypervisor.run_job(&booted, &body.job).await {
         Ok(outcome) => outcome,
         Err(e) => {
-            // A guest that died under the job is reaped now, while we hold it.
             if !state.inner.hypervisor.alive(&booted).await {
                 state.reap(&record, &booted, guard).await;
+                return (Err(e.into()), None);
             }
-            return Err(e.into());
+            return (Err(e.into()), Some(guard));
         }
     };
     if !output_matches(&body.job, &outcome.output) {
-        return Err(AgentError::new(
-            ErrorCode::WrongOutput,
-            "guest answered with another output shape",
-        ));
+        return (
+            Err(AgentError::new(
+                ErrorCode::WrongOutput,
+                "guest answered with another output shape",
+            )),
+            Some(guard),
+        );
     }
-    // Evidence for one job never stamps another: the attestation and the
-    // report must name this job's topic, submission, and artefact.
-    bind_evidence(&body.job, &outcome.output, outcome.sister.as_ref())
-        .map_err(|e| AgentError::new(ErrorCode::EvidenceMismatch, e.to_string()))?;
+    if let Err(e) = bind_evidence(&body.job, &outcome.output, outcome.sister.as_ref()) {
+        return (
+            Err(AgentError::new(ErrorCode::EvidenceMismatch, e.to_string())),
+            Some(guard),
+        );
+    }
     if let Some(s) = &outcome.sister {
         tracing::info!(
             %vm_id, sister = %s.sister_vm_id, submission = %s.submission_digest,
@@ -469,12 +633,15 @@ async fn run_job(
         );
     }
     let output = stamp_output(outcome.output, outcome.sister.as_ref());
-    Ok(Json(RunJobResponse {
-        topic_id: record.handle.topic_id,
-        vm_id,
-        output,
-        sister: outcome.sister,
-    }))
+    (
+        Ok(RunJobResponse {
+            topic_id: record.handle.topic_id,
+            vm_id,
+            output,
+            sister: outcome.sister,
+        }),
+        Some(guard),
+    )
 }
 
 async fn teardown(

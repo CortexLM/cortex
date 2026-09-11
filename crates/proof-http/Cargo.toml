@@ -23,7 +23,7 @@ proof-vm-proto = { path = "../proof-vm-proto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tokio = { version = "1", features = ["macros", "rt", "sync"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
 crypto = { path = "../crypto" }
@@ -31,7 +31,7 @@ http-body-util = "0.1"
 proof-submit = { path = "../proof-submit" }
 proof-vm-proto = { path = "../proof-vm-proto", features = ["test-fixtures"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
 
 [lints]

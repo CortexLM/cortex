@@ -85,6 +85,11 @@ impl GatewayState {
     ) -> Result<Self, String> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Proof evaluate is synchronous and can run for minutes. A
+            // client-wide timeout here would abort the upstream the same
+            // way a miner disconnect used to, and leave experiment VMs
+            // running. The miner `ctx` sets per-request GET (~60 s) and
+            // Proof POST (7200 s) budgets; this hop waits.
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -181,5 +186,22 @@ impl IntoResponse for ApiError {
             "error": self.0.to_string(),
         });
         (status, Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn proxy_http_client_has_no_reqwest_timeout() {
+        let src = include_str!("api.rs");
+        let builder = src
+            .split("reqwest::Client::builder()")
+            .nth(1)
+            .expect("builder");
+        let builder = builder.split(".build()").next().expect("build");
+        assert!(
+            !builder.contains(".timeout("),
+            "the challenge proxy must not set a client-wide reqwest timeout: {builder}"
+        );
     }
 }

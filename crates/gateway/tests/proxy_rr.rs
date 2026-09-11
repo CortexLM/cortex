@@ -542,3 +542,129 @@ async fn last_upstream_503_body_is_returned_after_retry() {
     );
     let _ = shutdown.send(());
 }
+
+/// Miner hang-up after the body is buffered must not cancel the Proof
+/// upstream: evaluate is sync and dropping it orphans experiment VMs.
+#[tokio::test]
+async fn drop_after_body_does_not_cancel_upstream() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/submissions"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_delay(Duration::from_millis(400))
+                .set_body_json(serde_json::json!({"id": "pf", "state": "awaiting_admin"})),
+        )
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let reg = fast_registry();
+    reg.create(&CreateBackend {
+        challenge_id: "proof".into(),
+        base_url: upstream.uri(),
+        weight: 1,
+    })
+    .unwrap();
+
+    let (addr, shutdown) = spawn_gateway(reg).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(80))
+        .build()
+        .expect("client");
+    let send = client
+        .post(format!("http://{addr}/challenge/proof/v1/submissions"))
+        .header("content-type", "application/json")
+        .body(r#"{"topic_id":"tbench"}"#)
+        .send();
+    let timed_out = tokio::time::timeout(Duration::from_millis(200), send).await;
+    assert!(
+        timed_out.is_err() || timed_out.ok().and_then(Result::ok).is_none(),
+        "miner must have dropped before the upstream answered"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        upstream
+            .received_requests()
+            .await
+            .expect("upstream saw the buffered body")
+            .len(),
+        1,
+        "dropping the miner must not cancel the spawned upstream"
+    );
+    let _ = shutdown.send(());
+}
+
+/// GET and non-Proof traffic cancel with the miner: a stall must not keep
+/// an unbounded detached upstream hop.
+#[tokio::test]
+async fn get_drop_cancels_stalled_upstream() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/status"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
+        .mount(&upstream)
+        .await;
+
+    let reg = fast_registry();
+    reg.create(&CreateBackend {
+        challenge_id: "proof".into(),
+        base_url: upstream.uri(),
+        weight: 1,
+    })
+    .unwrap();
+
+    let (addr, shutdown) = spawn_gateway(reg).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(80))
+        .build()
+        .expect("client");
+    let send = client
+        .get(format!("http://{addr}/challenge/proof/v1/status"))
+        .send();
+    let _ = tokio::time::timeout(Duration::from_millis(200), send).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let n = upstream.received_requests().await.expect("mock").len();
+    assert!(
+        n <= 1,
+        "GET must not keep retrying a stall after disconnect: {n}"
+    );
+    let _ = shutdown.send(());
+}
+
+/// The proxy client has no short reqwest timeout: a slow evaluate (here
+/// 2 s, live is minutes) must still return.
+#[tokio::test]
+async fn proxy_has_no_short_upstream_timeout() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/submissions"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_delay(Duration::from_secs(2))
+                .set_body_json(serde_json::json!({"id": "pf", "state": "awaiting_admin"})),
+        )
+        .mount(&upstream)
+        .await;
+
+    let reg = fast_registry();
+    reg.create(&CreateBackend {
+        challenge_id: "proof".into(),
+        base_url: upstream.uri(),
+        weight: 1,
+    })
+    .unwrap();
+
+    let (addr, shutdown) = spawn_gateway(reg).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/challenge/proof/v1/submissions"))
+        .json(&serde_json::json!({"topic_id": "tbench"}))
+        .send()
+        .await
+        .expect("proxy waited for the slow upstream");
+    assert_eq!(resp.status().as_u16(), 201);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("\"id\":\"pf\""), "{body}");
+    let _ = shutdown.send(());
+}

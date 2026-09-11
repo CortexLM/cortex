@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -67,6 +67,12 @@ pub struct FakeHypervisor {
     specs: Mutex<Vec<(String, TopicVmSpec)>>,
     jobs: Mutex<Vec<(String, VmJob)>>,
     teardowns: Mutex<Vec<(String, RetainPolicy)>>,
+    /// Remaining teardown attempts that fail (unconfirmed) before success.
+    teardown_fails: AtomicUsize,
+    /// When set, a failing teardown is `Err` rather than `Ok(false)`.
+    teardown_errors: AtomicBool,
+    /// Every teardown call, including failures.
+    teardown_attempts: AtomicUsize,
 }
 
 impl FakeHypervisor {
@@ -94,6 +100,9 @@ impl FakeHypervisor {
             specs: Mutex::new(Vec::new()),
             jobs: Mutex::new(Vec::new()),
             teardowns: Mutex::new(Vec::new()),
+            teardown_fails: AtomicUsize::new(0),
+            teardown_errors: AtomicBool::new(false),
+            teardown_attempts: AtomicUsize::new(0),
         })
     }
 
@@ -187,6 +196,19 @@ impl FakeHypervisor {
 
     pub fn teardowns(&self) -> Vec<(String, RetainPolicy)> {
         self.teardowns.lock().unwrap().clone()
+    }
+
+    pub fn teardown_attempts(&self) -> usize {
+        self.teardown_attempts.load(Ordering::SeqCst)
+    }
+
+    /// Next `n` teardowns fail without recording a release (VM stays alive).
+    pub fn set_teardown_fails(&self, n: usize) {
+        self.teardown_fails.store(n, Ordering::SeqCst);
+    }
+
+    pub fn set_teardown_errors(&self, v: bool) {
+        self.teardown_errors.store(v, Ordering::SeqCst);
     }
 
     fn rlm_report(&self, req: &CustomRunRequest) -> proof_rlm::CustomRunReport {
@@ -360,6 +382,15 @@ impl Hypervisor for FakeHypervisor {
     }
 
     async fn teardown(&self, vm: &BootedVm, policy: RetainPolicy) -> Result<bool, HvError> {
+        self.teardown_attempts.fetch_add(1, Ordering::SeqCst);
+        let left = self.teardown_fails.load(Ordering::SeqCst);
+        if left > 0 {
+            self.teardown_fails.store(left - 1, Ordering::SeqCst);
+            if self.teardown_errors.load(Ordering::SeqCst) {
+                return Err(HvError::Backend("fake teardown failure".into()));
+            }
+            return Ok(false);
+        }
         self.teardowns
             .lock()
             .unwrap()

@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
 use bytes::Bytes;
+use gateway_core::proxy_detach::{detach_proof, is_proof_submit};
 
 use crate::api::GatewayState;
 use gateway_registry::RegistryError;
@@ -92,73 +93,85 @@ async fn proxy_inner(
         }
     };
 
-    let mut last_status = StatusCode::BAD_GATEWAY;
-    let mut last_msg = String::from("no upstream attempt");
-    let mut last_error_resp: Option<Response> = None;
-    let mut attempted = Vec::new();
+    let detach = is_proof_submit(&challenge_id, &method, &rest);
+    let hop = async move {
+        let mut last_status = StatusCode::BAD_GATEWAY;
+        let mut last_msg = String::from("no upstream attempt");
+        let mut last_error_resp: Option<Response> = None;
+        let mut attempted = Vec::new();
 
-    for _ in 0..2 {
-        let backend = match st.registry.pick(&challenge_id) {
-            Ok(b) => b,
-            Err(RegistryError::NoBackends(_)) => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    format!("no healthy backends for challenge_id={challenge_id}"),
-                )
-                    .into_response();
+        for _ in 0..2 {
+            let backend = match st.registry.pick(&challenge_id) {
+                Ok(b) => b,
+                Err(RegistryError::NoBackends(_)) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!("no healthy backends for challenge_id={challenge_id}"),
+                    )
+                        .into_response();
+                }
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+                }
+            };
+
+            if attempted.contains(&backend.id) {
+                break;
             }
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-            }
-        };
+            attempted.push(backend.id);
 
-        if attempted.contains(&backend.id) {
-            break;
-        }
-        attempted.push(backend.id);
-
-        let url = upstream_url(&backend.base_url, &rest, query.as_deref());
-        match forward(&st.client, method.clone(), &url, &headers, body.clone()).await {
-            ForwardResult::Ok(mut upstream_resp) => {
-                let status = upstream_resp.status();
-                if status.is_server_error() {
-                    st.registry.record_failure(backend.id);
-                    last_status = status;
-                    last_msg = format!("upstream {status}");
-                    // Lock down before retain: a viewer 5xx is still
-                    // miner-controlled (cookies / CSP / cache).
+            let url = upstream_url(&backend.base_url, &rest, query.as_deref());
+            match forward(&st.client, method.clone(), &url, &headers, body.clone()).await {
+                ForwardResult::Ok(mut upstream_resp) => {
+                    let status = upstream_resp.status();
+                    if status.is_server_error() {
+                        st.registry.record_failure(backend.id);
+                        last_status = status;
+                        last_msg = format!("upstream {status}");
+                        // Lock down before retain: a viewer 5xx is still
+                        // miner-controlled (cookies / CSP / cache).
+                        if is_view_path(&rest) {
+                            apply_view_lockdown(
+                                &mut upstream_resp,
+                                &st.view_frame_ancestors,
+                                &rest,
+                            );
+                        }
+                        // Keep the challenge body: miners need the JSON error
+                        // (`artifact_uri must be https://`, …), not a synthetic
+                        // `upstream 503 Service Unavailable` string.
+                        last_error_resp = Some(upstream_resp);
+                        continue;
+                    }
+                    st.registry.record_success(backend.id);
                     if is_view_path(&rest) {
                         apply_view_lockdown(&mut upstream_resp, &st.view_frame_ancestors, &rest);
                     }
-                    // Keep the challenge body: miners need the JSON error
-                    // (`artifact_uri must be https://`, …), not a synthetic
-                    // `upstream 503 Service Unavailable` string.
-                    last_error_resp = Some(upstream_resp);
-                    continue;
+                    return upstream_resp;
                 }
-                st.registry.record_success(backend.id);
-                if is_view_path(&rest) {
-                    apply_view_lockdown(&mut upstream_resp, &st.view_frame_ancestors, &rest);
+                ForwardResult::Err(msg) => {
+                    st.registry.record_failure(backend.id);
+                    last_status = StatusCode::BAD_GATEWAY;
+                    last_msg = msg;
                 }
-                return upstream_resp;
-            }
-            ForwardResult::Err(msg) => {
-                st.registry.record_failure(backend.id);
-                last_status = StatusCode::BAD_GATEWAY;
-                last_msg = msg;
             }
         }
-    }
 
-    if let Some(mut resp) = last_error_resp {
-        // Same floor as 2xx: a miner-controlled viewer 5xx must not carry
-        // Set-Cookie / weak CSP / public cache through the gateway.
-        if is_view_path(&rest) {
-            apply_view_lockdown(&mut resp, &st.view_frame_ancestors, &rest);
+        if let Some(mut error_response) = last_error_resp {
+            // Same floor as 2xx: a miner-controlled viewer 5xx must not carry
+            // Set-Cookie / weak CSP / public cache through the gateway.
+            if is_view_path(&rest) {
+                apply_view_lockdown(&mut error_response, &st.view_frame_ancestors, &rest);
+            }
+            return error_response;
         }
-        return resp;
+        (last_status, last_msg).into_response()
+    };
+    if detach {
+        detach_proof(hop).await
+    } else {
+        hop.await
     }
-    (last_status, last_msg).into_response()
 }
 
 /// Join base URL, remaining path, and optional query.
@@ -243,20 +256,7 @@ async fn forward(
 
 /// Collapse `.` / empty / `..` segments the same way `url`/`reqwest` will before
 /// the upstream request — used so gateway gates cannot be skipped via `v1/./admin`.
-#[must_use]
-pub fn normalize_proxy_path(rest: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for seg in rest.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                let _ = out.pop();
-            }
-            other => out.push(other),
-        }
-    }
-    out.join("/")
-}
+pub use gateway_core::proxy_detach::normalize_proxy_path;
 
 /// Operator admin surfaces are master-local only (not on the public miner path).
 ///
@@ -264,8 +264,8 @@ pub fn normalize_proxy_path(rest: &str) -> String {
 /// when the HTTP client collapses `.` before dialing the challenge upstream.
 #[must_use]
 pub fn is_admin_path(rest: &str) -> bool {
-    let rest_norm = normalize_proxy_path(rest);
-    rest_norm.starts_with("v1/admin/") || rest_norm == "v1/admin"
+    let n = normalize_proxy_path(rest);
+    n.starts_with("v1/admin/") || n == "v1/admin"
 }
 
 /// Report bodies are operator-local. POST submit stays on the miner path.
@@ -274,11 +274,8 @@ pub fn is_admin_path(rest: &str) -> bool {
 /// status/headers (and whether a row exists) through the public gateway.
 #[must_use]
 pub fn is_blocked_report_read(method: &Method, rest: &str) -> bool {
-    if *method == Method::POST {
-        return false;
-    }
-    let rest_norm = normalize_proxy_path(rest);
-    rest_norm == "v1/reports" || rest_norm.starts_with("v1/reports/")
+    let n = normalize_proxy_path(rest);
+    *method != Method::POST && (n == "v1/reports" || n.starts_with("v1/reports/"))
 }
 
 /// Miner-controlled viewer paths (`/challenge/{id}/v1/view/{run}/{page}`).
@@ -342,6 +339,20 @@ mod tests {
             upstream_url("http://127.0.0.1:9/", "/v1/score", None),
             "http://127.0.0.1:9/v1/score"
         );
+    }
+
+    #[test]
+    fn only_proof_submit_post_detaches_after_the_body() {
+        assert!(is_proof_submit("proof", &Method::POST, "v1/submissions"));
+        assert!(is_proof_submit("proof", &Method::POST, "/v1/submissions"));
+        assert!(!is_proof_submit("proof", &Method::GET, "v1/submissions"));
+        assert!(!is_proof_submit("proof", &Method::POST, "v1/status"));
+        assert!(!is_proof_submit("bounty", &Method::POST, "v1/submissions"));
+        assert!(!is_proof_submit(
+            "proof",
+            &Method::POST,
+            "v1/submissions/pf"
+        ));
     }
 
     #[test]
