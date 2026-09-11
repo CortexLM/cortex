@@ -563,6 +563,9 @@ event land in the DB (`proof_checklist`, `proof_lifecycle_event`,
 `(topic_id, submission_id)` and a collision replaces zip metadata (path,
 sha256, bytes, digest, primary, checklist, promoted) so a restarted
 in-memory allocator cannot leave a stale sha next to a rewritten zip.
+`proof_checklist` is keyed by `submission_digest` and a re-inspect of the
+same digest replaces the latest inspection (`created_at` stays the original
+row) so a miner resubmit after a false anti-cheat reject is not a 503.
 `BASE_DATABASE_URL` selects Postgres; a
 configured-but-unreachable database is fatal, an unset one falls back to the
 in-memory store with a warning.

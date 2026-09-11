@@ -189,6 +189,11 @@ pub trait RlmStore: Send + Sync {
     async fn rules_at(&self, topic_id: &str, version: u32) -> Result<Option<RuleSet>, StoreError>;
 
     /// Persist a submission's checklist.
+    ///
+    /// A row that already exists for `submission_digest` is replaced
+    /// (topic_id / rules_version / green / failed_ids / document) so a miner
+    /// resubmit of the same artefact after a false anti-cheat reject can
+    /// store the latest inspection. Postgres keeps the original `created_at`.
     async fn put_checklist(&self, row: &ChecklistRow) -> Result<(), StoreError>;
     /// A submission's checklist.
     async fn checklist(&self, submission_digest: &str) -> Result<Option<ChecklistRow>, StoreError>;
