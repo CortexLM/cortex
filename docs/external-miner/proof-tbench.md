@@ -191,7 +191,9 @@ script must leave Harbor jobs with measured rewards
 the **filtered** task set only (`$PROOF_TASKS`); `$PROOF_PACK_DIR/tasks` is
 rebound to that copy and `harbor run --path` is rewritten onto it — do not
 iterate the unfiltered pack. A self-written `$PROOF_OUTPUT_DIR/report.json`
-is **not** a score. Inspect
+is **not** a score (the adaptor deletes it and summarizes Harbor trials;
+fail-closed only when nothing was measured). A postamble error after Harbor
+finishes does not discard already-measured rewards. Inspect
 ticks `no_eval_short_circuit` / `no_tb4_hardcoding` on **cheat markers**, not
 on the rule ids. Naming those ids in a README or comment is not a fail.
 What fails: `skip_eval`, `skip_verifier`, `always_pass_eval`,
@@ -244,7 +246,7 @@ class Agent:
             return None
         result = await environment.exec("pwd && ls -la")
         # Score is Harbor verifier rewards under $PROOF_WORK_DIR/harbor-jobs.
-        # Do not write $PROOF_OUTPUT_DIR/report.json — that path is refused.
+        # Do not write $PROOF_OUTPUT_DIR/report.json — that file is ignored.
         return getattr(result, "stdout", None)
 ```
 

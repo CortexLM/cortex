@@ -60,11 +60,17 @@ if [ "$HARNESS_KIND" = script ]; then
     script_exit=$?
     set -e
     proof_persist_work
-    # Miner-authored report.json is never a paid score. A script that
-    # self-reports primary_value is fail-closed even if Harbor jobs exist.
+    # Always summarize Harbor jobs *before* treating script_exit or a
+    # miner-authored report as fatal. x0020: Harbor finished (measured
+    # rewards on disk); miner run.sh TypeError in the postamble was exit 2
+    # and the adaptor discarded the score. Offline summarize of that job
+    # was n_measured=8. Miner primary_value is never a paid score — drop
+    # their report.json, then write the adaptor's from Harbor trials.
+    miner_report=0
     if [ -f "$PROOF_OUTPUT_DIR/report.json" ]; then
         rm -f "$PROOF_OUTPUT_DIR/report.json"
-        proof_die "script harness wrote report.json; refusing miner-authored primary_value (score must come from Harbor verifier trials)"
+        miner_report=1
+        echo "rlm_fc_in_guest_harbor: discarded miner-authored report.json; score must come from Harbor verifier trials" >&2
     fi
     set +e
     summarize_or_die "$script_exit"
@@ -72,10 +78,16 @@ if [ "$HARNESS_KIND" = script ]; then
     set -e
     if [ "$sum_exit" -ne 0 ]; then
         rm -f "$PROOF_OUTPUT_DIR/report.json"
+        if [ "$miner_report" -eq 1 ]; then
+            proof_die "script harness wrote report.json; refusing miner-authored primary_value and no measured Harbor trials"
+        fi
         if [ "$script_exit" -ne 0 ]; then
             proof_die "script harness exited $script_exit; no measured Harbor trials"
         fi
         proof_die "no measured Harbor trials; refusing to invent a primary_value"
+    fi
+    if [ "$script_exit" -ne 0 ]; then
+        echo "rlm_fc_in_guest_harbor: script harness exited ${script_exit}; scored already-measured trials" >&2
     fi
     exit 0
 fi

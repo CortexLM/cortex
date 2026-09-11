@@ -406,7 +406,7 @@ if grep -q "outside_agent:ExternalAgent" "$WORKDIR/escape.out"; then
 fi
 pass "import_path outside artefact is refused before Harbor"
 
-# --- script harness refuses miner-authored report.json ---
+# --- script harness refuses miner-authored report.json (no Harbor jobs) ---
 rm -rf "$PROOF_WORK_DIR/harbor-jobs"
 SCRIPT_ART="$WORKDIR/script-self-score"
 mkdir -p "$SCRIPT_ART/recipe"
@@ -424,14 +424,15 @@ SELF_OUT="$WORKDIR/out-self-score"
 mkdir -p "$SELF_OUT"
 export PROOF_OUTPUT_DIR="$SELF_OUT"
 if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/self.out" 2>"$WORKDIR/self.err"; then
-    fail "miner-authored report.json must fail closed"
+    fail "miner-authored report.json with n_measured=0 must fail closed"
 fi
 [ ! -f "$SELF_OUT/report.json" ] || fail "must not keep miner-authored report.json"
-grep -qi "miner-authored\\|refusing miner-authored primary_value" "$WORKDIR/self.err" \
-    || fail "must name the self-report refusal"
-pass "script harness refuses miner-authored primary_value"
+grep -qi "miner-authored\\|no measured Harbor trials" "$WORKDIR/self.err" \
+    || fail "must name the self-report refusal or empty measurement"
+pass "script harness refuses miner-authored primary_value when n_measured=0"
 
 # --- script harness score comes only from Harbor verifier trials ---
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
 SCRIPT_JOBS="$WORKDIR/script-jobs"
 mkdir -p "$SCRIPT_JOBS/recipe"
 cat > "$SCRIPT_JOBS/recipe/run.sh" <<'EOF'
@@ -457,7 +458,8 @@ assert r["evidence"]["harness_kind"] == "script"
 PY
 pass "script harness primary_value is Harbor verifier reward"
 
-# --- script that self-reports AND writes jobs still fails closed ---
+# --- self-report is ignored; Harbor trials still score ---
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
 SCRIPT_BOTH="$WORKDIR/script-both"
 mkdir -p "$SCRIPT_BOTH/recipe"
 cat > "$SCRIPT_BOTH/recipe/run.sh" <<'EOF'
@@ -477,11 +479,61 @@ export PROOF_ARTIFACT_DIR="$SCRIPT_BOTH"
 BOTH_OUT="$WORKDIR/out-script-both"
 mkdir -p "$BOTH_OUT"
 export PROOF_OUTPUT_DIR="$BOTH_OUT"
-if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/both.out" 2>"$WORKDIR/both.err"; then
-    fail "self-report must fail even when Harbor jobs exist"
-fi
-[ ! -f "$BOTH_OUT/report.json" ] || fail "must not keep report.json after self-report"
-pass "script self-report fails closed even with Harbor jobs"
+"$ADAPTOR/harness/run-harbor" >"$WORKDIR/both.out" 2>"$WORKDIR/both.err" \
+    || fail "Harbor trials must still score after discarding miner report.json"
+python3 - "$BOTH_OUT/report.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["primary_value"] == 1.0, r
+assert r["primary_value"] != 999999.25
+assert r["evidence"]["n_measured"] == 1
+PY
+grep -qi "discarded miner-authored" "$WORKDIR/both.err" \
+    || fail "must log that miner report.json was discarded"
+pass "script self-report is ignored; Harbor verifier reward is the score"
+
+# --- x0020: Harbor finished; miner postamble TypeError must not discard trials ---
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
+SCRIPT_POSTAMBLE="$WORKDIR/script-postamble"
+mkdir -p "$SCRIPT_POSTAMBLE/recipe"
+cat > "$SCRIPT_POSTAMBLE/recipe/run.sh" <<'EOF'
+#!/bin/bash
+# Harbor finished; postamble then raises (retained x0020).
+i=0
+while [ "$i" -lt 8 ]; do
+    job="$PROOF_WORK_DIR/harbor-jobs/job1/task-${i}__1"
+    mkdir -p "$job/verifier"
+    case "$i" in
+        0) printf '1.0\n' > "$job/verifier/reward.txt" ;;
+        1) printf '0.0\n' > "$job/verifier/reward.txt" ;;
+        2) printf '0.0\n' > "$job/verifier/reward.txt" ;;
+        3) printf '0.0\n' > "$job/verifier/reward.txt" ;;
+        4) printf '0.0\n' > "$job/verifier/reward.txt" ;;
+        5) printf '0.0\n' > "$job/verifier/reward.txt" ;;
+        6) printf '0.0\n' > "$job/verifier/reward.txt" ;;
+        7) printf '0.0\n' > "$job/verifier/reward.txt" ;;
+    esac
+    i=$((i + 1))
+done
+python3 -c 'raise TypeError("postamble")'
+EOF
+chmod 0755 "$SCRIPT_POSTAMBLE/recipe/run.sh"
+export PROOF_ARTIFACT_DIR="$SCRIPT_POSTAMBLE"
+POST_OUT="$WORKDIR/out-script-postamble"
+mkdir -p "$POST_OUT"
+export PROOF_OUTPUT_DIR="$POST_OUT"
+"$ADAPTOR/harness/run-harbor" >"$WORKDIR/postamble.out" 2>"$WORKDIR/postamble.err" \
+    || fail "postamble TypeError must not discard already-measured Harbor trials"
+python3 - "$POST_OUT/report.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["evidence"]["n_measured"] == 8, r
+assert abs(r["primary_value"] - 0.125) < 1e-9, r
+assert r["evidence"]["harbor_exit"] != 0
+PY
+grep -qi "scored already-measured" "$WORKDIR/postamble.err" \
+    || fail "must say measured trials scored after script exit"
+pass "x0020 postamble TypeError still scores n_measured=8 (mean 0.125)"
 
 # --- script harness evaluates only filtered PROOF_TASKS ---
 # Reset a recording harbor so --path rewrite is visible.
