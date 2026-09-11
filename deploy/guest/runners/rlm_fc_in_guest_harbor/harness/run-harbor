@@ -103,12 +103,14 @@ set +e
 "${harbor_cmd[@]}" >"$log" 2>&1
 harbor_exit=$?
 set -e
+# Flush before fail so retain-on-fail sees harbor.run.log without e2fsck.
+proof_persist_work
 
 # Nonzero Harbor is an incomplete or failed trial set. Do not invoke the
 # summarizer: a leftover report.json would be a successful score.
 if [ "$harbor_exit" -ne 0 ]; then
     rm -f "$PROOF_OUTPUT_DIR/report.json"
-    proof_die "harbor exited $harbor_exit; refusing to score a partial or failed run"
+    proof_die_harbor "$harbor_exit" "$log"
 fi
 
 summarize_or_die "$harbor_exit"

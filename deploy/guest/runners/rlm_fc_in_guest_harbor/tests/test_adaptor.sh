@@ -262,6 +262,34 @@ assert "terminus-2" not in json.dumps(r)
 PY
 pass "evaluate run-harbor passes miner -a, not terminus-2"
 
+# --- persist work helper (retain-on-fail durability) ---
+proof_persist_work || fail "proof_persist_work must succeed on a writable work dir"
+pass "proof_persist_work flushes a real work dir"
+
+# --- harbor log tail helper ---
+TAIL_LOG="$PROOF_WORK_DIR/harbor.run.log"
+: > "$TAIL_LOG"
+i=0
+while [ "$i" -lt 100 ]; do
+    echo "line-$i" >> "$TAIL_LOG"
+    i=$((i + 1))
+done
+tail_out="$(proof_harbor_log_tail "$TAIL_LOG")"
+echo "$tail_out" | grep -qx "line-99" || fail "log tail must include the last line"
+echo "$tail_out" | grep -qx "line-0" && fail "log tail must drop lines older than 80"
+echo "$tail_out" | grep -qx "line-19" && fail "log tail of 80 from 100 must start at line-20"
+echo "$tail_out" | grep -qx "line-20" || fail "log tail of 80 from 100 must include line-20"
+pass "proof_harbor_log_tail keeps the last 80 lines"
+
+set +e
+(proof_die_harbor 7 "$TAIL_LOG") 2>"$WORKDIR/die.err"
+die_rc=$?
+set -e
+[ "$die_rc" -eq 2 ] || fail "proof_die_harbor exit $die_rc want 2"
+grep -q "harbor exited 7" "$WORKDIR/die.err" || fail "must name harbor exit"
+grep -q "line-99" "$WORKDIR/die.err" || fail "proof_die_harbor must print log tail"
+pass "proof_die_harbor prints harbor.run.log tail on stderr"
+
 # --- nonzero Harbor exit must not write a successful report ---
 cat > "$FAKE_BIN/harbor" <<'EOF'
 #!/bin/bash
@@ -278,6 +306,7 @@ mkdir -p "$job"
 cat > "$job/result.json" <<JSON
 {"trial_name": "hello__1", "verifier_result": {"rewards": {"reward": 0.6}}}
 JSON
+echo "TypeError: Can't instantiate abstract class ProofPythonAgent without an implementation for abstract method 'setup'"
 exit 23
 EOF
 chmod 0755 "$FAKE_BIN/harbor"
@@ -291,7 +320,10 @@ if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/partial.out" 2>"$WORKDIR/partial.err
 fi
 [ ! -f "$PARTIAL_OUT/report.json" ] || fail "must not write report.json after harbor exit 23"
 grep -qi "harbor exited 23\\|refusing to score" "$WORKDIR/partial.err" || fail "must name the harbor failure"
-pass "nonzero harbor exit fails closed (no report)"
+grep -qi "Can't instantiate abstract class ProofPythonAgent" "$WORKDIR/partial.err" \
+    || fail "503 stderr must carry harbor.run.log tail (setup TypeError)"
+grep -qi "harbor.run.log" "$WORKDIR/partial.err" || fail "must label the log tail"
+pass "nonzero harbor exit fails closed (no report) and emits log tail"
 
 # --- import_path naming a module only on inherited PYTHONPATH ---
 ESCAPE="$WORKDIR/escape"
