@@ -3,8 +3,10 @@
 # External miner — troubleshoot (HTTP)
 
 **Path:** HTTP submit through [https://gateway.cortex.foundation](https://gateway.cortex.foundation).
-Install `ctx` from [README](./README.md). Proof miners pay Lium
-(`LIUM_API_KEY` / `X-Lium-Api-Key`).
+Install `ctx` from [README](./README.md). Proof harvest families (`nll` /
+`throughput`) pay Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`). **`tbench` does
+not:** it scores on Proof Firecracker VMs. A red `tbench` checklist is
+inspect, not a Lium rent.
 
 ## Installer and connectivity
 
@@ -38,6 +40,8 @@ Install `ctx` from [README](./README.md). Proof miners pay Lium
 | `401` `hotkey_signature` / `submit_nonce` required, invalid, or reused | Unsigned, wrong key, a `claim` / `declared_flops` / `manifest` that differs from what was signed, or a replayed `(hotkey, submit_nonce)` | `ctx proof sign` over `base-proof-submit-v1` with a fresh nonce; post the manifest you signed. `X-Lium-Api-Key` is not identity |
 | `rejected` with `contamination_evidence_missing` | Empty `manifest` on a topic that requires training evidence | Harvest (`nll` / `throughput`): declare `train_content_hashes` or `train_dataset_ids`. Custom / agent (`tbench`): omit `--train-dataset`; do not invent a fake id |
 | `rejected` with contamination / cheat code | Holdout overlap, unreproduced claim, strawman AdamW, … | Read the verdict `cheat_codes`. Contamination rejects without rent |
+| `tbench` `rejected` + `failed_ids` naming `no_eval_short_circuit` / `no_tb4_hardcoding` | Inspect ticked those rules. Evidence that quotes the **rule id** as the marker is a false positive (naming the rule in a README is not a cheat). Real fails quote `skip_eval`, `skip_verifier`, `always_pass_eval`, `short_circuit_eval`, `tb4_answers`, or `hardcoded_tb4` | `tbench` is Proof Firecracker inspect, not Lium. A prompt-only `terminus-2` subclass is not a cheat; importing it still needs the guest Harbor overlay. Re-submit after the host ships the scan that ignores rule-id text |
+| `tbench` `rejected` with `flops_used = 0`, `custom_value = null`, `cheat_codes: other` | Checklist was red, so **evaluate never ran** — by design, before any paid inference | Read checklist evidence. Not a Lium/harvest miss and not a missing Harbor trial |
 | HTTP 503 on submit | Empty `eval_image_digest`, zero open topics, unsealed baseline, harvest down, or missing/closed RLM judge | `ctx proof status` → `can_score`. Live digest is `sha256:78b614a1…`. Empty digest still 503. Do not invent a digest. Nothing was rented |
 
 ## Off challenges
