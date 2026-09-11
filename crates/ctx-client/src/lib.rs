@@ -426,7 +426,10 @@ mod tests {
         let c = Client::with_submit_timeout_secs(DEFAULT_GATEWAY, None, 0).expect("client");
         assert!(c.submit_timeout.is_none());
         let c = Client::new(DEFAULT_GATEWAY, None).expect("client");
-        assert_eq!(c.submit_timeout, Some(Duration::from_secs(7200)));
+        assert_eq!(
+            c.submit_timeout,
+            Some(Duration::from_secs(DEFAULT_SUBMIT_TIMEOUT_SECS))
+        );
         assert!(is_proof_submit_path("/challenge/proof/v1/submissions"));
         assert!(is_proof_submit_path("/v1/submissions"));
         assert!(!is_proof_submit_path("/challenge/bounty/v1/reports"));

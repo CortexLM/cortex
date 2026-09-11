@@ -168,7 +168,7 @@ async fn proxy_inner(
     })
     .await
     {
-        Ok(resp) => resp,
+        Ok(forwarded) => forwarded,
         Err(_) => (StatusCode::BAD_GATEWAY, "proxy task failed").into_response(),
     }
 }
