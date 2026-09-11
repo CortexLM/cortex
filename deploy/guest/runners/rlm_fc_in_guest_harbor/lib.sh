@@ -43,10 +43,10 @@ proof_die() {
     exit 2
 }
 
-# Harbor nonzero with n_measured==0: persist work, then put the log tail
-# on stderr so the guest rolling tail / gateway 503 carries the real error.
-# Already-measured trials are scored by summarize.py; this is only the
-# fail-closed path when nothing was measured.
+# Harbor nonzero with no complete filtered set: persist work, then put
+# the log tail on stderr so the guest rolling tail / gateway 503 carries
+# the real error. Already-measured complete trials still score when the
+# filtered set is covered; this is the fail-closed path otherwise.
 proof_die_harbor() {
     local harbor_exit="$1"
     local log_file="${2:-}"
@@ -313,12 +313,13 @@ proof_start_container_runtime() {
     export PROOF_CONTAINER_RUNTIME=podman
 }
 
-# Materialized workdir view of the pack whose tasks_dir is the filtered
-# copy (never a symlink to the original pack). Harbor CLI wrapper rewrites
-# --path to $PROOF_TASKS. The real pack is not mutated and its path is not
-# exported to the miner. Script harness only — Harbor -a already uses
-# --path "$PROOF_TASKS". Summarize still drops trial names outside the
-# filtered set (the PATH wrapper is not a same-uid sandbox).
+# Materialized workdir view that contains **only** the filtered tasks
+# directory (never a symlink, never other original-pack entries). Harbor
+# CLI wrapper rewrites --path to $PROOF_TASKS. PROOF_HARBOR_REAL is unset
+# and is not a wrapper fallback. Script harness only — Harbor -a already
+# uses --path "$PROOF_TASKS". Summarize still drops trial names outside the
+# filtered set and refuses a partial filtered set (the PATH wrapper is
+# not a same-uid sandbox).
 proof_script_bind_filtered_tasks() {
     : "${PROOF_TASKS:?proof_filter_tasks first}"
     : "${PROOF_PACK_DIR:?}"
@@ -327,16 +328,9 @@ proof_script_bind_filtered_tasks() {
     local view="$PROOF_WORK_DIR/pack-view"
     rm -rf "$view"
     mkdir -p "$view"
-    local item name
-    for item in "$PROOF_PACK_DIR"/*; do
-        [ -e "$item" ] || continue
-        name="$(basename "$item")"
-        if [ "$name" = "$PROOF_PARAM_TASKS_DIR" ]; then
-            cp -a "$PROOF_TASKS" "$view/$name"
-        else
-            cp -a "$item" "$view/$name"
-        fi
-    done
+    # Only the filtered task tree — do not copy pack-root siblings that
+    # would recover the original (unfiltered) pack for harbor --path.
+    cp -a "$PROOF_TASKS" "$view/$PROOF_PARAM_TASKS_DIR"
     export PROOF_PACK_DIR="$view"
     export PROOF_TASKS
     unset PROOF_HARBOR_REAL || true
@@ -349,7 +343,7 @@ proof_script_bind_filtered_tasks() {
         real="$(command -v harbor)"
         if [ "$real" != "$wrap_dir/harbor" ] && [ -f "$PROOF_HARBOR_PATH_WRAP" ]; then
             {
-                printf '%s\n' '#!/bin/bash' 'set -euo pipefail'
+                printf '%s\n' '#!/bin/bash' 'set -euo pipefail' 'unset PROOF_HARBOR_REAL || true'
                 printf 'real=%q\n' "$real"
                 printf 'tasks=%q\n' "$PROOF_TASKS"
                 tail -n +2 "$PROOF_HARBOR_PATH_WRAP"

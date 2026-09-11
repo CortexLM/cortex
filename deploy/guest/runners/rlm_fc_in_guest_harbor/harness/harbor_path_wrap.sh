@@ -1,11 +1,11 @@
 #!/bin/bash
 # Force Harbor --path onto the filtered task tree.
-# Generated copies bake `real` and `tasks` so the miner env does not need
-# (and must not receive) PROOF_HARBOR_REAL. Unit tests may set the env vars.
+# Generated copies bake `real` and `tasks`. This file must not read
+# PROOF_HARBOR_REAL (never a miner-usable env) and must not fall back to
+# an unfiltered pack path.
 set -euo pipefail
-real="${real:-${PROOF_HARBOR_REAL-}}"
-tasks="${tasks:-${PROOF_TASKS-}}"
-if [ -z "$real" ] || [ -z "$tasks" ]; then
+unset PROOF_HARBOR_REAL || true
+if [ -z "${real:-}" ] || [ -z "${tasks:-}" ]; then
     echo "rlm_fc_in_guest_harbor: harbor wrapper missing real binary or filtered tasks" >&2
     exit 2
 fi

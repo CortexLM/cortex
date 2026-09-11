@@ -62,11 +62,12 @@ if [ "$HARNESS_KIND" = script ]; then
     set -e
     proof_persist_work
     # Always summarize Harbor jobs *before* treating script_exit or a
-    # miner-authored report as fatal. x0020: Harbor finished (measured
-    # rewards on disk); miner run.sh TypeError in the postamble was exit 2
-    # and the adaptor discarded the score. Offline summarize of that job
-    # was n_measured=8. Miner primary_value is never a paid score — drop
-    # their report.json, then write the adaptor's from Harbor trials.
+    # miner-authored report as fatal. x0020: Harbor finished (complete
+    # trials on disk); miner run.sh TypeError in the postamble was exit 2
+    # and the adaptor discarded the score. Miner primary_value is never
+    # a paid score — drop their report.json, then write the adaptor's from
+    # complete Harbor trials. Fail-closed when the filtered set is
+    # incomplete or provenance is untrusted (txt-only / stale snapshot).
     miner_report=0
     if [ -f "$PROOF_OUTPUT_DIR/report.json" ]; then
         rm -f "$PROOF_OUTPUT_DIR/report.json"
@@ -83,9 +84,9 @@ if [ "$HARNESS_KIND" = script ]; then
             proof_die "script harness wrote report.json; refusing miner-authored primary_value and no measured Harbor trials"
         fi
         if [ "$script_exit" -ne 0 ]; then
-            proof_die "script harness exited $script_exit; no measured Harbor trials"
+            proof_die "script harness exited $script_exit; no complete Harbor trials for the filtered task set"
         fi
-        proof_die "no measured Harbor trials; refusing to invent a primary_value"
+        proof_die "no complete Harbor trials for the filtered task set; refusing to invent a primary_value"
     fi
     if [ "$script_exit" -ne 0 ]; then
         echo "rlm_fc_in_guest_harbor: script harness exited ${script_exit}; scored already-measured trials" >&2
@@ -127,9 +128,10 @@ set -e
 # Flush before fail so retain-on-fail sees harbor.run.log without e2fsck.
 proof_persist_work
 
-# Timeout / kill / nonzero still scores already-measured trials
-# (verifier/reward.txt or verifier_result.rewards.reward). Fail-closed
-# only when n_measured==0 — never invent a primary_value.
+# Timeout / kill / nonzero still scores already-complete trials when the
+# filtered set is covered (matching verifier_result + reward.txt).
+# Fail-closed when n_measured==0, the filtered set is incomplete, or
+# provenance is untrusted — never invent a primary_value.
 set +e
 summarize_or_die "$harbor_exit"
 sum_exit=$?
@@ -139,7 +141,7 @@ if [ "$sum_exit" -ne 0 ]; then
     if [ "$harbor_exit" -ne 0 ]; then
         proof_die_harbor "$harbor_exit" "$log"
     fi
-    proof_die "no measured Harbor trials; refusing to invent a primary_value"
+    proof_die "no complete Harbor trials for the filtered task set; refusing to invent a primary_value"
 fi
 if [ "$harbor_exit" -ne 0 ]; then
     echo "rlm_fc_in_guest_harbor: harbor exited ${harbor_exit}; scored already-measured trials" >&2
