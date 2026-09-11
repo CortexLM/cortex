@@ -823,6 +823,57 @@ async fn serve_connection_speaks_frames_until_the_host_hangs_up() {
     let _ = std::fs::remove_dir_all(&r);
 }
 
+/// After `handle(Run)` the `Done` write hits a broken pipe: retry reconnects
+/// and the host still gets the frame. Host harvest does not need this.
+#[tokio::test]
+async fn a_broken_pipe_on_done_retries_on_a_new_connection() {
+    let r = root("retry");
+    let a = agent(&r);
+    hello(&a).await;
+    let (mut host, guest) = tokio::io::duplex(1 << 20);
+    let (mut host2, guest2) = tokio::io::duplex(1 << 20);
+    let slot = std::sync::Arc::new(tokio::sync::Mutex::new(Some(guest2)));
+    let server = {
+        let a = a.clone();
+        tokio::spawn(async move {
+            a.serve_connection_resending(guest, move || {
+                let slot = slot.clone();
+                async move {
+                    slot.lock()
+                        .await
+                        .take()
+                        .ok_or_else(|| proof_vm_proto::ProtoError::Io("no retry stream".into()))
+                }
+            })
+            .await
+        })
+    };
+    write_frame(
+        &mut host,
+        &HostToRlm::Run {
+            job: Box::new(VmJob::Archive {
+                topic_id: "topic-a".into(),
+            }),
+        },
+    )
+    .await
+    .expect("job");
+    drop(host);
+    let done: RlmToHost =
+        tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut host2))
+            .await
+            .expect("retried before timeout")
+            .expect("retried done");
+    assert_eq!(
+        done,
+        RlmToHost::Done {
+            output: VmJobOutput::Archived
+        }
+    );
+    server.await.expect("join").expect("ok after retry");
+    let _ = std::fs::remove_dir_all(&r);
+}
+
 /// The miner's own BYOK environment reaches their paid run: exported under
 /// the name the signed topic declared, written to a 0600 file beside it, and
 /// blanked out of everything the guest ships back. It is not part of the

@@ -452,13 +452,16 @@ impl Hypervisor for FirecrackerHypervisor {
             cancel.clone(),
         ));
         let budget = self.job_budget(job);
+        let jail_dir = root
+            .parent()
+            .map_or_else(|| root.clone(), Path::to_path_buf);
         let answer = async {
             let mut ch = vsock::GuestChannel::connect(&root, RLM_JOB_PORT).await?;
             ch.send(&HostToRlm::Run {
                 job: Box::new(job.clone()),
             })
             .await?;
-            ch.recv_within::<RlmToHost>(budget).await
+            proof_fc_harvest::recv_job_or_harvest(&mut ch, &root, &jail_dir, job, budget).await
         }
         .await;
         // The job is over: stop serving sisters, and wait for a sister still
@@ -737,6 +740,33 @@ mod tests {
         })
     }
 
+    /// A guest that says hello, then drops the job connection after reading
+    /// `Run` — Broken pipe / EOF, no `Done`. The host must harvest scratch.
+    fn serve_fake_guest_dropping_done(root: PathBuf) -> tokio::task::JoinHandle<VmJob> {
+        use proof_vm_proto::guest::{read_frame, write_frame};
+        tokio::spawn(async move {
+            let listener = bind_when_ready(&root).await;
+            let mut stream = accept_vsock(&listener).await;
+            let hello: HostToRlm = read_frame(&mut stream).await.expect("hello");
+            assert!(matches!(hello, HostToRlm::Hello { .. }));
+            write_frame(
+                stream.get_mut(),
+                &RlmToHost::Ready {
+                    agent: "fake-rlm-guest-done-drop".into(),
+                    api_version: API_VERSION,
+                },
+            )
+            .await
+            .expect("ready");
+            let mut stream = accept_vsock(&listener).await;
+            let HostToRlm::Run { job } = read_frame(&mut stream).await.expect("job") else {
+                panic!("expected a job");
+            };
+            drop(stream);
+            *job
+        })
+    }
+
     /// A guest that says hello, then answers its one job with `Failed`
     /// carrying `error` — what the contract demands of an RLM whose artefact
     /// fetch failed or did not verify. Never a sister request, never `Done`.
@@ -920,6 +950,55 @@ mod tests {
             shell.calls()
         );
         assert!(hv.alive(&vm).await, "the topic VM outlives its failed job");
+        assert!(hv
+            .teardown(&vm, RetainPolicy::Destroy)
+            .await
+            .expect("teardown"));
+        let _ = std::fs::remove_dir_all(c.chroot_base.parent().unwrap_or(&c.chroot_base));
+    }
+
+    /// P0: vsock EOF after `Run` with Harbor's `report.json` already on
+    /// scratch must return `Evaluated` (`primary_value` kept), not sit until
+    /// the job budget and refuse. Stand-in process + fake guest, no FC.
+    #[tokio::test]
+    async fn harvest_on_vsock_fail_returns_evaluated_with_report_primary_value() {
+        let c = stand_in_host("donedrop");
+        let req = proof_rlm::fixtures::experiment_request(None);
+        let spec = TopicVmSpec::for_topic(&req.topic_id, pinned_template(), req.sandbox.clone());
+        let shell = Arc::new(RecordingShell::default());
+        let hv = FirecrackerHypervisor::with_shell(c.clone(), shell.clone()).expect("config");
+        let guest = serve_fake_guest_dropping_done(c.jail_root("topic-a-0004"));
+        let vm = hv
+            .boot_verified("topic-a-0004", &spec, c.image_dir.join("rlm.ext4"))
+            .await
+            .expect("boot");
+        let work = c
+            .jail_root("topic-a-0004")
+            .join(proof_fc_harvest::SCRATCH_TREE)
+            .join("work");
+        std::fs::create_dir_all(work.join("0001-evaluate").join("output")).expect("work");
+        std::fs::write(
+            work.join("0001-evaluate").join("output").join("report.json"),
+            r#"{"primary_value": 0.73, "claim_holds": true, "flops_used": 42, "evidence": {"harbor_exit": 0}}"#,
+        )
+        .expect("report");
+        let job = VmJob::Evaluate {
+            request: req.clone(),
+            checklist_digest: "c".into(),
+            rules_version: 1,
+        };
+        let out = hv.run_job(&vm, &job).await.expect("harvested, not refused");
+        let proof_rlm::VmJobOutput::Evaluated(run) = out.output else {
+            panic!("expected Evaluated, got {:?}", out.output);
+        };
+        assert!(
+            (run.report.primary_value - 0.73).abs() < 1e-12,
+            "primary_value {}",
+            run.report.primary_value
+        );
+        assert_eq!(run.report.flops_used, Some(42));
+        assert!(run.report.sandboxed);
+        let _ = guest.await;
         assert!(hv
             .teardown(&vm, RetainPolicy::Destroy)
             .await

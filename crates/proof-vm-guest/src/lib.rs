@@ -44,6 +44,7 @@ pub mod staging;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use proof_rlm::{CustomRunRequest, VmJob, VmJobOutput};
 use proof_vm_proto::guest::{check_version, read_frame, write_frame, HostToRlm, RlmToHost};
@@ -56,6 +57,11 @@ pub use staging::StagedPack;
 
 /// Agent name reported on `Ready`.
 pub const AGENT_NAME: &str = concat!("proof-vm-guest-agent/", env!("CARGO_PKG_VERSION"));
+/// Bounded retries when `write_frame(Done/Failed)` hits a broken vsock after
+/// the job has already finished (host harvest still recovers without this).
+pub const TERMINAL_WRITE_ATTEMPTS: u32 = 4;
+/// Backoff between terminal-frame retries.
+pub const TERMINAL_WRITE_BACKOFF: Duration = Duration::from_millis(50);
 
 /// Where the guest keeps what the host stages and what runs produce.
 #[derive(Debug, Clone)]
@@ -140,8 +146,62 @@ impl GuestAgent {
                 Err(ProtoError::Io(_)) => return Ok(()),
                 Err(e) => return Err(e),
             };
+            let terminal = matches!(&msg, HostToRlm::Run { .. });
             let answer = self.handle(msg).await;
-            write_frame(&mut stream, &answer).await?;
+            if let Err(e) = write_frame_retry(&mut stream, &answer).await {
+                if terminal && broken_pipe(&e) {
+                    tracing::warn!(
+                        "terminal frame not delivered ({e}); host harvest recovers the report"
+                    );
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    /// [`serve_connection`] that, after `Done` / `Failed` hits a broken-pipe
+    /// I/O error, opens a fresh channel via `reconnect` and rewrites the
+    /// frame. The host harvest path does not need this (tips without a guest
+    /// rebake); this is the guest-side belt after the image is rebaked.
+    pub async fn serve_connection_resending<S, R, Fut, S2>(
+        &self,
+        mut stream: S,
+        reconnect: R,
+    ) -> Result<(), ProtoError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+        R: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<S2, ProtoError>>,
+        S2: AsyncRead + AsyncWrite + Unpin,
+    {
+        loop {
+            let msg: HostToRlm = match read_frame(&mut stream).await {
+                Ok(m) => m,
+                Err(ProtoError::Io(_)) => return Ok(()),
+                Err(e) => return Err(e),
+            };
+            let terminal = matches!(&msg, HostToRlm::Run { .. });
+            let answer = self.handle(msg).await;
+            if let Err(e) = write_frame_retry(&mut stream, &answer).await {
+                if terminal && broken_pipe(&e) {
+                    tracing::warn!(
+                        "terminal frame not delivered ({e}); reconnecting to rewrite Done/Failed"
+                    );
+                    match reconnect().await {
+                        Ok(mut s2) => {
+                            if let Err(e2) = write_frame(&mut s2, &answer).await {
+                                tracing::warn!(
+                                    "terminal frame rewrite on a new connection failed: {e2}"
+                                );
+                            }
+                        }
+                        Err(e2) => tracing::warn!("terminal frame reconnect failed: {e2}"),
+                    }
+                    return Ok(());
+                }
+                return Err(e);
+            }
         }
     }
 
@@ -304,6 +364,48 @@ impl GuestAgent {
         )
         .await
     }
+}
+
+fn broken_pipe(err: &ProtoError) -> bool {
+    match err {
+        ProtoError::Io(s) => {
+            let s = s.to_ascii_lowercase();
+            s.contains("broken pipe")
+                || s.contains("brokenpipe")
+                || s.contains("connection reset")
+                || s.contains("connection abort")
+                || s.contains("not connected")
+                || s.contains("os error 32")
+                || s.contains("os error 104")
+                || s.contains("unexpected eof")
+                || s.contains("early eof")
+        }
+        ProtoError::FrameTooLarge(_) | ProtoError::Decode(_) | ProtoError::WrongVersion { .. } => {
+            false
+        }
+    }
+}
+
+async fn write_frame_retry<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    value: &RlmToHost,
+) -> Result<(), ProtoError> {
+    let mut last = None;
+    for i in 0..TERMINAL_WRITE_ATTEMPTS {
+        match write_frame(w, value).await {
+            Ok(()) => return Ok(()),
+            Err(e) if broken_pipe(&e) => {
+                tracing::warn!(
+                    "terminal frame write failed ({e}); retry {}/{TERMINAL_WRITE_ATTEMPTS}",
+                    i + 1
+                );
+                last = Some(e);
+                tokio::time::sleep(TERMINAL_WRITE_BACKOFF.saturating_mul(i + 1)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| ProtoError::Io("terminal frame not delivered".into())))
 }
 
 /// Where the agent resolves relative layout paths from (tests point this at

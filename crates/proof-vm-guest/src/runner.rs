@@ -628,6 +628,12 @@ async fn kill_group(pid: Option<u32>) {
         .await;
 }
 
+fn sync_file(path: &Path) {
+    if let Ok(f) = std::fs::File::open(path) {
+        let _ = f.sync_all();
+    }
+}
+
 fn read_output_doc<T: for<'de> Deserialize<'de>>(path: &Path, what: &str) -> Result<T, String> {
     let meta = std::fs::metadata(path)
         .map_err(|_| format!("adaptor wrote no {what} ({})", path.display()))?;
@@ -734,6 +740,9 @@ pub async fn run_paid(
     if exec.timed_out {
         return Err(describe(&exec, &secrets, request.sandbox.deadline_s));
     }
+    // Push the adaptor's report to the virtio-blk before Done, so a host
+    // scratch harvest can see it if vsock then drops.
+    sync_file(&output.join("report.json"));
     let report: RunnerReport = read_output_doc(&output.join("report.json"), "report.json")
         .map_err(|e| {
             format!(

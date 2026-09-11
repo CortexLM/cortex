@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use proof_vm_agent::HvError;
-use proof_vm_proto::guest::{read_frame, write_frame};
+use proof_vm_proto::guest::{read_frame, write_frame, RlmToHost};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -130,6 +130,14 @@ impl GuestChannel {
         tokio::time::timeout(budget, self.recv())
             .await
             .map_err(|_| HvError::Deadline(budget.as_secs()))?
+    }
+}
+
+impl proof_fc_harvest::RecvFrame for GuestChannel {
+    fn recv_frame(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<RlmToHost, HvError>> + Send {
+        self.recv()
     }
 }
 
