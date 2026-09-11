@@ -25,13 +25,6 @@ use proof_vm_agent::HvError;
 use proof_vm_proto::guest::RlmToHost;
 use serde::Deserialize;
 
-/// One vsock frame from the guest. Implemented by `GuestChannel` in
-/// `proof-fc-host` so this crate does not depend on the hypervisor.
-pub trait RecvFrame {
-    /// Receive one `RlmToHost` frame.
-    fn recv_frame(&mut self) -> impl Future<Output = Result<RlmToHost, HvError>> + Send;
-}
-
 /// Overlay of guest `/var/lib/proof` beside the virtio drives.
 pub const SCRATCH_TREE: &str = "scratch-tree";
 /// Jail-relative scratch image (guest mounts it at `/var/lib/proof`).
@@ -57,15 +50,28 @@ struct GuestReport {
 }
 
 /// Recv the job answer, or reconstruct it from scratch when vsock dies
-/// after `Run` was sent. `recv` is one vsock frame (no timeout of its own).
-pub async fn recv_job_or_harvest<R: RecvFrame>(
-    ch: &mut R,
+/// after `Run` was sent.
+///
+/// `recv` is **one** vsock-frame future, kept alive for the whole wait.
+/// Framing (`read_exact` of a 4-byte length, then the body) is not
+/// cancellation-safe: wrapping `recv` in `timeout` and calling it again
+/// on the same stream drops a partial header/body and the next read
+/// mis-parses length. Scratch and the job deadline are polled beside
+/// that future; they never recreate it. Passing `GuestChannel::recv()`
+/// from `proof-fc-host` is the live path.
+pub async fn recv_job_or_harvest<F>(
+    recv: F,
     jail_root: &Path,
     jail_dir: &Path,
     job: &VmJob,
     budget: Duration,
-) -> Result<RlmToHost, HvError> {
+) -> Result<RlmToHost, HvError>
+where
+    F: Future<Output = Result<RlmToHost, HvError>>,
+{
     let deadline = tokio::time::Instant::now() + budget;
+    let mut recv = std::pin::pin!(recv);
+    let mut report_seen_at: Option<tokio::time::Instant> = None;
     loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
@@ -76,26 +82,34 @@ pub async fn recv_job_or_harvest<R: RecvFrame>(
                 HvError::Deadline(budget.as_secs()),
             );
         }
-        let slice = (deadline - now).min(POLL_INTERVAL);
-        match tokio::time::timeout(slice, ch.recv_frame()).await {
-            Ok(Ok(msg)) => return Ok(msg),
-            Ok(Err(e)) => return or_err(jail_root, jail_dir, job, e),
-            Err(_silent) => {
+        if let Some(seen) = report_seen_at {
+            if now.saturating_duration_since(seen) >= DONE_GRACE {
                 if let Some(output) = try_from_jail(jail_root, jail_dir, job) {
+                    tracing::warn!(
+                        "vsock silent after a guest report landed on scratch; harvesting after {:?}",
+                        DONE_GRACE
+                    );
+                    return Ok(RlmToHost::Done { output });
+                }
+                report_seen_at = None;
+            }
+        }
+        let slice = (deadline - now).min(POLL_INTERVAL);
+        tokio::select! {
+            biased;
+            result = &mut recv => {
+                return match result {
+                    Ok(msg) => Ok(msg),
+                    Err(e) => or_err(jail_root, jail_dir, job, e),
+                };
+            }
+            () = tokio::time::sleep(slice) => {
+                if report_seen_at.is_none() && try_from_jail(jail_root, jail_dir, job).is_some() {
                     tracing::warn!(
                         "vsock silent after a guest report landed on scratch; waiting {:?} for Done then harvesting",
                         DONE_GRACE
                     );
-                    let grace = DONE_GRACE
-                        .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
-                    return match tokio::time::timeout(grace, ch.recv_frame()).await {
-                        Ok(Ok(msg)) => Ok(msg),
-                        Ok(Err(e)) => {
-                            tracing::warn!("vsock died with a harvestable report: {e}");
-                            Ok(RlmToHost::Done { output })
-                        }
-                        Err(_) => Ok(RlmToHost::Done { output }),
-                    };
+                    report_seen_at = Some(tokio::time::Instant::now());
                 }
             }
         }

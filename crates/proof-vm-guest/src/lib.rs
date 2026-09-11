@@ -160,51 +160,6 @@ impl GuestAgent {
         }
     }
 
-    /// [`serve_connection`] that, after `Done` / `Failed` hits a broken-pipe
-    /// I/O error, opens a fresh channel via `reconnect` and rewrites the
-    /// frame. The host harvest path does not need this (tips without a guest
-    /// rebake); this is the guest-side belt after the image is rebaked.
-    pub async fn serve_connection_resending<S, R, Fut, S2>(
-        &self,
-        mut stream: S,
-        reconnect: R,
-    ) -> Result<(), ProtoError>
-    where
-        S: AsyncRead + AsyncWrite + Unpin,
-        R: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<S2, ProtoError>>,
-        S2: AsyncRead + AsyncWrite + Unpin,
-    {
-        loop {
-            let msg: HostToRlm = match read_frame(&mut stream).await {
-                Ok(m) => m,
-                Err(ProtoError::Io(_)) => return Ok(()),
-                Err(e) => return Err(e),
-            };
-            let terminal = matches!(&msg, HostToRlm::Run { .. });
-            let answer = self.handle(msg).await;
-            if let Err(e) = write_frame_retry(&mut stream, &answer).await {
-                if terminal && broken_pipe(&e) {
-                    tracing::warn!(
-                        "terminal frame not delivered ({e}); reconnecting to rewrite Done/Failed"
-                    );
-                    match reconnect().await {
-                        Ok(mut s2) => {
-                            if let Err(e2) = write_frame(&mut s2, &answer).await {
-                                tracing::warn!(
-                                    "terminal frame rewrite on a new connection failed: {e2}"
-                                );
-                            }
-                        }
-                        Err(e2) => tracing::warn!("terminal frame reconnect failed: {e2}"),
-                    }
-                    return Ok(());
-                }
-                return Err(e);
-            }
-        }
-    }
-
     /// Answer one host message. Never panics, never leaks a secret.
     pub async fn handle(&self, msg: HostToRlm) -> RlmToHost {
         match msg {

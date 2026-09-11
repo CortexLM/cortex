@@ -461,7 +461,7 @@ impl Hypervisor for FirecrackerHypervisor {
                 job: Box::new(job.clone()),
             })
             .await?;
-            proof_fc_harvest::recv_job_or_harvest(&mut ch, &root, &jail_dir, job, budget).await
+            proof_fc_harvest::recv_job_or_harvest(ch.recv(), &root, &jail_dir, job, budget).await
         }
         .await;
         // The job is over: stop serving sisters, and wait for a sister still

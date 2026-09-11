@@ -18,7 +18,6 @@ use std::sync::Arc;
 use clap::Parser;
 use proof_vm_guest::{GuestAgent, GuestConfig, AGENT_NAME};
 use proof_vm_proto::guest::RLM_JOB_PORT;
-use proof_vm_proto::ProtoError;
 
 /// Guest agent CLI. Every flag has a `PROOF_GUEST_*` env twin for the init
 /// script baked into the image.
@@ -138,13 +137,12 @@ async fn serve_vsock(agent: Arc<GuestAgent>, port: u32) -> Result<(), String> {
                 tracing::debug!(cid = peer.cid(), port = peer.port(), "host connected");
                 let agent = agent.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = agent
-                        .serve_connection_resending(
-                            stream,
-                            || async move { reconnect_host(port).await },
-                        )
-                        .await
-                    {
+                    // Host harvest recovers a dropped Done: this guest is the
+                    // *listen* side of RLM_JOB_PORT (Firecracker UDS `v.sock`).
+                    // The host never binds `v.sock_5000`; only sister
+                    // (`v.sock_5001`) is a guest→host listener. Do not reconnect
+                    // to CID 2 / port 5000 — that connect has nowhere to land.
+                    if let Err(e) = agent.serve_connection(stream).await {
                         tracing::warn!("host connection ended with an error: {e}");
                     }
                 });
@@ -155,14 +153,6 @@ async fn serve_vsock(agent: Arc<GuestAgent>, port: u32) -> Result<(), String> {
             }
         }
     }
-}
-
-/// Guest → host CID 2, same job port: rewrite Done/Failed after Broken pipe.
-async fn reconnect_host(port: u32) -> Result<tokio_vsock::VsockStream, ProtoError> {
-    use tokio_vsock::{VsockAddr, VsockStream, VMADDR_CID_HOST};
-    VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, port))
-        .await
-        .map_err(|e| ProtoError::Io(format!("reconnect host vsock {port}: {e}")))
 }
 
 #[cfg(test)]

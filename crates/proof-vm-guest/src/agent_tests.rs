@@ -823,30 +823,18 @@ async fn serve_connection_speaks_frames_until_the_host_hangs_up() {
     let _ = std::fs::remove_dir_all(&r);
 }
 
-/// After `handle(Run)` the `Done` write hits a broken pipe: retry reconnects
-/// and the host still gets the frame. Host harvest does not need this.
+/// After `handle(Run)` the `Done` write hits a broken pipe: the session is
+/// still Ok. The guest does not open a new host vsock (the host never
+/// listens on `v.sock_5000`); host harvest reads `report.json`.
 #[tokio::test]
-async fn a_broken_pipe_on_done_retries_on_a_new_connection() {
+async fn a_broken_pipe_on_done_is_ok_host_harvest_recovers() {
     let r = root("retry");
     let a = agent(&r);
     hello(&a).await;
     let (mut host, guest) = tokio::io::duplex(1 << 20);
-    let (mut host2, guest2) = tokio::io::duplex(1 << 20);
-    let slot = std::sync::Arc::new(tokio::sync::Mutex::new(Some(guest2)));
     let server = {
         let a = a.clone();
-        tokio::spawn(async move {
-            a.serve_connection_resending(guest, move || {
-                let slot = slot.clone();
-                async move {
-                    slot.lock()
-                        .await
-                        .take()
-                        .ok_or_else(|| proof_vm_proto::ProtoError::Io("no retry stream".into()))
-                }
-            })
-            .await
-        })
+        tokio::spawn(async move { a.serve_connection(guest).await })
     };
     write_frame(
         &mut host,
@@ -859,18 +847,10 @@ async fn a_broken_pipe_on_done_retries_on_a_new_connection() {
     .await
     .expect("job");
     drop(host);
-    let done: RlmToHost =
-        tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut host2))
-            .await
-            .expect("retried before timeout")
-            .expect("retried done");
-    assert_eq!(
-        done,
-        RlmToHost::Done {
-            output: VmJobOutput::Archived
-        }
-    );
-    server.await.expect("join").expect("ok after retry");
+    server
+        .await
+        .expect("join")
+        .expect("ok; host harvest recovers");
     let _ = std::fs::remove_dir_all(&r);
 }
 
