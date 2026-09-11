@@ -258,16 +258,13 @@ pub async fn destroy(cfg: &HostConfig, shell: &dyn Shell, id: &str) -> Result<()
 }
 
 /// Move the jail under `retain_dir` for audit (scratch, console, config).
-///
-/// Destination is `<retain_dir>/<id>` when that path is free (the runbook
-/// layout). If a prior retain already occupies it — a restarted agent reissues
-/// deterministic ids — the jail lands at `<id>-<stamp>` instead of GNU `mv`
-/// nesting it as `<id>/<id>`. Success is confirmed only when the source is
-/// gone, that unique destination exists, and it is not a nested `<dest>/<id>`.
+/// `{id}` when free; `{id}-{nanos}` if occupied so GNU `mv` cannot nest into
+/// a prior retain (agent restart reissues ids). `mv -T` plus source-gone /
+/// dest-exists / not-`<dest>/<id>` — success only then.
 ///
 /// # Errors
 ///
-/// [`HvError::Backend`]. An occupied destination is never treated as success.
+/// [`HvError::Backend`].
 pub async fn retain(cfg: &HostConfig, shell: &dyn Shell, id: &str) -> Result<PathBuf, HvError> {
     sh(
         shell,
@@ -275,55 +272,28 @@ pub async fn retain(cfg: &HostConfig, shell: &dyn Shell, id: &str) -> Result<Pat
         &["-p", &cfg.retain_dir.display().to_string()],
     )
     .await?;
-    let dest = unique_retain_dest(&cfg.retain_dir, id)?;
-    if dest.exists() {
-        return Err(HvError::Backend(format!(
-            "retain destination {} already exists; refusing to nest",
-            dest.display()
-        )));
-    }
-    let src = cfg.jail_dir(id);
-    let src_s = src.display().to_string();
-    let dest_s = dest.display().to_string();
-    sh(shell, "mv", &[&src_s, &dest_s]).await?;
-    // GNU `mv` into an existing directory "succeeds" by nesting. Confirm the
-    // source is gone, the unique dest exists, and it is not `<dest>/<id>`.
-    sh(shell, "test", &["-d", &dest_s]).await?;
-    sh(shell, "test", &["!", "-e", &src_s]).await?;
-    sh(
-        shell,
-        "test",
-        &["!", "-e", &dest.join(id).display().to_string()],
-    )
-    .await?;
-    Ok(dest)
-}
-
-/// `<retain_dir>/<id>` when free; otherwise an exclusive `<id>-<stamp>-<n>`
-/// sibling. Never returns a path that already exists.
-fn unique_retain_dest(retain_dir: &Path, id: &str) -> Result<PathBuf, HvError> {
-    let primary = retain_dir.join(id);
-    if !primary.exists() {
-        return Ok(primary);
-    }
-    let stamp = retain_stamp();
-    for n in 0u32..32 {
-        let dest = retain_dir.join(format!("{id}-{stamp}-{n}"));
-        if !dest.exists() {
-            return Ok(dest);
+    let dest = {
+        let d = cfg.retain_dir.join(id);
+        if d.exists() {
+            let n = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |t| t.as_nanos());
+            let d = cfg.retain_dir.join(format!("{id}-{n}"));
+            if d.exists() {
+                return Err(HvError::Backend("retain dest reused".into()));
+            }
+            d
+        } else {
+            d
         }
-    }
-    Err(HvError::Backend(format!(
-        "retain destination for {id} already exists under {}; refusing to nest",
-        retain_dir.display()
-    )))
-}
-
-fn retain_stamp() -> String {
-    let d = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}.{:09}", d.as_secs(), d.subsec_nanos())
+    };
+    let src = cfg.jail_dir(id).display().to_string();
+    let dest_s = dest.display().to_string();
+    sh(shell, "mv", &["-T", &src, &dest_s]).await?;
+    sh(shell, "test", &["-d", &dest_s]).await?;
+    sh(shell, "test", &["!", "-e", &src]).await?;
+    sh(shell, "test", &["!", "-e", &format!("{dest_s}/{id}")]).await?;
+    Ok(dest)
 }
 
 /// Kill the process (if any), tear the network down (if any), remove the jail.
@@ -598,7 +568,7 @@ mod tests {
         let src = c.jail_dir("topic-a-0001").display().to_string();
         let dest_s = dest.display().to_string();
         assert!(
-            flat.iter().any(|l| l == &format!("mv {src} {dest_s}")),
+            flat.iter().any(|l| l == &format!("mv -T {src} {dest_s}")),
             "{flat:?}"
         );
         assert!(

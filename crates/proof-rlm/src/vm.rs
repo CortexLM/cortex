@@ -475,7 +475,12 @@ pub async fn run_paid_job(
             Ok(()) => Ok(VmJobOutput::Evaluated(out)),
             Err(e) => Err(VmError::Report(e)),
         },
-        other => other,
+        Ok(VmJobOutput::Baseline(r)) => match r.verify(&verify) {
+            Ok(()) => Ok(VmJobOutput::Baseline(r)),
+            Err(e) => Err(VmError::Report(e)),
+        },
+        Ok(_) => Err(VmError::WrongOutput("paid")),
+        Err(e) => Err(e),
     };
     // A failed job — including an Evaluated report that fails final
     // verification — keeps its jail (guest console, report.json scratch) on
@@ -791,6 +796,33 @@ mod tests {
             "the topic vm only; a retained vm is stopped"
         );
         assert_eq!(orch.experiments().len(), 1);
+
+        orch.set_sandboxed(false);
+        let topic_vm = orch
+            .attach(&req.topic_id)
+            .await
+            .expect("attach")
+            .expect("topic vm");
+        let err = run_paid_job(
+            orch.as_ref(),
+            &ExperimentPolicy::default(),
+            &pinned_template(),
+            &topic_vm,
+            VmJob::Baseline {
+                request: req.clone(),
+            },
+        )
+        .await
+        .expect_err("unsandboxed baseline is not evidence");
+        assert!(matches!(
+            err,
+            VmError::Report(crate::runner::ReportError::NotSandboxed)
+        ));
+        assert_eq!(
+            orch.teardowns().last().map(|(_, p)| *p),
+            Some(RetainPolicy::Retain),
+            "a failed baseline verify retains too"
+        );
     }
 
     /// Every job names its topic (the orchestrator's hard bind), the paid
