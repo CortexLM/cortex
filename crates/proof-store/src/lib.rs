@@ -256,6 +256,9 @@ struct Inner {
     /// A host that sets [`MINER_BYOK_DIR_ENV`] keeps them in
     /// [`MinerEnvVault`] files instead. See [`MemoryStore::stash_miner_env`].
     miner_envs: BTreeMap<String, MinerEnv>,
+    /// In-flight claims on a frozen digest's BYOK entry. A concurrent retry
+    /// increments this; abort decrements and deletes only at zero with no row.
+    env_refs: BTreeMap<String, u32>,
     /// Uploaded artefact bytes, keyed by `(digest, hotkey, submit_nonce)`,
     /// when the host configured no staging directory. Nonce is unique per
     /// miner, not globally — two miners can share a nonce.
@@ -735,6 +738,62 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Hold `env` for `digest`, incrementing an in-flight ref. The first
+    /// claim writes the vault; a concurrent claim of the same digest does
+    /// not overwrite. [`Self::release_miner_env`] drops one ref and deletes
+    /// only when none remain and no row still names this digest.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Vault`] when a configured vault cannot hold the key.
+    pub fn claim_miner_env(&self, digest: &str, env: &MinerEnv) -> Result<(), StoreError> {
+        if env.is_empty() {
+            return Ok(());
+        }
+        let mut g = self.lock()?;
+        let first = g.env_refs.get(digest).copied().unwrap_or(0) == 0;
+        if first {
+            if self.byok.is_file_backed() {
+                self.byok.put(digest, env)?;
+            } else {
+                g.miner_envs.insert(digest.to_owned(), env.clone());
+            }
+        }
+        let next = g
+            .env_refs
+            .get(digest)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        g.env_refs.insert(digest.to_owned(), next);
+        Ok(())
+    }
+
+    /// Drop one in-flight claim. The vault entry stays if another claim is
+    /// live or a row already carries this digest.
+    pub fn release_miner_env(&self, digest: &str) -> Result<(), StoreError> {
+        let mut g = self.lock()?;
+        let Some(n) = g.env_refs.get_mut(digest) else {
+            return Ok(());
+        };
+        *n = n.saturating_sub(1);
+        if *n > 0 {
+            return Ok(());
+        }
+        g.env_refs.remove(digest);
+        let has_row = g
+            .submissions
+            .values()
+            .any(|r| r.submission_digest == digest);
+        if has_row {
+            return Ok(());
+        }
+        g.miner_envs.remove(digest);
+        drop(g);
+        self.byok.remove(digest);
+        Ok(())
+    }
+
     /// The stashed environment for a frozen digest (empty when none).
     pub fn miner_env(&self, digest: &str) -> Result<MinerEnv, StoreError> {
         if self.byok.is_file_backed() {
@@ -752,7 +811,9 @@ impl MemoryStore {
     /// is scored: a terminal row never needs the key again.
     pub fn forget_miner_env(&self, digest: &str) -> Result<(), StoreError> {
         self.byok.remove(digest);
-        self.lock()?.miner_envs.remove(digest);
+        let mut g = self.lock()?;
+        g.miner_envs.remove(digest);
+        g.env_refs.remove(digest);
         Ok(())
     }
 
@@ -1473,6 +1534,36 @@ mod tests {
         assert!(store.miner_env(&digest).expect("gone").is_empty());
         assert_eq!(MINER_BYOK_DIR_ENV, "PROOF_MINER_BYOK_DIR");
         assert!(DEFAULT_MINER_BYOK_DIR.starts_with("/run/"), "runtime path");
+    }
+
+    #[test]
+    fn claim_release_keeps_env_while_another_claim_or_row_holds_it() {
+        let store = MemoryStore::new();
+        let digest = "ab".repeat(32);
+        let mut env = MinerEnv::new();
+        env.insert("MINER_PROVIDED_API_KEY", "miner-supplied-value");
+        store.claim_miner_env(&digest, &env).expect("first");
+        store.claim_miner_env(&digest, &env).expect("second");
+        store.release_miner_env(&digest).expect("one abort");
+        assert_eq!(store.miner_env(&digest).expect("shared"), env);
+        store.release_miner_env(&digest).expect("last abort");
+        assert!(
+            store.miner_env(&digest).expect("gone").is_empty(),
+            "zero refs and no row drops the entry"
+        );
+
+        store.claim_miner_env(&digest, &env).expect("claimed");
+        let mut row = queued_row("t", "1");
+        row.submission_digest = digest.clone();
+        store.insert(row).expect("queued");
+        store.release_miner_env(&digest).expect("inflight done");
+        assert_eq!(
+            store.miner_env(&digest).expect("row holds it"),
+            env,
+            "a queued row keeps the key after the submitter releases"
+        );
+        store.forget_miner_env(&digest).expect("terminal");
+        assert!(store.miner_env(&digest).expect("cleared").is_empty());
     }
 
     #[test]

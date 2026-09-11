@@ -649,17 +649,12 @@ async fn submit(
 
     let nonce = nonce_from(&hotkey, &topic_id, &artifact);
     let submission_digest = freeze_submission_digest(&hotkey, &topic_id, &artifact, &nonce);
-    // One vault entry per frozen digest. A retry of a queued artefact uses
-    // a new submit_nonce but the same digest — do not replace or roll back
-    // the key the queued row already holds.
-    let env_already_held = !st
-        .store
-        .miner_env(&submission_digest)
-        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?
-        .is_empty();
-    if !env_already_held {
+    // In-flight ref on this frozen digest. Concurrent retries share the
+    // vault entry; abort releases one ref and deletes only if nothing
+    // queued still names it.
+    if !miner_env.is_empty() {
         st.store
-            .stash_miner_env(&submission_digest, &miner_env)
+            .claim_miner_env(&submission_digest, &miner_env)
             .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
     }
     let mut artifact_staged = None;
@@ -668,9 +663,7 @@ async fn submit(
             st.store
                 .stash_artefact(&artifact, &hotkey, &submit_nonce, bytes)
                 .map_err(|e| {
-                    if !env_already_held {
-                        let _ = st.store.forget_miner_env(&submission_digest);
-                    }
+                    let _ = st.store.release_miner_env(&submission_digest);
                     err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string())
                 })?,
         );
@@ -729,9 +722,7 @@ async fn submit(
             let _ = st
                 .store
                 .forget_artefact(&staged_digest, &staged_hotkey, &staged_nonce);
-            if !env_already_held {
-                let _ = st.store.forget_miner_env(&staged_env);
-            }
+            let _ = st.store.release_miner_env(&staged_env);
             Err(e)
         }
     }
@@ -750,7 +741,10 @@ fn queue_deferred(
     let digest = row.artifact_digest.clone();
     let hotkey = row.miner_hotkey.clone();
     let nonce = row.submit_nonce.clone();
-    match st.store.enqueue(row).map_err(|e| store_err(&e))? {
+    let env_digest = row.submission_digest.clone();
+    let enqueued = st.store.enqueue(row).map_err(|e| store_err(&e))?;
+    let _ = st.store.release_miner_env(&env_digest);
+    match enqueued {
         Enqueued::Inserted(row) => Ok((
             StatusCode::CREATED,
             Json(SubmitResp::of(&row, st.backend, false)),
