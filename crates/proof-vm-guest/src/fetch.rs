@@ -7,10 +7,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use proof_rlm::CustomRunRequest;
+use proof_rlm::{is_staged_artifact_uri, CustomRunRequest};
 use proof_vm_proto::tar::verify_artifact;
 
-use crate::staging::unpack_tar;
+use crate::staging::{unpack_tar, StagedArtifact};
 
 /// Largest artefact the guest fetches (matches the host's relay cap).
 pub const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
@@ -22,6 +22,11 @@ pub const ARTIFACT_TAR_NAME: &str = "artifact.tar";
 pub const ARTIFACT_DIR_NAME: &str = "artifact";
 
 fn scheme_ok(uri: &str, allow_plain_http: bool) -> Result<(), String> {
+    if is_staged_artifact_uri(uri) {
+        return Err(format!(
+            "artifact_uri {uri:?} is a staged-vault locator; the host must inject the bytes over vsock (never HTTP-fetch this scheme)"
+        ));
+    }
     if uri.starts_with("https://") || (allow_plain_http && uri.starts_with("http://")) {
         Ok(())
     } else {
@@ -33,16 +38,31 @@ fn scheme_ok(uri: &str, allow_plain_http: bool) -> Result<(), String> {
 
 /// Fetch, verify, and unpack the request's artefact under `work`. `Ok(None)`
 /// when the request carries no locator (a baseline with no artefact).
+///
+/// A `proof-artefact://` locator uses `injected` (host vsock) and never
+/// HTTP. A miner-hosted `https://` URI still GETs. Injected bytes that do
+/// not match the job digest, or a staged locator with no inject, fail closed.
 pub async fn fetch_artifact(
     request: &CustomRunRequest,
     work: &Path,
     allow_plain_http: bool,
+    injected: Option<&StagedArtifact>,
 ) -> Result<Option<PathBuf>, String> {
-    let Some(uri) = request.artifact_uri.as_deref().map(str::trim) else {
+    let Some(uri) = request
+        .artifact_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    else {
         return Ok(None);
     };
-    scheme_ok(uri, allow_plain_http)?;
-    let bytes = download(uri).await?;
+    let bytes = if is_staged_artifact_uri(uri) {
+        let art = crate::staging::artifact_for(injected, &request.artifact_digest)?;
+        art.bytes
+    } else {
+        scheme_ok(uri, allow_plain_http)?;
+        download(uri).await?
+    };
     verify_artifact(&bytes, &request.artifact_digest)
         .map_err(|e| format!("artifact fetch from {uri}: {e}; refusing to run a substitute"))?;
     std::fs::create_dir_all(work).map_err(|e| format!("mkdir {}: {e}", work.display()))?;
@@ -110,6 +130,7 @@ pub async fn download_capped(uri: &str, max: usize) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
 
     #[test]
     fn only_https_by_default_and_no_locator_is_no_artifact() {
@@ -118,6 +139,11 @@ mod tests {
         scheme_ok("http://10.0.0.5/recipe.tar", true).expect("staging opt-in");
         assert!(scheme_ok("ftp://x/recipe.tar", true).is_err());
         assert!(scheme_ok("file:///etc/passwd", true).is_err());
+        assert!(
+            scheme_ok(&format!("proof-artefact://{}", "ab".repeat(32)), true)
+                .expect_err("staged scheme is never fetched")
+                .contains("must inject"),
+        );
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -127,16 +153,41 @@ mod tests {
         let work =
             std::env::temp_dir().join(format!("proof-vm-guest-fetch-{}", std::process::id()));
         assert_eq!(
-            rt.block_on(fetch_artifact(&req, &work, false))
+            rt.block_on(fetch_artifact(&req, &work, false, None))
                 .expect("no locator"),
             None
         );
         req.artifact_uri = Some("http://127.0.0.1:9/recipe.tar".into());
         let err = rt
-            .block_on(fetch_artifact(&req, &work, false))
+            .block_on(fetch_artifact(&req, &work, false, None))
             .expect_err("plain http refused before any request");
         assert!(err.contains("must be https://"), "{err}");
         assert_eq!(MAX_ARTIFACT_BYTES, 64 * 1024 * 1024);
+
+        let tar = proof_vm_proto::tar::fixtures::archive(&[proof_vm_proto::tar::fixtures::member(
+            "recipe/run.sh",
+            b'0',
+            b"echo hi\n",
+        )]);
+        let digest = hex::encode(sha2::Sha256::digest(&tar));
+        let uri = format!("proof-artefact://{digest}");
+        req.artifact_digest = digest.clone();
+        req.artifact_uri = Some(uri);
+        let err = rt
+            .block_on(fetch_artifact(&req, &work, true, None))
+            .expect_err("staged locator without inject");
+        assert!(err.contains("needs a host inject"), "{err}");
+        let injected = crate::staging::stage_artifact(
+            &digest,
+            &proof_vm_proto::guest::StagedFile::new("artifact.tar", &tar),
+        )
+        .expect("inject");
+        let dir = rt
+            .block_on(fetch_artifact(&req, &work, true, Some(&injected)))
+            .expect("injected")
+            .expect("unpacked");
+        assert!(dir.join("recipe/run.sh").is_file());
+        let _ = std::fs::remove_dir_all(&work);
     }
 
     /// Serve one chunked-encoding response with no `Content-Length`: `body`

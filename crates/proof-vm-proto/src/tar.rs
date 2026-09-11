@@ -1,6 +1,7 @@
 //! Artefact identity on the topic-VM path
-//! ([`crate::guest::SisterRequest::artifact_tar`]): **the bytes served at
-//! `artifact_uri`, verbatim**, hashed with SHA-256.
+//! ([`crate::guest::SisterRequest::artifact_tar`]): **the bytes of the
+//! recipe tar, verbatim**, hashed with SHA-256 (HTTP `artifact_uri` or a
+//! vsock inject of a `proof-artefact://` upload).
 //!
 //! One identity, three places, one function — [`verify_artifact`]:
 //!
@@ -8,14 +9,16 @@
 //!    `artifact_uri` serves: an **uncompressed** ustar / GNU / pax tar of
 //!    the recipe tree with at least one byte of file content
 //!    (`tar -cf recipe.tar recipe/ && sha256sum recipe.tar`).
-//! 2. **RLM guest.** Fetches `artifact_uri`, runs [`verify_artifact`] on
-//!    the bytes *as received* against the job's `artifact_digest`, inspects
-//!    a copy of the tree, and forwards **those same bytes** as
-//!    `artifact_tar`. It never re-tars: tar metadata and member order change
-//!    under re-encoding even when every file is identical, so a re-tarred
-//!    tree hashes differently and the host refuses it. A fetch that fails or
-//!    does not verify is a failed job (`RlmToHost::Failed`) — never a
-//!    substitute archive.
+//! 2. **RLM guest.** Obtains the bytes — HTTP `artifact_uri` on the URI-only
+//!    path, or a vsock [`crate::guest::HostToRlm::StageArtifact`] inject for
+//!    `proof-artefact://` — runs [`verify_artifact`] on the bytes *as
+//!    received* against the job's `artifact_digest`, inspects a copy of the
+//!    tree, and forwards **those same bytes** as `artifact_tar`. It never
+//!    re-tars: tar metadata and member order change under re-encoding even
+//!    when every file is identical, so a re-tarred tree hashes differently
+//!    and the host refuses it. A fetch or inject that fails or does not
+//!    verify is a failed job (`RlmToHost::Failed`) — never a substitute
+//!    archive.
 //! 3. **KVM host.** Runs the same [`verify_artifact`] on `artifact_tar`
 //!    against the paid job's digest before any sister jail is built; the
 //!    sister unpacks the same bytes.

@@ -17,11 +17,13 @@
 )]
 
 mod payout;
+mod promote;
 
 pub use payout::{
     novelty_bar, payout_lattices, primary_from_harness, primary_metric, sealed_primary,
     topic_masses, topic_share_bps, MinerTopicRun, PrimaryExtras, PROOF_SHARE_BPS,
 };
+pub use promote::{decide_promote, KeepReason, PromoteDecision};
 
 use std::collections::BTreeMap;
 
