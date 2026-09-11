@@ -463,13 +463,7 @@ fn resolve_artifact(input: &SubmitInput) -> Result<(String, Option<Vec<u8>>), St
         let digest = normalize_hex64(&input.artifact_digest, "artifact-digest")?;
         return Ok((digest, None));
     };
-    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    if bytes.is_empty() {
-        return Err("artifact is empty".into());
-    }
-    if bytes.len() > MAX_ARTEFACT_BYTES {
-        return Err("artifact exceeds 5 MiB".into());
-    }
+    let bytes = read_artifact_file(path)?;
     let got = sha256_hex(&bytes);
     let declared = input.artifact_digest.trim();
     if !declared.is_empty() {
@@ -479,6 +473,33 @@ fn resolve_artifact(input: &SubmitInput) -> Result<(String, Option<Vec<u8>>), St
         }
     }
     Ok((got, Some(bytes)))
+}
+
+/// Regular file only, at most [`MAX_ARTEFACT_BYTES`]. A FIFO or other special
+/// file is refused before open so `--artifact` cannot block on EOF.
+fn read_artifact_file(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let fail = |e: std::io::Error| format!("read {}: {e}", path.display());
+    let meta = std::fs::metadata(path).map_err(fail)?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    if meta.len() > MAX_ARTEFACT_BYTES as u64 {
+        return Err("artifact exceeds 5 MiB".into());
+    }
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .map_err(fail)?
+        .take(MAX_ARTEFACT_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(fail)?;
+    if buf.len() > MAX_ARTEFACT_BYTES {
+        return Err("artifact exceeds 5 MiB".into());
+    }
+    if buf.is_empty() {
+        return Err("artifact is empty".into());
+    }
+    Ok(buf)
 }
 
 fn attach_miner_env(body: &mut Value, env: &[(String, String)]) {
@@ -1085,6 +1106,29 @@ mod tests {
         })
         .expect_err("empty");
         assert!(err.contains("empty"), "{err}");
+        let over = dir.join("over.tar");
+        std::fs::write(&over, vec![b'x'; MAX_ARTEFACT_BYTES + 1]).expect("over");
+        let err = resolve_artifact(&SubmitInput {
+            artifact: Some(over),
+            ..SubmitInput::default()
+        })
+        .expect_err("over");
+        assert!(err.contains("5 MiB"), "{err}");
+        #[cfg(unix)]
+        {
+            let fifo = dir.join("pipe");
+            let status = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo");
+            assert!(status.success(), "mkfifo");
+            let err = resolve_artifact(&SubmitInput {
+                artifact: Some(fifo),
+                ..SubmitInput::default()
+            })
+            .expect_err("fifo");
+            assert!(err.contains("regular file"), "{err}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
