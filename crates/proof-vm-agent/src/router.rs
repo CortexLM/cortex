@@ -42,6 +42,9 @@ use crate::stamp::{output_matches, stamp_output};
 /// Longest `vm_id` the agent mints (jailer ids are capped at 64 chars).
 const MAX_VM_ID_LEN: usize = 63;
 
+/// Pause between abandoned-experiment teardown retries.
+const TEARDOWN_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Experiment VMs one host runs at once unless the operator says otherwise.
 /// Each may be as large as the ceilings (lock 16 vCPU / 32 GiB), so this is a
 /// deliberate, small default; `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS` raises it.
@@ -99,6 +102,8 @@ struct VmEntry {
     booted: BootedVm,
     /// One job (or teardown) at a time per VM.
     lock: Arc<Mutex<()>>,
+    /// Retryable harvest policy after a waiter drop; `None` when none pending.
+    cleanup: Option<RetainPolicy>,
 }
 
 struct Inner {
@@ -266,6 +271,10 @@ impl AgentState {
     /// Agent-level `Ok` is not enough — a missing sister stamps
     /// `sandboxed=false` and the CP then rejects `NotSandboxed`; that jail
     /// is retained for RCA.
+    ///
+    /// A failed or unconfirmed teardown never leaves [`VmState::Running`]:
+    /// the record is [`VmState::Crashed`] (capacity free) and the policy is
+    /// retried until the hypervisor confirms a terminal state.
     async fn harvest_abandoned(
         &self,
         record: &VmRecord,
@@ -281,38 +290,58 @@ impl AgentState {
         } else {
             RetainPolicy::Retain
         };
-        let vm_id = &record.handle.vm_id;
+        let vm_id = record.handle.vm_id.clone();
         tracing::info!(
             %vm_id, topic_id = %record.handle.topic_id, ?policy,
             "waiter gone; harvesting experiment vm"
         );
-        let mut confirmed = false;
-        for _ in 0..3 {
-            match self.inner.hypervisor.teardown(booted, policy).await {
-                Ok(true) => {
-                    confirmed = true;
-                    break;
+        loop {
+            let confirmed = match self.inner.hypervisor.teardown(booted, policy).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(%vm_id, "abandoned experiment teardown: {e}");
+                    false
                 }
-                Ok(false) => {}
-                Err(e) => tracing::error!(%vm_id, "abandoned experiment teardown: {e}"),
-            }
-        }
-        let mut vms = self.inner.vms.write().await;
-        if confirmed {
-            match policy {
-                RetainPolicy::Destroy => {
-                    vms.remove(vm_id);
-                }
-                RetainPolicy::Retain => {
-                    if let Some(e) = vms.get_mut(vm_id) {
-                        e.record.state = VmState::Retained;
+            };
+            if confirmed {
+                let mut vms = self.inner.vms.write().await;
+                match policy {
+                    RetainPolicy::Destroy => {
+                        vms.remove(&vm_id);
+                    }
+                    RetainPolicy::Retain => {
+                        if let Some(e) = vms.get_mut(&vm_id) {
+                            e.record.state = VmState::Retained;
+                            e.cleanup = None;
+                        }
                     }
                 }
+                return;
             }
-        } else {
-            tracing::error!(%vm_id, "abandoned experiment teardown never confirmed");
-            if let Some(e) = vms.get_mut(vm_id) {
-                e.record.state = VmState::Crashed;
+            {
+                let mut vms = self.inner.vms.write().await;
+                match vms.get_mut(&vm_id) {
+                    Some(e) => {
+                        if e.record.state == VmState::Running {
+                            e.record.state = VmState::Crashed;
+                        }
+                        e.cleanup = Some(policy);
+                    }
+                    None => return,
+                }
+            }
+            tokio::time::sleep(TEARDOWN_RETRY).await;
+            let vms = self.inner.vms.read().await;
+            match vms.get(&vm_id) {
+                Some(e)
+                    if e.cleanup.is_none()
+                        || e.record.state == VmState::Destroyed
+                        || e.record.state == VmState::Retained =>
+                {
+                    return;
+                }
+                None => return,
+                Some(_) => {}
             }
         }
     }
@@ -459,6 +488,7 @@ async fn create_vm(
             record: record.clone(),
             booted,
             lock: Arc::new(Mutex::new(())),
+            cleanup: None,
         },
     );
     Ok((StatusCode::CREATED, Json(record)))

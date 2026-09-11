@@ -706,14 +706,10 @@ async fn submit(
     if topic.constraints.defer_scoring() {
         return queue_deferred(&st, row);
     }
-    // Live submit: a 503/401 after staging must not leave bytes on disk.
-    // The nonce is already spent; a retry uses a new nonce (new vault key).
-    // Drain keeps staging on error so a queued row can still be scored.
-    //
+    // One live evaluation per frozen digest. A disconnect-then-retry with a
+    // fresh nonce shares this digest and waits for the first result.
     // Evaluate is not cancelled if the miner hangs up after this body was
-    // accepted: axum drops the handler on disconnect, a spawned task is not
-    // dropped. A client that holds still gets **201-after-score**. A retry
-    // of the same frozen digest must not start a second paid run.
+    // accepted: axum drops the handler on disconnect, a spawned task is not.
     let staged_digest = row.artifact_digest.clone();
     let staged_hotkey = row.miner_hotkey.clone();
     let staged_nonce = row.submit_nonce.clone();
@@ -725,39 +721,26 @@ async fn submit(
         .map_err(|e| store_err(&e))?
     {
         LiveEval::Existing(existing) => {
-            let existing = *existing;
-            let _ = st
-                .store
-                .forget_artefact(&staged_digest, &staged_hotkey, &staged_nonce);
-            let _ = st.store.release_miner_env(&staged_env);
-            let eligible = existing.verdict.as_ref().is_some_and(|v| v.pass);
-            let mut resp = SubmitResp::of(&existing, st.backend, eligible);
-            resp.detail = Some(format!(
-                "already submitted as {} and scored ({}); one run per artefact per topic",
-                existing.id,
-                state_name(existing.state)
-            ));
-            return Ok((StatusCode::OK, Json(resp)));
+            drop_retry_staging(&st, &row);
+            return Ok(already_submitted(&st, &existing));
         }
         LiveEval::InFlight => {
-            let _ = st
-                .store
-                .forget_artefact(&staged_digest, &staged_hotkey, &staged_nonce);
-            let _ = st.store.release_miner_env(&staged_env);
-            return Err(err(
-                StatusCode::CONFLICT,
-                "evaluation in flight for this artefact",
-            ));
+            drop_retry_staging(&st, &row);
+            return wait_live_eval(&st, &topic_id, &staged_env).await;
         }
-        LiveEval::Claimed => {}
+        LiveEval::Claimed | LiveEval::Vacant => {}
     }
     after_body_accepted({
         let st = st.clone();
         async move {
+            let _claim = LiveEvalGuard {
+                store: st.store.clone(),
+                topic_id,
+                digest: staged_env.clone(),
+            };
             match score_intake(&st, row, &topic).await {
                 Ok(resp) => Ok((StatusCode::CREATED, Json(resp))),
                 Err(e) => {
-                    let _ = st.store.release_live_eval(&topic_id, &staged_env);
                     let _ = st
                         .store
                         .forget_artefact(&staged_digest, &staged_hotkey, &staged_nonce);
@@ -783,6 +766,66 @@ async fn after_body_accepted<T: Send + 'static>(
             StatusCode::INTERNAL_SERVER_ERROR,
             "scoring task failed",
         )),
+    }
+}
+
+/// Releases the live-eval claim if scoring ends without [`MemoryStore::insert`].
+struct LiveEvalGuard {
+    store: MemoryStore,
+    topic_id: String,
+    digest: String,
+}
+
+impl Drop for LiveEvalGuard {
+    fn drop(&mut self) {
+        let _ = self.store.release_live_eval(&self.topic_id, &self.digest);
+    }
+}
+
+fn drop_retry_staging(st: &AppState, row: &Submission) {
+    let _ = st
+        .store
+        .forget_artefact(&row.artifact_digest, &row.miner_hotkey, &row.submit_nonce);
+    let _ = st.store.release_miner_env(&row.submission_digest);
+}
+
+fn already_submitted(st: &AppState, existing: &Submission) -> (StatusCode, Json<SubmitResp>) {
+    let eligible = existing.verdict.as_ref().is_some_and(|v| v.pass);
+    let mut resp = SubmitResp::of(existing, st.backend, eligible);
+    resp.detail = Some(if existing.state == SubmissionState::Queued {
+        format!("already queued as {}; {DEFERRED_DETAIL}", existing.id)
+    } else {
+        format!(
+            "already submitted as {} and scored ({}); one run per artefact per topic",
+            existing.id,
+            state_name(existing.state)
+        )
+    });
+    (StatusCode::OK, Json(resp))
+}
+
+async fn wait_live_eval(
+    st: &AppState,
+    topic_id: &str,
+    digest: &str,
+) -> Result<(StatusCode, Json<SubmitResp>), ErrResp> {
+    loop {
+        match st
+            .store
+            .live_eval(topic_id, digest)
+            .map_err(|e| store_err(&e))?
+        {
+            LiveEval::Existing(row) => return Ok(already_submitted(st, &row)),
+            LiveEval::InFlight | LiveEval::Claimed => {
+                tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+            }
+            LiveEval::Vacant => {
+                return Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "scoring task failed",
+                ))
+            }
+        }
     }
 }
 
@@ -812,18 +855,7 @@ fn queue_deferred(
         )),
         Enqueued::Existing(existing) => {
             let _ = st.store.forget_artefact(&digest, &hotkey, &nonce);
-            let eligible = existing.verdict.as_ref().is_some_and(|v| v.pass);
-            let mut resp = SubmitResp::of(&existing, st.backend, eligible);
-            resp.detail = Some(if existing.state == SubmissionState::Queued {
-                format!("already queued as {}; {DEFERRED_DETAIL}", existing.id)
-            } else {
-                format!(
-                    "already submitted as {} and scored ({}); one run per artefact per topic",
-                    existing.id,
-                    state_name(existing.state)
-                )
-            });
-            Ok((StatusCode::OK, Json(resp)))
+            Ok(already_submitted(st, &existing))
         }
     }
 }
@@ -4681,13 +4713,13 @@ mod tests {
         }
         let retry = submit_body("same-artefact", &serde_json::json!({}));
         let resp = post_submit(app, retry).await;
-        assert_eq!(
-            resp.status(),
-            StatusCode::CONFLICT,
-            "retry must not start a second run"
-        );
+        assert_eq!(resp.status(), StatusCode::OK, "idempotent retry");
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(v["state"], "awaiting_admin", "{v}");
         assert_eq!(scorer.hits.load(Ordering::SeqCst), 1);
-        let _ = first.await;
+        let first = first.await.expect("first");
+        assert_eq!(first.status(), StatusCode::CREATED);
         assert_eq!(store.list().expect("list").len(), 1);
         assert_eq!(scorer.hits.load(Ordering::SeqCst), 1);
     }

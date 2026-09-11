@@ -1205,7 +1205,17 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert_eq!(hv.teardowns().len(), 1);
+        let torn = tokio::time::Instant::now();
+        loop {
+            if hv.teardowns().len() == 1 {
+                break;
+            }
+            assert!(
+                torn.elapsed() < std::time::Duration::from_secs(2),
+                "teardown never confirmed after retries"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         let (status, _): (StatusCode, VmRecord) = call(
             &app,
             "POST",
@@ -1227,7 +1237,7 @@ mod tests {
         use proof_rlm::fixtures::experiment_request;
         let hv = FakeHypervisor::new(0.5);
         hv.set_job_delay(Some(std::time::Duration::from_millis(200)));
-        hv.set_teardown_fails(8);
+        hv.set_teardown_fails(usize::MAX);
         hv.set_teardown_errors(true);
         let auth = Arc::new(BearerAuth::from_file(&token_file("teardown-err", TOKEN)));
         let state = AgentState::with_max_experiment_vms(hv.clone(), auth, 1);

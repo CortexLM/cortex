@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
 use bytes::Bytes;
+use gateway_core::proxy_detach::{detach_proof, is_proof_submit, normalize_proxy_path};
 
 use crate::api::GatewayState;
 use gateway_registry::RegistryError;
@@ -92,11 +93,7 @@ async fn proxy_inner(
         }
     };
 
-    // Only Proof POST /v1/submissions detaches: evaluate is sync. GET and
-    // other challenges cancel with the caller so a stall cannot pin tasks.
-    let detach = challenge_id == "proof"
-        && method == Method::POST
-        && normalize_proxy_path(&rest) == "v1/submissions";
+    let detach = is_proof_submit(&challenge_id, &method, &rest);
     let hop = async move {
         let mut last_status = StatusCode::BAD_GATEWAY;
         let mut last_msg = String::from("no upstream attempt");
@@ -171,10 +168,7 @@ async fn proxy_inner(
         (last_status, last_msg).into_response()
     };
     if detach {
-        match tokio::spawn(hop).await {
-            Ok(upstream_response) => upstream_response,
-            Err(_) => (StatusCode::BAD_GATEWAY, "proxy task failed").into_response(),
-        }
+        detach_proof(hop).await
     } else {
         hop.await
     }
@@ -262,20 +256,7 @@ async fn forward(
 
 /// Collapse `.` / empty / `..` segments the same way `url`/`reqwest` will before
 /// the upstream request — used so gateway gates cannot be skipped via `v1/./admin`.
-#[must_use]
-pub fn normalize_proxy_path(rest: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for seg in rest.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                let _ = out.pop();
-            }
-            other => out.push(other),
-        }
-    }
-    out.join("/")
-}
+pub use gateway_core::proxy_detach::normalize_proxy_path;
 
 /// Operator admin surfaces are master-local only (not on the public miner path).
 ///
@@ -362,17 +343,16 @@ mod tests {
 
     #[test]
     fn only_proof_submit_post_detaches_after_the_body() {
-        let detach = |cid: &str, method: Method, rest: &str| {
-            cid == "proof"
-                && method == Method::POST
-                && normalize_proxy_path(rest) == "v1/submissions"
-        };
-        assert!(detach("proof", Method::POST, "v1/submissions"));
-        assert!(detach("proof", Method::POST, "/v1/submissions"));
-        assert!(!detach("proof", Method::GET, "v1/submissions"));
-        assert!(!detach("proof", Method::POST, "v1/status"));
-        assert!(!detach("bounty", Method::POST, "v1/submissions"));
-        assert!(!detach("proof", Method::POST, "v1/submissions/pf"));
+        assert!(is_proof_submit("proof", &Method::POST, "v1/submissions"));
+        assert!(is_proof_submit("proof", &Method::POST, "/v1/submissions"));
+        assert!(!is_proof_submit("proof", &Method::GET, "v1/submissions"));
+        assert!(!is_proof_submit("proof", &Method::POST, "v1/status"));
+        assert!(!is_proof_submit("bounty", &Method::POST, "v1/submissions"));
+        assert!(!is_proof_submit(
+            "proof",
+            &Method::POST,
+            "v1/submissions/pf"
+        ));
     }
 
     #[test]
