@@ -36,31 +36,9 @@ fn agent(r: &Path) -> std::sync::Arc<GuestAgent> {
 }
 
 /// After a finite `report.json`, write obligatory `results.json` from it.
-const WRITE_RESULTS: &str = r#"
-if [ -f "$PROOF_OUTPUT_DIR/report.json" ]; then
-python3 -c '
-import json, os
-from pathlib import Path
-out = Path(os.environ["PROOF_OUTPUT_DIR"])
-r = json.loads((out / "report.json").read_text())
-display = r.get("evidence") or {"ok": True}
-if not isinstance(display, dict) or not display:
-    display = {"ok": True}
-doc = {
-    "schema_version": 1,
-    "contract": "generic-custom-v1",
-    "topic_id": os.environ.get("PROOF_TOPIC_ID", ""),
-    "custom_id": os.environ.get("PROOF_CUSTOM_ID", ""),
-    "submission_digest": os.environ.get("PROOF_SUBMISSION_DIGEST", ""),
-    "artifact_digest": os.environ.get("PROOF_ARTIFACT_DIGEST", ""),
-    "primary_value": r["primary_value"],
-    "claim_holds": bool(r.get("claim_holds", False)),
-    "display": display,
-}
-(out / "results.json").write_text(json.dumps(doc))
-'
-fi
-"#;
+/// POSIX only — the guest `exec` clears PATH down to `/usr/bin` and does
+/// not promise `python3`.
+const WRITE_RESULTS: &str = include_str!("../../../deploy/guest/runners/write-generic-results.sh");
 
 /// Install `script` as `<runners>/<RUNNER>/<entry>`.
 fn install(r: &Path, entry: &str, script: &str) {
@@ -424,23 +402,9 @@ async fn evaluate_results_must_bind_scored_primary() {
         &r,
         r#"
 echo '{"primary_value": 0.5, "claim_holds": true}' > "$PROOF_OUTPUT_DIR/report.json"
-python3 -c '
-import json, os
-from pathlib import Path
-out = Path(os.environ["PROOF_OUTPUT_DIR"])
-doc = {
-    "schema_version": 1,
-    "contract": "generic-custom-v1",
-    "topic_id": os.environ.get("PROOF_TOPIC_ID", ""),
-    "custom_id": os.environ.get("PROOF_CUSTOM_ID", ""),
-    "submission_digest": os.environ.get("PROOF_SUBMISSION_DIGEST", ""),
-    "artifact_digest": os.environ.get("PROOF_ARTIFACT_DIGEST", ""),
-    "primary_value": 0.99,
-    "claim_holds": True,
-    "display": {"ok": True},
-}
-(out / "results.json").write_text(json.dumps(doc))
-'
+cat > "$PROOF_OUTPUT_DIR/results.json" <<EOF
+{"schema_version":1,"contract":"generic-custom-v1","topic_id":"${PROOF_TOPIC_ID}","custom_id":"${PROOF_CUSTOM_ID}","submission_digest":"${PROOF_SUBMISSION_DIGEST}","artifact_digest":"${PROOF_ARTIFACT_DIGEST}","primary_value":0.99,"claim_holds":true,"display":{"ok":true}}
+EOF
 "#,
     );
     let err = failed(

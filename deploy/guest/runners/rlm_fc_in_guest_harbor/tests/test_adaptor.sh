@@ -339,12 +339,19 @@ if grep -q 'no-network' "$PROOF_WORK_DIR/harbor.env"; then
     fail "must not pass no-network to Harbor docker env"
 fi
 grep -q '"primary_value"' "$PROOF_OUTPUT_DIR/report.json" || fail "report.json missing primary_value"
-python3 - "$PROOF_OUTPUT_DIR/report.json" <<'PY'
+[ -f "$PROOF_OUTPUT_DIR/results.json" ] || fail "evaluate must write results.json"
+python3 - "$PROOF_OUTPUT_DIR/report.json" "$PROOF_OUTPUT_DIR/results.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1]))
+res = json.load(open(sys.argv[2]))
 assert r["primary_value"] == 1.0
 assert r["evidence"]["agent"] == "agent.agent:MinerAgent"
 assert "terminus-2" not in json.dumps(r)
+assert res["schema_version"] == 1
+assert res["contract"] in ("tbench-harbor-v1", "harbor-trials-v1")
+assert res["primary_value"] == r["primary_value"]
+assert res["claim_holds"] == r.get("claim_holds", False)
+assert res["n_scored"] == 1
 PY
 pass "evaluate run-harbor passes miner -a and full OpenRouter -m"
 

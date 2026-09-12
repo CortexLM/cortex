@@ -44,6 +44,29 @@ fn exe(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// POSIX: bind a `generic-custom-v1` `results.json` to an existing `report.json`.
+const WRITE_GENERIC_RESULTS: &str =
+    include_str!("../../../deploy/guest/runners/write-generic-results.sh");
+
+/// Fake `smoke_runner` `run`: checks the guest contract, writes `report.json`,
+/// then the obligatory Evaluate `results.json` (no python3 on the guest PATH).
+fn smoke_evaluate_run_script() -> String {
+    let mut body = String::from(
+        r#"#!/bin/sh
+set -eu
+[ -d "$PROOF_PACK_DIR/$PROOF_PARAM_TASKS_DIR/task-a" ] || { echo "pack not staged" >&2; exit 2; }
+[ -f "$PROOF_ARTIFACT_DIR/recipe/agent/agent.py" ] || { echo "artefact not staged" >&2; exit 2; }
+[ -r "$PROOF_MINER_ENV_DIR/OPENROUTER_API_KEY" ] || { echo "byok file missing" >&2; exit 2; }
+[ "$OPENROUTER_API_KEY" = "$(cat "$PROOF_MINER_ENV_DIR/OPENROUTER_API_KEY")" ] || { echo "byok mismatch" >&2; exit 2; }
+echo "adaptor saw key $OPENROUTER_API_KEY" >&2
+printf '{"primary_value": 0.5, "claim_holds": true, "evidence": {"tasks": "%s", "policy": "%s", "exec_timeout": "%s", "slice": "%s", "n_scored": 1}}\n' \
+  "$PROOF_PARAM_TASKS" "${PROOF_PARAM_AGENT_EXCEPTION_POLICY:-unset}" "${PROOF_PARAM_EXEC_TIMEOUT_S:-unset}" "$PROOF_TASK_SLICE" > "$PROOF_OUTPUT_DIR/report.json"
+"#,
+    );
+    body.push_str(WRITE_GENERIC_RESULTS);
+    body
+}
+
 /// An uncompressed tar of `members` (`path → bytes`), like `tar -cf`.
 fn tar_of(members: &[(&str, &[u8])]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
@@ -170,40 +193,7 @@ fn one_task_evaluate_through_the_real_guest_agent() {
     let fx = fixture("contract", "smoke_runner", &[]);
     let adaptor = fx.root.join("adaptor");
     fs::create_dir_all(&adaptor).unwrap();
-    exe(
-        &adaptor.join("run"),
-        r#"#!/bin/sh
-set -eu
-[ -d "$PROOF_PACK_DIR/$PROOF_PARAM_TASKS_DIR/task-a" ] || { echo "pack not staged" >&2; exit 2; }
-[ -f "$PROOF_ARTIFACT_DIR/recipe/agent/agent.py" ] || { echo "artefact not staged" >&2; exit 2; }
-[ -r "$PROOF_MINER_ENV_DIR/OPENROUTER_API_KEY" ] || { echo "byok file missing" >&2; exit 2; }
-[ "$OPENROUTER_API_KEY" = "$(cat "$PROOF_MINER_ENV_DIR/OPENROUTER_API_KEY")" ] || { echo "byok mismatch" >&2; exit 2; }
-echo "adaptor saw key $OPENROUTER_API_KEY" >&2
-printf '{"primary_value": 0.5, "claim_holds": true, "evidence": {"tasks": "%s", "policy": "%s", "exec_timeout": "%s", "slice": "%s", "n_scored": 1}}\n' \
-  "$PROOF_PARAM_TASKS" "${PROOF_PARAM_AGENT_EXCEPTION_POLICY:-unset}" "${PROOF_PARAM_EXEC_TIMEOUT_S:-unset}" "$PROOF_TASK_SLICE" > "$PROOF_OUTPUT_DIR/report.json"
-python3 -c '
-import json, os
-from pathlib import Path
-out = Path(os.environ["PROOF_OUTPUT_DIR"])
-r = json.loads((out / "report.json").read_text())
-display = r.get("evidence") or {"ok": True}
-if not isinstance(display, dict) or not display:
-    display = {"ok": True}
-doc = {
-    "schema_version": 1,
-    "contract": "generic-custom-v1",
-    "topic_id": os.environ.get("PROOF_TOPIC_ID", ""),
-    "custom_id": os.environ.get("PROOF_CUSTOM_ID", ""),
-    "submission_digest": os.environ.get("PROOF_SUBMISSION_DIGEST", ""),
-    "artifact_digest": os.environ.get("PROOF_ARTIFACT_DIGEST", ""),
-    "primary_value": r["primary_value"],
-    "claim_holds": bool(r.get("claim_holds", False)),
-    "display": display,
-}
-(out / "results.json").write_text(json.dumps(doc))
-'
-"#,
-    );
+    exe(&adaptor.join("run"), &smoke_evaluate_run_script());
     let out = fx.root.join("outcome.json");
     let (ok, stdout, stderr) = run_driver(
         &fx,

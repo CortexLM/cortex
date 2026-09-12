@@ -33,6 +33,10 @@ operator's view of it.
 A non-zero exit with no document, a missing document, a non-finite
 `primary_value`, a missing or non-conforming Evaluate `results.json`, or a
 run that outlives `PROOF_DEADLINE_S` is a failed job.
+[`write-generic-results.sh`](write-generic-results.sh) is a POSIX helper
+that binds a `generic-custom-v1` file to an existing `report.json` (no
+`python3`). Harbor writes `tbench-harbor-v1` / `harbor-trials-v1` from
+`summarize.py`.
 The agent never fills in a value — and neither may the adaptor: a trial that
 produced no measurement is reported as what it is (the topic decides whether
 that counts as zero or fails the run), never as some other number that
@@ -150,6 +154,12 @@ fi
 #           held to PROOF_DEADLINE_S, writing under "$PROOF_WORK_DIR".
 # OPERATOR: turn its per-trial outputs into report.json. A trial with no
 #           measurement is no measurement — never another field's value.
+# OPERATOR: Evaluate must also write the topic-defined complete results
+#           JSON next to report.json (default results.json; pin
+#           results_path / results_contract). generic-custom-v1: source
+#           write-generic-results.sh after report.json. Harbor / trial
+#           contracts write their own document. Missing or non-conforming
+#           on evaluate is Failed (no Done).
 echo "no harness wired into this skeleton" >&2
 exit 2
 ```
