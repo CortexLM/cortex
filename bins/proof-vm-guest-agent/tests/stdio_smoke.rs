@@ -181,6 +181,27 @@ set -eu
 echo "adaptor saw key $OPENROUTER_API_KEY" >&2
 printf '{"primary_value": 0.5, "claim_holds": true, "evidence": {"tasks": "%s", "policy": "%s", "exec_timeout": "%s", "slice": "%s", "n_scored": 1}}\n' \
   "$PROOF_PARAM_TASKS" "${PROOF_PARAM_AGENT_EXCEPTION_POLICY:-unset}" "${PROOF_PARAM_EXEC_TIMEOUT_S:-unset}" "$PROOF_TASK_SLICE" > "$PROOF_OUTPUT_DIR/report.json"
+python3 -c '
+import json, os
+from pathlib import Path
+out = Path(os.environ["PROOF_OUTPUT_DIR"])
+r = json.loads((out / "report.json").read_text())
+display = r.get("evidence") or {"ok": True}
+if not isinstance(display, dict) or not display:
+    display = {"ok": True}
+doc = {
+    "schema_version": 1,
+    "contract": "generic-custom-v1",
+    "topic_id": os.environ.get("PROOF_TOPIC_ID", ""),
+    "custom_id": os.environ.get("PROOF_CUSTOM_ID", ""),
+    "submission_digest": os.environ.get("PROOF_SUBMISSION_DIGEST", ""),
+    "artifact_digest": os.environ.get("PROOF_ARTIFACT_DIGEST", ""),
+    "primary_value": r["primary_value"],
+    "claim_holds": bool(r.get("claim_holds", False)),
+    "display": display,
+}
+(out / "results.json").write_text(json.dumps(doc))
+'
 "#,
     );
     let out = fx.root.join("outcome.json");
@@ -217,6 +238,10 @@ printf '{"primary_value": 0.5, "claim_holds": true, "evidence": {"tasks": "%s", 
         serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
     let report = &outcome["report"];
     assert_eq!(report["primary_value"], serde_json::json!(0.5));
+    assert_eq!(
+        report["results"]["contract"],
+        serde_json::json!("generic-custom-v1")
+    );
     assert_eq!(
         report["sandboxed"],
         serde_json::json!(true),
