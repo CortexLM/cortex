@@ -34,6 +34,28 @@ grep -q '"claim_holds":true' "$PROOF_OUTPUT_DIR/results.json" \
     || fail "nested claim_holds was bound: $(cat "$PROOF_OUTPUT_DIR/results.json")"
 pass "root primary_value / claim_holds win over nested keys"
 
+# Compact one-line: greedy last-match must not win (root first, then evidence).
+rm -f "$PROOF_OUTPUT_DIR/results.json"
+printf '%s\n' '{"primary_value":0.75,"claim_holds":true,"evidence":{"primary_value":0.25,"claim_holds":false}}' \
+    > "$PROOF_OUTPUT_DIR/report.json"
+# shellcheck source=write-generic-results.sh
+. "$ROOT/write-generic-results.sh"
+grep -q '"primary_value":0.75' "$PROOF_OUTPUT_DIR/results.json" \
+    || fail "one-line root-first bound nested: $(cat "$PROOF_OUTPUT_DIR/results.json")"
+grep -q '"claim_holds":true' "$PROOF_OUTPUT_DIR/results.json" \
+    || fail "one-line root-first bound nested claim: $(cat "$PROOF_OUTPUT_DIR/results.json")"
+pass "one-line report binds root fields (not the last textual occurrence)"
+
+# Compact one-line: evidence first, then root.
+rm -f "$PROOF_OUTPUT_DIR/results.json"
+printf '%s\n' '{"evidence":{"primary_value":0.25,"claim_holds":false},"primary_value":0.75,"claim_holds":true}' \
+    > "$PROOF_OUTPUT_DIR/report.json"
+# shellcheck source=write-generic-results.sh
+. "$ROOT/write-generic-results.sh"
+grep -q '"primary_value":0.75' "$PROOF_OUTPUT_DIR/results.json" \
+    || fail "one-line nested-first bound nested: $(cat "$PROOF_OUTPUT_DIR/results.json")"
+pass "one-line report binds root fields when evidence comes first"
+
 rm -f "$PROOF_OUTPUT_DIR/results.json" "$PROOF_OUTPUT_DIR/audit.v1.final.json"
 export PROOF_PARAM_RESULTS_PATH=audit.v1.final.json
 # shellcheck source=write-generic-results.sh
