@@ -88,8 +88,13 @@ fn config(cli: &Cli) -> GuestConfig {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let _ = telemetry::init_tracing();
     let cli = Cli::parse();
+    // stdout is the wire in --stdio mode: logs must not share it.
+    let _ = if cli.stdio {
+        telemetry::init_tracing_stderr()
+    } else {
+        telemetry::init_tracing()
+    };
     let cfg = config(&cli);
     tracing::info!(
         agent = AGENT_NAME,

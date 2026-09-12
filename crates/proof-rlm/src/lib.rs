@@ -77,10 +77,11 @@ pub use vm::{
     VM_ORCHESTRATOR_TOKEN_FILE_ENV, VM_ORCHESTRATOR_URL_ENV,
 };
 // The generic in-guest experiment binding (runner id, pinned pack, VM size
-// read from the signed topic's `constraints.params`; operator ceilings).
+// read from the signed topic's `constraints.params`; operator ceilings) and
+// the generic run policy (tasks, gates, wall clocks, exception policy).
 pub use proof_experiment::{
-    ExperimentBinding, ExperimentCeilings, ExperimentError, ExperimentPolicy, ExperimentSpec,
-    PackRef, VmShape,
+    AgentExceptionPolicy, ExperimentBinding, ExperimentCeilings, ExperimentError, ExperimentPolicy,
+    ExperimentSpec, PackRef, RunPolicy, VmShape,
 };
 // Miner BYOK: the env a topic lets a miner bring to their own paid run.
 pub use proof_canon::{

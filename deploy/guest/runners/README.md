@@ -52,13 +52,39 @@ happened to be lying around.
 | `PROOF_RULES_FILE` | the rule set to tick (`inspect`); `PROOF_TOPIC_FILE` the signed topic (`propose_rules`) |
 | `PROOF_OUTPUT_DIR`, `PROOF_WORK_DIR` | where to write the answer; scratch on the writable disk |
 | `PROOF_SECRETS_DIR`, `PROOF_SECRET_FILES` | owner key material staged by the KVM host (`PROOF_VM_AGENT_OWNER_KEY_DIR`), by file name. **Read them; never print them** — the agent redacts their values from every log tail and evidence string it sends back, but not from anything you write elsewhere |
-| `PROOF_PARAM_<KEY>` | one per `constraints.params` entry (key upper-cased, `-` → `_`). This is how a topic tells its adaptor which tasks, agent, concurrency, key file, … to use — **the adaptor never hardcodes them**. Two signed names that collide after that mapping (`foo-bar` / `foo_bar`) are refused before anything runs |
+| `PROOF_PARAM_<KEY>` | one per `constraints.params` entry (key upper-cased, `-` → `_`). This is how a topic tells its adaptor which tasks, agent, concurrency, key file, … to use — **the adaptor never hardcodes them**. Two signed names that collide after that mapping (`foo-bar` / `foo_bar`) are refused before anything runs. The well-known **run-policy** keys below are shape-checked by the guest before the adaptor runs |
 | `PROOF_MINER_ENV_NAMES`, `PROOF_MINER_ENV_DIR` | the **miner's own** keys for this run (paid jobs only), for the variables the signed topic declared in `constraints.params.miner_byok` / `miner_env_allowlist`. Each is exported under its own name and also written to `$PROOF_MINER_ENV_DIR/<NAME>` (0600). Unset when the topic asks for none. Same rule as the owner files: **read them; never print them** — the agent redacts their values from the log tail and evidence it sends back |
 
 `HOME`, `XDG_RUNTIME_DIR`, `PATH`, `LANG` are set for the run-as user;
 nothing else of the agent's environment is inherited. stdout / stderr are
 drained into a rolling tail (64 KiB total) while the process runs; write
 logs you need to keep under `$PROOF_WORK_DIR`.
+
+## Generic run policy (every runner, `proof-experiment::RunPolicy`)
+
+A signed topic steers its paid jobs with these well-known
+`constraints.params` keys. They reach the adaptor as ordinary
+`PROOF_PARAM_*` variables; what makes them special is that the control
+plane (before any experiment VM) and the guest (before the adaptor) refuse
+a malformed value by name, so a typo in a signed knob is a 503 and never a
+run under another meaning. Values are topic data; a topic that sets none
+gets the adaptor's contract behaviour (score every item of the pack, fail
+closed on an unmeasured one).
+
+| Param | Shape | Meaning for an adaptor |
+|-------|-------|------------------------|
+| `tasks` | `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}` names, comma / space separated | The exact items to score, in order. An item the pack does not hold **fails closed** (never a smaller set). One name = the single-task smoke |
+| `task_exclude` | same list shape | Items never scored |
+| `n_tasks` | positive integer | Keep only the first N selected items (`1` = smoke) |
+| `max_task_duration_s` | positive integer | Drop items whose **known** duration is at or over this; absent = no gate |
+| `exclude_unknown_duration` | `"true"` / `"false"` | Under a gate, drop items with no duration metadata |
+| `exec_timeout_s` | positive integer | Default wall clock for one command the miner's harness runs without its own timeout (the reference adaptor exports it as `PROOF_EXEC_TIMEOUT_S`) |
+| `agent_exception_policy` | `fail` (default) / `zero` | What an item the **miner's harness** crashed on counts as: no measurement (run fails closed) or reward 0 with the exception in evidence. Infrastructure failures are never a score under either |
+| `timeout_multiplier`, `agent_timeout_multiplier`, `verifier_timeout_multiplier`, `env_build_timeout_multiplier` | positive number ≤ 100 | Scale the pack-declared timeouts; passed to the harness only when signed |
+| `n_concurrent`, `n_attempts` | positive integer | Items at once / attempts per item |
+
+An adaptor for another harness may ignore the ones that do not apply to it;
+it must never invent a value for one the topic did not set.
 
 ## Skeleton (contract only — no harness)
 

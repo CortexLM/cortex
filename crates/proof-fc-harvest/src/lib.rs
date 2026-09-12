@@ -655,12 +655,21 @@ fn harbor_trial_dirs(work: &Path) -> Vec<PathBuf> {
     trials
 }
 
+/// Names of the **measured** trials the guest's evidence claims. A row whose
+/// `outcome` is anything but `measured` (an `agent_exception` the topic's
+/// policy scored 0) never had a verifier reward on disk, so the harvest
+/// copy is not incomplete for lacking one; `n_measured` counts the same set.
 fn evidence_trial_names(evidence: &BTreeMap<String, serde_json::Value>) -> Vec<String> {
     let Some(trials) = evidence.get("trials").and_then(serde_json::Value::as_array) else {
         return Vec::new();
     };
     trials
         .iter()
+        .filter(|row| {
+            row.get("outcome")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|o| o == "measured")
+        })
         .filter_map(|row| {
             row.get("name")
                 .and_then(serde_json::Value::as_str)

@@ -161,52 +161,124 @@ proof_is_harbor_agent_dir() {
     python3 "$PROOF_RESOLVE_AGENT" --dir "$d" --check
 }
 
-# Filter pack tasks. Honor PROOF_TASK_SLICE / first-15: do not apply the
-# shortpack allow-list for a measured first-15 baseline (INFRA excludes
-# only). Shortpack only when PROOF_TASK_FILTER / params.task_filter_mode
-# is explicitly shortpack. See filter_tasks.py.
+# Materialise the scored task set from topic data only: params.tasks /
+# task_exclude / n_tasks / max_task_duration_s / exclude_unknown_duration,
+# constraints.task_slice, and the pack's own filter.json / slices/. No
+# compiled task list, no compiled mode. See filter_tasks.py.
 proof_filter_tasks() {
     : "${PROOF_TASKS:?proof_require_tasks first}"
     : "${PROOF_WORK_DIR:?PROOF_WORK_DIR is required}"
     local dest="$PROOF_WORK_DIR/tasks-filtered"
     local extra=()
-    if [ -n "${PROOF_TASK_FILTER:-}" ]; then
-        extra+=(--mode "$PROOF_TASK_FILTER")
-    elif [ -n "${PROOF_PARAM_TASK_FILTER_MODE:-}" ]; then
-        extra+=(--mode "$PROOF_PARAM_TASK_FILTER_MODE")
-    fi
-    if [ -n "${PROOF_TASK_SLICE:-}" ]; then
-        extra+=(--task-slice "$PROOF_TASK_SLICE")
-    fi
-    if [ -n "${PROOF_PARAM_TASK_FILTER:-}" ]; then
-        extra+=(--filter-rel "$PROOF_PARAM_TASK_FILTER")
-    fi
-    if [ "${PROOF_PARAM_EXCLUDE_UNKNOWN_DURATION:-}" = "true" ]; then
+    [ -n "${PROOF_PARAM_TASKS:-}" ] && extra+=(--tasks "$PROOF_PARAM_TASKS")
+    [ -n "${PROOF_PARAM_TASK_EXCLUDE:-}" ] && extra+=(--exclude "$PROOF_PARAM_TASK_EXCLUDE")
+    [ -n "${PROOF_PARAM_N_TASKS:-}" ] && extra+=(--n-tasks "$PROOF_PARAM_N_TASKS")
+    [ -n "${PROOF_TASK_SLICE:-}" ] && extra+=(--task-slice "$PROOF_TASK_SLICE")
+    [ -n "${PROOF_PARAM_TASK_FILTER:-}" ] && extra+=(--filter-rel "$PROOF_PARAM_TASK_FILTER")
+    [ -n "${PROOF_PARAM_MAX_TASK_DURATION_S:-}" ] && extra+=(--max-duration-s "$PROOF_PARAM_MAX_TASK_DURATION_S")
+    if [ "$(printf '%s' "${PROOF_PARAM_EXCLUDE_UNKNOWN_DURATION:-}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
         extra+=(--drop-unknown)
     fi
     python3 "$PROOF_FILTER_TASKS" \
         --tasks-dir "$PROOF_TASKS" \
         --dest-dir "$dest" \
         --pack-dir "${PROOF_PACK_DIR:?}" \
-        --max-duration-s "${PROOF_PARAM_MAX_TASK_DURATION_S:-3600}" \
         ${extra[@]+"${extra[@]}"} \
-        || proof_die "task duration filter failed"
+        || proof_die "task selection failed (topic params / pack filter)"
     PROOF_TASKS="$dest"
     export PROOF_TASKS
 }
 
-# Agents must reach the internet (OpenRouter / BYOK). Harbor Docker env
-# rejects network_mode=no-network on this guest; rewrite the filtered copy.
+# A positive integer, else fail closed naming the knob.
+proof_positive_int() {
+    local what="$1" raw="$2"
+    case "$raw" in
+        '' | *[!0-9]*) proof_die "$what must be a positive integer (got '$raw')" ;;
+    esac
+    [ "$raw" -gt 0 ] || proof_die "$what must be a positive integer (got '$raw')"
+}
+
+# A positive number (Harbor multiplier), else fail closed naming the knob.
+proof_positive_number() {
+    local what="$1" raw="$2"
+    printf '%s' "$raw" | grep -Eq '^([0-9]+(\.[0-9]+)?|\.[0-9]+)$' \
+        || proof_die "$what must be a positive number (got '$raw')"
+    awk -v v="$raw" 'BEGIN { exit (v > 0) ? 0 : 1 }' \
+        || proof_die "$what must be a positive number (got '$raw')"
+}
+
+# params.exec_timeout_s → PROOF_EXEC_TIMEOUT_S: the default wall clock, in
+# seconds, for one harness environment.exec() call that passes no
+# timeout_sec (proof_python_agent applies it; scripts read the variable).
+# Unset when the topic is silent — never a compiled default.
+proof_export_exec_timeout() {
+    if [ -n "${PROOF_PARAM_EXEC_TIMEOUT_S:-}" ]; then
+        proof_positive_int "exec_timeout_s" "$PROOF_PARAM_EXEC_TIMEOUT_S"
+        export PROOF_EXEC_TIMEOUT_S="$PROOF_PARAM_EXEC_TIMEOUT_S"
+        echo "rlm_fc_in_guest_harbor: harness exec default timeout ${PROOF_EXEC_TIMEOUT_S}s (topic exec_timeout_s)" >&2
+    else
+        unset PROOF_EXEC_TIMEOUT_S || true
+    fi
+}
+
+# Append Harbor timeout flags for the multipliers the topic signed
+# (params.timeout_multiplier, agent_timeout_multiplier,
+# verifier_timeout_multiplier, env_build_timeout_multiplier). Nothing is
+# passed for a silent topic, so the pack's task.toml wall clocks stand.
+# Usage: proof_harbor_timeout_flags ARRAY_NAME
+proof_harbor_timeout_flags() {
+    local -n _cmd="$1"
+    if [ -n "${PROOF_PARAM_TIMEOUT_MULTIPLIER:-}" ]; then
+        proof_positive_number "timeout_multiplier" "$PROOF_PARAM_TIMEOUT_MULTIPLIER"
+        _cmd+=(--timeout-multiplier "$PROOF_PARAM_TIMEOUT_MULTIPLIER")
+    fi
+    if [ -n "${PROOF_PARAM_AGENT_TIMEOUT_MULTIPLIER:-}" ]; then
+        proof_positive_number "agent_timeout_multiplier" "$PROOF_PARAM_AGENT_TIMEOUT_MULTIPLIER"
+        _cmd+=(--agent-timeout-multiplier "$PROOF_PARAM_AGENT_TIMEOUT_MULTIPLIER")
+    fi
+    if [ -n "${PROOF_PARAM_VERIFIER_TIMEOUT_MULTIPLIER:-}" ]; then
+        proof_positive_number "verifier_timeout_multiplier" "$PROOF_PARAM_VERIFIER_TIMEOUT_MULTIPLIER"
+        _cmd+=(--verifier-timeout-multiplier "$PROOF_PARAM_VERIFIER_TIMEOUT_MULTIPLIER")
+    fi
+    if [ -n "${PROOF_PARAM_ENV_BUILD_TIMEOUT_MULTIPLIER:-}" ]; then
+        proof_positive_number "env_build_timeout_multiplier" "$PROOF_PARAM_ENV_BUILD_TIMEOUT_MULTIPLIER"
+        _cmd+=(--environment-build-timeout-multiplier "$PROOF_PARAM_ENV_BUILD_TIMEOUT_MULTIPLIER")
+    fi
+}
+
+# Task network mode on the filtered copy. Default `public`: agents reach
+# the pinned model (OpenRouter / BYOK) and Harbor's Docker env cannot honour
+# no-network on this guest. A topic may sign task_network_mode=keep to leave
+# the pack's own task.toml untouched.
 proof_enable_agent_network() {
     : "${PROOF_TASKS:?proof_filter_tasks first}"
+    local mode
+    mode="$(printf '%s' "${PROOF_PARAM_TASK_NETWORK_MODE:-public}" | tr '[:upper:]' '[:lower:]')"
+    case "$mode" in
+        keep)
+            echo "rlm_fc_in_guest_harbor: task_network_mode=keep; pack network settings left as signed" >&2
+            return 0
+            ;;
+        public) ;;
+        *) proof_die "task_network_mode must be public (default) or keep (got $mode)" ;;
+    esac
     python3 "$PROOF_REWRITE_NETWORK" --tasks-dir "$PROOF_TASKS" --mode public \
         || proof_die "failed to enable agent network on the filtered task copy"
 }
 
-# Harbor verifier execs pytest inside the task environment image. n15 x0017
-# biped + cad scored 0 because that image had no pytest. Patch the copy.
+# Harbor verifier execs pytest inside the task environment image. Patch the
+# filtered copy so a missing pytest is an image build error, not a false
+# reward 0.0. A topic may sign ensure_verifier_pytest=false to skip it.
 proof_ensure_verifier() {
     : "${PROOF_TASKS:?proof_filter_tasks first}"
+    case "$(printf '%s' "${PROOF_PARAM_ENSURE_VERIFIER_PYTEST:-true}" | tr '[:upper:]' '[:lower:]')" in
+        false | 0 | no)
+            echo "rlm_fc_in_guest_harbor: ensure_verifier_pytest=false; verifier images left as packed" >&2
+            return 0
+            ;;
+        true | 1 | yes) ;;
+        *) proof_die "ensure_verifier_pytest must be true or false" ;;
+    esac
     python3 "$PROOF_ENSURE_VERIFIER" --tasks-dir "$PROOF_TASKS" \
         || proof_die "failed to ensure pytest in verifier/environment images"
 }
@@ -329,6 +401,14 @@ proof_start_container_runtime() {
     fi
     if [ -n "${DOCKER_HOST:-}" ] && proof_docker_ok; then
         echo "rlm_fc_in_guest_harbor: using docker via DOCKER_HOST=$DOCKER_HOST" >&2
+        export PROOF_CONTAINER_RUNTIME=docker
+        return 0
+    fi
+    # A docker CLI that reaches a daemon through its own default context
+    # (rootless docker under XDG_RUNTIME_DIR, a configured context, a dev
+    # box). Harbor talks to the same daemon the CLI does.
+    if proof_docker_ok; then
+        echo "rlm_fc_in_guest_harbor: using docker via the CLI's default context" >&2
         export PROOF_CONTAINER_RUNTIME=docker
         return 0
     fi

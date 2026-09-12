@@ -119,6 +119,16 @@ adaptor contract plus the versioned Harbor evaluate reference live under
 [`guest/runners/`](guest/runners/README.md).
 Procedure, RE-LOCK, and limits:
 [`docs/runbooks/proof-experiment-vms.md`](../docs/runbooks/proof-experiment-vms.md).
+The run itself is steered by the signed topic's generic run policy (`tasks`,
+`n_tasks`, `exec_timeout_s`, `agent_exception_policy`, …), so one task of
+any custom topic is a development smoke: `deploy/scripts/proof-experiment-smoke.py`
+(real guest agent over `--stdio`, adaptor direct, or a KVM-host experiment
+VM) and the operator-run hop `deploy/scripts/proof-metal-smoke.sh` —
+[`docs/runbooks/proof-experiment-smoke.md`](../docs/runbooks/proof-experiment-smoke.md).
+Neither persists a row or tips anything; cloud agents hold no metal key, the
+metal evidence is pasted by the operator, scratch stays under
+`/var/lib/proof/<wd>/`, and the `orch` driver refuses while an experiment VM
+is live or until the pinned image carries this adaptor.
 
 **Staging wire (DO):** the CP is the existing staging master; the agent runs
 as a host systemd unit on the same droplet (`cortex-staging`, nested

@@ -15,11 +15,28 @@ A Harbor **job** snapshot (``finished_at`` / ``n_running`` / ``n_completed``,
 no ``trial_name`` / ``verifier_result``) that is still running or
 ``finished_at``-null is fail-closed, matching host harvest.
 
-Zero measured trials → exit 2, no report. With ``--allow-tasks-dir``, every
-filtered task directory must have ≥1 complete trial (``task`` or
+Zero scored trials → exit 2, no report. With ``--allow-tasks-dir``, every
+filtered task directory must have ≥1 scored trial (``task`` or
 ``task__attempt``); a subset mean is not a paid score. A nonzero Harbor
 exit is **not** fail-closed by itself once the filtered set is complete;
 ``harbor_exit`` stays in evidence.
+
+**Agent exceptions are topic policy** (``--agent-exception-policy``, from
+``constraints.params.agent_exception_policy``). A trial whose ``result.json``
+carries ``exception_info`` raised **during the harness (agent) phase** —
+``agent_execution.started_at`` set, the verifier never started, no
+``verifier_result``, no ``verifier/reward.txt`` — is the miner's harness
+failing the task (a crash, an unhandled command timeout). Harbor's own
+agent timeout is different: Harbor records it and still runs the verifier,
+so that trial is simply **measured** (or, if the verifier then failed,
+unmeasured infrastructure). Under ``fail`` (the default) it is no measurement and the run
+fails closed as before. Under ``zero`` it scores **0.0** — the task was not
+solved — and the exception type plus first message line land in evidence
+(``agent_exception_trials``). Every other unmeasured trial — environment
+build / start failure, agent setup failure, a verifier that raised, a
+trial with no ``exception_info`` — is never a score under either policy:
+those are not the miner's harness failing, and inventing a 0 for them
+would punish the miner for the operator's infrastructure.
 """
 
 from __future__ import annotations
@@ -35,7 +52,11 @@ from typing import Any
 MAX_TAIL_CHARS = 8 * 1024
 MAX_EVIDENCE_TRIALS = 256
 MAX_REWARD_TXT_BYTES = 64 * 1024
+MAX_EXCEPTION_CHARS = 400
 REDACTED = "[REDACTED]"
+POLICY_FAIL = "fail"
+POLICY_ZERO = "zero"
+EXCEPTION_POLICIES = (POLICY_FAIL, POLICY_ZERO)
 
 
 def _fail(msg: str, code: int = 2) -> None:
@@ -226,20 +247,75 @@ def trial_complete_reward(trial_dir: Path, obj: Any) -> float | None:
     return json_reward
 
 
-def collect_trials(
-    jobs_dir: Path, allow: frozenset[str] | None = None
-) -> list[dict[str, Any]]:
-    """Load every complete Harbor trial. Do not cap here — the cap is evidence only.
+def _timing_started(obj: dict[str, Any], phase: str) -> bool:
+    timing = obj.get(phase)
+    if not isinstance(timing, dict):
+        return False
+    started = timing.get("started_at")
+    return isinstance(started, str) and bool(started.strip())
 
-    A trial dir counts only when ``result.json`` has
+
+def agent_phase_exception(trial_dir: Path, obj: Any) -> dict[str, str] | None:
+    """The harness-phase exception a trial died of, or ``None``.
+
+    Strict on purpose: ``exception_info`` present, the agent phase started,
+    the verifier never started, no ``verifier_result``, and no
+    ``verifier/reward.txt`` on disk. Anything else (environment build /
+    start failure before the agent ran, a verifier that raised, a trial
+    that recorded no exception) is **not** a harness failure and stays
+    unmeasured under every policy.
+    """
+    if not isinstance(obj, dict):
+        return None
+    info = obj.get("exception_info")
+    if not isinstance(info, dict):
+        return None
+    if obj.get("verifier_result") is not None:
+        return None
+    if not _timing_started(obj, "agent_execution"):
+        return None
+    if _timing_started(obj, "verifier"):
+        return None
+    if (trial_dir / "verifier" / "reward.txt").is_file():
+        return None
+    exc_type = info.get("exception_type")
+    exc_type = exc_type.strip() if isinstance(exc_type, str) and exc_type.strip() else "Exception"
+    message = info.get("exception_message")
+    first_line = ""
+    if isinstance(message, str):
+        for line in message.splitlines():
+            if line.strip():
+                first_line = line.strip()
+                break
+    return {
+        "exception_type": exc_type[:MAX_EXCEPTION_CHARS],
+        "exception_message": first_line[:MAX_EXCEPTION_CHARS],
+    }
+
+
+def collect_trials(
+    jobs_dir: Path,
+    allow: frozenset[str] | None = None,
+    agent_exception_policy: str = POLICY_FAIL,
+) -> list[dict[str, Any]]:
+    """Load every scored Harbor trial. Do not cap here — the cap is evidence only.
+
+    A trial dir is **measured** only when ``result.json`` has
     ``verifier_result.rewards.reward`` **and** ``verifier/reward.txt`` matches.
     ``reward.txt`` alone is not a measurement (miner-writable forge / host would
     refuse). Job-level snapshots are not trials.
+
+    Under ``agent_exception_policy = "zero"`` a trial that died of a
+    harness-phase exception ([`agent_phase_exception`]) is **scored** 0.0
+    and carries ``outcome = "agent_exception"``; under ``fail`` it is left
+    out (and the coverage check fails the run closed).
 
     When ``allow`` is a non-empty set, trials whose name is not a filtered
     task (or ``task__attempt``) are dropped so a script that ran the
     unfiltered pack cannot score excluded ids.
     """
+    if agent_exception_policy not in EXCEPTION_POLICIES:
+        _fail(f"agent_exception_policy must be one of {EXCEPTION_POLICIES}, got {agent_exception_policy!r}")
     by_dir: dict[str, dict[str, Any]] = {}
     if not jobs_dir.is_dir():
         return []
@@ -247,13 +323,28 @@ def collect_trials(
     for result_path in sorted(jobs_dir.rglob("result.json")):
         obj = _load_json(result_path)
         trial_dir = result_path.parent
-        reward = trial_complete_reward(trial_dir, obj)
-        if reward is None:
-            continue
         key = str(trial_dir)
         if key in by_dir:
             continue
-        by_dir[key] = {"name": _trial_name(obj, trial_dir), "reward": reward}
+        reward = trial_complete_reward(trial_dir, obj)
+        if reward is not None:
+            by_dir[key] = {
+                "name": _trial_name(obj, trial_dir),
+                "reward": reward,
+                "outcome": "measured",
+            }
+            continue
+        if agent_exception_policy != POLICY_ZERO:
+            continue
+        crashed = agent_phase_exception(trial_dir, obj)
+        if crashed is None:
+            continue
+        by_dir[key] = {
+            "name": _trial_name(obj, trial_dir),
+            "reward": 0.0,
+            "outcome": "agent_exception",
+            **crashed,
+        }
 
     rows = [by_dir[k] for k in sorted(by_dir)]
     if not allow:
@@ -354,15 +445,29 @@ def build_report(
     agent: str,
     agent_source: str,
     harness_kind: str = "",
+    agent_exception_policy: str = POLICY_FAIL,
 ) -> dict[str, Any]:
     primary = mean_reward(trials)
     evidence_trials = trials[:MAX_EVIDENCE_TRIALS]
+    measured = [t for t in trials if t.get("outcome", "measured") == "measured"]
+    crashed = [t for t in trials if t.get("outcome") == "agent_exception"]
     return {
         "primary_value": primary,
         "claim_holds": True,
         "evidence": {
             "trials": evidence_trials,
-            "n_measured": len(trials),
+            "n_scored": len(trials),
+            "n_measured": len(measured),
+            "n_agent_exceptions": len(crashed),
+            "agent_exception_policy": agent_exception_policy,
+            "agent_exception_trials": [
+                {
+                    "name": t["name"],
+                    "exception_type": t.get("exception_type", ""),
+                    "exception_message": t.get("exception_message", ""),
+                }
+                for t in crashed[:MAX_EVIDENCE_TRIALS]
+            ],
             "n_evidence_trials": len(evidence_trials),
             "evidence_truncated": len(trials) > MAX_EVIDENCE_TRIALS,
             "mean_reward": primary,
@@ -389,9 +494,19 @@ def main(argv: list[str] | None = None) -> int:
         "--allow-tasks-dir",
         default="",
         help="filtered task copy; trials not named after these dirs are dropped; "
-        "every dir must have ≥1 complete trial",
+        "every dir must have ≥1 scored trial",
+    )
+    parser.add_argument(
+        "--agent-exception-policy",
+        default=os.environ.get("PROOF_PARAM_AGENT_EXCEPTION_POLICY", POLICY_FAIL).strip().lower()
+        or POLICY_FAIL,
+        help="fail (default): a harness-phase exception is no measurement; "
+        "zero: it scores 0.0 with the exception in evidence",
     )
     args = parser.parse_args(argv)
+    policy = args.agent_exception_policy.strip().lower()
+    if policy not in EXCEPTION_POLICIES:
+        _fail(f"agent_exception_policy must be one of {EXCEPTION_POLICIES}, got {policy!r}")
 
     jobs_dir = Path(args.jobs_dir)
     refuse_stale_harbor_snapshots(jobs_dir)
@@ -403,19 +518,21 @@ def main(argv: list[str] | None = None) -> int:
                 f"allow-tasks-dir {args.allow_tasks_dir} has no task directories; "
                 "refusing to invent a primary_value"
             )
-    trials = collect_trials(jobs_dir, allow)
+    trials = collect_trials(jobs_dir, allow, policy)
     if not trials:
         _fail(
             f"no measured Harbor trials under {jobs_dir} "
-            "(need matching verifier_result.rewards.reward and verifier/reward.txt); "
-            "refusing to invent a primary_value"
+            "(need matching verifier_result.rewards.reward and verifier/reward.txt"
+            + ("; agent_exception_policy=zero found no harness-phase exception either" if policy == POLICY_ZERO else "")
+            + "); refusing to invent a primary_value"
         )
     if allow:
         missing = missing_filtered_tasks(trials, allow)
         if missing:
             _fail(
                 f"incomplete vs filtered task set (missing measured trials for: "
-                f"{', '.join(missing)}); refusing a partial primary_value"
+                f"{', '.join(missing)}; agent_exception_policy={policy}); "
+                "refusing a partial primary_value"
             )
     secrets = load_redact_values()
     log_path = Path(args.log) if args.log else None
@@ -426,16 +543,18 @@ def main(argv: list[str] | None = None) -> int:
         args.agent,
         args.agent_source,
         args.harness_kind,
+        policy,
     )
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     dumped = json.dumps(report, indent=2, sort_keys=True)
     dumped = redact(dumped, secrets)
     out.write_text(dumped + "\n", encoding="utf-8")
-    n = len(trials)
+    ev = report["evidence"]
     print(
-        f"summarize: n_measured={n} primary_value={report['primary_value']} "
-        f"harbor_exit={args.harbor_exit}",
+        f"summarize: n_scored={ev['n_scored']} n_measured={ev['n_measured']} "
+        f"n_agent_exceptions={ev['n_agent_exceptions']} (policy={policy}) "
+        f"primary_value={report['primary_value']} harbor_exit={args.harbor_exit}",
         file=sys.stderr,
     )
     return 0

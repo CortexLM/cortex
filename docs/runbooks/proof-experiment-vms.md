@@ -34,7 +34,8 @@ committed to this repository; the words that select the in-guest path are
 | `model` (`constraints.params.model`) | Harbor / LiteLLM id. Exported as `PROOF_PARAM_MODEL`. Harbor `-m` is `PROOF_PARAM_MODEL` falling back to `PROOF_MODEL_PIN`. An OpenRouter path (`miner_byok` / `inference_key_env` = `OPENROUTER_API_KEY`) fails closed unless that id already has the `openrouter/` provider prefix — the adaptor does not rewrite the pin | `openrouter/vendor/model` |
 | `miner_byok`, `miner_env_allowlist` | Environment variable names the **miner** must / may supply on the submit body's `env`. The miner's values are exported into this VM for the paid job under those names, written to `$PROOF_MINER_ENV_DIR/<NAME>` (0600), and redacted from everything the guest ships back. The operator's own key is never substituted for a missing one ([`docs/PROOF.md`](../PROOF.md) § Miner BYOK) | comma-separated `[A-Z][A-Z0-9_]{0,63}`, never `PROOF_…` |
 | `inject_miner_env_sister` | `"true"` also forwards that env to a sister guest running the miner's entrypoint | `"true"` / `"false"` |
-| any other key | Reaches the adaptor as `PROOF_PARAM_<KEY>` (upper-cased, `-` → `_`; two signed names that collide after that are refused before anything runs) — this is how a topic names its tasks sub-directory, harness agent, concurrency, key file, … | ≤32 printable params |
+| `tasks`, `task_exclude`, `n_tasks`, `max_task_duration_s`, `exclude_unknown_duration`, `exec_timeout_s`, `agent_exception_policy`, `timeout_multiplier` (+ `agent_` / `verifier_` / `env_build_` variants), `n_concurrent`, `n_attempts` | The generic **run policy** (`proof-experiment::RunPolicy`): which pack items are scored and how many, the wall clocks, what a harness crash counts as. Shape-checked by `run_paid_job` **before any experiment VM** and by the guest **before the adaptor** — a typo is a 503 naming the knob, never a run under another meaning. `tasks` with one name (or `n_tasks = "1"`) is the single-task smoke ([`proof-experiment-smoke.md`](proof-experiment-smoke.md)) | see [`deploy/guest/runners/README.md`](../../deploy/guest/runners/README.md) § Generic run policy |
+| any other key | Reaches the adaptor as `PROOF_PARAM_<KEY>` (upper-cased, `-` → `_`; two signed names that collide after that are refused before anything runs) — this is how a topic names its tasks sub-directory, harness agent, key file, inspect rule policy, … | ≤32 printable params |
 
 A topic that names none of these keeps its registered custom runner's
 ordinary path (topic VM + sister guest). The topic content the operator
@@ -331,21 +332,26 @@ still leak no path, key, or origin (the wire check's `cp` step).
   reach the allowlisted TAP (OpenRouter). The host nftables allowlist on the
   Firecracker TAP is unchanged. Do not treat guest-internal `public` as open
   host egress.
-- **Task pack duration filter.** The Harbor adaptor copies only the Dev
-  **default short-task allowlist** from retained n15 x0017 before
-  `n_concurrent` baselines or miner evals (`max_task_duration_s`, default
-  3600). INCLUDE: `cargo-flight-dispatch`, `embedding-drift-monitor`,
-  `bun-sourcemap-leak`, `fin-saccr-rwa`, `foodstuff-beta-activity`,
-  `atrx-vep-crispr`. EXCLUDE >1h: `biped-contact-dynamics` (~5.2h),
-  `formal-crypto` (~2.1h), `cad-model` (~1.2h), `data-anonymization`
-  (~1.1h). EXCLUDE broken until fixed: `batched-eval-parity` (no-network),
-  `ctr-optimization` / `cumulative-layout-shift` (EnvStartTimeout),
-  `distributed-dedup` (tmux), `coq-block-bound` (wall cut);
-  `biped-contact-dynamics` / `cad-model` also stay out until verifier pytest
-  is proven. Pack `filter.json` may only **intersect** that allow-list
-  (further restrict) and may only **lower** the duration ceiling. Example:
-  `harness/pack_filter.example.json`. An empty filtered set fails closed.
-  This does not reseal a stub baseline.
+- **Task selection is topic data.** The Harbor adaptor compiles no task
+  list, slice, mode, or duration table. The scored set is
+  `constraints.params.tasks` (exact names; a name the pack lacks fails
+  closed), else `constraints.task_slice` resolved through the pack
+  (`slices/<label>.json` / `filter.json` → `slices`), else the pack's
+  `filter.json` → `allow`, else every task; then `task_exclude` / pack
+  `deny`, an optional `max_task_duration_s` gate (pack `max_duration_s` may
+  only lower it; a declared timeout is not a duration), then `n_tasks`.
+  Broken-until-fixed tasks belong in the topic's `task_exclude` or the
+  pack's `deny`, never in git. An empty selection fails closed. Example
+  pack side: `harness/pack_filter.example.json`. One selected task is the
+  development smoke ([`proof-experiment-smoke.md`](proof-experiment-smoke.md)).
+- **What a harness crash counts as is topic data.** A trial the miner's
+  harness raised on before the verifier ran is no measurement under
+  `agent_exception_policy = fail` (default: the run fails closed) and a
+  reward 0 with the exception in evidence under `zero`. Infrastructure
+  failures (environment build / start, verifier, agent setup) are never a
+  score under either. `exec_timeout_s` sets the default wall clock for
+  harness `environment.exec` calls that pass none; the Harbor timeout
+  multipliers are passed only when signed.
 - **Verifier pytest.** Harbor execs `pytest` inside the task environment /
   verifier container. Filtered-copy **environment / verifier / tests**
   Dockerfiles are patched even when FROM is CUDA / MuJoCo / FreeCAD (the

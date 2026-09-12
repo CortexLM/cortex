@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Patch filtered-copy Dockerfiles so Harbor verifiers have pytest on PATH.
 
-Retained n15 x0017: ``biped-contact-dynamics`` and ``cad-model`` scored
-reward 0.0 because verifier stdout was ``pytest: command not found``. Harbor
-execs pytest inside the task environment / verifier container, not the guest
-host. A guest-image pytest does not fix that hole.
+A retained metal run scored two tasks reward 0.0 because verifier stdout was
+``pytest: command not found``. Harbor execs pytest inside the task
+environment / verifier container, not the guest host. A guest-image pytest
+does not fix that hole. The topic may sign ``ensure_verifier_pytest=false``
+to leave its pack's images untouched.
 
 Environment, verifier, and tests Dockerfiles are patched even when the FROM
 line does not look like Python (CUDA / MuJoCo / FreeCAD images). Last-stage

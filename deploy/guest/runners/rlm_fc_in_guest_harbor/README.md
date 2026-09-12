@@ -6,18 +6,19 @@ only by putting this exact id in `constraints.params.baseline_runner`
 (alias `in_guest_benchmark_runner`). Any other id still fails closed until
 that id is baked.
 
-This tree exists because the live overlay
-`/var/lib/proof/overlays/harbor-harness/opt/proof/harness/run-harbor` (and the
-thin adaptor that `exec`'d it) **ignored `$PROOF_ARTIFACT_DIR`** on evaluate
-(`harbor run … -a terminus-2` on the operator pack) and always loaded the
-**owner** key from `PROOF_SECRETS_DIR`. Inspect already saw the artefact;
-evaluate did not use the miner code. That gap is the bug this adaptor closes.
-
-The evaluate path is **not** Terminus-2-only. Custom Python is the primary
-miner harness; Harbor `BaseAgent` subclasses, an explicit `harness.json`, and
-a classic `run.sh` are also accepted. Built-in names such as `terminus-2` are
-used only for **baseline** with no miner artefact, or when the miner names
-one in `harness.json`.
+**Everything the adaptor decides is topic data.** Which tasks are scored,
+how many, under which wall clocks, what a crashed harness counts as, and
+how each anti-cheat rule is ticked all come from the signed
+`constraints.params` (exported by the guest as `PROOF_PARAM_*`),
+`constraints.task_slice` / `model_pin`, and the topic-pinned pack
+(`experiment_pack_digest`). Nothing in this directory names a benchmark, a
+task, a slice, a rule id, or a timeout number. The same adaptor therefore
+serves **any** custom-family topic whose pack is a directory of Harbor
+tasks: point a topic's params at it and the run is defined by that topic.
+The generic knobs are shape-checked by `proof-experiment::RunPolicy` on the
+control plane (before any experiment VM) and in the guest (before this
+adaptor runs), so a typo in a signed value is a 503 with the knob named,
+never a run under some other meaning.
 
 ## Miner harness interface
 
@@ -40,9 +41,9 @@ Evaluate discovers, in order:
 
 | `kind` | What runs |
 |--------|-----------|
-| `python` (primary) | Custom Python class (`Agent` / `ProofAgent` / any class named in `import_path`). Need not subclass Harbor `BaseAgent`. Harbor `-a` is the in-tree wrapper `proof_python_agent:ProofPythonAgent`, which imports **your** class from the artefact only. |
+| `python` (primary) | Custom Python class (`Agent` / `ProofAgent` / any class named in `import_path`). Need not subclass Harbor `BaseAgent`. Harbor `-a` is the in-tree wrapper `proof_python_agent:ProofPythonAgent`, which imports **your** class from the artefact only and hands it the environment (wrapped for the topic's `exec_timeout_s`, § Timeouts). |
 | `harbor` | Harbor `BaseAgent` / `BaseInstalledAgent` subclass, passed as `-a module:Class` |
-| `script` | Miner executable relative to the artefact. Docker, **filtered** tasks, and BYOK are already set. The script sees `$PROOF_TASKS` (and `$PROOF_PACK_DIR/<tasks_dir>` rebound to a **tasks-only** materialized copy — original-pack siblings are not copied). `harbor run --path` is rewritten onto the filtered tree. `PROOF_HARBOR_REAL` is unset and is not a wrapper fallback. Summarize **drops trial names** that are not directories under `$PROOF_TASKS` and **fails closed** unless every filtered task has ≥1 complete trial. After the script returns, the adaptor **always** summarizes Harbor trials before treating a postamble TypeError / nonzero exit as fatal. A trial is complete only with matching Harbor `verifier_result.rewards.reward` **and** `verifier/reward.txt` (txt-only / unfinished job snapshots fail closed, same as host harvest). A miner-authored `$PROOF_OUTPUT_DIR/report.json` is deleted and ignored. Never wrapped as `terminus-2`. |
+| `script` | Miner executable relative to the artefact. Docker, the **selected** tasks, and BYOK are already set. The script sees `$PROOF_TASKS` (and `$PROOF_PACK_DIR/<tasks_dir>` rebound to a **tasks-only** materialized copy — original-pack siblings are not copied). `harbor run --path` is rewritten onto the selected tree. Summarize **drops trial names** that are not directories under `$PROOF_TASKS` and **fails closed** unless every selected task has ≥1 scored trial. A trial is measured only with matching Harbor `verifier_result.rewards.reward` **and** `verifier/reward.txt`. A miner-authored `$PROOF_OUTPUT_DIR/report.json` is deleted and ignored. Never wrapped as a built-in agent. |
 | `builtin` | A Harbor built-in the **miner** opted into. Evaluate refuses a topic built-in when this file is absent. |
 
 Custom Python `run()` may take `instruction` alone or Harbor's
@@ -70,9 +71,9 @@ Harbor **does not** accept a filesystem path for `-a`. This adaptor therefore
 
 A one-line `import_path` file inside the agent dir (contents
 `module.path:ClassName`) wins when several classes exist. A built-in name in
-that file is refused: that would ignore miner code the same way `terminus-2`
-did. The named module is resolved in the evaluate import env (artefact
-parent only) and **rejected** if its origin is outside the staged artefact.
+that file is refused: that would ignore miner code. The named module is
+resolved in the evaluate import env (artefact parent only) and **rejected**
+if its origin is outside the staged artefact.
 
 ## Agent selection (miner attach surface)
 
@@ -81,9 +82,9 @@ parent only) and **rejected** if its origin is outside the staged artefact.
 | `evaluate` | custom Python at `agent/` / `recipe/agent/` | wrapper `-a proof_python_agent:ProofPythonAgent` |
 | `evaluate` | Harbor `BaseAgent` dir | that import path |
 | `evaluate` | `harness.json` | the named kind |
-| `evaluate` | `$PROOF_ARTIFACT_DIR/recipe/run.sh` only | **script harness** — not wrapped as `terminus-2` |
+| `evaluate` | `$PROOF_ARTIFACT_DIR/recipe/run.sh` only | **script harness** — not wrapped as a built-in |
 | `evaluate` | artefact staged, nothing matching | **fail closed** — never the topic agent |
-| `baseline` | `PROOF_ARTIFACT_DIR` unset | topic `PROOF_PARAM_HARBOR_AGENT` (operator pack agent, e.g. `terminus-2`) |
+| `baseline` | `PROOF_ARTIFACT_DIR` unset | topic `PROOF_PARAM_HARBOR_AGENT` (operator pack agent) |
 | `baseline` | artefact has a miner harness | that harness (same resolution) |
 | `baseline` | artefact staged but no harness | **fail closed** — topic fallback is only when no miner artefact is staged |
 
@@ -100,7 +101,7 @@ recipe/
   agent/            # PREFERRED: custom Python (class Agent) or Harbor BaseAgent
     agent.py
     import_path     # optional: one line `agent.agent:ClassName`
-  run.sh            # optional script harness; evaluate execs it, does not wrap terminus-2
+  run.sh            # optional script harness; evaluate execs it, does not wrap a built-in
   README.md
 ```
 
@@ -117,15 +118,95 @@ Resolution order after unpack: `$PROOF_ARTIFACT_DIR/agent` then
 `$PROOF_ARTIFACT_DIR/recipe/agent`. Be explicit which layout you hash and
 serve; re-tarring changes the digest.
 
-Off-limits **cheat markers** in the artefact (inspect fails the named rule):
+## Task selection (`harness/filter_tasks.py`)
 
-- `no_eval_short_circuit` on `skip_eval` / `skip_verifier` / `always_pass_eval` / `short_circuit_eval`
-- `no_tb4_hardcoding` on `tb4_answers` / `hardcoded_tb4`
+The scored set is a pure function of the signed topic and its pinned pack.
+Selection, in order, then filters:
 
-The rule-id strings themselves are not markers. A README or comment that
-names `no_eval_short_circuit` / `no_tb4_hardcoding` is compliance language,
-not a fail. A file/byte-limit truncation marks the scan incomplete and
-fails those off-limits rules. Unknown rule ids fail closed.
+| Step | Source | Behaviour |
+|------|--------|-----------|
+| 1 | `params.tasks` (`PROOF_PARAM_TASKS`) | Exact ordered names (comma / space separated). A name the pack does not hold **fails closed** — a topic that names a task is never scored on a smaller set. **One name is the single-task smoke.** |
+| 2 | `constraints.task_slice` (`PROOF_TASK_SLICE`) | Resolved **through the pack**: `slices/<label>.json` (`["task-a", …]`), `slices/<label>.txt` (one per line), or `filter.json` → `slices.<label>`. A label the pack does not define fails closed when the pack defines any slice; a pack with no slices treats the label as informational (recorded in the summary). |
+| 3 | pack `filter.json` → `allow` | The pack's own default set. |
+| 4 | every task directory under `params.tasks_dir` | Sorted. |
+| then | `params.task_exclude` (`PROOF_PARAM_TASK_EXCLUDE`) + pack `filter.json` → `deny` | Removed. **Exact names**, no alias / prefix matching. |
+| then | `params.max_task_duration_s` (pack `max_duration_s` may only **lower** it) | Drops tasks whose **known** duration is at or over the ceiling — pack `durations` / `task_durations.json` first, then duration keys in task metadata. A declared **timeout** (`agent.timeout_sec`, …) is a ceiling, not a duration, and never counts. **No gate at all when neither is set.** `params.exclude_unknown_duration = "true"` drops tasks with no duration under a gate. |
+| then | `params.n_tasks` (`PROOF_PARAM_N_TASKS`) | Keep the first N of what is left (`1` is the smoke shape). |
+
+An empty result fails closed. The kept tasks are **copied** to
+`$PROOF_WORK_DIR/tasks-filtered` (never the pack itself) and
+`.proof-task-filter.json` in that copy records the source, what was kept,
+what was dropped, and why. `harness/pack_filter.example.json` shows the pack
+side with placeholder names.
+
+**A malformed `filter.json` fails closed, never reads as absent.** Every
+present field is shape-checked: `allow` / `deny` must be lists of task
+names and `allow` must not be empty (an empty allow-list is not "every
+task"); `slices` a non-empty object of label → non-empty list;
+`max_duration_s` a positive integer; `durations` an object of task name →
+positive integer seconds (also enforced on `task_durations.json`);
+`exclude_unknown_duration` a JSON boolean. Keys starting with `_` are
+comments; any other unknown key is refused as a typo. A pack whose filter
+is malformed therefore scores nothing until it is fixed and re-pinned,
+rather than scoring a wider or less-gated set than the operator meant.
+
+## Timeouts (topic data)
+
+| Param | Env | Effect |
+|-------|-----|--------|
+| `exec_timeout_s` | `PROOF_EXEC_TIMEOUT_S` | Default `timeout_sec` for one `environment.exec(...)` call the miner's harness makes **without** its own. The custom-Python wrapper wraps the environment it hands the miner; a `timeout_sec` the miner passes explicitly is theirs and is left alone. Script harnesses read the variable. Unset = Harbor's default (no per-command timeout). |
+| `timeout_multiplier` | Harbor `--timeout-multiplier` | Scales every pack-declared timeout. Passed only when signed. |
+| `agent_timeout_multiplier` | Harbor `--agent-timeout-multiplier` | Harness (agent) timeout only. |
+| `verifier_timeout_multiplier` | Harbor `--verifier-timeout-multiplier` | Verifier timeout only. |
+| `env_build_timeout_multiplier` | Harbor `--environment-build-timeout-multiplier` | Environment build timeout only. |
+
+The per-task agent and verifier wall clocks themselves stay pack content
+(`task.toml`); the run as a whole is still held to the topic's
+`eval_executor.max_proof_deadline_s` by the guest agent. Nothing here
+carries a compiled number.
+
+## Trial outcomes (`harness/summarize.py`)
+
+`primary_value` is the mean over every **scored** trial of the selected
+set. A trial is **measured** only with matching Harbor
+`verifier_result.rewards.reward` **and** `verifier/reward.txt` (the paid
+value is the JSON verifier reward). Fail-closed (no invented number, no
+leftover `report.json`) when nothing was scored, the scored set does not
+cover every selected task directory, `reward.txt` is present without
+matching Harbor JSON, or a Harbor job snapshot is still running /
+`finished_at=null` (same refuse as host harvest). A nonzero Harbor or
+script-harness exit still scores when those checks pass; `harbor_exit`
+stays in evidence.
+
+**A task the miner's harness crashed on is topic policy** —
+`params.agent_exception_policy`:
+
+| Value | A trial with `exception_info` raised in the harness phase (agent started, verifier never started, no reward) |
+|-------|------|
+| `fail` (default) | No measurement. The selected set is incomplete → the run fails closed (503, no row) — today's behaviour. |
+| `zero` | Scores **0.0** — the miner's harness did not solve the task (a crash, an unhandled `environment.exec` timeout). Harbor's own agent timeout is not this case: Harbor records it and still runs the verifier, so that trial is measured. The exception type and first message line land in `evidence.agent_exception_trials`; `n_measured` / `n_agent_exceptions` / `n_scored` are split out. |
+
+Under **either** policy an unmeasured trial that is **not** a harness-phase
+failure — environment build / start failure before the agent ran, a
+verifier that raised, agent setup failure, a trial with no `exception_info`,
+a `reward.txt` left beside the exception — is never a score. Those are the
+operator's infrastructure, and inventing a 0 for them would charge the miner
+for it. The topic that wants harness crashes counted as failed tasks signs
+`agent_exception_policy = "zero"`; nothing about it is compiled in.
+
+## Inspect (`inspect_scan.py`)
+
+How each checklist rule is ticked is **signed topic data**:
+
+| Param | Shape | Meaning |
+|-------|-------|---------|
+| `inspect_marker_rules` | `<rule_id>:<marker>\|<marker>;<rule_id>:<marker>` | A rule that **fails** when any marker (case-insensitive substring) appears in the artefact text or file names. Rule-id strings are never markers (naming a rule in a README is compliance language); a marker that occurs inside a rule id is refused at parse time. A file / byte-limit truncation fails every marker rule — truncated absence is not a clean pass. |
+| `inspect_attested_rules` | `rule_a,rule_b` | Rules the host / topic enforce outside this scan (sandbox attestation, BYOK routing, seed, promotion policy). They pass with evidence saying so; inspect ran no inference. |
+
+A rule the topic names in neither list **fails closed** with evidence naming
+the two params — an unknown rule is never a silent pass, and no rule id or
+marker list is compiled into the adaptor. Inspect never sees a key and
+never runs the miner's code.
 
 ## BYOK
 
@@ -148,106 +229,45 @@ Never print key material. The guest agent also redacts log tails.
 
 From the guest contract (`deploy/guest/runners/README.md`): `PROOF_JOB`,
 `PROOF_PACK_DIR`, `PROOF_ARTIFACT_DIR`, `PROOF_OUTPUT_DIR`, `PROOF_WORK_DIR`,
-`PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`, `PROOF_PARAM_*`,
-`PROOF_MINER_ENV_DIR` / `PROOF_MINER_ENV_NAMES`, `PROOF_SECRETS_DIR`.
+`PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`, `PROOF_DEADLINE_S`,
+`PROOF_PARAM_*`, `PROOF_MINER_ENV_DIR` / `PROOF_MINER_ENV_NAMES`,
+`PROOF_SECRETS_DIR`.
 
-Topic params this adaptor reads (all optional except `tasks_dir`; never
-hardcoded to a benchmark name):
+Topic params this adaptor reads (all optional except `tasks_dir`; none
+defaults to a benchmark name):
 
 | Param | Env | Role |
 |-------|------|------|
 | `tasks_dir` | `PROOF_PARAM_TASKS_DIR` | Relative path under the pack. Refused if absolute or contains `..` |
-| `max_task_duration_s` | `PROOF_PARAM_MAX_TASK_DURATION_S` | **shortpack only.** Drop pack tasks whose duration metadata is ≥ this many seconds (default **3600**). Pack `filter.json` may only **lower** the ceiling. Ignored in **first15**. |
-| `task_filter` | `PROOF_PARAM_TASK_FILTER` | Optional relative pack path to `filter.json` / allow-list. In **first15** a pack allow-list is ignored (INFRA excludes still apply). |
-| `task_filter_mode` | `PROOF_PARAM_TASK_FILTER_MODE` / `PROOF_TASK_FILTER` | `first15` (default) or `shortpack`. Shortpack only when explicitly requested. `PROOF_TASK_SLICE=tb4-first-15` also selects first15 (no shortpack allow-list). |
+| `tasks`, `task_exclude`, `n_tasks`, `max_task_duration_s`, `exclude_unknown_duration` | `PROOF_PARAM_*` | § Task selection |
+| `task_filter` | `PROOF_PARAM_TASK_FILTER` | Optional relative pack path of the filter file (default `filter.json` / `task_filter.json`) |
+| `exec_timeout_s`, `timeout_multiplier`, `agent_timeout_multiplier`, `verifier_timeout_multiplier`, `env_build_timeout_multiplier` | `PROOF_PARAM_*` | § Timeouts |
+| `agent_exception_policy` | `PROOF_PARAM_AGENT_EXCEPTION_POLICY` | § Trial outcomes (`fail` default / `zero`) |
+| `inspect_marker_rules`, `inspect_attested_rules` | `PROOF_PARAM_INSPECT_*` | § Inspect |
 | `model` | `PROOF_PARAM_MODEL` | Harbor / LiteLLM id (`openrouter/vendor/model`). Harbor `-m` is `PROOF_PARAM_MODEL` falling back to `PROOF_MODEL_PIN`. Canon `model_pin` stays `vendor/model`. An OpenRouter path fails closed unless the id already has the `openrouter/` provider prefix. |
-| `exclude_unknown_duration` | `PROOF_PARAM_EXCLUDE_UNKNOWN_DURATION` | `true` to drop tasks with no duration metadata |
 | `harbor_agent` | `PROOF_PARAM_HARBOR_AGENT` | Topic built-in for **baseline only** when no miner harness |
 | `miner_byok` | `PROOF_PARAM_MINER_BYOK` | Miner key name |
 | `inference_key_file` / `inference_key_env` | owner key for baseline when miner_byok is unused |
 | `n_concurrent` / `n_attempts` | Harbor `--n-concurrent` / `--n-attempts` (default `1`) |
 | `harbor_environment` | `PROOF_PARAM_HARBOR_ENVIRONMENT` | Passed as Harbor `--env` (default **`docker`**). `no-network` / `none` are ignored — agents need the internet. |
+| `task_network_mode` | `PROOF_PARAM_TASK_NETWORK_MODE` | `public` (default): rewrite `network_mode` / `allow_internet` on the **filtered copy** so agents can reach the pinned model (Docker `no-network` is unsupported on this guest). `keep`: leave the pack's own settings. |
+| `ensure_verifier_pytest` | `PROOF_PARAM_ENSURE_VERIFIER_PYTEST` | `true` (default): inject pytest into filtered-copy environment / verifier / tests images so a missing pytest is an image error, not a false 0. `false`: leave the images as packed. |
 
 Tasks stay the operator pack. The miner attach surface is the **harness**,
-not the task list. Before Harbor runs, the adaptor copies surviving tasks
-to `$PROOF_WORK_DIR/tasks-filtered` and rewrites Harbor `network_mode` to
-**`public`** on that copy (Docker `no-network` is unsupported on this guest
-and blocked agent OpenRouter calls; n15 hit `ValueError network_mode=no-network
-unsupported` on batched-eval-parity). `allow_internet = false` in task.toml
-is mapped to `true` on the same copy (Harbor treats that pin as
-`network_mode=no-network`). The default duration filter still **excludes**
-`batched-eval-parity` and the other broken names. Host nftables on the VM TAP remain the
-egress allowlist; this rewrite does not open the host. A filtered copy with
-zero tasks fails closed.
-
-### Task filter modes (Owner job)
-
-`PROOF_TASK_FILTER` / `constraints.params.task_filter_mode` (`PROOF_PARAM_TASK_FILTER_MODE`).
-`PROOF_TASK_SLICE=tb4-first-15` (measured baseline) is honored even when those
-flags are unset: **no** 6-task allow-list, INFRA excludes only.
-
-| Mode | Who sets it | What is kept |
-|------|-------------|--------------|
-| **`first15`** (default) | Measured TB4 **first-15** baseline / `PROOF_TASK_SLICE=tb4-first-15` | The pack's first-15 set minus **INFRA-only** excludes (`batched-eval-parity`, `ctr-optimization`, `cumulative-layout-shift`, plus other broken-until-fixed Harbor ids). **No** 6-task allow-list. Hour-plus tasks stay. |
-| **`shortpack`** | Explicit Owner opt-in only | Adaptor `duration_hints.json` **allow=6** (`cargo-flight-dispatch`, `embedding-drift-monitor`, `bun-sourcemap-leak`, `fin-saccr-rwa`, `foodstuff-beta-activity`, `atrx-vep-crispr`) plus hour-plus and broken excludes |
-
-Defaulting to `first15` is the fail-safe for a measured baseline: a missing
-flag must not silently score the 6-task shortpack. Set
-`PROOF_TASK_FILTER=shortpack` (or sign `task_filter_mode=shortpack`) only when
-you want the Dev n15 pack.
-
-Operator pack hint (pack content, not compiled in): ship `filter.json` with
-`max_duration_s`, optional `allow` / `deny` directory names (aliases match
-`biped` → `biped-contact-dynamics`), and/or `task_durations.json`. See
-`harness/pack_filter.example.json`. Pack `allow` may only **intersect** the
-adaptor default allow-list in **shortpack** (further restrict). It cannot add
-names. **first15 ignores pack allow.**
-
-Adaptor `harness/duration_hints.json` records the Dev shortpack and INFRA
-lists from retained n15 x0017 (operator measurement, not a compiled Proof
-catalog):
-
-- **allow (<1h, shortpack only):** `cargo-flight-dispatch`,
-  `embedding-drift-monitor`, `bun-sourcemap-leak`, `fin-saccr-rwa`,
-  `foodstuff-beta-activity`, `atrx-vep-crispr`
-- **exclude >1h (shortpack):** `biped-contact-dynamics` (~5.2h), `formal-crypto`
-  (~2.1h), `cad-model` (~1.2h), `data-anonymization` (~1.1h)
-- **infra / broken until fixed (both modes):** `batched-eval-parity` (no-network),
-  `ctr-optimization` / `cumulative-layout-shift` (EnvStartTimeout),
-  `distributed-dedup` (tmux), `coq-block-bound` (wall cut).
-
-In **shortpack**, the deny/exclude list wins first, then the allow-list, then
-duration. A task named **exactly** on the allow-list was measured under an hour,
-so only a measured `walls_sec` wall ≥ `max_task_duration_s` drops it — a pack
-`task.toml` `agent_timeout` is the harness ceiling, not a duration, and is
-ignored for those tasks (n15 attempt1 on pin `4a04eeb1` declared 28800 on all
-six and the 3600 default emptied the pack). Every other task is still dropped
-on max(declared timeout, pack duration, adaptor hint), including an alias hit
-such as `cargo-flight-dispatch-extra` (a different task) and an unmeasured
-allow-list entry under a ceiling below 3600 (tighter than what the allow-list
-asserts); those also still honour `exclude_unknown_duration`.
-
-Do not put hour-plus or broken tasks in the **shortpack** scorable set. An empty
-filtered copy fails closed.
+not the task list. Host nftables on the VM TAP remain the egress allowlist;
+the network rewrite does not open the host.
 
 ### Harbor model id (OpenRouter)
 
-Harbor `-m` / terminus-2 / LiteLLM must receive the **full** OpenRouter /
-LiteLLM id (`openrouter/moonshotai/kimi-k3`), never a stripped `vendor/model`.
-The adaptor sets `MODEL="${PROOF_PARAM_MODEL:-$PROOF_MODEL_PIN}"` and passes
-`-m "$MODEL"`. Set `params.model` to the Harbor/LiteLLM id; leave
-`constraints.model_pin` as canon `vendor/model` (`proof-canon` rejects
-`a/b/c`). An OpenRouter path (`miner_byok` / `inference_key_env` =
-`OPENROUTER_API_KEY`) **fails closed** unless that id already has the
-`openrouter/` provider prefix — the adaptor does not rewrite the pin.
-`ProofPythonAgent` restores that prefix if Harbor passed the suffix as
-`model_name`.
-
-After the copy, `ensure_verifier.py` injects pytest into environment /
-verifier / tests Dockerfiles even when FROM is not `python:*` (n15
-`biped-contact-dynamics` + `cad-model` scored 0 from `pytest: command not
-found`). That is an image/env hole, not a true-zero miner reward. Partial
-pytest assertion failures remain real 0s.
+Harbor `-m` / LiteLLM must receive the **full** OpenRouter / LiteLLM id
+(`openrouter/vendor/model`), never a stripped `vendor/model`. The adaptor
+sets `MODEL="${PROOF_PARAM_MODEL:-$PROOF_MODEL_PIN}"` and passes `-m "$MODEL"`.
+Set `params.model` to the Harbor/LiteLLM id; leave `constraints.model_pin`
+as canon `vendor/model` (`proof-canon` rejects `a/b/c`). An OpenRouter path
+(`miner_byok` / `inference_key_env` = `OPENROUTER_API_KEY`) **fails closed**
+unless that id already has the `openrouter/` provider prefix — the adaptor
+does not rewrite the pin. `ProofPythonAgent` restores that prefix if Harbor
+passed the suffix as `model_name`.
 
 ## Outputs
 
@@ -255,12 +275,21 @@ pytest assertion failures remain real 0s.
 
 ```json
 {
-  "primary_value": 0.73,
+  "primary_value": 0.5,
   "claim_holds": true,
   "evidence": {
-    "trials": [{"name": "task__1", "reward": 1.0}],
+    "trials": [
+      {"name": "task-a__1", "reward": 1.0, "outcome": "measured"},
+      {"name": "task-b__1", "reward": 0.0, "outcome": "agent_exception",
+       "exception_type": "RuntimeError", "exception_message": "Command timed out after 120 seconds"}
+    ],
+    "n_scored": 2,
     "n_measured": 1,
-    "mean_reward": 0.73,
+    "n_agent_exceptions": 1,
+    "agent_exception_policy": "zero",
+    "agent_exception_trials": [{"name": "task-b__1", "exception_type": "RuntimeError", "exception_message": "…"}],
+    "mean_reward": 0.5,
+    "harbor_exit": 0,
     "harbor_run_tail": "…",
     "agent": "proof_python_agent:ProofPythonAgent",
     "agent_source": "artifact_dir/recipe/agent",
@@ -269,19 +298,23 @@ pytest assertion failures remain real 0s.
 }
 ```
 
-`primary_value` is the mean of **every complete** Harbor trial: matching
-`verifier_result.rewards.reward` **and** `verifier/reward.txt` (the paid
-value is the JSON verifier reward). Evidence may truncate the serialized
-trial list; the mean does not. Fail-closed (no invented number, no leftover
-`report.json`) when `n_measured == 0`, the measured set does not cover
-every filtered `$PROOF_TASKS` directory, `reward.txt` is present without
-matching Harbor JSON, or a Harbor job snapshot is still running /
-`finished_at=null` (same refuse as host harvest). A nonzero Harbor or
-script-harness exit (timeout / kill / postamble TypeError) still scores
-when those checks pass; `harbor_exit` stays in evidence. Miner-authored
-`report.json` is deleted and ignored — it does not skip Harbor summarize.
+Evidence may truncate the serialized trial list; the mean does not.
+Miner-authored `report.json` is deleted and ignored — it does not skip
+Harbor summarize.
 
 `inspect` writes `$PROOF_OUTPUT_DIR/checklist.json` (no Harbor, no keys).
+
+## Single-task smoke
+
+Development does not wait for a full pack. The smoke is a **topic shape**,
+not a code path: a run request whose `constraints.params` carry
+`tasks = "<one task>"` (or `n_tasks = "1"`) runs this same adaptor, through
+the same guest agent, over exactly one task. `deploy/scripts/proof-experiment-smoke.py`
+builds that request from a live topic document and drives the real guest
+agent (`--driver agent`, stdio frames), the adaptor directly
+(`--driver exec`), or the KVM-host orchestrator (`--driver orch`, a real
+Firecracker experiment VM). Runbook:
+[`docs/runbooks/proof-experiment-smoke.md`](../../../../docs/runbooks/proof-experiment-smoke.md).
 
 ## Operator bake / deploy
 
@@ -301,7 +334,7 @@ deploy/guest/bake-rootfs.sh \
 ```
 
 `--runner` copies this whole tree to `/opt/proof/runners/rlm_fc_in_guest_harbor/`.
-`run` execs `harness/run-harbor` next to it. Do **not** keep the old overlay
+`run` execs `harness/run-harbor` next to it. Do **not** keep an old overlay
 script at `/opt/proof/harness/run-harbor` as the evaluate path.
 
 **Metal copy (no re-bake), matching the live runners dir:**
@@ -319,26 +352,41 @@ Then re-bake or remount so the guest image actually contains those files.
 Copying onto the KVM host overlay is not enough unless the guest rootfs
 includes them.
 
-Optional overlay layout if you still ship harness files under
-`/opt/proof/harness/`: copy `harness/run-harbor` + `summarize.py` there
-**and** point the adaptor `run` at them only after this tree's evaluate
-behavior is in that copy. The in-tree `run` does not exec the old overlay.
-
-`tests/` is CI-only; omit it on metal if you want a smaller copy.
-`host/summarize_job.py` is a KVM-host RCA helper (nested orch `job.out`);
-it is not the guest `run` path. Pass `--jobdir <any-dir>` — no baked
-`JOBDIR`. It writes `custom_value.txt` and `summary.txt` under JOBDIR.
-`host/run-n15` waits for Harbor `curl.pid` / `job.out` (including `--restart`)
-and always invokes that helper.
+`tests/` is CI-only (run by `cargo test -p proof-vm-guest`); omit it on
+metal if you want a smaller copy. `host/summarize_job.py` is a KVM-host RCA
+helper (nested orch `job.out`); it is not the guest `run` path. Pass
+`--jobdir <any-dir>` — no baked `JOBDIR`. It writes `custom_value.txt` and
+`summary.txt` under JOBDIR. `host/run-n15` waits for Harbor `curl.pid` /
+`job.out` (including `--restart`) and always invokes that helper.
 
 Host harvest (`proof-fc-harvest`) refreshes `{jail}/harvest-work` after
 vsock `Done` until trial `result.json` / `verifier/reward.txt` and Harbor
-`n_running` / `stats.n_running_trials` would pass fail-closed checks. Dump-only
-reconstruct that still lags refuses. That is not an adaptor rewrite of
-`reward.txt`.
+`n_running` / `stats.n_running_trials` would pass fail-closed checks.
+Dump-only reconstruct that still lags refuses. That is not an adaptor rewrite
+of `reward.txt`.
 
 Topic params must name this runner id and a relative `tasks_dir` inside the
 pinned pack. Re-pin `experiment_pack_digest` when the pack tar bytes change.
+
+### Migrating a topic that relied on the old compiled lists
+
+Earlier versions of this adaptor compiled a task allow-list, an
+infrastructure deny-list, and the rule ids of one topic. A topic that ran
+on them must now **say** those things in its signed document (re-sign) or
+its pack (re-pin). What each old behaviour becomes:
+
+| Old (compiled) | Now (topic data) |
+|----------------|------------------|
+| `task_slice` label meaning "the pack minus INFRA excludes" | `params.task_exclude = "<broken-task>,<broken-task>"` **or** pack `filter.json` → `deny` (and, optionally, `slices/<label>.json` naming the set) |
+| 6-task "short" allow-list + `3600 s` gate | pack `filter.json` → `allow` / `slices`, `params.max_task_duration_s`, pack `durations` |
+| Rule ids ticked by name | `params.inspect_marker_rules = "<rule>:<marker>\|<marker>;…"` + `params.inspect_attested_rules = "<rule>,<rule>"` |
+| Harness crash → whole run 503 | keep (default `fail`) or sign `params.agent_exception_policy = "zero"` |
+| Silent `environment.exec` timeout in miner code | sign `params.exec_timeout_s`; miners may still pass their own |
+
+Until the topic carries the inspect params, **every** submission to it is a
+persisted `rejected` row (red checklist, no spend) whose evidence names the
+missing params — visible and recoverable by re-signing, never a silent
+pass. Until it carries a task selection, the whole `tasks_dir` is scored.
 
 ## Guest runtime (read-only rootfs)
 

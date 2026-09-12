@@ -33,7 +33,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use proof_canon::is_slug;
-use proof_experiment::{ExperimentBinding, ExperimentError, ExperimentPolicy, ExperimentSpec};
+use proof_experiment::{
+    ExperimentBinding, ExperimentError, ExperimentPolicy, ExperimentSpec, RunPolicy,
+};
 use proof_task::{ChecklistRule, TopicDocument};
 use serde::{Deserialize, Serialize};
 
@@ -481,6 +483,9 @@ pub async fn run_paid_job(
     let Some(binding) = request.experiment()? else {
         return orchestrator.run(topic_vm, job).await;
     };
+    // The generic run policy (tasks, gates, wall clocks, exception policy)
+    // is shape-checked here, before any VM exists — and again in the guest.
+    let run_policy = RunPolicy::from_params(&request.constraints.params)?;
     let shape = policy.ceilings.shape(&binding)?;
     let spec = TopicVmSpec::for_experiment(
         &request.topic_id,
@@ -503,7 +508,8 @@ pub async fn run_paid_job(
     tracing::info!(
         topic_id = %vm.topic_id, vm_id = %vm.vm_id, runner = %binding.runner,
         pack = %binding.pack.digest, vcpus = shape.vcpus, mem_mib = shape.mem_mib,
-        disk_mib = shape.disk_mib, "experiment vm created for one paid job"
+        disk_mib = shape.disk_mib, run_policy = %run_policy.summary(),
+        "experiment vm created for one paid job"
     );
     let outcome = match orchestrator.run(&vm, job).await {
         Ok(VmJobOutput::Evaluated(out)) => match out.report.verify(&verify) {
@@ -992,6 +998,62 @@ mod tests {
         );
         assert_eq!(own.experiments().ceilings.max_vcpus, 16);
         assert_eq!(own.experiments().ceilings.default_vcpus, 16);
+    }
+
+    /// A malformed generic run-policy knob on an experiment topic is
+    /// refused **before any experiment VM is created** (no boot, no spend),
+    /// and a well-formed one — including the single-task smoke shape —
+    /// travels to the guest untouched inside the job's params.
+    #[tokio::test]
+    async fn a_malformed_run_policy_is_refused_before_any_experiment_vm() {
+        use crate::fixtures::experiment_request;
+        let orch = FakeOrchestrator::new(0.8);
+        let runner = VmBackedRunner::new(orch.clone(), pinned_template());
+        let mut typo = experiment_request(None);
+        typo.constraints.params.insert(
+            proof_experiment::policy::PARAM_AGENT_EXCEPTION_POLICY.into(),
+            "zer0".into(),
+        );
+        let err = runner
+            .evaluate(&typo, &token_for(&typo))
+            .await
+            .expect_err("typo in a signed knob");
+        assert!(matches!(err, RunnerError::Backend(_)), "{err}");
+        assert!(
+            err.to_string().contains("agent_exception_policy"),
+            "names the knob: {err}"
+        );
+        assert!(err.to_string().contains("re-sign the topic"), "{err}");
+        assert_eq!(orch.created(), 1, "only the topic vm; no experiment vm");
+        assert!(orch.experiments().is_empty(), "nothing booted for the job");
+
+        let mut smoke = experiment_request(None);
+        smoke.constraints.params.insert(
+            proof_experiment::policy::PARAM_TASKS.into(),
+            "one-item".into(),
+        );
+        smoke.constraints.params.insert(
+            proof_experiment::policy::PARAM_AGENT_EXCEPTION_POLICY.into(),
+            "zero".into(),
+        );
+        let out = runner
+            .evaluate(&smoke, &token_for(&smoke))
+            .await
+            .expect("a one-item selection is a topic shape, not a code path");
+        assert!((out.report.primary_value - 0.8).abs() < 1e-12);
+        assert_eq!(orch.experiments().len(), 1);
+        let (_, job) = orch.runs().pop().expect("the paid job ran");
+        let carried = job.request().expect("paid").constraints.params.clone();
+        assert_eq!(
+            carried
+                .get(proof_experiment::policy::PARAM_TASKS)
+                .map(String::as_str),
+            Some("one-item"),
+            "the policy reaches the guest as the signed params, verbatim"
+        );
+        assert!(RunPolicy::from_params(&carried)
+            .expect("well-formed")
+            .selects_single_item());
     }
 
     /// An ask over the operator ceiling is refused before any VM exists, a

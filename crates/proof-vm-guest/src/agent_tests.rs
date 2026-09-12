@@ -582,6 +582,97 @@ echo "{\"primary_value\": 1.0, \"evidence\": {\"foo_bar\": \"$PROOF_PARAM_FOO_BA
     let _ = std::fs::remove_dir_all(&r);
 }
 
+/// The generic run policy is shape-checked in the guest too: a malformed
+/// signed knob (`agent_exception_policy = zer0`, `n_tasks = 0`) fails the
+/// job **before the adaptor runs** (no spend), while a well-formed one —
+/// the single-task smoke shape included — reaches the adaptor verbatim as
+/// `PROOF_PARAM_*` and nothing else about the contract changes.
+#[tokio::test]
+async fn a_malformed_run_policy_never_reaches_the_adaptor() {
+    let r = root("policy");
+    let a = agent(&r);
+    hello(&a).await;
+    let (tar, digest) = pack();
+    stage(&a, &tar, &digest).await;
+    install(
+        &r,
+        "run",
+        r#"
+touch "$PROOF_WORK_DIR/adaptor-ran"
+echo "{\"primary_value\": 0.5, \"evidence\": {\"tasks\": \"$PROOF_PARAM_TASKS\", \"policy\": \"${PROOF_PARAM_AGENT_EXCEPTION_POLICY:-unset}\", \"exec_timeout\": \"${PROOF_PARAM_EXEC_TIMEOUT_S:-unset}\"}}" > "$PROOF_OUTPUT_DIR/report.json"
+"#,
+    );
+    for (key, value, why) in [
+        (
+            proof_experiment::policy::PARAM_AGENT_EXCEPTION_POLICY,
+            "zer0",
+            "\"fail\" (default) or \"zero\"",
+        ),
+        (
+            proof_experiment::policy::PARAM_N_TASKS,
+            "0",
+            "positive integer",
+        ),
+        (
+            proof_experiment::policy::PARAM_TASKS,
+            "../escape",
+            "item names",
+        ),
+        (
+            proof_experiment::policy::PARAM_EXEC_TIMEOUT_S,
+            "soon",
+            "positive integer of seconds",
+        ),
+    ] {
+        let mut bad = req_for(&digest);
+        bad.constraints.params.insert(key.into(), value.into());
+        let err = failed(
+            a.handle(HostToRlm::Run {
+                job: Box::new(VmJob::Baseline { request: bad }),
+            })
+            .await,
+        );
+        assert!(err.contains(key), "{key}={value}: {err}");
+        assert!(err.contains(why), "{key}={value}: {err}");
+        assert!(err.contains("re-sign the topic"), "{err}");
+    }
+    assert!(
+        walkdir(&r.join("work"))
+            .iter()
+            .all(|p| !p.ends_with("adaptor-ran")),
+        "no malformed policy reached the adaptor"
+    );
+
+    let mut smoke = req_for(&digest);
+    smoke
+        .constraints
+        .params
+        .insert(proof_experiment::policy::PARAM_TASKS.into(), "one".into());
+    smoke.constraints.params.insert(
+        proof_experiment::policy::PARAM_AGENT_EXCEPTION_POLICY.into(),
+        "zero".into(),
+    );
+    smoke.constraints.params.insert(
+        proof_experiment::policy::PARAM_EXEC_TIMEOUT_S.into(),
+        "900".into(),
+    );
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::Baseline { request: smoke }),
+        })
+        .await;
+    let RlmToHost::Done {
+        output: VmJobOutput::Baseline(report),
+    } = out
+    else {
+        panic!("expected a baseline report, got {out:?}");
+    };
+    assert_eq!(report.evidence["tasks"], serde_json::json!("one"));
+    assert_eq!(report.evidence["policy"], serde_json::json!("zero"));
+    assert_eq!(report.evidence["exec_timeout"], serde_json::json!("900"));
+    let _ = std::fs::remove_dir_all(&r);
+}
+
 fn walkdir(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
