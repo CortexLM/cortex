@@ -102,17 +102,27 @@ fi
 [[ -x "$ADAPTOR_DIR/run" && -f "$DRIVER" ]] || die "run from a cortex checkout: missing $ADAPTOR_DIR/run or $DRIVER"
 command -v python3 >/dev/null || die "python3 is required locally"
 command -v curl >/dev/null || die "curl is required locally"
-# Scratch policy: only under /var/lib/proof/<wd>/ on the host.
+# Scratch policy: only under /var/lib/proof/<wd>/ on the host. The value is
+# interpolated into remote mkdir / rm -rf, so it is held to plain segments
+# (no `.`, `..`, empty segment, trailing slash, whitespace, or shell
+# metacharacter) here, and resolved with realpath on the host before use.
+SCRATCH_ROOT="/var/lib/proof"
 if [[ -z "$REMOTE_SCRATCH" ]]; then
-  REMOTE_SCRATCH="/var/lib/proof/smoke-${USER:-op}-$(date -u +%Y%m%dT%H%M%SZ)"
+  REMOTE_SCRATCH="$SCRATCH_ROOT/smoke-${USER:-op}-$(date -u +%Y%m%dT%H%M%SZ)"
 fi
-case "$REMOTE_SCRATCH" in
-  /var/lib/proof/?*) ;;
-  *) die "--remote-scratch must be a directory under /var/lib/proof/ (host scratch policy), got $REMOTE_SCRATCH" ;;
-esac
+if [[ ! "$REMOTE_SCRATCH" =~ ^/var/lib/proof(/[A-Za-z0-9][A-Za-z0-9._-]{0,127})+$ ]]; then
+  die "--remote-scratch must be $SCRATCH_ROOT/<plain segments> (no '..', '.', '//', trailing '/', spaces, or metacharacters), got $REMOTE_SCRATCH"
+fi
+if [[ "$REMOTE_SCRATCH" =~ (^|/)\.\.?(/|$) ]]; then
+  die "--remote-scratch must not contain '.' or '..' segments, got $REMOTE_SCRATCH"
+fi
 case "$REMOTE_SCRATCH" in
   */retained*|*/proof-vm/*) die "--remote-scratch must not point at retained jails or the orchestrator's state" ;;
 esac
+# Every remote command that names the scratch goes through this one guard:
+# the host resolves the path (symlinks and all) and refuses anything that
+# does not land strictly under the scratch root.
+REMOTE_GUARD="p=\$(realpath -m -- '$REMOTE_SCRATCH') && case \"\$p\" in $SCRATCH_ROOT/?*) ;; *) echo 'scratch resolves outside $SCRATCH_ROOT' >&2; exit 3 ;; esac"
 
 # --- 1. SSH reach (fail closed; this is an operator box's key, never an agent's) ---
 if ! "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=10 "$HOST" true 2>/dev/null; then
@@ -160,12 +170,17 @@ if [[ "$JOB" == "evaluate" ]]; then
 fi
 
 # --- 3. Remote preflight: scratch, pack present, python3, docker/harbor hints ---
-"$SSH_BIN" "$HOST" "test -d /var/lib/proof" || die "/var/lib/proof does not exist on $HOST; refusing to create scratch elsewhere"
-"$SSH_BIN" "$HOST" "test ! -e '$REMOTE_SCRATCH'" || die "$REMOTE_SCRATCH already exists on $HOST; pick another --remote-scratch"
-"$SSH_BIN" "$HOST" "install -d -m 0700 '$REMOTE_SCRATCH'" || die "cannot create $REMOTE_SCRATCH on $HOST"
+"$SSH_BIN" "$HOST" "test -d $SCRATCH_ROOT && test ! -L $SCRATCH_ROOT" || die "$SCRATCH_ROOT is not a real directory on $HOST; refusing to create scratch elsewhere"
+"$SSH_BIN" "$HOST" "$REMOTE_GUARD && test ! -e \"\$p\"" || die "$REMOTE_SCRATCH already exists on $HOST or resolves outside $SCRATCH_ROOT; pick another --remote-scratch"
+"$SSH_BIN" "$HOST" "$REMOTE_GUARD && install -d -m 0700 -- \"\$p\"" || die "cannot create $REMOTE_SCRATCH on $HOST"
 REMOTE_TMP="$REMOTE_SCRATCH"
 cleanup_remote() {
-  if [[ $KEEP -eq 1 ]]; then log "remote work kept at $HOST:$REMOTE_TMP"; else "$SSH_BIN" "$HOST" "rm -rf '$REMOTE_TMP'" || true; fi
+  if [[ $KEEP -eq 1 ]]; then
+    log "remote work kept at $HOST:$REMOTE_TMP"
+  else
+    # Same guard on the way out: never rm -rf a path the host resolves elsewhere.
+    "$SSH_BIN" "$HOST" "$REMOTE_GUARD && rm -rf -- \"\$p\"" || log "warning: could not remove $HOST:$REMOTE_TMP (left in place)"
+  fi
 }
 trap 'cleanup_remote; rm -rf "$TMP_LOCAL"' EXIT
 "$SSH_BIN" "$HOST" "test -f '$REMOTE_PACK'" || die "pack $REMOTE_PACK is not on $HOST (PROOF_VM_AGENT_EXPERIMENT_PACK_DIR?)"

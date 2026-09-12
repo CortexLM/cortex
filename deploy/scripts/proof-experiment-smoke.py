@@ -1012,7 +1012,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not selected:
             log("warning: no --tasks / --n-tasks; this runs the topic's full selection, not a smoke")
-        runner_dir = Path(args.runner_dir).resolve()
         EVIDENCE.set(
             topic_id=doc["id"],
             job=args.job,
@@ -1022,8 +1021,20 @@ def main(argv: list[str] | None = None) -> int:
             pack_digest=request["constraints"]["params"].get(PARAM_PACK_DIGEST),
             artifact_digest=artifact_digest,
             params_overridden=sorted(overrides),
-            adaptor_tree_sha256=adaptor_tree_sha256(runner_dir) if runner_dir.is_dir() else None,
         )
+        # Which adaptor the evidence names depends on which one ran: the
+        # local tree for agent / exec (with or without the dev PATH shim);
+        # for orch, whatever the pinned guest image carries — identified by
+        # that image's digest, never by a local directory the VM never saw.
+        if args.driver == "orch":
+            EVIDENCE.set(adaptor_source="pinned guest image", image_digest=args.image_digest)
+        else:
+            runner_dir = Path(args.runner_dir).resolve()
+            EVIDENCE.set(
+                adaptor_source="local tree",
+                adaptor_tree_sha256=adaptor_tree_sha256(runner_dir) if runner_dir.is_dir() else None,
+                adaptor_path_shim=bool(args.path_prepend),
+            )
         if args.driver == "orch":
             return driver_orch(args, args.job, request, runner, pack_digest, artifact_bytes, secrets)
         root = Path(args.work_root).resolve() if args.work_root else Path(tempfile.mkdtemp(prefix="proof-smoke-"))

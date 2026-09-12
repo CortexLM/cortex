@@ -123,9 +123,14 @@ and neither may you:
   pinned `e79be…` image carries the **old** adaptor, which ignores `tasks`
   and would run the full selection for hours;
 - scratch **only** under `/var/lib/proof/<your-wd>/`
-  (`--remote-scratch`, default `/var/lib/proof/smoke-<user>-<stamp>`;
-  anything else is refused, and so is anything under the orchestrator's
-  state or the retained dir).
+  (`--remote-scratch`, default `/var/lib/proof/smoke-<user>-<stamp>`). The
+  value is held to plain path segments before the first `ssh` (no `..`,
+  `.`, `//`, trailing `/`, spaces, or shell metacharacters — a traversal
+  such as `/var/lib/proof/../tmp/x` is refused locally), and the host
+  resolves it with `realpath -m` before every `mkdir` / `rm -rf` and
+  refuses anything that lands outside `/var/lib/proof/` (a symlinked
+  parent included). Anything under the orchestrator's state or the
+  retained dir is refused by name.
 
 ### Path A — on the host (Owner / Dev shell)
 
@@ -181,11 +186,15 @@ scratch unless `--keep`.
 ### What to paste into the PR
 
 The driver ends with a `smoke_evidence` block — topic, job, runner, the one
-task, pack and artefact digests, the params overridden, a digest over the
-adaptor tree that ran, the report's `primary_value` / `n_scored` /
-`n_measured` / `n_agent_exceptions`, the trial names, and the sha256 of the
-full outcome JSON. No secret, no host path. Paste it verbatim with the
-`run → done` line; attach `outcome.json` if the trial list matters.
+task, pack and artefact digests, the params overridden, the adaptor that
+**actually ran** (`adaptor_source: local tree` + `adaptor_tree_sha256` for
+the `agent` / `exec` drivers, with `adaptor_path_shim` when
+`--path-prepend` wrapped it; `adaptor_source: pinned guest image` +
+`image_digest` for `orch`, whose VM never sees a local directory), the
+report's `primary_value` / `n_scored` / `n_measured` /
+`n_agent_exceptions`, the trial names, and the sha256 of the full outcome
+JSON. No secret, no host path. Paste it verbatim with the `run → done`
+line; attach `outcome.json` if the trial list matters.
 
 Expected: `trials == ["<task>__1"]`, `n_scored == 1`. A `Failed` line names
 the adaptor's refusal (`harbor is not on PATH`, `no measured Harbor

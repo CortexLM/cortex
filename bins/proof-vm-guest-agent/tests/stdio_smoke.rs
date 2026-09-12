@@ -255,6 +255,9 @@ printf '{"primary_value": 0.5, "claim_holds": true, "evidence": {"tasks": "%s", 
     );
     assert_eq!(ev["primary_value"], serde_json::json!(0.5));
     assert_eq!(ev["driver"], serde_json::json!("agent"));
+    assert_eq!(ev["adaptor_source"], serde_json::json!("local tree"));
+    assert_eq!(ev["adaptor_path_shim"], serde_json::json!(false));
+    assert!(ev.get("image_digest").is_none(), "no image ran here");
     assert!(ev["adaptor_tree_sha256"].as_str().unwrap().len() == 64);
     assert!(ev["outcome_sha256"].as_str().unwrap().len() == 64);
     assert!(ev["pack_digest"].as_str().unwrap().starts_with("sha256:"));
@@ -344,6 +347,155 @@ else:
         "both paths exercised: {stdout}"
     );
     let _ = fs::remove_dir_all(&root);
+}
+
+/// The operator wrapper interpolates `--remote-scratch` into remote `mkdir`
+/// and `rm -rf`: anything but plain segments under `/var/lib/proof/` is
+/// refused **before the first ssh**, and a well-formed path proceeds to the
+/// ssh preflight (which fails closed here: no key, `ssh` is `/bin/false`).
+#[test]
+fn the_metal_wrapper_refuses_scratch_traversal_before_any_ssh() {
+    let wrapper = repo().join("deploy/scripts/proof-metal-smoke.sh");
+    let run = |scratch: &str| {
+        let out = Command::new("bash")
+            .arg(&wrapper)
+            .args([
+                "--host",
+                "nohost",
+                "--topic",
+                "smoke-topic",
+                "--task",
+                "task-a",
+                "--job",
+                "baseline",
+                "--remote-scratch",
+                scratch,
+            ])
+            .env("PROOF_METAL_SSH", "/bin/false")
+            .output()
+            .expect("run wrapper");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    for bad in [
+        "/var/lib/proof/../tmp/smoke",
+        "/var/lib/proof/x/../../tmp",
+        "/var/lib/proof/./x",
+        "/var/lib/proof//x",
+        "/var/lib/proof/x/",
+        "/var/lib/proof/a b",
+        "/var/lib/proof/x;rm -rf /",
+        "/var/lib/proof/x$(id)",
+        "/var/lib/proof",
+        "/var/lib/proof-vm/retained/x",
+        "/tmp/elsewhere",
+        "/var/lib/proofs/x",
+    ] {
+        let (code, stderr) = run(bad);
+        assert_eq!(code, Some(2), "{bad:?} must be refused: {stderr}");
+        assert!(stderr.contains("--remote-scratch"), "{bad:?}: {stderr}");
+        assert!(
+            !stderr.contains("no SSH access"),
+            "{bad:?} was refused only at ssh: {stderr}"
+        );
+    }
+    let (code, stderr) = run("/var/lib/proof/smoke-op-20260912T000000Z/work.1");
+    assert_eq!(code, Some(2));
+    assert!(
+        stderr.contains("no SSH access"),
+        "a well-formed scratch reaches the ssh preflight, which fails closed here: {stderr}"
+    );
+    assert!(stderr.contains("operator-run"), "{stderr}");
+}
+
+/// Evidence names the adaptor that actually ran: the local tree for the
+/// `agent` / `exec` drivers, the pinned guest image (its digest) for `orch`
+/// — never a local directory the VM never saw. Driven through a mocked
+/// orchestrator so the full `orch` flow (health gate, create, run, destroy)
+/// runs without a host.
+#[test]
+fn orch_evidence_names_the_pinned_image_not_a_local_tree() {
+    let fx = fixture("orch-evidence", "smoke_runner", &[]);
+    let token = fx.root.join("token");
+    fs::write(&token, "not-a-real-bearer\n").unwrap();
+    let script = r#"
+import importlib.util, io, json, sys
+from contextlib import redirect_stdout
+spec = importlib.util.spec_from_file_location("smoke", sys.argv[1])
+smoke = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(smoke)
+calls = []
+def fake_http(method, url, body, token, ca, timeout):
+    calls.append((method, url.split("/v1/", 1)[1], body))
+    if method == "GET" and url.endswith("/v1/health"):
+        return 200, {"api_version": 1, "ready": True, "reason": "", "hypervisor": "fake", "vms": 0, "experiment_vms": 0, "max_experiment_vms": 2}
+    if method == "POST" and url.endswith("/v1/vms"):
+        return 201, {"handle": {"topic_id": body["spec"]["topic_id"], "vm_id": "smoke-topic-x0001"}, "state": "running", "image_digest": body["spec"]["template"]["image_digest"]}
+    if method == "POST" and url.endswith("/jobs"):
+        req = body["job"]["request"]
+        report = {"schema_version": 1, "topic_id": req["topic_id"], "custom_id": req["custom_id"], "submission_digest": req["submission_digest"], "artifact_digest": req["artifact_digest"], "rules_version": 1, "primary_value": 0.25, "claim_holds": False, "sandboxed": True, "flops_used": None, "evidence": {"trials": [{"name": "task-a__1", "reward": 0.25, "outcome": "measured"}], "n_scored": 1}}
+        return 200, {"topic_id": req["topic_id"], "vm_id": "smoke-topic-x0001", "output": {"output": "baseline", "body": report}, "sister": None}
+    if method == "DELETE":
+        return 200, {"topic_id": body["topic_id"], "vm_id": "smoke-topic-x0001", "state": "destroyed", "confirmed": True}
+    raise AssertionError((method, url))
+smoke.orch_http = fake_http
+buf = io.StringIO()
+with redirect_stdout(buf):
+    rc = smoke.main([
+        "--driver", "orch", "--topic-json", sys.argv[2], "--job", "baseline", "--tasks", "task-a",
+        "--pack-tar", sys.argv[3], "--orch-url", "https://198.51.100.1:8200", "--orch-token-file", sys.argv[4],
+        "--image-digest", "sha256:" + "ab" * 32, "--ack-image-adaptor",
+    ])
+out = buf.getvalue()
+assert rc == 0, (rc, out)
+start = out.index('{\n  "smoke_evidence"')
+ev = json.loads(out[start:])["smoke_evidence"]
+assert ev["adaptor_source"] == "pinned guest image", ev
+assert ev["image_digest"] == "sha256:" + "ab" * 32, ev
+assert "adaptor_tree_sha256" not in ev, ev
+assert ev["driver"] == "orch" and ev["trials"] == ["task-a__1"], ev
+paths = [c[1] for c in calls]
+assert paths == ["health", "vms", "vms/smoke-topic-x0001/jobs", "vms/smoke-topic-x0001"], paths
+assert calls[1][2]["spec"]["experiment"]["runner"] == "smoke_runner", calls[1][2]
+assert calls[1][2]["spec"]["experiment"]["pack"]["digest"] == ev["pack_digest"], calls[1][2]
+assert calls[3][2]["policy"] == "destroy", calls[3][2]
+assert "not-a-real-bearer" not in out
+# A live experiment vm on the host: refused before create.
+def busy_http(method, url, body, token, ca, timeout):
+    assert method == "GET" and url.endswith("/v1/health"), (method, url)
+    return 200, {"ready": True, "reason": "", "experiment_vms": 1, "max_experiment_vms": 2}
+smoke.orch_http = busy_http
+rc = smoke.main([
+    "--driver", "orch", "--topic-json", sys.argv[2], "--job", "baseline", "--tasks", "task-a",
+    "--pack-tar", sys.argv[3], "--orch-url", "https://198.51.100.1:8200", "--orch-token-file", sys.argv[4],
+    "--image-digest", "sha256:" + "ab" * 32, "--ack-image-adaptor",
+])
+assert rc == 2, rc
+print("orch evidence ok")
+"#;
+    let out = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(repo().join("deploy/scripts/proof-experiment-smoke.py"))
+        .arg(&fx.topic)
+        .arg(&fx.pack)
+        .arg(&token)
+        .output()
+        .expect("run python");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "orch evidence check failed\n{stdout}\n{stderr}"
+    );
+    assert!(stdout.contains("orch evidence ok"), "{stdout}");
+    assert!(
+        stderr.contains("experiment vm(s) already running"),
+        "the live-slot refusal fired: {stderr}"
+    );
+    let _ = fs::remove_dir_all(&fx.root);
 }
 
 /// The `orch` driver never takes a live slot or boots an image whose adaptor
