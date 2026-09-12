@@ -265,6 +265,87 @@ printf '{"primary_value": 0.5, "claim_holds": true, "evidence": {"tasks": "%s", 
     let _ = fs::remove_dir_all(&fx.root);
 }
 
+/// The `exec` driver unpacks a **miner** artefact on the operator's host:
+/// every member is contained under the destination on every Python — a
+/// traversal member (`a/../../outside.txt`), an absolute path, or a link is
+/// refused before any byte is written, with and without the stdlib `data`
+/// filter (the legacy fallback is forced by hiding `tarfile.data_filter`).
+#[test]
+fn the_exec_driver_contains_artefact_extraction_on_every_python() {
+    let root = tmp("tar-contain");
+    let script = r#"
+import importlib.util, io, os, sys, tarfile, tempfile
+spec = importlib.util.spec_from_file_location("smoke", sys.argv[1])
+smoke = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(smoke)
+
+def tar_with(name, kind="file"):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:") as tf:
+        info = tarfile.TarInfo(name)
+        if kind == "link":
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            tf.addfile(info)
+        else:
+            body = b"attacker-controlled\n"
+            info.size = len(body)
+            tf.addfile(info, io.BytesIO(body))
+    return buf.getvalue()
+
+def check(mode):
+    root = tempfile.mkdtemp(prefix="contain-")
+    dest = os.path.join(root, "inner", "artifact")
+    outside = os.path.join(root, "outside.txt")
+    for name in ["inner/../../outside.txt", "a/../../outside.txt", "/outside.txt", "a/./b", "..", "a//b"]:
+        try:
+            smoke.extract_tar(tar_with(name), smoke.Path(dest))
+        except smoke.Refuse as e:
+            assert "refusing" in str(e), e
+        else:
+            raise SystemExit(f"{mode}: member {name!r} was not refused")
+        assert not os.path.exists(outside), f"{mode}: {name!r} wrote outside"
+    try:
+        smoke.extract_tar(tar_with("link", "link"), smoke.Path(dest))
+    except smoke.Refuse:
+        pass
+    else:
+        raise SystemExit(f"{mode}: symlink member was not refused")
+    smoke.extract_tar(tar_with("recipe/agent/agent.py"), smoke.Path(dest))
+    assert os.path.isfile(os.path.join(dest, "recipe", "agent", "agent.py")), mode
+    print(mode, "ok")
+
+check("native")
+if hasattr(tarfile, "data_filter"):
+    saved = tarfile.data_filter
+    del tarfile.data_filter
+    try:
+        check("legacy-fallback")
+    finally:
+        tarfile.data_filter = saved
+else:
+    print("legacy-fallback is the only path on this python")
+"#;
+    let out = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(repo().join("deploy/scripts/proof-experiment-smoke.py"))
+        .output()
+        .expect("run python");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "containment check failed\n{stdout}\n{stderr}"
+    );
+    assert!(stdout.contains("native ok"), "{stdout}");
+    assert!(
+        stdout.contains("legacy-fallback"),
+        "both paths exercised: {stdout}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// The `orch` driver never takes a live slot or boots an image whose adaptor
 /// predates the run policy: without the operator's explicit acknowledgement
 /// it refuses before any request leaves this process.

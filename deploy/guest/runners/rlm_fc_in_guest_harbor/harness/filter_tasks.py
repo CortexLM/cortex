@@ -167,6 +167,77 @@ def list_task_dirs(tasks_dir: Path) -> list[Path]:
     return sorted(p for p in tasks_dir.iterdir() if p.is_dir())
 
 
+FILTER_KEYS = frozenset(
+    {"slices", "allow", "deny", "max_duration_s", "durations", "exclude_unknown_duration"}
+)
+
+
+def _positive_int(value: Any, what: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _fail(f"{what} must be a positive integer, got {value!r}")
+    if isinstance(value, float) and not value.is_integer():
+        _fail(f"{what} must be a positive integer, got {value!r}")
+    n = int(value)
+    if n <= 0:
+        _fail(f"{what} must be a positive integer, got {value!r}")
+    return n
+
+
+def validate_pack_filter(obj: dict[str, Any], path: str) -> dict[str, Any]:
+    """Shape-check a pack ``filter.json``; **every present field** must be
+    well-formed or the run fails closed.
+
+    A malformed field is never read as "absent": an empty or wrong-type
+    ``allow`` would otherwise widen the scored set to every task, a
+    wrong-type ``deny`` would keep tasks the pack meant to drop, and a bad
+    ``max_duration_s`` would lift a gate. Keys starting with ``_`` are
+    comments; any other unknown key is a typo and is refused too.
+    """
+    out: dict[str, Any] = {"_path": path}
+    for key, value in obj.items():
+        if key.startswith("_"):
+            continue
+        if key not in FILTER_KEYS:
+            _fail(f"{path}: unknown key {key!r} (known: {', '.join(sorted(FILTER_KEYS))})")
+        if key in ("allow", "deny"):
+            if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+                _fail(f"{path}: {key} must be a list of task names")
+            names = parse_names(",".join(value), f"{path} {key}") if value else []
+            if key == "allow" and not names:
+                _fail(f"{path}: allow names no task; refusing to read an empty allow-list as 'every task'")
+            out[key] = names
+        elif key == "slices":
+            if not isinstance(value, dict) or not value:
+                _fail(f"{path}: slices must be a non-empty object of label -> task names")
+            slices: dict[str, list[str]] = {}
+            for label, names_raw in value.items():
+                if not isinstance(label, str) or not is_task_id(label):
+                    _fail(f"{path}: slice label {label!r} is not a label ([A-Za-z0-9][A-Za-z0-9_.-]{{0,63}})")
+                names = _names_from(names_raw, f"{path} slice {label}")
+                if not names:
+                    _fail(f"{path}: slice {label!r} names no task")
+                slices[label] = names
+            out["slices"] = slices
+        elif key == "max_duration_s":
+            out["max_duration_s"] = _positive_int(value, f"{path}: max_duration_s")
+        elif key == "durations":
+            if not isinstance(value, dict):
+                _fail(f"{path}: durations must be an object of task name -> seconds")
+            durations: dict[str, int] = {}
+            for name, secs in value.items():
+                if str(name).startswith("_"):
+                    continue
+                if not is_task_id(str(name)):
+                    _fail(f"{path}: durations names {name!r}, which is not a task name")
+                durations[str(name)] = _positive_int(secs, f"{path}: durations[{name}]")
+            out["durations"] = durations
+        elif key == "exclude_unknown_duration":
+            if not isinstance(value, bool):
+                _fail(f"{path}: exclude_unknown_duration must be true or false")
+            out["exclude_unknown_duration"] = value
+    return out
+
+
 def load_pack_filter(pack_dir: Path, rel: str | None) -> dict[str, Any]:
     candidates: list[Path] = []
     if rel:
@@ -178,10 +249,9 @@ def load_pack_filter(pack_dir: Path, rel: str | None) -> dict[str, Any]:
         if path.is_file():
             obj = _read_json(path)
             if isinstance(obj, dict):
-                obj["_path"] = str(path)
-                return obj
+                return validate_pack_filter(obj, str(path))
             if isinstance(obj, list) and all(isinstance(x, str) for x in obj):
-                return {"allow": obj, "_path": str(path)}
+                return validate_pack_filter({"allow": obj}, str(path))
             _fail(f"{path} must be a JSON object or an array of task names")
     if rel:
         _fail(f"task_filter names {rel}, which is not a file in the staged pack")
@@ -214,28 +284,34 @@ def resolve_slice(pack_dir: Path, spec: dict[str, Any], label: str) -> list[str]
                 return parse_names(",".join(lines), f"slice {label}")
     slices = spec.get("slices")
     if isinstance(slices, dict) and label in slices:
-        return _names_from(slices[label], f"slice {label}")
+        return list(slices[label])
     return None
 
 
 def load_durations_map(pack_dir: Path, spec: dict[str, Any]) -> dict[str, int]:
-    raw: dict[str, Any] = {}
+    """Measured walls: ``task_durations.json`` / ``durations.json`` (an object,
+    or ``{"durations": {...}}``) overlaid by ``filter.json`` → ``durations``.
+    Every value must be a positive integer of seconds — a malformed entry
+    fails closed rather than silently dropping out of a duration gate."""
+    out: dict[str, int] = {}
     for name in DURATION_FILES:
         path = pack_dir / name
-        if path.is_file():
-            loaded = _read_json(path)
-            if isinstance(loaded, dict):
-                inner = loaded.get("durations")
-                raw.update(inner if isinstance(inner, dict) else loaded)
-            break
-    if isinstance(spec.get("durations"), dict):
-        raw.update(spec["durations"])
-    out: dict[str, int] = {}
-    for key, value in raw.items():
-        if str(key).startswith("_"):
+        if not path.is_file():
             continue
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            out[str(key)] = int(value)
+        loaded = _read_json(path)
+        if not isinstance(loaded, dict):
+            _fail(f"{path} must be a JSON object of task name -> seconds")
+        inner = loaded.get("durations", loaded)
+        if not isinstance(inner, dict):
+            _fail(f"{path}: durations must be an object of task name -> seconds")
+        for key, value in inner.items():
+            if str(key).startswith("_"):
+                continue
+            if not is_task_id(str(key)):
+                _fail(f"{path}: {key!r} is not a task name")
+            out[str(key)] = _positive_int(value, f"{path}: durations[{key}]")
+        break
+    out.update(spec.get("durations") or {})
     return out
 
 
@@ -297,9 +373,8 @@ def select_base(
                 f"({SLICES_DIR}/ or filter.json slices); refusing to guess a task set"
             )
     allow = spec.get("allow")
-    if isinstance(allow, list) and allow:
-        names = _names_from(allow, "filter.json allow")
-        return must_exist(names, "pack filter.json allow"), "pack allow", False
+    if allow:
+        return must_exist(list(allow), "pack filter.json allow"), "pack allow", False
     return list(available), "tasks_dir", False
 
 
@@ -329,17 +404,13 @@ def filter_tasks(
         available, tasks=tasks, task_slice=task_slice, pack_dir=pack_dir, spec=spec
     )
     deny = set(exclude)
-    pack_deny = spec.get("deny")
-    if isinstance(pack_deny, list):
-        deny.update(_names_from(pack_deny, "filter.json deny"))
+    deny.update(spec.get("deny") or [])
     if overlap := [n for n in tasks if n in deny]:
         _fail(f"tasks and task_exclude/deny both name {', '.join(overlap)}")
     ceiling = max_s
     packed_max = spec.get("max_duration_s")
-    if isinstance(packed_max, (int, float)) and not isinstance(packed_max, bool):
-        packed_max = int(packed_max)
-        if packed_max > 0:
-            ceiling = packed_max if ceiling is None else min(ceiling, packed_max)
+    if packed_max is not None:
+        ceiling = packed_max if ceiling is None else min(ceiling, packed_max)
     if spec.get("exclude_unknown_duration") is True:
         drop_unknown = True
     durations_map = load_durations_map(pack_dir, spec)

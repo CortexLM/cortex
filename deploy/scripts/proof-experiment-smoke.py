@@ -123,16 +123,52 @@ def check_uncompressed_tar(data: bytes, what: str) -> None:
         raise Refuse(f"{what} is not a tar archive: {e}") from e
 
 
+def contained_members(tf: tarfile.TarFile, dest: Path) -> list[tarfile.TarInfo]:
+    """Every member of a miner / operator tar, or a refusal.
+
+    Regular files and directories only (no links, devices, or FIFOs — the
+    guest's own unpack skips those, this dev path refuses them), every path
+    made of plain relative segments (no absolute path, no ``.`` / ``..``
+    anywhere, no empty segment), and every normalised target strictly under
+    ``dest``. Checked on **every** Python, before any byte is written, so the
+    result does not depend on whether the stdlib ``data`` filter exists.
+    """
+    root = dest.resolve()
+    members: list[tarfile.TarInfo] = []
+    for member in tf.getmembers():
+        name = member.name
+        if not (member.isfile() or member.isdir()):
+            raise Refuse(f"tar member {name!r} is not a regular file or directory; refusing")
+        parts = name.split("/")
+        if not name or name.startswith("/") or any(p in ("", ".", "..") for p in parts) or "\\" in name:
+            raise Refuse(f"tar member {name!r} is not a plain relative path; refusing")
+        target = (root / name).resolve()
+        if target != root and root not in target.parents:
+            raise Refuse(f"tar member {name!r} resolves outside the extraction directory; refusing")
+        # The mode is never trusted beyond the executable bit; ownership never.
+        member.mode = (0o755 if member.isdir() else 0o644) | (member.mode & 0o111)
+        member.uid = member.gid = 0
+        member.uname = member.gname = ""
+        members.append(member)
+    return members
+
+
 def extract_tar(data: bytes, dest: Path) -> None:
-    """Unpack an uncompressed tar with the stdlib's safe ``data`` filter."""
+    """Unpack an uncompressed tar under ``dest`` and nowhere else.
+
+    Members are validated by [`contained_members`] first; the stdlib
+    ``data`` filter is then applied as well where this Python has it
+    (3.12+, or 3.11.4+ / 3.10.12+ / 3.9.17+ / 3.8.17+ with the backport).
+    """
+    dest.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as tf:
-        try:
-            tf.extractall(dest, filter="data")
-        except TypeError:  # pragma: no cover - python < 3.11.4 without the filter kw
-            for member in tf.getmembers():
-                if not (member.isfile() or member.isdir()) or member.name.startswith(("/", "..")):
-                    raise Refuse(f"tar member {member.name!r} is not a plain relative file")
-            tf.extractall(dest)  # noqa: S202 - members checked above
+        members = contained_members(tf, dest)
+        if hasattr(tarfile, "data_filter"):
+            tf.extractall(dest, members=members, filter="data")
+        else:  # pragma: no cover - interpreters predating the tar filter
+            for member in members:
+                tf.extract(member, dest, set_attrs=False)  # noqa: S202 - members contained above
+                os.chmod(dest / member.name, member.mode)
 
 
 # ---------------------------------------------------------------------------

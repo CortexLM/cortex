@@ -200,6 +200,79 @@ class SelectionTests(unittest.TestCase):
             s = _run(pack, tasks, Path(tmp) / "packonly")
             self.assertEqual(s["max_duration_s"], 99999)
 
+    def test_malformed_pack_filter_fields_fail_closed(self) -> None:
+        """A malformed field is never read as absent: that would widen the
+        scored set (allow), keep tasks the pack meant to drop (deny), or lift
+        a gate (max_duration_s)."""
+        bad_specs = [
+            {"allow": []},
+            {"allow": "task-a"},
+            {"allow": ["task-a", 3]},
+            {"allow": ["../x"]},
+            {"deny": "task-b"},
+            {"deny": [None]},
+            {"max_duration_s": "3600"},
+            {"max_duration_s": 0},
+            {"max_duration_s": -5},
+            {"max_duration_s": 1.5},
+            {"max_duration_s": True},
+            {"slices": []},
+            {"slices": {}},
+            {"slices": {"quick": "task-a,task-b"}, "allow": ["task-a"], "alow": ["task-b"]},
+            {"slices": {"quick": []}},
+            {"slices": {"bad label!": ["task-a"]}},
+            {"durations": [900]},
+            {"durations": {"task-a": "900"}},
+            {"durations": {"task-a": 0}},
+            {"exclude_unknown_duration": "true"},
+            {"alow": ["task-a"]},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            pack, tasks = _pack(tmp, ["task-a", "task-b", "task-c"])
+            for i, spec in enumerate(bad_specs):
+                (pack / "filter.json").write_text(json.dumps(spec), encoding="utf-8")
+                with self.assertRaises(SystemExit, msg=f"spec {spec!r} must be refused"):
+                    _run(pack, tasks, Path(tmp) / f"dest{i}")
+            # A list-shaped filter file is an allow-list; an empty one is refused too.
+            (pack / "filter.json").write_text("[]", encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                _run(pack, tasks, Path(tmp) / "dest-list")
+            # Comments are fine; a well-formed spec with every field validates.
+            (pack / "filter.json").write_text(
+                json.dumps(
+                    {
+                        "_comment": "pack content",
+                        "slices": {"quick": ["task-a"]},
+                        "allow": ["task-a", "task-b"],
+                        "deny": [],
+                        "max_duration_s": 3600,
+                        "durations": {"task-b": 100, "_note": "ignored"},
+                        "exclude_unknown_duration": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            s = _run(pack, tasks, Path(tmp) / "dest-ok")
+            self.assertEqual(_kept(Path(tmp) / "dest-ok"), ["task-a", "task-b"])
+            self.assertEqual(s["max_duration_s"], 3600)
+            # A malformed task_durations.json fails closed as well.
+            (pack / "task_durations.json").write_text(json.dumps({"task-a": "fast"}), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                _run(pack, tasks, Path(tmp) / "dest-dur")
+            (pack / "task_durations.json").write_text(json.dumps(["task-a"]), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                _run(pack, tasks, Path(tmp) / "dest-dur2")
+
+    def test_shipped_example_filter_validates(self) -> None:
+        example = json.loads(
+            (HERE.parent / "harness" / "pack_filter.example.json").read_text(encoding="utf-8")
+        )
+        spec = filter_tasks.validate_pack_filter(example, "pack_filter.example.json")
+        self.assertEqual(spec["allow"], ["task-a", "task-b", "task-c", "task-d"])
+        self.assertEqual(spec["slices"]["example-smoke"], ["task-a"])
+        self.assertEqual(spec["max_duration_s"], 7200)
+        self.assertEqual(spec["durations"]["task-c"], 5400)
+
     def test_empty_result_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pack, tasks = _pack(tmp, ["task-a"])

@@ -139,6 +139,17 @@ An empty result fails closed. The kept tasks are **copied** to
 what was dropped, and why. `harness/pack_filter.example.json` shows the pack
 side with placeholder names.
 
+**A malformed `filter.json` fails closed, never reads as absent.** Every
+present field is shape-checked: `allow` / `deny` must be lists of task
+names and `allow` must not be empty (an empty allow-list is not "every
+task"); `slices` a non-empty object of label → non-empty list;
+`max_duration_s` a positive integer; `durations` an object of task name →
+positive integer seconds (also enforced on `task_durations.json`);
+`exclude_unknown_duration` a JSON boolean. Keys starting with `_` are
+comments; any other unknown key is refused as a typo. A pack whose filter
+is malformed therefore scores nothing until it is fixed and re-pinned,
+rather than scoring a wider or less-gated set than the operator meant.
+
 ## Timeouts (topic data)
 
 | Param | Env | Effect |
