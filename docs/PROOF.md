@@ -302,8 +302,9 @@ Trust-root keygen is the throwaway owner path in
   — both filters optional; newest first. `GET /v1/submissions/{id}` shows a
   `queued` row with `verdict: null` until it is drained. A scored custom
   evaluate also carries `results` (topic-defined complete RLM JSON; zip root
-  `results.json`). Missing / non-conforming results on evaluate is **503**,
-  no pass row. Harvest families omit `results`.
+  `results.json`) on the create body and on GET. Missing / non-conforming
+  results on evaluate, or a custom pass whose pending results expired
+  before persist, is **503**, no pass row. Harvest families omit `results`.
 - A pass that the family scorer crowns (custom: green checklist and
   `primary >= bar * (1 + epsilon_rel)` direction-aware, bar = sealed value or
   reigning best) persists as `champion`; other passes stay `awaiting_admin`.

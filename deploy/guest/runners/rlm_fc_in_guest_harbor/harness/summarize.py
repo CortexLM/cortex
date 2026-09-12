@@ -64,6 +64,25 @@ def _fail(msg: str, code: int = 2) -> None:
     raise SystemExit(code)
 
 
+def is_results_file_name(name: str) -> bool:
+    """Match ``proof_results::is_results_file_name`` — one safe ``*.json`` segment."""
+    if not 8 <= len(name) <= 64:
+        return False
+    if "/" in name or name.startswith("."):
+        return False
+    if not name.lower().endswith(".json"):
+        return False
+    return all(c.isalnum() or c in "._-" for c in name)
+
+
+def results_file_name(pin: str) -> str:
+    """Guest write name: topic pin or ``results.json``. A bad pin is fail-closed."""
+    name = (pin or "").strip() or "results.json"
+    if not is_results_file_name(name):
+        _fail(f"results_path {name!r} is not a single safe .json file name")
+    return name
+
+
 def _is_finite_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
@@ -580,8 +599,10 @@ def main(argv: list[str] | None = None) -> int:
     dumped = json.dumps(report, indent=2, sort_keys=True)
     dumped = redact(dumped, secrets)
     out.write_text(dumped + "\n", encoding="utf-8")
-    results_name = os.environ.get("PROOF_PARAM_RESULTS_PATH", "").strip() or "results.json"
+    results_name = results_file_name(os.environ.get("PROOF_PARAM_RESULTS_PATH", ""))
     results_path = out.parent / results_name
+    if results_path.parent.resolve() != out.parent.resolve():
+        _fail(f"results_path {results_name!r} escapes the output directory")
     results = build_results(report, trials, read_tail(log_path, secrets))
     results_dumped = redact(json.dumps(results, indent=2, sort_keys=True), secrets)
     results_path.write_text(results_dumped + "\n", encoding="utf-8")

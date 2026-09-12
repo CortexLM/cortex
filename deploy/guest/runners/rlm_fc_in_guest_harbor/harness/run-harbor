@@ -99,7 +99,12 @@ if [ "$HARNESS_KIND" = script ]; then
     fi
     rm -f "$PROOF_OUTPUT_DIR/results.json"
     if [ -n "${PROOF_PARAM_RESULTS_PATH:-}" ]; then
-        rm -f "$PROOF_OUTPUT_DIR/$PROOF_PARAM_RESULTS_PATH"
+        _results_name="$(proof_results_file_name "$PROOF_PARAM_RESULTS_PATH" || true)"
+        if [ -z "$_results_name" ]; then
+            proof_die "results_path is not a single safe .json file name"
+        fi
+        rm -f "$PROOF_OUTPUT_DIR/$_results_name"
+        unset _results_name
     fi
     set +e
     summarize_or_die "$script_exit"

@@ -704,6 +704,29 @@ class AgentExceptionPolicyTests(unittest.TestCase):
             self.assertEqual(results["agent"], "proof_python_agent:ProofPythonAgent")
             self.assertIn("harbor_run_log", results["logs"])
 
+    def test_results_path_pin_is_contained(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            write_complete_trial(jobs / "job" / "a__1", "a__1", 1.0)
+            out = root / "output" / "report.json"
+            out.parent.mkdir()
+            outside = root / "outside.json"
+            outside.write_text("sentinel\n", encoding="utf-8")
+            saved = dict(os.environ)
+            os.environ["PROOF_PARAM_RESULTS_PATH"] = "../../outside.json"
+            try:
+                with self.assertRaises(SystemExit) as ctx:
+                    summarize.main(["--jobs-dir", str(jobs), "--output", str(out)])
+                self.assertEqual(ctx.exception.code, 2)
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+            self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel\n")
+            self.assertFalse((root / "output" / "results.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,17 @@ proof_csv_has_openrouter "OTHER_KEY" && fail "OTHER_KEY is not OpenRouter"
 proof_csv_has_openrouter "" && fail "empty is not OpenRouter"
 pass "proof_csv_has_openrouter trims comma-list names"
 
+got="$(proof_results_file_name || true)"
+[ "$got" = "results.json" ] || fail "empty pin defaults to results.json, got $got"
+got="$(proof_results_file_name results.json || true)"
+[ "$got" = "results.json" ] || fail "results.json must be accepted"
+got="$(proof_results_file_name tbench-results.json || true)"
+[ "$got" = "tbench-results.json" ] || fail "safe pin must be accepted, got $got"
+proof_results_file_name "../../outside.json" && fail "traversal pin must be refused"
+proof_results_file_name "nope.txt" && fail "non-json pin must be refused"
+proof_results_file_name ".hidden.json" && fail "dotfile pin must be refused"
+pass "proof_results_file_name is a single safe .json segment"
+
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/harbor-adaptor-XXXXXX")"
 cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT

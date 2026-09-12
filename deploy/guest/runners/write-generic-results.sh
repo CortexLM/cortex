@@ -3,22 +3,44 @@
 # After `report.json` exists, write `generic-custom-v1` results JSON bound
 # to the scored `primary_value` / `claim_holds` and the guest identity env.
 # File name: `results.json`, or `PROOF_PARAM_RESULTS_PATH` when it is one
-# safe `*.json` segment. Harbor / trial contracts write their own document
-# (see `rlm_fc_in_guest_harbor/harness/summarize.py`).
+# safe `*.json` segment (8–64 chars, no `/`, no leading `.`). A bad pin
+# is fail-closed (no write). Harbor / trial contracts write their own
+# document (see `rlm_fc_in_guest_harbor/harness/summarize.py`).
 #
 # Source or append this from an adaptor `run`. Missing `report.json` is a
 # no-op (the guest still fail-closes Evaluate with no results file).
 
 if [ -f "${PROOF_OUTPUT_DIR:?}/report.json" ]; then
     _results_name=results.json
-    case "${PROOF_PARAM_RESULTS_PATH:-}" in
-        [A-Za-z0-9][A-Za-z0-9._-]*.json)
-            case "${PROOF_PARAM_RESULTS_PATH}" in
-                */* | .* | *.*.*.*) ;;
-                *) _results_name="${PROOF_PARAM_RESULTS_PATH}" ;;
-            esac
-            ;;
-    esac
+    if [ -n "${PROOF_PARAM_RESULTS_PATH:-}" ]; then
+        _pin="${PROOF_PARAM_RESULTS_PATH}"
+        _n=${#_pin}
+        case "$_pin" in
+            */* | .* | . | ..)
+                echo "results_path is not a single safe .json file name" >&2
+                exit 2
+                ;;
+        esac
+        if [ "$_n" -lt 8 ] || [ "$_n" -gt 64 ]; then
+            echo "results_path is not a single safe .json file name" >&2
+            exit 2
+        fi
+        case "$_pin" in
+            *.json | *.JSON) ;;
+            *)
+                echo "results_path is not a single safe .json file name" >&2
+                exit 2
+                ;;
+        esac
+        case "$_pin" in
+            *[!A-Za-z0-9._-]*)
+                echo "results_path is not a single safe .json file name" >&2
+                exit 2
+                ;;
+        esac
+        _results_name="$_pin"
+        unset _pin _n
+    fi
     _pv=$(sed -n 's/.*"primary_value"[[:space:]]*:[[:space:]]*\([^,}[:space:]]*\).*/\1/p' \
         "$PROOF_OUTPUT_DIR/report.json" | sed -n '1p')
     _ch=$(sed -n 's/.*"claim_holds"[[:space:]]*:[[:space:]]*\([^,}[:space:]]*\).*/\1/p' \

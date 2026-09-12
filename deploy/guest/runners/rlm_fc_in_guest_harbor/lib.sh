@@ -79,6 +79,23 @@ proof_relative_ok() {
     esac
 }
 
+# Single safe *.json segment (matches proof_results::is_results_file_name).
+# Prints the name on success; empty / traversal / wrong suffix is 1.
+proof_results_file_name() {
+    local name="${1:-results.json}"
+    local n=${#name}
+    [ "$n" -ge 8 ] && [ "$n" -le 64 ] || return 1
+    case "$name" in
+        "" | */* | .* | . | ..) return 1 ;;
+        *.json | *.JSON) ;;
+        *) return 1 ;;
+    esac
+    case "$name" in
+        *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    printf '%s\n' "$name"
+}
+
 proof_require_tasks() {
     : "${PROOF_PACK_DIR:?PROOF_PACK_DIR is required}"
     local tasks_rel="${PROOF_PARAM_TASKS_DIR:?constraints.params.tasks_dir is required}"
