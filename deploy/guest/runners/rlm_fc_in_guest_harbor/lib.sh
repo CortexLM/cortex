@@ -404,6 +404,14 @@ proof_start_container_runtime() {
         export PROOF_CONTAINER_RUNTIME=docker
         return 0
     fi
+    # A docker CLI that reaches a daemon through its own default context
+    # (rootless docker under XDG_RUNTIME_DIR, a configured context, a dev
+    # box). Harbor talks to the same daemon the CLI does.
+    if proof_docker_ok; then
+        echo "rlm_fc_in_guest_harbor: using docker via the CLI's default context" >&2
+        export PROOF_CONTAINER_RUNTIME=docker
+        return 0
+    fi
     echo "rlm_fc_in_guest_harbor: docker not ready; falling back to podman API socket" >&2
     proof_start_podman
     export PROOF_CONTAINER_RUNTIME=podman

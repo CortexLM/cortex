@@ -44,14 +44,36 @@ static TRACING_ERROR: OnceLock<String> = OnceLock::new();
 /// Returns [`TelemetryError::Tracing`] when the global subscriber cannot be set
 /// on the first attempt.
 pub fn init_tracing() -> Result<(), TelemetryError> {
+    install_tracing(false)
+}
+
+/// [`init_tracing`], but every log line goes to **stderr**.
+///
+/// For a process whose stdout is a wire (the guest agent's `--stdio` frame
+/// mode): a JSON log line on stdout would corrupt the length-prefixed
+/// frames its peer reads. Same `Once` as [`init_tracing`] — whichever is
+/// called first wins for the process.
+///
+/// # Errors
+///
+/// As [`init_tracing`].
+pub fn init_tracing_stderr() -> Result<(), TelemetryError> {
+    install_tracing(true)
+}
+
+fn install_tracing(stderr: bool) -> Result<(), TelemetryError> {
     TRACING_INIT.call_once(|| {
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-        let result = tracing_subscriber::fmt()
+        let builder = tracing_subscriber::fmt()
             .json()
             .with_env_filter(filter)
             .with_current_span(true)
-            .with_span_list(true)
-            .try_init();
+            .with_span_list(true);
+        let result = if stderr {
+            builder.with_writer(std::io::stderr).try_init()
+        } else {
+            builder.try_init()
+        };
         if let Err(err) = result {
             let _ = TRACING_ERROR.set(err.to_string());
         }
