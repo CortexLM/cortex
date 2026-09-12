@@ -33,7 +33,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use proof_canon::validate_rules;
-use proof_experiment::ExperimentBinding;
+use proof_experiment::{ExperimentBinding, RunPolicy};
 use proof_rlm::{
     ArtifactFile, Checklist, CustomRunReport, CustomRunRequest, InspectOutcome, LogFile, RuleSet,
     RunOutcome, RUN_REPORT_SCHEMA,
@@ -411,6 +411,9 @@ fn job_env(
     pack: Option<&StagedPack>,
     artifact: Option<&Path>,
 ) -> Result<Vec<(String, String)>, String> {
+    // Generic run-policy knobs are shape-checked before the adaptor sees
+    // them (no spend on a malformed signed value); the adaptor interprets.
+    RunPolicy::from_params(&request.constraints.params).map_err(|e| e.to_string())?;
     let params = param_env(&request.constraints.params)?;
     let direction = match request.direction {
         proof_task::MetricDirection::Max => "max",

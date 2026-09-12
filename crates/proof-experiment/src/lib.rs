@@ -20,7 +20,14 @@
 //!   **≥ 16 GiB**, 32 GiB by default) and the control-plane policy env
 //!   ([`ExperimentPolicy`]);
 //! - the public wire shape the orchestrator carries for one experiment VM
-//!   ([`ExperimentSpec`]).
+//!   ([`ExperimentSpec`]);
+//! - the generic **run policy** a signed topic steers its paid jobs with
+//!   ([`RunPolicy`], module [`policy`]): which pack items are scored and how
+//!   many (`tasks`, `task_exclude`, `n_tasks`, a duration gate), the wall
+//!   clocks (`exec_timeout_s`, timeout multipliers), and what an item the
+//!   miner's harness crashed on counts as (`agent_exception_policy`). The
+//!   values are topic data; the control plane and the guest agent only
+//!   shape-check them, before any VM and before any spend.
 //!
 //! Everything here is a **shape** or a **ceiling**. The runner id, the pack
 //! digest, the model pin, and the sizes are topic data read from the signed
@@ -32,10 +39,14 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions, clippy::must_use_candidate)]
 
+pub mod policy;
+
 use std::collections::BTreeMap;
 
 use proof_canon::{is_custom_id, is_hex64};
 use serde::{Deserialize, Serialize};
+
+pub use policy::{is_task_id, AgentExceptionPolicy, RunPolicy};
 
 /// `constraints.params` key selecting the in-guest runner (an operator
 /// adaptor id installed in the guest image, `[a-z0-9][a-z0-9_-]{1,63}`).
@@ -172,6 +183,17 @@ pub enum ExperimentError {
         value: u32,
         /// The lock it exceeds.
         lock: u32,
+    },
+    /// A generic run-policy knob ([`policy`]) carries a value of the wrong
+    /// shape. Refused before any VM and before any spend; re-sign the topic.
+    #[error("constraints.params.{key} {value:?}: {why} (run policy; refused before any experiment vm — re-sign the topic)")]
+    BadPolicy {
+        /// Which key.
+        key: String,
+        /// What it said.
+        value: String,
+        /// The shape it must have.
+        why: &'static str,
     },
 }
 
@@ -1119,6 +1141,32 @@ mod tests {
             Err(ExperimentError::Spec("disk_mib")),
             "under the 16 GiB floor"
         );
+    }
+
+    /// The crate compiles no challenge: no benchmark, harness, model, or
+    /// task name appears in its non-test source — the run policy is shape
+    /// only, and every value it reads comes from a signed topic.
+    #[test]
+    fn no_challenge_content_is_compiled_in() {
+        for src in [include_str!("lib.rs"), include_str!("policy.rs")] {
+            let non_test = src.split("#[cfg(test)]").next().unwrap_or("");
+            let lower = non_test.to_ascii_lowercase();
+            for forbidden in [
+                "harbor",
+                "terminal-bench",
+                "terminal bench",
+                "tb4",
+                "tbench",
+                "terminus",
+                "kimi",
+                "openrouter",
+                "first-15",
+                "first15",
+                "shortpack",
+            ] {
+                assert!(!lower.contains(forbidden), "{forbidden:?} is compiled in");
+            }
+        }
     }
 
     #[test]
