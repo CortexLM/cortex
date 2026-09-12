@@ -657,6 +657,52 @@ class AgentExceptionPolicyTests(unittest.TestCase):
             blob = out.read_text(encoding="utf-8")
             self.assertNotIn("sk-or-secret-value-1234", blob)
             self.assertIn("[REDACTED]", blob)
+            results_blob = (root / "results.json").read_text(encoding="utf-8")
+            self.assertNotIn("sk-or-secret-value-1234", results_blob)
+            self.assertIn("[REDACTED]", results_blob)
+
+    def test_results_json_is_complete_harbor_contract(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            for i, reward in enumerate([1.0, 0.0, 1.0]):
+                write_complete_trial(jobs / "job" / f"t{i}__1", f"t{i}__1", reward)
+            out = root / "report.json"
+            saved = dict(os.environ)
+            os.environ["PROOF_TOPIC_ID"] = "tbench-x0032"
+            os.environ["PROOF_CUSTOM_ID"] = "tbench_terminal_bench"
+            os.environ["PROOF_SUBMISSION_DIGEST"] = "11" * 32
+            os.environ["PROOF_ARTIFACT_DIGEST"] = "22" * 32
+            try:
+                rc = summarize.main(
+                    [
+                        "--jobs-dir",
+                        str(jobs),
+                        "--output",
+                        str(out),
+                        "--agent",
+                        "proof_python_agent:ProofPythonAgent",
+                        "--agent-source",
+                        "artifact_dir/recipe/agent",
+                        "--harness-kind",
+                        "python",
+                    ]
+                )
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+            self.assertEqual(rc, 0)
+            results = json.loads((root / "results.json").read_text(encoding="utf-8"))
+            self.assertEqual(results["contract"], "tbench-harbor-v1")
+            self.assertEqual(results["topic_id"], "tbench-x0032")
+            self.assertEqual(results["n_scored"], 3)
+            self.assertEqual(len(results["trials"]), 3)
+            self.assertAlmostEqual(results["primary_value"], results["mean_reward"])
+            self.assertAlmostEqual(results["primary_value"], 2.0 / 3.0)
+            self.assertEqual(results["agent"], "proof_python_agent:ProofPythonAgent")
+            self.assertIn("harbor_run_log", results["logs"])
 
 
 if __name__ == "__main__":

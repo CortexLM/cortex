@@ -18,6 +18,7 @@ base64 = "0.22"
 hex = "0.4"
 proof-canon = { path = "../proof-canon" }
 proof-experiment = { path = "../proof-experiment" }
+proof-results = { path = "../proof-results" }
 proof-score = { path = "../proof-score" }
 proof-task = { path = "../proof-task" }
 serde = { version = "1", features = ["derive"] }

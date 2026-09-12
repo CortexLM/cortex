@@ -460,6 +460,17 @@ Poll `GET /challenge/proof/v1/submissions/{id}` for the verdict envelope
 below. While `can_score` is `false`, the POST itself answers **503** and
 there is no row to show.
 
+On a scored **custom** evaluate the same GET also carries `results`: the
+topic-defined complete RLM results JSON (not just `primary_value`). The
+object is **obligatory** for a pass — missing, invalid, or non-conforming
+results JSON is a **503** (no pass row), never a silent drop. Harvest
+`nll` / `throughput` omit `results`. A red-checklist reject has no
+`results` field (or `null`). The same document is at the artefact zip root
+as `results.json` (or the filename in signed
+`constraints.params.results_path`). Consensus scoring still reads only
+`report.json`; `results.primary_value` / `claim_holds` / identities must
+match those scored facts. See [Complete results JSON](#complete-results-json).
+
 ## HTTP 400 vs 503
 
 A **400** is your request. A **401** is a missing, invalid, or replayed
@@ -495,6 +506,7 @@ submission row.
 | **503** missing / closed / non-`1x` executor | Live `eval_executor` cannot rent the `1x` machine | no | no |
 | **503** `proof deadline … exceeded` | Your recipe did not finish inside `max_proof_deadline_s`; the body carries the run's `stdout_tail` | no | no (pod torn down) |
 | **503** `custom metric … has no registered runner` / `not wired` | The topic's `custom_id` has no runner on this host, or its topic VM is not configured | no | no |
+| **503** missing / invalid evaluate `results.json` | Custom evaluate: no topic-defined results JSON, or it does not bind the scored `primary_value` / `claim_holds` / identities | no | no (guest torn down) |
 | **503** staged artefact missing / digest mismatch | Upload-only evaluate: the host no longer holds matching vault bytes (missing, empty, oversize, or digest mismatch). The row is untouched — nothing was rented and no bytes are invented | live: no; deferred: queued | no |
 | **201** `queued` | Topic in `deferred_topics` (operator still installing its scoring path); every **400** above still applies first | **yes** (queued, scored later) | **no** (not yet) |
 | **200** existing row (`already queued …` / `already submitted … and scored`) | Same artefact + hotkey re-sent (freshly signed, new `submit_nonce`) to a deferring topic, before or after its row was drained | existing row | **no** |
@@ -609,6 +621,42 @@ topic's `params` in `ctx proof topics`: they name the harness inputs
 (tasks, agent, model, concurrency). Custom / agent topics do **not** apply
 hardcoded `flops_used` accounting; anti-cheat is the signed checklist.
 
+## Complete results JSON
+
+A successful **custom** evaluate must produce a topic-defined complete
+results document. The adaptor writes it next to `report.json` (default
+name `results.json`; a topic may pin `constraints.params.results_path` to
+another single `*.json` segment). The guest, harvest reconstruct, and
+RLM scorer all bind it to the scored facts and **refuse a pass** when it
+is missing or non-conforming (**503**, no pass row). This is display and
+audit for the frontend — not a second score. `primary_value` /
+`claim_holds` / identities must match `report.json`.
+
+`GET /challenge/proof/v1/submissions/{id}` exposes the same object as
+`results`. The operator artefact zip always embeds it at the zip root as
+`results.json` (even when the topic pinned another write name).
+
+Envelope (`schema_version` is `1`):
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `schema_version` | yes | `1` |
+| `contract` | yes | Known contract id (below). A topic may pin `constraints.params.results_contract`; the file's `contract` must be the same family |
+| `topic_id` / `custom_id` / `submission_digest` / `artifact_digest` | yes | Echo the run |
+| `primary_value` | yes | Finite number; must match the scored primary |
+| `claim_holds` | yes | Must match the scored report |
+
+Known contracts:
+
+| `contract` | Extra required fields |
+|------------|------------------------|
+| `generic-custom-v1` | `display`: non-empty JSON object (not `primary_value` alone) |
+| `harbor-trials-v1` / `tbench-harbor-v1` | Untruncated `trials[]` (`name`, finite `reward`, `outcome`); `n_scored` = `trials.length`; `n_measured`; `mean_reward` = `primary_value` = mean of trial rewards; non-empty `agent`; `logs.harbor_run_tail` and/or `logs.harbor_run_log` |
+
+Harvest `nll` / `throughput` rows have no `results`. A red-checklist
+reject never ships the file. See [`tbench`](./proof-tbench.md) for the
+Harbor trial document the frontend renders.
+
 **Anti-cheat checklist — every rule in the topic's `checklist` (current
 version) must pass before a single paid inference call is made.** Read the
 rule texts in `ctx proof topics`; they are the contract. One red, missing,
@@ -633,8 +681,8 @@ figure vs `declared_flops` or the topic budget.
 
 A clean pass that beats the current best (sealed value or reigning best) by
 `epsilon_rel` is promoted automatically: the row is `champion` and the
-operator archive keeps your artefact, `report.json`, and `checklist.json`
-under `{topic_id}/{submission_id}.zip`. Runs on one topic are scored and
+operator archive keeps your artefact, `report.json`, `results.json`, and
+`checklist.json` under `{topic_id}/{submission_id}.zip`. Runs on one topic are scored and
 crowned one at a time against the best at that moment, so a run that is not
 strictly better than the reigning champion never replaces it.
 

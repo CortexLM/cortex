@@ -26,12 +26,13 @@ operator's view of it.
 
 | File | Job | Must write under `$PROOF_OUTPUT_DIR` |
 |------|-----|--------------------------------------|
-| `run` (required) | `Baseline`, `Evaluate` | `report.json` — `{"primary_value": <finite number>, "claim_holds": bool, "flops_used": <int or omit>, "evidence": {...}}` |
+| `run` (required) | `Baseline`, `Evaluate` | `report.json` — `{"primary_value": <finite number>, "claim_holds": bool, "flops_used": <int or omit>, "evidence": {...}}`. **Evaluate** also writes the topic-defined complete results JSON (default `results.json`; pin `results_path` / `results_contract` in `constraints.params`). Missing or non-conforming on evaluate is fail-closed (no Done) |
 | `inspect` | `Inspect` (anti-cheat rules, **before any paid inference**) | `checklist.json` — `[{"id": "<rule id>", "pass": bool, "evidence": "..."}]`; a rule left out is recorded **red** |
 | `propose_rules` (optional) | `ProposeRules` | `rules.json` — `[{"id": "<slug>", "text": "..."}]`; without this entrypoint the agent proposes the signed topic's own `checklist` |
 
 A non-zero exit with no document, a missing document, a non-finite
-`primary_value`, or a run that outlives `PROOF_DEADLINE_S` is a failed job.
+`primary_value`, a missing or non-conforming Evaluate `results.json`, or a
+run that outlives `PROOF_DEADLINE_S` is a failed job.
 The agent never fills in a value — and neither may the adaptor: a trial that
 produced no measurement is reported as what it is (the topic decides whether
 that counts as zero or fails the run), never as some other number that

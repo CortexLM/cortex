@@ -699,6 +699,7 @@ async fn submit(
         state: SubmissionState::Queued,
         receipt_json: None,
         verdict: None,
+        results: None,
         detail: None,
     };
 
@@ -1186,6 +1187,9 @@ async fn persist_scored(
         Some(format!("gates={:?}", verdict.failed))
     };
     row.verdict = Some(verdict);
+    if let Some(live) = st.live() {
+        row.results = live.display_results(&row.submission_digest);
+    }
     let row = st
         .store
         .insert(row)

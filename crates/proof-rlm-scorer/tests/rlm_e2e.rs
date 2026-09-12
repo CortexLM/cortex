@@ -419,8 +419,11 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
             "logs/run.log",
             "manifest.json",
             "report.json",
+            "results.json",
         ]
     );
+    assert_eq!(row["results"]["contract"], "generic-custom-v1");
+    assert!((row["results"]["primary_value"].as_f64().unwrap() - 0.7).abs() < 1e-12);
     assert_eq!(manifest_of(&zip_a)["promoted"], true);
     let best = ArtefactStore::new(&root).best(&tid).expect("best.json");
     assert_eq!(best.submission_id, id_a);
@@ -474,6 +477,8 @@ async fn submit_scores_rejects_and_promotes_through_the_registry_end_to_end() {
     );
     let names_b = zip_names(&root.join(&tid).join(format!("{id_b}.zip")));
     assert!(!names_b.iter().any(|n| n == "report.json"), "{names_b:?}");
+    assert!(!names_b.iter().any(|n| n == "results.json"), "{names_b:?}");
+    assert!(row_b["results"].is_null(), "{row_b}");
     let digest_b = row_b["submission_digest"].as_str().unwrap();
     let cl = rlm_store
         .checklist(digest_b)
