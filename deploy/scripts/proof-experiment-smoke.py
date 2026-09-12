@@ -673,6 +673,15 @@ def driver_orch(
         raise Refuse("--image-digest must be sha256:<64 hex> (read PROOF_RLM_VM_IMAGE_DIGEST; never invent one)")
     if "cortex.foundation" in args.orch_url:
         raise Refuse("refusing a production host for a smoke run")
+    if not args.ack_image_adaptor:
+        raise Refuse(
+            "the orch driver boots the PINNED guest image, and this smoke only narrows the run to one "
+            "task if the adaptor baked into that image reads constraints.params.tasks. An image baked "
+            "before this adaptor (e.g. the e79be pin kept until RE-LOCK) ignores the knob, runs the "
+            "topic's whole selection, and holds an experiment slot for hours. Pass "
+            "--ack-image-adaptor only when --image-digest names an image re-baked with this adaptor; "
+            "until then use --driver agent / exec on the host."
+        )
     token = read_bytes(args.orch_token_file, "bearer file").decode("utf-8").strip()
     if not token:
         raise Refuse(f"bearer file {args.orch_token_file} is empty")
@@ -681,6 +690,24 @@ def driver_orch(
     if not pack_digest:
         raise Refuse("no experiment_pack_digest on the topic and no --pack-tar to hash")
     base = args.orch_url.rstrip("/")
+    # Never take a slot from a live paid evaluate: one experiment VM already
+    # running means a miner (or the operator) is in flight on this host.
+    code, health = orch_http("GET", f"{base}/v1/health", None, token, args.orch_ca, 30)
+    if code != 200:
+        raise Refuse(f"GET /v1/health → HTTP {code}: {redact(health, secrets)}")
+    if not health.get("ready", False):
+        raise Refuse(f"the KVM host is not ready: {health.get('reason') or 'no reason given'}")
+    live = int(health.get("experiment_vms") or 0)
+    cap = int(health.get("max_experiment_vms") or 0)
+    if live > 0 and not args.allow_shared_capacity:
+        raise Refuse(
+            f"{live} experiment vm(s) already running on this host (max {cap}); a smoke must not compete "
+            "with a live paid evaluate for its slot. Wait for the slot to free, or pass "
+            "--allow-shared-capacity when the operator has confirmed the running vm is not a paid run."
+        )
+    if cap and live >= cap:
+        raise Refuse(f"the host runs {live} of at most {cap} experiment vms; no capacity for a smoke")
+    log(f"KVM host ready; experiment_vms={live}/{cap}")
     spec = {
         "spec": {
             "topic_id": request["topic_id"],
@@ -746,6 +773,34 @@ def driver_orch(
     return rc
 
 
+def adaptor_tree_sha256(runner_dir: Path) -> str:
+    """One digest over the adaptor tree that ran (path + bytes of every
+    regular file, sorted; `tests/` and caches excluded) — what an operator
+    pastes beside the outcome so the evidence names the exact adaptor."""
+    h = hashlib.sha256()
+    for path in sorted(p for p in runner_dir.rglob("*") if p.is_file()):
+        rel = path.relative_to(runner_dir).as_posix()
+        if rel.startswith("tests/") or "__pycache__" in rel or rel == ".run.orig":
+            continue
+        h.update(rel.encode("utf-8") + b"\0")
+        h.update(path.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+class Evidence:
+    """Identities of one smoke run, printed for the PR / issue paste."""
+
+    def __init__(self) -> None:
+        self.fields: dict[str, Any] = {}
+
+    def set(self, **kv: Any) -> None:
+        self.fields.update({k: v for k, v in kv.items() if v is not None})
+
+
+EVIDENCE = Evidence()
+
+
 def print_outcome(outcome: dict[str, Any], secrets: list[str], out: str | None) -> None:
     redacted = redact(outcome, secrets)
     report = redacted.get("report") or {}
@@ -765,9 +820,21 @@ def print_outcome(outcome: dict[str, Any], secrets: list[str], out: str | None) 
     }
     log("Done — the guest returned a report (this smoke persists nothing):")
     print(json.dumps(summary, indent=2))
+    dumped = json.dumps(redacted, indent=2) + "\n"
     if out:
-        Path(out).write_text(json.dumps(redacted, indent=2) + "\n", encoding="utf-8")
+        Path(out).write_text(dumped, encoding="utf-8")
         log(f"full outcome written to {out}")
+    EVIDENCE.set(
+        driver=redacted.get("driver"),
+        primary_value=report.get("primary_value"),
+        n_scored=ev.get("n_scored"),
+        n_measured=ev.get("n_measured"),
+        n_agent_exceptions=ev.get("n_agent_exceptions"),
+        trials=[t.get("name") for t in (ev.get("trials") or []) if isinstance(t, dict)],
+        outcome_sha256=sha256_hex(dumped.encode("utf-8")),
+    )
+    log("evidence (paste into the PR / issue; no secret, no host path):")
+    print(json.dumps({"smoke_evidence": EVIDENCE.fields}, indent=2, sort_keys=True))
 
 
 # ---------------------------------------------------------------------------
@@ -818,10 +885,26 @@ def main(argv: list[str] | None = None) -> int:
     drv.add_argument("--mem-mib", type=int, default=32768)
     drv.add_argument("--disk-mib", type=int, default=32768)
     drv.add_argument("--retain-on-fail", action="store_true", help="orch driver: retain the VM when the job failed")
+    drv.add_argument(
+        "--ack-image-adaptor",
+        action="store_true",
+        help="orch driver: I confirm --image-digest names a guest image re-baked with an adaptor that reads "
+        "constraints.params.tasks (an older pin runs the whole selection and holds a slot for hours)",
+    )
+    drv.add_argument(
+        "--allow-shared-capacity",
+        action="store_true",
+        help="orch driver: proceed although an experiment vm is already running on the host (operator "
+        "confirmed it is not a live paid evaluate); default refuses so a smoke never takes a live slot",
+    )
     outg = p.add_argument_group("output")
     outg.add_argument("--dry-run", action="store_true", help="print the derived job / env (redacted) and exit")
     outg.add_argument("--out", help="write the full (redacted) outcome JSON here")
-    outg.add_argument("--work-root", help="keep guest/adaptor work under this dir instead of a temp dir")
+    outg.add_argument(
+        "--work-root",
+        help="keep guest/adaptor work under this dir instead of a temp dir. On a KVM host use a directory "
+        "under /var/lib/proof/<your-wd>/ — the only scratch the operator policy allows there",
+    )
     outg.add_argument("--keep-work", action="store_true", help="do not delete the temp work root")
     args = p.parse_args(argv)
 
@@ -893,6 +976,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not selected:
             log("warning: no --tasks / --n-tasks; this runs the topic's full selection, not a smoke")
+        runner_dir = Path(args.runner_dir).resolve()
+        EVIDENCE.set(
+            topic_id=doc["id"],
+            job=args.job,
+            runner=runner,
+            tasks=request["constraints"]["params"].get(PARAM_TASKS),
+            n_tasks=request["constraints"]["params"].get(PARAM_N_TASKS),
+            pack_digest=request["constraints"]["params"].get(PARAM_PACK_DIGEST),
+            artifact_digest=artifact_digest,
+            params_overridden=sorted(overrides),
+            adaptor_tree_sha256=adaptor_tree_sha256(runner_dir) if runner_dir.is_dir() else None,
+        )
         if args.driver == "orch":
             return driver_orch(args, args.job, request, runner, pack_digest, artifact_bytes, secrets)
         root = Path(args.work_root).resolve() if args.work_root else Path(tempfile.mkdtemp(prefix="proof-smoke-"))

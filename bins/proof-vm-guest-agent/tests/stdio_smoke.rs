@@ -240,6 +240,67 @@ printf '{"primary_value": 0.5, "claim_holds": true, "evidence": {"tasks": "%s", 
         printed.contains("adaptor saw key [REDACTED]") || !printed.contains("adaptor saw key"),
         "the guest redacts the key from the adaptor tail: {stderr}"
     );
+    // The paste-into-the-PR evidence block: identities and digests only.
+    let evidence_start = stdout
+        .find("{\n  \"smoke_evidence\"")
+        .expect("evidence block printed");
+    let evidence: serde_json::Value = serde_json::from_str(&stdout[evidence_start..]).unwrap();
+    let ev = &evidence["smoke_evidence"];
+    assert_eq!(ev["topic_id"], serde_json::json!("smoke-topic"));
+    assert_eq!(ev["tasks"], serde_json::json!("task-a"));
+    assert_eq!(
+        ev["trials"],
+        serde_json::json!([]),
+        "the fake adaptor reported no trial rows"
+    );
+    assert_eq!(ev["primary_value"], serde_json::json!(0.5));
+    assert_eq!(ev["driver"], serde_json::json!("agent"));
+    assert!(ev["adaptor_tree_sha256"].as_str().unwrap().len() == 64);
+    assert!(ev["outcome_sha256"].as_str().unwrap().len() == 64);
+    assert!(ev["pack_digest"].as_str().unwrap().starts_with("sha256:"));
+    assert!(
+        !stdout[evidence_start..].contains(fx.root.to_str().unwrap()),
+        "no host path in evidence"
+    );
+    let _ = fs::remove_dir_all(&fx.root);
+}
+
+/// The `orch` driver never takes a live slot or boots an image whose adaptor
+/// predates the run policy: without the operator's explicit acknowledgement
+/// it refuses before any request leaves this process.
+#[test]
+fn the_orch_driver_refuses_without_the_image_acknowledgement() {
+    let fx = fixture("orch-guard", "smoke_runner", &[]);
+    let token = fx.root.join("token");
+    fs::write(&token, "not-a-real-bearer\n").unwrap();
+    let out = Command::new("python3")
+        .arg(repo().join("deploy/scripts/proof-experiment-smoke.py"))
+        .args(["--driver", "orch", "--topic-json"])
+        .arg(&fx.topic)
+        .args([
+            "--job",
+            "baseline",
+            "--tasks",
+            "task-a",
+            "--orch-url",
+            "https://198.51.100.1:8200",
+            "--orch-token-file",
+        ])
+        .arg(&token)
+        .args([
+            "--image-digest",
+            "sha256:e79be204679a9e131dfa07eb2efea43dcb23921db98af97ca95cbbf335e198ff",
+        ])
+        .output()
+        .expect("run the smoke driver");
+    assert_eq!(out.status.code(), Some(2), "refused as a precondition");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--ack-image-adaptor"), "{stderr}");
+    assert!(stderr.contains("holds an experiment slot"), "{stderr}");
+    assert!(
+        !stderr.contains("not-a-real-bearer"),
+        "the bearer never prints"
+    );
     let _ = fs::remove_dir_all(&fx.root);
 }
 

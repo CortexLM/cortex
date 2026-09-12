@@ -14,7 +14,9 @@ anywhere: [`docs/PROOF.md`](../PROOF.md) § Generic run policy,
 What the smoke is **not**: it persists no row, mints no spend token, ticks
 no checklist, seals nothing, and is not a tip. It prints the report the
 guest returned. A `primary_value` printed here is evidence that the path
-runs end to end on that task, not a score anywhere.
+runs end to end on that task, not a score anywhere. The preferred
+acceptance evidence for a change to this path is **one Harbor trial (one
+task)** through the guest runner — never the full first-15 selection.
 
 Companion runbooks: [`proof-experiment-vms.md`](proof-experiment-vms.md)
 (the production path this exercises), [`proof-vm-orchestrator.md`](proof-vm-orchestrator.md)
@@ -93,44 +95,103 @@ is in the `Failed` line (`harbor is not on PATH`, `no measured Harbor
 trials`, `incomplete vs filtered task set`, `constraints.params.… re-sign
 the topic`), and `--work-root` keeps `harbor.run.log`.
 
-## Cursor cloud ↔ metal
+## Metal: operator-run (Cursor cloud agents have no metal SSH)
 
-A Cursor cloud VM reaches `185.8.107.43:22` but holds no key, so it can run
-the **CI half** (below) and every `--dry-run`, and it can prepare the exact
-Owner command. `deploy/scripts/proof-metal-smoke.sh` is that hop:
+Owner decision (2026-09-12): Cursor cloud agents hold **no** key to the
+KVM host, and must not probe it. A future `metal-smoke` cloud environment
+with a dedicated deploy key is planned but not ready. Until then the
+metal run of this smoke is **operator-run**: an Owner / Dev runs it when an
+experiment slot is free and pastes the `smoke_evidence` block into the PR.
+A cloud agent's part is the CI half (below), every `--dry-run`, and this
+runbook.
+
+**Off limits on the host, whoever runs it** — the scripts never do these
+and neither may you:
+
+- no tip, compose recreate, `register-backends`, re-bake, or re-pin without
+  Owner GO — the guest pin stays **`e79be…`** until an Architecte RE-LOCK;
+- no touching `baselines.json` / `topics.json` / `proof_sk` / hotkeys /
+  BYOK files;
+- no destroying or reading the retained `x0031` jail
+  (`/var/lib/proof-vm/retained/`);
+- no killing the live `x0034` experiment VM or competing for its slot (a
+  `timeout900` miner evaluate is in flight) — the `agent` / `exec` drivers
+  take **no** experiment slot, but they do use the host's Docker and CPU,
+  so run when a slot is free; the `orch` driver **refuses** while any
+  experiment VM is running (`--allow-shared-capacity` is an explicit
+  operator override) and refuses without `--ack-image-adaptor`, because the
+  pinned `e79be…` image carries the **old** adaptor, which ignores `tasks`
+  and would run the full selection for hours;
+- scratch **only** under `/var/lib/proof/<your-wd>/`
+  (`--remote-scratch`, default `/var/lib/proof/smoke-<user>-<stamp>`;
+  anything else is refused, and so is anything under the orchestrator's
+  state or the retained dir).
+
+### Path A — on the host (Owner / Dev shell)
 
 ```bash
-# Owner / Architecte, from a box with `ssh cortex-metal`, on this branch.
-# Evaluate: the topic's miner BYOK must be exported here (never on argv;
-# it travels as a 0600 file the remote shell sources and deletes).
-export OPENROUTER_API_KEY=…
+# on the KVM host, this branch checked out; scratch under /var/lib/proof/
+git fetch origin cursor/generic-rlm-topic-evaluate-c05f && git checkout cursor/generic-rlm-topic-evaluate-c05f
+WD=/var/lib/proof/smoke-$USER-$(date -u +%Y%m%dT%H%M%SZ); install -d -m 0700 "$WD"
 
-# authoritative guest path: a static guest agent built from this branch
+# authoritative guest path (same Rust toolchain the BUILD_FROM=source tips use)
+cargo build --release -p proof-vm-guest-agent-bin
+
+export OPENROUTER_API_KEY=…            # the topic's miner BYOK; never on argv
+python3 deploy/scripts/proof-experiment-smoke.py --driver agent \
+    --topic-id tbench --cp https://gateway.cortex.foundation/challenge/proof \
+    --guest-agent target/release/proof-vm-guest-agent \
+    --runner-dir deploy/guest/runners/rlm_fc_in_guest_harbor \
+    --pack-tar /var/lib/proof-vm/packs/sha256-<hex from the live document>.tar \
+    --job evaluate --tasks <one-task> --artifact-tar recipe.tar \
+    --path-prepend <harbor venv>/bin \
+    --set agent_exception_policy=zero --set exec_timeout_s=900 \
+    --work-root "$WD/work" --out "$WD/outcome.json" --keep-work
+```
+
+Without a Rust build, `--driver exec` runs the same adaptor directly (no
+guest agent; the env contract re-stated by the driver). `--path-prepend`
+names the Harbor venv's `bin` — the guest contract gives the adaptor a
+fixed `PATH`. Docker on the host is used for the task containers (the
+production path runs them inside the Firecracker guest; this is dev
+verification of the adaptor and the guest agent, not of the isolation
+boundary).
+
+### Path B — from an operator box with the key
+
+```bash
+export OPENROUTER_API_KEY=…            # travels as a 0600 file the remote shell sources, never argv
 cargo build --release -p proof-vm-guest-agent-bin --target x86_64-unknown-linux-musl
-
 ./deploy/scripts/proof-metal-smoke.sh --host cortex-metal \
     --topic tbench --task <one-task> --job evaluate --artifact recipe.tar \
     --guest-agent-local target/x86_64-unknown-linux-musl/release/proof-vm-guest-agent \
-    --path-prepend /opt/harbor/venv/bin \
+    --path-prepend <harbor venv>/bin \
     --set agent_exception_policy=zero --set exec_timeout_s=900 \
     --out-dir ./smoke-out --keep
 ```
 
-What it does on the host, read-only except its own temp dir: `ssh
-BatchMode` preflight (no key → prints the command above and exits 2),
-GETs the topic document, resolves the pinned pack at
-`/var/lib/proof-vm/packs/sha256-<hex>.tar` (fails closed if absent), ships
-**this checkout's** adaptor tree + the driver (+ artefact, + agent), and
-runs the driver with `--tasks <task>`. It does **not** touch
-`/var/lib/proof-vm/retained/`, the running orchestrator, the live
-evaluate slot, digests, seals, or weights. `--path-prepend` names the
-Harbor venv's `bin` on the host (the guest contract gives the adaptor a
-fixed `PATH`); without a guest agent binary the driver falls back to
-`--driver exec`.
+The wrapper: `ssh BatchMode` preflight (no key → prints the command and
+exits 2), GETs the topic document, resolves the pinned pack at
+`/var/lib/proof-vm/packs/sha256-<hex>.tar` (fails closed if absent), creates
+the scratch under `/var/lib/proof/` (refuses anywhere else), ships **this
+checkout's** adaptor tree + driver (+ artefact, + agent), runs
+`--tasks <task>`, copies back `outcome.json` + `smoke.log`, removes the
+scratch unless `--keep`.
 
-Expected: the block above with `trials[0].name == "<task>__1"`,
-`smoke-out/outcome.json` and `smoke-out/smoke.log` locally. Attach both to
-the PR / issue as the metal evidence.
+### What to paste into the PR
+
+The driver ends with a `smoke_evidence` block — topic, job, runner, the one
+task, pack and artefact digests, the params overridden, a digest over the
+adaptor tree that ran, the report's `primary_value` / `n_scored` /
+`n_measured` / `n_agent_exceptions`, the trial names, and the sha256 of the
+full outcome JSON. No secret, no host path. Paste it verbatim with the
+`run → done` line; attach `outcome.json` if the trial list matters.
+
+Expected: `trials == ["<task>__1"]`, `n_scored == 1`. A `Failed` line names
+the adaptor's refusal (`harbor is not on PATH`, `no measured Harbor
+trials`, `incomplete vs filtered task set`, `re-sign the topic`); with
+`--keep-work` the scratch holds `harbor.run.log` and
+`tasks-filtered/.proof-task-filter.json`.
 
 ### Why this run would have caught `tbench-x0032`
 

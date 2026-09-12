@@ -1,39 +1,47 @@
 #!/usr/bin/env bash
-# proof-metal-smoke — run the ONE-task in-guest smoke on the KVM host over SSH.
+# proof-metal-smoke — OPERATOR-RUN single-task in-guest smoke on the KVM host.
 #
-# The cloud ↔ metal test path. From any box with `ssh <host>` (Owner /
-# Architecte laptop, an ops box), ship THIS checkout's guest adaptor and the
-# smoke driver to the metal host, resolve the topic's pinned pack there, and
-# run `proof-experiment-smoke.py` against one task of the live topic. Nothing
-# is deployed, tipped, re-baked, sealed, or persisted: the run happens in a
-# temp dir on the host, prints the report the guest returned, and is removed.
+# Cursor cloud agents have NO metal SSH (owner decision, 2026-09-12); this
+# script is for an Owner / Dev box that already holds a key to the host. It
+# ships THIS checkout's guest adaptor and the smoke driver to the host,
+# resolves the topic's pinned pack there (read-only), and runs
+# `proof-experiment-smoke.py` against exactly ONE task of a live topic. It
+# prints the report the guest returned plus a `smoke_evidence` block to
+# paste into the PR. Nothing is deployed, tipped, re-baked, sealed, or
+# persisted; the run happens in a scratch dir the host policy allows and is
+# removed unless --keep.
 #
 # Usage:
 #   proof-metal-smoke.sh --topic tbench --task <one-task-name> --artifact recipe.tar \
 #       [--host cortex-metal] [--job evaluate|baseline] [--set k=v]... \
 #       [--guest-agent-local target/x86_64-unknown-linux-musl/release/proof-vm-guest-agent | --guest-agent-remote /path] \
-#       [--path-prepend /opt/harbor/venv/bin] [--byok-env OPENROUTER_API_KEY] \
-#       [--out-dir ./smoke-out] [--keep] [--dry-run]
+#       [--path-prepend /path/to/harbor/venv/bin] [--byok-env OPENROUTER_API_KEY] \
+#       [--remote-scratch /var/lib/proof/<wd>] [--out-dir ./smoke-out] [--keep] [--dry-run]
+#
+# OFF LIMITS — this script never does, and you must not use it to:
+#   - tip, recreate compose, register backends, re-bake, or re-pin anything
+#     (the guest pin stays what it is until an Architecte RE-LOCK);
+#   - touch baselines.json / topics.json / proof_sk / hotkeys / BYOK files;
+#   - destroy or read a retained jail (/var/lib/proof-vm/retained/...);
+#   - kill or compete with a live experiment VM (a paid miner evaluate may be
+#     in flight; run this when an experiment slot is free — the agent/exec
+#     drivers take no slot but do use the host's Docker and CPU);
+#   - write scratch anywhere but under /var/lib/proof/<your-wd>/ on the host
+#     (--remote-scratch; default /var/lib/proof/smoke-<user>-<stamp>).
 #
 # Preconditions (checked, never assumed):
-#   - `ssh -o BatchMode=yes <host> true` works (key in your agent; this box has
-#     network to the host). A Cursor cloud VM has TCP reach but no key: the
-#     script then prints the exact command the Owner must run and exits 2.
+#   - `ssh -o BatchMode=yes <host> true` works from THIS box.
 #   - The host holds the topic's pack: <pack-dir>/sha256-<hex>.tar
 #     (PROOF_VM_AGENT_EXPERIMENT_PACK_DIR, default /var/lib/proof-vm/packs).
 #   - For --job evaluate the topic's miner BYOK variable is exported in THIS
-#     shell (default name: the topic's miner_byok). It travels to the host as a
-#     0600 file the remote shell sources — never on argv, never in a log.
+#     shell (default name: the topic's miner_byok). It travels to the host as
+#     a 0600 file the remote shell sources and deletes — never argv.
 #   - A guest agent binary for the authoritative `agent` driver: build it
-#     static here (`cargo build --release -p proof-vm-guest-agent-bin
+#     static (`cargo build --release -p proof-vm-guest-agent-bin
 #     --target x86_64-unknown-linux-musl`) and pass --guest-agent-local, or
 #     name one already on the host with --guest-agent-remote. Without either
-#     the driver falls back to `exec` (the adaptor run directly with the
-#     derived guest env; same adaptor, no Rust binary).
-#
-# What it does NOT do: tip, deploy, re-bake, touch retained jails, touch the
-# live evaluate slot, reseal, or write any row. It reads the topic document
-# from the public gateway (GET) and the pack from the host, read-only.
+#     the driver falls back to `exec` (adaptor run directly with the derived
+#     guest env; same adaptor, no Rust binary).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -52,11 +60,12 @@ KEEP=0
 DRY_RUN=0
 CP="${PROOF_CP:-https://gateway.cortex.foundation/challenge/proof}"
 PACK_DIR="${PROOF_METAL_PACK_DIR:-/var/lib/proof-vm/packs}"
+REMOTE_SCRATCH="${PROOF_METAL_SCRATCH:-}"
 ADAPTOR_DIR="$ROOT/deploy/guest/runners/rlm_fc_in_guest_harbor"
 DRIVER="$ROOT/deploy/scripts/proof-experiment-smoke.py"
 SSH_BIN="${PROOF_METAL_SSH:-ssh}"
 
-usage() { sed -n '2,40p' "$0"; }
+usage() { sed -n '2,50p' "$0"; }
 die() { echo "[metal-smoke] $*" >&2; exit 2; }
 log() { echo "[metal-smoke] $*" >&2; }
 
@@ -75,6 +84,7 @@ while [[ $# -gt 0 ]]; do
     --out-dir) OUT_DIR="${2:?}"; shift 2 ;;
     --cp) CP="${2:?}"; shift 2 ;;
     --pack-dir) PACK_DIR="${2:?}"; shift 2 ;;
+    --remote-scratch) REMOTE_SCRATCH="${2:?}"; shift 2 ;;
     --keep) KEEP=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -92,20 +102,31 @@ fi
 [[ -x "$ADAPTOR_DIR/run" && -f "$DRIVER" ]] || die "run from a cortex checkout: missing $ADAPTOR_DIR/run or $DRIVER"
 command -v python3 >/dev/null || die "python3 is required locally"
 command -v curl >/dev/null || die "curl is required locally"
+# Scratch policy: only under /var/lib/proof/<wd>/ on the host.
+if [[ -z "$REMOTE_SCRATCH" ]]; then
+  REMOTE_SCRATCH="/var/lib/proof/smoke-${USER:-op}-$(date -u +%Y%m%dT%H%M%SZ)"
+fi
+case "$REMOTE_SCRATCH" in
+  /var/lib/proof/?*) ;;
+  *) die "--remote-scratch must be a directory under /var/lib/proof/ (host scratch policy), got $REMOTE_SCRATCH" ;;
+esac
+case "$REMOTE_SCRATCH" in
+  */retained*|*/proof-vm/*) die "--remote-scratch must not point at retained jails or the orchestrator's state" ;;
+esac
 
-# --- 1. SSH reach (fail closed with the Owner command) -----------------------
+# --- 1. SSH reach (fail closed; this is an operator box's key, never an agent's) ---
 if ! "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=10 "$HOST" true 2>/dev/null; then
   cat >&2 <<EOF
 [metal-smoke] no SSH access to $HOST from this box (BatchMode key auth failed).
-[metal-smoke] This is expected on a Cursor cloud VM. Owner / Architecte: run from a box with the key,
-[metal-smoke] on this branch, exactly:
+[metal-smoke] Cursor cloud agents hold no metal key by policy; this smoke is operator-run.
+[metal-smoke] Owner / Dev: from a box with the key, on this branch, exactly:
 
   export ${BYOK_ENVS[0]:-OPENROUTER_API_KEY}=…        # the topic's miner BYOK (evaluate only; never on argv)
   ./deploy/scripts/proof-metal-smoke.sh --host $HOST --topic $TOPIC --task $TASK --job $JOB \\
       ${ARTIFACT:+--artifact $ARTIFACT }${GUEST_AGENT_LOCAL:+--guest-agent-local $GUEST_AGENT_LOCAL }${PATH_PREPEND:+--path-prepend $PATH_PREPEND }$(printf -- '--set %q ' "${SETS[@]}")
 
-[metal-smoke] Expected: "[smoke] run → done" then a JSON summary with primary_value / n_scored / trials
-[metal-smoke] for exactly one trial named ${TASK}__1. See docs/runbooks/proof-experiment-smoke.md.
+[metal-smoke] Expected: "[smoke] run → done", a JSON summary for exactly one trial named ${TASK}__1,
+[metal-smoke] and a "smoke_evidence" block to paste into the PR. See docs/runbooks/proof-experiment-smoke.md.
 EOF
   exit 2
 fi
@@ -129,7 +150,7 @@ PY
 [[ "$RUNNER" == "$(basename "$ADAPTOR_DIR")" ]] || log "warning: topic selects runner $RUNNER; shipping adaptor $(basename "$ADAPTOR_DIR")"
 PACK_HEX="${PACK_DIGEST#sha256:}"
 REMOTE_PACK="$PACK_DIR/sha256-$PACK_HEX.tar"
-log "topic=$TOPIC runner=$RUNNER pack=$REMOTE_PACK task=$TASK job=$JOB"
+log "topic=$TOPIC runner=$RUNNER pack=$REMOTE_PACK task=$TASK job=$JOB scratch=$HOST:$REMOTE_SCRATCH"
 
 if [[ "$JOB" == "evaluate" ]]; then
   [[ ${#BYOK_ENVS[@]} -gt 0 ]] || { [[ "$BYOK_NAME" != "-" ]] && BYOK_ENVS=("$BYOK_NAME"); }
@@ -138,8 +159,11 @@ if [[ "$JOB" == "evaluate" ]]; then
   done
 fi
 
-# --- 3. Remote preflight: pack present, python3, docker/harbor hints --------
-REMOTE_TMP="$("$SSH_BIN" "$HOST" 'mktemp -d /tmp/proof-smoke-XXXXXX')"
+# --- 3. Remote preflight: scratch, pack present, python3, docker/harbor hints ---
+"$SSH_BIN" "$HOST" "test -d /var/lib/proof" || die "/var/lib/proof does not exist on $HOST; refusing to create scratch elsewhere"
+"$SSH_BIN" "$HOST" "test ! -e '$REMOTE_SCRATCH'" || die "$REMOTE_SCRATCH already exists on $HOST; pick another --remote-scratch"
+"$SSH_BIN" "$HOST" "install -d -m 0700 '$REMOTE_SCRATCH'" || die "cannot create $REMOTE_SCRATCH on $HOST"
+REMOTE_TMP="$REMOTE_SCRATCH"
 cleanup_remote() {
   if [[ $KEEP -eq 1 ]]; then log "remote work kept at $HOST:$REMOTE_TMP"; else "$SSH_BIN" "$HOST" "rm -rf '$REMOTE_TMP'" || true; fi
 }
@@ -154,7 +178,8 @@ if ! "$SSH_BIN" "$HOST" "docker info >/dev/null 2>&1 || test -S /var/run/docker.
 fi
 
 # --- 4. Ship this checkout's adaptor + driver (+ artefact, + agent) ---------
-tar -C "$(dirname "$ADAPTOR_DIR")" -cf - "$(basename "$ADAPTOR_DIR")" | "$SSH_BIN" "$HOST" "tar -C '$REMOTE_TMP' -xf -"
+tar -C "$(dirname "$ADAPTOR_DIR")" --exclude='tests' --exclude='__pycache__' -cf - "$(basename "$ADAPTOR_DIR")" \
+  | "$SSH_BIN" "$HOST" "tar -C '$REMOTE_TMP' -xf -"
 "$SSH_BIN" "$HOST" "cat > '$REMOTE_TMP/proof-experiment-smoke.py' && chmod 0755 '$REMOTE_TMP/proof-experiment-smoke.py'" < "$DRIVER"
 "$SSH_BIN" "$HOST" "cat > '$REMOTE_TMP/topic.json'" < "$TOPIC_JSON"
 if [[ -n "$ARTIFACT" ]]; then
@@ -211,7 +236,7 @@ if "$SSH_BIN" "$HOST" "test -f '$REMOTE_TMP/outcome.json'"; then
   log "outcome → $OUT_DIR/outcome.json"
 fi
 if [[ $RC -eq 0 ]]; then
-  log "PASS: the guest returned a report for $TOPIC/$TASK (nothing persisted)"
+  log "PASS: the guest returned a report for $TOPIC/$TASK (nothing persisted). Paste the smoke_evidence block from $OUT_DIR/smoke.log into the PR."
 else
   log "FAIL (rc=$RC): read $OUT_DIR/smoke.log; with --keep the remote work root holds the adaptor's harbor.run.log / tasks-filtered"
 fi
