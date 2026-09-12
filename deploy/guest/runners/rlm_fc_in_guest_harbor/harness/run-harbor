@@ -97,12 +97,16 @@ if [ "$HARNESS_KIND" = script ]; then
         miner_report=1
         echo "rlm_fc_in_guest_harbor: discarded miner-authored report.json; score must come from Harbor verifier trials" >&2
     fi
+    rm -f "$PROOF_OUTPUT_DIR/results.json"
+    if [ -n "${PROOF_PARAM_RESULTS_PATH:-}" ]; then
+        rm -f "$PROOF_OUTPUT_DIR/$PROOF_PARAM_RESULTS_PATH"
+    fi
     set +e
     summarize_or_die "$script_exit"
     sum_exit=$?
     set -e
     if [ "$sum_exit" -ne 0 ]; then
-        rm -f "$PROOF_OUTPUT_DIR/report.json"
+        rm -f "$PROOF_OUTPUT_DIR/report.json" "$PROOF_OUTPUT_DIR/results.json"
         if [ "$miner_report" -eq 1 ]; then
             proof_die "script harness wrote report.json; refusing miner-authored primary_value and no measured Harbor trials"
         fi

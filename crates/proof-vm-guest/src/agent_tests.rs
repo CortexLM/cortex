@@ -35,11 +35,52 @@ fn agent(r: &Path) -> std::sync::Arc<GuestAgent> {
     GuestAgent::new(cfg)
 }
 
+/// After a finite `report.json`, write obligatory `results.json` from it.
+const WRITE_RESULTS: &str = r#"
+if [ -f "$PROOF_OUTPUT_DIR/report.json" ]; then
+python3 -c '
+import json, os
+from pathlib import Path
+out = Path(os.environ["PROOF_OUTPUT_DIR"])
+r = json.loads((out / "report.json").read_text())
+display = r.get("evidence") or {"ok": True}
+if not isinstance(display, dict) or not display:
+    display = {"ok": True}
+doc = {
+    "schema_version": 1,
+    "contract": "generic-custom-v1",
+    "topic_id": os.environ.get("PROOF_TOPIC_ID", ""),
+    "custom_id": os.environ.get("PROOF_CUSTOM_ID", ""),
+    "submission_digest": os.environ.get("PROOF_SUBMISSION_DIGEST", ""),
+    "artifact_digest": os.environ.get("PROOF_ARTIFACT_DIGEST", ""),
+    "primary_value": r["primary_value"],
+    "claim_holds": bool(r.get("claim_holds", False)),
+    "display": display,
+}
+(out / "results.json").write_text(json.dumps(doc))
+'
+fi
+"#;
+
 /// Install `script` as `<runners>/<RUNNER>/<entry>`.
 fn install(r: &Path, entry: &str, script: &str) {
     let dir = r.join("runners").join(RUNNER);
     std::fs::create_dir_all(&dir).expect("adaptor dir");
     let path = dir.join(entry);
+    let body = if entry == "run" {
+        format!("#!/bin/sh\nset -eu\n{script}\n{WRITE_RESULTS}\n")
+    } else {
+        format!("#!/bin/sh\nset -eu\n{script}\n")
+    };
+    std::fs::write(&path, body).expect("script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+/// `run` without the obligatory `results.json` helper (fail-closed tests).
+fn install_run_without_results(r: &Path, script: &str) {
+    let dir = r.join("runners").join(RUNNER);
+    std::fs::create_dir_all(&dir).expect("adaptor dir");
+    let path = dir.join("run");
     std::fs::write(&path, format!("#!/bin/sh\nset -eu\n{script}\n")).expect("script");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 }
@@ -307,6 +348,10 @@ echo '{"primary_value": 0.5, "flops_used": 7}' > "$PROOF_OUTPUT_DIR/report.json"
     run.report.verify(&eval).expect("bound");
     assert!(!run.report.claim_holds, "claim_holds defaults to false");
     assert_eq!(run.report.flops_used, Some(7));
+    assert!(
+        run.report.results.is_some(),
+        "evaluate must attach the obligatory results document"
+    );
     assert_eq!(run.logs.len(), 1);
     let log = String::from_utf8_lossy(&run.logs[0].bytes);
     assert!(log.contains("secret in log: [REDACTED]"), "{log}");
@@ -327,6 +372,91 @@ echo '{"primary_value": 0.5, "flops_used": 7}' > "$PROOF_OUTPUT_DIR/report.json"
         .await,
     );
     assert!(err.contains("refusing to run a substitute"), "{err}");
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+/// Evaluate with a finite `report.json` but no `results.json` is not Done.
+#[tokio::test]
+async fn evaluate_without_results_json_is_fail_closed() {
+    let r = root("no-results");
+    let a = agent(&r);
+    hello(&a).await;
+    let (tar, digest) = pack();
+    stage(&a, &tar, &digest).await;
+    let artefact = archive(&[member("recipe/run.sh", b'0', b"echo hi\n")]);
+    let mut eval = req_for(&digest);
+    eval.artifact_digest = hex::encode(Sha256::digest(&artefact));
+    eval.artifact_uri = Some(serve_once(artefact).await);
+    install_run_without_results(
+        &r,
+        r#"echo '{"primary_value": 0.5, "claim_holds": true}' > "$PROOF_OUTPUT_DIR/report.json""#,
+    );
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::Evaluate {
+                request: eval,
+                checklist_digest: "c".into(),
+                rules_version: 1,
+            }),
+        })
+        .await,
+    );
+    assert!(
+        err.contains("results"),
+        "missing results.json must fail closed, got {err}"
+    );
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+/// Evaluate `results.json` that diverges from the scored primary is not Done.
+#[tokio::test]
+async fn evaluate_results_must_bind_scored_primary() {
+    let r = root("results-mismatch");
+    let a = agent(&r);
+    hello(&a).await;
+    let (tar, digest) = pack();
+    stage(&a, &tar, &digest).await;
+    let artefact = archive(&[member("recipe/run.sh", b'0', b"echo hi\n")]);
+    let mut eval = req_for(&digest);
+    eval.artifact_digest = hex::encode(Sha256::digest(&artefact));
+    eval.artifact_uri = Some(serve_once(artefact).await);
+    install_run_without_results(
+        &r,
+        r#"
+echo '{"primary_value": 0.5, "claim_holds": true}' > "$PROOF_OUTPUT_DIR/report.json"
+python3 -c '
+import json, os
+from pathlib import Path
+out = Path(os.environ["PROOF_OUTPUT_DIR"])
+doc = {
+    "schema_version": 1,
+    "contract": "generic-custom-v1",
+    "topic_id": os.environ.get("PROOF_TOPIC_ID", ""),
+    "custom_id": os.environ.get("PROOF_CUSTOM_ID", ""),
+    "submission_digest": os.environ.get("PROOF_SUBMISSION_DIGEST", ""),
+    "artifact_digest": os.environ.get("PROOF_ARTIFACT_DIGEST", ""),
+    "primary_value": 0.99,
+    "claim_holds": True,
+    "display": {"ok": True},
+}
+(out / "results.json").write_text(json.dumps(doc))
+'
+"#,
+    );
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::Evaluate {
+                request: eval,
+                checklist_digest: "c".into(),
+                rules_version: 1,
+            }),
+        })
+        .await,
+    );
+    assert!(
+        err.contains("does not match") || err.contains("primary_value"),
+        "divergent results primary must fail closed, got {err}"
+    );
     let _ = std::fs::remove_dir_all(&r);
 }
 

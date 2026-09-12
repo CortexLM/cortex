@@ -7,7 +7,7 @@
 //!
 //! | Entrypoint | Job | Writes under `PROOF_OUTPUT_DIR` |
 //! |------------|-----|---------------------------------|
-//! | `run` | `Baseline`, `Evaluate` | `report.json` — [`RunnerReport`] |
+//! | `run` | `Baseline`, `Evaluate` | `report.json` — [`RunnerReport`]; **Evaluate** also `results.json` |
 //! | `inspect` | `Inspect` | `checklist.json` — `[{"id", "pass", "evidence"}]` |
 //! | `propose_rules` | `ProposeRules` (optional) | `rules.json` — `[{"id", "text"}]` |
 //!
@@ -34,6 +34,7 @@ use std::time::Duration;
 
 use proof_canon::validate_rules;
 use proof_experiment::{ExperimentBinding, RunPolicy};
+use proof_results::load_evaluate;
 use proof_rlm::{
     ArtifactFile, Checklist, CustomRunReport, CustomRunRequest, InspectOutcome, LogFile, RuleSet,
     RunOutcome, RUN_REPORT_SCHEMA,
@@ -823,6 +824,17 @@ pub async fn run_paid(
     evidence.insert("runner".into(), serde_json::json!(adaptor.binding.runner));
     evidence.insert("pack_digest".into(), serde_json::json!(pack.digest));
     evidence.insert("exit_code".into(), serde_json::json!(exec.exit));
+    let results = (kind == JobKind::Evaluate)
+        .then(|| {
+            let bind = request.results_bind(report.primary_value, report.claim_holds);
+            load_evaluate(&output, &request.constraints.params, &bind)
+                .map(|mut v| {
+                    redact_value(&mut v, &secrets);
+                    v
+                })
+                .map_err(|e| e.to_string())
+        })
+        .transpose()?;
     Ok(RunOutcome {
         report: CustomRunReport {
             schema_version: RUN_REPORT_SCHEMA,
@@ -833,11 +845,10 @@ pub async fn run_paid(
             rules_version: request.rules_version,
             primary_value: report.primary_value,
             claim_holds: report.claim_holds,
-            // The host overwrites this from what it booted; the guest only
-            // states where it ran.
             sandboxed: true,
             flops_used: report.flops_used,
             evidence,
+            results,
         },
         logs: vec![run_log(&exec, &secrets)],
     })

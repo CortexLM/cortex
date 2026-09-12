@@ -149,7 +149,18 @@ pub fn report_for(req: &CustomRunRequest, primary_value: f64) -> CustomRunReport
         claim_holds: true,
         sandboxed: true,
         flops_used: Some(1),
-        evidence,
+        evidence: evidence.clone(),
+        results: Some(serde_json::json!({
+            "schema_version": 1,
+            "contract": "generic-custom-v1",
+            "topic_id": req.topic_id,
+            "custom_id": req.custom_id,
+            "submission_digest": req.submission_digest,
+            "artifact_digest": req.artifact_digest,
+            "primary_value": primary_value,
+            "claim_holds": true,
+            "display": evidence,
+        })),
     }
 }
 

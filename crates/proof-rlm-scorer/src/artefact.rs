@@ -4,6 +4,7 @@
 //! manifest.json      what this bundle is (ids, digests, primary, promoted)
 //! checklist.json     the rule items with evidence (rule version bound)
 //! report.json        runner-authored measurement (absent on a pre-spend reject)
+//! results.json       topic-defined complete RLM results (absent on reject / baseline)
 //! baseline_ref.json  the sealed baseline this run was compared against
 //! artifact/…         the miner's tree as inspected
 //! logs/…             runner logs (harness stdout, guest console, judge transcript)
@@ -18,6 +19,7 @@ use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
 use proof_canon::is_slug;
+use proof_results::RESULTS_FILE;
 use proof_rlm::{ArtifactFile, Checklist, CustomRunReport, LogFile};
 use proof_task::{ProofPin, TopicDocument};
 use serde::{Deserialize, Serialize};
@@ -176,6 +178,8 @@ pub struct ArtefactBundle {
     pub artifact: Vec<ArtifactFile>,
     /// Runner logs.
     pub logs: Vec<LogFile>,
+    /// Topic-defined complete results (evaluate only).
+    pub results: Option<serde_json::Value>,
 }
 
 /// Why a bundle could not be written.
@@ -320,6 +324,9 @@ impl ArtefactBundle {
         if self.report.is_some() {
             out.push(REPORT_FILE.to_owned());
         }
+        if self.results.is_some() {
+            out.push(RESULTS_FILE.to_owned());
+        }
         out.extend(
             self.artifact
                 .iter()
@@ -365,6 +372,9 @@ impl ArtefactBundle {
         ];
         if let Some(r) = &self.report {
             files.push((REPORT_FILE.into(), r.to_json().into_bytes()));
+        }
+        if let Some(v) = &self.results {
+            files.push((RESULTS_FILE.into(), pretty(v)));
         }
         for f in &self.artifact {
             if !is_safe_entry_path(&f.path) {
@@ -599,6 +609,9 @@ mod tests {
                 name: "run.log".into(),
                 bytes: b"ok\n".to_vec(),
             }],
+            results: with_report
+                .then(|| report_for(&req, 0.6))
+                .and_then(|r| r.results),
         }
     }
 
@@ -632,6 +645,7 @@ mod tests {
                 "logs/run.log",
                 "manifest.json",
                 "report.json",
+                "results.json",
             ]
         );
         let manifest: ArtefactManifest = serde_json::from_slice(&entries[5].1).expect("manifest");
@@ -644,6 +658,10 @@ mod tests {
         let report = CustomRunReport::from_json(std::str::from_utf8(&entries[6].1).expect("utf8"))
             .expect("report");
         assert_eq!(report.topic_id, b.topic_id);
+        let results: serde_json::Value =
+            serde_json::from_slice(&entries[7].1).expect("results.json");
+        assert_eq!(results["contract"], "generic-custom-v1");
+        assert!((results["primary_value"].as_f64().expect("p") - 0.6).abs() < 1e-12);
     }
 
     /// A pre-spend reject still ships a bundle: the red checklist is the
@@ -654,6 +672,7 @@ mod tests {
         let bytes = b.zip_bytes("pf_0000000000000002", false).expect("zip");
         let names: Vec<String> = entries_of(&bytes).into_iter().map(|(n, _)| n).collect();
         assert!(!names.iter().any(|n| n == REPORT_FILE), "{names:?}");
+        assert!(!names.iter().any(|n| n == RESULTS_FILE), "{names:?}");
         let m = b.manifest("pf_0000000000000002", false);
         assert!(!m.checklist_green);
         assert_eq!(m.primary_value, None);

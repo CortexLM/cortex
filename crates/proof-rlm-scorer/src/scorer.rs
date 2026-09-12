@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use proof_eval::{EvalError, LiveScorer, ProofEvalDocument, PROOF_METRICS_SCHEMA};
 use proof_executor::ExecutorPlan;
+use proof_results::{require_evaluate, ReportBind};
 use proof_rlm::{
     authorize_spend, decide_promote, ArtifactFile, Checklist, CustomRunReport, CustomRunRequest,
     Lifecycle, LogFile, MinerEnv, PromoteDecision, RlmEvent, RlmState, RuleSet, RunnerError,
@@ -101,6 +102,29 @@ fn map_runner(custom_id: &str, e: RunnerError) -> EvalError {
 
 fn store_err<E: std::fmt::Display>(e: E) -> EvalError {
     EvalError::Backend(format!("rlm store: {e}"))
+}
+
+fn bind_evaluate_results(
+    report: &CustomRunReport,
+    req: &CustomRunRequest,
+) -> Result<(), EvalError> {
+    report
+        .verify(req)
+        .map_err(|e| EvalError::NoVerdict(e.to_string()))?;
+    require_evaluate(
+        report.results.as_ref(),
+        &ReportBind {
+            topic_id: &report.topic_id,
+            custom_id: &report.custom_id,
+            submission_digest: &report.submission_digest,
+            artifact_digest: &report.artifact_digest,
+            primary_value: report.primary_value,
+            claim_holds: report.claim_holds,
+        },
+        &req.constraints.params,
+    )
+    .map_err(|e| EvalError::NoVerdict(e.to_string()))?;
+    Ok(())
 }
 
 /// The harder of two bars, direction-aware (`None` when neither exists).
@@ -377,6 +401,7 @@ impl RlmScorer {
         report: Option<CustomRunReport>,
         logs: Vec<LogFile>,
     ) {
+        let results = report.as_ref().and_then(|r| r.results.clone());
         let bundle = ArtefactBundle {
             topic_id: topic.id.clone(),
             custom_id: req.custom_id.clone(),
@@ -388,6 +413,7 @@ impl RlmScorer {
             baseline_ref: BaselineRef::from_topic(topic, pin),
             artifact,
             logs,
+            results,
         };
         self.pending
             .lock()
@@ -519,9 +545,7 @@ impl RlmScorer {
             .evaluate(&req, &token)
             .await
             .map_err(|e| map_runner(&custom_id, e))?;
-        run.report
-            .verify(&req)
-            .map_err(|e| EvalError::NoVerdict(e.to_string()))?;
+        bind_evaluate_results(&run.report, &req)?;
         let agent = Self::paid_verdict(topic, &req, &run.report, rules.version);
         let doc = Self::document(pin, topic, &req, agent, Some(run.report.primary_value));
         self.stash(
@@ -840,6 +864,14 @@ impl LiveScorer for RlmScorer {
             direction: topic.metric.direction,
         });
         promote
+    }
+
+    fn display_results(&self, submission_digest: &str) -> Option<serde_json::Value> {
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(submission_digest.trim())
+            .and_then(|p| p.bundle.results.clone())
     }
 
     async fn on_persisted(

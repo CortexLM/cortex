@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turn a Harbor jobs directory into Proof ``report.json``.
+"""Turn a Harbor jobs directory into Proof ``report.json`` and ``results.json``.
 
 ``primary_value`` is the mean of **complete** Harbor trials. A trial is
 measured only when Harbor left both:
@@ -481,6 +481,36 @@ def build_report(
     }
 
 
+def build_results(report: dict[str, Any], trials: list[dict[str, Any]], log_tail: str) -> dict[str, Any]:
+    """Complete Harbor display document. Trials are never truncated here."""
+    ev = report["evidence"]
+    return {
+        "schema_version": 1,
+        "contract": "tbench-harbor-v1",
+        "topic_id": os.environ.get("PROOF_TOPIC_ID", ""),
+        "custom_id": os.environ.get("PROOF_CUSTOM_ID", ""),
+        "submission_digest": os.environ.get("PROOF_SUBMISSION_DIGEST", ""),
+        "artifact_digest": os.environ.get("PROOF_ARTIFACT_DIGEST", ""),
+        "primary_value": report["primary_value"],
+        "claim_holds": report["claim_holds"],
+        "n_scored": ev["n_scored"],
+        "n_measured": ev["n_measured"],
+        "n_agent_exceptions": ev["n_agent_exceptions"],
+        "mean_reward": ev["mean_reward"],
+        "agent": ev.get("agent") or "harbor",
+        "agent_source": ev.get("agent_source", ""),
+        "harness_kind": ev.get("harness_kind", ""),
+        "agent_exception_policy": ev.get("agent_exception_policy", POLICY_FAIL),
+        "harbor_exit": ev.get("harbor_exit", 0),
+        "trials": trials,
+        "agent_exception_trials": ev.get("agent_exception_trials", []),
+        "logs": {
+            "harbor_run_log": "logs/harbor.run.log",
+            "harbor_run_tail": log_tail,
+        },
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jobs-dir", required=True)
@@ -550,6 +580,11 @@ def main(argv: list[str] | None = None) -> int:
     dumped = json.dumps(report, indent=2, sort_keys=True)
     dumped = redact(dumped, secrets)
     out.write_text(dumped + "\n", encoding="utf-8")
+    results_name = os.environ.get("PROOF_PARAM_RESULTS_PATH", "").strip() or "results.json"
+    results_path = out.parent / results_name
+    results = build_results(report, trials, read_tail(log_path, secrets))
+    results_dumped = redact(json.dumps(results, indent=2, sort_keys=True), secrets)
+    results_path.write_text(results_dumped + "\n", encoding="utf-8")
     ev = report["evidence"]
     print(
         f"summarize: n_scored={ev['n_scored']} n_measured={ev['n_measured']} "

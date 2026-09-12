@@ -300,7 +300,10 @@ Trust-root keygen is the throwaway owner path in
   waiter dropped and tears down that **experiment** VM (keeps the topic VM).
 - `GET /v1/submissions?state=<queued|awaiting_admin|rejected|champion>&topic_id=<id>`
   — both filters optional; newest first. `GET /v1/submissions/{id}` shows a
-  `queued` row with `verdict: null` until it is drained.
+  `queued` row with `verdict: null` until it is drained. A scored custom
+  evaluate also carries `results` (topic-defined complete RLM JSON; zip root
+  `results.json`). Missing / non-conforming results on evaluate is **503**,
+  no pass row. Harvest families omit `results`.
 - A pass that the family scorer crowns (custom: green checklist and
   `primary >= bar * (1 + epsilon_rel)` direction-aware, bar = sealed value or
   reigning best) persists as `champion`; other passes stay `awaiting_admin`.
@@ -753,8 +756,9 @@ listed over it register nothing.
 ### Artefacts and promotion
 
 Every scored row leaves `$PROOF_ARTEFACT_ROOT/{topic_id}/{submission_id}.zip`
-(`manifest.json`, `artifact/`, `report.json`, `checklist.json`,
-`baseline_ref.json`, `logs/`; a red-checklist reject ships no report), plus
+(`manifest.json`, `artifact/`, `report.json`, `results.json`,
+`checklist.json`, `baseline_ref.json`, `logs/`; a red-checklist reject
+ships no report and no results JSON), plus
 `best.json` (current best pointer) and `events.jsonl` (public `scored` /
 `promoted` events). Default root `/artefacts`; compose sets
 `/var/lib/proof/artefacts` on the `proof-artifacts` volume. **Promote:** a
