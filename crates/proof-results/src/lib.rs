@@ -646,6 +646,11 @@ mod tests {
         let mut p = BTreeMap::new();
         p.insert(PARAM_RESULTS_PATH.into(), "tbench-results.json".into());
         assert_eq!(results_file_name(&p).expect("pin"), "tbench-results.json");
+        p.insert(PARAM_RESULTS_PATH.into(), "audit.v1.final.json".into());
+        assert_eq!(
+            results_file_name(&p).expect("multi-dot"),
+            "audit.v1.final.json"
+        );
         p.insert(PARAM_RESULTS_PATH.into(), "../x.json".into());
         assert!(matches!(
             results_file_name(&p),

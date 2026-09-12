@@ -34,9 +34,10 @@ A non-zero exit with no document, a missing document, a non-finite
 `primary_value`, a missing or non-conforming Evaluate `results.json`, or a
 run that outlives `PROOF_DEADLINE_S` is a failed job.
 [`write-generic-results.sh`](write-generic-results.sh) is a POSIX helper
-that binds a `generic-custom-v1` file to an existing `report.json` (no
-`python3`). Harbor writes `tbench-harbor-v1` / `harbor-trials-v1` from
-`summarize.py`.
+that binds a `generic-custom-v1` file to the *root* `primary_value` /
+`claim_holds` of an existing `report.json` (no `python3`; nested keys
+with the same name are ignored). Harbor writes `tbench-harbor-v1` /
+`harbor-trials-v1` from `summarize.py`.
 The agent never fills in a value — and neither may the adaptor: a trial that
 produced no measurement is reported as what it is (the topic decides whether
 that counts as zero or fails the run), never as some other number that
