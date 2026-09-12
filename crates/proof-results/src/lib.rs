@@ -48,6 +48,12 @@ pub const CONTRACT_HARBOR_TRIALS: &str = "harbor-trials-v1";
 /// Alias a tbench topic may pin; same shape as [`CONTRACT_HARBOR_TRIALS`].
 pub const CONTRACT_TBENCH_HARBOR: &str = "tbench-harbor-v1";
 
+/// Harbor trial that produced a verifier reward.
+pub const HARBOR_OUTCOME_MEASURED: &str = "measured";
+
+/// Harbor trial the miner's harness crashed on (`agent_exception_policy=zero`).
+pub const HARBOR_OUTCOME_EXCEPTION: &str = "agent_exception";
+
 /// Why a results document is not evidence.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ResultsError {
@@ -336,6 +342,8 @@ fn validate_harbor(obj: &Map<String, Value>, primary: f64) -> Result<(), Results
         return Err(ResultsError::Shape("trials must not be empty"));
     }
     let mut rewards = Vec::with_capacity(trials.len());
+    let mut n_measured = 0u64;
+    let mut n_exceptions = 0u64;
     for t in trials {
         let t = t
             .as_object()
@@ -358,16 +366,33 @@ fn validate_harbor(obj: &Map<String, Value>, primary: f64) -> Result<(), Results
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or(ResultsError::Shape(
-                "trial.outcome must be a non-empty string",
+                "trial.outcome must be measured or agent_exception",
             ))?;
-        let _ = outcome;
+        match outcome {
+            HARBOR_OUTCOME_MEASURED => n_measured = n_measured.saturating_add(1),
+            HARBOR_OUTCOME_EXCEPTION => n_exceptions = n_exceptions.saturating_add(1),
+            _ => {
+                return Err(ResultsError::Shape(
+                    "trial.outcome must be measured or agent_exception",
+                ));
+            }
+        }
         rewards.push(reward);
     }
     let n_scored = uint_field(obj, "n_scored")?;
     if n_scored != trials.len() as u64 {
         return Err(ResultsError::Shape("n_scored must equal trials.len()"));
     }
-    let _ = uint_field(obj, "n_measured")?;
+    if uint_field(obj, "n_measured")? != n_measured {
+        return Err(ResultsError::Shape(
+            "n_measured must equal the number of measured trials",
+        ));
+    }
+    if uint_field(obj, "n_agent_exceptions")? != n_exceptions {
+        return Err(ResultsError::Shape(
+            "n_agent_exceptions must equal agent_exception trials",
+        ));
+    }
     let mean = finite_field(obj, "mean_reward")?;
     if !close(mean, primary) {
         return Err(ResultsError::Mismatch("mean_reward"));
@@ -461,6 +486,7 @@ fn field_must(key: &'static str) -> &'static str {
         "claim_holds" => "claim_holds must be a boolean",
         "n_scored" => "n_scored must be an unsigned integer",
         "n_measured" => "n_measured must be an unsigned integer",
+        "n_agent_exceptions" => "n_agent_exceptions must be an unsigned integer",
         "mean_reward" => "mean_reward must be a finite number",
         "agent" => "agent must be a string",
         _ => "field has the wrong type",
@@ -577,6 +603,29 @@ mod tests {
             ),
             Err(ResultsError::ContractMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn harbor_rejects_contradictory_trial_metadata() {
+        let b = bind();
+        let mut unknown = harbor_ok(&b);
+        unknown["trials"][0]["outcome"] = serde_json::json!("skipped");
+        assert!(
+            validate(&unknown, &b, None).is_err(),
+            "unknown trial.outcome must fail closed"
+        );
+        let mut counted = harbor_ok(&b);
+        counted["n_measured"] = serde_json::json!(999);
+        assert!(
+            validate(&counted, &b, None).is_err(),
+            "n_measured must match measured trials"
+        );
+        let mut exceptions = harbor_ok(&b);
+        exceptions["n_agent_exceptions"] = serde_json::json!(0);
+        assert!(
+            validate(&exceptions, &b, None).is_err(),
+            "n_agent_exceptions must match agent_exception trials"
+        );
     }
 
     #[test]

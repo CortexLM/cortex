@@ -466,8 +466,8 @@ object is **obligatory** for a pass — missing, invalid, or non-conforming
 results JSON is a **503** (no pass row), never a silent drop. Harvest
 `nll` / `throughput` omit `results`. A red-checklist reject has no
 `results` field (or `null`). The same document is at the artefact zip root
-as `results.json` (or the filename in signed
-`constraints.params.results_path`). Consensus scoring still reads only
+as `results.json`; `constraints.params.results_path` only changes the file
+name written by the guest adaptor. Consensus scoring still reads only
 `report.json`; `results.primary_value` / `claim_holds` / identities must
 match those scored facts. See [Complete results JSON](#complete-results-json).
 
@@ -651,7 +651,7 @@ Known contracts:
 | `contract` | Extra required fields |
 |------------|------------------------|
 | `generic-custom-v1` | `display`: non-empty JSON object (not `primary_value` alone) |
-| `harbor-trials-v1` / `tbench-harbor-v1` | Untruncated `trials[]` (`name`, finite `reward`, `outcome`); `n_scored` = `trials.length`; `n_measured`; `mean_reward` = `primary_value` = mean of trial rewards; non-empty `agent`; `logs.harbor_run_tail` and/or `logs.harbor_run_log` |
+| `harbor-trials-v1` / `tbench-harbor-v1` | Untruncated `trials[]` (`name`, finite `reward`, `outcome` `measured` or `agent_exception`); `n_scored` = `trials.length`; `n_measured` / `n_agent_exceptions` match those outcomes; `mean_reward` = `primary_value` = mean of trial rewards; non-empty `agent`; `logs.harbor_run_tail` and/or `logs.harbor_run_log` |
 
 Harvest `nll` / `throughput` rows have no `results`. A red-checklist
 reject never ships the file. See [`tbench`](./proof-tbench.md) for the
