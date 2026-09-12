@@ -162,9 +162,9 @@ fn run_driver(fx: &Fixture, args: &[&str], key: Option<&str>) -> (bool, String, 
     )
 }
 
-/// The guest contract end to end: hello → stage_pack → stage_artifact → run
-/// over real frames, one task selected by the topic shape, the miner key
-/// exported to the adaptor and never printed.
+/// The guest contract end to end: `hello` → `stage_pack` → `stage_artifact`
+/// → `run` over real frames, one task selected by the topic shape, the miner
+/// key exported to the adaptor and never printed.
 #[test]
 fn one_task_evaluate_through_the_real_guest_agent() {
     let fx = fixture("contract", "smoke_runner", &[]);
