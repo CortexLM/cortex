@@ -3827,6 +3827,7 @@ dependencies = [
  "async-trait",
  "hex",
  "proof-fc-harvest",
+ "proof-results",
  "proof-rlm",
  "proof-vm-agent",
  "proof-vm-proto",

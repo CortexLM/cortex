@@ -204,7 +204,10 @@ fn or_err(
         }
         Err(harvest_err) => {
             let msg = harvest_err.to_string();
-            if msg.contains("harvest-work incomplete") {
+            if msg.contains("harvest-work incomplete")
+                || msg.contains("results.json")
+                || msg.contains("results json")
+            {
                 tracing::warn!("vsock lost the Done frame ({err}); {msg}");
                 return Err(harvest_err);
             }
