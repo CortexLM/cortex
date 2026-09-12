@@ -498,8 +498,8 @@ class AgentExceptionPolicyTests(unittest.TestCase):
             write_exception_trial(
                 jobs / "job" / "task-c__1",
                 "task-c__1",
-                exc_type="AgentTimeoutError",
-                message="Agent execution timed out after 900 seconds",
+                exc_type="RuntimeError",
+                message="Command timed out after 120 seconds",
             )
             out = root / "report.json"
             rc = summarize.main(
@@ -523,8 +523,8 @@ class AgentExceptionPolicyTests(unittest.TestCase):
             self.assertEqual(ev["n_agent_exceptions"], 1)
             self.assertEqual(ev["agent_exception_policy"], "zero")
             self.assertEqual(ev["agent_exception_trials"][0]["name"], "task-c__1")
-            self.assertEqual(ev["agent_exception_trials"][0]["exception_type"], "AgentTimeoutError")
-            self.assertIn("900 seconds", ev["agent_exception_trials"][0]["exception_message"])
+            self.assertEqual(ev["agent_exception_trials"][0]["exception_type"], "RuntimeError")
+            self.assertIn("120 seconds", ev["agent_exception_trials"][0]["exception_message"])
             crashed = [t for t in ev["trials"] if t["name"] == "task-c__1"][0]
             self.assertEqual(crashed["outcome"], "agent_exception")
             self.assertEqual(crashed["reward"], 0.0)
@@ -558,6 +558,30 @@ class AgentExceptionPolicyTests(unittest.TestCase):
                     ["--jobs-dir", str(jobs), "--output", str(out), "--agent-exception-policy", "zero"]
                 )
             self.assertFalse(out.exists())
+
+    def test_agent_timeout_with_a_verifier_reward_is_measured_not_zeroed(self) -> None:
+        """Harbor records AgentTimeoutError and still runs the verifier: measured wins."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            t = jobs / "job" / "task-a__1"
+            t.mkdir(parents=True)
+            (t / "verifier").mkdir()
+            (t / "result.json").write_text(
+                json.dumps(
+                    {
+                        "trial_name": "task-a__1",
+                        "exception_info": {"exception_type": "AgentTimeoutError", "exception_message": "x"},
+                        "agent_execution": {"started_at": "2026-09-11T00:00:00Z"},
+                        "verifier": {"started_at": "2026-09-11T00:10:00Z"},
+                        "verifier_result": {"rewards": {"reward": 0.5}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (t / "verifier" / "reward.txt").write_text("0.5\n", encoding="utf-8")
+            trials = summarize.collect_trials(jobs, None, "zero")
+            self.assertEqual(trials, [{"name": "task-a__1", "reward": 0.5, "outcome": "measured"}])
 
     def test_zero_still_fails_closed_on_an_uncovered_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

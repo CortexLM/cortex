@@ -46,9 +46,11 @@ What that endpoint has been reading while scoring is on:
 - The sealed bar is a **stub baseline 0.5** (operator-noted). Beat it by
   `epsilon_rel` on `success_rate`. Do not copy a digest from this page.
 
-The short-task allowlist is **operator-side** (pack filter / adaptor hints).
-You do not choose the task list; `constraints.task_slice` stays an opaque
-runner input. A ready light is permission to try, not a payment guarantee.
+The task list is **operator-side** (the signed document's
+`constraints.params.tasks` / `task_exclude` and the pinned pack's own
+`filter.json`). You do not choose it; `constraints.task_slice` stays an
+opaque runner input. A ready light is permission to try, not a payment
+guarantee.
 
 ## 0. Install `ctx`
 
@@ -110,6 +112,9 @@ What the signed document carries today, and what each field means for you:
 | `constraints.params.baseline_runner` | an in-guest runner id | Selects the **experiment VM** path: one dedicated Firecracker VM per paid job, created for the job and stopped after it (destroyed once it scored; kept stopped on the operator's host when the run failed, never reused) |
 | `constraints.params.experiment_pack_digest` | a `sha256:` pin | The operator's experiment pack, re-hashed by the host before any jail. Not yours to supply |
 | `constraints.params.miner_byok` | `OPENROUTER_API_KEY` | You bring the model key — see § 4 |
+| `constraints.params.tasks` / `task_exclude` / `n_tasks` | read the live document | The operator's task selection for the scored set. Names are exact; a task the pack lacks fails the run closed on the operator's side, not yours |
+| `constraints.params.exec_timeout_s` | read the live document | When set, the default wall clock (seconds) for an `environment.exec(...)` call your agent makes **without** its own `timeout_sec`; exported to your run as `PROOF_EXEC_TIMEOUT_S`. A `timeout_sec` you pass explicitly is yours and is left alone — see § 3 |
+| `constraints.params.agent_exception_policy` | read the live document | What a task your harness **crashes** on counts as: `fail` (default) — no measurement, the run fails closed (**503**, no row); `zero` — that task scores 0 with the exception type recorded on your row — see § 3 |
 | `constraints.params.defer_scoring` | unset today | When `"true"`, the topic is in `deferred_topics` and submits stay **`queued`**. Absent on the live document while scoring is on — confirm with `ctx proof topics` |
 | `flops_budget` | `2e18` | Topic document field. **Not** a reject gate on `tbench`: the host ignores `declared_flops` vs measured FLOPs |
 | `eval_executor.max_proof_deadline_s` | `7200` | Your run is cut at this wall clock; a cut run is **503** with the run's `stdout_tail` |
@@ -257,6 +262,21 @@ class Agent:
 leave measured rewards under harbor-jobs. Returning `"ok"`, `None`, or the
 command's stdout is honest for this minimal example.
 
+**Command timeouts and crashes.** `environment.exec(cmd)` with no
+`timeout_sec` waits as long as the task's own agent timeout allows — unless
+the live document sets `constraints.params.exec_timeout_s`, in which case
+the adaptor fills that default in for you (also exported as
+`PROOF_EXEC_TIMEOUT_S`, read it if you want to budget your own calls). A
+`timeout_sec` you pass explicitly is honoured as written, and when it fires
+Harbor raises `RuntimeError: Command timed out after N seconds` **inside
+your `run`**. Catch it if you want the trial to continue; an exception that
+escapes `run` ends the trial before the verifier. What that costs you is
+the document's `agent_exception_policy`: under the default `fail` the whole
+evaluate is an incomplete task set → **503, no row** (the operator sees the
+retained guest, you see nothing stored); under `zero` that task is scored
+**0** and the exception type lands on your row's evidence
+(`agent_exception_trials`). Either way a crashed task is never a pass.
+
 Pack, hash, and serve **that exact file** (either layout):
 
 ```bash
@@ -290,20 +310,20 @@ mode is unsupported on this runtime and blocked model calls. Task containers
 use the default Docker bridge; the Firecracker TAP is still allowlisted on
 the host.
 
-The scored task slice is the topic's `constraints.task_slice` (today
-`tb4-first-15`). The in-guest adaptor honors `PROOF_TASK_SLICE` / first-15:
-it **keeps that first-15 set** and drops only **INFRA** Harbor ids (known
-broken `batched-eval-parity`, `ctr-optimization`, `cumulative-layout-shift`,
-and other broken-until-fixed ids). It does **not** apply the six-task Dev
-shortpack allow-list on that slice. Shortpack is only when the operator
-explicitly sets `PROOF_TASK_FILTER=shortpack` (or signs
-`constraints.params.task_filter_mode=shortpack`). You do not choose the task
-list. A verifier image that lacks `pytest` on PATH scores 0 rather than failing
-the trial — that is an operator image hole, not a miner contract.
+The scored task set is **topic data**: the signed document's
+`constraints.params.tasks` / `task_exclude` / `n_tasks` and the pinned
+pack's own `filter.json` (`allow` / `deny` / `slices`), resolved by the
+in-guest adaptor — `constraints.task_slice` (today `tb4-first-15`) is an
+opaque label the pack may define as a slice. Nothing about the set is
+compiled into the adaptor, and you do not choose it. Read the live document
+for what is scored today. A verifier image that lacks `pytest` on PATH is
+patched by the adaptor unless the operator signs
+`ensure_verifier_pytest=false` — an operator image hole is never your 0.
 
 Env the run sees: `PROOF_SEED`, `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE`,
 `PROOF_PARAM_*`, `PROOF_PACK_DIR`, `PROOF_ARTIFACT_DIR`, `PROOF_OUTPUT_DIR`,
-`PROOF_WORK_DIR`, and miner BYOK under `PROOF_MINER_ENV_DIR`.
+`PROOF_WORK_DIR`, `PROOF_EXEC_TIMEOUT_S` (when the document sets
+`exec_timeout_s`), and miner BYOK under `PROOF_MINER_ENV_DIR`.
 
 - Prefer `ctx proof submit --artifact recipe.tar` (gateway intake cap **5 MiB**).
   Re-running `tar` later produces different bytes (mtimes, member order) and

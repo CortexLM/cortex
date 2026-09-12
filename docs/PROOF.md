@@ -514,7 +514,12 @@ id shapes shared with `proof-task`).
 | `constraints.firecracker_required` | Miner code runs only inside a Firecracker guest under the topic VM |
 | `constraints.model_pin` | `vendor/model[:tag]` every paid call must name (shape-checked only; `proof-canon` rejects `a/b/c`) |
 | `constraints.params.model` | Harbor / LiteLLM id (`openrouter/vendor/model`). The guest injects it as `PROOF_PARAM_MODEL`. Canon `model_pin` stays two-segment; do not put the LiteLLM id in `model_pin` |
-| `constraints.task_slice` | Opaque label the runner interprets; the control plane does not. Harbor honors `tb4-first-15` / first-15 by **not** applying the shortpack allow-list (INFRA excludes only) |
+| `constraints.task_slice` | Opaque label the runner interprets; the control plane does not. The Harbor reference adaptor resolves it **through the pinned pack** (`slices/<label>.json` / `.txt` or `filter.json` → `slices`); a pack that defines no slices treats it as informational. No label has a compiled meaning |
+| `constraints.params.tasks` / `task_exclude` / `n_tasks` / `max_task_duration_s` / `exclude_unknown_duration` | Generic **run policy** (`proof-experiment::RunPolicy`): the exact items to score (an item the pack lacks fails closed; one item is the single-task smoke), items never scored, keep the first N, an optional duration gate. Shape-checked before any experiment VM and again in the guest; values are topic data |
+| `constraints.params.exec_timeout_s` | Default wall clock (s) for one command the miner's harness runs without its own timeout (`PROOF_EXEC_TIMEOUT_S`). Absent = the harness default |
+| `constraints.params.agent_exception_policy` | `fail` (default): a task the **miner's harness** raised on is no measurement and the run fails closed. `zero`: it scores 0 with the exception in evidence. Infrastructure failures (environment, verifier, setup) are never a score under either |
+| `constraints.params.timeout_multiplier` / `agent_timeout_multiplier` / `verifier_timeout_multiplier` / `env_build_timeout_multiplier` | Positive numbers ≤ 100 scaling the pack-declared timeouts; passed to the harness only when signed |
+| `constraints.params.inspect_marker_rules` / `inspect_attested_rules` | How the reference adaptor ticks each checklist rule: `rule:marker\|marker;…` fails on cheat markers in the artefact; the attested list passes with evidence. A rule named in neither fails closed. No rule id is compiled anywhere |
 | `constraints.params` | ≤32 opaque `slug → printable` runner params |
 | `constraints.params.miner_byok` | Comma-separated environment variable names (`[A-Z][A-Z0-9_]{0,63}`) a miner **must** send in the submit body's `env`. A submission missing one is **400** before any row, rent, or paid inference. The topic carries the *name*; the miner carries the value. See § Miner BYOK |
 | `constraints.params.miner_env_allowlist` | Additional variable names a miner **may** send (accepted, never demanded). `miner_byok` is always allowed on top of it |
@@ -679,7 +684,12 @@ on the KVM host for root-cause analysis) after a failed one or an
 destinations land at `<vm-id>-<stamp>` rather than nesting). No
 adaptor, pack, or value is defaulted anywhere: no runner selected, no
 adaptor baked, no pack staged, no report, or a non-finite value is a failed
-job. Runbook [`runbooks/proof-experiment-vms.md`](runbooks/proof-experiment-vms.md).
+job. **The run itself is steered by the signed topic alone**
+(`RunPolicy`, § Topic-carried bindings): which pack items are scored, how
+many, the wall clocks, and what a harness crash counts as are params, so
+the same adaptor serves every custom-family topic and a one-item selection
+is the development smoke ([`runbooks/proof-experiment-smoke.md`](runbooks/proof-experiment-smoke.md)).
+Runbook [`runbooks/proof-experiment-vms.md`](runbooks/proof-experiment-vms.md).
 Deploy: `deploy/systemd/proof-vm-orchestrator.service`,
 runbook [`runbooks/proof-vm-orchestrator.md`](runbooks/proof-vm-orchestrator.md).
 CI runs the fake hypervisor only; no GitHub runner ever boots Firecracker.

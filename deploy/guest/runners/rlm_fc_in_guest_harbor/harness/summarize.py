@@ -26,8 +26,10 @@ exit is **not** fail-closed by itself once the filtered set is complete;
 carries ``exception_info`` raised **during the harness (agent) phase** —
 ``agent_execution.started_at`` set, the verifier never started, no
 ``verifier_result``, no ``verifier/reward.txt`` — is the miner's harness
-failing the task (a crash, an unhandled command timeout, Harbor's own agent
-timeout). Under ``fail`` (the default) it is no measurement and the run
+failing the task (a crash, an unhandled command timeout). Harbor's own
+agent timeout is different: Harbor records it and still runs the verifier,
+so that trial is simply **measured** (or, if the verifier then failed,
+unmeasured infrastructure). Under ``fail`` (the default) it is no measurement and the run
 fails closed as before. Under ``zero`` it scores **0.0** — the task was not
 solved — and the exception type plus first message line land in evidence
 (``agent_exception_trials``). Every other unmeasured trial — environment

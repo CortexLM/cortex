@@ -173,7 +173,7 @@ stays in evidence.
 | Value | A trial with `exception_info` raised in the harness phase (agent started, verifier never started, no reward) |
 |-------|------|
 | `fail` (default) | No measurement. The selected set is incomplete → the run fails closed (503, no row) — today's behaviour. |
-| `zero` | Scores **0.0** — the miner's harness did not solve the task (a crash, an unhandled `environment.exec` timeout, Harbor's own agent timeout). The exception type and first message line land in `evidence.agent_exception_trials`; `n_measured` / `n_agent_exceptions` / `n_scored` are split out. |
+| `zero` | Scores **0.0** — the miner's harness did not solve the task (a crash, an unhandled `environment.exec` timeout). Harbor's own agent timeout is not this case: Harbor records it and still runs the verifier, so that trial is measured. The exception type and first message line land in `evidence.agent_exception_trials`; `n_measured` / `n_agent_exceptions` / `n_scored` are split out. |
 
 Under **either** policy an unmeasured trial that is **not** a harness-phase
 failure — environment build / start failure before the agent ran, a
