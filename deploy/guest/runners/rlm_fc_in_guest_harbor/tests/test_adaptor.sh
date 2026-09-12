@@ -24,19 +24,17 @@ export PROOF_WORK_DIR="$WORKDIR/work"
 export PROOF_OUTPUT_DIR="$WORKDIR/out"
 export PROOF_PACK_DIR="$WORKDIR/pack"
 export PROOF_HARNESS_SKIP_PODMAN=1
-mkdir -p "$PROOF_WORK_DIR" "$PROOF_OUTPUT_DIR" "$PROOF_PACK_DIR/tasks/cargo-flight-dispatch"
-printf '[agent]\ntimeout_sec = 120\n' > "$PROOF_PACK_DIR/tasks/cargo-flight-dispatch/task.toml"
-# x0017 hour-plus and broken-until-fixed names with no timeout must still drop.
-for drop in \
-    biped biped-contact-dynamics formal-crypto cad cad-model data-anon data-anonymization \
-    batched-eval-parity ctr-optimization cumulative-layout-shift distributed-dedup coq-block-bound; do
-    mkdir -p "$PROOF_PACK_DIR/tasks/$drop"
-    printf '# leftover long or broken task\n' > "$PROOF_PACK_DIR/tasks/$drop/instruction.md"
+mkdir -p "$PROOF_WORK_DIR" "$PROOF_OUTPUT_DIR" "$PROOF_PACK_DIR/tasks/task-alpha"
+printf '[agent]\ntimeout_sec = 120\n' > "$PROOF_PACK_DIR/tasks/task-alpha/task.toml"
+# Neutral fixture names: nothing here is a benchmark task list.
+for name in too-slow task-excluded task-topic-excluded; do
+    mkdir -p "$PROOF_PACK_DIR/tasks/$name"
+    printf '# fixture task\n' > "$PROOF_PACK_DIR/tasks/$name/instruction.md"
 done
+printf '[task]\nestimated_duration_s = 7200\n' > "$PROOF_PACK_DIR/tasks/too-slow/task.toml"
+printf '{"deny": ["task-excluded"], "slices": {"quick": ["task-alpha"]}}\n' > "$PROOF_PACK_DIR/filter.json"
 export PROOF_PARAM_TASKS_DIR="tasks"
 
-# --- duration filter: shortpack (Dev n15 6-task allow-list) ---
-export PROOF_TASK_FILTER=shortpack
 # --- tasks_dir ---
 if (export PROOF_PARAM_TASKS_DIR=".."; proof_require_tasks) 2>/dev/null; then
     fail "tasks_dir=.. must be refused"
@@ -45,77 +43,115 @@ export PROOF_PARAM_TASKS_DIR="tasks"
 proof_require_tasks || fail "tasks_dir=tasks should work"
 pass "tasks_dir relative ok, .. refused"
 
-# --- duration filter drops ≥1h tasks ---
-LONG="$PROOF_PACK_DIR/tasks/too-slow"
-mkdir -p "$LONG"
-printf '[agent]\ntimeout_sec = 7200\n' > "$LONG/task.toml"
+# --- silent topic: every task minus pack deny / params.task_exclude; no gate ---
+export PROOF_PARAM_TASK_EXCLUDE="task-topic-excluded"
 proof_require_tasks
-proof_filter_tasks || fail "filter should keep the short task"
-[ -d "$PROOF_TASKS/cargo-flight-dispatch" ] || fail "allowlisted short task must be kept"
-[ ! -d "$PROOF_TASKS/too-slow" ] || fail "≥1h task must be dropped"
-[ ! -d "$PROOF_TASKS/biped" ] || fail "n15 biped must be dropped without timeout_sec"
-[ ! -d "$PROOF_TASKS/cad-model" ] || fail "n15 cad-model must be dropped"
-[ ! -d "$PROOF_TASKS/formal-crypto" ] || fail "n15 formal-crypto must be dropped"
-[ ! -d "$PROOF_TASKS/data-anonymization" ] || fail "n15 data-anonymization must be dropped"
-[ ! -d "$PROOF_TASKS/batched-eval-parity" ] || fail "broken batched-eval-parity must be dropped"
-[ ! -d "$PROOF_TASKS/ctr-optimization" ] || fail "broken ctr-optimization must be dropped"
-[ ! -d "$PROOF_TASKS/cumulative-layout-shift" ] || fail "broken cumulative-layout-shift must be dropped"
-[ ! -d "$PROOF_TASKS/distributed-dedup" ] || fail "broken distributed-dedup must be dropped"
-[ ! -d "$PROOF_TASKS/coq-block-bound" ] || fail "broken coq-block-bound must be dropped"
-pass "default pack keeps x0017 allowlist and drops hour-plus plus broken"
+proof_filter_tasks || fail "silent topic must select the pack"
+[ -d "$PROOF_TASKS/task-alpha" ] || fail "task-alpha must be kept"
+[ -d "$PROOF_TASKS/too-slow" ] || fail "no duration gate unless the topic sets one"
+[ ! -d "$PROOF_TASKS/task-excluded" ] || fail "pack filter.json deny must drop task-excluded"
+[ ! -d "$PROOF_TASKS/task-topic-excluded" ] || fail "params.task_exclude must drop task-topic-excluded"
+grep -q '"source": "tasks_dir"' "$PROOF_TASKS/.proof-task-filter.json" || fail "summary must name the source"
+pass "silent topic keeps every task minus deny/exclude, no duration gate"
 
-# --- first15: INFRA excludes only (measured TB4 first-15) ---
-export PROOF_TASK_FILTER=first15
-export PROOF_PARAM_TASKS_DIR="tasks"
-proof_require_tasks || fail "tasks_dir=tasks should work after mode switch"
-proof_filter_tasks || fail "first15 filter should keep hour-plus plus short tasks"
-[ -d "$PROOF_TASKS/cargo-flight-dispatch" ] || fail "first15 must keep short tasks"
-[ -d "$PROOF_TASKS/biped-contact-dynamics" ] || fail "first15 must keep hour-plus biped"
-[ -d "$PROOF_TASKS/cad-model" ] || fail "first15 must keep hour-plus cad-model"
-[ -d "$PROOF_TASKS/too-slow" ] || fail "first15 must not duration-drop too-slow"
-[ ! -d "$PROOF_TASKS/batched-eval-parity" ] || fail "first15 infra must drop batched-eval-parity"
-[ ! -d "$PROOF_TASKS/ctr-optimization" ] || fail "first15 infra must drop ctr-optimization"
-[ ! -d "$PROOF_TASKS/cumulative-layout-shift" ] || fail "first15 infra must drop cumulative-layout-shift"
-pass "first15 keeps first-15 minus INFRA (not the shortpack allow-list)"
-
-# --- first15 via PROOF_TASK_SLICE (measured baseline; ignore shortpack allow) ---
-unset PROOF_TASK_FILTER || true
-unset PROOF_PARAM_TASK_FILTER_MODE || true
-export PROOF_TASK_SLICE=tb4-first-15
-export PROOF_PARAM_TASKS_DIR="tasks"
-proof_require_tasks || fail "tasks_dir=tasks should work for slice"
-proof_filter_tasks || fail "tb4-first-15 slice should keep hour-plus plus short tasks"
-[ -d "$PROOF_TASKS/cargo-flight-dispatch" ] || fail "slice first15 must keep short tasks"
-[ -d "$PROOF_TASKS/biped-contact-dynamics" ] || fail "slice first15 must keep hour-plus biped"
-[ -d "$PROOF_TASKS/cad-model" ] || fail "slice first15 must keep hour-plus cad-model"
-[ -d "$PROOF_TASKS/too-slow" ] || fail "slice first15 must not duration-drop too-slow"
-[ ! -d "$PROOF_TASKS/batched-eval-parity" ] || fail "slice first15 infra must drop batched-eval-parity"
-[ ! -d "$PROOF_TASKS/ctr-optimization" ] || fail "slice first15 infra must drop ctr-optimization"
-pass "PROOF_TASK_SLICE=tb4-first-15 skips the shortpack allow-list"
-unset PROOF_TASK_SLICE || true
-export PROOF_TASK_FILTER=shortpack
+# --- duration gate only from the topic (or the pack's own ceiling) ---
+export PROOF_PARAM_MAX_TASK_DURATION_S=3600
 proof_require_tasks
-proof_filter_tasks || fail "restore shortpack for later adaptor tests"
+proof_filter_tasks || fail "gate should keep the short task"
+[ -d "$PROOF_TASKS/task-alpha" ] || fail "task with only a timeout ceiling must be kept (timeouts are not durations)"
+[ ! -d "$PROOF_TASKS/too-slow" ] || fail "known duration >= ceiling must be dropped"
+unset PROOF_PARAM_MAX_TASK_DURATION_S
+pass "max_task_duration_s gates known durations only"
+
+# --- explicit tasks: smoke shape; unknown name fails closed ---
+export PROOF_PARAM_TASKS="task-alpha"
+proof_require_tasks
+proof_filter_tasks || fail "params.tasks=task-alpha must select"
+[ "$(ls -1 "$PROOF_TASKS" | grep -vc '^\.')" = "1" ] || fail "params.tasks must keep exactly the named task"
+if (export PROOF_PARAM_TASKS="task-alpha,task-missing"; proof_require_tasks; proof_filter_tasks) 2>/dev/null; then
+    fail "a named task absent from the pack must fail closed"
+fi
+if (export PROOF_PARAM_TASKS="task-topic-excluded"; proof_require_tasks; proof_filter_tasks) 2>/dev/null; then
+    fail "a task both selected and excluded must fail closed"
+fi
+unset PROOF_PARAM_TASKS
+pass "params.tasks selects exactly the named tasks (single-task smoke) and fails on unknown names"
+
+# --- n_tasks=1 smoke ---
+export PROOF_PARAM_N_TASKS=1
+proof_require_tasks
+proof_filter_tasks || fail "n_tasks=1 must select"
+[ "$(ls -1 "$PROOF_TASKS" | grep -vc '^\.')" = "1" ] || fail "n_tasks=1 must keep one task"
+unset PROOF_PARAM_N_TASKS
+pass "n_tasks=1 keeps the first selected task"
+
+# --- task_slice via the pack's slices ---
+export PROOF_TASK_SLICE=quick
+proof_require_tasks
+proof_filter_tasks || fail "pack slice quick must select"
+[ -d "$PROOF_TASKS/task-alpha" ] || fail "slice must keep task-alpha"
+[ ! -d "$PROOF_TASKS/too-slow" ] || fail "slice must not keep too-slow"
+grep -q '"task_slice_resolved": true' "$PROOF_TASKS/.proof-task-filter.json" || fail "summary must record the resolved slice"
+if (export PROOF_TASK_SLICE=nope; proof_require_tasks; proof_filter_tasks) 2>/dev/null; then
+    fail "a slice the pack does not define must fail closed"
+fi
+unset PROOF_TASK_SLICE
+pass "task_slice resolves through the pack; an unknown label fails closed"
+
+# --- exec timeout export: topic data only ---
+unset PROOF_PARAM_EXEC_TIMEOUT_S || true
+proof_export_exec_timeout
+[ -z "${PROOF_EXEC_TIMEOUT_S:-}" ] || fail "no exec_timeout_s → PROOF_EXEC_TIMEOUT_S must stay unset"
+export PROOF_PARAM_EXEC_TIMEOUT_S=900
+proof_export_exec_timeout
+[ "${PROOF_EXEC_TIMEOUT_S:-}" = "900" ] || fail "exec_timeout_s must export PROOF_EXEC_TIMEOUT_S"
+if (export PROOF_PARAM_EXEC_TIMEOUT_S=soon; proof_export_exec_timeout) 2>/dev/null; then
+    fail "a non-integer exec_timeout_s must fail closed"
+fi
+unset PROOF_PARAM_EXEC_TIMEOUT_S PROOF_EXEC_TIMEOUT_S
+pass "exec_timeout_s → PROOF_EXEC_TIMEOUT_S only when the topic signs it"
+
+# --- Harbor timeout multipliers: flags only when signed ---
+flags=()
+proof_harbor_timeout_flags flags
+[ "${#flags[@]}" -eq 0 ] || fail "silent topic must pass no timeout flag"
+export PROOF_PARAM_TIMEOUT_MULTIPLIER=1.5
+export PROOF_PARAM_VERIFIER_TIMEOUT_MULTIPLIER=2
+proof_harbor_timeout_flags flags
+[ "${flags[*]}" = "--timeout-multiplier 1.5 --verifier-timeout-multiplier 2" ] || fail "timeout flags were: ${flags[*]}"
+if (export PROOF_PARAM_AGENT_TIMEOUT_MULTIPLIER=fast; f=(); proof_harbor_timeout_flags f) 2>/dev/null; then
+    fail "a non-numeric multiplier must fail closed"
+fi
+if (export PROOF_PARAM_TIMEOUT_MULTIPLIER=0; f=(); proof_harbor_timeout_flags f) 2>/dev/null; then
+    fail "a zero multiplier must fail closed"
+fi
+unset PROOF_PARAM_TIMEOUT_MULTIPLIER PROOF_PARAM_VERIFIER_TIMEOUT_MULTIPLIER
+pass "timeout multipliers reach Harbor only when the topic signs them"
+
+# Leave the filtered set at the single task the later fixtures use.
+export PROOF_PARAM_TASKS="task-alpha"
+proof_require_tasks
+proof_filter_tasks || fail "restore the single-task selection for later adaptor tests"
 
 # --- agent network rewrite ---
-printf '[environment]\nnetwork_mode = "no-network"\n' > "$PROOF_TASKS/cargo-flight-dispatch/task.toml"
+printf '[environment]\nnetwork_mode = "no-network"\n' > "$PROOF_TASKS/task-alpha/task.toml"
 proof_enable_agent_network || fail "network rewrite should succeed"
-grep -q 'network_mode = "public"' "$PROOF_TASKS/cargo-flight-dispatch/task.toml" || fail "agent network must be public"
-if grep -q 'no-network' "$PROOF_TASKS/cargo-flight-dispatch/task.toml"; then
+grep -q 'network_mode = "public"' "$PROOF_TASKS/task-alpha/task.toml" || fail "agent network must be public"
+if grep -q 'no-network' "$PROOF_TASKS/task-alpha/task.toml"; then
     fail "no-network must not remain on the filtered copy"
 fi
 pass "agent network rewritten to public (not no-network)"
 
 # --- pytest in verifier / environment images ---
-mkdir -p "$PROOF_TASKS/cargo-flight-dispatch/environment"
-printf 'FROM python:3.12-slim\nWORKDIR /app\n' > "$PROOF_TASKS/cargo-flight-dispatch/environment/Dockerfile"
-printf 'numpy\n' > "$PROOF_TASKS/cargo-flight-dispatch/environment/requirements.txt"
+mkdir -p "$PROOF_TASKS/task-alpha/environment"
+printf 'FROM python:3.12-slim\nWORKDIR /app\n' > "$PROOF_TASKS/task-alpha/environment/Dockerfile"
+printf 'numpy\n' > "$PROOF_TASKS/task-alpha/environment/requirements.txt"
 proof_ensure_verifier || fail "ensure_verifier should patch the filtered copy"
-grep -q 'pip install --no-cache-dir pytest' "$PROOF_TASKS/cargo-flight-dispatch/environment/Dockerfile" \
+grep -q 'pip install --no-cache-dir pytest' "$PROOF_TASKS/task-alpha/environment/Dockerfile" \
     || fail "environment Dockerfile must install pytest"
-grep -qx 'pytest' "$PROOF_TASKS/cargo-flight-dispatch/environment/requirements.txt" \
+grep -qx 'pytest' "$PROOF_TASKS/task-alpha/environment/requirements.txt" \
     || fail "environment requirements.txt must list pytest"
-pass "verifier/environment images gain pytest (n15 biped+cad hole)"
+pass "verifier/environment images gain pytest (verifier image hole)"
 
 # --- BYOK evaluate never owner ---
 export PROOF_JOB=evaluate
@@ -270,10 +306,10 @@ printf '%s\n' "$agent" > "${PROOF_WORK_DIR}/harbor.agent"
 printf '%s\n' "$path" > "${PROOF_WORK_DIR}/harbor.path"
 printf '%s\n' "$env" > "${PROOF_WORK_DIR}/harbor.env"
 printf '%s\n' "$model" > "${PROOF_WORK_DIR}/harbor.model"
-job="$jobs/job1/cargo-flight-dispatch__1"
+job="$jobs/job1/task-alpha__1"
 mkdir -p "$job/verifier"
 cat > "$job/result.json" <<JSON
-{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 1.0}}}
+{"trial_name": "task-alpha__1", "verifier_result": {"rewards": {"reward": 1.0}}}
 JSON
 printf '1.0\n' > "$job/verifier/reward.txt"
 EOF
@@ -380,10 +416,10 @@ while [ $# -gt 0 ]; do
         *) shift ;;
     esac
 done
-job="$jobs/job1/cargo-flight-dispatch__1"
+job="$jobs/job1/task-alpha__1"
 mkdir -p "$job/verifier"
 cat > "$job/result.json" <<JSON
-{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 0.6}}}
+{"trial_name": "task-alpha__1", "verifier_result": {"rewards": {"reward": 0.6}}}
 JSON
 printf '0.6\n' > "$job/verifier/reward.txt"
 echo "harbor: timeout after deadline"
@@ -422,11 +458,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 job="$jobs/job1"
-mkdir -p "$job/cargo-flight-dispatch__1/verifier"
+mkdir -p "$job/task-alpha__1/verifier"
 cat > "$job/result.json" <<JSON
 {"finished_at": null, "n_running": 1, "n_completed": 1}
 JSON
-printf '1.0\n' > "$job/cargo-flight-dispatch__1/verifier/reward.txt"
+printf '1.0\n' > "$job/task-alpha__1/verifier/reward.txt"
 exit 143
 EOF
 chmod 0755 "$FAKE_BIN/harbor"
@@ -512,10 +548,10 @@ SCRIPT_JOBS="$WORKDIR/script-jobs"
 mkdir -p "$SCRIPT_JOBS/recipe"
 cat > "$SCRIPT_JOBS/recipe/run.sh" <<'EOF'
 #!/bin/bash
-job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
+job="$PROOF_WORK_DIR/harbor-jobs/job1/task-alpha__1"
 mkdir -p "$job/verifier"
 cat > "$job/result.json" <<JSON
-{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 0.5}}}
+{"trial_name": "task-alpha__1", "verifier_result": {"rewards": {"reward": 0.5}}}
 JSON
 printf '0.5\n' > "$job/verifier/reward.txt"
 exit 0
@@ -540,10 +576,10 @@ SCRIPT_BOTH="$WORKDIR/script-both"
 mkdir -p "$SCRIPT_BOTH/recipe"
 cat > "$SCRIPT_BOTH/recipe/run.sh" <<'EOF'
 #!/bin/bash
-job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
+job="$PROOF_WORK_DIR/harbor-jobs/job1/task-alpha__1"
 mkdir -p "$job/verifier"
 cat > "$job/result.json" <<JSON
-{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 1.0}}}
+{"trial_name": "task-alpha__1", "verifier_result": {"rewards": {"reward": 1.0}}}
 JSON
 printf '1.0\n' > "$job/verifier/reward.txt"
 cat > "$PROOF_OUTPUT_DIR/report.json" <<JSON
@@ -578,7 +614,7 @@ cat > "$SCRIPT_POSTAMBLE/recipe/run.sh" <<'EOF'
 # Harbor finished; postamble then raises (retained x0020).
 i=1
 while [ "$i" -le 8 ]; do
-    job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__${i}"
+    job="$PROOF_WORK_DIR/harbor-jobs/job1/task-alpha__${i}"
     mkdir -p "$job/verifier"
     if [ "$i" -eq 1 ]; then
         reward=1.0
@@ -586,7 +622,7 @@ while [ "$i" -le 8 ]; do
         reward=0.0
     fi
     cat > "$job/result.json" <<JSON
-{"trial_name": "cargo-flight-dispatch__${i}", "verifier_result": {"rewards": {"reward": ${reward}}}}
+{"trial_name": "task-alpha__${i}", "verifier_result": {"rewards": {"reward": ${reward}}}}
 JSON
     printf '%s\n' "$reward" > "$job/verifier/reward.txt"
     i=$((i + 1))
@@ -646,10 +682,10 @@ ls -1 "$PROOF_PACK_DIR" > "$PROOF_WORK_DIR/script.pack-root"
 # Bypass: miners historically pass the unfiltered pack tasks dir.
 harbor run --path "$PROOF_PACK_DIR/$PROOF_PARAM_TASKS_DIR" --jobs-dir "$PROOF_WORK_DIR/harbor-jobs" -a x --env docker --yes
 # Write a complete filtered trial so summarize succeeds.
-job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
+job="$PROOF_WORK_DIR/harbor-jobs/job1/task-alpha__1"
 mkdir -p "$job/verifier"
 cat > "$job/result.json" <<JSON
-{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 0.25}}}
+{"trial_name": "task-alpha__1", "verifier_result": {"rewards": {"reward": 0.25}}}
 JSON
 printf '0.25\n' > "$job/verifier/reward.txt"
 exit 0
@@ -657,26 +693,25 @@ EOF
 chmod 0755 "$SCRIPT_FILTER/recipe/run.sh"
 # Pack-view is only the filtered tasks dir (no original-pack siblings).
 mkdir -p "$PROOF_PACK_DIR/unfiltered-original"
-printf 'biped\n' > "$PROOF_PACK_DIR/unfiltered-original/hint"
+printf 'unfiltered\n' > "$PROOF_PACK_DIR/unfiltered-original/hint"
 rm -rf "$PROOF_WORK_DIR/harbor-jobs"
 export PROOF_ARTIFACT_DIR="$SCRIPT_FILTER"
 FILTER_OUT="$WORKDIR/out-script-filter"
 mkdir -p "$FILTER_OUT"
 export PROOF_OUTPUT_DIR="$FILTER_OUT"
 "$ADAPTOR/harness/run-harbor" || fail "script harness with filtered tasks must summarize"
-# Filtered set from this fixture pack: cargo-flight-dispatch only.
-grep -qx "cargo-flight-dispatch" "$PROOF_WORK_DIR/script.proof-tasks" \
-    || fail "PROOF_TASKS must contain the allowlisted short task"
+# Filtered set from this fixture (params.tasks): task-alpha only.
+grep -qx "task-alpha" "$PROOF_WORK_DIR/script.proof-tasks" \
+    || fail "PROOF_TASKS must contain the selected task"
 if grep -qx "too-slow" "$PROOF_WORK_DIR/script.proof-tasks" \
-    || grep -qx "biped" "$PROOF_WORK_DIR/script.proof-tasks" \
-    || grep -qx "batched-eval-parity" "$PROOF_WORK_DIR/script.proof-tasks"; then
+    || grep -qx "task-excluded" "$PROOF_WORK_DIR/script.proof-tasks"; then
     fail "PROOF_TASKS must not include filtered-out pack tasks"
 fi
 # Pack view: $PROOF_PACK_DIR/tasks is the same filtered tree.
-grep -qx "cargo-flight-dispatch" "$PROOF_WORK_DIR/script.pack-tasks" \
+grep -qx "task-alpha" "$PROOF_WORK_DIR/script.pack-tasks" \
     || fail "pack-view tasks must be the filtered set"
 if grep -qx "too-slow" "$PROOF_WORK_DIR/script.pack-tasks" \
-    || grep -qx "batched-eval-parity" "$PROOF_WORK_DIR/script.pack-tasks"; then
+    || grep -qx "task-excluded" "$PROOF_WORK_DIR/script.pack-tasks"; then
     fail "script must not see unfiltered \$PROOF_PACK_DIR/tasks"
 fi
 got_path="$(cat "$PROOF_WORK_DIR/script.harbor-path")"
@@ -707,7 +742,7 @@ SCRIPT_TIMEOUT="$WORKDIR/script-timeout"
 mkdir -p "$SCRIPT_TIMEOUT/recipe"
 cat > "$SCRIPT_TIMEOUT/recipe/run.sh" <<'EOF'
 #!/bin/bash
-job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
+job="$PROOF_WORK_DIR/harbor-jobs/job1/task-alpha__1"
 mkdir -p "$job/verifier"
 printf '0.4\n' > "$job/verifier/reward.txt"
 exit 143
@@ -730,15 +765,15 @@ SCRIPT_BYPASS="$WORKDIR/script-bypass"
 mkdir -p "$SCRIPT_BYPASS/recipe"
 cat > "$SCRIPT_BYPASS/recipe/run.sh" <<'EOF'
 #!/bin/bash
-kept="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
-drop="$PROOF_WORK_DIR/harbor-jobs/job1/biped__1"
+kept="$PROOF_WORK_DIR/harbor-jobs/job1/task-alpha__1"
+drop="$PROOF_WORK_DIR/harbor-jobs/job1/task-excluded__1"
 mkdir -p "$kept/verifier" "$drop/verifier"
 cat > "$kept/result.json" <<JSON
-{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 0.5}}}
+{"trial_name": "task-alpha__1", "verifier_result": {"rewards": {"reward": 0.5}}}
 JSON
 printf '0.5\n' > "$kept/verifier/reward.txt"
 cat > "$drop/result.json" <<JSON
-{"trial_name": "biped__1", "verifier_result": {"rewards": {"reward": 0.99}}}
+{"trial_name": "task-excluded__1", "verifier_result": {"rewards": {"reward": 0.99}}}
 JSON
 printf '0.99\n' > "$drop/verifier/reward.txt"
 exit 0
@@ -754,30 +789,30 @@ import json, sys
 r = json.load(open(sys.argv[1]))
 assert r["primary_value"] == 0.5, r
 assert r["evidence"]["n_measured"] == 1, r
-assert all("biped" not in t["name"] for t in r["evidence"]["trials"]), r
+assert all("task-excluded" not in t["name"] for t in r["evidence"]["trials"]), r
 PY
-pass "summarize drops excluded task names (biped) even if miner wrote them"
+pass "summarize drops excluded task names even if the miner wrote them"
 
 # --- partial filtered set (one of two allowlisted tasks) is fail-closed ---
 TWO_PACK="$WORKDIR/two-pack"
-mkdir -p "$TWO_PACK/tasks/cargo-flight-dispatch" "$TWO_PACK/tasks/embedding-drift-monitor"
-printf '[agent]\ntimeout_sec = 120\n' > "$TWO_PACK/tasks/cargo-flight-dispatch/task.toml"
-printf '[agent]\ntimeout_sec = 120\n' > "$TWO_PACK/tasks/embedding-drift-monitor/task.toml"
+mkdir -p "$TWO_PACK/tasks/task-alpha" "$TWO_PACK/tasks/task-beta"
+printf '[agent]\ntimeout_sec = 120\n' > "$TWO_PACK/tasks/task-alpha/task.toml"
+printf '[agent]\ntimeout_sec = 120\n' > "$TWO_PACK/tasks/task-beta/task.toml"
 export PROOF_PACK_DIR="$TWO_PACK"
-unset PROOF_TASKS || true
+unset PROOF_TASKS PROOF_PARAM_TASKS || true
 proof_require_tasks
 proof_filter_tasks || fail "two-task pack should filter"
-[ -d "$PROOF_TASKS/cargo-flight-dispatch" ] || fail "two-pack must keep cargo"
-[ -d "$PROOF_TASKS/embedding-drift-monitor" ] || fail "two-pack must keep embedding"
+[ -d "$PROOF_TASKS/task-alpha" ] || fail "two-pack must keep task-alpha"
+[ -d "$PROOF_TASKS/task-beta" ] || fail "two-pack must keep task-beta"
 SCRIPT_PARTIAL="$WORKDIR/script-partial"
 mkdir -p "$SCRIPT_PARTIAL/recipe"
 cat > "$SCRIPT_PARTIAL/recipe/run.sh" <<'EOF'
 #!/bin/bash
 # Favourable score on one filtered task; skip the rest (P1 partial mean).
-job="$PROOF_WORK_DIR/harbor-jobs/job1/cargo-flight-dispatch__1"
+job="$PROOF_WORK_DIR/harbor-jobs/job1/task-alpha__1"
 mkdir -p "$job/verifier"
 cat > "$job/result.json" <<JSON
-{"trial_name": "cargo-flight-dispatch__1", "verifier_result": {"rewards": {"reward": 1.0}}}
+{"trial_name": "task-alpha__1", "verifier_result": {"rewards": {"reward": 1.0}}}
 JSON
 printf '1.0\n' > "$job/verifier/reward.txt"
 exit 143
@@ -795,5 +830,112 @@ fi
 grep -qi "incomplete vs filtered\\|no complete Harbor trials" "$WORKDIR/partial-set.err" \
     || fail "must name incomplete filtered set: $(cat "$WORKDIR/partial-set.err")"
 pass "partial filtered task set fails closed (no subset mean)"
+
+# --- agent_exception_policy: a harness crash is topic policy, never a 503 by default flip ---
+# Fake Harbor: one measured trial (0.0) + one trial whose agent phase raised.
+cat > "$FAKE_BIN/harbor" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+jobs=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --jobs-dir) jobs="$2"; shift 2 ;;
+        --timeout-multiplier) printf '%s\n' "$2" > "${PROOF_WORK_DIR}/harbor.timeout-multiplier"; shift 2 ;;
+        --agent-timeout-multiplier) printf '%s\n' "$2" > "${PROOF_WORK_DIR}/harbor.agent-timeout-multiplier"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+printf '%s\n' "${PROOF_EXEC_TIMEOUT_S-UNSET}" > "${PROOF_WORK_DIR}/harbor.exec-timeout"
+ok="$jobs/job1/task-alpha__1"
+mkdir -p "$ok/verifier"
+cat > "$ok/result.json" <<JSON
+{"trial_name": "task-alpha__1", "verifier_result": {"rewards": {"reward": 0.0}}}
+JSON
+printf '0.0\n' > "$ok/verifier/reward.txt"
+crashed="$jobs/job1/task-beta__1"
+mkdir -p "$crashed"
+cat > "$crashed/result.json" <<JSON
+{"trial_name": "task-beta__1", "exception_info": {"exception_type": "RuntimeError", "exception_message": "Command timed out after 120 seconds", "exception_traceback": "…", "occurred_at": "2026-09-11T00:00:00Z"}, "agent_execution": {"started_at": "2026-09-11T00:00:00Z", "finished_at": "2026-09-11T00:02:00Z"}, "verifier": null}
+JSON
+exit 0
+EOF
+chmod 0755 "$FAKE_BIN/harbor"
+export PROOF_PACK_DIR="$TWO_PACK"
+export PROOF_JOB=evaluate
+export PROOF_ARTIFACT_DIR="$FIXTURES"
+export PROOF_MODEL_PIN="vendor/model"
+export PROOF_PARAM_MODEL="openrouter/vendor/model"
+export PROOF_PARAM_MINER_BYOK=OPENROUTER_API_KEY
+unset PROOF_PARAM_TASKS PROOF_PARAM_AGENT_EXCEPTION_POLICY PROOF_PARAM_EXEC_TIMEOUT_S || true
+rm -rf "$PROOF_WORK_DIR/harbor-jobs" "$PROOF_WORK_DIR"/harbor.timeout-multiplier "$PROOF_WORK_DIR"/harbor.agent-timeout-multiplier
+POLICY_FAIL_OUT="$WORKDIR/out-policy-fail"
+mkdir -p "$POLICY_FAIL_OUT"
+export PROOF_OUTPUT_DIR="$POLICY_FAIL_OUT"
+if "$ADAPTOR/harness/run-harbor" >"$WORKDIR/policy-fail.out" 2>"$WORKDIR/policy-fail.err"; then
+    fail "default agent_exception_policy=fail must refuse an uncovered crashed task"
+fi
+[ ! -f "$POLICY_FAIL_OUT/report.json" ] || fail "fail policy must not publish"
+grep -qi "incomplete vs filtered\\|no complete Harbor trials" "$WORKDIR/policy-fail.err" \
+    || fail "must name the incomplete set: $(cat "$WORKDIR/policy-fail.err")"
+grep -qx "UNSET" "$PROOF_WORK_DIR/harbor.exec-timeout" || fail "PROOF_EXEC_TIMEOUT_S must stay unset for a silent topic"
+[ ! -f "$PROOF_WORK_DIR/harbor.timeout-multiplier" ] || fail "no timeout multiplier flag for a silent topic"
+pass "agent_exception_policy=fail (default) keeps the fail-closed behaviour"
+
+rm -rf "$PROOF_WORK_DIR/harbor-jobs"
+export PROOF_PARAM_AGENT_EXCEPTION_POLICY=zero
+export PROOF_PARAM_EXEC_TIMEOUT_S=900
+export PROOF_PARAM_TIMEOUT_MULTIPLIER=2
+export PROOF_PARAM_AGENT_TIMEOUT_MULTIPLIER=1.5
+POLICY_ZERO_OUT="$WORKDIR/out-policy-zero"
+mkdir -p "$POLICY_ZERO_OUT"
+export PROOF_OUTPUT_DIR="$POLICY_ZERO_OUT"
+"$ADAPTOR/harness/run-harbor" >"$WORKDIR/policy-zero.out" 2>"$WORKDIR/policy-zero.err" \
+    || fail "agent_exception_policy=zero must score the crashed task as 0: $(cat "$WORKDIR/policy-zero.err")"
+python3 - "$POLICY_ZERO_OUT/report.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+ev = r["evidence"]
+assert r["primary_value"] == 0.0, r
+assert ev["n_scored"] == 2 and ev["n_measured"] == 1 and ev["n_agent_exceptions"] == 1, ev
+assert ev["agent_exception_policy"] == "zero"
+assert ev["agent_exception_trials"][0]["exception_type"] == "RuntimeError"
+assert "120 seconds" in ev["agent_exception_trials"][0]["exception_message"]
+PY
+grep -qx "900" "$PROOF_WORK_DIR/harbor.exec-timeout" || fail "PROOF_EXEC_TIMEOUT_S must carry exec_timeout_s to the harness"
+grep -qx "2" "$PROOF_WORK_DIR/harbor.timeout-multiplier" || fail "timeout_multiplier must reach Harbor"
+grep -qx "1.5" "$PROOF_WORK_DIR/harbor.agent-timeout-multiplier" || fail "agent_timeout_multiplier must reach Harbor"
+pass "agent_exception_policy=zero scores a harness crash as 0 with evidence; timeouts are topic data"
+
+if (export PROOF_PARAM_AGENT_EXCEPTION_POLICY=zer0; "$ADAPTOR/harness/run-harbor") >/dev/null 2>"$WORKDIR/policy-typo.err"; then
+    fail "a malformed agent_exception_policy must fail closed"
+fi
+grep -q "agent_exception_policy" "$WORKDIR/policy-typo.err" || fail "must name the knob"
+unset PROOF_PARAM_AGENT_EXCEPTION_POLICY PROOF_PARAM_EXEC_TIMEOUT_S PROOF_PARAM_TIMEOUT_MULTIPLIER PROOF_PARAM_AGENT_TIMEOUT_MULTIPLIER
+pass "malformed agent_exception_policy fails closed before Harbor"
+
+# --- network / verifier knobs are topic data with today's defaults ---
+proof_require_tasks
+proof_filter_tasks
+printf '[environment]\nnetwork_mode = "no-network"\n' > "$PROOF_TASKS/task-alpha/task.toml"
+export PROOF_PARAM_TASK_NETWORK_MODE=keep
+proof_enable_agent_network || fail "task_network_mode=keep must succeed"
+grep -q 'no-network' "$PROOF_TASKS/task-alpha/task.toml" || fail "keep must leave the pack's network settings"
+unset PROOF_PARAM_TASK_NETWORK_MODE
+proof_enable_agent_network || fail "default network mode must rewrite"
+grep -q 'network_mode = "public"' "$PROOF_TASKS/task-alpha/task.toml" || fail "default must be public"
+if (export PROOF_PARAM_TASK_NETWORK_MODE=bridge; proof_enable_agent_network) 2>/dev/null; then
+    fail "an unknown task_network_mode must fail closed"
+fi
+mkdir -p "$PROOF_TASKS/task-alpha/environment"
+printf 'FROM python:3.12-slim\n' > "$PROOF_TASKS/task-alpha/environment/Dockerfile"
+export PROOF_PARAM_ENSURE_VERIFIER_PYTEST=false
+proof_ensure_verifier || fail "ensure_verifier_pytest=false must succeed"
+if grep -q 'pytest' "$PROOF_TASKS/task-alpha/environment/Dockerfile"; then
+    fail "ensure_verifier_pytest=false must leave the image untouched"
+fi
+unset PROOF_PARAM_ENSURE_VERIFIER_PYTEST
+proof_ensure_verifier || fail "default ensure_verifier must patch"
+grep -q 'pytest' "$PROOF_TASKS/task-alpha/environment/Dockerfile" || fail "default must inject pytest"
+pass "task_network_mode / ensure_verifier_pytest are topic knobs with today's defaults"
 
 echo "all adaptor tests passed"

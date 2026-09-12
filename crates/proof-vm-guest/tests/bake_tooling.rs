@@ -389,7 +389,6 @@ fn deploy_guest_names_no_harness_or_benchmark() {
         "harness/run-harbor",
         "harness/summarize.py",
         "harness/filter_tasks.py",
-        "harness/duration_hints.json",
         "harness/resolve_model.py",
         "harness/pack_filter.example.json",
         "harness/ensure_verifier.py",
@@ -405,6 +404,42 @@ fn deploy_guest_names_no_harness_or_benchmark() {
         adaptor.join("run").metadata().unwrap().permissions().mode() & 0o111 != 0,
         "reference adaptor run must be executable"
     );
+    // The adaptor's selection / inspection code carries no task list, slice
+    // name, filter mode, or rule id of any topic: those are topic data
+    // (signed params + the pinned pack). Test fixtures are exempt.
+    assert!(
+        !adaptor.join("harness/duration_hints.json").exists(),
+        "a measured task-duration table is pack content, never adaptor content"
+    );
+    for rel in [
+        "harness/filter_tasks.py",
+        "harness/summarize.py",
+        "harness/run-harbor",
+        "lib.sh",
+        "inspect_scan.py",
+    ] {
+        let lower = std::fs::read_to_string(adaptor.join(rel))
+            .unwrap()
+            .to_ascii_lowercase();
+        for forbidden in [
+            "first15",
+            "first-15",
+            "shortpack",
+            "x0017",
+            "tb4_answers",
+            "hardcoded_tb4",
+            "no_tb4_hardcoding",
+            "miner_byok_openrouter",
+            "cargo-flight-dispatch",
+            "biped-contact-dynamics",
+            "batched-eval-parity",
+        ] {
+            assert!(
+                !lower.contains(forbidden),
+                "{rel} names {forbidden:?}; the adaptor reads task sets and rule policy from the signed topic"
+            );
+        }
+    }
 }
 
 /// Rootful overlay path: init starts a container engine when one is present;

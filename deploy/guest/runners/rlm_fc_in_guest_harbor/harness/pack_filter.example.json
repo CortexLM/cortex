@@ -1,28 +1,16 @@
 {
-  "max_duration_s": 3600,
-  "allow": [
-    "cargo-flight-dispatch",
-    "embedding-drift-monitor",
-    "bun-sourcemap-leak",
-    "fin-saccr-rwa",
-    "foodstuff-beta-activity",
-    "atrx-vep-crispr"
-  ],
-  "deny": [
-    "biped-contact-dynamics",
-    "formal-crypto",
-    "cad-model",
-    "data-anonymization",
-    "batched-eval-parity",
-    "ctr-optimization",
-    "cumulative-layout-shift",
-    "distributed-dedup",
-    "coq-block-bound"
-  ],
+  "_comment": "Example pack filter.json — PACK CONTENT, pinned by the topic's experiment_pack_digest, never compiled into the adaptor. Every name is a placeholder. `slices` map a signed constraints.task_slice label onto task directory names (a slices/<label>.json or .txt file works too); `allow` is the pack's default set when the topic names neither `tasks` nor a slice; `deny` is always removed; `max_duration_s` may only lower a topic's max_task_duration_s and is inert without one; `durations` are measured walls in seconds used by that gate.",
+  "slices": {
+    "example-slice-a": ["task-a", "task-b", "task-c"],
+    "example-smoke": ["task-a"]
+  },
+  "allow": ["task-a", "task-b", "task-c", "task-d"],
+  "deny": ["task-broken-env"],
+  "max_duration_s": 7200,
   "durations": {
-    "biped-contact-dynamics": 18628,
-    "formal-crypto": 7482,
-    "cad-model": 4364,
-    "data-anonymization": 3964
+    "task-a": 900,
+    "task-b": 1800,
+    "task-c": 5400,
+    "task-d": 14400
   }
 }

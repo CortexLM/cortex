@@ -428,5 +428,212 @@ class SummarizeTests(unittest.TestCase):
             self.assertEqual(report["evidence"]["n_measured"], 1)
 
 
+def write_exception_trial(
+    trial_dir: Path,
+    name: str,
+    *,
+    exc_type: str = "RuntimeError",
+    message: str = "Command timed out after 120 seconds\nTraceback…",
+    agent_started: bool = True,
+    verifier_started: bool = False,
+    reward_txt: float | None = None,
+) -> None:
+    """Harbor-shaped trial that died of an exception (no verifier_result)."""
+    trial_dir.mkdir(parents=True, exist_ok=True)
+    body: dict = {
+        "trial_name": name,
+        "exception_info": {
+            "exception_type": exc_type,
+            "exception_message": message,
+            "exception_traceback": "Traceback (most recent call last): …",
+            "occurred_at": "2026-09-11T00:00:00Z",
+        },
+        "agent_execution": (
+            {"started_at": "2026-09-11T00:00:00Z", "finished_at": "2026-09-11T00:02:00Z"}
+            if agent_started
+            else None
+        ),
+        "verifier": {"started_at": "2026-09-11T00:02:01Z"} if verifier_started else None,
+    }
+    (trial_dir / "result.json").write_text(json.dumps(body), encoding="utf-8")
+    if reward_txt is not None:
+        (trial_dir / "verifier").mkdir(exist_ok=True)
+        (trial_dir / "verifier" / "reward.txt").write_text(f"{reward_txt}\n", encoding="utf-8")
+
+
+class AgentExceptionPolicyTests(unittest.TestCase):
+    """What a task the miner's harness crashed on counts as is topic data."""
+
+    def _pack(self, root: Path, names: list[str]) -> Path:
+        allow = root / "tasks"
+        for n in names:
+            (allow / n).mkdir(parents=True)
+        return allow
+
+    def test_default_fail_keeps_today_behaviour(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            allow = self._pack(root, ["task-a", "task-b"])
+            write_complete_trial(jobs / "job" / "task-a__1", "task-a__1", 0.0)
+            write_exception_trial(jobs / "job" / "task-b__1", "task-b__1")
+            out = root / "report.json"
+            with self.assertRaises(SystemExit) as ctx:
+                summarize.main(
+                    ["--jobs-dir", str(jobs), "--output", str(out), "--allow-tasks-dir", str(allow)]
+                )
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertFalse(out.exists())
+            # And without the coverage check, the crashed trial is simply not a measurement.
+            trials = summarize.collect_trials(jobs)
+            self.assertEqual([t["name"] for t in trials], ["task-a__1"])
+
+    def test_zero_scores_a_harness_crash_as_zero_with_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            allow = self._pack(root, ["task-a", "task-b", "task-c"])
+            write_complete_trial(jobs / "job" / "task-a__1", "task-a__1", 1.0)
+            write_complete_trial(jobs / "job" / "task-b__1", "task-b__1", 0.0)
+            write_exception_trial(
+                jobs / "job" / "task-c__1",
+                "task-c__1",
+                exc_type="AgentTimeoutError",
+                message="Agent execution timed out after 900 seconds",
+            )
+            out = root / "report.json"
+            rc = summarize.main(
+                [
+                    "--jobs-dir",
+                    str(jobs),
+                    "--output",
+                    str(out),
+                    "--allow-tasks-dir",
+                    str(allow),
+                    "--agent-exception-policy",
+                    "zero",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            report = json.loads(out.read_text(encoding="utf-8"))
+            self.assertAlmostEqual(report["primary_value"], 1.0 / 3.0)
+            ev = report["evidence"]
+            self.assertEqual(ev["n_scored"], 3)
+            self.assertEqual(ev["n_measured"], 2)
+            self.assertEqual(ev["n_agent_exceptions"], 1)
+            self.assertEqual(ev["agent_exception_policy"], "zero")
+            self.assertEqual(ev["agent_exception_trials"][0]["name"], "task-c__1")
+            self.assertEqual(ev["agent_exception_trials"][0]["exception_type"], "AgentTimeoutError")
+            self.assertIn("900 seconds", ev["agent_exception_trials"][0]["exception_message"])
+            crashed = [t for t in ev["trials"] if t["name"] == "task-c__1"][0]
+            self.assertEqual(crashed["outcome"], "agent_exception")
+            self.assertEqual(crashed["reward"], 0.0)
+
+    def test_zero_never_scores_infrastructure_failures(self) -> None:
+        """Environment / verifier / setup failures are not the miner's harness."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            # Environment start failed before the agent ran.
+            write_exception_trial(
+                jobs / "job" / "env__1", "env__1", exc_type="EnvironmentStartTimeoutError", agent_started=False
+            )
+            # The verifier itself raised after the agent finished.
+            write_exception_trial(
+                jobs / "job" / "ver__1", "ver__1", exc_type="VerifierTimeoutError", verifier_started=True
+            )
+            # A reward.txt is on disk: not a clean harness failure.
+            write_exception_trial(jobs / "job" / "txt__1", "txt__1", reward_txt=1.0)
+            # No exception recorded at all: unmeasured, whatever happened.
+            (jobs / "job" / "none__1").mkdir(parents=True)
+            (jobs / "job" / "none__1" / "result.json").write_text(
+                json.dumps({"trial_name": "none__1", "agent_execution": {"started_at": "x"}}),
+                encoding="utf-8",
+            )
+            trials = summarize.collect_trials(jobs, None, "zero")
+            self.assertEqual(trials, [], "nothing here is the miner's harness failing")
+            out = root / "report.json"
+            with self.assertRaises(SystemExit):
+                summarize.main(
+                    ["--jobs-dir", str(jobs), "--output", str(out), "--agent-exception-policy", "zero"]
+                )
+            self.assertFalse(out.exists())
+
+    def test_zero_still_fails_closed_on_an_uncovered_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            allow = self._pack(root, ["task-a", "task-b"])
+            write_exception_trial(jobs / "job" / "task-a__1", "task-a__1")
+            out = root / "report.json"
+            with self.assertRaises(SystemExit) as ctx:
+                summarize.main(
+                    [
+                        "--jobs-dir",
+                        str(jobs),
+                        "--output",
+                        str(out),
+                        "--allow-tasks-dir",
+                        str(allow),
+                        "--agent-exception-policy",
+                        "zero",
+                    ]
+                )
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertFalse(out.exists())
+
+    def test_unknown_policy_word_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            write_complete_trial(jobs / "job" / "task-a__1", "task-a__1", 1.0)
+            with self.assertRaises(SystemExit):
+                summarize.main(
+                    ["--jobs-dir", str(jobs), "--output", str(root / "r.json"), "--agent-exception-policy", "skip"]
+                )
+            with self.assertRaises(SystemExit):
+                summarize.collect_trials(jobs, None, "zer0")
+
+    def test_exception_message_is_redacted(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            allow = self._pack(root, ["task-a"])
+            write_exception_trial(
+                jobs / "job" / "task-a__1",
+                "task-a__1",
+                message="provider refused key sk-or-secret-value-1234",
+            )
+            miner_dir = root / "miner"
+            miner_dir.mkdir()
+            (miner_dir / "OPENROUTER_API_KEY").write_text("sk-or-secret-value-1234", encoding="utf-8")
+            out = root / "report.json"
+            saved = dict(os.environ)
+            os.environ["PROOF_MINER_ENV_DIR"] = str(miner_dir)
+            os.environ["PROOF_MINER_ENV_NAMES"] = "OPENROUTER_API_KEY"
+            try:
+                rc = summarize.main(
+                    [
+                        "--jobs-dir",
+                        str(jobs),
+                        "--output",
+                        str(out),
+                        "--allow-tasks-dir",
+                        str(allow),
+                        "--agent-exception-policy",
+                        "zero",
+                    ]
+                )
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+            self.assertEqual(rc, 0)
+            blob = out.read_text(encoding="utf-8")
+            self.assertNotIn("sk-or-secret-value-1234", blob)
+            self.assertIn("[REDACTED]", blob)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,18 +1,29 @@
 #!/bin/bash
 # run-harbor — paid Harbor / custom-Python / script invoke for Baseline / Evaluate.
 #
-# Tasks: pack copy. Honor PROOF_TASK_SLICE / first-15 (INFRA excludes
-# only, no shortpack allow-list). ``PROOF_TASK_FILTER=shortpack`` is
-# explicit Dev n15 6-task allow-list. Harbor -m is
-# ``PROOF_PARAM_MODEL`` else ``PROOF_MODEL_PIN``; OpenRouter fails closed
-# without an ``openrouter/`` provider prefix.
-# Network: agent path is public (Docker no-network breaks OpenRouter / BYOK).
-#          allow_internet=false is rewritten to true on the filtered copy.
-# Harness: custom Python primary; Harbor BaseAgent, harness.json, run.sh
-#          accepted. Topic terminus-2 only for baseline with no miner artefact.
-# Runtime: Docker daemon first (rootful overlay); podman API socket fallback.
-# Verifier: pytest injected into filtered-copy environment/verifier images.
-# BYOK: evaluate never falls back to the owner secrets dir.
+# Every knob is topic data (PROOF_PARAM_* from the signed constraints.params,
+# PROOF_TASK_SLICE, PROOF_MODEL_PIN) or pack content; nothing here names a
+# benchmark, a task, or a slice.
+# Tasks:    filter_tasks.py — params.tasks / task_exclude / n_tasks /
+#           max_task_duration_s, task_slice via the pack's slices, pack
+#           filter.json allow/deny; else every task. Copied, never the pack.
+# Model:    Harbor -m is PROOF_PARAM_MODEL else PROOF_MODEL_PIN; an
+#           OpenRouter path fails closed without the openrouter/ prefix.
+# Timeouts: params.timeout_multiplier / agent_timeout_multiplier /
+#           verifier_timeout_multiplier / env_build_timeout_multiplier →
+#           the matching Harbor flags (only when signed); params.exec_timeout_s
+#           → PROOF_EXEC_TIMEOUT_S, the default wall clock for a harness
+#           environment.exec() call that passes no timeout_sec.
+# Trials:   summarize.py — a verifier-measured reward per selected task;
+#           params.agent_exception_policy decides what a task the miner's
+#           harness crashed on counts as (fail = no measurement, the
+#           default; zero = reward 0.0 with the exception in evidence).
+# Network:  task_network_mode (default public: agents need the pinned model).
+# Harness:  custom Python primary; Harbor BaseAgent, harness.json, run.sh
+#           accepted. Topic built-in agent only for baseline with no artefact.
+# Runtime:  Docker daemon first (rootful overlay); podman API socket fallback.
+# Verifier: pytest injected into filtered-copy images (ensure_verifier_pytest).
+# BYOK:     evaluate never falls back to the owner secrets dir.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ADAPTOR="$(cd "$HERE/.." && pwd)"
@@ -39,10 +50,19 @@ AGENT_SOURCE="${PROOF_HARBOR_AGENT_SOURCE:-}"
 HARNESS_KIND="${PROOF_HARNESS_KIND:?proof_select_harness did not set PROOF_HARNESS_KIND}"
 
 proof_start_container_runtime
+proof_export_exec_timeout
 
 jobs_dir="$PROOF_WORK_DIR/harbor-jobs"
 mkdir -p "$jobs_dir"
 log="$PROOF_WORK_DIR/harbor.run.log"
+
+# What a task the miner's harness raised on counts as (topic data; default
+# fail-closed). Shape-checked by the guest before this script runs.
+AGENT_EXCEPTION_POLICY="$(printf '%s' "${PROOF_PARAM_AGENT_EXCEPTION_POLICY:-fail}" | tr '[:upper:]' '[:lower:]')"
+case "$AGENT_EXCEPTION_POLICY" in
+    fail | zero) ;;
+    *) proof_die "agent_exception_policy must be fail or zero (got $AGENT_EXCEPTION_POLICY)" ;;
+esac
 
 summarize_or_die() {
     local harbor_exit="$1"
@@ -54,7 +74,8 @@ summarize_or_die() {
         --agent "${AGENT_ARG:-$HARNESS_KIND}" \
         --agent-source "$AGENT_SOURCE" \
         --harness-kind "$HARNESS_KIND" \
-        --allow-tasks-dir "$PROOF_TASKS"
+        --allow-tasks-dir "$PROOF_TASKS" \
+        --agent-exception-policy "$AGENT_EXCEPTION_POLICY"
 }
 
 if [ "$HARNESS_KIND" = script ]; then
@@ -116,6 +137,9 @@ harbor_cmd=(
     --env "$harbor_env"
     --yes
 )
+# Wall clocks are topic data: each multiplier is passed only when signed,
+# so a pack's own task.toml timeouts stand unless the topic scales them.
+proof_harbor_timeout_flags harbor_cmd
 # Canon model_pin is vendor/model only. Harbor/LiteLLM -m is params.model
 # (PROOF_PARAM_MODEL) falling back to the pin. OpenRouter fails closed
 # unless the id already has the openrouter/ provider prefix. Inspect

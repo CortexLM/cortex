@@ -7,8 +7,17 @@ it imports the miner class named by ``PROOF_MINER_AGENT_IMPORT`` from the
 staged artefact only and delegates ``setup`` / ``run``. Harbor's
 ``BaseAgent`` is an ABC: pin 8704 failed every trial with
 ``Can't instantiate abstract class ProofPythonAgent without an
-implementation for abstract method 'setup'``. Built-in names such as
-``terminus-2`` are never loaded here.
+implementation for abstract method 'setup'``. Built-in agent names are
+never loaded here.
+
+**Exec wall clock is topic data.** The environment handed to the miner's
+``run`` / ``setup`` is wrapped so that an ``environment.exec(...)`` call that
+passes no ``timeout_sec`` gets the topic's ``exec_timeout_s``
+(``PROOF_EXEC_TIMEOUT_S``, exported by the adaptor from
+``constraints.params.exec_timeout_s``) instead of Harbor's default (none).
+A ``timeout_sec`` the miner passes explicitly is theirs and is left alone;
+an unset topic knob wraps nothing. Everything else on the environment is
+delegated untouched.
 """
 
 from __future__ import annotations
@@ -20,6 +29,68 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+
+EXEC_TIMEOUT_ENV = "PROOF_EXEC_TIMEOUT_S"
+# ``BaseEnvironment.exec(command, cwd=None, env=None, timeout_sec=None, …)``:
+# the position ``timeout_sec`` holds when passed positionally.
+_EXEC_TIMEOUT_POSITION = 3
+
+
+def exec_timeout_default(env: dict[str, str] | None = None) -> int | None:
+    """The topic's default exec wall clock, or ``None`` when it set none."""
+    source = os.environ if env is None else env
+    raw = (source.get(EXEC_TIMEOUT_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        _fail(f"{EXEC_TIMEOUT_ENV}={raw!r} is not a positive integer of seconds")
+    if value <= 0:
+        _fail(f"{EXEC_TIMEOUT_ENV}={raw!r} is not a positive integer of seconds")
+    return value
+
+
+class ExecTimeoutEnvironment:
+    """Delegating proxy: fills ``exec(timeout_sec=None)`` from the topic."""
+
+    __slots__ = ("_inner", "_default")
+
+    def __init__(self, inner: Any, default_timeout_s: int) -> None:
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_default", default_timeout_s)
+
+    @property
+    def proof_exec_timeout_default_s(self) -> int:
+        return self._default
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._inner, name, value)
+
+    def exec(self, *args: Any, **kwargs: Any) -> Any:
+        if len(args) > _EXEC_TIMEOUT_POSITION:
+            if args[_EXEC_TIMEOUT_POSITION] is None:
+                args = (
+                    *args[:_EXEC_TIMEOUT_POSITION],
+                    self._default,
+                    *args[_EXEC_TIMEOUT_POSITION + 1 :],
+                )
+        elif kwargs.get("timeout_sec") is None:
+            kwargs["timeout_sec"] = self._default
+        return self._inner.exec(*args, **kwargs)
+
+
+def wrap_environment(environment: Any, default_timeout_s: int | None) -> Any:
+    """The miner's view of the environment: wrapped only when the topic set
+    ``exec_timeout_s``; ``None`` and already-wrapped values pass through."""
+    if environment is None or default_timeout_s is None:
+        return environment
+    if isinstance(environment, ExecTimeoutEnvironment):
+        return environment
+    return ExecTimeoutEnvironment(environment, default_timeout_s)
 
 try:
     from harbor.agents.base import BaseAgent
@@ -211,12 +282,15 @@ class ProofPythonAgent(BaseAgent):
         search = Path(os.environ.get("PROOF_MINER_AGENT_ROOT", "") or str(bound))
         cls = load_miner_class(import_path, search, bound)
         self._miner = _construct(cls, *args, **kwargs)
+        self._exec_timeout_s = exec_timeout_default()
 
     async def setup(self, environment: Any = None, **kwargs: Any) -> Any:
         # Harbor ABC (abstract ``setup``). A miner without setup is a no-op so
         # custom Python stays valid; a miner that implements it is delegated.
         del kwargs
-        return await _await_maybe(_call_setup(self._miner, environment))
+        env = wrap_environment(environment, self._exec_timeout_s)
+        return await _await_maybe(_call_setup(self._miner, env))
 
     async def run(self, instruction: str, environment: Any = None, context: Any = None) -> Any:
-        return await _await_maybe(_call_run(self._miner, instruction, environment, context))
+        env = wrap_environment(environment, self._exec_timeout_s)
+        return await _await_maybe(_call_run(self._miner, instruction, env, context))

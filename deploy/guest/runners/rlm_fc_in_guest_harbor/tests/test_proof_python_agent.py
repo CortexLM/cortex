@@ -252,5 +252,101 @@ class ProofPythonAgentTests(unittest.TestCase):
         self.assertEqual(kwargs["model_name"], "openrouter/moonshotai/kimi-k3")
 
 
+class RecordingEnvironment:
+    """Harbor-shaped environment: ``exec(command, cwd=None, env=None, timeout_sec=None)``."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.name = "recording"
+
+    async def exec(self, command, cwd=None, env=None, timeout_sec=None):
+        self.calls.append({"command": command, "cwd": cwd, "env": env, "timeout_sec": timeout_sec})
+        return {"stdout": "", "return_code": 0}
+
+    async def other(self) -> str:
+        return "delegated"
+
+
+class ExecTimeoutTests(unittest.TestCase):
+    """The default exec wall clock is topic data (exec_timeout_s), never a
+    number compiled here; a miner's explicit timeout is theirs."""
+
+    def test_unset_topic_knob_wraps_nothing(self) -> None:
+        os.environ.pop(proof_python_agent.EXEC_TIMEOUT_ENV, None)
+        self.assertIsNone(proof_python_agent.exec_timeout_default())
+        env = RecordingEnvironment()
+        self.assertIs(proof_python_agent.wrap_environment(env, None), env)
+        self.assertIsNone(proof_python_agent.wrap_environment(None, 900))
+
+    def test_topic_default_fills_only_an_unset_timeout(self) -> None:
+        import asyncio
+
+        inner = RecordingEnvironment()
+        env = proof_python_agent.wrap_environment(inner, 900)
+        self.assertIsInstance(env, proof_python_agent.ExecTimeoutEnvironment)
+        self.assertEqual(env.proof_exec_timeout_default_s, 900)
+        asyncio.run(env.exec("ls"))
+        asyncio.run(env.exec("sleep 1", timeout_sec=120))
+        asyncio.run(env.exec("pwd", "/work", None, None))
+        asyncio.run(env.exec("pwd", "/work", None, 30))
+        asyncio.run(env.exec("make", timeout_sec=None))
+        self.assertEqual([c["timeout_sec"] for c in inner.calls], [900, 120, 900, 30, 900])
+        self.assertEqual(inner.calls[2]["cwd"], "/work")
+        # Everything else delegates; wrapping twice is idempotent.
+        self.assertEqual(env.name, "recording")
+        self.assertEqual(asyncio.run(env.other()), "delegated")
+        self.assertIs(proof_python_agent.wrap_environment(env, 900), env)
+        env.name = "renamed"
+        self.assertEqual(inner.name, "renamed")
+
+    def test_env_var_is_read_and_shape_checked(self) -> None:
+        os.environ[proof_python_agent.EXEC_TIMEOUT_ENV] = " 1800 "
+        try:
+            self.assertEqual(proof_python_agent.exec_timeout_default(), 1800)
+        finally:
+            os.environ.pop(proof_python_agent.EXEC_TIMEOUT_ENV, None)
+        for bad in ("0", "-5", "soon", "1.5"):
+            with self.assertRaises(SystemExit):
+                proof_python_agent.exec_timeout_default({proof_python_agent.EXEC_TIMEOUT_ENV: bad})
+        self.assertIsNone(proof_python_agent.exec_timeout_default({}))
+
+    def test_agent_run_hands_the_miner_the_wrapped_environment(self) -> None:
+        import asyncio
+
+        art = HERE / "fixtures" / "python_agent"
+        os.environ["PROOF_ARTIFACT_DIR"] = str(art)
+        os.environ["PROOF_MINER_AGENT_IMPORT"] = "agent.agent:Agent"
+        os.environ["PROOF_MINER_AGENT_ROOT"] = str(art)
+        os.environ[proof_python_agent.EXEC_TIMEOUT_ENV] = "600"
+        try:
+            agent = proof_python_agent.ProofPythonAgent()
+            seen: list = []
+
+            class Miner:
+                async def run(self, instruction, environment=None, context=None):
+                    seen.append(environment)
+                    await environment.exec("true")
+                    return "ok"
+
+            agent._miner = Miner()
+            inner = RecordingEnvironment()
+            self.assertEqual(asyncio.run(agent.run("hi", inner, None)), "ok")
+            self.assertIsInstance(seen[0], proof_python_agent.ExecTimeoutEnvironment)
+            self.assertEqual(inner.calls[0]["timeout_sec"], 600)
+        finally:
+            for k in (
+                "PROOF_ARTIFACT_DIR",
+                "PROOF_MINER_AGENT_IMPORT",
+                "PROOF_MINER_AGENT_ROOT",
+                proof_python_agent.EXEC_TIMEOUT_ENV,
+            ):
+                os.environ.pop(k, None)
+
+    def test_no_compiled_timeout_number(self) -> None:
+        src = (HERE.parent / "harness" / "proof_python_agent.py").read_text(encoding="utf-8")
+        self.assertNotIn("timeout_sec=120", src)
+        self.assertNotIn("= 120", src)
+
+
 if __name__ == "__main__":
     unittest.main()
