@@ -658,6 +658,46 @@ fn dump_only_missing_trial_reward_txt_is_refused() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A trial the topic's `agent_exception_policy = zero` scored 0 never had a
+/// verifier reward on disk: the harvest copy is complete without one, and
+/// `n_measured` counts measured trials only. A measured trial that is
+/// missing from the copy is still refused.
+#[test]
+fn dump_only_agent_exception_rows_do_not_need_a_reward_on_disk() {
+    let root = tree("dump-zeroed");
+    let dump = root.join(HARVEST_WORK);
+    let report = r#"{"primary_value": 0.0, "claim_holds": false, "evidence": {"n_measured": 1, "n_scored": 2, "n_agent_exceptions": 1, "agent_exception_policy": "zero", "harbor_exit": 0, "trials": [{"name": "task-hard", "reward": 0.0, "outcome": "measured"}, {"name": "task-crashed", "reward": 0.0, "outcome": "agent_exception", "exception_type": "RuntimeError"}]}}"#;
+    plant(&dump, "evaluate", "0001", report);
+    plant_trial(&dump, "0001-evaluate", "run", "task-hard", "0");
+    let crashed = dump
+        .join("0001-evaluate")
+        .join(HARBOR_JOBS)
+        .join("run")
+        .join("task-crashed");
+    std::fs::create_dir_all(&crashed).expect("crashed trial dir");
+    std::fs::write(
+        crashed.join("result.json"),
+        r#"{"trial_name":"task-crashed","exception_info":{"exception_type":"RuntimeError","exception_message":"Command timed out after 120 seconds"},"agent_execution":{"started_at":"x"}}"#,
+    )
+    .expect("result");
+    let out = from_work_tree(&dump, &root, &evaluate_job()).expect("complete dump");
+    let VmJobOutput::Evaluated(run) = out else {
+        panic!("{out:?}");
+    };
+    assert!((run.report.primary_value - 0.0).abs() < 1e-12);
+
+    let root2 = tree("dump-zeroed-missing");
+    let dump2 = root2.join(HARVEST_WORK);
+    plant(&dump2, "evaluate", "0001", report);
+    let err = from_work_tree(&dump2, &root2, &evaluate_job()).expect_err("measured trial missing");
+    assert!(
+        err.to_string().contains("task-hard"),
+        "the measured trial is still required: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&root2);
+}
+
 #[test]
 fn dump_only_complete_trials_matching_n_measured_harvests() {
     let root = tree("dump-ok");
