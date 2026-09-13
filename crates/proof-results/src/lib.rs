@@ -53,10 +53,11 @@ pub const WRITE_RESULTS_EMIT: &str = "write_results_next_to_report";
 
 /// Largest results document accepted (bytes).
 ///
-/// Guest Harbor logs are sized to stay under this cap at 33 scored trials:
-/// 2 KiB `agent_log` + 2 KiB `verifier_log` per trial (132 KiB) plus
-/// `logs.harbor_run_tail` (8 KiB) and envelope. Overflow is fail-closed
-/// (`TooLarge`), never truncated here. 8 KiB per field would not fit.
+/// Guest summarize prefers 8 KiB `agent_log` / `verifier_log` and shrinks
+/// to 4 KiB, then omits those bodies, so a 33-trial pack still binds here
+/// instead of 503ing a paid score. Job-level `logs.harbor_run_tail` is
+/// unchanged. Overflow of a document that still exceeds this cap is
+/// fail-closed (`TooLarge`).
 pub const MAX_RESULTS_BYTES: u64 = 256 * 1024;
 
 /// Signed `constraints.params` key pinning the results contract id.

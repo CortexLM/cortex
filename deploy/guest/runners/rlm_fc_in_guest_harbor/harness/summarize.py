@@ -50,10 +50,12 @@ from pathlib import Path
 from typing import Any
 
 MAX_TAIL_CHARS = 8 * 1024
-# 33 trials × 2 KiB × 2 fields = 132 KiB, which fits proof-results
-# MAX_RESULTS_BYTES (256 KiB) with harbor_run_tail (8 KiB) and envelope.
-# 8 KiB per field would be 528 KiB and overflow that cap.
-MAX_TRIAL_LOG_CHARS = 2 * 1024
+# Prefer 8 KiB per trial log field. 33 trials × 8 KiB × 2 overflows the
+# 256 KiB CustomRunReport.results cap, so write_results_next_to_report
+# shrinks to 4 KiB then omits bodies rather than 503 a paid score.
+MAX_TRIAL_LOG_CHARS = 8 * 1024
+MAX_TRIAL_LOG_CHARS_STEP = 4 * 1024
+MAX_RESULTS_BYTES = 256 * 1024
 MAX_EVIDENCE_TRIALS = 256
 MAX_REWARD_TXT_BYTES = 64 * 1024
 MAX_EXCEPTION_CHARS = 400
@@ -509,9 +511,11 @@ def attach_trial_logs(row: dict[str, Any], trial_dir: Path, secrets: list[str]) 
     """Fill ``agent_log`` / ``verifier_log`` from Harbor's native trial dir.
 
     Agent sources, first available, each already ≤ ``MAX_TRIAL_LOG_CHARS``
-    and redacted: ``trial.log``, then ``agent/trajectory.json``, then
-    ``terminus_2.pane`` (optional third). Verifier is only
-    ``verifier/test-stdout.txt``. Missing files are omitted — never invented.
+    (8 KiB) and redacted: ``trial.log``, then ``agent/trajectory.json``, then
+    ``terminus_2.pane`` (optional third). ``agent/stdout.txt`` only if those
+    are missing. Verifier is only ``verifier/test-stdout.txt``. Missing
+    files are omitted — never invented. ``fit_results_under_cap`` may later
+    shrink to 4 KiB or omit bodies so ``results.json`` stays under 256 KiB.
     Runs for measured, agent-exception, FAIL, and incomplete Harbor alike.
     """
     sources: list[str] = []
@@ -520,6 +524,7 @@ def attach_trial_logs(row: dict[str, Any], trial_dir: Path, secrets: list[str]) 
         ("trial.log", trial_dir / "trial.log"),
         ("agent/trajectory.json", trial_dir / "agent" / "trajectory.json"),
         (pane_rel, pane_path),
+        ("agent/stdout.txt", trial_dir / "agent" / "stdout.txt"),
     ):
         text = read_tail(path, secrets, MAX_TRIAL_LOG_CHARS)
         if not text:
@@ -621,6 +626,60 @@ def build_results(
     }
 
 
+def clip_trial_log_bodies(
+    trials: list[dict[str, Any]], max_chars: int | None
+) -> list[dict[str, Any]]:
+    """Copy trials, shrinking or omitting ``agent_log`` / ``verifier_log``.
+
+    ``max_chars`` is the last-N char cap. ``None`` omits the bodies (and
+    ``log_sources``) so a large pack still scores under ``MAX_RESULTS_BYTES``.
+    Job-level ``logs.harbor_run_tail`` is not touched here.
+    """
+    out: list[dict[str, Any]] = []
+    for trial in trials:
+        row = dict(trial)
+        if max_chars is None:
+            row.pop("agent_log", None)
+            row.pop("verifier_log", None)
+            row.pop("log_sources", None)
+        else:
+            for key in ("agent_log", "verifier_log"):
+                val = row.get(key)
+                if isinstance(val, str) and len(val) > max_chars:
+                    row[key] = val[-max_chars:]
+        out.append(row)
+    return out
+
+
+def results_payload_bytes(results: dict[str, Any], secrets: list[str]) -> int:
+    dumped = redact(json.dumps(results, indent=2, sort_keys=True), secrets)
+    return len((dumped + "\n").encode("utf-8"))
+
+
+def fit_results_under_cap(
+    report: dict[str, Any],
+    trials: list[dict[str, Any]],
+    log_tail: str,
+    contract: str,
+    secrets: list[str],
+) -> dict[str, Any]:
+    """Prefer 8 KiB trial logs; shrink to 4 KiB, then omit, rather than overflow.
+
+    ``logs.harbor_run_tail`` stays as passed. A pack that still exceeds the
+    cap after omitting bodies is written as-is (envelope-only overflow is
+    not a log-body problem).
+    """
+    results = build_results(report, trials, log_tail, contract)
+    if results_payload_bytes(results, secrets) <= MAX_RESULTS_BYTES:
+        return results
+    for cap in (MAX_TRIAL_LOG_CHARS_STEP, None):
+        fitted = clip_trial_log_bodies(trials, cap)
+        results = build_results(report, fitted, log_tail, contract)
+        if results_payload_bytes(results, secrets) <= MAX_RESULTS_BYTES:
+            return results
+    return results
+
+
 def write_results_next_to_report(
     report_path: Path,
     report: dict[str, Any],
@@ -643,7 +702,7 @@ def write_results_next_to_report(
             "evidence.trials is truncated and the full trial table was not supplied; "
             "refusing a partial results.json"
         )
-    results = build_results(report, trials, log_tail, contract)
+    results = fit_results_under_cap(report, trials, log_tail, contract, secrets)
     dumped = redact(json.dumps(results, indent=2, sort_keys=True), secrets)
     atomic_write(results_path, dumped + "\n")
     return results_path
