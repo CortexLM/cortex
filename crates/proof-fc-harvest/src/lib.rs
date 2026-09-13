@@ -170,7 +170,55 @@ async fn after_vsock(
             let _ = std::fs::remove_dir_all(&dest);
         }
     }
-    Ok(msg)
+    // Tip runner writes results.json; a guest pin baked before that tree
+    // (pin/runner skew) still sends Done without `report.results`. Attach
+    // from scratch when the file is on disk, else fail closed naming the
+    // skew — never hand CP a paid evaluate with no results. Never invent.
+    attach_evaluate_results(msg, jail_root, jail_dir, job)
+}
+
+fn attach_evaluate_results(
+    msg: RlmToHost,
+    jail_root: &Path,
+    jail_dir: &Path,
+    job: &VmJob,
+) -> Result<RlmToHost, HvError> {
+    let RlmToHost::Done {
+        output: VmJobOutput::Evaluated(run),
+    } = &msg
+    else {
+        return Ok(msg);
+    };
+    if run.report.results.is_some() {
+        return Ok(msg);
+    }
+    let VmJob::Evaluate { request, .. } = job else {
+        return Ok(msg);
+    };
+    let work = work_root(jail_root, jail_dir).ok_or_else(|| {
+        HvError::Guest("evaluate Done omitted results json and no scratch to attach from".into())
+    })?;
+    let report_path = find_report(&work, "evaluate").ok_or_else(|| {
+        HvError::Guest("evaluate Done omitted results json and no report.json on scratch".into())
+    })?;
+    let output_dir = report_path.parent().unwrap_or(&work);
+    let results = harvest_results(
+        request,
+        output_dir,
+        run.report.primary_value,
+        run.report.claim_holds,
+        true,
+    )?;
+    let RlmToHost::Done {
+        output: VmJobOutput::Evaluated(mut run),
+    } = msg
+    else {
+        return Ok(msg);
+    };
+    run.report.results = results;
+    Ok(RlmToHost::Done {
+        output: VmJobOutput::Evaluated(run),
+    })
 }
 
 fn report_from_output(output: &VmJobOutput) -> Option<&CustomRunReport> {
@@ -934,13 +982,16 @@ fn harvest_results(
         .map_err(|e| HvError::Guest(e.to_string()))?;
     if !path.is_file() {
         if required {
-            return Err(HvError::Guest(format!(
-                "no {} in {}",
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(proof_results::RESULTS_FILE),
-                output_dir.display()
-            )));
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(proof_results::RESULTS_FILE);
+            let detail = if output_dir.join("report.json").is_file() {
+                proof_results::report_only_missing_results_detail(name, Some(&path))
+            } else {
+                proof_results::missing_results_detail(name, Some(&path))
+            };
+            return Err(HvError::Guest(detail));
         }
         return Ok(None);
     }

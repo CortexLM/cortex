@@ -93,25 +93,16 @@ if [ "$HARNESS_KIND" = script ]; then
     # incomplete or provenance is untrusted (txt-only / stale snapshot).
     miner_report=0
     if [ -f "$PROOF_OUTPUT_DIR/report.json" ]; then
-        rm -f "$PROOF_OUTPUT_DIR/report.json"
         miner_report=1
         echo "rlm_fc_in_guest_harbor: discarded miner-authored report.json; score must come from Harbor verifier trials" >&2
     fi
-    rm -f "$PROOF_OUTPUT_DIR/results.json"
-    if [ -n "${PROOF_PARAM_RESULTS_PATH:-}" ]; then
-        _results_name="$(proof_results_file_name "$PROOF_PARAM_RESULTS_PATH" || true)"
-        if [ -z "$_results_name" ]; then
-            proof_die "results_path is not a single safe .json file name"
-        fi
-        rm -f "$PROOF_OUTPUT_DIR/$_results_name"
-        unset _results_name
-    fi
+    proof_discard_miner_results
     set +e
     summarize_or_die "$script_exit"
     sum_exit=$?
     set -e
     if [ "$sum_exit" -ne 0 ]; then
-        rm -f "$PROOF_OUTPUT_DIR/report.json" "$PROOF_OUTPUT_DIR/results.json"
+        proof_discard_miner_results
         if [ "$miner_report" -eq 1 ]; then
             proof_die "script harness wrote report.json; refusing miner-authored primary_value and no measured Harbor trials"
         fi
@@ -120,6 +111,7 @@ if [ "$HARNESS_KIND" = script ]; then
         fi
         proof_die "no complete Harbor trials for the filtered task set; refusing to invent a primary_value"
     fi
+    proof_require_harbor_results
     if [ "$script_exit" -ne 0 ]; then
         echo "rlm_fc_in_guest_harbor: script harness exited ${script_exit}; scored already-measured trials" >&2
     fi
@@ -192,17 +184,19 @@ proof_persist_work
 # filtered set is covered (matching verifier_result + reward.txt).
 # Fail-closed when n_measured==0, the filtered set is incomplete, or
 # provenance is untrusted — never invent a primary_value.
+proof_discard_miner_results
 set +e
 summarize_or_die "$harbor_exit"
 sum_exit=$?
 set -e
 if [ "$sum_exit" -ne 0 ]; then
-    rm -f "$PROOF_OUTPUT_DIR/report.json"
+    proof_discard_miner_results
     if [ "$harbor_exit" -ne 0 ]; then
         proof_die_harbor "$harbor_exit" "$log"
     fi
     proof_die "no complete Harbor trials for the filtered task set; refusing to invent a primary_value"
 fi
+proof_require_harbor_results
 if [ "$harbor_exit" -ne 0 ]; then
     echo "rlm_fc_in_guest_harbor: harbor exited ${harbor_exit}; scored already-measured trials" >&2
 fi

@@ -118,6 +118,7 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
             "manifest_canonical",
             "--artifact",
             "artifact required",
+            "rebake",
         ],
     ),
     (
@@ -142,6 +143,7 @@ const PAGE_PINS: &[(&str, &[&str])] = &[
             "recipe/agent",
             "harness.json",
             "custom Python",
+            "rebake",
         ],
     ),
 ];

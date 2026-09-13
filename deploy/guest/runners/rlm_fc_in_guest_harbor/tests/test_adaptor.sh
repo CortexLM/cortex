@@ -40,6 +40,14 @@ trap cleanup EXIT
 
 export PROOF_WORK_DIR="$WORKDIR/work"
 export PROOF_OUTPUT_DIR="$WORKDIR/out"
+mkdir -p "$PROOF_OUTPUT_DIR"
+got="$(proof_results_path || true)"
+[ "$got" = "$PROOF_OUTPUT_DIR/results.json" ] || fail "default results path, got $got"
+export PROOF_PARAM_RESULTS_PATH="tbench-results.json"
+got="$(proof_results_path || true)"
+[ "$got" = "$PROOF_OUTPUT_DIR/tbench-results.json" ] || fail "pinned results path, got $got"
+unset PROOF_PARAM_RESULTS_PATH
+pass "proof_results_path honors the topic pin"
 export PROOF_PACK_DIR="$WORKDIR/pack"
 export PROOF_HARNESS_SKIP_PODMAN=1
 mkdir -p "$PROOF_WORK_DIR" "$PROOF_OUTPUT_DIR" "$PROOF_PACK_DIR/tasks/task-alpha"
@@ -373,6 +381,76 @@ assert res["n_scored"] == 1
 PY
 pass "evaluate run-harbor passes miner -a and full OpenRouter -m"
 
+# Overlay that still only writes report.json (metal tbench-x0039): run-harbor
+# must emit results.json from that report before exiting 0.
+REPAIR_OUT="$WORKDIR/out-repair"
+mkdir -p "$REPAIR_OUT"
+cat > "$REPAIR_OUT/report.json" <<'JSON'
+{
+  "primary_value": 0.0,
+  "claim_holds": true,
+  "evidence": {
+    "n_scored": 10,
+    "n_measured": 10,
+    "n_agent_exceptions": 0,
+    "mean_reward": 0.0,
+    "agent": "proof_python_agent:ProofPythonAgent",
+    "agent_source": "artifact_dir/recipe/agent",
+    "harness_kind": "python",
+    "agent_exception_policy": "fail",
+    "harbor_exit": 0,
+    "harbor_run_tail": "harbor: 10/10 mean 0.0",
+    "trials": [
+      {"name": "t00__1", "reward": 0.0, "outcome": "measured"},
+      {"name": "t01__1", "reward": 0.0, "outcome": "measured"},
+      {"name": "t02__1", "reward": 0.0, "outcome": "measured"},
+      {"name": "t03__1", "reward": 0.0, "outcome": "measured"},
+      {"name": "t04__1", "reward": 0.0, "outcome": "measured"},
+      {"name": "t05__1", "reward": 0.0, "outcome": "measured"},
+      {"name": "t06__1", "reward": 0.0, "outcome": "measured"},
+      {"name": "t07__1", "reward": 0.0, "outcome": "measured"},
+      {"name": "t08__1", "reward": 0.0, "outcome": "measured"},
+      {"name": "t09__1", "reward": 0.0, "outcome": "measured"}
+    ]
+  }
+}
+JSON
+export PROOF_OUTPUT_DIR="$REPAIR_OUT"
+export PROOF_TOPIC_ID="tbench-x0039"
+export PROOF_CUSTOM_ID="tbench_terminal_bench"
+export PROOF_SUBMISSION_DIGEST="$(printf 'aa%.0s' {1..32})"
+export PROOF_ARTIFACT_DIGEST="$(printf 'bb%.0s' {1..32})"
+proof_require_harbor_results
+[ -f "$REPAIR_OUT/results.json" ] || fail "proof_require_harbor_results must write results.json from report.json"
+python3 - "$REPAIR_OUT/report.json" "$REPAIR_OUT/results.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+res = json.load(open(sys.argv[2]))
+assert res["contract"] in ("tbench-harbor-v1", "harbor-trials-v1")
+assert res["n_scored"] == 10
+assert len(res["trials"]) == 10
+assert res["primary_value"] == r["primary_value"] == 0.0
+assert res["claim_holds"] is True
+assert abs(res["mean_reward"] - 0.0) < 1e-9
+PY
+unset PROOF_TOPIC_ID PROOF_CUSTOM_ID PROOF_SUBMISSION_DIGEST PROOF_ARTIFACT_DIGEST
+export PROOF_OUTPUT_DIR="$WORKDIR/out-eval"
+pass "run-harbor repairs report-only overlay into tbench-harbor-v1 results.json"
+
+# report.json without a complete trial table stays fail-closed (no invented results).
+MISS_OUT="$WORKDIR/out-missing-results"
+mkdir -p "$MISS_OUT"
+printf '{"primary_value":0.0,"claim_holds":true,"evidence":{"n_scored":1}}\n' > "$MISS_OUT/report.json"
+export PROOF_OUTPUT_DIR="$MISS_OUT"
+if ( proof_require_harbor_results ) 2>"$WORKDIR/missing-results.err"; then
+    fail "incomplete report.json must not invent results.json"
+fi
+[ ! -f "$MISS_OUT/results.json" ] || fail "must not write results.json from an incomplete report"
+[ ! -f "$MISS_OUT/report.json" ] || fail "must delete report.json when results cannot be written"
+grep -q "results" "$WORKDIR/missing-results.err" || fail "must name results: $(cat "$WORKDIR/missing-results.err")"
+export PROOF_OUTPUT_DIR="$WORKDIR/out-eval"
+pass "missing / incomplete results.json stays fail-closed"
+
 # OpenRouter + vendor/model pin only (no params.model) fails closed.
 unset PROOF_PARAM_MODEL || true
 export PROOF_MODEL_PIN="moonshotai/kimi-k3"
@@ -459,14 +537,20 @@ export PROOF_JOB=evaluate
 export PROOF_ARTIFACT_DIR="$FIXTURES"
 "$ADAPTOR/harness/run-harbor" >"$WORKDIR/partial.out" 2>"$WORKDIR/partial.err" \
     || fail "nonzero harbor with measured trials must still summarize"
-python3 - "$PARTIAL_OUT/report.json" <<'PY'
+python3 - "$PARTIAL_OUT/report.json" "$PARTIAL_OUT/results.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1]))
+res = json.load(open(sys.argv[2]))
 assert r["primary_value"] == 0.6, r
 assert r["evidence"]["n_measured"] == 1
 assert r["evidence"]["harbor_exit"] == 23
 assert r["evidence"]["harbor_incomplete"] is True
+assert res["n_scored"] == 1
+assert res["primary_value"] == r["primary_value"]
+assert res["claim_holds"] == r.get("claim_holds", False)
+assert res["contract"] in ("tbench-harbor-v1", "harbor-trials-v1")
 PY
+[ -f "$PARTIAL_OUT/results.json" ] || fail "nonzero harbor evaluate must write results.json"
 grep -qi "harbor exited 23" "$WORKDIR/partial.err" || fail "must name the harbor exit"
 grep -qi "scored already-measured" "$WORKDIR/partial.err" || fail "must say measured trials scored"
 pass "nonzero harbor exit scores already-measured trials"

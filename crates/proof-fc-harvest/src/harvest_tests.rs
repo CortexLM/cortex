@@ -15,8 +15,9 @@ use proof_vm_proto::guest::{encode_frame, read_frame, RlmToHost};
 use tokio::io::AsyncWriteExt;
 
 use super::{
-    copy_regular_nofollow, copy_tree, from_work_tree, harvest_from_jail, recv_job_or_harvest,
-    try_from_jail, HARBOR_JOBS, HARVEST_WORK, POLL_INTERVAL, SCRATCH_IN_JAIL, SCRATCH_TREE,
+    attach_evaluate_results, copy_regular_nofollow, copy_tree, from_work_tree, harvest_from_jail,
+    recv_job_or_harvest, try_from_jail, HARBOR_JOBS, HARVEST_WORK, POLL_INTERVAL, SCRATCH_IN_JAIL,
+    SCRATCH_TREE,
 };
 
 fn tree(tag: &str) -> PathBuf {
@@ -188,6 +189,69 @@ fn harvest_on_vsock_fail_returns_evaluated_with_report_primary_value() {
 }
 
 #[test]
+fn vsock_done_without_results_attaches_scratch_file() {
+    let root = tree("attach-results");
+    let work = root.join(SCRATCH_TREE).join("work");
+    plant(
+        &work,
+        "evaluate",
+        "0001",
+        r#"{"primary_value": 0.0, "claim_holds": false, "evidence": {"n_scored": 2}}"#,
+    );
+    let msg = vsock_done_n2();
+    let RlmToHost::Done {
+        output: VmJobOutput::Evaluated(before),
+    } = &msg
+    else {
+        panic!("fixture");
+    };
+    assert!(before.report.results.is_none());
+    let got = attach_evaluate_results(msg, &root, &root, &evaluate_job()).expect("attach");
+    let RlmToHost::Done {
+        output: VmJobOutput::Evaluated(run),
+    } = got
+    else {
+        panic!("expected Evaluated, got {got:?}");
+    };
+    assert!(run.report.results.is_some(), "must attach results.json");
+    assert!(
+        !run.report.evidence.contains_key("host_harvest"),
+        "attach must not rewrite vsock evidence as a harvest reconstruct"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn vsock_done_without_results_or_file_is_fail_closed() {
+    let root = tree("attach-missing");
+    let work = root.join(SCRATCH_TREE).join("work");
+    plant(
+        &work,
+        "evaluate",
+        "0001",
+        r#"{"primary_value": 0.0, "claim_holds": false, "evidence": {"n": 1}}"#,
+    );
+    std::fs::remove_file(
+        work.join("0001-evaluate")
+            .join("output")
+            .join("results.json"),
+    )
+    .expect("drop results");
+    let err = attach_evaluate_results(vsock_done_n2(), &root, &root, &evaluate_job())
+        .expect_err("missing results.json must not pass evaluate Done");
+    let text = err.to_string();
+    assert!(
+        text.contains("results.json") || text.contains("results json"),
+        "{text}"
+    );
+    assert!(
+        text.contains("guest pin/runner skew") && text.contains("rebake"),
+        "{text}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn evaluate_harvest_without_results_json_is_fail_closed() {
     let root = tree("no-results");
     let work = root.join("work");
@@ -204,7 +268,12 @@ fn evaluate_harvest_without_results_json_is_fail_closed() {
     )
     .expect("drop results");
     let err = from_work_tree(&work, &root, &evaluate_job()).expect_err("no results");
-    assert!(err.to_string().contains("results.json"), "{err}");
+    let text = err.to_string();
+    assert!(text.contains("results.json"), "{text}");
+    assert!(
+        text.contains("guest pin/runner skew") && text.contains("rebake"),
+        "{text}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1209,7 +1278,7 @@ fn vsock_done_n2() -> RlmToHost {
                 artifact_digest: req.artifact_digest,
                 rules_version: req.rules_version,
                 primary_value: 0.0,
-                claim_holds: true,
+                claim_holds: false,
                 sandboxed: true,
                 flops_used: None,
                 evidence,
@@ -1262,6 +1331,10 @@ async fn vsock_done_refreshes_stale_dump_keeps_vsock_score() {
     assert!(
         !run.report.evidence.contains_key("host_harvest"),
         "vsock Done must not be rewritten as a harvest reconstruct"
+    );
+    assert!(
+        run.report.results.is_some(),
+        "vsock Done that omitted results must attach results.json from scratch"
     );
     let refreshed = dump
         .join("0001-evaluate")

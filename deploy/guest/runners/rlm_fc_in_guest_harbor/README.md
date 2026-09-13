@@ -304,14 +304,18 @@ Harbor summarize.
 
 `run` also writes `$PROOF_OUTPUT_DIR/results.json` (or
 `$PROOF_PARAM_RESULTS_PATH` when the topic pins a single `*.json`
-segment) — the obligatory complete Harbor document (`tbench-harbor-v1`):
-untruncated `trials`, `n_scored` / `n_measured`, `mean_reward` (=
-`primary_value`), agent identity, and `logs.harbor_run_tail` /
-`logs.harbor_run_log`. A miner-authored results file is deleted with
-`report.json` before Harbor runs. The guest refuses Done when this file
-is missing or does not bind the scored report. Frontend consumers read
-the same object on `GET /v1/submissions/{id}` as `results` and at the
-artefact zip root as `results.json`.
+segment) — the obligatory complete Harbor document (`tbench-harbor-v1`
+/ `harbor-trials-v1`; pin `results_contract` to choose). Summarize writes
+**that file first**, then `report.json`, so a successful Harbor mean
+never lands as report-only (the metal `tbench-x0039` miss: 10/10 mean
+0.0, scoring 503). `run-harbor` refuses to exit 0 without the sibling;
+an older overlay that still only wrote `report.json` is repaired from
+that report when `evidence.trials` is the complete scored set. A
+miner-authored results file is deleted with `report.json` before Harbor
+runs. The guest refuses Done when this file is missing or does not bind
+the scored report. Frontend consumers read the same object on
+`GET /v1/submissions/{id}` as `results` and at the artefact zip root as
+`results.json`.
 
 `inspect` writes `$PROOF_OUTPUT_DIR/checklist.json` (no Harbor, no keys).
 
@@ -347,6 +351,16 @@ deploy/guest/bake-rootfs.sh \
 `--runner` copies this whole tree to `/opt/proof/runners/rlm_fc_in_guest_harbor/`.
 `run` execs `harness/run-harbor` next to it. Do **not** keep an old overlay
 script at `/opt/proof/harness/run-harbor` as the evaluate path.
+
+**Guest rebake is required after any runner-tree change.** Tipping
+gateway / `proof-challenge` alone leaves `/opt/proof/runners` on the
+**old pin**. Metal RCA: tip `b7d52fa6` already emitted `results.json`;
+live guest pin `sha256:0d9329ea…` (baked before #293) did not — Harbor
+10/10 mean 0.0 wrote `report.json` only; scoring 503 fail-closed as
+designed. Rebake + re-pin (`PROOF_RLM_VM_IMAGE_DIGEST`); do not invent
+a digest. Runbook:
+[`docs/runbooks/proof-experiment-vms.md`](../../../../docs/runbooks/proof-experiment-vms.md)
+§ Guest rebake after runner changes.
 
 **Metal copy (no re-bake), matching the live runners dir:**
 

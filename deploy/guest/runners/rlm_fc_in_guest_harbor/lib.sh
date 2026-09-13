@@ -99,6 +99,52 @@ proof_results_file_name() {
     printf '%s\n' "$name"
 }
 
+# Resolved results file name under $PROOF_OUTPUT_DIR (topic pin or default).
+proof_results_path() {
+    local name="results.json"
+    if [ -n "${PROOF_PARAM_RESULTS_PATH:-}" ]; then
+        name="$(proof_results_file_name "$PROOF_PARAM_RESULTS_PATH")" || return 1
+    fi
+    printf '%s\n' "${PROOF_OUTPUT_DIR:?}/$name"
+}
+
+# Drop a miner-authored report / results file. Score must come from Harbor.
+proof_discard_miner_results() {
+    : "${PROOF_OUTPUT_DIR:?}"
+    rm -f "$PROOF_OUTPUT_DIR/report.json" "$PROOF_OUTPUT_DIR/results.json"
+    if [ -n "${PROOF_PARAM_RESULTS_PATH:-}" ]; then
+        local name
+        name="$(proof_results_file_name "$PROOF_PARAM_RESULTS_PATH" || true)"
+        if [ -z "$name" ]; then
+            proof_die "results_path is not a single safe .json file name"
+        fi
+        rm -f "$PROOF_OUTPUT_DIR/$name"
+    fi
+}
+
+# After a successful Harbor summarize: the obligatory results document must
+# sit next to report.json. An overlay that still only writes report.json
+# (metal tbench-x0039) is repaired from that report when the trial table
+# is complete; otherwise fail closed and delete the report.
+proof_require_harbor_results() {
+    : "${PROOF_OUTPUT_DIR:?}"
+    local path
+    path="$(proof_results_path)" || proof_die "results_path is not a single safe .json file name"
+    if [ ! -f "$path" ] && [ -f "$PROOF_OUTPUT_DIR/report.json" ]; then
+        python3 "${_PROOF_HARBOR_ADAPTOR_DIR}/harness/summarize.py" \
+            --emit-results-from-report "$PROOF_OUTPUT_DIR/report.json" \
+            || {
+                rm -f "$PROOF_OUTPUT_DIR/report.json" "$path"
+                proof_die "summarize wrote report.json but no ${path##*/}; refusing a score without results"
+            }
+    fi
+    if [ ! -f "$path" ]; then
+        rm -f "$PROOF_OUTPUT_DIR/report.json"
+        proof_die "summarize wrote no ${path##*/}; refusing a score without results"
+    fi
+    proof_persist_work
+}
+
 proof_require_tasks() {
     : "${PROOF_PACK_DIR:?PROOF_PACK_DIR is required}"
     local tasks_rel="${PROOF_PARAM_TASKS_DIR:?constraints.params.tasks_dir is required}"

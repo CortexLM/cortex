@@ -224,6 +224,31 @@ vsock, virtio-blk/net, ext4); a stock Firecracker microVM kernel config
 usually lacks several — rebuild the guest kernel with them and re-pin
 `PROOF_VM_AGENT_KERNEL_DIGEST`.
 
+### Guest rebake after runner changes
+
+The in-guest adaptor is **the baked image**, not the control-plane tip.
+`deploy/guest/runners/` on a tipped `proof-challenge` / gateway checkout is
+**not** what `/opt/proof/runners/` inside the Firecracker guest runs.
+After any change to that tree (Harbor summarize emitting `results.json`,
+`run-harbor` refuse, inspect rules, …):
+
+1. Re-bake (`bake-rootfs.sh --runner rlm_fc_in_guest_harbor=deploy/guest/runners/rlm_fc_in_guest_harbor` plus the operator overlay / chroot-hook).
+2. Stage the new ext4 on the KVM host; re-pin `PROOF_RLM_VM_IMAGE_DIGEST` (Architecte RE-LOCK — do not invent a digest).
+3. Restart the KVM-host agent and `proof-challenge`.
+
+**Tipping gateway / challenge alone is insufficient.** A new CP binary still
+boots the old pin. Metal RCA (tip `b7d52fa6`, guest pin `sha256:0d9329ea…`
+baked before [#293](https://github.com/CortexLM/cortex/pull/293)): Harbor
+finished 10/10 mean 0.0 and wrote `report.json`; in-guest summarize lacked
+the emit; scoring correctly 503'd `adaptor wrote no results.json` (no row).
+Fail-closed is correct until the guest is rebaked. CI
+`deploy/scripts/assert-harbor-runner-results-emit.sh` (via
+`cargo test -p proof-vm-guest --test bake_tooling`) fails if the **tip**
+runner tree itself loses the emit; it cannot see a live pin.
+
+Copying the runner onto the KVM host overlay (`/var/lib/proof/runners/…`)
+is not enough unless that tree is what the guest rootfs actually contains.
+
 ## RE-LOCK (metal)
 
 Every digest below is `sha256sum` of a file you staged. Nothing here is
@@ -292,6 +317,7 @@ spend**. Use `proof-vm-wire-check.sh submit-probe --topic <id> --expect
 | runner id not baked (`/opt/proof/runners/<id>/run` missing) | 503 `runner … is not installed in this guest image` | `experiment vm booted` → guest `Failed` → retained; **no value reported** |
 | run report `sandboxed=false` on a `firecracker_required` topic | 503 `run report says miner code ran outside the Firecracker guest` | retained (final verification is part of the job outcome used for teardown policy) |
 | adaptor writes no `report.json` / non-finite value / outlives the deadline | 503 with the adaptor's exit + redacted tail / `cut at the deadline of Ns` | retained (read `console.log` and `root/scratch.ext4` under `PROOF_VM_AGENT_RETAIN_DIR/<topic>-x<n>`) |
+| evaluate wrote `report.json` but no `results.json` | 503 `adaptor wrote no results.json` **and** `guest pin/runner skew` / `rebake` — tip runner already emits; the live pin predates that tree. **Do not tip around it.** Rebake + re-pin. Fail-closed (no row) | retained; overlay `output/` has `report.json` only |
 | `artifact_uri` unreachable from the VM or bytes ≠ `artifact_digest` (evaluate) | 503 `artifact fetch … refusing to run a substitute` | retained; no sister, no attestation |
 | guest agent absent from the image (old RLM image) | 503 `pack staging answered …` / boot timeout | boot fails, jail released (nothing to retain: the VM never existed) |
 

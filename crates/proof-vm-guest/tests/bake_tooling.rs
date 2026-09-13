@@ -74,6 +74,10 @@ fn guest_scripts_parse() {
             "bash",
             "deploy/guest/runners/rlm_fc_in_guest_harbor/tests/run.sh",
         ),
+        (
+            "bash",
+            "deploy/scripts/assert-harbor-runner-results-emit.sh",
+        ),
     ] {
         let status = Command::new(shell)
             .arg("-n")
@@ -465,6 +469,89 @@ fn guest_prefers_real_docker_and_does_not_alias_compose() {
         init_sh.contains("$SCRATCH/docker"),
         "engine store must live on the scratch drive, not the read-only rootfs"
     );
+}
+
+/// Tip Harbor runner tree must emit results.json. A live guest pin baked
+/// before that overlay (metal RCA: sha256:0d9329ea… vs tip b7d52fa6) is
+/// pin/runner skew — rebake; this gate fails CI if tip itself loses emit.
+#[test]
+fn harbor_runner_tree_emits_results_json() {
+    let status = Command::new("bash")
+        .arg(repo().join("deploy/scripts/assert-harbor-runner-results-emit.sh"))
+        .status()
+        .expect("run emit assert");
+    assert!(
+        status.success(),
+        "tip Harbor runner tree must write results.json beside report.json"
+    );
+
+    let summarize = read("deploy/guest/runners/rlm_fc_in_guest_harbor/harness/summarize.py");
+    assert!(
+        summarize.contains("def write_results_next_to_report"),
+        "summarize.py must define write_results_next_to_report"
+    );
+    let main = summarize.split("def main(").nth(1).expect("main()");
+    let results_at = main.find("write_results_next_to_report(out, report, trials");
+    let report_at = main.find("atomic_write(out, dumped");
+    assert!(
+        results_at.is_some() && report_at.is_some() && results_at < report_at,
+        "summarize main() must write results.json before report.json"
+    );
+
+    // Bake dry-run of the tip runner: the plan must name the adaptor so a
+    // rebake actually copies this emit tree (not an empty / other id).
+    let d = tmp("harbor-emit-dryrun");
+    let agent = d.join("proof-vm-guest-agent");
+    exe(&agent, "#!/bin/sh\nexit 0\n");
+    let runner = repo().join("deploy/guest/runners/rlm_fc_in_guest_harbor");
+    let spec = format!("rlm_fc_in_guest_harbor={}", runner.display());
+    let (ok, text) = bake(&[
+        "--guest-agent",
+        &agent.display().to_string(),
+        "--runner",
+        &spec,
+        "--dry-run",
+    ]);
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("runners          rlm_fc_in_guest_harbor"),
+        "dry-run must plan the tip Harbor runner: {text}"
+    );
+    assert!(
+        runner.join("harness/summarize.py").is_file(),
+        "dry-run runner path must be the tip emit tree"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+
+    // A runner tree that lost the emit (pre-#293 overlay) must fail the gate.
+    let stale = tmp("harbor-stale-emit");
+    let dest = stale.join("rlm_fc_in_guest_harbor");
+    let copy = Command::new("cp")
+        .args([
+            "-a",
+            &runner.display().to_string(),
+            &dest.display().to_string(),
+        ])
+        .status()
+        .expect("copy runner");
+    assert!(copy.success(), "copy tip runner for stale-emit probe");
+    let stale_sum = dest.join("harness/summarize.py");
+    let mut stripped = std::fs::read_to_string(&stale_sum).expect("read");
+    stripped = stripped.replace(
+        "def write_results_next_to_report",
+        "def _removed_results_emit",
+    );
+    std::fs::write(&stale_sum, stripped).expect("strip emit");
+    let stale_status = Command::new("bash")
+        .arg(repo().join("deploy/scripts/assert-harbor-runner-results-emit.sh"))
+        .env("HARBOR_ADAPTOR_DIR", &dest)
+        .status()
+        .expect("run emit assert against stripped tree");
+    assert!(
+        !stale_status.success(),
+        "runner tree without results emit must fail the bake/tip gate"
+    );
+    let _ = std::fs::remove_dir_all(&stale);
 }
 
 /// The Harbor reference adaptor's unit tests (no Harbor CLI, no podman).

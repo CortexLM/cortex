@@ -304,7 +304,10 @@ Trust-root keygen is the throwaway owner path in
   evaluate also carries `results` (topic-defined complete RLM JSON; zip root
   `results.json`) on the create body and on GET. Missing / non-conforming
   results on evaluate, or a custom pass whose pending results expired
-  before persist, is **503**, no pass row. Harvest families omit `results`.
+  before persist, is **503**, no pass row. A Harbor `report.json` without
+  the sibling is **guest pin/runner skew** — rebake so
+  `/opt/proof/runners` matches `deploy/guest/runners`; tipping
+  gateway / challenge alone is insufficient. Harvest families omit `results`.
 - A pass that the family scorer crowns (custom: green checklist and
   `primary >= bar * (1 + epsilon_rel)` direction-aware, bar = sealed value or
   reigning best) persists as `champion`; other passes stay `awaiting_admin`.
