@@ -975,5 +975,430 @@ class HarborResultsEmitTests(unittest.TestCase):
             self.assertFalse((root / "results.json").exists())
 
 
+class TrialLogHarvestTests(unittest.TestCase):
+    """Per-trial agent_log / verifier_log from Harbor's native job dir."""
+
+    FIXTURE_JOBS = HERE / "fixtures" / "harbor-trial-logs" / "jobs"
+
+    def _by_name(self, trials: list[dict]) -> dict[str, dict]:
+        return {str(t["name"]): t for t in trials}
+
+    def test_fixture_trial_dirs_fill_log_bodies(self) -> None:
+        trials = summarize.collect_trials(self.FIXTURE_JOBS)
+        rows = self._by_name(trials)
+        self.assertEqual(
+            set(rows),
+            {"hello-world__1", "traj-only__1", "pane-only__1", "no-logs__1"},
+        )
+
+        hello = rows["hello-world__1"]
+        self.assertIn("hello-world agent stdout: ran ls", hello["agent_log"])
+        self.assertNotIn("trajectory must not displace", hello["agent_log"])
+        self.assertIn("verifier: reward=1.0", hello["verifier_log"])
+        self.assertEqual(
+            hello["log_sources"],
+            ["trial.log", "verifier/test-stdout.txt"],
+        )
+
+        traj = rows["traj-only__1"]
+        self.assertIn("traj-only agent step", traj["agent_log"])
+        self.assertEqual(traj["log_sources"], ["agent/trajectory.json"])
+        self.assertNotIn("verifier_log", traj)
+
+        pane = rows["pane-only__1"]
+        self.assertIn("optional third source", pane["agent_log"])
+        self.assertEqual(pane["log_sources"], ["terminus_2.pane"])
+
+        missing = rows["no-logs__1"]
+        self.assertNotIn("agent_log", missing)
+        self.assertNotIn("verifier_log", missing)
+        self.assertNotIn("log_sources", missing)
+
+    def test_results_json_carries_trial_logs_on_nonzero_harbor_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "t__1"
+            write_complete_trial(trial, "t__1", 0.6)
+            (trial / "trial.log").write_text("agent ran under FAIL\n", encoding="utf-8")
+            (trial / "verifier" / "test-stdout.txt").write_text(
+                "verifier stdout on incomplete harbor\n", encoding="utf-8"
+            )
+            out = root / "report.json"
+            rc = summarize.main(
+                [
+                    "--jobs-dir",
+                    str(root / "jobs"),
+                    "--output",
+                    str(out),
+                    "--harbor-exit",
+                    "23",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            results = json.loads((root / "results.json").read_text(encoding="utf-8"))
+            self.assertEqual(results["harbor_exit"], 23)
+            self.assertEqual(results["logs"]["harbor_run_log"], "logs/harbor.run.log")
+            row = results["trials"][0]
+            self.assertEqual(row["agent_log"], "agent ran under FAIL\n")
+            self.assertEqual(row["verifier_log"], "verifier stdout on incomplete harbor\n")
+            self.assertEqual(
+                row["log_sources"],
+                ["trial.log", "verifier/test-stdout.txt"],
+            )
+
+    def test_agent_exception_keeps_exception_fields_and_harvests_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            crashed = jobs / "job" / "task-c__1"
+            write_exception_trial(crashed, "task-c__1")
+            (crashed / "trial.log").write_text("harness crashed here\n", encoding="utf-8")
+            trials = summarize.collect_trials(jobs, None, "zero")
+            self.assertEqual(len(trials), 1)
+            row = trials[0]
+            self.assertEqual(row["outcome"], "agent_exception")
+            self.assertEqual(row["exception_type"], "RuntimeError")
+            self.assertIn("120 seconds", row["exception_message"])
+            self.assertEqual(row["agent_log"], "harness crashed here\n")
+            self.assertEqual(row["log_sources"], ["trial.log"])
+
+    def test_nested_agent_pane_is_third_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "nested__1"
+            write_complete_trial(trial, "nested__1", 1.0)
+            (trial / "agent").mkdir()
+            (trial / "agent" / "terminus_2.pane").write_text(
+                "nested pane body\n", encoding="utf-8"
+            )
+            trials = summarize.collect_trials(root / "jobs")
+            self.assertEqual(trials[0]["agent_log"], "nested pane body\n")
+            self.assertEqual(trials[0]["log_sources"], ["agent/terminus_2.pane"])
+
+    def test_stdout_fallback_only_when_primaries_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "t__1"
+            write_complete_trial(trial, "t__1", 1.0)
+            (trial / "agent").mkdir()
+            (trial / "agent" / "stdout.txt").write_text("fallback stdout\n", encoding="utf-8")
+            trials = summarize.collect_trials(root / "jobs")
+            self.assertEqual(trials[0]["agent_log"], "fallback stdout\n")
+            self.assertEqual(trials[0]["log_sources"], ["agent/stdout.txt"])
+
+    def test_trial_logs_are_redacted_and_capped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            secrets = root / "secrets"
+            secrets.mkdir()
+            (secrets / "inference_key").write_text("sk-secret-owner\n", encoding="utf-8")
+            trial = root / "jobs" / "job" / "t__1"
+            write_complete_trial(trial, "t__1", 1.0)
+            huge = "keep-me\n" + ("x" * (summarize.MAX_TRIAL_LOG_CHARS + 64)) + "sk-secret-owner tail\n"
+            (trial / "trial.log").write_text(huge, encoding="utf-8")
+            (trial / "verifier" / "test-stdout.txt").write_text(
+                "verifier saw sk-secret-owner\n", encoding="utf-8"
+            )
+            import os
+
+            os.environ["PROOF_SECRETS_DIR"] = str(secrets)
+            os.environ["PROOF_SECRET_FILES"] = "inference_key"
+            try:
+                trials = summarize.collect_trials(root / "jobs")
+            finally:
+                os.environ.pop("PROOF_SECRETS_DIR", None)
+                os.environ.pop("PROOF_SECRET_FILES", None)
+            row = trials[0]
+            self.assertNotIn("sk-secret-owner", row["agent_log"])
+            self.assertIn("[REDACTED]", row["agent_log"])
+            self.assertLessEqual(len(row["agent_log"]), summarize.MAX_TRIAL_LOG_CHARS)
+            self.assertNotIn("sk-secret-owner", row["verifier_log"])
+            self.assertIn("[REDACTED]", row["verifier_log"])
+
+    def _secret_straddling_cut(self, secret: str, max_chars: int, into: int = 4) -> tuple[str, str]:
+        """File body where a naive last-``max_chars`` slice keeps only a suffix."""
+        into = min(into, len(secret) - 1)
+        leaked = secret[into:]
+        suffix = "Z" * (max_chars - len(leaked))
+        body = ("X" * (max_chars + 64)) + secret + suffix
+        naive = body[-max_chars:]
+        self.assertIn(leaked, naive)
+        self.assertNotIn(secret, naive)
+        return body, leaked
+
+    def test_read_tail_redacts_before_cutting(self) -> None:
+        secret = "sk-secret-owner"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trial.log"
+            body, leaked = self._secret_straddling_cut(
+                secret, summarize.MAX_TRIAL_LOG_CHARS
+            )
+            path.write_text(body, encoding="utf-8")
+            out = summarize.read_tail(path, [secret], summarize.MAX_TRIAL_LOG_CHARS)
+            self.assertNotIn(secret, out)
+            self.assertNotIn(leaked, out)
+            self.assertIn(summarize.REDACTED, out)
+            self.assertLessEqual(len(out), summarize.MAX_TRIAL_LOG_CHARS)
+
+    def test_read_tail_redacts_secret_split_on_utf8_continuation(self) -> None:
+        """A max_chars-byte slice that starts mid-sequence must not leak the secret.
+
+        ``é`` / ``秘`` are 2- and 3-byte UTF-8. A last-N-**byte** window that
+        begins on a continuation byte decodes to a replacement + suffix that
+        no longer equals the configured secret. Decode+redact-then-char-tail
+        must still blank it.
+        """
+        secret = "sk-clé-秘密-owner"
+        leaked_suffix = "秘密-owner"
+        sb = secret.encode("utf-8")
+        split_at = next(i for i, b in enumerate(sb) if b & 0xC0 == 0x80)
+        max_chars = summarize.MAX_TRIAL_LOG_CHARS
+        suffix = b"Z" * (max_chars - (len(sb) - split_at))
+        raw = ("\N{GRINNING FACE}" * 256).encode("utf-8") + sb + suffix
+        naive = raw[-max_chars:]
+        self.assertEqual(naive[0] & 0xC0, 0x80)
+        naive_text = naive.decode("utf-8", errors="replace")
+        self.assertNotIn(secret, naive_text)
+        self.assertIn(leaked_suffix, naive_text)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trial.log"
+            path.write_bytes(raw)
+            out = summarize.read_tail(path, [secret], max_chars)
+            self.assertNotIn(secret, out)
+            self.assertNotIn(leaked_suffix, out)
+            self.assertIn(summarize.REDACTED, out)
+            self.assertLessEqual(len(out), max_chars)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "t__1"
+            write_complete_trial(trial, "t__1", 1.0)
+            (trial / "trial.log").write_bytes(raw)
+            (trial / "verifier" / "test-stdout.txt").write_bytes(raw)
+            trials = summarize.collect_trials(root / "jobs", secrets=[secret])
+            row = trials[0]
+            for field in ("agent_log", "verifier_log"):
+                text = row[field]
+                self.assertNotIn(secret, text, field)
+                self.assertNotIn(leaked_suffix, text, field)
+
+    def test_trial_logs_redact_secret_only_in_last_k_of_larger_file(self) -> None:
+        secret = "sk-secret-owner"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "t__1"
+            write_complete_trial(trial, "t__1", 1.0)
+            agent_body, leaked_a = self._secret_straddling_cut(
+                secret, summarize.MAX_TRIAL_LOG_CHARS
+            )
+            verifier_body, leaked_v = self._secret_straddling_cut(
+                secret, summarize.MAX_TRIAL_LOG_CHARS, into=6
+            )
+            (trial / "trial.log").write_text(agent_body, encoding="utf-8")
+            (trial / "verifier" / "test-stdout.txt").write_text(
+                verifier_body, encoding="utf-8"
+            )
+            trials = summarize.collect_trials(root / "jobs", secrets=[secret])
+            row = trials[0]
+            for field, leaked in (("agent_log", leaked_a), ("verifier_log", leaked_v)):
+                text = row[field]
+                self.assertNotIn(secret, text, field)
+                self.assertNotIn(leaked, text, field)
+                self.assertLessEqual(len(text), summarize.MAX_TRIAL_LOG_CHARS, field)
+                self.assertIn("REDACTED", text, field)
+
+    def test_harbor_run_tail_redacts_secret_straddling_cut(self) -> None:
+        secret = "sk-secret-owner"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            write_complete_trial(jobs / "job" / "t__1", "t__1", 1.0)
+            body, leaked = self._secret_straddling_cut(secret, summarize.MAX_TAIL_CHARS)
+            log = root / "harbor.log"
+            log.write_text(body, encoding="utf-8")
+            out = root / "report.json"
+            secrets_dir = root / "secrets"
+            secrets_dir.mkdir()
+            (secrets_dir / "inference_key").write_text(secret + "\n", encoding="utf-8")
+            import os
+
+            saved = dict(os.environ)
+            os.environ["PROOF_SECRETS_DIR"] = str(secrets_dir)
+            os.environ["PROOF_SECRET_FILES"] = "inference_key"
+            try:
+                rc = summarize.main(
+                    [
+                        "--jobs-dir",
+                        str(jobs),
+                        "--log",
+                        str(log),
+                        "--output",
+                        str(out),
+                        "--harbor-exit",
+                        "0",
+                        "--agent",
+                        "agent.agent:MinerAgent",
+                        "--agent-source",
+                        "artifact_dir/agent",
+                    ]
+                )
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+            self.assertEqual(rc, 0)
+            report = json.loads(out.read_text(encoding="utf-8"))
+            results = json.loads((root / "results.json").read_text(encoding="utf-8"))
+            for blob in (
+                report["evidence"]["harbor_run_tail"],
+                results["logs"]["harbor_run_tail"],
+                out.read_text(encoding="utf-8"),
+                (root / "results.json").read_text(encoding="utf-8"),
+            ):
+                self.assertNotIn(secret, blob)
+                self.assertNotIn(leaked, blob)
+            self.assertIn(summarize.REDACTED, results["logs"]["harbor_run_tail"])
+
+    def test_thirty_three_trials_shrink_to_two_kib_rather_than_overflow(self) -> None:
+        """33 × 8 KiB overflows; 2 KiB step keeps encoded results.json under 256 KiB."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            body_a = "A" * summarize.MAX_TRIAL_LOG_CHARS
+            body_v = "V" * summarize.MAX_TRIAL_LOG_CHARS
+            for i in range(33):
+                trial = jobs / "job" / f"task-{i:02d}__1"
+                write_complete_trial(trial, f"task-{i:02d}__1", 0.0)
+                (trial / "trial.log").write_text(body_a, encoding="utf-8")
+                (trial / "verifier" / "test-stdout.txt").write_text(body_v, encoding="utf-8")
+            harbor_log = root / "harbor.run.log"
+            harbor_log.write_text("job-level harbor run tail stays\n", encoding="utf-8")
+            out = root / "report.json"
+            rc = summarize.main(
+                [
+                    "--jobs-dir",
+                    str(jobs),
+                    "--log",
+                    str(harbor_log),
+                    "--output",
+                    str(out),
+                    "--harbor-exit",
+                    "23",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            results_path = root / "results.json"
+            size = results_path.stat().st_size
+            self.assertLessEqual(
+                size,
+                summarize.MAX_RESULTS_BYTES,
+                f"results.json {size} bytes exceeds {summarize.MAX_RESULTS_BYTES}",
+            )
+            results = json.loads(results_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(results["trials"]), 33)
+            self.assertEqual(results["n_scored"], 33)
+            self.assertAlmostEqual(results["primary_value"], 0.0)
+            self.assertEqual(
+                results["logs"]["harbor_run_tail"],
+                "job-level harbor run tail stays\n",
+            )
+            for row in results["trials"]:
+                self.assertEqual(row["outcome"], "measured")
+                self.assertEqual(len(row["agent_log"]), summarize.MAX_TRIAL_LOG_CHARS_STEP_2K)
+                self.assertEqual(len(row["verifier_log"]), summarize.MAX_TRIAL_LOG_CHARS_STEP_2K)
+
+    def test_sixteen_trials_shrink_to_four_kib(self) -> None:
+        """16 × 8 KiB × 2 overflows; 4 KiB step still fits, so bodies are kept."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            body_a = "A" * summarize.MAX_TRIAL_LOG_CHARS
+            body_v = "V" * summarize.MAX_TRIAL_LOG_CHARS
+            for i in range(16):
+                trial = jobs / "job" / f"task-{i:02d}__1"
+                write_complete_trial(trial, f"task-{i:02d}__1", 0.0)
+                (trial / "trial.log").write_text(body_a, encoding="utf-8")
+                (trial / "verifier" / "test-stdout.txt").write_text(body_v, encoding="utf-8")
+            out = root / "report.json"
+            rc = summarize.main(["--jobs-dir", str(jobs), "--output", str(out)])
+            self.assertEqual(rc, 0)
+            results = json.loads((root / "results.json").read_text(encoding="utf-8"))
+            self.assertLessEqual((root / "results.json").stat().st_size, summarize.MAX_RESULTS_BYTES)
+            self.assertEqual(len(results["trials"]), 16)
+            for row in results["trials"]:
+                self.assertEqual(len(row["agent_log"]), summarize.MAX_TRIAL_LOG_CHARS_STEP)
+                self.assertEqual(len(row["verifier_log"]), summarize.MAX_TRIAL_LOG_CHARS_STEP)
+
+    def test_ten_trials_keep_eight_kib_log_bodies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            body_a = "A" * summarize.MAX_TRIAL_LOG_CHARS
+            body_v = "V" * summarize.MAX_TRIAL_LOG_CHARS
+            for i in range(10):
+                trial = jobs / "job" / f"task-{i:02d}__1"
+                write_complete_trial(trial, f"task-{i:02d}__1", 0.0)
+                (trial / "trial.log").write_text(body_a, encoding="utf-8")
+                (trial / "verifier" / "test-stdout.txt").write_text(body_v, encoding="utf-8")
+            out = root / "report.json"
+            rc = summarize.main(["--jobs-dir", str(jobs), "--output", str(out)])
+            self.assertEqual(rc, 0)
+            results = json.loads((root / "results.json").read_text(encoding="utf-8"))
+            self.assertLessEqual((root / "results.json").stat().st_size, summarize.MAX_RESULTS_BYTES)
+            self.assertEqual(len(results["trials"]), 10)
+            for row in results["trials"]:
+                self.assertEqual(len(row["agent_log"]), summarize.MAX_TRIAL_LOG_CHARS)
+                self.assertEqual(len(row["verifier_log"]), summarize.MAX_TRIAL_LOG_CHARS)
+
+    def test_invalid_utf8_and_escapes_use_encoded_json_size(self) -> None:
+        """0xFF tails JSON-escape to ~986 KiB; encoded-size guard still scores."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            raw = b"\xff" * summarize.MAX_TRIAL_LOG_CHARS
+            escaped = (b'\\"' * 2048) + (b"\x01" * 2048) + (b"\xff" * 4096)
+            for i in range(10):
+                trial = jobs / "job" / f"task-{i:02d}__1"
+                write_complete_trial(trial, f"task-{i:02d}__1", 0.0)
+                (trial / "trial.log").write_bytes(raw)
+                (trial / "verifier" / "test-stdout.txt").write_bytes(escaped)
+            trials = summarize.collect_trials(jobs)
+            self.assertEqual(len(trials), 10)
+            self.assertIn("agent_log", trials[0])
+            report = summarize.build_report(
+                trials, "", 0, "harbor", "", "", summarize.POLICY_FAIL
+            )
+            inflated = summarize.build_results(
+                report, trials, "", summarize.CONTRACT_TBENCH
+            )
+            self.assertGreater(
+                summarize.results_payload_bytes(inflated, []),
+                summarize.MAX_RESULTS_BYTES,
+                "invalid UTF-8 / escapes must inflate past 256 KiB before the guard",
+            )
+            out = root / "report.json"
+            rc = summarize.main(["--jobs-dir", str(jobs), "--output", str(out)])
+            self.assertEqual(rc, 0)
+            results_path = root / "results.json"
+            size = results_path.stat().st_size
+            self.assertLessEqual(size, summarize.MAX_RESULTS_BYTES, f"encoded {size}")
+            results = json.loads(results_path.read_text(encoding="utf-8"))
+            self.assertEqual(results["n_scored"], 10)
+            self.assertEqual(len(results["trials"]), 10)
+            self.assertAlmostEqual(results["primary_value"], 0.0)
+            self.assertEqual(results["logs"]["harbor_run_log"], "logs/harbor.run.log")
+
+    def test_empty_log_files_are_omitted_never_invented(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "t__1"
+            write_complete_trial(trial, "t__1", 1.0)
+            (trial / "trial.log").write_text("", encoding="utf-8")
+            (trial / "verifier" / "test-stdout.txt").write_text("", encoding="utf-8")
+            trials = summarize.collect_trials(root / "jobs")
+            self.assertNotIn("agent_log", trials[0])
+            self.assertNotIn("verifier_log", trials[0])
+            self.assertNotIn("log_sources", trials[0])
+
+
 if __name__ == "__main__":
     unittest.main()

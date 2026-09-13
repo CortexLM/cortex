@@ -50,6 +50,25 @@ from pathlib import Path
 from typing import Any
 
 MAX_TAIL_CHARS = 8 * 1024
+# Hard cap on bytes read from EOF before decode/redact. Last ``max_chars``
+# UTF-8 characters occupy at most 4× that many bytes; 1 MiB is well above
+# 8 KiB tails plus any realistic secret, so a char-tail never starts before
+# this window. Do not size the read from ``max_chars`` in bytes.
+MAX_TAIL_READ_BYTES = 1024 * 1024
+# Prefer 8 KiB per trial log field. Acceptance is the encoded results.json
+# size (json.dumps UTF-8), not the raw field cap: invalid UTF-8 replacement
+# chars and JSON escapes can inflate ~8 KiB tails past 256 KiB. Shrink
+# 8 → 4 → 2 KiB, then omit bodies, rather than 503 a paid score.
+MAX_TRIAL_LOG_CHARS = 8 * 1024
+MAX_TRIAL_LOG_CHARS_STEP = 4 * 1024
+MAX_TRIAL_LOG_CHARS_STEP_2K = 2 * 1024
+TRIAL_LOG_FIT_STEPS: tuple[int | None, ...] = (
+    MAX_TRIAL_LOG_CHARS,
+    MAX_TRIAL_LOG_CHARS_STEP,
+    MAX_TRIAL_LOG_CHARS_STEP_2K,
+    None,
+)
+MAX_RESULTS_BYTES = 256 * 1024
 MAX_EVIDENCE_TRIALS = 256
 MAX_REWARD_TXT_BYTES = 64 * 1024
 MAX_EXCEPTION_CHARS = 400
@@ -347,6 +366,7 @@ def collect_trials(
     jobs_dir: Path,
     allow: frozenset[str] | None = None,
     agent_exception_policy: str = POLICY_FAIL,
+    secrets: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Load every scored Harbor trial. Do not cap here — the cap is evidence only.
 
@@ -363,12 +383,17 @@ def collect_trials(
     When ``allow`` is a non-empty set, trials whose name is not a filtered
     task (or ``task__attempt``) are dropped so a script that ran the
     unfiltered pack cannot score excluded ids.
+
+    Each scored row also harvests bounded, redacted ``agent_log`` /
+    ``verifier_log`` from the trial dir when those files exist (FAIL /
+    incomplete Harbor included). Missing files are omitted.
     """
     if agent_exception_policy not in EXCEPTION_POLICIES:
         _fail(f"agent_exception_policy must be one of {EXCEPTION_POLICIES}, got {agent_exception_policy!r}")
     by_dir: dict[str, dict[str, Any]] = {}
     if not jobs_dir.is_dir():
         return []
+    redact_secrets = secrets if secrets is not None else load_redact_values()
 
     for result_path in sorted(jobs_dir.rglob("result.json")):
         obj = _load_json(result_path)
@@ -378,23 +403,27 @@ def collect_trials(
             continue
         reward = trial_complete_reward(trial_dir, obj)
         if reward is not None:
-            by_dir[key] = {
+            row: dict[str, Any] = {
                 "name": _trial_name(obj, trial_dir),
                 "reward": reward,
                 "outcome": "measured",
             }
+            attach_trial_logs(row, trial_dir, redact_secrets)
+            by_dir[key] = row
             continue
         if agent_exception_policy != POLICY_ZERO:
             continue
         crashed = agent_phase_exception(trial_dir, obj)
         if crashed is None:
             continue
-        by_dir[key] = {
+        row = {
             "name": _trial_name(obj, trial_dir),
             "reward": 0.0,
             "outcome": "agent_exception",
             **crashed,
         }
+        attach_trial_logs(row, trial_dir, redact_secrets)
+        by_dir[key] = row
 
     rows = [by_dir[k] for k in sorted(by_dir)]
     if not allow:
@@ -470,17 +499,75 @@ def redact(text: str, secrets: list[str]) -> str:
     return out
 
 
-def read_tail(path: Path | None, secrets: list[str]) -> str:
-    if path is None or not path.is_file():
+def read_tail(path: Path | None, secrets: list[str], max_chars: int = MAX_TAIL_CHARS) -> str:
+    """Last ``max_chars`` **characters** of the log after secrets are blanked.
+
+    Decode first (lossy UTF-8 is OK for display), redact that decoded text,
+    then take the last N characters. Never pick the tail by a raw byte
+    offset of the original file: a ``max_chars``-byte window can start in
+    the middle of a UTF-8 sequence or of a secret, so the decoded suffix
+    would not match and would leak. Trial ``agent_log`` / ``verifier_log``
+    and job-level ``harbor_run_tail`` share this helper.
+    """
+    if path is None or not path.is_file() or max_chars <= 0:
         return ""
     try:
-        data = path.read_bytes()
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > MAX_TAIL_READ_BYTES:
+                fh.seek(-MAX_TAIL_READ_BYTES, os.SEEK_END)
+            data = fh.read()
     except OSError:
         return ""
-    if len(data) > MAX_TAIL_CHARS:
-        data = data[-MAX_TAIL_CHARS:]
-    text = data.decode("utf-8", errors="replace")
-    return redact(text, secrets)
+    redacted = redact(data.decode("utf-8", errors="replace"), secrets)
+    if len(redacted) > max_chars:
+        return redacted[-max_chars:]
+    return redacted
+
+
+def _trial_pane_path(trial_dir: Path) -> tuple[str, Path]:
+    """Owner lock is ``terminus_2.pane``; metal retain also has ``agent/terminus_2.pane``."""
+    root_pane = trial_dir / "terminus_2.pane"
+    if root_pane.is_file():
+        return "terminus_2.pane", root_pane
+    return "agent/terminus_2.pane", trial_dir / "agent" / "terminus_2.pane"
+
+
+def attach_trial_logs(row: dict[str, Any], trial_dir: Path, secrets: list[str]) -> None:
+    """Fill ``agent_log`` / ``verifier_log`` from Harbor's native trial dir.
+
+    Agent sources, first available, each already ≤ ``MAX_TRIAL_LOG_CHARS``
+    (8 KiB) and redacted: ``trial.log``, then ``agent/trajectory.json``, then
+    ``terminus_2.pane`` (optional third). ``agent/stdout.txt`` only if those
+    are missing. Verifier is only ``verifier/test-stdout.txt``. Missing
+    files are omitted — never invented. ``fit_results_under_cap`` may later
+    shrink 8 → 4 → 2 KiB or omit bodies so the **encoded** ``results.json``
+    stays under 256 KiB (JSON escapes / replacement chars included).
+    Runs for measured, agent-exception, FAIL, and incomplete Harbor alike.
+    """
+    sources: list[str] = []
+    pane_rel, pane_path = _trial_pane_path(trial_dir)
+    for rel, path in (
+        ("trial.log", trial_dir / "trial.log"),
+        ("agent/trajectory.json", trial_dir / "agent" / "trajectory.json"),
+        (pane_rel, pane_path),
+        ("agent/stdout.txt", trial_dir / "agent" / "stdout.txt"),
+    ):
+        text = read_tail(path, secrets, MAX_TRIAL_LOG_CHARS)
+        if not text:
+            continue
+        row["agent_log"] = text
+        sources.append(rel)
+        break
+    verifier_rel = "verifier/test-stdout.txt"
+    verifier_log = read_tail(
+        trial_dir / "verifier" / "test-stdout.txt", secrets, MAX_TRIAL_LOG_CHARS
+    )
+    if verifier_log:
+        row["verifier_log"] = verifier_log
+        sources.append(verifier_rel)
+    if sources:
+        row["log_sources"] = sources
 
 
 def mean_reward(trials: list[dict[str, Any]]) -> float:
@@ -566,6 +653,65 @@ def build_results(
     }
 
 
+def clip_trial_log_bodies(
+    trials: list[dict[str, Any]], max_chars: int | None
+) -> list[dict[str, Any]]:
+    """Copy trials, shrinking or omitting ``agent_log`` / ``verifier_log``.
+
+    ``max_chars`` is the last-N char cap on **already redacted** bodies.
+    ``None`` omits the bodies (and ``log_sources``) so a large pack still
+    scores under ``MAX_RESULTS_BYTES``. Job-level ``logs.harbor_run_tail``
+    is not touched here.
+    """
+    out: list[dict[str, Any]] = []
+    for trial in trials:
+        row = dict(trial)
+        if max_chars is None:
+            row.pop("agent_log", None)
+            row.pop("verifier_log", None)
+            row.pop("log_sources", None)
+        else:
+            for key in ("agent_log", "verifier_log"):
+                val = row.get(key)
+                if isinstance(val, str) and len(val) > max_chars:
+                    row[key] = val[-max_chars:]
+        out.append(row)
+    return out
+
+
+def dumps_results(results: dict[str, Any], secrets: list[str]) -> str:
+    """Serialize the document that is written to disk (size guard must match)."""
+    return redact(json.dumps(results, indent=2, sort_keys=True), secrets) + "\n"
+
+
+def results_payload_bytes(results: dict[str, Any], secrets: list[str]) -> int:
+    return len(dumps_results(results, secrets).encode("utf-8"))
+
+
+def fit_results_under_cap(
+    report: dict[str, Any],
+    trials: list[dict[str, Any]],
+    log_tail: str,
+    contract: str,
+    secrets: list[str],
+) -> dict[str, Any]:
+    """Keep encoded ``results.json`` ≤ ``MAX_RESULTS_BYTES``.
+
+    Field byte caps are only a search: re-measure ``len(json.dumps(…).encode())``
+    after each step. Invalid UTF-8 replacement chars and JSON escapes can
+    inflate an 8 KiB tail well past 256 KiB. Steps: 8 KiB → 4 KiB → 2 KiB
+    → omit ``agent_log`` / ``verifier_log``. ``logs.harbor_run_tail`` is
+    unchanged. Envelope-only overflow after omit is not a log-body problem.
+    """
+    results = build_results(report, trials, log_tail, contract)
+    for cap in TRIAL_LOG_FIT_STEPS:
+        fitted = clip_trial_log_bodies(trials, cap)
+        results = build_results(report, fitted, log_tail, contract)
+        if results_payload_bytes(results, secrets) <= MAX_RESULTS_BYTES:
+            return results
+    return results
+
+
 def write_results_next_to_report(
     report_path: Path,
     report: dict[str, Any],
@@ -588,9 +734,8 @@ def write_results_next_to_report(
             "evidence.trials is truncated and the full trial table was not supplied; "
             "refusing a partial results.json"
         )
-    results = build_results(report, trials, log_tail, contract)
-    dumped = redact(json.dumps(results, indent=2, sort_keys=True), secrets)
-    atomic_write(results_path, dumped + "\n")
+    results = fit_results_under_cap(report, trials, log_tail, contract, secrets)
+    atomic_write(results_path, dumps_results(results, secrets))
     return results_path
 
 
@@ -685,7 +830,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"allow-tasks-dir {args.allow_tasks_dir} has no task directories; "
                 "refusing to invent a primary_value"
             )
-    trials = collect_trials(jobs_dir, allow, policy)
+    secrets = load_redact_values()
+    trials = collect_trials(jobs_dir, allow, policy, secrets)
     if not trials:
         _fail(
             f"no measured Harbor trials under {jobs_dir} "
@@ -701,7 +847,6 @@ def main(argv: list[str] | None = None) -> int:
                 f"{', '.join(missing)}; agent_exception_policy={policy}); "
                 "refusing a partial primary_value"
             )
-    secrets = load_redact_values()
     log_path = Path(args.log) if args.log else None
     report = build_report(
         trials,

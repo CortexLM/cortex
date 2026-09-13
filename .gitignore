@@ -30,6 +30,7 @@ Thumbs.db
 
 # Local / ops noise
 *.log
+!deploy/guest/runners/rlm_fc_in_guest_harbor/tests/fixtures/**/trial.log
 tmp/
 .cache/
 coverage/

@@ -279,7 +279,14 @@ passed the suffix as `model_name`.
   "claim_holds": true,
   "evidence": {
     "trials": [
-      {"name": "task-a__1", "reward": 1.0, "outcome": "measured"},
+      {
+        "name": "task-a__1",
+        "reward": 1.0,
+        "outcome": "measured",
+        "agent_log": "…",
+        "verifier_log": "…",
+        "log_sources": ["trial.log", "verifier/test-stdout.txt"]
+      },
       {"name": "task-b__1", "reward": 0.0, "outcome": "agent_exception",
        "exception_type": "RuntimeError", "exception_message": "Command timed out after 120 seconds"}
     ],
@@ -315,7 +322,15 @@ miner-authored results file is deleted with `report.json` before Harbor
 runs. The guest refuses Done when this file is missing or does not bind
 the scored report. Frontend consumers read the same object on
 `GET /v1/submissions/{id}` as `results` and at the artefact zip root as
-`results.json`.
+`results.json`. Each `trials[]` row may also carry bounded, redacted
+`agent_log` / `verifier_log` (prefer last 8 KiB each, then 4 KiB, then 2 KiB,
+or omit if the **encoded** 256 KiB `results.json` would overflow) harvested from Harbor's
+native trial dir (`trial.log`, else `agent/trajectory.json`, else
+`terminus_2.pane`; verifier `verifier/test-stdout.txt`). Missing files are
+omitted, never invented. Job-level `logs.harbor_run_log` /
+`logs.harbor_run_tail` stay as today. This harvest lives in the in-guest
+adaptor — a live pin needs a guest rebake + RE-LOCK; tipping
+gateway/challenge alone does not update `/opt/proof/runners`.
 
 `inspect` writes `$PROOF_OUTPUT_DIR/checklist.json` (no Harbor, no keys).
 

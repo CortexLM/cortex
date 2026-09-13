@@ -51,8 +51,23 @@ pub const ORCH_RESULTS_ATTACH_HINT: &str =
 /// `report.json`. Absence from the guest runner tree is the skew probe.
 pub const WRITE_RESULTS_EMIT: &str = "write_results_next_to_report";
 
-/// Largest results document accepted (bytes).
+/// Default results document cap (bytes). [`CONTRACT_GENERIC`] and any
+/// unidentified `contract` stay on this prior limit.
+///
+/// Guest summarize prefers 8 KiB `agent_log` / `verifier_log` and shrinks
+/// 8 → 4 → 2 KiB, then omits those bodies, measuring the encoded JSON it
+/// writes so replacement chars / escapes cannot 503 a paid score.
+/// Job-level `logs.harbor_run_tail` is unchanged. A document that still
+/// exceeds the **selected** contract's cap is fail-closed (`TooLarge`).
 pub const MAX_RESULTS_BYTES: u64 = 256 * 1024;
+
+/// Harbor family cap (bytes): [`CONTRACT_HARBOR_TRIALS`] /
+/// [`CONTRACT_TBENCH_HARBOR`] only, after `contract` is identified.
+///
+/// [`load_file`] may *read* up to this ceiling so a Harbor document between
+/// [`MAX_RESULTS_BYTES`] and this size can parse; generic-custom-v1 over
+/// [`MAX_RESULTS_BYTES`] is still `TooLarge`.
+pub const MAX_HARBOR_RESULTS_BYTES: u64 = 512 * 1024;
 
 /// Signed `constraints.params` key pinning the results contract id.
 pub const PARAM_RESULTS_CONTRACT: &str = "results_contract";
@@ -81,11 +96,13 @@ pub enum ResultsError {
     /// File missing or unreadable.
     #[error("results json: {0}")]
     Io(String),
-    /// Over the size cap.
-    #[error("results json is {got} bytes (cap {MAX_RESULTS_BYTES})")]
+    /// Over the size cap selected for this document's contract.
+    #[error("results json is {got} bytes (cap {cap})")]
     TooLarge {
         /// Observed size.
         got: u64,
+        /// Cap that applied (`MAX_RESULTS_BYTES` or Harbor's larger allowance).
+        cap: u64,
     },
     /// JSON did not parse or was not an object.
     #[error("results json: {0}")]
@@ -174,6 +191,38 @@ pub fn known_contract(id: &str) -> Option<Contract> {
         CONTRACT_HARBOR_TRIALS | CONTRACT_TBENCH_HARBOR => Some(Contract::HarborTrials),
         _ => None,
     }
+}
+
+/// Byte cap for a results document **after** its `contract` is known.
+///
+/// Harbor ids get [`MAX_HARBOR_RESULTS_BYTES`]. Everything else, including
+/// an unknown or missing id, keeps [`MAX_RESULTS_BYTES`].
+#[must_use]
+pub fn results_size_cap(contract_id: &str) -> u64 {
+    match known_contract(contract_id) {
+        Some(Contract::HarborTrials) => MAX_HARBOR_RESULTS_BYTES,
+        Some(Contract::Generic) | None => MAX_RESULTS_BYTES,
+    }
+}
+
+fn results_size_cap_for_value(value: &Value) -> u64 {
+    value
+        .get("contract")
+        .and_then(Value::as_str)
+        .map_or(MAX_RESULTS_BYTES, results_size_cap)
+}
+
+fn reject_too_large(got: u64, cap: u64) -> Result<(), ResultsError> {
+    if got > cap {
+        Err(ResultsError::TooLarge { got, cap })
+    } else {
+        Ok(())
+    }
+}
+
+fn encoded_len(value: &Value) -> Result<u64, ResultsError> {
+    let bytes = serde_json::to_vec(value).map_err(|e| ResultsError::Parse(e.to_string()))?;
+    Ok(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
 }
 
 /// Single path segment, ends with `.json`, conservative charset.
@@ -269,11 +318,15 @@ pub fn runner_tree_emits_results(runner_dir: &Path) -> bool {
     EMIT_PROBE.iter().any(|rel| py_emits(&runner_dir.join(rel)))
 }
 
+/// Max adaptor source file we will scan for [`WRITE_RESULTS_EMIT`].
+/// Not a results.json allowance (generic stays [`MAX_RESULTS_BYTES`]).
+const MAX_EMIT_PROBE_BYTES: u64 = 512 * 1024;
+
 fn py_emits(path: &Path) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
-    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > 512 * 1024 {
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_EMIT_PROBE_BYTES {
         return false;
     }
     std::fs::read_to_string(path).is_ok_and(|body| body.contains(WRITE_RESULTS_EMIT))
@@ -314,11 +367,16 @@ pub fn load_file(path: &Path) -> Result<Value, ResultsError> {
     let meta = std::fs::metadata(path).map_err(|e| {
         ResultsError::Io(format!("{}: {e}", missing_results_detail(name, Some(path))))
     })?;
-    if meta.len() > MAX_RESULTS_BYTES {
-        return Err(ResultsError::TooLarge { got: meta.len() });
-    }
+    // Hard read ceiling is Harbor's max so a 257–512 KiB Harbor file can
+    // parse. Acceptance of that size happens only after `contract` is a
+    // Harbor id — generic-custom-v1 keeps MAX_RESULTS_BYTES.
+    reject_too_large(meta.len(), MAX_HARBOR_RESULTS_BYTES)?;
     let body = std::fs::read_to_string(path).map_err(|e| ResultsError::Io(e.to_string()))?;
-    parse_results(&body)
+    let got = u64::try_from(body.len()).unwrap_or(u64::MAX);
+    reject_too_large(got, MAX_HARBOR_RESULTS_BYTES)?;
+    let value = parse_results(&body)?;
+    reject_too_large(got, results_size_cap_for_value(&value))?;
+    Ok(value)
 }
 
 /// Parse results JSON text.
@@ -347,6 +405,7 @@ pub fn validate(
     let contract = str_field(obj, "contract")?;
     let family = known_contract(contract)
         .ok_or_else(|| ResultsError::UnknownContract(contract.to_owned()))?;
+    reject_too_large(encoded_len(value)?, results_size_cap(contract))?;
     if let Some(pin) = pinned.map(str::trim).filter(|s| !s.is_empty()) {
         let pin_fam =
             known_contract(pin).ok_or_else(|| ResultsError::UnknownContract(pin.to_owned()))?;
@@ -470,6 +529,7 @@ fn validate_harbor(obj: &Map<String, Value>, primary: f64) -> Result<(), Results
                 ));
             }
         }
+        optional_trial_log_fields(t)?;
         rewards.push(reward);
     }
     let n_scored = uint_field(obj, "n_scored")?;
@@ -509,6 +569,33 @@ fn validate_harbor(obj: &Map<String, Value>, primary: f64) -> Result<(), Results
         return Err(ResultsError::Shape(
             "logs must carry harbor_run_tail and/or harbor_run_log",
         ));
+    }
+    Ok(())
+}
+
+/// Optional per-trial Harbor logs. Not required (`agent_log` / `verifier_log`
+/// / `log_sources` may be omitted). A present value of the wrong JSON type
+/// is fail-closed so the frontend never treats a non-string as a log body.
+fn optional_trial_log_fields(t: &Map<String, Value>) -> Result<(), ResultsError> {
+    if t.get("agent_log").is_some_and(|v| !v.is_string()) {
+        return Err(ResultsError::Shape(
+            "trial.agent_log must be a string when present",
+        ));
+    }
+    if t.get("verifier_log").is_some_and(|v| !v.is_string()) {
+        return Err(ResultsError::Shape(
+            "trial.verifier_log must be a string when present",
+        ));
+    }
+    if let Some(v) = t.get("log_sources") {
+        let arr = v.as_array().ok_or(ResultsError::Shape(
+            "trial.log_sources must be an array of strings when present",
+        ))?;
+        if arr.iter().any(|item| !item.is_string()) {
+            return Err(ResultsError::Shape(
+                "trial.log_sources must be an array of strings when present",
+            ));
+        }
     }
     Ok(())
 }
@@ -621,7 +708,14 @@ mod tests {
             "agent_exception_policy": "zero",
             "harbor_exit": 0,
             "trials": [
-                {"name": "task-a__1", "reward": 1.0, "outcome": "measured"},
+                {
+                    "name": "task-a__1",
+                    "reward": 1.0,
+                    "outcome": "measured",
+                    "agent_log": "agent: hello\n",
+                    "verifier_log": "verifier: ok\n",
+                    "log_sources": ["trial.log", "verifier/test-stdout.txt"]
+                },
                 {
                     "name": "task-b__1",
                     "reward": 0.0,
@@ -684,6 +778,169 @@ mod tests {
     }
 
     #[test]
+    fn generic_keeps_256kib_harbor_gets_512kib_after_contract() {
+        assert_eq!(MAX_RESULTS_BYTES, 256 * 1024);
+        assert_eq!(MAX_HARBOR_RESULTS_BYTES, 512 * 1024);
+        assert_eq!(results_size_cap(CONTRACT_GENERIC), MAX_RESULTS_BYTES);
+        assert_eq!(
+            results_size_cap(CONTRACT_HARBOR_TRIALS),
+            MAX_HARBOR_RESULTS_BYTES
+        );
+        assert_eq!(
+            results_size_cap(CONTRACT_TBENCH_HARBOR),
+            MAX_HARBOR_RESULTS_BYTES
+        );
+        assert_eq!(results_size_cap("not-a-contract"), MAX_RESULTS_BYTES);
+        // Adaptor source scan; coincidentally 512 KiB, not generic-custom-v1's cap.
+        assert_eq!(MAX_EMIT_PROBE_BYTES, 512 * 1024);
+        assert_eq!(MAX_EMIT_PROBE_BYTES, MAX_HARBOR_RESULTS_BYTES);
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("proof-results-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        dir
+    }
+
+    fn write_contract_sized(dir: &Path, contract: &str, size: usize) -> PathBuf {
+        let path = dir.join("results.json");
+        let prefix = format!("{{\"contract\":\"{contract}\",\"pad\":\"");
+        let suffix = "\"}";
+        assert!(size >= prefix.len() + suffix.len());
+        let mut body = String::with_capacity(size);
+        body.push_str(&prefix);
+        body.extend(std::iter::repeat_n('x', size - prefix.len() - suffix.len()));
+        body.push_str(suffix);
+        assert_eq!(body.len(), size);
+        std::fs::write(&path, body).expect("write");
+        path
+    }
+
+    fn with_encoded_padding(mut value: Value, min_bytes: usize) -> Value {
+        let mut n = 1usize;
+        loop {
+            value["padding"] = Value::String("x".repeat(n));
+            let encoded = serde_json::to_vec(&value).expect("encode");
+            if encoded.len() >= min_bytes {
+                return value;
+            }
+            n = n.saturating_add(min_bytes.saturating_sub(encoded.len()).saturating_add(8));
+        }
+    }
+
+    #[test]
+    fn load_file_generic_rejects_over_256kib_under_harbor_ceiling() {
+        let dir = scratch_dir("generic-over");
+        let over = usize::try_from(MAX_RESULTS_BYTES).expect("cap") + 1;
+        let path = write_contract_sized(&dir, CONTRACT_GENERIC, over);
+        let err = load_file(&path).expect_err("generic over 256");
+        assert!(
+            matches!(
+                err,
+                ResultsError::TooLarge {
+                    cap: MAX_RESULTS_BYTES,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_file_harbor_accepts_between_256kib_and_512kib() {
+        let dir = scratch_dir("harbor-mid");
+        let mid = usize::try_from(MAX_RESULTS_BYTES).expect("cap") + 1;
+        let path = write_contract_sized(&dir, CONTRACT_HARBOR_TRIALS, mid);
+        load_file(&path).expect("harbor mid-size parses");
+        let alias = scratch_dir("harbor-alias");
+        let path = write_contract_sized(&alias, CONTRACT_TBENCH_HARBOR, mid);
+        load_file(&path).expect("tbench-harbor alias mid-size parses");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&alias);
+    }
+
+    #[test]
+    fn load_file_unknown_contract_keeps_generic_cap() {
+        let dir = scratch_dir("unknown-over");
+        let over = usize::try_from(MAX_RESULTS_BYTES).expect("cap") + 1;
+        let path = write_contract_sized(&dir, "not-a-contract", over);
+        let err = load_file(&path).expect_err("unknown is not Harbor");
+        assert!(
+            matches!(
+                err,
+                ResultsError::TooLarge {
+                    cap: MAX_RESULTS_BYTES,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_file_hard_ceiling_is_harbor_max_before_parse() {
+        let dir = scratch_dir("ceiling");
+        let path = dir.join("results.json");
+        let over = usize::try_from(MAX_HARBOR_RESULTS_BYTES).expect("cap") + 1;
+        std::fs::write(&path, vec![b'x'; over]).expect("write");
+        let err = load_file(&path).expect_err("over Harbor ceiling");
+        assert!(
+            matches!(
+                err,
+                ResultsError::TooLarge {
+                    cap: MAX_HARBOR_RESULTS_BYTES,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_applies_family_cap_after_contract() {
+        let b = bind();
+        let generic_over = with_encoded_padding(
+            generic_document(&b, &serde_json::json!({"ok": true})),
+            usize::try_from(MAX_RESULTS_BYTES).expect("cap") + 1,
+        );
+        let err = validate(&generic_over, &b, None).expect_err("generic over");
+        assert!(
+            matches!(
+                err,
+                ResultsError::TooLarge {
+                    cap: MAX_RESULTS_BYTES,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        let harbor_mid = with_encoded_padding(
+            harbor_ok(&b),
+            usize::try_from(MAX_RESULTS_BYTES).expect("cap") + 1,
+        );
+        validate(&harbor_mid, &b, None).expect("harbor mid-size still binds");
+        let harbor_over = with_encoded_padding(
+            harbor_ok(&b),
+            usize::try_from(MAX_HARBOR_RESULTS_BYTES).expect("cap") + 1,
+        );
+        let err = validate(&harbor_over, &b, None).expect_err("harbor over 512");
+        assert!(
+            matches!(
+                err,
+                ResultsError::TooLarge {
+                    cap: MAX_HARBOR_RESULTS_BYTES,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn unknown_or_mismatched_contract_fails_closed() {
         let b = bind();
         let mut unknown = generic_document(&b, &serde_json::json!({"ok": true}));
@@ -728,6 +985,36 @@ mod tests {
         assert!(
             validate(&exceptions, &b, None).is_err(),
             "n_agent_exceptions must match agent_exception trials"
+        );
+    }
+
+    #[test]
+    fn harbor_optional_trial_logs_are_typed() {
+        let b = bind();
+        validate(&harbor_ok(&b), &b, None).expect("optional logs allowed");
+        let mut omitted = harbor_ok(&b);
+        let trial0 = omitted["trials"][0].as_object_mut().expect("trial 0");
+        trial0.remove("agent_log");
+        trial0.remove("verifier_log");
+        trial0.remove("log_sources");
+        validate(&omitted, &b, None).expect("omitted logs allowed");
+        let mut bad_agent = harbor_ok(&b);
+        bad_agent["trials"][0]["agent_log"] = serde_json::json!(1);
+        assert!(
+            validate(&bad_agent, &b, None).is_err(),
+            "agent_log must be a string when present"
+        );
+        let mut bad_verifier = harbor_ok(&b);
+        bad_verifier["trials"][0]["verifier_log"] = serde_json::json!(true);
+        assert!(
+            validate(&bad_verifier, &b, None).is_err(),
+            "verifier_log must be a string when present"
+        );
+        let mut bad_sources = harbor_ok(&b);
+        bad_sources["trials"][0]["log_sources"] = serde_json::json!([1]);
+        assert!(
+            validate(&bad_sources, &b, None).is_err(),
+            "log_sources must be strings when present"
         );
     }
 
@@ -792,6 +1079,31 @@ mod tests {
         validate(&value, &b, Some(CONTRACT_TBENCH_HARBOR)).expect("fixture");
         assert_eq!(value["n_scored"], 10);
         assert_eq!(value["trials"].as_array().expect("trials").len(), 10);
+        let trials = value["trials"].as_array().expect("trials");
+        assert_eq!(
+            trials[0]["agent_log"].as_str().expect("agent_log"),
+            "hello-world agent stdout: ran ls\n"
+        );
+        assert_eq!(
+            trials[0]["verifier_log"].as_str().expect("verifier_log"),
+            "verifier: reward=1.0\n"
+        );
+        assert_eq!(
+            trials[0]["log_sources"],
+            serde_json::json!(["trial.log", "verifier/test-stdout.txt"])
+        );
+        assert!(
+            trials[2].get("agent_log").is_none(),
+            "missing Harbor files stay omitted"
+        );
+        assert_eq!(
+            trials[3]["exception_type"].as_str().expect("exc"),
+            "RuntimeError"
+        );
+        assert_eq!(
+            trials[3]["agent_log"].as_str().expect("exc agent_log"),
+            "build-tmux agent raised during harness\n"
+        );
     }
 
     #[test]
