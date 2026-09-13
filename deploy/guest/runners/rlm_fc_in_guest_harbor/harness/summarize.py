@@ -65,10 +65,14 @@ def _fail(msg: str, code: int = 2) -> None:
 
 
 def is_results_file_name(name: str) -> bool:
-    """Match ``proof_results::is_results_file_name`` — one safe ``*.json`` segment."""
+    """Match ``proof_results::is_results_file_name`` — one safe ASCII ``*.json`` segment."""
+    if not name.isascii():
+        return False
     if not 8 <= len(name) <= 64:
         return False
     if "/" in name or name.startswith("."):
+        return False
+    if name in (".", ".."):
         return False
     if not name.lower().endswith(".json"):
         return False

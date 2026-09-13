@@ -651,6 +651,15 @@ mod tests {
             results_file_name(&p).expect("multi-dot"),
             "audit.v1.final.json"
         );
+        p.insert(PARAM_RESULTS_PATH.into(), "audit.Json".into());
+        assert_eq!(results_file_name(&p).expect("mixed-case"), "audit.Json");
+        p.insert(PARAM_RESULTS_PATH.into(), " audit.json ".into());
+        assert_eq!(results_file_name(&p).expect("trim"), "audit.json");
+        p.insert(PARAM_RESULTS_PATH.into(), "résultats.json".into());
+        assert!(matches!(
+            results_file_name(&p),
+            Err(ResultsError::BadPath(_))
+        ));
         p.insert(PARAM_RESULTS_PATH.into(), "../x.json".into());
         assert!(matches!(
             results_file_name(&p),

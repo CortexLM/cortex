@@ -12,6 +12,38 @@
 # Source or append this from an adaptor `run`. Missing `report.json` is a
 # no-op (the guest still fail-closes Evaluate with no results file).
 
+# Same contract as `proof_results::results_file_name`: trim, then one safe
+# ASCII `*.json` segment (8–64 bytes, case-insensitive suffix, no `/`,
+# no leading `.`). Unicode letters are refused.
+_proof_results_file_name() {
+    _name=$(printf '%s' "${1:-results.json}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -n "$_name" ] || _name=results.json
+    _n=${#_name}
+    if [ "$_n" -lt 8 ] || [ "$_n" -gt 64 ]; then
+        unset _name _n
+        return 1
+    fi
+    case "$_name" in
+        */* | .* | . | ..)
+            unset _name _n
+            return 1
+            ;;
+        *.[Jj][Ss][Oo][Nn]) ;;
+        *)
+            unset _name _n
+            return 1
+            ;;
+    esac
+    case "$_name" in
+        *[!A-Za-z0-9._-]*)
+            unset _name _n
+            return 1
+            ;;
+    esac
+    printf '%s\n' "$_name"
+    unset _name _n
+}
+
 # Root-object JSON atom (number / true / false / null). Nested names ignored.
 _proof_root_json_atom() {
     awk -v want="$2" '
@@ -74,33 +106,10 @@ _proof_root_json_atom() {
 if [ -f "${PROOF_OUTPUT_DIR:?}/report.json" ]; then
     _results_name=results.json
     if [ -n "${PROOF_PARAM_RESULTS_PATH:-}" ]; then
-        _pin="${PROOF_PARAM_RESULTS_PATH}"
-        _n=${#_pin}
-        case "$_pin" in
-            */* | .* | . | ..)
-                echo "results_path is not a single safe .json file name" >&2
-                exit 2
-                ;;
-        esac
-        if [ "$_n" -lt 8 ] || [ "$_n" -gt 64 ]; then
+        _results_name="$(_proof_results_file_name "$PROOF_PARAM_RESULTS_PATH")" || {
             echo "results_path is not a single safe .json file name" >&2
             exit 2
-        fi
-        case "$_pin" in
-            *.json | *.JSON) ;;
-            *)
-                echo "results_path is not a single safe .json file name" >&2
-                exit 2
-                ;;
-        esac
-        case "$_pin" in
-            *[!A-Za-z0-9._-]*)
-                echo "results_path is not a single safe .json file name" >&2
-                exit 2
-                ;;
-        esac
-        _results_name="$_pin"
-        unset _pin _n
+        }
     fi
     _pv="$(_proof_root_json_atom "$PROOF_OUTPUT_DIR/report.json" primary_value)" || _pv=
     _ch="$(_proof_root_json_atom "$PROOF_OUTPUT_DIR/report.json" claim_holds)" || _ch=

@@ -66,6 +66,22 @@ grep -q '"primary_value":0.75' "$PROOF_OUTPUT_DIR/audit.v1.final.json" \
     || fail "pinned file missing root bind"
 pass "audit.v1.final.json pin is honored (no results.json fallback)"
 
+rm -f "$PROOF_OUTPUT_DIR/results.json" "$PROOF_OUTPUT_DIR/audit.Json"
+export PROOF_PARAM_RESULTS_PATH=audit.Json
+# shellcheck source=write-generic-results.sh
+. "$ROOT/write-generic-results.sh"
+[ -f "$PROOF_OUTPUT_DIR/audit.Json" ] || fail "mixed-case pin was not written"
+[ ! -f "$PROOF_OUTPUT_DIR/results.json" ] || fail "mixed-case pin fell back to results.json"
+pass "audit.Json pin is honored"
+
+rm -f "$PROOF_OUTPUT_DIR/results.json" "$PROOF_OUTPUT_DIR/audit.json"
+export PROOF_PARAM_RESULTS_PATH=' audit.json '
+# shellcheck source=write-generic-results.sh
+. "$ROOT/write-generic-results.sh"
+[ -f "$PROOF_OUTPUT_DIR/audit.json" ] || fail "padded pin did not write trimmed name"
+[ ! -f "$PROOF_OUTPUT_DIR/ audit.json " ] || fail "padded pin wrote the untrimmed name"
+pass "padded results_path trims before write"
+
 unset PROOF_PARAM_RESULTS_PATH
 export PROOF_PARAM_RESULTS_PATH='../../outside.json'
 if sh "$ROOT/write-generic-results.sh"; then
@@ -73,5 +89,11 @@ if sh "$ROOT/write-generic-results.sh"; then
 fi
 [ ! -f "$WORKDIR/outside.json" ] || fail "traversal pin wrote outside the output dir"
 pass "traversal pin is fail-closed"
+
+export PROOF_PARAM_RESULTS_PATH='résultats.json'
+if sh "$ROOT/write-generic-results.sh"; then
+    fail "unicode pin must exit"
+fi
+pass "unicode pin is fail-closed"
 
 echo "all write-generic-results tests passed"

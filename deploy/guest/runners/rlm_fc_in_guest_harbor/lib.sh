@@ -79,15 +79,18 @@ proof_relative_ok() {
     esac
 }
 
-# Single safe *.json segment (matches proof_results::is_results_file_name).
-# Prints the name on success; empty / traversal / wrong suffix is 1.
+# Same contract as `proof_results::results_file_name`: trim, then one safe
+# ASCII `*.json` segment (8–64 bytes, case-insensitive suffix, no `/`,
+# no leading `.`). Unicode letters are refused.
 proof_results_file_name() {
-    local name="${1:-results.json}"
-    local n=${#name}
+    local name n
+    name=$(printf '%s' "${1:-results.json}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -n "$name" ] || name=results.json
+    n=${#name}
     [ "$n" -ge 8 ] && [ "$n" -le 64 ] || return 1
     case "$name" in
-        "" | */* | .* | . | ..) return 1 ;;
-        *.json | *.JSON) ;;
+        */* | .* | . | ..) return 1 ;;
+        *.[Jj][Ss][Oo][Nn]) ;;
         *) return 1 ;;
     esac
     case "$name" in

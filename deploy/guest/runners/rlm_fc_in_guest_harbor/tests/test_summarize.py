@@ -727,6 +727,14 @@ class AgentExceptionPolicyTests(unittest.TestCase):
             self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel\n")
             self.assertFalse((root / "output" / "results.json").exists())
 
+    def test_results_file_name_matches_host_ascii_contract(self) -> None:
+        self.assertEqual(summarize.results_file_name("audit.Json"), "audit.Json")
+        self.assertEqual(summarize.results_file_name(" audit.json "), "audit.json")
+        self.assertEqual(summarize.results_file_name(""), "results.json")
+        with self.assertRaises(SystemExit) as ctx:
+            summarize.results_file_name("résultats.json")
+        self.assertEqual(ctx.exception.code, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
