@@ -579,7 +579,7 @@ you will actually meet on `tbench`:
 | **400** `artifact required` | You left both the upload and the locator out. `tbench` is `custom` | no |
 | **400** `artifact is not a tar archive` / gzip / no file content | The upload is not an uncompressed tar with file bytes | no |
 | **503** staged artefact missing / digest mismatch | Upload evaluate: the host no longer holds matching vault bytes. The row is untouched | live: no; deferred: queued |
-| **503** missing / invalid `results.json` | Evaluate produced no Harbor results document, or it does not bind the scored primary / trials. A finished Harbor mean with `report.json` only is **host pin/runner skew**: the guest image was baked before the tip runner emit. The operator must **rebake** the guest; tipping challenge / gateway alone is insufficient | no |
+| **503** missing / invalid `results.json` | Evaluate produced no Harbor results document, or it does not bind the scored primary / trials. Default text is `adaptor wrote no results.json`. That is **not** automatically pin/runner skew (a pin that already matches tip still 503s this way when Harbor/adaptor wrote no sibling). Rebake only when the guest runner tree lacks `write_results_next_to_report` | no |
 | **400** `artifact_digest is the sha256 of empty input …` | You hashed nothing, or an empty tar | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not exactly 64 lowercase hex. The host never normalises a hex field | no |
 | **401** `hotkey_signature required` / `invalid` | Missing signature, or a `claim`, `declared_flops`, `manifest`, or nonce that differs from what you signed | no |

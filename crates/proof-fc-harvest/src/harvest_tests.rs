@@ -16,8 +16,8 @@ use tokio::io::AsyncWriteExt;
 
 use super::{
     attach_evaluate_results, copy_regular_nofollow, copy_tree, from_work_tree, harvest_from_jail,
-    recv_job_or_harvest, try_from_jail, HARBOR_JOBS, HARVEST_WORK, POLL_INTERVAL, SCRATCH_IN_JAIL,
-    SCRATCH_TREE,
+    harvest_retain_dest, recv_job_or_harvest, snapshot_rca, try_from_jail, CONSOLE_LOG,
+    HARBOR_JOBS, HARVEST_WORK, POLL_INTERVAL, SCRATCH_IN_JAIL, SCRATCH_TREE,
 };
 
 fn tree(tag: &str) -> PathBuf {
@@ -245,7 +245,7 @@ fn vsock_done_without_results_or_file_is_fail_closed() {
         "{text}"
     );
     assert!(
-        text.contains("guest pin/runner skew") && text.contains("rebake"),
+        !text.contains("guest pin/runner skew") && !text.contains("rebake"),
         "{text}"
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -271,7 +271,7 @@ fn evaluate_harvest_without_results_json_is_fail_closed() {
     let text = err.to_string();
     assert!(text.contains("results.json"), "{text}");
     assert!(
-        text.contains("guest pin/runner skew") && text.contains("rebake"),
+        !text.contains("guest pin/runner skew") && !text.contains("rebake"),
         "{text}"
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -1357,5 +1357,54 @@ async fn vsock_done_refreshes_stale_dump_keeps_vsock_score() {
         !snap.contains("\"finished_at\":null"),
         "dump must not stay finished_at=null, got {snap}"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Destroy must not drop `report.json` / `harbor.run.log`: snapshot copies
+/// them to a durable dest first (metal tbench-x0040 empty retained-harvest).
+#[test]
+fn snapshot_rca_copies_output_and_harbor_log_before_destroy() {
+    let root = tree("retain-before-destroy");
+    let jail_root = root.join("root");
+    let work = jail_root.join(SCRATCH_TREE).join("work");
+    plant(
+        &work,
+        "evaluate",
+        "0001",
+        r#"{"primary_value": 0.4, "claim_holds": true, "evidence": {"n": 1}}"#,
+    );
+    let job = work.join("0001-evaluate");
+    std::fs::write(job.join("harbor.run.log"), b"harbor: done\n").expect("log");
+    std::fs::write(root.join(CONSOLE_LOG), b"console\n").expect("console");
+    let dest = harvest_retain_dest(&root.join("retained"), "topic-a-x0001");
+    let n = snapshot_rca(&jail_root, &root, &dest).expect("snapshot");
+    assert!(n >= 3, "report + results + harbor.run.log, got {n}");
+    assert!(
+        dest.join("0001-evaluate")
+            .join("output")
+            .join("report.json")
+            .is_file(),
+        "report.json must land in retained-harvest"
+    );
+    assert!(
+        dest.join("0001-evaluate").join("harbor.run.log").is_file(),
+        "harbor.run.log must land in retained-harvest"
+    );
+    assert!(
+        dest.join("console.log").is_file(),
+        "jail console.log must land in retained-harvest"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A snapshot miss is an error string, not a panic, so teardown can keep
+/// the original evaluate error.
+#[test]
+fn snapshot_rca_fail_soft_on_unwritable_dest() {
+    let root = tree("retain-unwritable");
+    let dest = root.join("retained-harvest");
+    std::fs::write(&dest, b"not a dir").expect("file");
+    let err = snapshot_rca(&root.join("root"), &root, &dest).expect_err("file dest");
+    assert!(err.contains("mkdir"), "{err}");
     let _ = std::fs::remove_dir_all(&root);
 }

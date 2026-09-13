@@ -157,6 +157,14 @@ is gone, that unique destination exists, and it is not nested. What is there:
 | `harvest-work/` | Host `debugfs` dump of guest `/work`. A vsock `Done` **refreshes** this tree from the guest overlay (or a new `rdump`) until trial `result.json` / `verifier/reward.txt` and Harbor `n_running=0` / `stats.n_running_trials` / `finished_at` would pass fail-closed checks (`reward.txt` can land ~12s before `result.json`). Dump-only reconstruct without a complete overlay still refuses. Guest writes those files; do not treat a lagging dump as a missing guest `reward.txt`. |
 | `root/vm-config.json`, `net.nft` | What the VM was booted with (the `root/` copies of the kernel and the pinned rootfs sit beside them) |
 
+**Retain-before-destroy.** Teardown copies guest scratch RCA
+(`…/output/report.json`, `results.json` if any, `harbor.run.log`, runner
+logs, `console.log`) to `PROOF_VM_AGENT_RETAIN_DIR/<vm_id>-harvest` **before**
+Destroy removes the jail (or Retain moves it). That snapshot is fail-soft: a
+copy miss is logged and the original evaluate error stands. Metal
+tbench-x0040: Destroy used to land before the operator WD captured
+`harvest-work` / `harbor.run.log`, leaving an empty retained-harvest.
+
 Pair it with the CP journal line `evaluate refused; no row` (topic, frozen
 digest, the same error string the miner's 503 body carried) to walk from a
 miner's failed submission to the guest evidence. Key material is not in the
@@ -317,7 +325,7 @@ spend**. Use `proof-vm-wire-check.sh submit-probe --topic <id> --expect
 | runner id not baked (`/opt/proof/runners/<id>/run` missing) | 503 `runner … is not installed in this guest image` | `experiment vm booted` → guest `Failed` → retained; **no value reported** |
 | run report `sandboxed=false` on a `firecracker_required` topic | 503 `run report says miner code ran outside the Firecracker guest` | retained (final verification is part of the job outcome used for teardown policy) |
 | adaptor writes no `report.json` / non-finite value / outlives the deadline | 503 with the adaptor's exit + redacted tail / `cut at the deadline of Ns` | retained (read `console.log` and `root/scratch.ext4` under `PROOF_VM_AGENT_RETAIN_DIR/<topic>-x<n>`) |
-| evaluate wrote `report.json` but no `results.json` | 503 `adaptor wrote no results.json` **and** `guest pin/runner skew` / `rebake` — tip runner already emits; the live pin predates that tree. **Do not tip around it.** Rebake + re-pin. Fail-closed (no row) | retained; overlay `output/` has `report.json` only |
+| evaluate wrote `report.json` but no `results.json` | 503 `adaptor wrote no results.json` — fail-closed (no row). **Not** automatically `guest pin/runner skew` / `rebake` (metal tbench-x0040: pin MATCH tip still 503s this way). Skew text is appended only when the guest `/opt/proof/runners` tree lacks `write_results_next_to_report` | retained; overlay `output/` has `report.json` only. Destroy copies that output + `harbor.run.log` to `{PROOF_VM_AGENT_RETAIN_DIR}/<vm_id>-harvest` first |
 | `artifact_uri` unreachable from the VM or bytes ≠ `artifact_digest` (evaluate) | 503 `artifact fetch … refusing to run a substitute` | retained; no sister, no attestation |
 | guest agent absent from the image (old RLM image) | 503 `pack staging answered …` / boot timeout | boot fails, jail released (nothing to retain: the VM never existed) |
 

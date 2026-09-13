@@ -171,9 +171,10 @@ async fn after_vsock(
         }
     }
     // Tip runner writes results.json; a guest pin baked before that tree
-    // (pin/runner skew) still sends Done without `report.results`. Attach
-    // from scratch when the file is on disk, else fail closed naming the
-    // skew — never hand CP a paid evaluate with no results. Never invent.
+    // still sends Done without `report.results`. Attach from scratch when
+    // the file is on disk, else fail closed as missing results — never hand
+    // CP a paid evaluate with no results, and do not blame rebake from
+    // report-only alone (pin MATCH tip still 503s that way). Never invent.
     attach_evaluate_results(msg, jail_root, jail_dir, job)
 }
 
@@ -986,11 +987,7 @@ fn harvest_results(
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(proof_results::RESULTS_FILE);
-            let detail = if output_dir.join("report.json").is_file() {
-                proof_results::report_only_missing_results_detail(name, Some(&path))
-            } else {
-                proof_results::missing_results_detail(name, Some(&path))
-            };
+            let detail = proof_results::missing_results_detail(name, Some(&path));
             return Err(HvError::Guest(detail));
         }
         return Ok(None);
@@ -1036,6 +1033,127 @@ fn push_log(logs: &mut Vec<LogFile>, name: &str, path: &Path) {
         name: name.to_owned(),
         bytes: bytes[start..].to_vec(),
     });
+}
+
+/// Durable copy next to a retained jail: `{retain_dir}/{vm_id}-harvest`.
+pub const HARVEST_RETAIN_SUFFIX: &str = "-harvest";
+
+const RCA_NAMES: &[&str] = &[
+    "report.json",
+    "results.json",
+    "harbor.run.log",
+    "runner.log",
+    "harbor.log",
+    "console.log",
+];
+
+/// `{retain_dir}/{vm_id}-harvest`, or `{vm_id}-harvest-{nanos}` if occupied.
+#[must_use]
+pub fn harvest_retain_dest(retain_dir: &Path, vm_id: &str) -> PathBuf {
+    let base = retain_dir.join(format!("{vm_id}{HARVEST_RETAIN_SUFFIX}"));
+    if !base.exists() {
+        return base;
+    }
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |t| t.as_nanos());
+    retain_dir.join(format!("{vm_id}{HARVEST_RETAIN_SUFFIX}-{n}"))
+}
+
+/// Copy guest scratch RCA (`report.json`, `results.json`, `harbor.run.log`,
+/// runner logs) to `dest` **before** Destroy. Fail-soft: a dump miss is
+/// `Ok(0)`; individual file errors are skipped. Never the job error.
+pub fn snapshot_rca(jail_root: &Path, jail_dir: &Path, dest: &Path) -> Result<u32, String> {
+    let _ = dump_rca_into_jail(jail_root, jail_dir);
+    std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
+    let mut n = 0u32;
+    n = n.saturating_add(copy_rca_tree(&jail_dir.join(HARVEST_WORK), dest)?);
+    n = n.saturating_add(copy_rca_tree(
+        &jail_root.join(SCRATCH_TREE).join("work"),
+        dest,
+    )?);
+    n = n.saturating_add(copy_named(&jail_dir.join(CONSOLE_LOG), dest, "console.log"));
+    Ok(n)
+}
+
+fn dump_rca_into_jail(jail_root: &Path, jail_dir: &Path) -> Result<(), String> {
+    let dest = jail_dir.join(HARVEST_WORK);
+    let overlay = jail_root.join(SCRATCH_TREE).join("work");
+    if overlay.is_dir() {
+        let _ = std::fs::remove_dir_all(&dest);
+        return copy_tree(&overlay, &dest);
+    }
+    let image = jail_root.join(SCRATCH_IN_JAIL);
+    if image.is_file() {
+        dump_ext4_work(&image, &dest)?;
+    }
+    Ok(())
+}
+
+fn copy_rca_tree(src: &Path, dest: &Path) -> Result<u32, String> {
+    if !src.is_dir() {
+        return Ok(0);
+    }
+    copy_rca_walk(src, src, dest, 0)
+}
+
+fn copy_rca_walk(root: &Path, dir: &Path, dest: &Path, depth: u8) -> Result<u32, String> {
+    if depth > 8 {
+        return Ok(0);
+    }
+    let mut n = 0u32;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(0);
+    };
+    for e in entries.flatten() {
+        let from = e.path();
+        let Ok(meta) = std::fs::symlink_metadata(&from) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            n = n.saturating_add(copy_rca_walk(root, &from, dest, depth.saturating_add(1))?);
+            continue;
+        }
+        if !meta.is_file() {
+            continue;
+        }
+        let Some(name) = from.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !RCA_NAMES.contains(&name) {
+            continue;
+        }
+        let rel = from.strip_prefix(root).unwrap_or(from.as_path());
+        let to = dest.join(rel);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        match copy_regular_nofollow(&from, &to) {
+            Ok(()) => n = n.saturating_add(1),
+            Err(e) => tracing::warn!(
+                path = %from.display(),
+                "retain-before-destroy skip: {e}"
+            ),
+        }
+    }
+    Ok(n)
+}
+
+fn copy_named(from: &Path, dest: &Path, name: &str) -> u32 {
+    if !from.is_file() {
+        return 0;
+    }
+    match copy_regular_nofollow(from, &dest.join(name)) {
+        Ok(()) => 1,
+        Err(e) => {
+            tracing::warn!(path = %from.display(), "retain-before-destroy skip: {e}");
+            0
+        }
+    }
 }
 
 #[cfg(test)]

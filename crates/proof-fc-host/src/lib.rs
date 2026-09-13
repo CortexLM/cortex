@@ -18,7 +18,10 @@
 //!    for the miner artefact — for that job's topic, submission, and
 //!    artefact only — then attests that run ([`sister`]);
 //! 5. tears the VM down: `Destroy` removes the jail, `Retain` moves it under
-//!    `retain_dir` for audit.
+//!    `retain_dir` for audit. **Before either**, the host copies guest
+//!    scratch RCA (`report.json`, `results.json`, `harbor.run.log`) to
+//!    `{retain_dir}/{vm_id}-harvest` so Destroy cannot empty the operator
+//!    WD (fail-soft: a snapshot miss does not replace the job error).
 //!
 //! Nothing a boot started outlives its failure: from the moment a jail is
 //! prepared it is owned by a [`jail::JailGuard`] until the VM is registered
@@ -563,6 +566,28 @@ impl Hypervisor for FirecrackerHypervisor {
         for e in live.net.down(shell).await {
             tracing::warn!(vm_id = %vm.vm_id, "network teardown: {e}");
         }
+        // Copy harvest RCA out of the jail before Destroy removes it.
+        // Fail-soft: a snapshot miss must not replace the job error.
+        let jail_dir = self.ctx.cfg.jail_dir(&vm.vm_id);
+        let dest = proof_fc_harvest::harvest_retain_dest(&self.ctx.cfg.retain_dir, &vm.vm_id);
+        match proof_fc_harvest::snapshot_rca(&live.root, &jail_dir, &dest) {
+            Ok(0) => {
+                let _ = std::fs::remove_dir_all(&dest);
+            }
+            Ok(n) => tracing::info!(
+                vm_id = %vm.vm_id,
+                retained = %dest.display(),
+                files = n,
+                "harvest RCA copied before teardown"
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    vm_id = %vm.vm_id,
+                    "retain-before-destroy snapshot failed (job error stands): {e}"
+                );
+                let _ = std::fs::remove_dir_all(&dest);
+            }
+        }
         match policy {
             RetainPolicy::Destroy => jail::destroy(&self.ctx.cfg, shell, &vm.vm_id).await?,
             RetainPolicy::Retain => {
@@ -596,6 +621,7 @@ mod tests {
         c.kernel = base.join("vmlinux");
         c.kernel_digest = format!("sha256:{}", "aa".repeat(32));
         c.sister_image_digest = format!("sha256:{}", "bb".repeat(32));
+        c.retain_dir = base.join("retained");
         c
     }
 
@@ -1249,6 +1275,15 @@ mod tests {
             &req,
             false,
         );
+        std::fs::write(
+            c.jail_root("topic-a-0004")
+                .join(proof_fc_harvest::SCRATCH_TREE)
+                .join("work")
+                .join("0001-evaluate")
+                .join("harbor.run.log"),
+            b"harbor: evaluate\n",
+        )
+        .expect("harbor log");
         let job = VmJob::Evaluate {
             request: req.clone(),
             checklist_digest: "c".into(),
@@ -1263,7 +1298,21 @@ mod tests {
             "want a results bind refusal, got {err}"
         );
         let _ = guest.await;
+        let retain = c.retain_dir.clone();
         let _ = hv.teardown(&vm, RetainPolicy::Destroy).await;
+        let dest = retain.join("topic-a-0004-harvest");
+        assert!(
+            dest.join("0001-evaluate")
+                .join("output")
+                .join("report.json")
+                .is_file(),
+            "Destroy must copy report.json to retained-harvest first: {}",
+            dest.display()
+        );
+        assert!(
+            dest.join("0001-evaluate").join("harbor.run.log").is_file(),
+            "Destroy must copy harbor.run.log to retained-harvest first"
+        );
         let _ = std::fs::remove_dir_all(c.chroot_base.parent().unwrap_or(&c.chroot_base));
     }
 
