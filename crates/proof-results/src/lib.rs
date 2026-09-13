@@ -30,14 +30,22 @@ pub const RESULTS_SCHEMA: u32 = 1;
 /// Default file name under `PROOF_OUTPUT_DIR` and at the artefact zip root.
 pub const RESULTS_FILE: &str = "results.json";
 
-/// Host RCA when the **guest runner tree** lacks the results-emit helper.
+/// Host RCA when the **selected** guest runner lacks the results-emit helper.
 ///
 /// Report-only (`report.json` without `results.json`) is **not** this by
 /// itself — that is [`missing_results_detail`]. Append this only when
-/// [`runner_tree_emits_results`] is false (the baked `/opt/proof/runners`
-/// has no `write_results_next_to_report`). Tipping gateway / challenge
-/// alone does not update the in-guest adaptor.
+/// [`runner_tree_emits_results`] is false for **that** runner directory
+/// (no `.py` carrying `write_results_next_to_report`). A sibling runner or
+/// a notes file does not count. Tipping gateway / challenge alone does not
+/// update the in-guest adaptor.
 pub const PIN_RUNNER_SKEW_HINT: &str = "guest pin/runner skew: rebake the guest image so /opt/proof/runners matches deploy/guest/runners (tipping gateway/challenge alone is insufficient)";
+
+/// Pathless [`require_evaluate`]: the scored `CustomRunReport` carried no
+/// `results` field. Guest Done+results can still be attested while an old
+/// orch KEEP drops the field; tip the host past CustomRunReport.results /
+/// #294 harvest attach. Not pin/runner rebake.
+pub const ORCH_RESULTS_ATTACH_HINT: &str =
+    "host orch tip past CustomRunReport.results / #294 harvest attach";
 
 /// Source marker Harbor / tip runners use to write `results.json` next to
 /// `report.json`. Absence from the guest runner tree is the skew probe.
@@ -222,7 +230,7 @@ pub fn results_path(
 ///
 /// A missing file is always [`missing_results_detail`] — report-only is
 /// not pin/runner skew. Call [`hint_skew_if_runner_unemitted`] when the
-/// caller can probe the guest runner tree.
+/// caller can probe the **selected** runner directory.
 pub fn load_evaluate(
     dir: &Path,
     params: &BTreeMap<String, String>,
@@ -251,10 +259,12 @@ pub fn report_only_missing_results_detail(name: &str, path: Option<&Path>) -> St
     missing_results_detail(name, path)
 }
 
-/// True when `runners_dir` contains [`WRITE_RESULTS_EMIT`] (Harbor tip).
+/// True when the **selected** runner dir has a `.py` carrying
+/// [`WRITE_RESULTS_EMIT`] (Harbor `summarize.py`). Other runners and
+/// non-Python files are not emit evidence.
 #[must_use]
-pub fn runner_tree_emits_results(runners_dir: &Path) -> bool {
-    contains_emit_marker(runners_dir, 0)
+pub fn runner_tree_emits_results(runner_dir: &Path) -> bool {
+    contains_emit_marker(runner_dir, 0)
 }
 
 fn contains_emit_marker(dir: &Path, depth: u8) -> bool {
@@ -276,22 +286,33 @@ fn contains_emit_marker(dir: &Path, depth: u8) -> bool {
             if contains_emit_marker(&p, depth.saturating_add(1)) {
                 return true;
             }
-        } else if meta.is_file() && meta.len() <= 512 * 1024 {
-            if let Ok(body) = std::fs::read_to_string(&p) {
-                if body.contains(WRITE_RESULTS_EMIT) {
-                    return true;
-                }
+            continue;
+        }
+        if !meta.is_file() || meta.len() > 512 * 1024 {
+            continue;
+        }
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
+        {
+            continue;
+        }
+        if let Ok(body) = std::fs::read_to_string(&p) {
+            if body.contains(WRITE_RESULTS_EMIT) {
+                return true;
             }
         }
     }
     false
 }
 
-/// Append [`PIN_RUNNER_SKEW_HINT`] only when `runners_dir` lacks the emit
-/// helper. A tree that already emits is not pin/runner skew.
+/// Append [`PIN_RUNNER_SKEW_HINT`] only when `runner_dir` (the selected
+/// adaptor) lacks the emit helper. A runner that already emits is not
+/// pin/runner skew.
 #[must_use]
-pub fn hint_skew_if_runner_unemitted(err: ResultsError, runners_dir: &Path) -> ResultsError {
-    if runner_tree_emits_results(runners_dir) {
+pub fn hint_skew_if_runner_unemitted(err: ResultsError, runner_dir: &Path) -> ResultsError {
+    if runner_tree_emits_results(runner_dir) {
         err
     } else {
         with_report_only_skew_hint(err)
@@ -383,6 +404,10 @@ pub fn validate(
 }
 
 /// Require `report_results` on a paid evaluate and bind it.
+///
+/// `None` is a **pathless** miss: the report object had no `results` field
+/// (orch KEEP drop / missing harvest attach), not a guest file path. Hint
+/// [`ORCH_RESULTS_ATTACH_HINT`], never [`PIN_RUNNER_SKEW_HINT`].
 pub fn require_evaluate(
     report_results: Option<&Value>,
     bind: &ReportBind<'_>,
@@ -390,9 +415,12 @@ pub fn require_evaluate(
 ) -> Result<Value, ResultsError> {
     let pinned = pinned_contract(params)?;
     let name = results_file_name(params)?;
-    let value = report_results
-        .cloned()
-        .ok_or_else(|| ResultsError::Io(missing_results_detail(&name, None)))?;
+    let value = report_results.cloned().ok_or_else(|| {
+        ResultsError::Io(format!(
+            "{}; {ORCH_RESULTS_ATTACH_HINT}",
+            missing_results_detail(&name, None)
+        ))
+    })?;
     validate(&value, bind, pinned.as_deref())?;
     Ok(value)
 }
@@ -655,7 +683,12 @@ mod tests {
             "{missing}"
         );
         assert!(
-            !missing.to_string().contains(PIN_RUNNER_SKEW_HINT),
+            missing.to_string().contains(ORCH_RESULTS_ATTACH_HINT),
+            "{missing}"
+        );
+        assert!(
+            !missing.to_string().contains(PIN_RUNNER_SKEW_HINT)
+                && !missing.to_string().contains("rebake"),
             "{missing}"
         );
         let mut bad = harbor_ok(&b);
@@ -840,26 +873,41 @@ mod tests {
     }
 
     #[test]
-    fn hint_skew_only_when_runner_tree_lacks_emit() {
+    fn hint_skew_only_when_selected_runner_lacks_emit() {
         let dir =
             std::env::temp_dir().join(format!("proof-results-skew-probe-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let runners = dir.join("runners");
-        std::fs::create_dir_all(runners.join("old")).expect("runners");
+        let selected = dir.join("runners").join("selected");
+        let other = dir.join("runners").join("other");
+        std::fs::create_dir_all(&selected).expect("selected");
+        std::fs::create_dir_all(&other).expect("other");
         let err = ResultsError::Io("adaptor wrote no results.json".into());
-        let hinted = hint_skew_if_runner_unemitted(err.clone(), &runners);
+        let hinted = hint_skew_if_runner_unemitted(err.clone(), &selected);
         assert!(
             hinted.to_string().contains(PIN_RUNNER_SKEW_HINT),
             "{hinted}"
         );
         std::fs::write(
-            runners.join("old").join("summarize.py"),
+            other.join("summarize.py"),
+            "def write_results_next_to_report():\n    pass\n",
+        )
+        .expect("other emit");
+        std::fs::write(selected.join("notes.txt"), "write_results_next_to_report\n")
+            .expect("notes");
+        let still = hint_skew_if_runner_unemitted(err.clone(), &selected);
+        assert!(
+            still.to_string().contains(PIN_RUNNER_SKEW_HINT),
+            "sibling runner / non-py notes must not count as emit, {still}"
+        );
+        assert!(!runner_tree_emits_results(&selected));
+        std::fs::write(
+            selected.join("summarize.py"),
             "def write_results_next_to_report():\n    pass\n",
         )
         .expect("emit");
-        let clean = hint_skew_if_runner_unemitted(err, &runners);
+        let clean = hint_skew_if_runner_unemitted(err, &selected);
         assert!(!clean.to_string().contains(PIN_RUNNER_SKEW_HINT), "{clean}");
-        assert!(runner_tree_emits_results(&runners));
+        assert!(runner_tree_emits_results(&selected));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

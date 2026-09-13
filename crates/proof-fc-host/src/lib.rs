@@ -566,11 +566,10 @@ impl Hypervisor for FirecrackerHypervisor {
         for e in live.net.down(shell).await {
             tracing::warn!(vm_id = %vm.vm_id, "network teardown: {e}");
         }
-        // Copy harvest RCA out of the jail before Destroy removes it.
-        // Fail-soft: a snapshot miss must not replace the job error.
         let jail_dir = self.ctx.cfg.jail_dir(&vm.vm_id);
         let dest = proof_fc_harvest::harvest_retain_dest(&self.ctx.cfg.retain_dir, &vm.vm_id);
-        match proof_fc_harvest::snapshot_rca(&live.root, &jail_dir, &dest) {
+        match proof_fc_harvest::snapshot_rca_async(live.root.clone(), jail_dir, dest.clone()).await
+        {
             Ok(0) => {
                 let _ = std::fs::remove_dir_all(&dest);
             }

@@ -304,10 +304,14 @@ Trust-root keygen is the throwaway owner path in
   evaluate also carries `results` (topic-defined complete RLM JSON; zip root
   `results.json`) on the create body and on GET. Missing / non-conforming
   results on evaluate, or a custom pass whose pending results expired
-  before persist, is **503**, no pass row. Missing `results.json` is
+  before persist, is **503**, no pass row. Missing `results.json` on disk is
   `adaptor wrote no results.json` (fail-closed). That text is **not**
   pin/runner skew by itself — rebake guidance is appended only when the
-  guest runner tree lacks `write_results_next_to_report`. Harvest families omit `results`.
+  **selected** guest runner lacks `write_results_next_to_report` in a `.py`
+  file. A pathless miss (`require_evaluate` on a report with no `results`
+  field after the host attested Done) is host orch KEEP drop: tip past
+  `CustomRunReport.results` / #294 harvest attach, not a guest rebake.
+  Harvest families omit `results`.
 - A pass that the family scorer crowns (custom: green checklist and
   `primary >= bar * (1 + epsilon_rel)` direction-aware, bar = sealed value or
   reigning best) persists as `champion`; other passes stay `awaiting_admin`.

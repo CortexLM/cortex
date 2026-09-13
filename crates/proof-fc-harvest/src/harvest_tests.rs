@@ -16,8 +16,9 @@ use tokio::io::AsyncWriteExt;
 
 use super::{
     attach_evaluate_results, copy_regular_nofollow, copy_tree, from_work_tree, harvest_from_jail,
-    harvest_retain_dest, recv_job_or_harvest, snapshot_rca, try_from_jail, CONSOLE_LOG,
-    HARBOR_JOBS, HARVEST_WORK, POLL_INTERVAL, SCRATCH_IN_JAIL, SCRATCH_TREE,
+    harvest_retain_dest, recv_job_or_harvest, replace_dir_with_copy, snapshot_rca, try_from_jail,
+    CONSOLE_LOG, HARBOR_JOBS, HARVEST_WORK, MAX_RCA_FILES, POLL_INTERVAL, SCRATCH_IN_JAIL,
+    SCRATCH_TREE,
 };
 
 fn tree(tag: &str) -> PathBuf {
@@ -1406,5 +1407,83 @@ fn snapshot_rca_fail_soft_on_unwritable_dest() {
     std::fs::write(&dest, b"not a dir").expect("file");
     let err = snapshot_rca(&root.join("root"), &root, &dest).expect_err("file dest");
     assert!(err.contains("mkdir"), "{err}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Overlay snapshot must not wipe a prior `harvest-work` (copy to temp /
+/// replace only on success; overlay is walked directly).
+#[test]
+fn snapshot_rca_keeps_prior_harvest_work_when_overlay_exists() {
+    let root = tree("keep-prior-harvest");
+    let jail_root = root.join("root");
+    let work = jail_root.join(SCRATCH_TREE).join("work");
+    plant(
+        &work,
+        "evaluate",
+        "0001",
+        r#"{"primary_value": 0.4, "claim_holds": true, "evidence": {"n": 1}}"#,
+    );
+    let prior = root.join(HARVEST_WORK);
+    std::fs::create_dir_all(&prior).expect("harvest-work");
+    std::fs::write(prior.join("prior.txt"), b"keep\n").expect("prior");
+    let dest = harvest_retain_dest(&root.join("retained"), "topic-a-keep");
+    snapshot_rca(&jail_root, &root, &dest).expect("snapshot");
+    assert_eq!(
+        std::fs::read_to_string(prior.join("prior.txt")).expect("read"),
+        "keep\n",
+        "overlay RCA must not delete harvest-work"
+    );
+    assert!(
+        dest.join("0001-evaluate")
+            .join("output")
+            .join("report.json")
+            .is_file(),
+        "overlay report still retained"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn replace_dir_with_copy_keeps_dest_when_src_fails() {
+    let root = tree("replace-keep");
+    let dest = root.join(HARVEST_WORK);
+    std::fs::create_dir_all(&dest).expect("dest");
+    std::fs::write(dest.join("prior.txt"), b"keep\n").expect("prior");
+    let src = root.join("not-a-dir");
+    std::fs::write(&src, b"x").expect("file");
+    assert!(replace_dir_with_copy(&src, &dest).is_err());
+    assert_eq!(
+        std::fs::read_to_string(dest.join("prior.txt")).expect("read"),
+        "keep\n"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Allowlisted RCA copies are bounded (file count + per-file + total).
+#[test]
+fn snapshot_rca_skips_over_file_and_byte_caps() {
+    let root = tree("rca-caps");
+    let jail_root = root.join("root");
+    let work = jail_root.join(SCRATCH_TREE).join("work");
+    std::fs::create_dir_all(&work).expect("work");
+    for i in 0..MAX_RCA_FILES.saturating_add(8) {
+        let dir = work.join(format!("job-{i}")).join("output");
+        std::fs::create_dir_all(&dir).expect("job");
+        std::fs::write(dir.join("report.json"), b"{\"n\":1}\n").expect("report");
+    }
+    let huge = work.join("huge").join("output");
+    std::fs::create_dir_all(&huge).expect("huge");
+    std::fs::write(huge.join("results.json"), vec![b'x'; 3 * 1024 * 1024]).expect("oversize");
+    let dest = harvest_retain_dest(&root.join("retained"), "topic-a-cap");
+    let n = snapshot_rca(&jail_root, &root, &dest).expect("snapshot");
+    assert!(n <= MAX_RCA_FILES, "file cap {n}");
+    assert!(
+        !dest
+            .join("huge")
+            .join("output")
+            .join("results.json")
+            .is_file(),
+        "per-file cap must skip oversize results.json"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

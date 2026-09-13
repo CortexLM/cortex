@@ -840,7 +840,7 @@ pub async fn run_paid(
                     v
                 })
                 .map_err(|e| {
-                    proof_results::hint_skew_if_runner_unemitted(e, &cfg.runners_dir).to_string()
+                    proof_results::hint_skew_if_runner_unemitted(e, &adaptor.dir).to_string()
                 })
         })
         .transpose()?;
