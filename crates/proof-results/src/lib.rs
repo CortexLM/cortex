@@ -51,13 +51,14 @@ pub const ORCH_RESULTS_ATTACH_HINT: &str =
 /// `report.json`. Absence from the guest runner tree is the skew probe.
 pub const WRITE_RESULTS_EMIT: &str = "write_results_next_to_report";
 
-/// Largest results document accepted (bytes).
+/// Largest results document accepted (bytes). Applies to **every** contract
+/// (`generic-custom-v1` included — Harbor does not get a larger allowance).
 ///
 /// Guest summarize prefers 8 KiB `agent_log` / `verifier_log` and shrinks
-/// to 4 KiB, then omits those bodies, so a 33-trial pack still binds here
-/// instead of 503ing a paid score. Job-level `logs.harbor_run_tail` is
-/// unchanged. Overflow of a document that still exceeds this cap is
-/// fail-closed (`TooLarge`).
+/// 8 → 4 → 2 KiB, then omits those bodies, measuring the encoded JSON it
+/// writes so replacement chars / escapes cannot 503 a paid score.
+/// Job-level `logs.harbor_run_tail` is unchanged. A document that still
+/// exceeds this cap is fail-closed (`TooLarge`).
 pub const MAX_RESULTS_BYTES: u64 = 256 * 1024;
 
 /// Signed `constraints.params` key pinning the results contract id.
@@ -275,11 +276,15 @@ pub fn runner_tree_emits_results(runner_dir: &Path) -> bool {
     EMIT_PROBE.iter().any(|rel| py_emits(&runner_dir.join(rel)))
 }
 
+/// Max adaptor source file we will scan for [`WRITE_RESULTS_EMIT`].
+/// Not [`MAX_RESULTS_BYTES`] and not a Harbor-only results allowance.
+const MAX_EMIT_PROBE_BYTES: u64 = 512 * 1024;
+
 fn py_emits(path: &Path) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
-    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > 512 * 1024 {
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_EMIT_PROBE_BYTES {
         return false;
     }
     std::fs::read_to_string(path).is_ok_and(|body| body.contains(WRITE_RESULTS_EMIT))
@@ -722,6 +727,15 @@ mod tests {
             validate(&mean, &b, None),
             Err(ResultsError::Mismatch("mean_reward"))
         ));
+    }
+
+    #[test]
+    fn every_contract_shares_the_256kib_results_cap() {
+        assert_eq!(MAX_RESULTS_BYTES, 256 * 1024);
+        assert!(
+            MAX_EMIT_PROBE_BYTES > MAX_RESULTS_BYTES,
+            "adaptor source probe is not a results.json allowance"
+        );
     }
 
     #[test]

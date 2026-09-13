@@ -1115,8 +1115,8 @@ class TrialLogHarvestTests(unittest.TestCase):
             self.assertNotIn("sk-secret-owner", row["verifier_log"])
             self.assertIn("[REDACTED]", row["verifier_log"])
 
-    def test_thirty_three_trials_omit_logs_rather_than_overflow(self) -> None:
-        """33 × 8 KiB × 2 would exceed 256 KiB: omit bodies, still score (no 503)."""
+    def test_thirty_three_trials_shrink_to_two_kib_rather_than_overflow(self) -> None:
+        """33 × 8 KiB overflows; 2 KiB step keeps encoded results.json under 256 KiB."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             jobs = root / "jobs"
@@ -1160,10 +1160,8 @@ class TrialLogHarvestTests(unittest.TestCase):
             )
             for row in results["trials"]:
                 self.assertEqual(row["outcome"], "measured")
-                self.assertIn("name", row)
-                self.assertNotIn("agent_log", row)
-                self.assertNotIn("verifier_log", row)
-                self.assertNotIn("log_sources", row)
+                self.assertEqual(len(row["agent_log"]), summarize.MAX_TRIAL_LOG_CHARS_STEP_2K)
+                self.assertEqual(len(row["verifier_log"]), summarize.MAX_TRIAL_LOG_CHARS_STEP_2K)
 
     def test_sixteen_trials_shrink_to_four_kib(self) -> None:
         """16 × 8 KiB × 2 overflows; 4 KiB step still fits, so bodies are kept."""
@@ -1207,6 +1205,44 @@ class TrialLogHarvestTests(unittest.TestCase):
             for row in results["trials"]:
                 self.assertEqual(len(row["agent_log"]), summarize.MAX_TRIAL_LOG_CHARS)
                 self.assertEqual(len(row["verifier_log"]), summarize.MAX_TRIAL_LOG_CHARS)
+
+    def test_invalid_utf8_and_escapes_use_encoded_json_size(self) -> None:
+        """0xFF tails JSON-escape to ~986 KiB; encoded-size guard still scores."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            raw = b"\xff" * summarize.MAX_TRIAL_LOG_CHARS
+            escaped = (b'\\"' * 2048) + (b"\x01" * 2048) + (b"\xff" * 4096)
+            for i in range(10):
+                trial = jobs / "job" / f"task-{i:02d}__1"
+                write_complete_trial(trial, f"task-{i:02d}__1", 0.0)
+                (trial / "trial.log").write_bytes(raw)
+                (trial / "verifier" / "test-stdout.txt").write_bytes(escaped)
+            trials = summarize.collect_trials(jobs)
+            self.assertEqual(len(trials), 10)
+            self.assertIn("agent_log", trials[0])
+            report = summarize.build_report(
+                trials, "", 0, "harbor", "", "", summarize.POLICY_FAIL
+            )
+            inflated = summarize.build_results(
+                report, trials, "", summarize.CONTRACT_TBENCH
+            )
+            self.assertGreater(
+                summarize.results_payload_bytes(inflated, []),
+                summarize.MAX_RESULTS_BYTES,
+                "invalid UTF-8 / escapes must inflate past 256 KiB before the guard",
+            )
+            out = root / "report.json"
+            rc = summarize.main(["--jobs-dir", str(jobs), "--output", str(out)])
+            self.assertEqual(rc, 0)
+            results_path = root / "results.json"
+            size = results_path.stat().st_size
+            self.assertLessEqual(size, summarize.MAX_RESULTS_BYTES, f"encoded {size}")
+            results = json.loads(results_path.read_text(encoding="utf-8"))
+            self.assertEqual(results["n_scored"], 10)
+            self.assertEqual(len(results["trials"]), 10)
+            self.assertAlmostEqual(results["primary_value"], 0.0)
+            self.assertEqual(results["logs"]["harbor_run_log"], "logs/harbor.run.log")
 
     def test_empty_log_files_are_omitted_never_invented(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

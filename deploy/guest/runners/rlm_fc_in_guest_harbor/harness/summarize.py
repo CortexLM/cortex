@@ -50,11 +50,19 @@ from pathlib import Path
 from typing import Any
 
 MAX_TAIL_CHARS = 8 * 1024
-# Prefer 8 KiB per trial log field. 33 trials × 8 KiB × 2 overflows the
-# 256 KiB CustomRunReport.results cap, so write_results_next_to_report
-# shrinks to 4 KiB then omits bodies rather than 503 a paid score.
+# Prefer 8 KiB per trial log field. Acceptance is the encoded results.json
+# size (json.dumps UTF-8), not the raw field cap: invalid UTF-8 replacement
+# chars and JSON escapes can inflate ~8 KiB tails past 256 KiB. Shrink
+# 8 → 4 → 2 KiB, then omit bodies, rather than 503 a paid score.
 MAX_TRIAL_LOG_CHARS = 8 * 1024
 MAX_TRIAL_LOG_CHARS_STEP = 4 * 1024
+MAX_TRIAL_LOG_CHARS_STEP_2K = 2 * 1024
+TRIAL_LOG_FIT_STEPS: tuple[int | None, ...] = (
+    MAX_TRIAL_LOG_CHARS,
+    MAX_TRIAL_LOG_CHARS_STEP,
+    MAX_TRIAL_LOG_CHARS_STEP_2K,
+    None,
+)
 MAX_RESULTS_BYTES = 256 * 1024
 MAX_EVIDENCE_TRIALS = 256
 MAX_REWARD_TXT_BYTES = 64 * 1024
@@ -515,7 +523,8 @@ def attach_trial_logs(row: dict[str, Any], trial_dir: Path, secrets: list[str]) 
     ``terminus_2.pane`` (optional third). ``agent/stdout.txt`` only if those
     are missing. Verifier is only ``verifier/test-stdout.txt``. Missing
     files are omitted — never invented. ``fit_results_under_cap`` may later
-    shrink to 4 KiB or omit bodies so ``results.json`` stays under 256 KiB.
+    shrink 8 → 4 → 2 KiB or omit bodies so the **encoded** ``results.json``
+    stays under 256 KiB (JSON escapes / replacement chars included).
     Runs for measured, agent-exception, FAIL, and incomplete Harbor alike.
     """
     sources: list[str] = []
@@ -651,9 +660,13 @@ def clip_trial_log_bodies(
     return out
 
 
+def dumps_results(results: dict[str, Any], secrets: list[str]) -> str:
+    """Serialize the document that is written to disk (size guard must match)."""
+    return redact(json.dumps(results, indent=2, sort_keys=True), secrets) + "\n"
+
+
 def results_payload_bytes(results: dict[str, Any], secrets: list[str]) -> int:
-    dumped = redact(json.dumps(results, indent=2, sort_keys=True), secrets)
-    return len((dumped + "\n").encode("utf-8"))
+    return len(dumps_results(results, secrets).encode("utf-8"))
 
 
 def fit_results_under_cap(
@@ -663,16 +676,16 @@ def fit_results_under_cap(
     contract: str,
     secrets: list[str],
 ) -> dict[str, Any]:
-    """Prefer 8 KiB trial logs; shrink to 4 KiB, then omit, rather than overflow.
+    """Keep encoded ``results.json`` ≤ ``MAX_RESULTS_BYTES``.
 
-    ``logs.harbor_run_tail`` stays as passed. A pack that still exceeds the
-    cap after omitting bodies is written as-is (envelope-only overflow is
-    not a log-body problem).
+    Field byte caps are only a search: re-measure ``len(json.dumps(…).encode())``
+    after each step. Invalid UTF-8 replacement chars and JSON escapes can
+    inflate an 8 KiB tail well past 256 KiB. Steps: 8 KiB → 4 KiB → 2 KiB
+    → omit ``agent_log`` / ``verifier_log``. ``logs.harbor_run_tail`` is
+    unchanged. Envelope-only overflow after omit is not a log-body problem.
     """
     results = build_results(report, trials, log_tail, contract)
-    if results_payload_bytes(results, secrets) <= MAX_RESULTS_BYTES:
-        return results
-    for cap in (MAX_TRIAL_LOG_CHARS_STEP, None):
+    for cap in TRIAL_LOG_FIT_STEPS:
         fitted = clip_trial_log_bodies(trials, cap)
         results = build_results(report, fitted, log_tail, contract)
         if results_payload_bytes(results, secrets) <= MAX_RESULTS_BYTES:
@@ -703,8 +716,7 @@ def write_results_next_to_report(
             "refusing a partial results.json"
         )
     results = fit_results_under_cap(report, trials, log_tail, contract, secrets)
-    dumped = redact(json.dumps(results, indent=2, sort_keys=True), secrets)
-    atomic_write(results_path, dumped + "\n")
+    atomic_write(results_path, dumps_results(results, secrets))
     return results_path
 
 

@@ -513,8 +513,8 @@ summary (`contract` `tbench-harbor-v1` / `harbor-trials-v1`). That is
 what the Arcade frontend renders — every trial's reward and outcome,
 optional bounded `agent_log` / `verifier_log` (UTF-8 last 8 KiB from Harbor's
 `trial.log` / `agent/trajectory.json` / `terminus_2.pane` and
-`verifier/test-stdout.txt`; a large pack shrinks to 4 KiB or omits bodies
-so `results.json` stays under 256 KiB rather than 503; missing files are
+`verifier/test-stdout.txt`; a large pack shrinks 8 → 4 → 2 KiB or omits bodies
+so the encoded `results.json` stays under 256 KiB rather than 503; missing files are
 omitted, never invented),
 `n_scored` / `n_measured` / `n_agent_exceptions`, `mean_reward` (equals
 `primary_value`), agent identity, and `logs.harbor_run_tail` /
