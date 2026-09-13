@@ -506,7 +506,7 @@ submission row.
 | **503** missing / closed / non-`1x` executor | Live `eval_executor` cannot rent the `1x` machine | no | no |
 | **503** `proof deadline … exceeded` | Your recipe did not finish inside `max_proof_deadline_s`; the body carries the run's `stdout_tail` | no | no (pod torn down) |
 | **503** `custom metric … has no registered runner` / `not wired` | The topic's `custom_id` has no runner on this host, or its topic VM is not configured | no | no |
-| **503** missing / invalid evaluate `results.json` | Custom evaluate: no topic-defined results JSON, or it does not bind the scored `primary_value` / `claim_holds` / identities | no | no (guest torn down) |
+| **503** missing / invalid evaluate `results.json` | Custom evaluate: no topic-defined results JSON, or it does not bind the scored `primary_value` / `claim_holds` / identities. A Harbor run that wrote `report.json` only is **host pin/runner skew** (stale guest image) — not your artefact. The operator must **rebake** the guest; tipping the challenge / gateway alone is insufficient | no | no (guest torn down) |
 | **503** evaluate results expired before persist | Custom pass whose pending results were reaped before the row landed — refuse the pass rather than store `results: null` | no | no |
 | **503** staged artefact missing / digest mismatch | Upload-only evaluate: the host no longer holds matching vault bytes (missing, empty, oversize, or digest mismatch). The row is untouched — nothing was rented and no bytes are invented | live: no; deferred: queued | no |
 | **201** `queued` | Topic in `deferred_topics` (operator still installing its scoring path); every **400** above still applies first | **yes** (queued, scored later) | **no** (not yet) |
@@ -629,7 +629,12 @@ results document. The adaptor writes it next to `report.json` (default
 name `results.json`; a topic may pin `constraints.params.results_path` to
 another single `*.json` segment). The guest, harvest reconstruct, and
 RLM scorer all bind it to the scored facts and **refuse a pass** when it
-is missing or non-conforming (**503**, no pass row). This is display and
+is missing or non-conforming (**503**, no pass row). On Harbor / tbench
+the tip runner already emits this file; a 503 after a finished trial
+table is the **guest image pin** still carrying a pre-emit overlay — the
+operator must rebake so `/opt/proof/runners` matches
+`deploy/guest/runners`. Tipping the challenge service does not update
+that in-guest tree. This is display and
 audit for the frontend — not a second score. `primary_value` /
 `claim_holds` / identities must match `report.json`.
 

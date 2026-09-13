@@ -737,8 +737,66 @@ class AgentExceptionPolicyTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
 
 
+def assert_results_beside_report(test: unittest.TestCase, report_path: Path) -> None:
+    """Harbor summarize must always leave results.json next to report.json."""
+    test.assertTrue(report_path.is_file(), f"missing {report_path}")
+    results_path = report_path.parent / "results.json"
+    test.assertTrue(
+        results_path.is_file(),
+        f"Harbor summarize must write results.json beside {report_path}",
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    results = json.loads(results_path.read_text(encoding="utf-8"))
+    test.assertIn(results["contract"], ("tbench-harbor-v1", "harbor-trials-v1"))
+    test.assertAlmostEqual(results["primary_value"], report["primary_value"])
+    test.assertEqual(results["claim_holds"], report["claim_holds"])
+    test.assertEqual(results["n_scored"], report["evidence"]["n_scored"])
+    test.assertEqual(len(results["trials"]), report["evidence"]["n_scored"])
+
+
 class HarborResultsEmitTests(unittest.TestCase):
     """Obligatory results.json on successful Harbor summarize (metal tbench)."""
+
+    def test_successful_summarize_always_writes_results_beside_report(self) -> None:
+        """Every successful summarize.main leaves the sibling, including mean 0.0."""
+        cases = (
+            ([0.0] * 10, 0, True),
+            ([1.0, 0.5], 0, False),
+            ([0.6], 23, False),
+            ([1.0, 0.0, 1.0], 0, False),
+        )
+        for rewards, harbor_exit, with_allow in cases:
+            with self.subTest(rewards=rewards, harbor_exit=harbor_exit):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    jobs = root / "jobs"
+                    argv = [
+                        "--jobs-dir",
+                        str(jobs),
+                        "--output",
+                        str(root / "output" / "report.json"),
+                        "--harbor-exit",
+                        str(harbor_exit),
+                    ]
+                    (root / "output").mkdir()
+                    names = [f"task-{i:02d}" for i in range(len(rewards))]
+                    if with_allow:
+                        allow = root / "tasks"
+                        for name, reward in zip(names, rewards, strict=True):
+                            (allow / name).mkdir(parents=True)
+                            write_complete_trial(
+                                jobs / "job" / f"{name}__1", f"{name}__1", reward
+                            )
+                        argv.extend(["--allow-tasks-dir", str(allow)])
+                    else:
+                        for name, reward in zip(names, rewards, strict=True):
+                            write_complete_trial(
+                                jobs / "job" / f"{name}__1", f"{name}__1", reward
+                            )
+                    rc = summarize.main(argv)
+                    self.assertEqual(rc, 0)
+                    assert_results_beside_report(self, root / "output" / "report.json")
+
 
     def test_ten_zero_reward_trials_emit_full_tbench_results(self) -> None:
         """Live tbench-x0039 shape: 10/10 measured, mean 0.0, full trial table."""
@@ -781,6 +839,7 @@ class HarborResultsEmitTests(unittest.TestCase):
                 os.environ.clear()
                 os.environ.update(saved)
             self.assertEqual(rc, 0)
+            assert_results_beside_report(self, out)
             report = json.loads(out.read_text(encoding="utf-8"))
             results = json.loads((out.parent / "results.json").read_text(encoding="utf-8"))
             self.assertAlmostEqual(report["primary_value"], 0.0)

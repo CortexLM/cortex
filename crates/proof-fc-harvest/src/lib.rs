@@ -170,9 +170,10 @@ async fn after_vsock(
             let _ = std::fs::remove_dir_all(&dest);
         }
     }
-    // Metal copy of the Harbor overlay writes results.json; an older guest
-    // agent still sends Done without `report.results`. Attach from scratch
-    // or fail closed — never hand CP a paid evaluate with no results.
+    // Tip runner writes results.json; a guest pin baked before that tree
+    // (pin/runner skew) still sends Done without `report.results`. Attach
+    // from scratch when the file is on disk, else fail closed naming the
+    // skew — never hand CP a paid evaluate with no results. Never invent.
     attach_evaluate_results(msg, jail_root, jail_dir, job)
 }
 
@@ -195,10 +196,16 @@ fn attach_evaluate_results(
         return Ok(msg);
     };
     let work = work_root(jail_root, jail_dir).ok_or_else(|| {
-        HvError::Guest("evaluate Done omitted results json and no scratch to attach from".into())
+        HvError::Guest(format!(
+            "evaluate Done omitted results json and no scratch to attach from; {}",
+            proof_results::PIN_RUNNER_SKEW_HINT
+        ))
     })?;
     let report_path = find_report(&work, "evaluate").ok_or_else(|| {
-        HvError::Guest("evaluate Done omitted results json and no report.json on scratch".into())
+        HvError::Guest(format!(
+            "evaluate Done omitted results json and no report.json on scratch; {}",
+            proof_results::PIN_RUNNER_SKEW_HINT
+        ))
     })?;
     let output_dir = report_path.parent().unwrap_or(&work);
     let results = harvest_results(
@@ -981,12 +988,13 @@ fn harvest_results(
         .map_err(|e| HvError::Guest(e.to_string()))?;
     if !path.is_file() {
         if required {
-            return Err(HvError::Guest(format!(
-                "no {} in {}",
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(proof_results::RESULTS_FILE),
-                output_dir.display()
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(proof_results::RESULTS_FILE);
+            return Err(HvError::Guest(proof_results::missing_results_detail(
+                name,
+                Some(&path),
             )));
         }
         return Ok(None);

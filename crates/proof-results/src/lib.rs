@@ -30,6 +30,14 @@ pub const RESULTS_SCHEMA: u32 = 1;
 /// Default file name under `PROOF_OUTPUT_DIR` and at the artefact zip root.
 pub const RESULTS_FILE: &str = "results.json";
 
+/// Host RCA when evaluate produced `report.json` but no results sibling.
+///
+/// Tip `deploy/guest/runners/` already emits the file. A live guest still
+/// running a pin baked before that tree is **pin/runner skew**: rebake
+/// so `/opt/proof/runners` matches the tip overlay. Tipping gateway /
+/// challenge alone does not update the in-guest adaptor.
+pub const PIN_RUNNER_SKEW_HINT: &str = "guest pin/runner skew: rebake the guest image so /opt/proof/runners matches deploy/guest/runners (tipping gateway/challenge alone is insufficient)";
+
 /// Largest results document accepted (bytes).
 pub const MAX_RESULTS_BYTES: u64 = 256 * 1024;
 
@@ -217,17 +225,26 @@ pub fn load_evaluate(
     Ok(value)
 }
 
+/// Detail string for a missing results file (fail-closed; names pin/runner skew).
+#[must_use]
+pub fn missing_results_detail(name: &str, path: Option<&Path>) -> String {
+    match path {
+        Some(p) => format!(
+            "adaptor wrote no {name} ({}); {PIN_RUNNER_SKEW_HINT}",
+            p.display()
+        ),
+        None => format!("adaptor wrote no {name}; {PIN_RUNNER_SKEW_HINT}"),
+    }
+}
+
 /// Read and parse a results file. Does not bind scored facts.
 pub fn load_file(path: &Path) -> Result<Value, ResultsError> {
-    let meta = std::fs::metadata(path).map_err(|_| {
-        ResultsError::Io(format!(
-            "adaptor wrote no {} ({})",
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(RESULTS_FILE),
-            path.display()
-        ))
-    })?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(RESULTS_FILE);
+    let meta = std::fs::metadata(path)
+        .map_err(|_| ResultsError::Io(missing_results_detail(name, Some(path))))?;
     if meta.len() > MAX_RESULTS_BYTES {
         return Err(ResultsError::TooLarge { got: meta.len() });
     }
@@ -299,7 +316,7 @@ pub fn require_evaluate(
     let name = results_file_name(params)?;
     let value = report_results
         .cloned()
-        .ok_or_else(|| ResultsError::Io(format!("adaptor wrote no {name}")))?;
+        .ok_or_else(|| ResultsError::Io(missing_results_detail(&name, None)))?;
     validate(&value, bind, pinned.as_deref())?;
     Ok(value)
 }
@@ -556,10 +573,15 @@ mod tests {
     #[test]
     fn missing_or_divergent_facts_fail_closed() {
         let b = bind();
-        assert!(matches!(
-            require_evaluate(None, &b, &BTreeMap::new()),
-            Err(ResultsError::Io(_))
-        ));
+        let missing = require_evaluate(None, &b, &BTreeMap::new()).expect_err("none");
+        assert!(
+            matches!(&missing, ResultsError::Io(s) if s.contains(PIN_RUNNER_SKEW_HINT)),
+            "{missing}"
+        );
+        assert!(
+            missing.to_string().contains("guest pin/runner skew"),
+            "{missing}"
+        );
         let mut bad = harbor_ok(&b);
         bad["primary_value"] = serde_json::json!(0.9);
         assert!(matches!(
@@ -689,5 +711,14 @@ mod tests {
         validate(&value, &b, Some(CONTRACT_TBENCH_HARBOR)).expect("fixture");
         assert_eq!(value["n_scored"], 10);
         assert_eq!(value["trials"].as_array().expect("trials").len(), 10);
+    }
+
+    #[test]
+    fn missing_file_names_pin_runner_skew() {
+        let err = load_file(Path::new("/no/such/results.json")).expect_err("missing");
+        let text = err.to_string();
+        assert!(text.contains("adaptor wrote no results.json"), "{text}");
+        assert!(text.contains(PIN_RUNNER_SKEW_HINT), "{text}");
+        assert!(text.contains("rebake"), "{text}");
     }
 }

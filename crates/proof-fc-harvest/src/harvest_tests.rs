@@ -239,9 +239,14 @@ fn vsock_done_without_results_or_file_is_fail_closed() {
     .expect("drop results");
     let err = attach_evaluate_results(vsock_done_n2(), &root, &root, &evaluate_job())
         .expect_err("missing results.json must not pass evaluate Done");
+    let text = err.to_string();
     assert!(
-        err.to_string().contains("results.json") || err.to_string().contains("results json"),
-        "{err}"
+        text.contains("results.json") || text.contains("results json"),
+        "{text}"
+    );
+    assert!(
+        text.contains("guest pin/runner skew") && text.contains("rebake"),
+        "{text}"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -263,7 +268,12 @@ fn evaluate_harvest_without_results_json_is_fail_closed() {
     )
     .expect("drop results");
     let err = from_work_tree(&work, &root, &evaluate_job()).expect_err("no results");
-    assert!(err.to_string().contains("results.json"), "{err}");
+    let text = err.to_string();
+    assert!(text.contains("results.json"), "{text}");
+    assert!(
+        text.contains("guest pin/runner skew") && text.contains("rebake"),
+        "{text}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

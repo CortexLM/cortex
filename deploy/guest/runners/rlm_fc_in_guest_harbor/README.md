@@ -352,6 +352,16 @@ deploy/guest/bake-rootfs.sh \
 `run` execs `harness/run-harbor` next to it. Do **not** keep an old overlay
 script at `/opt/proof/harness/run-harbor` as the evaluate path.
 
+**Guest rebake is required after any runner-tree change.** Tipping
+gateway / `proof-challenge` alone leaves `/opt/proof/runners` on the
+**old pin**. Metal RCA: tip `b7d52fa6` already emitted `results.json`;
+live guest pin `sha256:0d9329ea…` (baked before #293) did not — Harbor
+10/10 mean 0.0 wrote `report.json` only; scoring 503 fail-closed as
+designed. Rebake + re-pin (`PROOF_RLM_VM_IMAGE_DIGEST`); do not invent
+a digest. Runbook:
+[`docs/runbooks/proof-experiment-vms.md`](../../../../docs/runbooks/proof-experiment-vms.md)
+§ Guest rebake after runner changes.
+
 **Metal copy (no re-bake), matching the live runners dir:**
 
 ```bash
