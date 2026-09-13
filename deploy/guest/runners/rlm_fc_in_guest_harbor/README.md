@@ -304,14 +304,18 @@ Harbor summarize.
 
 `run` also writes `$PROOF_OUTPUT_DIR/results.json` (or
 `$PROOF_PARAM_RESULTS_PATH` when the topic pins a single `*.json`
-segment) — the obligatory complete Harbor document (`tbench-harbor-v1`):
-untruncated `trials`, `n_scored` / `n_measured`, `mean_reward` (=
-`primary_value`), agent identity, and `logs.harbor_run_tail` /
-`logs.harbor_run_log`. A miner-authored results file is deleted with
-`report.json` before Harbor runs. The guest refuses Done when this file
-is missing or does not bind the scored report. Frontend consumers read
-the same object on `GET /v1/submissions/{id}` as `results` and at the
-artefact zip root as `results.json`.
+segment) — the obligatory complete Harbor document (`tbench-harbor-v1`
+/ `harbor-trials-v1`; pin `results_contract` to choose). Summarize writes
+**that file first**, then `report.json`, so a successful Harbor mean
+never lands as report-only (the metal `tbench-x0039` miss: 10/10 mean
+0.0, scoring 503). `run-harbor` refuses to exit 0 without the sibling;
+an older overlay that still only wrote `report.json` is repaired from
+that report when `evidence.trials` is the complete scored set. A
+miner-authored results file is deleted with `report.json` before Harbor
+runs. The guest refuses Done when this file is missing or does not bind
+the scored report. Frontend consumers read the same object on
+`GET /v1/submissions/{id}` as `results` and at the artefact zip root as
+`results.json`.
 
 `inspect` writes `$PROOF_OUTPUT_DIR/checklist.json` (no Harbor, no keys).
 

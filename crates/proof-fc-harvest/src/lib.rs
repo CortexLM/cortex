@@ -170,7 +170,54 @@ async fn after_vsock(
             let _ = std::fs::remove_dir_all(&dest);
         }
     }
-    Ok(msg)
+    // Metal copy of the Harbor overlay writes results.json; an older guest
+    // agent still sends Done without `report.results`. Attach from scratch
+    // or fail closed — never hand CP a paid evaluate with no results.
+    attach_evaluate_results(msg, jail_root, jail_dir, job)
+}
+
+fn attach_evaluate_results(
+    msg: RlmToHost,
+    jail_root: &Path,
+    jail_dir: &Path,
+    job: &VmJob,
+) -> Result<RlmToHost, HvError> {
+    let RlmToHost::Done {
+        output: VmJobOutput::Evaluated(run),
+    } = &msg
+    else {
+        return Ok(msg);
+    };
+    if run.report.results.is_some() {
+        return Ok(msg);
+    }
+    let VmJob::Evaluate { request, .. } = job else {
+        return Ok(msg);
+    };
+    let work = work_root(jail_root, jail_dir).ok_or_else(|| {
+        HvError::Guest("evaluate Done omitted results json and no scratch to attach from".into())
+    })?;
+    let report_path = find_report(&work, "evaluate").ok_or_else(|| {
+        HvError::Guest("evaluate Done omitted results json and no report.json on scratch".into())
+    })?;
+    let output_dir = report_path.parent().unwrap_or(&work);
+    let results = harvest_results(
+        request,
+        output_dir,
+        run.report.primary_value,
+        run.report.claim_holds,
+        true,
+    )?;
+    let RlmToHost::Done {
+        output: VmJobOutput::Evaluated(mut run),
+    } = msg
+    else {
+        return Ok(msg);
+    };
+    run.report.results = results;
+    Ok(RlmToHost::Done {
+        output: VmJobOutput::Evaluated(run),
+    })
 }
 
 fn report_from_output(output: &VmJobOutput) -> Option<&CustomRunReport> {

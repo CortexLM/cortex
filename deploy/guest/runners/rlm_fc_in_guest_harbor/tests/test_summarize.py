@@ -726,6 +726,7 @@ class AgentExceptionPolicyTests(unittest.TestCase):
                 os.environ.update(saved)
             self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel\n")
             self.assertFalse((root / "output" / "results.json").exists())
+            self.assertFalse(out.exists(), "bad pin must not leave report.json without results")
 
     def test_results_file_name_matches_host_ascii_contract(self) -> None:
         self.assertEqual(summarize.results_file_name("audit.Json"), "audit.Json")
@@ -734,6 +735,185 @@ class AgentExceptionPolicyTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             summarize.results_file_name("résultats.json")
         self.assertEqual(ctx.exception.code, 2)
+
+
+class HarborResultsEmitTests(unittest.TestCase):
+    """Obligatory results.json on successful Harbor summarize (metal tbench)."""
+
+    def test_ten_zero_reward_trials_emit_full_tbench_results(self) -> None:
+        """Live tbench-x0039 shape: 10/10 measured, mean 0.0, full trial table."""
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            allow = root / "tasks"
+            names = [f"task-{i:02d}" for i in range(10)]
+            for name in names:
+                (allow / name).mkdir(parents=True)
+                write_complete_trial(jobs / "job" / f"{name}__1", f"{name}__1", 0.0)
+            out = root / "output" / "report.json"
+            out.parent.mkdir()
+            saved = dict(os.environ)
+            os.environ["PROOF_TOPIC_ID"] = "tbench-x0039"
+            os.environ["PROOF_CUSTOM_ID"] = "tbench_terminal_bench"
+            os.environ["PROOF_SUBMISSION_DIGEST"] = "aa" * 32
+            os.environ["PROOF_ARTIFACT_DIGEST"] = "bb" * 32
+            os.environ["PROOF_PARAM_RESULTS_CONTRACT"] = "tbench-harbor-v1"
+            try:
+                rc = summarize.main(
+                    [
+                        "--jobs-dir",
+                        str(jobs),
+                        "--output",
+                        str(out),
+                        "--allow-tasks-dir",
+                        str(allow),
+                        "--agent",
+                        "proof_python_agent:ProofPythonAgent",
+                        "--agent-source",
+                        "artifact_dir/recipe/agent",
+                        "--harness-kind",
+                        "python",
+                    ]
+                )
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+            self.assertEqual(rc, 0)
+            report = json.loads(out.read_text(encoding="utf-8"))
+            results = json.loads((out.parent / "results.json").read_text(encoding="utf-8"))
+            self.assertAlmostEqual(report["primary_value"], 0.0)
+            self.assertTrue(report["claim_holds"])
+            self.assertEqual(results["contract"], "tbench-harbor-v1")
+            self.assertEqual(results["schema_version"], 1)
+            self.assertEqual(results["topic_id"], "tbench-x0039")
+            self.assertEqual(results["n_scored"], 10)
+            self.assertEqual(results["n_measured"], 10)
+            self.assertEqual(results["n_agent_exceptions"], 0)
+            self.assertEqual(len(results["trials"]), 10)
+            self.assertAlmostEqual(results["primary_value"], 0.0)
+            self.assertAlmostEqual(results["mean_reward"], 0.0)
+            self.assertTrue(results["claim_holds"])
+            self.assertEqual(results["agent"], "proof_python_agent:ProofPythonAgent")
+            self.assertIn("harbor_run_tail", results["logs"])
+            for row in results["trials"]:
+                self.assertEqual(row["outcome"], "measured")
+                self.assertAlmostEqual(row["reward"], 0.0)
+
+    def test_results_contract_pin_harbor_trials_alias(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            write_complete_trial(jobs / "job" / "a__1", "a__1", 1.0)
+            out = root / "report.json"
+            saved = dict(os.environ)
+            os.environ["PROOF_PARAM_RESULTS_CONTRACT"] = "harbor-trials-v1"
+            try:
+                rc = summarize.main(["--jobs-dir", str(jobs), "--output", str(out), "--agent", "harbor"])
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+            self.assertEqual(rc, 0)
+            results = json.loads((root / "results.json").read_text(encoding="utf-8"))
+            self.assertEqual(results["contract"], "harbor-trials-v1")
+
+    def test_unknown_results_contract_fails_closed_without_report(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            write_complete_trial(jobs / "job" / "a__1", "a__1", 1.0)
+            out = root / "report.json"
+            saved = dict(os.environ)
+            os.environ["PROOF_PARAM_RESULTS_CONTRACT"] = "generic-custom-v1"
+            try:
+                with self.assertRaises(SystemExit) as ctx:
+                    summarize.main(["--jobs-dir", str(jobs), "--output", str(out)])
+                self.assertEqual(ctx.exception.code, 2)
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+            self.assertFalse(out.exists())
+            self.assertFalse((root / "results.json").exists())
+
+    def test_emit_results_from_report_repairs_overlay_that_wrote_report_only(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report_path = root / "report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "primary_value": 0.0,
+                        "claim_holds": True,
+                        "evidence": {
+                            "n_scored": 2,
+                            "n_measured": 2,
+                            "n_agent_exceptions": 0,
+                            "mean_reward": 0.0,
+                            "agent": "harbor",
+                            "agent_source": "artifact_dir/agent",
+                            "harness_kind": "python",
+                            "agent_exception_policy": "fail",
+                            "harbor_exit": 0,
+                            "harbor_run_tail": "done",
+                            "trials": [
+                                {"name": "task-a__1", "reward": 0.0, "outcome": "measured"},
+                                {"name": "task-b__1", "reward": 0.0, "outcome": "measured"},
+                            ],
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            saved = dict(os.environ)
+            os.environ["PROOF_TOPIC_ID"] = "tbench-x0039"
+            os.environ["PROOF_CUSTOM_ID"] = "tbench_terminal_bench"
+            os.environ["PROOF_SUBMISSION_DIGEST"] = "cc" * 32
+            os.environ["PROOF_ARTIFACT_DIGEST"] = "dd" * 32
+            try:
+                rc = summarize.main(["--emit-results-from-report", str(report_path)])
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+            self.assertEqual(rc, 0)
+            results = json.loads((root / "results.json").read_text(encoding="utf-8"))
+            self.assertEqual(results["contract"], "tbench-harbor-v1")
+            self.assertEqual(results["n_scored"], 2)
+            self.assertEqual(len(results["trials"]), 2)
+            self.assertAlmostEqual(results["primary_value"], 0.0)
+
+    def test_emit_results_from_truncated_report_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report_path = root / "report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "primary_value": 0.5,
+                        "claim_holds": True,
+                        "evidence": {
+                            "n_scored": 3,
+                            "n_measured": 3,
+                            "n_agent_exceptions": 0,
+                            "mean_reward": 0.5,
+                            "evidence_truncated": True,
+                            "trials": [{"name": "a__1", "reward": 1.0, "outcome": "measured"}],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                summarize.main(["--emit-results-from-report", str(report_path)])
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertFalse((root / "results.json").exists())
 
 
 if __name__ == "__main__":

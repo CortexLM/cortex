@@ -57,6 +57,9 @@ REDACTED = "[REDACTED]"
 POLICY_FAIL = "fail"
 POLICY_ZERO = "zero"
 EXCEPTION_POLICIES = (POLICY_FAIL, POLICY_ZERO)
+CONTRACT_TBENCH = "tbench-harbor-v1"
+CONTRACT_HARBOR_TRIALS = "harbor-trials-v1"
+HARBOR_CONTRACTS = (CONTRACT_TBENCH, CONTRACT_HARBOR_TRIALS)
 
 
 def _fail(msg: str, code: int = 2) -> None:
@@ -85,6 +88,30 @@ def results_file_name(pin: str) -> str:
     if not is_results_file_name(name):
         _fail(f"results_path {name!r} is not a single safe .json file name")
     return name
+
+
+def results_contract(pin: str) -> str:
+    """Harbor / tbench contract id. Unknown pin is fail-closed, never generic."""
+    name = (pin or "").strip() or CONTRACT_TBENCH
+    if name not in HARBOR_CONTRACTS:
+        _fail(
+            f"results_contract {name!r} is not a Harbor trial contract "
+            f"({CONTRACT_TBENCH} / {CONTRACT_HARBOR_TRIALS})"
+        )
+    return name
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Replace ``path`` only after the bytes are on disk (tmp + fsync + rename)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        with tmp.open("rb") as fh:
+            os.fsync(fh.fileno())
+    except OSError:
+        pass
+    tmp.replace(path)
 
 
 def _is_finite_number(value: Any) -> bool:
@@ -504,12 +531,17 @@ def build_report(
     }
 
 
-def build_results(report: dict[str, Any], trials: list[dict[str, Any]], log_tail: str) -> dict[str, Any]:
+def build_results(
+    report: dict[str, Any],
+    trials: list[dict[str, Any]],
+    log_tail: str,
+    contract: str = CONTRACT_TBENCH,
+) -> dict[str, Any]:
     """Complete Harbor display document. Trials are never truncated here."""
     ev = report["evidence"]
     return {
         "schema_version": 1,
-        "contract": "tbench-harbor-v1",
+        "contract": contract,
         "topic_id": os.environ.get("PROOF_TOPIC_ID", ""),
         "custom_id": os.environ.get("PROOF_CUSTOM_ID", ""),
         "submission_digest": os.environ.get("PROOF_SUBMISSION_DIGEST", ""),
@@ -534,11 +566,80 @@ def build_results(report: dict[str, Any], trials: list[dict[str, Any]], log_tail
     }
 
 
+def write_results_next_to_report(
+    report_path: Path,
+    report: dict[str, Any],
+    trials: list[dict[str, Any]],
+    log_tail: str,
+    secrets: list[str],
+) -> Path:
+    """Write the obligatory results document beside ``report.json``. Fail closed."""
+    if report_path.name != "report.json":
+        _fail(f"summarize --output must be report.json, got {report_path.name!r}")
+    contract = results_contract(os.environ.get("PROOF_PARAM_RESULTS_CONTRACT", ""))
+    results_name = results_file_name(os.environ.get("PROOF_PARAM_RESULTS_PATH", ""))
+    results_path = report_path.parent / results_name
+    if results_path.parent.resolve() != report_path.parent.resolve():
+        _fail(f"results_path {results_name!r} escapes the output directory")
+    if not trials:
+        _fail("refusing to write results.json with an empty trial table")
+    if ev_truncated(report) and len(trials) != int(report.get("evidence", {}).get("n_scored", -1)):
+        _fail(
+            "evidence.trials is truncated and the full trial table was not supplied; "
+            "refusing a partial results.json"
+        )
+    results = build_results(report, trials, log_tail, contract)
+    dumped = redact(json.dumps(results, indent=2, sort_keys=True), secrets)
+    atomic_write(results_path, dumped + "\n")
+    return results_path
+
+
+def ev_truncated(report: dict[str, Any]) -> bool:
+    ev = report.get("evidence")
+    return isinstance(ev, dict) and ev.get("evidence_truncated") is True
+
+
+def emit_results_from_report(report_path: Path, secrets: list[str] | None = None) -> Path:
+    """Rebuild results.json from a scored report.json (run-harbor fallback).
+
+    Used when an older overlay summarize wrote ``report.json`` only. The
+    report's ``evidence.trials`` must be the complete scored set — a
+    truncated evidence list is fail-closed (we do not invent rows).
+    """
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+        _fail(f"cannot read report.json for results emit: {exc}")
+    if not isinstance(report, dict):
+        _fail("report.json is not a JSON object")
+    ev = report.get("evidence")
+    if not isinstance(ev, dict):
+        _fail("report.json has no evidence object; refusing to invent results.json")
+    trials = ev.get("trials")
+    if not isinstance(trials, list) or not trials:
+        _fail("report.json evidence.trials is empty; refusing to invent results.json")
+    n_scored = ev.get("n_scored")
+    if not isinstance(n_scored, int) or n_scored != len(trials):
+        _fail(
+            "report.json evidence.trials is incomplete "
+            f"(n_scored={n_scored}, trials={len(trials)}); refusing a partial results.json"
+        )
+    if ev_truncated(report):
+        _fail("report.json evidence.trials is truncated; refusing a partial results.json")
+    tail = ""
+    logs_tail = ev.get("harbor_run_tail")
+    if isinstance(logs_tail, str):
+        tail = logs_tail
+    return write_results_next_to_report(
+        report_path, report, trials, tail, secrets if secrets is not None else load_redact_values()
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--jobs-dir", required=True)
+    parser.add_argument("--jobs-dir", default="")
     parser.add_argument("--log", default="")
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--output", default="")
     parser.add_argument("--harbor-exit", type=int, default=0)
     parser.add_argument("--agent", default="")
     parser.add_argument("--agent-source", default="")
@@ -556,7 +657,20 @@ def main(argv: list[str] | None = None) -> int:
         help="fail (default): a harness-phase exception is no measurement; "
         "zero: it scores 0.0 with the exception in evidence",
     )
+    parser.add_argument(
+        "--emit-results-from-report",
+        default="",
+        help="write results.json from an existing report.json (no jobs scan); "
+        "used by run-harbor when summarize on the overlay left report.json only",
+    )
     args = parser.parse_args(argv)
+    if args.emit_results_from_report:
+        path = Path(args.emit_results_from_report)
+        written = emit_results_from_report(path)
+        print(f"summarize: wrote {written.name} from {path}", file=sys.stderr)
+        return 0
+    if not args.jobs_dir or not args.output:
+        _fail("--jobs-dir and --output are required unless --emit-results-from-report is set")
     policy = args.agent_exception_policy.strip().lower()
     if policy not in EXCEPTION_POLICIES:
         _fail(f"agent_exception_policy must be one of {EXCEPTION_POLICIES}, got {policy!r}")
@@ -599,22 +713,25 @@ def main(argv: list[str] | None = None) -> int:
         policy,
     )
     out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    dumped = json.dumps(report, indent=2, sort_keys=True)
-    dumped = redact(dumped, secrets)
-    out.write_text(dumped + "\n", encoding="utf-8")
-    results_name = results_file_name(os.environ.get("PROOF_PARAM_RESULTS_PATH", ""))
-    results_path = out.parent / results_name
-    if results_path.parent.resolve() != out.parent.resolve():
-        _fail(f"results_path {results_name!r} escapes the output directory")
-    results = build_results(report, trials, read_tail(log_path, secrets))
-    results_dumped = redact(json.dumps(results, indent=2, sort_keys=True), secrets)
-    results_path.write_text(results_dumped + "\n", encoding="utf-8")
+    log_tail = read_tail(log_path, secrets)
+    # results.json first: a report.json without the obligatory sibling is
+    # the metal tbench-x0039 miss (Harbor 10/10 mean 0.0, scoring 503).
+    results_path = write_results_next_to_report(out, report, trials, log_tail, secrets)
+    dumped = redact(json.dumps(report, indent=2, sort_keys=True), secrets)
+    try:
+        atomic_write(out, dumped + "\n")
+    except OSError as exc:
+        try:
+            results_path.unlink()
+        except OSError:
+            pass
+        _fail(f"failed to write report.json after results.json: {exc}")
     ev = report["evidence"]
     print(
         f"summarize: n_scored={ev['n_scored']} n_measured={ev['n_measured']} "
         f"n_agent_exceptions={ev['n_agent_exceptions']} (policy={policy}) "
-        f"primary_value={report['primary_value']} harbor_exit={args.harbor_exit}",
+        f"primary_value={report['primary_value']} harbor_exit={args.harbor_exit} "
+        f"results={results_path.name}",
         file=sys.stderr,
     )
     return 0
