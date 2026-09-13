@@ -323,7 +323,8 @@ runs. The guest refuses Done when this file is missing or does not bind
 the scored report. Frontend consumers read the same object on
 `GET /v1/submissions/{id}` as `results` and at the artefact zip root as
 `results.json`. Each `trials[]` row may also carry bounded, redacted
-`agent_log` / `verifier_log` harvested from Harbor's native trial dir
+`agent_log` / `verifier_log` (last 2 KiB each, so 33 trials stay under the
+256 KiB `results.json` cap) harvested from Harbor's native trial dir
 (`trial.log`, else `agent/trajectory.json`, else `terminus_2.pane`;
 verifier `verifier/test-stdout.txt`). Missing files are omitted, never
 invented. Job-level `logs.harbor_run_log` / `logs.harbor_run_tail` stay

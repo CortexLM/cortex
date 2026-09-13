@@ -50,6 +50,10 @@ from pathlib import Path
 from typing import Any
 
 MAX_TAIL_CHARS = 8 * 1024
+# 33 trials × 2 KiB × 2 fields = 132 KiB, which fits proof-results
+# MAX_RESULTS_BYTES (256 KiB) with harbor_run_tail (8 KiB) and envelope.
+# 8 KiB per field would be 528 KiB and overflow that cap.
+MAX_TRIAL_LOG_CHARS = 2 * 1024
 MAX_EVIDENCE_TRIALS = 256
 MAX_REWARD_TXT_BYTES = 64 * 1024
 MAX_EXCEPTION_CHARS = 400
@@ -480,15 +484,15 @@ def redact(text: str, secrets: list[str]) -> str:
     return out
 
 
-def read_tail(path: Path | None, secrets: list[str]) -> str:
+def read_tail(path: Path | None, secrets: list[str], max_chars: int = MAX_TAIL_CHARS) -> str:
     if path is None or not path.is_file():
         return ""
     try:
         data = path.read_bytes()
     except OSError:
         return ""
-    if len(data) > MAX_TAIL_CHARS:
-        data = data[-MAX_TAIL_CHARS:]
+    if len(data) > max_chars:
+        data = data[-max_chars:]
     text = data.decode("utf-8", errors="replace")
     return redact(text, secrets)
 
@@ -504,8 +508,8 @@ def _trial_pane_path(trial_dir: Path) -> tuple[str, Path]:
 def attach_trial_logs(row: dict[str, Any], trial_dir: Path, secrets: list[str]) -> None:
     """Fill ``agent_log`` / ``verifier_log`` from Harbor's native trial dir.
 
-    Agent sources, first available, each already ≤ ``MAX_TAIL_CHARS`` and
-    redacted: ``trial.log``, then ``agent/trajectory.json``, then
+    Agent sources, first available, each already ≤ ``MAX_TRIAL_LOG_CHARS``
+    and redacted: ``trial.log``, then ``agent/trajectory.json``, then
     ``terminus_2.pane`` (optional third). Verifier is only
     ``verifier/test-stdout.txt``. Missing files are omitted — never invented.
     Runs for measured, agent-exception, FAIL, and incomplete Harbor alike.
@@ -517,14 +521,16 @@ def attach_trial_logs(row: dict[str, Any], trial_dir: Path, secrets: list[str]) 
         ("agent/trajectory.json", trial_dir / "agent" / "trajectory.json"),
         (pane_rel, pane_path),
     ):
-        text = read_tail(path, secrets)
+        text = read_tail(path, secrets, MAX_TRIAL_LOG_CHARS)
         if not text:
             continue
         row["agent_log"] = text
         sources.append(rel)
         break
     verifier_rel = "verifier/test-stdout.txt"
-    verifier_log = read_tail(trial_dir / "verifier" / "test-stdout.txt", secrets)
+    verifier_log = read_tail(
+        trial_dir / "verifier" / "test-stdout.txt", secrets, MAX_TRIAL_LOG_CHARS
+    )
     if verifier_log:
         row["verifier_log"] = verifier_log
         sources.append(verifier_rel)

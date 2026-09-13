@@ -53,10 +53,11 @@ pub const WRITE_RESULTS_EMIT: &str = "write_results_next_to_report";
 
 /// Largest results document accepted (bytes).
 ///
-/// Sized for a typical Harbor pack (~10 trials) with optional 8 KiB
-/// `agent_log` + `verifier_log` bodies after JSON escaping. A pack that
-/// still overflows is fail-closed (`TooLarge`), never truncated here.
-pub const MAX_RESULTS_BYTES: u64 = 512 * 1024;
+/// Guest Harbor logs are sized to stay under this cap at 33 scored trials:
+/// 2 KiB `agent_log` + 2 KiB `verifier_log` per trial (132 KiB) plus
+/// `logs.harbor_run_tail` (8 KiB) and envelope. Overflow is fail-closed
+/// (`TooLarge`), never truncated here. 8 KiB per field would not fit.
+pub const MAX_RESULTS_BYTES: u64 = 256 * 1024;
 
 /// Signed `constraints.params` key pinning the results contract id.
 pub const PARAM_RESULTS_CONTRACT: &str = "results_contract";
@@ -518,7 +519,9 @@ fn validate_harbor(obj: &Map<String, Value>, primary: f64) -> Result<(), Results
     Ok(())
 }
 
-/// Optional per-trial Harbor logs. Absent is fine; a wrong type is not.
+/// Optional per-trial Harbor logs. Not required (`agent_log` / `verifier_log`
+/// / `log_sources` may be omitted). A present value of the wrong JSON type
+/// is fail-closed so the frontend never treats a non-string as a log body.
 fn optional_trial_log_fields(t: &Map<String, Value>) -> Result<(), ResultsError> {
     if t.get("agent_log").is_some_and(|v| !v.is_string()) {
         return Err(ResultsError::Shape(

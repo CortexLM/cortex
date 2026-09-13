@@ -1083,7 +1083,7 @@ class TrialLogHarvestTests(unittest.TestCase):
             (secrets / "inference_key").write_text("sk-secret-owner\n", encoding="utf-8")
             trial = root / "jobs" / "job" / "t__1"
             write_complete_trial(trial, "t__1", 1.0)
-            huge = "keep-me\n" + ("x" * (summarize.MAX_TAIL_CHARS + 64)) + "sk-secret-owner tail\n"
+            huge = "keep-me\n" + ("x" * (summarize.MAX_TRIAL_LOG_CHARS + 64)) + "sk-secret-owner tail\n"
             (trial / "trial.log").write_text(huge, encoding="utf-8")
             (trial / "verifier" / "test-stdout.txt").write_text(
                 "verifier saw sk-secret-owner\n", encoding="utf-8"
@@ -1100,9 +1100,50 @@ class TrialLogHarvestTests(unittest.TestCase):
             row = trials[0]
             self.assertNotIn("sk-secret-owner", row["agent_log"])
             self.assertIn("[REDACTED]", row["agent_log"])
-            self.assertLessEqual(len(row["agent_log"]), summarize.MAX_TAIL_CHARS)
+            self.assertLessEqual(len(row["agent_log"]), summarize.MAX_TRIAL_LOG_CHARS)
             self.assertNotIn("sk-secret-owner", row["verifier_log"])
             self.assertIn("[REDACTED]", row["verifier_log"])
+
+    def test_thirty_three_trials_with_max_logs_fit_results_cap(self) -> None:
+        """33 scored trials × 2 KiB × 2 fields must stay under 256 KiB results.json."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            body_a = "A" * summarize.MAX_TRIAL_LOG_CHARS
+            body_v = "V" * summarize.MAX_TRIAL_LOG_CHARS
+            for i in range(33):
+                trial = jobs / "job" / f"task-{i:02d}__1"
+                write_complete_trial(trial, f"task-{i:02d}__1", 0.0)
+                (trial / "trial.log").write_text(body_a, encoding="utf-8")
+                (trial / "verifier" / "test-stdout.txt").write_text(body_v, encoding="utf-8")
+            out = root / "report.json"
+            rc = summarize.main(
+                [
+                    "--jobs-dir",
+                    str(jobs),
+                    "--output",
+                    str(out),
+                    "--harbor-exit",
+                    "23",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            results_path = root / "results.json"
+            size = results_path.stat().st_size
+            self.assertLessEqual(
+                size,
+                256 * 1024,
+                f"results.json {size} bytes exceeds proof-results 256 KiB cap",
+            )
+            results = json.loads(results_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(results["trials"]), 33)
+            for row in results["trials"]:
+                self.assertEqual(len(row["agent_log"]), summarize.MAX_TRIAL_LOG_CHARS)
+                self.assertEqual(len(row["verifier_log"]), summarize.MAX_TRIAL_LOG_CHARS)
+                self.assertEqual(
+                    row["log_sources"],
+                    ["trial.log", "verifier/test-stdout.txt"],
+                )
 
     def test_empty_log_files_are_omitted_never_invented(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

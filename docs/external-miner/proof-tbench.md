@@ -511,7 +511,7 @@ replaces it.
 A scored evaluate also carries **`results`**: the complete Harbor job
 summary (`contract` `tbench-harbor-v1` / `harbor-trials-v1`). That is
 what the Arcade frontend renders — every trial's reward and outcome,
-optional bounded `agent_log` / `verifier_log` (UTF-8 from Harbor's
+optional bounded `agent_log` / `verifier_log` (UTF-8 last 2 KiB from Harbor's
 `trial.log` / `agent/trajectory.json` / `terminus_2.pane` and
 `verifier/test-stdout.txt`; missing files are omitted, never invented),
 `n_scored` / `n_measured` / `n_agent_exceptions`, `mean_reward` (equals
