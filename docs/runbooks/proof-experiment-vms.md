@@ -241,8 +241,8 @@ usually lacks several — rebuild the guest kernel with them and re-pin
 The in-guest adaptor is **the baked image**, not the control-plane tip.
 `deploy/guest/runners/` on a tipped `proof-challenge` / gateway checkout is
 **not** what `/opt/proof/runners/` inside the Firecracker guest runs.
-After any change to that tree (Harbor summarize emitting `results.json`,
-`run-harbor` refuse, inspect rules, …):
+After any change to that tree (Harbor summarize emitting `results.json` and
+per-trial `agent_log` / `verifier_log`, `run-harbor` refuse, inspect rules, …):
 
 1. Re-bake (`bake-rootfs.sh --runner rlm_fc_in_guest_harbor=deploy/guest/runners/rlm_fc_in_guest_harbor` plus the operator overlay / chroot-hook).
 2. Stage the new ext4 on the KVM host; re-pin `PROOF_RLM_VM_IMAGE_DIGEST` (Architecte RE-LOCK — do not invent a digest).

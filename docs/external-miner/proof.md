@@ -660,7 +660,7 @@ Known contracts:
 | `contract` | Extra required fields |
 |------------|------------------------|
 | `generic-custom-v1` | `display`: non-empty JSON object (not `primary_value` alone) |
-| `harbor-trials-v1` / `tbench-harbor-v1` | Untruncated `trials[]` (`name`, finite `reward`, `outcome` `measured` or `agent_exception`); `n_scored` = `trials.length`; `n_measured` / `n_agent_exceptions` match those outcomes; `mean_reward` = `primary_value` = mean of trial rewards; non-empty `agent`; `logs.harbor_run_tail` and/or `logs.harbor_run_log` |
+| `harbor-trials-v1` / `tbench-harbor-v1` | Untruncated `trials[]` (`name`, finite `reward`, `outcome` `measured` or `agent_exception`; optional `agent_log` / `verifier_log` / `log_sources`); `n_scored` = `trials.length`; `n_measured` / `n_agent_exceptions` match those outcomes; `mean_reward` = `primary_value` = mean of trial rewards; non-empty `agent`; `logs.harbor_run_tail` and/or `logs.harbor_run_log` |
 
 Harvest `nll` / `throughput` rows have no `results`. A red-checklist
 reject never ships the file. See [`tbench`](./proof-tbench.md) for the

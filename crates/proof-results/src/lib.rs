@@ -52,7 +52,11 @@ pub const ORCH_RESULTS_ATTACH_HINT: &str =
 pub const WRITE_RESULTS_EMIT: &str = "write_results_next_to_report";
 
 /// Largest results document accepted (bytes).
-pub const MAX_RESULTS_BYTES: u64 = 256 * 1024;
+///
+/// Sized for a typical Harbor pack (~10 trials) with optional 8 KiB
+/// `agent_log` + `verifier_log` bodies after JSON escaping. A pack that
+/// still overflows is fail-closed (`TooLarge`), never truncated here.
+pub const MAX_RESULTS_BYTES: u64 = 512 * 1024;
 
 /// Signed `constraints.params` key pinning the results contract id.
 pub const PARAM_RESULTS_CONTRACT: &str = "results_contract";
@@ -470,6 +474,7 @@ fn validate_harbor(obj: &Map<String, Value>, primary: f64) -> Result<(), Results
                 ));
             }
         }
+        optional_trial_log_fields(t)?;
         rewards.push(reward);
     }
     let n_scored = uint_field(obj, "n_scored")?;
@@ -509,6 +514,31 @@ fn validate_harbor(obj: &Map<String, Value>, primary: f64) -> Result<(), Results
         return Err(ResultsError::Shape(
             "logs must carry harbor_run_tail and/or harbor_run_log",
         ));
+    }
+    Ok(())
+}
+
+/// Optional per-trial Harbor logs. Absent is fine; a wrong type is not.
+fn optional_trial_log_fields(t: &Map<String, Value>) -> Result<(), ResultsError> {
+    if t.get("agent_log").is_some_and(|v| !v.is_string()) {
+        return Err(ResultsError::Shape(
+            "trial.agent_log must be a string when present",
+        ));
+    }
+    if t.get("verifier_log").is_some_and(|v| !v.is_string()) {
+        return Err(ResultsError::Shape(
+            "trial.verifier_log must be a string when present",
+        ));
+    }
+    if let Some(v) = t.get("log_sources") {
+        let arr = v.as_array().ok_or(ResultsError::Shape(
+            "trial.log_sources must be an array of strings when present",
+        ))?;
+        if arr.iter().any(|item| !item.is_string()) {
+            return Err(ResultsError::Shape(
+                "trial.log_sources must be an array of strings when present",
+            ));
+        }
     }
     Ok(())
 }
@@ -621,7 +651,14 @@ mod tests {
             "agent_exception_policy": "zero",
             "harbor_exit": 0,
             "trials": [
-                {"name": "task-a__1", "reward": 1.0, "outcome": "measured"},
+                {
+                    "name": "task-a__1",
+                    "reward": 1.0,
+                    "outcome": "measured",
+                    "agent_log": "agent: hello\n",
+                    "verifier_log": "verifier: ok\n",
+                    "log_sources": ["trial.log", "verifier/test-stdout.txt"]
+                },
                 {
                     "name": "task-b__1",
                     "reward": 0.0,
@@ -732,6 +769,36 @@ mod tests {
     }
 
     #[test]
+    fn harbor_optional_trial_logs_are_typed() {
+        let b = bind();
+        validate(&harbor_ok(&b), &b, None).expect("optional logs allowed");
+        let mut omitted = harbor_ok(&b);
+        let trial0 = omitted["trials"][0].as_object_mut().expect("trial 0");
+        trial0.remove("agent_log");
+        trial0.remove("verifier_log");
+        trial0.remove("log_sources");
+        validate(&omitted, &b, None).expect("omitted logs allowed");
+        let mut bad_agent = harbor_ok(&b);
+        bad_agent["trials"][0]["agent_log"] = serde_json::json!(1);
+        assert!(
+            validate(&bad_agent, &b, None).is_err(),
+            "agent_log must be a string when present"
+        );
+        let mut bad_verifier = harbor_ok(&b);
+        bad_verifier["trials"][0]["verifier_log"] = serde_json::json!(true);
+        assert!(
+            validate(&bad_verifier, &b, None).is_err(),
+            "verifier_log must be a string when present"
+        );
+        let mut bad_sources = harbor_ok(&b);
+        bad_sources["trials"][0]["log_sources"] = serde_json::json!([1]);
+        assert!(
+            validate(&bad_sources, &b, None).is_err(),
+            "log_sources must be strings when present"
+        );
+    }
+
+    #[test]
     fn generic_requires_displayable_content() {
         let b = bind();
         let mut empty = generic_document(&b, &serde_json::json!({}));
@@ -792,6 +859,31 @@ mod tests {
         validate(&value, &b, Some(CONTRACT_TBENCH_HARBOR)).expect("fixture");
         assert_eq!(value["n_scored"], 10);
         assert_eq!(value["trials"].as_array().expect("trials").len(), 10);
+        let trials = value["trials"].as_array().expect("trials");
+        assert_eq!(
+            trials[0]["agent_log"].as_str().expect("agent_log"),
+            "hello-world agent stdout: ran ls\n"
+        );
+        assert_eq!(
+            trials[0]["verifier_log"].as_str().expect("verifier_log"),
+            "verifier: reward=1.0\n"
+        );
+        assert_eq!(
+            trials[0]["log_sources"],
+            serde_json::json!(["trial.log", "verifier/test-stdout.txt"])
+        );
+        assert!(
+            trials[2].get("agent_log").is_none(),
+            "missing Harbor files stay omitted"
+        );
+        assert_eq!(
+            trials[3]["exception_type"].as_str().expect("exc"),
+            "RuntimeError"
+        );
+        assert_eq!(
+            trials[3]["agent_log"].as_str().expect("exc agent_log"),
+            "build-tmux agent raised during harness\n"
+        );
     }
 
     #[test]

@@ -975,5 +975,147 @@ class HarborResultsEmitTests(unittest.TestCase):
             self.assertFalse((root / "results.json").exists())
 
 
+class TrialLogHarvestTests(unittest.TestCase):
+    """Per-trial agent_log / verifier_log from Harbor's native job dir."""
+
+    FIXTURE_JOBS = HERE / "fixtures" / "harbor-trial-logs" / "jobs"
+
+    def _by_name(self, trials: list[dict]) -> dict[str, dict]:
+        return {str(t["name"]): t for t in trials}
+
+    def test_fixture_trial_dirs_fill_log_bodies(self) -> None:
+        trials = summarize.collect_trials(self.FIXTURE_JOBS)
+        rows = self._by_name(trials)
+        self.assertEqual(
+            set(rows),
+            {"hello-world__1", "traj-only__1", "pane-only__1", "no-logs__1"},
+        )
+
+        hello = rows["hello-world__1"]
+        self.assertIn("hello-world agent stdout: ran ls", hello["agent_log"])
+        self.assertNotIn("trajectory must not displace", hello["agent_log"])
+        self.assertIn("verifier: reward=1.0", hello["verifier_log"])
+        self.assertEqual(
+            hello["log_sources"],
+            ["trial.log", "verifier/test-stdout.txt"],
+        )
+
+        traj = rows["traj-only__1"]
+        self.assertIn("traj-only agent step", traj["agent_log"])
+        self.assertEqual(traj["log_sources"], ["agent/trajectory.json"])
+        self.assertNotIn("verifier_log", traj)
+
+        pane = rows["pane-only__1"]
+        self.assertIn("optional third source", pane["agent_log"])
+        self.assertEqual(pane["log_sources"], ["terminus_2.pane"])
+
+        missing = rows["no-logs__1"]
+        self.assertNotIn("agent_log", missing)
+        self.assertNotIn("verifier_log", missing)
+        self.assertNotIn("log_sources", missing)
+
+    def test_results_json_carries_trial_logs_on_nonzero_harbor_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "t__1"
+            write_complete_trial(trial, "t__1", 0.6)
+            (trial / "trial.log").write_text("agent ran under FAIL\n", encoding="utf-8")
+            (trial / "verifier" / "test-stdout.txt").write_text(
+                "verifier stdout on incomplete harbor\n", encoding="utf-8"
+            )
+            out = root / "report.json"
+            rc = summarize.main(
+                [
+                    "--jobs-dir",
+                    str(root / "jobs"),
+                    "--output",
+                    str(out),
+                    "--harbor-exit",
+                    "23",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            results = json.loads((root / "results.json").read_text(encoding="utf-8"))
+            self.assertEqual(results["harbor_exit"], 23)
+            self.assertEqual(results["logs"]["harbor_run_log"], "logs/harbor.run.log")
+            row = results["trials"][0]
+            self.assertEqual(row["agent_log"], "agent ran under FAIL\n")
+            self.assertEqual(row["verifier_log"], "verifier stdout on incomplete harbor\n")
+            self.assertEqual(
+                row["log_sources"],
+                ["trial.log", "verifier/test-stdout.txt"],
+            )
+
+    def test_agent_exception_keeps_exception_fields_and_harvests_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            crashed = jobs / "job" / "task-c__1"
+            write_exception_trial(crashed, "task-c__1")
+            (crashed / "trial.log").write_text("harness crashed here\n", encoding="utf-8")
+            trials = summarize.collect_trials(jobs, None, "zero")
+            self.assertEqual(len(trials), 1)
+            row = trials[0]
+            self.assertEqual(row["outcome"], "agent_exception")
+            self.assertEqual(row["exception_type"], "RuntimeError")
+            self.assertIn("120 seconds", row["exception_message"])
+            self.assertEqual(row["agent_log"], "harness crashed here\n")
+            self.assertEqual(row["log_sources"], ["trial.log"])
+
+    def test_nested_agent_pane_is_third_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "nested__1"
+            write_complete_trial(trial, "nested__1", 1.0)
+            (trial / "agent").mkdir()
+            (trial / "agent" / "terminus_2.pane").write_text(
+                "nested pane body\n", encoding="utf-8"
+            )
+            trials = summarize.collect_trials(root / "jobs")
+            self.assertEqual(trials[0]["agent_log"], "nested pane body\n")
+            self.assertEqual(trials[0]["log_sources"], ["agent/terminus_2.pane"])
+
+    def test_trial_logs_are_redacted_and_capped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            secrets = root / "secrets"
+            secrets.mkdir()
+            (secrets / "inference_key").write_text("sk-secret-owner\n", encoding="utf-8")
+            trial = root / "jobs" / "job" / "t__1"
+            write_complete_trial(trial, "t__1", 1.0)
+            huge = "keep-me\n" + ("x" * (summarize.MAX_TAIL_CHARS + 64)) + "sk-secret-owner tail\n"
+            (trial / "trial.log").write_text(huge, encoding="utf-8")
+            (trial / "verifier" / "test-stdout.txt").write_text(
+                "verifier saw sk-secret-owner\n", encoding="utf-8"
+            )
+            import os
+
+            os.environ["PROOF_SECRETS_DIR"] = str(secrets)
+            os.environ["PROOF_SECRET_FILES"] = "inference_key"
+            try:
+                trials = summarize.collect_trials(root / "jobs")
+            finally:
+                os.environ.pop("PROOF_SECRETS_DIR", None)
+                os.environ.pop("PROOF_SECRET_FILES", None)
+            row = trials[0]
+            self.assertNotIn("sk-secret-owner", row["agent_log"])
+            self.assertIn("[REDACTED]", row["agent_log"])
+            self.assertLessEqual(len(row["agent_log"]), summarize.MAX_TAIL_CHARS)
+            self.assertNotIn("sk-secret-owner", row["verifier_log"])
+            self.assertIn("[REDACTED]", row["verifier_log"])
+
+    def test_empty_log_files_are_omitted_never_invented(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "t__1"
+            write_complete_trial(trial, "t__1", 1.0)
+            (trial / "trial.log").write_text("", encoding="utf-8")
+            (trial / "verifier" / "test-stdout.txt").write_text("", encoding="utf-8")
+            trials = summarize.collect_trials(root / "jobs")
+            self.assertNotIn("agent_log", trials[0])
+            self.assertNotIn("verifier_log", trials[0])
+            self.assertNotIn("log_sources", trials[0])
+
+
 if __name__ == "__main__":
     unittest.main()

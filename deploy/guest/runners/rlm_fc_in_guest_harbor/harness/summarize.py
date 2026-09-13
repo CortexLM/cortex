@@ -347,6 +347,7 @@ def collect_trials(
     jobs_dir: Path,
     allow: frozenset[str] | None = None,
     agent_exception_policy: str = POLICY_FAIL,
+    secrets: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Load every scored Harbor trial. Do not cap here — the cap is evidence only.
 
@@ -363,12 +364,17 @@ def collect_trials(
     When ``allow`` is a non-empty set, trials whose name is not a filtered
     task (or ``task__attempt``) are dropped so a script that ran the
     unfiltered pack cannot score excluded ids.
+
+    Each scored row also harvests bounded, redacted ``agent_log`` /
+    ``verifier_log`` from the trial dir when those files exist (FAIL /
+    incomplete Harbor included). Missing files are omitted.
     """
     if agent_exception_policy not in EXCEPTION_POLICIES:
         _fail(f"agent_exception_policy must be one of {EXCEPTION_POLICIES}, got {agent_exception_policy!r}")
     by_dir: dict[str, dict[str, Any]] = {}
     if not jobs_dir.is_dir():
         return []
+    redact_secrets = secrets if secrets is not None else load_redact_values()
 
     for result_path in sorted(jobs_dir.rglob("result.json")):
         obj = _load_json(result_path)
@@ -378,23 +384,27 @@ def collect_trials(
             continue
         reward = trial_complete_reward(trial_dir, obj)
         if reward is not None:
-            by_dir[key] = {
+            row: dict[str, Any] = {
                 "name": _trial_name(obj, trial_dir),
                 "reward": reward,
                 "outcome": "measured",
             }
+            attach_trial_logs(row, trial_dir, redact_secrets)
+            by_dir[key] = row
             continue
         if agent_exception_policy != POLICY_ZERO:
             continue
         crashed = agent_phase_exception(trial_dir, obj)
         if crashed is None:
             continue
-        by_dir[key] = {
+        row = {
             "name": _trial_name(obj, trial_dir),
             "reward": 0.0,
             "outcome": "agent_exception",
             **crashed,
         }
+        attach_trial_logs(row, trial_dir, redact_secrets)
+        by_dir[key] = row
 
     rows = [by_dir[k] for k in sorted(by_dir)]
     if not allow:
@@ -481,6 +491,45 @@ def read_tail(path: Path | None, secrets: list[str]) -> str:
         data = data[-MAX_TAIL_CHARS:]
     text = data.decode("utf-8", errors="replace")
     return redact(text, secrets)
+
+
+def _trial_pane_path(trial_dir: Path) -> tuple[str, Path]:
+    """Owner lock is ``terminus_2.pane``; metal retain also has ``agent/terminus_2.pane``."""
+    root_pane = trial_dir / "terminus_2.pane"
+    if root_pane.is_file():
+        return "terminus_2.pane", root_pane
+    return "agent/terminus_2.pane", trial_dir / "agent" / "terminus_2.pane"
+
+
+def attach_trial_logs(row: dict[str, Any], trial_dir: Path, secrets: list[str]) -> None:
+    """Fill ``agent_log`` / ``verifier_log`` from Harbor's native trial dir.
+
+    Agent sources, first available, each already ≤ ``MAX_TAIL_CHARS`` and
+    redacted: ``trial.log``, then ``agent/trajectory.json``, then
+    ``terminus_2.pane`` (optional third). Verifier is only
+    ``verifier/test-stdout.txt``. Missing files are omitted — never invented.
+    Runs for measured, agent-exception, FAIL, and incomplete Harbor alike.
+    """
+    sources: list[str] = []
+    pane_rel, pane_path = _trial_pane_path(trial_dir)
+    for rel, path in (
+        ("trial.log", trial_dir / "trial.log"),
+        ("agent/trajectory.json", trial_dir / "agent" / "trajectory.json"),
+        (pane_rel, pane_path),
+    ):
+        text = read_tail(path, secrets)
+        if not text:
+            continue
+        row["agent_log"] = text
+        sources.append(rel)
+        break
+    verifier_rel = "verifier/test-stdout.txt"
+    verifier_log = read_tail(trial_dir / "verifier" / "test-stdout.txt", secrets)
+    if verifier_log:
+        row["verifier_log"] = verifier_log
+        sources.append(verifier_rel)
+    if sources:
+        row["log_sources"] = sources
 
 
 def mean_reward(trials: list[dict[str, Any]]) -> float:
@@ -685,7 +734,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"allow-tasks-dir {args.allow_tasks_dir} has no task directories; "
                 "refusing to invent a primary_value"
             )
-    trials = collect_trials(jobs_dir, allow, policy)
+    secrets = load_redact_values()
+    trials = collect_trials(jobs_dir, allow, policy, secrets)
     if not trials:
         _fail(
             f"no measured Harbor trials under {jobs_dir} "
@@ -701,7 +751,6 @@ def main(argv: list[str] | None = None) -> int:
                 f"{', '.join(missing)}; agent_exception_policy={policy}); "
                 "refusing a partial primary_value"
             )
-    secrets = load_redact_values()
     log_path = Path(args.log) if args.log else None
     report = build_report(
         trials,
