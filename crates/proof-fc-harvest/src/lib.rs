@@ -196,16 +196,10 @@ fn attach_evaluate_results(
         return Ok(msg);
     };
     let work = work_root(jail_root, jail_dir).ok_or_else(|| {
-        HvError::Guest(format!(
-            "evaluate Done omitted results json and no scratch to attach from; {}",
-            proof_results::PIN_RUNNER_SKEW_HINT
-        ))
+        HvError::Guest("evaluate Done omitted results json and no scratch to attach from".into())
     })?;
     let report_path = find_report(&work, "evaluate").ok_or_else(|| {
-        HvError::Guest(format!(
-            "evaluate Done omitted results json and no report.json on scratch; {}",
-            proof_results::PIN_RUNNER_SKEW_HINT
-        ))
+        HvError::Guest("evaluate Done omitted results json and no report.json on scratch".into())
     })?;
     let output_dir = report_path.parent().unwrap_or(&work);
     let results = harvest_results(
@@ -992,10 +986,12 @@ fn harvest_results(
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(proof_results::RESULTS_FILE);
-            return Err(HvError::Guest(proof_results::missing_results_detail(
-                name,
-                Some(&path),
-            )));
+            let detail = if output_dir.join("report.json").is_file() {
+                proof_results::report_only_missing_results_detail(name, Some(&path))
+            } else {
+                proof_results::missing_results_detail(name, Some(&path))
+            };
+            return Err(HvError::Guest(detail));
         }
         return Ok(None);
     }

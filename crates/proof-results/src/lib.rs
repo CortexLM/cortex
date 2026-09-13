@@ -214,37 +214,70 @@ pub fn results_path(
 }
 
 /// Load, parse, and bind the results file under `dir` (topic path or default).
+///
+/// Pin/runner-skew guidance is added only when `report.json` is already in
+/// `dir` — a report-only evaluate, not a bare I/O miss.
 pub fn load_evaluate(
     dir: &Path,
     params: &BTreeMap<String, String>,
     bind: &ReportBind<'_>,
 ) -> Result<Value, ResultsError> {
-    let value = load_file(&results_path(dir, params)?)?;
+    let path = results_path(dir, params)?;
+    let value = match load_file(&path) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(if dir.join("report.json").is_file() {
+                with_report_only_skew_hint(e)
+            } else {
+                e
+            });
+        }
+    };
     let pinned = pinned_contract(params)?;
     validate(&value, bind, pinned.as_deref())?;
     Ok(value)
 }
 
-/// Detail string for a missing results file (fail-closed; names pin/runner skew).
+/// Path-only missing-file text. No rebake diagnosis — callers add that
+/// only when `report.json` is already present.
 #[must_use]
 pub fn missing_results_detail(name: &str, path: Option<&Path>) -> String {
     match path {
-        Some(p) => format!(
-            "adaptor wrote no {name} ({}); {PIN_RUNNER_SKEW_HINT}",
-            p.display()
-        ),
-        None => format!("adaptor wrote no {name}; {PIN_RUNNER_SKEW_HINT}"),
+        Some(p) => format!("adaptor wrote no {name} ({})", p.display()),
+        None => format!("adaptor wrote no {name}"),
+    }
+}
+
+/// Missing results after a scored `report.json` (Harbor metal RCA).
+#[must_use]
+pub fn report_only_missing_results_detail(name: &str, path: Option<&Path>) -> String {
+    format!(
+        "{}; {PIN_RUNNER_SKEW_HINT}",
+        missing_results_detail(name, path)
+    )
+}
+
+fn with_report_only_skew_hint(err: ResultsError) -> ResultsError {
+    match err {
+        ResultsError::Io(s) if !s.contains(PIN_RUNNER_SKEW_HINT) => {
+            ResultsError::Io(format!("{s}; {PIN_RUNNER_SKEW_HINT}"))
+        }
+        other => other,
     }
 }
 
 /// Read and parse a results file. Does not bind scored facts.
+///
+/// Preserves the OS error. Does **not** diagnose pin/runner skew — a
+/// dangling path is not a guest-image miss.
 pub fn load_file(path: &Path) -> Result<Value, ResultsError> {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(RESULTS_FILE);
-    let meta = std::fs::metadata(path)
-        .map_err(|_| ResultsError::Io(missing_results_detail(name, Some(path))))?;
+    let meta = std::fs::metadata(path).map_err(|e| {
+        ResultsError::Io(format!("{}: {e}", missing_results_detail(name, Some(path))))
+    })?;
     if meta.len() > MAX_RESULTS_BYTES {
         return Err(ResultsError::TooLarge { got: meta.len() });
     }
@@ -316,7 +349,7 @@ pub fn require_evaluate(
     let name = results_file_name(params)?;
     let value = report_results
         .cloned()
-        .ok_or_else(|| ResultsError::Io(missing_results_detail(&name, None)))?;
+        .ok_or_else(|| ResultsError::Io(report_only_missing_results_detail(&name, None)))?;
     validate(&value, bind, pinned.as_deref())?;
     Ok(value)
 }
@@ -714,11 +747,61 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_names_pin_runner_skew() {
+    fn load_file_preserves_io_error_without_skew_hint() {
         let err = load_file(Path::new("/no/such/results.json")).expect_err("missing");
         let text = err.to_string();
         assert!(text.contains("adaptor wrote no results.json"), "{text}");
+        assert!(
+            text.contains("No such file") || text.contains("os error"),
+            "{text}"
+        );
+        assert!(
+            !text.contains(PIN_RUNNER_SKEW_HINT) && !text.contains("rebake"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn dangling_symlink_preserves_io_without_skew() {
+        let dir =
+            std::env::temp_dir().join(format!("proof-results-dangling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let link = dir.join("results.json");
+        std::os::unix::fs::symlink(dir.join("gone.json"), &link).expect("symlink");
+        let err = load_file(&link).expect_err("dangling");
+        let text = err.to_string();
+        assert!(text.contains("adaptor wrote no results.json"), "{text}");
+        assert!(
+            !text.contains(PIN_RUNNER_SKEW_HINT) && !text.contains("rebake"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_evaluate_report_only_names_skew() {
+        let dir =
+            std::env::temp_dir().join(format!("proof-results-report-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(dir.join("report.json"), "{\"primary_value\":0.0}\n").expect("report");
+        let err = load_evaluate(&dir, &BTreeMap::new(), &bind()).expect_err("missing results");
+        let text = err.to_string();
         assert!(text.contains(PIN_RUNNER_SKEW_HINT), "{text}");
-        assert!(text.contains("rebake"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_evaluate_without_report_does_not_name_skew() {
+        let dir =
+            std::env::temp_dir().join(format!("proof-results-no-report-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let err = load_evaluate(&dir, &BTreeMap::new(), &bind()).expect_err("missing results");
+        let text = err.to_string();
+        assert!(text.contains("adaptor wrote no"), "{text}");
+        assert!(!text.contains(PIN_RUNNER_SKEW_HINT), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
