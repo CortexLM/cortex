@@ -30,13 +30,26 @@ pub const RESULTS_SCHEMA: u32 = 1;
 /// Default file name under `PROOF_OUTPUT_DIR` and at the artefact zip root.
 pub const RESULTS_FILE: &str = "results.json";
 
-/// Host RCA when evaluate produced `report.json` but no results sibling.
+/// Host RCA when the **selected** guest runner lacks the results-emit helper.
 ///
-/// Tip `deploy/guest/runners/` already emits the file. A live guest still
-/// running a pin baked before that tree is **pin/runner skew**: rebake
-/// so `/opt/proof/runners` matches the tip overlay. Tipping gateway /
-/// challenge alone does not update the in-guest adaptor.
+/// Report-only (`report.json` without `results.json`) is **not** this by
+/// itself — that is [`missing_results_detail`]. Append this only when
+/// [`runner_tree_emits_results`] is false for **that** runner directory
+/// (no `.py` carrying `write_results_next_to_report`). A sibling runner or
+/// a notes file does not count. Tipping gateway / challenge alone does not
+/// update the in-guest adaptor.
 pub const PIN_RUNNER_SKEW_HINT: &str = "guest pin/runner skew: rebake the guest image so /opt/proof/runners matches deploy/guest/runners (tipping gateway/challenge alone is insufficient)";
+
+/// Pathless [`require_evaluate`]: the scored `CustomRunReport` carried no
+/// `results` field. Guest Done+results can still be attested while an old
+/// orch KEEP drops the field; tip the host past CustomRunReport.results /
+/// #294 harvest attach. Not pin/runner rebake.
+pub const ORCH_RESULTS_ATTACH_HINT: &str =
+    "host orch tip past CustomRunReport.results / #294 harvest attach";
+
+/// Source marker Harbor / tip runners use to write `results.json` next to
+/// `report.json`. Absence from the guest runner tree is the skew probe.
+pub const WRITE_RESULTS_EMIT: &str = "write_results_next_to_report";
 
 /// Largest results document accepted (bytes).
 pub const MAX_RESULTS_BYTES: u64 = 256 * 1024;
@@ -215,31 +228,22 @@ pub fn results_path(
 
 /// Load, parse, and bind the results file under `dir` (topic path or default).
 ///
-/// Pin/runner-skew guidance is added only when `report.json` is already in
-/// `dir` — a report-only evaluate, not a bare I/O miss.
+/// A missing file is always [`missing_results_detail`] — report-only is
+/// not pin/runner skew. Call [`hint_skew_if_runner_unemitted`] when the
+/// caller can probe the **selected** runner directory.
 pub fn load_evaluate(
     dir: &Path,
     params: &BTreeMap<String, String>,
     bind: &ReportBind<'_>,
 ) -> Result<Value, ResultsError> {
     let path = results_path(dir, params)?;
-    let value = match load_file(&path) {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(if dir.join("report.json").is_file() {
-                with_report_only_skew_hint(e)
-            } else {
-                e
-            });
-        }
-    };
+    let value = load_file(&path)?;
     let pinned = pinned_contract(params)?;
     validate(&value, bind, pinned.as_deref())?;
     Ok(value)
 }
 
-/// Path-only missing-file text. No rebake diagnosis — callers add that
-/// only when `report.json` is already present.
+/// Path-only missing-file text. No rebake diagnosis.
 #[must_use]
 pub fn missing_results_detail(name: &str, path: Option<&Path>) -> String {
     match path {
@@ -248,16 +252,48 @@ pub fn missing_results_detail(name: &str, path: Option<&Path>) -> String {
     }
 }
 
-/// Missing results after a scored `report.json` (Harbor metal RCA).
+/// Missing results after a scored `report.json`. Same text as
+/// [`missing_results_detail`] — do not blame rebake from this alone.
 #[must_use]
 pub fn report_only_missing_results_detail(name: &str, path: Option<&Path>) -> String {
-    format!(
-        "{}; {PIN_RUNNER_SKEW_HINT}",
-        missing_results_detail(name, path)
-    )
+    missing_results_detail(name, path)
 }
 
-fn with_report_only_skew_hint(err: ResultsError) -> ResultsError {
+/// Harbor production emit paths under the **selected** runner directory.
+/// Never walk `runners_dir` or sibling adaptors.
+const EMIT_PROBE: &[&str] = &["summarize.py", "harness/summarize.py"];
+
+/// True when the selected runner's Harbor helper carries [`WRITE_RESULTS_EMIT`].
+#[must_use]
+pub fn runner_tree_emits_results(runner_dir: &Path) -> bool {
+    EMIT_PROBE.iter().any(|rel| py_emits(&runner_dir.join(rel)))
+}
+
+fn py_emits(path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > 512 * 1024 {
+        return false;
+    }
+    std::fs::read_to_string(path).is_ok_and(|body| body.contains(WRITE_RESULTS_EMIT))
+}
+
+/// Append [`PIN_RUNNER_SKEW_HINT`] only when `runner_dir` (the selected
+/// adaptor) lacks the emit helper. A runner that already emits is not
+/// pin/runner skew.
+#[must_use]
+pub fn hint_skew_if_runner_unemitted(err: ResultsError, runner_dir: &Path) -> ResultsError {
+    if runner_tree_emits_results(runner_dir) {
+        err
+    } else {
+        with_report_only_skew_hint(err)
+    }
+}
+
+/// Unconditional skew suffix (tests / probe-failed path only).
+#[must_use]
+pub fn with_report_only_skew_hint(err: ResultsError) -> ResultsError {
     match err {
         ResultsError::Io(s) if !s.contains(PIN_RUNNER_SKEW_HINT) => {
             ResultsError::Io(format!("{s}; {PIN_RUNNER_SKEW_HINT}"))
@@ -340,6 +376,10 @@ pub fn validate(
 }
 
 /// Require `report_results` on a paid evaluate and bind it.
+///
+/// `None` is a **pathless** miss: the report object had no `results` field
+/// (orch KEEP drop / missing harvest attach), not a guest file path. Hint
+/// [`ORCH_RESULTS_ATTACH_HINT`], never [`PIN_RUNNER_SKEW_HINT`].
 pub fn require_evaluate(
     report_results: Option<&Value>,
     bind: &ReportBind<'_>,
@@ -347,9 +387,12 @@ pub fn require_evaluate(
 ) -> Result<Value, ResultsError> {
     let pinned = pinned_contract(params)?;
     let name = results_file_name(params)?;
-    let value = report_results
-        .cloned()
-        .ok_or_else(|| ResultsError::Io(report_only_missing_results_detail(&name, None)))?;
+    let value = report_results.cloned().ok_or_else(|| {
+        ResultsError::Io(format!(
+            "{}; {ORCH_RESULTS_ATTACH_HINT}",
+            missing_results_detail(&name, None)
+        ))
+    })?;
     validate(&value, bind, pinned.as_deref())?;
     Ok(value)
 }
@@ -608,11 +651,16 @@ mod tests {
         let b = bind();
         let missing = require_evaluate(None, &b, &BTreeMap::new()).expect_err("none");
         assert!(
-            matches!(&missing, ResultsError::Io(s) if s.contains(PIN_RUNNER_SKEW_HINT)),
+            matches!(&missing, ResultsError::Io(s) if s.contains("adaptor wrote no")),
             "{missing}"
         );
         assert!(
-            missing.to_string().contains("guest pin/runner skew"),
+            missing.to_string().contains(ORCH_RESULTS_ATTACH_HINT),
+            "{missing}"
+        );
+        assert!(
+            !missing.to_string().contains(PIN_RUNNER_SKEW_HINT)
+                && !missing.to_string().contains("rebake"),
             "{missing}"
         );
         let mut bad = harbor_ok(&b);
@@ -780,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn load_evaluate_report_only_names_skew() {
+    fn load_evaluate_report_only_does_not_name_skew() {
         let dir =
             std::env::temp_dir().join(format!("proof-results-report-only-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -788,7 +836,56 @@ mod tests {
         std::fs::write(dir.join("report.json"), "{\"primary_value\":0.0}\n").expect("report");
         let err = load_evaluate(&dir, &BTreeMap::new(), &bind()).expect_err("missing results");
         let text = err.to_string();
-        assert!(text.contains(PIN_RUNNER_SKEW_HINT), "{text}");
+        assert!(text.contains("adaptor wrote no results.json"), "{text}");
+        assert!(
+            !text.contains(PIN_RUNNER_SKEW_HINT) && !text.contains("rebake"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hint_skew_only_when_selected_runner_lacks_emit() {
+        let dir =
+            std::env::temp_dir().join(format!("proof-results-skew-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let selected = dir.join("runners").join("selected");
+        let other = dir.join("runners").join("other");
+        std::fs::create_dir_all(&selected).expect("selected");
+        std::fs::create_dir_all(&other).expect("other");
+        let err = ResultsError::Io("adaptor wrote no results.json".into());
+        let hinted = hint_skew_if_runner_unemitted(err.clone(), &selected);
+        assert!(
+            hinted.to_string().contains(PIN_RUNNER_SKEW_HINT),
+            "{hinted}"
+        );
+        std::fs::write(
+            other.join("summarize.py"),
+            "def write_results_next_to_report():\n    pass\n",
+        )
+        .expect("other emit");
+        std::fs::write(selected.join("notes.txt"), "write_results_next_to_report\n")
+            .expect("notes");
+        std::fs::create_dir_all(selected.join("nested")).expect("nested");
+        std::fs::write(
+            selected.join("nested").join("helper.py"),
+            "def write_results_next_to_report():\n    pass\n",
+        )
+        .expect("nested");
+        let still = hint_skew_if_runner_unemitted(err.clone(), &selected);
+        assert!(
+            still.to_string().contains(PIN_RUNNER_SKEW_HINT),
+            "sibling runner / notes / nested py must not count as emit, {still}"
+        );
+        assert!(!runner_tree_emits_results(&selected));
+        std::fs::write(
+            selected.join("summarize.py"),
+            "def write_results_next_to_report():\n    pass\n",
+        )
+        .expect("emit");
+        let clean = hint_skew_if_runner_unemitted(err, &selected);
+        assert!(!clean.to_string().contains(PIN_RUNNER_SKEW_HINT), "{clean}");
+        assert!(runner_tree_emits_results(&selected));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

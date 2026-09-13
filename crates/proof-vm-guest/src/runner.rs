@@ -807,6 +807,13 @@ pub async fn run_paid(
     if exec.timed_out {
         return Err(describe(&exec, &secrets, request.sandbox.deadline_s));
     }
+    // Non-zero adaptor exit is Failed even when report.json / results.json
+    // landed: those files are not a successful Evaluated outcome. Harbor may
+    // exit nonzero after measured trials; run-harbor still prints
+    // scored-already-measured and exits 0 — that path stays Some(0) here.
+    if !matches!(exec.exit, Some(0)) {
+        return Err(describe(&exec, &secrets, request.sandbox.deadline_s));
+    }
     let report_path = output.join("report.json");
     let report: RunnerReport = read_output_doc(&report_path, "report.json").map_err(|e| {
         format!(
@@ -832,7 +839,10 @@ pub async fn run_paid(
                     redact_value(&mut v, &secrets);
                     v
                 })
-                .map_err(|e| e.to_string())
+                .map_err(|e| {
+                    // Selected adaptor only (`<runners>/<id>/`), not cfg.runners_dir.
+                    proof_results::hint_skew_if_runner_unemitted(e, &adaptor.dir).to_string()
+                })
         })
         .transpose()?;
     Ok(RunOutcome {

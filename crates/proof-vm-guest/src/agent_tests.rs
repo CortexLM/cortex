@@ -353,6 +353,53 @@ echo '{"primary_value": 0.5, "flops_used": 7}' > "$PROOF_OUTPUT_DIR/report.json"
     let _ = std::fs::remove_dir_all(&r);
 }
 
+/// Adaptor exit ≠ 0 is Failed even when it wrote `report.json` / `results.json`.
+/// Harbor nonzero after measured trials is the adaptor's problem: run-harbor
+/// still exits 0 after scored-already-measured, and that path is Done.
+#[tokio::test]
+async fn evaluate_nonzero_adaptor_exit_is_fail_closed() {
+    let r = root("nz-exit");
+    let a = agent(&r);
+    hello(&a).await;
+    let (tar, digest) = pack();
+    stage(&a, &tar, &digest).await;
+    let artefact = archive(&[member("recipe/run.sh", b'0', b"echo hi\n")]);
+    let mut eval = req_for(&digest);
+    eval.artifact_digest = hex::encode(Sha256::digest(&artefact));
+    eval.artifact_uri = Some(serve_once(artefact).await);
+    // Write both documents, then fail: neither file is an Evaluated outcome.
+    install_run_without_results(
+        &r,
+        r#"
+echo '{"primary_value": 0.5, "claim_holds": true}' > "$PROOF_OUTPUT_DIR/report.json"
+cat > "$PROOF_OUTPUT_DIR/results.json" <<EOF
+{"schema_version":1,"contract":"generic-custom-v1","topic_id":"${PROOF_TOPIC_ID}","custom_id":"${PROOF_CUSTOM_ID}","submission_digest":"${PROOF_SUBMISSION_DIGEST}","artifact_digest":"${PROOF_ARTIFACT_DIGEST}","primary_value":0.5,"claim_holds":true,"display":{"ok":true}}
+EOF
+echo adaptor-failed-after-report
+exit 1
+"#,
+    );
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::Evaluate {
+                request: eval,
+                checklist_digest: "c".into(),
+                rules_version: 1,
+            }),
+        })
+        .await,
+    );
+    assert!(
+        err.contains("exit") && err.contains("Some(1)"),
+        "nonzero adaptor exit must be Failed with the adaptor tail, got {err}"
+    );
+    assert!(
+        !err.contains("guest pin/runner skew") && !err.contains("rebake"),
+        "exit-gate fail must not blame pin/runner skew, got {err}"
+    );
+    let _ = std::fs::remove_dir_all(&r);
+}
+
 /// Evaluate with a finite `report.json` but no `results.json` is not Done.
 #[tokio::test]
 async fn evaluate_without_results_json_is_fail_closed() {
@@ -382,6 +429,55 @@ async fn evaluate_without_results_json_is_fail_closed() {
     assert!(
         err.contains("results"),
         "missing results.json must fail closed, got {err}"
+    );
+    assert!(
+        err.contains("guest pin/runner skew"),
+        "stub runner without write_results_next_to_report is the skew probe, got {err}"
+    );
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+/// Report-only evaluate does not name pin/runner skew when the guest
+/// runner tree already emits `results.json` (pin MATCH tip).
+#[tokio::test]
+async fn evaluate_report_only_does_not_name_skew_when_runner_emits() {
+    let r = root("no-results-emits");
+    let a = agent(&r);
+    hello(&a).await;
+    let (tar, digest) = pack();
+    stage(&a, &tar, &digest).await;
+    let artefact = archive(&[member("recipe/run.sh", b'0', b"echo hi\n")]);
+    let mut eval = req_for(&digest);
+    eval.artifact_digest = hex::encode(Sha256::digest(&artefact));
+    eval.artifact_uri = Some(serve_once(artefact).await);
+    install_run_without_results(
+        &r,
+        r#"echo '{"primary_value": 0.5, "claim_holds": true}' > "$PROOF_OUTPUT_DIR/report.json""#,
+    );
+    let helper = r.join("runners").join(RUNNER).join("harness");
+    std::fs::create_dir_all(&helper).expect("harness");
+    std::fs::write(
+        helper.join("summarize.py"),
+        "def write_results_next_to_report(out, report, trials, log_tail, secrets):\n    return out\n",
+    )
+    .expect("emit helper");
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::Evaluate {
+                request: eval,
+                checklist_digest: "c".into(),
+                rules_version: 1,
+            }),
+        })
+        .await,
+    );
+    assert!(
+        err.contains("results"),
+        "missing results.json must fail closed, got {err}"
+    );
+    assert!(
+        !err.contains("guest pin/runner skew") && !err.contains("rebake"),
+        "emit helper present is not pin/runner skew, got {err}"
     );
     let _ = std::fs::remove_dir_all(&r);
 }
@@ -525,19 +621,21 @@ async fn bad_reports_and_deadline_cuts_fail_the_job() {
         "echo \"nothing written for $(cat \\\"$PROOF_SECRETS_DIR/inference_key\\\")\"; exit 3",
     );
     let err = failed(a.handle(HostToRlm::Run { job: job() }).await);
-    assert!(err.contains("wrote no report.json"), "{err}");
-    assert!(err.contains("exit Some(3)"), "{err}");
+    assert!(
+        err.contains("exit Some(3)"),
+        "nonzero adaptor exit is Failed with the adaptor tail, got {err}"
+    );
     assert!(!err.contains(SECRET), "{err}");
-    install(
+    // Parse / finite checks only apply when the adaptor exited 0 (otherwise
+    // the exit gate already failed closed and never loads report.json).
+    install_run_without_results(
         &r,
-        "run",
         "echo '{\"primary_value\": \"NaN\"}' > \"$PROOF_OUTPUT_DIR/report.json\"",
     );
     let err = failed(a.handle(HostToRlm::Run { job: job() }).await);
     assert!(err.contains("did not parse"), "{err}");
-    install(
+    install_run_without_results(
         &r,
-        "run",
         "echo '{\"primary_value\": 1e999}' > \"$PROOF_OUTPUT_DIR/report.json\"",
     );
     let err = failed(a.handle(HostToRlm::Run { job: job() }).await);

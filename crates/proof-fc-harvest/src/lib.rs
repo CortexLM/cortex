@@ -171,9 +171,10 @@ async fn after_vsock(
         }
     }
     // Tip runner writes results.json; a guest pin baked before that tree
-    // (pin/runner skew) still sends Done without `report.results`. Attach
-    // from scratch when the file is on disk, else fail closed naming the
-    // skew — never hand CP a paid evaluate with no results. Never invent.
+    // still sends Done without `report.results`. Attach from scratch when
+    // the file is on disk, else fail closed as missing results — never hand
+    // CP a paid evaluate with no results, and do not blame rebake from
+    // report-only alone (pin MATCH tip still 503s that way). Never invent.
     attach_evaluate_results(msg, jail_root, jail_dir, job)
 }
 
@@ -451,8 +452,7 @@ fn refresh_dump_once(
     let dest = jail_dir.join(HARVEST_WORK);
     let overlay = jail_root.join(SCRATCH_TREE).join("work");
     if overlay.is_dir() {
-        let _ = std::fs::remove_dir_all(&dest);
-        copy_tree(&overlay, &dest)
+        replace_dir_with_copy(&overlay, &dest)
             .map_err(|e| HvError::Guest(format!("refresh harvest-work from overlay: {e}")))?;
         let work = work_tree_from_dump(dest)
             .ok_or_else(|| HvError::Guest("refresh harvest-work wrote no work tree".into()))?;
@@ -465,7 +465,6 @@ fn refresh_dump_once(
     if !image.is_file() {
         return Ok(());
     }
-    let _ = std::fs::remove_dir_all(&dest);
     dump_ext4_work(&image, &dest).map_err(HvError::Guest)?;
     let work = work_tree_from_dump(dest)
         .ok_or_else(|| HvError::Guest("debugfs dumped no work tree into harvest-work".into()))?;
@@ -833,14 +832,16 @@ fn debugfs_bin() -> &'static str {
 }
 
 fn dump_ext4_work(image: &Path, dest: &Path) -> Result<(), String> {
-    let _ = std::fs::remove_dir_all(dest);
-    std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
-    let spec = format!("rdump /work {}", dest.display());
+    let tmp = sibling(dest, "new")?;
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("mkdir {}: {e}", tmp.display()))?;
+    let spec = format!("rdump /work {}", tmp.display());
     let out = std::process::Command::new(debugfs_bin())
         .args(["-c", "-R", &spec, &image.display().to_string()])
         .output()
         .map_err(|e| format!("debugfs: {e}"))?;
-    if dest.read_dir().ok().and_then(|mut d| d.next()).is_none() {
+    if tmp.read_dir().ok().and_then(|mut d| d.next()).is_none() {
+        let _ = std::fs::remove_dir_all(&tmp);
         let tail = String::from_utf8_lossy(&out.stderr);
         return Err(format!(
             "debugfs dumped nothing from {} ({})",
@@ -848,7 +849,7 @@ fn dump_ext4_work(image: &Path, dest: &Path) -> Result<(), String> {
             tail.chars().rev().take(200).collect::<String>()
         ));
     }
-    Ok(())
+    install_dir(&tmp, dest)
 }
 
 /// Build [`VmJobOutput`] from a guest `work/` tree already on the host.
@@ -986,11 +987,7 @@ fn harvest_results(
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(proof_results::RESULTS_FILE);
-            let detail = if output_dir.join("report.json").is_file() {
-                proof_results::report_only_missing_results_detail(name, Some(&path))
-            } else {
-                proof_results::missing_results_detail(name, Some(&path))
-            };
+            let detail = proof_results::missing_results_detail(name, Some(&path));
             return Err(HvError::Guest(detail));
         }
         return Ok(None);
@@ -1036,6 +1033,273 @@ fn push_log(logs: &mut Vec<LogFile>, name: &str, path: &Path) {
         name: name.to_owned(),
         bytes: bytes[start..].to_vec(),
     });
+}
+
+/// Durable copy next to a retained jail: `{retain_dir}/{vm_id}-harvest`.
+pub const HARVEST_RETAIN_SUFFIX: &str = "-harvest";
+
+const RCA_NAMES: &[&str] = &[
+    "report.json",
+    "results.json",
+    "harbor.run.log",
+    "runner.log",
+    "harbor.log",
+    "console.log",
+];
+/// Allowlisted RCA files retained before Destroy (T-Rex: 21×1MiB must not
+/// all land). Checked **before** each copy.
+pub const MAX_RCA_FILES: u32 = 16;
+/// Per-file RCA copy cap.
+pub const MAX_RCA_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// Total RCA copy cap across overlay + harvest-work + console.
+pub const MAX_RCA_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
+/// Dirents visited while scanning guest work (stops a 10k-dir walk).
+pub const MAX_RCA_WALK: u32 = 256;
+
+struct RcaBudget {
+    files: u32,
+    bytes: u64,
+    walked: u32,
+}
+
+impl RcaBudget {
+    const fn new() -> Self {
+        Self {
+            files: 0,
+            bytes: 0,
+            walked: 0,
+        }
+    }
+
+    fn skip_reason(&self, len: u64) -> Option<&'static str> {
+        if self.walked >= MAX_RCA_WALK {
+            return Some("walk cap");
+        }
+        if self.files >= MAX_RCA_FILES {
+            return Some("file cap");
+        }
+        if len > MAX_RCA_FILE_BYTES {
+            return Some("per-file cap");
+        }
+        if self.bytes.saturating_add(len) > MAX_RCA_TOTAL_BYTES {
+            return Some("total cap");
+        }
+        None
+    }
+
+    fn full(&self) -> bool {
+        self.walked >= MAX_RCA_WALK
+            || self.files >= MAX_RCA_FILES
+            || self.bytes >= MAX_RCA_TOTAL_BYTES
+    }
+}
+
+/// `{retain_dir}/{vm_id}-harvest`, or `{vm_id}-harvest-{nanos}` if occupied.
+#[must_use]
+pub fn harvest_retain_dest(retain_dir: &Path, vm_id: &str) -> PathBuf {
+    let base = retain_dir.join(format!("{vm_id}{HARVEST_RETAIN_SUFFIX}"));
+    if !base.exists() {
+        return base;
+    }
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |t| t.as_nanos());
+    retain_dir.join(format!("{vm_id}{HARVEST_RETAIN_SUFFIX}-{n}"))
+}
+
+/// Copy guest scratch RCA (`report.json`, `results.json`, `harbor.run.log`,
+/// runner logs) to `dest` **before** Destroy. Fail-soft: a dump miss is
+/// `Ok(0)`; individual file errors and cap overflow are skipped. Never the
+/// job error.
+pub fn snapshot_rca(jail_root: &Path, jail_dir: &Path, dest: &Path) -> Result<u32, String> {
+    let _ = dump_rca_into_jail(jail_root, jail_dir);
+    std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
+    let mut budget = RcaBudget::new();
+    let mut n = 0u32;
+    n = n.saturating_add(copy_rca_tree(
+        &jail_dir.join(HARVEST_WORK),
+        dest,
+        &mut budget,
+    )?);
+    n = n.saturating_add(copy_rca_tree(
+        &jail_root.join(SCRATCH_TREE).join("work"),
+        dest,
+        &mut budget,
+    )?);
+    n = n.saturating_add(copy_named(
+        &jail_dir.join(CONSOLE_LOG),
+        dest,
+        "console.log",
+        &mut budget,
+    ));
+    Ok(n)
+}
+
+/// Run [`snapshot_rca`] on the Tokio blocking pool so teardown does not
+/// stall the async VM worker on a large guest overlay.
+pub async fn snapshot_rca_async(
+    jail_root: PathBuf,
+    jail_dir: PathBuf,
+    dest: PathBuf,
+) -> Result<u32, String> {
+    tokio::task::spawn_blocking(move || snapshot_rca(&jail_root, &jail_dir, &dest))
+        .await
+        .unwrap_or_else(|e| Err(format!("snapshot task: {e}")))
+}
+
+/// Overlay is walked by [`snapshot_rca`] directly. Do not wipe
+/// `harvest-work` to copy it. Ext4-only: dump into a temp dir and replace
+/// only on success.
+fn dump_rca_into_jail(jail_root: &Path, jail_dir: &Path) -> Result<(), String> {
+    let overlay = jail_root.join(SCRATCH_TREE).join("work");
+    if overlay.is_dir() {
+        return Ok(());
+    }
+    let image = jail_root.join(SCRATCH_IN_JAIL);
+    if image.is_file() {
+        dump_ext4_work(&image, &jail_dir.join(HARVEST_WORK))?;
+    }
+    Ok(())
+}
+
+fn sibling(dest: &Path, tag: &str) -> Result<PathBuf, String> {
+    let name = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("no name for {}", dest.display()))?;
+    let parent = dest
+        .parent()
+        .ok_or_else(|| format!("no parent for {}", dest.display()))?;
+    Ok(parent.join(format!(".{name}-{tag}")))
+}
+
+fn install_dir(tmp: &Path, dest: &Path) -> Result<(), String> {
+    let bak = sibling(dest, "old")?;
+    let _ = std::fs::remove_dir_all(&bak);
+    if dest.exists() {
+        std::fs::rename(dest, &bak).map_err(|e| format!("stow {}: {e}", dest.display()))?;
+    }
+    if let Err(e) = std::fs::rename(tmp, dest) {
+        if bak.exists() {
+            let _ = std::fs::rename(&bak, dest);
+        }
+        return Err(format!("install {}: {e}", dest.display()));
+    }
+    let _ = std::fs::remove_dir_all(&bak);
+    Ok(())
+}
+
+fn replace_dir_with_copy(src: &Path, dest: &Path) -> Result<(), String> {
+    let tmp = sibling(dest, "new")?;
+    let _ = std::fs::remove_dir_all(&tmp);
+    if let Err(e) = copy_tree(src, &tmp) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    install_dir(&tmp, dest)
+}
+
+fn copy_rca_tree(src: &Path, dest: &Path, budget: &mut RcaBudget) -> Result<u32, String> {
+    if !src.is_dir() {
+        return Ok(0);
+    }
+    copy_rca_walk(src, src, dest, 0, budget)
+}
+
+fn copy_rca_walk(
+    root: &Path,
+    dir: &Path,
+    dest: &Path,
+    depth: u8,
+    budget: &mut RcaBudget,
+) -> Result<u32, String> {
+    if depth > 8 || budget.full() {
+        return Ok(0);
+    }
+    let mut n = 0u32;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(0);
+    };
+    for e in entries.flatten() {
+        budget.walked = budget.walked.saturating_add(1);
+        if budget.full() {
+            tracing::warn!(path = %dir.display(), "retain-before-destroy skip (walk cap)");
+            break;
+        }
+        let from = e.path();
+        let Ok(meta) = std::fs::symlink_metadata(&from) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            n = n.saturating_add(copy_rca_walk(
+                root,
+                &from,
+                dest,
+                depth.saturating_add(1),
+                budget,
+            )?);
+            continue;
+        }
+        if !meta.is_file() {
+            continue;
+        }
+        let Some(name) = from.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !RCA_NAMES.contains(&name) {
+            continue;
+        }
+        if let Some(why) = budget.skip_reason(meta.len()) {
+            tracing::warn!(path = %from.display(), "retain-before-destroy skip ({why})");
+            continue;
+        }
+        // Caps already applied; copy this allowlisted file only.
+        let rel = from.strip_prefix(root).unwrap_or(from.as_path());
+        let to = dest.join(rel);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        match copy_regular_nofollow(&from, &to) {
+            Ok(()) => {
+                budget.files = budget.files.saturating_add(1);
+                budget.bytes = budget.bytes.saturating_add(meta.len());
+                n = n.saturating_add(1);
+            }
+            Err(e) => tracing::warn!(
+                path = %from.display(),
+                "retain-before-destroy skip: {e}"
+            ),
+        }
+    }
+    Ok(n)
+}
+
+fn copy_named(from: &Path, dest: &Path, name: &str, budget: &mut RcaBudget) -> u32 {
+    if !from.is_file() {
+        return 0;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(from) else {
+        return 0;
+    };
+    if let Some(why) = budget.skip_reason(meta.len()) {
+        tracing::warn!(path = %from.display(), "retain-before-destroy skip ({why})");
+        return 0;
+    }
+    match copy_regular_nofollow(from, &dest.join(name)) {
+        Ok(()) => {
+            budget.files = budget.files.saturating_add(1);
+            budget.bytes = budget.bytes.saturating_add(meta.len());
+            1
+        }
+        Err(e) => {
+            tracing::warn!(path = %from.display(), "retain-before-destroy skip: {e}");
+            0
+        }
+    }
 }
 
 #[cfg(test)]
