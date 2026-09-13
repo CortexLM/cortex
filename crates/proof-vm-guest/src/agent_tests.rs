@@ -390,7 +390,7 @@ exit 1
         .await,
     );
     assert!(
-        err.contains("exit") && (err.contains("1") || err.contains("Some(1)")),
+        err.contains("exit") && err.contains("Some(1)"),
         "nonzero adaptor exit must be Failed with the adaptor tail, got {err}"
     );
     assert!(
@@ -621,19 +621,21 @@ async fn bad_reports_and_deadline_cuts_fail_the_job() {
         "echo \"nothing written for $(cat \\\"$PROOF_SECRETS_DIR/inference_key\\\")\"; exit 3",
     );
     let err = failed(a.handle(HostToRlm::Run { job: job() }).await);
-    assert!(err.contains("wrote no report.json"), "{err}");
-    assert!(err.contains("exit Some(3)"), "{err}");
+    assert!(
+        err.contains("exit Some(3)"),
+        "nonzero adaptor exit is Failed with the adaptor tail, got {err}"
+    );
     assert!(!err.contains(SECRET), "{err}");
-    install(
+    // Parse / finite checks only apply when the adaptor exited 0 (otherwise
+    // the exit gate already failed closed and never loads report.json).
+    install_run_without_results(
         &r,
-        "run",
         "echo '{\"primary_value\": \"NaN\"}' > \"$PROOF_OUTPUT_DIR/report.json\"",
     );
     let err = failed(a.handle(HostToRlm::Run { job: job() }).await);
     assert!(err.contains("did not parse"), "{err}");
-    install(
+    install_run_without_results(
         &r,
-        "run",
         "echo '{\"primary_value\": 1e999}' > \"$PROOF_OUTPUT_DIR/report.json\"",
     );
     let err = failed(a.handle(HostToRlm::Run { job: job() }).await);
