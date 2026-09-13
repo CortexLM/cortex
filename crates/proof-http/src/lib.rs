@@ -463,6 +463,9 @@ pub struct SubmitResp {
     /// Why the row is where it is: the deferred-scoring note on a `queued`
     /// row, the failed gates on a reject. `None` on a clean pass.
     pub detail: Option<String>,
+    /// Evaluate results JSON when persist captured it (skip when none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub results: Option<serde_json::Value>,
 }
 
 impl SubmitResp {
@@ -475,6 +478,7 @@ impl SubmitResp {
             eval_backend: backend,
             eligible,
             detail: row.detail.clone(),
+            results: row.results.clone(),
         }
     }
 }
@@ -699,6 +703,7 @@ async fn submit(
         state: SubmissionState::Queued,
         receipt_json: None,
         verdict: None,
+        results: None,
         detail: None,
     };
 
@@ -1186,6 +1191,23 @@ async fn persist_scored(
         Some(format!("gates={:?}", verdict.failed))
     };
     row.verdict = Some(verdict);
+    if topic.metric.family == MetricFamily::Custom && pass {
+        let Some(live) = st.live() else {
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "evaluate results unavailable; refusing a pass row without results",
+            ));
+        };
+        let Some(results) = live.display_results(&row.submission_digest) else {
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "evaluate results expired before persist; refusing a pass row without results",
+            ));
+        };
+        row.results = Some(results);
+    } else if let Some(live) = st.live() {
+        row.results = live.display_results(&row.submission_digest);
+    }
     let row = st
         .store
         .insert(row)
@@ -3328,6 +3350,8 @@ mod tests {
         inner: StubScorer,
         custom_id: String,
         wired: bool,
+        /// When false, `display_results` is empty so persist must refuse a pass.
+        emit_results: bool,
         persisted: std::sync::Mutex<Vec<(String, String, bool)>>,
     }
 
@@ -3337,7 +3361,15 @@ mod tests {
                 inner: StubScorer::win(),
                 custom_id: custom_id.into(),
                 wired: true,
+                emit_results: true,
                 persisted: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn win_without_results(custom_id: &str) -> Self {
+            Self {
+                emit_results: false,
+                ..Self::win(custom_id)
             }
         }
 
@@ -3450,6 +3482,23 @@ mod tests {
                 .lock()
                 .expect("persisted")
                 .push((topic_id.into(), id.into(), promoted));
+        }
+
+        fn display_results(&self, submission_digest: &str) -> Option<serde_json::Value> {
+            if !self.wired || !self.emit_results {
+                return None;
+            }
+            Some(serde_json::json!({
+                "schema_version": 1,
+                "contract": "generic-custom-v1",
+                "topic_id": "custom-topic-v0",
+                "custom_id": self.custom_id,
+                "submission_digest": submission_digest,
+                "artifact_digest": "aa".repeat(32),
+                "primary_value": 0.7,
+                "claim_holds": true,
+                "display": {"ok": true},
+            }))
         }
     }
 
@@ -3615,10 +3664,48 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::CREATED, "{created}");
         assert_eq!(created["state"], "champion", "{created}");
+        assert_eq!(created["results"]["contract"], "generic-custom-v1");
         assert_eq!(scorer.inner.hits.load(Ordering::SeqCst), 1);
         let persisted = scorer.persisted.lock().expect("p").clone();
         assert_eq!(persisted.len(), 1, "{persisted:?}");
         assert_eq!(persisted[0].0, "custom-topic-v0");
+    }
+
+    /// A custom pass whose pending results were reaped (or never stashed)
+    /// must not persist a successful row with `results: None`.
+    #[tokio::test]
+    async fn a_custom_pass_without_results_is_503_and_does_not_persist() {
+        let scorer = Arc::new(FamilyStub::win_without_results("topic_minted_metric"));
+        let app = app_with_custom(scorer.clone());
+        let (st, body) = json_req(
+            app.clone(),
+            "POST",
+            "/v1/submissions",
+            submit_body(
+                "expired-results",
+                &serde_json::json!({
+                    "topic_id": "custom-topic-v0",
+                    "artifact_uri": "https://example.invalid/expired-results.zip",
+                }),
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("results"),
+            "{body}"
+        );
+        let (st, list) = json_req(app, "GET", "/v1/submissions", serde_json::json!({}), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(
+            list["items"].as_array().is_some_and(Vec::is_empty),
+            "a pass without results must not bank a row: {list}"
+        );
+        assert!(scorer.persisted.lock().expect("p").is_empty());
     }
 
     /// A registered runner whose topic VM is not wired: the topic is open

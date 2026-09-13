@@ -126,6 +126,11 @@ pub struct Submission {
     pub receipt_json: Option<String>,
     /// Judge verdict (if any).
     pub verdict: Option<ProofVerdict>,
+    /// Topic-defined complete RLM results JSON (custom evaluate only).
+    /// Harvest `nll` / `throughput` rows omit this. Frontend reads it on
+    /// `GET /v1/submissions/{id}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<serde_json::Value>,
     /// Reject / gate reason.
     pub detail: Option<String>,
 }
@@ -1341,6 +1346,7 @@ mod tests {
             state: SubmissionState::Queued,
             receipt_json: None,
             verdict: None,
+            results: None,
             detail: Some("scoring deferred".into()),
         }
     }

@@ -302,6 +302,17 @@ Evidence may truncate the serialized trial list; the mean does not.
 Miner-authored `report.json` is deleted and ignored — it does not skip
 Harbor summarize.
 
+`run` also writes `$PROOF_OUTPUT_DIR/results.json` (or
+`$PROOF_PARAM_RESULTS_PATH` when the topic pins a single `*.json`
+segment) — the obligatory complete Harbor document (`tbench-harbor-v1`):
+untruncated `trials`, `n_scored` / `n_measured`, `mean_reward` (=
+`primary_value`), agent identity, and `logs.harbor_run_tail` /
+`logs.harbor_run_log`. A miner-authored results file is deleted with
+`report.json` before Harbor runs. The guest refuses Done when this file
+is missing or does not bind the scored report. Frontend consumers read
+the same object on `GET /v1/submissions/{id}` as `results` and at the
+artefact zip root as `results.json`.
+
 `inspect` writes `$PROOF_OUTPUT_DIR/checklist.json` (no Harbor, no keys).
 
 ## Single-task smoke

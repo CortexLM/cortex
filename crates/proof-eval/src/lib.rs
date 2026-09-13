@@ -390,6 +390,15 @@ pub trait LiveScorer: Send + Sync {
     ) {
         let _ = (topic_id, submission_digest, submission_id, promoted);
     }
+
+    /// Topic-defined complete results JSON for a scored-but-not-yet-persisted
+    /// custom evaluate. Default: none (harvest families have no RLM results
+    /// file). Peeked onto `GET /v1/submissions/{id}` before the artefact zip
+    /// is written.
+    fn display_results(&self, submission_digest: &str) -> Option<serde_json::Value> {
+        let _ = submission_digest;
+        None
+    }
 }
 
 /// Route scoring by metric family: `custom` topics go to the registered
@@ -562,6 +571,17 @@ impl LiveScorer for FamilyMux {
             c.on_persisted(topic_id, submission_digest, submission_id, promoted)
                 .await;
         }
+    }
+
+    fn display_results(&self, submission_digest: &str) -> Option<serde_json::Value> {
+        self.custom
+            .as_deref()
+            .and_then(|c| c.display_results(submission_digest))
+            .or_else(|| {
+                self.default
+                    .as_deref()
+                    .and_then(|d| d.display_results(submission_digest))
+            })
     }
 }
 

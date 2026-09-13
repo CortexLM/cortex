@@ -505,6 +505,22 @@ def driver_exec(
     if not isinstance(report.get("primary_value"), (int, float)):
         log("report.json has no finite primary_value → Failed")
         return 1
+    if job == "evaluate":
+        params = request["constraints"].get("params") or {}
+        results_name = (params.get("results_path") or "").strip() or "results.json"
+        results_path = output / results_name
+        if not results_path.is_file():
+            log(f"no {results_name} → this would be Failed (503, no row)")
+            sys.stderr.write(tail + "\n")
+            return 1
+        results = json.loads(results_path.read_text(encoding="utf-8"))
+        if results.get("primary_value") != report.get("primary_value"):
+            log("results.json primary_value does not match report.json → Failed")
+            return 1
+        if bool(results.get("claim_holds", False)) != bool(report.get("claim_holds", False)):
+            log("results.json claim_holds does not match report.json → Failed")
+            return 1
+        report["results"] = results
     print_outcome({"driver": "exec", "wall_s": round(wall), "exit": proc.returncode, "report": report}, secrets, args.out)
     return 0
 

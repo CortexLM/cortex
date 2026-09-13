@@ -577,9 +577,10 @@ impl Hypervisor for FirecrackerHypervisor {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
 
     use super::*;
-    use proof_rlm::fixtures::{pinned_template, request};
+    use proof_rlm::fixtures::{experiment_request, pinned_template, request};
     use proof_vm_proto::tar::fixtures::{archive, member};
     use sha2::{Digest, Sha256};
 
@@ -1155,13 +1156,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(c.chroot_base.parent().unwrap_or(&c.chroot_base));
     }
 
-    /// P0: vsock EOF after `Run` with Harbor's `report.json` already on
-    /// scratch must return `Evaluated` (`primary_value` kept), not sit until
-    /// the job budget and refuse. Stand-in process + fake guest, no FC.
+    /// Evaluate scratch used by vsock-drop harvest: `report.json` plus a
+    /// conforming sibling `results.json` bound to `req`.
+    fn plant_evaluate_scratch(work: &Path, req: &proof_rlm::CustomRunRequest, with_results: bool) {
+        let output = work.join("0001-evaluate").join("output");
+        std::fs::create_dir_all(&output).expect("work");
+        std::fs::write(
+            output.join("report.json"),
+            r#"{"primary_value": 0.73, "claim_holds": true, "flops_used": 42, "evidence": {"harbor_exit": 0}}"#,
+        )
+        .expect("report");
+        if with_results {
+            let display = serde_json::json!({"harbor_exit": 0});
+            let doc = proof_results::generic_document(&req.results_bind(0.73, true), &display);
+            std::fs::write(
+                output.join("results.json"),
+                serde_json::to_string(&doc).expect("results"),
+            )
+            .expect("results");
+        }
+    }
+
+    /// P0: vsock EOF after `Run` with Harbor's `report.json` + conforming
+    /// `results.json` already on scratch must return `Evaluated`
+    /// (`primary_value` kept), not sit until the job budget and refuse.
+    /// Stand-in process + fake guest, no FC.
     #[tokio::test]
     async fn harvest_on_vsock_fail_returns_evaluated_with_report_primary_value() {
         let c = stand_in_host("donedrop");
-        let req = proof_rlm::fixtures::experiment_request(None);
+        let req = experiment_request(None);
         let spec = TopicVmSpec::for_topic(&req.topic_id, pinned_template(), req.sandbox.clone());
         let shell = Arc::new(RecordingShell::default());
         let hv = FirecrackerHypervisor::with_shell(c.clone(), shell.clone()).expect("config");
@@ -1170,16 +1193,13 @@ mod tests {
             .boot_verified("topic-a-0004", &spec, c.image_dir.join("rlm.ext4"))
             .await
             .expect("boot");
-        let work = c
-            .jail_root("topic-a-0004")
-            .join(proof_fc_harvest::SCRATCH_TREE)
-            .join("work");
-        std::fs::create_dir_all(work.join("0001-evaluate").join("output")).expect("work");
-        std::fs::write(
-            work.join("0001-evaluate").join("output").join("report.json"),
-            r#"{"primary_value": 0.73, "claim_holds": true, "flops_used": 42, "evidence": {"harbor_exit": 0}}"#,
-        )
-        .expect("report");
+        plant_evaluate_scratch(
+            &c.jail_root("topic-a-0004")
+                .join(proof_fc_harvest::SCRATCH_TREE)
+                .join("work"),
+            &req,
+            true,
+        );
         let job = VmJob::Evaluate {
             request: req.clone(),
             checklist_digest: "c".into(),
@@ -1196,11 +1216,54 @@ mod tests {
         );
         assert_eq!(run.report.flops_used, Some(42));
         assert!(run.report.sandboxed);
+        assert!(
+            run.report.results.is_some(),
+            "evaluate harvest must carry results.json"
+        );
         let _ = guest.await;
         assert!(hv
             .teardown(&vm, RetainPolicy::Destroy)
             .await
             .expect("teardown"));
+        let _ = std::fs::remove_dir_all(c.chroot_base.parent().unwrap_or(&c.chroot_base));
+    }
+
+    /// Same vsock-drop path: `report.json` without sibling `results.json`
+    /// is fail-closed (no Evaluated).
+    #[tokio::test]
+    async fn harvest_on_vsock_fail_without_results_json_is_fail_closed() {
+        let c = stand_in_host("donedrop-no-results");
+        let req = experiment_request(None);
+        let spec = TopicVmSpec::for_topic(&req.topic_id, pinned_template(), req.sandbox.clone());
+        let shell = Arc::new(RecordingShell::default());
+        let hv = FirecrackerHypervisor::with_shell(c.clone(), shell.clone()).expect("config");
+        let guest = serve_fake_guest_dropping_done(c.jail_root("topic-a-0004"));
+        let vm = hv
+            .boot_verified("topic-a-0004", &spec, c.image_dir.join("rlm.ext4"))
+            .await
+            .expect("boot");
+        plant_evaluate_scratch(
+            &c.jail_root("topic-a-0004")
+                .join(proof_fc_harvest::SCRATCH_TREE)
+                .join("work"),
+            &req,
+            false,
+        );
+        let job = VmJob::Evaluate {
+            request: req.clone(),
+            checklist_digest: "c".into(),
+            rules_version: 1,
+        };
+        let err = hv
+            .run_job(&vm, &job)
+            .await
+            .expect_err("missing results.json must not harvest a pass");
+        assert!(
+            err.to_string().contains("results.json") || err.to_string().contains("results json"),
+            "want a results bind refusal, got {err}"
+        );
+        let _ = guest.await;
+        let _ = hv.teardown(&vm, RetainPolicy::Destroy).await;
         let _ = std::fs::remove_dir_all(c.chroot_base.parent().unwrap_or(&c.chroot_base));
     }
 

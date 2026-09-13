@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 hex = "0.4"
 libc = "0.2"
+proof-results = { path = "../proof-results" }
 proof-rlm = { path = "../proof-rlm" }
 proof-vm-agent = { path = "../proof-vm-agent" }
 proof-vm-proto = { path = "../proof-vm-proto" }

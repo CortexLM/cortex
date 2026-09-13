@@ -40,6 +40,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use proof_results::{load_file, pinned_contract, results_path, validate, ReportBind};
 use proof_rlm::{
     CustomRunReport, CustomRunRequest, LogFile, RunOutcome, VmJob, VmJobOutput, RUN_REPORT_SCHEMA,
 };
@@ -203,7 +204,10 @@ fn or_err(
         }
         Err(harvest_err) => {
             let msg = harvest_err.to_string();
-            if msg.contains("harvest-work incomplete") {
+            if msg.contains("harvest-work incomplete")
+                || msg.contains("results.json")
+                || msg.contains("results json")
+            {
                 tracing::warn!("vsock lost the Done frame ({err}); {msg}");
                 return Err(harvest_err);
             }
@@ -821,7 +825,13 @@ pub fn from_work_tree(
             work_root.display()
         ))
     })?;
-    let run = reconstruct(request, &report_path, work_root, jail_dir)?;
+    let run = reconstruct(
+        request,
+        &report_path,
+        work_root,
+        jail_dir,
+        kind == "evaluate",
+    )?;
     match kind {
         "baseline" => Ok(VmJobOutput::Baseline(run.report)),
         _ => Ok(VmJobOutput::Evaluated(run)),
@@ -847,6 +857,7 @@ fn reconstruct(
     report_path: &Path,
     work_root: &Path,
     jail_dir: &Path,
+    require_results: bool,
 ) -> Result<RunOutcome, HvError> {
     let meta = std::fs::metadata(report_path)
         .map_err(|e| HvError::Guest(format!("harvest report {}: {e}", report_path.display())))?;
@@ -881,6 +892,14 @@ fn reconstruct(
     evidence
         .entry("host_harvest".into())
         .or_insert_with(|| serde_json::json!("vsock_done_drop"));
+    let output_dir = report_path.parent().unwrap_or(work_root);
+    let results = harvest_results(
+        request,
+        output_dir,
+        guest.primary_value,
+        guest.claim_holds,
+        require_results,
+    )?;
     let report = CustomRunReport {
         schema_version: RUN_REPORT_SCHEMA,
         topic_id: request.topic_id.clone(),
@@ -893,6 +912,7 @@ fn reconstruct(
         sandboxed: true,
         flops_used: guest.flops_used,
         evidence,
+        results,
     };
     report
         .verify(request)
@@ -901,6 +921,42 @@ fn reconstruct(
         report,
         logs: collect_logs(work_root, jail_dir),
     })
+}
+
+fn harvest_results(
+    request: &CustomRunRequest,
+    output_dir: &Path,
+    primary_value: f64,
+    claim_holds: bool,
+    required: bool,
+) -> Result<Option<serde_json::Value>, HvError> {
+    let path = results_path(output_dir, &request.constraints.params)
+        .map_err(|e| HvError::Guest(e.to_string()))?;
+    if !path.is_file() {
+        if required {
+            return Err(HvError::Guest(format!(
+                "no {} in {}",
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(proof_results::RESULTS_FILE),
+                output_dir.display()
+            )));
+        }
+        return Ok(None);
+    }
+    let value = load_file(&path).map_err(|e| HvError::Guest(e.to_string()))?;
+    let bind = ReportBind {
+        topic_id: &request.topic_id,
+        custom_id: &request.custom_id,
+        submission_digest: &request.submission_digest,
+        artifact_digest: &request.artifact_digest,
+        primary_value,
+        claim_holds,
+    };
+    let pinned =
+        pinned_contract(&request.constraints.params).map_err(|e| HvError::Guest(e.to_string()))?;
+    validate(&value, &bind, pinned.as_deref()).map_err(|e| HvError::Guest(e.to_string()))?;
+    Ok(Some(value))
 }
 
 fn collect_logs(work_root: &Path, jail_dir: &Path) -> Vec<LogFile> {

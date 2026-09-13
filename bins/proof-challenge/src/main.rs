@@ -1073,6 +1073,7 @@ mod tests {
                 state: proof_store::SubmissionState::Queued,
                 receipt_json: None,
                 verdict: None,
+                results: None,
                 detail: None,
             })
             .expect("mint");
@@ -1119,6 +1120,7 @@ mod tests {
                 state: proof_store::SubmissionState::Queued,
                 receipt_json: None,
                 verdict: None,
+                results: None,
                 detail: None,
             })
             .expect("mint");

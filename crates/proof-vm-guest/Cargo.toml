@@ -12,6 +12,7 @@ publish = false
 hex = "0.4"
 proof-canon = { path = "../proof-canon" }
 proof-experiment = { path = "../proof-experiment" }
+proof-results = { path = "../proof-results" }
 proof-rlm = { path = "../proof-rlm" }
 proof-task = { path = "../proof-task" }
 proof-vm-proto = { path = "../proof-vm-proto" }

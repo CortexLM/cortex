@@ -276,6 +276,23 @@ impl CustomRunRequest {
         self
     }
 
+    /// Facts a results JSON must echo for this request (evaluate bind).
+    #[must_use]
+    pub fn results_bind(
+        &self,
+        primary_value: f64,
+        claim_holds: bool,
+    ) -> proof_results::ReportBind<'_> {
+        proof_results::ReportBind::new(
+            &self.topic_id,
+            &self.custom_id,
+            &self.submission_digest,
+            &self.artifact_digest,
+            primary_value,
+            claim_holds,
+        )
+    }
+
     /// Bind the miner's own BYOK environment to this run.
     ///
     /// The caller has already held `env` to the signed topic's allowlist
@@ -364,6 +381,10 @@ pub struct CustomRunReport {
     pub flops_used: Option<u64>,
     /// Opaque runner evidence (per-task rows, timings). Shipped in the artefact.
     pub evidence: BTreeMap<String, serde_json::Value>,
+    /// Topic-defined complete results JSON (display/audit). Required on a
+    /// successful evaluate; absent on baseline / pre-spend reject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<serde_json::Value>,
 }
 
 /// Why a report is not evidence.

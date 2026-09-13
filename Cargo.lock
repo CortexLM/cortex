@@ -3809,6 +3809,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "libc",
+ "proof-results",
  "proof-rlm",
  "proof-vm-agent",
  "proof-vm-proto",
@@ -3826,6 +3827,7 @@ dependencies = [
  "async-trait",
  "hex",
  "proof-fc-harvest",
+ "proof-results",
  "proof-rlm",
  "proof-vm-agent",
  "proof-vm-proto",
@@ -3892,6 +3894,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "proof-results"
+version = "0.1.0"
+dependencies = [
+ "proof-canon",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "proof-rlm"
 version = "0.1.0"
 dependencies = [
@@ -3900,6 +3912,7 @@ dependencies = [
  "hex",
  "proof-canon",
  "proof-experiment",
+ "proof-results",
  "proof-score",
  "proof-task",
  "serde",
@@ -3924,6 +3937,7 @@ dependencies = [
  "proof-executor",
  "proof-experiment",
  "proof-http",
+ "proof-results",
  "proof-rlm",
  "proof-rlm-store",
  "proof-score",
@@ -4050,6 +4064,7 @@ dependencies = [
  "hex",
  "proof-canon",
  "proof-experiment",
+ "proof-results",
  "proof-rlm",
  "proof-task",
  "proof-vm-proto",

@@ -12,8 +12,8 @@
 //!   the row is persisted, so promotion is decided and written against the
 //!   store's current best and a worse run can never displace a champion.
 //! - [`ArtefactStore`] writes `{root}/{topic_id}/{submission_id}.zip`
-//!   (`manifest.json`, `artifact/`, `report.json`, `checklist.json`,
-//!   `baseline_ref.json`, `logs/`) once the row is persisted, `best.json`
+//!   (`manifest.json`, `artifact/`, `report.json`, `results.json`,
+//!   `checklist.json`, `baseline_ref.json`, `logs/`) once the row is persisted, `best.json`
 //!   on promotion, and `events.jsonl` (public events) — with metadata and
 //!   the promotion continuum mirrored into the RLM store.
 //! - [`TopicSetup`] drives `draft → … → baselining` over the topic-VM
@@ -44,5 +44,6 @@ pub use artefact::{
     CHECKLIST_FILE, DEFAULT_ARTEFACT_ROOT, EVENTS_FILE, LOGS_DIR, MANIFEST_FILE, MAX_ENTRY_PATH,
     REPORT_FILE,
 };
+pub use proof_results::RESULTS_FILE;
 pub use scorer::{RlmScorer, DEFAULT_LEASE_TTL};
 pub use setup::{SetupError, SetupOutcome, TopicSetup};

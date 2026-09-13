@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use proof_results::{generic_document, ReportBind};
 use proof_rlm::fixtures::{experiment_request, request};
 use proof_rlm::{CustomRunReport, RunOutcome, VmJob, VmJobOutput, RUN_REPORT_SCHEMA};
 use proof_vm_agent::HvError;
@@ -29,6 +30,43 @@ fn plant(work: &Path, kind: &str, seq: &str, body: &str) {
     let dir = work.join(format!("{seq}-{kind}")).join("output");
     std::fs::create_dir_all(&dir).expect("output");
     std::fs::write(dir.join("report.json"), body).expect("report");
+    if kind == "evaluate" {
+        plant_results(&dir, body, &request());
+    }
+}
+
+fn plant_results(dir: &Path, report_body: &str, req: &proof_rlm::CustomRunRequest) {
+    let v: serde_json::Value =
+        serde_json::from_str(report_body).unwrap_or_else(|_| serde_json::json!({}));
+    let primary = v.get("primary_value").and_then(serde_json::Value::as_f64);
+    let Some(primary) = primary.filter(|p| p.is_finite()) else {
+        return;
+    };
+    let claim = v
+        .get("claim_holds")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let display = v
+        .get("evidence")
+        .cloned()
+        .filter(|e| e.as_object().is_some_and(|o| !o.is_empty()))
+        .unwrap_or_else(|| serde_json::json!({"harvest": true}));
+    let doc = generic_document(
+        &ReportBind {
+            topic_id: &req.topic_id,
+            custom_id: &req.custom_id,
+            submission_digest: &req.submission_digest,
+            artifact_digest: &req.artifact_digest,
+            primary_value: primary,
+            claim_holds: claim,
+        },
+        &display,
+    );
+    std::fs::write(
+        dir.join("results.json"),
+        serde_json::to_string(&doc).expect("results"),
+    )
+    .expect("results");
 }
 
 fn plant_trial(work: &Path, seq_kind: &str, job: &str, trial: &str, reward: &str) {
@@ -134,6 +172,10 @@ fn harvest_on_vsock_fail_returns_evaluated_with_report_primary_value() {
     assert_eq!(run.report.flops_used, Some(42));
     assert!(run.report.sandboxed);
     assert!(run.report.claim_holds);
+    assert!(
+        run.report.results.is_some(),
+        "evaluate harvest must carry results.json"
+    );
     assert_eq!(
         run.report
             .evidence
@@ -142,6 +184,27 @@ fn harvest_on_vsock_fail_returns_evaluated_with_report_primary_value() {
         Some("vsock_done_drop")
     );
     run.report.verify(&experiment_request(None)).expect("bound");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn evaluate_harvest_without_results_json_is_fail_closed() {
+    let root = tree("no-results");
+    let work = root.join("work");
+    plant(
+        &work,
+        "evaluate",
+        "0001",
+        r#"{"primary_value": 0.5, "claim_holds": true, "evidence": {"n": 1}}"#,
+    );
+    std::fs::remove_file(
+        work.join("0001-evaluate")
+            .join("output")
+            .join("results.json"),
+    )
+    .expect("drop results");
+    let err = from_work_tree(&work, &root, &evaluate_job()).expect_err("no results");
+    assert!(err.to_string().contains("results.json"), "{err}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1150,6 +1213,7 @@ fn vsock_done_n2() -> RlmToHost {
                 sandboxed: true,
                 flops_used: None,
                 evidence,
+                results: None,
             },
             logs: vec![],
         }),

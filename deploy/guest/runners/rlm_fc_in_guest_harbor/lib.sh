@@ -79,6 +79,26 @@ proof_relative_ok() {
     esac
 }
 
+# Same contract as `proof_results::results_file_name`: trim, then one safe
+# ASCII `*.json` segment (8–64 bytes, case-insensitive suffix, no `/`,
+# no leading `.`). Unicode letters are refused.
+proof_results_file_name() {
+    local name n
+    name=$(printf '%s' "${1:-results.json}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -n "$name" ] || name=results.json
+    n=${#name}
+    [ "$n" -ge 8 ] && [ "$n" -le 64 ] || return 1
+    case "$name" in
+        */* | .* | . | ..) return 1 ;;
+        *.[Jj][Ss][Oo][Nn]) ;;
+        *) return 1 ;;
+    esac
+    case "$name" in
+        *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    printf '%s\n' "$name"
+}
+
 proof_require_tasks() {
     : "${PROOF_PACK_DIR:?PROOF_PACK_DIR is required}"
     local tasks_rel="${PROOF_PARAM_TASKS_DIR:?constraints.params.tasks_dir is required}"

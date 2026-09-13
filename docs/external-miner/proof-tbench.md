@@ -508,6 +508,17 @@ Runs on one topic are scored and crowned one at a time against the best at that
 moment, so a run that is not strictly better than the reigning champion never
 replaces it.
 
+A scored evaluate also carries **`results`**: the complete Harbor job
+summary (`contract` `tbench-harbor-v1` / `harbor-trials-v1`). That is
+what the Arcade frontend renders — every trial's reward and outcome,
+`n_scored` / `n_measured` / `n_agent_exceptions`, `mean_reward` (equals
+`primary_value`), agent identity, and `logs.harbor_run_tail` /
+`logs.harbor_run_log`. It is **obligatory**: a missing or non-conforming
+file is **503** (no pass row), never a thin `primary_value` alone. The
+same JSON is at the artefact zip root as `results.json`. Consensus
+scoring still reads only `report.json`; `results` must match those
+facts. Shape: [proof.md § Complete results JSON](./proof.md#complete-results-json).
+
 ## 7. What `tbench` pays
 
 `payout_mode` is `discovery`, so the topic's mass splits two ways:
@@ -568,6 +579,7 @@ you will actually meet on `tbench`:
 | **400** `artifact required` | You left both the upload and the locator out. `tbench` is `custom` | no |
 | **400** `artifact is not a tar archive` / gzip / no file content | The upload is not an uncompressed tar with file bytes | no |
 | **503** staged artefact missing / digest mismatch | Upload evaluate: the host no longer holds matching vault bytes. The row is untouched | live: no; deferred: queued |
+| **503** missing / invalid `results.json` | Evaluate produced no Harbor results document, or it does not bind the scored primary / trials | no |
 | **400** `artifact_digest is the sha256 of empty input …` | You hashed nothing, or an empty tar | no |
 | **400** invalid `miner_hotkey` / `artifact_digest` | Not exactly 64 lowercase hex. The host never normalises a hex field | no |
 | **401** `hotkey_signature required` / `invalid` | Missing signature, or a `claim`, `declared_flops`, `manifest`, or nonce that differs from what you signed | no |

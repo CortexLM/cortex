@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "contract": "tbench-harbor-v1",
+  "topic_id": "tbench-x0032",
+  "custom_id": "tbench_terminal_bench",
+  "submission_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "artifact_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "primary_value": 0.4,
+  "claim_holds": true,
+  "n_scored": 10,
+  "n_measured": 8,
+  "n_agent_exceptions": 2,
+  "mean_reward": 0.4,
+  "agent": "proof_python_agent:ProofPythonAgent",
+  "agent_source": "artifact_dir/recipe/agent",
+  "harness_kind": "python",
+  "agent_exception_policy": "zero",
+  "harbor_exit": 0,
+  "trials": [
+    {"name": "hello-world__1", "reward": 1.0, "outcome": "measured"},
+    {"name": "fix-git-diff__1", "reward": 1.0, "outcome": "measured"},
+    {"name": "csv-to-parquet__1", "reward": 0.0, "outcome": "measured"},
+    {
+      "name": "build-tmux__1",
+      "reward": 0.0,
+      "outcome": "agent_exception",
+      "exception_type": "RuntimeError",
+      "exception_message": "Command timed out after 120 seconds"
+    },
+    {"name": "nginx-config__1", "reward": 1.0, "outcome": "measured"},
+    {"name": "sqlite-query__1", "reward": 1.0, "outcome": "measured"},
+    {
+      "name": "kernel-module__1",
+      "reward": 0.0,
+      "outcome": "agent_exception",
+      "exception_type": "RuntimeError",
+      "exception_message": "agent raised during harness"
+    },
+    {"name": "regex-extract__1", "reward": 0.0, "outcome": "measured"},
+    {"name": "json-schema__1", "reward": 0.0, "outcome": "measured"},
+    {"name": "path-rewrite__1", "reward": 0.0, "outcome": "measured"}
+  ],
+  "agent_exception_trials": [
+    {
+      "name": "build-tmux__1",
+      "exception_type": "RuntimeError",
+      "exception_message": "Command timed out after 120 seconds"
+    },
+    {
+      "name": "kernel-module__1",
+      "exception_type": "RuntimeError",
+      "exception_message": "agent raised during harness"
+    }
+  ],
+  "logs": {
+    "harbor_run_log": "logs/harbor.run.log",
+    "harbor_run_tail": "harbor run: 10 trials, 8 measured, 2 agent_exception; mean_reward=0.4"
+  }
+}

@@ -14,6 +14,7 @@ hex = "0.4"
 proof-canon = { path = "../proof-canon" }
 proof-eval = { path = "../proof-eval" }
 proof-executor = { path = "../proof-executor" }
+proof-results = { path = "../proof-results" }
 proof-rlm = { path = "../proof-rlm" }
 proof-rlm-store = { path = "../proof-rlm-store" }
 proof-score = { path = "../proof-score" }
