@@ -1046,20 +1046,35 @@ const RCA_NAMES: &[&str] = &[
     "harbor.log",
     "console.log",
 ];
-/// Allowlisted RCA files retained before Destroy (T-Rex bound).
-pub const MAX_RCA_FILES: u32 = 32;
+/// Allowlisted RCA files retained before Destroy (T-Rex: 21×1MiB must not
+/// all land). Checked **before** each copy.
+pub const MAX_RCA_FILES: u32 = 16;
 /// Per-file RCA copy cap.
 pub const MAX_RCA_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// Total RCA copy cap across overlay + harvest-work + console.
 pub const MAX_RCA_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
+/// Dirents visited while scanning guest work (stops a 10k-dir walk).
+pub const MAX_RCA_WALK: u32 = 256;
 
 struct RcaBudget {
     files: u32,
     bytes: u64,
+    walked: u32,
 }
 
 impl RcaBudget {
+    const fn new() -> Self {
+        Self {
+            files: 0,
+            bytes: 0,
+            walked: 0,
+        }
+    }
+
     fn skip_reason(&self, len: u64) -> Option<&'static str> {
+        if self.walked >= MAX_RCA_WALK {
+            return Some("walk cap");
+        }
         if self.files >= MAX_RCA_FILES {
             return Some("file cap");
         }
@@ -1073,7 +1088,9 @@ impl RcaBudget {
     }
 
     fn full(&self) -> bool {
-        self.files >= MAX_RCA_FILES || self.bytes >= MAX_RCA_TOTAL_BYTES
+        self.walked >= MAX_RCA_WALK
+            || self.files >= MAX_RCA_FILES
+            || self.bytes >= MAX_RCA_TOTAL_BYTES
     }
 }
 
@@ -1097,7 +1114,7 @@ pub fn harvest_retain_dest(retain_dir: &Path, vm_id: &str) -> PathBuf {
 pub fn snapshot_rca(jail_root: &Path, jail_dir: &Path, dest: &Path) -> Result<u32, String> {
     let _ = dump_rca_into_jail(jail_root, jail_dir);
     std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
-    let mut budget = RcaBudget { files: 0, bytes: 0 };
+    let mut budget = RcaBudget::new();
     let mut n = 0u32;
     n = n.saturating_add(copy_rca_tree(
         &jail_dir.join(HARVEST_WORK),
@@ -1204,7 +1221,9 @@ fn copy_rca_walk(
         return Ok(0);
     };
     for e in entries.flatten() {
+        budget.walked = budget.walked.saturating_add(1);
         if budget.full() {
+            tracing::warn!(path = %dir.display(), "retain-before-destroy skip (walk cap)");
             break;
         }
         let from = e.path();
@@ -1237,6 +1256,7 @@ fn copy_rca_walk(
             tracing::warn!(path = %from.display(), "retain-before-destroy skip ({why})");
             continue;
         }
+        // Caps already applied; copy this allowlisted file only.
         let rel = from.strip_prefix(root).unwrap_or(from.as_path());
         let to = dest.join(rel);
         if let Some(parent) = to.parent() {

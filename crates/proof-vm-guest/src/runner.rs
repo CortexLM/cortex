@@ -840,6 +840,7 @@ pub async fn run_paid(
                     v
                 })
                 .map_err(|e| {
+                    // Selected adaptor only (`<runners>/<id>/`), not cfg.runners_dir.
                     proof_results::hint_skew_if_runner_unemitted(e, &adaptor.dir).to_string()
                 })
         })

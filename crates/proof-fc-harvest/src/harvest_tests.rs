@@ -17,8 +17,8 @@ use tokio::io::AsyncWriteExt;
 use super::{
     attach_evaluate_results, copy_regular_nofollow, copy_tree, from_work_tree, harvest_from_jail,
     harvest_retain_dest, recv_job_or_harvest, replace_dir_with_copy, snapshot_rca, try_from_jail,
-    CONSOLE_LOG, HARBOR_JOBS, HARVEST_WORK, MAX_RCA_FILES, POLL_INTERVAL, SCRATCH_IN_JAIL,
-    SCRATCH_TREE,
+    CONSOLE_LOG, HARBOR_JOBS, HARVEST_WORK, MAX_RCA_FILES, MAX_RCA_TOTAL_BYTES, POLL_INTERVAL,
+    SCRATCH_IN_JAIL, SCRATCH_TREE,
 };
 
 fn tree(tag: &str) -> PathBuf {
@@ -1484,6 +1484,48 @@ fn snapshot_rca_skips_over_file_and_byte_caps() {
             .join("results.json")
             .is_file(),
         "per-file cap must skip oversize results.json"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// T-Rex: 21 allowlisted 1 MiB files must not all be retained (total cap).
+#[test]
+fn snapshot_rca_caps_21_allowlisted_one_mib_files() {
+    let root = tree("rca-trex-21");
+    let jail_root = root.join("root");
+    let work = jail_root.join(SCRATCH_TREE).join("work");
+    std::fs::create_dir_all(&work).expect("work");
+    let mib = vec![b'x'; 1024 * 1024];
+    for i in 0..21 {
+        let dir = work.join(format!("job-{i}")).join("output");
+        std::fs::create_dir_all(&dir).expect("job");
+        std::fs::write(dir.join("report.json"), &mib).expect("1mib");
+    }
+    let dest = harvest_retain_dest(&root.join("retained"), "topic-a-trex");
+    let n = snapshot_rca(&jail_root, &root, &dest).expect("snapshot");
+    assert!(n < 21, "21×1MiB must overflow the retain cap, copied {n}");
+    assert!(n <= MAX_RCA_FILES, "file cap {n}");
+    let mut retained = 0u64;
+    let mut stack = vec![dest.clone()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(m) = std::fs::symlink_metadata(&p) else {
+                continue;
+            };
+            if m.is_dir() {
+                stack.push(p);
+            } else if m.is_file() {
+                retained = retained.saturating_add(m.len());
+            }
+        }
+    }
+    assert!(
+        retained <= MAX_RCA_TOTAL_BYTES,
+        "retained {retained} over total cap {MAX_RCA_TOTAL_BYTES}"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

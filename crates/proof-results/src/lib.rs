@@ -259,52 +259,24 @@ pub fn report_only_missing_results_detail(name: &str, path: Option<&Path>) -> St
     missing_results_detail(name, path)
 }
 
-/// True when the **selected** runner dir has a `.py` carrying
-/// [`WRITE_RESULTS_EMIT`] (Harbor `summarize.py`). Other runners and
-/// non-Python files are not emit evidence.
+/// Harbor production emit paths under the **selected** runner directory.
+/// Never walk `runners_dir` or sibling adaptors.
+const EMIT_PROBE: &[&str] = &["summarize.py", "harness/summarize.py"];
+
+/// True when the selected runner's Harbor helper carries [`WRITE_RESULTS_EMIT`].
 #[must_use]
 pub fn runner_tree_emits_results(runner_dir: &Path) -> bool {
-    contains_emit_marker(runner_dir, 0)
+    EMIT_PROBE.iter().any(|rel| py_emits(&runner_dir.join(rel)))
 }
 
-fn contains_emit_marker(dir: &Path, depth: u8) -> bool {
-    if depth > 6 {
-        return false;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
+fn py_emits(path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
-    for e in entries.flatten() {
-        let p = e.path();
-        let Ok(meta) = std::fs::symlink_metadata(&p) else {
-            continue;
-        };
-        if meta.file_type().is_symlink() {
-            continue;
-        }
-        if meta.is_dir() {
-            if contains_emit_marker(&p, depth.saturating_add(1)) {
-                return true;
-            }
-            continue;
-        }
-        if !meta.is_file() || meta.len() > 512 * 1024 {
-            continue;
-        }
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !Path::new(name)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
-        {
-            continue;
-        }
-        if let Ok(body) = std::fs::read_to_string(&p) {
-            if body.contains(WRITE_RESULTS_EMIT) {
-                return true;
-            }
-        }
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > 512 * 1024 {
+        return false;
     }
-    false
+    std::fs::read_to_string(path).is_ok_and(|body| body.contains(WRITE_RESULTS_EMIT))
 }
 
 /// Append [`PIN_RUNNER_SKEW_HINT`] only when `runner_dir` (the selected
@@ -894,10 +866,16 @@ mod tests {
         .expect("other emit");
         std::fs::write(selected.join("notes.txt"), "write_results_next_to_report\n")
             .expect("notes");
+        std::fs::create_dir_all(selected.join("nested")).expect("nested");
+        std::fs::write(
+            selected.join("nested").join("helper.py"),
+            "def write_results_next_to_report():\n    pass\n",
+        )
+        .expect("nested");
         let still = hint_skew_if_runner_unemitted(err.clone(), &selected);
         assert!(
             still.to_string().contains(PIN_RUNNER_SKEW_HINT),
-            "sibling runner / non-py notes must not count as emit, {still}"
+            "sibling runner / notes / nested py must not count as emit, {still}"
         );
         assert!(!runner_tree_emits_results(&selected));
         std::fs::write(
