@@ -494,17 +494,36 @@ def redact(text: str, secrets: list[str]) -> str:
     return out
 
 
+def _tail_window_bytes(max_chars: int, secrets: list[str]) -> int:
+    """Bytes to read from EOF: tail plus overlap so a secret can still match."""
+    overlap = max((len(s.encode("utf-8")) for s in secrets if s), default=0)
+    return max_chars + overlap + 3
+
+
 def read_tail(path: Path | None, secrets: list[str], max_chars: int = MAX_TAIL_CHARS) -> str:
-    if path is None or not path.is_file():
+    """Last ``max_chars`` of the log **after** secrets are blanked.
+
+    A credential that starts before the tail cut would otherwise survive as
+    a suffix that no longer equals the configured value. Read an overlap
+    window (≥ longest secret, plus 3 bytes for a UTF-8 split), redact
+    that buffer, then take the last N chars. Trial ``agent_log`` /
+    ``verifier_log`` and job-level ``harbor_run_tail`` share this helper.
+    """
+    if path is None or not path.is_file() or max_chars <= 0:
         return ""
+    window = _tail_window_bytes(max_chars, secrets)
     try:
-        data = path.read_bytes()
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > window:
+                fh.seek(-window, os.SEEK_END)
+            data = fh.read()
     except OSError:
         return ""
-    if len(data) > max_chars:
-        data = data[-max_chars:]
-    text = data.decode("utf-8", errors="replace")
-    return redact(text, secrets)
+    redacted = redact(data.decode("utf-8", errors="replace"), secrets)
+    if len(redacted) > max_chars:
+        return redacted[-max_chars:]
+    return redacted
 
 
 def _trial_pane_path(trial_dir: Path) -> tuple[str, Path]:
@@ -640,9 +659,10 @@ def clip_trial_log_bodies(
 ) -> list[dict[str, Any]]:
     """Copy trials, shrinking or omitting ``agent_log`` / ``verifier_log``.
 
-    ``max_chars`` is the last-N char cap. ``None`` omits the bodies (and
-    ``log_sources``) so a large pack still scores under ``MAX_RESULTS_BYTES``.
-    Job-level ``logs.harbor_run_tail`` is not touched here.
+    ``max_chars`` is the last-N char cap on **already redacted** bodies.
+    ``None`` omits the bodies (and ``log_sources``) so a large pack still
+    scores under ``MAX_RESULTS_BYTES``. Job-level ``logs.harbor_run_tail``
+    is not touched here.
     """
     out: list[dict[str, Any]] = []
     for trial in trials:

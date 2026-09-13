@@ -1115,6 +1115,107 @@ class TrialLogHarvestTests(unittest.TestCase):
             self.assertNotIn("sk-secret-owner", row["verifier_log"])
             self.assertIn("[REDACTED]", row["verifier_log"])
 
+    def _secret_straddling_cut(self, secret: str, max_chars: int, into: int = 4) -> tuple[str, str]:
+        """File body where a naive last-``max_chars`` slice keeps only a suffix."""
+        into = min(into, len(secret) - 1)
+        leaked = secret[into:]
+        suffix = "Z" * (max_chars - len(leaked))
+        body = ("X" * (max_chars + 64)) + secret + suffix
+        naive = body[-max_chars:]
+        self.assertIn(leaked, naive)
+        self.assertNotIn(secret, naive)
+        return body, leaked
+
+    def test_read_tail_redacts_before_cutting(self) -> None:
+        secret = "sk-secret-owner"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trial.log"
+            body, leaked = self._secret_straddling_cut(
+                secret, summarize.MAX_TRIAL_LOG_CHARS
+            )
+            path.write_text(body, encoding="utf-8")
+            out = summarize.read_tail(path, [secret], summarize.MAX_TRIAL_LOG_CHARS)
+            self.assertNotIn(secret, out)
+            self.assertNotIn(leaked, out)
+            self.assertIn(summarize.REDACTED, out)
+            self.assertLessEqual(len(out), summarize.MAX_TRIAL_LOG_CHARS)
+
+    def test_trial_logs_redact_secret_only_in_last_k_of_larger_file(self) -> None:
+        secret = "sk-secret-owner"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "t__1"
+            write_complete_trial(trial, "t__1", 1.0)
+            agent_body, leaked_a = self._secret_straddling_cut(
+                secret, summarize.MAX_TRIAL_LOG_CHARS
+            )
+            verifier_body, leaked_v = self._secret_straddling_cut(
+                secret, summarize.MAX_TRIAL_LOG_CHARS, into=6
+            )
+            (trial / "trial.log").write_text(agent_body, encoding="utf-8")
+            (trial / "verifier" / "test-stdout.txt").write_text(
+                verifier_body, encoding="utf-8"
+            )
+            trials = summarize.collect_trials(root / "jobs", secrets=[secret])
+            row = trials[0]
+            for field, leaked in (("agent_log", leaked_a), ("verifier_log", leaked_v)):
+                text = row[field]
+                self.assertNotIn(secret, text, field)
+                self.assertNotIn(leaked, text, field)
+                self.assertLessEqual(len(text), summarize.MAX_TRIAL_LOG_CHARS, field)
+                self.assertIn("REDACTED", text, field)
+
+    def test_harbor_run_tail_redacts_secret_straddling_cut(self) -> None:
+        secret = "sk-secret-owner"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs"
+            write_complete_trial(jobs / "job" / "t__1", "t__1", 1.0)
+            body, leaked = self._secret_straddling_cut(secret, summarize.MAX_TAIL_CHARS)
+            log = root / "harbor.log"
+            log.write_text(body, encoding="utf-8")
+            out = root / "report.json"
+            secrets_dir = root / "secrets"
+            secrets_dir.mkdir()
+            (secrets_dir / "inference_key").write_text(secret + "\n", encoding="utf-8")
+            import os
+
+            saved = dict(os.environ)
+            os.environ["PROOF_SECRETS_DIR"] = str(secrets_dir)
+            os.environ["PROOF_SECRET_FILES"] = "inference_key"
+            try:
+                rc = summarize.main(
+                    [
+                        "--jobs-dir",
+                        str(jobs),
+                        "--log",
+                        str(log),
+                        "--output",
+                        str(out),
+                        "--harbor-exit",
+                        "0",
+                        "--agent",
+                        "agent.agent:MinerAgent",
+                        "--agent-source",
+                        "artifact_dir/agent",
+                    ]
+                )
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+            self.assertEqual(rc, 0)
+            report = json.loads(out.read_text(encoding="utf-8"))
+            results = json.loads((root / "results.json").read_text(encoding="utf-8"))
+            for blob in (
+                report["evidence"]["harbor_run_tail"],
+                results["logs"]["harbor_run_tail"],
+                out.read_text(encoding="utf-8"),
+                (root / "results.json").read_text(encoding="utf-8"),
+            ):
+                self.assertNotIn(secret, blob)
+                self.assertNotIn(leaked, blob)
+            self.assertIn(summarize.REDACTED, results["logs"]["harbor_run_tail"])
+
     def test_thirty_three_trials_shrink_to_two_kib_rather_than_overflow(self) -> None:
         """33 × 8 KiB overflows; 2 KiB step keeps encoded results.json under 256 KiB."""
         with tempfile.TemporaryDirectory() as tmp:
