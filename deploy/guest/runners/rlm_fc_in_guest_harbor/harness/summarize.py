@@ -50,6 +50,11 @@ from pathlib import Path
 from typing import Any
 
 MAX_TAIL_CHARS = 8 * 1024
+# Hard cap on bytes read from EOF before decode/redact. Last ``max_chars``
+# UTF-8 characters occupy at most 4× that many bytes; 1 MiB is well above
+# 8 KiB tails plus any realistic secret, so a char-tail never starts before
+# this window. Do not size the read from ``max_chars`` in bytes.
+MAX_TAIL_READ_BYTES = 1024 * 1024
 # Prefer 8 KiB per trial log field. Acceptance is the encoded results.json
 # size (json.dumps UTF-8), not the raw field cap: invalid UTF-8 replacement
 # chars and JSON escapes can inflate ~8 KiB tails past 256 KiB. Shrink
@@ -494,29 +499,23 @@ def redact(text: str, secrets: list[str]) -> str:
     return out
 
 
-def _tail_window_bytes(max_chars: int, secrets: list[str]) -> int:
-    """Bytes to read from EOF: tail plus overlap so a secret can still match."""
-    overlap = max((len(s.encode("utf-8")) for s in secrets if s), default=0)
-    return max_chars + overlap + 3
-
-
 def read_tail(path: Path | None, secrets: list[str], max_chars: int = MAX_TAIL_CHARS) -> str:
-    """Last ``max_chars`` of the log **after** secrets are blanked.
+    """Last ``max_chars`` **characters** of the log after secrets are blanked.
 
-    A credential that starts before the tail cut would otherwise survive as
-    a suffix that no longer equals the configured value. Read an overlap
-    window (≥ longest secret, plus 3 bytes for a UTF-8 split), redact
-    that buffer, then take the last N chars. Trial ``agent_log`` /
-    ``verifier_log`` and job-level ``harbor_run_tail`` share this helper.
+    Decode first (lossy UTF-8 is OK for display), redact that decoded text,
+    then take the last N characters. Never pick the tail by a raw byte
+    offset of the original file: a ``max_chars``-byte window can start in
+    the middle of a UTF-8 sequence or of a secret, so the decoded suffix
+    would not match and would leak. Trial ``agent_log`` / ``verifier_log``
+    and job-level ``harbor_run_tail`` share this helper.
     """
     if path is None or not path.is_file() or max_chars <= 0:
         return ""
-    window = _tail_window_bytes(max_chars, secrets)
     try:
         size = path.stat().st_size
         with path.open("rb") as fh:
-            if size > window:
-                fh.seek(-window, os.SEEK_END)
+            if size > MAX_TAIL_READ_BYTES:
+                fh.seek(-MAX_TAIL_READ_BYTES, os.SEEK_END)
             data = fh.read()
     except OSError:
         return ""

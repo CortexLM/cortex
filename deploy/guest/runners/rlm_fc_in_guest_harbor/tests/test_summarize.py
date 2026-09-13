@@ -1140,6 +1140,48 @@ class TrialLogHarvestTests(unittest.TestCase):
             self.assertIn(summarize.REDACTED, out)
             self.assertLessEqual(len(out), summarize.MAX_TRIAL_LOG_CHARS)
 
+    def test_read_tail_redacts_secret_split_on_utf8_continuation(self) -> None:
+        """A max_chars-byte slice that starts mid-sequence must not leak the secret.
+
+        ``é`` / ``秘`` are 2- and 3-byte UTF-8. A last-N-**byte** window that
+        begins on a continuation byte decodes to a replacement + suffix that
+        no longer equals the configured secret. Decode+redact-then-char-tail
+        must still blank it.
+        """
+        secret = "sk-clé-秘密-owner"
+        leaked_suffix = "秘密-owner"
+        sb = secret.encode("utf-8")
+        split_at = next(i for i, b in enumerate(sb) if b & 0xC0 == 0x80)
+        max_chars = summarize.MAX_TRIAL_LOG_CHARS
+        suffix = b"Z" * (max_chars - (len(sb) - split_at))
+        raw = ("\N{GRINNING FACE}" * 256).encode("utf-8") + sb + suffix
+        naive = raw[-max_chars:]
+        self.assertEqual(naive[0] & 0xC0, 0x80)
+        naive_text = naive.decode("utf-8", errors="replace")
+        self.assertNotIn(secret, naive_text)
+        self.assertIn(leaked_suffix, naive_text)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trial.log"
+            path.write_bytes(raw)
+            out = summarize.read_tail(path, [secret], max_chars)
+            self.assertNotIn(secret, out)
+            self.assertNotIn(leaked_suffix, out)
+            self.assertIn(summarize.REDACTED, out)
+            self.assertLessEqual(len(out), max_chars)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "jobs" / "job" / "t__1"
+            write_complete_trial(trial, "t__1", 1.0)
+            (trial / "trial.log").write_bytes(raw)
+            (trial / "verifier" / "test-stdout.txt").write_bytes(raw)
+            trials = summarize.collect_trials(root / "jobs", secrets=[secret])
+            row = trials[0]
+            for field in ("agent_log", "verifier_log"):
+                text = row[field]
+                self.assertNotIn(secret, text, field)
+                self.assertNotIn(leaked_suffix, text, field)
+
     def test_trial_logs_redact_secret_only_in_last_k_of_larger_file(self) -> None:
         secret = "sk-secret-owner"
         with tempfile.TemporaryDirectory() as tmp:
