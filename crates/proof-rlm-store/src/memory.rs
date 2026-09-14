@@ -11,7 +11,7 @@ use proof_task::TopicDocument;
 
 use crate::{
     check_artefact, check_promotion, check_rules, parse_row_id, replay, ArtefactRow, BaselineRow,
-    ChecklistRow, PromotionRow, RlmStore, StoreError, TransitionRow,
+    ChecklistRow, PromotionRow, RlmStore, StoreError, TopicVersionRow, TransitionRow,
 };
 
 #[derive(Default)]
@@ -62,6 +62,24 @@ impl RlmStore for MemoryRlmStore {
                 .cloned()
                 .map(|d| (u32::try_from(v.len()).unwrap_or(u32::MAX), d))
         }))
+    }
+
+    async fn latest_topics(&self) -> Result<Vec<TopicVersionRow>, StoreError> {
+        let g = self.lock()?;
+        // `BTreeMap` iteration is already ordered by topic id, which is the
+        // order the Postgres view returns.
+        let mut out = Vec::with_capacity(g.topics.len());
+        for (topic_id, versions) in &g.topics {
+            let Some(doc) = versions.last() else {
+                continue;
+            };
+            out.push(TopicVersionRow {
+                topic_id: topic_id.clone(),
+                version: u32::try_from(versions.len()).unwrap_or(u32::MAX),
+                document: doc.clone(),
+            });
+        }
+        Ok(out)
     }
 
     async fn put_rules(&self, rules: &RuleSet) -> Result<(), StoreError> {

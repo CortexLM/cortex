@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::{
     check_artefact, check_promotion, check_rules, parse_row_id, replay, ArtefactRow, BaselineRow,
-    ChecklistRow, PromotionRow, RlmStore, StoreError, TransitionRow,
+    ChecklistRow, PromotionRow, RlmStore, StoreError, TopicVersionRow, TransitionRow,
 };
 
 /// Postgres-backed store.
@@ -193,6 +193,29 @@ impl RlmStore for PgRlmStore {
         .await?;
         row.map(|(v, doc)| Ok((to_u32(v)?, serde_json::from_value(doc).map_err(malformed)?)))
             .transpose()
+    }
+
+    /// Newest version per topic, read straight from `proof_topic_version`.
+    ///
+    /// `DISTINCT ON` is the whole query: the journal is append-only, so the
+    /// newest row per slug *is* the current one, and no second table has to
+    /// be kept in step with it.
+    async fn latest_topics(&self) -> Result<Vec<TopicVersionRow>, StoreError> {
+        let rows: Vec<(String, i32, Value)> = sqlx::query_as(
+            "SELECT DISTINCT ON (topic_id) topic_id, version, document \
+             FROM proof_topic_version ORDER BY topic_id, version DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (topic_id, version, doc) in rows {
+            out.push(TopicVersionRow {
+                topic_id,
+                version: to_u32(version)?,
+                document: serde_json::from_value(doc).map_err(malformed)?,
+            });
+        }
+        Ok(out)
     }
 
     async fn put_rules(&self, rules: &RuleSet) -> Result<(), StoreError> {

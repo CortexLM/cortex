@@ -197,51 +197,57 @@ Empty digest stays 503 (never invent a sha256).
 
 ## Topic install bundles (`proof-admin`, P0 skeleton)
 
-A signed topic document is the *scoring contract*. The **install** is a
-separate operator record: which runner the topic names, which RLM and
-experiment images and which experiment pack it is pinned to, how much
-concurrency it may use, and whether it is live. `bins/proof-admin` is the
-operator CLI for that record, and `proof_topic`
-([migration `0024`](../crates/db/migrations/0024_proof_topics.sql)) is where
-it lands — one row per `topic_id`, in the shared challenge DB.
+A topic already has **one** home: the operator-signed document published
+through `POST /v1/admin/proof/topics` and persisted in `proof_topic_version`
+(migration [`0020`](../crates/db/migrations/0020_proof_rlm.sql)). Its
+bindings are signed topic data too — `constraints.params` carries the in-guest
+runner and its pinned pack digest, and the image pins are operator env. There
+is no second topic table and no second route.
+
+What `bins/proof-admin` adds is the **procedure**: a bundle that names the
+signed document plus the host env that must agree with it, `validate` that
+runs the same acceptance the publish route runs, and `install --dry-run` that
+prints the exact publish call and env lines without touching anything.
 
 ```bash
-# Check a bundle. Reads the file; writes nothing; needs no database.
-proof-admin topic validate --bundle /root/.base-secrets/proof/tb4.json
+# Check a bundle. Runs the same checks the publish route runs; writes nothing.
+proof-admin topic validate --bundle /root/.base-secrets/proof/tb4.json \
+  --pin config/proof-pin.toml
 
-# Resolve an install without touching anything.
+# Resolve the publish call and host env. Touches nothing.
 proof-admin topic install --bundle …/tb4.json --env metal --dry-run
 
-# Install it. Writes one DISABLED row; needs BASE_DATABASE_URL (or _FILE).
-BASE_DATABASE_URL=… proof-admin topic install --bundle …/tb4.json --env metal
-proof-admin topic list
-proof-admin topic show tb4
+# Read what is installed (a read-only view of proof_topic_version):
+BASE_DATABASE_URL=… proof-admin topic list
+BASE_DATABASE_URL=… proof-admin topic show tb4
 ```
 
-`--env` is `staging` or `metal` and must match the bundle's own
-`environment`: a bundle written for one target is refused on the other
-rather than coerced. Every pin is `sha256:<64 lowercase hex>` or absent, and
-an in-guest `runner_id` without a `pack_digest` is refused, so a topic that
-names a runner with nothing to run never installs. Unknown keys are refused
-at parse: a binding this build cannot name is a binding nothing enforces.
+The bundle carries the signed `topic` document verbatim, so every binding has
+exactly one copy in the system. Its `host` block is what the master must be
+configured with: `rlm_image_digest` (`PROOF_RLM_VM_IMAGE_DIGEST`),
+`experiment_image_digest` (`PROOF_EXPERIMENT_VM_IMAGE_DIGEST`),
+`custom_ids_entry` (`PROOF_VM_RUNNER_CUSTOM_IDS`, which must register an open
+custom topic's `metric.custom_id` or it answers **503**), and `pack_dir`
+(`PROOF_VM_AGENT_EXPERIMENT_PACK_DIR`, a **directory** — the host re-hashes
+the tar it finds there against the document's pin, so the directory never
+carries a digest).
 
-A value the row cannot hold is a **reject, never a rewrite**: `version` and
-`n_concurrent` above `i32::MAX` are refused rather than clamped (a clamped
-row would disagree with the digest-covered bundle an operator reviewed), and
-a pin is accepted only in the exact lowercase, unpadded spelling the
-column's `CHECK` requires — so a bundle that validates also installs.
-Re-installing reports the **persisted** state: a topic that was already live
-stays live, and the output says so rather than assuming the install disabled
-it.
+**The document wins.** A host expectation that disagrees with the signed
+document is a reject, not a silent override: the signature is what the
+scoring path trusts, so an operator env saying otherwise would run something
+other than what was signed. A runner without a `pack_digest` is refused, as
+is a pack no runner reads. Every digest is `sha256:<64 lowercase hex>` or
+absent, never invented. Unknown keys are refused at parse.
 
-**P0 scope — what this does not do.** Installing writes `enabled = false`
-and no scoring path reads `proof_topic` yet, so an install cannot move a
-score. `topic enable`, `topic disable`, and `topic seal` exit **3** with a
-"not implemented in this slice" message. There is no route change (P1), no
-allocator change (P2), no full install (P3), and no removal of the
-compiled-in topic bindings (P4). The first topic slug is **`tb4`** with
-alias **`tbench`**; alias resolution is a later slice, so `topic show`
-matches the exact `topic_id` today and says so when it misses.
+**P0 scope — what this does not do.** `install` **prints** the publish call;
+it does not perform it, because publishing needs the operator bearer, which
+stays on the host. `topic enable`, `topic disable`, and `topic seal` exit
+**3** with a "not implemented in this slice" message — a topic's lifecycle is
+the signed document's `status`, so the answer is to re-sign and re-publish.
+There is no route change (P1), no allocator change (P2), no full install
+(P3), and no removal of the compiled-in topic bindings (P4). The first topic
+slug is **`tb4`**; its custom id is **`tbench`**, which is the runner-registry
+id, not an alias table — `topic show` matches the exact `topic_id`.
 
 ## Metric families
 

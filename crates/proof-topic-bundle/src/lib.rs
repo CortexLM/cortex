@@ -1,32 +1,31 @@
-//! Proof **topic install bundle**: the JSON document an operator installs a
-//! topic from.
+//! Proof **topic install bundle**: the operator procedure that publishes one
+//! signed topic.
 //!
-//! A topic's *scoring contract* is its signed topic document (see
-//! `proof-task`). The *install* is a separate operator record: which runner
-//! the topic names, which RLM and experiment images and which experiment pack
-//! it is pinned to, how much concurrency it may use, and whether it is live.
-//! This crate is the shape of that record, the checks it has to pass before
-//! anything is written, and the canonical digest a later slice can pin.
+//! This crate deliberately does **not** define a second topic registry. A
+//! Proof topic already has one home: the operator-signed [`TopicDocument`]
+//! (`proof-task`), published through `POST /v1/admin/proof/topics` and
+//! persisted in `proof_topic_version` (migration `0020`). The bindings a topic
+//! needs are already signed topic data too — `constraints.params` carries the
+//! in-guest runner and its pinned pack digest (`proof-experiment`), and the
+//! image pins are operator env.
 //!
-//! P0 scope (dynamic-topics skeleton): parse, validate, digest, and describe.
-//! This crate never touches the database, the network, or the filesystem, and
-//! it never enables anything. The CLI that drives it (`bins/proof-admin`)
-//! writes a row with `enabled = false` and nothing in this repository reads
-//! that row on a scoring path yet — the routes (P1), the allocator (P2), the
-//! full install (P3), and the removal of the compiled-in `tbench` bindings
-//! (P4) are later slices.
+//! What was missing is the *procedure*: which signed document, which install
+//! target, and which host env must agree with it before the topic can run.
+//! That is this bundle. It **references** the document and **cross-checks**
+//! the host expectations against it; it never restates a binding in a second
+//! place that could drift.
 //!
 //! Three rules carry the fail-closed posture:
 //!
-//! - **Unknown keys are refused.** A binding this build does not understand
-//!   is a binding nothing enforces, so `deny_unknown_fields` rejects it at
-//!   parse rather than installing a topic that half-works.
-//! - **A digest is never invented.** Every pin is `sha256:<64 hex>` or it is
-//!   absent; absent means "not pinned", which every later slice must read as
-//!   fail-closed (an unpinned topic never boots), never as a default.
-//! - **A runner without a pack is refused.** An in-guest runner with nothing
-//!   to run is a job that cannot score, so the pair travels together or not
-//!   at all — the same rule the signed topic's `constraints.params` carries.
+//! - **Unknown keys are refused.** A field this build does not understand is a
+//!   step nothing performs, so `deny_unknown_fields` rejects it at parse.
+//! - **A digest is never invented.** Every expected pin is
+//!   `sha256:<64 lowercase hex>`, checked against the same shape the host env
+//!   uses.
+//! - **The document wins.** A host expectation that disagrees with the signed
+//!   document is a reject, not a silent override: the signature is what the
+//!   scoring path trusts, so an operator env that says otherwise would mean
+//!   the topic runs something other than what was signed.
 
 #![forbid(unsafe_code)]
 #![allow(
@@ -39,8 +38,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+use proof_experiment::{ExperimentBinding, ExperimentError};
+use proof_task::{MetricFamily, TopicDocument, TopicError, TopicStatus};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 /// Only accepted `schema_version`.
 pub const BUNDLE_SCHEMA_VERSION: u32 = 1;
@@ -48,55 +48,60 @@ pub const BUNDLE_SCHEMA_VERSION: u32 = 1;
 /// Longest legal `display_name`.
 pub const MAX_DISPLAY_NAME_LEN: usize = 128;
 
-/// Most aliases one topic may carry.
-pub const MAX_ALIASES: usize = 8;
-
-/// Largest canonical `config` object, in bytes.
-pub const MAX_CONFIG_BYTES: usize = 16 * 1024;
-
-/// Largest `version` / `n_concurrent` a bundle may carry.
-///
-/// The row's columns are `INTEGER`, so a value above this would have to be
-/// clamped on write — and a clamped row would disagree with the validated,
-/// digest-covered bundle an operator reviewed. Out of range is a reject, never
-/// a silent rewrite.
-pub const MAX_INT_COLUMN: u32 = i32::MAX as u32;
-
-/// Install targets, in the order the CLI offers them.
-pub const INSTALL_ENVIRONMENTS: [&str; 2] = ["staging", "metal"];
-
 /// Every key the bundle schema accepts, sorted. The schema is this Rust type
 /// (`deny_unknown_fields`), not a second document that could drift from it:
 /// this list is what a test pins, so adding or removing a key is a deliberate
 /// edit here rather than a silent widening of what an operator may write.
-pub const BUNDLE_KEYS: [&str; 13] = [
-    "aliases",
-    "config",
+pub const BUNDLE_KEYS: [&str; 5] = [
     "display_name",
     "environment",
-    "n_concurrent",
-    "pack_digest",
-    "pin_experiment",
-    "pin_rlm",
-    "runner_id",
+    "host",
     "schema_version",
-    "sealed_custom_value",
-    "topic_id",
-    "version",
+    "topic",
 ];
 
 /// Keys with no `serde` default: a bundle that omits one is a parse error
-/// naming the field, never an empty string that fails later.
+/// naming the field, never an empty value that fails later.
 pub const REQUIRED_BUNDLE_KEYS: [&str; 5] = [
     "display_name",
     "environment",
+    "host",
     "schema_version",
-    "topic_id",
-    "version",
+    "topic",
 ];
 
-/// Prefix of every pin digest.
+/// Keys of the `host` block, sorted.
+pub const HOST_KEYS: [&str; 5] = [
+    "custom_ids_entry",
+    "experiment_image_digest",
+    "pack_digest",
+    "pack_dir",
+    "rlm_image_digest",
+];
+
+/// Install targets, in the order the CLI offers them.
+pub const INSTALL_ENVIRONMENTS: [&str; 2] = ["staging", "metal"];
+
+/// Prefix of every digest.
 pub const DIGEST_PREFIX: &str = "sha256:";
+
+/// The existing admin publish route this bundle prepares a call for.
+///
+/// Not a new route: `proof-http` already serves it, and the CLI's `validate`
+/// runs the same acceptance checks that route runs before it writes.
+pub const PUBLISH_ROUTE: &str = "POST /v1/admin/proof/topics";
+
+/// Operator env naming the custom ids the host will score.
+pub const ENV_CUSTOM_IDS: &str = "PROOF_VM_RUNNER_CUSTOM_IDS";
+
+/// Operator env pinning the RLM VM image.
+pub const ENV_RLM_IMAGE: &str = "PROOF_RLM_VM_IMAGE_DIGEST";
+
+/// Operator env pinning the experiment guest image.
+pub const ENV_EXPERIMENT_IMAGE: &str = "PROOF_EXPERIMENT_VM_IMAGE_DIGEST";
+
+/// Operator env holding the directory of staged experiment packs.
+pub const ENV_PACK_DIR: &str = "PROOF_VM_AGENT_EXPERIMENT_PACK_DIR";
 
 /// Where a topic may be installed.
 ///
@@ -113,7 +118,7 @@ pub enum InstallEnvironment {
 }
 
 impl InstallEnvironment {
-    /// Wire word (`staging` / `metal`), which is also the DB value.
+    /// Wire word (`staging` / `metal`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -158,69 +163,61 @@ pub enum BundleError {
         /// What this build reads.
         want: u32,
     },
-    /// `topic_id` is not `[a-z0-9][a-z0-9-]{1,62}`.
-    #[error("topic_id {0:?} must match [a-z0-9][a-z0-9-]{{1,62}} (a hyphen slug)")]
-    BadTopicId(String),
     /// `display_name` is empty or oversized.
     #[error("display_name must be 1..={MAX_DISPLAY_NAME_LEN} chars")]
     BadDisplayName,
-    /// `version` is zero.
-    #[error("version must be >= 1")]
-    BadVersion,
-    /// More aliases than the bound allows.
-    #[error("aliases carries {0}, at most {MAX_ALIASES} are allowed")]
-    TooManyAliases(usize),
-    /// An alias is not a slug, repeats, or names the topic itself.
-    #[error("alias {alias:?}: {why}")]
-    BadAlias {
-        /// The offending alias.
-        alias: String,
-        /// What is wrong.
-        why: &'static str,
-    },
-    /// `runner_id` is not `[a-z0-9][a-z0-9_-]{1,63}`.
-    #[error("runner_id {0:?} must match [a-z0-9][a-z0-9_-]{{1,63}}")]
-    BadRunnerId(String),
-    /// A pin is not `sha256:<64 hex>`.
-    #[error("{field} {got:?} is not {DIGEST_PREFIX}<64 lowercase hex>")]
+    /// A host expectation is not `sha256:<64 lowercase hex>`.
+    #[error("host.{field} {got:?} is not {DIGEST_PREFIX}<64 lowercase hex>")]
     BadDigest {
-        /// Which pin (`pin_rlm`, `pin_experiment`, `pack_digest`).
+        /// Which expectation (`rlm_image_digest`, `experiment_image_digest`, `pack_digest`).
         field: &'static str,
         /// What the bundle said.
         got: String,
     },
-    /// An in-guest runner with no pack to run.
+    /// The document selects an in-guest runner but nothing pins its pack.
     #[error(
-        "runner_id {runner_id:?} names an in-guest runner, so pack_digest is required \
-         (sha256:<64 hex> of the pack tar staged on the KVM host; never invented)"
+        "the signed document selects in-guest runner {runner_id:?}, so host.pack_digest is \
+         required and must equal the document's constraints.params.experiment_pack_digest \
+         (sha256:<64 hex>; never invented)"
     )]
     RunnerWithoutPack {
-        /// The runner the bundle named.
+        /// The runner the document selected.
         runner_id: String,
     },
-    /// A pack nothing runs.
-    #[error("pack_digest is set but runner_id is absent: a pack no runner reads is dead weight")]
+    /// A pack is pinned that nothing runs.
+    #[error(
+        "host.pack_digest is set but the signed document selects no in-guest runner: a pack no \
+         runner reads is dead weight, and this bundle would stage it anyway"
+    )]
     PackWithoutRunner,
-    /// `n_concurrent` is zero.
-    #[error("n_concurrent must be >= 1")]
-    BadConcurrency,
-    /// `version` / `n_concurrent` does not fit the row's `INTEGER` column.
-    #[error("{field} {got} does not fit the topic row (max {MAX_INT_COLUMN}); refused rather than clamped")]
-    IntColumnOverflow {
-        /// Which field.
+    /// A host expectation disagrees with the signed document.
+    #[error("host.{field} {got:?} contradicts the signed document, which says {document:?}")]
+    HostContradictsDocument {
+        /// Which expectation.
         field: &'static str,
         /// What the bundle said.
-        got: u32,
+        got: String,
+        /// What the document says.
+        document: String,
     },
-    /// `sealed_custom_value` is not finite.
-    #[error("sealed_custom_value {0} is not finite; a baseline must be a measured number")]
-    NonFiniteSealedValue(f64),
-    /// `config` is not a JSON object.
-    #[error("config must be a JSON object, got {0}")]
-    ConfigNotObject(&'static str),
-    /// `config` is larger than the bound.
-    #[error("config is {0} bytes of canonical JSON, at most {MAX_CONFIG_BYTES} are allowed")]
-    ConfigTooLarge(usize),
+    /// `custom_ids_entry` names no custom id while the document is custom.
+    #[error(
+        "{ENV_CUSTOM_IDS} does not register this topic's metric.custom_id {custom_id:?}; an \
+         open custom topic whose id is not registered cannot score (503)"
+    )]
+    CustomIdNotRegistered {
+        /// The topic's `metric.custom_id`.
+        custom_id: String,
+    },
+    /// `pack_dir` is not an absolute path with no traversal.
+    #[error("host.pack_dir {0:?} must be an absolute path with no `..` segment")]
+    BadPackDir(String),
+    /// The document itself was refused by the shared topic checks.
+    #[error("topic document: {0}")]
+    Topic(#[from] TopicError),
+    /// The document's `constraints.params` are not a usable runner binding.
+    #[error("topic binding: {0}")]
+    Binding(#[from] ExperimentError),
     /// The canonical form could not be built.
     #[error("canonicalize bundle: {0}")]
     Canonicalize(String),
@@ -234,118 +231,98 @@ pub enum BundleError {
     },
 }
 
-/// One topic install bundle, as written by an operator.
+/// The operator env that must agree with the signed document.
 ///
-/// Required keys are not defaulted, so a missing `topic_id` is a parse error
-/// naming the field rather than an empty string that fails later. Optional
-/// keys default to the fail-closed reading: no aliases, no runner, no pins,
-/// one concurrent job, no sealed baseline, empty config.
+/// Every field is optional: an operator writes only what the topic needs. What
+/// is present is checked against the document, never used to override it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HostExpectations {
+    /// `PROOF_RLM_VM_IMAGE_DIGEST` the host must pin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rlm_image_digest: Option<String>,
+    /// Experiment guest image the host must pin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub experiment_image_digest: Option<String>,
+    /// The experiment pack the KVM host must hold, staged under
+    /// `PROOF_VM_AGENT_EXPERIMENT_PACK_DIR`. Must equal the document's
+    /// `constraints.params.experiment_pack_digest` when the document selects
+    /// an in-guest runner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pack_digest: Option<String>,
+    /// The **directory** the pack tar is staged in on the KVM host, i.e. the
+    /// value of `PROOF_VM_AGENT_EXPERIMENT_PACK_DIR`.
+    ///
+    /// A path, never a digest: the variable names a directory, and the host
+    /// re-hashes the tar it finds there against the document's pin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pack_dir: Option<String>,
+    /// Comma-separated value the host will set as `PROOF_VM_RUNNER_CUSTOM_IDS`.
+    /// An open custom topic scores only when this registers its
+    /// `metric.custom_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_ids_entry: Option<String>,
+}
+
+/// One topic install bundle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TopicInstallBundle {
     /// Must equal [`BUNDLE_SCHEMA_VERSION`].
     pub schema_version: u32,
-    /// Topic slug (`[a-z0-9][a-z0-9-]{1,62}`). The Arch default for the first
-    /// topic is `tb4`.
-    pub topic_id: String,
-    /// Human label for operator output.
-    pub display_name: String,
-    /// Monotonic install version for this topic (a re-sign is a new version).
-    pub version: u32,
     /// Install target this bundle was written for.
     pub environment: InstallEnvironment,
-    /// Extra slugs the topic answers to. The Arch default is `["tbench"]`
-    /// for topic `tb4`, so old miner links resolve to one row.
-    #[serde(default)]
-    pub aliases: Vec<String>,
-    /// In-guest runner id, if the topic selects one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runner_id: Option<String>,
-    /// `sha256:<hex>` of the RLM VM image, or absent when not pinned.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pin_rlm: Option<String>,
-    /// `sha256:<hex>` of the experiment guest image, or absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pin_experiment: Option<String>,
-    /// `sha256:<hex>` of the experiment pack tar, or absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pack_digest: Option<String>,
-    /// Jobs of this topic that may run at once.
-    #[serde(default = "default_n_concurrent")]
-    pub n_concurrent: u32,
-    /// The sealed baseline primary, once measured. Absent until the seal path
-    /// has a number; a topic with no sealed value cannot be enabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sealed_custom_value: Option<f64>,
-    /// Opaque per-topic operator config. Stored verbatim; this crate only
-    /// checks that it is a bounded JSON object.
-    #[serde(default = "default_config")]
-    pub config: Value,
+    /// Human label for operator output. Not topic data: the scoring contract
+    /// is the signed document below.
+    pub display_name: String,
+    /// The signed topic document, verbatim.
+    pub topic: TopicDocument,
+    /// Operator env this install needs.
+    pub host: HostExpectations,
 }
 
-fn default_n_concurrent() -> u32 {
-    1
+/// One operator env line the SOP asks for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostEnvVar {
+    /// Variable name.
+    pub name: String,
+    /// Value the host must set.
+    pub value: String,
+    /// Why, in operator English.
+    pub why: String,
 }
 
-fn default_config() -> Value {
-    Value::Object(serde_json::Map::new())
-}
-
-impl Default for TopicInstallBundle {
-    fn default() -> Self {
-        Self {
-            schema_version: BUNDLE_SCHEMA_VERSION,
-            topic_id: String::new(),
-            display_name: String::new(),
-            version: 1,
-            environment: InstallEnvironment::Staging,
-            aliases: Vec::new(),
-            runner_id: None,
-            pin_rlm: None,
-            pin_experiment: None,
-            pack_digest: None,
-            n_concurrent: default_n_concurrent(),
-            sealed_custom_value: None,
-            config: default_config(),
-        }
-    }
-}
-
-/// The resolved install: what a `--dry-run` prints and what a real install
-/// writes. `enabled` is always `false` — installing a topic never opens it.
+/// The resolved install: what a `--dry-run` prints and what an operator runs.
+///
+/// Everything here is derived from the signed document or from the bundle's
+/// own target. Nothing is stored: the registry remains `proof_topic_version`,
+/// and this plan is a procedure, not a row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TopicInstallPlan {
-    /// Topic slug (the row's primary key).
+    /// Topic slug (the document's `id`).
     pub topic_id: String,
     /// Human label.
     pub display_name: String,
-    /// Install version.
-    pub version: u32,
     /// Install target.
     pub environment: InstallEnvironment,
-    /// Extra slugs, sorted and de-duplicated.
-    pub aliases: Vec<String>,
-    /// In-guest runner id, empty when the topic selects none.
-    pub runner_id: String,
-    /// RLM image pin, empty when unpinned.
-    pub pin_rlm: String,
-    /// Experiment guest image pin, empty when unpinned.
-    pub pin_experiment: String,
-    /// Experiment pack digest, empty when absent.
-    pub pack_digest: String,
-    /// Concurrency bound.
-    pub n_concurrent: u32,
-    /// Sealed baseline primary, when the bundle carries one.
-    pub sealed_custom_value: Option<f64>,
-    /// Bundle schema version.
-    pub schema_version: u32,
-    /// The opaque per-topic operator config, verbatim.
-    pub config: Value,
+    /// Lifecycle the signed document declares.
+    pub document_status: TopicStatus,
+    /// Metric family the document declares.
+    pub metric_family: MetricFamily,
+    /// `metric.custom_id` (empty on non-custom families).
+    pub custom_id: String,
+    /// In-guest runner the document selects, when it selects one.
+    pub runner_id: Option<String>,
+    /// Experiment pack digest the document pins, when it pins one.
+    pub pack_digest: Option<String>,
+    /// The existing admin route that publishes this document.
+    pub publish_route: String,
+    /// Operator env lines this install needs, in the order to set them.
+    pub host_env: Vec<HostEnvVar>,
+    /// Where the pack is staged on the KVM host, when a pack is pinned.
+    pub pack_dir_env: Option<String>,
     /// `sha256:<hex>` over the canonical bundle.
     pub bundle_digest: String,
-    /// Always `false` on install. A topic is enabled by an operator action
-    /// that P0 does not implement.
-    pub enabled: bool,
 }
 
 fn is_digest(s: &str) -> bool {
@@ -355,73 +332,61 @@ fn is_digest(s: &str) -> bool {
 /// Exactly 64 **lowercase** hex characters, with no surrounding whitespace.
 ///
 /// Deliberately stricter than `proof_canon::is_hex64`, which trims and accepts
-/// uppercase: a pin is stored here verbatim and the row's `CHECK` is
-/// `^sha256:[0-9a-f]{64}$`, so accepting `sha256:AB…` or `sha256: ab… ` would
-/// let a bundle validate and dry-run and then fail on a real install. One
-/// spelling of a digest, checked the same way in both places.
+/// uppercase: the host env this mirrors is compared verbatim, so accepting
+/// `sha256:AB…` or `sha256: ab… ` would let a bundle validate and then
+/// disagree with the pin actually staged. One spelling of a digest.
 fn is_lower_hex64(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Split a `PROOF_VM_RUNNER_CUSTOM_IDS` value into ids.
+///
+/// Comma- or whitespace-separated, trimmed, empties dropped — the same shape
+/// `proof-challenge` parses from that variable.
+#[must_use]
+pub fn parse_custom_ids(raw: &str) -> Vec<String> {
+    raw.split([',', ' ', '\t', '\n'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 impl TopicInstallBundle {
     /// Parse a bundle body (JSON only).
     ///
-    /// Unknown keys are refused here: a binding this build cannot name is a
-    /// binding it cannot enforce.
+    /// Unknown keys are refused here: a step this build cannot name is a step
+    /// nothing performs.
     pub fn from_json(body: &str) -> Result<Self, BundleError> {
         serde_json::from_str(body).map_err(|e| BundleError::Parse(e.to_string()))
     }
 
-    /// Shape checks: ids, pins, cross-field rules, config bounds.
+    /// Shape checks that need no pin: schema, label, digest spellings, and the
+    /// cross-checks between the host block and the signed document.
     ///
-    /// Every value checked here is stored as given — nothing is normalised,
-    /// substituted, or defaulted into existence.
-    pub fn validate(&self) -> Result<(), BundleError> {
+    /// The document's own floors, signature, and seal are **not** checked
+    /// here — that is [`Self::accept`], which runs the same acceptance the
+    /// admin publish route runs.
+    pub fn validate_shape(&self) -> Result<(), BundleError> {
         if self.schema_version != BUNDLE_SCHEMA_VERSION {
             return Err(BundleError::WrongSchema {
                 got: self.schema_version,
                 want: BUNDLE_SCHEMA_VERSION,
             });
         }
-        if !proof_canon::is_slug(&self.topic_id) {
-            return Err(BundleError::BadTopicId(self.topic_id.clone()));
-        }
         let name = self.display_name.trim();
         if name.is_empty() || name.chars().count() > MAX_DISPLAY_NAME_LEN {
             return Err(BundleError::BadDisplayName);
         }
-        if self.version == 0 {
-            return Err(BundleError::BadVersion);
-        }
-        if self.aliases.len() > MAX_ALIASES {
-            return Err(BundleError::TooManyAliases(self.aliases.len()));
-        }
-        for alias in &self.aliases {
-            let why = if !proof_canon::is_slug(alias) {
-                "must match [a-z0-9][a-z0-9-]{1,62}"
-            } else if alias == &self.topic_id {
-                "an alias of the topic id itself is not an alias"
-            } else if self.aliases.iter().filter(|a| *a == alias).count() > 1 {
-                "duplicate alias"
-            } else {
-                continue;
-            };
-            return Err(BundleError::BadAlias {
-                alias: alias.clone(),
-                why,
-            });
-        }
-        if let Some(id) = self.runner_id.as_deref() {
-            if !proof_canon::is_custom_id(id) {
-                return Err(BundleError::BadRunnerId(id.to_owned()));
-            }
-        }
         for (field, value) in [
-            ("pin_rlm", self.pin_rlm.as_deref()),
-            ("pin_experiment", self.pin_experiment.as_deref()),
-            ("pack_digest", self.pack_digest.as_deref()),
+            ("rlm_image_digest", self.host.rlm_image_digest.as_deref()),
+            (
+                "experiment_image_digest",
+                self.host.experiment_image_digest.as_deref(),
+            ),
+            ("pack_digest", self.host.pack_digest.as_deref()),
         ] {
             if let Some(v) = value {
                 if !is_digest(v) {
@@ -432,44 +397,86 @@ impl TopicInstallBundle {
                 }
             }
         }
-        if self.runner_id.is_some() && self.pack_digest.is_none() {
-            return Err(BundleError::RunnerWithoutPack {
-                runner_id: self.runner_id.clone().unwrap_or_default(),
-            });
+        self.check_pack_dir()?;
+        self.cross_check_host()
+    }
+
+    /// Whether `pack_dir` is a usable directory value.
+    fn check_pack_dir(&self) -> Result<(), BundleError> {
+        let Some(dir) = self.host.pack_dir.as_deref() else {
+            return Ok(());
+        };
+        let d = dir.trim();
+        let ok = d.starts_with('/')
+            && d.len() <= 512
+            && !d.chars().any(char::is_control)
+            && !d.split('/').any(|seg| seg == "..");
+        if ok {
+            Ok(())
+        } else {
+            Err(BundleError::BadPackDir(dir.to_owned()))
         }
-        if self.pack_digest.is_some() && self.runner_id.is_none() {
-            return Err(BundleError::PackWithoutRunner);
-        }
-        if self.n_concurrent == 0 {
-            return Err(BundleError::BadConcurrency);
-        }
-        for (field, value) in [
-            ("version", self.version),
-            ("n_concurrent", self.n_concurrent),
-        ] {
-            if value > MAX_INT_COLUMN {
-                return Err(BundleError::IntColumnOverflow { field, got: value });
+    }
+
+    /// The in-guest runner binding the **signed document** carries, if any.
+    pub fn binding(&self) -> Result<Option<ExperimentBinding>, BundleError> {
+        Ok(ExperimentBinding::from_params(
+            &self.topic.constraints.params,
+        )?)
+    }
+
+    /// Cross-check the host block against the signed document.
+    ///
+    /// The document is authoritative. A disagreement is a reject: the
+    /// signature is what the scoring path trusts, so an operator env that says
+    /// otherwise would run something other than what was signed.
+    fn cross_check_host(&self) -> Result<(), BundleError> {
+        let binding = self.binding()?;
+        match (&binding, self.host.pack_digest.as_deref()) {
+            (Some(b), Some(host_digest)) => {
+                if host_digest != b.pack.digest {
+                    return Err(BundleError::HostContradictsDocument {
+                        field: "pack_digest",
+                        got: host_digest.to_owned(),
+                        document: b.pack.digest.clone(),
+                    });
+                }
             }
-        }
-        if let Some(v) = self.sealed_custom_value {
-            if !v.is_finite() {
-                return Err(BundleError::NonFiniteSealedValue(v));
+            // A runner with nothing to run cannot score, so the pack travels
+            // with it — the same rule the document's own params enforce.
+            (Some(b), None) => {
+                return Err(BundleError::RunnerWithoutPack {
+                    runner_id: b.runner.clone(),
+                });
             }
+            (None, Some(_)) => return Err(BundleError::PackWithoutRunner),
+            (None, None) => {}
         }
-        match &self.config {
-            Value::Object(_) => {}
-            other => {
-                return Err(BundleError::ConfigNotObject(json_kind(other)));
+        // A custom topic is scored by the runner registered under its
+        // `metric.custom_id`; an open one whose id is not registered answers
+        // 503. When the bundle declares the host's id list, it has to contain
+        // that id.
+        if self.topic.metric.family == MetricFamily::Custom {
+            let id = self.topic.metric.custom_id.trim();
+            if let Some(raw) = self.host.custom_ids_entry.as_deref() {
+                if !parse_custom_ids(raw).iter().any(|e| e == id) {
+                    return Err(BundleError::CustomIdNotRegistered {
+                        custom_id: id.to_owned(),
+                    });
+                }
             }
-        }
-        // The bound is on the `config` object, measured on its own canonical
-        // form: a large-but-legal bundle elsewhere must not be blamed on a
-        // config that is well inside the limit.
-        let config_bytes = proof_canon::canonical_json(&self.config).len();
-        if config_bytes > MAX_CONFIG_BYTES {
-            return Err(BundleError::ConfigTooLarge(config_bytes));
         }
         Ok(())
+    }
+
+    /// The custom ids this bundle's host block registers, for the shared
+    /// acceptance check (an `open` custom topic needs its id registered).
+    #[must_use]
+    pub fn registered_custom(&self) -> Vec<String> {
+        self.host
+            .custom_ids_entry
+            .as_deref()
+            .map_or_else(Vec::new, parse_custom_ids)
     }
 
     /// Canonical JSON of the bundle: sorted keys, no insignificant
@@ -493,50 +500,79 @@ impl TopicInstallBundle {
     /// Resolve the install plan for `requested`, refusing a bundle whose
     /// declared `environment` is not the target being installed to.
     pub fn plan(&self, requested: InstallEnvironment) -> Result<TopicInstallPlan, BundleError> {
-        self.validate()?;
+        self.validate_shape()?;
         if self.environment != requested {
             return Err(BundleError::EnvironmentMismatch {
                 bundle: self.environment,
                 requested,
             });
         }
-        let mut aliases = self.aliases.clone();
-        aliases.sort_unstable();
-        aliases.dedup();
+        let binding = self.binding()?;
+        let custom_id = self.topic.metric.custom_id.trim().to_owned();
+        let mut host_env = Vec::new();
+        if let Some(digest) = self.host.rlm_image_digest.as_deref() {
+            host_env.push(HostEnvVar {
+                name: ENV_RLM_IMAGE.to_owned(),
+                value: digest.to_owned(),
+                why: "RLM VM image the orchestrator boots for this topic".to_owned(),
+            });
+        }
+        if let Some(digest) = self.host.experiment_image_digest.as_deref() {
+            host_env.push(HostEnvVar {
+                name: ENV_EXPERIMENT_IMAGE.to_owned(),
+                value: digest.to_owned(),
+                why: "guest image for this topic's in-guest runner jobs".to_owned(),
+            });
+        }
+        if let Some(raw) = self.host.custom_ids_entry.as_deref() {
+            host_env.push(HostEnvVar {
+                name: ENV_CUSTOM_IDS.to_owned(),
+                value: raw.trim().to_owned(),
+                why: format!(
+                    "registers {custom_id:?} so this host can score it (empty registry = 503)"
+                ),
+            });
+        }
+        // `PROOF_VM_AGENT_EXPERIMENT_PACK_DIR` names a **directory**, so the
+        // value comes from `host.pack_dir`, never from the pack digest. The
+        // digest is what the host re-hashes the staged tar against, and it
+        // travels in the `why` so the operator can check both.
+        if let (Some(dir), Some(digest)) = (
+            self.host.pack_dir.as_deref(),
+            self.host.pack_digest.as_deref(),
+        ) {
+            host_env.push(HostEnvVar {
+                name: ENV_PACK_DIR.to_owned(),
+                value: dir.trim().to_owned(),
+                why: format!(
+                    "stage the pack tar here; the host re-hashes it and refuses a mismatch \
+                     against {digest}"
+                ),
+            });
+        }
         Ok(TopicInstallPlan {
-            topic_id: self.topic_id.clone(),
+            topic_id: self.topic.id.clone(),
             display_name: self.display_name.trim().to_owned(),
-            version: self.version,
             environment: self.environment,
-            aliases,
-            runner_id: self.runner_id.clone().unwrap_or_default(),
-            pin_rlm: self.pin_rlm.clone().unwrap_or_default(),
-            pin_experiment: self.pin_experiment.clone().unwrap_or_default(),
-            pack_digest: self.pack_digest.clone().unwrap_or_default(),
-            n_concurrent: self.n_concurrent,
-            sealed_custom_value: self.sealed_custom_value,
-            schema_version: self.schema_version,
-            config: self.config.clone(),
+            document_status: self.topic.status,
+            metric_family: self.topic.metric.family,
+            custom_id,
+            runner_id: binding.as_ref().map(|b| b.runner.clone()),
+            pack_digest: binding.as_ref().map(|b| b.pack.digest.clone()),
+            publish_route: PUBLISH_ROUTE.to_owned(),
+            host_env,
+            pack_dir_env: binding.as_ref().map(|_| ENV_PACK_DIR.to_owned()),
             bundle_digest: self.digest()?,
-            enabled: false,
         })
-    }
-}
-
-fn json_kind(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "a boolean",
-        Value::Number(_) => "a number",
-        Value::String(_) => "a string",
-        Value::Array(_) => "an array",
-        Value::Object(_) => "an object",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proof_task::{
+        default_adamw, holdout_commitment, synthetic_holdout, MetricSpec, PayoutMode, STRATUM_SIZE,
+    };
 
     const HEX: &str = "abababababababababababababababababababababababababababababababab";
 
@@ -544,33 +580,364 @@ mod tests {
         format!("{DIGEST_PREFIX}{HEX}")
     }
 
-    /// The Arch default for the first topic: slug `tb4`, alias `tbench`.
+    /// A custom topic that selects an in-guest runner, the shape the live
+    /// `tb4` topic has.
+    fn custom_topic(custom_id: &str) -> TopicDocument {
+        let mut doc = TopicDocument {
+            id: "tb4".into(),
+            statement: "Score the pinned task pack with the pinned runner.".into(),
+            payout_mode: PayoutMode::Discovery,
+            metric: MetricSpec {
+                family: MetricFamily::Custom,
+                primary: "primary_value".into(),
+                custom_id: custom_id.into(),
+                epsilon_rel: 0.05,
+                ..MetricSpec::default()
+            },
+            baseline: default_adamw(proof_task::FLOPS_BUDGET_MAX),
+            holdout_commitment: holdout_commitment(&synthetic_holdout(STRATUM_SIZE, 1)),
+            ..TopicDocument::default()
+        };
+        doc.constraints.params.insert(
+            proof_experiment::PARAM_RUNNER.into(),
+            "rlm_fc_in_guest_harbor".into(),
+        );
+        doc.constraints
+            .params
+            .insert(proof_experiment::PARAM_PACK_DIGEST.into(), digest());
+        doc
+    }
+
     fn tb4() -> TopicInstallBundle {
         TopicInstallBundle {
-            topic_id: "tb4".into(),
-            display_name: "Terminal-Bench 4".into(),
+            schema_version: BUNDLE_SCHEMA_VERSION,
             environment: InstallEnvironment::Metal,
-            aliases: vec!["tbench".into()],
-            runner_id: Some("rlm_fc_in_guest_harbor".into()),
-            pack_digest: Some(digest()),
-            pin_rlm: Some(digest()),
-            pin_experiment: Some(digest()),
-            n_concurrent: 2,
-            ..TopicInstallBundle::default()
+            display_name: "Terminal-Bench 4".into(),
+            topic: custom_topic("tbench"),
+            host: HostExpectations {
+                rlm_image_digest: Some(digest()),
+                experiment_image_digest: Some(digest()),
+                pack_digest: Some(digest()),
+                pack_dir: Some("/var/lib/proof/packs".into()),
+                custom_ids_entry: Some("tbench".into()),
+            },
         }
     }
 
     #[test]
-    fn the_arch_default_topic_validates_and_plans_disabled() {
+    fn the_arch_default_bundle_plans_against_the_existing_admin_route() {
         let bundle = tb4();
-        bundle.validate().expect("tb4 validates");
+        bundle.validate_shape().expect("validates");
         let plan = bundle.plan(InstallEnvironment::Metal).expect("plan");
         assert_eq!(plan.topic_id, "tb4");
-        assert_eq!(plan.aliases, ["tbench"]);
         assert_eq!(plan.environment, InstallEnvironment::Metal);
-        assert!(!plan.enabled, "install never enables a topic");
+        assert_eq!(plan.custom_id, "tbench");
+        assert_eq!(plan.runner_id.as_deref(), Some("rlm_fc_in_guest_harbor"));
+        assert_eq!(plan.pack_digest.as_deref(), Some(digest().as_str()));
+        assert_eq!(
+            plan.publish_route, PUBLISH_ROUTE,
+            "the plan names the existing route, not a new one"
+        );
+        assert_eq!(plan.pack_dir_env.as_deref(), Some(ENV_PACK_DIR));
+        let names: Vec<&str> = plan.host_env.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                ENV_RLM_IMAGE,
+                ENV_EXPERIMENT_IMAGE,
+                ENV_CUSTOM_IDS,
+                ENV_PACK_DIR
+            ]
+        );
         assert!(plan.bundle_digest.starts_with(DIGEST_PREFIX));
         assert_eq!(plan.bundle_digest.len(), DIGEST_PREFIX.len() + 64);
+    }
+
+    /// The bundle carries the signed document verbatim, so there is exactly
+    /// one copy of every binding in the system.
+    #[test]
+    fn the_document_is_carried_verbatim_and_is_the_only_source_of_truth() {
+        let mut bundle = tb4();
+        bundle.topic.signature = "cd".repeat(64);
+        let value = serde_json::to_value(&bundle).expect("json");
+        assert_eq!(
+            value["topic"]["constraints"]["params"][proof_experiment::PARAM_RUNNER],
+            "rlm_fc_in_guest_harbor"
+        );
+        assert_eq!(
+            value["topic"]["metric"]["custom_id"], "tbench",
+            "the custom id is the document's, not a bundle field"
+        );
+        assert_eq!(
+            value["topic"]["signature"],
+            "cd".repeat(64),
+            "the signature travels with the document"
+        );
+        // The bundle itself has no place to restate a binding.
+        let keys: Vec<&String> = value.as_object().expect("object").keys().collect();
+        for forbidden in [
+            "runner_id",
+            "custom_id",
+            "pin_rlm",
+            "n_concurrent",
+            "sealed_custom_value",
+        ] {
+            assert!(
+                !keys.iter().any(|k| k.as_str() == forbidden),
+                "the bundle must not duplicate topic data: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_schema_key_lists_match_the_type() {
+        let bundle = tb4();
+        let value = serde_json::to_value(&bundle).expect("json");
+        let mut keys: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
+        keys.sort_unstable();
+        assert_eq!(keys, BUNDLE_KEYS, "the bundle key list drifted");
+
+        let mut host_keys: Vec<String> = value["host"]
+            .as_object()
+            .expect("host object")
+            .keys()
+            .cloned()
+            .collect();
+        host_keys.sort_unstable();
+        assert_eq!(host_keys, HOST_KEYS, "the host key list drifted");
+        for key in REQUIRED_BUNDLE_KEYS {
+            assert!(keys.iter().any(|k| k == key), "{key} must be required");
+        }
+    }
+
+    #[test]
+    fn unknown_keys_are_refused_at_parse() {
+        let body = r#"{
+            "schema_version": 1, "environment": "metal", "display_name": "x",
+            "topic": {}, "runner_id": "rlm_fc_in_guest_harbor"
+        }"#;
+        let err = TopicInstallBundle::from_json(body).expect_err("unknown key");
+        assert!(
+            matches!(err, BundleError::Parse(ref m) if m.contains("runner_id")),
+            "{err}"
+        );
+
+        let host_body = r#"{
+            "schema_version": 1, "environment": "metal", "display_name": "x",
+            "topic": {}, "host": {"custom_id": "tbench"}
+        }"#;
+        let err = TopicInstallBundle::from_json(host_body).expect_err("unknown host key");
+        assert!(
+            matches!(err, BundleError::Parse(ref m) if m.contains("custom_id")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn required_keys_are_named_when_absent() {
+        for (body, missing) in [
+            (
+                r#"{"environment":"metal","display_name":"x","topic":{},"host":{}}"#,
+                "schema_version",
+            ),
+            (
+                r#"{"schema_version":1,"display_name":"x","topic":{},"host":{}}"#,
+                "environment",
+            ),
+            (
+                r#"{"schema_version":1,"environment":"metal","topic":{},"host":{}}"#,
+                "display_name",
+            ),
+            (
+                r#"{"schema_version":1,"environment":"metal","display_name":"x","host":{}}"#,
+                "topic",
+            ),
+            (
+                r#"{"schema_version":1,"environment":"metal","display_name":"x","topic":{}}"#,
+                "host",
+            ),
+        ] {
+            let err = TopicInstallBundle::from_json(body).expect_err(missing);
+            assert!(
+                matches!(err, BundleError::Parse(ref m) if m.contains(missing)),
+                "{missing}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn digest_expectations_are_exactly_lowercase_and_unpadded() {
+        let upper = HEX.to_ascii_uppercase();
+        for bad in [
+            format!("sha256:{upper}"),
+            format!("sha256: {HEX}"),
+            format!("sha256:{HEX} "),
+            format!(" sha256:{HEX}"),
+            format!("sha256:{}", &HEX[..63]),
+            format!("sha256:{HEX}0"),
+            format!("SHA256:{HEX}"),
+            HEX.to_owned(),
+        ] {
+            for field in ["rlm_image_digest", "experiment_image_digest", "pack_digest"] {
+                let mut bundle = tb4();
+                match field {
+                    "rlm_image_digest" => bundle.host.rlm_image_digest = Some(bad.clone()),
+                    "experiment_image_digest" => {
+                        bundle.host.experiment_image_digest = Some(bad.clone());
+                    }
+                    _ => bundle.host.pack_digest = Some(bad.clone()),
+                }
+                assert!(
+                    matches!(
+                        bundle.validate_shape(),
+                        Err(BundleError::BadDigest { field: f, .. }) if f == field
+                    ),
+                    "{field}={bad:?} must be refused, not silently accepted"
+                );
+            }
+        }
+        tb4().validate_shape().expect("lowercase hex validates");
+        assert!(is_lower_hex64(HEX));
+        assert!(!is_lower_hex64(&upper));
+        assert!(!is_lower_hex64(&format!(" {HEX}")));
+    }
+
+    /// The host block may only agree with the document.
+    #[test]
+    fn a_host_expectation_that_contradicts_the_document_is_refused() {
+        let other = format!("sha256:{}", "cd".repeat(32));
+        let mut bundle = tb4();
+        bundle.host.pack_digest = Some(other.clone());
+        let err = bundle.validate_shape().expect_err("contradicting pack");
+        assert!(
+            matches!(
+                err,
+                BundleError::HostContradictsDocument {
+                    field: "pack_digest",
+                    ref got,
+                    ..
+                } if *got == other
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("contradicts"), "{err}");
+    }
+
+    #[test]
+    fn a_runner_and_its_pack_travel_together() {
+        let mut no_pack = tb4();
+        no_pack.host.pack_digest = None;
+        let err = no_pack.validate_shape().expect_err("runner without pack");
+        assert!(
+            matches!(err, BundleError::RunnerWithoutPack { ref runner_id }
+                if runner_id == "rlm_fc_in_guest_harbor"),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("never invented"), "{err}");
+
+        // A pack pinned for a topic that selects no runner is refused: the
+        // bundle would stage something nothing reads.
+        let mut orphan = tb4();
+        orphan
+            .topic
+            .constraints
+            .params
+            .remove(proof_experiment::PARAM_RUNNER);
+        orphan
+            .topic
+            .constraints
+            .params
+            .remove(proof_experiment::PARAM_PACK_DIGEST);
+        assert!(matches!(
+            orphan.validate_shape(),
+            Err(BundleError::PackWithoutRunner)
+        ));
+
+        // No runner, no pack: the harvest-family shape is legal.
+        let mut harvest = tb4();
+        harvest
+            .topic
+            .constraints
+            .params
+            .remove(proof_experiment::PARAM_RUNNER);
+        harvest
+            .topic
+            .constraints
+            .params
+            .remove(proof_experiment::PARAM_PACK_DIGEST);
+        harvest.host.pack_digest = None;
+        harvest.topic.metric.family = MetricFamily::Nll;
+        harvest.topic.metric.custom_id = String::new();
+        harvest.topic.metric.primary = proof_task::PRIMARY_HOLDOUT_NLL.into();
+        harvest.host.custom_ids_entry = None;
+        harvest
+            .validate_shape()
+            .expect("a topic may select no runner");
+        let plan = harvest.plan(InstallEnvironment::Metal).expect("plan");
+        assert!(plan.runner_id.is_none());
+        assert!(plan.pack_dir_env.is_none());
+    }
+
+    /// A malformed binding in the document is refused, never ignored: a topic
+    /// that half-selects a backend must not install on another path.
+    #[test]
+    fn a_malformed_document_binding_is_refused() {
+        let mut bundle = tb4();
+        bundle.topic.constraints.params.insert(
+            proof_experiment::PARAM_PACK_DIGEST.into(),
+            "not-a-digest".into(),
+        );
+        let err = bundle.validate_shape().expect_err("bad pack digest");
+        assert!(matches!(err, BundleError::Binding(_)), "{err:?}");
+
+        // A runner id that is not a custom-id shape is refused by the shared
+        // binding reader rather than silently treated as "no runner".
+        let mut bad_runner = tb4();
+        bad_runner
+            .topic
+            .constraints
+            .params
+            .insert(proof_experiment::PARAM_RUNNER.into(), "Not A Runner".into());
+        assert!(matches!(
+            bad_runner.validate_shape(),
+            Err(BundleError::Binding(_))
+        ));
+
+        // Dropping the runner but leaving its pack behind is the half-selected
+        // shape: nothing runs the pack, so the bundle refuses rather than
+        // staging it.
+        let mut no_runner = tb4();
+        no_runner
+            .topic
+            .constraints
+            .params
+            .remove(proof_experiment::PARAM_RUNNER);
+        assert!(matches!(
+            no_runner.validate_shape(),
+            Err(BundleError::PackWithoutRunner)
+        ));
+    }
+
+    #[test]
+    fn an_open_custom_topic_needs_its_id_registered_in_the_host_block() {
+        let mut bundle = tb4();
+        bundle.host.custom_ids_entry = Some("some_other_metric".into());
+        let err = bundle.validate_shape().expect_err("id not registered");
+        assert!(
+            matches!(err, BundleError::CustomIdNotRegistered { ref custom_id }
+                if custom_id == "tbench"),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("503"), "{err}");
+
+        // The id list is parsed the same way `proof-challenge` parses it.
+        bundle.host.custom_ids_entry = Some("other_metric, tbench ,third".into());
+        bundle.validate_shape().expect("one entry is enough");
+        assert_eq!(
+            bundle.registered_custom(),
+            ["other_metric", "tbench", "third"]
+        );
+        assert!(parse_custom_ids("  ").is_empty());
     }
 
     #[test]
@@ -608,426 +975,66 @@ mod tests {
     }
 
     #[test]
-    fn unknown_keys_are_refused_at_parse() {
-        let body = r#"{
-            "schema_version": 1, "topic_id": "tb4", "display_name": "x",
-            "version": 1, "environment": "metal", "task_slice": "tb4-first-15"
-        }"#;
-        let err = TopicInstallBundle::from_json(body).expect_err("unknown key");
-        assert!(
-            matches!(err, BundleError::Parse(ref m) if m.contains("task_slice")),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn required_keys_are_named_when_absent() {
-        for (body, missing) in [
-            (
-                r#"{"schema_version":1,"display_name":"x","version":1,"environment":"metal"}"#,
-                "topic_id",
-            ),
-            (
-                r#"{"schema_version":1,"topic_id":"tb4","version":1,"environment":"metal"}"#,
-                "display_name",
-            ),
-            (
-                r#"{"schema_version":1,"topic_id":"tb4","display_name":"x","environment":"metal"}"#,
-                "version",
-            ),
-            (
-                r#"{"schema_version":1,"topic_id":"tb4","display_name":"x","version":1}"#,
-                "environment",
-            ),
-        ] {
-            let err = TopicInstallBundle::from_json(body).expect_err(missing);
-            assert!(
-                matches!(err, BundleError::Parse(ref m) if m.contains(missing)),
-                "{missing}: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn ids_pins_and_bounds_are_checked() {
-        let mut bundle = tb4();
-        bundle.topic_id = "TB4".into();
-        assert!(matches!(bundle.validate(), Err(BundleError::BadTopicId(_))));
-        bundle = tb4();
-        bundle.topic_id = "tbench_tb4".into();
-        assert!(matches!(bundle.validate(), Err(BundleError::BadTopicId(_))));
-        bundle = tb4();
-        bundle.display_name = "  ".into();
-        assert!(matches!(
-            bundle.validate(),
-            Err(BundleError::BadDisplayName)
-        ));
-        bundle = tb4();
-        bundle.version = 0;
-        assert!(matches!(bundle.validate(), Err(BundleError::BadVersion)));
-        bundle = tb4();
-        bundle.n_concurrent = 0;
-        assert!(matches!(
-            bundle.validate(),
-            Err(BundleError::BadConcurrency)
-        ));
-        bundle = tb4();
-        bundle.schema_version = 2;
-        assert!(matches!(
-            bundle.validate(),
-            Err(BundleError::WrongSchema { got: 2, want: 1 })
-        ));
-    }
-
-    #[test]
-    fn a_digest_is_never_invented() {
-        for bad in ["", "abc", HEX, "sha256:", "sha256:zz", "sha512:dead"] {
-            let mut bundle = tb4();
-            bundle.pin_rlm = Some(bad.into());
-            assert!(
-                matches!(
-                    bundle.validate(),
-                    Err(BundleError::BadDigest {
-                        field: "pin_rlm",
-                        ..
-                    })
-                ),
-                "{bad:?} must be refused"
-            );
-        }
-        // Absent is the only alternative to a well-formed digest.
-        let mut unpinned = tb4();
-        unpinned.pin_rlm = None;
-        unpinned.pin_experiment = None;
-        unpinned
-            .validate()
-            .expect("unpinned is legal, not defaulted");
-    }
-
-    #[test]
-    fn a_runner_and_its_pack_travel_together() {
-        let mut no_pack = tb4();
-        no_pack.pack_digest = None;
-        let err = no_pack.validate().expect_err("runner without pack");
-        assert!(
-            matches!(err, BundleError::RunnerWithoutPack { ref runner_id }
-                if runner_id == "rlm_fc_in_guest_harbor"),
-            "{err:?}"
-        );
-        assert!(err.to_string().contains("never invented"), "{err}");
-
-        let mut orphan = tb4();
-        orphan.runner_id = None;
-        assert!(matches!(
-            orphan.validate(),
-            Err(BundleError::PackWithoutRunner)
-        ));
-
-        let mut bad_id = tb4();
-        bad_id.runner_id = Some("Runner With Spaces".into());
-        assert!(matches!(
-            bad_id.validate(),
-            Err(BundleError::BadRunnerId(_))
-        ));
-
-        // No runner, no pack: the harvest-family shape is legal.
-        let mut harvest = tb4();
-        harvest.runner_id = None;
-        harvest.pack_digest = None;
-        harvest.validate().expect("a topic may select no runner");
-    }
-
-    #[test]
-    fn aliases_are_slugs_unique_and_never_the_topic_id() {
-        let mut dup = tb4();
-        dup.aliases = vec!["tbench".into(), "tbench".into()];
-        assert!(matches!(
-            dup.validate(),
-            Err(BundleError::BadAlias {
-                why: "duplicate alias",
-                ..
-            })
-        ));
-
-        let mut self_alias = tb4();
-        self_alias.aliases = vec!["tb4".into()];
-        assert!(matches!(
-            self_alias.validate(),
-            Err(BundleError::BadAlias {
-                why: "an alias of the topic id itself is not an alias",
-                ..
-            })
-        ));
-
-        let mut malformed = tb4();
-        malformed.aliases = vec!["TBench".into()];
-        assert!(matches!(
-            malformed.validate(),
-            Err(BundleError::BadAlias { .. })
-        ));
-
-        let mut many = tb4();
-        many.aliases = (0..=MAX_ALIASES).map(|i| format!("alias-{i}")).collect();
-        assert!(matches!(
-            many.validate(),
-            Err(BundleError::TooManyAliases(9))
-        ));
-
-        // Order does not matter: the plan sorts and de-duplicates.
-        let mut two = tb4();
-        two.aliases = vec!["zeta".into(), "alpha".into()];
-        assert_eq!(
-            two.plan(InstallEnvironment::Metal).expect("plan").aliases,
-            ["alpha", "zeta"]
-        );
-    }
-
-    #[test]
-    fn a_baseline_must_be_finite_and_config_must_be_a_bounded_object() {
-        let mut nan = tb4();
-        nan.sealed_custom_value = Some(f64::NAN);
-        assert!(matches!(
-            nan.validate(),
-            Err(BundleError::NonFiniteSealedValue(_))
-        ));
-        let mut inf = tb4();
-        inf.sealed_custom_value = Some(f64::INFINITY);
-        assert!(matches!(
-            inf.validate(),
-            Err(BundleError::NonFiniteSealedValue(_))
-        ));
-        let mut sealed = tb4();
-        sealed.sealed_custom_value = Some(0.42);
-        sealed.validate().expect("a finite baseline is fine");
-
-        let mut list = tb4();
-        list.config = serde_json::json!([1, 2]);
-        assert!(matches!(
-            list.validate(),
-            Err(BundleError::ConfigNotObject("an array"))
-        ));
-        let mut huge = tb4();
-        huge.config = serde_json::json!({ "pad": "x".repeat(MAX_CONFIG_BYTES) });
-        assert!(matches!(
-            huge.validate(),
-            Err(BundleError::ConfigTooLarge(_))
-        ));
-        let mut null = tb4();
-        null.config = Value::Null;
-        assert!(matches!(
-            null.validate(),
-            Err(BundleError::ConfigNotObject("null"))
-        ));
-    }
-
-    #[test]
-    fn defaults_are_the_fail_closed_reading() {
-        let body = r#"{
-            "schema_version": 1, "topic_id": "tb4", "display_name": "Terminal-Bench 4",
-            "version": 1, "environment": "staging"
-        }"#;
-        let bundle = TopicInstallBundle::from_json(body).expect("parse");
-        assert!(bundle.aliases.is_empty());
-        assert!(bundle.runner_id.is_none());
-        assert!(bundle.pin_rlm.is_none());
-        assert!(bundle.pack_digest.is_none());
-        assert_eq!(bundle.n_concurrent, 1);
-        assert!(bundle.sealed_custom_value.is_none());
-        assert_eq!(bundle.config, Value::Object(serde_json::Map::new()));
-        bundle.validate().expect("defaults validate");
-    }
-
-    #[test]
     fn the_digest_ignores_formatting_and_key_order() {
-        let compact = r#"{"schema_version":1,"topic_id":"tb4","display_name":"Terminal-Bench 4","version":1,"environment":"metal"}"#;
-        let spaced = r#"{
-            "environment": "metal",
-            "version": 1,
-            "display_name": "Terminal-Bench 4",
-            "topic_id": "tb4",
-            "schema_version": 1
-        }"#;
-        let a = TopicInstallBundle::from_json(compact).expect("a");
-        let b = TopicInstallBundle::from_json(spaced).expect("b");
-        assert_eq!(a.digest().expect("digest a"), b.digest().expect("digest b"));
+        let bundle = tb4();
+        let body = serde_json::to_string(&bundle).expect("json");
+        let reparsed = TopicInstallBundle::from_json(&body).expect("parse");
+        assert_eq!(
+            bundle.digest().expect("digest"),
+            reparsed.digest().expect("digest"),
+            "a round trip is the same bundle"
+        );
 
         // Any real change is a different install, so a different digest.
-        let mut changed = a.clone();
-        changed.n_concurrent = 3;
+        let mut changed = bundle.clone();
+        changed.host.custom_ids_entry = Some("tbench,extra".into());
         assert_ne!(
-            a.digest().expect("a"),
+            bundle.digest().expect("a"),
             changed.digest().expect("changed"),
             "a changed bundle must not hash the same"
         );
-        let mut renamed = a;
-        renamed.topic_id = "tb5".into();
+        let mut renamed = bundle;
+        renamed.display_name = "Other".into();
         assert_ne!(
-            b.digest().expect("b"),
+            reparsed.digest().expect("b"),
             renamed.digest().expect("renamed"),
-            "the topic id is part of the identity"
+            "the label is part of the identity"
         );
     }
 
+    /// `pack_dir` names a directory, so it is checked as a path — and it never
+    /// carries the digest, which travels in the document.
     #[test]
-    fn the_digest_is_stable_and_matches_a_pinned_vector() {
-        // A literal vector: if the canonical form or the digest algorithm ever
-        // drifts, this test fails rather than silently re-pinning every topic.
-        let body = r#"{"schema_version":1,"topic_id":"tb4","display_name":"Terminal-Bench 4","version":1,"environment":"metal"}"#;
-        let bundle = TopicInstallBundle::from_json(body).expect("parse");
-        let canonical = bundle.canonical().expect("canonical");
-        assert_eq!(
-            canonical,
-            r#"{"aliases":[],"config":{},"display_name":"Terminal-Bench 4","environment":"metal","n_concurrent":1,"schema_version":1,"topic_id":"tb4","version":1}"#
-        );
-        let digest = bundle.digest().expect("digest");
-        assert_eq!(digest, format!("{DIGEST_PREFIX}{}", sha256_hex(&canonical)));
-    }
-
-    fn sha256_hex(s: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(s.as_bytes());
-        hex::encode(h.finalize())
-    }
-
-    /// The row's `CHECK` is `^sha256:[0-9a-f]{64}$`, so anything this
-    /// validator accepts has to be exactly that. Accepting an uppercase or
-    /// padded pin would let a bundle validate and dry-run and then fail a real
-    /// install — the operator would find out only on the host that matters.
-    #[test]
-    fn digest_pins_are_exactly_lowercase_and_unpadded() {
-        let upper = HEX.to_ascii_uppercase();
-        for bad in [
-            format!("sha256:{upper}"),
-            format!("sha256: {HEX}"),
-            format!("sha256:{HEX} "),
-            format!(" sha256:{HEX}"),
-            format!("sha256:{}", &HEX[..63]),
-            format!("sha256:{HEX}0"),
-            format!("SHA256:{HEX}"),
-        ] {
-            for field in ["pin_rlm", "pin_experiment", "pack_digest"] {
-                let mut bundle = tb4();
-                match field {
-                    "pin_rlm" => bundle.pin_rlm = Some(bad.clone()),
-                    "pin_experiment" => bundle.pin_experiment = Some(bad.clone()),
-                    _ => bundle.pack_digest = Some(bad.clone()),
-                }
-                assert!(
-                    matches!(
-                        bundle.validate(),
-                        Err(BundleError::BadDigest { field: f, .. }) if f == field
-                    ),
-                    "{field}={bad:?} must be refused, not silently accepted"
-                );
-            }
+    fn pack_dir_is_a_path_not_a_digest() {
+        for bad in ["", "relative/packs", "/var/../etc", "sha256:abc"] {
+            let mut bundle = tb4();
+            bundle.host.pack_dir = Some(bad.into());
+            assert!(
+                matches!(bundle.validate_shape(), Err(BundleError::BadPackDir(_))),
+                "{bad:?} must be refused as a pack dir"
+            );
         }
-        // The canonical spelling still validates, so this is strictness
-        // rather than a blanket rejection.
-        tb4().validate().expect("lowercase hex validates");
-        assert!(is_lower_hex64(HEX));
-        assert!(!is_lower_hex64(&upper));
-        assert!(!is_lower_hex64(&format!(" {HEX}")));
-    }
-
-    /// The row's columns are `INTEGER`. A value that would not fit is a
-    /// reject, never a clamp: a clamped row would disagree with the
-    /// digest-covered bundle the operator reviewed.
-    #[test]
-    fn numeric_columns_out_of_range_are_refused_not_clamped() {
-        let mut big_version = tb4();
-        big_version.version = MAX_INT_COLUMN + 1;
-        let err = big_version.validate().expect_err("version overflow");
+        let mut no_dir = tb4();
+        no_dir.host.pack_dir = None;
+        no_dir.validate_shape().expect("a pack dir is optional");
+        let plan = no_dir.plan(InstallEnvironment::Metal).expect("plan");
         assert!(
-            matches!(
-                err,
-                BundleError::IntColumnOverflow {
-                    field: "version",
-                    got: _
-                }
-            ),
-            "{err:?}"
-        );
-        assert!(
-            err.to_string().contains("refused rather than clamped"),
-            "{err}"
+            !plan.host_env.iter().any(|e| e.name == ENV_PACK_DIR),
+            "no directory declared means no pack-dir env line: {:?}",
+            plan.host_env
         );
 
-        let mut big_concurrency = tb4();
-        big_concurrency.n_concurrent = u32::MAX;
-        assert!(
-            matches!(
-                big_concurrency.validate(),
-                Err(BundleError::IntColumnOverflow {
-                    field: "n_concurrent",
-                    ..
-                })
-            ),
-            "n_concurrent overflow"
-        );
-
-        // The boundary itself is legal.
-        let mut at_limit = tb4();
-        at_limit.version = MAX_INT_COLUMN;
-        at_limit.n_concurrent = MAX_INT_COLUMN;
-        at_limit.validate().expect("i32::MAX fits the column");
-        assert_eq!(MAX_INT_COLUMN, i32::MAX as u32);
-    }
-
-    /// The advertised limit is on the `config` object. A legal bundle with
-    /// long metadata must not be rejected for a small config, and the error
-    /// must report the config's own size rather than the bundle's.
-    #[test]
-    fn the_config_bound_measures_the_config_not_the_bundle() {
-        // A small config inside a large-but-legal bundle.
-        let mut bundle = tb4();
-        bundle.display_name = "x".repeat(MAX_DISPLAY_NAME_LEN);
-        bundle.aliases = (0..MAX_ALIASES).map(|i| format!("alias-{i}")).collect();
-        bundle.config = serde_json::json!({ "task_slice": "tb4-first-15" });
-        bundle
-            .validate()
-            .expect("a small config in a large bundle is fine");
-
-        // Over the limit is refused, and the number is the config's own size.
-        let mut over = tb4();
-        over.config = serde_json::json!({ "pad": "x".repeat(MAX_CONFIG_BYTES) });
-        let err = over.validate().expect_err("oversized config");
-        let BundleError::ConfigTooLarge(reported) = err else {
-            panic!("expected ConfigTooLarge, got {err:?}");
-        };
-        let config_bytes = proof_canon::canonical_json(&over.config).len();
-        assert_eq!(
-            reported, config_bytes,
-            "the error must report the config's size"
-        );
-        assert!(config_bytes > MAX_CONFIG_BYTES);
-
-        // Exactly at the limit passes.
-        let mut at_limit = tb4();
-        let overhead = proof_canon::canonical_json(&serde_json::json!({ "pad": "" })).len();
-        at_limit.config = serde_json::json!({ "pad": "x".repeat(MAX_CONFIG_BYTES - overhead) });
-        assert_eq!(
-            proof_canon::canonical_json(&at_limit.config).len(),
-            MAX_CONFIG_BYTES
-        );
-        at_limit.validate().expect("exactly at the limit passes");
-    }
-
-    #[test]
-    fn the_schema_key_list_matches_the_type() {
-        // A full bundle with every key set: the serialized form must carry
-        // exactly `BUNDLE_KEYS`, and each one must round-trip.
-        let bundle = TopicInstallBundle {
-            sealed_custom_value: Some(0.5),
-            ..tb4()
-        };
-        let value = serde_json::to_value(&bundle).expect("serialize");
-        let mut keys: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
-        keys.sort_unstable();
-        assert_eq!(keys, BUNDLE_KEYS, "the schema key list drifted");
-        for key in REQUIRED_BUNDLE_KEYS {
-            assert!(keys.iter().any(|k| k == key), "{key} must be required");
-        }
+        // With a directory, the value is the path and the digest is only in
+        // the explanation.
+        let plan = tb4().plan(InstallEnvironment::Metal).expect("plan");
+        let pack = plan
+            .host_env
+            .iter()
+            .find(|e| e.name == ENV_PACK_DIR)
+            .expect("pack dir line");
+        assert_eq!(pack.value, "/var/lib/proof/packs");
+        assert!(!pack.value.starts_with("sha256:"), "{pack:?}");
+        assert!(pack.why.contains(&digest()), "{pack:?}");
     }
 
     #[test]
@@ -1035,7 +1042,10 @@ mod tests {
         let plan = tb4().plan(InstallEnvironment::Metal).expect("plan");
         let body = serde_json::to_string(&plan).expect("json");
         assert!(body.contains(r#""topic_id":"tb4""#), "{body}");
-        assert!(body.contains(r#""enabled":false"#), "{body}");
+        assert!(
+            body.contains(r#""publish_route":"POST /v1/admin/proof/topics""#),
+            "{body}"
+        );
         assert!(body.contains(r#""environment":"metal""#), "{body}");
         let round: TopicInstallPlan = serde_json::from_str(&body).expect("round trip");
         assert_eq!(round, plan);

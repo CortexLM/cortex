@@ -17,6 +17,9 @@ async fn contract(store: &dyn RlmStore) {
 
     // Topic versions advance per persisted document.
     assert!(store.latest_topic(&t.id).await.unwrap().is_none());
+    // The registry view is empty before anything is installed, and empty is
+    // an empty vector rather than an error.
+    assert!(store.latest_topics().await.unwrap().is_empty());
     assert_eq!(store.put_topic_version(&t).await.unwrap(), 1);
     let mut resigned = t.clone();
     resigned.statement.push_str(" (v2)");
@@ -24,6 +27,26 @@ async fn contract(store: &dyn RlmStore) {
     let (v, latest) = store.latest_topic(&t.id).await.unwrap().unwrap();
     assert_eq!(v, 2);
     assert!(latest.statement.ends_with("(v2)"));
+
+    // The registry view reads the newest version of every topic, ordered by
+    // id, and carries the signed document verbatim — the one source of truth.
+    let listed = store.latest_topics().await.unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].topic_id, t.id);
+    assert_eq!(listed[0].version, 2);
+    assert_eq!(listed[0].document, resigned);
+    let mut other = t.clone();
+    other.id = "aaa-other-v0".into();
+    store.put_topic_version(&other).await.unwrap();
+    let listed = store.latest_topics().await.unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|r| r.topic_id.as_str())
+            .collect::<Vec<_>>(),
+        ["aaa-other-v0", t.id.as_str()],
+        "ordered by topic_id"
+    );
 
     // Rules: v1 from the document, v2 from the RLM, gaps refused.
     let v1 = rules();

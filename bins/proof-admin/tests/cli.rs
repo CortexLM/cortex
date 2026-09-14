@@ -1,14 +1,15 @@
 //! Process-level tests for `proof-admin` (dynamic-topics P0).
 //!
-//! Everything here runs without a database, a network, or a metal key:
-//! `topic validate` and `topic install --dry-run` are the two commands P0
-//! promises to make work end to end, and the stubs must fail closed with
-//! exit code 3 rather than doing something partial.
+//! The commands that must work end to end are `topic validate` and
+//! `topic install --dry-run`: both run the same acceptance checks the existing
+//! `POST /v1/admin/proof/topics` route runs, and neither touches a host. The
+//! stubs must fail closed with exit code 3 rather than doing something partial.
 //!
-//! The real install path is covered against Postgres in
-//! `crates/db/tests/topics.rs` (schema and upsert) and by the same
-//! `upsert_topic` call this binary makes; these tests assert that the binary
-//! never *reaches* a database unless it was asked to and given one.
+//! A real install is deliberately **not** implemented in this slice, so the
+//! test asserts it refuses rather than writing anything; the registry view
+//! (`topic list` / `topic show`) is covered against Postgres in
+//! `crates/proof-rlm-store/tests/store_contract.rs` and by one DB-gated test
+//! here.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -16,14 +17,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// Exit code for a failure (bad bundle, missing database, ...).
+/// Exit code for a failure (bad bundle, refused document, ...).
 const EXIT_ERROR: i32 = 1;
 /// Exit code for bad usage or missing configuration.
 const EXIT_USAGE: i32 = 2;
 /// Exit code for a command a later slice owns.
 const EXIT_NOT_IMPLEMENTED: i32 = 3;
-
-const HEX: &str = "abababababababababababababababababababababababababababababababab";
 
 fn workdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -37,30 +36,10 @@ fn workdir(tag: &str) -> PathBuf {
     dir
 }
 
-fn write_bundle(dir: &Path, name: &str, body: &str) -> PathBuf {
+fn write_file(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
-    fs::write(&path, body).expect("write bundle");
+    fs::write(&path, body).expect("write file");
     path
-}
-
-/// The Arch default bundle: slug `tb4`, alias `tbench`.
-fn tb4_json(environment: &str) -> String {
-    format!(
-        r#"{{
-  "schema_version": 1,
-  "topic_id": "tb4",
-  "display_name": "Terminal-Bench 4",
-  "version": 1,
-  "environment": "{environment}",
-  "aliases": ["tbench"],
-  "runner_id": "rlm_fc_in_guest_harbor",
-  "pin_rlm": "sha256:{HEX}",
-  "pin_experiment": "sha256:{HEX}",
-  "pack_digest": "sha256:{HEX}",
-  "n_concurrent": 2,
-  "config": {{"task_slice": "tb4-first-15"}}
-}}"#
-    )
 }
 
 /// Run the binary with every database variable removed, so a command that
@@ -86,109 +65,132 @@ fn code(out: &Output) -> i32 {
     out.status.code().unwrap_or(-1)
 }
 
-/// Run the binary against a real Postgres URL.
-fn run_with_db(args: &[&str], database_url: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_proof-admin"))
-        .args(args)
-        .env("BASE_DATABASE_URL", database_url)
-        .env_remove("BASE_DATABASE_URL_FILE")
-        .output()
-        .expect("run proof-admin")
-}
-
-/// Returns `None` when `DATABASE_URL` is unset so default CI (no Postgres)
-/// skips, matching the gating in `crates/db/tests`.
-fn owner_url() -> Option<String> {
-    std::env::var("DATABASE_URL")
-        .ok()
-        .map(|u| u.trim().to_owned())
-        .filter(|u| !u.is_empty())
-}
-
-/// The reported install state must be the **persisted** state.
+/// A bundle whose signed document matches `pin_body`'s key, so `validate`
+/// exercises the real acceptance path.
 ///
-/// A re-install deliberately leaves `enabled` alone, so a topic that was
-/// already live stays live. An operator (or an automation reading `--json`)
-/// told it is disabled would be exactly the mistake that produces a surprise
-/// on a live host.
-#[tokio::test]
-async fn a_reinstall_reports_the_persisted_state_not_a_guess() {
-    let Some(url) = owner_url() else {
-        return;
-    };
-    let tp = match db::test_pool_with_url(&url).await {
-        Ok(tp) => tp,
-        Err(e) => panic!("test_pool: {e}"),
-    };
-    // The binary talks to this schema through `search_path`, so hand it a URL
-    // whose connections land in the isolated test schema.
-    let schema = tp.schema().to_owned();
-    let scoped = format!("{url}?options=-c%20search_path%3D{schema}%2Cpublic");
-
-    let dir = workdir("reinstall");
-    let bundle = write_bundle(&dir, "tb4.json", &tb4_json("metal"));
-    let install = |json: bool| {
-        let mut args = vec![
-            "topic",
-            "install",
-            "--bundle",
-            bundle.to_str().unwrap(),
-            "--env",
-            "metal",
-        ];
-        if json {
-            args.insert(0, "--json");
-        }
-        run_with_db(&args, &scoped)
+/// Built by signing a real `TopicDocument` with a test mini-secret, then
+/// embedding it: the CLI checks the signature exactly as the route does.
+mod fixture {
+    use proof_task::{
+        default_adamw, holdout_commitment, synthetic_holdout, Constraints, MetricDirection,
+        MetricFamily, MetricSpec, PayoutMode, TopicDocument, TopicStatus, FLOPS_BUDGET_MAX,
+        STRATUM_SIZE,
     };
 
-    // First install: the row does not exist, so it is reported disabled.
-    let out = install(true);
-    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
-    let first: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
-    assert_eq!(first["enabled"], false, "{first}");
+    /// Test mini-secret. Not a real key, never a production one.
+    pub fn sk() -> [u8; 32] {
+        let mut s = [3u8; 32];
+        s[0] = 17;
+        s
+    }
 
-    // An operator enables it (the enable path is a later slice, so the test
-    // writes the column directly).
-    sqlx::query("UPDATE proof_topic SET enabled = TRUE WHERE topic_id = 'tb4'")
-        .execute(tp.pool())
-        .await
-        .expect("enable");
+    pub fn pin_toml() -> String {
+        let pk = hex::encode(crypto::public_key_from_mini_secret(&sk()).expect("pk"));
+        format!(
+            r#"challenge_id = "proof"
+scoring_version = 1
+base_model_family = "Qwen/Qwen3.8"
+eval_image = "ghcr.io/cortexlm/proof-eval"
+eval_image_digest = "sha256:{}"
+topic_pubkey = "{pk}"
+flops_budget_max = 2000000000000000000
+epsilon_nll_min = 0.02
+epsilon_topic_max_regress_min = 0.05
+epsilon_throughput_rel_min = 0.05
+quality_floor_nll_max = 0.02
+holdout_size = 120
+stratum_size = 24
 
-    // Re-install: the row stays enabled, and the output must say so.
-    let out = install(true);
-    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
-    let second: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
-    assert_eq!(
-        second["enabled"], true,
-        "a re-install must report the persisted state: {second}"
-    );
+[inference]
+provider = "openai_compatible"
+base_url = "http://127.0.0.1:8000/v1"
+model = "master-proxy-v0"
+mode = "chat"
+max_input_tokens = 32768
+max_output_tokens = 8192
+"#,
+            "ab".repeat(32)
+        )
+    }
 
-    // The human output agrees with the JSON output.
-    let out = install(false);
-    let text = stdout(&out);
-    assert!(
-        text.contains("still ENABLED") && !text.contains("(DISABLED)"),
-        "human output must not claim a live topic is disabled:\n{text}"
-    );
+    /// A signed custom topic selecting the in-guest runner, the shape the live
+    /// `tb4` topic has.
+    pub fn signed_topic(pack_digest: &str) -> TopicDocument {
+        let mut doc = TopicDocument {
+            id: "tb4".into(),
+            statement: "Score the pinned task pack with the pinned runner.".into(),
+            payout_mode: PayoutMode::Discovery,
+            constraints: Constraints::default(),
+            metric: MetricSpec {
+                family: MetricFamily::Custom,
+                primary: "primary_value".into(),
+                direction: MetricDirection::Max,
+                unit: "rate".into(),
+                epsilon_rel: 0.05,
+                custom_id: "tbench".into(),
+                ..MetricSpec::default()
+            },
+            baseline: default_adamw(FLOPS_BUDGET_MAX),
+            holdout_commitment: holdout_commitment(&synthetic_holdout(STRATUM_SIZE, 1)),
+            status: TopicStatus::Draft,
+            ..TopicDocument::default()
+        };
+        doc.constraints.params.insert(
+            proof_experiment::PARAM_RUNNER.into(),
+            "rlm_fc_in_guest_harbor".into(),
+        );
+        doc.constraints.params.insert(
+            proof_experiment::PARAM_PACK_DIGEST.into(),
+            pack_digest.into(),
+        );
+        doc.signature = doc.sign_with(&sk()).expect("sign");
+        doc
+    }
 
-    let _ = std::fs::remove_dir_all(&dir);
-    tp.drop_schema().await.expect("drop");
+    /// The Arch default bundle: slug `tb4`, custom id `tbench`.
+    pub fn bundle_json(environment: &str) -> String {
+        let hex = "ab".repeat(32);
+        let pack = format!("sha256:{hex}");
+        let topic = signed_topic(&pack);
+        let bundle = serde_json::json!({
+            "schema_version": 1,
+            "environment": environment,
+            "display_name": "Terminal-Bench 4",
+            "topic": topic,
+            "host": {
+                "rlm_image_digest": format!("sha256:{hex}"),
+                "experiment_image_digest": format!("sha256:{hex}"),
+                "pack_digest": pack,
+                "pack_dir": "/var/lib/proof/packs",
+                "custom_ids_entry": "tbench"
+            }
+        });
+        serde_json::to_string_pretty(&bundle).expect("json")
+    }
 }
 
 #[test]
 fn validate_accepts_the_arch_default_bundle_and_writes_nothing() {
     let dir = workdir("validate-ok");
-    let bundle = write_bundle(&dir, "tb4.json", &tb4_json("metal"));
-    let out = run(&["topic", "validate", "--bundle", bundle.to_str().unwrap()]);
+    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("metal"));
+    let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
+    let out = run(&[
+        "topic",
+        "validate",
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--pin",
+        pin.to_str().unwrap(),
+    ]);
     assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
     let body = stdout(&out);
     for needle in [
         "is valid",
-        "topic_id       tb4",
-        "environment    metal",
-        "aliases        tbench",
-        "bundle_digest  sha256:",
+        "topic_id         tb4",
+        "environment      metal",
+        "custom_id        tbench",
+        "runner_id        rlm_fc_in_guest_harbor",
+        "bundle_digest    sha256:",
         "Nothing was written",
     ] {
         assert!(body.contains(needle), "missing {needle:?} in:\n{body}");
@@ -196,18 +198,35 @@ fn validate_accepts_the_arch_default_bundle_and_writes_nothing() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// `validate` runs the same acceptance the publish route runs, so a document
+/// the route would refuse is refused here — with the reason.
 #[test]
-fn validate_reports_the_offending_key_and_writes_nothing() {
-    let dir = workdir("validate-bad");
-    // An unknown key is refused rather than ignored: a binding this build
-    // cannot name is a binding nothing enforces.
-    let unknown = tb4_json("metal").replace("\"version\": 1,", "\"task_slice\": \"x\",");
-    let bundle = write_bundle(&dir, "unknown.json", &unknown);
-    let out = run(&["topic", "validate", "--bundle", bundle.to_str().unwrap()]);
+fn validate_refuses_a_document_the_publish_route_would_refuse() {
+    let dir = workdir("validate-refuse");
+
+    // A signature that does not verify under the pin's topic key.
+    let mut wrong_key =
+        serde_json::from_str::<serde_json::Value>(&fixture::bundle_json("metal")).expect("json");
+    let mut other = [9u8; 32];
+    other[1] = 4;
+    let doc: proof_task::TopicDocument =
+        serde_json::from_value(wrong_key["topic"].clone()).expect("document");
+    let resigned = doc.sign_with(&other).expect("sign with another key");
+    wrong_key["topic"]["signature"] = serde_json::Value::String(resigned);
+    let bundle = write_file(&dir, "wrong-key.json", &wrong_key.to_string());
+    let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
+    let out = run(&[
+        "topic",
+        "validate",
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--pin",
+        pin.to_str().unwrap(),
+    ]);
     assert_eq!(code(&out), EXIT_ERROR, "stderr={}", stderr(&out));
     assert!(
-        stderr(&out).contains("task_slice"),
-        "stderr must name the unknown key: {}",
+        stderr(&out).contains("signature"),
+        "stderr must name the signature: {}",
         stderr(&out)
     );
     assert!(
@@ -215,40 +234,64 @@ fn validate_reports_the_offending_key_and_writes_nothing() {
         "a failure prints nothing to stdout"
     );
 
-    // A runner with no pack cannot be installed, so it does not validate.
-    let no_pack = tb4_json("metal").replace(&format!(",\n  \"pack_digest\": \"sha256:{HEX}\""), "");
-    let bundle = write_bundle(&dir, "no-pack.json", &no_pack);
-    let out = run(&["topic", "validate", "--bundle", bundle.to_str().unwrap()]);
+    // An unknown key is refused rather than ignored: a step this build cannot
+    // name is a step nothing performs.
+    let mut unknown =
+        serde_json::from_str::<serde_json::Value>(&fixture::bundle_json("metal")).expect("json");
+    unknown["runner_id"] = serde_json::Value::String("rlm_fc_in_guest_harbor".into());
+    let bundle = write_file(&dir, "unknown.json", &unknown.to_string());
+    let out = run(&[
+        "topic",
+        "validate",
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--pin",
+        pin.to_str().unwrap(),
+    ]);
     assert_eq!(code(&out), EXIT_ERROR);
     assert!(
-        stderr(&out).contains("pack_digest is required"),
+        stderr(&out).contains("runner_id"),
+        "stderr must name the unknown key: {}",
+        stderr(&out)
+    );
+
+    // A host expectation that contradicts the signed document.
+    let mut contradicting =
+        serde_json::from_str::<serde_json::Value>(&fixture::bundle_json("metal")).expect("json");
+    contradicting["host"]["pack_digest"] =
+        serde_json::Value::String(format!("sha256:{}", "cd".repeat(32)));
+    let bundle = write_file(&dir, "contradicting.json", &contradicting.to_string());
+    let out = run(&[
+        "topic",
+        "validate",
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--pin",
+        pin.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), EXIT_ERROR);
+    assert!(
+        stderr(&out).contains("contradicts the signed document"),
         "stderr={}",
         stderr(&out)
     );
 
-    // An invented digest is refused by name.
-    let bad_digest = tb4_json("metal").replace(&format!("sha256:{HEX}"), "sha256:abc");
-    let bundle = write_bundle(&dir, "bad-digest.json", &bad_digest);
-    let out = run(&["topic", "validate", "--bundle", bundle.to_str().unwrap()]);
-    assert_eq!(code(&out), EXIT_ERROR);
-    assert!(
-        stderr(&out).contains("64 lowercase hex"),
-        "stderr={}",
-        stderr(&out)
-    );
     fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn validate_json_output_is_machine_readable() {
     let dir = workdir("validate-json");
-    let bundle = write_bundle(&dir, "tb4.json", &tb4_json("metal"));
+    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("metal"));
+    let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
     let out = run(&[
         "--json",
         "topic",
         "validate",
         "--bundle",
         bundle.to_str().unwrap(),
+        "--pin",
+        pin.to_str().unwrap(),
     ]);
     assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
     let parsed: serde_json::Value =
@@ -256,7 +299,8 @@ fn validate_json_output_is_machine_readable() {
     assert_eq!(parsed["ok"], true);
     assert_eq!(parsed["topic_id"], "tb4");
     assert_eq!(parsed["environment"], "metal");
-    assert_eq!(parsed["aliases"][0], "tbench");
+    assert_eq!(parsed["custom_id"], "tbench");
+    assert_eq!(parsed["runner_id"], "rlm_fc_in_guest_harbor");
     assert!(
         parsed["bundle_digest"]
             .as_str()
@@ -267,10 +311,13 @@ fn validate_json_output_is_machine_readable() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// The dry run prints the **existing** publish call and the host env, and
+/// touches nothing.
 #[test]
-fn dry_run_install_resolves_a_disabled_plan_without_a_database() {
+fn dry_run_install_prints_the_existing_publish_call_and_host_env() {
     let dir = workdir("dry-run");
-    let bundle = write_bundle(&dir, "tb4.json", &tb4_json("metal"));
+    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("metal"));
+    let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
     let out = run(&[
         "topic",
         "install",
@@ -278,6 +325,8 @@ fn dry_run_install_resolves_a_disabled_plan_without_a_database() {
         bundle.to_str().unwrap(),
         "--env",
         "metal",
+        "--pin",
+        pin.to_str().unwrap(),
         "--dry-run",
     ]);
     assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
@@ -286,21 +335,37 @@ fn dry_run_install_resolves_a_disabled_plan_without_a_database() {
         "topic install plan",
         "topic_id          tb4",
         "environment       metal",
-        "aliases           tbench",
+        "custom_id         tbench",
         "runner_id         rlm_fc_in_guest_harbor",
-        "n_concurrent      2",
-        "enabled           false",
-        "nothing was written and no database was touched",
+        "Publish the signed document (existing route, operator bearer)",
+        "/challenge/proof/v1/admin/proof/topics",
+        "PROOF_VM_RUNNER_CUSTOM_IDS=tbench",
+        "PROOF_RLM_VM_IMAGE_DIGEST=sha256:",
+        "PROOF_EXPERIMENT_VM_IMAGE_DIGEST=sha256:",
+        "PROOF_VM_AGENT_EXPERIMENT_PACK_DIR=/var/lib/proof/packs",
+        "nothing was written and no host was touched",
     ] {
         assert!(body.contains(needle), "missing {needle:?} in:\n{body}");
     }
+    // The pack directory is a path, never the digest: the variable names a
+    // directory and the host re-hashes what it finds there.
+    assert!(
+        !body.contains("PROOF_VM_AGENT_EXPERIMENT_PACK_DIR=sha256:"),
+        "the pack dir must not carry a digest:\n{body}"
+    );
+    // The bearer is never printed; the operator supplies it.
+    assert!(
+        body.contains("Bearer $PROOF_ADMIN_TOKEN"),
+        "the token must stay a placeholder:\n{body}"
+    );
     fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn dry_run_install_json_matches_the_plan_shape() {
     let dir = workdir("dry-run-json");
-    let bundle = write_bundle(&dir, "tb4.json", &tb4_json("staging"));
+    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("staging"));
+    let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
     let out = run(&[
         "--json",
         "topic",
@@ -309,6 +374,8 @@ fn dry_run_install_json_matches_the_plan_shape() {
         bundle.to_str().unwrap(),
         "--env",
         "staging",
+        "--pin",
+        pin.to_str().unwrap(),
         "--dry-run",
     ]);
     assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
@@ -316,9 +383,14 @@ fn dry_run_install_json_matches_the_plan_shape() {
         serde_json::from_str(&stdout(&out)).expect("dry run --json is JSON");
     assert_eq!(parsed["topic_id"], "tb4");
     assert_eq!(parsed["environment"], "staging");
-    assert_eq!(parsed["enabled"], false, "a plan never enables");
-    assert_eq!(parsed["n_concurrent"], 2);
-    assert_eq!(parsed["schema_version"], 1);
+    assert_eq!(parsed["custom_id"], "tbench");
+    assert_eq!(parsed["runner_id"], "rlm_fc_in_guest_harbor");
+    assert_eq!(parsed["publish_route"], "POST /v1/admin/proof/topics");
+    assert_eq!(parsed["pack_dir_env"], "PROOF_VM_AGENT_EXPERIMENT_PACK_DIR");
+    assert!(
+        parsed["host_env"].as_array().is_some_and(|a| a.len() == 4),
+        "{parsed}"
+    );
     assert!(parsed["bundle_digest"].as_str().is_some(), "{parsed}");
     fs::remove_dir_all(&dir).ok();
 }
@@ -326,7 +398,8 @@ fn dry_run_install_json_matches_the_plan_shape() {
 #[test]
 fn install_refuses_an_environment_the_bundle_does_not_declare() {
     let dir = workdir("env-mismatch");
-    let bundle = write_bundle(&dir, "tb4.json", &tb4_json("metal"));
+    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("metal"));
+    let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
     let out = run(&[
         "topic",
         "install",
@@ -334,6 +407,8 @@ fn install_refuses_an_environment_the_bundle_does_not_declare() {
         bundle.to_str().unwrap(),
         "--env",
         "staging",
+        "--pin",
+        pin.to_str().unwrap(),
         "--dry-run",
     ]);
     assert_eq!(code(&out), EXIT_ERROR, "stderr={}", stderr(&out));
@@ -345,10 +420,13 @@ fn install_refuses_an_environment_the_bundle_does_not_declare() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// A real install is out of scope for this slice: it must refuse loudly rather
+/// than write anything, and it must not need a database to say so.
 #[test]
-fn a_real_install_without_a_database_is_a_usage_error_not_a_write() {
-    let dir = workdir("no-db");
-    let bundle = write_bundle(&dir, "tb4.json", &tb4_json("metal"));
+fn a_real_install_is_not_implemented_and_changes_nothing() {
+    let dir = workdir("no-real-install");
+    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("metal"));
+    let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
     let out = run(&[
         "topic",
         "install",
@@ -356,13 +434,14 @@ fn a_real_install_without_a_database_is_a_usage_error_not_a_write() {
         bundle.to_str().unwrap(),
         "--env",
         "metal",
+        "--pin",
+        pin.to_str().unwrap(),
     ]);
-    assert_eq!(code(&out), EXIT_USAGE, "stderr={}", stderr(&out));
-    assert!(
-        stderr(&out).contains("needs a database"),
-        "stderr={}",
-        stderr(&out)
-    );
+    assert_eq!(code(&out), EXIT_NOT_IMPLEMENTED, "stderr={}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("not implemented in this slice"), "{err}");
+    assert!(err.contains("Nothing was changed"), "{err}");
+    assert!(stdout(&out).is_empty(), "a stub prints nothing to stdout");
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -382,17 +461,11 @@ fn read_commands_without_a_database_are_usage_errors() {
 #[test]
 fn database_url_and_file_are_mutually_exclusive() {
     let dir = workdir("db-url-both");
-    let bundle = write_bundle(&dir, "tb4.json", &tb4_json("metal"));
-    let url_file = dir.join("url.txt");
-    fs::write(&url_file, "postgres://example/db").expect("write url file");
+    let url_file = write_file(&dir, "url.txt", "postgres://example/db");
     let out = Command::new(env!("CARGO_BIN_EXE_proof-admin"))
         .args([
             "topic",
-            "install",
-            "--bundle",
-            bundle.to_str().unwrap(),
-            "--env",
-            "metal",
+            "list",
             "--database-url",
             "postgres://example/other",
             "--database-url-file",
@@ -438,57 +511,6 @@ fn enable_disable_and_seal_fail_closed_with_exit_3() {
 }
 
 #[test]
-fn validate_refuses_a_noncanonical_digest_before_an_install_can_fail() {
-    let dir = workdir("digest-strict");
-    // The row's CHECK is `^sha256:[0-9a-f]{64}$`. An uppercase or padded pin
-    // must be a validate-time reject, not a surprise on the host that matters.
-    for (label, replacement) in [
-        (
-            "uppercase hex",
-            format!("sha256:{}", HEX.to_ascii_uppercase()),
-        ),
-        ("padded", format!("sha256: {HEX}")),
-    ] {
-        let body = tb4_json("metal").replace(&format!("sha256:{HEX}"), &replacement);
-        let bundle = write_bundle(&dir, &format!("{}.json", label.replace(' ', "-")), &body);
-        let out = run(&["topic", "validate", "--bundle", bundle.to_str().unwrap()]);
-        assert_eq!(code(&out), EXIT_ERROR, "{label}: {}", stderr(&out));
-        assert!(
-            stderr(&out).contains("64 lowercase hex"),
-            "{label}: stderr={}",
-            stderr(&out)
-        );
-    }
-    fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn validate_refuses_a_numeric_column_overflow_instead_of_clamping() {
-    let dir = workdir("overflow");
-    // `version` and `n_concurrent` land in INTEGER columns; a value that does
-    // not fit is a reject, never a silent rewrite of what was validated.
-    for (label, from, to) in [
-        ("version", "\"version\": 1,", "\"version\": 4294967295,"),
-        (
-            "concurrency",
-            "\"n_concurrent\": 2",
-            "\"n_concurrent\": 4294967295",
-        ),
-    ] {
-        let body = tb4_json("metal").replace(from, to);
-        let bundle = write_bundle(&dir, &format!("{label}.json"), &body);
-        let out = run(&["topic", "validate", "--bundle", bundle.to_str().unwrap()]);
-        assert_eq!(code(&out), EXIT_ERROR, "{label}: {}", stderr(&out));
-        assert!(
-            stderr(&out).contains("refused rather than clamped"),
-            "{label}: stderr={}",
-            stderr(&out)
-        );
-    }
-    fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
 fn help_lists_every_p0_subcommand_and_says_what_is_not_implemented() {
     let out = run(&["topic", "--help"]);
     assert_eq!(code(&out), 0);
@@ -507,4 +529,63 @@ fn help_lists_every_p0_subcommand_and_says_what_is_not_implemented() {
             .contains("not implemented in this slice"),
         "the stubs must say so in help:\n{body}"
     );
+}
+
+/// The registry view reads the existing `proof_topic_version` rows.
+#[tokio::test]
+async fn the_registry_view_lists_what_the_scoring_path_persisted() {
+    let Some(url) = std::env::var("DATABASE_URL")
+        .ok()
+        .map(|u| u.trim().to_owned())
+        .filter(|u| !u.is_empty())
+    else {
+        return;
+    };
+    let tp = match db::test_pool_with_url(&url).await {
+        Ok(tp) => tp,
+        Err(e) => panic!("test_pool: {e}"),
+    };
+    // Persist through the scoring path's own store, then read it back through
+    // the CLI: there is one table, so the view cannot disagree with scoring.
+    let store = proof_rlm_store::PgRlmStore::new(tp.pool().clone());
+    let doc = fixture::signed_topic(&format!("sha256:{}", "ab".repeat(32)));
+    proof_rlm_store::RlmStore::put_topic_version(&store, &doc)
+        .await
+        .expect("persist through the scoring path");
+
+    let schema = tp.schema().to_owned();
+    let scoped = format!("{url}?options=-c%20search_path%3D{schema}%2Cpublic");
+    let run_db = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_proof-admin"))
+            .args(args)
+            .env("BASE_DATABASE_URL", &scoped)
+            .env_remove("BASE_DATABASE_URL_FILE")
+            .output()
+            .expect("run proof-admin")
+    };
+
+    let out = run_db(&["--json", "topic", "list"]);
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+    let listed: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
+    assert_eq!(listed[0]["topic_id"], "tb4");
+    assert_eq!(listed[0]["version"], 1);
+    assert_eq!(listed[0]["custom_id"], "tbench");
+
+    let out = run_db(&["--json", "topic", "show", "tb4"]);
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+    let shown: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
+    assert_eq!(shown["topic_id"], "tb4");
+    assert_eq!(shown["document"]["id"], "tb4");
+    assert_eq!(shown["document"]["signature"], doc.signature);
+
+    // An unknown id is an error that says what to do, not an empty success.
+    let out = run_db(&["topic", "show", "nope"]);
+    assert_eq!(code(&out), EXIT_ERROR);
+    assert!(
+        stderr(&out).contains("no installed topic"),
+        "{}",
+        stderr(&out)
+    );
+
+    tp.drop_schema().await.expect("drop");
 }

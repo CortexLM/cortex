@@ -100,6 +100,22 @@ pub struct TransitionRow {
     pub note: String,
 }
 
+/// One persisted topic version, as the registry view reads it.
+///
+/// This is a **view** over `proof_topic_version`, not a second topic table:
+/// every field except `version` lives inside the signed document, which stays
+/// the one source of truth. The status is `document.status`, and the
+/// signature is `document.signature`; neither is duplicated here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TopicVersionRow {
+    /// Topic slug (the registry key).
+    pub topic_id: String,
+    /// Newest persisted version for that slug.
+    pub version: u32,
+    /// The signed document, verbatim.
+    pub document: TopicDocument,
+}
+
 /// What the RLM measured before any submission (learning continuum start).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BaselineRow {
@@ -180,6 +196,15 @@ pub trait RlmStore: Send + Sync {
         &self,
         topic_id: &str,
     ) -> Result<Option<(u32, TopicDocument)>, StoreError>;
+
+    /// Newest persisted version of **every** topic, ordered by `topic_id`.
+    ///
+    /// A read-only registry view over the same `proof_topic_version` rows
+    /// [`Self::latest_topic`] reads. It exists so the operator CLI can list
+    /// what is installed without a second table that could disagree with the
+    /// signed documents. An empty result is an empty vector, not an error:
+    /// nothing is installed yet is a normal state.
+    async fn latest_topics(&self) -> Result<Vec<TopicVersionRow>, StoreError>;
 
     /// Persist a rule version. Must be `current + 1` (or 1 for the first).
     async fn put_rules(&self, rules: &RuleSet) -> Result<(), StoreError>;

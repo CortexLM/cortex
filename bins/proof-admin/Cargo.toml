@@ -1,6 +1,6 @@
 [package]
 name = "proof-admin-bin"
-description = "Proof operator CLI: topic install bundle validate / install (dry-run) / list / show, plus fail-closed stubs"
+description = "Proof operator CLI: validate and install a topic install bundle through the existing admin publish path"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,15 +15,19 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 db = { path = "../../crates/db" }
+proof-rlm-store = { path = "../../crates/proof-rlm-store" }
+proof-task = { path = "../../crates/proof-task" }
 proof-topic-bundle = { path = "../../crates/proof-topic-bundle" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
+crypto = { path = "../../crates/crypto" }
 db = { path = "../../crates/db", features = ["testing"] }
+hex = "0.4"
+proof-experiment = { path = "../../crates/proof-experiment" }
 serde_json = "1"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [lints]

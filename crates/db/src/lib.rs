@@ -12,20 +12,11 @@
 //!
 //! `challenge_backends` stores operational routing only. It must never gain
 //! signing-key columns; keys live in owner-signed `config/challenges.toml`.
-//!
-//! # Proof topics
-//!
-//! `proof_topic` (migration `0024_proof_topics.sql`) is the per-topic install
-//! registry the dynamic-topics work adds: runner id, image and pack pins,
-//! concurrency, and the enable flag, keyed by `topic_id`. It is install state,
-//! not the scoring contract — that stays the operator-signed document in
-//! `proof_topic_version`. See [`topics`].
 
 #![forbid(unsafe_code)]
 
 pub mod prism_store;
 mod store;
-pub mod topics;
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -43,7 +34,6 @@ pub use store::{
     AttestationRecord, EpochBundleRecord, MinerEndpointRow, NewAttestation, NewEpochBundle,
     NewMinerEndpoint, NewRawWeight, RawWeightRecord, RECEIPT_PK_LEN,
 };
-pub use topics::{get_topic, list_topics, upsert_topic, NewTopic, TopicRow};
 
 /// Tables that the application role may insert into but never update.
 pub const APPEND_ONLY_TABLES: &[&str] =
