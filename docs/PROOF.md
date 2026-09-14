@@ -195,6 +195,45 @@ Ship order: control plane (payout schema) → proof-eval image + digest pin
 path: [`deploy/scripts/proof-operator-path.sh`](../deploy/scripts/proof-operator-path.sh).
 Empty digest stays 503 (never invent a sha256).
 
+## Topic install bundles (`proof-admin`, P0 skeleton)
+
+A signed topic document is the *scoring contract*. The **install** is a
+separate operator record: which runner the topic names, which RLM and
+experiment images and which experiment pack it is pinned to, how much
+concurrency it may use, and whether it is live. `bins/proof-admin` is the
+operator CLI for that record, and `proof_topic`
+([migration `0024`](../crates/db/migrations/0024_proof_topics.sql)) is where
+it lands — one row per `topic_id`, in the shared challenge DB.
+
+```bash
+# Check a bundle. Reads the file; writes nothing; needs no database.
+proof-admin topic validate --bundle /root/.base-secrets/proof/tb4.json
+
+# Resolve an install without touching anything.
+proof-admin topic install --bundle …/tb4.json --env metal --dry-run
+
+# Install it. Writes one DISABLED row; needs BASE_DATABASE_URL (or _FILE).
+BASE_DATABASE_URL=… proof-admin topic install --bundle …/tb4.json --env metal
+proof-admin topic list
+proof-admin topic show tb4
+```
+
+`--env` is `staging` or `metal` and must match the bundle's own
+`environment`: a bundle written for one target is refused on the other
+rather than coerced. Every pin is `sha256:<64 lowercase hex>` or absent, and
+an in-guest `runner_id` without a `pack_digest` is refused, so a topic that
+names a runner with nothing to run never installs. Unknown keys are refused
+at parse: a binding this build cannot name is a binding nothing enforces.
+
+**P0 scope — what this does not do.** Installing writes `enabled = false`
+and no scoring path reads `proof_topic` yet, so an install cannot move a
+score. `topic enable`, `topic disable`, and `topic seal` exit **3** with a
+"not implemented in this slice" message. There is no route change (P1), no
+allocator change (P2), no full install (P3), and no removal of the
+compiled-in topic bindings (P4). The first topic slug is **`tb4`** with
+alias **`tbench`**; alias resolution is a later slice, so `topic show`
+matches the exact `topic_id` today and says so when it misses.
+
 ## Metric families
 
 | Family | Primary | Win |

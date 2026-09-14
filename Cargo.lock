@@ -3682,6 +3682,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "proof-admin-bin"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "db",
+ "proof-topic-bundle",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "proof-canon"
 version = "0.1.0"
 dependencies = [
@@ -4018,6 +4030,18 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.19",
  "toml",
+]
+
+[[package]]
+name = "proof-topic-bundle"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "proof-canon",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

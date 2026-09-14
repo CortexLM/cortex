@@ -1,0 +1,24 @@
+[package]
+name = "proof-admin-bin"
+description = "Proof operator CLI: topic install bundle validate / install (dry-run) / list / show, plus fail-closed stubs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "proof-admin"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+db = { path = "../../crates/db" }
+proof-topic-bundle = { path = "../../crates/proof-topic-bundle" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
