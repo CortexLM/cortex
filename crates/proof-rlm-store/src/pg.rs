@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::{
     check_artefact, check_promotion, check_rules, parse_row_id, replay, ArtefactRow, BaselineRow,
-    ChecklistRow, PromotionRow, RlmStore, StoreError, TransitionRow,
+    ChecklistRow, PromotionRow, RlmStore, StoreError, TopicVersionRow, TransitionRow,
 };
 
 /// Postgres-backed store.
@@ -193,6 +193,123 @@ impl RlmStore for PgRlmStore {
         .await?;
         row.map(|(v, doc)| Ok((to_u32(v)?, serde_json::from_value(doc).map_err(malformed)?)))
             .transpose()
+    }
+
+    /// Newest version per topic, read straight from `proof_topic_version`.
+    ///
+    /// `DISTINCT ON` is the whole query: the journal is append-only, so the
+    /// newest row per slug *is* the current one, and no second table has to
+    /// be kept in step with it.
+    async fn latest_topics(&self) -> Result<Vec<TopicVersionRow>, StoreError> {
+        let rows: Vec<(String, i32, Value)> = sqlx::query_as(
+            "SELECT DISTINCT ON (topic_id) topic_id, version, document \
+             FROM proof_topic_version ORDER BY topic_id, version DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (topic_id, version, doc) in rows {
+            out.push(TopicVersionRow {
+                topic_id,
+                version: to_u32(version)?,
+                document: serde_json::from_value(doc).map_err(malformed)?,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn put_alias(&self, alias: &str, topic_id: &str) -> Result<(), StoreError> {
+        // The whole check-then-insert runs in **one** transaction, because the
+        // guard has to be atomic: `pg_advisory_xact_lock` is released at the
+        // end of its transaction, so issuing these as separate statements
+        // would drop the lock before the insert and reopen the race the
+        // migration's trigger closes. The trigger takes the same lock, so the
+        // two layers serialize against each other rather than against
+        // different keys.
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(alias)
+            .execute(&mut *tx)
+            .await?;
+        // Fail closed before the write: an alias must name a topic that
+        // actually has a published version, or resolution would hand back
+        // nothing and look like an unknown topic.
+        let target_published: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM proof_topic_version WHERE topic_id = $1)",
+        )
+        .bind(topic_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !target_published {
+            return Err(StoreError::Malformed(format!(
+                "alias {alias:?} names topic {topic_id:?}, which has no published version"
+            )));
+        }
+        // A canonical slug is never shadowed. If `alias` is itself a
+        // published topic, then resolving it as an alias would hand back a
+        // *different* topic's signed document for that slug.
+        let alias_is_topic: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM proof_topic_version WHERE topic_id = $1)",
+        )
+        .bind(alias)
+        .fetch_one(&mut *tx)
+        .await?;
+        if alias_is_topic {
+            return Err(StoreError::Malformed(format!(
+                "alias {alias:?} is already a published topic id; a canonical slug is never \
+                 shadowed by an alias"
+            )));
+        }
+        sqlx::query(
+            "INSERT INTO proof_topic_alias (alias, topic_id) VALUES ($1, $2) \
+             ON CONFLICT (alias) DO UPDATE SET topic_id = EXCLUDED.topic_id, \
+             updated_at = now()",
+        )
+        .bind(alias)
+        .bind(topic_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn resolve_alias(&self, alias: &str) -> Result<Option<String>, StoreError> {
+        // The join is the fail-closed part: an alias whose topic has no
+        // published version resolves to nothing rather than to an empty
+        // document.
+        let row: Option<(String,)> = sqlx::query_as(
+            // Three guards, all fail-closed: the alias must exist, its target
+            // must have a published version (else it resolves to an empty
+            // document), and the alias must **not** itself be a published
+            // topic id — a canonical slug always wins over an alias, so a row
+            // that predates this guard cannot shadow one either.
+            "SELECT a.topic_id FROM proof_topic_alias a \
+             WHERE a.alias = $1 \
+               AND EXISTS (SELECT 1 FROM proof_topic_version v WHERE v.topic_id = a.topic_id) \
+               AND NOT EXISTS (SELECT 1 FROM proof_topic_version s WHERE s.topic_id = a.alias)",
+        )
+        .bind(alias)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(t,)| t))
+    }
+
+    async fn aliases_for(&self, topic_id: &str) -> Result<Vec<String>, StoreError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT alias FROM proof_topic_alias WHERE topic_id = $1 ORDER BY alias",
+        )
+        .bind(topic_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(a,)| a).collect())
+    }
+
+    async fn delete_alias(&self, alias: &str) -> Result<bool, StoreError> {
+        let done = sqlx::query("DELETE FROM proof_topic_alias WHERE alias = $1")
+            .bind(alias)
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected() > 0)
     }
 
     async fn put_rules(&self, rules: &RuleSet) -> Result<(), StoreError> {

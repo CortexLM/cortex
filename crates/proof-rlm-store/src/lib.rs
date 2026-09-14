@@ -85,6 +85,21 @@ impl ChecklistRow {
     }
 }
 
+/// One temporary compatibility alias for a topic slug.
+///
+/// Owner default: the first topic's slug is `tb4` with `tbench` as a
+/// **temporary** alias, so existing miner links keep resolving while the
+/// canonical slug settles. A row carries the mapping and nothing else — no
+/// name, no pins, no status — so it cannot drift from the topic it names.
+/// Retiring the alias is deleting the row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopicAliasRow {
+    /// The alias slug that resolves to `topic_id`.
+    pub alias: String,
+    /// The canonical topic slug the alias names.
+    pub topic_id: String,
+}
+
 /// One lifecycle move for one topic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransitionRow {
@@ -98,6 +113,22 @@ pub struct TransitionRow {
     pub to: RlmState,
     /// Operator-readable note (never a secret).
     pub note: String,
+}
+
+/// One persisted topic version, as the registry view reads it.
+///
+/// This is a **view** over `proof_topic_version`, not a second topic table:
+/// every field except `version` lives inside the signed document, which stays
+/// the one source of truth. The status is `document.status`, and the
+/// signature is `document.signature`; neither is duplicated here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TopicVersionRow {
+    /// Topic slug (the registry key).
+    pub topic_id: String,
+    /// Newest persisted version for that slug.
+    pub version: u32,
+    /// The signed document, verbatim.
+    pub document: TopicDocument,
 }
 
 /// What the RLM measured before any submission (learning continuum start).
@@ -180,6 +211,33 @@ pub trait RlmStore: Send + Sync {
         &self,
         topic_id: &str,
     ) -> Result<Option<(u32, TopicDocument)>, StoreError>;
+
+    /// Newest persisted version of **every** topic, ordered by `topic_id`.
+    ///
+    /// A read-only registry view over the same `proof_topic_version` rows
+    /// [`Self::latest_topic`] reads. It exists so the operator CLI can list
+    /// what is installed without a second table that could disagree with the
+    /// signed documents. An empty result is an empty vector, not an error:
+    /// nothing is installed yet is a normal state.
+    async fn latest_topics(&self) -> Result<Vec<TopicVersionRow>, StoreError>;
+
+    /// Record (or replace) a temporary alias for a topic slug.
+    ///
+    /// Fail-closed: the topic must already have a published version, because
+    /// an alias pointing at nothing would resolve to no document and look
+    /// like an unknown topic to a miner. `alias == topic_id` is refused — that
+    /// is the topic's own key, not an alias.
+    async fn put_alias(&self, alias: &str, topic_id: &str) -> Result<(), StoreError>;
+    /// The topic slug `alias` resolves to, or `None`.
+    ///
+    /// `None` covers both "no such alias" and "the aliased topic has no
+    /// published version", so a stale row can never resolve to an empty
+    /// document.
+    async fn resolve_alias(&self, alias: &str) -> Result<Option<String>, StoreError>;
+    /// Every alias of one topic, ordered by alias.
+    async fn aliases_for(&self, topic_id: &str) -> Result<Vec<String>, StoreError>;
+    /// Remove a temporary alias. Returns whether a row was deleted.
+    async fn delete_alias(&self, alias: &str) -> Result<bool, StoreError>;
 
     /// Persist a rule version. Must be `current + 1` (or 1 for the first).
     async fn put_rules(&self, rules: &RuleSet) -> Result<(), StoreError>;

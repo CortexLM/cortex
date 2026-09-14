@@ -195,6 +195,134 @@ Ship order: control plane (payout schema) → proof-eval image + digest pin
 path: [`deploy/scripts/proof-operator-path.sh`](../deploy/scripts/proof-operator-path.sh).
 Empty digest stays 503 (never invent a sha256).
 
+## Topic install bundles (`proof-admin`, P0 skeleton)
+
+A topic already has **one** home: the operator-signed document published
+through `POST /v1/admin/proof/topics` and persisted in `proof_topic_version`
+(migration [`0020`](../crates/db/migrations/0020_proof_rlm.sql)). Its
+bindings are signed topic data too — `constraints.params` carries the in-guest
+runner and its pinned pack digest, and the image pins are operator env. There
+is no second topic table and no second route.
+
+What `bins/proof-admin` adds is the **procedure**: a bundle that names the
+signed document plus the host env that must agree with it, `validate` that
+runs the same acceptance the publish route runs, and `install --dry-run` that
+prints the exact publish call and env lines without touching anything.
+
+```bash
+# Check a bundle. Runs the same checks the publish route runs; writes nothing.
+proof-admin topic validate --bundle /root/.base-secrets/proof/tb4.json \
+  --pin config/proof-pin.toml
+
+# Resolve the publish call and host env. Touches nothing.
+proof-admin topic install --bundle …/tb4.json --env metal --dry-run
+
+# Read what is installed (a read-only view of proof_topic_version):
+BASE_DATABASE_URL=… proof-admin topic list
+BASE_DATABASE_URL=… proof-admin topic show tb4
+```
+
+The bundle carries the signed `topic` document verbatim, so every binding has
+exactly one copy in the system. Its `host` block is what the master must be
+configured with: `rlm_image_digest` (`PROOF_RLM_VM_IMAGE_DIGEST`),
+`experiment_image_digest` (`PROOF_EXPERIMENT_VM_IMAGE_DIGEST`),
+`custom_ids_entry` (`PROOF_VM_RUNNER_CUSTOM_IDS`, which must register an open
+custom topic's `metric.custom_id` or it answers **503**), and `pack_dir`
+(`PROOF_VM_AGENT_EXPERIMENT_PACK_DIR`, a **directory** — the host re-hashes
+the tar it finds there against the document's pin, so the directory never
+carries a digest).
+
+**The document wins.** A host expectation that disagrees with the signed
+document is a reject, not a silent override: the signature is what the
+scoring path trusts, so an operator env saying otherwise would run something
+other than what was signed. A runner without a `pack_digest` is refused, as
+is a pack no runner reads. Every digest is `sha256:<64 lowercase hex>` or
+absent, never invented. Unknown keys are refused at parse.
+
+### The RLM owns topic behavior
+
+Topics are **RLM-based and autonomous**. The admin CLI's job is to **hand
+control to the topic's RLM** — it asks the RLM to install and set the topic
+up. The bundle's `rlm` section is what gets handed over, and it owns
+everything topic-specific:
+
+| RLM-owned | What it is |
+|-----------|------------|
+| `rules` | the anti-cheat rules the RLM ticks before any paid inference |
+| `migrations` | the SQL migrations the topic's install needs |
+| `apis` | the APIs the topic exposes |
+| `submission_format` | the shape a miner submits |
+| `scoring` | how the topic scores |
+
+**Rust never interprets any of it.** The bundle crate checks the section's
+*shape* (an object or array, bounded) and carries it byte-for-byte; it does
+not know what a rule, a migration, an API, a submission format, or a scoring
+function means. Nothing topic-specific is compiled into `proof-challenge`,
+the gateway, the orchestrator, or this CLI — no `if topic == "tb4"` branch,
+no rule list, no metric, no submit format. A topic's behavior travels in its
+signed document and its RLM section.
+
+The seed slug `tb4` and its temporary alias `tbench` are **strings** that
+appear in test fixtures and operator examples. They are never a condition in
+logic, and two tests fail the build if that changes: one over the bundle
+crate's non-test source, one over the CLI's.
+
+The install plan prints the hand-off first and the RLM's own lifecycle steps
+(`provision -> propose_rules -> baseline`, the existing `TopicSetup` driver),
+then the publish call and the host env. The CLI does not run those steps and
+does not read the section — it reports what the RLM will be asked to do.
+
+### Locked defaults
+
+| Default | Value | Where |
+|---------|-------|-------|
+| First topic slug | **`tb4`** | the signed document's `id` |
+| Temporary alias | **`tbench`** | `proof_topic_alias` row `tbench → tb4` (migration `0024`) |
+| Storage | **shared challenge DB**, `topic_id` discriminant | `proof_topic_version` (no per-topic schema) |
+| Metal install | **Owner-only, staging first** | `--owner-metal-ack` gate |
+| Custom id | `tbench` | the document's `metric.custom_id` |
+
+**Schema:** `0024_proof_topic_alias.sql` is the only change in this slice. It
+adds `proof_topic_alias` and a `BEFORE INSERT`/`UPDATE` trigger pair that makes
+an alias collision with a published slug fail closed in both directions — a
+**publish-path integrity guard, not scoring math**: it cannot change a score,
+a payout, or a sealed vector. It does not `ALTER` or `DROP` anything, and the
+`0020` tables keep their columns, keys, and grants.
+
+`tbench` is two different things and they are not the same mapping: it is the
+topic's **alias** (`show tbench` resolves to `tb4`) and also the runner
+registry's **custom id** (`PROOF_VM_RUNNER_CUSTOM_IDS=tbench`). The alias is
+temporary — retire it with `proof-admin topic alias rm tbench` once miner
+links move — while the custom id is the scoring binding and stays.
+
+```bash
+proof-admin topic alias set tbench --topic tb4   # the locked default
+proof-admin topic alias list --topic tb4
+proof-admin topic show tbench                    # resolves to tb4
+proof-admin topic alias rm tbench                # retire the temporary alias
+```
+
+An alias carries only `alias → topic_id`: no name, no pins, no status. It
+cannot drift from the topic it names, and retiring it changes nothing about
+the topic. It must name a topic that already has a published version —
+fail-closed in the store, so a stale alias resolves to *nothing* rather than
+to an empty document.
+
+**Metal is Owner-only and staging goes first.** `--env metal` is refused
+unless `--owner-metal-ack` is passed, which asserts both that an Owner
+authorized the install and that staging has passed for that bundle. The gate
+is an operator assertion, not a verified precondition: it exists so a live
+target cannot be reached by a default or a copy-pasted staging command.
+`--env staging` is never gated.
+
+**P0 scope — what this does not do.** `install` **prints** the publish call;
+it does not perform it, because publishing needs the operator bearer, which
+stays on the host. `topic enable`, `topic disable`, and `topic seal` exit
+**3** with a "not implemented in this slice" message — a topic's lifecycle is
+the signed document's `status`, so the answer is to re-sign and re-publish.
+There is no route change (P1), no allocator change (P2), no full install
+(P3), and no removal of the compiled-in topic bindings (P4).
+
 ## Metric families
 
 | Family | Primary | Win |

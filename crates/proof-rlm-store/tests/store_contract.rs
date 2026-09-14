@@ -17,6 +17,9 @@ async fn contract(store: &dyn RlmStore) {
 
     // Topic versions advance per persisted document.
     assert!(store.latest_topic(&t.id).await.unwrap().is_none());
+    // The registry view is empty before anything is installed, and empty is
+    // an empty vector rather than an error.
+    assert!(store.latest_topics().await.unwrap().is_empty());
     assert_eq!(store.put_topic_version(&t).await.unwrap(), 1);
     let mut resigned = t.clone();
     resigned.statement.push_str(" (v2)");
@@ -24,6 +27,94 @@ async fn contract(store: &dyn RlmStore) {
     let (v, latest) = store.latest_topic(&t.id).await.unwrap().unwrap();
     assert_eq!(v, 2);
     assert!(latest.statement.ends_with("(v2)"));
+
+    // The registry view reads the newest version of every topic, ordered by
+    // id, and carries the signed document verbatim — the one source of truth.
+    let listed = store.latest_topics().await.unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].topic_id, t.id);
+    assert_eq!(listed[0].version, 2);
+    assert_eq!(listed[0].document, resigned);
+    let mut other = t.clone();
+    other.id = "aaa-other-v0".into();
+    store.put_topic_version(&other).await.unwrap();
+    let listed = store.latest_topics().await.unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|r| r.topic_id.as_str())
+            .collect::<Vec<_>>(),
+        ["aaa-other-v0", t.id.as_str()],
+        "ordered by topic_id"
+    );
+
+    // Aliases: the Owner default is slug `tb4` with temporary alias `tbench`.
+    // An alias resolves to the canonical slug, an unknown one to nothing, and
+    // an alias for a topic with no published version is refused outright.
+    assert!(store.resolve_alias("tbench").await.unwrap().is_none());
+    store.put_alias("tbench", &t.id).await.unwrap();
+    assert_eq!(
+        store.resolve_alias("tbench").await.unwrap().as_deref(),
+        Some(t.id.as_str())
+    );
+    assert_eq!(store.aliases_for(&t.id).await.unwrap(), ["tbench"]);
+    assert!(store
+        .resolve_alias("no-such-alias")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        store.put_alias("orphan", "never-published").await.is_err(),
+        "an alias must name a topic that has a published version"
+    );
+    assert!(
+        store.resolve_alias("orphan").await.unwrap().is_none(),
+        "the refused alias must not have been written"
+    );
+    // A canonical slug is never shadowed. An alias that equals another
+    // *published* topic's id would make that slug resolve to a different
+    // topic's document, so it is refused at write time and never resolved.
+    store
+        .put_alias("shadow-attempt", "aaa-other-v0")
+        .await
+        .unwrap();
+    assert!(
+        store.put_alias("aaa-other-v0", &t.id).await.is_err(),
+        "an alias may not take a published topic's canonical slug"
+    );
+    assert_eq!(
+        store
+            .resolve_alias("aaa-other-v0")
+            .await
+            .unwrap()
+            .as_deref(),
+        None,
+        "the canonical slug must not resolve to another topic"
+    );
+    store.delete_alias("shadow-attempt").await.unwrap();
+
+    // A second alias on the same topic, then retire one.
+    store.put_alias("tb4-legacy", &t.id).await.unwrap();
+    assert_eq!(
+        store.aliases_for(&t.id).await.unwrap(),
+        ["tb4-legacy", "tbench"],
+        "aliases are ordered by alias"
+    );
+    assert!(store.delete_alias("tb4-legacy").await.unwrap());
+    assert!(
+        !store.delete_alias("tb4-legacy").await.unwrap(),
+        "already gone"
+    );
+    assert_eq!(store.aliases_for(&t.id).await.unwrap(), ["tbench"]);
+    // Re-pointing an existing alias replaces it rather than conflicting.
+    let other = store.latest_topic("aaa-other-v0").await.unwrap();
+    assert!(other.is_some(), "the second topic was published above");
+    store.put_alias("tbench", "aaa-other-v0").await.unwrap();
+    assert_eq!(
+        store.resolve_alias("tbench").await.unwrap().as_deref(),
+        Some("aaa-other-v0")
+    );
+    assert!(store.aliases_for(&t.id).await.unwrap().is_empty());
 
     // Rules: v1 from the document, v2 from the RLM, gaps refused.
     let v1 = rules();
@@ -220,6 +311,100 @@ async fn contract(store: &dyn RlmStore) {
 #[tokio::test]
 async fn memory_store_honours_the_contract() {
     contract(&MemoryRlmStore::new()).await;
+}
+
+/// An alias claim and a topic publish must not both claim one slug.
+///
+/// This is the **cross-table** race the advisory lock exists for. The alias
+/// insert and the topic publish each check the other table, and under READ
+/// COMMITTED neither sees the other's uncommitted row. Two things must hold,
+/// and the test checks both because each covers a different layer:
+///
+/// 1. **Blocking.** With the shared transaction-scoped lock, the publish waits
+///    for the in-flight alias claim. Without the lock it sees no committed
+///    alias and succeeds immediately. (Pass condition: still blocked.)
+/// 2. **Rejection.** Once the alias claim *commits* and releases the lock, the
+///    waiting publish must be **refused**, not admitted — that is the
+///    publisher-side collision check. A test that only asserts the block
+///    stays green if that check is deleted, which is exactly the regression
+///    this covers.
+///
+/// Postgres-only: the memory store has one mutex and no such race.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_concurrent_alias_and_topic_publish_cannot_both_claim_a_slug() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    if url.trim().is_empty() {
+        return;
+    }
+    let tp = db::test_pool_with_url(&url).await.expect("isolated schema");
+    let pool = tp.pool();
+    let store = PgRlmStore::new(pool.clone());
+
+    // A published topic for the alias to point at.
+    let doc = topic();
+    store.put_topic_version(&doc).await.unwrap();
+    let contested = "contested-slug-v0";
+
+    // A: claim `contested` as an alias and hold the transaction open.
+    let mut holder = pool.begin().await.expect("begin holder");
+    sqlx::query("INSERT INTO proof_topic_alias (alias, topic_id) VALUES ($1, $2)")
+        .bind(contested)
+        .bind(&doc.id)
+        .execute(&mut *holder)
+        .await
+        .expect("alias insert inside the open transaction");
+
+    // B: publish a topic whose id is `contested`, on another connection.
+    let publisher_pool = pool.clone();
+    let mut publisher = tokio::spawn(async move {
+        sqlx::query(
+            "INSERT INTO proof_topic_version (topic_id, version, status, document, signature) \
+             VALUES ($1, 1, 'draft', '{}'::jsonb, 'sig')",
+        )
+        .bind(contested)
+        .execute(&publisher_pool)
+        .await
+    });
+
+    // 1. It must block while A is open.
+    let blocked = tokio::time::timeout(std::time::Duration::from_millis(750), &mut publisher).await;
+    assert!(
+        blocked.is_err(),
+        "the publish did not block on the slug claim, so an alias and a topic can both \
+         claim {contested}: {blocked:?}"
+    );
+
+    // A commits: the alias claim is now visible and the lock is released.
+    holder.commit().await.expect("commit the alias claim");
+
+    // 2. The waiting publish must be **refused**, not admitted.
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), &mut publisher)
+        .await
+        .expect("the blocked publish must finish once the claim commits")
+        .expect("the publisher task must not panic");
+    let err = outcome.expect_err(
+        "the publish was admitted after the alias claim committed, so both claimed the slug",
+    );
+    assert!(
+        err.to_string().contains("already claimed as an alias"),
+        "the publish must be refused by the collision check, got: {err}"
+    );
+
+    // And the invariant, read back: exactly one claim exists, and the slug
+    // never resolves through an alias to a different topic's document.
+    assert!(
+        store.latest_topic(contested).await.unwrap().is_none(),
+        "the refused publish must not have written a topic row"
+    );
+    assert_eq!(
+        store.resolve_alias(contested).await.unwrap().as_deref(),
+        Some(doc.id.as_str()),
+        "the alias claim is the one that won"
+    );
+
+    tp.drop_schema().await.expect("drop");
 }
 
 #[tokio::test]

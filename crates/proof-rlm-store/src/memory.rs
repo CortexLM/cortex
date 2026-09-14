@@ -11,7 +11,7 @@ use proof_task::TopicDocument;
 
 use crate::{
     check_artefact, check_promotion, check_rules, parse_row_id, replay, ArtefactRow, BaselineRow,
-    ChecklistRow, PromotionRow, RlmStore, StoreError, TransitionRow,
+    ChecklistRow, PromotionRow, RlmStore, StoreError, TopicVersionRow, TransitionRow,
 };
 
 #[derive(Default)]
@@ -23,6 +23,7 @@ struct Inner {
     baselines: BTreeMap<String, Vec<BaselineRow>>,
     artefacts: BTreeMap<String, Vec<ArtefactRow>>,
     promotions: BTreeMap<String, Vec<PromotionRow>>,
+    aliases: BTreeMap<String, String>,
 }
 
 /// In-memory store.
@@ -62,6 +63,69 @@ impl RlmStore for MemoryRlmStore {
                 .cloned()
                 .map(|d| (u32::try_from(v.len()).unwrap_or(u32::MAX), d))
         }))
+    }
+
+    async fn latest_topics(&self) -> Result<Vec<TopicVersionRow>, StoreError> {
+        let g = self.lock()?;
+        // `BTreeMap` iteration is already ordered by topic id, which is the
+        // order the Postgres view returns.
+        let mut out = Vec::with_capacity(g.topics.len());
+        for (topic_id, versions) in &g.topics {
+            let Some(doc) = versions.last() else {
+                continue;
+            };
+            out.push(TopicVersionRow {
+                topic_id: topic_id.clone(),
+                version: u32::try_from(versions.len()).unwrap_or(u32::MAX),
+                document: doc.clone(),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn put_alias(&self, alias: &str, topic_id: &str) -> Result<(), StoreError> {
+        let mut g = self.lock()?;
+        if !g.topics.contains_key(topic_id) {
+            return Err(StoreError::Malformed(format!(
+                "alias {alias:?} names topic {topic_id:?}, which has no published version"
+            )));
+        }
+        // A canonical slug is never shadowed (see the Postgres store).
+        if g.topics.contains_key(alias) {
+            return Err(StoreError::Malformed(format!(
+                "alias {alias:?} is already a published topic id; a canonical slug is never \
+                 shadowed by an alias"
+            )));
+        }
+        g.aliases.insert(alias.to_owned(), topic_id.to_owned());
+        Ok(())
+    }
+
+    async fn resolve_alias(&self, alias: &str) -> Result<Option<String>, StoreError> {
+        let g = self.lock()?;
+        // Fail closed like Postgres: the target must still have a version.
+        // A canonical slug wins: never resolve an alias whose own name is a
+        // published topic, or `show` would return a different topic.
+        if g.topics.contains_key(alias) {
+            return Ok(None);
+        }
+        Ok(g.aliases
+            .get(alias)
+            .filter(|t| g.topics.contains_key(*t))
+            .cloned())
+    }
+
+    async fn aliases_for(&self, topic_id: &str) -> Result<Vec<String>, StoreError> {
+        let g = self.lock()?;
+        Ok(g.aliases
+            .iter()
+            .filter(|(_, t)| t.as_str() == topic_id)
+            .map(|(a, _)| a.clone())
+            .collect())
+    }
+
+    async fn delete_alias(&self, alias: &str) -> Result<bool, StoreError> {
+        Ok(self.lock()?.aliases.remove(alias).is_some())
     }
 
     async fn put_rules(&self, rules: &RuleSet) -> Result<(), StoreError> {
