@@ -119,25 +119,39 @@ fn the_section_reader_enforces_the_allow_list() {
     }
 }
 
-/// The **signed document** wins for the runner: a bundle cannot bind a
-/// different runner than the one the operator signed. When the document
-/// selects none, the section's handler family is what is recorded.
+/// The **signed document** wins for the runner; the section supplies only the
+/// handler family, which is recorded for audit.
+///
+/// The two are independent questions: the document says which runner the paid
+/// jobs use (and only the signature can answer that), while the section says
+/// which family the operator baked into the guest image.
 #[test]
-fn the_signed_document_wins_for_the_runner() {
+fn the_signed_document_wins_for_the_runner_and_the_section_names_the_family() {
     // A document that selects a runner: that runner is bound, and the family
-    // is the generic in-guest runner whatever the section said.
+    // is the section's (allow-listed) answer, recorded for audit.
     let (runner, handler) = bound_runner(Some("operator_adaptor_v0"), Some(Handler::Harbor));
     assert_eq!(runner.as_deref(), Some("operator_adaptor_v0"));
-    assert_eq!(handler, Handler::VmBacked);
+    assert_eq!(
+        handler,
+        Handler::Harbor,
+        "the family is the section's answer, and it is recorded"
+    );
 
-    // A document that selects none: nothing is bound as a runner, and the
-    // handler family is whatever the section allow-listed (default vm_backed).
+    // A document that selects none: no runner is bound, and the family is
+    // whatever the section allow-listed (default vm_backed).
     let (runner, handler) = bound_runner(None, Some(Handler::Harbor));
     assert_eq!(runner, None);
     assert_eq!(handler, Handler::Harbor);
     let (runner, handler) = bound_runner(None, None);
     assert_eq!(runner, None);
     assert_eq!(handler, Handler::VmBacked, "the fail-closed default");
+
+    // Whatever the family, the runner the document named is unchanged: the
+    // section can never redirect a topic to a different runner.
+    for handler in Handler::ALL {
+        let (runner, _) = bound_runner(Some("operator_adaptor_v0"), Some(handler));
+        assert_eq!(runner.as_deref(), Some("operator_adaptor_v0"));
+    }
 }
 
 /// The crate compiles no challenge: no benchmark, harness, model, or task

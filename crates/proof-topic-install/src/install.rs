@@ -42,9 +42,19 @@
 //!
 //! A failure leaves the topic **draft or disabled**: an install never
 //! publishes an `open` document, so a failed setup cannot produce a topic
-//! miners can submit to. Every failure appends a `failed` journal row naming
-//! the step and the reason, so the next attempt and the operator can both see
-//! what was applied before it stopped.
+//! miners can submit to.
+//!
+//! Refusals come in two kinds, and they differ in what they leave behind:
+//!
+//! - **Pre-flight refusals** — the deny-list, the handler allow-list, the
+//!   section shape, and the open-custom-id gate — run before the journal
+//!   opens, so a bundle they refuse **writes nothing at all**. Not a row, not
+//!   a rule, not a table. The operator sees the refusal on stderr and fixes
+//!   the bundle; there is nothing to roll back.
+//! - **Step failures** — a migration the database rejected, a store error —
+//!   happen after the journal opens, so they append a `failed` row naming the
+//!   step and the reason. The migrations already applied stay applied and are
+//!   recorded, so the next attempt resumes from them rather than restarting.
 
 use std::collections::BTreeSet;
 

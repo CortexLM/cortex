@@ -22,6 +22,8 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json", "macr
 thiserror = "2"
 
 [dev-dependencies]
+db = { path = "../db", features = ["testing"] }
+proof-experiment = { path = "../proof-experiment" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [lints]

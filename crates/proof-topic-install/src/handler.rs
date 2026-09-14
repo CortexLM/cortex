@@ -148,22 +148,30 @@ pub fn check_handler(name: &str) -> Result<Handler, InstallError> {
     resolve_handler(name).map_err(|e| InstallError::HandlerNotAllowed(e.to_string()))
 }
 
-/// The runner id an install binds for a topic.
+/// The run backend an install binds, from the document and the section.
 ///
-/// The **signed document** is the source of truth: when it selects an
-/// in-guest runner, that is the runner, and a bundle that names a different
-/// one is a contradiction (the CLI refuses those before reaching here — see
-/// `proof_topic_bundle::BundleError::HostContradictsDocument`). When the
-/// document selects none, the install binds the topic's registered custom id
-/// through the generic runner, which is what the operator's
-/// `PROOF_VM_RUNNER_CUSTOM_IDS` entry already does.
+/// The two inputs answer two different questions, and both are recorded:
+///
+/// - **Which runner** runs the topic's paid jobs is the **signed document's**
+///   answer (`constraints.params`). The section cannot override it: the
+///   signature is what the scoring path trusts.
+/// - **Which handler family** the install bound is the **section's** answer,
+///   and it must be on the allow-list. It is audit information — the family
+///   is what an operator baked into the guest image — so it is recorded even
+///   when the document also names a runner, because a Harbor topic and a
+///   generic in-guest topic are operationally different and the journal
+///   should say which one this is.
+///
+/// Both resolve to the same [`proof_rlm::VmBackedRunner`] over the topic-VM
+/// orchestrator; the family never selects a second code path here, and it can
+/// never name a binary.
 #[must_use]
 pub fn bound_runner(
     document_runner: Option<&str>,
     handler: Option<Handler>,
 ) -> (Option<String>, Handler) {
-    match (document_runner, handler) {
-        (Some(runner), _) => (Some(runner.to_owned()), Handler::VmBacked),
-        (None, handler) => (None, handler.unwrap_or(Handler::VmBacked)),
-    }
+    (
+        document_runner.map(str::to_owned),
+        handler.unwrap_or(Handler::VmBacked),
+    )
 }
