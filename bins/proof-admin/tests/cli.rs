@@ -337,7 +337,11 @@ fn dry_run_install_prints_the_existing_publish_call_and_host_env() {
         "environment       metal",
         "custom_id         tbench",
         "runner_id         rlm_fc_in_guest_harbor",
-        "Publish the signed document (existing route, operator bearer)",
+        "Extract the signed document (the route takes a TopicDocument, not the bundle)",
+        "jq '.topic'",
+        "> /tmp/proof-topic-document.json",
+        "Publish it (existing route, operator bearer)",
+        "--data-binary @/tmp/proof-topic-document.json",
         "/challenge/proof/v1/admin/proof/topics",
         "PROOF_VM_RUNNER_CUSTOM_IDS=tbench",
         "PROOF_RLM_VM_IMAGE_DIGEST=sha256:",
@@ -357,6 +361,27 @@ fn dry_run_install_prints_the_existing_publish_call_and_host_env() {
     assert!(
         body.contains("Bearer $PROOF_ADMIN_TOKEN"),
         "the token must stay a placeholder:\n{body}"
+    );
+    // The procedure must be runnable shell, not a placeholder an operator has
+    // to hand-edit: the route takes a TopicDocument, so the step extracts it.
+    assert!(
+        !body.contains("<extract"),
+        "the publish step must not be a placeholder:\n{body}"
+    );
+    let extract = body
+        .lines()
+        .find(|l| l.trim_start().starts_with("jq '.topic'"))
+        .expect("an extraction step");
+    let extract = extract.trim();
+    let status = std::process::Command::new("sh")
+        .arg("-n")
+        .arg("-c")
+        .arg(extract)
+        .status()
+        .expect("sh -n");
+    assert!(
+        status.success(),
+        "the printed extraction step must be valid shell: {extract}"
     );
     fs::remove_dir_all(&dir).ok();
 }

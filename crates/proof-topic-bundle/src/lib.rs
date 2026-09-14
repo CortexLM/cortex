@@ -91,6 +91,9 @@ pub const DIGEST_PREFIX: &str = "sha256:";
 /// runs the same acceptance checks that route runs before it writes.
 pub const PUBLISH_ROUTE: &str = "POST /v1/admin/proof/topics";
 
+/// The publish path as it appears in a printed `curl` line.
+pub const PUBLISH_PATH: &str = "/challenge/proof/v1/admin/proof/topics";
+
 /// Operator env naming the custom ids the host will score.
 pub const ENV_CUSTOM_IDS: &str = "PROOF_VM_RUNNER_CUSTOM_IDS";
 

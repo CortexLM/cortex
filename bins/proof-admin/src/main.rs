@@ -39,7 +39,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use proof_rlm_store::{MemoryRlmStore, PgRlmStore, RlmStore, TopicVersionRow};
 use proof_task::ProofPin;
-use proof_topic_bundle::{InstallEnvironment, TopicInstallBundle, TopicInstallPlan};
+use proof_topic_bundle::{InstallEnvironment, TopicInstallBundle, TopicInstallPlan, PUBLISH_PATH};
 
 /// Successful run.
 const EXIT_OK: u8 = 0;
@@ -390,23 +390,19 @@ fn print_plan(plan: &TopicInstallPlan, bundle_path: &Path, pin_path: &Path) {
     println!("  bundle_digest     {}", plan.bundle_digest);
     println!("  pin               {}", pin_path.display());
     println!();
-    println!("1) Publish the signed document (existing route, operator bearer):");
-    println!(
-        "     curl -sS -X {} \\",
-        plan.publish_route.split(' ').next().unwrap_or("POST")
-    );
-    println!("       -H \"Authorization: Bearer $PROOF_ADMIN_TOKEN\" \\");
-    println!("       -H 'content-type: application/json' \\");
-    println!(
-        "       --data-binary @{} \\",
-        signed_document_hint(bundle_path)
-    );
-    println!("       <host>/challenge/proof/v1/admin/proof/topics");
+    let (extract, publish) = publish_steps(bundle_path);
+    println!("1) Extract the signed document (the route takes a TopicDocument, not the bundle):");
+    println!("     {extract}");
+    println!();
+    println!("2) Publish it (existing route, operator bearer):");
+    for line in publish.lines() {
+        println!("     {line}");
+    }
     println!();
     if plan.host_env.is_empty() {
-        println!("2) Host env: nothing extra is required for this topic.");
+        println!("3) Host env: nothing extra is required for this topic.");
     } else {
-        println!("2) Set these on the master before the topic can score:");
+        println!("3) Set these on the master before the topic can score:");
         for var in &plan.host_env {
             println!("     {}={}", var.name, var.value);
             println!("       # {}", var.why);
@@ -414,13 +410,34 @@ fn print_plan(plan: &TopicInstallPlan, bundle_path: &Path, pin_path: &Path) {
     }
 }
 
-/// Where the signed document is expected to live, given the bundle path.
+/// The runnable steps that publish a bundle, as shell.
 ///
-/// The bundle carries the document inline; the publish call posts the document
-/// itself, so the hint names the bundle and lets the operator extract it. This
-/// never invents a path that does not exist.
-fn signed_document_hint(bundle_path: &Path) -> String {
-    format!("<extract .topic from {}>", bundle_path.display())
+/// The publish route takes a `TopicDocument`, **not** the bundle envelope, so
+/// the procedure has to extract `topic` first. Both commands are printed as
+/// real, copy-pasteable shell: a placeholder an operator has to hand-edit is
+/// not a procedure.
+fn publish_steps(bundle_path: &Path) -> (String, String) {
+    let bundle = shell_single_quote(&bundle_path.display().to_string());
+    let extract = format!(
+        "jq '.topic' {bundle} > /tmp/proof-topic-document.json && \
+         proof-admin topic validate --bundle {bundle} --pin config/proof-pin.toml"
+    );
+    let publish = format!(
+        "curl -sS -X POST \\\n  \
+         -H \"Authorization: Bearer $PROOF_ADMIN_TOKEN\" \\\n  \
+         -H 'content-type: application/json' \\\n  \
+         --data-binary @/tmp/proof-topic-document.json \\\n  \
+         <host>{PUBLISH_PATH}"
+    );
+    (extract, publish)
+}
+
+/// Single-quote a path for `sh`, escaping any embedded quote.
+///
+/// A path with a space or a quote must not turn the printed procedure into a
+/// different command than the operator read.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 async fn cmd_list(opts: &Options) -> Result<(), Failure> {
