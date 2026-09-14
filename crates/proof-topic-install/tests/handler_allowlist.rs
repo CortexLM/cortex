@@ -164,7 +164,7 @@ fn no_challenge_content_is_compiled_into_this_crate() {
         include_str!("../src/handler.rs"),
         include_str!("../src/install.rs"),
         include_str!("../src/section.rs"),
-        include_str!("../src/sql_guard.rs"),
+        include_str!("../../proof-topic-sql-guard/src/lib.rs"),
     ] {
         let non_test = src.split("#[cfg(test)]").next().unwrap_or("");
         let lower = non_test.to_ascii_lowercase();
@@ -198,7 +198,7 @@ fn no_topic_literal_appears_in_this_crates_logic() {
         include_str!("../src/handler.rs"),
         include_str!("../src/install.rs"),
         include_str!("../src/section.rs"),
-        include_str!("../src/sql_guard.rs"),
+        include_str!("../../proof-topic-sql-guard/src/lib.rs"),
     ] {
         let non_test = src.split("#[cfg(test)]").next().unwrap_or("");
         let logic: String = non_test

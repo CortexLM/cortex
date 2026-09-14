@@ -12,19 +12,17 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proof_topic_install::sql_guard::{
+use proof_topic_sql_guard::MigrationDenied;
+use proof_topic_sql_guard::{
     blank_statements, check_migration, is_topic_scoped, split_statements, OWNED_TABLES,
 };
-use proof_topic_install::InstallError;
 
 const TOPIC: &str = "tb4";
 
 /// Assert a migration is refused, naming `needle` in the refusal.
 fn refused(sql: &str, needle: &str) {
     let err = check_migration(sql, TOPIC).expect_err(&format!("must refuse: {sql}"));
-    let InstallError::MigrationDenied { what, why, .. } = &err else {
-        panic!("expected MigrationDenied for {sql:?}, got {err:?}");
-    };
+    let MigrationDenied { what, why, .. } = &err;
     let text = format!("{what} {why}");
     assert!(
         text.to_lowercase().contains(&needle.to_lowercase()),
@@ -62,9 +60,7 @@ fn no_topic_migration_may_touch_a_proof_table() {
             format!("CREATE INDEX ON {table} (topic_id)"),
         ] {
             let err = check_migration(&sql, TOPIC).expect_err(&format!("{sql:?} must be refused"));
-            let InstallError::MigrationDenied { what, why, .. } = &err else {
-                panic!("{sql:?}: expected MigrationDenied, got {err:?}");
-            };
+            let MigrationDenied { what, why, .. } = &err;
             assert!(
                 what.to_lowercase().contains(&table.to_lowercase())
                     || why.to_lowercase().contains("proof_"),
@@ -133,10 +129,7 @@ fn privilege_and_session_control_are_refused() {
         "NOTIFY channel",
     ] {
         let err = check_migration(sql, TOPIC).expect_err(sql);
-        assert!(
-            matches!(err, InstallError::MigrationDenied { .. }),
-            "{sql}: {err:?}"
-        );
+        assert!(matches!(err, MigrationDenied { .. }), "{sql}: {err:?}");
     }
 }
 
@@ -215,10 +208,7 @@ fn maintenance_verbs_are_refused() {
         "REINDEX TABLE tb4_scratch",
     ] {
         let err = check_migration(sql, TOPIC).expect_err(sql);
-        assert!(
-            matches!(err, InstallError::MigrationDenied { .. }),
-            "{sql}: {err:?}"
-        );
+        assert!(matches!(err, MigrationDenied { .. }), "{sql}: {err:?}");
     }
 }
 
@@ -244,20 +234,17 @@ fn a_topic_may_only_touch_its_own_namespace() {
         "SELECT * FROM miners",
     ] {
         let err = check_migration(sql, TOPIC).expect_err(&format!("{sql:?} must be refused"));
-        assert!(
-            matches!(err, InstallError::MigrationDenied { .. }),
-            "{sql}: {err:?}"
-        );
+        assert!(matches!(err, MigrationDenied { .. }), "{sql}: {err:?}");
     }
 }
 
-/// The topic's own namespace — `tb4_*`, `topic_*`, and `tb4.…` — is allowed,
-/// in every verb a migration legitimately needs.
+/// The topic's own namespace — `tb4_*` and `tb4.…` — is allowed, in every
+/// verb a migration legitimately needs.
 #[test]
 fn a_topics_own_namespace_is_allowed() {
     for sql in [
         "CREATE TABLE tb4_scratch (id TEXT)",
-        "CREATE TABLE topic_scores (id TEXT, value DOUBLE PRECISION)",
+        "CREATE TABLE tb4_scores (id TEXT, value DOUBLE PRECISION)",
         "CREATE INDEX tb4_scratch_idx ON tb4_scratch (id)",
         "ALTER TABLE tb4_scratch ADD COLUMN note TEXT",
         "INSERT INTO tb4_scratch (id) VALUES ('a')",
@@ -275,7 +262,6 @@ fn a_topics_own_namespace_is_allowed() {
     // A sibling topic's namespace is not the topic's, even though it looks
     // similar: the prefix has to match the topic's own id.
     assert!(is_topic_scoped("tb4_scratch", "tb4"));
-    assert!(is_topic_scoped("topic_scratch", "tb4"));
     assert!(is_topic_scoped("tb4.runs", "tb4"));
     assert!(!is_topic_scoped("tb40_scratch", "tb4"));
     assert!(!is_topic_scoped("tb_scratch", "tb4"));
@@ -293,10 +279,7 @@ fn quoted_identifiers_cannot_smuggle_a_denied_object() {
         r#"CREATE TABLE "scores" (id TEXT)"#,
     ] {
         let err = check_migration(sql, TOPIC).expect_err(&format!("{sql:?} must be refused"));
-        assert!(
-            matches!(err, InstallError::MigrationDenied { .. }),
-            "{sql}: {err:?}"
-        );
+        assert!(matches!(err, MigrationDenied { .. }), "{sql}: {err:?}");
     }
 }
 
@@ -334,10 +317,7 @@ fn case_and_whitespace_do_not_evade_the_guard() {
         "sElEcT * FrOm PrOoF_rUlE_vErSiOn",
     ] {
         let err = check_migration(sql, TOPIC).expect_err(sql);
-        assert!(
-            matches!(err, InstallError::MigrationDenied { .. }),
-            "{sql}: {err:?}"
-        );
+        assert!(matches!(err, MigrationDenied { .. }), "{sql}: {err:?}");
     }
 }
 
@@ -355,6 +335,106 @@ fn a_dollar_quoted_body_is_scanned_not_trusted() {
     );
 }
 
+/// A **single-quoted** function body is scanned too.
+///
+/// `PostgreSQL` accepts a function body as a string literal:
+///
+/// ```sql
+/// CREATE FUNCTION f() RETURNS void AS 'DELETE FROM proof_rule_version' LANGUAGE sql;
+/// ```
+///
+/// A string literal is normally *data*, so the scanner blanks it — which
+/// would have let a topic install a function reaching a protected object
+/// simply by wrapping the statement in `AS '…'`. The body of a function
+/// definition is code, so it is decoded and scanned as well.
+#[test]
+fn a_single_quoted_function_body_is_scanned_not_trusted() {
+    refused(
+        "CREATE FUNCTION tb4_f() RETURNS void AS 'DELETE FROM proof_rule_version' LANGUAGE sql",
+        "proof_",
+    );
+    refused(
+        "CREATE FUNCTION tb4_f() RETURNS void AS 'GRANT ALL ON tb4_x TO base_app' LANGUAGE sql",
+        "GRANT",
+    );
+    refused(
+        "CREATE FUNCTION tb4_f() RETURNS void AS 'DROP DATABASE base' LANGUAGE sql",
+        "DROP DATABASE",
+    );
+    refused(
+        "CREATE FUNCTION tb4_f() RETURNS void AS 'SELECT pg_read_file($$/etc/passwd$$)' LANGUAGE sql",
+        "pg_read_file",
+    );
+    // A literal that is *not* a function body stays data: a topic may store
+    // the text of a denied statement without executing it.
+    allowed("INSERT INTO tb4_notes (body) VALUES ('DELETE FROM proof_rule_version')");
+    // And a function body that stays inside the topic's namespace is fine.
+    allowed("CREATE FUNCTION tb4_f() RETURNS void AS 'INSERT INTO tb4_log (m) VALUES ($$ok$$)' LANGUAGE sql");
+}
+
+/// A doubled quote inside a single-quoted body is decoded before scanning, so
+/// an escaped spelling cannot hide a denied statement.
+#[test]
+fn an_escaped_quote_in_a_function_body_does_not_hide_a_denied_statement() {
+    refused(
+        "CREATE FUNCTION tb4_f() RETURNS void AS 'SELECT ''x''; DROP TABLE proof_topic_version;' LANGUAGE sql",
+        "proof_",
+    );
+    refused(
+        "CREATE FUNCTION tb4_f() RETURNS void AS 'SELECT ''pg_read_file''; SELECT pg_read_file($$/etc/passwd$$)' LANGUAGE sql",
+        "pg_read_file",
+    );
+}
+
+/// The generic `topic_` prefix is **not** an isolation boundary.
+///
+/// Every topic shares one database, so a bare `topic_scores` is one table that
+/// every topic's install can reach: approving it for topic A would let A
+/// write, truncate, or redefine the table B created. Only the topic's own
+/// namespace counts.
+#[test]
+fn the_generic_topic_prefix_is_not_a_shared_namespace() {
+    for sql in [
+        "CREATE TABLE topic_scores (id TEXT)",
+        "UPDATE topic_victim_private SET value = 'compromised'",
+        "DELETE FROM topic_victim_private",
+        "TRUNCATE topic_shared",
+        "DROP TABLE topic_scores",
+        "INSERT INTO topic_scores (id) VALUES ('x')",
+        "ALTER TABLE topic_scores ADD COLUMN evil TEXT",
+    ] {
+        let err = check_migration(sql, TOPIC).expect_err(&format!("{sql:?} must be refused"));
+        assert!(matches!(err, MigrationDenied { .. }), "{sql}: {err:?}");
+    }
+    // The topic's own namespace is still the topic's.
+    allowed("CREATE TABLE tb4_scores (id TEXT)");
+    allowed("CREATE TABLE tb4.topic_scores (id TEXT)");
+    assert!(!is_topic_scoped("topic_scores", "tb4"));
+    assert!(!is_topic_scoped("topic_scratch", "tb4"));
+    assert!(is_topic_scoped("tb4_scratch", "tb4"));
+    assert!(is_topic_scoped("tb4.topic_scratch", "tb4"));
+}
+
+/// One topic's namespace is not another's, whatever the prefix resembles.
+#[test]
+fn a_sibling_topics_namespace_is_refused() {
+    for (sql, topic) in [
+        ("UPDATE tb4_scores SET value = 'x'", "tb9"),
+        ("SELECT * FROM tb9_scratch", "tb4"),
+        ("DELETE FROM tb4_log", "tb40"),
+        ("INSERT INTO tb4_runs (a) VALUES (1)", "tb"),
+    ] {
+        let err = check_migration(sql, topic).expect_err(&format!("{sql:?} for {topic:?}"));
+        assert!(
+            matches!(err, MigrationDenied { .. }),
+            "{sql:?} for {topic:?}: {err:?}"
+        );
+    }
+    // The same statement is legal for the topic that owns the namespace.
+    allowed("UPDATE tb4_scores SET value = 'x'");
+    allowed("SELECT * FROM tb4_scratch");
+}
+
 /// A multi-statement migration is refused as a whole: the ordinal names the
 /// offending statement, and the good statements before it do not save it.
 #[test]
@@ -362,9 +442,7 @@ fn a_denied_statement_refuses_the_whole_migration_and_names_its_ordinal() {
     let sql = "CREATE TABLE tb4_ok (id TEXT); INSERT INTO tb4_ok (id) VALUES ('a'); \
                DROP TABLE proof_rule_version;";
     let err = check_migration(sql, TOPIC).expect_err("third statement is denied");
-    let InstallError::MigrationDenied { ordinal, what, .. } = err else {
-        panic!("expected MigrationDenied, got {err:?}");
-    };
+    let MigrationDenied { ordinal, what, .. } = err;
     assert_eq!(ordinal, 3, "the refusal must name the offending statement");
     assert!(what.contains("proof_"), "{what}");
 
@@ -380,10 +458,7 @@ fn a_denied_statement_refuses_the_whole_migration_and_names_its_ordinal() {
 fn an_empty_migration_is_refused() {
     for sql in ["", "   ", "\n\n", "-- only a comment\n", "/* nothing */"] {
         let err = check_migration(sql, TOPIC).expect_err(sql);
-        assert!(
-            matches!(err, InstallError::MigrationDenied { .. }),
-            "{sql:?}: {err:?}"
-        );
+        assert!(matches!(err, MigrationDenied { .. }), "{sql:?}: {err:?}");
     }
 }
 

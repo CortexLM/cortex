@@ -5,7 +5,7 @@
 //! completes or stops the install with a named reason:
 //!
 //! 1. **Migrations** — the topic's SQL, applied through the deny-list
-//!    ([`crate::sql_guard`]). A statement touching a `proof_*` object, a
+//!    ([`proof_topic_sql_guard`]). A statement touching a `proof_*` object, a
 //!    role, or another topic's namespace is refused *before* the first one
 //!    runs, so a bundle cannot leave half its migrations applied. Resumable
 //!    by journal: a migration whose name already appears in this topic's
@@ -66,8 +66,8 @@ use sqlx::PgPool;
 
 use crate::handler::{bound_runner, Handler};
 use crate::section::{ApiRoute, SectionPlan, MAX_MIGRATIONS};
-use crate::sql_guard::{check_migration, Statement};
 use crate::InstallError;
+use proof_topic_sql_guard::{check_migration, Statement};
 
 /// VMs one submission may use. **1**, always.
 ///
@@ -292,15 +292,22 @@ impl Installer<'_> {
         setup: SetupSummary,
     ) -> Result<InstallReport, InstallError> {
         let already = self.applied_migrations(&request.topic.id).await?;
-        let mut applied = Vec::new();
+        let mut applied: Vec<String> = already.iter().cloned().collect();
+        applied.sort();
+        let mut applied_now = Vec::new();
         let mut skipped = Vec::new();
         for (name, statements) in checked {
             if already.contains(name) {
                 skipped.push(name.clone());
                 continue;
             }
-            self.run_migration(name, statements).await?;
+            // The migration and the journal row that records it commit in
+            // **one** transaction, so a crash cannot leave a migration applied
+            // with no durable record of it. See `run_migration`.
+            self.run_migration(request, name, statements, &applied)
+                .await?;
             applied.push(name.clone());
+            applied_now.push(name.clone());
         }
 
         let apis = self.register_apis(&request.topic.id, &plan.apis).await?;
@@ -322,7 +329,7 @@ impl Installer<'_> {
             topic_id: request.topic.id.clone(),
             bundle_digest: request.bundle_digest.clone(),
             environment: request.environment.clone(),
-            migrations_applied: applied,
+            migrations_applied: applied_now,
             migrations_skipped: skipped,
             apis,
             rules_version: rules.version,
@@ -335,10 +342,11 @@ impl Installer<'_> {
 
     /// Migration names this topic has already applied, from the journal.
     ///
-    /// The union over `pending` and `applied` rows is deliberate: a run that
-    /// crashed after applying a migration but before journaling `applied`
-    /// still gets credit for it, so a resume does not re-apply a statement
-    /// whose `CREATE TABLE` would now fail.
+    /// Every row this reads was written **in the same transaction as the
+    /// migration it names**, so the set is exactly the migrations whose
+    /// effects are durably in the database. A run that crashed mid-way leaves
+    /// a `pending` row naming the migrations that committed before the crash,
+    /// and a resume skips them.
     async fn applied_migrations(&self, topic_id: &str) -> Result<BTreeSet<String>, InstallError> {
         let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
             "SELECT migrations FROM proof_topic_install \
@@ -361,15 +369,32 @@ impl Installer<'_> {
         Ok(out)
     }
 
-    /// Run one migration's statements in one transaction.
+    /// Run one migration's statements **and record it, in one transaction**.
     ///
-    /// All-or-nothing per migration: a failure on the third statement of a
-    /// migration leaves none of that migration applied, so the journal and
-    /// the database agree about what landed.
+    /// All-or-nothing per migration, and — the part that makes resume correct
+    /// — the journal row that names the migration commits with it. A crash
+    /// can therefore leave two states and no third:
+    ///
+    /// - the migration's effects are in the database *and* the journal names
+    ///   it, so a resume skips it; or
+    /// - neither is, so a resume applies it.
+    ///
+    /// The alternative (apply, commit, then journal separately) has a window
+    /// where a migration has run and nothing records it: a resume would
+    /// re-apply it, and ordinary non-idempotent DDL such as `CREATE TABLE`
+    /// would fail on a duplicate relation. Writing the row inside the same
+    /// transaction closes that window rather than narrowing it.
+    ///
+    /// The row is `pending` with the migrations applied **so far** (including
+    /// this one). A run that finishes writes its `applied` row afterwards;
+    /// the `pending` rows are what a resume reads, so an interrupted install
+    /// resumes from exactly what landed.
     async fn run_migration(
         &self,
+        request: &InstallRequest<'_>,
         name: &str,
         statements: &[Statement],
+        applied_before: &[String],
     ) -> Result<(), InstallError> {
         let mut tx = self
             .pool
@@ -386,6 +411,29 @@ impl Installer<'_> {
                     detail: e.to_string(),
                 })?;
         }
+        let mut progress: Vec<String> = applied_before.to_vec();
+        if !progress.iter().any(|n| n == name) {
+            progress.push(name.to_owned());
+        }
+        sqlx::query(
+            "INSERT INTO proof_topic_install \
+             (topic_id, bundle_digest, environment, state, migrations, detail) \
+             VALUES ($1, $2, $3, 'pending', $4, $5)",
+        )
+        .bind(&request.topic.id)
+        .bind(&request.bundle_digest)
+        .bind(&request.environment)
+        .bind(serde_json::Value::Array(
+            progress
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        ))
+        .bind(format!("migration {name} applied"))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| InstallError::Db(e.to_string()))?;
         tx.commit()
             .await
             .map_err(|e| InstallError::MigrationFailed {

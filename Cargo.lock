@@ -4065,12 +4065,20 @@ dependencies = [
  "proof-rlm-store",
  "proof-task",
  "proof-topic-bundle",
+ "proof-topic-sql-guard",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
  "thiserror 2.0.19",
  "tokio",
+]
+
+[[package]]
+name = "proof-topic-sql-guard"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.19",
 ]
 
 [[package]]

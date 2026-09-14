@@ -10,7 +10,7 @@
 //!
 //! | Part | What the install does with it |
 //! |------|-------------------------------|
-//! | `migrations` | shape-checked, then executed under the SQL deny-list ([`crate::sql_guard`]) |
+//! | `migrations` | shape-checked, then executed under the SQL deny-list ([`proof_topic_sql_guard`]) |
 //! | `apis` | recorded as topic-scoped routes ([`crate::install`]) |
 //! | `rules` | installed as the topic's first rule version ([`crate::install`]) |
 //! | `submission_format` | shape-checked and recorded; never interpreted |

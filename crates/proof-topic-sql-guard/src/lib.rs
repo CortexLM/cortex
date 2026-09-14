@@ -47,9 +47,34 @@
 //! Both are why an install is an **operator** action against an
 //! operator-published bundle, not a miner-facing path.
 
+#![forbid(unsafe_code)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::module_name_repetitions,
+    clippy::must_use_candidate,
+    clippy::doc_markdown
+)]
+
 use std::collections::BTreeSet;
 
-use crate::InstallError;
+/// Why a migration statement was refused.
+///
+/// This crate owns its error rather than reusing the installer's, so the
+/// guard is a self-contained rule: a caller can check a migration without
+/// pulling in a database, a store, or a topic. The installer wraps this in
+/// its own [`MigrationDenied`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("migration statement {ordinal} denied ({what}): {why}\n  statement: {statement}")]
+pub struct MigrationDenied {
+    /// 1-based position in the migration's statement list.
+    pub ordinal: usize,
+    /// The statement, shortened.
+    pub statement: String,
+    /// The token or construct that was refused.
+    pub what: String,
+    /// Why it is refused.
+    pub why: String,
+}
 
 /// Prefix every object this repository owns carries.
 ///
@@ -151,7 +176,14 @@ pub const DENIED_FUNCTIONS: [&str; 8] = [
 ];
 
 /// Keywords after which a table name appears.
-const TABLE_KEYWORDS: [&str; 6] = ["FROM", "JOIN", "INTO", "UPDATE", "TABLE", "INDEX"];
+///
+/// `TRUNCATE` and `DELETE` are here for the same reason as `FROM`: the object
+/// they act on is the whole point of the statement, so it has to be checked.
+/// A verb whose table is not in this list would let a topic name an object
+/// outside its namespace and never be asked about it.
+const TABLE_KEYWORDS: [&str; 8] = [
+    "FROM", "JOIN", "INTO", "UPDATE", "TABLE", "INDEX", "TRUNCATE", "DELETE",
+];
 
 /// One statement, in both the forms the guard needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,12 +282,7 @@ pub fn split_statements(sql: &str) -> Vec<Statement> {
             }
             ';' => {
                 if !text.trim().is_empty() {
-                    out.push(Statement {
-                        ordinal: out.len() + 1,
-                        text: text.trim().to_owned(),
-                        blanked: blanked.trim().to_owned(),
-                        bodies: bodies.trim().to_owned(),
-                    });
+                    out.push(finish_statement(out.len() + 1, &text, &blanked, &bodies));
                 }
                 text.clear();
                 blanked.clear();
@@ -266,12 +293,86 @@ pub fn split_statements(sql: &str) -> Vec<Statement> {
         }
     }
     if !text.trim().is_empty() {
-        out.push(Statement {
-            ordinal: out.len() + 1,
-            text: text.trim().to_owned(),
-            blanked: blanked.trim().to_owned(),
-            bodies: bodies.trim().to_owned(),
-        });
+        out.push(finish_statement(out.len() + 1, &text, &blanked, &bodies));
+    }
+    out
+}
+
+/// Build a [`Statement`], adding any single-quoted **function body** to the
+/// scanned bodies.
+///
+/// PostgreSQL accepts a function body as a single-quoted string as well as a
+/// dollar-quoted one:
+///
+/// ```sql
+/// CREATE FUNCTION f() RETURNS void AS 'DELETE FROM proof_rule_version' LANGUAGE sql;
+/// ```
+///
+/// The string-literal branch blanks that body in `blanked` (a literal is
+/// normally *data*, not code), so without this step the body would be executed
+/// without ever being scanned — a topic could install a function that reaches
+/// a `proof_*` object by wrapping the statement in `AS '…'`. When the
+/// statement is a function definition, its string literals are therefore
+/// decoded and appended to [`Statement::bodies`], which
+/// [`check_statement`] scans exactly as it scans a dollar-quoted body.
+///
+/// The detection is deliberately broad: any statement mentioning `FUNCTION`
+/// and `AS` has its literals scanned. A false positive costs a migration
+/// nothing (its literals are inert text that will not match a deny rule); a
+/// false negative would be the hole above.
+fn finish_statement(ordinal: usize, text: &str, blanked: &str, bodies: &str) -> Statement {
+    let mut bodies = bodies.to_owned();
+    if is_function_definition(blanked) {
+        for literal in single_quoted_literals(text) {
+            bodies.push(' ');
+            bodies.push_str(&literal);
+        }
+    }
+    Statement {
+        ordinal,
+        text: text.trim().to_owned(),
+        blanked: blanked.trim().to_owned(),
+        bodies: bodies.trim().to_owned(),
+    }
+}
+
+/// Whether a statement defines a function (so its string literals are code).
+fn is_function_definition(blanked: &str) -> bool {
+    has_word(blanked, "FUNCTION") && has_word(blanked, "AS")
+}
+
+/// Every single-quoted literal in `text`, decoded (`''` → `'`).
+///
+/// Doubled quotes are decoded so the scanned text is what PostgreSQL would
+/// execute, not the escaped spelling: a body that smuggles a denied statement
+/// as `''`-escaped text is still caught.
+fn single_quoted_literals(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] != '\'' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let mut literal = String::new();
+        while i < chars.len() {
+            if chars[i] == '\'' {
+                if chars.get(i + 1) == Some(&'\'') {
+                    literal.push('\'');
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                break;
+            }
+            literal.push(chars[i]);
+            i += 1;
+        }
+        if !literal.trim().is_empty() {
+            out.push(literal);
+        }
     }
     out
 }
@@ -518,10 +619,17 @@ fn is_function_call(statement: &str, name: &str) -> bool {
 }
 
 /// Keywords that are never a table name in the position the scanner reads.
+///
+/// `FROM` is here because `DELETE` and `TRUNCATE` are keywords a table name
+/// follows: in `DELETE FROM x`, the token after `DELETE` is `FROM`, and the
+/// table is the token after *that*. Skipping a keyword here is what lets the
+/// scan continue to the real name instead of refusing the statement for
+/// naming `from`.
 fn is_sql_keyword(tok: &str) -> bool {
     matches!(
         tok,
         "select"
+            | "from"
             | "where"
             | "values"
             | "set"
@@ -558,8 +666,26 @@ fn copy_chars(
 
 /// Whether `name` is inside `topic_id`'s namespace.
 ///
-/// `{topic_id}.scores`, `{topic_id}_scores`, and the generic `topic_scores`
-/// are the topic's. Anything else is another topic's — or this repository's.
+/// Two spellings are the topic's, and only two:
+///
+/// - a `{topic_id}`-qualified name (`tb4.scores`, `tb4.runs`), or
+/// - a bare `{topic_id}_`-prefixed name (`tb4_scores`).
+///
+/// # Why there is no generic `topic_` allowance
+///
+/// An earlier revision also accepted any `topic_*` name, on the theory that a
+/// shared prefix was a convenient place for a topic's scratch tables. It is
+/// not: every topic shares one database, so `topic_scores` is *one* table that
+/// every topic's install can reach. A migration approved for topic A could
+/// then write, truncate, or redefine the table topic B created — the prefix
+/// would be a naming convention, not an isolation boundary, and this guard's
+/// whole job is to be the boundary.
+///
+/// Namespacing by the topic's own id is what makes "a topic may only touch its
+/// own objects" enforceable by string comparison. A topic that wants a shared
+/// table needs an operator-owned object created by a migration in
+/// `crates/db/migrations/`, which is exactly the review this guard exists to
+/// force.
 #[must_use]
 pub fn is_topic_scoped(name: &str, topic_id: &str) -> bool {
     let n = name.trim().trim_matches('"').to_ascii_lowercase();
@@ -574,7 +700,7 @@ pub fn is_topic_scoped(name: &str, topic_id: &str) -> bool {
     if schema == Some(topic.as_str()) {
         return true;
     }
-    bare.starts_with(&format!("{topic}_")) || bare.starts_with("topic_")
+    bare.starts_with(&format!("{topic}_"))
 }
 
 /// Check a statement's text against every deny rule.
@@ -586,11 +712,11 @@ fn check_text(
     text: &str,
     topic_id: &str,
     where_: &str,
-) -> Result<(), InstallError> {
+) -> Result<(), MigrationDenied> {
     if text.trim().is_empty() {
         return Ok(());
     }
-    let deny = |what: &str, why: &str| InstallError::MigrationDenied {
+    let deny = |what: &str, why: &str| MigrationDenied {
         ordinal: statement.ordinal,
         statement: truncate(&statement.blanked, 160),
         what: what.to_owned(),
@@ -678,9 +804,9 @@ fn check_text(
 ///
 /// # Errors
 ///
-/// [`InstallError::MigrationDenied`] naming the statement ordinal, the
+/// [`MigrationDenied`] naming the statement ordinal, the
 /// offending token, and why.
-pub fn check_statement(statement: &Statement, topic_id: &str) -> Result<(), InstallError> {
+pub fn check_statement(statement: &Statement, topic_id: &str) -> Result<(), MigrationDenied> {
     check_text(statement, &statement.blanked, topic_id, "statement")?;
     check_text(statement, &statement.bodies, topic_id, "function body")
 }
@@ -689,11 +815,11 @@ pub fn check_statement(statement: &Statement, topic_id: &str) -> Result<(), Inst
 ///
 /// # Errors
 ///
-/// The first [`InstallError::MigrationDenied`].
-pub fn check_migration(sql: &str, topic_id: &str) -> Result<Vec<Statement>, InstallError> {
+/// The first [`MigrationDenied`].
+pub fn check_migration(sql: &str, topic_id: &str) -> Result<Vec<Statement>, MigrationDenied> {
     let statements = split_statements(sql);
     if statements.is_empty() {
-        return Err(InstallError::MigrationDenied {
+        return Err(MigrationDenied {
             ordinal: 0,
             statement: String::new(),
             what: "empty migration".to_owned(),

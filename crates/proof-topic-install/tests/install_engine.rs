@@ -237,11 +237,14 @@ async fn a_denied_migration_writes_nothing_at_all() {
         )
         .await
         .expect_err("the second statement is denied");
-    let InstallError::MigrationDenied { ordinal, what, .. } = &err else {
+    let InstallError::MigrationDenied(denied) = &err else {
         panic!("expected MigrationDenied, got {err:?}");
     };
-    assert_eq!(*ordinal, 2, "the refusal names the offending statement");
-    assert!(what.contains("proof_"), "{what}");
+    assert_eq!(
+        denied.ordinal, 2,
+        "the refusal names the offending statement"
+    );
+    assert!(denied.what.contains("proof_"), "{}", denied.what);
 
     // Nothing from the *first* migration landed either.
     let exists: Option<String> = sqlx::query_scalar("SELECT to_regclass('tb4_ok')::text")
@@ -560,14 +563,105 @@ async fn a_migration_reaching_another_namespace_is_refused() {
             .install(&req, SetupSummary::NotDriven { reason: "x".into() })
             .await
             .expect_err(sql);
-        let InstallError::MigrationDenied { what, .. } = &err else {
+        let InstallError::MigrationDenied(denied) = &err else {
             panic!("{sql}: expected MigrationDenied, got {err:?}");
         };
         assert!(
-            what.to_lowercase().contains(&needle.to_lowercase()),
-            "{sql}: refusal must name {needle:?}, said {what:?}"
+            denied.what.to_lowercase().contains(&needle.to_lowercase()),
+            "{sql}: refusal must name {needle:?}, said {:?}",
+            denied.what
         );
     }
+    tp.drop_schema().await.expect("drop");
+}
+
+/// A crash between two migrations cannot lose a committed migration.
+///
+/// The failure this pins: if a migration's effects commit but the record of it
+/// does not, a resume re-applies it — and ordinary non-idempotent DDL
+/// (`CREATE TABLE`) fails on a duplicate relation, leaving the install
+/// unresumable. The engine writes the journal row **in the same transaction**
+/// as the migration, so those two facts cannot disagree.
+///
+/// Simulated by applying the first migration and then failing the second, so
+/// the run dies exactly where a crash would, with the first migration's
+/// effects and its journal row already durable.
+#[tokio::test]
+async fn a_crash_between_migrations_does_not_lose_a_committed_one() {
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    let doc = topic("tb4");
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    // Migration 1 commits; migration 2 fails in the database. Migration 1's
+    // `CREATE TABLE` is not idempotent, so re-applying it would error.
+    let interrupted = r#"{
+        "rules": [{"id": "no_short_circuit", "text": "run the task"}],
+        "migrations": [
+            {"name": "0001_first", "sql": "CREATE TABLE tb4_first (id TEXT)"},
+            {"name": "0002_boom", "sql": "INSERT INTO tb4_missing (nope) VALUES ('x')"}
+        ]
+    }"#;
+    installer
+        .install(
+            &request(&doc, interrupted),
+            SetupSummary::NotDriven { reason: "x".into() },
+        )
+        .await
+        .expect_err("the second migration fails");
+
+    // The first migration really landed, and the journal durably names it —
+    // written in the same transaction, so these two facts cannot disagree.
+    let exists: Option<String> = sqlx::query_scalar("SELECT to_regclass('tb4_first')::text")
+        .fetch_one(&pool)
+        .await
+        .expect("probe");
+    assert_eq!(exists.as_deref(), Some("tb4_first"));
+    let recorded: Vec<serde_json::Value> =
+        sqlx::query_scalar("SELECT migrations FROM proof_topic_install WHERE topic_id = 'tb4'")
+            .fetch_all(&pool)
+            .await
+            .expect("journal");
+    assert!(
+        recorded.iter().any(|v| v
+            .as_array()
+            .is_some_and(|a| a.iter().any(|n| n.as_str() == Some("0001_first")))),
+        "the committed migration must be durably recorded: {recorded:?}"
+    );
+
+    // Resume: the bundle now carries the same first migration (non-idempotent,
+    // so re-applying it would fail) plus a fixed second one. It must skip the
+    // first and apply only the second.
+    let resumed = r#"{
+        "rules": [{"id": "no_short_circuit", "text": "run the task"}],
+        "migrations": [
+            {"name": "0001_first", "sql": "CREATE TABLE tb4_first (id TEXT)"},
+            {"name": "0002_fixed", "sql": "CREATE TABLE tb4_second (id TEXT)"}
+        ]
+    }"#;
+    let report = installer
+        .install(
+            &request(&doc, resumed),
+            SetupSummary::NotDriven { reason: "x".into() },
+        )
+        .await
+        .expect("the resume succeeds: the committed migration is skipped");
+    assert_eq!(
+        report.migrations_applied,
+        ["0002_fixed"],
+        "only the unapplied migration runs"
+    );
+    assert_eq!(report.migrations_skipped, ["0001_first"]);
+    let second: Option<String> = sqlx::query_scalar("SELECT to_regclass('tb4_second')::text")
+        .fetch_one(&pool)
+        .await
+        .expect("probe");
+    assert_eq!(second.as_deref(), Some("tb4_second"));
+
     tp.drop_schema().await.expect("drop");
 }
 
@@ -598,10 +692,19 @@ async fn the_journal_appends_pending_then_applied() {
     .fetch_all(&pool)
     .await
     .expect("states");
+    // The journal is a **progress log**, not a single row: one `pending` row
+    // opens the run, then each migration appends its own `pending` row in the
+    // migration's own transaction (which is what makes a resume correct), and
+    // the run closes with `applied`.
     assert_eq!(
         states,
-        ["pending", "applied"],
-        "the pending row lands first so a crash is visible"
+        ["pending", "pending", "pending", "applied"],
+        "two migrations → three pending rows (open + one each) then applied: {states:?}"
+    );
+    assert_eq!(
+        *states.last().expect("non-empty"),
+        "applied",
+        "the run closes with applied"
     );
     for state in &states {
         assert!(
@@ -609,6 +712,14 @@ async fn the_journal_appends_pending_then_applied() {
             "{state}"
         );
     }
+    // Every row is one of the three states the migration's CHECK allows, and
+    // the last one is terminal for a successful run.
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM proof_topic_install WHERE topic_id = 'tb4'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(count, 4, "one row per durable step plus the closing row");
 
     tp.drop_schema().await.expect("drop");
 }

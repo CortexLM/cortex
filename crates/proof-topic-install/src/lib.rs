@@ -14,7 +14,7 @@
 //!
 //! | Gate | What it refuses |
 //! |------|-----------------|
-//! | [`sql_guard`] | a migration that names a `proof_*` object, a role, the sqlx bookkeeping table, or any object outside the topic's own namespace; `DROP DATABASE` / `SCHEMA` / `ROLE`; privilege changes; server-side file access; `SECURITY DEFINER` |
+//! | [`proof_topic_sql_guard`] | a migration that names a `proof_*` object, a role, the sqlx bookkeeping table, or any object outside the topic's own namespace; `DROP DATABASE` / `SCHEMA` / `ROLE`; privilege changes; server-side file access; `SECURITY DEFINER` |
 //! | [`handler`] | a handler that is not an allow-listed run backend — never a path, a URL, or a command line |
 //!
 //! Both gates run **before** anything is applied, and both refuse on doubt.
@@ -23,7 +23,9 @@
 //!
 //! - [`section`] reads the RLM section's parts strictly, and carries the rest.
 //! - [`install`] is the engine: migrations, routes, rules, binding, journal.
-//! - [`sql_guard`] is the migration deny-list.
+//! - [`proof_topic_sql_guard`] is the migration deny-list (its own crate: it
+//!   is pure text analysis, and keeping it separate means it can be reasoned
+//!   about — and tested — without a database).
 //! - [`handler`] is the run-backend allow-list.
 //!
 //! # What this crate does not do
@@ -46,38 +48,28 @@
 pub mod handler;
 pub mod install;
 pub mod section;
-pub mod sql_guard;
 
 pub use handler::{bound_runner, check_handler, resolve_handler, Handler, HandlerError};
 pub use install::{
     install_history, latest_install, topic_routes, ExecutorBinding, InstallReport, InstallRequest,
     InstallRow, InstallState, Installer, SetupSummary, VMS_PER_SUBMISSION,
 };
+pub use proof_topic_sql_guard::{
+    blank_statements, check_migration, check_statement, is_topic_scoped, split_statements,
+    MigrationDenied, Statement, DENIED_DROP_KINDS, DENIED_FUNCTIONS, DENIED_OBJECTS, DENIED_VERBS,
+    OWNED_TABLES, OWNED_TABLE_PREFIX,
+};
 pub use section::{
     is_api_method, is_relative_api_path, read_section, ApiRoute, Migration, SectionPlan, MAX_APIS,
     MAX_MIGRATIONS, MAX_MIGRATION_SQL_BYTES, READ_KEYS,
-};
-pub use sql_guard::{
-    blank_statements, check_migration, check_statement, is_topic_scoped, split_statements,
-    Statement, DENIED_DROP_KINDS, DENIED_FUNCTIONS, DENIED_OBJECTS, DENIED_VERBS, OWNED_TABLES,
-    OWNED_TABLE_PREFIX,
 };
 
 /// Why an install refused or failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InstallError {
     /// A migration statement reached outside the topic's namespace.
-    #[error("migration statement {ordinal} denied ({what}): {why}\n  statement: {statement}")]
-    MigrationDenied {
-        /// 1-based position in the migration's statement list.
-        ordinal: usize,
-        /// The statement, shortened.
-        statement: String,
-        /// The token or construct that was refused.
-        what: String,
-        /// Why it is refused.
-        why: String,
-    },
+    #[error("{0}")]
+    MigrationDenied(#[from] MigrationDenied),
     /// A migration was checked and allowed, then the database refused it.
     #[error("migration {name:?} failed at statement {ordinal}: {detail}")]
     MigrationFailed {
@@ -168,12 +160,12 @@ mod tests {
 
     #[test]
     fn error_messages_name_the_step_and_stay_actionable() {
-        let denied = InstallError::MigrationDenied {
+        let denied = InstallError::MigrationDenied(MigrationDenied {
             ordinal: 2,
             statement: "DROP TABLE proof_rule_version".into(),
             what: "proof_rule_version".into(),
             why: "owned".into(),
-        };
+        });
         let text = denied.to_string();
         assert!(text.contains("statement 2"), "{text}");
         assert!(text.contains("proof_rule_version"), "{text}");
