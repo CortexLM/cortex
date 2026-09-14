@@ -338,6 +338,8 @@ fn dry_run_install_prints_the_existing_publish_call_and_host_env() {
         "environment       metal",
         "custom_id         tbench",
         "runner_id         rlm_fc_in_guest_harbor",
+        "Hand control to the topic's RLM (it installs and sets the topic up)",
+        "provision -> propose_rules -> baseline",
         "Publish the signed document (one block; existing route, operator bearer)",
         "jq '.topic'",
         "mktemp -d",
@@ -734,6 +736,53 @@ fn help_lists_every_p0_subcommand_and_says_what_is_not_implemented() {
         body.to_lowercase()
             .contains("not implemented in this slice"),
         "the stubs must say so in help:\n{body}"
+    );
+}
+
+/// The admin CLI hands control to the RLM; it does not interpret the topic.
+///
+/// This is the architectural guard: the CLI may *name* the RLM-owned parts in
+/// its output, but no topic behavior may be compiled into it. A future edit
+/// that branches on a topic id, or bakes in a rule, metric, or submit format,
+/// fails here.
+#[test]
+fn the_cli_does_not_bake_in_topic_behavior() {
+    const SOURCE: &str = include_str!("../src/main.rs");
+    // Strip comments: the crate may *explain* the boundary (and its help text
+    // shows an example bundle name), but no literal may live in logic.
+    let logic: String = SOURCE
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The one place a seed id is allowed is the CLI's own help/examples.
+    let without_examples = logic
+        .replace("tb4.json", "")
+        .replace("`tbench`", "")
+        .replace("`tb4`", "");
+    assert!(
+        !without_examples.contains("tb4") && !without_examples.contains("tbench"),
+        "a topic id must not appear in CLI logic"
+    );
+    for forbidden in [
+        "terminal-bench",
+        "harbor",
+        "success_rate",
+        "no_short_circuit",
+        "submission_format",
+    ] {
+        assert!(
+            !without_examples.to_lowercase().contains(forbidden),
+            "{forbidden} must not be compiled into the admin CLI"
+        );
+    }
+    // It must not read the RLM section's *contents* either: only carry them.
+    assert!(
+        !without_examples.contains("rlm.rules")
+            && !without_examples.contains("rlm.scoring")
+            && !without_examples.contains("rlm.migrations")
+            && !without_examples.contains("rlm.apis"),
+        "the CLI must carry the RLM section, never read into it"
     );
 }
 

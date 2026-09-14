@@ -239,6 +239,39 @@ other than what was signed. A runner without a `pack_digest` is refused, as
 is a pack no runner reads. Every digest is `sha256:<64 lowercase hex>` or
 absent, never invented. Unknown keys are refused at parse.
 
+### The RLM owns topic behavior
+
+Topics are **RLM-based and autonomous**. The admin CLI's job is to **hand
+control to the topic's RLM** — it asks the RLM to install and set the topic
+up. The bundle's `rlm` section is what gets handed over, and it owns
+everything topic-specific:
+
+| RLM-owned | What it is |
+|-----------|------------|
+| `rules` | the anti-cheat rules the RLM ticks before any paid inference |
+| `migrations` | the SQL migrations the topic's install needs |
+| `apis` | the APIs the topic exposes |
+| `submission_format` | the shape a miner submits |
+| `scoring` | how the topic scores |
+
+**Rust never interprets any of it.** The bundle crate checks the section's
+*shape* (an object or array, bounded) and carries it byte-for-byte; it does
+not know what a rule, a migration, an API, a submission format, or a scoring
+function means. Nothing topic-specific is compiled into `proof-challenge`,
+the gateway, the orchestrator, or this CLI — no `if topic == "tb4"` branch,
+no rule list, no metric, no submit format. A topic's behavior travels in its
+signed document and its RLM section.
+
+The seed slug `tb4` and its temporary alias `tbench` are **strings** that
+appear in test fixtures and operator examples. They are never a condition in
+logic, and two tests fail the build if that changes: one over the bundle
+crate's non-test source, one over the CLI's.
+
+The install plan prints the hand-off first and the RLM's own lifecycle steps
+(`provision -> propose_rules -> baseline`, the existing `TopicSetup` driver),
+then the publish call and the host env. The CLI does not run those steps and
+does not read the section — it reports what the RLM will be asked to do.
+
 ### Locked defaults
 
 | Default | Value | Where |

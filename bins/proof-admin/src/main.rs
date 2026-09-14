@@ -400,6 +400,7 @@ fn cmd_validate(opts: &Options, path: &Path, pin_path: &Path) -> Result<(), Fail
             "custom_id": bundle.topic.metric.custom_id,
             "runner_id": binding.as_ref().map(|b| b.runner.clone()),
             "bundle_digest": digest,
+            "rlm_install": !bundle.rlm.is_empty(),
         });
         print_json(&body)?;
         return Ok(());
@@ -420,6 +421,14 @@ fn cmd_validate(opts: &Options, path: &Path, pin_path: &Path) -> Result<(), Fail
             .map_or_else(|| "-".to_owned(), |b| b.runner.clone())
     );
     println!("  bundle_digest    {digest}");
+    println!(
+        "  rlm_install      {}",
+        if bundle.rlm.is_empty() {
+            "-".to_owned()
+        } else {
+            "present (handed to the RLM verbatim)".to_owned()
+        }
+    );
     println!();
     println!("Checked against {}.", pin_path.display());
     println!(
@@ -505,7 +514,21 @@ fn print_plan(plan: &TopicInstallPlan, bundle_path: &Path, pin_path: &Path) {
         println!("  owner_gate        n/a (staging)");
     }
     println!();
-    println!("1) Publish the signed document (one block; existing route, operator bearer):");
+    println!("1) Hand control to the topic's RLM (it installs and sets the topic up):");
+    println!(
+        "     # The RLM drives, in order: {}",
+        plan.rlm_jobs.join(" -> ")
+    );
+    if plan.rlm_install.is_some() {
+        println!("     # This bundle carries an RLM install section. It is handed to the RLM");
+        println!("     # verbatim and the admin CLI does not read into it: what the section");
+        println!("     # contains is the topic's business, not this binary's. Rust never");
+        println!("     # branches on a topic's rules, APIs, submit format, or scoring.");
+    } else {
+        println!("     # No RLM install section in this bundle: the RLM uses its defaults.");
+    }
+    println!();
+    println!("2) Publish the signed document (one block; existing route, operator bearer):");
     println!("     # The route takes a TopicDocument, not the bundle envelope, so this");
     println!("     # extracts .topic into a private mktemp -d directory first.");
     for line in publish_block(bundle_path).lines() {
@@ -513,9 +536,9 @@ fn print_plan(plan: &TopicInstallPlan, bundle_path: &Path, pin_path: &Path) {
     }
     println!();
     if plan.host_env.is_empty() {
-        println!("2) Host env: nothing extra is required for this topic.");
+        println!("3) Host env: nothing extra is required for this topic.");
     } else {
-        println!("2) Set these on the master before the topic can score:");
+        println!("3) Set these on the master before the topic can score:");
         for var in &plan.host_env {
             println!("     {}={}", var.name, var.value);
             println!("       # {}", var.why);

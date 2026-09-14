@@ -10,10 +10,31 @@
 //! image pins are operator env.
 //!
 //! What was missing is the *procedure*: which signed document, which install
-//! target, and which host env must agree with it before the topic can run.
-//! That is this bundle. It **references** the document and **cross-checks**
-//! the host expectations against it; it never restates a binding in a second
-//! place that could drift.
+//! target, which host env must agree with it, and what the topic's RLM is
+//! asked to install. That is this bundle. It **references** the document,
+//! **cross-checks** the host expectations against it, and **carries** the
+//! RLM-owned section verbatim; it never restates a binding in a second place
+//! that could drift.
+//!
+//! # The RLM owns topic behavior; this crate does not
+//!
+//! Topics are **RLM-based and autonomous**. The admin CLI's job is to hand
+//! control to the topic's RLM — it asks the RLM to install and set itself up.
+//! Everything that makes a topic *that* topic belongs to the bundle's
+//! [`RlmSection`]: its anti-cheat **rules**, the **SQL migrations** it needs,
+//! the **APIs** it exposes, its **submission format**, and its **scoring**.
+//!
+//! Rust never interprets any of it. This crate checks the section's *shape*
+//! (an object, bounded) and carries it byte-for-byte; it does not know what a
+//! rule, a migration, an API, or a scoring function *means*. That is the
+//! whole point: no `if topic == …` branch, no compiled-in rule list, no
+//! metric or submit format baked into challenge, gateway, or orchestrator
+//! code. A topic's behavior travels in its signed document and its RLM
+//! section, never in this binary.
+//!
+//! Consequence for tests and fixtures: the seed slug `tb4` and its temporary
+//! alias `tbench` are **strings** that appear in test fixtures and operator
+//! examples. They are never a condition in logic.
 //!
 //! Three rules carry the fail-closed posture:
 //!
@@ -52,10 +73,11 @@ pub const MAX_DISPLAY_NAME_LEN: usize = 128;
 /// (`deny_unknown_fields`), not a second document that could drift from it:
 /// this list is what a test pins, so adding or removing a key is a deliberate
 /// edit here rather than a silent widening of what an operator may write.
-pub const BUNDLE_KEYS: [&str; 5] = [
+pub const BUNDLE_KEYS: [&str; 6] = [
     "display_name",
     "environment",
     "host",
+    "rlm",
     "schema_version",
     "topic",
 ];
@@ -69,6 +91,27 @@ pub const REQUIRED_BUNDLE_KEYS: [&str; 5] = [
     "schema_version",
     "topic",
 ];
+
+/// Keys of the RLM-owned section, sorted.
+///
+/// These are the parts the bundle owns, per the architecture: the topic's
+/// **rules**, the **SQL migrations** it needs, the **APIs** it exposes, its
+/// **submission format**, and its **scoring**. Naming them here makes the
+/// section reviewable; it does **not** make this crate understand them. Each
+/// value is carried verbatim and never read.
+pub const RLM_KEYS: [&str; 5] = [
+    "apis",
+    "migrations",
+    "rules",
+    "scoring",
+    "submission_format",
+];
+
+/// Largest canonical RLM section, in bytes.
+///
+/// A bound, not a schema: it stops a bundle from smuggling an unbounded blob
+/// through the install path, and it says nothing about what the content is.
+pub const MAX_RLM_BYTES: usize = 256 * 1024;
 
 /// Keys of the `host` block, sorted.
 pub const HOST_KEYS: [&str; 5] = [
@@ -90,6 +133,14 @@ pub const DIGEST_PREFIX: &str = "sha256:";
 /// Not a new route: `proof-http` already serves it, and the CLI's `validate`
 /// runs the same acceptance checks that route runs before it writes.
 pub const PUBLISH_ROUTE: &str = "POST /v1/admin/proof/topics";
+
+/// The RLM jobs an install drives, in order, for operator output.
+///
+/// These are the **existing** RLM lifecycle steps (`proof-rlm-scorer`
+/// `TopicSetup`): the RLM is asked to provision, write its rules, and seal a
+/// baseline. Naming them here is documentation for the operator; the CLI does
+/// not run them, and none of them is topic-specific.
+pub const RLM_INSTALL_JOBS: [&str; 3] = ["provision", "propose_rules", "baseline"];
 
 /// The publish path as it appears in a printed `curl` line.
 pub const PUBLISH_PATH: &str = "/challenge/proof/v1/admin/proof/topics";
@@ -221,6 +272,17 @@ pub enum BundleError {
     /// The document's `constraints.params` are not a usable runner binding.
     #[error("topic binding: {0}")]
     Binding(#[from] ExperimentError),
+    /// An RLM section field is not an object or array.
+    #[error("rlm.{field} must be a JSON object or array, got {got}")]
+    RlmNotObject {
+        /// Which field.
+        field: &'static str,
+        /// What it was.
+        got: &'static str,
+    },
+    /// The RLM section is larger than the bound.
+    #[error("rlm section is {0} bytes of canonical JSON, at most {MAX_RLM_BYTES} are allowed")]
+    RlmTooLarge(usize),
     /// The canonical form could not be built.
     #[error("canonicalize bundle: {0}")]
     Canonicalize(String),
@@ -267,6 +329,93 @@ pub struct HostExpectations {
     pub custom_ids_entry: Option<String>,
 }
 
+/// What the topic's **RLM** is asked to install — opaque to Rust.
+///
+/// Topics are RLM-based and autonomous. Everything topic-specific lives here,
+/// owned by the bundle and consumed by the RLM inside its VM: the anti-cheat
+/// **rules**, the **SQL migrations** the topic needs, the **APIs** it exposes,
+/// its **submission format**, and its **scoring**.
+///
+/// This crate does not read any of it. The fields exist so an operator can
+/// *review* the section and so the shape can be bounded; the values are
+/// carried verbatim to the RLM. Nothing here is validated semantically, and
+/// nothing here may become a branch in challenge, gateway, or orchestrator
+/// code — that is exactly the hardcoding this boundary exists to prevent.
+///
+/// Every field is optional and unconstrained beyond "valid JSON": a topic that
+/// needs none of them says nothing, and a topic that needs something Rust has
+/// never heard of puts it in the section rather than requiring a code change.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RlmSection {
+    /// Anti-cheat rules the RLM ticks before any paid inference. Opaque.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<serde_json::Value>,
+    /// SQL migrations the topic's install needs. Opaque.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub migrations: Option<serde_json::Value>,
+    /// APIs the topic exposes. Opaque.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apis: Option<serde_json::Value>,
+    /// The topic's submission format. Opaque.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submission_format: Option<serde_json::Value>,
+    /// The topic's scoring definition. Opaque.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scoring: Option<serde_json::Value>,
+}
+
+impl RlmSection {
+    /// Whether the section carries anything at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_none()
+            && self.migrations.is_none()
+            && self.apis.is_none()
+            && self.submission_format.is_none()
+            && self.scoring.is_none()
+    }
+
+    /// Canonical form of the section, for the size bound.
+    fn canonical_len(&self) -> Result<usize, BundleError> {
+        let value =
+            serde_json::to_value(self).map_err(|e| BundleError::Canonicalize(e.to_string()))?;
+        Ok(proof_canon::canonical_json(&value).len())
+    }
+
+    /// Shape only: the section must be a bounded JSON object.
+    ///
+    /// Deliberately says nothing about the *content* — a rule list this crate
+    /// does not recognise is not an error, because recognising it would mean
+    /// this crate knows the topic.
+    fn validate_shape(&self) -> Result<(), BundleError> {
+        for (field, value) in [
+            ("rules", self.rules.as_ref()),
+            ("migrations", self.migrations.as_ref()),
+            ("apis", self.apis.as_ref()),
+            ("submission_format", self.submission_format.as_ref()),
+            ("scoring", self.scoring.as_ref()),
+        ] {
+            if let Some(v) = value {
+                if v.is_null() {
+                    continue;
+                }
+                if !v.is_object() && !v.is_array() {
+                    return Err(BundleError::RlmNotObject {
+                        field,
+                        got: json_kind(v),
+                    });
+                }
+            }
+        }
+        let len = self.canonical_len()?;
+        if len > MAX_RLM_BYTES {
+            return Err(BundleError::RlmTooLarge(len));
+        }
+        Ok(())
+    }
+}
+
 /// One topic install bundle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -282,6 +431,9 @@ pub struct TopicInstallBundle {
     pub topic: TopicDocument,
     /// Operator env this install needs.
     pub host: HostExpectations,
+    /// What the topic's RLM installs. Opaque to Rust: see [`RlmSection`].
+    #[serde(default)]
+    pub rlm: RlmSection,
 }
 
 /// One operator env line the SOP asks for.
@@ -320,12 +472,35 @@ pub struct TopicInstallPlan {
     pub pack_digest: Option<String>,
     /// The existing admin route that publishes this document.
     pub publish_route: String,
+    /// What the CLI hands the RLM: the install section, verbatim.
+    ///
+    /// Present only when the bundle carries one. This is the hand-off — the
+    /// admin CLI asks the RLM to install and set the topic up; it does not
+    /// interpret, rewrite, or partially apply any of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rlm_install: Option<RlmSection>,
+    /// The RLM job kinds this install is expected to drive, for operator
+    /// output only. Derived from the existing RLM lifecycle, not from the
+    /// bundle's contents: this crate still reads none of it.
+    pub rlm_jobs: Vec<String>,
     /// Operator env lines this install needs, in the order to set them.
     pub host_env: Vec<HostEnvVar>,
     /// Where the pack is staged on the KVM host, when a pack is pinned.
     pub pack_dir_env: Option<String>,
     /// `sha256:<hex>` over the canonical bundle.
     pub bundle_digest: String,
+}
+
+/// Name a JSON value's kind, for an error that says what arrived.
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
 }
 
 fn is_digest(s: &str) -> bool {
@@ -401,6 +576,9 @@ impl TopicInstallBundle {
             }
         }
         self.check_pack_dir()?;
+        // Shape only. The RLM section's *content* is the topic's business:
+        // this crate carries it, never interprets it.
+        self.rlm.validate_shape()?;
         self.cross_check_host()
     }
 
@@ -563,6 +741,8 @@ impl TopicInstallBundle {
             runner_id: binding.as_ref().map(|b| b.runner.clone()),
             pack_digest: binding.as_ref().map(|b| b.pack.digest.clone()),
             publish_route: PUBLISH_ROUTE.to_owned(),
+            rlm_install: (!self.rlm.is_empty()).then(|| self.rlm.clone()),
+            rlm_jobs: RLM_INSTALL_JOBS.iter().map(|s| (*s).to_owned()).collect(),
             host_env,
             pack_dir_env: binding.as_ref().map(|_| ENV_PACK_DIR.to_owned()),
             bundle_digest: self.digest()?,
@@ -624,6 +804,33 @@ mod tests {
                 pack_dir: Some("/var/lib/proof/packs".into()),
                 custom_ids_entry: Some("tbench".into()),
             },
+            rlm: RlmSection::default(),
+        }
+    }
+
+    /// A section carrying all five RLM-owned parts, with shapes this crate
+    /// has no opinion about.
+    fn rlm_section() -> RlmSection {
+        RlmSection {
+            rules: Some(serde_json::json!([
+                {"id": "no_short_circuit", "text": "the harness must run the task"}
+            ])),
+            migrations: Some(serde_json::json!([
+                {"name": "0001_topic_scratch", "sql": "CREATE TABLE scratch (id TEXT)"}
+            ])),
+            apis: Some(serde_json::json!([
+                {"path": "/v1/topic/status", "method": "GET"}
+            ])),
+            submission_format: Some(serde_json::json!({
+                "kind": "tar",
+                "max_bytes": 5_242_880,
+                "fields": ["entrypoint", "manifest"]
+            })),
+            scoring: Some(serde_json::json!({
+                "primary": "success_rate",
+                "direction": "max",
+                "epsilon_rel": 0.05
+            })),
         }
     }
 
@@ -689,6 +896,162 @@ mod tests {
                 !keys.iter().any(|k| k.as_str() == forbidden),
                 "the bundle must not duplicate topic data: {forbidden}"
             );
+        }
+    }
+
+    /// The RLM section is **opaque**: this crate carries it and never interprets
+    /// it. The test proves the carry is verbatim and that shapes this crate has
+    /// never heard of are not errors — recognising them would mean this crate
+    /// knows the topic, which is exactly the hardcoding the boundary prevents.
+    #[test]
+    fn the_rlm_section_is_carried_verbatim_and_never_interpreted() {
+        let mut bundle = tb4();
+        bundle.rlm = rlm_section();
+        bundle
+            .validate_shape()
+            .expect("an opaque section validates");
+        let plan = bundle.plan(InstallEnvironment::Metal).expect("plan");
+
+        let carried = plan
+            .rlm_install
+            .as_ref()
+            .expect("the section is handed over");
+        assert_eq!(
+            carried, &bundle.rlm,
+            "the section must be handed over byte-for-byte, not rewritten"
+        );
+        // Content this crate has no schema for survives a round trip untouched.
+        let scoring = carried.scoring.as_ref().expect("scoring");
+        assert_eq!(scoring["primary"], "success_rate");
+        assert_eq!(scoring["epsilon_rel"], 0.05);
+        assert_eq!(
+            carried.rules.as_ref().expect("rules")[0]["id"],
+            "no_short_circuit"
+        );
+
+        // A topic-specific shape Rust has never seen is still not an error: the
+        // section is data, and only the RLM knows what it means.
+        let mut exotic = tb4();
+        exotic.rlm = RlmSection {
+            scoring: Some(serde_json::json!({
+                "some_future_metric_this_build_has_never_heard_of": {"weight": 0.7}
+            })),
+            ..RlmSection::default()
+        };
+        exotic
+            .validate_shape()
+            .expect("unknown content is not a validation error");
+
+        // The hand-off names the RLM's own jobs, and they are the existing
+        // lifecycle steps — not anything derived from the bundle's contents.
+        assert_eq!(plan.rlm_jobs, ["provision", "propose_rules", "baseline"]);
+
+        // An empty section is legal and is not handed over at all.
+        let empty = tb4();
+        empty.validate_shape().expect("an absent section is fine");
+        assert!(
+            empty
+                .plan(InstallEnvironment::Metal)
+                .expect("plan")
+                .rlm_install
+                .is_none(),
+            "a bundle with no RLM section hands over nothing"
+        );
+    }
+
+    /// Only the *shape* of the section is checked, and only to keep it bounded.
+    #[test]
+    fn the_rlm_section_is_shape_checked_but_not_semantically_validated() {
+        for field in [
+            "rules",
+            "migrations",
+            "apis",
+            "submission_format",
+            "scoring",
+        ] {
+            let mut bundle = tb4();
+            let scalar = serde_json::json!("a bare string is not a section part");
+            match field {
+                "rules" => bundle.rlm.rules = Some(scalar),
+                "migrations" => bundle.rlm.migrations = Some(scalar),
+                "apis" => bundle.rlm.apis = Some(scalar),
+                "submission_format" => bundle.rlm.submission_format = Some(scalar),
+                _ => bundle.rlm.scoring = Some(scalar),
+            }
+            let err = bundle
+                .validate_shape()
+                .expect_err(&format!("{field} must be an object or array"));
+            assert!(
+                matches!(err, BundleError::RlmNotObject { field: f, .. } if f == field),
+                "{field}: {err:?}"
+            );
+        }
+
+        // An array is fine: a rule list is a list.
+        let mut list = tb4();
+        list.rlm.rules = Some(serde_json::json!([{"id": "r", "text": "t"}]));
+        list.validate_shape()
+            .expect("a list is a legal rules shape");
+
+        // The bound is on the section's own canonical size.
+        let mut huge = tb4();
+        huge.rlm.scoring = Some(serde_json::json!({ "pad": "x".repeat(MAX_RLM_BYTES) }));
+        let err = huge.validate_shape().expect_err("oversized section");
+        let BundleError::RlmTooLarge(reported) = err else {
+            panic!("expected RlmTooLarge, got {err:?}");
+        };
+        assert!(reported > MAX_RLM_BYTES, "{reported}");
+    }
+
+    /// The topic slug and its alias are **strings**, never conditions.
+    ///
+    /// This is the guard against the hardcoding the architecture forbids: the
+    /// seed ids may appear in fixtures and examples, but no logic may branch on
+    /// them, and this crate must not know any topic by name. The check is on the
+    /// crate's own non-test source, so a future edit that adds `if topic == "tb4"`
+    /// fails here.
+    #[test]
+    fn no_topic_literal_appears_in_this_crates_logic() {
+        const SOURCE: &str = include_str!("lib.rs");
+        // The test module is where fixtures legitimately name the seed ids, and
+        // a doc comment may *explain* the rule — so the check runs on the
+        // non-test source with comment lines stripped. That is precisely "no
+        // topic literal in logic": a string in a `let`, `match`, or `if` is
+        // caught; prose about the boundary is not.
+        let strip = |s: &str| -> String {
+            s.lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let logic = strip(
+            SOURCE
+                .split("#[cfg(test)]")
+                .next()
+                .expect("non-test source"),
+        );
+        assert!(
+            !logic.contains("tb4") && !logic.contains("tbench"),
+            "topic ids belong in fixtures and signed documents, never in logic"
+        );
+        // The same guard for the parts a topic would otherwise be tempted to bake
+        // in: this crate must not name a metric, a task, or a benchmark.
+        for forbidden in ["terminal-bench", "harbor", "success_rate"] {
+            assert!(
+                !logic.to_lowercase().contains(forbidden),
+                "{forbidden} must not be compiled into this crate"
+            );
+        }
+        // Guard the guard: a literal in real code must still be caught even
+        // though a comment beside it is filtered out.
+        assert!(
+            strip("let topic = \"tb4\"; // fixture").contains("tb4"),
+            "the comment filter must not hide a literal in code"
+        );
+        // The RLM-owned key *names* are the one thing it may know, because they
+        // are the section's shape.
+        for key in RLM_KEYS {
+            assert!(logic.contains(key), "the section shape must name {key}");
         }
     }
 
