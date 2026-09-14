@@ -337,11 +337,11 @@ fn dry_run_install_prints_the_existing_publish_call_and_host_env() {
         "environment       metal",
         "custom_id         tbench",
         "runner_id         rlm_fc_in_guest_harbor",
-        "Extract the signed document (the route takes a TopicDocument, not the bundle)",
+        "Publish the signed document (one block; existing route, operator bearer)",
         "jq '.topic'",
-        "> /tmp/proof-topic-document.json",
-        "Publish it (existing route, operator bearer)",
-        "--data-binary @/tmp/proof-topic-document.json",
+        "mktemp -d",
+        "chmod 600",
+        "--data-binary @\"$PROOF_TOPIC_DIR/document.json\"",
         "/challenge/proof/v1/admin/proof/topics",
         "PROOF_VM_RUNNER_CUSTOM_IDS=tbench",
         "PROOF_RLM_VM_IMAGE_DIGEST=sha256:",
@@ -363,25 +363,44 @@ fn dry_run_install_prints_the_existing_publish_call_and_host_env() {
         "the token must stay a placeholder:\n{body}"
     );
     // The procedure must be runnable shell, not a placeholder an operator has
-    // to hand-edit: the route takes a TopicDocument, so the step extracts it.
+    // to hand-edit.
     assert!(
         !body.contains("<extract"),
         "the publish step must not be a placeholder:\n{body}"
     );
-    let extract = body
+    // The extracted document must not live at a fixed shared path: any local
+    // process could swap it between validation and publication, so what gets
+    // published would not be what was validated. It goes in a private
+    // `mktemp -d` directory, and extraction and publication are one block.
+    assert!(
+        !body.contains("/tmp/proof-topic-document.json"),
+        "the document must not use a fixed shared path:\n{body}"
+    );
+    assert!(
+        body.contains("PROOF_TOPIC_DIR=$(mktemp -d)"),
+        "the document must live in a private directory:\n{body}"
+    );
+    let block: Vec<&str> = body
         .lines()
-        .find(|l| l.trim_start().starts_with("jq '.topic'"))
-        .expect("an extraction step");
-    let extract = extract.trim();
+        .skip_while(|l| !l.contains("PROOF_TOPIC_DIR=$(mktemp -d)"))
+        .take_while(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .collect();
+    assert!(
+        block.iter().any(|l| l.contains("jq '.topic'"))
+            && block.iter().any(|l| l.contains("curl -sS -X POST")),
+        "extraction and publication must be one block:\n{block:#?}"
+    );
+    let script = block.join("\n");
     let status = std::process::Command::new("sh")
         .arg("-n")
         .arg("-c")
-        .arg(extract)
+        .arg(&script)
         .status()
         .expect("sh -n");
     assert!(
         status.success(),
-        "the printed extraction step must be valid shell: {extract}"
+        "the printed publish block must be valid shell: {script}"
     );
     fs::remove_dir_all(&dir).ok();
 }

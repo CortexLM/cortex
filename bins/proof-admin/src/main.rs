@@ -390,19 +390,17 @@ fn print_plan(plan: &TopicInstallPlan, bundle_path: &Path, pin_path: &Path) {
     println!("  bundle_digest     {}", plan.bundle_digest);
     println!("  pin               {}", pin_path.display());
     println!();
-    let (extract, publish) = publish_steps(bundle_path);
-    println!("1) Extract the signed document (the route takes a TopicDocument, not the bundle):");
-    println!("     {extract}");
-    println!();
-    println!("2) Publish it (existing route, operator bearer):");
-    for line in publish.lines() {
+    println!("1) Publish the signed document (one block; existing route, operator bearer):");
+    println!("     # The route takes a TopicDocument, not the bundle envelope, so this");
+    println!("     # extracts .topic into a private mktemp -d directory first.");
+    for line in publish_block(bundle_path).lines() {
         println!("     {line}");
     }
     println!();
     if plan.host_env.is_empty() {
-        println!("3) Host env: nothing extra is required for this topic.");
+        println!("2) Host env: nothing extra is required for this topic.");
     } else {
-        println!("3) Set these on the master before the topic can score:");
+        println!("2) Set these on the master before the topic can score:");
         for var in &plan.host_env {
             println!("     {}={}", var.name, var.value);
             println!("       # {}", var.why);
@@ -410,26 +408,39 @@ fn print_plan(plan: &TopicInstallPlan, bundle_path: &Path, pin_path: &Path) {
     }
 }
 
-/// The runnable steps that publish a bundle, as shell.
+/// The runnable publish step, as one shell block.
 ///
 /// The publish route takes a `TopicDocument`, **not** the bundle envelope, so
-/// the procedure has to extract `topic` first. Both commands are printed as
-/// real, copy-pasteable shell: a placeholder an operator has to hand-edit is
-/// not a procedure.
-fn publish_steps(bundle_path: &Path) -> (String, String) {
+/// the procedure has to extract `topic` first.
+///
+/// Two things make this safe to paste:
+///
+/// - The extracted document goes into a **private directory created by
+///   `mktemp -d`** (`mktemp` makes it 0700), and the file itself is `0600`. A
+///   fixed shared path like `/tmp/document.json` would let any local process
+///   replace the file between the checks and the publication, so the document
+///   that gets published would not be the one that was validated.
+/// - Extraction and publication are **one block**, so the path variable and
+///   the file it names cannot drift apart or be swapped in between. An
+///   operator pastes the whole thing once.
+///
+/// The document itself was already accepted by `validate` before this is
+/// printed, so the block does not re-check it; re-running `proof-admin topic
+/// validate` on the extracted file is a reasonable extra step for an operator
+/// who wants it.
+fn publish_block(bundle_path: &Path) -> String {
     let bundle = shell_single_quote(&bundle_path.display().to_string());
-    let extract = format!(
-        "jq '.topic' {bundle} > /tmp/proof-topic-document.json && \
-         proof-admin topic validate --bundle {bundle} --pin config/proof-pin.toml"
-    );
-    let publish = format!(
-        "curl -sS -X POST \\\n  \
-         -H \"Authorization: Bearer $PROOF_ADMIN_TOKEN\" \\\n  \
-         -H 'content-type: application/json' \\\n  \
-         --data-binary @/tmp/proof-topic-document.json \\\n  \
-         <host>{PUBLISH_PATH}"
-    );
-    (extract, publish)
+    format!(
+        "PROOF_TOPIC_DIR=$(mktemp -d) \\\n  \
+         && jq '.topic' {bundle} > \"$PROOF_TOPIC_DIR/document.json\" \\\n  \
+         && chmod 600 \"$PROOF_TOPIC_DIR/document.json\" \\\n  \
+         && curl -sS -X POST \\\n       \
+         -H \"Authorization: Bearer $PROOF_ADMIN_TOKEN\" \\\n       \
+         -H 'content-type: application/json' \\\n       \
+         --data-binary @\"$PROOF_TOPIC_DIR/document.json\" \\\n       \
+         <host>{PUBLISH_PATH} \\\n  \
+         && rm -rf \"$PROOF_TOPIC_DIR\""
+    )
 }
 
 /// Single-quote a path for `sh`, escaping any embedded quote.
