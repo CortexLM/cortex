@@ -32,6 +32,23 @@
 //! the scanner does not recognise becomes a reviewed edit to this module
 //! rather than a runtime surprise.
 //!
+//! # Literals are decoded, not read as written
+//!
+//! A function body may be written as a **string literal** rather than a
+//! dollar-quoted one, and PostgreSQL does not execute the characters between
+//! the quotes — it executes the *decoded* value. The scanner therefore
+//! decodes every form PostgreSQL accepts before it scans a body, because a
+//! denied statement spelled in an escape is still that statement:
+//!
+//! | Form | What PostgreSQL runs |
+//! |------|----------------------|
+//! | `'…''…'` | the doubled quote is one `'` |
+//! | `E'\x44ELETE FROM …'` | `DELETE FROM …` (`\x44` is `D`) |
+//! | `E'\104RANT …'` | `GRANT …` (octal, `\u`/`\U` likewise) |
+//! | `E'…\'…'` | the backslash escapes the quote, so the body does not end there |
+//! | `U&'\0044ELETE …'` | `DELETE …` (Unicode escapes, `UESCAPE 'c'` honoured) |
+//! | `'DROP TABLE proof'`⏎`'_topic_version'` | one concatenated string |
+//!
 //! Two limitations are worth stating plainly, because a reader should not
 //! assume more than this buys:
 //!
@@ -298,34 +315,37 @@ pub fn split_statements(sql: &str) -> Vec<Statement> {
     out
 }
 
-/// Build a [`Statement`], adding any single-quoted **function body** to the
+/// Build a [`Statement`], adding any **code-carrying string literal** to the
 /// scanned bodies.
 ///
-/// PostgreSQL accepts a function body as a single-quoted string as well as a
+/// PostgreSQL accepts a function body as a string literal as well as a
 /// dollar-quoted one:
 ///
 /// ```sql
 /// CREATE FUNCTION f() RETURNS void AS 'DELETE FROM proof_rule_version' LANGUAGE sql;
+/// CREATE PROCEDURE p() AS E'\x44ROP TABLE proof_topic_version' LANGUAGE sql;
+/// DO U&'\0044ELETE FROM proof_rule_version';
 /// ```
 ///
 /// The string-literal branch blanks that body in `blanked` (a literal is
 /// normally *data*, not code), so without this step the body would be executed
 /// without ever being scanned — a topic could install a function that reaches
 /// a `proof_*` object by wrapping the statement in `AS '…'`. When the
-/// statement is a function definition, its string literals are therefore
-/// decoded and appended to [`Statement::bodies`], which
-/// [`check_statement`] scans exactly as it scans a dollar-quoted body.
+/// statement is one whose literal is code, that literal is therefore decoded
+/// and appended to [`Statement::bodies`], which [`check_statement`] scans
+/// exactly as it scans a dollar-quoted body.
 ///
-/// The detection is deliberately broad: any statement mentioning `FUNCTION`
-/// and `AS` has its literals scanned. A false positive costs a migration
-/// nothing (its literals are inert text that will not match a deny rule); a
-/// false negative would be the hole above.
+/// The detection is deliberately broad inside that class: any statement
+/// mentioning `FUNCTION`/`PROCEDURE` and `AS`, or whose head is `DO`, has its
+/// literals scanned. A false positive costs a migration nothing (its literals
+/// are inert text that will not match a deny rule); a false negative would be
+/// the hole above.
 fn finish_statement(ordinal: usize, text: &str, blanked: &str, bodies: &str) -> Statement {
     let mut bodies = bodies.to_owned();
-    if is_function_definition(blanked) {
-        for literal in single_quoted_literals(text) {
+    if carries_code_in_literals(blanked) {
+        for snippet in code_literals(text) {
             bodies.push(' ');
-            bodies.push_str(&literal);
+            bodies.push_str(&snippet);
         }
     }
     Statement {
@@ -336,45 +356,403 @@ fn finish_statement(ordinal: usize, text: &str, blanked: &str, bodies: &str) -> 
     }
 }
 
-/// Whether a statement defines a function (so its string literals are code).
-fn is_function_definition(blanked: &str) -> bool {
-    has_word(blanked, "FUNCTION") && has_word(blanked, "AS")
+/// Whether a statement's string literals are **code** rather than data.
+///
+/// Three forms carry code in a literal:
+///
+/// - `CREATE [OR REPLACE] FUNCTION … AS <literal>`,
+/// - `CREATE [OR REPLACE] PROCEDURE … AS <literal>` (same shape, different
+///   object kind), and
+/// - `DO [LANGUAGE lang] <literal>`, which is a literal body by definition.
+///
+/// The `DO` test is a **statement-head** test, not a word search, so
+/// `INSERT … ON CONFLICT … DO UPDATE …` (whose literals are ordinary data)
+/// is not dragged in.
+fn carries_code_in_literals(blanked: &str) -> bool {
+    if has_word(blanked, "AS") && (has_word(blanked, "FUNCTION") || has_word(blanked, "PROCEDURE"))
+    {
+        return true;
+    }
+    let head = blanked.trim_start();
+    head.len() > 2
+        && head[..2].eq_ignore_ascii_case("DO")
+        && head[2..].starts_with(char::is_whitespace)
 }
 
-/// Every single-quoted literal in `text`, decoded (`''` → `'`).
+/// The literal code a statement carries, decoded as PostgreSQL would execute
+/// it.
 ///
-/// Doubled quotes are decoded so the scanned text is what PostgreSQL would
-/// execute, not the escaped spelling: a body that smuggles a denied statement
-/// as `''`-escaped text is still caught.
-fn single_quoted_literals(text: &str) -> Vec<String> {
+/// Every literal in a code-carrying statement is included, not only the one
+/// after `AS`: PostgreSQL's grammar puts the body literal wherever the
+/// operator wrote it, and a deny rule that only read the first one would be a
+/// hole the operator could reach by reordering two clauses.
+///
+/// Each literal contributes up to two snippets — its **decoded** value (what
+/// the server runs) and its **raw** spelling (what the operator wrote, when
+/// the two differ) — plus the concatenation of any run of literals that
+/// PostgreSQL would join into one string.
+fn code_literals(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
+    let literals = scan_literals(&chars);
+    let mut out: Vec<String> = Vec::new();
+    let mut joined: Option<String> = None;
+    for (i, literal) in literals.iter().enumerate() {
+        let concatenated_with_previous = i > 0
+            && i.checked_sub(1).is_some_and(|p| {
+                let prev = &literals[p];
+                let gap: String = chars
+                    .get(prev.end..literal.start)
+                    .unwrap_or_default()
+                    .iter()
+                    .collect();
+                !gap.is_empty() && gap.chars().all(char::is_whitespace) && gap.contains('\n')
+            });
+        if concatenated_with_previous {
+            let base = joined
+                .take()
+                .unwrap_or_else(|| literals[i - 1].decoded.clone());
+            joined = Some(base + &literal.decoded);
+        } else if let Some(done) = joined.take() {
+            push_snippet(&mut out, &done);
+        }
+        push_snippet(&mut out, &literal.decoded);
+        if literal.raw != literal.decoded {
+            push_snippet(&mut out, &literal.raw);
+        }
+    }
+    if let Some(done) = joined {
+        push_snippet(&mut out, &done);
+    }
+    out
+}
+
+/// Append a snippet that carries something to scan.
+fn push_snippet(out: &mut Vec<String>, snippet: &str) {
+    if !snippet.trim().is_empty() {
+        out.push(snippet.to_owned());
+    }
+}
+
+/// The string-literal form a quote opens, which decides how its content is
+/// read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiteralKind {
+    /// `'…'` — `''` is a quote; a backslash is an ordinary character.
+    Standard,
+    /// `E'…'` — `''` is a quote, and a backslash escapes what follows
+    /// (`\x44`, `\104`, `\u0044`, `\'`, `\\`, …).
+    Escape,
+    /// `U&'…'` — `''` is a quote, and the escape character (a backslash by
+    /// default, or whatever a following `UESCAPE 'c'` names) introduces
+    /// `XXXX` / `+XXXXXX` code points.
+    Unicode,
+}
+
+/// One string literal found in a statement's text.
+struct Literal {
+    /// Index of the opening quote.
+    start: usize,
+    /// Index just past the literal and any `UESCAPE` clause.
+    end: usize,
+    /// The content as written between the quotes.
+    raw: String,
+    /// The content as PostgreSQL would execute it: escapes decoded.
+    decoded: String,
+}
+
+/// Every string literal in `chars`, in order.
+///
+/// A quote whose form the scanner does not recognise is still read as a
+/// standard literal, so nothing between quotes is ever left unblanked in the
+/// statement scan.
+fn scan_literals(chars: &[char]) -> Vec<Literal> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < chars.len() {
-        if chars[i] != '\'' {
+        let Some((quote, kind)) = literal_start(chars, i) else {
             i += 1;
             continue;
-        }
-        i += 1;
-        let mut literal = String::new();
-        while i < chars.len() {
-            if chars[i] == '\'' {
-                if chars.get(i + 1) == Some(&'\'') {
-                    literal.push('\'');
-                    i += 2;
-                    continue;
-                }
-                i += 1;
-                break;
-            }
-            literal.push(chars[i]);
-            i += 1;
-        }
-        if !literal.trim().is_empty() {
-            out.push(literal);
-        }
+        };
+        let literal = read_literal(chars, quote, kind);
+        i = literal.end.max(quote + 1);
+        out.push(literal);
     }
     out
+}
+
+/// Where a string literal starts, and which form it is.
+///
+/// The prefix is only a prefix when it is a whole word: `E'…'` is an escape
+/// string, `xE'…'` is not.
+fn literal_start(chars: &[char], i: usize) -> Option<(usize, LiteralKind)> {
+    let c = chars[i];
+    if c == '\'' {
+        return Some((i, LiteralKind::Standard));
+    }
+    if !is_word_char(c) || (i > 0 && is_word_char(chars[i - 1])) {
+        return None;
+    }
+    match c {
+        'E' | 'e' if chars.get(i + 1) == Some(&'\'') => Some((i + 1, LiteralKind::Escape)),
+        'U' | 'u' if chars.get(i + 1) == Some(&'&') && chars.get(i + 2) == Some(&'\'') => {
+            Some((i + 2, LiteralKind::Unicode))
+        }
+        // Bit and hex strings (`B'1010'`, `X'1f'`) are numbers, not code:
+        // reading them as standard strings keeps their digits scanned like
+        // any other literal, which is all a scanner needs from them.
+        'B' | 'b' | 'X' | 'x' if chars.get(i + 1) == Some(&'\'') => {
+            Some((i + 1, LiteralKind::Standard))
+        }
+        _ => None,
+    }
+}
+
+/// A word character, for the prefix boundary test.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Read one literal: its extent, its escape character, and its decoded value.
+fn read_literal(chars: &[char], quote: usize, kind: LiteralKind) -> Literal {
+    let (raw, after) = literal_extent(chars, quote, kind);
+    // A `U&'…'` string may rename its escape character with a following
+    // `UESCAPE 'c'` clause. The clause is read **after** the extent, because
+    // the extent does not depend on it: a `U&` string ends at the first quote
+    // that is not doubled whatever the escape character is.
+    let (escape, end) = match kind {
+        LiteralKind::Unicode => uescape_clause(chars, after),
+        _ => ('\\', after),
+    };
+    Literal {
+        start: quote,
+        end,
+        decoded: decode_literal(&raw, kind, escape),
+        raw,
+    }
+}
+
+/// The raw content between the quotes, and the index just past the closing
+/// quote.
+///
+/// `''` is always one quote. In an `E'…'` string a backslash escapes the
+/// character after it, so `\'` does **not** close the literal — the body runs
+/// on, exactly as PostgreSQL reads it.
+fn literal_extent(chars: &[char], quote: usize, kind: LiteralKind) -> (String, usize) {
+    let mut raw = String::new();
+    let mut i = quote + 1;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' {
+            if chars.get(i + 1) == Some(&'\'') {
+                raw.push_str("''");
+                i += 2;
+                continue;
+            }
+            return (raw, i + 1);
+        }
+        if kind == LiteralKind::Escape && c == '\\' {
+            raw.push('\\');
+            i += 1;
+            if let Some(next) = chars.get(i) {
+                raw.push(*next);
+                i += 1;
+            }
+            continue;
+        }
+        raw.push(c);
+        i += 1;
+    }
+    // Unterminated: the server refuses the statement, so nothing runs. The
+    // rest of the text is kept as the literal's content, which can only make
+    // the scan read *more* as code.
+    (raw, chars.len())
+}
+
+/// A `U&'…'` string's escape character and the index just past the clause.
+///
+/// `UESCAPE 'c'` names the character that introduces a code point; the default
+/// is a backslash. A clause PostgreSQL would refuse (a hex digit, `+`, a
+/// quote, or a malformed spelling) leaves the default in place rather than
+/// inventing a second reading: the statement does not run, so nothing hides.
+fn uescape_clause(chars: &[char], after: usize) -> (char, usize) {
+    let default = ('\\', after);
+    let mut i = after;
+    while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+        i += 1;
+    }
+    let word: String = chars.iter().skip(i).take(7).collect();
+    if !word.eq_ignore_ascii_case("UESCAPE") {
+        return default;
+    }
+    let mut j = i + 7;
+    while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+        j += 1;
+    }
+    if chars.get(j) != Some(&'\'') || chars.get(j + 2) != Some(&'\'') {
+        return default;
+    }
+    let Some(c) = chars.get(j + 1).copied() else {
+        return default;
+    };
+    if c.is_ascii_hexdigit() || matches!(c, '+' | '\'' | '"') {
+        return default;
+    }
+    (c, j + 3)
+}
+
+/// Decode a literal's content the way PostgreSQL reads it.
+///
+/// The result is the value the server would execute, so a body that spells a
+/// denied statement in escapes is scanned in the form that actually runs. A
+/// sequence PostgreSQL would refuse is kept in its written form, which is the
+/// conservative read: the statement does not run, and the spelling is scanned
+/// too.
+fn decode_literal(raw: &str, kind: LiteralKind, escape: char) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut bytes: Vec<u8> = Vec::with_capacity(raw.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' && chars.get(i + 1) == Some(&'\'') {
+            bytes.push(b'\'');
+            i += 2;
+            continue;
+        }
+        match kind {
+            LiteralKind::Escape if c == '\\' => i = decode_escape(&chars, i, &mut bytes),
+            LiteralKind::Unicode if c == escape => {
+                i = decode_unicode_escape(&chars, i, escape, &mut bytes);
+            }
+            _ => {
+                push_char(&mut bytes, c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Decode one `E'…'` escape sequence, returning the index just past it.
+///
+/// `\x` takes one or two hex digits, `\o`/`\oo`/`\ooo` one to three octal
+/// digits, `\u` four and `\U` eight hex digits, and any other character after
+/// the backslash stands for itself (`\'`, `\\`, `\n`, `\t`, …). A sequence
+/// with too few digits is one PostgreSQL refuses; it is kept as written.
+fn decode_escape(chars: &[char], start: usize, out: &mut Vec<u8>) -> usize {
+    let mut i = start + 1;
+    let Some(c) = chars.get(i).copied() else {
+        out.push(b'\\');
+        return i;
+    };
+    i += 1;
+    match c {
+        'b' => out.push(0x08),
+        'f' => out.push(0x0c),
+        'n' => out.push(b'\n'),
+        'r' => out.push(b'\r'),
+        't' => out.push(b'\t'),
+        '0'..='7' => {
+            let mut value = c.to_digit(8).unwrap_or(0);
+            for _ in 0..2 {
+                match chars.get(i).and_then(|d| d.to_digit(8)) {
+                    Some(d) => {
+                        value = value * 8 + d;
+                        i += 1;
+                    }
+                    None => break,
+                }
+            }
+            out.push(u8::try_from(value).unwrap_or(0));
+        }
+        'x' => match hex_at(chars, i, 1, 2) {
+            Some((value, next)) => {
+                out.push(u8::try_from(value).unwrap_or(0));
+                i = next;
+            }
+            None => out.extend_from_slice(b"\\x"),
+        },
+        'u' => match hex_at(chars, i, 4, 4) {
+            Some((value, next)) => {
+                push_code_point(out, value, chars, start, next);
+                i = next;
+            }
+            None => out.extend_from_slice(b"\\u"),
+        },
+        'U' => match hex_at(chars, i, 8, 8) {
+            Some((value, next)) => {
+                push_code_point(out, value, chars, start, next);
+                i = next;
+            }
+            None => out.extend_from_slice(b"\\U"),
+        },
+        other => push_char(out, other),
+    }
+    i
+}
+
+/// Decode one `U&'…'` escape sequence, returning the index just past it.
+///
+/// `<esc>XXXX` (four hex digits) and `<esc>+XXXXXX` (six) are code points, and
+/// a doubled escape character is one literal escape character. Anything else
+/// is a sequence PostgreSQL refuses, kept as written.
+fn decode_unicode_escape(chars: &[char], start: usize, escape: char, out: &mut Vec<u8>) -> usize {
+    let i = start + 1;
+    let Some(c) = chars.get(i).copied() else {
+        push_char(out, escape);
+        return i;
+    };
+    if c == escape {
+        push_char(out, escape);
+        return i + 1;
+    }
+    if c == '+' {
+        if let Some((value, next)) = hex_at(chars, i + 1, 6, 6) {
+            push_code_point(out, value, chars, start, next);
+            return next;
+        }
+    } else if let Some((value, next)) = hex_at(chars, i, 4, 4) {
+        push_code_point(out, value, chars, start, next);
+        return next;
+    }
+    push_char(out, escape);
+    i
+}
+
+/// Push a decoded code point as UTF-8, keeping the written spelling when the
+/// code point is not one PostgreSQL would accept (a surrogate, or out of
+/// range): that statement does not run, and the spelling is scanned as well.
+fn push_code_point(out: &mut Vec<u8>, value: u32, chars: &[char], start: usize, to: usize) {
+    match char::from_u32(value) {
+        Some(c) => push_char(out, c),
+        None => {
+            for c in chars.iter().skip(start).take(to.saturating_sub(start)) {
+                push_char(out, *c);
+            }
+        }
+    }
+}
+
+/// `min..=max` hex digits starting at `i`, as a number and the index past it.
+fn hex_at(chars: &[char], i: usize, min: usize, max: usize) -> Option<(u32, usize)> {
+    let mut value = 0u32;
+    let mut taken = 0usize;
+    while taken < max {
+        let Some(d) = chars.get(i + taken).and_then(|c| c.to_digit(16)) else {
+            break;
+        };
+        value = value * 16 + d;
+        taken += 1;
+    }
+    if taken < min {
+        return None;
+    }
+    Some((value, i + taken))
+}
+
+/// Push one character as UTF-8 bytes.
+fn push_char(out: &mut Vec<u8>, c: char) {
+    let mut buf = [0u8; 4];
+    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
 }
 
 /// Skip a `/* … */` comment (PostgreSQL allows nesting), returning the index

@@ -386,6 +386,125 @@ fn an_escaped_quote_in_a_function_body_does_not_hide_a_denied_statement() {
     );
 }
 
+/// An `E'…'` escape string is **decoded** before its body is scanned, because
+/// the decoded value is what `PostgreSQL` executes: `\x44ELETE` is `DELETE`.
+///
+/// Without the decoding the scanner would read the written spelling, see no
+/// denied word, and install a function that reaches a protected object.
+#[test]
+fn an_escape_string_body_is_decoded_before_scanning() {
+    // `\x44` is `D`, `\x5f` is `_`: the whole denied name can be spelled in
+    // escapes, so the written text never contains it.
+    refused(
+        r"CREATE FUNCTION tb4_f() RETURNS void AS E'\x44ELETE FROM proof\x5frule\x5fversion' LANGUAGE sql",
+        "proof_",
+    );
+    refused(
+        r"CREATE FUNCTION tb4_f() RETURNS void AS E'\x44ROP DATABASE base' LANGUAGE sql",
+        "DROP DATABASE",
+    );
+    // Octal (`\107` is `G`), and the `\u` / `\U` code-point spellings.
+    refused(
+        r"CREATE FUNCTION tb4_f() RETURNS void AS E'\107RANT ALL ON tb4_x TO base_app' LANGUAGE sql",
+        "GRANT",
+    );
+    refused(
+        r"CREATE FUNCTION tb4_f() RETURNS void AS E'\u0044ELETE FROM proof\x5frule\x5fversion' LANGUAGE sql",
+        "proof_",
+    );
+    refused(
+        r"CREATE FUNCTION tb4_f() RETURNS void AS E'\U00000044ELETE FROM proof\x5frule\x5fversion' LANGUAGE sql",
+        "proof_",
+    );
+    // A backslash-escaped quote does not end the body early, so the statement
+    // after it is still part of the body the server runs.
+    refused(
+        r"CREATE FUNCTION tb4_f() RETURNS void AS E'SELECT \x27x\x27; DELETE FROM proof\x5frule\x5fversion' LANGUAGE sql",
+        "proof_",
+    );
+    // The same escapes inside a `DO` body, which is a literal body too.
+    refused(r"DO E'\x44ROP TABLE proof\x5ftopic\x5fversion'", "proof_");
+}
+
+/// A `U&'…'` Unicode escape string is decoded too, including the `UESCAPE`
+/// clause that renames the escape character.
+#[test]
+fn a_unicode_escape_string_body_is_decoded_before_scanning() {
+    refused(
+        r"CREATE FUNCTION tb4_f() RETURNS void AS U&'\0044ELETE FROM proof\005frule\005fversion' LANGUAGE sql",
+        "proof_",
+    );
+    refused(
+        r"CREATE FUNCTION tb4_f() RETURNS void AS U&'\+000044ROP DATABASE base' LANGUAGE sql",
+        "DROP DATABASE",
+    );
+    // `UESCAPE '!'` makes `!` the escape character, so a body spelled with
+    // `!0044` is `DELETE` — the reading has to follow the clause.
+    refused(
+        r"CREATE FUNCTION tb4_f() RETURNS void AS U&'!0044ELETE FROM proof!005frule!005fversion' UESCAPE '!' LANGUAGE sql",
+        "proof_",
+    );
+    // A doubled escape character is one literal escape character.
+    refused(
+        r"CREATE FUNCTION tb4_f() RETURNS void AS U&'SELECT \\x27; DROP DATABASE base' LANGUAGE sql",
+        "DROP DATABASE",
+    );
+}
+
+/// `CREATE PROCEDURE … AS '…'` and `DO '…'` carry code in a literal exactly
+/// as `CREATE FUNCTION … AS '…'` does, so they are scanned the same way.
+#[test]
+fn every_literal_body_form_is_scanned() {
+    refused(
+        "CREATE PROCEDURE tb4_p() AS 'DELETE FROM proof_rule_version' LANGUAGE sql",
+        "proof_",
+    );
+    refused(
+        r"CREATE PROCEDURE tb4_p() AS E'\x44ROP DATABASE base' LANGUAGE sql",
+        "DROP DATABASE",
+    );
+    refused("DO 'DELETE FROM proof_rule_version'", "proof_");
+    refused(
+        "DO LANGUAGE plpgsql 'GRANT ALL ON tb4_x TO base_app'",
+        "GRANT",
+    );
+    // `ON CONFLICT … DO UPDATE …` is a write whose literals are data: the
+    // `DO` test is a statement-head test, not a word search.
+    allowed("INSERT INTO tb4_scratch (id) VALUES ('DELETE FROM proof_rule_version') ON CONFLICT (id) DO UPDATE SET id = 'b'");
+}
+
+/// Two literals separated by whitespace containing a newline are **one**
+/// string to `PostgreSQL`, so a denied name split across them is still refused.
+#[test]
+fn literals_postgresql_concatenates_are_scanned_as_one() {
+    refused(
+        "CREATE FUNCTION tb4_f() RETURNS void AS 'DROP TABLE proof'\n'_topic_version' LANGUAGE sql",
+        "proof_",
+    );
+    refused(
+        "CREATE FUNCTION tb4_f() RETURNS void AS 'GRANT ALL ON tb4_x'\n' TO base_app' LANGUAGE sql",
+        "GRANT",
+    );
+    // Without the newline `PostgreSQL` does not concatenate them (and refuses
+    // the statement), so the topic's own namespace is still allowed.
+    allowed("CREATE FUNCTION tb4_f() RETURNS void AS 'SELECT 1 FROM tb4_scratch' LANGUAGE sql");
+}
+
+/// The decoding is for **code**, not for data: an escape string a migration
+/// merely stores stays a literal, and a body that keeps to the topic's own
+/// namespace is still allowed.
+#[test]
+fn an_escape_string_that_is_data_stays_data() {
+    allowed(r"INSERT INTO tb4_notes (body) VALUES (E'\x44ROP DATABASE base')");
+    allowed(r"INSERT INTO tb4_notes (body) VALUES (U&'\0044ELETE FROM proof_rule_version')");
+    allowed(
+        r"CREATE FUNCTION tb4_f() RETURNS void AS E'INSERT INTO tb4_log (m) VALUES (\x27ok\x27)' LANGUAGE sql",
+    );
+    allowed(
+        r"CREATE FUNCTION tb4_f() RETURNS text AS E'SELECT ''it\''s'' FROM tb4_scratch' LANGUAGE sql",
+    );
+}
+
 /// The generic `topic_` prefix is **not** an isolation boundary.
 ///
 /// Every topic shares one database, so a bare `topic_scores` is one table that
