@@ -303,14 +303,28 @@ async fn cmd_install(opts: &Options, path: &Path, env: &str, dry_run: bool) -> R
         .await
         .map_err(|e| Failure::Error(format!("install {}: {e}", plan.topic_id)))?;
 
+    // Report the **persisted** state, not the state an install would have
+    // written. A re-install deliberately leaves `enabled` alone, so a topic
+    // that was already live stays live — telling an operator it is disabled
+    // would be exactly the mistake that leads to a surprise on a live host.
+    let persisted = db::get_topic(&pool, &plan.topic_id)
+        .await
+        .map_err(|e| Failure::Error(format!("read back {}: {e}", plan.topic_id)))?
+        .ok_or_else(|| {
+            Failure::Error(format!(
+                "install {} reported success but the row is missing",
+                plan.topic_id
+            ))
+        })?;
+
     if opts.json {
         let body = serde_json::json!({
             "ok": true,
             "installed": true,
-            "topic_id": plan.topic_id,
-            "environment": plan.environment.as_str(),
-            "bundle_digest": plan.bundle_digest,
-            "enabled": false,
+            "topic_id": persisted.topic_id,
+            "environment": persisted.environment,
+            "bundle_digest": persisted.bundle_digest,
+            "enabled": persisted.enabled,
         });
         println!(
             "{}",
@@ -320,20 +334,31 @@ async fn cmd_install(opts: &Options, path: &Path, env: &str, dry_run: bool) -> R
     }
     print_plan(&plan);
     println!();
-    println!(
-        "Installed {} (DISABLED). Enabling is a later slice: nothing scores this topic yet.",
-        plan.topic_id
-    );
+    if persisted.enabled {
+        println!(
+            "Re-installed {} (still ENABLED, unchanged by this install).",
+            persisted.topic_id
+        );
+    } else {
+        println!(
+            "Installed {} (DISABLED). Enabling is a later slice: nothing scores this topic yet.",
+            persisted.topic_id
+        );
+    }
     Ok(())
 }
 
 /// Borrow the plan's fields as the row to write. `bundle` is the file
 /// verbatim: what an operator reviews is what the row keeps.
+///
+/// Every numeric field is already range-checked by
+/// [`TopicInstallPlan`]'s validation, so the casts cannot truncate: the bundle
+/// refuses a value that would not fit the row rather than clamping it.
 fn new_topic<'a>(plan: &'a TopicInstallPlan, bundle: &'a serde_json::Value) -> NewTopic<'a> {
     NewTopic {
         topic_id: &plan.topic_id,
         display_name: &plan.display_name,
-        version: clamp_i32(plan.version),
+        version: to_i32(plan.version),
         environment: plan.environment.as_str(),
         runner_id: &plan.runner_id,
         aliases: &plan.aliases,
@@ -341,17 +366,16 @@ fn new_topic<'a>(plan: &'a TopicInstallPlan, bundle: &'a serde_json::Value) -> N
         pin_rlm: &plan.pin_rlm,
         pin_experiment: &plan.pin_experiment,
         pack_digest: &plan.pack_digest,
-        n_concurrent: clamp_i32(plan.n_concurrent),
+        n_concurrent: to_i32(plan.n_concurrent),
         sealed_custom_value: plan.sealed_custom_value,
-        schema_version: clamp_i32(plan.schema_version),
+        schema_version: to_i32(plan.schema_version),
         bundle,
         bundle_digest: &plan.bundle_digest,
     }
 }
 
-/// A `u32` that fits the row's `INTEGER` columns. The bundle's own bounds keep
-/// every value far below `i32::MAX`, so this only guards the cast.
-fn clamp_i32(v: u32) -> i32 {
+/// A `u32` the bundle's own validation proved fits an `INTEGER` column.
+fn to_i32(v: u32) -> i32 {
     i32::try_from(v).unwrap_or(i32::MAX)
 }
 

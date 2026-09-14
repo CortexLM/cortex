@@ -86,6 +86,96 @@ fn code(out: &Output) -> i32 {
     out.status.code().unwrap_or(-1)
 }
 
+/// Run the binary against a real Postgres URL.
+fn run_with_db(args: &[&str], database_url: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_proof-admin"))
+        .args(args)
+        .env("BASE_DATABASE_URL", database_url)
+        .env_remove("BASE_DATABASE_URL_FILE")
+        .output()
+        .expect("run proof-admin")
+}
+
+/// Returns `None` when `DATABASE_URL` is unset so default CI (no Postgres)
+/// skips, matching the gating in `crates/db/tests`.
+fn owner_url() -> Option<String> {
+    std::env::var("DATABASE_URL")
+        .ok()
+        .map(|u| u.trim().to_owned())
+        .filter(|u| !u.is_empty())
+}
+
+/// The reported install state must be the **persisted** state.
+///
+/// A re-install deliberately leaves `enabled` alone, so a topic that was
+/// already live stays live. An operator (or an automation reading `--json`)
+/// told it is disabled would be exactly the mistake that produces a surprise
+/// on a live host.
+#[tokio::test]
+async fn a_reinstall_reports_the_persisted_state_not_a_guess() {
+    let Some(url) = owner_url() else {
+        return;
+    };
+    let tp = match db::test_pool_with_url(&url).await {
+        Ok(tp) => tp,
+        Err(e) => panic!("test_pool: {e}"),
+    };
+    // The binary talks to this schema through `search_path`, so hand it a URL
+    // whose connections land in the isolated test schema.
+    let schema = tp.schema().to_owned();
+    let scoped = format!("{url}?options=-c%20search_path%3D{schema}%2Cpublic");
+
+    let dir = workdir("reinstall");
+    let bundle = write_bundle(&dir, "tb4.json", &tb4_json("metal"));
+    let install = |json: bool| {
+        let mut args = vec![
+            "topic",
+            "install",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--env",
+            "metal",
+        ];
+        if json {
+            args.insert(0, "--json");
+        }
+        run_with_db(&args, &scoped)
+    };
+
+    // First install: the row does not exist, so it is reported disabled.
+    let out = install(true);
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+    let first: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
+    assert_eq!(first["enabled"], false, "{first}");
+
+    // An operator enables it (the enable path is a later slice, so the test
+    // writes the column directly).
+    sqlx::query("UPDATE proof_topic SET enabled = TRUE WHERE topic_id = 'tb4'")
+        .execute(tp.pool())
+        .await
+        .expect("enable");
+
+    // Re-install: the row stays enabled, and the output must say so.
+    let out = install(true);
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+    let second: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
+    assert_eq!(
+        second["enabled"], true,
+        "a re-install must report the persisted state: {second}"
+    );
+
+    // The human output agrees with the JSON output.
+    let out = install(false);
+    let text = stdout(&out);
+    assert!(
+        text.contains("still ENABLED") && !text.contains("(DISABLED)"),
+        "human output must not claim a live topic is disabled:\n{text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    tp.drop_schema().await.expect("drop");
+}
+
 #[test]
 fn validate_accepts_the_arch_default_bundle_and_writes_nothing() {
     let dir = workdir("validate-ok");
@@ -345,6 +435,57 @@ fn enable_disable_and_seal_fail_closed_with_exit_3() {
             "a stub prints nothing to stdout: {args:?}"
         );
     }
+}
+
+#[test]
+fn validate_refuses_a_noncanonical_digest_before_an_install_can_fail() {
+    let dir = workdir("digest-strict");
+    // The row's CHECK is `^sha256:[0-9a-f]{64}$`. An uppercase or padded pin
+    // must be a validate-time reject, not a surprise on the host that matters.
+    for (label, replacement) in [
+        (
+            "uppercase hex",
+            format!("sha256:{}", HEX.to_ascii_uppercase()),
+        ),
+        ("padded", format!("sha256: {HEX}")),
+    ] {
+        let body = tb4_json("metal").replace(&format!("sha256:{HEX}"), &replacement);
+        let bundle = write_bundle(&dir, &format!("{}.json", label.replace(' ', "-")), &body);
+        let out = run(&["topic", "validate", "--bundle", bundle.to_str().unwrap()]);
+        assert_eq!(code(&out), EXIT_ERROR, "{label}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("64 lowercase hex"),
+            "{label}: stderr={}",
+            stderr(&out)
+        );
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn validate_refuses_a_numeric_column_overflow_instead_of_clamping() {
+    let dir = workdir("overflow");
+    // `version` and `n_concurrent` land in INTEGER columns; a value that does
+    // not fit is a reject, never a silent rewrite of what was validated.
+    for (label, from, to) in [
+        ("version", "\"version\": 1,", "\"version\": 4294967295,"),
+        (
+            "concurrency",
+            "\"n_concurrent\": 2",
+            "\"n_concurrent\": 4294967295",
+        ),
+    ] {
+        let body = tb4_json("metal").replace(from, to);
+        let bundle = write_bundle(&dir, &format!("{label}.json"), &body);
+        let out = run(&["topic", "validate", "--bundle", bundle.to_str().unwrap()]);
+        assert_eq!(code(&out), EXIT_ERROR, "{label}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("refused rather than clamped"),
+            "{label}: stderr={}",
+            stderr(&out)
+        );
+    }
+    fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

@@ -323,6 +323,59 @@ async fn s4_the_schema_refuses_a_malformed_row() {
     tp.drop_schema().await.expect("drop");
 }
 
+/// A `NULL` inside the alias array is refused.
+///
+/// `array_to_string` drops NULL elements, so a joined-string shape check
+/// alone would accept `{tbench,NULL}` — and the typed reader decodes every
+/// element as a `String`, so that one row would make `topic list` and
+/// `topic show` fail for the whole table rather than just its own row.
+#[tokio::test]
+async fn s4b_a_null_alias_element_is_refused() {
+    if !database_url_present() {
+        return;
+    }
+    let tp = db::test_pool().await.expect("test_pool");
+    let pool = tp.pool();
+
+    for label in ["NULL first", "NULL last", "NULL only"] {
+        let insert = match label {
+            "NULL first" => "INSERT INTO proof_topic \
+                (topic_id, display_name, version, environment, schema_version, bundle, bundle_digest, aliases) \
+                VALUES ('tb4', 'x', 1, 'metal', 1, '{}', 'sha256:' || repeat('a', 64), ARRAY[NULL, 'tbench'])",
+            "NULL last" => "INSERT INTO proof_topic \
+                (topic_id, display_name, version, environment, schema_version, bundle, bundle_digest, aliases) \
+                VALUES ('tb4', 'x', 1, 'metal', 1, '{}', 'sha256:' || repeat('a', 64), ARRAY['tbench', NULL])",
+            _ => "INSERT INTO proof_topic \
+                (topic_id, display_name, version, environment, schema_version, bundle, bundle_digest, aliases) \
+                VALUES ('tb4', 'x', 1, 'metal', 1, '{}', 'sha256:' || repeat('a', 64), ARRAY[NULL])",
+        };
+        let err = sqlx::query(insert).execute(pool).await.expect_err(label);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("aliases_no_null") || msg.contains("check constraint"),
+            "{label}: {msg}"
+        );
+    }
+
+    // The shape check alone would have accepted the NULL (it is dropped by
+    // array_to_string), which is exactly why the separate constraint exists.
+    let joined: String =
+        sqlx::query_scalar("SELECT array_to_string(ARRAY['tbench', NULL]::text[], ',')")
+            .fetch_one(pool)
+            .await
+            .expect("array_to_string");
+    assert_eq!(
+        joined, "tbench",
+        "the NULL is dropped, not caught, by the join"
+    );
+
+    assert!(
+        list_topics(pool).await.expect("list").is_empty(),
+        "no refused probe may leave a row"
+    );
+    tp.drop_schema().await.expect("drop");
+}
+
 #[tokio::test]
 async fn s5_app_role_writes_and_updates_but_never_deletes() {
     if !database_url_present() {

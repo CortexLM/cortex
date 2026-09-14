@@ -3690,6 +3690,7 @@ dependencies = [
  "proof-topic-bundle",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
 ]
 

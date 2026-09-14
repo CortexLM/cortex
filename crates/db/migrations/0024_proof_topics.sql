@@ -64,11 +64,17 @@ CREATE TABLE proof_topic (
     CONSTRAINT proof_topic_environment_check CHECK (environment IN ('staging', 'metal')),
     CONSTRAINT proof_topic_runner_id_check
         CHECK (runner_id = '' OR runner_id ~ '^[a-z0-9][a-z0-9_-]{1,63}$'),
-    -- Aliases are topic slugs too, and a topic is never its own alias. The
-    -- joined form is the only element-wise regex a CHECK can carry; a stray
-    -- comma still has to match the slug pattern on both sides, so it cannot
-    -- smuggle a malformed element in.
+    -- Aliases are topic slugs too, and a topic is never its own alias.
+    --
+    -- The shape check is element-wise on purpose. `array_to_string` **drops
+    -- NULL elements**, so a joined-string regex would happily accept
+    -- `{tbench,NULL}` — and the typed reader decodes every element as a
+    -- `String`, so that one accepted row would make `topic list` and
+    -- `topic show` fail for the whole table. `array_position(..., NULL)` is
+    -- the NULL probe that actually holds; it is separate from the regex so
+    -- each constraint fails for one reason.
     CONSTRAINT proof_topic_aliases_bound CHECK (cardinality(aliases) <= 8),
+    CONSTRAINT proof_topic_aliases_no_null CHECK (array_position(aliases, NULL) IS NULL),
     CONSTRAINT proof_topic_aliases_shape CHECK (
         cardinality(aliases) = 0
         OR array_to_string(aliases, ',') ~ '^[a-z0-9][a-z0-9-]{1,62}(,[a-z0-9][a-z0-9-]{1,62})*$'

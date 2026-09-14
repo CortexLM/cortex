@@ -225,6 +225,15 @@ an in-guest `runner_id` without a `pack_digest` is refused, so a topic that
 names a runner with nothing to run never installs. Unknown keys are refused
 at parse: a binding this build cannot name is a binding nothing enforces.
 
+A value the row cannot hold is a **reject, never a rewrite**: `version` and
+`n_concurrent` above `i32::MAX` are refused rather than clamped (a clamped
+row would disagree with the digest-covered bundle an operator reviewed), and
+a pin is accepted only in the exact lowercase, unpadded spelling the
+column's `CHECK` requires — so a bundle that validates also installs.
+Re-installing reports the **persisted** state: a topic that was already live
+stays live, and the output says so rather than assuming the install disabled
+it.
+
 **P0 scope — what this does not do.** Installing writes `enabled = false`
 and no scoring path reads `proof_topic` yet, so an install cannot move a
 score. `topic enable`, `topic disable`, and `topic seal` exit **3** with a

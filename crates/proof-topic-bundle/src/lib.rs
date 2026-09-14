@@ -54,6 +54,14 @@ pub const MAX_ALIASES: usize = 8;
 /// Largest canonical `config` object, in bytes.
 pub const MAX_CONFIG_BYTES: usize = 16 * 1024;
 
+/// Largest `version` / `n_concurrent` a bundle may carry.
+///
+/// The row's columns are `INTEGER`, so a value above this would have to be
+/// clamped on write — and a clamped row would disagree with the validated,
+/// digest-covered bundle an operator reviewed. Out of range is a reject, never
+/// a silent rewrite.
+pub const MAX_INT_COLUMN: u32 = i32::MAX as u32;
+
 /// Install targets, in the order the CLI offers them.
 pub const INSTALL_ENVIRONMENTS: [&str; 2] = ["staging", "metal"];
 
@@ -196,6 +204,14 @@ pub enum BundleError {
     /// `n_concurrent` is zero.
     #[error("n_concurrent must be >= 1")]
     BadConcurrency,
+    /// `version` / `n_concurrent` does not fit the row's `INTEGER` column.
+    #[error("{field} {got} does not fit the topic row (max {MAX_INT_COLUMN}); refused rather than clamped")]
+    IntColumnOverflow {
+        /// Which field.
+        field: &'static str,
+        /// What the bundle said.
+        got: u32,
+    },
     /// `sealed_custom_value` is not finite.
     #[error("sealed_custom_value {0} is not finite; a baseline must be a measured number")]
     NonFiniteSealedValue(f64),
@@ -333,8 +349,20 @@ pub struct TopicInstallPlan {
 }
 
 fn is_digest(s: &str) -> bool {
-    s.strip_prefix(DIGEST_PREFIX)
-        .is_some_and(proof_canon::is_hex64)
+    s.strip_prefix(DIGEST_PREFIX).is_some_and(is_lower_hex64)
+}
+
+/// Exactly 64 **lowercase** hex characters, with no surrounding whitespace.
+///
+/// Deliberately stricter than `proof_canon::is_hex64`, which trims and accepts
+/// uppercase: a pin is stored here verbatim and the row's `CHECK` is
+/// `^sha256:[0-9a-f]{64}$`, so accepting `sha256:AB…` or `sha256: ab… ` would
+/// let a bundle validate and dry-run and then fail on a real install. One
+/// spelling of a digest, checked the same way in both places.
+fn is_lower_hex64(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 impl TopicInstallBundle {
@@ -415,6 +443,14 @@ impl TopicInstallBundle {
         if self.n_concurrent == 0 {
             return Err(BundleError::BadConcurrency);
         }
+        for (field, value) in [
+            ("version", self.version),
+            ("n_concurrent", self.n_concurrent),
+        ] {
+            if value > MAX_INT_COLUMN {
+                return Err(BundleError::IntColumnOverflow { field, got: value });
+            }
+        }
         if let Some(v) = self.sealed_custom_value {
             if !v.is_finite() {
                 return Err(BundleError::NonFiniteSealedValue(v));
@@ -426,9 +462,12 @@ impl TopicInstallBundle {
                 return Err(BundleError::ConfigNotObject(json_kind(other)));
             }
         }
-        let canonical = self.canonical()?;
-        if canonical.len() > MAX_CONFIG_BYTES {
-            return Err(BundleError::ConfigTooLarge(canonical.len()));
+        // The bound is on the `config` object, measured on its own canonical
+        // form: a large-but-legal bundle elsewhere must not be blamed on a
+        // config that is well inside the limit.
+        let config_bytes = proof_canon::canonical_json(&self.config).len();
+        if config_bytes > MAX_CONFIG_BYTES {
+            return Err(BundleError::ConfigTooLarge(config_bytes));
         }
         Ok(())
     }
@@ -849,6 +888,129 @@ mod tests {
         let mut h = Sha256::new();
         h.update(s.as_bytes());
         hex::encode(h.finalize())
+    }
+
+    /// The row's `CHECK` is `^sha256:[0-9a-f]{64}$`, so anything this
+    /// validator accepts has to be exactly that. Accepting an uppercase or
+    /// padded pin would let a bundle validate and dry-run and then fail a real
+    /// install — the operator would find out only on the host that matters.
+    #[test]
+    fn digest_pins_are_exactly_lowercase_and_unpadded() {
+        let upper = HEX.to_ascii_uppercase();
+        for bad in [
+            format!("sha256:{upper}"),
+            format!("sha256: {HEX}"),
+            format!("sha256:{HEX} "),
+            format!(" sha256:{HEX}"),
+            format!("sha256:{}", &HEX[..63]),
+            format!("sha256:{HEX}0"),
+            format!("SHA256:{HEX}"),
+        ] {
+            for field in ["pin_rlm", "pin_experiment", "pack_digest"] {
+                let mut bundle = tb4();
+                match field {
+                    "pin_rlm" => bundle.pin_rlm = Some(bad.clone()),
+                    "pin_experiment" => bundle.pin_experiment = Some(bad.clone()),
+                    _ => bundle.pack_digest = Some(bad.clone()),
+                }
+                assert!(
+                    matches!(
+                        bundle.validate(),
+                        Err(BundleError::BadDigest { field: f, .. }) if f == field
+                    ),
+                    "{field}={bad:?} must be refused, not silently accepted"
+                );
+            }
+        }
+        // The canonical spelling still validates, so this is strictness
+        // rather than a blanket rejection.
+        tb4().validate().expect("lowercase hex validates");
+        assert!(is_lower_hex64(HEX));
+        assert!(!is_lower_hex64(&upper));
+        assert!(!is_lower_hex64(&format!(" {HEX}")));
+    }
+
+    /// The row's columns are `INTEGER`. A value that would not fit is a
+    /// reject, never a clamp: a clamped row would disagree with the
+    /// digest-covered bundle the operator reviewed.
+    #[test]
+    fn numeric_columns_out_of_range_are_refused_not_clamped() {
+        let mut big_version = tb4();
+        big_version.version = MAX_INT_COLUMN + 1;
+        let err = big_version.validate().expect_err("version overflow");
+        assert!(
+            matches!(
+                err,
+                BundleError::IntColumnOverflow {
+                    field: "version",
+                    got: _
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string().contains("refused rather than clamped"),
+            "{err}"
+        );
+
+        let mut big_concurrency = tb4();
+        big_concurrency.n_concurrent = u32::MAX;
+        assert!(
+            matches!(
+                big_concurrency.validate(),
+                Err(BundleError::IntColumnOverflow {
+                    field: "n_concurrent",
+                    ..
+                })
+            ),
+            "n_concurrent overflow"
+        );
+
+        // The boundary itself is legal.
+        let mut at_limit = tb4();
+        at_limit.version = MAX_INT_COLUMN;
+        at_limit.n_concurrent = MAX_INT_COLUMN;
+        at_limit.validate().expect("i32::MAX fits the column");
+        assert_eq!(MAX_INT_COLUMN, i32::MAX as u32);
+    }
+
+    /// The advertised limit is on the `config` object. A legal bundle with
+    /// long metadata must not be rejected for a small config, and the error
+    /// must report the config's own size rather than the bundle's.
+    #[test]
+    fn the_config_bound_measures_the_config_not_the_bundle() {
+        // A small config inside a large-but-legal bundle.
+        let mut bundle = tb4();
+        bundle.display_name = "x".repeat(MAX_DISPLAY_NAME_LEN);
+        bundle.aliases = (0..MAX_ALIASES).map(|i| format!("alias-{i}")).collect();
+        bundle.config = serde_json::json!({ "task_slice": "tb4-first-15" });
+        bundle
+            .validate()
+            .expect("a small config in a large bundle is fine");
+
+        // Over the limit is refused, and the number is the config's own size.
+        let mut over = tb4();
+        over.config = serde_json::json!({ "pad": "x".repeat(MAX_CONFIG_BYTES) });
+        let err = over.validate().expect_err("oversized config");
+        let BundleError::ConfigTooLarge(reported) = err else {
+            panic!("expected ConfigTooLarge, got {err:?}");
+        };
+        let config_bytes = proof_canon::canonical_json(&over.config).len();
+        assert_eq!(
+            reported, config_bytes,
+            "the error must report the config's size"
+        );
+        assert!(config_bytes > MAX_CONFIG_BYTES);
+
+        // Exactly at the limit passes.
+        let mut at_limit = tb4();
+        let overhead = proof_canon::canonical_json(&serde_json::json!({ "pad": "" })).len();
+        at_limit.config = serde_json::json!({ "pad": "x".repeat(MAX_CONFIG_BYTES - overhead) });
+        assert_eq!(
+            proof_canon::canonical_json(&at_limit.config).len(),
+            MAX_CONFIG_BYTES
+        );
+        at_limit.validate().expect("exactly at the limit passes");
     }
 
     #[test]
