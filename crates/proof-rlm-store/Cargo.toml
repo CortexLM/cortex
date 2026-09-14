@@ -22,7 +22,7 @@ tracing = "0.1"
 [dev-dependencies]
 db = { path = "../db", features = ["testing"] }
 proof-rlm = { path = "../proof-rlm", features = ["test-fixtures"] }
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true
