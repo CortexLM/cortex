@@ -576,13 +576,21 @@ fn install_refuses_an_environment_the_bundle_does_not_declare() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// A real install is out of scope for this slice: it must refuse loudly rather
-/// than write anything, and it must not need a database to say so.
+/// A real install needs the master and a bearer, and refuses **before**
+/// touching anything when either is missing.
+///
+/// This is the P1a contract replacing the P0 stub: `install` without
+/// `--dry-run` now performs the install, so the test that matters is that a
+/// missing configuration is a usage error naming what to set — not a partial
+/// install. The happy path is covered against Postgres in
+/// `crates/proof-topic-install/tests/install_engine.rs`.
 #[test]
-fn a_real_install_is_not_implemented_and_changes_nothing() {
-    let dir = workdir("no-real-install");
+fn a_real_install_refuses_without_a_master_and_a_bearer_and_changes_nothing() {
+    let dir = workdir("real-install-config");
     let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("metal"));
     let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
+
+    // No --admin-url: refused, and it says how to supply one.
     let out = run(&[
         "topic",
         "install",
@@ -594,11 +602,148 @@ fn a_real_install_is_not_implemented_and_changes_nothing() {
         "--pin",
         pin.to_str().unwrap(),
     ]);
-    assert_eq!(code(&out), EXIT_NOT_IMPLEMENTED, "stderr={}", stderr(&out));
+    assert_eq!(code(&out), EXIT_USAGE, "stderr={}", stderr(&out));
     let err = stderr(&out);
-    assert!(err.contains("not implemented in this slice"), "{err}");
-    assert!(err.contains("Nothing was changed"), "{err}");
-    assert!(stdout(&out).is_empty(), "a stub prints nothing to stdout");
+    assert!(err.contains("--admin-url"), "{err}");
+    assert!(err.contains("PROOF_ADMIN_URL"), "{err}");
+    assert!(
+        err.contains("--dry-run"),
+        "the refusal must point at the dry run: {err}"
+    );
+    assert!(stdout(&out).is_empty(), "a refused install prints no plan");
+
+    // With a URL but no bearer: refused too, and it names the token file.
+    let out = run(&[
+        "topic",
+        "install",
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--env",
+        "metal",
+        "--owner-metal-ack",
+        "--pin",
+        pin.to_str().unwrap(),
+        "--admin-url",
+        "http://127.0.0.1:8100",
+    ]);
+    assert_eq!(code(&out), EXIT_USAGE, "stderr={}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("--admin-token-file"), "{err}");
+    assert!(err.contains("PROOF_ADMIN_TOKEN_FILE"), "{err}");
+    assert!(
+        err.contains("never logged or printed"),
+        "the refusal must say the bearer is handled safely: {err}"
+    );
+
+    // An empty tokens file is an error naming the file, not a silent no-op.
+    let empty = write_file(&dir, "empty-token", "# only a comment\n\n");
+    let out = run(&[
+        "topic",
+        "install",
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--env",
+        "metal",
+        "--owner-metal-ack",
+        "--pin",
+        pin.to_str().unwrap(),
+        "--admin-url",
+        "http://127.0.0.1:8100",
+        "--admin-token-file",
+        empty.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), EXIT_ERROR, "stderr={}", stderr(&out));
+    assert!(stderr(&out).contains("holds no bearer"), "{}", stderr(&out));
+
+    // The bearer is never echoed, in any of those refusals.
+    for args in [
+        vec![
+            "topic",
+            "install",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--env",
+            "metal",
+            "--owner-metal-ack",
+            "--pin",
+            pin.to_str().unwrap(),
+        ],
+        vec![
+            "topic",
+            "install",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--env",
+            "metal",
+            "--owner-metal-ack",
+            "--pin",
+            pin.to_str().unwrap(),
+            "--admin-url",
+            "http://127.0.0.1:8100",
+        ],
+    ] {
+        let out = run(&args);
+        assert!(
+            !stdout(&out).contains("Bearer ") && !stderr(&out).contains("Bearer "),
+            "the bearer must never be printed: {} {}",
+            stdout(&out),
+            stderr(&out)
+        );
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// `--drive-rlm` provisions a VM and runs a paid baseline, so it needs the
+/// Owner assertion. Without either flag the install is the static half only.
+#[test]
+fn driving_the_rlm_requires_the_owner_assertion() {
+    let dir = workdir("drive-rlm-gate");
+    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("staging"));
+    let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
+    let base = |extra: &[&str]| {
+        let mut a = vec![
+            "topic",
+            "install",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--env",
+            "staging",
+            "--pin",
+            pin.to_str().unwrap(),
+            "--admin-url",
+            "http://127.0.0.1:8100",
+            "--admin-token-file",
+            "/nonexistent/token",
+        ];
+        a.extend_from_slice(extra);
+        run(&a)
+    };
+
+    // --drive-rlm without --owner-approved: refused as usage, before anything.
+    let out = base(&["--drive-rlm"]);
+    assert_eq!(code(&out), EXIT_USAGE, "stderr={}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("--owner-approved"), "{err}");
+    assert!(err.contains("provisions a topic VM"), "{err}");
+    assert!(
+        err.contains("paid baseline"),
+        "the gate must say what it authorizes: {err}"
+    );
+
+    // --skip-baseline without --drive-rlm is a contradiction, not a no-op.
+    let out = base(&["--skip-baseline"]);
+    assert_eq!(code(&out), EXIT_USAGE, "stderr={}", stderr(&out));
+    assert!(
+        stderr(&out).contains("only means something with --drive-rlm"),
+        "{}",
+        stderr(&out)
+    );
+
+    // The gates are checked before the token file is read, so a gate refusal
+    // is a usage error rather than a confusing "file not found".
+    let out = base(&["--drive-rlm", "--skip-baseline"]);
+    assert_eq!(code(&out), EXIT_USAGE, "stderr={}", stderr(&out));
+
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -828,23 +973,49 @@ fn enable_disable_and_seal_fail_closed_with_exit_3() {
 }
 
 #[test]
-fn help_lists_every_p0_subcommand_and_says_what_is_not_implemented() {
+fn help_lists_every_subcommand_and_says_what_is_not_implemented() {
     let out = run(&["topic", "--help"]);
     assert_eq!(code(&out), 0);
     let body = stdout(&out);
     for sub in [
-        "validate", "install", "list", "show", "enable", "disable", "seal",
+        "validate",
+        "install",
+        "install-log",
+        "list",
+        "show",
+        "enable",
+        "disable",
+        "seal",
     ] {
         assert!(body.contains(sub), "missing subcommand {sub} in:\n{body}");
     }
+    // `topic --help` lists subcommands; the flags live on `install --help`.
     assert!(
-        body.contains("--dry-run"),
-        "the dry-run flag must be discoverable:\n{body}"
+        !body.contains("not implemented in this slice")
+            || body.contains("enable")
+            || body.contains("disable")
+            || body.contains("seal"),
+        "the stubs must be the ones that say so:\n{body}"
     );
+
+    let out = run(&["topic", "install", "--help"]);
+    assert_eq!(code(&out), 0);
+    let body = stdout(&out);
+    for flag in [
+        "--dry-run",
+        "--skip-baseline",
+        "--drive-rlm",
+        "--owner-approved",
+        "--owner-metal-ack",
+        "--admin-url",
+        "--admin-token-file",
+    ] {
+        assert!(body.contains(flag), "missing {flag} in:\n{body}");
+    }
+    // And the install help must not promise a stub it no longer is.
     assert!(
-        body.to_lowercase()
-            .contains("not implemented in this slice"),
-        "the stubs must say so in help:\n{body}"
+        !body.contains("not implemented in this slice"),
+        "install is implemented; its help must not say otherwise:\n{body}"
     );
 }
 

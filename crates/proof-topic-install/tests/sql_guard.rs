@@ -13,8 +13,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proof_topic_install::sql_guard::{
-    blank_statements, check_migration, check_statement, is_topic_scoped, split_statements,
-    OWNED_TABLES,
+    blank_statements, check_migration, is_topic_scoped, split_statements, OWNED_TABLES,
 };
 use proof_topic_install::InstallError;
 

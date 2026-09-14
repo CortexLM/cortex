@@ -15,9 +15,12 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 db = { path = "../../crates/db" }
+proof-rlm = { path = "../../crates/proof-rlm" }
 proof-rlm-store = { path = "../../crates/proof-rlm-store" }
 proof-task = { path = "../../crates/proof-task" }
 proof-topic-bundle = { path = "../../crates/proof-topic-bundle" }
+proof-topic-install = { path = "../../crates/proof-topic-install" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

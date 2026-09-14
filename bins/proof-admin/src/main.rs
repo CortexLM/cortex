@@ -41,6 +41,10 @@ use proof_rlm_store::{MemoryRlmStore, PgRlmStore, RlmStore, TopicVersionRow};
 use proof_task::ProofPin;
 use proof_topic_bundle::{InstallEnvironment, TopicInstallBundle, TopicInstallPlan, PUBLISH_PATH};
 
+mod install;
+
+use install::InstallArgs;
+
 /// Successful run.
 const EXIT_OK: u8 = 0;
 /// A command failed (bad bundle, refused document, database error).
@@ -110,8 +114,13 @@ enum TopicCmd {
         #[arg(long, value_name = "PATH", default_value = "config/proof-pin.toml")]
         pin: PathBuf,
     },
-    /// Resolve the publish call and host env. `--dry-run` is the only mode
-    /// this slice implements; it touches nothing.
+    /// Resolve the publish call and host env, or run the install for real.
+    ///
+    /// `--dry-run` prints the plan and touches nothing. Without it, the
+    /// install runs: the signed document is published through the existing
+    /// admin route, then the bundle's RLM section is applied (migrations
+    /// under the deny-list, routes, rules, the executor binding) and the
+    /// topic's RLM is asked to set itself up.
     Install {
         /// Bundle JSON.
         #[arg(long, value_name = "PATH")]
@@ -131,9 +140,40 @@ enum TopicCmd {
         /// metal install cannot happen by accident or by copy-paste.
         #[arg(long)]
         owner_metal_ack: bool,
+        /// Skip the RLM's baseline job. Rules, migrations, routes, and the
+        /// executor binding are still applied; the topic simply has no
+        /// measured baseline yet, so it cannot open until one is sealed.
+        /// Intended for staging, where a baseline run is the expensive part.
+        #[arg(long)]
+        skip_baseline: bool,
+        /// Master base URL for the admin publish call, e.g.
+        /// `http://10.116.0.3:8080` (the gateway) or
+        /// `http://127.0.0.1:8100` (the challenge service directly).
+        #[arg(long, env = "PROOF_ADMIN_URL", value_name = "URL")]
+        admin_url: Option<String>,
+        /// File holding the operator bearer for `/v1/admin/*`. Never logged,
+        /// never printed. Defaults to `PROOF_ADMIN_TOKENS_FILE`.
+        #[arg(long, env = "PROOF_ADMIN_TOKEN_FILE", value_name = "PATH")]
+        admin_token_file: Option<PathBuf>,
+        /// Drive the RLM setup (provision, rules, baseline) over the
+        /// topic-VM orchestrator. Without it the install applies the bundle's
+        /// migrations, routes, rules, and binding, and stops there.
+        #[arg(long)]
+        drive_rlm: bool,
+        /// Assert the Owner approved provisioning and spend. Required with
+        /// `--drive-rlm`; refused (usage) without it, because the setup
+        /// provisions a VM and runs a paid baseline.
+        #[arg(long)]
+        owner_approved: bool,
     },
     /// List installed topics: a read-only view of `proof_topic_version`.
     List,
+    /// Show one topic's newest install: the `proof_topic_install` journal.
+    InstallLog {
+        /// Topic slug.
+        #[arg(long, value_name = "TOPIC_ID")]
+        topic: String,
+    },
     /// Show one installed topic. An alias resolves to its topic.
     Show {
         /// Topic slug, or an alias of one.
@@ -255,8 +295,30 @@ async fn run_topic(opts: &Options, cmd: &TopicCmd) -> Result<(), Failure> {
             pin,
             dry_run,
             owner_metal_ack,
-        } => cmd_install(opts, bundle, env, pin, *dry_run, *owner_metal_ack),
+            skip_baseline,
+            admin_url,
+            admin_token_file,
+            drive_rlm,
+            owner_approved,
+        } => {
+            let request = InstallArgs {
+                bundle,
+                env,
+                pin,
+                gates: install::Gates {
+                    dry_run: *dry_run,
+                    owner_metal_ack: *owner_metal_ack,
+                    owner_approved: *owner_approved,
+                },
+                skip_baseline: *skip_baseline,
+                admin_url: admin_url.as_deref(),
+                admin_token_file: admin_token_file.as_deref(),
+                drive_rlm: *drive_rlm,
+            };
+            cmd_install(opts, &request).await
+        }
         TopicCmd::List => cmd_list(opts).await,
+        TopicCmd::InstallLog { topic } => cmd_install_log(opts, topic).await,
         TopicCmd::Show { topic_id } => cmd_show(opts, topic_id).await,
         TopicCmd::Alias { cmd } => run_alias(opts, cmd).await,
         TopicCmd::Enable { topic_id } => Err(not_implemented("topic enable", topic_id)),
@@ -338,7 +400,7 @@ fn not_implemented(command: &str, topic_id: &str) -> Failure {
 }
 
 /// Read a bundle file.
-fn load_bundle(path: &Path) -> Result<TopicInstallBundle, Failure> {
+pub(crate) fn load_bundle(path: &Path) -> Result<TopicInstallBundle, Failure> {
     let body = std::fs::read_to_string(path)
         .map_err(|e| Failure::Error(format!("read {}: {e}", path.display())))?;
     TopicInstallBundle::from_json(&body)
@@ -346,7 +408,7 @@ fn load_bundle(path: &Path) -> Result<TopicInstallBundle, Failure> {
 }
 
 /// Read the pin the document is checked against.
-fn load_pin(path: &Path) -> Result<ProofPin, Failure> {
+pub(crate) fn load_pin(path: &Path) -> Result<ProofPin, Failure> {
     let body = std::fs::read_to_string(path)
         .map_err(|e| Failure::Error(format!("read {}: {e}", path.display())))?;
     let pin = ProofPin::from_toml(&body).map_err(|e| Failure::Error(e.to_string()))?;
@@ -354,12 +416,23 @@ fn load_pin(path: &Path) -> Result<ProofPin, Failure> {
     Ok(pin)
 }
 
+/// Custom ids this host registers for scoring (`PROOF_VM_RUNNER_CUSTOM_IDS`).
+///
+/// Read for the install's open-custom-topic gate: an open custom topic whose
+/// id is not registered answers 503 when a miner submits, so an install
+/// refuses rather than recording a binding that cannot score.
+pub(crate) fn registered_custom_from_env() -> Vec<String> {
+    std::env::var(proof_topic_bundle::ENV_CUSTOM_IDS)
+        .ok()
+        .map_or_else(Vec::new, |raw| proof_topic_bundle::parse_custom_ids(&raw))
+}
+
 /// The shared acceptance checks, in the order the admin route runs them.
 ///
 /// This is the point of the CLI: an operator finds out here — not on the host
 /// that matters — that a document would be refused, and why. It runs exactly
 /// the two checks `POST /v1/admin/proof/topics` runs, against the same pin.
-fn accept_document(bundle: &TopicInstallBundle, pin: &ProofPin) -> Result<(), Failure> {
+pub(crate) fn accept_document(bundle: &TopicInstallBundle, pin: &ProofPin) -> Result<(), Failure> {
     bundle
         .validate_shape()
         .map_err(|e| Failure::Error(e.to_string()))?;
@@ -377,7 +450,7 @@ fn accept_document(bundle: &TopicInstallBundle, pin: &ProofPin) -> Result<(), Fa
 }
 
 /// Parse `--env` into an install target.
-fn parse_env(raw: &str) -> Result<InstallEnvironment, Failure> {
+pub(crate) fn parse_env(raw: &str) -> Result<InstallEnvironment, Failure> {
     raw.parse::<InstallEnvironment>().map_err(Failure::Usage)
 }
 
@@ -437,60 +510,17 @@ fn cmd_validate(opts: &Options, path: &Path, pin_path: &Path) -> Result<(), Fail
     Ok(())
 }
 
-fn cmd_install(
-    opts: &Options,
-    path: &Path,
-    env: &str,
-    pin_path: &Path,
-    dry_run: bool,
-    owner_metal_ack: bool,
-) -> Result<(), Failure> {
-    let bundle = load_bundle(path)?;
-    let requested = parse_env(env)?;
-    // Owner default: metal is Owner-only, and staging goes first. A metal
-    // plan is refused unless the operator asserts both, so a live target can
-    // never be reached by a default or a copy-pasted staging command.
-    if requested == InstallEnvironment::Metal && !owner_metal_ack {
-        return Err(Failure::Usage(format!(
-            "`--env metal` is Owner-only and requires --owner-metal-ack, which asserts that \
-             (a) an Owner authorized this install and (b) staging has passed for this bundle \
-             ({}). Install to staging first: `proof-admin topic install --bundle {} --env \
-             staging --dry-run`.",
-            path.display(),
-            path.display()
-        )));
-    }
-    let pin = load_pin(pin_path)?;
-    let plan = bundle
-        .plan(requested)
-        .map_err(|e| Failure::Error(format!("{}: {e}", path.display())))?;
-    // The same acceptance the publish route runs, so a dry run cannot print a
-    // call that the route would refuse.
-    accept_document(&bundle, &pin)?;
-
-    if !dry_run {
-        // Deliberately not implemented in this slice: publishing needs the
-        // operator bearer, which stays on the host. Printing the call is the
-        // whole point of P0.
-        return Err(Failure::NotImplemented(
-            "a real install is not implemented in this slice (P0: bundle + admin CLI skeleton). \
-             Nothing was changed. Run the printed publish call on the host that holds the \
-             operator bearer, or use `--dry-run`."
-                .to_owned(),
-        ));
-    }
-
-    if opts.json {
-        print_json(&plan)?;
-        return Ok(());
-    }
-    print_plan(&plan, path, pin_path);
-    println!();
-    println!("Dry run: nothing was written and no host was touched.");
-    Ok(())
+/// The real install (and the dry run) live in [`install`].
+async fn cmd_install(opts: &Options, args: &InstallArgs<'_>) -> Result<(), Failure> {
+    install::run(opts, args).await
 }
 
-fn print_plan(plan: &TopicInstallPlan, bundle_path: &Path, pin_path: &Path) {
+/// The install journal for one topic.
+async fn cmd_install_log(opts: &Options, topic_id: &str) -> Result<(), Failure> {
+    install::install_log(opts, topic_id).await
+}
+
+pub(crate) fn print_plan(plan: &TopicInstallPlan, bundle_path: &Path, pin_path: &Path) {
     println!("topic install plan");
     println!("  topic_id          {}", plan.topic_id);
     println!("  display_name      {}", plan.display_name);
@@ -682,7 +712,7 @@ async fn open_store(opts: &Options) -> Result<Box<dyn RlmStore>, Failure> {
 ///
 /// The two are mutually exclusive, matching `crates/config`: a value and a
 /// file that disagree would be a silent choice between two databases.
-fn database_url(opts: &Options) -> Result<Option<String>, Failure> {
+pub(crate) fn database_url(opts: &Options) -> Result<Option<String>, Failure> {
     let value = opts
         .database_url
         .as_deref()
@@ -770,7 +800,7 @@ fn topic_json(row: &TopicVersionRow) -> serde_json::Value {
     })
 }
 
-fn print_json<T: serde::Serialize>(value: &T) -> Result<(), Failure> {
+pub(crate) fn print_json<T: serde::Serialize>(value: &T) -> Result<(), Failure> {
     let body = serde_json::to_string_pretty(value).map_err(|e| Failure::Error(e.to_string()))?;
     println!("{body}");
     Ok(())
