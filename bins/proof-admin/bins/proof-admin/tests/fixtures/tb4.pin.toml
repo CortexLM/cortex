@@ -1,0 +1,21 @@
+challenge_id = "proof"
+scoring_version = 1
+base_model_family = "Qwen/Qwen3.8"
+eval_image = "ghcr.io/cortexlm/proof-eval"
+eval_image_digest = "sha256:abababababababababababababababababababababababababababababababab"
+topic_pubkey = "5a714bcc1332e8ce4354ab4573450fc2517beb5568e3771c48e7195b415e3d7b"
+flops_budget_max = 2000000000000000000
+epsilon_nll_min = 0.02
+epsilon_topic_max_regress_min = 0.05
+epsilon_throughput_rel_min = 0.05
+quality_floor_nll_max = 0.02
+holdout_size = 120
+stratum_size = 24
+
+[inference]
+provider = "openai_compatible"
+base_url = "http://127.0.0.1:8000/v1"
+model = "master-proxy-v0"
+mode = "chat"
+max_input_tokens = 32768
+max_output_tokens = 8192

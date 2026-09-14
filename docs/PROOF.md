@@ -277,10 +277,17 @@ does not read the section — it reports what the RLM will be asked to do.
 | Default | Value | Where |
 |---------|-------|-------|
 | First topic slug | **`tb4`** | the signed document's `id` |
-| Temporary alias | **`tbench`** | `proof_topic_alias` row `tbench → tb4` |
+| Temporary alias | **`tbench`** | `proof_topic_alias` row `tbench → tb4` (migration `0024`) |
 | Storage | **shared challenge DB**, `topic_id` discriminant | `proof_topic_version` (no per-topic schema) |
 | Metal install | **Owner-only, staging first** | `--owner-metal-ack` gate |
 | Custom id | `tbench` | the document's `metric.custom_id` |
+
+**Schema:** `0024_proof_topic_alias.sql` is the only change in this slice. It
+adds `proof_topic_alias` and a `BEFORE INSERT`/`UPDATE` trigger pair that makes
+an alias collision with a published slug fail closed in both directions — a
+**publish-path integrity guard, not scoring math**: it cannot change a score,
+a payout, or a sealed vector. It does not `ALTER` or `DROP` anything, and the
+`0020` tables keep their columns, keys, and grants.
 
 `tbench` is two different things and they are not the same mapping: it is the
 topic's **alias** (`show tbench` resolves to `tb4`) and also the runner

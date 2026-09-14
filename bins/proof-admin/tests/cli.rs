@@ -163,10 +163,119 @@ max_output_tokens = 8192
                 "pack_digest": pack,
                 "pack_dir": "/var/lib/proof/packs",
                 "custom_ids_entry": "tbench"
+            },
+            // A small illustrative RLM section, so the committed fixture also
+            // exercises the hand-off. A real bundle carries the topic's own
+            // rules / migrations / apis / submission_format / scoring.
+            "rlm": {
+                "rules": [
+                    {"id": "no_short_circuit", "text": "the harness must run the task"}
+                ],
+                "submission_format": {"kind": "tar", "max_bytes": 5_242_880}
             }
         });
         serde_json::to_string_pretty(&bundle).expect("json")
     }
+}
+
+/// Regenerate the committed dry-run fixture.
+///
+/// Gated on `PROOF_ADMIN_FIXTURE_DIR` so it is a no-op in CI. The fixture is
+/// the operator artifact for the Owner A→Z walkthrough and must be signed by
+/// the same test key its pin carries, so it cannot be hand-edited safely:
+///
+/// ```bash
+/// PROOF_ADMIN_FIXTURE_DIR=bins/proof-admin/tests/fixtures \
+///   cargo test -p proof-admin-bin --test cli regenerate_dry_run_fixture
+/// ```
+#[test]
+fn regenerate_dry_run_fixture() {
+    let Ok(dir) = std::env::var("PROOF_ADMIN_FIXTURE_DIR") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    fs::create_dir_all(&dir).expect("fixture dir");
+    fs::write(
+        dir.join("tb4.install-bundle.json"),
+        fixture::bundle_json("staging"),
+    )
+    .expect("bundle");
+    fs::write(dir.join("tb4.pin.toml"), fixture::pin_toml()).expect("pin");
+}
+
+/// The committed dry-run fixture must stay runnable.
+///
+/// `tests/fixtures/tb4.bundle.json` + `tb4.pin.toml` are the operator artifact
+/// the A→Z walkthrough uses, so a schema change that quietly breaks them must
+/// fail here rather than in the Owner's hands. This runs the **same two
+/// commands** the fixture README documents.
+#[test]
+fn the_committed_dry_run_fixture_still_validates_and_plans() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let bundle = fixtures.join("tb4.install-bundle.json");
+    let pin = fixtures.join("tb4.pin.toml");
+    assert!(bundle.is_file(), "missing {}", bundle.display());
+    assert!(pin.is_file(), "missing {}", pin.display());
+
+    // 1. validate
+    let out = run(&[
+        "topic",
+        "validate",
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--pin",
+        pin.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), 0, "fixture must validate: {}", stderr(&out));
+    let body = stdout(&out);
+    assert!(body.contains("topic_id         tb4"), "{body}");
+    assert!(body.contains("custom_id        tbench"), "{body}");
+    assert!(
+        body.contains("rlm_install      present"),
+        "the fixture carries an RLM section: {body}"
+    );
+
+    // 2. install --dry-run, the documented staging command.
+    let out = run(&[
+        "topic",
+        "install",
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--env",
+        "staging",
+        "--dry-run",
+        "--pin",
+        pin.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), 0, "fixture must plan: {}", stderr(&out));
+    let body = stdout(&out);
+    assert!(body.contains("environment       staging"), "{body}");
+    assert!(body.contains("owner_gate        n/a (staging)"), "{body}");
+    assert!(
+        body.contains("Hand control to the topic's RLM"),
+        "the plan must show the hand-off: {body}"
+    );
+
+    // The fixture is staging-only: a metal plan must be refused, both by the
+    // declared target and by the Owner gate.
+    let out = run(&[
+        "topic",
+        "install",
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--env",
+        "metal",
+        "--owner-metal-ack",
+        "--dry-run",
+        "--pin",
+        pin.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&out), EXIT_ERROR, "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("declares environment staging"),
+        "{}",
+        stderr(&out)
+    );
 }
 
 #[test]
