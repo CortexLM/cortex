@@ -125,13 +125,24 @@ enum TopicCmd {
         /// Resolve and print the plan without touching anything.
         #[arg(long)]
         dry_run: bool,
+        /// Assert Owner authority and that staging passed first. Required for
+        /// `--env metal`; refused (usage) without it. This is an operator
+        /// assertion, not a verified precondition — the gate exists so a
+        /// metal install cannot happen by accident or by copy-paste.
+        #[arg(long)]
+        owner_metal_ack: bool,
     },
     /// List installed topics: a read-only view of `proof_topic_version`.
     List,
-    /// Show one installed topic by its exact `topic_id`.
+    /// Show one installed topic. An alias resolves to its topic.
     Show {
-        /// Topic slug.
+        /// Topic slug, or an alias of one.
         topic_id: String,
+    },
+    /// Manage the temporary compatibility aliases a topic answers to.
+    Alias {
+        #[command(subcommand)]
+        cmd: AliasCmd,
     },
     /// Not implemented in this slice.
     Enable {
@@ -150,6 +161,29 @@ enum TopicCmd {
         /// Measured baseline primary.
         #[arg(long, value_name = "VALUE")]
         value: f64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AliasCmd {
+    /// Point an alias at a topic. The topic must be published already.
+    Set {
+        /// The alias slug (e.g. `tbench`).
+        alias: String,
+        /// The canonical topic slug it resolves to (e.g. `tb4`).
+        #[arg(long, value_name = "TOPIC_ID")]
+        topic: String,
+    },
+    /// List the aliases of one topic.
+    List {
+        /// Canonical topic slug.
+        #[arg(long, value_name = "TOPIC_ID")]
+        topic: String,
+    },
+    /// Retire an alias. The topic itself is untouched.
+    Rm {
+        /// The alias slug to remove.
+        alias: String,
     },
 }
 
@@ -220,15 +254,77 @@ async fn run_topic(opts: &Options, cmd: &TopicCmd) -> Result<(), Failure> {
             env,
             pin,
             dry_run,
-        } => cmd_install(opts, bundle, env, pin, *dry_run),
+            owner_metal_ack,
+        } => cmd_install(opts, bundle, env, pin, *dry_run, *owner_metal_ack),
         TopicCmd::List => cmd_list(opts).await,
         TopicCmd::Show { topic_id } => cmd_show(opts, topic_id).await,
+        TopicCmd::Alias { cmd } => run_alias(opts, cmd).await,
         TopicCmd::Enable { topic_id } => Err(not_implemented("topic enable", topic_id)),
         TopicCmd::Disable { topic_id } => Err(not_implemented("topic disable", topic_id)),
         TopicCmd::Seal { topic_id, value } => Err(not_implemented(
             &format!("topic seal (value {value})"),
             topic_id,
         )),
+    }
+}
+
+async fn run_alias(opts: &Options, cmd: &AliasCmd) -> Result<(), Failure> {
+    let store = open_store(opts).await?;
+    match cmd {
+        AliasCmd::Set { alias, topic } => {
+            store
+                .put_alias(alias, topic)
+                .await
+                .map_err(|e| Failure::Error(e.to_string()))?;
+            if opts.json {
+                print_json(&serde_json::json!({
+                    "ok": true,
+                    "alias": alias,
+                    "topic_id": topic,
+                }))?;
+                return Ok(());
+            }
+            println!("alias {alias} -> {topic}");
+            println!();
+            println!(
+                "Temporary compatibility mapping. Retire it with \
+                 `proof-admin topic alias rm {alias}` once links move to {topic}."
+            );
+            Ok(())
+        }
+        AliasCmd::List { topic } => {
+            let aliases = store
+                .aliases_for(topic)
+                .await
+                .map_err(|e| Failure::Error(format!("aliases for {topic}: {e}")))?;
+            if opts.json {
+                print_json(&serde_json::json!({ "topic_id": topic, "aliases": aliases }))?;
+                return Ok(());
+            }
+            if aliases.is_empty() {
+                println!("No aliases for {topic}.");
+            } else {
+                for alias in &aliases {
+                    println!("{alias} -> {topic}");
+                }
+            }
+            Ok(())
+        }
+        AliasCmd::Rm { alias } => {
+            let removed = store
+                .delete_alias(alias)
+                .await
+                .map_err(|e| Failure::Error(format!("remove alias {alias}: {e}")))?;
+            if !removed {
+                return Err(Failure::Error(format!("no alias {alias:?}")));
+            }
+            if opts.json {
+                print_json(&serde_json::json!({ "ok": true, "removed": alias }))?;
+                return Ok(());
+            }
+            println!("removed alias {alias}");
+            Ok(())
+        }
     }
 }
 
@@ -338,9 +434,23 @@ fn cmd_install(
     env: &str,
     pin_path: &Path,
     dry_run: bool,
+    owner_metal_ack: bool,
 ) -> Result<(), Failure> {
     let bundle = load_bundle(path)?;
     let requested = parse_env(env)?;
+    // Owner default: metal is Owner-only, and staging goes first. A metal
+    // plan is refused unless the operator asserts both, so a live target can
+    // never be reached by a default or a copy-pasted staging command.
+    if requested == InstallEnvironment::Metal && !owner_metal_ack {
+        return Err(Failure::Usage(format!(
+            "`--env metal` is Owner-only and requires --owner-metal-ack, which asserts that \
+             (a) an Owner authorized this install and (b) staging has passed for this bundle \
+             ({}). Install to staging first: `proof-admin topic install --bundle {} --env \
+             staging --dry-run`.",
+            path.display(),
+            path.display()
+        )));
+    }
     let pin = load_pin(pin_path)?;
     let plan = bundle
         .plan(requested)
@@ -389,6 +499,11 @@ fn print_plan(plan: &TopicInstallPlan, bundle_path: &Path, pin_path: &Path) {
     );
     println!("  bundle_digest     {}", plan.bundle_digest);
     println!("  pin               {}", pin_path.display());
+    if plan.environment == InstallEnvironment::Metal {
+        println!("  owner_gate        acknowledged (Owner-only metal install)");
+    } else {
+        println!("  owner_gate        n/a (staging)");
+    }
     println!();
     println!("1) Publish the signed document (one block; existing route, operator bearer):");
     println!("     # The route takes a TopicDocument, not the bundle envelope, so this");
@@ -477,20 +592,38 @@ async fn cmd_list(opts: &Options) -> Result<(), Failure> {
 
 async fn cmd_show(opts: &Options, topic_id: &str) -> Result<(), Failure> {
     let store = open_store(opts).await?;
-    let row = store
-        .latest_topic(topic_id)
+    // An alias resolves to its canonical slug first, so `show tbench` finds
+    // `tb4`. Resolution is fail-closed in the store: an alias whose topic has
+    // no published version resolves to nothing rather than to an empty row.
+    let resolved = store
+        .resolve_alias(topic_id)
         .await
-        .map_err(|e| Failure::Error(format!("show {topic_id}: {e}")))?;
+        .map_err(|e| Failure::Error(format!("resolve {topic_id}: {e}")))?;
+    let canonical = resolved.as_deref().unwrap_or(topic_id);
+    let row = store
+        .latest_topic(canonical)
+        .await
+        .map_err(|e| Failure::Error(format!("show {canonical}: {e}")))?;
     let Some((version, document)) = row else {
         return Err(Failure::Error(format!(
-            "no installed topic {topic_id:?}. Use `proof-admin topic list` to see the exact ids."
+            "no installed topic {topic_id:?}{}. Use `proof-admin topic list` to see the exact ids.",
+            resolved
+                .as_deref()
+                .map(|c| format!(" (alias of {c:?})"))
+                .unwrap_or_default()
         )));
     };
     let row = TopicVersionRow {
-        topic_id: topic_id.to_owned(),
+        topic_id: canonical.to_owned(),
         version,
         document,
     };
+    if let Some(canonical) = resolved.as_deref() {
+        if !opts.json {
+            println!("{topic_id} is an alias of {canonical}");
+            println!();
+        }
+    }
     if opts.json {
         print_json(&topic_json(&row))?;
         return Ok(());

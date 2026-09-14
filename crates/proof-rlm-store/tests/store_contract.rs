@@ -48,6 +48,52 @@ async fn contract(store: &dyn RlmStore) {
         "ordered by topic_id"
     );
 
+    // Aliases: the Owner default is slug `tb4` with temporary alias `tbench`.
+    // An alias resolves to the canonical slug, an unknown one to nothing, and
+    // an alias for a topic with no published version is refused outright.
+    assert!(store.resolve_alias("tbench").await.unwrap().is_none());
+    store.put_alias("tbench", &t.id).await.unwrap();
+    assert_eq!(
+        store.resolve_alias("tbench").await.unwrap().as_deref(),
+        Some(t.id.as_str())
+    );
+    assert_eq!(store.aliases_for(&t.id).await.unwrap(), ["tbench"]);
+    assert!(store
+        .resolve_alias("no-such-alias")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        store.put_alias("orphan", "never-published").await.is_err(),
+        "an alias must name a topic that has a published version"
+    );
+    assert!(
+        store.resolve_alias("orphan").await.unwrap().is_none(),
+        "the refused alias must not have been written"
+    );
+    // A second alias on the same topic, then retire one.
+    store.put_alias("tb4-legacy", &t.id).await.unwrap();
+    assert_eq!(
+        store.aliases_for(&t.id).await.unwrap(),
+        ["tb4-legacy", "tbench"],
+        "aliases are ordered by alias"
+    );
+    assert!(store.delete_alias("tb4-legacy").await.unwrap());
+    assert!(
+        !store.delete_alias("tb4-legacy").await.unwrap(),
+        "already gone"
+    );
+    assert_eq!(store.aliases_for(&t.id).await.unwrap(), ["tbench"]);
+    // Re-pointing an existing alias replaces it rather than conflicting.
+    let other = store.latest_topic("aaa-other-v0").await.unwrap();
+    assert!(other.is_some(), "the second topic was published above");
+    store.put_alias("tbench", "aaa-other-v0").await.unwrap();
+    assert_eq!(
+        store.resolve_alias("tbench").await.unwrap().as_deref(),
+        Some("aaa-other-v0")
+    );
+    assert!(store.aliases_for(&t.id).await.unwrap().is_empty());
+
     // Rules: v1 from the document, v2 from the RLM, gaps refused.
     let v1 = rules();
     assert!(store.current_rules(&t.id).await.unwrap().is_none());

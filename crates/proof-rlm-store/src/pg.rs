@@ -218,6 +218,60 @@ impl RlmStore for PgRlmStore {
         Ok(out)
     }
 
+    async fn put_alias(&self, alias: &str, topic_id: &str) -> Result<(), StoreError> {
+        // Fail closed before the write: an alias must name a topic that
+        // actually has a published version, or resolution would hand back
+        // nothing and look like an unknown topic.
+        if self.latest_topic(topic_id).await?.is_none() {
+            return Err(StoreError::Malformed(format!(
+                "alias {alias:?} names topic {topic_id:?}, which has no published version"
+            )));
+        }
+        sqlx::query(
+            "INSERT INTO proof_topic_alias (alias, topic_id) VALUES ($1, $2) \
+             ON CONFLICT (alias) DO UPDATE SET topic_id = EXCLUDED.topic_id, \
+             updated_at = now()",
+        )
+        .bind(alias)
+        .bind(topic_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn resolve_alias(&self, alias: &str) -> Result<Option<String>, StoreError> {
+        // The join is the fail-closed part: an alias whose topic has no
+        // published version resolves to nothing rather than to an empty
+        // document.
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT a.topic_id FROM proof_topic_alias a \
+             WHERE a.alias = $1 \
+               AND EXISTS (SELECT 1 FROM proof_topic_version v WHERE v.topic_id = a.topic_id)",
+        )
+        .bind(alias)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(t,)| t))
+    }
+
+    async fn aliases_for(&self, topic_id: &str) -> Result<Vec<String>, StoreError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT alias FROM proof_topic_alias WHERE topic_id = $1 ORDER BY alias",
+        )
+        .bind(topic_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(a,)| a).collect())
+    }
+
+    async fn delete_alias(&self, alias: &str) -> Result<bool, StoreError> {
+        let done = sqlx::query("DELETE FROM proof_topic_alias WHERE alias = $1")
+            .bind(alias)
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
     async fn put_rules(&self, rules: &RuleSet) -> Result<(), StoreError> {
         let current = self
             .current_rules(&rules.topic_id)

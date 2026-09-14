@@ -23,6 +23,7 @@ struct Inner {
     baselines: BTreeMap<String, Vec<BaselineRow>>,
     artefacts: BTreeMap<String, Vec<ArtefactRow>>,
     promotions: BTreeMap<String, Vec<PromotionRow>>,
+    aliases: BTreeMap<String, String>,
 }
 
 /// In-memory store.
@@ -80,6 +81,39 @@ impl RlmStore for MemoryRlmStore {
             });
         }
         Ok(out)
+    }
+
+    async fn put_alias(&self, alias: &str, topic_id: &str) -> Result<(), StoreError> {
+        let mut g = self.lock()?;
+        if !g.topics.contains_key(topic_id) {
+            return Err(StoreError::Malformed(format!(
+                "alias {alias:?} names topic {topic_id:?}, which has no published version"
+            )));
+        }
+        g.aliases.insert(alias.to_owned(), topic_id.to_owned());
+        Ok(())
+    }
+
+    async fn resolve_alias(&self, alias: &str) -> Result<Option<String>, StoreError> {
+        let g = self.lock()?;
+        // Fail closed like Postgres: the target must still have a version.
+        Ok(g.aliases
+            .get(alias)
+            .filter(|t| g.topics.contains_key(*t))
+            .cloned())
+    }
+
+    async fn aliases_for(&self, topic_id: &str) -> Result<Vec<String>, StoreError> {
+        let g = self.lock()?;
+        Ok(g.aliases
+            .iter()
+            .filter(|(_, t)| t.as_str() == topic_id)
+            .map(|(a, _)| a.clone())
+            .collect())
+    }
+
+    async fn delete_alias(&self, alias: &str) -> Result<bool, StoreError> {
+        Ok(self.lock()?.aliases.remove(alias).is_some())
     }
 
     async fn put_rules(&self, rules: &RuleSet) -> Result<(), StoreError> {

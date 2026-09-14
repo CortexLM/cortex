@@ -239,15 +239,49 @@ other than what was signed. A runner without a `pack_digest` is refused, as
 is a pack no runner reads. Every digest is `sha256:<64 lowercase hex>` or
 absent, never invented. Unknown keys are refused at parse.
 
+### Locked defaults
+
+| Default | Value | Where |
+|---------|-------|-------|
+| First topic slug | **`tb4`** | the signed document's `id` |
+| Temporary alias | **`tbench`** | `proof_topic_alias` row `tbench → tb4` |
+| Storage | **shared challenge DB**, `topic_id` discriminant | `proof_topic_version` (no per-topic schema) |
+| Metal install | **Owner-only, staging first** | `--owner-metal-ack` gate |
+| Custom id | `tbench` | the document's `metric.custom_id` |
+
+`tbench` is two different things and they are not the same mapping: it is the
+topic's **alias** (`show tbench` resolves to `tb4`) and also the runner
+registry's **custom id** (`PROOF_VM_RUNNER_CUSTOM_IDS=tbench`). The alias is
+temporary — retire it with `proof-admin topic alias rm tbench` once miner
+links move — while the custom id is the scoring binding and stays.
+
+```bash
+proof-admin topic alias set tbench --topic tb4   # the locked default
+proof-admin topic alias list --topic tb4
+proof-admin topic show tbench                    # resolves to tb4
+proof-admin topic alias rm tbench                # retire the temporary alias
+```
+
+An alias carries only `alias → topic_id`: no name, no pins, no status. It
+cannot drift from the topic it names, and retiring it changes nothing about
+the topic. It must name a topic that already has a published version —
+fail-closed in the store, so a stale alias resolves to *nothing* rather than
+to an empty document.
+
+**Metal is Owner-only and staging goes first.** `--env metal` is refused
+unless `--owner-metal-ack` is passed, which asserts both that an Owner
+authorized the install and that staging has passed for that bundle. The gate
+is an operator assertion, not a verified precondition: it exists so a live
+target cannot be reached by a default or a copy-pasted staging command.
+`--env staging` is never gated.
+
 **P0 scope — what this does not do.** `install` **prints** the publish call;
 it does not perform it, because publishing needs the operator bearer, which
 stays on the host. `topic enable`, `topic disable`, and `topic seal` exit
 **3** with a "not implemented in this slice" message — a topic's lifecycle is
 the signed document's `status`, so the answer is to re-sign and re-publish.
 There is no route change (P1), no allocator change (P2), no full install
-(P3), and no removal of the compiled-in topic bindings (P4). The first topic
-slug is **`tb4`**; its custom id is **`tbench`**, which is the runner-registry
-id, not an alias table — `topic show` matches the exact `topic_id`.
+(P3), and no removal of the compiled-in topic bindings (P4).
 
 ## Metric families
 

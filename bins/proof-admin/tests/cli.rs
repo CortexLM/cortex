@@ -325,6 +325,7 @@ fn dry_run_install_prints_the_existing_publish_call_and_host_env() {
         bundle.to_str().unwrap(),
         "--env",
         "metal",
+        "--owner-metal-ack",
         "--pin",
         pin.to_str().unwrap(),
         "--dry-run",
@@ -478,6 +479,7 @@ fn a_real_install_is_not_implemented_and_changes_nothing() {
         bundle.to_str().unwrap(),
         "--env",
         "metal",
+        "--owner-metal-ack",
         "--pin",
         pin.to_str().unwrap(),
     ]);
@@ -487,6 +489,166 @@ fn a_real_install_is_not_implemented_and_changes_nothing() {
     assert!(err.contains("Nothing was changed"), "{err}");
     assert!(stdout(&out).is_empty(), "a stub prints nothing to stdout");
     fs::remove_dir_all(&dir).ok();
+}
+
+/// Owner default: metal is Owner-only and staging goes first, so a metal plan
+/// without the explicit acknowledgement is a usage error, not a silent
+/// fallback and not a partial install.
+#[test]
+fn a_metal_install_requires_the_owner_acknowledgement() {
+    let dir = workdir("metal-gate");
+    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("metal"));
+    let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
+    let args = |extra: &[&str]| {
+        let mut a = vec![
+            "topic",
+            "install",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--env",
+            "metal",
+            "--pin",
+            pin.to_str().unwrap(),
+            "--dry-run",
+        ];
+        a.extend_from_slice(extra);
+        run(&a)
+    };
+
+    // Without the flag: refused, and it says how to proceed.
+    let out = args(&[]);
+    assert_eq!(code(&out), EXIT_USAGE, "stderr={}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("Owner-only"), "{err}");
+    assert!(err.contains("--owner-metal-ack"), "{err}");
+    assert!(
+        err.contains("staging has passed"),
+        "the gate must state the staging precondition: {err}"
+    );
+    assert!(
+        err.contains("--env \n             staging") || err.contains("staging --dry-run"),
+        "the gate must point at staging first: {err}"
+    );
+    assert!(stdout(&out).is_empty(), "a refused plan prints no plan");
+
+    // With the flag: the plan resolves and says the gate was acknowledged.
+    let out = args(&["--owner-metal-ack"]);
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+    assert!(
+        stdout(&out).contains("owner_gate        acknowledged"),
+        "{}",
+        stdout(&out)
+    );
+
+    // Staging is never gated: that is the default path.
+    let staging = write_file(&dir, "tb4-staging.json", &fixture::bundle_json("staging"));
+    let out = run(&[
+        "topic",
+        "install",
+        "--bundle",
+        staging.to_str().unwrap(),
+        "--env",
+        "staging",
+        "--pin",
+        pin.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+    assert!(
+        stdout(&out).contains("owner_gate        n/a (staging)"),
+        "{}",
+        stdout(&out)
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// The Owner default: slug `tb4` with `tbench` as a temporary alias. The
+/// alias resolves through the store, and the CLI says which topic it hit.
+#[tokio::test]
+async fn an_alias_resolves_to_its_topic() {
+    let Some(url) = std::env::var("DATABASE_URL")
+        .ok()
+        .map(|u| u.trim().to_owned())
+        .filter(|u| !u.is_empty())
+    else {
+        return;
+    };
+    let tp = match db::test_pool_with_url(&url).await {
+        Ok(tp) => tp,
+        Err(e) => panic!("test_pool: {e}"),
+    };
+    let store = proof_rlm_store::PgRlmStore::new(tp.pool().clone());
+    let doc = fixture::signed_topic(&format!("sha256:{}", "ab".repeat(32)));
+    proof_rlm_store::RlmStore::put_topic_version(&store, &doc)
+        .await
+        .expect("persist");
+
+    let schema = tp.schema().to_owned();
+    let scoped = format!("{url}?options=-c%20search_path%3D{schema}%2Cpublic");
+    let run_db = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_proof-admin"))
+            .args(args)
+            .env("BASE_DATABASE_URL", &scoped)
+            .env_remove("BASE_DATABASE_URL_FILE")
+            .output()
+            .expect("run proof-admin")
+    };
+
+    // Before the alias exists, the temporary slug is unknown.
+    let out = run_db(&["topic", "show", "tbench"]);
+    assert_eq!(code(&out), EXIT_ERROR, "stderr={}", stderr(&out));
+
+    // Set the Owner default alias.
+    let out = run_db(&["topic", "alias", "set", "tbench", "--topic", "tb4"]);
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+    assert!(stdout(&out).contains("tbench -> tb4"), "{}", stdout(&out));
+
+    // The alias now resolves, and the CLI says so.
+    let out = run_db(&["topic", "show", "tbench"]);
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+    let body = stdout(&out);
+    assert!(body.contains("tbench is an alias of tb4"), "{body}");
+    assert!(body.contains("topic tb4"), "{body}");
+
+    let out = run_db(&["--json", "topic", "show", "tbench"]);
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+    let parsed: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
+    assert_eq!(
+        parsed["topic_id"], "tb4",
+        "the alias reports the canonical id"
+    );
+
+    // Listing shows the temporary mapping.
+    let out = run_db(&["topic", "alias", "list", "--topic", "tb4"]);
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+    assert!(stdout(&out).contains("tbench -> tb4"), "{}", stdout(&out));
+
+    // An alias for an unpublished topic is refused.
+    let out = run_db(&[
+        "topic",
+        "alias",
+        "set",
+        "ghost",
+        "--topic",
+        "never-published",
+    ]);
+    assert_eq!(code(&out), EXIT_ERROR, "stderr={}", stderr(&out));
+    assert!(
+        stderr(&out).contains("no published version"),
+        "{}",
+        stderr(&out)
+    );
+
+    // Retiring the alias leaves the topic alone.
+    let out = run_db(&["topic", "alias", "rm", "tbench"]);
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+    let out = run_db(&["topic", "show", "tb4"]);
+    assert_eq!(code(&out), 0, "the topic survives: {}", stderr(&out));
+    let out = run_db(&["topic", "alias", "rm", "tbench"]);
+    assert_eq!(code(&out), EXIT_ERROR, "already gone: {}", stderr(&out));
+
+    tp.drop_schema().await.expect("drop");
 }
 
 #[test]
