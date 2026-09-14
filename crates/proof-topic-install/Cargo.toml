@@ -1,0 +1,28 @@
+[package]
+name = "proof-topic-install"
+description = "Proof topic install executor: applies a bundle's RLM section fail-closed (migrations, APIs, rules, submission format, executor binding) against the shared challenge DB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+proof-canon = { path = "../proof-canon" }
+proof-experiment = { path = "../proof-experiment" }
+proof-rlm = { path = "../proof-rlm" }
+proof-rlm-store = { path = "../proof-rlm-store" }
+proof-task = { path = "../proof-task" }
+proof-topic-bundle = { path = "../proof-topic-bundle" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json", "macros"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

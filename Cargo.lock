@@ -4052,6 +4052,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "proof-topic-install"
+version = "0.1.0"
+dependencies = [
+ "proof-canon",
+ "proof-experiment",
+ "proof-rlm",
+ "proof-rlm-store",
+ "proof-task",
+ "proof-topic-bundle",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "proof-vm-agent"
 version = "0.1.0"
 dependencies = [
