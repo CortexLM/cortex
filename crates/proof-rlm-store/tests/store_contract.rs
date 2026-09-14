@@ -317,14 +317,17 @@ async fn memory_store_honours_the_contract() {
 ///
 /// This is the **cross-table** race the advisory lock exists for. The alias
 /// insert and the topic publish each check the other table, and under READ
-/// COMMITTED neither sees the other's uncommitted row.
+/// COMMITTED neither sees the other's uncommitted row. Two things must hold,
+/// and the test checks both because each covers a different layer:
 ///
-/// The detector holds an alias insert **open** in one transaction and then
-/// tries to publish a topic with that slug on another connection. With the
-/// shared transaction-scoped lock the publish blocks until the holder ends;
-/// without it, the publish sees no committed alias and succeeds immediately.
-/// So "still blocked after the wait" is the pass condition — a test that only
-/// races two fast commits passes either way and would not catch a regression.
+/// 1. **Blocking.** With the shared transaction-scoped lock, the publish waits
+///    for the in-flight alias claim. Without the lock it sees no committed
+///    alias and succeeds immediately. (Pass condition: still blocked.)
+/// 2. **Rejection.** Once the alias claim *commits* and releases the lock, the
+///    waiting publish must be **refused**, not admitted — that is the
+///    publisher-side collision check. A test that only asserts the block
+///    stays green if that check is deleted, which is exactly the regression
+///    this covers.
 ///
 /// Postgres-only: the memory store has one mutex and no such race.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -344,7 +347,7 @@ async fn a_concurrent_alias_and_topic_publish_cannot_both_claim_a_slug() {
     store.put_topic_version(&doc).await.unwrap();
     let contested = "contested-slug-v0";
 
-    // A: claim `contested` as an alias, and hold the transaction open.
+    // A: claim `contested` as an alias and hold the transaction open.
     let mut holder = pool.begin().await.expect("begin holder");
     sqlx::query("INSERT INTO proof_topic_alias (alias, topic_id) VALUES ($1, $2)")
         .bind(contested)
@@ -354,39 +357,51 @@ async fn a_concurrent_alias_and_topic_publish_cannot_both_claim_a_slug() {
         .expect("alias insert inside the open transaction");
 
     // B: publish a topic whose id is `contested`, on another connection.
-    let mut publisher = pool.begin().await.expect("begin publisher");
-    let publish = sqlx::query(
-        "INSERT INTO proof_topic_version (topic_id, version, status, document, signature) \
-         VALUES ($1, 1, 'draft', '{}'::jsonb, 'sig')",
-    )
-    .bind(contested)
-    .execute(&mut *publisher);
+    let publisher_pool = pool.clone();
+    let mut publisher = tokio::spawn(async move {
+        sqlx::query(
+            "INSERT INTO proof_topic_version (topic_id, version, status, document, signature) \
+             VALUES ($1, 1, 'draft', '{}'::jsonb, 'sig')",
+        )
+        .bind(contested)
+        .execute(&publisher_pool)
+        .await
+    });
 
-    let outcome = tokio::time::timeout(std::time::Duration::from_millis(750), publish).await;
+    // 1. It must block while A is open.
+    let blocked = tokio::time::timeout(std::time::Duration::from_millis(750), &mut publisher).await;
     assert!(
-        outcome.is_err(),
+        blocked.is_err(),
         "the publish did not block on the slug claim, so an alias and a topic can both \
-         claim {contested}: {outcome:?}"
+         claim {contested}: {blocked:?}"
     );
 
-    // Releasing A lets B proceed; the invariant still holds because A's claim
-    // is then visible and B is refused.
-    holder.rollback().await.expect("rollback holder");
-    drop(publisher);
+    // A commits: the alias claim is now visible and the lock is released.
+    holder.commit().await.expect("commit the alias claim");
 
-    let second = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        store.put_alias(contested, &doc.id),
-    )
-    .await
-    .expect("the alias claim must not deadlock after the race");
-    second.expect("the alias claim is free once the race is resolved");
-
-    let is_topic = store.latest_topic(contested).await.unwrap().is_some();
-    let resolved = store.resolve_alias(contested).await.unwrap();
+    // 2. The waiting publish must be **refused**, not admitted.
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), &mut publisher)
+        .await
+        .expect("the blocked publish must finish once the claim commits")
+        .expect("the publisher task must not panic");
+    let err = outcome.expect_err(
+        "the publish was admitted after the alias claim committed, so both claimed the slug",
+    );
     assert!(
-        !(is_topic && resolved.is_some()),
-        "slug {contested} is both a published topic and an alias -> {resolved:?}"
+        err.to_string().contains("already claimed as an alias"),
+        "the publish must be refused by the collision check, got: {err}"
+    );
+
+    // And the invariant, read back: exactly one claim exists, and the slug
+    // never resolves through an alias to a different topic's document.
+    assert!(
+        store.latest_topic(contested).await.unwrap().is_none(),
+        "the refused publish must not have written a topic row"
+    );
+    assert_eq!(
+        store.resolve_alias(contested).await.unwrap().as_deref(),
+        Some(doc.id.as_str()),
+        "the alias claim is the one that won"
     );
 
     tp.drop_schema().await.expect("drop");
