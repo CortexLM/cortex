@@ -147,7 +147,8 @@ max_output_tokens = 8192
         doc
     }
 
-    /// The Arch default bundle: slug `tb4`, custom id `tbench`.
+    /// The Arch default bundle: slug `tb4`, custom id `tbench`, and the
+    /// temporary alias `tbench` the Owner default declares.
     pub fn bundle_json(environment: &str) -> String {
         let hex = "ab".repeat(32);
         let pack = format!("sha256:{hex}");
@@ -157,6 +158,7 @@ max_output_tokens = 8192
             "environment": environment,
             "display_name": "Terminal-Bench 4",
             "topic": topic,
+            "aliases": ["tbench"],
             "host": {
                 "rlm_image_digest": format!("sha256:{hex}"),
                 "experiment_image_digest": format!("sha256:{hex}"),
@@ -171,7 +173,14 @@ max_output_tokens = 8192
                 "rules": [
                     {"id": "no_short_circuit", "text": "the harness must run the task"}
                 ],
-                "submission_format": {"kind": "tar", "max_bytes": 5_242_880}
+                "migrations": [
+                    {"name": "0001_scratch", "sql": "CREATE TABLE tb4_scratch (id TEXT)"}
+                ],
+                "apis": [
+                    {"path": "status", "method": "GET", "summary": "topic status"}
+                ],
+                "submission_format": {"kind": "tar", "max_bytes": 5_242_880},
+                "scoring": {"primary": "primary_value", "epsilon_rel": 0.05}
             }
         });
         serde_json::to_string_pretty(&bundle).expect("json")
@@ -193,7 +202,19 @@ fn regenerate_dry_run_fixture() {
     let Ok(dir) = std::env::var("PROOF_ADMIN_FIXTURE_DIR") else {
         return;
     };
-    let dir = PathBuf::from(dir);
+    // `cargo test` runs with the **package** directory as the working
+    // directory, so a repo-relative value would land under
+    // `bins/proof-admin/bins/proof-admin/…`. Resolving against the workspace
+    // root is what makes the documented command write where it says.
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("bins/<pkg> sits two levels under the workspace root");
+    let dir = if Path::new(&dir).is_absolute() {
+        PathBuf::from(dir)
+    } else {
+        workspace.join(dir)
+    };
     fs::create_dir_all(&dir).expect("fixture dir");
     fs::write(
         dir.join("tb4.install-bundle.json"),
@@ -201,6 +222,7 @@ fn regenerate_dry_run_fixture() {
     )
     .expect("bundle");
     fs::write(dir.join("tb4.pin.toml"), fixture::pin_toml()).expect("pin");
+    eprintln!("wrote the dry-run fixture to {}", dir.display());
 }
 
 /// The committed dry-run fixture must stay runnable.
@@ -254,6 +276,12 @@ fn the_committed_dry_run_fixture_still_validates_and_plans() {
     assert!(
         body.contains("Hand control to the topic's RLM"),
         "the plan must show the hand-off: {body}"
+    );
+    // The fixture carries the Owner-default alias, so the plan must say so:
+    // an operator reads the plan to know what the install will do.
+    assert!(
+        body.contains("tbench"),
+        "the plan must name the alias the fixture declares: {body}"
     );
 
     // The fixture is staging-only: a metal plan must be refused, both by the

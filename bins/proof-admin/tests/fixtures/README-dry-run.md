@@ -1,11 +1,11 @@
 # `proof-admin` dry-run fixture — Owner A→Z
 
-Operator dry-run artifact for the dynamic-topics P0 skeleton (PR #297).
+Operator dry-run artifact for the dynamic-topics install path (P0 + P1a).
 **Nothing here is a production topic.**
 
 | File | What it is |
 |------|------------|
-| `tb4.install-bundle.json` | A **Topic Install Bundle**: slug `tb4`, alias `tbench`, install target `staging`, carrying a signed `TopicDocument` and an RLM install section. |
+| `tb4.install-bundle.json` | A **Topic Install Bundle**: slug `tb4`, alias `tbench`, install target `staging`, carrying a signed `TopicDocument`, an `rlm` install section (`rules`, `migrations`, `apis`, `submission_format`, `scoring`), and the Owner-default alias. |
 | `tb4.pin.toml` | The `ProofPin` that document is checked against. |
 
 ## Exact commands
@@ -32,6 +32,35 @@ cargo run --bin proof-admin -- topic validate \
 ```
 
 Both write nothing and need no database.
+
+## Running the install for real
+
+Drop `--dry-run` and supply the master and the operator bearer:
+
+```bash
+cargo run -p proof-admin-bin -- topic install \
+  --bundle bins/proof-admin/tests/fixtures/tb4.install-bundle.json \
+  --env staging \
+  --pin bins/proof-admin/tests/fixtures/tb4.pin.toml \
+  --admin-url http://127.0.0.1:8100 \
+  --admin-token-file /run/proof/admin_token
+```
+
+This fixture's document is signed by the **test** key, so a real install
+against a live master would be refused at the publish step. Use it to exercise
+the gates and the dry run; the real `tb4` document is signed by the `proof`
+row key and is a follow-up (see below).
+
+Add `--drive-rlm --owner-approved` to provision the topic VM and run the paid
+baseline; that step needs a wired topic-VM orchestrator and spends, so it is
+the Owner's call, not a walkthrough step. `--skip-baseline` stops before the
+baseline job.
+
+Read the journal back with:
+
+```bash
+BASE_DATABASE_URL=… proof-admin topic install-log --topic tb4
+```
 
 ### Two things the command needs
 
@@ -61,17 +90,20 @@ row key and is a follow-up (see below).
 - **Not a production topic.** The document is signed with a test mini-secret;
   `tb4.pin.toml` carries the matching `topic_pubkey`.
 - **Not a real RLM install.** The `rlm` section is a small illustrative sample
-  (`rules`, `submission_format`). A real bundle carries the topic's own rules,
-  migrations, APIs, submission format, and scoring — which the RLM consumes
-  and this repository never interprets.
+  (`rules`, `migrations`, `apis`, `submission_format`, `scoring`). A real
+  bundle carries the topic's own — which the RLM consumes and this repository
+  never interprets. The sample's migration (`CREATE TABLE tb4_scratch`) is
+  legal under the deny-list precisely because it stays inside the topic's own
+  namespace.
 - **Not the metal artifact.** The metal signed Operator `tb4.json` is a
   follow-up; this fixture exists so the staging A→Z walkthrough can exercise
-  `validate` and `--dry-run` today.
+  `validate`, `--dry-run`, and the install gates today.
 
 ## Staging migrate
 
-`crates/db/migrations/0024_proof_topic_alias.sql` is the **only** schema
-change in this PR.
+`crates/db/migrations/0024_proof_topic_alias.sql` and
+`crates/db/migrations/0025_proof_topic_install.sql` are the schema changes in
+this stack.
 
 **There is no manual migration command to run.** Migrations are embedded in
 the `db` crate (`sqlx::migrate!("./migrations")`) and applied automatically on
@@ -87,17 +119,22 @@ staging path is the **service restart**:
 a workspace dependency and is not installed in a clean checkout, so that
 command fails with `error: no such command: sqlx`.
 
-What it does, exactly:
+What they do, exactly:
 
-- **Adds** `proof_topic_alias` (`alias → topic_id`, plus a `topic_id` index).
-  It is a mapping and nothing else — no display name, no pins, no status, no
-  document; those stay in `proof_topic_version` (migration `0020`).
-- **Adds** `BEFORE INSERT` (and `UPDATE` on the alias table) triggers,
+- `0024` **adds** `proof_topic_alias` (`alias → topic_id`, plus a `topic_id`
+  index). It is a mapping and nothing else — no display name, no pins, no
+  status, no document; those stay in `proof_topic_version` (migration `0020`).
+  It also adds `BEFORE INSERT` (and `UPDATE` on the alias table) triggers,
   `proof_topic_alias_no_shadow` and `proof_topic_version_no_shadow`, which
   make an alias collision with a published slug fail closed in **both**
-  directions. This is a **publish-path integrity guard, not scoring math** —
-  it cannot change a score, a payout, or a sealed vector.
-- **Does not** `ALTER` or `DROP` anything: the `0020` tables keep their
+  directions. That is a publish-path integrity guard, not scoring math.
+- `0025` **adds** `proof_topic_install` (the install journal: bundle digest,
+  environment, state, rules version, rule ids, migrations applied, executor
+  binding, detail) and `proof_topic_api` (the routes a topic registers, with
+  paths stored **relative** so a row cannot escape the topic's prefix). Both
+  are append-only for `base_app`: a journal that could be edited in place
+  would not be a journal, so a re-install appends.
+- Neither **does** `ALTER` or `DROP` anything: the `0020` tables keep their
   columns, keys, and grants.
 
 ## Regenerating

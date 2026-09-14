@@ -538,6 +538,14 @@ pub(crate) fn print_plan(plan: &TopicInstallPlan, bundle_path: &Path, pin_path: 
     );
     println!("  bundle_digest     {}", plan.bundle_digest);
     println!("  pin               {}", pin_path.display());
+    println!(
+        "  aliases           {}",
+        if plan.aliases.is_empty() {
+            "-".to_owned()
+        } else {
+            plan.aliases.join(", ")
+        }
+    );
     if plan.environment == InstallEnvironment::Metal {
         println!("  owner_gate        acknowledged (Owner-only metal install)");
     } else {
@@ -550,10 +558,11 @@ pub(crate) fn print_plan(plan: &TopicInstallPlan, bundle_path: &Path, pin_path: 
         plan.rlm_jobs.join(" -> ")
     );
     if plan.rlm_install.is_some() {
-        println!("     # This bundle carries an RLM install section. It is handed to the RLM");
-        println!("     # verbatim and the admin CLI does not read into it: what the section");
-        println!("     # contains is the topic's business, not this binary's. Rust never");
-        println!("     # branches on a topic's rules, APIs, submit format, or scoring.");
+        println!("     # This bundle carries an RLM install section. A real install applies it");
+        println!("     # under two closed gates (a SQL deny-list and a handler allow-list) and");
+        println!("     # records what it did in `proof_topic_install`. The CLI itself does not");
+        println!("     # read into the section: Rust never branches on a topic's rules, APIs,");
+        println!("     # submit format, or scoring.");
     } else {
         println!("     # No RLM install section in this bundle: the RLM uses its defaults.");
     }
