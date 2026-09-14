@@ -71,15 +71,21 @@ row key and is a follow-up (see below).
 ## Staging migrate
 
 `crates/db/migrations/0024_proof_topic_alias.sql` is the **only** schema
-change in this PR. Apply it through the usual sqlx path — migrations are
-embedded and run automatically wherever `BASE_DATABASE_URL` is set (the
-gateway does this on boot), so a compose / `remote-deploy` restart is the
-path. There is no separate manual `sqlx migrate` step in this repo's deploy
-flow:
+change in this PR.
+
+**There is no manual migration command to run.** Migrations are embedded in
+the `db` crate (`sqlx::migrate!("./migrations")`) and applied automatically on
+boot wherever `BASE_DATABASE_URL` is set — the gateway does this. So the
+staging path is the **service restart**:
 
 ```bash
-cargo sqlx migrate run   # or: restart the service with BASE_DATABASE_URL set
+# Restart the master services with BASE_DATABASE_URL set (compose / remote-deploy).
+# Migrations apply on boot; no separate step.
 ```
+
+`cargo sqlx migrate run` is **not** an option in this repo: `sqlx-cli` is not
+a workspace dependency and is not installed in a clean checkout, so that
+command fails with `error: no such command: sqlx`.
 
 What it does, exactly:
 
