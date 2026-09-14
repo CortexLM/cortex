@@ -41,7 +41,6 @@ use proof_rlm_store::{MemoryRlmStore, PgRlmStore, RlmStore};
 use proof_topic_install::{PgTopicRoutes, TopicRouteMux};
 use proof_vm_fc::{parse_custom_ids, FirecrackerOrchestrator, VM_RUNNER_CUSTOM_IDS_ENV};
 use sqlx::PgPool;
-use std::sync::Arc;
 use tokio::net::TcpListener;
 
 /// Operator Proof challenge service CLI.
@@ -245,32 +244,13 @@ fn run(cli: &Cli) -> Result<(), String> {
         _ => {}
     }
     let executor = boot_executor(&pin, backend, cli.eval_executor_offer_file.as_deref());
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
 
-    let (rlm_store, pool) = rt.block_on(resolve_rlm_store(cli))?;
-    // The dynamic topic routes come from the same database: the challenge
-    // *reads* the route table an install wrote, and answers
-    // `/challenge/{topic_id}/…` from it. No database → no route table → the
-    // Proof routes alone (and a topic route is a 404 from the base router,
-    // never an answer from a table that was never read).
-    let topic_routes =
-        pool.map(|pool| Arc::new(TopicRouteMux::new(Arc::new(PgTopicRoutes::new(pool)))));
-    if topic_routes.is_some() {
-        tracing::info!(
-            "topic route mux wired: /challenge/{{topic_id}}/… resolves proof_topic_api \
-             (cache keyed by the table's generation, so an install is visible on the next \
-             request)"
-        );
-    } else {
-        tracing::warn!(
-            "no database configured; the dynamic topic routes are not served (a topic's \
-             /challenge/{{topic_id}}/… path answers 404)"
-        );
-    }
+    let (rlm_store, db_pool) = rt.block_on(resolve_rlm_store(cli))?;
+    let topic_routes = topic_route_mux(db_pool);
     let harvest = build_live_scorer(
         backend,
         cli.eval_timeout_secs,
@@ -322,18 +302,23 @@ fn run(cli: &Cli) -> Result<(), String> {
         vm_probe: Some(vm),
         epoch: 0,
     };
+    spawn_queue_drainer(cli, &rt, &state);
+    rt.block_on(serve(cli.bind, state, topic_routes))
+}
+
+/// The background queue drainer, unless the operator turned it off.
+fn spawn_queue_drainer(cli: &Cli, rt: &tokio::runtime::Runtime, state: &AppState) {
     if cli.queue_drain_poll_secs == 0 {
         tracing::info!(
             "queue drain loop disabled (PROOF_QUEUE_DRAIN_POLL_SECS=0); queued rows score only \
              through POST /v1/admin/proof/queue/drain"
         );
-    } else {
-        rt.spawn(run_queue_drainer(
-            state.clone(),
-            Duration::from_secs(cli.queue_drain_poll_secs),
-        ));
+        return;
     }
-    rt.block_on(serve(cli.bind, state, topic_routes))
+    rt.spawn(run_queue_drainer(
+        state.clone(),
+        Duration::from_secs(cli.queue_drain_poll_secs),
+    ));
 }
 
 /// Default seconds between queue-drain passes.
@@ -691,6 +676,30 @@ fn database_url(cli: &Cli) -> Result<Option<String>, String> {
         return Err("BASE_DATABASE_URL_FILE is empty".into());
     }
     Ok(Some(trimmed.to_owned()))
+}
+
+/// The dynamic topic-route mux, over the same database the RLM store uses.
+///
+/// The challenge **reads** the route table an install wrote
+/// (`proof_topic_api`) and answers `/challenge/{topic_id}/…` from it. `None`
+/// means no database was configured, so there is no route table to read: the
+/// Proof routes are served alone and a topic route is a 404 from the base
+/// router — never an answer from a table that was never read.
+fn topic_route_mux(db_pool: Option<PgPool>) -> Option<Arc<TopicRouteMux>> {
+    let mux = db_pool.map(|pool| Arc::new(TopicRouteMux::new(Arc::new(PgTopicRoutes::new(pool)))));
+    if mux.is_some() {
+        tracing::info!(
+            "topic route mux wired: /challenge/{{topic_id}}/… resolves proof_topic_api \
+             (cache keyed by the table's generation, so an install is visible on the next \
+             request)"
+        );
+    } else {
+        tracing::warn!(
+            "no database configured; the dynamic topic routes are not served (a topic's \
+             /challenge/{{topic_id}}/… path answers 404)"
+        );
+    }
+    mux
 }
 
 /// Postgres RLM store when a database is configured, in-memory otherwise.

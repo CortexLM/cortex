@@ -1337,7 +1337,8 @@ async fn an_experiment_topic_measures_its_baseline_in_a_dedicated_vm() {
 async fn skipping_the_baseline_pauses_and_a_later_run_resumes() {
     let root = tmp_root("skip-baseline");
     let key = root.join("owner_key");
-    let orchestrator = Arc::new(FakeOrchestrator::new());
+    std::fs::write(&key, "not-a-real-secret\n").unwrap();
+    let orchestrator = FakeOrchestrator::new(0.42);
     let rlm_store: Arc<MemoryRlmStore> = Arc::new(MemoryRlmStore::new());
     let mut draft = topic();
     draft.status = TopicStatus::Draft;
@@ -1392,10 +1393,16 @@ async fn skipping_the_baseline_pauses_and_a_later_run_resumes() {
         .await
         .expect("the resume measures the baseline");
     assert!(resumed.measured_baseline());
+    // The resume re-proposes rules, and the store is append-only: the RLM's
+    // second proposal is version 2, not a rewrite of version 1. What the
+    // scoring gate reads afterwards is the newest proposal.
     assert_eq!(
-        resumed.rules_version, 1,
-        "the rules are not re-versioned by the resume"
+        resumed.rules_version, 2,
+        "the resume's proposal lands as the next version"
     );
+    let rules = rlm_store.current_rules(&draft.id).await.unwrap().unwrap();
+    assert_eq!(rules.version, 2, "and it is the topic's current rules");
+    assert_eq!(rules.source, proof_rlm::RuleSource::Rlm);
     assert!(
         rlm_store.baseline(&draft.id).await.unwrap().is_some(),
         "the resume recorded the baseline"
@@ -1415,7 +1422,8 @@ async fn skipping_the_baseline_pauses_and_a_later_run_resumes() {
 async fn measuring_a_baseline_without_an_offer_is_refused() {
     let root = tmp_root("no-offer");
     let key = root.join("owner_key");
-    let orchestrator = Arc::new(FakeOrchestrator::new());
+    std::fs::write(&key, "not-a-real-secret\n").unwrap();
+    let orchestrator = FakeOrchestrator::new(0.42);
     let rlm_store: Arc<MemoryRlmStore> = Arc::new(MemoryRlmStore::new());
     let mut draft = topic();
     draft.status = TopicStatus::Draft;

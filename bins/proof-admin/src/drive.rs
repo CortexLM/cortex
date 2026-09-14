@@ -64,11 +64,17 @@ impl DriveOutcome {
 
 /// Drive the RLM setup for `topic`.
 ///
+/// Every parameter is a piece of host configuration the driver must check
+/// **before** it forwards the first job, and each one is named in the refusal
+/// it produces — so they are explicit here rather than bundled into a config
+/// struct a caller could half-fill.
+///
 /// # Errors
 ///
 /// [`Failure::Usage`] for a missing piece of host configuration (naming the
 /// env var), [`Failure::Error`] for a refusal from the orchestrator, the
 /// lifecycle, or the store.
+#[allow(clippy::too_many_arguments)]
 pub async fn drive(
     topic: &TopicDocument,
     pin: &ProofPin,
@@ -145,7 +151,7 @@ fn resolve_orchestrator(
     // Presence only: `FirecrackerOrchestrator::from_env` reads the env itself,
     // so the CLI checks that each piece *is* set (and names the missing one)
     // without duplicating the client's parsing and validation.
-    if url.map(str::trim).filter(|u| !u.is_empty()).is_none() {
+    if url.map(str::trim).is_none_or(str::is_empty) {
         return Err(Failure::Usage(format!(
             "driving the RLM needs the topic-VM orchestrator: set {VM_ORCHESTRATOR_URL_ENV} \
              (https, the KVM host agent) plus {VM_ORCHESTRATOR_TOKEN_FILE_ENV} and \
@@ -159,11 +165,7 @@ fn resolve_orchestrator(
              for the topic-VM orchestrator. It is re-read per request and never logged."
         )));
     }
-    if image_digest
-        .map(str::trim)
-        .filter(|d| !d.is_empty())
-        .is_none()
-    {
+    if image_digest.map(str::trim).is_none_or(str::is_empty) {
         return Err(Failure::Usage(format!(
             "driving the RLM needs {RLM_VM_IMAGE_DIGEST_ENV}: the sha256 digest of the RLM VM \
              image the orchestrator boots. A digest is never invented."

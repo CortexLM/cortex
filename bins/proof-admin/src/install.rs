@@ -3,34 +3,44 @@
 //! The procedure is the same in both modes; only the writes differ. A dry run
 //! stops after the plan is printed. A real install:
 //!
-//! 1. **Publishes** the signed document through the existing admin route
-//!    (`POST /v1/admin/proof/topics`), with the operator bearer read from a
-//!    file — never printed, never logged.
-//! 2. **Applies** the bundle's RLM section through
-//!    [`proof_topic_install::Installer`]: migrations under the deny-list,
-//!    routes, the rule vector, and the executor binding.
-//! 3. **Points** the bundle's declared aliases at the topic.
-//! 4. **Drives** the topic's RLM setup (`TopicSetup`: provision →
+//! 1. **Drives** the topic's RLM setup (`TopicSetup`: provision →
 //!    `propose_rules` → baseline) when `--drive-rlm` is given. This is the
 //!    step that provisions a VM and runs a paid baseline, so it needs
 //!    `--owner-approved` as well.
+//! 2. **Applies** the bundle's RLM section through
+//!    [`proof_topic_install::Installer`]: migrations under the deny-list,
+//!    routes, the rule vector, and the executor binding.
+//! 3. **Publishes** the signed document through the existing admin route
+//!    (`POST /v1/admin/proof/topics`), with the operator bearer read from a
+//!    file — never printed, never logged.
+//! 4. **Points** the bundle's declared aliases at the topic.
 //!
-//! # Why the order is publish-last for a *new* topic, and why it is not here
+//! # Why the publish is last
 //!
-//! The document is published first because everything after it needs the
-//! topic to exist in the registry: the rule store keys on `topic_id`, the
-//! route table keys on it, and the RLM setup reads the published document.
-//! What makes that safe is the **status**: an install publishes the document
-//! exactly as the operator signed it, and a topic that is not `open` cannot
-//! be submitted to. A failed install therefore leaves a `draft` topic that
-//! miners cannot reach — never a half-live one.
+//! Publishing is what makes a topic **reachable**: a miner can submit to a
+//! document whose `status` is `open`, and the topic's routes answer as soon as
+//! their rows are in `proof_topic_api`. The install before it is the fallible
+//! half — a deny-listed migration, a refused handler, an unregistered custom
+//! id, a store error — and every one of those failures leaves the topic
+//! **unpublished**: there is nothing for a miner to reach, so a failed install
+//! cannot produce a topic that is live but not installed.
+//!
+//! The other order (publish, then install) makes an `open` document
+//! submitable for as long as the install takes, and leaves it submitable
+//! forever if the install fails. Its old justification was that the topic had
+//! to exist before the rest could key on it; it does not — the rule store,
+//! the route table, and the journal all key on `topic_id` with no dependency
+//! on the published row, and the RLM setup writes the document itself when it
+//! is not there yet. Aliases are the one step that does need a published
+//! topic, which is why they stay last.
 //!
 //! # Fail-closed, and what the operator does next
 //!
 //! Any refusal stops the install and prints rollback notes naming the step
-//! that failed and what remains to undo. The topic stays draft/disabled; the
-//! install journal (`proof_topic_install`) records the attempt so the next
-//! run resumes from the migrations that already applied.
+//! that failed and what remains to undo. Nothing is published unless the
+//! install reached green, so the topic is not reachable at all; the install
+//! journal (`proof_topic_install`) records the attempt so the next run
+//! resumes from the migrations that already applied.
 
 use std::path::{Path, PathBuf};
 
@@ -147,6 +157,12 @@ pub async fn run(opts: &Options, args: &InstallArgs<'_>) -> Result<(), Failure> 
 }
 
 /// The real install.
+///
+/// One function rather than a chain of helpers because the **order** is the
+/// contract here: drive → apply → publish → aliases, each step's output
+/// feeding the next, and a reader has to be able to see that no step runs
+/// before the one it depends on.
+#[allow(clippy::too_many_lines)]
 async fn run_real(
     opts: &Options,
     args: &InstallArgs<'_>,
@@ -178,25 +194,18 @@ async fn run_real(
         println!("  bundle_digest     {bundle_digest}");
         println!("  admin             {}", admin.redacted());
         println!();
-        println!("1) Publish the signed document through the existing admin route…");
-    }
-    admin
-        .publish(&bundle.topic)
-        .await
-        .map_err(|e| Failure::Error(publish_failure(&e)))?;
-    if !opts.json {
-        println!("   published (the topic's status is the document's own).");
-        println!();
-        println!("2) Apply the RLM install section…");
+        println!(
+            "1) Apply the RLM install section (the topic is not published until this is green)…"
+        );
     }
 
     let installer = Installer {
         pool: &pool,
         store: &store,
     };
-    // The RLM setup is driven **after** the static half lands, so the rules
-    // the driver proposes supersede a version the topic already has rather
-    // than being overwritten by the bundle's vector.
+    // The RLM setup is driven **before** the static half lands, so the rules
+    // the driver proposes are the topic's current version and the install
+    // keeps them rather than overwriting them with the bundle's vector.
     let driven = if args.drive_rlm {
         if !opts.json {
             println!("   (driving the RLM: provision → rules → baseline)");
@@ -244,6 +253,21 @@ async fn run_real(
             println!("   rlm_drive         {}", outcome.summary());
             println!("   lifecycle         {}", outcome.state);
         }
+        println!();
+        println!("2) Publish the signed document through the existing admin route…");
+    }
+    // Publish **last**, once the install is green: a document reaches the
+    // registry only when the rules, routes, and migrations it depends on are
+    // already in place, so an `open` topic is never submitable before its
+    // install landed.
+    admin
+        .publish(&bundle.topic)
+        .await
+        .map_err(|e| Failure::Error(publish_failure(&e, &report)))?;
+    if !opts.json {
+        println!("   published (the topic's status is the document's own).");
+        println!();
+        println!("3) Point the bundle's aliases at the topic…");
     }
 
     // Aliases last: they are a lookup convenience, so a failure here leaves
@@ -304,12 +328,13 @@ async fn run_real(
 /// baseline would leave a topic that is half-installed for no reason.
 fn load_offer(path: Option<&Path>, pin: &ProofPin) -> Result<InferenceOffer, Failure> {
     let Some(path) = path else {
-        return Err(Failure::Usage(format!(
+        return Err(Failure::Usage(
             "driving the RLM measures a baseline, which is a paid run that needs a live judge \
              offer: set PROOF_INFERENCE_OFFER_FILE (or pass --inference-offer-file). To install \
              without measuring one, add --skip-baseline — but note the topic cannot open until a \
              baseline is sealed."
-        )));
+                .to_owned(),
+        ));
     };
     let body = std::fs::read_to_string(path)
         .map_err(|e| Failure::Error(format!("read {}: {e}", path.display())))?;
@@ -529,10 +554,21 @@ impl AdminTarget {
 }
 
 /// Turn a publish refusal into an operator instruction.
-fn publish_failure(why: &str) -> String {
+///
+/// The install has already run by the time this can happen, so the message
+/// says what is and is not in place rather than claiming nothing changed.
+fn publish_failure(why: &str, report: &proof_topic_install::InstallReport) -> String {
     format!(
-        "the publish step failed, so nothing was applied: {why}\n  Nothing was changed on the \
-         host. Check the admin URL and bearer, then re-run."
+        "the install is applied, but the publish step failed: {why}\n  The topic is NOT \
+         published, so miners cannot reach it and nothing is live. What is already in place:\n  \
+         - the RLM install section applied (journal row {}, {} migration(s) applied, {} already \
+         applied, rules v{})\n  - the routes it registered are in `proof_topic_api`\n  Nothing \
+         needs to be undone. Fix the admin URL or bearer and re-run the same command: the \
+         install resumes (its migrations are skipped) and publishes.",
+        report.journal_id,
+        report.migrations_applied.len(),
+        report.migrations_skipped.len(),
+        report.rules_version
     )
 }
 
@@ -554,12 +590,12 @@ fn install_failure(err: &InstallError, topic_id: &str) -> String {
     };
     format!(
         "the install stopped: {step}\n  {err}\n\n  Rollback notes — what is and is not changed:\n  \
-         - The topic's status is the published document's own, and an install never publishes an \
-         `open`\n    document, so the topic is draft/disabled and miners cannot submit to it.\n  \
-         - Migrations already applied are recorded in `proof_topic_install`; a re-run skips \
-         them\n    (they are not rolled back automatically — drop them by hand if the bundle is \
-         being\n    replaced rather than fixed).\n  - Rules already installed stay installed; a \
-         re-run keeps the version it finds.\n  - Inspect the journal: \
+         - The document was **not** published: publishing is the last step, so the topic is not \
+         in the\n    registry at all and miners cannot reach it (no status, no route, no \
+         submission).\n  - Migrations already applied are recorded in `proof_topic_install`; a \
+         re-run skips\n    them\n    (they are not rolled back automatically — drop them by hand \
+         if the bundle is being\n    replaced rather than fixed).\n  - Rules already installed \
+         stay installed; a re-run keeps the version it finds.\n  - Inspect the journal: \
          `proof-admin topic install-log --topic {topic_id}`\n  - Fix the bundle and re-run the \
          same command; the install resumes rather than restarts."
     )

@@ -346,20 +346,34 @@ proof-admin topic install \
 
 What it does, in order:
 
-1. **Publishes** the signed document through the existing admin route. The
-   bearer is read from the file and never printed or logged. A missing URL, a
-   missing token file, or an empty one is a **usage error before anything is
-   written**, so a misconfiguration cannot leave a half-installed topic.
-2. **Applies** the bundle's RLM section: its `migrations` (under the
-   deny-list), its `apis` (recorded as topic-scoped routes), its `rules`
-   (installed through the store the scoring path reads), and its `scoring` /
-   `submission_format` digests. All of it lands in the install journal.
-3. **Points** the bundle's declared `aliases` at the topic.
-4. **Drives** the RLM's own lifecycle — `provision` → `propose_rules` →
+1. **Drives** the RLM's own lifecycle — `provision` → `propose_rules` →
    `baseline` — but only with `--drive-rlm`, because that provisions a VM and
    runs a paid baseline. `--drive-rlm` therefore also requires
    `--owner-approved`. `--skip-baseline` stops before the baseline job (it
    requires `--drive-rlm`, since otherwise the install never gets there).
+2. **Applies** the bundle's RLM section: its `migrations` (under the
+   deny-list), its `apis` (recorded as topic-scoped routes), its `rules`
+   (installed through the store the scoring path reads), and its `scoring` /
+   `submission_format` digests. All of it lands in the install journal.
+3. **Publishes** the signed document through the existing admin route — the
+   bearer is read from the file and never printed or logged. A missing URL, a
+   missing token file, or an empty one is a **usage error before anything is
+   written**.
+4. **Points** the bundle's declared `aliases` at the topic.
+
+**The publish is last on purpose.** Publishing is what makes a topic
+reachable: a miner can submit to a document whose `status` is `open`, and a
+topic's routes answer as soon as their rows are in `proof_topic_api`. The
+install before it is the fallible half — a deny-listed migration, a refused
+handler, an unregistered custom id, a store error — so a failed install
+publishes **nothing at all** and there is no live-but-uninstalled topic. The
+reverse order makes an `open` document submitable for as long as the install
+takes, and leaves it submitable forever if the install fails. The old
+justification (the topic has to exist before the rest can key on it) does not
+hold: the rule store, the route table, and the journal all key on `topic_id`
+with no dependency on the published row, and the RLM setup writes the
+document itself when it is not there yet. Only the aliases need a published
+topic, which is why they stay last.
 
 `topic install-log --topic <id>` reads the journal back: which bundle digest
 was applied, whether the install reached `applied`, which migrations and
@@ -428,8 +442,9 @@ for a topic id exactly as it is for a challenge id.
 
 #### Fail-closed, and what an operator does next
 
-An install never publishes an `open` document, so a failed install leaves the
-topic **draft or disabled** and miners cannot submit to it. Two failure
+An install publishes the document **only after** every step succeeded, so a
+failed install leaves the topic **unpublished**: not in the registry at all,
+so there is no status to submit to and no route to reach. Two failure
 shapes:
 
 - A **pre-flight refusal** (the deny-list, the handler allow-list, the
@@ -440,6 +455,10 @@ shapes:
   stay applied and are recorded, so a re-run **resumes** rather than
   restarts. Every refusal prints rollback notes saying exactly what is and is
   not changed.
+
+A **publish failure** is the one failure that happens after the install is
+green: the topic is not live, nothing needs undoing, and a re-run skips the
+applied migrations and publishes.
 
 **Still not implemented:** `topic enable`, `topic disable`, and `topic seal`
 exit **3** with a "not implemented in this slice" message — a topic's

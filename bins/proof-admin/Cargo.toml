@@ -34,7 +34,7 @@ db = { path = "../../crates/db", features = ["testing"] }
 hex = "0.4"
 proof-experiment = { path = "../../crates/proof-experiment" }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "net", "io-util", "rt-multi-thread"] }
 
 [lints]
 workspace = true

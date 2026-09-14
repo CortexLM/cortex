@@ -16,6 +16,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Arc, Mutex};
 
 /// Exit code for a failure (bad bundle, refused document, ...).
 const EXIT_ERROR: i32 = 1;
@@ -1150,5 +1151,307 @@ async fn the_registry_view_lists_what_the_scoring_path_persisted() {
         stderr(&out)
     );
 
+    tp.drop_schema().await.expect("drop");
+}
+
+// ---------------------------------------------------------------------------
+// The publish order: an `open` document is not publishable before the install
+// ---------------------------------------------------------------------------
+
+/// What the stub saw in the database **at the moment** the publish arrived.
+type PublishProbe = Option<(String, String)>;
+
+/// A minimal `POST /v1/admin/proof/topics` stub.
+///
+/// It records every request it receives, and — when it is given a pool — reads
+/// the install journal and the migration's table *inside* the publish handler,
+/// so the test can assert what was in place **before** the topic became
+/// reachable rather than after the process exited.
+struct AdminStub {
+    addr: std::net::SocketAddr,
+    requests: Arc<Mutex<Vec<String>>>,
+    at_publish: Arc<Mutex<PublishProbe>>,
+}
+
+impl AdminStub {
+    async fn start(probe: Option<sqlx::PgPool>) -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub");
+        let addr = listener.local_addr().expect("addr");
+        let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let at_publish: Arc<Mutex<PublishProbe>> = Arc::new(Mutex::new(None));
+        let held_requests = Arc::clone(&requests);
+        let held_probe = Arc::clone(&at_publish);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let requests = Arc::clone(&held_requests);
+                let at_publish = Arc::clone(&held_probe);
+                let probe = probe.clone();
+                tokio::spawn(async move {
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    // Headers, then the body the Content-Length promises.
+                    let (head, body) = loop {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                        let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&buf[..end]).into_owned();
+                        let want = head
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.eq_ignore_ascii_case("content-length")
+                                    .then(|| v.trim().parse::<usize>().ok())?
+                            })
+                            .unwrap_or(0);
+                        if buf.len() >= end + 4 + want {
+                            break (head, String::from_utf8_lossy(&buf[end + 4..]).into_owned());
+                        }
+                    };
+                    let request_line = head.lines().next().unwrap_or_default().to_owned();
+                    let path = request_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("")
+                        .to_owned();
+                    if path == "/challenge/proof/v1/admin/proof/topics" {
+                        let seen = match &probe {
+                            Some(pool) => {
+                                let state: Option<String> = sqlx::query_scalar(
+                                    "SELECT state FROM proof_topic_install \
+                                     WHERE topic_id = 'tb4' ORDER BY id DESC LIMIT 1",
+                                )
+                                .fetch_optional(pool)
+                                .await
+                                .ok()
+                                .flatten();
+                                let table: Option<String> =
+                                    sqlx::query_scalar("SELECT to_regclass('tb4_scratch')::text")
+                                        .fetch_optional(pool)
+                                        .await
+                                        .ok()
+                                        .flatten();
+                                Some((
+                                    state.unwrap_or_else(|| "no row".into()),
+                                    table.unwrap_or_else(|| "no table".into()),
+                                ))
+                            }
+                            None => None,
+                        };
+                        if let Some(seen) = seen {
+                            *at_publish.lock().unwrap() = Some(seen);
+                        }
+                    }
+                    requests.lock().unwrap().push(request_line);
+                    let _ = body;
+                    let body = r#"{"ok":true}"#;
+                    let response = format!(
+                        "HTTP/1.1 201 Created\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        Self {
+            addr,
+            requests,
+            at_publish,
+        }
+    }
+
+    fn publish_requests(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.contains("/challenge/proof/v1/admin/proof/topics"))
+            .cloned()
+            .collect()
+    }
+}
+
+/// The publish happens **after** the install reached green — never before.
+///
+/// The stub reads the journal and the migration's table inside the publish
+/// handler, so this asserts the state a miner would have found at the instant
+/// the topic became reachable: rules installed, migrations applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_publish_lands_only_after_the_install_is_green() {
+    let Some(url) = std::env::var("DATABASE_URL")
+        .ok()
+        .map(|u| u.trim().to_owned())
+        .filter(|u| !u.is_empty())
+    else {
+        return;
+    };
+    let tp = match db::test_pool_with_url(&url).await {
+        Ok(tp) => tp,
+        Err(e) => panic!("test_pool: {e}"),
+    };
+    let schema = tp.schema().to_owned();
+    let scoped = format!("{url}?options=-c%20search_path%3D{schema}%2Cpublic");
+    let probe_pool = db::connect(&scoped).await.expect("probe pool");
+    let stub = AdminStub::start(Some(probe_pool.clone())).await;
+
+    // The document's own version, as the RLM setup (or an earlier publish)
+    // leaves it: the alias step is the one part of the install that keys on a
+    // persisted version rather than on `topic_id` alone.
+    let store = proof_rlm_store::PgRlmStore::new(probe_pool.clone());
+    proof_rlm_store::RlmStore::put_topic_version(
+        &store,
+        &fixture::signed_topic(&format!("sha256:{}", "ab".repeat(32))),
+    )
+    .await
+    .expect("persist the document");
+
+    let dir = workdir("publish-order");
+    let bundle = write_file(&dir, "b.json", &fixture::bundle_json("staging"));
+    let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
+    let token = write_file(&dir, "token", "operator-bearer-not-a-real-one\n");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_proof-admin"))
+        .args([
+            "topic",
+            "install",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--env",
+            "staging",
+            "--pin",
+            pin.to_str().unwrap(),
+            "--admin-url",
+            &format!("http://{}", stub.addr),
+            "--admin-token-file",
+            token.to_str().unwrap(),
+        ])
+        .env("BASE_DATABASE_URL", &scoped)
+        .env_remove("BASE_DATABASE_URL_FILE")
+        .output()
+        .expect("run proof-admin");
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+
+    let published = stub.publish_requests();
+    assert_eq!(published.len(), 1, "one publish: {published:?}");
+    let (state, table) = stub
+        .at_publish
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the stub saw a publish");
+    assert_eq!(
+        state, "applied",
+        "the install must be green before the topic is published"
+    );
+    assert_eq!(
+        table, "tb4_scratch",
+        "the migration must have applied before the topic is published"
+    );
+
+    // And the install is complete afterwards: the journal's newest row is
+    // `applied` with the migration recorded.
+    let row = proof_topic_install::latest_install(&probe_pool, "tb4")
+        .await
+        .expect("journal")
+        .expect("a row");
+    assert_eq!(row.state, "applied");
+    assert_eq!(row.migrations, ["0001_scratch"]);
+
+    fs::remove_dir_all(&dir).ok();
+    tp.drop_schema().await.expect("drop");
+}
+
+/// A refused install publishes **nothing at all**: no document reaches the
+/// registry, so there is no `open` topic for a miner to submit to while its
+/// migrations, routes, and rules are missing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_install_never_publishes() {
+    let Some(url) = std::env::var("DATABASE_URL")
+        .ok()
+        .map(|u| u.trim().to_owned())
+        .filter(|u| !u.is_empty())
+    else {
+        return;
+    };
+    let tp = match db::test_pool_with_url(&url).await {
+        Ok(tp) => tp,
+        Err(e) => panic!("test_pool: {e}"),
+    };
+    let schema = tp.schema().to_owned();
+    let scoped = format!("{url}?options=-c%20search_path%3D{schema}%2Cpublic");
+    let stub = AdminStub::start(None).await;
+
+    let dir = workdir("publish-refused");
+    // The same bundle, with a migration the deny-list refuses. The document
+    // and its signature are untouched, so the refusal comes from the install.
+    let denied = fixture::bundle_json("staging").replace(
+        "CREATE TABLE tb4_scratch (id TEXT)",
+        "DROP TABLE proof_rule_version",
+    );
+    assert!(denied.contains("proof_rule_version"), "the swap applied");
+    let bundle = write_file(&dir, "b.json", &denied);
+    let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
+    let token = write_file(&dir, "token", "operator-bearer-not-a-real-one\n");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_proof-admin"))
+        .args([
+            "topic",
+            "install",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--env",
+            "staging",
+            "--pin",
+            pin.to_str().unwrap(),
+            "--admin-url",
+            &format!("http://{}", stub.addr),
+            "--admin-token-file",
+            token.to_str().unwrap(),
+        ])
+        .env("BASE_DATABASE_URL", &scoped)
+        .env_remove("BASE_DATABASE_URL_FILE")
+        .output()
+        .expect("run proof-admin");
+    assert_eq!(code(&out), EXIT_ERROR, "stderr={}", stderr(&out));
+    assert!(
+        stderr(&out).contains("deny-list"),
+        "the refusal names the gate: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("was **not** published"),
+        "the rollback notes must say nothing was published: {}",
+        stderr(&out)
+    );
+    assert!(
+        stub.publish_requests().is_empty(),
+        "a refused install must publish nothing: {:?}",
+        stub.publish_requests()
+    );
+
+    // Nothing was installed either: no journal row, no table.
+    let row = proof_topic_install::latest_install(tp.pool(), "tb4")
+        .await
+        .expect("journal");
+    assert!(row.is_none(), "a pre-flight refusal writes no journal row");
+    let table: Option<String> = sqlx::query_scalar("SELECT to_regclass('tb4_scratch')::text")
+        .fetch_one(tp.pool())
+        .await
+        .expect("probe");
+    assert!(table.is_none(), "and no migration ran: {table:?}");
+
+    fs::remove_dir_all(&dir).ok();
     tp.drop_schema().await.expect("drop");
 }
