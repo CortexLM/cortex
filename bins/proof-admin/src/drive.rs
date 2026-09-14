@@ -91,11 +91,8 @@ pub async fn drive(
     // The VM boundary. `FirecrackerOrchestrator::from_env` is the same reader
     // the challenge service uses; the CLI does not re-implement it, so a host
     // wired for scoring is wired for install and vice versa.
-    let orchestrator = resolve_orchestrator(
-        orchestrator_url,
-        orchestrator_token_file,
-        rlm_image_digest,
-    )?;
+    let orchestrator =
+        resolve_orchestrator(orchestrator_url, orchestrator_token_file, rlm_image_digest)?;
     // A baseline is a paid run: without an offer there is nothing to measure
     // against. `--skip-baseline` is the path that does not need one.
     if offer.is_none() && !skip_baseline {
@@ -162,7 +159,11 @@ fn resolve_orchestrator(
              for the topic-VM orchestrator. It is re-read per request and never logged."
         )));
     }
-    if image_digest.map(str::trim).filter(|d| !d.is_empty()).is_none() {
+    if image_digest
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .is_none()
+    {
         return Err(Failure::Usage(format!(
             "driving the RLM needs {RLM_VM_IMAGE_DIGEST_ENV}: the sha256 digest of the RLM VM \
              image the orchestrator boots. A digest is never invented."

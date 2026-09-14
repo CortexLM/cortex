@@ -170,11 +170,7 @@ enum TopicCmd {
         #[arg(long, env = "PROOF_INFERENCE_OFFER_FILE", value_name = "PATH")]
         inference_offer_file: Option<PathBuf>,
         /// Owner inference key file the lifecycle's key probe checks.
-        #[arg(
-            long,
-            env = "PROOF_RLM_OWNER_INFERENCE_KEY_FILE",
-            value_name = "PATH"
-        )]
+        #[arg(long, env = "PROOF_RLM_OWNER_INFERENCE_KEY_FILE", value_name = "PATH")]
         owner_key_file: Option<PathBuf>,
     },
     /// List installed topics: a read-only view of `proof_topic_version`.

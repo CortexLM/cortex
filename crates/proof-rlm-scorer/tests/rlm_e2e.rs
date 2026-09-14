@@ -1071,7 +1071,10 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
 
     // Approved but no key file: stops at awaiting_owner_keys, nothing provisioned.
     setup.owner = Arc::new(StaticOwnerHook(OwnerDecision::Approve));
-    let err = setup.run(&draft, &pin, Some(&offer())).await.expect_err("no key");
+    let err = setup
+        .run(&draft, &pin, Some(&offer()))
+        .await
+        .expect_err("no key");
     assert!(err.to_string().contains("owner keys not present"), "{err}");
     assert_eq!(
         rlm_store.lifecycle(&draft.id).await.unwrap().unwrap().state,
@@ -1083,7 +1086,10 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
     // (custom / agent setup does not gate on FLOP accounting).
     std::fs::write(&key, "not-a-real-secret\n").unwrap();
     orchestrator.set_flops_used(None);
-    let out = setup.run(&draft, &pin, Some(&offer())).await.expect("setup");
+    let out = setup
+        .run(&draft, &pin, Some(&offer()))
+        .await
+        .expect("setup");
     assert_eq!(out.rules_version, 1);
     assert!((out.baseline_primary.expect("measured") - 0.42).abs() < 1e-12);
     assert_eq!(
@@ -1246,7 +1252,10 @@ async fn an_experiment_topic_measures_its_baseline_in_a_dedicated_vm() {
         spend_cap_usd: None,
         skip_baseline: false,
     };
-    let out = setup.run(&draft, &pin, Some(&offer())).await.expect("setup");
+    let out = setup
+        .run(&draft, &pin, Some(&offer()))
+        .await
+        .expect("setup");
     assert!((out.baseline_primary.expect("measured") - 0.61).abs() < 1e-12);
     assert_eq!(
         orchestrator.created(),
