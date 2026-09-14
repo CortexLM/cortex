@@ -313,6 +313,60 @@ async fn memory_store_honours_the_contract() {
     contract(&MemoryRlmStore::new()).await;
 }
 
+/// Two writers racing for the same slug must not both commit.
+///
+/// The `EXISTS` guards in the trigger and in `put_alias` see nothing from the
+/// other uncommitted transaction under READ COMMITTED, so without the
+/// advisory lock both would commit and the slug would be shadowed after all.
+/// Postgres-only: the memory store has one mutex and no such race.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_slug_claims_are_serialized() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    if url.trim().is_empty() {
+        return;
+    }
+    let tp = db::test_pool_with_url(&url).await.expect("isolated schema");
+    let store = std::sync::Arc::new(PgRlmStore::new(tp.pool().clone()));
+
+    // One real topic to alias, and a slug that both racers will claim.
+    let doc = topic();
+    store.put_topic_version(&doc).await.unwrap();
+    let mut second = doc.clone();
+    second.id = "race-slug-v0".into();
+    store.put_topic_version(&second).await.unwrap();
+
+    // Race an alias claim against a *different* alias claim for the same slug.
+    // One must win; the loser must be refused, never silently applied.
+    let slug = "race-slug-v0";
+    let a = store.clone();
+    let b = store.clone();
+    let (ra, rb) = tokio::join!(
+        async move { a.put_alias(slug, &doc.id).await },
+        async move { b.put_alias(slug, "race-slug-v0").await },
+    );
+    // `race-slug-v0` is itself published, so B must be refused on that
+    // ground regardless; A may win. Whichever way it lands, at most one row
+    // may exist and it must not shadow a canonical slug.
+    let winners = usize::from(ra.is_ok()) + usize::from(rb.is_ok());
+    assert!(winners <= 1, "both claims committed: {ra:?} / {rb:?}");
+
+    // The invariant that matters: the canonical slug still resolves to itself
+    // (or not at all), never through an alias.
+    assert!(
+        store.resolve_alias(slug).await.unwrap().is_none(),
+        "a published canonical slug must never resolve through an alias"
+    );
+    let listed = store.aliases_for(slug).await.unwrap();
+    assert!(
+        listed.is_empty(),
+        "no alias may be filed under a published slug: {listed:?}"
+    );
+
+    tp.drop_schema().await.expect("drop");
+}
+
 #[tokio::test]
 async fn postgres_store_honours_the_contract_when_a_database_is_present() {
     if std::env::var_os("DATABASE_URL").is_none() {

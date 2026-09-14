@@ -54,16 +54,35 @@ CREATE INDEX ix_proof_topic_alias_topic ON proof_topic_alias (topic_id);
 -- `(topic_id, version)`), so the shadow guard cannot be a UNIQUE constraint.
 -- It is a trigger instead, checked in both directions: a published topic may
 -- not be claimed as an alias, and an alias may not be published as a topic.
+--
+-- An `EXISTS` check alone is not enough: under READ COMMITTED two concurrent
+-- claims for the same slug each see no row from the other, so *both* commit
+-- and the slug is shadowed after all. A transaction-scoped advisory lock on
+-- the slug serializes the pair, so the second claim blocks until the first
+-- commits and then sees it. The lock is keyed on the slug, so unrelated
+-- topics never contend, and it is released automatically at commit/rollback.
+CREATE OR REPLACE FUNCTION proof_topic_claim_lock(slug text) RETURNS void AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(slug, 0));
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION proof_topic_alias_no_shadow() RETURNS trigger AS $$
+DECLARE
+    slug text;
 BEGIN
     IF TG_TABLE_NAME = 'proof_topic_alias' THEN
-        IF EXISTS (SELECT 1 FROM proof_topic_version WHERE topic_id = NEW.alias) THEN
-            RAISE EXCEPTION 'alias % is already a published topic id', NEW.alias
+        slug := NEW.alias;
+        PERFORM proof_topic_claim_lock(slug);
+        IF EXISTS (SELECT 1 FROM proof_topic_version WHERE topic_id = slug) THEN
+            RAISE EXCEPTION 'alias % is already a published topic id', slug
                 USING ERRCODE = 'check_violation';
         END IF;
     ELSE
-        IF EXISTS (SELECT 1 FROM proof_topic_alias WHERE alias = NEW.topic_id) THEN
-            RAISE EXCEPTION 'topic % is already claimed as an alias', NEW.topic_id
+        slug := NEW.topic_id;
+        PERFORM proof_topic_claim_lock(slug);
+        IF EXISTS (SELECT 1 FROM proof_topic_alias WHERE alias = slug) THEN
+            RAISE EXCEPTION 'topic % is already claimed as an alias', slug
                 USING ERRCODE = 'check_violation';
         END IF;
     END IF;

@@ -219,10 +219,28 @@ impl RlmStore for PgRlmStore {
     }
 
     async fn put_alias(&self, alias: &str, topic_id: &str) -> Result<(), StoreError> {
+        // The whole check-then-insert runs in **one** transaction, because the
+        // guard has to be atomic: `pg_advisory_xact_lock` is released at the
+        // end of its transaction, so issuing these as separate statements
+        // would drop the lock before the insert and reopen the race the
+        // migration's trigger closes. The trigger takes the same lock, so the
+        // two layers serialize against each other rather than against
+        // different keys.
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(alias)
+            .execute(&mut *tx)
+            .await?;
         // Fail closed before the write: an alias must name a topic that
         // actually has a published version, or resolution would hand back
         // nothing and look like an unknown topic.
-        if self.latest_topic(topic_id).await?.is_none() {
+        let target_published: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM proof_topic_version WHERE topic_id = $1)",
+        )
+        .bind(topic_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !target_published {
             return Err(StoreError::Malformed(format!(
                 "alias {alias:?} names topic {topic_id:?}, which has no published version"
             )));
@@ -230,7 +248,13 @@ impl RlmStore for PgRlmStore {
         // A canonical slug is never shadowed. If `alias` is itself a
         // published topic, then resolving it as an alias would hand back a
         // *different* topic's signed document for that slug.
-        if self.latest_topic(alias).await?.is_some() {
+        let alias_is_topic: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM proof_topic_version WHERE topic_id = $1)",
+        )
+        .bind(alias)
+        .fetch_one(&mut *tx)
+        .await?;
+        if alias_is_topic {
             return Err(StoreError::Malformed(format!(
                 "alias {alias:?} is already a published topic id; a canonical slug is never \
                  shadowed by an alias"
@@ -243,8 +267,9 @@ impl RlmStore for PgRlmStore {
         )
         .bind(alias)
         .bind(topic_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
