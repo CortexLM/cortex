@@ -32,9 +32,11 @@
 //! install journal (`proof_topic_install`) records the attempt so the next
 //! run resumes from the migrations that already applied.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use proof_rlm::{RLM_VM_IMAGE_DIGEST_ENV, VM_ORCHESTRATOR_TOKEN_FILE_ENV, VM_ORCHESTRATOR_URL_ENV};
 use proof_rlm_store::{PgRlmStore, RlmStore};
+use proof_task::{InferenceOffer, ProofPin, TopicDocument};
 use proof_topic_bundle::{InstallEnvironment, TopicInstallBundle, TopicInstallPlan};
 use proof_topic_install::install::{InstallRequest, Installer, SetupSummary};
 use proof_topic_install::InstallError;
@@ -74,6 +76,10 @@ pub struct InstallArgs<'a> {
     pub admin_token_file: Option<&'a Path>,
     /// Drive the RLM setup over the topic-VM orchestrator.
     pub drive_rlm: bool,
+    /// Live judge offer the baseline's paid run needs.
+    pub inference_offer_file: Option<&'a Path>,
+    /// Owner inference key file the lifecycle's key probe checks.
+    pub owner_key_file: Option<&'a Path>,
 }
 
 /// Run `topic install`.
@@ -137,7 +143,7 @@ pub async fn run(opts: &Options, args: &InstallArgs<'_>) -> Result<(), Failure> 
         return Ok(());
     }
 
-    run_real(opts, args, &bundle, &plan).await
+    run_real(opts, args, &bundle, &plan, &pin).await
 }
 
 /// The real install.
@@ -146,6 +152,7 @@ async fn run_real(
     args: &InstallArgs<'_>,
     bundle: &TopicInstallBundle,
     plan: &TopicInstallPlan,
+    pin: &ProofPin,
 ) -> Result<(), Failure> {
     // The bearer and the URL are resolved before anything is written, so a
     // misconfiguration cannot leave a half-installed topic.
@@ -187,7 +194,35 @@ async fn run_real(
         pool: &pool,
         store: &store,
     };
-    let setup = setup_summary(args, plan, &store).await;
+    // The RLM setup is driven **after** the static half lands, so the rules
+    // the driver proposes supersede a version the topic already has rather
+    // than being overwritten by the bundle's vector.
+    let driven = if args.drive_rlm {
+        if !opts.json {
+            println!("   (driving the RLM: provision → rules → baseline)");
+        }
+        Some(drive_rlm(args, &bundle.topic, pin, &pool, &store).await?)
+    } else {
+        None
+    };
+    let setup = match &driven {
+        Some(outcome) => match outcome.baseline_primary {
+            Some(v) => SetupSummary::Baselined {
+                rules_version: outcome.rules_version,
+                baseline_primary: format!("{v}"),
+            },
+            None => SetupSummary::Skipped {
+                reason: "--skip-baseline: the RLM's rules were installed, no baseline was \
+                         measured"
+                    .to_owned(),
+            },
+        },
+        None => SetupSummary::NotDriven {
+            reason: "not driven: --drive-rlm was not given, so no VM was provisioned and no \
+                     baseline was run"
+                .to_owned(),
+        },
+    };
     let report = installer
         .install(
             &InstallRequest {
@@ -205,6 +240,10 @@ async fn run_real(
 
     if !opts.json {
         print_install_report(&report);
+        if let Some(outcome) = &driven {
+            println!("   rlm_drive         {}", outcome.summary());
+            println!("   lifecycle         {}", outcome.state);
+        }
     }
 
     // Aliases last: they are a lookup convenience, so a failure here leaves
@@ -257,37 +296,66 @@ async fn run_real(
     Ok(())
 }
 
-/// What the RLM setup step did, resolved without running it here.
+/// Read the live judge offer the baseline's paid run needs.
 ///
-/// The setup itself is driven over the topic-VM orchestrator, which is a KVM
-/// host: `--drive-rlm` is the operator's assertion that this host is allowed
-/// to provision and spend. Without it the install says plainly that it did
-/// not drive the RLM, so the journal and the operator output agree.
-async fn setup_summary(
+/// Read and validated here rather than inside the driver so a misconfigured
+/// offer is a usage error **before** the static half writes anything: an
+/// install that applies migrations and then discovers it cannot measure a
+/// baseline would leave a topic that is half-installed for no reason.
+fn load_offer(path: Option<&Path>, pin: &ProofPin) -> Result<InferenceOffer, Failure> {
+    let Some(path) = path else {
+        return Err(Failure::Usage(format!(
+            "driving the RLM measures a baseline, which is a paid run that needs a live judge \
+             offer: set PROOF_INFERENCE_OFFER_FILE (or pass --inference-offer-file). To install \
+             without measuring one, add --skip-baseline — but note the topic cannot open until a \
+             baseline is sealed."
+        )));
+    };
+    let body = std::fs::read_to_string(path)
+        .map_err(|e| Failure::Error(format!("read {}: {e}", path.display())))?;
+    let offer = InferenceOffer::from_json(&body)
+        .map_err(|e| Failure::Error(format!("{}: {e}", path.display())))?;
+    offer
+        .validate(pin)
+        .map_err(|e| Failure::Error(format!("{}: {e}", path.display())))?;
+    Ok(offer)
+}
+
+/// Drive the topic's RLM setup over the topic-VM orchestrator.
+///
+/// With `--skip-baseline` the offer is not needed: no paid run happens, so a
+/// missing offer is not an error on that path.
+async fn drive_rlm(
     args: &InstallArgs<'_>,
-    plan: &TopicInstallPlan,
+    topic: &TopicDocument,
+    pin: &ProofPin,
+    pool: &sqlx::PgPool,
     store: &PgRlmStore,
-) -> SetupSummary {
-    if args.drive_rlm {
-        // The setup runs after the rules land; its own summary is written by
-        // the caller of the install (this CLI) once it returns.
-        return SetupSummary::Skipped {
-            reason: if args.skip_baseline {
-                "--skip-baseline: the RLM's rules were installed, no baseline was measured"
-                    .to_owned()
-            } else {
-                "the RLM setup is driven by the operator over the topic-VM orchestrator".to_owned()
-            },
-        };
-    }
-    let rules = store.current_rules(&plan.topic_id).await.ok().flatten();
-    let version = rules.as_ref().map_or(1, |r| r.version);
-    SetupSummary::NotDriven {
-        reason: format!(
-            "not driven: --drive-rlm was not given, so no VM was provisioned and no baseline was \
-             run (rules are at version {version})"
-        ),
-    }
+) -> Result<crate::drive::DriveOutcome, Failure> {
+    let _ = store;
+    let offer = if args.skip_baseline {
+        None
+    } else {
+        Some(load_offer(args.inference_offer_file, pin)?)
+    };
+    let url = std::env::var(VM_ORCHESTRATOR_URL_ENV).ok();
+    let token = std::env::var(VM_ORCHESTRATOR_TOKEN_FILE_ENV)
+        .ok()
+        .map(|p| PathBuf::from(p.trim().to_owned()));
+    let digest = std::env::var(RLM_VM_IMAGE_DIGEST_ENV).ok();
+    crate::drive::drive(
+        topic,
+        pin,
+        PgRlmStore::new(pool.clone()),
+        args.skip_baseline,
+        args.gates.owner_approved,
+        url.as_deref(),
+        token.as_deref(),
+        digest.as_deref(),
+        offer,
+        args.owner_key_file,
+    )
+    .await
 }
 
 /// Print the install report.

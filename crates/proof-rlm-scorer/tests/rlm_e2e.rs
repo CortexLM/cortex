@@ -1054,11 +1054,12 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
         })),
         keys: Arc::new(FileKeysProbe::new(&key)),
         spend_cap_usd: Some(10.0),
+        skip_baseline: false,
     };
 
     // A decline returns to draft; nothing is provisioned.
     let err = setup
-        .run(&draft, &pin, &offer())
+        .run(&draft, &pin, Some(&offer()))
         .await
         .expect_err("declined");
     assert!(matches!(err, SetupError::Declined(_)), "{err}");
@@ -1070,7 +1071,7 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
 
     // Approved but no key file: stops at awaiting_owner_keys, nothing provisioned.
     setup.owner = Arc::new(StaticOwnerHook(OwnerDecision::Approve));
-    let err = setup.run(&draft, &pin, &offer()).await.expect_err("no key");
+    let err = setup.run(&draft, &pin, Some(&offer())).await.expect_err("no key");
     assert!(err.to_string().contains("owner keys not present"), "{err}");
     assert_eq!(
         rlm_store.lifecycle(&draft.id).await.unwrap().unwrap().state,
@@ -1082,9 +1083,9 @@ async fn topic_setup_walks_the_lifecycle_over_the_vm_boundary() {
     // (custom / agent setup does not gate on FLOP accounting).
     std::fs::write(&key, "not-a-real-secret\n").unwrap();
     orchestrator.set_flops_used(None);
-    let out = setup.run(&draft, &pin, &offer()).await.expect("setup");
+    let out = setup.run(&draft, &pin, Some(&offer())).await.expect("setup");
     assert_eq!(out.rules_version, 1);
-    assert!((out.baseline_primary - 0.42).abs() < 1e-12);
+    assert!((out.baseline_primary.expect("measured") - 0.42).abs() < 1e-12);
     assert_eq!(
         orchestrator.created(),
         1,
@@ -1243,9 +1244,10 @@ async fn an_experiment_topic_measures_its_baseline_in_a_dedicated_vm() {
         owner: Arc::new(StaticOwnerHook(OwnerDecision::Approve)),
         keys: Arc::new(FileKeysProbe::new(&key)),
         spend_cap_usd: None,
+        skip_baseline: false,
     };
-    let out = setup.run(&draft, &pin, &offer()).await.expect("setup");
-    assert!((out.baseline_primary - 0.61).abs() < 1e-12);
+    let out = setup.run(&draft, &pin, Some(&offer())).await.expect("setup");
+    assert!((out.baseline_primary.expect("measured") - 0.61).abs() < 1e-12);
     assert_eq!(
         orchestrator.created(),
         2,
@@ -1287,7 +1289,7 @@ async fn an_experiment_topic_measures_its_baseline_in_a_dedicated_vm() {
     let mut leaky = draft.clone();
     leaky.id = "topic-b".into();
     let err = setup
-        .run(&leaky, &pin, &offer())
+        .run(&leaky, &pin, Some(&offer()))
         .await
         .expect_err("unconfirmed destroy withholds the baseline");
     assert!(
@@ -1312,5 +1314,135 @@ async fn an_experiment_topic_measures_its_baseline_in_a_dedicated_vm() {
         3,
         "and is still alive on the fake host"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `skip_baseline` stops after the rules land, and a later run resumes.
+///
+/// This is the flag the operator CLI passes for a staging install: the point
+/// is to prove the install path without paying for a baseline. It must be a
+/// **pause**, not a different path — the lifecycle is left at `baselining`
+/// with the rules installed, and a second run without the flag measures the
+/// baseline from exactly there rather than starting over.
+#[tokio::test]
+async fn skipping_the_baseline_pauses_and_a_later_run_resumes() {
+    let root = tmp_root("skip-baseline");
+    let key = root.join("owner_key");
+    let orchestrator = Arc::new(FakeOrchestrator::new());
+    let rlm_store: Arc<MemoryRlmStore> = Arc::new(MemoryRlmStore::new());
+    let mut draft = topic();
+    draft.status = TopicStatus::Draft;
+    draft.holdout_commitment = holdout_commitment(&synthetic_holdout(STRATUM_SIZE, 1));
+    draft.baseline.script_sha256 = "11".repeat(32);
+    draft.baseline.metrics_commitment.clear();
+    let pin = pin();
+
+    let mut setup = TopicSetup {
+        orchestrator: orchestrator.clone(),
+        store: rlm_store.clone(),
+        template: pinned_template(),
+        experiments: proof_rlm::ExperimentPolicy::default(),
+        owner: Arc::new(StaticOwnerHook(OwnerDecision::Approve)),
+        keys: Arc::new(FileKeysProbe::new(&key)),
+        spend_cap_usd: None,
+        skip_baseline: true,
+    };
+    let out = setup
+        .run(&draft, &pin, Some(&offer()))
+        .await
+        .expect("skip-baseline run");
+    assert!(
+        out.baseline_primary.is_none(),
+        "no baseline was measured, so there is nothing to seal"
+    );
+    assert!(!out.measured_baseline());
+    assert_eq!(out.rules_version, 1, "the RLM's rules were still installed");
+    let rules = rlm_store.current_rules(&draft.id).await.unwrap().unwrap();
+    assert_eq!(rules.version, 1);
+    assert!(
+        rlm_store.baseline(&draft.id).await.unwrap().is_none(),
+        "a skipping run writes no baseline row"
+    );
+    // No baseline job was forwarded: only the rules proposal ran.
+    let runs = orchestrator.runs();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(
+        matches!(runs[0].1, VmJob::ProposeRules { .. }),
+        "only the rules proposal ran"
+    );
+    assert_eq!(
+        rlm_store.lifecycle(&draft.id).await.unwrap().unwrap().state,
+        RlmState::Baselining,
+        "the lifecycle is left exactly where a resume picks up"
+    );
+
+    // A later run without the flag resumes from `baselining` and measures.
+    setup.skip_baseline = false;
+    let resumed = setup
+        .run(&draft, &pin, Some(&offer()))
+        .await
+        .expect("the resume measures the baseline");
+    assert!(resumed.measured_baseline());
+    assert_eq!(
+        resumed.rules_version, 1,
+        "the rules are not re-versioned by the resume"
+    );
+    assert!(
+        rlm_store.baseline(&draft.id).await.unwrap().is_some(),
+        "the resume recorded the baseline"
+    );
+    let runs = orchestrator.runs();
+    assert!(
+        runs.iter()
+            .any(|(_, job)| matches!(job, VmJob::Baseline { .. })),
+        "the resume forwarded the baseline job: {runs:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A baseline asked for with no judge offer is a refusal, not a placeholder
+/// run: the offer is what binds the measurement to a backend.
+#[tokio::test]
+async fn measuring_a_baseline_without_an_offer_is_refused() {
+    let root = tmp_root("no-offer");
+    let key = root.join("owner_key");
+    let orchestrator = Arc::new(FakeOrchestrator::new());
+    let rlm_store: Arc<MemoryRlmStore> = Arc::new(MemoryRlmStore::new());
+    let mut draft = topic();
+    draft.status = TopicStatus::Draft;
+    draft.holdout_commitment = holdout_commitment(&synthetic_holdout(STRATUM_SIZE, 1));
+    draft.baseline.metrics_commitment.clear();
+    let pin = pin();
+    let setup = TopicSetup {
+        orchestrator: orchestrator.clone(),
+        store: rlm_store.clone(),
+        template: pinned_template(),
+        experiments: proof_rlm::ExperimentPolicy::default(),
+        owner: Arc::new(StaticOwnerHook(OwnerDecision::Approve)),
+        keys: Arc::new(FileKeysProbe::new(&key)),
+        spend_cap_usd: None,
+        skip_baseline: false,
+    };
+    let err = setup
+        .run(&draft, &pin, None)
+        .await
+        .expect_err("no offer, no baseline");
+    assert!(matches!(err, SetupError::NoOffer), "{err}");
+    assert!(err.to_string().contains("skip_baseline"), "{err}");
+    assert_eq!(
+        orchestrator.created(),
+        0,
+        "the refusal happens before any vm exists"
+    );
+
+    // The same setup with `skip_baseline` does not need one.
+    let setup = TopicSetup {
+        skip_baseline: true,
+        ..setup
+    };
+    setup
+        .run(&draft, &pin, None)
+        .await
+        .expect("a skipping run needs no offer");
     let _ = std::fs::remove_dir_all(&root);
 }

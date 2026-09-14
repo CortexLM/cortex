@@ -41,6 +41,7 @@ use proof_rlm_store::{MemoryRlmStore, PgRlmStore, RlmStore, TopicVersionRow};
 use proof_task::ProofPin;
 use proof_topic_bundle::{InstallEnvironment, TopicInstallBundle, TopicInstallPlan, PUBLISH_PATH};
 
+mod drive;
 mod install;
 
 use install::InstallArgs;
@@ -165,6 +166,16 @@ enum TopicCmd {
         /// provisions a VM and runs a paid baseline.
         #[arg(long)]
         owner_approved: bool,
+        /// Live RLM judge `InferenceOffer` JSON the baseline's paid run needs.
+        #[arg(long, env = "PROOF_INFERENCE_OFFER_FILE", value_name = "PATH")]
+        inference_offer_file: Option<PathBuf>,
+        /// Owner inference key file the lifecycle's key probe checks.
+        #[arg(
+            long,
+            env = "PROOF_RLM_OWNER_INFERENCE_KEY_FILE",
+            value_name = "PATH"
+        )]
+        owner_key_file: Option<PathBuf>,
     },
     /// List installed topics: a read-only view of `proof_topic_version`.
     List,
@@ -300,6 +311,8 @@ async fn run_topic(opts: &Options, cmd: &TopicCmd) -> Result<(), Failure> {
             admin_token_file,
             drive_rlm,
             owner_approved,
+            inference_offer_file,
+            owner_key_file,
         } => {
             let request = InstallArgs {
                 bundle,
@@ -314,6 +327,8 @@ async fn run_topic(opts: &Options, cmd: &TopicCmd) -> Result<(), Failure> {
                 admin_url: admin_url.as_deref(),
                 admin_token_file: admin_token_file.as_deref(),
                 drive_rlm: *drive_rlm,
+                inference_offer_file: inference_offer_file.as_deref(),
+                owner_key_file: owner_key_file.as_deref(),
             };
             cmd_install(opts, &request).await
         }

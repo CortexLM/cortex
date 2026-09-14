@@ -20,9 +20,12 @@ proof-rlm-store = { path = "../../crates/proof-rlm-store" }
 proof-task = { path = "../../crates/proof-task" }
 proof-topic-bundle = { path = "../../crates/proof-topic-bundle" }
 proof-topic-install = { path = "../../crates/proof-topic-install" }
+proof-topic-setup = { path = "../../crates/proof-topic-setup" }
+proof-vm-fc = { path = "../../crates/proof-vm-fc" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]

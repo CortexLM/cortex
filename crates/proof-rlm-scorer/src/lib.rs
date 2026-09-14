@@ -35,7 +35,7 @@
 
 mod artefact;
 mod scorer;
-mod setup;
+
 
 pub use artefact::{
     artefact_path, is_safe_entry_path, max_zip_numeric_id, ArtefactBundle, ArtefactError,
@@ -46,4 +46,4 @@ pub use artefact::{
 };
 pub use proof_results::RESULTS_FILE;
 pub use scorer::{RlmScorer, DEFAULT_LEASE_TTL};
-pub use setup::{SetupError, SetupOutcome, TopicSetup};
+pub use proof_topic_setup::{SetupError, SetupOutcome, TopicSetup};
