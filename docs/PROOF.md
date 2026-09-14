@@ -195,7 +195,7 @@ Ship order: control plane (payout schema) → proof-eval image + digest pin
 path: [`deploy/scripts/proof-operator-path.sh`](../deploy/scripts/proof-operator-path.sh).
 Empty digest stays 503 (never invent a sha256).
 
-## Topic install bundles (`proof-admin`, P0 skeleton)
+## Topic install bundles (`proof-admin`)
 
 A topic already has **one** home: the operator-signed document published
 through `POST /v1/admin/proof/topics` and persisted in `proof_topic_version`
@@ -269,8 +269,20 @@ crate's non-test source, one over the CLI's.
 
 The install plan prints the hand-off first and the RLM's own lifecycle steps
 (`provision -> propose_rules -> baseline`, the existing `TopicSetup` driver),
-then the publish call and the host env. The CLI does not run those steps and
-does not read the section — it reports what the RLM will be asked to do.
+then the publish call and the host env.
+
+`proof-admin` does not read the section: it carries it. The **install
+executor** (`crates/proof-topic-install`) is the one consumer, and it reads
+only the parts it applies — `migrations`, `apis`, `rules`,
+`submission_format`, `scoring`, `handler` — each under a closed gate. A key
+inside one of those parts that this build does not read is refused, because a
+step nothing would perform is a step that silently did not happen. A part it
+has never heard of **travels**: that is the boundary working, and it is why a
+new topic behavior does not need a code change here.
+
+`submission_format` and `scoring` are recorded as canonical-JSON digests and
+otherwise untouched: the install can prove *which* ones a topic was installed
+with without claiming to understand them.
 
 ### Locked defaults
 
@@ -280,14 +292,19 @@ does not read the section — it reports what the RLM will be asked to do.
 | Temporary alias | **`tbench`** | `proof_topic_alias` row `tbench → tb4` (migration `0024`) |
 | Storage | **shared challenge DB**, `topic_id` discriminant | `proof_topic_version` (no per-topic schema) |
 | Metal install | **Owner-only, staging first** | `--owner-metal-ack` gate |
+| Driving the RLM | **Owner-only** (provisions a VM, runs a paid baseline) | `--drive-rlm` + `--owner-approved` |
+| VMs per submission | **1** (the allocator pin) | recorded in `proof_topic_install.binding` |
 | Custom id | `tbench` | the document's `metric.custom_id` |
 
-**Schema:** `0024_proof_topic_alias.sql` is the only change in this slice. It
-adds `proof_topic_alias` and a `BEFORE INSERT`/`UPDATE` trigger pair that makes
-an alias collision with a published slug fail closed in both directions — a
-**publish-path integrity guard, not scoring math**: it cannot change a score,
-a payout, or a sealed vector. It does not `ALTER` or `DROP` anything, and the
-`0020` tables keep their columns, keys, and grants.
+**Schema:** `0024_proof_topic_alias.sql` adds `proof_topic_alias` and a
+`BEFORE INSERT`/`UPDATE` trigger pair that makes an alias collision with a
+published slug fail closed in both directions. `0025_proof_topic_install.sql`
+adds the install journal (`proof_topic_install`) and the topic's dynamic route
+table (`proof_topic_api`). Both are **append-only** for `base_app` — a journal
+that could be edited in place would not be a journal — and neither `ALTER`s
+nor `DROP`s anything, so the `0020` tables keep their columns, keys, and
+grants. The route table stores paths **relative** to the topic's prefix, so a
+row cannot carry an absolute path that escapes the topic's namespace.
 
 `tbench` is two different things and they are not the same mapping: it is the
 topic's **alias** (`show tbench` resolves to `tb4`) and also the runner
@@ -315,13 +332,156 @@ is an operator assertion, not a verified precondition: it exists so a live
 target cannot be reached by a default or a copy-pasted staging command.
 `--env staging` is never gated.
 
-**P0 scope — what this does not do.** `install` **prints** the publish call;
-it does not perform it, because publishing needs the operator bearer, which
-stays on the host. `topic enable`, `topic disable`, and `topic seal` exit
-**3** with a "not implemented in this slice" message — a topic's lifecycle is
-the signed document's `status`, so the answer is to re-sign and re-publish.
-There is no route change (P1), no allocator change (P2), no full install
-(P3), and no removal of the compiled-in topic bindings (P4).
+### Running the install for real (P1a)
+
+Without `--dry-run`, `install` performs the procedure. It needs the master's
+address and the operator bearer, both of which stay on the host:
+
+```bash
+proof-admin topic install \
+  --bundle /root/.base-secrets/proof/tb4.json --env staging \
+  --admin-url http://127.0.0.1:8100 \
+  --admin-token-file /run/proof/admin_token
+```
+
+What it does, in order:
+
+1. **Drives** the RLM's own lifecycle — `provision` → `propose_rules` →
+   `baseline` — but only with `--drive-rlm`, because that provisions a VM and
+   runs a paid baseline. `--drive-rlm` therefore also requires
+   `--owner-approved`. `--skip-baseline` stops before the baseline job (it
+   requires `--drive-rlm`, since otherwise the install never gets there).
+2. **Applies** the bundle's RLM section: its `migrations` (under the
+   deny-list), its `apis` (recorded as topic-scoped routes), its `rules`
+   (installed through the store the scoring path reads), and its `scoring` /
+   `submission_format` digests. All of it lands in the install journal.
+3. **Publishes** the signed document through the existing admin route — the
+   bearer is read from the file and never printed or logged. A missing URL, a
+   missing token file, or an empty one is a **usage error before anything is
+   written**.
+4. **Points** the bundle's declared `aliases` at the topic.
+
+**The publish is last on purpose.** Publishing is what makes a topic
+reachable: a miner can submit to a document whose `status` is `open`, and a
+topic's routes answer as soon as their rows are in `proof_topic_api`. The
+install before it is the fallible half — a deny-listed migration, a refused
+handler, an unregistered custom id, a store error — so a failed install
+publishes **nothing at all** and there is no live-but-uninstalled topic. The
+reverse order makes an `open` document submitable for as long as the install
+takes, and leaves it submitable forever if the install fails. The old
+justification (the topic has to exist before the rest can key on it) does not
+hold: the rule store, the route table, and the journal all key on `topic_id`
+with no dependency on the published row, and the RLM setup writes the
+document itself when it is not there yet. Only the aliases need a published
+topic, which is why they stay last.
+
+**And the route enforces it, not just the CLI.** `POST /v1/admin/proof/topics`
+refuses an **`open`** document with **409** unless the topic's newest
+`proof_topic_install` row is `applied`:
+
+| Host state | `open` document | `draft` document |
+|------------|-----------------|------------------|
+| install `applied` | **201** | **201** |
+| install `pending` / `failed` / no row | **409** | **201** |
+| journal unreadable | **409** | **201** |
+| no install journal on the host (no database) | **409** | **201** |
+
+A `draft` is never gated: it is not submitable, and staging one is how an
+operator stages a bundle. The refusal says which case it was, so the operator
+can tell "finish the install" from "fix the database". This is the ordering
+as a **rule of the route** rather than a convention of the client: a direct
+POST that skipped the install cannot put a submitable document in the registry
+before its migrations, routes, and rules exist.
+
+`topic install-log --topic <id>` reads the journal back: which bundle digest
+was applied, whether the install reached `applied`, which migrations and
+rules landed, and the executor binding it resolved.
+
+#### What an install may not do
+
+A topic's SQL runs in the **shared** challenge database under a `topic_id`
+discriminant, so a migration that reached outside its own namespace could
+rewrite another topic's rules or drop the tables scoring reads. Every
+statement is therefore checked before the first one executes:
+
+| Refused | Examples |
+|---------|----------|
+| **Owned objects** | any `proof_*` object (by prefix, so a table added later is covered), `_sqlx_migrations`, `base_app`, the catalogues |
+| **Statements** | `DROP DATABASE`/`SCHEMA`/`ROLE`/`OWNED`/`EXTENSION`, `GRANT`/`REVOKE`, `SET`/`RESET`/`BEGIN`/`COMMIT`, `COPY`, `VACUUM`/`CLUSTER`/`REINDEX`, `SECURITY DEFINER`, `pg_read_file` and friends |
+| **Namespace** | every table a statement creates, writes, or reads must be `{topic_id}_*`, `topic_*`, or `{topic_id}.…` |
+
+Strings, comments, and dollar-quoted **function bodies** are blanked before
+scanning, so a denied word inside a literal is data (not a false refusal) and
+a denied statement cannot be smuggled in by quoting. Function bodies are
+*scanned*, not trusted — they are what runs.
+
+A body may also be written as a **string literal**, and the server executes
+the *decoded* value, so the guard decodes before it scans:
+`''` doubling, `E'…'` backslash escapes (`\xhh`, `\ooo`, `\uXXXX`,
+`\UXXXXXXXX`, `\'`), `U&'…'` code points (with `UESCAPE 'c'` honoured),
+adjacent literals a newline joins into one string, and the literal bodies of
+`CREATE PROCEDURE … AS '…'` and `DO '…'`. Both the decoded value and the
+written spelling are scanned, so `E'\x44ELETE FROM proof\x5frule\x5fversion'`
+is refused as the `DELETE` it is.
+
+A bundle's `handler` names the run backend, and only two exist: the generic
+in-guest runner (Firecracker) and an operator-baked Harbor adaptor over it.
+A path, a URL, or a command line is refused by shape; a well-formed but
+unknown id is refused with the allow-list in the message. The **signed
+document** keeps sole authority over which *runner* the topic's paid jobs
+use; the handler family is recorded for audit.
+
+#### The routes a topic registers (`proof_topic_api`)
+
+A topic's `apis` are its own routes: the install records them in
+`proof_topic_api` (path **relative** to the topic's prefix, method, summary),
+and the challenge **reads** that table to answer
+`/challenge/{topic_id}/…`. Nothing about a topic's routes is compiled in.
+
+| Answer | When |
+|--------|------|
+| **200** | the topic registered the path, for this method or for `*`; the body is the row the install wrote |
+| **405** | the topic registered the path for another method |
+| **404** | nothing is registered for that topic and path (an unknown topic is this case) |
+| **503** | the route table could not be read — **not** a 404, which would read as "this topic exposes nothing" |
+
+The registry is cached per request path and **keyed by the table's
+generation** (`count(*)`, sound because the table is `SELECT, INSERT` only):
+an install in another process — the operator's `proof-admin` — is visible on
+the next request, with no restart and no cross-process signal. A host with no
+database serves the Proof routes alone.
+
+The gateway forwards a **topic id** it does not know to the Proof challenge
+with the topic id kept in the path (`/challenge/{topic_id}/…`); the challenge
+is the gate, so an id that is not a registered topic is a 404. An id that is
+not topic-shaped (`^[a-z0-9][a-z0-9-]{1,62}$`, the table's own CHECK) keeps
+the registry's `no healthy backends` answer, and `v1/admin/*` stays blocked
+for a topic id exactly as it is for a challenge id.
+
+#### Fail-closed, and what an operator does next
+
+An install publishes the document **only after** every step succeeded, so a
+failed install leaves the topic **unpublished**: not in the registry at all,
+so there is no status to submit to and no route to reach. Two failure
+shapes:
+
+- A **pre-flight refusal** (the deny-list, the handler allow-list, the
+  section shape, an open custom id this host does not register) writes
+  **nothing at all** — no row, no rule, no table. Fix the bundle and re-run.
+- A **step failure** (a migration the database rejected, a store error)
+  appends a `failed` journal row naming the step. Migrations already applied
+  stay applied and are recorded, so a re-run **resumes** rather than
+  restarts. Every refusal prints rollback notes saying exactly what is and is
+  not changed.
+
+A **publish failure** is the one failure that happens after the install is
+green: the topic is not live, nothing needs undoing, and a re-run skips the
+applied migrations and publishes.
+
+**Still not implemented:** `topic enable`, `topic disable`, and `topic seal`
+exit **3** with a "not implemented in this slice" message — a topic's
+lifecycle is the signed document's `status`, so the answer is to re-sign and
+re-publish.
 
 ## Metric families
 
@@ -363,7 +523,7 @@ Trust-root keygen is the throwaway owner path in
 - `GET /v1/proof/topics`, `GET /v1/proof/topics/{id}`
 - `GET /v1/proof/executor` — always **200**: `eval_executor` (public offer or
   `null`), `ready`, `reason` when not ready, and the pin ceilings.
-- `POST /v1/admin/proof/topics` — operator bearer; verify sig/schema/floors/seal before `open`
+- `POST /v1/admin/proof/topics` — operator bearer; verify sig/schema/floors/seal before `open`, and refuse an **`open`** document with **409** unless the topic's newest `proof_topic_install` row is `applied` (a `draft` is never gated; see § Running the install for real)
 - `POST /v1/admin/proof/executor` — operator bearer; body is the offer
   document. Pin-validated (**400** keeps the previous offer); `status: closed`
   takes the executor down live. In-memory until restart, like submissions —

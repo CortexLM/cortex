@@ -9,6 +9,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 bundle = { path = "../bundle" }
 chain = { path = "../chain" }
 challenge-common = { path = "../challenge-common" }
@@ -19,16 +21,21 @@ proof-http = { path = "../proof-http" }
 proof-score = { path = "../proof-score" }
 proof-store = { path = "../proof-store" }
 proof-task = { path = "../proof-task" }
+proof-topic-install = { path = "../proof-topic-install" }
 serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
 tracing = "0.1"
 trustroot = { path = "../trustroot" }
 
 [dev-dependencies]
+async-trait = "0.1"
 axum = "0.8"
 crypto = { path = "../crypto" }
+http-body-util = "0.1"
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true

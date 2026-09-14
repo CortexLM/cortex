@@ -1,0 +1,22 @@
+[package]
+name = "proof-topic-setup"
+description = "Proof topic setup driver: the agentic lifecycle from draft to a sealed baseline, with the RLM doing its work inside the topic VM (owner hook, key probe, provision, rule proposal, baseline)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+proof-eval = { path = "../proof-eval" }
+proof-rlm = { path = "../proof-rlm" }
+proof-rlm-store = { path = "../proof-rlm-store" }
+proof-task = { path = "../proof-task" }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

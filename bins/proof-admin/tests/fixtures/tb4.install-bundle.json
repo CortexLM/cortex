@@ -1,4 +1,7 @@
 {
+  "aliases": [
+    "tbench"
+  ],
   "display_name": "Terminal-Bench 4",
   "environment": "staging",
   "host": {
@@ -9,12 +12,29 @@
     "rlm_image_digest": "sha256:abababababababababababababababababababababababababababababababab"
   },
   "rlm": {
+    "apis": [
+      {
+        "method": "GET",
+        "path": "status",
+        "summary": "topic status"
+      }
+    ],
+    "migrations": [
+      {
+        "name": "0001_scratch",
+        "sql": "CREATE TABLE tb4_scratch (id TEXT)"
+      }
+    ],
     "rules": [
       {
         "id": "no_short_circuit",
         "text": "the harness must run the task"
       }
     ],
+    "scoring": {
+      "epsilon_rel": 0.05,
+      "primary": "primary_value"
+    },
     "submission_format": {
       "kind": "tar",
       "max_bytes": 5242880
@@ -83,7 +103,7 @@
     "payout_mode": "discovery",
     "proxy_model": null,
     "schema_version": 1,
-    "signature": "14252aa026fda0a80957ea01c952311f171707cbc0c7d966e2594a8edd46a732d5132660f89c7a77cd4efba6fb6bf47803f155af26783fe46fc8ae418aee2a85",
+    "signature": "c4396e7185c040d176efcff71ae8fe1cee590ee1ad7bbbaae0e7b2c4f6f5c5034ee03b3ec3b42c48f268ad5af0690cb058351968bfcd37792f15e50e34357f8d",
     "statement": "Score the pinned task pack with the pinned runner.",
     "status": "draft",
     "valid_from_epoch": 0,

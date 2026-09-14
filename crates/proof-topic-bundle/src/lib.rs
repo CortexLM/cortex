@@ -74,7 +74,8 @@ pub const MAX_DISPLAY_NAME_LEN: usize = 128;
 /// (`deny_unknown_fields`), not a second document that could drift from it:
 /// this list is what a test pins, so adding or removing a key is a deliberate
 /// edit here rather than a silent widening of what an operator may write.
-pub const BUNDLE_KEYS: [&str; 6] = [
+pub const BUNDLE_KEYS: [&str; 7] = [
+    "aliases",
     "display_name",
     "environment",
     "host",
@@ -85,6 +86,9 @@ pub const BUNDLE_KEYS: [&str; 6] = [
 
 /// Keys with no `serde` default: a bundle that omits one is a parse error
 /// naming the field, never an empty value that fails later.
+///
+/// `aliases` and `rlm` are absent deliberately: a bundle with neither is the
+/// common shape, and both default to "nothing extra".
 pub const REQUIRED_BUNDLE_KEYS: [&str; 5] = [
     "display_name",
     "environment",
@@ -92,6 +96,9 @@ pub const REQUIRED_BUNDLE_KEYS: [&str; 5] = [
     "schema_version",
     "topic",
 ];
+
+/// Most aliases one bundle may declare.
+pub const MAX_ALIASES: usize = 8;
 
 /// Keys of the `host` block, sorted.
 pub const HOST_KEYS: [&str; 5] = [
@@ -233,6 +240,27 @@ pub enum BundleError {
         got: String,
         /// What the document says.
         document: String,
+    },
+    /// An alias is not a usable slug, or is the topic's own id.
+    #[error(
+        "alias {alias:?} is not usable: {why} (an alias is a topic slug, \
+         `[a-z0-9][a-z0-9-]{{1,62}}`, and may never be the topic's own id — that is a second \
+         spelling of the same key in one lookup)"
+    )]
+    BadAlias {
+        /// The alias the bundle declared.
+        alias: String,
+        /// Why it is not usable.
+        why: &'static str,
+    },
+    /// The same alias is declared twice.
+    #[error("alias {0:?} is declared twice")]
+    DuplicateAlias(String),
+    /// More aliases than a bundle may declare.
+    #[error("bundle declares {got} aliases, at most {MAX_ALIASES} are installed")]
+    TooManyAliases {
+        /// How many it declared.
+        got: usize,
     },
     /// `custom_ids_entry` names no custom id while the document is custom.
     #[error(
@@ -498,6 +526,16 @@ pub struct TopicInstallBundle {
     pub topic: TopicDocument,
     /// Operator env this install needs.
     pub host: HostExpectations,
+    /// Temporary compatibility slugs this topic answers to, if the bundle
+    /// declares any.
+    ///
+    /// Owner default: the first topic's slug is `tb4` with `tbench` as a
+    /// **temporary** alias so existing miner links keep resolving. An alias
+    /// is not topic data — the topic's identity is its signed document's
+    /// `id` — so this is a bundle field that becomes a `proof_topic_alias`
+    /// row, and retiring it is deleting the row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     /// What the topic's RLM installs. Opaque to Rust: see [`RlmSection`].
     #[serde(default)]
     pub rlm: RlmSection,
@@ -533,6 +571,10 @@ pub struct TopicInstallPlan {
     pub metric_family: MetricFamily,
     /// `metric.custom_id` (empty on non-custom families).
     pub custom_id: String,
+    /// Temporary compatibility aliases this install will point at the topic,
+    /// in declaration order. Empty when the bundle declares none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     /// In-guest runner the document selects, when it selects one.
     pub runner_id: Option<String>,
     /// Experiment pack digest the document pins, when it pins one.
@@ -644,10 +686,74 @@ impl TopicInstallBundle {
             }
         }
         self.check_pack_dir()?;
+        self.check_aliases()?;
         // Shape only. The RLM section's *content* is the topic's business:
         // this crate carries it, never interprets it.
         self.rlm.validate_shape()?;
         self.cross_check_host()
+    }
+
+    /// Whether every declared alias is a usable, distinct, non-self slug.
+    ///
+    /// An alias is a **lookup key**: it must be a topic slug shape, it must
+    /// not be the topic's own id (that is a second spelling of one key), and
+    /// it must not repeat within the bundle. Whether it collides with another
+    /// *published* topic is not knowable here — the store and the
+    /// `0024` trigger decide that at write time, fail-closed.
+    fn check_aliases(&self) -> Result<(), BundleError> {
+        if self.aliases.len() > MAX_ALIASES {
+            return Err(BundleError::TooManyAliases {
+                got: self.aliases.len(),
+            });
+        }
+        let mut seen: Vec<&str> = Vec::with_capacity(self.aliases.len());
+        for alias in &self.aliases {
+            let a = alias.trim();
+            if a.is_empty() {
+                return Err(BundleError::BadAlias {
+                    alias: alias.clone(),
+                    why: "it is empty",
+                });
+            }
+            if a.len() > 63 {
+                return Err(BundleError::BadAlias {
+                    alias: alias.clone(),
+                    why: "it is longer than 63 characters",
+                });
+            }
+            let mut chars = a.chars();
+            let head_ok = chars
+                .next()
+                .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+            let rest_ok = chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+            if !head_ok || !rest_ok {
+                return Err(BundleError::BadAlias {
+                    alias: alias.clone(),
+                    why: "it must be `[a-z0-9][a-z0-9-]{1,62}`",
+                });
+            }
+            if a == self.topic.id {
+                return Err(BundleError::BadAlias {
+                    alias: alias.clone(),
+                    why: "it is the topic's own id",
+                });
+            }
+            if seen.contains(&a) {
+                return Err(BundleError::DuplicateAlias(a.to_owned()));
+            }
+            seen.push(a);
+        }
+        Ok(())
+    }
+
+    /// The aliases this bundle installs, trimmed, in declaration order.
+    #[must_use]
+    pub fn aliases(&self) -> Vec<String> {
+        self.aliases
+            .iter()
+            .map(|a| a.trim().to_owned())
+            .filter(|a| !a.is_empty())
+            .collect()
     }
 
     /// Whether `pack_dir` is a usable directory value.
@@ -806,6 +912,7 @@ impl TopicInstallBundle {
             document_status: self.topic.status,
             metric_family: self.topic.metric.family,
             custom_id,
+            aliases: self.aliases(),
             runner_id: binding.as_ref().map(|b| b.runner.clone()),
             pack_digest: binding.as_ref().map(|b| b.pack.digest.clone()),
             publish_route: PUBLISH_ROUTE.to_owned(),
@@ -872,6 +979,7 @@ mod tests {
                 pack_dir: Some("/var/lib/proof/packs".into()),
                 custom_ids_entry: Some("tbench".into()),
             },
+            aliases: vec!["tbench".into()],
             rlm: RlmSection::default(),
         }
     }
@@ -1409,6 +1517,81 @@ mod tests {
             ["other_metric", "tbench", "third"]
         );
         assert!(parse_custom_ids("  ").is_empty());
+    }
+
+    /// Aliases are lookup keys, so they are shape-checked here and their
+    /// collisions with *published* topics are left to the store's fail-closed
+    /// guard — the bundle cannot know what is published.
+    #[test]
+    fn aliases_are_slugs_that_are_neither_the_topic_nor_repeated() {
+        // The Owner default shape: slug `tb4`, temporary alias `tbench`.
+        let bundle = tb4();
+        assert_eq!(bundle.aliases(), ["tbench"]);
+        bundle
+            .validate_shape()
+            .expect("the default alias validates");
+        let plan = bundle.plan(InstallEnvironment::Metal).expect("plan");
+        assert_eq!(plan.aliases, ["tbench"]);
+
+        // A bundle with none is the common shape, and the plan carries none.
+        let mut bare = tb4();
+        bare.aliases = Vec::new();
+        bare.validate_shape().expect("no aliases is fine");
+        assert!(bare.aliases().is_empty());
+        assert!(bare
+            .plan(InstallEnvironment::Metal)
+            .expect("plan")
+            .aliases
+            .is_empty());
+
+        for bad in [
+            "Tbench",   // upper case is not a slug
+            "t bench",  // no spaces
+            "-tbench",  // must start alphanumeric
+            "tbench-",  // trailing hyphen is a slug, so this one is fine…
+            "tbench/x", // no path separators
+            "tb4",      // the topic's own id
+            "",
+        ] {
+            let mut b = tb4();
+            b.aliases = vec![bad.into()];
+            // A trailing hyphen is a legal slug (`[a-z0-9][a-z0-9-]{1,62}`),
+            // so it must *not* be refused.
+            if bad == "tbench-" {
+                b.validate_shape()
+                    .unwrap_or_else(|e| panic!("{bad:?} is legal: {e}"));
+                continue;
+            }
+            assert!(
+                matches!(b.validate_shape(), Err(BundleError::BadAlias { .. })),
+                "{bad:?} must be refused as an alias"
+            );
+        }
+
+        let mut dup = tb4();
+        dup.aliases = vec!["tbench".into(), "tbench".into()];
+        assert!(matches!(
+            dup.validate_shape(),
+            Err(BundleError::DuplicateAlias(ref a)) if a == "tbench"
+        ));
+
+        let mut many = tb4();
+        many.aliases = (0..=MAX_ALIASES).map(|i| format!("alias-{i}")).collect();
+        assert!(matches!(
+            many.validate_shape(),
+            Err(BundleError::TooManyAliases { got }) if got == MAX_ALIASES + 1
+        ));
+        let mut just_enough = tb4();
+        just_enough.aliases = (0..MAX_ALIASES).map(|i| format!("alias-{i}")).collect();
+        just_enough
+            .validate_shape()
+            .expect("exactly the maximum is allowed");
+
+        // An alias is a lookup key, never topic data: the bundle's own key
+        // list still forbids a second place to restate a binding.
+        let value = serde_json::to_value(tb4()).expect("json");
+        assert_eq!(value["aliases"], serde_json::json!(["tbench"]));
+        assert_eq!(value["topic"]["id"], "tb4");
     }
 
     #[test]

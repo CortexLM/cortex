@@ -9,12 +9,21 @@
 //! POST /v1/submissions            miner submit (topic_id + hotkey_signature + submit_nonce required)
 //! GET  /v1/submissions            ?state=queued&topic_id=… filters
 //! GET  /v1/submissions/{id}
-//! POST /v1/admin/proof/topics     operator publish (signed document)
+//! POST /v1/admin/proof/topics     operator publish (signed document; an `open` one needs an applied install)
 //! POST /v1/admin/proof/executor   operator rotate the live executor offer
 //! GET  /v1/admin/proof/vm-orchestrator   operator probe: topic-VM orchestrator readiness + agent health
 //! POST /v1/admin/proof/queue/drain       operator: score `queued` rows of one topic, in order
 //! POST /v1/admin/proof/submissions/{id}/score   operator: score one `queued` row
 //! ```
+//!
+//! **The install gate.** An `open` document is submitable the moment it is
+//! published, so the publish route refuses one unless the topic's newest
+//! `proof_topic_install` row is `applied` (**409**, with the reason). A
+//! `draft` document is never gated — it is not submitable, and staging one is
+//! how an operator stages a bundle. A host with no journal (no database), an
+//! unreadable journal, and a `pending` / `failed` / missing row all refuse,
+//! so a topic cannot become live before its migrations, routes, and rules are
+//! in place.
 //!
 //! **Deferred scoring.** An open topic whose signed document carries
 //! `constraints.params.defer_scoring = "true"` accepts submissions the same
@@ -169,6 +178,31 @@ pub trait VmOrchestratorProbe: Send + Sync {
     async fn probe(&self) -> VmOrchestratorReport;
 }
 
+/// Whether a topic's install reached `applied`, as the publish route reads it.
+///
+/// A trait rather than a pool so the route can be exercised without a
+/// database, and so a host that resolved no install journal can say so instead
+/// of answering from a table it never read.
+#[async_trait]
+pub trait InstallJournal: Send + Sync {
+    /// `Ok(true)` when the newest install row for `topic_id` is `applied`.
+    ///
+    /// # Errors
+    ///
+    /// The reason the journal could not be read. The caller refuses the
+    /// publish: an unreadable journal is not an installed topic.
+    async fn applied(&self, topic_id: &str) -> Result<bool, String>;
+}
+
+/// The journal read behind the publish gate, or `None` on a host that
+/// resolved none (no database).
+///
+/// `None` is **fail-closed**: [`install_applied`] refuses, so an `open`
+/// document cannot be published on a host that cannot prove the install ran.
+/// That is the same rule the gate enforces when the journal is unreadable —
+/// the only difference is which sentence the operator reads.
+pub type InstallJournalSlot = Option<Arc<dyn InstallJournal>>;
+
 /// Shared HTTP state.
 #[derive(Clone)]
 pub struct AppState {
@@ -195,6 +229,10 @@ pub struct AppState {
     /// Topic-VM orchestrator diagnostic for `GET /v1/admin/proof/vm-orchestrator`.
     /// `None` = the host resolved none (the route then reports `none`).
     pub vm_probe: Option<Arc<dyn VmOrchestratorProbe>>,
+    /// The install journal the **publish gate** reads: an `open` document is
+    /// refused unless the topic's newest install row is `applied`. `None` is
+    /// fail-closed (an `open` publish is refused, a `draft` one is not).
+    pub install_journal: InstallJournalSlot,
     /// Chain epoch used for topic windows. v0 hosts pass 0.
     pub epoch: u64,
 }
@@ -1283,6 +1321,19 @@ async fn publish_topic(
     doc.validate(&st.pin, &custom_ids_ref(&registered))
         .map_err(|e| topic_err(&e))?;
     doc.verify_signature(&st.pin).map_err(|e| topic_err(&e))?;
+    // The install gate, before anything is written: an `open` document is
+    // submitable the moment it is published, so it may not reach the registry
+    // until the topic's install is **applied**. The operator's CLI publishes
+    // after the install for the same reason, but that ordering is a client
+    // convention — a direct POST could skip it, and this route is the one that
+    // decides. A topic that is not installed, or whose install is still
+    // `pending` or ended `failed`, is refused here; the operator finishes the
+    // install and re-publishes.
+    if doc.status == TopicStatus::Open {
+        if let Err(why) = install_gate(&st, &doc.id).await {
+            return Err(err(StatusCode::CONFLICT, &why));
+        }
+    }
     if doc.status == TopicStatus::Open && !doc.baseline.is_sealed() {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -1604,6 +1655,45 @@ fn admin_ok(headers: &HeaderMap, hashes: &[String]) -> bool {
 
 fn err(code: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     (code, Json(serde_json::json!({ "error": msg })))
+}
+
+/// Whether the topic's install reached `applied`, as the publish gate reads it.
+///
+/// **Fail-closed on every doubt**: no journal slot, an unreadable journal, and
+/// a topic with no install row all refuse, so an `open` document is never
+/// admitted on a fact the host cannot prove.
+///
+/// The refusal says **which** of those it was, because the operator has to
+/// tell "not installed yet" from "the journal could not be read" — one is a
+/// step to finish, the other is a host to fix. It is returned rather than
+/// logged: `proof-http` has no logging dependency, and this reason belongs in
+/// the response the operator is already reading.
+///
+/// # Errors
+///
+/// The reason the `open` document cannot be published.
+async fn install_gate(st: &AppState, topic_id: &str) -> Result<(), String> {
+    let Some(journal) = st.install_journal.as_deref() else {
+        return Err(format!(
+            "this host resolved no install journal (no database), so it cannot prove that topic \
+             {topic_id:?} was installed. Publish the document as `draft`, or wire \
+             BASE_DATABASE_URL and restart."
+        ));
+    };
+    match journal.applied(topic_id).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "topic {topic_id:?} has no `applied` install row: run `proof-admin topic install` to \
+             completion first (the journal is `proof_topic_install`; read it with `proof-admin \
+             topic install-log --topic {topic_id}`). A `pending` or `failed` row means the \
+             migrations, routes, or rules are not in place, and an `open` document is submitable \
+             the moment it is published."
+        )),
+        Err(e) => Err(format!(
+            "the install journal could not be read for topic {topic_id:?}: {e}. The publish is \
+             refused rather than admitted on an unread fact; fix the database and re-publish."
+        )),
+    }
 }
 
 fn store_err(e: &proof_store::StoreError) -> (StatusCode, Json<serde_json::Value>) {
@@ -1943,6 +2033,7 @@ mod tests {
             judge_api_key,
             admin_hashes: Arc::new(vec![hash_admin_token(token)]),
             vm_probe: None,
+            install_journal: Some(Arc::new(InstalledJournal)),
             epoch: 0,
         })
     }
@@ -1988,6 +2079,7 @@ mod tests {
             judge_api_key: Some("test-judge-key".into()),
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             vm_probe: None,
+            install_journal: Some(Arc::new(InstalledJournal)),
             epoch: 0,
         })
     }
@@ -2376,6 +2468,7 @@ mod tests {
                 Vec::new()
             }),
             vm_probe: probe,
+            install_journal: Some(Arc::new(InstalledJournal)),
             epoch: 0,
         })
     }
@@ -2532,6 +2625,7 @@ mod tests {
             judge_api_key: Some("test-judge-key".into()),
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             vm_probe: None,
+            install_journal: Some(Arc::new(InstalledJournal)),
             epoch: 0,
         });
         let (st, body) = json_req(
@@ -3017,6 +3111,7 @@ mod tests {
             judge_api_key: Some("test-judge-key".into()),
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             vm_probe: None,
+            install_journal: Some(Arc::new(InstalledJournal)),
             epoch: 0,
         });
         let (st, created) = json_req(
@@ -3268,6 +3363,168 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::CREATED, "{created}");
         assert_eq!(created["id"], "adamw-beater-v0");
+    }
+
+    /// An install journal that reports every topic as installed, for the tests
+    /// whose subject is the publish path rather than the install gate.
+    struct InstalledJournal;
+
+    #[async_trait]
+    impl InstallJournal for InstalledJournal {
+        async fn applied(&self, _topic_id: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    /// An install journal that refuses every read, for the gate's
+    /// fail-closed case.
+    struct BrokenJournal;
+
+    #[async_trait]
+    impl InstallJournal for BrokenJournal {
+        async fn applied(&self, _topic_id: &str) -> Result<bool, String> {
+            Err("journal unavailable".into())
+        }
+    }
+
+    /// An install journal that has no row for any topic.
+    struct EmptyJournal;
+
+    #[async_trait]
+    impl InstallJournal for EmptyJournal {
+        async fn applied(&self, _topic_id: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+
+    /// A host whose install journal says every topic is installed, and whose
+    /// every other field is the test default.
+    fn app_with_install_journal(token: &str, journal: InstallJournalSlot) -> Router {
+        let mut state = AppState {
+            store: MemoryStore::new(),
+            pin: pin(""),
+            backend: EvalBackend::Sim,
+            live_scorer: None,
+            offer: None,
+            executor: executor_slot(None),
+            judge_api_key: None,
+            admin_hashes: Arc::new(vec![hash_admin_token(token)]),
+            vm_probe: None,
+            install_journal: Some(Arc::new(InstalledJournal)),
+            epoch: 0,
+        };
+        state.install_journal = journal;
+        proof_router(state)
+    }
+
+    /// **The publish gate.** An `open` document is refused unless the topic's
+    /// install reached `applied`; a `draft` document is not gated, because a
+    /// draft is not submitable and is how an operator stages a bundle.
+    ///
+    /// The gate is what makes the ordering a **rule of the route** rather than
+    /// a convention of the CLI: a direct POST that skipped the install would
+    /// otherwise put a submitable document in the registry before its
+    /// migrations, routes, and rules existed.
+    #[tokio::test]
+    async fn an_open_topic_publishes_only_when_its_install_is_applied() {
+        let token = "op";
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let p = pin("");
+        let (mut doc, _) = seal_topic(&p, unsigned_topic(&recs));
+        doc.id = "gated-topic-v0".into();
+        doc.signature = doc.sign_with(&sk()).expect("sign");
+        // The document is kept under its own name: the response bodies below
+        // are what each refusal said, and shadowing this would send the
+        // previous *answer* back as the next request.
+        let document = serde_json::to_value(&doc).expect("json");
+
+        // No journal on this host: fail-closed, and the refusal says why.
+        let (st, body) = json_req(
+            app_with_install_journal(token, None),
+            "POST",
+            "/v1/admin/proof/topics",
+            document.clone(),
+            Some(token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("resolved no install journal"),
+            "{body}"
+        );
+
+        // A journal with no row for the topic: not installed.
+        let (st, body) = json_req(
+            app_with_install_journal(token, Some(Arc::new(EmptyJournal))),
+            "POST",
+            "/v1/admin/proof/topics",
+            document.clone(),
+            Some(token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no `applied` install row"),
+            "{body}"
+        );
+
+        // An unreadable journal is refused too, never admitted.
+        let (st, body) = json_req(
+            app_with_install_journal(token, Some(Arc::new(BrokenJournal))),
+            "POST",
+            "/v1/admin/proof/topics",
+            document.clone(),
+            Some(token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("could not be read"),
+            "{body}"
+        );
+
+        // The same document **drafts** on every one of those hosts: a draft is
+        // not submitable, so staging it needs no install.
+        let mut draft = doc.clone();
+        draft.status = TopicStatus::Draft;
+        draft.signature = draft.sign_with(&sk()).expect("sign");
+        let draft = serde_json::to_value(&draft).expect("json");
+        for journal in [
+            None,
+            Some(Arc::new(EmptyJournal) as Arc<dyn InstallJournal>),
+            Some(Arc::new(BrokenJournal) as Arc<dyn InstallJournal>),
+        ] {
+            let (st, body) = json_req(
+                app_with_install_journal(token, journal),
+                "POST",
+                "/v1/admin/proof/topics",
+                draft.clone(),
+                Some(token),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+        }
+
+        // And an applied install admits it.
+        let (st, body) = json_req(
+            app_with_install_journal(token, Some(Arc::new(InstalledJournal))),
+            "POST",
+            "/v1/admin/proof/topics",
+            document,
+            Some(token),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        assert_eq!(body["status"], "open");
     }
 
     fn custom_metric(custom_id: &str) -> MetricSpec {
@@ -3570,6 +3827,7 @@ mod tests {
             judge_api_key: Some("test-judge-key".into()),
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             vm_probe: None,
+            install_journal: Some(Arc::new(InstalledJournal)),
             epoch: 0,
         })
     }
@@ -4292,6 +4550,7 @@ mod tests {
             judge_api_key: None,
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             vm_probe: None,
+            install_journal: Some(Arc::new(InstalledJournal)),
             epoch: 0,
         })
     }
@@ -4382,6 +4641,7 @@ mod tests {
             judge_api_key: None,
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             vm_probe: None,
+            install_journal: Some(Arc::new(InstalledJournal)),
             epoch: 0,
         });
         let (st, body) = json_req(
@@ -4424,6 +4684,7 @@ mod tests {
             judge_api_key: None,
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             vm_probe: None,
+            install_journal: Some(Arc::new(InstalledJournal)),
             epoch: 0,
         })
     }
@@ -4633,6 +4894,7 @@ mod tests {
             judge_api_key: None,
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             vm_probe: None,
+            install_journal: Some(Arc::new(InstalledJournal)),
             epoch: 0,
         })
     }
@@ -4702,6 +4964,7 @@ mod tests {
             judge_api_key: Some("test-judge-key".into()),
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             vm_probe: None,
+            install_journal: Some(Arc::new(InstalledJournal)),
             epoch: 0,
         });
         (app, store, scorer)
@@ -4888,6 +5151,7 @@ mod tests {
             judge_api_key: Some("test-judge-key".into()),
             admin_hashes: Arc::new(vec![hash_admin_token("op")]),
             vm_probe: None,
+            install_journal: Some(Arc::new(InstalledJournal)),
             epoch: 0,
         }
     }

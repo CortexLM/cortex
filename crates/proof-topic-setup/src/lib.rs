@@ -15,6 +15,23 @@
 //! lands in the store. A missing orchestrator, a declined owner, or a
 //! missing key file stops the driver where it is, with the reason, and a
 //! re-run resumes from the persisted state.
+//!
+//! # This crate exists so `proof-admin` can drive it
+//!
+//! The driver lives in its own crate because it has **two** callers with
+//! different lifetimes: the challenge service drives it per submission, and
+//! the operator CLI (`proof-admin topic install --drive-rlm`) drives it once
+//! at install time. Keeping it beside the scorer would have pushed that crate
+//! past the repository's per-crate LOC cap, and the driver has no dependency
+//! on scoring: it needs the VM boundary, the store, and the lifecycle.
+
+#![forbid(unsafe_code)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::doc_markdown,
+    clippy::module_name_repetitions,
+    clippy::must_use_candidate
+)]
 
 use std::sync::Arc;
 
@@ -63,6 +80,12 @@ pub enum SetupError {
     /// the RLM measured in the topic VM.
     #[error("seal: {0}")]
     Seal(String),
+    /// A baseline would be measured but there is no judge offer to bind it to.
+    #[error(
+        "no inference offer: the baseline is a paid run and needs a live judge offer to bind \
+         (or set skip_baseline, which measures none)"
+    )]
+    NoOffer,
 }
 
 /// What setup produced for the operator to seal.
@@ -75,7 +98,18 @@ pub struct SetupOutcome {
     /// Rule version in force after the RLM wrote its rules.
     pub rules_version: u32,
     /// Baseline primary the operator seals as `custom_value`.
-    pub baseline_primary: f64,
+    ///
+    /// `None` when [`TopicSetup::skip_baseline`] was set: no baseline was
+    /// measured, so there is nothing to seal and the topic cannot open yet.
+    pub baseline_primary: Option<f64>,
+}
+
+impl SetupOutcome {
+    /// Whether this run measured a baseline.
+    #[must_use]
+    pub const fn measured_baseline(&self) -> bool {
+        self.baseline_primary.is_some()
+    }
 }
 
 /// Everything the driver needs; no secrets.
@@ -96,6 +130,15 @@ pub struct TopicSetup {
     pub keys: Arc<dyn OwnerKeysProbe>,
     /// Spend cap shown to the owner, if any.
     pub spend_cap_usd: Option<f64>,
+    /// Stop after the RLM's rules are installed, before the baseline job.
+    ///
+    /// The operator CLI sets this for a staging install, where provisioning a
+    /// VM and running a paid baseline is the expensive part and the point is
+    /// to prove the install path. A topic installed this way has **no**
+    /// measured baseline, so it cannot open until one is sealed — the
+    /// lifecycle is left at `baselining`, and a later run without the flag
+    /// resumes from there rather than restarting.
+    pub skip_baseline: bool,
 }
 
 impl TopicSetup {
@@ -290,6 +333,18 @@ impl TopicSetup {
 
     /// Drive `draft → … → baselining` and run the RLM's rule + baseline jobs.
     ///
+    /// `offer` is the live judge offer the **baseline** runs against, so it is
+    /// `None` only on the [`TopicSetup::skip_baseline`] path: with no baseline
+    /// to measure there is no paid run and nothing for an offer to bind. Any
+    /// other combination is a refusal naming what is missing, rather than a
+    /// placeholder offer that would silently bind a run to nothing.
+    ///
+    /// With `skip_baseline` the driver stops after the RLM's rules land: the
+    /// VM is provisioned, the rules are installed, and
+    /// [`SetupOutcome::baseline_primary`] is `None`. The lifecycle is left at
+    /// `baselining`, which is exactly where a later run without the flag
+    /// resumes — so skipping is a pause, not a different path.
+    ///
     /// # Errors
     ///
     /// See [`SetupError`]. The lifecycle is left where the failure happened
@@ -298,10 +353,13 @@ impl TopicSetup {
         &self,
         topic: &TopicDocument,
         pin: &ProofPin,
-        offer: &InferenceOffer,
+        offer: Option<&InferenceOffer>,
     ) -> Result<SetupOutcome, SetupError> {
         if topic.metric.family != MetricFamily::Custom {
             return Err(SetupError::NotCustom(topic.id.clone()));
+        }
+        if offer.is_none() && !self.skip_baseline {
+            return Err(SetupError::NoOffer);
         }
         if self.store.latest_topic(&topic.id).await?.is_none() {
             self.store.put_topic_version(topic).await?;
@@ -317,6 +375,19 @@ impl TopicSetup {
         }
         let vm = self.provision(topic, pin, &mut lc).await?;
         let rules = self.propose_rules(topic, &vm).await?;
+        if self.skip_baseline {
+            return Ok(SetupOutcome {
+                topic_id: topic.id.clone(),
+                vm,
+                rules_version: rules.version,
+                baseline_primary: None,
+            });
+        }
+        let Some(offer) = offer else {
+            // Unreachable: checked above. Kept as a refusal rather than an
+            // `expect`, because the workspace forbids panics in non-test code.
+            return Err(SetupError::NoOffer);
+        };
         let report = self
             .baseline(topic, pin, offer, &rules, &vm, &mut lc)
             .await?;
@@ -324,7 +395,7 @@ impl TopicSetup {
             topic_id: topic.id.clone(),
             vm,
             rules_version: rules.version,
-            baseline_primary: report.primary_value,
+            baseline_primary: Some(report.primary_value),
         })
     }
 

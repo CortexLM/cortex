@@ -1,0 +1,17 @@
+[package]
+name = "proof-topic-sql-guard"
+description = "What a Proof topic's SQL migration may touch: a deny-list over owned objects, statements, and namespaces, scanned before anything executes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+thiserror = "2"
+
+[dev-dependencies]
+
+[lints]
+workspace = true

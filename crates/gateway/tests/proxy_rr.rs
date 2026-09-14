@@ -668,3 +668,65 @@ async fn proxy_has_no_short_upstream_timeout() {
     assert!(body.contains("\"id\":\"pf\""), "{body}");
     let _ = shutdown.send(());
 }
+
+/// A **topic id** the registry does not know is forwarded to the Proof
+/// challenge with the topic id kept in the path, because the topic's routes
+/// are resolved *by* it out of `proof_topic_api`. An id that is not
+/// topic-shaped keeps the registry's own answer.
+#[tokio::test]
+async fn a_topic_route_reaches_proof_with_its_topic_id() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/challenge/tb4/status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "topic_id": "tb4",
+            "path": "status",
+            "registry": "proof_topic_api",
+        })))
+        .mount(&upstream)
+        .await;
+
+    // Only the challenge is registered: `tb4` has no backend of its own.
+    let reg = fast_registry();
+    reg.create(&CreateBackend {
+        challenge_id: "proof".into(),
+        base_url: upstream.uri(),
+        weight: 1,
+    })
+    .unwrap();
+
+    let (addr, shutdown) = spawn_gateway(reg).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/challenge/tb4/status"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("proof_topic_api"), "{body}");
+    // The admin block is decided on the path, not on the id: a topic route
+    // cannot carry an admin call to the challenge.
+    let resp = client
+        .get(format!("http://{addr}/challenge/tb4/v1/admin/proof/topics"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "admin paths stay blocked for a topic id too"
+    );
+
+    // An id that is not topic-shaped is not re-addressed: no Proof backend
+    // would answer it, so the registry's own refusal stands.
+    let resp = client
+        .get(format!("http://{addr}/challenge/Nope!/status"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status().as_u16(), 503);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("no healthy backends"), "{body}");
+    let _ = shutdown.send(());
+}

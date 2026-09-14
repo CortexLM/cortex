@@ -2080,6 +2080,7 @@ dependencies = [
  "axum",
  "crypto",
  "db",
+ "gateway-registry",
  "hex",
  "parking_lot",
  "serde",
@@ -3690,11 +3691,17 @@ dependencies = [
  "db",
  "hex",
  "proof-experiment",
+ "proof-rlm",
  "proof-rlm-store",
  "proof-task",
  "proof-topic-bundle",
+ "proof-topic-install",
+ "proof-topic-setup",
+ "proof-vm-fc",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
 ]
 
@@ -3711,21 +3718,26 @@ dependencies = [
 name = "proof-challenge"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "bundle",
  "chain",
  "challenge-common",
  "crypto",
  "hex",
+ "http-body-util",
  "proof-eval",
  "proof-executor",
  "proof-http",
  "proof-score",
  "proof-store",
  "proof-task",
+ "proof-topic-install",
  "serde_json",
+ "sqlx",
  "thiserror 2.0.19",
  "tokio",
+ "tower",
  "tracing",
  "trustroot",
 ]
@@ -3753,11 +3765,13 @@ dependencies = [
  "proof-store",
  "proof-submit",
  "proof-task",
+ "proof-topic-install",
  "proof-vm-agent",
  "proof-vm-fc",
  "reqwest 0.12.28",
  "serde_json",
  "sha2 0.10.9",
+ "sqlx",
  "telemetry",
  "tokio",
  "tracing",
@@ -3961,6 +3975,7 @@ dependencies = [
  "proof-store",
  "proof-submit",
  "proof-task",
+ "proof-topic-setup",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4048,6 +4063,46 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "proof-topic-install"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "db",
+ "proof-canon",
+ "proof-experiment",
+ "proof-rlm",
+ "proof-rlm-store",
+ "proof-task",
+ "proof-topic-bundle",
+ "proof-topic-sql-guard",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "proof-topic-setup"
+version = "0.1.0"
+dependencies = [
+ "proof-eval",
+ "proof-rlm",
+ "proof-rlm-store",
+ "proof-task",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "proof-topic-sql-guard"
+version = "0.1.0"
+dependencies = [
  "thiserror 2.0.19",
 ]
 

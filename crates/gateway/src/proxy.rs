@@ -101,14 +101,24 @@ async fn proxy_inner(
         let mut attempted = Vec::new();
 
         for _ in 0..2 {
-            let backend = match st.registry.pick(&challenge_id) {
-                Ok(b) => b,
+            let (backend, upstream_path) = match st.registry.pick(&challenge_id) {
+                Ok(b) => (b, rest.clone()),
+                // An id the registry does not know may be a **topic id**: its
+                // routes live in `proof_topic_api` and the Proof challenge
+                // serves them (see `gateway_core::topic_routes`).
                 Err(RegistryError::NoBackends(_)) => {
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        format!("no healthy backends for challenge_id={challenge_id}"),
-                    )
-                        .into_response();
+                    let topic =
+                        gateway_core::topic_routes::topic_route(&st.registry, &challenge_id, &rest);
+                    match topic {
+                        Some(pair) => pair,
+                        None => {
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                format!("no healthy backends for challenge_id={challenge_id}"),
+                            )
+                                .into_response();
+                        }
+                    }
                 }
                 Err(e) => {
                     return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
@@ -120,7 +130,7 @@ async fn proxy_inner(
             }
             attempted.push(backend.id);
 
-            let url = upstream_url(&backend.base_url, &rest, query.as_deref());
+            let url = upstream_url(&backend.base_url, &upstream_path, query.as_deref());
             match forward(&st.client, method.clone(), &url, &headers, body.clone()).await {
                 ForwardResult::Ok(mut upstream_resp) => {
                     let status = upstream_resp.status();
