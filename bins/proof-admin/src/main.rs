@@ -299,23 +299,19 @@ async fn cmd_install(opts: &Options, path: &Path, env: &str, dry_run: bool) -> R
     let bundle_value = serde_json::to_value(&bundle)
         .map_err(|e| Failure::Error(format!("serialize bundle: {e}")))?;
     let row = new_topic(&plan, &bundle_value);
-    db::upsert_topic(&pool, &row)
+    // The write returns the row it committed, so the reported state and the
+    // write share one outcome: a failure here means the install did not land,
+    // and a success means the fields below are the persisted ones. A separate
+    // read afterwards could fail after the commit and tell a caller a
+    // successful install failed — which is how an automation retries and
+    // overwrites a newer concurrent install.
+    //
+    // The reported `enabled` is the **persisted** one, not the state an
+    // install would have written: a re-install deliberately leaves the column
+    // alone, so a topic that was already live stays live.
+    let persisted = db::upsert_topic(&pool, &row)
         .await
         .map_err(|e| Failure::Error(format!("install {}: {e}", plan.topic_id)))?;
-
-    // Report the **persisted** state, not the state an install would have
-    // written. A re-install deliberately leaves `enabled` alone, so a topic
-    // that was already live stays live — telling an operator it is disabled
-    // would be exactly the mistake that leads to a surprise on a live host.
-    let persisted = db::get_topic(&pool, &plan.topic_id)
-        .await
-        .map_err(|e| Failure::Error(format!("read back {}: {e}", plan.topic_id)))?
-        .ok_or_else(|| {
-            Failure::Error(format!(
-                "install {} reported success but the row is missing",
-                plan.topic_id
-            ))
-        })?;
 
     if opts.json {
         let body = serde_json::json!({

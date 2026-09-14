@@ -219,6 +219,68 @@ async fn s3_reinstall_replaces_the_install_and_keeps_the_first_created_at() {
     tp.drop_schema().await.expect("drop");
 }
 
+/// The write returns the row it committed.
+///
+/// The CLI reports install success from this value, so the write and the
+/// reported state must be one statement: a separate read after the commit
+/// could fail and tell a caller a successful install failed — which is how an
+/// automation retries and overwrites a newer concurrent install. The returned
+/// `enabled` is the **persisted** one, which a re-install deliberately leaves
+/// alone.
+#[tokio::test]
+async fn s3b_the_upsert_returns_the_persisted_row() {
+    if !database_url_present() {
+        return;
+    }
+    let tp = db::test_pool().await.expect("test_pool");
+    let pool = tp.pool();
+
+    let fixture = Fixture::new();
+    let inserted = upsert_topic(pool, &fixture.row()).await.expect("install");
+    assert_eq!(inserted.topic_id, "tb4");
+    assert_eq!(inserted.version, 1);
+    assert_eq!(inserted.n_concurrent, 2);
+    assert!(
+        !inserted.enabled,
+        "a first install writes (and therefore reports) disabled"
+    );
+    assert_eq!(
+        inserted,
+        get_topic(pool, "tb4").await.expect("get").expect("row"),
+        "the returned row is the persisted row"
+    );
+
+    sqlx::query("UPDATE proof_topic SET enabled = TRUE WHERE topic_id = 'tb4'")
+        .execute(pool)
+        .await
+        .expect("enable");
+
+    let reinserted = upsert_topic(
+        pool,
+        &NewTopic {
+            version: 2,
+            ..fixture.row()
+        },
+    )
+    .await
+    .expect("re-install");
+    assert_eq!(reinserted.version, 2, "the write's own version comes back");
+    assert!(
+        reinserted.enabled,
+        "the returned state is the persisted one, not what an install would write"
+    );
+    assert_eq!(
+        reinserted.created_at, inserted.created_at,
+        "created_at still belongs to the first install"
+    );
+    assert_eq!(
+        reinserted,
+        get_topic(pool, "tb4").await.expect("get").expect("row")
+    );
+
+    tp.drop_schema().await.expect("drop");
+}
+
 #[tokio::test]
 async fn s4_the_schema_refuses_a_malformed_row() {
     if !database_url_present() {

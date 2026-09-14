@@ -130,7 +130,7 @@ fn row_to_topic(row: &sqlx::postgres::PgRow) -> Result<TopicRow, DbError> {
     })
 }
 
-/// Write one topic install.
+/// Write one topic install and return the row as persisted.
 ///
 /// A re-install of the same `topic_id` replaces the install fields and bumps
 /// `updated_at`; `created_at` keeps the first install's instant. `enabled` is
@@ -139,12 +139,18 @@ fn row_to_topic(row: &sqlx::postgres::PgRow) -> Result<TopicRow, DbError> {
 /// silently drop it out of scoring either. The enable/disable path is a later
 /// slice.
 ///
+/// The write and the reported state are **one statement**: `RETURNING` gives
+/// the caller the row it just wrote, including the `enabled` it did not set.
+/// A separate read afterwards could fail after the commit and leave a caller
+/// believing a successful install failed — which is how an automation
+/// retries and overwrites a newer concurrent install.
+///
 /// # Errors
 ///
 /// Propagates sqlx errors, including the row's `CHECK` violations (slug,
 /// digest shape, non-finite baseline, empty config, ...).
-pub async fn upsert_topic(pool: &PgPool, topic: &NewTopic<'_>) -> Result<(), DbError> {
-    sqlx::query(
+pub async fn upsert_topic(pool: &PgPool, topic: &NewTopic<'_>) -> Result<TopicRow, DbError> {
+    let sql = format!(
         "INSERT INTO proof_topic (
              topic_id, display_name, version, environment, runner_id, aliases,
              config, pin_rlm, pin_experiment, pack_digest, n_concurrent,
@@ -165,26 +171,28 @@ pub async fn upsert_topic(pool: &PgPool, topic: &NewTopic<'_>) -> Result<(), DbE
              schema_version = EXCLUDED.schema_version,
              bundle = EXCLUDED.bundle,
              bundle_digest = EXCLUDED.bundle_digest,
-             updated_at = now()",
-    )
-    .bind(topic.topic_id)
-    .bind(topic.display_name)
-    .bind(topic.version)
-    .bind(topic.environment)
-    .bind(topic.runner_id)
-    .bind(topic.aliases)
-    .bind(topic.config)
-    .bind(topic.pin_rlm)
-    .bind(topic.pin_experiment)
-    .bind(topic.pack_digest)
-    .bind(topic.n_concurrent)
-    .bind(topic.sealed_custom_value)
-    .bind(topic.schema_version)
-    .bind(topic.bundle)
-    .bind(topic.bundle_digest)
-    .execute(pool)
-    .await?;
-    Ok(())
+             updated_at = now()
+         RETURNING {ROW_COLUMNS}"
+    );
+    let row = sqlx::query(&sql)
+        .bind(topic.topic_id)
+        .bind(topic.display_name)
+        .bind(topic.version)
+        .bind(topic.environment)
+        .bind(topic.runner_id)
+        .bind(topic.aliases)
+        .bind(topic.config)
+        .bind(topic.pin_rlm)
+        .bind(topic.pin_experiment)
+        .bind(topic.pack_digest)
+        .bind(topic.n_concurrent)
+        .bind(topic.sealed_custom_value)
+        .bind(topic.schema_version)
+        .bind(topic.bundle)
+        .bind(topic.bundle_digest)
+        .fetch_one(pool)
+        .await?;
+    row_to_topic(&row)
 }
 
 /// Every installed topic, ordered by `topic_id`.
@@ -227,6 +235,8 @@ mod unit_tests {
 
     /// The selected columns are what [`row_to_topic`] reads: a column added to
     /// one side only is a decode error at runtime, so both lists are pinned.
+    /// The upsert's `RETURNING` reuses the same list, so the write and the
+    /// read cannot drift apart either.
     #[test]
     fn the_column_list_covers_every_decoded_field() {
         for column in [
