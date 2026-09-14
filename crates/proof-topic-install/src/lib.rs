@@ -23,6 +23,9 @@
 //!
 //! - [`section`] reads the RLM section's parts strictly, and carries the rest.
 //! - [`install`] is the engine: migrations, routes, rules, binding, journal.
+//! - [`routes`] is the **read** side of the routes an install recorded: the
+//!   dynamic mux the challenge answers `/challenge/{topic_id}/…` from, behind
+//!   a cache an install invalidates.
 //! - [`proof_topic_sql_guard`] is the migration deny-list (its own crate: it
 //!   is pure text analysis, and keeping it separate means it can be reasoned
 //!   about — and tested — without a database).
@@ -47,6 +50,7 @@
 
 pub mod handler;
 pub mod install;
+pub mod routes;
 pub mod section;
 
 pub use handler::{bound_runner, check_handler, resolve_handler, Handler, HandlerError};
@@ -59,6 +63,7 @@ pub use proof_topic_sql_guard::{
     MigrationDenied, Statement, DENIED_DROP_KINDS, DENIED_FUNCTIONS, DENIED_OBJECTS, DENIED_VERBS,
     OWNED_TABLES, OWNED_TABLE_PREFIX,
 };
+pub use routes::{is_topic_id, PgTopicRoutes, Resolved, TopicRouteMux, TopicRouteSource};
 pub use section::{
     is_api_method, is_relative_api_path, read_section, ApiRoute, Migration, SectionPlan, MAX_APIS,
     MAX_MIGRATIONS, MAX_MIGRATION_SQL_BYTES, READ_KEYS,

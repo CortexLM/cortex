@@ -23,7 +23,7 @@ use challenge_keys::load_challenge_secret;
 use clap::Parser;
 use prism_lium::LiumClient;
 use proof_challenge::{
-    executor_slot, hash_admin_token, parse_holdout_file, proof_router, AppState, ArtefactVault,
+    challenge_router, executor_slot, hash_admin_token, parse_holdout_file, AppState, ArtefactVault,
     BaselineMeasurement, EvalBackend, EvalExecutorOffer, GatewayClient, GatewayClientConfig,
     HarvestOverrides, InferenceOffer, LiveScorer, MemoryStore, MinerEnvVault, ProofEmitter,
     ProofPin, TopicDocument, VmAgentHealth, VmOrchestratorProbe, VmOrchestratorReport,
@@ -38,7 +38,10 @@ use proof_rlm::{
 };
 use proof_rlm_scorer::{max_zip_numeric_id, ArtefactStore, RlmScorer};
 use proof_rlm_store::{MemoryRlmStore, PgRlmStore, RlmStore};
+use proof_topic_install::{PgTopicRoutes, TopicRouteMux};
 use proof_vm_fc::{parse_custom_ids, FirecrackerOrchestrator, VM_RUNNER_CUSTOM_IDS_ENV};
+use sqlx::PgPool;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 
 /// Operator Proof challenge service CLI.
@@ -248,7 +251,26 @@ fn run(cli: &Cli) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    let rlm_store = rt.block_on(resolve_rlm_store(cli))?;
+    let (rlm_store, pool) = rt.block_on(resolve_rlm_store(cli))?;
+    // The dynamic topic routes come from the same database: the challenge
+    // *reads* the route table an install wrote, and answers
+    // `/challenge/{topic_id}/…` from it. No database → no route table → the
+    // Proof routes alone (and a topic route is a 404 from the base router,
+    // never an answer from a table that was never read).
+    let topic_routes =
+        pool.map(|pool| Arc::new(TopicRouteMux::new(Arc::new(PgTopicRoutes::new(pool)))));
+    if topic_routes.is_some() {
+        tracing::info!(
+            "topic route mux wired: /challenge/{{topic_id}}/… resolves proof_topic_api \
+             (cache keyed by the table's generation, so an install is visible on the next \
+             request)"
+        );
+    } else {
+        tracing::warn!(
+            "no database configured; the dynamic topic routes are not served (a topic's \
+             /challenge/{{topic_id}}/… path answers 404)"
+        );
+    }
     let harvest = build_live_scorer(
         backend,
         cli.eval_timeout_secs,
@@ -311,7 +333,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             Duration::from_secs(cli.queue_drain_poll_secs),
         ));
     }
-    rt.block_on(serve(cli.bind, state))
+    rt.block_on(serve(cli.bind, state, topic_routes))
 }
 
 /// Default seconds between queue-drain passes.
@@ -676,13 +698,19 @@ fn database_url(cli: &Cli) -> Result<Option<String>, String> {
 /// A configured but unreachable database is fatal: falling back to memory
 /// would silently drop every rule version, checklist, and promotion on
 /// restart.
-async fn resolve_rlm_store(cli: &Cli) -> Result<Arc<dyn RlmStore>, String> {
+///
+/// The pool comes back with the store because the challenge reads a second
+/// thing from the same database: the topic route table an install wrote
+/// (`proof_topic_api`), which the dynamic mux serves `/challenge/{topic_id}/…`
+/// from. `None` means no database was configured, so there is no route table
+/// to read.
+async fn resolve_rlm_store(cli: &Cli) -> Result<(Arc<dyn RlmStore>, Option<PgPool>), String> {
     let Some(url) = database_url(cli)? else {
         tracing::warn!(
             "no database configured; rlm rules, checklists, lifecycle, and promotions are not \
              persisted across restarts"
         );
-        return Ok(Arc::new(MemoryRlmStore::new()));
+        return Ok((Arc::new(MemoryRlmStore::new()), None));
     };
     let pool = db::connect(&url)
         .await
@@ -691,7 +719,7 @@ async fn resolve_rlm_store(cli: &Cli) -> Result<Arc<dyn RlmStore>, String> {
         .await
         .map_err(|e| format!("database migrate failed: {e}"))?;
     tracing::info!("rlm store persists to postgres");
-    Ok(Arc::new(PgRlmStore::new(pool)))
+    Ok((Arc::new(PgRlmStore::new(pool.clone())), Some(pool)))
 }
 
 /// Raise the in-memory `pf_…` allocator past every id already used as
@@ -977,8 +1005,12 @@ fn load_admin_hashes(path: Option<&Path>) -> Vec<String> {
         .collect()
 }
 
-async fn serve(bind: SocketAddr, state: AppState) -> Result<(), String> {
-    let app = proof_router(state);
+async fn serve(
+    bind: SocketAddr,
+    state: AppState,
+    topic_routes: Option<Arc<TopicRouteMux>>,
+) -> Result<(), String> {
+    let app = challenge_router(state, topic_routes);
     let listener = TcpListener::bind(bind)
         .await
         .map_err(|e| format!("bind {bind}: {e}"))?;

@@ -20,8 +20,12 @@ use proof_task::{
     MetricSpec, PayoutMode, TopicDocument, TopicStatus, FLOPS_BUDGET_MAX, STRATUM_SIZE,
 };
 use proof_topic_install::install::{InstallRequest, InstallState, Installer, SetupSummary};
-use proof_topic_install::{latest_install, topic_routes, InstallError, VMS_PER_SUBMISSION};
+use proof_topic_install::{
+    latest_install, topic_routes, InstallError, PgTopicRoutes, Resolved, TopicRouteMux,
+    VMS_PER_SUBMISSION,
+};
 use sqlx::PgPool;
+use std::sync::Arc;
 
 /// The test database, or `None` when the suite should skip.
 async fn test_pool() -> Option<(db::TestPool, PgPool)> {
@@ -190,6 +194,9 @@ async fn a_permitted_bundle_installs_and_the_journal_records_it() {
         "stored paths are relative: {routes:?}"
     );
 
+    // The **mux** reads what the install wrote.
+    mux_reads_what_the_install_wrote(&pool).await;
+
     // The journal's newest row is this run, in the `applied` state.
     let row = latest_install(&pool, "tb4")
         .await
@@ -202,6 +209,45 @@ async fn a_permitted_bundle_installs_and_the_journal_records_it() {
     assert_eq!(row.binding["vms_per_submission"], 1);
 
     tp.drop_schema().await.expect("drop");
+}
+
+/// The dynamic mux **reads** what an install **wrote**: the routes the
+/// challenge answers `/challenge/{topic_id}/…` from are the rows this install
+/// recorded, and a path nobody registered is not invented.
+///
+/// The last part is the cross-process half: a *second* install (another
+/// process — the operator's `proof-admin`) appends a row, and the next request
+/// serves it with no restart and no in-process signal, because the cache is
+/// keyed by the table's generation.
+async fn mux_reads_what_the_install_wrote(pool: &PgPool) {
+    let mux = TopicRouteMux::new(Arc::new(PgTopicRoutes::new(pool.clone())));
+    let resolved = mux.resolve("tb4", "GET", "status").await.expect("resolve");
+    assert!(
+        matches!(&resolved, Resolved::Route(r) if r.summary == "topic status"),
+        "{resolved:?}"
+    );
+    assert_eq!(
+        mux.resolve("tb4", "POST", "status").await.expect("resolve"),
+        Resolved::MethodNotAllowed,
+        "a path registered for GET is not a route for POST"
+    );
+    assert_eq!(
+        mux.resolve("tb4", "GET", "nothing").await.expect("resolve"),
+        Resolved::NotRegistered
+    );
+
+    sqlx::query(
+        "INSERT INTO proof_topic_api (topic_id, path, method, summary) \
+         VALUES ('tb4', 'v2/runs', 'GET', 'a later install')",
+    )
+    .execute(pool)
+    .await
+    .expect("append the second install's route");
+    let later = mux.resolve("tb4", "GET", "v2/runs").await.expect("resolve");
+    assert!(
+        matches!(&later, Resolved::Route(r) if r.summary == "a later install"),
+        "{later:?}"
+    );
 }
 
 /// A denied migration writes **nothing at all**.

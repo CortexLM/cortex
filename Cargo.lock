@@ -2080,6 +2080,7 @@ dependencies = [
  "axum",
  "crypto",
  "db",
+ "gateway-registry",
  "hex",
  "parking_lot",
  "serde",
@@ -3717,21 +3718,25 @@ dependencies = [
 name = "proof-challenge"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "bundle",
  "chain",
  "challenge-common",
  "crypto",
  "hex",
+ "http-body-util",
  "proof-eval",
  "proof-executor",
  "proof-http",
  "proof-score",
  "proof-store",
  "proof-task",
+ "proof-topic-install",
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
+ "tower",
  "tracing",
  "trustroot",
 ]
@@ -4062,6 +4067,7 @@ dependencies = [
 name = "proof-topic-install"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "db",
  "proof-canon",
  "proof-experiment",

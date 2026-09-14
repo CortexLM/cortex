@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+async-trait = "0.1"
 proof-canon = { path = "../proof-canon" }
 proof-experiment = { path = "../proof-experiment" }
 proof-rlm = { path = "../proof-rlm" }

@@ -383,12 +383,48 @@ scanning, so a denied word inside a literal is data (not a false refusal) and
 a denied statement cannot be smuggled in by quoting. Function bodies are
 *scanned*, not trusted — they are what runs.
 
+A body may also be written as a **string literal**, and the server executes
+the *decoded* value, so the guard decodes before it scans:
+`''` doubling, `E'…'` backslash escapes (`\xhh`, `\ooo`, `\uXXXX`,
+`\UXXXXXXXX`, `\'`), `U&'…'` code points (with `UESCAPE 'c'` honoured),
+adjacent literals a newline joins into one string, and the literal bodies of
+`CREATE PROCEDURE … AS '…'` and `DO '…'`. Both the decoded value and the
+written spelling are scanned, so `E'\x44ELETE FROM proof\x5frule\x5fversion'`
+is refused as the `DELETE` it is.
+
 A bundle's `handler` names the run backend, and only two exist: the generic
 in-guest runner (Firecracker) and an operator-baked Harbor adaptor over it.
 A path, a URL, or a command line is refused by shape; a well-formed but
 unknown id is refused with the allow-list in the message. The **signed
 document** keeps sole authority over which *runner* the topic's paid jobs
 use; the handler family is recorded for audit.
+
+#### The routes a topic registers (`proof_topic_api`)
+
+A topic's `apis` are its own routes: the install records them in
+`proof_topic_api` (path **relative** to the topic's prefix, method, summary),
+and the challenge **reads** that table to answer
+`/challenge/{topic_id}/…`. Nothing about a topic's routes is compiled in.
+
+| Answer | When |
+|--------|------|
+| **200** | the topic registered the path, for this method or for `*`; the body is the row the install wrote |
+| **405** | the topic registered the path for another method |
+| **404** | nothing is registered for that topic and path (an unknown topic is this case) |
+| **503** | the route table could not be read — **not** a 404, which would read as "this topic exposes nothing" |
+
+The registry is cached per request path and **keyed by the table's
+generation** (`count(*)`, sound because the table is `SELECT, INSERT` only):
+an install in another process — the operator's `proof-admin` — is visible on
+the next request, with no restart and no cross-process signal. A host with no
+database serves the Proof routes alone.
+
+The gateway forwards a **topic id** it does not know to the Proof challenge
+with the topic id kept in the path (`/challenge/{topic_id}/…`); the challenge
+is the gate, so an id that is not a registered topic is a 404. An id that is
+not topic-shaped (`^[a-z0-9][a-z0-9-]{1,62}$`, the table's own CHECK) keeps
+the registry's `no healthy backends` answer, and `v1/admin/*` stays blocked
+for a topic id exactly as it is for a challenge id.
 
 #### Fail-closed, and what an operator does next
 

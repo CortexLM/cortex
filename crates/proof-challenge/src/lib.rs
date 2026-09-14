@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 mod emit;
+mod topic_routes;
 
 use bundle::{NoScoreReasonCode, ScoreOrAbsence};
 use challenge_common::{emit_signed_leaf_set, Hotkey, LeafEmitError};
@@ -40,6 +41,7 @@ pub use proof_task::{
     CHALLENGE_ID, CHALLENGE_ID_BYTES as PROOF_ID_BYTES, SCORE_MAX as PROOF_SCORE_MAX,
     SCORING_VERSION,
 };
+pub use topic_routes::{challenge_router, topic_route_router, REGISTRY_TABLE};
 
 /// Build a D24-complete score map: each expected hotkey is a **sum** of
 /// WTA/discovery topic masses, or an explicit `NoScore`.

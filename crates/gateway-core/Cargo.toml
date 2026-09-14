@@ -12,6 +12,7 @@ publish = false
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 crypto = { path = "../crypto" }
 db = { path = "../db" }
+gateway-registry = { path = "../gateway-registry" }
 hex = "0.4"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
