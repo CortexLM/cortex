@@ -13,17 +13,32 @@ Operator dry-run artifact for the dynamic-topics P0 skeleton (PR #297).
 Run from the repository root:
 
 ```bash
-cargo run -p proof-admin -- topic validate \
+cargo run -p proof-admin-bin -- topic validate \
   --bundle bins/proof-admin/tests/fixtures/tb4.install-bundle.json \
   --pin bins/proof-admin/tests/fixtures/tb4.pin.toml
 
-cargo run -p proof-admin -- topic install \
+cargo run -p proof-admin-bin -- topic install \
   --bundle bins/proof-admin/tests/fixtures/tb4.install-bundle.json \
   --env staging --dry-run \
   --pin bins/proof-admin/tests/fixtures/tb4.pin.toml
 ```
 
+`--bin proof-admin` works too and is package-name-agnostic:
+
+```bash
+cargo run --bin proof-admin -- topic validate \
+  --bundle bins/proof-admin/tests/fixtures/tb4.install-bundle.json \
+  --pin bins/proof-admin/tests/fixtures/tb4.pin.toml
+```
+
 Both write nothing and need no database.
+
+### Two things the command needs
+
+**`-p proof-admin-bin`, not `-p proof-admin`.** The repo names binary packages
+with a `-bin` suffix (`trustroot-bin` → `trustroot`, `validator-bin` →
+`validator`), so the package is `proof-admin-bin` and the *binary* is
+`proof-admin`. `cargo run --bin proof-admin -- …` sidesteps the distinction.
 
 ### `--pin` is required, and here is why
 
