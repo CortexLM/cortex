@@ -62,6 +62,7 @@ use std::str::FromStr;
 use proof_experiment::{ExperimentBinding, ExperimentError};
 use proof_task::{MetricFamily, TopicDocument, TopicError, TopicStatus};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 /// Only accepted `schema_version`.
 pub const BUNDLE_SCHEMA_VERSION: u32 = 1;
@@ -280,6 +281,15 @@ pub enum BundleError {
         /// What it was.
         got: &'static str,
     },
+    /// An RLM part was written as an explicit `null`.
+    #[error(
+        "rlm.{field} is an explicit null; a part the operator wrote is never silently dropped \
+         — remove the key instead"
+    )]
+    RlmExplicitNull {
+        /// Which part.
+        field: &'static str,
+    },
     /// The RLM section is larger than the bound.
     #[error("rlm section is {0} bytes of canonical JSON, at most {MAX_RLM_BYTES} are allowed")]
     RlmTooLarge(usize),
@@ -336,79 +346,183 @@ pub struct HostExpectations {
 /// **rules**, the **SQL migrations** the topic needs, the **APIs** it exposes,
 /// its **submission format**, and its **scoring**.
 ///
-/// This crate does not read any of it. The fields exist so an operator can
-/// *review* the section and so the shape can be bounded; the values are
-/// carried verbatim to the RLM. Nothing here is validated semantically, and
-/// nothing here may become a branch in challenge, gateway, or orchestrator
-/// code — that is exactly the hardcoding this boundary exists to prevent.
+/// Each part is held as **raw JSON text** ([`RawValue`]), not a parsed
+/// [`serde_json::Value`]. That is deliberate and load-bearing: parsing and
+/// re-serializing would reorder keys, collapse duplicate keys, and normalise
+/// whitespace, so the bytes handed to the RLM would not be the bytes the
+/// operator wrote. This crate carries the text it was given.
 ///
-/// Every field is optional and unconstrained beyond "valid JSON": a topic that
-/// needs none of them says nothing, and a topic that needs something Rust has
-/// never heard of puts it in the section rather than requiring a code change.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+/// The named fields exist so an operator can *review* the section and so its
+/// shape can be bounded. Nothing here is validated semantically, and nothing
+/// here may become a branch in challenge, gateway, or orchestrator code —
+/// that is exactly the hardcoding this boundary prevents. A part Rust has
+/// never heard of goes in the section rather than requiring a code change.
+#[derive(Debug, Clone, Default)]
 pub struct RlmSection {
     /// Anti-cheat rules the RLM ticks before any paid inference. Opaque.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rules: Option<serde_json::Value>,
+    pub rules: Option<Box<RawValue>>,
     /// SQL migrations the topic's install needs. Opaque.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub migrations: Option<serde_json::Value>,
+    pub migrations: Option<Box<RawValue>>,
     /// APIs the topic exposes. Opaque.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub apis: Option<serde_json::Value>,
+    pub apis: Option<Box<RawValue>>,
     /// The topic's submission format. Opaque.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub submission_format: Option<serde_json::Value>,
+    pub submission_format: Option<Box<RawValue>>,
     /// The topic's scoring definition. Opaque.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scoring: Option<serde_json::Value>,
+    pub scoring: Option<Box<RawValue>>,
+}
+
+/// The five parts, in a fixed order, for iteration and error naming.
+const RLM_FIELDS: [&str; 5] = [
+    "rules",
+    "migrations",
+    "apis",
+    "submission_format",
+    "scoring",
+];
+
+/// Compare the raw **bytes**, which is what the RLM receives.
+///
+/// `RawValue` has no `PartialEq`; comparing the text is also the honest
+/// comparison here, since two sections are the same hand-off only if they
+/// carry the same bytes.
+impl PartialEq for RlmSection {
+    fn eq(&self, other: &Self) -> bool {
+        let raw = |v: Option<&RawValue>| v.map(|r| r.get().to_owned());
+        RLM_FIELDS
+            .iter()
+            .all(|f| raw(field_of(self, f)) == raw(field_of(other, f)))
+    }
+}
+
+impl Eq for RlmSection {}
+
+/// The field behind a name, for the generic helpers above.
+fn field_of<'a>(section: &'a RlmSection, field: &str) -> Option<&'a RawValue> {
+    match field {
+        "rules" => section.rules.as_deref(),
+        "migrations" => section.migrations.as_deref(),
+        "apis" => section.apis.as_deref(),
+        "submission_format" => section.submission_format.as_deref(),
+        _ => section.scoring.as_deref(),
+    }
+}
+
+/// Deserialize the section as a map of **raw** parts.
+///
+/// Hand-written so three things hold that the derive cannot give:
+///
+/// - Each part keeps its exact bytes (a parsed `Value` would not).
+/// - An **explicit `null`** is kept as the text `null`, not folded into
+///   "absent" the way `Option` would. [`Self::validate_shape`] then refuses
+///   it, because silently dropping a part the operator wrote is the same
+///   failure as rewriting it.
+/// - An unknown key is an error, like `deny_unknown_fields`.
+impl<'de> Deserialize<'de> for RlmSection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SectionVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SectionVisitor {
+            type Value = RlmSection;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an RLM install section (a map of opaque parts)")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<RlmSection, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut section = RlmSection::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    let raw: Box<RawValue> = map.next_value()?;
+                    let slot = match key.as_str() {
+                        "rules" => &mut section.rules,
+                        "migrations" => &mut section.migrations,
+                        "apis" => &mut section.apis,
+                        "submission_format" => &mut section.submission_format,
+                        "scoring" => &mut section.scoring,
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown RLM section key {other:?} (expected one of {RLM_FIELDS:?})"
+                            )));
+                        }
+                    };
+                    *slot = Some(raw);
+                }
+                Ok(section)
+            }
+        }
+
+        deserializer.deserialize_map(SectionVisitor)
+    }
+}
+
+impl Serialize for RlmSection {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        for field in RLM_FIELDS {
+            if let Some(raw) = field_of(self, field) {
+                // `RawValue` writes its bytes through untouched.
+                map.serialize_entry(field, raw)?;
+            }
+        }
+        map.end()
+    }
 }
 
 impl RlmSection {
     /// Whether the section carries anything at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.rules.is_none()
-            && self.migrations.is_none()
-            && self.apis.is_none()
-            && self.submission_format.is_none()
-            && self.scoring.is_none()
+        RLM_FIELDS.iter().all(|f| field_of(self, f).is_none())
     }
 
-    /// Canonical form of the section, for the size bound.
-    fn canonical_len(&self) -> Result<usize, BundleError> {
-        let value =
-            serde_json::to_value(self).map_err(|e| BundleError::Canonicalize(e.to_string()))?;
-        Ok(proof_canon::canonical_json(&value).len())
+    /// The raw bytes of one part, for a caller that wants to hand them on.
+    #[must_use]
+    pub fn raw(&self, field: &str) -> Option<&str> {
+        field_of(self, field).map(RawValue::get)
     }
 
-    /// Shape only: the section must be a bounded JSON object.
+    /// Total size of the parts, in bytes — the text the RLM receives.
+    fn raw_len(&self) -> usize {
+        RLM_FIELDS
+            .iter()
+            .filter_map(|f| self.raw(f))
+            .map(str::len)
+            .sum()
+    }
+
+    /// Shape only: each part must be a bounded JSON object or array.
     ///
     /// Deliberately says nothing about the *content* — a rule list this crate
     /// does not recognise is not an error, because recognising it would mean
     /// this crate knows the topic.
     fn validate_shape(&self) -> Result<(), BundleError> {
-        for (field, value) in [
-            ("rules", self.rules.as_ref()),
-            ("migrations", self.migrations.as_ref()),
-            ("apis", self.apis.as_ref()),
-            ("submission_format", self.submission_format.as_ref()),
-            ("scoring", self.scoring.as_ref()),
-        ] {
-            if let Some(v) = value {
-                if v.is_null() {
-                    continue;
-                }
-                if !v.is_object() && !v.is_array() {
-                    return Err(BundleError::RlmNotObject {
-                        field,
-                        got: json_kind(v),
-                    });
-                }
+        for field in RLM_FIELDS {
+            let Some(text) = self.raw(field) else {
+                continue;
+            };
+            let trimmed = text.trim();
+            // An explicit null is refused rather than dropped: the operator
+            // wrote it, so silently discarding it would change the install.
+            if trimmed == "null" {
+                return Err(BundleError::RlmExplicitNull { field });
+            }
+            if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+                return Err(BundleError::RlmNotObject {
+                    field,
+                    got: raw_kind(trimmed),
+                });
             }
         }
-        let len = self.canonical_len()?;
+        let len = self.raw_len();
         if len > MAX_RLM_BYTES {
             return Err(BundleError::RlmTooLarge(len));
         }
@@ -491,15 +605,16 @@ pub struct TopicInstallPlan {
     pub bundle_digest: String,
 }
 
-/// Name a JSON value's kind, for an error that says what arrived.
-fn json_kind(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "a boolean",
-        serde_json::Value::Number(_) => "a number",
-        serde_json::Value::String(_) => "a string",
-        serde_json::Value::Array(_) => "an array",
-        serde_json::Value::Object(_) => "an object",
+/// Name a raw JSON part's kind, for an error that says what arrived.
+fn raw_kind(text: &str) -> &'static str {
+    let t = text.trim();
+    match t.chars().next() {
+        Some('"') => "a string",
+        Some('{') => "an object",
+        Some('[') => "an array",
+        Some('t' | 'f') => "a boolean",
+        Some('n') => "null",
+        _ => "a number",
     }
 }
 
@@ -808,29 +923,24 @@ mod tests {
         }
     }
 
+    /// A raw part from text, the way a bundle file supplies it.
+    fn raw(text: &str) -> Box<RawValue> {
+        RawValue::from_string(text.to_owned()).expect("raw json")
+    }
+
     /// A section carrying all five RLM-owned parts, with shapes this crate
     /// has no opinion about.
     fn rlm_section() -> RlmSection {
         RlmSection {
-            rules: Some(serde_json::json!([
-                {"id": "no_short_circuit", "text": "the harness must run the task"}
-            ])),
-            migrations: Some(serde_json::json!([
-                {"name": "0001_topic_scratch", "sql": "CREATE TABLE scratch (id TEXT)"}
-            ])),
-            apis: Some(serde_json::json!([
-                {"path": "/v1/topic/status", "method": "GET"}
-            ])),
-            submission_format: Some(serde_json::json!({
-                "kind": "tar",
-                "max_bytes": 5_242_880,
-                "fields": ["entrypoint", "manifest"]
-            })),
-            scoring: Some(serde_json::json!({
-                "primary": "success_rate",
-                "direction": "max",
-                "epsilon_rel": 0.05
-            })),
+            rules: Some(raw(
+                r#"[{"id": "no_short_circuit", "text": "run the task"}]"#,
+            )),
+            migrations: Some(raw(
+                r#"[{"name": "0001_scratch", "sql": "CREATE TABLE s (id TEXT)"}]"#,
+            )),
+            apis: Some(raw(r#"[{"path": "/v1/topic/status", "method": "GET"}]"#)),
+            submission_format: Some(raw(r#"{"kind": "tar", "max_bytes": 5242880}"#)),
+            scoring: Some(raw(r#"{"primary": "success_rate", "epsilon_rel": 0.05}"#)),
         }
     }
 
@@ -900,7 +1010,7 @@ mod tests {
     }
 
     /// The RLM section is **opaque**: this crate carries it and never interprets
-    /// it. The test proves the carry is verbatim and that shapes this crate has
+    /// it. The test proves the carry is byte-exact and that shapes this crate has
     /// never heard of are not errors — recognising them would mean this crate
     /// knows the topic, which is exactly the hardcoding the boundary prevents.
     #[test]
@@ -918,35 +1028,29 @@ mod tests {
             .expect("the section is handed over");
         assert_eq!(
             carried, &bundle.rlm,
-            "the section must be handed over byte-for-byte, not rewritten"
+            "the section must be handed over unchanged"
         );
-        // Content this crate has no schema for survives a round trip untouched.
-        let scoring = carried.scoring.as_ref().expect("scoring");
-        assert_eq!(scoring["primary"], "success_rate");
-        assert_eq!(scoring["epsilon_rel"], 0.05);
         assert_eq!(
-            carried.rules.as_ref().expect("rules")[0]["id"],
-            "no_short_circuit"
+            carried.raw("scoring"),
+            Some(r#"{"primary": "success_rate", "epsilon_rel": 0.05}"#),
+            "the part must come back as the exact text that went in"
+        );
+        assert_eq!(
+            carried.raw("rules"),
+            Some(r#"[{"id": "no_short_circuit", "text": "run the task"}]"#)
         );
 
-        // A topic-specific shape Rust has never seen is still not an error: the
-        // section is data, and only the RLM knows what it means.
+        // A topic-specific shape Rust has never seen is still not an error.
         let mut exotic = tb4();
-        exotic.rlm = RlmSection {
-            scoring: Some(serde_json::json!({
-                "some_future_metric_this_build_has_never_heard_of": {"weight": 0.7}
-            })),
-            ..RlmSection::default()
-        };
+        exotic.rlm.scoring = Some(raw(
+            r#"{"some_future_metric_this_build_has_never_heard_of": {"weight": 0.7}}"#,
+        ));
         exotic
             .validate_shape()
             .expect("unknown content is not a validation error");
 
-        // The hand-off names the RLM's own jobs, and they are the existing
-        // lifecycle steps — not anything derived from the bundle's contents.
         assert_eq!(plan.rlm_jobs, ["provision", "propose_rules", "baseline"]);
 
-        // An empty section is legal and is not handed over at all.
         let empty = tb4();
         empty.validate_shape().expect("an absent section is fine");
         assert!(
@@ -959,24 +1063,93 @@ mod tests {
         );
     }
 
+    /// The hand-off must preserve the **bytes** the operator wrote.
+    ///
+    /// Parsing a part into a `Value` and re-serializing would reorder keys,
+    /// collapse duplicate keys, and normalise whitespace, so the RLM would
+    /// receive something other than what was signed off. Key order, duplicate
+    /// keys, and significant whitespace are all checked here.
+    #[test]
+    fn the_hand_off_preserves_key_order_duplicates_and_whitespace() {
+        let awkward = r#"{"b": 1, "a": 2, "a": 3, "sp": "x   y"}"#;
+        // Splice the awkward part into the serialized fixture as **text**, so
+        // the test itself does not round-trip it through a `Value` (which is
+        // exactly the lossy path under test).
+        let fixture = serde_json::to_string(&tb4()).expect("fixture json");
+        let body = fixture.replacen(
+            "\"rlm\":{}",
+            &format!("\"rlm\":{{\"scoring\": {awkward}}}"),
+            1,
+        );
+        assert!(
+            body.contains(awkward),
+            "the splice must have landed: {body}"
+        );
+        let bundle = TopicInstallBundle::from_json(&body).expect("parse");
+        bundle.validate_shape().expect("validates");
+        assert_eq!(
+            bundle.rlm.raw("scoring"),
+            Some(awkward),
+            "the exact bytes must survive parsing"
+        );
+
+        // And through a serialize/parse round trip, as the plan's JSON output does.
+        let plan = bundle.plan(InstallEnvironment::Metal).expect("plan");
+        let plan_json = serde_json::to_string(&plan).expect("plan json");
+        let reparsed: TopicInstallPlan = serde_json::from_str(&plan_json).expect("reparse plan");
+        assert_eq!(
+            reparsed
+                .rlm_install
+                .as_ref()
+                .expect("carried")
+                .raw("scoring"),
+            Some(awkward),
+            "the exact bytes must survive the plan's own JSON"
+        );
+    }
+
+    /// An explicit `null` is refused, not silently dropped.
+    ///
+    /// `Option<Box<RawValue>>` would fold `"rules": null` into "absent", so the
+    /// operator would sign off one bundle and the RLM would receive another. The
+    /// custom deserializer keeps the text, and the shape check refuses it.
+    #[test]
+    fn an_explicit_null_rlm_part_is_refused_not_dropped() {
+        let body = format!(
+            r#"{{
+  "schema_version": 1, "environment": "metal", "display_name": "Terminal-Bench 4",
+  "topic": {}, "host": {{}}, "rlm": {{"rules": null}}
+}}"#,
+            serde_json::to_string(&custom_topic("tbench")).expect("topic json")
+        );
+        let bundle = TopicInstallBundle::from_json(&body).expect("parse");
+        assert_eq!(
+            bundle.rlm.raw("rules"),
+            Some("null"),
+            "the null must be kept, not folded into absent"
+        );
+        let err = bundle
+            .validate_shape()
+            .expect_err("an explicit null is refused");
+        assert!(
+            matches!(err, BundleError::RlmExplicitNull { field: "rules" }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("never silently dropped"), "{err}");
+    }
+
     /// Only the *shape* of the section is checked, and only to keep it bounded.
     #[test]
     fn the_rlm_section_is_shape_checked_but_not_semantically_validated() {
-        for field in [
-            "rules",
-            "migrations",
-            "apis",
-            "submission_format",
-            "scoring",
-        ] {
+        for field in RLM_FIELDS {
             let mut bundle = tb4();
-            let scalar = serde_json::json!("a bare string is not a section part");
+            let scalar = || Some(raw(r#""a bare string is not a section part""#));
             match field {
-                "rules" => bundle.rlm.rules = Some(scalar),
-                "migrations" => bundle.rlm.migrations = Some(scalar),
-                "apis" => bundle.rlm.apis = Some(scalar),
-                "submission_format" => bundle.rlm.submission_format = Some(scalar),
-                _ => bundle.rlm.scoring = Some(scalar),
+                "rules" => bundle.rlm.rules = scalar(),
+                "migrations" => bundle.rlm.migrations = scalar(),
+                "apis" => bundle.rlm.apis = scalar(),
+                "submission_format" => bundle.rlm.submission_format = scalar(),
+                _ => bundle.rlm.scoring = scalar(),
             }
             let err = bundle
                 .validate_shape()
@@ -987,20 +1160,35 @@ mod tests {
             );
         }
 
-        // An array is fine: a rule list is a list.
         let mut list = tb4();
-        list.rlm.rules = Some(serde_json::json!([{"id": "r", "text": "t"}]));
+        list.rlm.rules = Some(raw(r#"[{"id": "r", "text": "t"}]"#));
         list.validate_shape()
             .expect("a list is a legal rules shape");
 
-        // The bound is on the section's own canonical size.
         let mut huge = tb4();
-        huge.rlm.scoring = Some(serde_json::json!({ "pad": "x".repeat(MAX_RLM_BYTES) }));
+        huge.rlm.scoring = Some(raw(&format!(
+            r#"{{"pad": "{}"}}"#,
+            "x".repeat(MAX_RLM_BYTES)
+        )));
         let err = huge.validate_shape().expect_err("oversized section");
         let BundleError::RlmTooLarge(reported) = err else {
             panic!("expected RlmTooLarge, got {err:?}");
         };
         assert!(reported > MAX_RLM_BYTES, "{reported}");
+
+        // An unknown key is refused, like every other key in this schema.
+        let body = format!(
+            r#"{{
+  "schema_version": 1, "environment": "metal", "display_name": "x",
+  "topic": {}, "host": {{}}, "rlm": {{"not_a_part": {{}}}}
+}}"#,
+            serde_json::to_string(&custom_topic("tbench")).expect("topic json")
+        );
+        let err = TopicInstallBundle::from_json(&body).expect_err("unknown rlm key");
+        assert!(
+            matches!(err, BundleError::Parse(ref m) if m.contains("not_a_part")),
+            "{err}"
+        );
     }
 
     /// The topic slug and its alias are **strings**, never conditions.
