@@ -90,6 +90,13 @@ impl RlmStore for MemoryRlmStore {
                 "alias {alias:?} names topic {topic_id:?}, which has no published version"
             )));
         }
+        // A canonical slug is never shadowed (see the Postgres store).
+        if g.topics.contains_key(alias) {
+            return Err(StoreError::Malformed(format!(
+                "alias {alias:?} is already a published topic id; a canonical slug is never \
+                 shadowed by an alias"
+            )));
+        }
         g.aliases.insert(alias.to_owned(), topic_id.to_owned());
         Ok(())
     }
@@ -97,6 +104,11 @@ impl RlmStore for MemoryRlmStore {
     async fn resolve_alias(&self, alias: &str) -> Result<Option<String>, StoreError> {
         let g = self.lock()?;
         // Fail closed like Postgres: the target must still have a version.
+        // A canonical slug wins: never resolve an alias whose own name is a
+        // published topic, or `show` would return a different topic.
+        if g.topics.contains_key(alias) {
+            return Ok(None);
+        }
         Ok(g.aliases
             .get(alias)
             .filter(|t| g.topics.contains_key(*t))

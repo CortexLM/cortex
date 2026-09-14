@@ -21,6 +21,14 @@
 -- published version resolves to *nothing*, never to an empty document. The
 -- alias CHECKs are shape guards only.
 --
+-- A canonical slug is never shadowed. If an alias equals some *other*
+-- published topic's id, resolving that id as an alias would hand back a
+-- different topic's signed document. The store refuses to write such a row
+-- and refuses to resolve one, and the trigger below closes the same hole for
+-- a writer that goes straight to SQL. Both directions are needed: the trigger
+-- fires when the alias is written, and again when a topic is published under
+-- a name that an existing alias already claims.
+--
 -- `alias` is a topic slug (`[a-z0-9][a-z0-9-]{1,62}`), matching the id shape
 -- `proof_topic_version` enforces, and an alias may never be its own topic's
 -- id: that would be a second spelling of the same key in one lookup.
@@ -41,5 +49,34 @@ CREATE TABLE proof_topic_alias (
 -- The read is "every alias of this topic" (list/show) and the reverse
 -- single-alias lookup (resolve).
 CREATE INDEX ix_proof_topic_alias_topic ON proof_topic_alias (topic_id);
+
+-- `topic_id` alone is not unique in `proof_topic_version` (it is keyed by
+-- `(topic_id, version)`), so the shadow guard cannot be a UNIQUE constraint.
+-- It is a trigger instead, checked in both directions: a published topic may
+-- not be claimed as an alias, and an alias may not be published as a topic.
+CREATE OR REPLACE FUNCTION proof_topic_alias_no_shadow() RETURNS trigger AS $$
+BEGIN
+    IF TG_TABLE_NAME = 'proof_topic_alias' THEN
+        IF EXISTS (SELECT 1 FROM proof_topic_version WHERE topic_id = NEW.alias) THEN
+            RAISE EXCEPTION 'alias % is already a published topic id', NEW.alias
+                USING ERRCODE = 'check_violation';
+        END IF;
+    ELSE
+        IF EXISTS (SELECT 1 FROM proof_topic_alias WHERE alias = NEW.topic_id) THEN
+            RAISE EXCEPTION 'topic % is already claimed as an alias', NEW.topic_id
+                USING ERRCODE = 'check_violation';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER proof_topic_alias_no_shadow
+    BEFORE INSERT OR UPDATE ON proof_topic_alias
+    FOR EACH ROW EXECUTE FUNCTION proof_topic_alias_no_shadow();
+
+CREATE TRIGGER proof_topic_version_no_shadow
+    BEFORE INSERT ON proof_topic_version
+    FOR EACH ROW EXECUTE FUNCTION proof_topic_alias_no_shadow();
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE proof_topic_alias TO base_app;

@@ -71,6 +71,28 @@ async fn contract(store: &dyn RlmStore) {
         store.resolve_alias("orphan").await.unwrap().is_none(),
         "the refused alias must not have been written"
     );
+    // A canonical slug is never shadowed. An alias that equals another
+    // *published* topic's id would make that slug resolve to a different
+    // topic's document, so it is refused at write time and never resolved.
+    store
+        .put_alias("shadow-attempt", "aaa-other-v0")
+        .await
+        .unwrap();
+    assert!(
+        store.put_alias("aaa-other-v0", &t.id).await.is_err(),
+        "an alias may not take a published topic's canonical slug"
+    );
+    assert_eq!(
+        store
+            .resolve_alias("aaa-other-v0")
+            .await
+            .unwrap()
+            .as_deref(),
+        None,
+        "the canonical slug must not resolve to another topic"
+    );
+    store.delete_alias("shadow-attempt").await.unwrap();
+
     // A second alias on the same topic, then retire one.
     store.put_alias("tb4-legacy", &t.id).await.unwrap();
     assert_eq!(

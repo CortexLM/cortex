@@ -227,6 +227,15 @@ impl RlmStore for PgRlmStore {
                 "alias {alias:?} names topic {topic_id:?}, which has no published version"
             )));
         }
+        // A canonical slug is never shadowed. If `alias` is itself a
+        // published topic, then resolving it as an alias would hand back a
+        // *different* topic's signed document for that slug.
+        if self.latest_topic(alias).await?.is_some() {
+            return Err(StoreError::Malformed(format!(
+                "alias {alias:?} is already a published topic id; a canonical slug is never \
+                 shadowed by an alias"
+            )));
+        }
         sqlx::query(
             "INSERT INTO proof_topic_alias (alias, topic_id) VALUES ($1, $2) \
              ON CONFLICT (alias) DO UPDATE SET topic_id = EXCLUDED.topic_id, \
@@ -244,9 +253,15 @@ impl RlmStore for PgRlmStore {
         // published version resolves to nothing rather than to an empty
         // document.
         let row: Option<(String,)> = sqlx::query_as(
+            // Three guards, all fail-closed: the alias must exist, its target
+            // must have a published version (else it resolves to an empty
+            // document), and the alias must **not** itself be a published
+            // topic id — a canonical slug always wins over an alias, so a row
+            // that predates this guard cannot shadow one either.
             "SELECT a.topic_id FROM proof_topic_alias a \
              WHERE a.alias = $1 \
-               AND EXISTS (SELECT 1 FROM proof_topic_version v WHERE v.topic_id = a.topic_id)",
+               AND EXISTS (SELECT 1 FROM proof_topic_version v WHERE v.topic_id = a.topic_id) \
+               AND NOT EXISTS (SELECT 1 FROM proof_topic_version s WHERE s.topic_id = a.alias)",
         )
         .bind(alias)
         .fetch_optional(&self.pool)
