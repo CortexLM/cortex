@@ -30,6 +30,7 @@ use proof_challenge::{
     ARTEFACT_STAGING_DIR_ENV, CHALLENGE_ID, DEFAULT_EMIT_POLL_SECS, MINER_BYOK_DIR_ENV,
     SCORING_VERSION,
 };
+use proof_challenge::{InstallJournalSlot, PgInstallJournal};
 use proof_eval::{custom_ids_ref, registered_custom, FamilyMux};
 use proof_harvest::{HarvestLimits, LiumProofHarvest};
 use proof_rlm::{
@@ -250,7 +251,8 @@ fn run(cli: &Cli) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     let (rlm_store, db_pool) = rt.block_on(resolve_rlm_store(cli))?;
-    let topic_routes = topic_route_mux(db_pool);
+    let topic_routes = topic_route_mux(db_pool.as_ref());
+    let journal = install_journal(db_pool.as_ref());
     let harvest = build_live_scorer(
         backend,
         cli.eval_timeout_secs,
@@ -300,6 +302,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         judge_api_key,
         admin_hashes: Arc::new(load_admin_hashes(cli.admin_tokens_file.as_deref())),
         vm_probe: Some(vm),
+        install_journal: journal,
         epoch: 0,
     };
     spawn_queue_drainer(cli, &rt, &state);
@@ -685,8 +688,12 @@ fn database_url(cli: &Cli) -> Result<Option<String>, String> {
 /// means no database was configured, so there is no route table to read: the
 /// Proof routes are served alone and a topic route is a 404 from the base
 /// router — never an answer from a table that was never read.
-fn topic_route_mux(db_pool: Option<PgPool>) -> Option<Arc<TopicRouteMux>> {
-    let mux = db_pool.map(|pool| Arc::new(TopicRouteMux::new(Arc::new(PgTopicRoutes::new(pool)))));
+fn topic_route_mux(db_pool: Option<&PgPool>) -> Option<Arc<TopicRouteMux>> {
+    let mux = db_pool.map(|pool| {
+        Arc::new(TopicRouteMux::new(Arc::new(PgTopicRoutes::new(
+            pool.clone(),
+        ))))
+    });
     if mux.is_some() {
         tracing::info!(
             "topic route mux wired: /challenge/{{topic_id}}/… resolves proof_topic_api \
@@ -700,6 +707,26 @@ fn topic_route_mux(db_pool: Option<PgPool>) -> Option<Arc<TopicRouteMux>> {
         );
     }
     mux
+}
+
+/// The install journal the **publish gate** reads, over the same database.
+///
+/// `None` (no database) is fail-closed at the route: an `open` document is
+/// refused, because the host cannot prove the topic was installed. A `draft`
+/// document is unaffected.
+fn install_journal(db_pool: Option<&PgPool>) -> InstallJournalSlot {
+    if let Some(pool) = db_pool {
+        tracing::info!(
+            "publish gate wired: an `open` topic is refused until its newest \
+             proof_topic_install row is `applied`"
+        );
+        return Some(Arc::new(PgInstallJournal::new(pool.clone())));
+    }
+    tracing::warn!(
+        "no database configured; the publish gate cannot read proof_topic_install, so an `open` \
+         document will be refused (a `draft` one is not)"
+    );
+    None
 }
 
 /// Postgres RLM store when a database is configured, in-memory otherwise.

@@ -29,8 +29,8 @@ pub use proof_executor::{
     EVAL_EXECUTOR_OFFER_FILE_ENV,
 };
 pub use proof_http::{
-    executor_slot, hash_admin_token, proof_router, AppState, ExecutorSlot, VmAgentHealth,
-    VmOrchestratorProbe, VmOrchestratorReport,
+    executor_slot, hash_admin_token, proof_router, AppState, ExecutorSlot, InstallJournal,
+    InstallJournalSlot, VmAgentHealth, VmOrchestratorProbe, VmOrchestratorReport,
 };
 pub use proof_store::{
     ArtefactVault, ArtifactManifest, MemoryStore, MinerEnvVault, ARTEFACT_STAGING_DIR_ENV,
@@ -41,7 +41,7 @@ pub use proof_task::{
     CHALLENGE_ID, CHALLENGE_ID_BYTES as PROOF_ID_BYTES, SCORE_MAX as PROOF_SCORE_MAX,
     SCORING_VERSION,
 };
-pub use topic_routes::{challenge_router, topic_route_router, REGISTRY_TABLE};
+pub use topic_routes::{challenge_router, topic_route_router, PgInstallJournal, REGISTRY_TABLE};
 
 /// Build a D24-complete score map: each expected hotkey is a **sum** of
 /// WTA/discovery topic masses, or an explicit `NoScore`.

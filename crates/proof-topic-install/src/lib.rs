@@ -55,8 +55,9 @@ pub mod section;
 
 pub use handler::{bound_runner, check_handler, resolve_handler, Handler, HandlerError};
 pub use install::{
-    install_history, latest_install, topic_routes, ExecutorBinding, InstallReport, InstallRequest,
-    InstallRow, InstallState, Installer, SetupSummary, VMS_PER_SUBMISSION,
+    applied_install, install_history, is_installed, latest_install, topic_routes, ExecutorBinding,
+    InstallReport, InstallRequest, InstallRow, InstallState, Installer, SetupSummary,
+    VMS_PER_SUBMISSION,
 };
 pub use proof_topic_sql_guard::{
     blank_statements, check_migration, check_statement, is_topic_scoped, split_statements,

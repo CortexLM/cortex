@@ -375,6 +375,24 @@ with no dependency on the published row, and the RLM setup writes the
 document itself when it is not there yet. Only the aliases need a published
 topic, which is why they stay last.
 
+**And the route enforces it, not just the CLI.** `POST /v1/admin/proof/topics`
+refuses an **`open`** document with **409** unless the topic's newest
+`proof_topic_install` row is `applied`:
+
+| Host state | `open` document | `draft` document |
+|------------|-----------------|------------------|
+| install `applied` | **201** | **201** |
+| install `pending` / `failed` / no row | **409** | **201** |
+| journal unreadable | **409** | **201** |
+| no install journal on the host (no database) | **409** | **201** |
+
+A `draft` is never gated: it is not submitable, and staging one is how an
+operator stages a bundle. The refusal says which case it was, so the operator
+can tell "finish the install" from "fix the database". This is the ordering
+as a **rule of the route** rather than a convention of the client: a direct
+POST that skipped the install cannot put a submitable document in the registry
+before its migrations, routes, and rules exist.
+
 `topic install-log --topic <id>` reads the journal back: which bundle digest
 was applied, whether the install reached `applied`, which migrations and
 rules landed, and the executor binding it resolved.
@@ -505,7 +523,7 @@ Trust-root keygen is the throwaway owner path in
 - `GET /v1/proof/topics`, `GET /v1/proof/topics/{id}`
 - `GET /v1/proof/executor` — always **200**: `eval_executor` (public offer or
   `null`), `ready`, `reason` when not ready, and the pin ceilings.
-- `POST /v1/admin/proof/topics` — operator bearer; verify sig/schema/floors/seal before `open`
+- `POST /v1/admin/proof/topics` — operator bearer; verify sig/schema/floors/seal before `open`, and refuse an **`open`** document with **409** unless the topic's newest `proof_topic_install` row is `applied` (a `draft` is never gated; see § Running the install for real)
 - `POST /v1/admin/proof/executor` — operator bearer; body is the offer
   document. Pin-validated (**400** keeps the previous offer); `status: closed`
   takes the executor down live. In-memory until restart, like submissions —

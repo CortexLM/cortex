@@ -63,6 +63,17 @@ use tower::ServiceExt;
 
 /// Open `1x` executor on the digest-scoped template of `pin` (host state the
 /// live path requires; the RLM path only records its plan commitment).
+/// An install journal that reports every topic as installed: this file's
+/// subject is scoring, so its host models one whose install already ran.
+struct InstalledJournal;
+
+#[async_trait::async_trait]
+impl proof_http::InstallJournal for InstalledJournal {
+    async fn applied(&self, _topic_id: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+}
+
 fn test_executor(pin: &ProofPin) -> EvalExecutorOffer {
     let hex = pin.eval_image_digest.trim_start_matches("sha256:");
     let mut o = EvalExecutorOffer {
@@ -159,6 +170,9 @@ fn stack(register: bool) -> Stack {
         judge_api_key: Some("test-judge-key".into()),
         admin_hashes: Arc::new(vec![hash_admin_token("op")]),
         vm_probe: None,
+        // This stack's subject is scoring, not the publish gate: model a host
+        // whose topic install ran (the gate's own tests live in proof-http).
+        install_journal: Some(Arc::new(InstalledJournal)),
         epoch: 0,
     });
     Stack {

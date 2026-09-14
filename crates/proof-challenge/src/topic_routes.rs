@@ -67,6 +67,34 @@ pub fn challenge_router(state: AppState, topic_routes: Option<Arc<TopicRouteMux>
     }
 }
 
+/// The install journal, read through `proof_topic_install`.
+///
+/// This is what the **publish gate** consults: an `open` document is refused
+/// until the topic's newest install row is `applied`. The read is the same
+/// one `proof-admin topic install-log` shows, so the operator and the route
+/// cannot disagree about whether a topic is installed.
+pub struct PgInstallJournal {
+    /// Pool over the shared challenge database.
+    pub pool: sqlx::PgPool,
+}
+
+impl PgInstallJournal {
+    /// Read `proof_topic_install` through `pool`.
+    #[must_use]
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl proof_http::InstallJournal for PgInstallJournal {
+    async fn applied(&self, topic_id: &str) -> Result<bool, String> {
+        proof_topic_install::applied_install(&self.pool, topic_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// One topic route.
 async fn topic_route(
     State(mux): State<Arc<TopicRouteMux>>,
@@ -303,6 +331,8 @@ mod tests {
             judge_api_key: None,
             admin_hashes: Arc::new(Vec::new()),
             vm_probe: None,
+            // This file's subject is the route mux, not the publish gate.
+            install_journal: None,
             epoch: 0,
         };
         let app = challenge_router(state.clone(), Some(mux(fake)));

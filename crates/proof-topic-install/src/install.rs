@@ -690,6 +690,42 @@ fn strings(value: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether `topic_id` has an install in the **`applied`** state.
+///
+/// This is the durable fact a publish of an `open` document is gated on. The
+/// journal is append-only, so the newest row for a topic is its current
+/// install state: `applied` means every migration, route, and rule the
+/// operator's bundle carries is in place, and `pending` / `failed` mean it is
+/// not.
+///
+/// The read is **fail-closed at the call site**: a database error is an
+/// `Err`, never a `false` that a caller could mistake for "not installed" or
+/// — worse, if inverted — for "installed". [`is_installed`] is the boolean
+/// form, for callers that want it.
+///
+/// # Errors
+///
+/// [`InstallError::Db`].
+pub async fn applied_install(pool: &PgPool, topic_id: &str) -> Result<bool, InstallError> {
+    let state: Option<String> = sqlx::query_scalar(
+        "SELECT state FROM proof_topic_install WHERE topic_id = $1 ORDER BY id DESC LIMIT 1",
+    )
+    .bind(topic_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| InstallError::Db(e.to_string()))?;
+    Ok(state.as_deref() == Some(InstallState::Applied.as_str()))
+}
+
+/// [`applied_install`], as a plain boolean.
+///
+/// # Errors
+///
+/// [`InstallError::Db`].
+pub async fn is_installed(pool: &PgPool, topic_id: &str) -> Result<bool, InstallError> {
+    applied_install(pool, topic_id).await
+}
+
 /// Every route a topic registered, for the dynamic mux.
 ///
 /// A stored path is **relative**, so the caller owns the prefix and a topic
