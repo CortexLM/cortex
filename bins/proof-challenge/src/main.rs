@@ -921,6 +921,15 @@ async fn open_topic_admissible(pool: &sqlx::PgPool, topic_id: &str) -> Result<()
              its own behavior",
             provenance.as_deref().unwrap_or("absent")
         )),
+        proof_topic_install::InstalledRules::SupersededByOperator {
+            installed,
+            in_force,
+            provenance,
+        } => Err(format!(
+            "the install landed RLM-authored rule version {installed}, but version {in_force} \
+             ({provenance}) is in force; the topic's behavior is no longer its RLM's, so it is \
+             not admitted until the RLM's vector is the one in force again"
+        )),
     }
 }
 

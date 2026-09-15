@@ -435,6 +435,117 @@ async fn the_admission_read_binds_the_install_to_the_version_it_recorded() {
     tp.drop_schema().await.expect("drop");
 }
 
+/// An `operator` edit that supersedes the RLM's vector refuses the topic.
+///
+/// The other direction of the same defect: the install recorded an
+/// RLM-authored version, but the vector **in force** is an operator's. A gate
+/// that bound only the install's version would admit the topic and serve rules
+/// no RLM wrote.
+#[tokio::test]
+async fn an_operator_edit_in_force_refuses_the_topic() {
+    use proof_rlm::RuleSource;
+    use proof_task::ChecklistRule;
+    use proof_topic_install::{installed_rules, InstalledRules};
+
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    let doc = topic("tb4");
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    installer
+        .install(
+            &request(&doc, &section("tb4")),
+            SetupSummary::NotDriven { reason: "x".into() },
+        )
+        .await
+        .expect("install");
+
+    // The RLM authors version 2, and an install records it.
+    let rlm = store
+        .current_rules("tb4")
+        .await
+        .expect("rules")
+        .expect("v1")
+        .next(
+            RuleSource::Rlm,
+            vec![ChecklistRule {
+                id: "rlm-1".into(),
+                text: "the RLM's rule".into(),
+            }],
+        )
+        .expect("v2");
+    store.put_rules(&rlm).await.expect("write v2");
+    installer
+        .install(
+            &request(&doc, &section("tb4")),
+            SetupSummary::Baselined {
+                rules_version: 2,
+                baseline_primary: "0.5".into(),
+            },
+        )
+        .await
+        .expect("re-install");
+    assert_eq!(
+        installed_rules(&pool, "tb4").await.expect("read"),
+        InstalledRules::RlmAuthored { version: 2 },
+        "the install landed the RLM's vector"
+    );
+
+    // An operator edit supersedes it. Both halves of the gate have to hold:
+    // the installed version is still `rlm`, but it is no longer in force.
+    let edited = store
+        .current_rules("tb4")
+        .await
+        .expect("rules")
+        .expect("v2")
+        .next(
+            RuleSource::Operator,
+            vec![ChecklistRule {
+                id: "hand-1".into(),
+                text: "an operator's rule".into(),
+            }],
+        )
+        .expect("v3");
+    store.put_rules(&edited).await.expect("write v3");
+    assert_eq!(
+        installed_rules(&pool, "tb4").await.expect("read"),
+        InstalledRules::SupersededByOperator {
+            installed: 2,
+            in_force: 3,
+            provenance: "operator".into(),
+        },
+        "an operator vector in force is not an admission, even when the install landed an RLM one"
+    );
+
+    // An RLM rewrite of its own rules stays admitted: that is the autonomy this
+    // gate protects, not something it may refuse.
+    let rewritten = store
+        .current_rules("tb4")
+        .await
+        .expect("rules")
+        .expect("v3")
+        .next(
+            RuleSource::Rlm,
+            vec![ChecklistRule {
+                id: "rlm-2".into(),
+                text: "the RLM rewrote its own rule".into(),
+            }],
+        )
+        .expect("v4");
+    store.put_rules(&rewritten).await.expect("write v4");
+    assert_eq!(
+        installed_rules(&pool, "tb4").await.expect("read"),
+        InstalledRules::RlmAuthored { version: 2 },
+        "an RLM rewrite (rlm -> rlm) stays admitted"
+    );
+
+    tp.drop_schema().await.expect("drop");
+}
+
 /// A re-run resumes: migrations already in the journal are skipped, the rules
 /// version is not bumped, and the routes are not duplicated.
 #[tokio::test]

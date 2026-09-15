@@ -149,6 +149,7 @@ impl proof_http::InstallJournal for PgInstallJournal {
         {
             proof_topic_install::InstalledRules::RlmAuthored { .. } => Ok(true),
             proof_topic_install::InstalledRules::NotRlmAuthored { .. }
+            | proof_topic_install::InstalledRules::SupersededByOperator { .. }
             | proof_topic_install::InstalledRules::NotApplied { .. } => Ok(false),
         }
     }

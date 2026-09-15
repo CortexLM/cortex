@@ -727,6 +727,21 @@ pub enum InstalledRules {
         /// `topic_document` / `operator` / `rlm`, or `None` when no row.
         provenance: Option<String>,
     },
+    /// The install recorded an RLM-authored version, but a **different**
+    /// version is in force and it is not RLM-authored.
+    ///
+    /// The other half of the same defect, from the opposite direction: the
+    /// install landed the RLM's vector and a later `operator` edit superseded
+    /// it. The topic would open with rules no RLM wrote — refused exactly as a
+    /// document-sourced vector is.
+    SupersededByOperator {
+        /// The RLM-authored version the install recorded.
+        installed: u32,
+        /// The version now in force.
+        in_force: u32,
+        /// Its provenance (`operator`, or `topic_document`).
+        provenance: String,
+    },
     /// The newest install is not `applied`, or the topic has no install row.
     NotApplied {
         /// The state the journal holds (`pending` / `failed`), or `None` when
@@ -762,23 +777,47 @@ pub async fn applied_install(pool: &PgPool, topic_id: &str) -> Result<bool, Inst
     Ok(state.as_deref() == Some(InstallState::Applied.as_str()))
 }
 
-/// The provenance of the rule version the newest install **recorded**.
+/// The admission query's row: the newest install's state and recorded rule
+/// version with that version's provenance, plus the version in force and its
+/// provenance. A named alias rather than an inline tuple, because five
+/// positional `Option`s read as noise at the call site.
+type AdmissionRow = (
+    String,
+    Option<i32>,
+    Option<String>,
+    Option<i32>,
+    Option<String>,
+);
+
+/// The provenance of the rule version the newest install **recorded**, and of
+/// the version actually in force.
 ///
-/// One read, one binding. The join is on
-/// `proof_rule_version.version = proof_topic_install.rules_version`, so the
-/// provenance answered for is the provenance of the vector *this install
-/// landed* — not of whatever rule version happens to be newest.
+/// Two facts, read as **one statement** so they come from one snapshot:
 ///
-/// That distinction is the gate. Two independent predicates — "the newest
-/// install is `applied`" and "the newest rule version is `rlm`" — would admit
-/// a topic whose install landed rule version 1 from the signed document
-/// (`topic_document`) while an unrelated later version 2 was RLM-authored:
-/// the topic would open with the operator's vector in force, which is exactly
-/// the operator-cloned document the gate exists to refuse.
+/// 1. The newest install row is `applied`, and the rule version it recorded is
+///    `rlm`-sourced (joined on
+///    `proof_rule_version.version = proof_topic_install.rules_version`).
+/// 2. The version **in force** is also `rlm`-sourced.
 ///
-/// Fail-closed: an `applied` row that recorded **no** rule version (or whose
-/// rule row is missing) is [`InstalledRules::NotRlmAuthored`], never an
-/// admission, and a database error is an `Err`.
+/// That pair is the gate, and each half closes a different way for an
+/// operator-authored vector to reach a live topic:
+///
+/// - **Only (1)** would admit a topic whose install landed the RLM's version
+///   while a later `operator` edit superseded it: the vector in force would be
+///   one no RLM wrote.
+/// - **Only (2)** — the original defect — would admit a topic whose install
+///   landed the signed document's version 1 (`topic_document`) while an
+///   unrelated later version 2 happened to be RLM-authored: the topic would
+///   open with the operator's vector in force, which is the operator-cloned
+///   document the gate exists to refuse.
+///
+/// Requiring both is not "the install's version must equal the one in force":
+/// an RLM that rewrites its own rules after the install (version N → N+1, both
+/// `rlm`) is exactly the autonomy this track wants, and it stays admitted.
+///
+/// Fail-closed: an `applied` row that recorded **no** rule version, a missing
+/// rule row, and any non-`rlm` provenance are refusals, never an admission,
+/// and a database error is an `Err`.
 ///
 /// # Errors
 ///
@@ -788,38 +827,61 @@ pub async fn installed_rules(
     topic_id: &str,
 ) -> Result<InstalledRules, InstallError> {
     // `LEFT JOIN` so an `applied` row whose rule version has no row is
-    // visible as "no provenance" rather than as "no install".
-    let row: Option<(String, Option<i32>, Option<String>)> = sqlx::query_as(
-        "SELECT i.state, i.rules_version, r.source \
-         FROM proof_topic_install i \
-         LEFT JOIN proof_rule_version r \
-           ON r.topic_id = i.topic_id AND r.version = i.rules_version \
-         WHERE i.topic_id = $1 \
-         ORDER BY i.id DESC \
-         LIMIT 1",
+    // visible as "no provenance" rather than as "no install". The two scalar
+    // subqueries read the version in force in the same snapshot.
+    let row: Option<AdmissionRow> = sqlx::query_as(
+        "SELECT i.state, i.rules_version, r.source, \
+                    f.version, f.source \
+             FROM proof_topic_install i \
+             LEFT JOIN proof_rule_version r \
+               ON r.topic_id = i.topic_id AND r.version = i.rules_version \
+             LEFT JOIN LATERAL ( \
+                 SELECT version, source FROM proof_rule_version \
+                 WHERE topic_id = i.topic_id ORDER BY version DESC LIMIT 1 \
+             ) f ON true \
+             WHERE i.topic_id = $1 \
+             ORDER BY i.id DESC \
+             LIMIT 1",
     )
     .bind(topic_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| InstallError::Db(e.to_string()))?;
-    let Some((state, version, source)) = row else {
+    let Some((state, version, source, in_force_raw, in_force_source)) = row else {
         return Ok(InstalledRules::NotApplied { state: None });
     };
     if state != InstallState::Applied.as_str() {
         return Ok(InstalledRules::NotApplied { state: Some(state) });
     }
     let version = version.and_then(|v| u32::try_from(v).ok());
-    // A non-null `source` can only come from a joined row, which can only
-    // join on a non-null `rules_version` — so the version is present here.
-    // Both are still matched explicitly rather than assumed.
-    if source.as_deref() == Some(RULES_SOURCE_RLM) {
-        if let Some(version) = version {
-            return Ok(InstalledRules::RlmAuthored { version });
-        }
+    let in_force = in_force_raw.and_then(|v| u32::try_from(v).ok());
+    let Some(installed_version) = version else {
+        // An `applied` row with no recorded rule version cannot be admitted:
+        // there is no vector it can be shown to have landed.
+        return Ok(InstalledRules::NotRlmAuthored {
+            version: None,
+            provenance: source,
+        });
+    };
+    if source.as_deref() != Some(RULES_SOURCE_RLM) {
+        return Ok(InstalledRules::NotRlmAuthored {
+            version: Some(installed_version),
+            provenance: source,
+        });
     }
-    Ok(InstalledRules::NotRlmAuthored {
-        version,
-        provenance: source,
+    if in_force_source.as_deref() == Some(RULES_SOURCE_RLM) {
+        return Ok(InstalledRules::RlmAuthored {
+            version: installed_version,
+        });
+    }
+    // The install landed an RLM vector and something else is in force. A rule
+    // row for the install's version exists (the join matched), so the version
+    // in force exists too; the fallback is unreachable and only avoids a
+    // panic in a read that must stay total.
+    Ok(InstalledRules::SupersededByOperator {
+        installed: installed_version,
+        in_force: in_force.unwrap_or(installed_version),
+        provenance: in_force_source.unwrap_or_else(|| "absent".to_owned()),
     })
 }
 
