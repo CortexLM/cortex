@@ -328,21 +328,27 @@ impl FirecrackerHypervisor {
         // Scanning first makes the common case exact; the retry covers the
         // race where two boots pick the same free index, and the *second*
         // boot moves on instead of failing.
-        let mut attempt = 0;
+        let mut attempts: u32 = 0;
         loop {
+            attempts = attempts.saturating_add(1);
             let from = self.net_index.load(Ordering::SeqCst);
             let index = NetPlan::first_free(self.ctx.shell.as_ref(), from).await?;
+            // `fetch_max`, not `store`: two boots running at once both load
+            // the same `from`, and a plain store would let the slower one
+            // move the counter *backwards* past an index the faster one just
+            // claimed. The scan still protects correctness; this keeps the
+            // counter monotonic so it does not have to re-scan ground it
+            // already covered.
             self.net_index
-                .store(index.saturating_add(1), Ordering::SeqCst);
+                .fetch_max(index.saturating_add(1), Ordering::SeqCst);
             let net = NetPlan::for_index(&cfg, index);
             match self
                 .boot_on_index(vm_id, spec, image.clone(), net, owner_files.clone())
                 .await
             {
-                Err(e) if NetPlan::name_taken(&e) && attempt < net::TAP_ATTEMPTS => {
-                    attempt = attempt.saturating_add(1);
+                Err(e) if NetPlan::name_taken(&e) && attempts < net::TAP_ATTEMPTS => {
                     tracing::warn!(
-                        %vm_id, index, attempt,
+                        %vm_id, index, attempts,
                         "tap index raced another boot; retrying on the next free one: {e}"
                     );
                 }
@@ -905,6 +911,154 @@ mod tests {
         })
     }
 
+    /// A shell that models the host's TAP namespace: `ip tuntap add` fails
+    /// with the kernel's own `TUNSETIFF` wording when the name is taken, and
+    /// `ip link del` frees it. Everything else succeeds.
+    ///
+    /// This is what lets a test drive the allocator and the retry against a
+    /// *changing* host, the way a second VM booting at the same time does —
+    /// the recording shell always answers "free", so it can never show a
+    /// collision.
+    #[derive(Default)]
+    struct TapNamespace {
+        live: std::sync::Mutex<std::collections::BTreeSet<u32>>,
+        /// Index a concurrent boot grabs *between* the scan and the
+        /// `ip tuntap add`: the add for it fails once, then the index is
+        /// live as if the other boot had taken it.
+        race: std::sync::Mutex<Option<u32>>,
+        /// Every add fails, as on a host whose pool is exhausted.
+        always_busy: std::sync::atomic::AtomicBool,
+        inner: RecordingShell,
+    }
+
+    impl TapNamespace {
+        fn with_live(taps: &[u32]) -> Self {
+            let mut set = std::collections::BTreeSet::new();
+            for t in taps {
+                set.insert(*t);
+            }
+            Self {
+                live: std::sync::Mutex::new(set),
+                race: std::sync::Mutex::new(None),
+                always_busy: std::sync::atomic::AtomicBool::new(false),
+                inner: RecordingShell::default(),
+            }
+        }
+
+        fn live(&self) -> Vec<u32> {
+            self.live
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .copied()
+                .collect()
+        }
+
+        fn lines(&self) -> Vec<String> {
+            self.inner.calls().iter().map(|c| c.join(" ")).collect()
+        }
+
+        /// A concurrent boot takes `index` after this boot's scan but before
+        /// its `ip tuntap add` — the Gate 4 race.
+        fn race_on(&self, index: u32) {
+            *self
+                .race
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(index);
+        }
+
+        /// Every index is taken by the time the add lands.
+        fn exhaust(&self) {
+            self.always_busy
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl Shell for TapNamespace {
+        async fn run(
+            &self,
+            program: &str,
+            args: &[String],
+        ) -> Result<crate::shell::CmdOutput, HvError> {
+            let out = self.inner.run(program, args).await?;
+            let a: Vec<&str> = args.iter().map(String::as_str).collect();
+            let busy = || crate::shell::CmdOutput {
+                code: Some(1),
+                stdout: String::new(),
+                stderr: "ioctl(TUNSETIFF): Device or resource busy\n".into(),
+            };
+            let mut live = self
+                .live
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match (program, a.as_slice()) {
+                // `ip tuntap add dev pfc<n> mode tap user <uid>`
+                ("ip", ["tuntap", "add", "dev", tap, ..]) => {
+                    let index: u32 = tap
+                        .trim_start_matches("pfc")
+                        .parse()
+                        .expect("a pfc index in this test");
+                    let mut race = self
+                        .race
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if *race == Some(index) {
+                        // The other boot won this index just now.
+                        *race = None;
+                        live.insert(index);
+                        return Ok(busy());
+                    }
+                    drop(race);
+                    if self.always_busy.load(std::sync::atomic::Ordering::SeqCst)
+                        || !live.insert(index)
+                    {
+                        return Ok(busy());
+                    }
+                }
+                ("ip", ["link", "del", tap]) => {
+                    if let Ok(index) = tap.trim_start_matches("pfc").parse::<u32>() {
+                        live.remove(&index);
+                    }
+                }
+                // The scan the allocator runs.
+                ("ip", ["-o", "link", "show"]) => {
+                    use std::fmt::Write as _;
+                    let mut listing = String::new();
+                    for i in live.iter() {
+                        let _ = writeln!(listing, "{i}: pfc{i}: <BROADCAST,MULTICAST,UP> mtu 1500");
+                    }
+                    return Ok(crate::shell::CmdOutput {
+                        code: Some(0),
+                        stdout: listing,
+                        stderr: String::new(),
+                    });
+                }
+                // `rm -rf <jail>` really removes it. `jail::prepare` refuses a
+                // root that already exists and `JailGuard::destroy` clears it
+                // through this command, so a shell that only *records* the
+                // removal would leave a jail behind and make a retry fail for
+                // a reason the host would never produce.
+                ("rm", ["-rf", dir]) => {
+                    drop(live);
+                    if let Err(e) = std::fs::remove_dir_all(dir) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            return Ok(crate::shell::CmdOutput {
+                                code: Some(1),
+                                stdout: String::new(),
+                                stderr: format!("rm: {e}\n"),
+                            });
+                        }
+                    }
+                    return Ok(out);
+                }
+                _ => {}
+            }
+            drop(live);
+            Ok(out)
+        }
+    }
+
     /// A guest that says hello, then drops the job connection after reading
     /// `Run` — Broken pipe / EOF, no `Done`. The host must harvest scratch.
     fn serve_fake_guest_dropping_done(root: PathBuf) -> tokio::task::JoinHandle<VmJob> {
@@ -970,6 +1124,139 @@ mod tests {
             .expect("failed");
             *job
         })
+    }
+
+    /// The LIVE Gate 3 shape, end to end on the host: a leftover topic VM
+    /// holds `pfc0` while a new VM boots. The allocator must skip it — the
+    /// counter alone names `pfc0`, and `ip tuntap add` answers
+    /// `ioctl(TUNSETIFF): Device or resource busy`.
+    #[tokio::test]
+    async fn a_leftover_topic_vm_does_not_take_the_next_boot_off_the_air() {
+        let c = stand_in_host("leftover-tap");
+        let req = request();
+        let spec = TopicVmSpec::for_topic(&req.topic_id, pinned_template(), req.sandbox.clone());
+        // The baseline's topic VM is still up, holding the first TAP.
+        let shell = Arc::new(TapNamespace::with_live(&[0]));
+        let hv =
+            Arc::new(FirecrackerHypervisor::with_shell(c.clone(), shell.clone()).expect("config"));
+        let guest = serve_fake_guest_when_ready(c.jail_root("topic-b-0001"));
+        let vm = hv
+            .boot_verified("topic-b-0001", &spec, c.image_dir.join("rlm.ext4"))
+            .await
+            .expect("a leftover tap must not fail the boot");
+        guest.await.expect("guest");
+
+        let lines = shell.lines();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "ip tuntap add dev pfc1 mode tap user 65534"),
+            "the new vm takes the first free index, not the taken one: {lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l == "ip tuntap add dev pfc0 mode tap user 65534"),
+            "the leftover vm's tap is never attempted: {lines:?}"
+        );
+        assert_eq!(
+            shell.live(),
+            vec![0, 1],
+            "both taps are live; the new boot did not disturb the old one"
+        );
+        assert!(hv.alive(&vm).await);
+        assert!(hv.teardown(&vm, RetainPolicy::Destroy).await.expect("down"));
+        assert_eq!(
+            shell.live(),
+            vec![0],
+            "teardown frees only this vm's tap; the leftover keeps its own"
+        );
+        let _ = std::fs::remove_dir_all(&c.chroot_base);
+    }
+
+    /// Two VMs booting at once can pick the same free index between the scan
+    /// and the `ip tuntap add`. The loser must move to the next free one
+    /// instead of failing — Gate 4 runs exactly this race.
+    #[tokio::test]
+    async fn a_raced_tap_index_moves_the_loser_to_the_next_free_one() {
+        let c = stand_in_host("raced-tap");
+        let req = request();
+        let spec = TopicVmSpec::for_topic(&req.topic_id, pinned_template(), req.sandbox.clone());
+        // The scan answers "nothing is up", so this boot picks 0 — and a
+        // concurrent boot takes 0 in the window between that scan and our
+        // `ip tuntap add`.
+        let shell = Arc::new(TapNamespace::default());
+        shell.race_on(0);
+        let hv =
+            Arc::new(FirecrackerHypervisor::with_shell(c.clone(), shell.clone()).expect("config"));
+        let guest = serve_fake_guest_when_ready(c.jail_root("topic-c-0001"));
+        let vm = hv
+            .boot_verified("topic-c-0001", &spec, c.image_dir.join("rlm.ext4"))
+            .await
+            .expect("the loser retries instead of failing");
+        guest.await.expect("guest");
+
+        let lines = shell.lines();
+        let first = lines
+            .iter()
+            .position(|l| l == "ip tuntap add dev pfc0 mode tap user 65534")
+            .expect("the first attempt is on the index the scan offered");
+        let retry = lines
+            .iter()
+            .position(|l| l == "ip tuntap add dev pfc1 mode tap user 65534")
+            .expect("the retry moves to the next free index");
+        assert!(
+            first < retry,
+            "the retry comes after the collision: {lines:?}"
+        );
+        // The failed attempt's jail is released before the retry, so the
+        // second `prepare` does not meet its own leftovers.
+        let removed = lines
+            .iter()
+            .position(|l| l.starts_with("rm -rf") && l.ends_with("topic-c-0001"))
+            .expect("the failed attempt releases its jail");
+        assert!(
+            first < removed && removed < retry,
+            "jail released between the attempts: {lines:?}"
+        );
+        assert!(hv.alive(&vm).await);
+        assert_eq!(
+            shell.live(),
+            vec![0, 1],
+            "the raced index belongs to the other boot; this one took the next free"
+        );
+        let _ = std::fs::remove_dir_all(&c.chroot_base);
+    }
+
+    /// The retry is bounded: a host that keeps losing the race answers the
+    /// caller an error rather than spinning forever.
+    #[tokio::test]
+    async fn the_tap_retry_gives_up_rather_than_spinning() {
+        let c = stand_in_host("tap-exhausted");
+        let req = request();
+        let spec = TopicVmSpec::for_topic(&req.topic_id, pinned_template(), req.sandbox.clone());
+        // Every index the allocator offers is taken before the boot gets there.
+        let shell = Arc::new(TapNamespace::default());
+        shell.exhaust();
+        let hv =
+            Arc::new(FirecrackerHypervisor::with_shell(c.clone(), shell.clone()).expect("config"));
+        let err = hv
+            .boot_verified("topic-d-0001", &spec, c.image_dir.join("rlm.ext4"))
+            .await
+            .expect_err("a host with no free tap must refuse, not spin");
+        assert!(err.to_string().contains("already taken"), "{err}");
+        let attempts = shell
+            .lines()
+            .iter()
+            .filter(|l| l.starts_with("ip tuntap add"))
+            .count();
+        assert_eq!(
+            attempts,
+            usize::try_from(net::TAP_ATTEMPTS).expect("fits"),
+            "the retry budget is exactly TAP_ATTEMPTS"
+        );
+        assert!(hv.vms.lock().await.is_empty(), "nothing registered");
+        let _ = std::fs::remove_dir_all(&c.chroot_base);
     }
 
     fn stand_in_host(tag: &str) -> HostConfig {

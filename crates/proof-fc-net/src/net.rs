@@ -12,7 +12,8 @@ use crate::shell::{sh, Shell};
 
 /// How many TAP indexes one boot will try before it gives up. The allocator
 /// scans the host first, so this only covers a race with a concurrent boot
-/// (two experiments starting at once can pick the same free index).
+/// (two experiments starting at once can pick the same free index). It counts
+/// **attempts**, so `1` means "no retry".
 pub const TAP_ATTEMPTS: u32 = 16;
 
 /// One RLM VM's network plan.
