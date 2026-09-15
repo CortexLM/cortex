@@ -1315,12 +1315,177 @@ mod tests {
             .to_lowercase()
     }
 
+    /// Blank every byte that is **not** Rust code structure: comments, string
+    /// bodies (including raw and byte strings), and character literals.
+    ///
+    /// This is what makes brace counting honest. A `{` inside a `//` comment,
+    /// a `"…"` literal, or an `r#"…"#` block is *text*, not a delimiter; left
+    /// in place it would drive the depth counter and leave a `#[cfg(test)]`
+    /// module looking unclosed, so every line after it would be dropped from
+    /// the scan. That is precisely how a prohibited literal could hide.
+    ///
+    /// Masked bytes become spaces so byte offsets and line breaks survive
+    /// (a `//` comment ends at its newline, which is kept).
+    ///
+    /// Deliberately not a full Rust parser: it is a small lexer for the four
+    /// constructs that can contain a brace. It errs toward masking, which
+    /// makes the scan *more* inclusive of real code, never less.
+    ///
+    /// One function, not four: the cases are mutually exclusive branches of a
+    /// single left-to-right scan, and splitting them would mean re-deriving
+    /// "am I at a comment / a raw string / a string / a char?" in each helper.
+    #[allow(clippy::too_many_lines)]
+    fn mask_non_code(source: &str) -> String {
+        let bytes = source.as_bytes();
+        let mut out = vec![b' '; bytes.len()];
+        let mut i = 0usize;
+        while i < bytes.len() {
+            // Line comment: mask to end of line (newline kept).
+            if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            // Block comment (nesting is legal in Rust).
+            if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                let mut depth = 0usize;
+                while i < bytes.len() {
+                    if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                        depth += 1;
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                        continue;
+                    }
+                    if bytes[i] == b'\n' {
+                        out[i] = b'\n';
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            // Raw string: r"…", r#"…"#, br#"…"#, rb#"…"#.
+            let raw_at = {
+                let rest = &bytes[i..];
+                let (skip, hashes) = if rest.starts_with(b"br") || rest.starts_with(b"rb") {
+                    (2usize, 0usize)
+                } else if rest.starts_with(b"r") {
+                    (1usize, 0usize)
+                } else {
+                    (0usize, 0usize)
+                };
+                if skip == 0 {
+                    None
+                } else {
+                    let mut h = hashes;
+                    while i + skip + h < bytes.len() && bytes[i + skip + h] == b'#' {
+                        h += 1;
+                    }
+                    if i + skip + h < bytes.len() && bytes[i + skip + h] == b'"' {
+                        Some((skip + h + 1, h))
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some((body_start, hashes)) = raw_at {
+                i += body_start;
+                // Closing delimiter: `"` followed by `hashes` `#`.
+                loop {
+                    if i >= bytes.len() {
+                        break;
+                    }
+                    if bytes[i] == b'"' {
+                        let mut k = i + 1;
+                        let mut seen = 0usize;
+                        while seen < hashes && k < bytes.len() && bytes[k] == b'#' {
+                            seen += 1;
+                            k += 1;
+                        }
+                        if seen == hashes {
+                            i = k;
+                            break;
+                        }
+                    }
+                    if bytes[i] == b'\n' {
+                        out[i] = b'\n';
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            // Normal string or byte string.
+            let quote_at = if bytes[i] == b'"' {
+                Some(i)
+            } else if bytes[i] == b'b' && i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                Some(i + 1)
+            } else {
+                None
+            };
+            if let Some(q) = quote_at {
+                i = q + 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    }
+                    if bytes[i] == b'\n' {
+                        out[i] = b'\n';
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            // Character literal or a lifetime. A lifetime (`'a`) is code and
+            // must be kept; a char literal's contents are masked. The
+            // discriminator: a char literal closes within a few bytes, a
+            // lifetime is followed by an identifier.
+            if bytes[i] == b'\'' {
+                let closed = {
+                    let mut j = i + 1;
+                    if j < bytes.len() && bytes[j] == b'\\' {
+                        j += 2;
+                        while j < bytes.len() && bytes[j] != b'\'' {
+                            j += 1;
+                        }
+                        j + 1
+                    } else if j + 1 < bytes.len() && bytes[j + 1] == b'\'' {
+                        j + 2
+                    } else {
+                        0
+                    }
+                };
+                if closed > 0 && closed <= bytes.len() {
+                    i = closed;
+                    continue;
+                }
+            }
+            out[i] = bytes[i];
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
     /// Strip `#[cfg(test)] mod …` blocks from `source`, structurally.
     ///
-    /// Brace depth, not "everything after the first marker". A file may carry
-    /// a `#[cfg(test)]` attribute on a **method** (the guest's `Tail::bytes`)
-    /// with production code after it; splitting on the first marker would
-    /// declare that production code test-only and stop guarding it.
+    /// Brace depth over **code only** ([`mask_non_code`]), not "everything
+    /// after the first marker". A file may carry a `#[cfg(test)]` attribute on
+    /// a **method** (the guest's `Tail::bytes`) with production code after it;
+    /// splitting on the first marker would declare that production code
+    /// test-only and stop guarding it. And counting raw bytes would let a
+    /// brace in a comment or a string unbalance the depth, dropping every
+    /// later line from the scan.
     ///
     /// Only `mod` items are removed. A `#[cfg(test)]` on anything else is
     /// left in place deliberately: the scan then sees test-only code and
@@ -1328,14 +1493,21 @@ mod tests {
     /// moving the fixture into a `mod tests`. Over-scanning is a false alarm;
     /// under-scanning is the hole this guards against.
     fn production_source(source: &str) -> String {
+        let masked = mask_non_code(source);
+        let masked_lines: Vec<&str> = masked.lines().collect();
         let mut kept: Vec<&str> = Vec::new();
         let mut depth_test: Option<usize> = None;
         let mut brace_depth = 0usize;
         let mut pending_cfg_test = false;
-        for line in source.lines() {
-            let trimmed = line.trim();
+        for (idx, line) in source.lines().enumerate() {
+            // Braces are counted from the masked line, so a brace in a
+            // comment or a literal cannot move the depth. The attribute and
+            // `mod` markers are read from the masked line too, for the same
+            // reason (a `mod ` inside a string is not a module).
+            let code = masked_lines.get(idx).copied().unwrap_or("");
+            let trimmed = code.trim();
             if pending_cfg_test {
-                if trimmed.starts_with("mod ") && trimmed.contains('{') {
+                if trimmed.starts_with("mod ") && code.contains('{') {
                     depth_test = Some(brace_depth);
                     pending_cfg_test = false;
                 } else if trimmed.ends_with(';') {
@@ -1343,18 +1515,15 @@ mod tests {
                     // file, which the caller's list already excludes.
                     pending_cfg_test = false;
                     continue;
-                } else if !trimmed.is_empty()
-                    && !trimmed.starts_with("//")
-                    && !trimmed.starts_with('#')
-                {
+                } else if !trimmed.is_empty() {
                     // The attribute is on a non-`mod` item (a method, say):
                     // keep it, so the scan still covers what follows.
                     pending_cfg_test = false;
                 }
             }
-            if trimmed == "#[cfg(test)]" || trimmed.starts_with("#[cfg(test)]") {
+            if trimmed.starts_with("#[cfg(test)]") {
                 pending_cfg_test = true;
-                if trimmed.contains("mod ") && trimmed.contains('{') {
+                if trimmed.contains("mod ") && code.contains('{') {
                     depth_test = Some(brace_depth);
                     pending_cfg_test = false;
                 }
@@ -1363,8 +1532,8 @@ mod tests {
             if depth_test.is_none() {
                 kept.push(line);
             }
-            brace_depth = brace_depth.saturating_add(line.matches('{').count());
-            for _ in 0..line.matches('}').count() {
+            brace_depth = brace_depth.saturating_add(code.matches('{').count());
+            for _ in 0..code.matches('}').count() {
                 brace_depth = brace_depth.saturating_sub(1);
                 if depth_test == Some(brace_depth) {
                     depth_test = None;
@@ -1483,6 +1652,69 @@ mod tests {
                 .any(|(label, _)| *label == "proof-challenge/src/topic_routes.rs"),
             "the dynamic topic routes are a product branch and must be guarded"
         );
+    }
+
+    /// A brace that is *text* cannot unbalance the strip and hide code after a
+    /// test module.
+    ///
+    /// The defect this pins: the stripper counted `{` / `}` in raw bytes, so a
+    /// brace inside a comment, a string, a raw string, or a macro's input left
+    /// the depth non-zero after the test module closed — and every line after
+    /// it was silently dropped from the scan. A prohibited literal placed
+    /// there passed the guard.
+    #[test]
+    fn braces_inside_text_do_not_hide_code_from_the_guard() {
+        // Each case: a `#[cfg(test)]` module whose body contains a brace that
+        // is *not* a delimiter, followed by production code carrying a
+        // literal.
+        let cases: [(&str, &str); 4] = [
+            (
+                "comment",
+                "#[cfg(test)]\nmod m {\n    // an unbalanced brace in a comment: {\n}\nfn later() { let s = \"tbench\"; }\n",
+            ),
+            (
+                "normal string",
+                "#[cfg(test)]\nmod m {\n    fn f() { let s = \"a { brace\"; }\n}\nfn later() { let s = \"tbench\"; }\n",
+            ),
+            (
+                "raw string",
+                "#[cfg(test)]\nmod m {\n    fn f() { let s = r#\"a { brace\"#; }\n}\nfn later() { let s = \"tbench\"; }\n",
+            ),
+            (
+                "macro input",
+                "#[cfg(test)]\nmod m {\n    fn f() { println!(\"{{ literal brace\"); }\n}\nfn later() { let s = \"tbench\"; }\n",
+            ),
+        ];
+        for (label, source) in cases {
+            let stripped = production_source(source);
+            assert!(
+                stripped.to_lowercase().contains("tbench"),
+                "a brace in a {label} must not hide the production code after the test module: \
+                 {stripped:?}"
+            );
+            assert!(
+                !stripped.contains("mod m"),
+                "the test module is still stripped in the {label} case: {stripped:?}"
+            );
+        }
+    }
+
+    /// Masking removes exactly the non-code bytes and keeps structure.
+    #[test]
+    fn masking_blanks_text_and_keeps_code() {
+        let masked = mask_non_code("let a = 1; // { }\nlet b = \"}{ x\";\nlet c = 'x';\n");
+        assert!(
+            !masked.contains("}{ x"),
+            "string bodies are masked: {masked:?}"
+        );
+        assert!(
+            !masked.contains("// { }"),
+            "comment bodies are masked: {masked:?}"
+        );
+        assert!(masked.contains("let a = 1;"), "{masked:?}");
+        assert!(masked.contains("let c ="), "{masked:?}");
+        // Newlines survive, so line-by-line pairing with the original holds.
+        assert_eq!(masked.lines().count(), 3, "{masked:?}");
     }
 
     #[test]
