@@ -1014,6 +1014,26 @@ fn disable_and_enable_need_the_gate_database() {
     }
 }
 
+/// The commands that take an install to a **scorable** topic are implemented
+/// and fail closed when they cannot run: `topic baseline` needs the registry
+/// (it reads the measurement the RLM stored) and `topic seal` needs the signed
+/// open document. An install never makes a topic scorable on its own, so this
+/// is the path an operator is told to take.
+#[test]
+fn the_scorable_path_fails_closed_on_its_inputs() {
+    let out = run(&["topic", "baseline", "tb4"]);
+    assert_eq!(code(&out), EXIT_USAGE, "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("BASE_DATABASE_URL"),
+        "{}",
+        stderr(&out)
+    );
+
+    let out = run(&["topic", "seal", "tb4"]);
+    assert_eq!(code(&out), EXIT_USAGE, "{}", stderr(&out));
+    assert!(stderr(&out).contains("--document"), "{}", stderr(&out));
+}
+
 #[test]
 fn help_lists_every_subcommand() {
     let out = run(&["topic", "--help"]);

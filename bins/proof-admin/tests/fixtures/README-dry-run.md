@@ -62,6 +62,37 @@ Read the journal back with:
 BASE_DATABASE_URL=… proof-admin topic install-log --topic tb4
 ```
 
+## The rest of the path to a scorable topic
+
+An install never makes a topic scorable on its own, whichever way it runs: the
+topic needs an **`open`** document whose baseline is **sealed**, and the seal
+is the operator's. `topic install` prints this, and `--json` reports it as
+`"scorable": false` with the `remaining` steps. The three commands are:
+
+```bash
+# 1. Measure the baseline (paid: a VM + a judge call). Requires the
+#    topic-VM orchestrator and the owner's assertions.
+proof-admin topic install --bundle <bundle> --env staging --drive-rlm --owner-approved \
+  --admin-url <master-or-gateway> --admin-token-file <file>
+
+# 2. Read what was measured and the commitment the open document must seal.
+proof-admin topic baseline tb4
+
+# 3. Put that `metrics_commitment` into the document, set `status: open`, sign
+#    it with the `proof` key (`xtask proof-topic`), then seal and publish.
+proof-admin topic seal tb4 --document <open.json> --publish \
+  --admin-url <master-or-gateway> --admin-token-file <file>
+```
+
+`topic seal` runs the same `mark_sealed` the runtime uses, so a document it
+accepts is one the scoring path accepts; `--publish` then posts it through the
+admin route (which still refuses an `open` document whose install is not
+`applied`). Confirm with `GET /v1/status`: `can_score` is true and the topic is
+in `scorable_topics`.
+
+`--skip-baseline` is a **pause**, not a path: it installs the rules and leaves
+the topic unscorable until a run without the flag measures a baseline.
+
 ### Two things the command needs
 
 **`-p proof-admin-bin`, not `-p proof-admin`.** The repo names binary packages
@@ -101,8 +132,9 @@ row key and is a follow-up (see below).
 
 ## Staging migrate
 
-`crates/db/migrations/0024_proof_topic_alias.sql` and
-`crates/db/migrations/0025_proof_topic_install.sql` are the schema changes in
+`crates/db/migrations/0024_proof_topic_alias.sql`,
+`crates/db/migrations/0025_proof_topic_install.sql`, and
+`crates/db/migrations/0026_proof_topic_gate.sql` are the schema changes in
 this stack.
 
 **There is no manual migration command to run.** Migrations are embedded in
@@ -134,8 +166,13 @@ What they do, exactly:
   paths stored **relative** so a row cannot escape the topic's prefix). Both
   are append-only for `base_app`: a journal that could be edited in place
   would not be a journal, so a re-install appends.
-- Neither **does** `ALTER` or `DROP` anything: the `0020` tables keep their
-  columns, keys, and grants.
+- `0026` **adds** `proof_topic_gate` (the operator switch `topic disable` /
+  `topic enable` appends to: state, reason, actor). Append-only too — the
+  newest row per topic is the state, the rows before it are the history — and
+  the challenge reads it on the submit path, so a disable takes effect on the
+  next request with no re-sign, restart, or redeploy.
+- None of them **does** `ALTER` or `DROP` anything: the `0020` tables keep
+  their columns, keys, and grants.
 
 ## Regenerating
 

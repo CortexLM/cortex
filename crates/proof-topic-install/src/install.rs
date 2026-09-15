@@ -203,6 +203,13 @@ pub struct InstallReport {
     pub setup: SetupSummary,
     /// The journal row this run appended.
     pub journal_id: i64,
+    /// The document's own status, as the bundle carries it.
+    ///
+    /// Reported so an operator (and `topic install --json`) can see whether
+    /// the install left a **scorable** topic: a `draft` is not one, whatever
+    /// the setup step measured, and the remaining step is the operator's seal
+    /// (`proof-admin topic seal --publish`).
+    pub document_status: TopicStatus,
 }
 
 /// Everything one install needs, resolved by the caller.
@@ -337,6 +344,7 @@ impl Installer<'_> {
             binding: binding.clone(),
             setup,
             journal_id,
+            document_status: request.topic.status,
         })
     }
 
