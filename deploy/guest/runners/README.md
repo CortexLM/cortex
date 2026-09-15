@@ -28,7 +28,7 @@ operator's view of it.
 |------|-----|--------------------------------------|
 | `run` (required) | `Baseline`, `Evaluate` | `report.json` — `{"primary_value": <finite number>, "claim_holds": bool, "flops_used": <int or omit>, "evidence": {...}}`. **Evaluate** also writes the topic-defined complete results JSON (default `results.json`; pin `results_path` / `results_contract` in `constraints.params`). Missing or non-conforming on evaluate is fail-closed (no Done) |
 | `inspect` | `Inspect` (anti-cheat rules, **before any paid inference**) | `checklist.json` — `[{"id": "<rule id>", "pass": bool, "evidence": "..."}]`; a rule left out is recorded **red** |
-| `propose_rules` (optional) | `ProposeRules` | `rules.json` — `[{"id": "<slug>", "text": "..."}]`; without this entrypoint the agent proposes the signed topic's own `checklist` |
+| `propose_rules` | `ProposeRules` (RLM authorship) | `rules.json` — `[{"id": "<slug>", "text": "..."}]`. **A runner whose topic must open needs this entrypoint**: without it the guest refuses the job (`Failed` → 503, no row, nothing scored), because there is **no** fallback that echoes the signed `checklist` back. Echoing it would let the control plane record the operator's own vector as `source = rlm`, which is an operator-cloned document masquerading as RLM authorship. The signed `checklist` stays the topic's version 1 with honest `topic_document` provenance, and only a run of this entrypoint advances the store to `rlm` — which the publish gate requires before a topic may be `open`. |
 
 A non-zero exit with no document, a missing document, a non-finite
 `primary_value`, a missing or non-conforming Evaluate `results.json`, or a
