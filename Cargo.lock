@@ -3690,6 +3690,7 @@ dependencies = [
  "crypto",
  "db",
  "hex",
+ "proof-eval",
  "proof-experiment",
  "proof-rlm",
  "proof-rlm-store",

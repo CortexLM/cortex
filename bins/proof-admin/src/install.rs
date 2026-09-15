@@ -172,7 +172,7 @@ async fn run_real(
 ) -> Result<(), Failure> {
     // The bearer and the URL are resolved before anything is written, so a
     // misconfiguration cannot leave a half-installed topic.
-    let admin = AdminTarget::resolve(args)?;
+    let admin = AdminTarget::resolve(args.admin_url, args.admin_token_file)?;
     let database_url = crate::database_url(opts)?.ok_or_else(|| {
         Failure::Usage(
             "a real install writes to the topic registry, so it needs a database: set \
@@ -472,15 +472,18 @@ fn next_steps(plan: &TopicInstallPlan, args: &InstallArgs<'_>) -> String {
 }
 
 /// Where the admin publish call goes, and the bearer it uses.
-struct AdminTarget {
+pub(crate) struct AdminTarget {
     base_url: String,
     token: String,
 }
 
 impl AdminTarget {
     /// Resolve the URL and bearer, refusing a half-configured pair.
-    fn resolve(args: &InstallArgs<'_>) -> Result<Self, Failure> {
-        let Some(base_url) = args.admin_url.map(str::trim).filter(|u| !u.is_empty()) else {
+    pub(crate) fn resolve(
+        admin_url: Option<&str>,
+        admin_token_file: Option<&Path>,
+    ) -> Result<Self, Failure> {
+        let Some(base_url) = admin_url.map(str::trim).filter(|u| !u.is_empty()) else {
             return Err(Failure::Usage(
                 "a real install publishes through the admin route, so it needs the master's \
                  base URL: pass --admin-url (or set PROOF_ADMIN_URL), e.g. \
@@ -489,7 +492,7 @@ impl AdminTarget {
                     .to_owned(),
             ));
         };
-        let Some(path) = args.admin_token_file else {
+        let Some(path) = admin_token_file else {
             return Err(Failure::Usage(
                 "a real install needs the operator bearer for /v1/admin/*: pass \
                  --admin-token-file (or set PROOF_ADMIN_TOKEN_FILE). The file is read and never \
@@ -524,7 +527,7 @@ impl AdminTarget {
     }
 
     /// Publish the document through the existing admin route.
-    async fn publish(&self, doc: &proof_task::TopicDocument) -> Result<(), String> {
+    pub(crate) async fn publish(&self, doc: &proof_task::TopicDocument) -> Result<(), String> {
         let url = format!("{}{}", self.base_url, proof_topic_bundle::PUBLISH_PATH);
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_mins(1))

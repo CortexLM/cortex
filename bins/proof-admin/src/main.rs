@@ -27,8 +27,7 @@
 //! - It touches no route, no allocator, and no scoring path.
 //! - It removes none of the compiled-in bindings the current live topic uses.
 //!
-//! Exit codes: `0` ok, `1` error, `2` usage or configuration, `3` not
-//! implemented in this slice.
+//! Exit codes: `0` ok, `1` error, `2` usage or configuration.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -43,6 +42,7 @@ use proof_topic_bundle::{InstallEnvironment, TopicInstallBundle, TopicInstallPla
 
 mod drive;
 mod install;
+mod seal;
 
 use install::InstallArgs;
 
@@ -52,8 +52,6 @@ const EXIT_OK: u8 = 0;
 const EXIT_ERROR: u8 = 1;
 /// Bad usage or missing configuration.
 const EXIT_USAGE: u8 = 2;
-/// The command exists but its behaviour belongs to a later slice.
-const EXIT_NOT_IMPLEMENTED: u8 = 3;
 
 /// Proof operator CLI.
 #[derive(Debug, Parser)]
@@ -72,10 +70,12 @@ Resolve the publish call and host env without touching anything:
 List the installed topics (a read-only view of proof_topic_version):
   proof-admin topic list
 
-Nothing here writes a topic, opens a route, or changes how a score is
-computed. `install` prints the publish call and the host env for an operator
-to run; `disable` / `enable` throw the operator gate the challenge reads on
-the submit path; `topic seal` exits 3 as not-implemented."
+Every command is implemented. Nothing here writes a topic document, opens a
+route, or changes how a score is computed: `install` publishes the document
+the bundle carries and applies the bundle's RLM section, `disable` / `enable`
+throw the operator gate the challenge reads on the submit path, and
+`seal` records the operator's seal of the baseline the RLM measured and
+publishes the open document."
 )]
 struct Cli {
     /// Postgres URL for the topic registry view. Falls back to `BASE_DATABASE_URL`.
@@ -225,13 +225,44 @@ enum TopicCmd {
         #[arg(long, env = "PROOF_GATE_ACTOR", value_name = "LABEL")]
         actor: Option<String>,
     },
-    /// Not implemented in this slice.
-    Seal {
-        /// Topic slug.
+    /// Show what the RLM measured, and the commitment an open document must
+    /// seal. The read half of `topic seal`.
+    Baseline {
+        /// Topic slug, or an alias of one.
         topic_id: String,
-        /// Measured baseline primary.
-        #[arg(long, value_name = "VALUE")]
-        value: f64,
+        /// Pin the document is checked against. Defaults to `config/proof-pin.toml`.
+        #[arg(long, value_name = "PATH", default_value = "config/proof-pin.toml")]
+        pin: PathBuf,
+    },
+    /// Seal the RLM's measured baseline and open the topic.
+    ///
+    /// Takes the signed `status: open` document whose `baseline` carries the
+    /// commitment `topic baseline` printed, checks it exactly the way the
+    /// runtime does (`TopicSetup::mark_sealed`: open, valid on this host,
+    /// operator-signed, and sealing the value the RLM measured), records the
+    /// move to `open`, and — with `--publish` — publishes it through the
+    /// admin route, which is what makes the topic reachable and scorable.
+    Seal {
+        /// Topic slug, or an alias of one.
+        topic_id: String,
+        /// The signed `status: open` document (JSON).
+        #[arg(long, value_name = "PATH")]
+        document: PathBuf,
+        /// Pin the document is checked against. Defaults to `config/proof-pin.toml`.
+        #[arg(long, value_name = "PATH", default_value = "config/proof-pin.toml")]
+        pin: PathBuf,
+        /// Publish the sealed document through the admin route.
+        #[arg(long)]
+        publish: bool,
+        /// Master base URL for the publish call, e.g.
+        /// `http://10.116.0.3:8080` (the gateway) or
+        /// `http://127.0.0.1:8100` (the challenge service directly).
+        #[arg(long, env = "PROOF_ADMIN_URL", value_name = "URL")]
+        admin_url: Option<String>,
+        /// File holding the operator bearer for `/v1/admin/*`. Never logged,
+        /// never printed. Defaults to `PROOF_ADMIN_TOKENS_FILE`.
+        #[arg(long, env = "PROOF_ADMIN_TOKEN_FILE", value_name = "PATH")]
+        admin_token_file: Option<PathBuf>,
     },
 }
 
@@ -284,10 +315,6 @@ fn main() -> ExitCode {
             eprintln!("proof-admin: {msg}");
             ExitCode::from(EXIT_USAGE)
         }
-        Err(Failure::NotImplemented(msg)) => {
-            eprintln!("proof-admin: {msg}");
-            ExitCode::from(EXIT_NOT_IMPLEMENTED)
-        }
         Err(Failure::Error(msg)) => {
             eprintln!("proof-admin: {msg}");
             ExitCode::from(EXIT_ERROR)
@@ -300,8 +327,6 @@ fn main() -> ExitCode {
 enum Failure {
     /// Bad usage or missing configuration.
     Usage(String),
-    /// A later slice owns this behaviour.
-    NotImplemented(String),
     /// Anything else (bad bundle, refused document, database error).
     Error(String),
 }
@@ -384,10 +409,28 @@ async fn run_topic(opts: &Options, cmd: &TopicCmd) -> Result<(), Failure> {
             )
             .await
         }
-        TopicCmd::Seal { topic_id, value } => Err(not_implemented(
-            &format!("topic seal (value {value})"),
+        TopicCmd::Seal {
             topic_id,
-        )),
+            document,
+            pin,
+            publish,
+            admin_url,
+            admin_token_file,
+        } => {
+            seal::seal(
+                opts,
+                &seal::SealArgs {
+                    topic_id,
+                    document,
+                    pin,
+                    publish: *publish,
+                    admin_url: admin_url.as_deref(),
+                    admin_token_file: admin_token_file.as_deref(),
+                },
+            )
+            .await
+        }
+        TopicCmd::Baseline { topic_id, pin } => seal::baseline(opts, topic_id, pin).await,
     }
 }
 
@@ -449,15 +492,6 @@ async fn run_alias(opts: &Options, cmd: &AliasCmd) -> Result<(), Failure> {
             Ok(())
         }
     }
-}
-
-/// A stub that names what is missing instead of guessing.
-fn not_implemented(command: &str, topic_id: &str) -> Failure {
-    Failure::NotImplemented(format!(
-        "`{command}` for topic {topic_id:?} is not implemented in this slice (P0: bundle + \
-         admin CLI skeleton). Nothing was changed. A topic's lifecycle is the signed document's \
-         `status`; re-sign and re-publish through POST /v1/admin/proof/topics instead."
-    ))
 }
 
 /// Read a bundle file.
@@ -824,7 +858,7 @@ async fn open_store(opts: &Options) -> Result<Box<dyn RlmStore>, Failure> {
 ///
 /// The gate commands write (`proof_topic_gate`) as well as read, so they need
 /// the pool itself and not only the registry trait object.
-async fn open_pool(opts: &Options) -> Result<sqlx::PgPool, Failure> {
+pub(crate) async fn open_pool(opts: &Options) -> Result<sqlx::PgPool, Failure> {
     let Some(url) = database_url(opts)? else {
         return Err(Failure::Usage(
             "this command reads the topic registry and needs a database: set \
@@ -988,7 +1022,7 @@ fn summarize(row: &TopicVersionRow) -> String {
 }
 
 /// Lifecycle word, matching the wire spelling the document uses.
-fn status_word(status: proof_task::TopicStatus) -> &'static str {
+pub(crate) fn status_word(status: proof_task::TopicStatus) -> &'static str {
     match status {
         proof_task::TopicStatus::Draft => "draft",
         proof_task::TopicStatus::Open => "open",
@@ -1017,7 +1051,7 @@ pub(crate) fn print_json<T: serde::Serialize>(value: &T) -> Result<(), Failure> 
     Ok(())
 }
 
-fn dash_if_empty(s: &str) -> String {
+pub(crate) fn dash_if_empty(s: &str) -> String {
     if s.trim().is_empty() {
         "-".to_owned()
     } else {

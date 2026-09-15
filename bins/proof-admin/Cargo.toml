@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 db = { path = "../../crates/db" }
+proof-eval = { path = "../../crates/proof-eval" }
 proof-rlm = { path = "../../crates/proof-rlm" }
 proof-rlm-store = { path = "../../crates/proof-rlm-store" }
 proof-task = { path = "../../crates/proof-task" }
@@ -30,6 +31,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
 crypto = { path = "../../crates/crypto" }
+proof-rlm = { path = "../../crates/proof-rlm", features = ["test-fixtures"] }
 db = { path = "../../crates/db", features = ["testing"] }
 hex = "0.4"
 proof-experiment = { path = "../../crates/proof-experiment" }
