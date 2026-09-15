@@ -216,6 +216,22 @@ fn backend(msg: impl Into<String>) -> VmError {
     VmError::Backend(msg.into())
 }
 
+/// Whether a refusal is the agent's `AlreadyExists` (409).
+///
+/// `call` folds every non-2xx into [`VmError::Backend`] as
+/// `orchestrator {status} on {method} {path}: {code}: {error}`, so both the
+/// status and the agent's code survive as text. Matching **both** keeps "the
+/// topic already has a VM" distinguishable from every other backend failure
+/// without depending on the `Debug` rendering alone, so `create` can attach
+/// instead of failing the submission.
+fn is_already_exists(e: &VmError) -> bool {
+    matches!(
+        e,
+        VmError::Backend(m)
+            if m.contains("AlreadyExists") && (m.contains("409") || m.contains("Conflict"))
+    )
+}
+
 impl FirecrackerOrchestrator {
     /// Build the client. Reads the CA file (if any) now; the token per request.
     pub fn new(config: FcConfig) -> Result<Self, FcConfigError> {
@@ -383,15 +399,42 @@ impl TopicVmOrchestrator for FirecrackerOrchestrator {
     async fn create(&self, spec: &TopicVmSpec) -> Result<VmHandle, VmError> {
         self.ready()?;
         spec.validate()?;
-        let record: VmRecord = self
-            .call(
+        let created = self
+            .call::<CreateVmRequest, VmRecord>(
                 Method::POST,
                 paths::VMS,
                 Some(&CreateVmRequest { spec: spec.clone() }),
                 self.config.create_timeout,
             )
-            .await?
-            .ok_or_else(|| backend("orchestrator has no create route"))?;
+            .await;
+        let record: VmRecord = match created {
+            Ok(Some(record)) => record,
+            // The topic already has a live VM — a leftover from the RLM
+            // install/baseline that still holds its jail and TAP. That is not
+            // a failure: it is the VM this submission wants. Attaching keeps
+            // the submit path idempotent, so a miner's run does not depend on
+            // an operator clearing the host first.
+            //
+            // Only a **topic** spec may attach. An experiment spec asks for a
+            // dedicated VM for one paid job; attaching would hand back the
+            // topic's RLM VM and run the job in the wrong guest, so a 409
+            // there stays an error.
+            Err(e) if spec.experiment.is_none() && is_already_exists(&e) => {
+                tracing::info!(
+                    topic_id = %spec.topic_id,
+                    "topic vm already exists on the host; attaching instead of creating"
+                );
+                return self.attach(&spec.topic_id).await?.ok_or_else(|| {
+                    backend(format!(
+                        "orchestrator reported the topic already has a vm, but attach found none \
+                         for {:?}",
+                        spec.topic_id
+                    ))
+                });
+            }
+            Err(e) => return Err(e),
+            Ok(None) => return Err(backend("orchestrator has no create route")),
+        };
         if record.handle.topic_id != spec.topic_id {
             return Err(backend(format!(
                 "orchestrator bound the vm to {:?}, asked for {:?}",

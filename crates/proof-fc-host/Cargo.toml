@@ -13,6 +13,7 @@ async-trait = "0.1"
 hex = "0.4"
 proof-rlm = { path = "../proof-rlm" }
 proof-fc-harvest = { path = "../proof-fc-harvest" }
+proof-fc-net = { path = "../proof-fc-net" }
 proof-vm-agent = { path = "../proof-vm-agent" }
 proof-vm-proto = { path = "../proof-vm-proto" }
 serde = { version = "1", features = ["derive"] }
@@ -24,6 +25,7 @@ tokio-util = { version = "0.7", default-features = false }
 tracing = "0.1"
 
 [dev-dependencies]
+proof-fc-net = { path = "../proof-fc-net", features = ["test-fixtures"] }
 proof-results = { path = "../proof-results" }
 proof-rlm = { path = "../proof-rlm", features = ["test-fixtures"] }
 proof-vm-proto = { path = "../proof-vm-proto", features = ["test-fixtures"] }

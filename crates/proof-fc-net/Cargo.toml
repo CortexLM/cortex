@@ -1,0 +1,28 @@
+[package]
+name = "proof-fc-net"
+description = "KVM-host plumbing shared by the Proof Firecracker backend and its experiment layer: operator host config, the `Shell` trait every host command is rendered through (so CI asserts argv without spawning anything), and per-VM networking — a TAP on its own /30, NAT through the uplink, and an nftables table that lets an RLM VM reach only the operator's egress allowlist. Split out of `proof-fc-host` to keep that crate under the workspace LOC cap; no behaviour lives here that the backend did not already have."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+# Exposes `proof_fc_net::shell::FailingShell` to sibling crates' tests: a
+# recording shell that fails every command matching a prefix, so a host
+# cleanup path can be asserted without a host.
+test-fixtures = []
+
+[dependencies]
+async-trait = "0.1"
+proof-fc-harvest = { path = "../proof-fc-harvest" }
+proof-vm-agent = { path = "../proof-vm-agent" }
+serde_json = "1"
+tokio = { version = "1", features = ["process"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

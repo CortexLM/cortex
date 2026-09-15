@@ -38,10 +38,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 
-pub mod config;
 pub mod jail;
-pub mod net;
-pub mod shell;
 pub mod sister;
 pub mod vsock;
 
@@ -63,12 +60,19 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-pub use config::{EgressAllow, HostConfig, Proto};
+// The host plumbing (config, `Shell`, per-VM networking) lives in
+// `proof-fc-net` so this crate stays under the workspace LOC cap. Re-exported
+// so every existing `proof_fc_host::…` path keeps working.
 pub use jail::JailGuard;
-pub use net::NetPlan;
 pub use proof_fc_harvest::images;
 pub use proof_fc_harvest::images::ImageCache;
-pub use shell::{RecordingShell, Shell, SystemShell};
+pub use proof_fc_net::config;
+pub use proof_fc_net::net;
+pub use proof_fc_net::shell;
+#[cfg(test)]
+pub use proof_fc_net::shell::FailingShell;
+pub use proof_fc_net::{EgressAllow, HostConfig, NetPlan, Proto};
+pub use proof_fc_net::{RecordingShell, Shell, SystemShell};
 pub use sister::SisterCtx;
 
 /// How long a job waits for its sister task to finish killing and destroying
@@ -311,7 +315,52 @@ impl FirecrackerHypervisor {
     ) -> Result<BootedVm, HvError> {
         let cfg = self.ctx.cfg.clone();
         let owner_files = self.owner_files()?;
-        let net = NetPlan::for_index(&cfg, self.net_index.fetch_add(1, Ordering::SeqCst));
+        // The TAP index has to come from the **host**, not just from the
+        // in-process counter. A jailed VM outlives the agent that booted it
+        // (the jailer is handed over, not a child of this process), so after
+        // an agent restart — or with a topic VM an earlier agent left behind
+        // holding `pfc0` — a counter starting again at zero names a TAP that
+        // is already up, and `ip tuntap add` answers
+        // `ioctl(TUNSETIFF): Device or resource busy`. That is how a leftover
+        // topic VM from the baseline/RLM install took every new experiment VM
+        // off the air and no miner submission ever produced a row.
+        //
+        // Scanning first makes the common case exact; the retry covers the
+        // race where two boots pick the same free index, and the *second*
+        // boot moves on instead of failing.
+        let mut attempt = 0;
+        loop {
+            let from = self.net_index.load(Ordering::SeqCst);
+            let index = NetPlan::first_free(self.ctx.shell.as_ref(), from).await?;
+            self.net_index
+                .store(index.saturating_add(1), Ordering::SeqCst);
+            let net = NetPlan::for_index(&cfg, index);
+            match self
+                .boot_on_index(vm_id, spec, image.clone(), net, owner_files.clone())
+                .await
+            {
+                Err(e) if NetPlan::name_taken(&e) && attempt < net::TAP_ATTEMPTS => {
+                    attempt = attempt.saturating_add(1);
+                    tracing::warn!(
+                        %vm_id, index, attempt,
+                        "tap index raced another boot; retrying on the next free one: {e}"
+                    );
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// [`Self::boot_verified`] with the network plan already chosen.
+    async fn boot_on_index(
+        &self,
+        vm_id: &str,
+        spec: &TopicVmSpec,
+        image: PathBuf,
+        net: NetPlan,
+        owner_files: Vec<StagedFile>,
+    ) -> Result<BootedVm, HvError> {
+        let cfg = self.ctx.cfg.clone();
         let boot = jail::VmBoot {
             id: vm_id.to_owned(),
             vcpus: spec.template.vcpus,
@@ -377,6 +426,10 @@ impl FirecrackerHypervisor {
     ) -> Result<(), HvError> {
         let vm_id = jail.id().to_owned();
         net.up(shell, cfg.jail_uid).await?;
+        // The interface exists now, so this boot owns it: only from here may
+        // the guard delete it. A boot that failed at `up` leaves the TAP to
+        // whichever VM already had it.
+        jail.net_brought_up();
         let rules = cfg.jail_dir(&vm_id).join("net.nft").display().to_string();
         net.load_rules(shell, &rules).await?;
         // Advisory: a ufw / Docker forward chain that drops by default
@@ -699,11 +752,18 @@ mod tests {
     /// or a guest that never says hello — releases everything it built: the
     /// nftables table, the TAP, and the jail directory (with the rules file
     /// and scratch inside it). Nothing is registered, nothing is alive.
+    ///
+    /// The network half is **ownership-scoped**, and the two injected
+    /// failures differ on exactly that: a boot that failed at `ip tuntap add`
+    /// never got the interface (another VM holds it), so it must leave the
+    /// TAP and its table alone; a boot that got the interface and failed
+    /// later owns it and must release it.
     #[tokio::test]
     async fn a_boot_that_fails_before_the_handshake_releases_its_jail_and_network() {
         let req = request();
         let spec = TopicVmSpec::for_topic(&req.topic_id, pinned_template(), req.sandbox.clone());
-        for (tag, fail_on) in [("tap", "ip tuntap"), ("rules", "nft -f")] {
+        // (tag, failing command, did this boot create the TAP?)
+        for (tag, fail_on, owns_tap) in [("tap", "ip tuntap", false), ("rules", "nft -f", true)] {
             let c = cfg(tag);
             let image = c.image_dir.join("rlm.ext4");
             std::fs::write(&image, b"rlm rootfs stand-in").expect("image");
@@ -725,14 +785,25 @@ mod tests {
                 .position(|l| l.starts_with(fail_on))
                 .expect("position");
             let after = &lines[failed_at + 1..];
-            assert!(
-                after.contains(&"nft delete table inet proof_vm_pfc0".to_owned()),
-                "{tag}: table released: {after:?}"
-            );
-            assert!(
-                after.contains(&"ip link del pfc0".to_owned()),
-                "{tag}: tap released: {after:?}"
-            );
+            if owns_tap {
+                assert!(
+                    after.contains(&"nft delete table inet proof_vm_pfc0".to_owned()),
+                    "{tag}: table released: {after:?}"
+                );
+                assert!(
+                    after.contains(&"ip link del pfc0".to_owned()),
+                    "{tag}: tap released: {after:?}"
+                );
+            } else {
+                assert!(
+                    !after.iter().any(|l| l.contains("nft delete table")),
+                    "{tag}: a tap this boot never created must not be deleted: {after:?}"
+                );
+                assert!(
+                    !after.iter().any(|l| l.starts_with("ip link del")),
+                    "{tag}: a tap this boot never created must not be deleted: {after:?}"
+                );
+            }
             assert_eq!(
                 after.last().map(String::as_str),
                 Some(format!("rm -rf {jail_dir}").as_str()),

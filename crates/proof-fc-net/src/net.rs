@@ -2,12 +2,18 @@
 //! nftables table that lets the RLM VM reach **only** the operator's egress
 //! allowlist. The sister miner guest gets no interface at all.
 
+use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
 use proof_vm_agent::HvError;
 
 use crate::config::{EgressAllow, HostConfig, Proto};
 use crate::shell::{sh, Shell};
+
+/// How many TAP indexes one boot will try before it gives up. The allocator
+/// scans the host first, so this only covers a race with a concurrent boot
+/// (two experiments starting at once can pick the same free index).
+pub const TAP_ATTEMPTS: u32 = 16;
 
 /// One RLM VM's network plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +53,41 @@ impl NetPlan {
     #[must_use]
     pub fn table(&self) -> String {
         format!("proof_vm_{}", self.tap)
+    }
+
+    /// The first `pfc<n>` index at or above `from` that this host does not
+    /// already have.
+    ///
+    /// A process-local counter is not enough to pick one. A jailed VM
+    /// outlives the agent process that booted it — the jailer is handed over,
+    /// not a child of the agent — so an agent restart, or a VM an earlier
+    /// agent left behind (a topic VM still holding its TAP after a baseline),
+    /// keeps `pfc<n>` in place while the counter starts again at zero.
+    /// `ip tuntap add` on a live name is `ioctl(TUNSETIFF): Device or
+    /// resource busy`, which is how a leftover topic VM took every new
+    /// experiment VM off the air.
+    ///
+    /// # Errors
+    ///
+    /// [`HvError::Backend`] when `ip` fails.
+    pub async fn first_free(shell: &dyn Shell, from: u32) -> Result<u32, HvError> {
+        let out = sh(shell, "ip", &["-o", "link", "show"]).await?;
+        let used: BTreeSet<u32> = out.stdout.lines().filter_map(tap_index).collect();
+        let mut i = from;
+        while used.contains(&i) {
+            i = i.saturating_add(1);
+        }
+        Ok(i)
+    }
+
+    /// Whether this error is the host refusing a TAP name that is taken.
+    ///
+    /// `ip tuntap add` renders both `EBUSY` and `EEXIST` from `TUNSETIFF` as
+    /// `ioctl(TUNSETIFF): Device or resource busy`, so the text is the only
+    /// signal the command's exit status carries.
+    #[must_use]
+    pub fn name_taken(e: &HvError) -> bool {
+        matches!(e, HvError::Backend(m) if m.contains("TUNSETIFF") || m.contains("resource busy"))
     }
 
     /// Kernel `ip=` argument giving the guest its address statically.
@@ -94,9 +135,16 @@ impl NetPlan {
     /// Create the TAP (owned by the jail uid so jailed Firecracker can open
     /// it), address it, enable forwarding, load the ruleset.
     ///
+    /// A name this host already has is refused **by name** rather than
+    /// half-built: the caller allocates a free index first
+    /// ([`Self::first_free`]) and retries on this error, so a TAP that
+    /// belongs to a live VM is never addressed or deleted by a boot that did
+    /// not create it.
+    ///
     /// # Errors
     ///
-    /// [`HvError::Backend`] from the first failing command.
+    /// [`HvError::Backend`] from the first failing command; a taken name is
+    /// recognisable with [`Self::name_taken`].
     pub async fn up(&self, shell: &dyn Shell, jail_uid: u32) -> Result<(), HvError> {
         let uid = jail_uid.to_string();
         sh(
@@ -106,7 +154,17 @@ impl NetPlan {
                 "tuntap", "add", "dev", &self.tap, "mode", "tap", "user", &uid,
             ],
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            if Self::name_taken(&e) {
+                HvError::Backend(format!(
+                    "tap {} is already taken on this host ({e}); another vm holds it",
+                    self.tap
+                ))
+            } else {
+                e
+            }
+        })?;
         let cidr = format!("{}/30", self.host_ip);
         sh(shell, "ip", &["addr", "add", &cidr, "dev", &self.tap]).await?;
         sh(shell, "ip", &["link", "set", &self.tap, "up"]).await?;
@@ -196,6 +254,14 @@ impl NetPlan {
 /// Prefix every TAP name shares (`pfc<n>`).
 const TAP_PREFIX: &str = "pfc";
 
+/// The index of a `pfc<n>` interface, from one `ip -o link show` line
+/// (`3: pfc0: <BROADCAST,…> mtu …`). `None` for anything else on the host.
+fn tap_index(line: &str) -> Option<u32> {
+    let rest = line.split_once(": ")?.1;
+    let name = rest.split([':', '@']).next()?;
+    name.strip_prefix(TAP_PREFIX)?.parse().ok()
+}
+
 /// Does this `nft -j` rule accept traffic arriving on a TAP? True for an
 /// `iifname` match against `pfc*` / `pfc+` / a specific `pfc<n>` (also inside
 /// a set) that ends in an `accept` verdict — the shape both
@@ -226,6 +292,33 @@ mod tests {
     use super::*;
     use crate::shell::RecordingShell;
 
+    /// A shell that answers `ip -o link show` with a canned interface listing
+    /// and fails anything else — the host state the allocator has to read.
+    struct LinkListing(String);
+
+    impl LinkListing {
+        fn new(lines: &[&str]) -> Self {
+            Self(lines.join("\n") + "\n")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Shell for LinkListing {
+        async fn run(
+            &self,
+            program: &str,
+            args: &[String],
+        ) -> Result<crate::shell::CmdOutput, HvError> {
+            assert_eq!(program, "ip", "the scan must ask the host");
+            assert_eq!(args, ["-o", "link", "show"]);
+            Ok(crate::shell::CmdOutput {
+                code: Some(0),
+                stdout: self.0.clone(),
+                stderr: String::new(),
+            })
+        }
+    }
+
     fn cfg() -> HostConfig {
         let mut c = HostConfig::defaults();
         c.egress_allow = vec![
@@ -234,6 +327,84 @@ mod tests {
             EgressAllow::parse("1.1.1.1:53/udp").expect("allow"),
         ];
         c
+    }
+
+    /// The LIVE Gate 3 failure: a topic VM left over from the RLM
+    /// install/baseline still holds `pfc0`, and the allocator — a counter
+    /// starting again at zero after the agent restarted — named it for the
+    /// next experiment VM. `ip tuntap add` answered
+    /// `ioctl(TUNSETIFF): Device or resource busy`, so no miner submission
+    /// ever got a `pf_` row.
+    ///
+    /// The allocator now asks the **host** which indexes exist, so a leftover
+    /// VM is skipped instead of collided with.
+    #[tokio::test]
+    async fn a_leftover_topic_vm_does_not_take_the_next_index() {
+        let shell = LinkListing::new(&[
+            "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT",
+            "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP",
+            // The leftover topic VM's TAP, still up from the baseline run.
+            "3: pfc0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP",
+        ]);
+        let next = NetPlan::first_free(&shell, 0).await.expect("scan");
+        assert_eq!(next, 1, "pfc0 is taken by the leftover topic vm");
+        assert_eq!(NetPlan::for_index(&cfg(), next).tap, "pfc1");
+
+        // A host with no TAPs of ours starts at the counter's value.
+        let empty = LinkListing::new(&["1: lo: <LOOPBACK,UP> mtu 65536"]);
+        assert_eq!(NetPlan::first_free(&empty, 0).await.expect("scan"), 0);
+        assert_eq!(NetPlan::first_free(&empty, 7).await.expect("scan"), 7);
+
+        // A gap is used before a higher index: a torn-down VM frees its slot.
+        let gap = LinkListing::new(&[
+            "3: pfc0: <BROADCAST,UP> mtu 1500",
+            "5: pfc2: <BROADCAST,UP> mtu 1500",
+        ]);
+        assert_eq!(gap_indices(&gap).await, vec![0, 2]);
+        assert_eq!(NetPlan::first_free(&gap, 0).await.expect("scan"), 1);
+    }
+
+    /// The scan reads only our TAPs: an unrelated interface whose name merely
+    /// starts with `pfc`-like text, or a `pfc` with a non-numeric suffix, is
+    /// not an index.
+    #[tokio::test]
+    async fn the_scan_counts_only_pfc_indexes() {
+        let shell = LinkListing::new(&[
+            "3: pfc0: <BROADCAST,UP> mtu 1500",
+            "4: pfc10: <BROADCAST,UP> mtu 1500",
+            "5: pfconf: <BROADCAST,UP> mtu 1500",
+            "6: pfcX: <BROADCAST,UP> mtu 1500",
+            "7: docker0: <BROADCAST,UP> mtu 1500",
+        ]);
+        assert_eq!(gap_indices(&shell).await, vec![0, 10]);
+        // 1..9 are free, so the next is 1 — the scan does not jump to 11.
+        assert_eq!(NetPlan::first_free(&shell, 0).await.expect("scan"), 1);
+    }
+
+    /// A taken name is recognised from the kernel's own wording, which is what
+    /// the boot retry keys on.
+    #[test]
+    fn a_taken_tap_name_is_recognised_from_the_kernels_wording() {
+        let busy =
+            HvError::Backend("ip exited Some(1): ioctl(TUNSETIFF): Device or resource busy".into());
+        assert!(NetPlan::name_taken(&busy));
+        assert!(!NetPlan::name_taken(&HvError::Backend(
+            "ip exited Some(1): RTNETLINK answers: Operation not permitted".into()
+        )));
+        assert!(!NetPlan::name_taken(&HvError::Guest("busy".into())));
+    }
+
+    async fn gap_indices(shell: &LinkListing) -> Vec<u32> {
+        let out = shell
+            .run(
+                "ip",
+                &["-o".to_owned(), "link".to_owned(), "show".to_owned()],
+            )
+            .await
+            .expect("scan");
+        let mut got: Vec<u32> = out.stdout.lines().filter_map(tap_index).collect();
+        got.sort_unstable();
+        got
     }
 
     #[test]
