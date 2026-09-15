@@ -124,6 +124,33 @@ fi
 unset PROOF_TASK_SLICE
 pass "task_slice resolves through the pack; an unknown label fails closed"
 
+# --- a label on a pack with NO slices is a refusal, not "score everything" ---
+# This is the LIVE Gate 1 configuration: the pack had only MANIFEST_FIRST15 +
+# tasks/, so `task_slice` resolved to nothing and the run scored every task,
+# overran its wall clock, and measured no baseline. A label is the topic's
+# assertion about which tasks to score; it is never silently widened.
+no_slices="$PROOF_WORK_DIR/no-slices-pack"
+rm -rf "$no_slices"
+mkdir -p "$no_slices/tasks"
+for t in alpha beta gamma; do
+    mkdir -p "$no_slices/tasks/$t"
+    printf '[task]\nname = "%s"\n' "$t" > "$no_slices/tasks/$t/task.toml"
+done
+if (export PROOF_PACK_DIR="$no_slices" PROOF_TASK_SLICE=tb4-first-5
+    proof_require_tasks; proof_filter_tasks) 2>"$PROOF_WORK_DIR/no-slices.err"; then
+    fail "a slice on a pack with no slices/ must fail closed, not score every task"
+fi
+grep -q "defines no slices" "$PROOF_WORK_DIR/no-slices.err" \
+    || fail "the refusal must say the pack defines no slices: $(cat "$PROOF_WORK_DIR/no-slices.err")"
+# The same pack with the set named explicitly still works: the documented path.
+if (export PROOF_PACK_DIR="$no_slices" PROOF_TASK_SLICE=
+    PROOF_PARAM_TASKS=alpha,beta proof_require_tasks; proof_filter_tasks); then
+    pass "a pack with no slices still scores a set the topic names explicitly"
+else
+    fail "params.tasks must be the escape from a missing slice"
+fi
+pass "an unresolved task_slice on a slice-less pack fails closed and names why"
+
 # --- exec timeout export: topic data only ---
 unset PROOF_PARAM_EXEC_TIMEOUT_S || true
 proof_export_exec_timeout
