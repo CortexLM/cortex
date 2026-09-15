@@ -107,6 +107,9 @@ pub struct RlmScorer {
     /// this topic is in flight — which is what makes a persisted `evaluating`
     /// a *stale* phase rather than another submission's.
     inflight: Mutex<BTreeMap<String, usize>>,
+    /// Per-topic locks for paid runs that share their topic's **one** VM (a
+    /// topic with no in-guest runner). See [`Self::shared_vm`].
+    shared_vms: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 fn unwired(custom_id: &str, detail: String) -> EvalError {
@@ -184,6 +187,7 @@ impl RlmScorer {
             locks: Mutex::new(BTreeMap::new()),
             lease_ttl: DEFAULT_LEASE_TTL,
             inflight: Mutex::new(BTreeMap::new()),
+            shared_vms: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -208,8 +212,37 @@ impl RlmScorer {
         self.pending.lock().map_or(0, |m| m.len())
     }
 
+    /// Runs of `topic_id` between `SubmissionReceived` and their verdict.
+    ///
+    /// `0` means nothing of this topic is in flight, which is what lets the
+    /// next run treat a persisted `evaluating` / `promoting` as a dead run's
+    /// phase and recover it. Exposed so a test can pin that a reaped run
+    /// releases its count (a phantom count would skip that recovery).
+    #[must_use]
+    pub fn inflight_len(&self, topic_id: &str) -> usize {
+        self.inflight(topic_id)
+    }
+
     fn topic_lock(&self, topic_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(topic_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// The lock that serializes the paid runs of `topic_id` on its **shared**
+    /// VM.
+    ///
+    /// Taken only by a run whose topic selects no in-guest runner (see
+    /// [`Self::evaluate`]): such a topic has one VM and no second one to ask
+    /// for, and the KVM host refuses a second concurrent job on one VM. A
+    /// topic that selects a runner takes no lock here — each paid job is its
+    /// own experiment VM, which is what makes two submissions of such a topic
+    /// genuinely parallel.
+    fn shared_vm(&self, topic_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.shared_vms
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .entry(topic_id.to_owned())
@@ -254,21 +287,40 @@ impl RlmScorer {
     }
 
     /// Drop pending runs of `topic_id` whose row never landed within the TTL,
-    /// releasing the lease they hold.
+    /// releasing the lease they hold **and their evaluation-phase count**.
+    ///
+    /// The count matters as much as the lease: `recover_stale` reads it to
+    /// decide whether a persisted `evaluating` is a dead run or a live one, so
+    /// a reaped run that left its count behind would pin the topic at
+    /// "something is in flight" forever — and no later callback could repair
+    /// it, because the entry this reaps is the one that would have. Exactly
+    /// one `enter` is balanced per reaped entry, and `on_persisted` cannot
+    /// double-count it: `take` and this `remove` race for the same entry, and
+    /// only the winner calls `leave`.
     fn reap_abandoned(&self, topic_id: &str) {
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        let stale: Vec<String> = pending
-            .iter()
-            .filter(|(_, p)| p.bundle.topic_id == topic_id && p.since.elapsed() >= self.lease_ttl)
-            .map(|(digest, _)| digest.clone())
-            .collect();
-        for digest in stale {
-            pending.remove(&digest);
-            tracing::warn!(
-                topic_id,
-                submission_digest = %digest,
-                "scored run never persisted within the lease ttl; lease released"
-            );
+        let reaped = {
+            let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            let stale: Vec<String> = pending
+                .iter()
+                .filter(|(_, p)| {
+                    p.bundle.topic_id == topic_id && p.since.elapsed() >= self.lease_ttl
+                })
+                .map(|(digest, _)| digest.clone())
+                .collect();
+            for digest in &stale {
+                pending.remove(digest);
+                tracing::warn!(
+                    topic_id,
+                    submission_digest = %digest,
+                    "scored run never persisted within the lease ttl; lease released"
+                );
+            }
+            stale.len()
+        };
+        // The inflight lock is taken **after** the pending lock is released,
+        // so the two are never held at once and no ordering rule is needed.
+        for _ in 0..reaped {
+            self.leave(topic_id);
         }
     }
 
@@ -610,6 +662,28 @@ impl RlmScorer {
         if let Some(bytes) = artifact_tar {
             req = req.with_artifact_tar(bytes);
         }
+        // The topic's **shared** VM, held for the whole paid run — inspect
+        // included.
+        //
+        // A topic whose signed params select an in-guest runner gets one
+        // experiment VM per paid job, so two submissions run in parallel by
+        // construction and take no lock. A topic that selects none has a
+        // single VM shared with the cheap jobs, and the KVM host refuses a
+        // second concurrent job on one VM — so this run takes `shared_vm`
+        // from its first job (the anti-cheat `inspect`, which is *also* a job
+        // on that VM) to its last, and the second submission waits here
+        // rather than racing into that refusal. That is what makes a
+        // submission parallel: either it has its own VM, or it takes its
+        // turn.
+        let shared_vm_lock = match req.experiment() {
+            Ok(Some(_)) => None,
+            Ok(None) => Some(self.shared_vm(&req.topic_id)),
+            Err(e) => return Err(EvalError::Backend(format!("experiment binding: {e}"))),
+        };
+        let _shared_vm = match &shared_vm_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         let inspected = runner
             .inspect(&req, &rules)
             .await

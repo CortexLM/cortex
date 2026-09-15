@@ -1124,6 +1124,107 @@ async fn an_abandoned_run_releases_its_topic_lease_after_the_ttl() {
     let _ = std::fs::remove_dir_all(&d.root);
 }
 
+/// A topic whose signed params select **no** in-guest runner has one VM and
+/// no second one to ask for, so its paid runs take turns on that VM: the host
+/// refuses a second concurrent job on one VM (`409 Busy`), and two
+/// submissions arriving at once must wait rather than race into that refusal.
+///
+/// This is the other half of "one VM per submission": a submission either has
+/// a VM of its own (an experiment topic) or it takes its turn.
+///
+/// **Multi-threaded on purpose.** The default `#[tokio::test]` runtime is
+/// single-threaded, so two spawned submissions cannot actually interleave and
+/// the race this pins would not be observable — the fake's one-job-per-VM
+/// check would never see a second entrant. This needs real parallelism.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_topic_without_an_experiment_runner_serializes_its_paid_runs() {
+    let d = Arc::new(direct("shared-vm", None));
+    assert!(
+        !d.topic
+            .constraints
+            .params
+            .contains_key(proof_experiment::PARAM_RUNNER),
+        "this topic selects no in-guest runner"
+    );
+    // Long enough that the two submissions genuinely overlap without the
+    // lock: the fake holds the VM busy for the job's duration.
+    d.orchestrator.set_job_delay(Duration::from_millis(100));
+
+    // Two different submissions, both driven at once. Each holds its own
+    // lease (so neither waits on the other's *row*), but the shared VM's lock
+    // serializes their **evaluations**.
+    let a = tokio::spawn({
+        let d = d.clone();
+        async move { score(&d, "shared-a").await }
+    });
+    let b = tokio::spawn({
+        let d = d.clone();
+        async move { score(&d, "shared-b").await }
+    });
+    let (ra, rb) = (a.await.unwrap(), b.await.unwrap());
+    assert!(ra.is_ok(), "a scores: {ra:?}");
+    assert!(rb.is_ok(), "b scores: {rb:?}");
+    assert_eq!(paid_runs(&d.orchestrator), 2, "both paid runs happened");
+    assert_eq!(
+        d.orchestrator.created(),
+        1,
+        "a topic with no in-guest runner has exactly one VM"
+    );
+    // The lock is released after each run, so a third submission is admitted
+    // rather than deadlocked behind them.
+    let c = tokio::time::timeout(Duration::from_secs(10), score(&d, "shared-c"))
+        .await
+        .expect("the shared-VM lock is released after each run")
+        .expect("c scores");
+    assert!((c.harness.custom_value.unwrap() - 0.7).abs() < 1e-12);
+    let _ = std::fs::remove_dir_all(&d.root);
+}
+
+/// A run whose row never lands must not hold its **own** lease forever, and
+/// reaping it must release **both** halves of its state: the lease and the
+/// evaluation-phase count. A reaped run that left its count behind would pin
+/// the topic at "something is in flight" forever, and `recover_stale` would
+/// skip the recovery that unsticks it.
+#[tokio::test]
+async fn a_reaped_run_releases_its_inflight_count_too() {
+    let d = direct("ttl-inflight", Some(Duration::ZERO));
+    let tid = d.topic.id.clone();
+    score(&d, "abandoned").await.expect("scores");
+    assert_eq!(d.scorer.pending_len(), 1);
+
+    // The next run reaps the abandoned one on its way in. Both runs' counts
+    // must be balanced once each has left: the reaped one by the reap, the
+    // live one by its own persist.
+    let next = tokio::time::timeout(Duration::from_secs(10), score(&d, "next"))
+        .await
+        .expect("the abandoned lease is reaped, not waited on")
+        .expect("scores");
+    assert!((next.harness.custom_value.unwrap() - 0.7).abs() < 1e-12);
+    assert_eq!(d.scorer.pending_len(), 1, "only the live run is pending");
+    assert_eq!(
+        d.scorer.inflight_len(&tid),
+        1,
+        "the reaped run's count is gone; only the live run's remains"
+    );
+
+    d.scorer
+        .on_persisted(&tid, "digest-next", "pf_0000000000000002", false)
+        .await;
+    assert_eq!(
+        d.scorer.inflight_len(&tid),
+        0,
+        "nothing is in flight, so a later run may recover the phase"
+    );
+
+    // And the topic is not stuck: a fresh run is admitted, which is what the
+    // skipped recovery would have prevented.
+    let after = tokio::time::timeout(Duration::from_secs(10), score(&d, "after"))
+        .await
+        .expect("a topic with nothing in flight is not stuck")
+        .expect("scores");
+    assert!((after.harness.custom_value.unwrap() - 0.7).abs() < 1e-12);
+    let _ = std::fs::remove_dir_all(&d.root);
+}
 /// Two submissions of **one topic** are two runs, not a queue: each holds its
 /// own lease, so the second evaluates while the first is still in flight.
 /// (Its row cannot land first, though — `on_persisted` takes the topic lock —

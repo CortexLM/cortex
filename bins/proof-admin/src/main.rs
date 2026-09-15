@@ -693,13 +693,21 @@ async fn cmd_seal(
             "metrics_commitment": outcome.metrics_commitment,
             "primary_value": outcome.primary_value,
             "published": outcome.published,
+            "already_sealed": outcome.already_sealed,
         }));
     }
-    println!("topic {} sealed and opened.", outcome.topic_id);
-    println!("  state             open");
-    println!("  document_version  {}", outcome.document_version);
-    println!("  primary_value     {}", outcome.primary_value);
-    println!("  commitment        {}", outcome.metrics_commitment);
+    if outcome.already_sealed {
+        println!(
+            "topic {} was already sealed (document version {}); this run only published.",
+            outcome.topic_id, outcome.document_version
+        );
+    } else {
+        println!("topic {} sealed and opened.", outcome.topic_id);
+        println!("  state             open");
+        println!("  document_version  {}", outcome.document_version);
+        println!("  primary_value     {}", outcome.primary_value);
+        println!("  commitment        {}", outcome.metrics_commitment);
+    }
     if outcome.published {
         println!("  published         yes (the topic's routes and document are live)");
     } else {

@@ -111,7 +111,7 @@ impl BaselineReport {
 pub struct SealOutcome {
     /// Canonical topic slug.
     pub topic_id: String,
-    /// New document version the seal stored.
+    /// The document version now stored (unchanged on a retry).
     pub document_version: u32,
     /// The primary the RLM measured and the document sealed.
     pub primary_value: f64,
@@ -119,6 +119,12 @@ pub struct SealOutcome {
     pub metrics_commitment: String,
     /// Whether the open document was published through the admin route.
     pub published: bool,
+    /// The seal was already recorded (this run only published).
+    ///
+    /// The retry path: the previous run sealed the topic and the publish
+    /// failed, so the operator re-runs the same command and this one skips
+    /// `mark_sealed` rather than being refused by the lifecycle it moved.
+    pub already_sealed: bool,
 }
 
 impl SealOutcome {
@@ -208,16 +214,30 @@ pub async fn seal(pool: &sqlx::PgPool, args: &SealArgs<'_>) -> Result<SealOutcom
         )));
     };
     let sealed = seal_measurement(args.pin, &document, &measured);
+    let commitment = sealed.commitment();
     // The one call that decides: the same `mark_sealed` the runtime's own
     // tests drive, so a document this command accepts is one the scoring path
     // would accept.
-    let registered: Vec<&str> = args.registered_custom.iter().map(String::as_str).collect();
-    let setup = seal_setup(store);
-    setup
-        .mark_sealed(&document, args.pin, &registered, &sealed)
-        .await
-        .map_err(|e| OpsError::error(seal_failure(&e, &canonical)))?;
-    let commitment = sealed.commitment();
+    //
+    // **Unless the seal already landed.** `mark_sealed` moves the lifecycle
+    // `baselining → open`, and the publish is a *remote* call that can fail
+    // after it: the retry an operator is told to run (`--publish` again) would
+    // otherwise be refused by the lifecycle it already moved. So a topic that
+    // is already open under *this* document is not re-sealed — the seal is
+    // recorded, and what remains is the publish. Anything else (an open topic
+    // under a different document, or a lifecycle that never reached
+    // `baselining`) still goes through `mark_sealed`, which is what refuses
+    // it with the reason.
+    let already_open = already_sealed(&store, &canonical, &document).await?;
+    if !already_open {
+        let registered: Vec<&str> = args.registered_custom.iter().map(String::as_str).collect();
+        let setup = seal_setup(store);
+        setup
+            .mark_sealed(&document, args.pin, &registered, &sealed)
+            .await
+            .map_err(|e| OpsError::error(seal_failure(&e, &canonical)))?;
+    }
+    let document_version = if already_open { version } else { version + 1 };
 
     if args.publish {
         let admin = PublishTarget::resolve(args.admin_url, args.admin_token_file)?;
@@ -228,11 +248,41 @@ pub async fn seal(pool: &sqlx::PgPool, args: &SealArgs<'_>) -> Result<SealOutcom
     }
     Ok(SealOutcome {
         topic_id: canonical,
-        document_version: version + 1,
+        document_version,
         primary_value: measured.primary_value,
         metrics_commitment: commitment,
         published: args.publish,
+        already_sealed: already_open,
     })
+}
+
+/// Whether the topic is already open under **this** document and measurement.
+///
+/// The retry predicate, and deliberately narrow: the newest stored version
+/// must be the document being sealed (same id, same signature, `open`) and
+/// the lifecycle must already be `open`. A draft, a different signature, or a
+/// lifecycle anywhere else answers `false`, so the caller still runs
+/// `mark_sealed` and the operator still gets its refusal.
+async fn already_sealed(
+    store: &PgRlmStore,
+    canonical: &str,
+    document: &TopicDocument,
+) -> Result<bool, OpsError> {
+    let Some((_, latest)) = store
+        .latest_topic(canonical)
+        .await
+        .map_err(|e| OpsError::error(format!("{canonical}: {e}")))?
+    else {
+        return Ok(false);
+    };
+    if latest.signature != document.signature || latest.status != TopicStatus::Open {
+        return Ok(false);
+    }
+    let lifecycle = store
+        .lifecycle(canonical)
+        .await
+        .map_err(|e| OpsError::error(format!("{canonical} lifecycle: {e}")))?;
+    Ok(lifecycle.is_some_and(|lc| lc.state == proof_rlm::RlmState::Open))
 }
 
 /// The `TopicSetup` `mark_sealed` needs: the store, and a VM boundary that is

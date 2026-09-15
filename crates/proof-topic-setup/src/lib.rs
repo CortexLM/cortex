@@ -302,6 +302,8 @@ impl TopicSetup {
         let job = VmJob::Baseline {
             request: request.clone(),
         };
+        // The baseline is the only paid job the setup driver runs, so it
+        // never contends for a topic's shared-VM lock: it passes `None`.
         let ran = run_paid_job(
             self.orchestrator.as_ref(),
             &self.experiments,
