@@ -120,8 +120,9 @@ impl proof_http::InstallJournal for PgInstallJournal {
         //
         // 1. The newest install row is `applied` — every migration, route, and
         //    rule the operator's bundle carries is in place.
-        // 2. The rule vector **in force was authored by the topic's RLM**
-        //    (`proof_rule_version.source = 'rlm'`).
+        // 2. The rule vector **that install landed** was authored by the
+        //    topic's RLM (`proof_rule_version.source = 'rlm'` for
+        //    `version = proof_topic_install.rules_version`).
         //
         // The second is the operator-cloned-document gate. An install seeds
         // rule version 1 from the signed document (`topic_document`), which is
@@ -132,17 +133,24 @@ impl proof_http::InstallJournal for PgInstallJournal {
         // to `rlm`, and the guest refuses to echo the signed checklist back as
         // if it had. So an `open` document is refused until that happened.
         //
-        // Both reads fail closed: a database error is an `Err`, which the
+        // The two facts are read as **one bound query**, not as two
+        // independent predicates: "the newest rule version is rlm" would admit
+        // a topic whose install landed the operator's version 1 while an
+        // unrelated version 2 was RLM-authored — the topic would open with the
+        // operator's vector in force. `installed_rules` joins the install row
+        // to the exact version it recorded, so the provenance answered for is
+        // the provenance of the vector in force.
+        //
+        // The read fails closed: a database error is an `Err`, which the
         // publish route turns into a refusal, never into an admission.
-        if !proof_topic_install::applied_install(&self.pool, topic_id)
+        match proof_topic_install::installed_rules(&self.pool, topic_id)
             .await
             .map_err(|e| e.to_string())?
         {
-            return Ok(false);
+            proof_topic_install::InstalledRules::RlmAuthored { .. } => Ok(true),
+            proof_topic_install::InstalledRules::NotRlmAuthored { .. }
+            | proof_topic_install::InstalledRules::NotApplied { .. } => Ok(false),
         }
-        proof_topic_install::rlm_authored_rules(&self.pool, topic_id)
-            .await
-            .map_err(|e| e.to_string())
     }
 
     async fn submit_gate(&self, topic_id: &str) -> Result<proof_http::SubmitGate, String> {

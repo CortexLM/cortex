@@ -274,14 +274,18 @@ fn run(cli: &Cli) -> Result<(), String> {
     let live_scorer = live_scorer(backend, harvest, rlm_store, &cli.artefact_root, &vm);
     log_live_wiring(backend, live_scorer.as_deref(), &cli.artefact_root);
     let registered = registered_custom(live_scorer.as_deref());
-    match load_topics(
+    // Loaded **through** the runtime: an `open` document's admission reads the
+    // install journal, and a read outside an entered runtime would fail and
+    // silently skip the topic. Driving the loader with `rt.block_on` is what
+    // makes the gate run at all on a live host.
+    match rt.block_on(load_topics(
         &store,
         &pin,
         cli.topics_file.as_deref(),
         &registered,
         db_pool.as_ref(),
         backend,
-    ) {
+    )) {
         Ok(n) => tracing::info!(topics = n, "signed topics loaded"),
         Err(e) => tracing::warn!("topics unavailable ({e}); submissions will 400/503 until fixed"),
     }
@@ -847,7 +851,7 @@ fn load_pin(path: Option<&Path>) -> Result<ProofPin, String> {
 /// (`PROOF_FORCE_SIM`, never a live fallback) that scores in-process with no
 /// install, no RLM, and no topic VM. Applying the gate there would test the
 /// fixture rather than the boundary.
-fn load_topics(
+async fn load_topics(
     store: &MemoryStore,
     pin: &ProofPin,
     path: Option<&Path>,
@@ -873,7 +877,7 @@ fn load_topics(
                 );
                 continue;
             };
-            if let Err(why) = open_topic_admissible(pool, &doc.id) {
+            if let Err(why) = open_topic_admissible(pool, &doc.id).await {
                 tracing::warn!(topic_id = %doc.id, "open topic skipped: {why}");
                 continue;
             }
@@ -890,32 +894,34 @@ fn load_topics(
 /// and rules that are not RLM-authored all refuse. The reason names the
 /// provenance so an operator can tell "run the install" from "the RLM never
 /// wrote its rules".
-fn open_topic_admissible(pool: &sqlx::PgPool, topic_id: &str) -> Result<(), String> {
-    let runtime = tokio::runtime::Handle::try_current()
-        .map_err(|_| "no async runtime to read the install journal".to_owned())?;
-    runtime.block_on(async {
-        let applied = proof_topic_install::applied_install(pool, topic_id)
-            .await
-            .map_err(|e| format!("install journal unreadable: {e}"))?;
-        if !applied {
-            return Err(
-                "no `applied` install row; run `proof-admin topic install` to completion first"
-                    .to_owned(),
-            );
-        }
-        let source = proof_topic_install::rules_source(pool, topic_id)
-            .await
-            .map_err(|e| format!("rule provenance unreadable: {e}"))?;
-        if source.as_deref() != Some("rlm") {
-            return Err(format!(
-                "rules are not RLM-authored (proof_rule_version.source is {}); drive the RLM's \
-                 propose_rules job (`proof-admin topic install --drive-rlm --owner-approved`) \
-                 so the topic authors its own behavior",
-                source.as_deref().unwrap_or("absent")
-            ));
-        }
-        Ok(())
-    })
+///
+/// The two facts come from **one bound read**
+/// ([`proof_topic_install::installed_rules`]): the newest install is
+/// `applied`, and the rule version *that install recorded* is `rlm`-sourced.
+/// Reading them as two independent predicates would admit a topic whose
+/// install landed the operator's signed vector while a later, unrelated
+/// version happened to be RLM-authored.
+async fn open_topic_admissible(pool: &sqlx::PgPool, topic_id: &str) -> Result<(), String> {
+    match proof_topic_install::installed_rules(pool, topic_id)
+        .await
+        .map_err(|e| format!("install journal unreadable: {e}"))?
+    {
+        proof_topic_install::InstalledRules::RlmAuthored { .. } => Ok(()),
+        proof_topic_install::InstalledRules::NotApplied { state } => Err(format!(
+            "the newest install row is {}; run `proof-admin topic install` to completion first",
+            match state.as_deref() {
+                Some(state) => format!("`{state}`"),
+                None => "absent".to_owned(),
+            }
+        )),
+        proof_topic_install::InstalledRules::NotRlmAuthored { provenance, .. } => Err(format!(
+            "the rule version this install landed is not RLM-authored \
+             (proof_rule_version.source is {}); drive the RLM's propose_rules job \
+             (`proof-admin topic install --drive-rlm --owner-approved`) so the topic authors \
+             its own behavior",
+            provenance.as_deref().unwrap_or("absent")
+        )),
+    }
 }
 
 fn load_holdouts(store: &MemoryStore, path: Option<&Path>) -> Result<usize, String> {
@@ -1156,8 +1162,8 @@ mod tests {
     /// The document is skipped (the host keeps serving what else it has)
     /// rather than admitted into `open_topics` / `scorable_topics`, so a topic
     /// whose behavior nobody authored never becomes submitable.
-    #[test]
-    fn a_live_host_admits_no_open_topic_it_cannot_prove_was_installed() {
+    #[tokio::test]
+    async fn a_live_host_admits_no_open_topic_it_cannot_prove_was_installed() {
         let dir = std::env::temp_dir().join(format!(
             "proof-topics-{}",
             std::time::SystemTime::now()
@@ -1174,7 +1180,9 @@ mod tests {
         let store = MemoryStore::new();
         let missing = dir.join("does-not-exist.json");
         assert!(
-            load_topics(&store, &pin, Some(&missing), &[], None, EvalBackend::Lium).is_err(),
+            load_topics(&store, &pin, Some(&missing), &[], None, EvalBackend::Lium)
+                .await
+                .is_err(),
             "an unreadable topics file is still an error"
         );
         // With no documents at all the loader is a no-op, which is the only
@@ -1184,10 +1192,74 @@ mod tests {
         std::fs::write(&path, "[]").expect("write");
         assert_eq!(
             load_topics(&store, &pin, Some(&path), &[], None, EvalBackend::Lium)
+                .await
                 .expect("empty list"),
             0
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The admission read really runs **inside** a runtime, so a live startup
+    /// does not silently skip every open topic.
+    ///
+    /// The defect this pins: `open_topic_admissible` used to reach for
+    /// `Handle::try_current()` and fail when the synchronous startup called it
+    /// after its `block_on` scopes had returned. Every valid open topic was
+    /// then logged as skipped and never loaded. The gate must therefore be
+    /// callable from the synchronous startup path *and* from an async caller,
+    /// which is only true if it is itself `async` (no ambient runtime needed).
+    #[test]
+    fn the_admission_gate_needs_no_ambient_runtime() {
+        // A synchronous context with no runtime entered: the shape startup
+        // has. A lazy pool pointed at a closed port fails fast on acquire, so
+        // the call reaches the read and returns the fail-closed `Err`.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        let pool = rt
+            .block_on(async {
+                sqlx::postgres::PgPoolOptions::new()
+                    .acquire_timeout(std::time::Duration::from_millis(250))
+                    .connect_lazy("postgres://127.0.0.1:1/none")
+            })
+            .expect("lazy pool builds without connecting");
+        // Outside any entered runtime — exactly where the old gate failed
+        // with "no async runtime to read the install journal".
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "this test must run outside an entered runtime to be meaningful"
+        );
+        let verdict = rt.block_on(open_topic_admissible(&pool, "any-topic"));
+        let why = verdict.expect_err("an unreadable journal is never an admission");
+        assert!(
+            why.contains("install journal unreadable"),
+            "the refusal names the unreadable journal, not a missing runtime: {why}"
+        );
+    }
+
+    /// The publish gate and the startup gate read the **same bound fact**: the
+    /// rule version the newest install recorded, not whichever version is
+    /// newest.
+    #[test]
+    fn the_admission_gate_reads_the_version_the_install_recorded() {
+        // `installed_rules` is the single read both gates call; the pairing is
+        // what makes "an install landed the operator's vector while a later
+        // version was RLM-authored" unable to open a topic.
+        let source = include_str!("main.rs");
+        let gate = source
+            .split("async fn open_topic_admissible")
+            .nth(1)
+            .expect("the gate");
+        assert!(
+            gate.contains("installed_rules"),
+            "the startup gate must read the install-bound fact, not two independent predicates"
+        );
+        assert!(
+            !gate.contains("rlm_authored_rules"),
+            "reading the newest rule version's provenance separately is the defect this gate \
+             fixes: it admits a topic whose install landed the operator's vector"
+        );
     }
 
     /// The rule-provenance read is fail-closed on a database error: it never

@@ -319,6 +319,122 @@ async fn a_denied_migration_writes_nothing_at_all() {
     tp.drop_schema().await.expect("drop");
 }
 
+/// The admission read binds the install to **the rule version it recorded**.
+///
+/// The defect this pins: the publish gate composed "the newest install is
+/// `applied`" and "the newest rule version is `rlm`" as two independent
+/// predicates. A topic whose install landed rule version 1 from the signed
+/// document (`topic_document`) was therefore admitted as soon as *any* later
+/// version happened to be RLM-authored — so it could open with the operator's
+/// vector in force, which is exactly the operator-cloned document the gate
+/// exists to refuse.
+#[tokio::test]
+async fn the_admission_read_binds_the_install_to_the_version_it_recorded() {
+    use proof_topic_install::{installed_rules, InstallState, InstalledRules};
+
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    let doc = topic("tb4");
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    // The install seeds version 1 from the signed document.
+    installer
+        .install(
+            &request(&doc, &section("tb4")),
+            SetupSummary::NotDriven { reason: "x".into() },
+        )
+        .await
+        .expect("install");
+
+    // Nothing to admit yet: the version the install landed is the operator's.
+    let before = installed_rules(&pool, "tb4").await.expect("read");
+    assert!(
+        matches!(
+            before,
+            InstalledRules::NotRlmAuthored {
+                version: Some(1),
+                ..
+            }
+        ),
+        "version 1 is topic_document-sourced, so the topic is not admissible: {before:?}"
+    );
+
+    // An **unrelated later** version is RLM-authored. The install still
+    // recorded version 1, so the topic must stay refused: reading "the newest
+    // rule version is rlm" would admit it.
+    let rlm_v2 = store
+        .current_rules("tb4")
+        .await
+        .expect("rules")
+        .expect("version 1")
+        .next(
+            proof_rlm::RuleSource::Rlm,
+            vec![proof_task::ChecklistRule {
+                id: "r-1".into(),
+                text: "the RLM's own rule".into(),
+            }],
+        )
+        .expect("v2");
+    store.put_rules(&rlm_v2).await.expect("write v2");
+    let after = installed_rules(&pool, "tb4").await.expect("read");
+    assert!(
+        matches!(
+            after,
+            InstalledRules::NotRlmAuthored {
+                version: Some(1),
+                ..
+            }
+        ),
+        "the install recorded version 1; a newer RLM version must not admit it: {after:?}"
+    );
+
+    // A **new install row** that records version 2 is what admits the topic.
+    // This is the operator's real path: re-install after the RLM wrote rules.
+    let report = installer
+        .install(
+            &request(&doc, &section("tb4")),
+            SetupSummary::Baselined {
+                rules_version: 2,
+                baseline_primary: "0.42".into(),
+            },
+        )
+        .await
+        .expect("re-install");
+    assert_eq!(
+        report.rules_version, 2,
+        "the install keeps the RLM's version"
+    );
+    assert_eq!(
+        installed_rules(&pool, "tb4").await.expect("read"),
+        InstalledRules::RlmAuthored { version: 2 },
+        "an applied install recording an rlm-sourced version is the admission"
+    );
+
+    // And the states that are not `applied` are refused as their own shape.
+    sqlx::query(
+        "INSERT INTO proof_topic_install \
+         (topic_id, bundle_digest, environment, state, rules_version) \
+         VALUES ('tb4', 'sha256:' || repeat('ab', 32), 'staging', $1, 2)",
+    )
+    .bind(InstallState::Failed.as_str())
+    .execute(&pool)
+    .await
+    .expect("append a failed row");
+    assert_eq!(
+        installed_rules(&pool, "tb4").await.expect("read"),
+        InstalledRules::NotApplied {
+            state: Some("failed".into())
+        },
+        "the newest row being `failed` refuses regardless of rule provenance"
+    );
+
+    tp.drop_schema().await.expect("drop");
+}
+
 /// A re-run resumes: migrations already in the journal are skipped, the rules
 /// version is not bumped, and the routes are not duplicated.
 #[tokio::test]

@@ -706,6 +706,35 @@ fn strings(value: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// What the newest install row says about the rules **it** landed.
+///
+/// The publish gate's answer, as a value rather than a boolean, so a caller
+/// that has to explain *why* a topic is not ready reads the same fact the
+/// boolean was derived from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstalledRules {
+    /// The newest install is `applied` and the rule version **that install
+    /// recorded** is `rlm`-sourced.
+    RlmAuthored {
+        /// The rule version the install landed.
+        version: u32,
+    },
+    /// The newest install is `applied`, but the rule version it recorded is
+    /// not RLM-authored (or its row is gone).
+    NotRlmAuthored {
+        /// The rule version the install recorded, when it recorded one.
+        version: Option<u32>,
+        /// `topic_document` / `operator` / `rlm`, or `None` when no row.
+        provenance: Option<String>,
+    },
+    /// The newest install is not `applied`, or the topic has no install row.
+    NotApplied {
+        /// The state the journal holds (`pending` / `failed`), or `None` when
+        /// no row exists at all.
+        state: Option<String>,
+    },
+}
+
 /// Whether `topic_id` has an install in the **`applied`** state.
 ///
 /// This is the durable fact a publish of an `open` document is gated on. The
@@ -732,6 +761,71 @@ pub async fn applied_install(pool: &PgPool, topic_id: &str) -> Result<bool, Inst
     .map_err(|e| InstallError::Db(e.to_string()))?;
     Ok(state.as_deref() == Some(InstallState::Applied.as_str()))
 }
+
+/// The provenance of the rule version the newest install **recorded**.
+///
+/// One read, one binding. The join is on
+/// `proof_rule_version.version = proof_topic_install.rules_version`, so the
+/// provenance answered for is the provenance of the vector *this install
+/// landed* — not of whatever rule version happens to be newest.
+///
+/// That distinction is the gate. Two independent predicates — "the newest
+/// install is `applied`" and "the newest rule version is `rlm`" — would admit
+/// a topic whose install landed rule version 1 from the signed document
+/// (`topic_document`) while an unrelated later version 2 was RLM-authored:
+/// the topic would open with the operator's vector in force, which is exactly
+/// the operator-cloned document the gate exists to refuse.
+///
+/// Fail-closed: an `applied` row that recorded **no** rule version (or whose
+/// rule row is missing) is [`InstalledRules::NotRlmAuthored`], never an
+/// admission, and a database error is an `Err`.
+///
+/// # Errors
+///
+/// [`InstallError::Db`].
+pub async fn installed_rules(
+    pool: &PgPool,
+    topic_id: &str,
+) -> Result<InstalledRules, InstallError> {
+    // `LEFT JOIN` so an `applied` row whose rule version has no row is
+    // visible as "no provenance" rather than as "no install".
+    let row: Option<(String, Option<i32>, Option<String>)> = sqlx::query_as(
+        "SELECT i.state, i.rules_version, r.source \
+         FROM proof_topic_install i \
+         LEFT JOIN proof_rule_version r \
+           ON r.topic_id = i.topic_id AND r.version = i.rules_version \
+         WHERE i.topic_id = $1 \
+         ORDER BY i.id DESC \
+         LIMIT 1",
+    )
+    .bind(topic_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| InstallError::Db(e.to_string()))?;
+    let Some((state, version, source)) = row else {
+        return Ok(InstalledRules::NotApplied { state: None });
+    };
+    if state != InstallState::Applied.as_str() {
+        return Ok(InstalledRules::NotApplied { state: Some(state) });
+    }
+    let version = version.and_then(|v| u32::try_from(v).ok());
+    // A non-null `source` can only come from a joined row, which can only
+    // join on a non-null `rules_version` — so the version is present here.
+    // Both are still matched explicitly rather than assumed.
+    if source.as_deref() == Some(RULES_SOURCE_RLM) {
+        if let Some(version) = version {
+            return Ok(InstalledRules::RlmAuthored { version });
+        }
+    }
+    Ok(InstalledRules::NotRlmAuthored {
+        version,
+        provenance: source,
+    })
+}
+
+/// The `proof_rule_version.source` value meaning the topic's own RLM wrote
+/// the vector (the store's `RuleSource::Rlm` wire word).
+pub const RULES_SOURCE_RLM: &str = "rlm";
 
 /// [`applied_install`], as a plain boolean.
 ///

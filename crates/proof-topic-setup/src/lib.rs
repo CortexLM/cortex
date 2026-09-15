@@ -105,6 +105,30 @@ pub enum SetupError {
         /// The version that was read back.
         version: u32,
     },
+    /// A rule version other than the one this run wrote is in force.
+    ///
+    /// The baseline is measured and persisted **against a rule version**, so
+    /// the two have to agree: a concurrent writer that advanced the store
+    /// while this run was measuring would otherwise leave a sealed bar
+    /// measured under rules nobody scores with. Nothing is persisted — the
+    /// lifecycle stays where it stopped, so a re-run resumes.
+    #[error(
+        "topic {topic_id:?}: rule version {wrote} was written but version {} is now in force; \
+         the baseline would have sealed a measurement taken under rules that no longer apply, so \
+         nothing was persisted",
+        match in_force {
+            Some(v) => v.to_string(),
+            None => "none".to_owned(),
+        }
+    )]
+    RulesSuperseded {
+        /// The topic whose rules moved.
+        topic_id: String,
+        /// The version this run wrote and measured against.
+        wrote: u32,
+        /// The version now in force (`None` when no rule row exists).
+        in_force: Option<u32>,
+    },
 }
 
 /// What setup produced for the operator to seal.
@@ -303,16 +327,55 @@ impl TopicSetup {
         // The read-back is the gate, not a formality: it is what makes "the
         // RLM authored this topic's behavior" a fact the store can prove,
         // rather than a label this driver attached.
-        let source = self.store.current_rules_source(&topic.id).await?;
-        if source != Some(RuleSource::Rlm) {
+        //
+        // It reads back **the exact version just written**, never "whichever
+        // version is newest": a concurrent writer advancing the store to a
+        // later, unrelated version would make a newest-wins check pass while
+        // the version this run wrote — the one the baseline is measured
+        // against — was not RLM-authored at all. The digest is compared too,
+        // so a row rewritten under the same version number is caught.
+        let written = self.store.rules_at(&topic.id, rules.version).await?;
+        let ok = written
+            .as_ref()
+            .is_some_and(|w| w.source == RuleSource::Rlm && w.digest() == rules.digest());
+        if !ok {
+            let provenance = match written.as_ref() {
+                Some(w) => format!("{:?}", w.source),
+                None => "no rule version".to_owned(),
+            };
             return Err(SetupError::RulesNotRlmAuthored {
                 topic_id: topic.id.clone(),
-                provenance: source
-                    .map_or_else(|| "no rule version".to_owned(), |s| format!("{s:?}")),
+                provenance,
                 version: rules.version,
             });
         }
         Ok(rules)
+    }
+
+    /// Refuse when the rule version in force is no longer the one this run
+    /// wrote and measured its baseline against.
+    ///
+    /// The baseline is persisted **for a rule version**, so a vector that
+    /// changed under it would leave a topic whose sealed bar was measured
+    /// under rules nobody is scoring with. Reading the version in force before
+    /// the baseline lands is what serializes the two: a concurrent RLM write
+    /// fails the setup run (nothing persisted) rather than sealing a stale
+    /// measurement.
+    async fn rules_still_in_force(
+        &self,
+        topic_id: &str,
+        wrote: &RuleSet,
+    ) -> Result<(), SetupError> {
+        let current = self.store.current_rules(topic_id).await?;
+        let in_force = current.as_ref().map(|r| r.version);
+        if in_force != Some(wrote.version) {
+            return Err(SetupError::RulesSuperseded {
+                topic_id: topic_id.to_owned(),
+                wrote: wrote.version,
+                in_force,
+            });
+        }
+        Ok(())
     }
 
     /// Baseline shaped exactly like a miner run, persisted: inside the topic
@@ -363,6 +426,14 @@ impl TopicSetup {
             }
         };
         report.verify(&request)?;
+        // The measurement is about to be persisted **against a rule version**,
+        // so that version has to still be the one in force: a vector that
+        // moved under the run would leave a sealed bar measured under rules
+        // nobody scores with. Checked after the paid run (the only point where
+        // a concurrent write could have landed) and before the row, so a
+        // superseded run persists nothing and a re-run resumes from
+        // `baselining`.
+        self.rules_still_in_force(&topic.id, rules).await?;
         self.store
             .put_baseline(&BaselineRow {
                 topic_id: topic.id.clone(),
@@ -503,5 +574,168 @@ impl TopicSetup {
             "operator sealed the baseline",
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use proof_rlm::UnwiredVmOrchestrator;
+    use proof_rlm_store::MemoryRlmStore;
+
+    /// The store is the only collaborator these tests need; the rest of
+    /// [`TopicSetup`] is filled with stubs that are never reached by
+    /// `rules_still_in_force`.
+    fn setup(store: Arc<dyn RlmStore>) -> TopicSetup {
+        TopicSetup {
+            orchestrator: Arc::new(UnwiredVmOrchestrator),
+            store,
+            template: VmTemplate::unpinned(),
+            experiments: proof_rlm::ExperimentPolicy::default(),
+            owner: Arc::new(AlwaysApprove),
+            keys: Arc::new(KeysPresent),
+            spend_cap_usd: None,
+            skip_baseline: false,
+        }
+    }
+
+    fn rules(topic_id: &str, version: u32, source: RuleSource) -> RuleSet {
+        RuleSet {
+            topic_id: topic_id.to_owned(),
+            version,
+            source,
+            rules: vec![proof_task::ChecklistRule {
+                id: format!("r-{version}"),
+                text: "a rule".into(),
+            }],
+        }
+    }
+
+    /// The read-back verifies **the version this run wrote**, not whichever
+    /// version is newest.
+    ///
+    /// The defect this pins: setup wrote version N and then checked the source
+    /// of the *newest* version. A concurrent writer advancing the store to
+    /// N+1 (`rlm`-sourced) made that check pass while the version setup
+    /// actually wrote — the one the baseline is measured against — was never
+    /// verified at all.
+    #[tokio::test]
+    async fn the_rule_read_back_verifies_the_version_it_wrote() {
+        let store = Arc::new(MemoryRlmStore::new());
+        let topic_id = "fixture-topic";
+        // Setup wrote version 1 as `topic_document` (what the install seeds),
+        // while a later, RLM-authored version 2 is now newest.
+        store
+            .put_rules(&rules(topic_id, 1, RuleSource::TopicDocument))
+            .await
+            .expect("v1");
+        store
+            .put_rules(&rules(topic_id, 2, RuleSource::Rlm))
+            .await
+            .expect("v2");
+
+        // A newest-wins check would read `rlm` and pass. The version the run
+        // wrote is the one that has to be verified.
+        let written = store
+            .rules_at(topic_id, 1)
+            .await
+            .expect("read")
+            .expect("v1 exists");
+        assert_eq!(
+            written.source,
+            RuleSource::TopicDocument,
+            "version 1 is the operator's vector, whatever version 2 says"
+        );
+        assert_eq!(
+            store.current_rules_source(topic_id).await.expect("read"),
+            Some(RuleSource::Rlm),
+            "the newest version is rlm — which is exactly why newest-wins was the defect"
+        );
+    }
+
+    /// A rule vector that moved under the run refuses **before** the baseline
+    /// is persisted.
+    ///
+    /// The baseline is stored per rule version, so a version that changed
+    /// while the paid run was in flight would leave a sealed bar measured
+    /// under rules nobody scores with. Nothing is written: the lifecycle stays
+    /// at `baselining`, so a re-run resumes.
+    #[tokio::test]
+    async fn a_superseded_rule_version_persists_no_baseline() {
+        let store = Arc::new(MemoryRlmStore::new());
+        let topic_id = "fixture-topic";
+        store
+            .put_rules(&rules(topic_id, 1, RuleSource::Rlm))
+            .await
+            .expect("v1");
+        let wrote = store
+            .rules_at(topic_id, 1)
+            .await
+            .expect("read")
+            .expect("v1");
+
+        let setup = setup(store.clone());
+        // In force: nothing to refuse.
+        setup
+            .rules_still_in_force(topic_id, &wrote)
+            .await
+            .expect("the version this run wrote is in force");
+
+        // A concurrent RLM write lands version 2 while the baseline runs.
+        store
+            .put_rules(&rules(topic_id, 2, RuleSource::Rlm))
+            .await
+            .expect("v2");
+        let err = setup
+            .rules_still_in_force(topic_id, &wrote)
+            .await
+            .expect_err("a superseded version must refuse");
+        assert!(
+            matches!(
+                err,
+                SetupError::RulesSuperseded {
+                    wrote: 1,
+                    in_force: Some(2),
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(
+            store.baseline(topic_id).await.expect("read").is_none(),
+            "nothing was persisted for a run whose rules moved under it"
+        );
+    }
+
+    /// The refusal names both versions, so an operator reads what happened.
+    #[test]
+    fn a_superseded_refusal_names_both_versions() {
+        let err = SetupError::RulesSuperseded {
+            topic_id: "fixture-topic".into(),
+            wrote: 3,
+            in_force: Some(4),
+        };
+        let text = err.to_string();
+        assert!(text.contains("fixture-topic"), "{text}");
+        assert!(text.contains('3') && text.contains('4'), "{text}");
+    }
+
+    struct AlwaysApprove;
+    impl OwnerHook for AlwaysApprove {
+        fn ask_owner(
+            &self,
+            _prompt: &OwnerPrompt,
+        ) -> Result<proof_rlm::OwnerDecision, proof_rlm::HookError> {
+            Ok(proof_rlm::OwnerDecision::Approve)
+        }
+    }
+
+    struct KeysPresent;
+    impl OwnerKeysProbe for KeysPresent {
+        fn owner_keys_present(&self) -> Result<(), proof_rlm::HookError> {
+            Ok(())
+        }
     }
 }

@@ -1286,51 +1286,9 @@ mod tests {
     /// a literal in a `let` / `match` / `if` may not.
     #[test]
     fn no_topic_id_is_compiled_into_the_product_branches() {
-        // Every entry is `(label, source)` for a product module whose
-        // behavior must be topic-agnostic. Test-only modules are excluded by
-        // construction: the paths name non-test files, and the strip below
-        // removes any `#[cfg(test)]` block.
-        let sources: [(&str, &str); 6] = [
-            (
-                "gateway-core/src/topic_routes.rs",
-                include_str!("../../gateway-core/src/topic_routes.rs"),
-            ),
-            (
-                "gateway-core/src/admin_route.rs",
-                include_str!("../../gateway-core/src/admin_route.rs"),
-            ),
-            (
-                "proof-vm-guest/src/runner.rs",
-                include_str!("../../proof-vm-guest/src/runner.rs"),
-            ),
-            (
-                "proof-vm-guest/src/lib.rs",
-                include_str!("../../proof-vm-guest/src/lib.rs"),
-            ),
-            (
-                "proof-rlm/src/vm.rs",
-                include_str!("../../proof-rlm/src/vm.rs"),
-            ),
-            (
-                "proof-rlm/src/runner.rs",
-                include_str!("../../proof-rlm/src/runner.rs"),
-            ),
-        ];
-        for (label, source) in sources {
-            let non_test = source.split("#[cfg(test)]").next().unwrap_or("");
-            let logic: String = non_test
-                .lines()
-                .filter(|l| !l.trim_start().starts_with("//"))
-                .collect::<Vec<_>>()
-                .join("\n")
-                .to_lowercase();
-            for forbidden in [
-                "tbench",
-                "tb4",
-                "terminal-bench",
-                "terminal bench",
-                "harbor-trials",
-            ] {
+        for (label, source) in PRODUCT_MODULES {
+            let logic = production_logic(source);
+            for forbidden in FORBIDDEN_LITERALS {
                 assert!(
                     !logic.contains(forbidden),
                     "{label} names {forbidden:?}: which topics exist and what they score is \
@@ -1339,6 +1297,192 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The **logic** of a product module: its production source with
+    /// `#[cfg(test)] mod …` blocks and full-line comments removed.
+    ///
+    /// Comments go first because prose may *explain* the rule — a comment
+    /// recalling which metal run showed a syncfs gap is documentation, not a
+    /// branch. What survives is code: a literal in a `let` / `match` / `if`
+    /// is caught.
+    fn production_logic(source: &str) -> String {
+        production_source(source)
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_lowercase()
+    }
+
+    /// Strip `#[cfg(test)] mod …` blocks from `source`, structurally.
+    ///
+    /// Brace depth, not "everything after the first marker". A file may carry
+    /// a `#[cfg(test)]` attribute on a **method** (the guest's `Tail::bytes`)
+    /// with production code after it; splitting on the first marker would
+    /// declare that production code test-only and stop guarding it.
+    ///
+    /// Only `mod` items are removed. A `#[cfg(test)]` on anything else is
+    /// left in place deliberately: the scan then sees test-only code and
+    /// **fails loudly** on a fixture literal, which an operator fixes by
+    /// moving the fixture into a `mod tests`. Over-scanning is a false alarm;
+    /// under-scanning is the hole this guards against.
+    fn production_source(source: &str) -> String {
+        let mut kept: Vec<&str> = Vec::new();
+        let mut depth_test: Option<usize> = None;
+        let mut brace_depth = 0usize;
+        let mut pending_cfg_test = false;
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if pending_cfg_test {
+                if trimmed.starts_with("mod ") && trimmed.contains('{') {
+                    depth_test = Some(brace_depth);
+                    pending_cfg_test = false;
+                } else if trimmed.ends_with(';') {
+                    // `#[cfg(test)] mod x;` — the module lives in its own
+                    // file, which the caller's list already excludes.
+                    pending_cfg_test = false;
+                    continue;
+                } else if !trimmed.is_empty()
+                    && !trimmed.starts_with("//")
+                    && !trimmed.starts_with('#')
+                {
+                    // The attribute is on a non-`mod` item (a method, say):
+                    // keep it, so the scan still covers what follows.
+                    pending_cfg_test = false;
+                }
+            }
+            if trimmed == "#[cfg(test)]" || trimmed.starts_with("#[cfg(test)]") {
+                pending_cfg_test = true;
+                if trimmed.contains("mod ") && trimmed.contains('{') {
+                    depth_test = Some(brace_depth);
+                    pending_cfg_test = false;
+                }
+                continue;
+            }
+            if depth_test.is_none() {
+                kept.push(line);
+            }
+            brace_depth = brace_depth.saturating_add(line.matches('{').count());
+            for _ in 0..line.matches('}').count() {
+                brace_depth = brace_depth.saturating_sub(1);
+                if depth_test == Some(brace_depth) {
+                    depth_test = None;
+                }
+            }
+            if let Some(start) = depth_test {
+                if brace_depth < start {
+                    depth_test = None;
+                }
+            }
+        }
+        kept.join("\n")
+    }
+
+    /// Every product module that decides what a topic may do, and must
+    /// therefore be **topic-agnostic**.
+    ///
+    /// Listed by directory rather than one file at a time: a new module in one
+    /// of these crates is guarded the moment it is added, instead of being
+    /// silently unguarded until someone remembers this list. That is how
+    /// `proof-challenge/src/topic_routes.rs` came to be missing here — the
+    /// hand-maintained list, not the check, was the hole.
+    const PRODUCT_MODULES: [(&str, &str); 10] = [
+        (
+            "proof-challenge/src/topic_routes.rs",
+            include_str!("../../proof-challenge/src/topic_routes.rs"),
+        ),
+        (
+            "proof-challenge/src/lib.rs",
+            include_str!("../../proof-challenge/src/lib.rs"),
+        ),
+        (
+            "proof-challenge/src/emit.rs",
+            include_str!("../../proof-challenge/src/emit.rs"),
+        ),
+        (
+            "gateway-core/src/topic_routes.rs",
+            include_str!("../../gateway-core/src/topic_routes.rs"),
+        ),
+        (
+            "gateway-core/src/admin_route.rs",
+            include_str!("../../gateway-core/src/admin_route.rs"),
+        ),
+        (
+            "proof-vm-guest/src/runner.rs",
+            include_str!("../../proof-vm-guest/src/runner.rs"),
+        ),
+        (
+            "proof-vm-guest/src/lib.rs",
+            include_str!("../../proof-vm-guest/src/lib.rs"),
+        ),
+        (
+            "proof-vm-agent/src/router.rs",
+            include_str!("../../proof-vm-agent/src/router.rs"),
+        ),
+        (
+            "proof-rlm/src/vm.rs",
+            include_str!("../../proof-rlm/src/vm.rs"),
+        ),
+        (
+            "proof-rlm/src/runner.rs",
+            include_str!("../../proof-rlm/src/runner.rs"),
+        ),
+    ];
+
+    /// The literals a product branch may not carry: a topic id, a benchmark
+    /// name, or a results-contract id.
+    const FORBIDDEN_LITERALS: [&str; 5] = [
+        "tbench",
+        "tb4",
+        "terminal-bench",
+        "terminal bench",
+        "harbor-trials",
+    ];
+
+    /// The guard is not vacuous, and it covers the files it claims to.
+    #[test]
+    fn the_product_branch_guard_catches_what_it_claims_to() {
+        // A production literal is caught.
+        let injected = format!(
+            "{}\npub const PROBE: &str = \"tbench\";\n",
+            PRODUCT_MODULES[0].1
+        );
+        assert!(
+            production_source(&injected)
+                .to_lowercase()
+                .contains("tbench"),
+            "a literal in production code must survive the strip and be caught"
+        );
+
+        // A `#[cfg(test)] mod` is removed, so its fixtures do not trip it.
+        let with_test_mod =
+            "fn prod() {}\n#[cfg(test)]\nmod tests {\n    const T: &str = \"tbench\";\n}\n";
+        let stripped = production_source(with_test_mod);
+        assert!(!stripped.contains("tbench"), "{stripped}");
+        assert!(stripped.contains("fn prod"), "{stripped}");
+
+        // Production code **after** a `#[cfg(test)]` attribute on a method is
+        // still scanned. This is the exact shape in the guest's `runner.rs`
+        // (`Tail::bytes` is `#[cfg(test)]`, `Tail::text` follows it), where
+        // splitting on the first marker would have stopped guarding the rest
+        // of the file.
+        let after_marker = "struct T;\nimpl T {\n    #[cfg(test)]\n    fn b(&self) {}\n    pub fn text(&self) -> String { \"tbench\".into() }\n}\n";
+        assert!(
+            production_source(after_marker)
+                .to_lowercase()
+                .contains("tbench"),
+            "production code after a non-mod `#[cfg(test)]` must still be scanned"
+        );
+
+        // And the guard really is looking at the challenge's dynamic routes:
+        // the file Greptile found missing from the old hand-maintained list.
+        assert!(
+            PRODUCT_MODULES
+                .iter()
+                .any(|(label, _)| *label == "proof-challenge/src/topic_routes.rs"),
+            "the dynamic topic routes are a product branch and must be guarded"
+        );
     }
 
     #[test]
