@@ -401,6 +401,127 @@ fn next_seal_steps(topic_id: &str, commitment: &str) -> String {
     )
 }
 
+/// Where a topic is in its RLM lifecycle, and what it is waiting on.
+///
+/// `topic install --drive-rlm` prints one line and then **nothing** until the
+/// whole run returns: provisioning a VM, the RLM's `propose_rules` job, and a
+/// paid baseline can legitimately take hours, and a run that is working is
+/// indistinguishable from one that is stuck if the only observable is "no
+/// output yet". The durable progress is the lifecycle journal, so this is the
+/// read that makes a long run legible — and, when a run dies, the last
+/// transition is what says how far it got.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LifecycleReport {
+    /// Canonical topic slug (the alias resolved).
+    pub topic_id: String,
+    /// The state the newest transition left the topic in.
+    pub state: String,
+    /// Rule version in force, when the RLM has written one.
+    pub rules_version: Option<u32>,
+    /// Whether that version is RLM-authored (`proof_rule_version.source`).
+    pub rules_source: Option<String>,
+    /// Whether a baseline has been measured (and under which version).
+    pub baseline_rules_version: Option<u32>,
+    /// Every transition, oldest first: `from -> to (event)`.
+    pub history: Vec<String>,
+}
+
+impl LifecycleReport {
+    /// What the operator should do next, read off the state.
+    #[must_use]
+    pub fn next_steps(&self) -> String {
+        match self.state.as_str() {
+            "draft" => "Nothing has run yet. Drive the RLM: `proof-admin topic install \
+                        --bundle <bundle> --env <target> --drive-rlm --owner-approved`."
+                .to_owned(),
+            "owner_presend" | "awaiting_owner_keys" => {
+                "The lifecycle is waiting on the owner (approval, then the owner key file). \
+                 `--drive-rlm` needs `--owner-approved` and \
+                 `PROOF_RLM_OWNER_INFERENCE_KEY_FILE` present."
+                    .to_owned()
+            }
+            "provisioning" => "The VM is being created. A `--drive-rlm` run is in flight if the \
+                               CLI is still attached; if it is not, this state is where it \
+                               stopped — re-run the same command to resume."
+                .to_owned(),
+            "baselining" => {
+                if self.baseline_rules_version.is_some() {
+                    "A baseline is measured. Seal it: `proof-admin topic baseline \
+                     <topic>` then `topic seal … --publish`."
+                        .to_owned()
+                } else {
+                    "No baseline yet. The RLM's `propose_rules` → `baseline` jobs run here; a \
+                     paid baseline can take hours. If no CLI is attached, the run stopped — \
+                     re-run `topic install --drive-rlm --owner-approved` to resume from this \
+                     state."
+                        .to_owned()
+                }
+            }
+            "open" => "The topic is open. Miners can submit; confirm `can_score` on \
+                       `GET /v1/status`."
+                .to_owned(),
+            other => format!("State {other:?} is not one this command gives advice for."),
+        }
+    }
+}
+
+/// `topic lifecycle`: read the journal and the provenance, and say what is next.
+///
+/// Read-only: it never writes, never moves the lifecycle, and never spends.
+///
+/// # Errors
+///
+/// [`OpsError::error`] when the topic is unknown or the store cannot be read.
+pub async fn lifecycle(pool: &sqlx::PgPool, topic_id: &str) -> Result<LifecycleReport, OpsError> {
+    let store = PgRlmStore::new(pool.clone());
+    let (canonical, _, _) = resolve_topic(&store, topic_id).await?;
+    let lc = store
+        .lifecycle(&canonical)
+        .await
+        .map_err(|e| OpsError::error(format!("{canonical} lifecycle: {e}")))?
+        .ok_or_else(|| {
+            OpsError::error(format!(
+                "topic {canonical:?} has no lifecycle rows: nothing has driven it yet. \
+                 `proof-admin topic install --drive-rlm --owner-approved` writes the first one."
+            ))
+        })?;
+    let rules_version = store
+        .current_rules(&canonical)
+        .await
+        .map_err(|e| OpsError::error(format!("{canonical} rules: {e}")))?
+        .map(|r| r.version);
+    let rules_source = store
+        .current_rules_source(&canonical)
+        .await
+        .map_err(|e| OpsError::error(format!("{canonical} rule provenance: {e}")))?
+        .map(|s| format!("{s:?}").to_lowercase());
+    let baseline_rules_version = store
+        .baseline(&canonical)
+        .await
+        .map_err(|e| OpsError::error(format!("{canonical} baseline: {e}")))?
+        .map(|b| b.rules_version);
+    let history = lc
+        .history
+        .iter()
+        .map(|t| {
+            format!(
+                "{} -> {} ({})",
+                t.from.as_str(),
+                t.to.as_str(),
+                t.event.as_str()
+            )
+        })
+        .collect();
+    Ok(LifecycleReport {
+        topic_id: canonical,
+        state: lc.state.as_str().to_owned(),
+        rules_version,
+        rules_source,
+        baseline_rules_version,
+        history,
+    })
+}
+
 /// What to do once the topic is open.
 fn after_seal(topic_id: &str, published: bool) -> String {
     if published {

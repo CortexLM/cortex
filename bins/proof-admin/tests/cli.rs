@@ -962,6 +962,7 @@ fn read_commands_without_a_database_are_usage_errors() {
     for args in [
         vec!["topic", "list"],
         vec!["topic", "show", "fixture-topic-v0"],
+        vec!["topic", "lifecycle", "fixture-topic-v0"],
     ] {
         let out = run(&args);
         assert_eq!(code(&out), EXIT_USAGE, "{args:?}: {}", stderr(&out));
@@ -1073,6 +1074,7 @@ fn help_lists_every_subcommand() {
         "validate",
         "install",
         "install-log",
+        "lifecycle",
         "list",
         "show",
         "enable",
@@ -1216,6 +1218,115 @@ async fn the_registry_view_lists_what_the_scoring_path_persisted() {
         stderr(&out).contains("no installed topic"),
         "{}",
         stderr(&out)
+    );
+
+    tp.drop_schema().await.expect("drop");
+}
+
+/// `topic lifecycle` reports where a driven topic actually is.
+///
+/// This is the read that makes a long `--drive-rlm` legible: the command
+/// prints one line and then nothing until the whole run returns, so an
+/// operator watching a working run sees the same output as one watching a
+/// stopped run. The durable progress is the lifecycle journal, and the
+/// baseline's absence is what says the paid job has not landed yet — the
+/// exact question "0 rows in `proof_baseline_measurement`" raises.
+#[tokio::test]
+async fn the_lifecycle_view_says_where_a_driven_topic_is() {
+    use proof_rlm::{RlmEvent, RlmState};
+    use proof_rlm_store::{RlmStore, TransitionRow};
+
+    let Some(url) = std::env::var("DATABASE_URL")
+        .ok()
+        .map(|u| u.trim().to_owned())
+        .filter(|u| !u.is_empty())
+    else {
+        return;
+    };
+    let tp = match db::test_pool_with_url(&url).await {
+        Ok(tp) => tp,
+        Err(e) => panic!("test_pool: {e}"),
+    };
+    let store = proof_rlm_store::PgRlmStore::new(tp.pool().clone());
+    let doc = fixture::signed_topic(&format!("sha256:{}", "ab".repeat(32)));
+    RlmStore::put_topic_version(&store, &doc)
+        .await
+        .expect("persist the document");
+
+    let schema = tp.schema().to_owned();
+    let scoped = format!("{url}?options=-c%20search_path%3D{schema}%2Cpublic");
+    let run_db = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_proof-admin"))
+            .args(args)
+            .env("BASE_DATABASE_URL", &scoped)
+            .env_remove("BASE_DATABASE_URL_FILE")
+            .output()
+            .expect("run proof-admin")
+    };
+
+    // No transitions yet: an error that says nothing has driven it, not an
+    // empty success an operator could misread as "fine".
+    let out = run_db(&["topic", "lifecycle", "fixture-topic-v0"]);
+    assert_eq!(code(&out), EXIT_ERROR, "stderr={}", stderr(&out));
+    assert!(
+        stderr(&out).contains("no lifecycle rows"),
+        "{}",
+        stderr(&out)
+    );
+
+    // The shape a `--drive-rlm` run leaves mid-flight: past the owner gate,
+    // provisioning, with **no** baseline row yet.
+    for (from, event, to) in [
+        (
+            RlmState::Draft,
+            RlmEvent::SubmitForReview,
+            RlmState::OwnerPresend,
+        ),
+        (
+            RlmState::OwnerPresend,
+            RlmEvent::OwnerApproved,
+            RlmState::AwaitingOwnerKeys,
+        ),
+        (
+            RlmState::AwaitingOwnerKeys,
+            RlmEvent::OwnerKeysPresent,
+            RlmState::Provisioning,
+        ),
+    ] {
+        RlmStore::record_transition(
+            &store,
+            &TransitionRow {
+                topic_id: doc.id.clone(),
+                from,
+                event,
+                to,
+                note: "test".into(),
+            },
+        )
+        .await
+        .expect("record");
+    }
+
+    let out = run_db(&["--json", "topic", "lifecycle", "fixture-topic-v0"]);
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+    let view: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
+    assert_eq!(view["topic_id"], "fixture-topic-v0");
+    assert_eq!(view["state"], "provisioning");
+    assert!(
+        view["baseline_rules_version"].is_null(),
+        "no baseline has been measured yet: {view}"
+    );
+    assert!(
+        view["history"].as_array().is_some_and(|h| h.len() == 3),
+        "every transition is reported, oldest first: {view}"
+    );
+    // The advice names the state, so an operator knows the run is in flight
+    // rather than lost.
+    assert!(
+        view["next"]
+            .as_str()
+            .is_some_and(|s| s.contains("VM is being created")),
+        "{view}"
     );
 
     tp.drop_schema().await.expect("drop");

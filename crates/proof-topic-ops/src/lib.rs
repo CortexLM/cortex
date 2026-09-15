@@ -34,7 +34,7 @@ pub mod seal;
 
 pub use drive::{drive, DriveOutcome};
 pub use publish::PublishTarget;
-pub use seal::{baseline, seal, BaselineReport, SealArgs, SealOutcome};
+pub use seal::{baseline, lifecycle, seal, BaselineReport, LifecycleReport, SealArgs, SealOutcome};
 
 /// Why an operator procedure refused.
 ///
