@@ -81,7 +81,7 @@ closed on an unmeasured one).
 |-------|-------|------------------------|
 | `tasks` | `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}` names, comma / space separated | The exact items to score, in order. An item the pack does not hold **fails closed** (never a smaller set). One name = the single-task smoke |
 | `task_exclude` | same list shape | Items never scored |
-| `n_tasks` | positive integer | Keep only the first N selected items (`1` = smoke) |
+| `n_tasks` | positive integer | Keep only the first N selected items (`1` = smoke). `task_count` is a legacy alias, used only when `n_tasks` is absent; it is a **count, never a selector** and cannot stand in for a slice |
 | `max_task_duration_s` | positive integer | Drop items whose **known** duration is at or over this; absent = no gate |
 | `exclude_unknown_duration` | `"true"` / `"false"` | Under a gate, drop items with no duration metadata |
 | `exec_timeout_s` | positive integer | Default wall clock for one command the miner's harness runs without its own timeout (the reference adaptor exports it as `PROOF_EXEC_TIMEOUT_S`) |

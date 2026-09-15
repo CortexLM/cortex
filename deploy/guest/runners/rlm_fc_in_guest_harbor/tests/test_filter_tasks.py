@@ -4,11 +4,15 @@
 No task name, slice, or mode is compiled in. Selection: ``tasks`` →
 pack slice for ``task_slice`` → pack ``allow`` → every task; then
 ``task_exclude`` / pack ``deny``, an optional duration gate, ``n_tasks``.
-A named task the pack does not hold fails closed; an empty set fails closed.
+A named task the pack does not hold fails closed; a ``task_slice`` the pack
+does not define fails closed **whether or not the pack defines any slice**; an
+empty set fails closed.
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -57,6 +61,22 @@ def _run(pack: Path, tasks_dir: Path, dest: Path, **kw) -> dict:
 
 def _kept(dest: Path) -> list[str]:
     return sorted(p.name for p in dest.iterdir() if p.is_dir())
+
+
+def _fail_message(pack: Path, tasks_dir: Path, dest: Path, **kw) -> str:
+    """The refusal text for a run that must fail.
+
+    `_fail` writes to stderr and exits, so the message is not in the exception
+    — it is what the operator actually reads. Asserting on it is the point:
+    a fail-closed that does not say *why* is only half the fix.
+    """
+    captured = io.StringIO()
+    with contextlib.redirect_stderr(captured):
+        try:
+            _run(pack, tasks_dir, dest, **kw)
+        except SystemExit:
+            return captured.getvalue()
+    raise AssertionError("expected SystemExit, but the call returned")
 
 
 class SelectionTests(unittest.TestCase):
@@ -139,15 +159,100 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(_kept(Path(tmp) / "d5"), ["task-b"])
             self.assertEqual(s["source"], "params.tasks")
 
-    def test_slice_label_is_informational_when_the_pack_defines_none(self) -> None:
+    def test_slice_label_always_fails_closed_when_the_pack_defines_none(self) -> None:
+        """A pack with no slices is a **refusal**, not an informational label.
+
+        This is the LIVE Gate 1 defect. `task_slice=tb4-first-5` on a pack whose
+        only slice-ish file was `MANIFEST_FIRST15` (no `slices/`) used to fall
+        through to "every task", so a topic that named 5 tasks was scored on all
+        10 the pack held — the run overran the wall clock and measured no
+        baseline. A label the topic set is an assertion, never a hint.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             pack, tasks = _pack(tmp, ["task-a", "task-b"])
             dest = Path(tmp) / "dest"
-            s = _run(pack, tasks, dest, task_slice="some-label")
-            self.assertEqual(s["source"], "tasks_dir")
-            self.assertEqual(s["task_slice"], "some-label")
-            self.assertFalse(s["task_slice_resolved"])
+            message = _fail_message(pack, tasks, dest, task_slice="some-label")
+            self.assertIn("some-label", message)
+            self.assertIn("defines no slices", message)
+            # Nothing was materialised: a refusal is not a partial run.
+            self.assertFalse(dest.exists())
+
+    def test_slice_label_fails_closed_and_names_what_the_pack_does_define(self) -> None:
+        """A typo against a pack that *has* slices names the labels it has."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pack, tasks = _pack(tmp, ["task-a", "task-b"])
+            slices = pack / "slices"
+            slices.mkdir()
+            (slices / "real-slice.json").write_text(json.dumps(["task-a"]), encoding="utf-8")
+            message = _fail_message(pack, tasks, Path(tmp) / "dest", task_slice="typo-slice")
+            self.assertIn("typo-slice", message)
+            self.assertIn("real-slice.json", message)
+
+    def test_an_unresolved_slice_never_widens_to_the_whole_pack(self) -> None:
+        """The regression, stated as the property that matters.
+
+        Whatever the pack holds — slices, an `allow` list, nothing — a topic
+        that set a slice it cannot resolve must not be scored on a set it did
+        not name. Here the pack even has an `allow` list, which the old escape
+        would have fallen through to.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            pack, tasks = _pack(tmp, ["task-a", "task-b", "task-c"])
+            (pack / "filter.json").write_text(
+                json.dumps({"allow": ["task-a", "task-b", "task-c"]}), encoding="utf-8"
+            )
+            with self.assertRaises(SystemExit):
+                _run(pack, tasks, Path(tmp) / "dest", task_slice="tb4-first-5")
+            # And the same pack without a slice still uses its own default.
+            s = _run(pack, tasks, Path(tmp) / "dest2")
+            self.assertEqual(s["source"], "pack allow")
+            self.assertEqual(len(_kept(Path(tmp) / "dest2")), 3)
+
+    def test_explicit_tasks_are_the_documented_escape_from_a_missing_slice(self) -> None:
+        """The supported fix: name the tasks, and `n_tasks` bounds the set."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pack, tasks = _pack(tmp, ["task-a", "task-b", "task-c"])
+            dest = Path(tmp) / "dest"
+            s = _run(
+                pack,
+                tasks,
+                dest,
+                task_slice="tb4-first-5",
+                tasks=["task-a", "task-b", "task-c"],
+                n_tasks=2,
+            )
+            # `params.tasks` wins over the slice, so the unresolved label never
+            # matters — and `n_tasks` still bounds the scored set.
+            self.assertEqual(s["source"], "params.tasks")
             self.assertEqual(_kept(dest), ["task-a", "task-b"])
+
+    def test_task_count_is_a_legacy_alias_for_n_tasks(self) -> None:
+        """`task_count` bounds the set; it is a count, never a slice selector."""
+        self.assertEqual(filter_tasks.resolve_n_tasks("3", None), (3, "n_tasks"))
+        self.assertEqual(filter_tasks.resolve_n_tasks(None, "3"), (3, "task_count"))
+        # `n_tasks` wins when both are set — the documented knob is not
+        # overridden by the alias.
+        self.assertEqual(filter_tasks.resolve_n_tasks("2", "5"), (2, "n_tasks"))
+        self.assertEqual(filter_tasks.resolve_n_tasks(None, None), (None, ""))
+        self.assertEqual(filter_tasks.resolve_n_tasks("", "  "), (None, ""))
+
+    def test_task_count_never_stands_in_for_a_slice(self) -> None:
+        """A count cannot name a set: an unresolved slice is still refused.
+
+        This is the trap the LIVE run hit. `task_count=5` looks like "score 5
+        tasks", but it says nothing about *which* — so a topic that also set a
+        slice the pack does not define is refused, not silently scored on the
+        first 5 tasks the pack happens to hold.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            pack, tasks = _pack(tmp, ["task-a", "task-b", "task-c"])
+            with self.assertRaises(SystemExit):
+                _run(pack, tasks, Path(tmp) / "dest", task_slice="tb4-first-5", n_tasks=5)
+            # With the set named, the count bounds it as documented.
+            dest = Path(tmp) / "dest2"
+            s = _run(pack, tasks, dest, tasks=["task-a", "task-b", "task-c"], n_tasks=5)
+            self.assertEqual(s["n_kept"], 3)
+            self.assertEqual(_kept(dest), ["task-a", "task-b", "task-c"])
 
     def test_pack_allow_is_the_default_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

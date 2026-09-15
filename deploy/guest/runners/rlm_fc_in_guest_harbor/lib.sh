@@ -239,6 +239,10 @@ proof_filter_tasks() {
     [ -n "${PROOF_PARAM_TASKS:-}" ] && extra+=(--tasks "$PROOF_PARAM_TASKS")
     [ -n "${PROOF_PARAM_TASK_EXCLUDE:-}" ] && extra+=(--exclude "$PROOF_PARAM_TASK_EXCLUDE")
     [ -n "${PROOF_PARAM_N_TASKS:-}" ] && extra+=(--n-tasks "$PROOF_PARAM_N_TASKS")
+    # `task_count` is a legacy alias for `n_tasks` (a count, never a slice
+    # selector). `n_tasks` wins when both are set.
+    [ -z "${PROOF_PARAM_N_TASKS:-}" ] && [ -n "${PROOF_PARAM_TASK_COUNT:-}" ] \
+        && extra+=(--task-count "$PROOF_PARAM_TASK_COUNT")
     [ -n "${PROOF_TASK_SLICE:-}" ] && extra+=(--task-slice "$PROOF_TASK_SLICE")
     [ -n "${PROOF_PARAM_TASK_FILTER:-}" ] && extra+=(--filter-rel "$PROOF_PARAM_TASK_FILTER")
     [ -n "${PROOF_PARAM_MAX_TASK_DURATION_S:-}" ] && extra+=(--max-duration-s "$PROOF_PARAM_MAX_TASK_DURATION_S")
