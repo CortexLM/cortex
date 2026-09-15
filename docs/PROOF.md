@@ -519,10 +519,17 @@ A **publish failure** is the one failure that happens after the install is
 green: the topic is not live, nothing needs undoing, and a re-run skips the
 applied migrations and publishes.
 
-**Still not implemented:** `topic enable`, `topic disable`, and `topic seal`
-exit **3** with a "not implemented in this slice" message — a topic's
-lifecycle is the signed document's `status`, so the answer is to re-sign and
-re-publish.
+**`topic disable` / `topic enable` / `topic seal` are implemented.** `disable`
+appends a `disabled` row to `proof_topic_gate` and the challenge refuses the
+next `POST /v1/submissions` with your reason — no re-sign, no restart, no
+redeploy; the document keeps its own `status`, in-flight evaluations finish,
+and rows already scored keep their verdicts. It is for "something is wrong
+with this topic right now", not for retiring one: retiring is a signed
+`closed` document. `enable` appends the matching `enabled` row and is the
+only way back, so the audit trail stays readable. `seal` is the operator
+ceremony that records the measured baseline and moves the topic to `open`
+(§ Sealing the baseline above) — a topic's lifecycle is otherwise the signed
+document's `status`.
 
 ## Metric families
 
