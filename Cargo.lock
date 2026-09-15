@@ -4102,6 +4102,7 @@ dependencies = [
  "proof-eval",
  "proof-rlm",
  "proof-rlm-store",
+ "proof-score",
  "proof-task",
  "proof-topic-bundle",
  "proof-topic-install",

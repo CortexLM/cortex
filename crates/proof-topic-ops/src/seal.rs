@@ -96,6 +96,14 @@ pub struct BaselineReport {
     pub metrics_commitment: String,
     /// The document's current status (a draft is not scorable).
     pub document_status: TopicStatus,
+    /// Whether this measurement is a **degenerate bar**: a relative-win family
+    /// whose measured primary is ~zero, so no challenger could ever clear it
+    /// and sealing it will be refused (`SetupError::DegenerateBar`).
+    ///
+    /// Surfaced here because this is the read that happens **before** the
+    /// operator signs an `open` document: warning at seal time is correct but
+    /// late — the document would already carry a number that cannot be sealed.
+    pub degenerate_bar: bool,
 }
 
 impl BaselineReport {
@@ -135,6 +143,16 @@ impl SealOutcome {
     }
 }
 
+/// Whether a measured primary is a bar no challenger could ever clear.
+///
+/// The same predicate `mark_sealed` refuses on, named once so the early read
+/// (`topic baseline`) and the seal cannot disagree about what "degenerate"
+/// means. A missing primary is not degenerate — it is missing evidence, which
+/// the scoring gate reports as such.
+fn baseline_is_degenerate(document: &TopicDocument, primary_value: f64) -> bool {
+    proof_score::family_bar_is_degenerate(document.metric.family, Some(primary_value))
+}
+
 /// `topic baseline`: what the RLM measured, and what to seal.
 ///
 /// # Errors
@@ -168,6 +186,7 @@ pub async fn baseline(
         holdout_commitment: document.holdout_commitment.clone(),
         metrics_commitment: commitment,
         document_status: document.status,
+        degenerate_bar: baseline_is_degenerate(&document, measured.primary_value),
     })
 }
 
@@ -745,8 +764,47 @@ mod tests {
         );
     }
 
-    /// `open` is a registry state, not a promise that miners can submit.
+    /// `topic baseline` is the read **before** the operator signs an `open`
+    /// document, so it has to say when the measurement cannot be sealed.
     ///
+    /// Warning only at seal time is correct but late: the document would
+    /// already carry a number the seal refuses, and the operator would have
+    /// signed and published a topic that can never open. The flag is the same
+    /// predicate `mark_sealed` refuses on, so the two cannot disagree.
+    #[test]
+    fn a_degenerate_measurement_is_flagged_before_the_document_is_signed() {
+        use proof_task::MetricSpec;
+        let custom = |primary_value: f64| {
+            let mut doc = document();
+            doc.metric = MetricSpec {
+                family: MetricFamily::Custom,
+                primary: "custom_value".into(),
+                custom_id: "placeholder_metric".into(),
+                epsilon_rel: 0.05,
+                ..doc.metric.clone()
+            };
+            baseline_is_degenerate(&doc, primary_value)
+        };
+        assert!(
+            custom(0.0),
+            "a zero primary on a relative family is flagged"
+        );
+        assert!(
+            !custom(0.42),
+            "a real measurement is not flagged: the guard narrows nothing else"
+        );
+
+        // `nll` compares absolutely, so a zero bar there is a hard but
+        // meaningful target — the flag must not reach across families.
+        let mut nll = document();
+        nll.metric.family = MetricFamily::Nll;
+        assert!(
+            !baseline_is_degenerate(&nll, 0.0),
+            "the absolute family is never degenerate"
+        );
+    }
+
+    /// `open` is a registry state, not a promise that miners can submit.    ///
     /// A seal without `--publish` reaches `open` while the host still serves
     /// the previous document, so the lifecycle advice must not tell an operator
     /// the topic is reachable. It has to say the seal is recorded, that the

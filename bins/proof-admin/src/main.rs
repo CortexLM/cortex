@@ -695,6 +695,7 @@ async fn cmd_baseline(opts: &Options, topic_id: &str, pin_path: &Path) -> Result
             "holdout_commitment": report.holdout_commitment,
             "metrics_commitment": report.metrics_commitment,
             "document_status": report.document_status,
+            "degenerate_bar": report.degenerate_bar,
             "next": report.next_steps(),
         }));
     }
@@ -708,6 +709,18 @@ async fn cmd_baseline(opts: &Options, topic_id: &str, pin_path: &Path) -> Result
         "  document_status   {}",
         status_word(report.document_status)
     );
+    if report.degenerate_bar {
+        // Printed **before** the commitment, because signing this number
+        // would only produce a document the seal refuses.
+        println!();
+        println!(
+            "⚠ degenerate bar: {} is zero, and this family scores a relative win",
+            report.metric_primary
+        );
+        println!("  (`challenger >= bar * (1 + epsilon_rel)`), so no miner could ever pass.");
+        println!("  Sealing this measurement will be refused. Re-run the reference against");
+        println!("  something that scores, or fix the task selection, then measure again.");
+    }
     println!();
     println!("An `open` document must seal this measurement. Its baseline block needs:");
     println!("  metrics_commitment  {}", report.metrics_commitment);
