@@ -27,6 +27,7 @@ proof-harvest = { path = "../../crates/proof-harvest" }
 proof-rlm = { path = "../../crates/proof-rlm" }
 proof-rlm-scorer = { path = "../../crates/proof-rlm-scorer" }
 proof-rlm-store = { path = "../../crates/proof-rlm-store" }
+proof-score = { path = "../../crates/proof-score" }
 proof-task = { path = "../../crates/proof-task" }
 proof-topic-install = { path = "../../crates/proof-topic-install" }
 proof-vm-fc = { path = "../../crates/proof-vm-fc" }

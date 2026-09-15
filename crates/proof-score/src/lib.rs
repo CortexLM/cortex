@@ -20,11 +20,10 @@ mod payout;
 mod promote;
 
 pub use payout::{
-    novelty_bar, payout_lattices, primary_from_harness, primary_metric, sealed_primary,
-    topic_masses, topic_share_bps, MinerTopicRun, PrimaryExtras, PROOF_SHARE_BPS,
+    novelty_bar, payout_lattices, primary_from_harness, primary_metric, sealed_bar_is_degenerate,
+    sealed_primary, topic_masses, topic_share_bps, MinerTopicRun, PrimaryExtras, PROOF_SHARE_BPS,
 };
 pub use promote::{decide_promote, KeepReason, PromoteDecision};
-
 use std::collections::BTreeMap;
 
 use proof_task::{
@@ -251,6 +250,53 @@ fn finite(x: f64) -> bool {
     x.is_finite()
 }
 
+/// Smallest bar a challenger can be compared against relatively. A bar at or
+/// below this is **degenerate**: `challenger >= bar * (1 + eps)` has no
+/// meaningful solution, so [`relative_win`] refuses every challenger and the
+/// topic can never be passed by anyone.
+///
+/// This is the same threshold [`relative_win`] uses, named so that the
+/// operator-facing checks (`proof-topic-setup`, the baseline loader) can ask
+/// the question without restating the constant and drifting from it.
+pub const BAR_FLOOR: f64 = 1e-12;
+
+/// Whether a bar can ever be beaten. A non-finite or ~zero bar cannot.
+///
+/// A zero bar arises from a real measurement — a reference run that solved
+/// nothing, which is what an all-zero Harbor baseline is — and sealing it
+/// would publish a topic no miner can ever win. Callers refuse it at the
+/// boundary rather than let it become a silently dead topic.
+#[must_use]
+pub fn bar_is_degenerate(bar: f64) -> bool {
+    !bar.is_finite() || bar.abs() < BAR_FLOOR
+}
+
+/// Whether a family decides a pass with the **relative** rule
+/// ([`relative_win`]) — the families where a degenerate bar is fatal.
+///
+/// `nll` compares the challenger **absolutely** against the sealed vector
+/// (`holdout_nll > sealed - epsilon_nll` and the per-split regression cap), so
+/// a zero bar there is a hard but meaningful target rather than a degenerate
+/// one. Only the families that ask for a relative win are affected by
+/// [`bar_is_degenerate`].
+#[must_use]
+pub fn family_uses_relative_win(family: MetricFamily) -> bool {
+    matches!(family, MetricFamily::Throughput | MetricFamily::Custom)
+}
+
+/// Whether a family's bar is one no challenger could ever clear.
+///
+/// `primary` is the sealed (or champion) value for the family's primary
+/// metric. `None` is **missing evidence**, not a bar of zero — the pass gate
+/// reports that as `EvidenceMissing`, so it is not degenerate here. This is
+/// the check that stops the LIVE Gate 1 shape — a reference run that solved
+/// nothing, so every trial measured `0.0` — from being sealed into a topic
+/// that is open, scorable and permanently unwinnable.
+#[must_use]
+pub fn family_bar_is_degenerate(family: MetricFamily, primary: Option<f64>) -> bool {
+    family_uses_relative_win(family) && primary.is_some_and(bar_is_degenerate)
+}
+
 /// Relative win rule shared by the throughput and custom families (and by
 /// automatic promotion): `challenger` beats `baseline` by at least `epsilon`
 /// relative, direction-aware. A zero or non-finite baseline can never be
@@ -262,7 +308,7 @@ pub fn relative_win(
     direction: MetricDirection,
     epsilon: f64,
 ) -> bool {
-    if !finite(challenger) || !finite(baseline) || baseline.abs() < 1e-12 {
+    if !finite(challenger) || bar_is_degenerate(baseline) {
         return false;
     }
     match direction {
@@ -808,5 +854,65 @@ mod tests {
             }
         )));
         assert_eq!(v.lattice, 0);
+    }
+
+    /// A zero bar is degenerate: nobody can ever be `>= 0 * (1 + eps)` in a
+    /// way that means anything, so `relative_win` refuses every challenger.
+    /// This is the LIVE Gate 1 shape — five Harbor tasks measured at 0.0 —
+    /// and it is why sealing such a baseline has to be refused at the
+    /// boundary instead of publishing a topic that is silently unwinnable.
+    #[test]
+    fn a_zero_bar_is_degenerate_and_unbeatable() {
+        for direction in [MetricDirection::Max, MetricDirection::Min] {
+            assert!(
+                bar_is_degenerate(0.0),
+                "a zero bar is degenerate under {direction:?}"
+            );
+            for challenger in [0.0, 1.0, -1.0, 1e-3, 1e9] {
+                assert!(
+                    !relative_win(challenger, 0.0, direction, 0.05),
+                    "no challenger ({challenger}) may beat a zero bar under {direction:?}"
+                );
+            }
+        }
+        // Non-finite is the same refusal, never a panic and never a pass.
+        assert!(bar_is_degenerate(f64::NAN));
+        assert!(bar_is_degenerate(f64::INFINITY));
+        assert!(!relative_win(1.0, f64::NAN, MetricDirection::Max, 0.05));
+    }
+
+    /// The floor is exactly the threshold the win rule uses, so a bar just
+    /// above it is beatable and one just below is not. Pinned so the two
+    /// cannot drift apart.
+    #[test]
+    fn the_bar_floor_is_the_threshold_relative_win_uses() {
+        let above = BAR_FLOOR * 10.0;
+        let below = BAR_FLOOR / 10.0;
+        assert!(!bar_is_degenerate(above));
+        assert!(bar_is_degenerate(below));
+        assert!(relative_win(above * 2.0, above, MetricDirection::Max, 0.05));
+        assert!(!relative_win(1.0, below, MetricDirection::Max, 0.05));
+    }
+
+    /// A real (non-degenerate) bar still promotes exactly as before: the
+    /// guard must not have narrowed the normal path.
+    #[test]
+    fn a_real_bar_still_passes_a_real_win() {
+        let topic = throughput_topic();
+        let mut sealed = flat_nll(3.0);
+        sealed.tokens_per_sec = Some(100.0);
+        let mut harness = nll_harness(3.01);
+        harness.tokens_per_sec = Some(106.0);
+        harness.wall_s = Some(10_000);
+        let v = judge_topic(
+            &topic,
+            &clean_agent(&topic.id, MetricFamily::Throughput, 1),
+            &harness,
+            &sealed,
+            &[],
+            &[],
+        );
+        assert!(v.pass, "{:?}", v.failed);
+        assert_eq!(v.lattice, SCORE_MAX);
     }
 }

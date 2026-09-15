@@ -12,6 +12,7 @@ publish = false
 proof-eval = { path = "../proof-eval" }
 proof-rlm = { path = "../proof-rlm" }
 proof-rlm-store = { path = "../proof-rlm-store" }
+proof-score = { path = "../proof-score" }
 proof-task = { path = "../proof-task" }
 thiserror = "2"
 

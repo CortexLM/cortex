@@ -96,6 +96,16 @@ pub fn sealed_primary(topic: &TopicDocument, sealed: &SealedBaseline) -> Option<
     )
 }
 
+/// Whether the **sealed** bar this topic compares against is degenerate — a
+/// bar no challenger can ever clear (`crate::family_bar_is_degenerate`).
+///
+/// An **absent** primary is not degenerate: it is missing evidence, which the
+/// pass gate reports as such rather than as a bar of zero.
+#[must_use]
+pub fn sealed_bar_is_degenerate(topic: &TopicDocument, sealed: &SealedBaseline) -> bool {
+    crate::family_bar_is_degenerate(topic.metric.family, sealed_primary(topic, sealed))
+}
+
 /// Equal split of the challenge's emission share across `n` open topics.
 #[must_use]
 pub fn topic_share_bps(n: usize) -> u16 {
@@ -403,6 +413,42 @@ mod tests {
             artifact_digest: digest.into(),
             near_duplicate: false,
         }
+    }
+
+    /// A sealed zero bar on a relative-win family is degenerate: the topic is
+    /// open, scorable, and nobody can ever pass it. This is the LIVE Gate 1
+    /// shape (a reference run that solved nothing, every trial 0.0).
+    #[test]
+    fn a_zero_sealed_bar_is_degenerate_on_a_relative_family() {
+        let topic = wta_topic();
+        let mut sealed = flat_nll(3.0);
+        sealed.tokens_per_sec = Some(0.0);
+        assert!(sealed_bar_is_degenerate(&topic, &sealed));
+        // ...and a real bar is not.
+        sealed.tokens_per_sec = Some(100.0);
+        assert!(!sealed_bar_is_degenerate(&topic, &sealed));
+    }
+
+    /// `nll` decides a pass with an **absolute** comparison, so a zero bar
+    /// there is a hard target rather than a degenerate one. The check must not
+    /// reach across families and refuse it.
+    #[test]
+    fn a_zero_sealed_bar_is_not_degenerate_on_the_absolute_family() {
+        let topic = nll_topic();
+        let sealed = flat_nll(0.0);
+        assert_eq!(topic.metric.family, MetricFamily::Nll);
+        assert!(!sealed_bar_is_degenerate(&topic, &sealed));
+    }
+
+    /// A missing primary is missing evidence, not a bar of zero: the gate
+    /// reports `EvidenceMissing` for it, so this must not claim degeneracy.
+    #[test]
+    fn a_missing_sealed_primary_is_not_degenerate_but_missing() {
+        let topic = wta_topic();
+        let mut sealed = flat_nll(3.0);
+        sealed.tokens_per_sec = None;
+        assert!(sealed_primary(&topic, &sealed).is_none());
+        assert!(!sealed_bar_is_degenerate(&topic, &sealed));
     }
 
     #[test]

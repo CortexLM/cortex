@@ -382,6 +382,21 @@ still leak no path, key, or origin (the wire check's `cp` step).
   pack's `deny`, never in git. An empty selection fails closed. Example
   pack side: `harness/pack_filter.example.json`. One selected task is the
   development smoke ([`proof-experiment-smoke.md`](proof-experiment-smoke.md)).
+- **Preflight the selection before a re-sign.**
+  [`proof-slice-preflight.sh`](../../deploy/scripts/proof-slice-preflight.sh)
+  runs the **guest's own** `filter_tasks.py` on the host in seconds, so a bad
+  selection is caught before provisioning a VM instead of after. It forwards
+  **every** selector the guest supports — `tasks`, `exclude`, `n_tasks`,
+  `task_count`, `task_slice`, `filter_rel`, `max_duration_s`,
+  `drop_unknown` — with `lib.sh`'s precedence, because a preflight that
+  dropped one would report a set the guest never runs.
+  `test_proof_slice_preflight.sh` pins that with a differential check: it
+  sources the adaptor's `lib.sh`, drives `proof_filter_tasks` the way the
+  guest does, and requires the two to agree on every selector.
+  ```bash
+  deploy/scripts/proof-slice-preflight.sh --pack-dir /var/lib/proof-vm/packs/<pack> \
+      --task-slice <label> --expect 5 --keep <t1>,<t2>,<t3>,<t4>,<t5>
+  ```
 - **What a harness crash counts as is topic data.** A trial the miner's
   harness raised on before the verifier ran is no measurement under
   `agent_exception_policy = fail` (default: the run fails closed) and a

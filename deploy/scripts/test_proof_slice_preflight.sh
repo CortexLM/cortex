@@ -107,4 +107,116 @@ after="$(cd "$with_slices" && find . -type f | sort | xargs sha256sum | sha256su
 [ "$before" = "$after" ] || fail "the preflight must not touch the pack"
 pass "the preflight leaves the pack byte-identical"
 
+# ---------------------------------------------------------------------------
+# Differential: the preflight must select what the **guest** selects.
+#
+# Greptile found the first version of this script forwarded only four of the
+# eight selector inputs `lib.sh` passes, so it could print a clean PASS for a
+# set the guest would never run — exactly the class of failure the script
+# exists to catch. The check below is the real thing: it sources the adaptor's
+# own `lib.sh`, drives `proof_filter_tasks` the way the guest does, and
+# compares the kept set against the preflight's, for every supported selector.
+# ---------------------------------------------------------------------------
+ADAPTOR="$REPO_ROOT/deploy/guest/runners/rlm_fc_in_guest_harbor"
+
+# A pack with a filter file, a slice, durations and a deny list, so every
+# selector has something to bite on. Names are placeholders this test invents.
+diff_pack="$work/diff-pack"
+mkdir -p "$diff_pack/tasks" "$diff_pack/slices"
+for t in d-fast d-slow d-unknown d-denied d-fifth d-sixth; do
+    mkdir -p "$diff_pack/tasks/$t"
+    case "$t" in
+        d-fast) dur=10 ;;
+        d-slow) dur=900 ;;
+        d-denied) dur=10 ;;
+        d-fifth) dur=10 ;;
+        d-sixth) dur=10 ;;
+        *) dur= ;; # d-unknown declares no duration
+    esac
+    {
+        printf '[task]\nname = "%s"\n' "$t"
+        [ -n "$dur" ] && printf 'estimated_duration_s = %s\n' "$dur"
+    } >"$diff_pack/tasks/$t/task.toml"
+done
+printf '%s\n' '["d-fast","d-slow","d-unknown"]' >"$diff_pack/slices/three.json"
+cat >"$diff_pack/strict.json" <<'JSON'
+{"allow": ["d-fast", "d-slow", "d-unknown", "d-denied"],
+ "deny": ["d-denied"],
+ "slices": {"two": ["d-fast", "d-slow"]}}
+JSON
+
+# The guest's own path: source lib.sh, set the topic params, call the filter.
+# Prints the kept names in order, one per line.
+guest_select() {
+    local env_pairs=("$@")
+    local wd="$work/guest-work"
+    rm -rf "$wd"
+    mkdir -p "$wd"
+    (
+        export PROOF_TASKS="$diff_pack/tasks"
+        export PROOF_WORK_DIR="$wd"
+        export PROOF_PACK_DIR="$diff_pack"
+        # shellcheck disable=SC2068  # env pairs are intentional here
+        export ${env_pairs[@]+"${env_pairs[@]}"}
+        # shellcheck source=/dev/null
+        source "$ADAPTOR/lib.sh"
+        proof_filter_tasks >/dev/null 2>&1 || return 1
+        python3 - "$PROOF_TASKS/.proof-task-filter.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    doc = json.load(fh)
+for row in doc["kept"]:
+    print(row["name"])
+PY
+    )
+}
+
+# The preflight's answer for the same topic data, as the same list.
+guest_case() {
+    local label="$1"
+    shift
+    local guest pre env_pairs=() flags=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --tasks) env_pairs+=("PROOF_PARAM_TASKS=$2"); flags+=(--tasks "$2"); shift 2 ;;
+            --exclude) env_pairs+=("PROOF_PARAM_TASK_EXCLUDE=$2"); flags+=(--exclude "$2"); shift 2 ;;
+            --n-tasks) env_pairs+=("PROOF_PARAM_N_TASKS=$2"); flags+=(--n-tasks "$2"); shift 2 ;;
+            --task-count) env_pairs+=("PROOF_PARAM_TASK_COUNT=$2"); flags+=(--task-count "$2"); shift 2 ;;
+            --task-slice) env_pairs+=("PROOF_TASK_SLICE=$2"); flags+=(--task-slice "$2"); shift 2 ;;
+            --filter-rel) env_pairs+=("PROOF_PARAM_TASK_FILTER=$2"); flags+=(--filter-rel "$2"); shift 2 ;;
+            --max-duration-s) env_pairs+=("PROOF_PARAM_MAX_TASK_DURATION_S=$2"); flags+=(--max-duration-s "$2"); shift 2 ;;
+            --drop-unknown) env_pairs+=("PROOF_PARAM_EXCLUDE_UNKNOWN_DURATION=true"); flags+=(--drop-unknown); shift ;;
+            *) fail "guest_case: unknown selector $1" ;;
+        esac
+    done
+    guest="$(guest_select ${env_pairs[@]+"${env_pairs[@]}"} 2>/dev/null)" \
+        || fail "$label: the guest's own selection failed unexpectedly"
+    pre="$("$PREFLIGHT" --pack-dir "$diff_pack" ${flags[@]+"${flags[@]}"} 2>&1 \
+        | sed -n 's/^    kept: //p' | tr ',' '\n')" \
+        || fail "$label: the preflight refused where the guest selected"
+    [ "$guest" = "$pre" ] \
+        || fail "$label: preflight and guest disagree
+  guest:
+$guest
+  preflight:
+$pre"
+    [ -n "$guest" ] || fail "$label: both selected nothing"
+    pass "$label: preflight selects exactly what the guest selects"
+}
+
+guest_case "task_slice through the pack" --task-slice three
+guest_case "explicit tasks" --tasks d-fast,d-fifth
+guest_case "task_exclude" --exclude d-slow
+guest_case "n_tasks truncation" --n-tasks 2
+guest_case "legacy task_count" --task-count 2
+guest_case "n_tasks wins over task_count" --n-tasks 3 --task-count 1
+guest_case "named pack filter" --filter-rel strict.json
+guest_case "duration ceiling" --max-duration-s 100
+guest_case "duration ceiling dropping unknowns" --max-duration-s 100 --drop-unknown
+
+# The exact combination Greptile reproduced: the preflight used to keep three
+# tasks where the guest kept one.
+guest_case "Greptile's combined case" \
+    --task-count 2 --filter-rel strict.json --max-duration-s 100 --drop-unknown
+
 echo "all proof-slice-preflight tests passed"

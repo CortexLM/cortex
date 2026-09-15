@@ -26,6 +26,11 @@
 #   # or the pack's own filter.json / slices/ with no topic data:
 #   deploy/scripts/proof-slice-preflight.sh --pack-dir /var/lib/proof-vm/packs/<pack> --expect 5
 #
+# Every selector the guest supports is forwarded with the same precedence
+# `lib.sh` uses: `tasks` -> `task_slice` -> the pack filter's `allow` -> every
+# task; then `exclude` / pack `deny`, a duration gate, `n_tasks`. A preflight
+# that silently dropped one of them would report a set the guest never runs.
+#
 # Read-only: it writes only to a temporary directory it removes, and never
 # touches the pack, the database, or any host service.
 
@@ -43,6 +48,10 @@ task_slice=""
 tasks=""
 exclude=""
 n_tasks=""
+task_count=""
+filter_rel=""
+max_duration_s=""
+drop_unknown=""
 expect=""
 keep=""
 
@@ -54,7 +63,7 @@ pass() { echo "ok - $*"; }
 note() { echo "    $*"; }
 
 usage() {
-    sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
 }
 
@@ -66,6 +75,12 @@ while [ $# -gt 0 ]; do
         --tasks) tasks="${2:-}"; shift 2 ;;
         --exclude) exclude="${2:-}"; shift 2 ;;
         --n-tasks) n_tasks="${2:-}"; shift 2 ;;
+        --task-count) task_count="${2:-}"; shift 2 ;;
+        --filter-rel) filter_rel="${2:-}"; shift 2 ;;
+        --max-duration-s) max_duration_s="${2:-}"; shift 2 ;;
+        # Bare flag, matching lib.sh: the guest emits it only when the topic's
+        # `exclude_unknown_duration` normalises to exactly `true`.
+        --drop-unknown) drop_unknown="true"; shift ;;
         --expect) expect="${2:-}"; shift 2 ;;
         --keep) keep="${2:-}"; shift 2 ;;
         --adaptor-dir) ADAPTOR_DIR="${2:-}"; FILTER_TASKS="$ADAPTOR_DIR/harness/filter_tasks.py"; shift 2 ;;
@@ -85,6 +100,9 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/proof-slice-preflight.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 dest="$work/selected"
 
+# Same arguments, same precedence, as `proof_filter_tasks` in lib.sh. Every
+# selector the guest supports is here: one omitted would let this report a set
+# the guest never runs.
 args=(
     --tasks-dir "$tasks_dir"
     --dest-dir "$dest"
@@ -93,14 +111,24 @@ args=(
 [ -n "$tasks" ] && args+=(--tasks "$tasks")
 [ -n "$exclude" ] && args+=(--exclude "$exclude")
 [ -n "$n_tasks" ] && args+=(--n-tasks "$n_tasks")
+# `task_count` is a legacy alias for `n_tasks`; `n_tasks` wins when both are set.
+[ -z "$n_tasks" ] && [ -n "$task_count" ] && args+=(--task-count "$task_count")
 [ -n "$task_slice" ] && args+=(--task-slice "$task_slice")
+[ -n "$filter_rel" ] && args+=(--filter-rel "$filter_rel")
+[ -n "$max_duration_s" ] && args+=(--max-duration-s "$max_duration_s")
+[ -n "$drop_unknown" ] && args+=(--drop-unknown)
 
 echo "proof-slice-preflight"
 echo "  pack_dir          $pack_dir"
 echo "  tasks_dir         $tasks_dir"
 echo "  task_slice        ${task_slice:-<none>}"
 echo "  tasks             ${tasks:-<none>}"
+echo "  exclude           ${exclude:-<none>}"
 echo "  n_tasks           ${n_tasks:-<none>}"
+echo "  task_count        ${task_count:-<none>}"
+echo "  filter_rel        ${filter_rel:-<none>}"
+echo "  max_duration_s    ${max_duration_s:-<none>}"
+echo "  drop_unknown      ${drop_unknown:-<none>}"
 echo "  adaptor           $FILTER_TASKS"
 echo
 

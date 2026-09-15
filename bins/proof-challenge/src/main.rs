@@ -998,8 +998,21 @@ fn record_one_baseline(
 ) -> Result<(), String> {
     let topic = store.topic(&meas.topic_id).map_err(|e| e.to_string())?;
     meas.verify(pin, &topic).map_err(|e| e.to_string())?;
+    // The same refusal `mark_sealed` applies, on the other door into the
+    // store: a baseline file is operator-supplied, so it must not be able to
+    // install a bar no challenger can clear. A relative-win family compares
+    // `challenger >= bar * (1 + epsilon_rel)`, which has no solution at zero.
+    let sealed = meas.into_sealed();
+    if proof_score::sealed_bar_is_degenerate(&topic, &sealed) {
+        return Err(format!(
+            "baseline {}: the measured primary is a degenerate bar, so this family could never \
+             be passed by anyone (a relative win against zero has no solution). Nothing was \
+             recorded. Re-run the reference against something that scores and write that number.",
+            topic.id
+        ));
+    }
     store
-        .set_baseline(&topic.id, meas.into_sealed())
+        .set_baseline(&topic.id, sealed)
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1245,6 +1258,92 @@ mod tests {
             why.contains("install journal unreadable"),
             "the refusal names the unreadable journal, not a missing runtime: {why}"
         );
+    }
+
+    /// The boot-time baseline file is the **other** door into the store, so it
+    /// applies the same degenerate-bar refusal `mark_sealed` does.
+    ///
+    /// Without it, a hand-written baseline file could install a bar no
+    /// challenger can clear on a relative-win family — a topic that is open,
+    /// scorable, and unwinnable by anyone (the LIVE Gate 1 shape: a reference
+    /// run that solved nothing, every trial `0.0`). Nothing is recorded when
+    /// it refuses, so the host fails closed with no sealed baseline rather
+    /// than with a dead one.
+    #[tokio::test]
+    async fn a_baseline_file_cannot_install_a_degenerate_bar() {
+        let dir = std::env::temp_dir().join(format!(
+            "proof-baseline-degenerate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("baseline.json");
+        let pin = ProofPin::default();
+        let store = MemoryStore::new();
+        let mut topic = proof_task::TopicDocument {
+            id: "baseline-gate-v0".into(),
+            status: proof_task::TopicStatus::Open,
+            ..proof_task::TopicDocument::default()
+        };
+        topic.metric.family = proof_task::MetricFamily::Custom;
+        topic.metric.custom_id = "placeholder_metric".into();
+        topic.metric.primary = "placeholder_primary".into();
+        topic.holdout_commitment = "cd".repeat(32);
+        topic.baseline.script_sha256 = "ee".repeat(32);
+        store.put_topic(topic.clone()).expect("topic");
+
+        // A measurement that binds to the topic (commitment + image digest),
+        // carrying a zero primary: the seal `verify` accepts, the bar the
+        // scoring path cannot.
+        let mut meas = BaselineMeasurement {
+            eval_image_digest: pin.eval_image_digest.clone(),
+            topic_id: topic.id.clone(),
+            holdout_commitment: topic.holdout_commitment.clone(),
+            holdout_nll: 0.0,
+            split_nll: proof_task::HoldoutSplit::SCORED
+                .iter()
+                .map(|s| (s.as_str().to_owned(), 0.0))
+                .collect(),
+            tokens_per_sec: None,
+            step_latency_ms: None,
+            custom_value: Some(0.0),
+        };
+        topic.baseline.metrics_commitment = meas.commitment();
+        store
+            .put_topic(topic.clone())
+            .expect("re-put with commitment");
+        std::fs::write(&path, serde_json::to_string(&meas).expect("json")).expect("write");
+
+        let err = load_baselines(&store, &pin, Some(&path)).expect_err("a zero bar must not load");
+        assert!(err.contains("degenerate bar"), "{err}");
+        assert!(
+            store.baseline("baseline-gate-v0").expect("read").is_none(),
+            "nothing may be recorded when the bar is refused"
+        );
+
+        // A real measurement still loads: the guard narrows nothing else.
+        // The topic's commitment has to move with it — `verify` binds the
+        // measurement to the document, which is the property that makes the
+        // guard above meaningful rather than a check on a file nobody reads.
+        meas.custom_value = Some(0.42);
+        topic.baseline.metrics_commitment = meas.commitment();
+        store
+            .put_topic(topic)
+            .expect("re-put with the new commitment");
+        std::fs::write(&path, serde_json::to_string(&meas).expect("json")).expect("write");
+        assert_eq!(load_baselines(&store, &pin, Some(&path)).expect("loads"), 1);
+        let sealed = store
+            .baseline("baseline-gate-v0")
+            .expect("read")
+            .expect("recorded");
+        assert!(
+            (sealed.custom_value.expect("custom") - 0.42).abs() < 1e-12,
+            "{sealed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The publish gate and the startup gate read the **same bound fact**: the

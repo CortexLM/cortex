@@ -570,6 +570,24 @@ fn seal_failure(err: &proof_topic_setup::SetupError, topic_id: &str) -> String {
                  `custom_value` the RLM never measured. Re-read the measurement and re-sign."
             );
         }
+        SetupError::DegenerateBar { topic_id, primary } => {
+            return format!(
+                "the measured baseline is a degenerate bar ({primary}) for topic {topic_id:?}, so \
+                 it will not be sealed.\n  This family scores a **relative** win \
+                 (`challenger >= bar * (1 + epsilon_rel)`), which has no solution when the bar is \
+                 zero: the topic would be open, scorable, and impossible for every miner to pass. \
+                 A zero bar is a real measurement — a reference run that solved nothing, which is \
+                 what an all-zero Harbor baseline is — not a defect in this command.\n  Nothing \
+                 was changed and **nothing was auto-resealed**: the stored measurement is exactly \
+                 what the RLM wrote. To get a sealable baseline, re-run it against a reference \
+                 that can actually score, or fix the task selection so the reference run measures \
+                 something:\n    1. `proof-admin topic baseline {topic_id}` shows the measurement \
+                 the RLM left, with the rules version it was taken under.\n    2. Re-drive the \
+                 RLM with a reference that scores: `proof-admin topic install --bundle <bundle> \
+                 --env <target> --drive-rlm --owner-approved`.\n    3. Re-read \
+                 `proof-admin topic baseline {topic_id}` and seal the new commitment."
+            );
+        }
         SetupError::State(proof_rlm::StateError::Illegal { from, .. }) => {
             return format!(
                 "the topic's lifecycle is at {from:?}, not `baselining`, so there is no \

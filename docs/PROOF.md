@@ -122,6 +122,18 @@ baseline + an open topic are on the host.
   topic-scoped attach.
 - A baseline must be sealed (`script_sha256` + `metrics_commitment`) to
   open. Nobody is paid for beating a number nobody measured.
+- **A degenerate baseline is refused, never sealed.** A `throughput` /
+  `custom` topic scores a *relative* win
+  (`challenger >= bar * (1 + epsilon_rel)`, direction-aware), so a bar at
+  ~zero has no solution: the topic would be open, scorable, and impossible
+  for every miner to pass. That is a real measurement — a reference run that
+  solved nothing, which is what an all-zero Harbor baseline is — so
+  `mark_sealed` refuses it (`SetupError::DegenerateBar`) and `proof-admin
+  topic seal` prints the two ways forward. The stored measurement is left
+  **exactly** as the RLM wrote it: this is a refusal at the boundary, **not**
+  an auto-reseal. The `nll` family compares absolutely
+  (`holdout_nll > sealed - epsilon_nll` plus the per-split regression cap),
+  so a zero bar there is a hard but meaningful target and is not refused.
 - 8000 bps is split equally across currently `open` topics. Each topic then
   pays under its `payout_mode`:
   - **`wta`:** among miners with `pass=true` this epoch, the best primary
@@ -186,7 +198,11 @@ operator holdout file (`xtask proof-holdout --topic-id <id> …`) so the
 commitment matches records the host will unseal.
 
 3. Seal the baseline (`script_sha256` + `metrics_commitment`) before setting
-   `status: open`. A draft may be unsealed; an open topic may not.
+   `status: open`. A draft may be unsealed; an open topic may not. A seal
+   whose measured primary is a **degenerate bar** (~zero on a relative-win
+   family) is refused, because such a topic can never be passed by anyone —
+   re-run the baseline against a reference that scores, then seal that
+   number.
 4. `POST /v1/admin/proof/topics` with the signed document and the operator
    bearer. `GET /v1/proof/topics` lists open ids (never holdout records).
 

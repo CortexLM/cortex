@@ -80,6 +80,31 @@ pub enum SetupError {
     /// the RLM measured in the topic VM.
     #[error("seal: {0}")]
     Seal(String),
+    /// The measured baseline is a bar no challenger can ever clear.
+    ///
+    /// A relative-win family (`throughput` / `custom`) compares a challenger
+    /// against the sealed value with `challenger >= bar * (1 + epsilon_rel)`,
+    /// so a bar at ~zero has no solution: the topic would be open, scorable,
+    /// and permanently unwinnable by anyone. That is what an all-zero
+    /// reference run measures (LIVE Gate 1: five Harbor tasks, every one
+    /// `0.0`), and sealing it would publish a dead topic.
+    ///
+    /// Refused **without** touching the stored measurement and **without**
+    /// auto-resealing: the operator re-runs the baseline against a reference
+    /// that can score, or re-scopes the task set, and seals the new number.
+    #[error(
+        "topic {topic_id:?}: the measured baseline {primary} is a degenerate bar — this family \
+         scores a relative win (`challenger >= bar * (1 + epsilon_rel)`), so a bar at zero can \
+         never be cleared by anyone and the topic would be open but unwinnable. Nothing was \
+         changed. Re-run the baseline against a reference that can score (or fix the task \
+         selection so the reference run actually measures something), then seal that number"
+    )]
+    DegenerateBar {
+        /// The topic whose baseline is degenerate.
+        topic_id: String,
+        /// The measured primary that cannot be a bar.
+        primary: f64,
+    },
     /// A baseline would be measured but there is no judge offer to bind it to.
     #[error(
         "no inference offer: the baseline is a paid run and needs a live judge offer to bind \
@@ -558,6 +583,23 @@ impl TopicSetup {
                 "sealed custom_value {sealed_primary} is not the measured baseline {}",
                 measured.primary_value
             )));
+        }
+        // A sealed bar nobody can clear is a topic that is open, scorable and
+        // permanently unwinnable: `relative_win` refuses every challenger
+        // against a zero bar, so no submission could ever pass. That is a real
+        // measurement, not a bug — a reference run that solved nothing, which
+        // is exactly what an all-zero Harbor baseline is — so it is refused
+        // here, at the boundary, where the operator can still act on it.
+        //
+        // This is deliberately **not** an auto-reseal: the stored measurement
+        // is left exactly as the RLM wrote it. Fixing it means re-running the
+        // baseline against a reference that can score (or re-scoping the task
+        // set), then sealing the new number.
+        if proof_score::family_bar_is_degenerate(topic.metric.family, Some(sealed_primary)) {
+            return Err(SetupError::DegenerateBar {
+                topic_id: topic.id.clone(),
+                primary: sealed_primary,
+            });
         }
         let mut lc = self.lifecycle(topic).await?;
         if lc.state != RlmState::Baselining {
