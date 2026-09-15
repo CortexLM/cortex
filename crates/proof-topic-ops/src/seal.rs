@@ -457,8 +457,14 @@ impl LifecycleReport {
                         .to_owned()
                 }
             }
-            "open" => "The topic is open. Miners can submit; confirm `can_score` on \
-                       `GET /v1/status`."
+            "open" => "The topic is sealed and open in the registry. A seal without \
+                       `--publish` leaves the host serving the **previous** document, so \
+                       miners cannot reach it yet: confirm the open version is live \
+                       (`proof-admin topic show <id>` reports the published document) and \
+                       that the host is scorable (`can_score` on `GET /v1/status`) before \
+                       treating it as submitable. If it is not published, re-run \
+                       `topic seal … --publish` (the seal is already recorded; the same \
+                       document publishes as-is)."
                 .to_owned(),
             other => format!("State {other:?} is not one this command gives advice for."),
         }
@@ -679,5 +685,70 @@ mod tests {
             other.verify(&pin, &open).is_err(),
             "0.99 cannot verify against a document sealing 0.42"
         );
+    }
+
+    /// `open` is a registry state, not a promise that miners can submit.
+    ///
+    /// A seal without `--publish` reaches `open` while the host still serves
+    /// the previous document, so the lifecycle advice must not tell an operator
+    /// the topic is reachable. It has to say the seal is recorded, that the
+    /// publish is the step that makes it live, and how to retry it.
+    #[test]
+    fn the_open_advice_does_not_claim_the_topic_is_published() {
+        let report = LifecycleReport {
+            topic_id: "tb4".into(),
+            state: "open".into(),
+            rules_version: Some(2),
+            rules_source: Some("rlm".into()),
+            baseline_rules_version: Some(2),
+            history: Vec::new(),
+        };
+        let advice = report.next_steps();
+        assert!(
+            advice.contains("--publish"),
+            "the advice must name the publish step: {advice}"
+        );
+        assert!(
+            advice.to_lowercase().contains("previous"),
+            "the advice must say the previous document is still served: {advice}"
+        );
+        assert!(
+            advice.contains("can_score"),
+            "the advice must say to confirm the host is scorable: {advice}"
+        );
+        assert!(
+            !advice.contains("Miners can submit;"),
+            "the advice must not promise submissions on `open` alone: {advice}"
+        );
+    }
+
+    /// The state-specific advice names the state it is talking about.
+    #[test]
+    fn the_lifecycle_advice_matches_the_state() {
+        let make = |state: &str| LifecycleReport {
+            topic_id: "tb4".into(),
+            state: state.into(),
+            rules_version: None,
+            rules_source: None,
+            baseline_rules_version: None,
+            history: Vec::new(),
+        };
+        // The in-flight state is the one a long `--drive-rlm` sits in, so the
+        // advice has to say a run may be working rather than lost.
+        assert!(make("provisioning")
+            .next_steps()
+            .contains("VM is being created"));
+        // `baselining` with no baseline is the paid job not having landed.
+        let baselining = make("baselining").next_steps();
+        assert!(
+            baselining.contains("No baseline yet"),
+            "an unmeasured baseline must say so: {baselining}"
+        );
+        // …and with one, the next step is the seal.
+        let mut measured = make("baselining");
+        measured.baseline_rules_version = Some(2);
+        assert!(measured.next_steps().contains("Seal it"));
+        // A topic nothing has driven says so rather than inventing advice.
+        assert!(make("draft").next_steps().contains("Nothing has run yet"));
     }
 }
