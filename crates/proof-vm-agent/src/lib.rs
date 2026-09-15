@@ -56,7 +56,7 @@ pub mod fixtures;
 
 pub use auth::{AuthError, BearerAuth};
 pub use hypervisor::{BootedVm, HvError, Hypervisor, JobOutcome};
-pub use memory::{parse_mem_total_mib, MemoryBudget, MEMINFO};
+pub use memory::{nominal_total_mib, parse_mem_total_mib, MemoryBudget, MEMINFO};
 pub use router::{agent_router, AgentError, AgentState, DEFAULT_MAX_EXPERIMENT_VMS};
 pub use stamp::{output_matches, stamp_output};
 

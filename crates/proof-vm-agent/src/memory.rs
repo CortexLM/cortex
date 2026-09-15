@@ -55,10 +55,22 @@ impl MemoryBudget {
     /// cannot prove it has room does not get to boot VMs on a guess.
     pub fn read(reserve_mib: u64) -> Result<Self, String> {
         let body = std::fs::read_to_string(MEMINFO).map_err(|e| format!("read {MEMINFO}: {e}"))?;
+        Self::from_meminfo(&body, reserve_mib)
+    }
+
+    /// [`Self::read`] over a `/proc/meminfo` body.
+    ///
+    /// Split out so a test can drive the real parse — including the rounding
+    /// to the host's purchased size — without a host to read from.
+    ///
+    /// # Errors
+    ///
+    /// When the body carries no `MemTotal`.
+    pub fn from_meminfo(body: &str, reserve_mib: u64) -> Result<Self, String> {
         let total_mib =
-            parse_mem_total_mib(&body).ok_or_else(|| format!("{MEMINFO} carries no MemTotal"))?;
+            parse_mem_total_mib(body).ok_or_else(|| format!("{MEMINFO} carries no MemTotal"))?;
         Ok(Self {
-            total_mib,
+            total_mib: nominal_total_mib(total_mib),
             reserve_mib,
         })
     }
@@ -126,6 +138,34 @@ pub fn parse_mem_total_mib(body: &str) -> Option<u64> {
     let line = body.lines().find(|l| l.starts_with("MemTotal:"))?;
     let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
     Some(kib / 1024)
+}
+
+/// `MemTotal` rounded up to the whole GiB the host was sold as.
+///
+/// `MemTotal` is the RAM the kernel can hand out, **not** the RAM the host
+/// has: the kernel keeps a slice for itself, so a 16 GiB droplet reports
+/// `16326344 kB` = `15_943` MiB, ~441 MiB short. Sizing VMs against the raw
+/// figure refuses shapes the operator sized for and that demonstrably run —
+/// the proven Gate 3 pair (an 8192 MiB topic VM beside an 8192 MiB experiment
+/// VM) is `16_384` MiB of guest memory on exactly that host, and a raw
+/// comparison took it offline.
+///
+/// Guest RAM is also lazily populated: Firecracker maps the region but the
+/// guest touches pages as it works, so a nominal 16 GiB host carries two
+/// 8 GiB guests (Gate 3 passes) and does **not** carry three (Gate 4: the
+/// kernel OOM-killed every guest at ~154% of `MemTotal`). Rounding to the
+/// purchased size keeps the first and still refuses the second, without an
+/// invented tolerance: RAM ships in whole GiB, so rounding restores the
+/// operator's number and nothing more.
+///
+/// A host whose `MemTotal` is already a whole GiB is unchanged.
+#[must_use]
+pub fn nominal_total_mib(mem_total_mib: u64) -> u64 {
+    const GIB: u64 = 1024;
+    if mem_total_mib == 0 {
+        return 0;
+    }
+    mem_total_mib.div_ceil(GIB) * GIB
 }
 
 #[cfg(test)]
@@ -258,5 +298,76 @@ mod tests {
         assert_eq!(parse_mem_total_mib("MemFree: 1 kB\n"), None);
         assert_eq!(parse_mem_total_mib("MemTotal: not-a-number kB\n"), None);
         assert_eq!(parse_mem_total_mib(""), None);
+    }
+
+    /// The kernel does not hand out the RAM the host was sold: a 16 GiB
+    /// droplet reports `MemTotal: 16326344 kB` = `15_943` MiB, ~441 MiB short.
+    ///
+    /// Sizing against the raw figure refuses the **proven Gate 3 pair** — an
+    /// 8192 MiB topic VM beside an 8192 MiB experiment VM, exactly the
+    /// workload that passes on this host — so the budget rounds to the
+    /// purchased whole GiB. This is the regression Greptile caught: the
+    /// guard must not take a working shape offline.
+    ///
+    /// This drives [`MemoryBudget::from_meminfo`], the real read path, so it
+    /// fails if the rounding is dropped — a test that built the budget by
+    /// hand would pass with the bug still in.
+    #[test]
+    fn a_nominal_host_keeps_the_proven_gate3_pair_admitted() {
+        let body = "MemTotal:       16326344 kB\n";
+        assert_eq!(
+            parse_mem_total_mib(body),
+            Some(15_943),
+            "the raw figure is short of 16 GiB"
+        );
+
+        let budget = MemoryBudget::from_meminfo(body, 0).expect("parsed");
+        assert_eq!(
+            budget.total_mib, 16_384,
+            "the budget must round to the sold size, not the raw figure"
+        );
+
+        let topic = vm("tb4-0007", 8_192, false);
+        assert!(
+            budget.fits(std::slice::from_ref(&topic), 8_192).is_ok(),
+            "the proven Gate 3 pair must stay admitted on a nominal 16 GiB host"
+        );
+        assert!(
+            budget
+                .fits(&[topic, vm("tb4-x0008", 8_192, true)], 8_192)
+                .is_err(),
+            "and Gate 4's third guest is still refused: rounding restores the \
+             operator's number, it does not invent headroom"
+        );
+    }
+
+    /// The raw figure really is what refuses the working shape — the reason
+    /// the rounding exists, pinned so it cannot be dropped as "just noise".
+    #[test]
+    fn the_raw_figure_would_refuse_the_working_shape() {
+        let raw_budget = MemoryBudget {
+            total_mib: 15_943,
+            reserve_mib: 0,
+        };
+        let topic = vm("tb4-0007", 8_192, false);
+        assert!(
+            raw_budget
+                .fits(std::slice::from_ref(&topic), 8_192)
+                .is_err(),
+            "the unrounded figure refuses the shape that demonstrably runs"
+        );
+    }
+
+    /// Rounding is a no-op on a host that already reports a whole GiB, and
+    /// zero stays zero (no host size is invented).
+    #[test]
+    fn rounding_restores_the_sold_size_and_nothing_more() {
+        assert_eq!(nominal_total_mib(16_384), 16_384);
+        assert_eq!(nominal_total_mib(32_768), 32_768);
+        assert_eq!(nominal_total_mib(0), 0);
+        // 8 GiB sold, ~7.8 GiB visible.
+        assert_eq!(nominal_total_mib(7_975), 8_192);
+        // A smaller host is not rounded *up* into one that fits more than it has.
+        assert_eq!(nominal_total_mib(1_024), 1_024);
     }
 }
