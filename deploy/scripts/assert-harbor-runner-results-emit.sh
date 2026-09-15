@@ -32,7 +32,7 @@ need "$SUMMARIZE" 'def write_results_next_to_report'
 # The generic contract id is what an un-pinned topic gets; the tbench-named id
 # is a legacy wire value (a signed topic may still pin it) and stays accepted.
 need "$SUMMARIZE" 'CONTRACT_HARBOR_TRIALS = "harbor-trials-v1"'
-need "$SUMMARIZE" 'CONTRACT_TBENCH = "tbench-harbor-v1"'
+need "$SUMMARIZE" 'CONTRACT_HARBOR_TRIALS_LEGACY = "tbench-harbor-v1"'
 need "$SUMMARIZE" 'name = (pin or "").strip() or CONTRACT_HARBOR_TRIALS'
 need "$SUMMARIZE" 'results.json first'
 need "$SUMMARIZE" 'write_results_next_to_report(out, report, trials, log_tail, secrets)'
