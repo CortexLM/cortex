@@ -730,3 +730,92 @@ async fn a_topic_route_reaches_proof_with_its_topic_id() {
     assert!(body.contains("no healthy backends"), "{body}");
     let _ = shutdown.send(());
 }
+
+/// The operator publish is the one admin route the gateway forwards, so
+/// `proof-admin topic install` works on staging against the gateway itself
+/// (no rewrite proxy). It is forwarded with the challenge id stripped, it
+/// needs a bearer at the gateway, and every other admin route — plus the
+/// topic-id form — keeps its 403.
+#[tokio::test]
+async fn the_operator_publish_route_is_forwarded_with_a_bearer() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/admin/proof/topics"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": "tb4",
+            "status": "draft",
+        })))
+        .mount(&upstream)
+        .await;
+    // Any other admin path reaching the upstream would be a leak; wiremock
+    // answers 404 for an unmounted path, so an assertion on the gateway's own
+    // 403 below is what proves it never dialed.
+
+    let reg = fast_registry();
+    reg.create(&CreateBackend {
+        challenge_id: "proof".into(),
+        base_url: upstream.uri(),
+        weight: 1,
+    })
+    .unwrap();
+
+    let (addr, shutdown) = spawn_gateway(reg).await;
+    let client = reqwest::Client::new();
+
+    // The CLI's publish path, with the operator bearer: forwarded to the
+    // challenge with the challenge id stripped.
+    let resp = client
+        .post(format!(
+            "http://{addr}/challenge/proof/v1/admin/proof/topics"
+        ))
+        .header("authorization", "Bearer operator-token")
+        .json(&serde_json::json!({"id": "tb4", "status": "draft"}))
+        .send()
+        .await
+        .expect("proxy");
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "the publish must reach the challenge"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("\"id\":\"tb4\""), "{body}");
+
+    // No bearer: refused at the gateway, never forwarded.
+    let resp = client
+        .post(format!(
+            "http://{addr}/challenge/proof/v1/admin/proof/topics"
+        ))
+        .json(&serde_json::json!({"id": "tb4", "status": "draft"}))
+        .send()
+        .await
+        .expect("proxy");
+    assert_eq!(resp.status().as_u16(), 401);
+
+    // Every other admin route stays master-local, bearer or not.
+    for rest in [
+        "v1/admin/proof/executor",
+        "v1/admin/proof/queue/drain",
+        "v1/admin/proof/vm-orchestrator",
+    ] {
+        let resp = client
+            .post(format!("http://{addr}/challenge/proof/{rest}"))
+            .header("authorization", "Bearer operator-token")
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("proxy");
+        assert_eq!(resp.status().as_u16(), 403, "{rest} must stay master-local");
+    }
+
+    // A topic id is not a way to reach the admin surface.
+    let resp = client
+        .post(format!("http://{addr}/challenge/tb4/v1/admin/proof/topics"))
+        .header("authorization", "Bearer operator-token")
+        .json(&serde_json::json!({"id": "tb4"}))
+        .send()
+        .await
+        .expect("proxy");
+    assert_eq!(resp.status().as_u16(), 403);
+    let _ = shutdown.send(());
+}

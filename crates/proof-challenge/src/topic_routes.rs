@@ -60,12 +60,33 @@ pub fn topic_route_router(mux: Arc<TopicRouteMux>) -> Router {
 /// Proof routes alone, and a topic route is a 404 from the base router rather
 /// than an answer from a table that was never read.
 pub fn challenge_router(state: AppState, topic_routes: Option<Arc<TopicRouteMux>>) -> Router {
-    let app = proof_router(state);
+    // The challenge's own routes answer under their own prefix too
+    // (`/challenge/proof/…` → the Proof routes). That is the path the
+    // operator CLI publishes to (`proof_topic_bundle::PUBLISH_PATH`), and it
+    // is the *same* path the gateway forwards — so one publish URL works
+    // against the gateway and against the challenge service directly, with no
+    // rewrite proxy in between. Without this mount the prefix would fall
+    // through to the topic mux below, which holds no routes for the
+    // challenge's own id and would answer `404 topic_route_not_registered`.
+    let app = proof_router(state.clone()).merge(prefixed_proof_router(state));
     match topic_routes {
         Some(mux) => app.merge(topic_route_router(mux)),
         None => app,
     }
 }
+
+/// The Proof routes under the challenge's own prefix: `/challenge/proof/…`.
+///
+/// The prefix is the challenge id (`proof`), never a topic id: a topic's
+/// routes live under its own slug, and [`topic_route_router`] is what serves
+/// those. A request to `/challenge/{topic_id}/…` for any other id is
+/// unaffected.
+pub fn prefixed_proof_router(state: AppState) -> Router {
+    Router::new().nest(PROOF_PREFIX, proof_router(state))
+}
+
+/// The challenge's own prefix: `/challenge/proof`.
+pub const PROOF_PREFIX: &str = "/challenge/proof";
 
 /// The install journal, read through `proof_topic_install`.
 ///
@@ -256,6 +277,28 @@ mod tests {
         (status, body)
     }
 
+    /// The same, with a JSON body — the admin routes take a `Json` extractor,
+    /// so a POST without one is a 415 before any gate runs.
+    async fn ask_json(app: Router, method: &str, uri: &str) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, body)
+    }
+
     /// A registered route is served; a path the topic did not register is not
     /// invented, and a method it did not claim is a 405.
     #[tokio::test]
@@ -351,5 +394,56 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let (status, _) = ask(app, "GET", "/challenge/tb4/status").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// The challenge's own routes answer under its own prefix too, so one
+    /// publish URL works against the gateway and against the challenge
+    /// service directly (no rewrite proxy): `/challenge/proof/v1/admin/proof/
+    /// topics` reaches the Proof publish route, while a *topic* id keeps
+    /// resolving through the mux.
+    #[tokio::test]
+    async fn the_challenge_prefix_reaches_the_proof_routes_and_not_the_mux() {
+        let fake = Fake::new(vec![("tb4", "status", "GET")]);
+        let state = AppState {
+            store: MemoryStore::new(),
+            pin: ProofPin::default(),
+            backend: EvalBackend::Sim,
+            live_scorer: None,
+            offer: None,
+            executor: executor_slot(None),
+            judge_api_key: None,
+            admin_hashes: Arc::new(Vec::new()),
+            vm_probe: None,
+            install_journal: None,
+            epoch: 0,
+        };
+        let app = challenge_router(state, Some(mux(fake)));
+
+        // The Proof routes are served under the prefix, with their own
+        // answers: `auth_unconfigured` (503) is the publish route's, not the
+        // mux's 404.
+        let (status, body) = ask(app.clone(), "GET", "/challenge/proof/health").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["challenge_id"], CHALLENGE_ID);
+        let (status, body) = ask_json(
+            app.clone(),
+            "POST",
+            "/challenge/proof/v1/admin/proof/topics",
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["error"], "auth_unconfigured", "{body}");
+
+        // The topic mux still owns every other id under `/challenge/…`.
+        let (status, _) = ask(app.clone(), "GET", "/challenge/tb4/status").await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = ask(app.clone(), "GET", "/challenge/proof/status").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "topic_route_not_registered", "{body}");
+
+        // A topic id is never a way to reach the admin surface.
+        let (status, body) = ask(app, "POST", "/challenge/tb4/v1/admin/proof/topics").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "topic_route_not_registered", "{body}");
     }
 }
