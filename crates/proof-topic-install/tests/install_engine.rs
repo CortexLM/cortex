@@ -114,6 +114,84 @@ fn section(id: &str) -> String {
     .replace("{id}", id)
 }
 
+/// A **hyphenated** topic id installs its migrations end to end.
+///
+/// Every real topic id is a hyphen slug (`[a-z0-9][a-z0-9-]{1,62}`), and a
+/// bare SQL identifier cannot contain a hyphen. The defect this pins: the
+/// migration guard required a literal `{topic_id}_` prefix, so its requirement
+/// was unsatisfiable — `CREATE TABLE real-topic_scratch` is a syntax error at
+/// the first `-`, and the underscore spelling was refused as unscoped. No real
+/// topic could install a migration, and `topic install --drive-rlm` would only
+/// discover it *after* the paid baseline.
+///
+/// The suite's other tests all use `tb4`, which is why this went unnoticed.
+#[tokio::test]
+async fn a_hyphenated_topic_id_installs_its_migrations() {
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    let id = "fixture-topic-v0";
+    let doc = topic(id);
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    // The table the migration creates, spelled with the identifier-safe
+    // prefix the guard maps the id to. `section()` appends `_scratch`.
+    let table = "fixture_topic_v0_scratch";
+    let report = installer
+        .install(
+            &request(&doc, &section("fixture_topic_v0")),
+            SetupSummary::Skipped {
+                reason: "--skip-baseline".into(),
+            },
+        )
+        .await
+        .expect("a hyphenated topic's bundle installs");
+
+    assert_eq!(report.topic_id, id);
+    assert_eq!(
+        report.migrations_applied,
+        ["0001_scratch", "0002_index"],
+        "both migrations apply for a hyphenated id"
+    );
+    // The migration really ran: its table exists in this test's schema.
+    let exists: Option<String> =
+        sqlx::query_scalar(&format!("SELECT to_regclass('{table}')::text"))
+            .fetch_one(&pool)
+            .await
+            .expect("probe the table");
+    assert_eq!(
+        exists.as_deref(),
+        Some(table),
+        "the hyphenated topic's migration created its table"
+    );
+
+    // And a migration reaching a sibling topic is still refused, in both
+    // spellings — the fix widened the namespace, it did not remove it.
+    for sql in [
+        "CREATE TABLE fixture_topic_v1_scratch (id TEXT)",
+        "CREATE TABLE topic_scratch (id TEXT)",
+        "CREATE TABLE proof_rule_version (id TEXT)",
+    ] {
+        let section = format!(r#"{{"migrations": [{{"name": "0003_bad", "sql": "{sql}"}}]}}"#);
+        let err = installer
+            .install(
+                &request(&doc, &section),
+                SetupSummary::Skipped { reason: "x".into() },
+            )
+            .await
+            .expect_err("a sibling's table is not this topic's");
+        assert!(
+            matches!(err, proof_topic_install::InstallError::MigrationDenied(_)),
+            "{sql:?} must be refused by the guard, got {err:?}"
+        );
+    }
+
+    tp.drop_schema().await.expect("drop");
+}
+
 /// The happy path: every step applies, and the journal records it.
 #[tokio::test]
 async fn a_permitted_bundle_installs_and_the_journal_records_it() {
