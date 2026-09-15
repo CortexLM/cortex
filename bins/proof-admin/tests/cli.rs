@@ -972,31 +972,53 @@ fn database_url_and_file_are_mutually_exclusive() {
 }
 
 #[test]
-fn enable_disable_and_seal_fail_closed_with_exit_3() {
+fn seal_still_fails_closed_with_exit_3() {
+    let args = vec!["topic", "seal", "tb4", "--value", "0.42"];
+    let out = run(&args);
+    assert_eq!(
+        code(&out),
+        EXIT_NOT_IMPLEMENTED,
+        "{args:?}: {}",
+        stderr(&out)
+    );
+    let err = stderr(&out);
+    assert!(
+        err.contains("not implemented in this slice"),
+        "{args:?}: {err}"
+    );
+    assert!(
+        err.contains("Nothing was changed"),
+        "a stub must say it changed nothing: {args:?}: {err}"
+    );
+    assert!(
+        stdout(&out).is_empty(),
+        "a stub prints nothing to stdout: {args:?}"
+    );
+}
+
+/// `topic disable` / `topic enable` are implemented now, and they are
+/// **fail-closed without a database**: the gate is the table the challenge
+/// reads, so a CLI that could not write it must refuse rather than report a
+/// topic as stopped. Exit 2 (usage), nothing on stdout, and the message names
+/// the variable to set.
+#[test]
+fn disable_and_enable_need_the_gate_database() {
     for args in [
+        vec!["topic", "disable", "tb4", "--reason", "incident 42"],
         vec!["topic", "enable", "tb4"],
-        vec!["topic", "disable", "tb4"],
-        vec!["topic", "seal", "tb4", "--value", "0.42"],
     ] {
-        let out = run(&args);
-        assert_eq!(
-            code(&out),
-            EXIT_NOT_IMPLEMENTED,
-            "{args:?}: {}",
-            stderr(&out)
-        );
+        let out = Command::new(env!("CARGO_BIN_EXE_proof-admin"))
+            .args(&args)
+            .env_remove("BASE_DATABASE_URL")
+            .env_remove("BASE_DATABASE_URL_FILE")
+            .output()
+            .expect("run");
+        assert_eq!(code(&out), EXIT_USAGE, "{args:?}: {}", stderr(&out));
         let err = stderr(&out);
-        assert!(
-            err.contains("not implemented in this slice"),
-            "{args:?}: {err}"
-        );
-        assert!(
-            err.contains("Nothing was changed"),
-            "a stub must say it changed nothing: {args:?}: {err}"
-        );
+        assert!(err.contains("BASE_DATABASE_URL"), "{args:?}: {err}");
         assert!(
             stdout(&out).is_empty(),
-            "a stub prints nothing to stdout: {args:?}"
+            "nothing is reported as changed: {args:?}"
         );
     }
 }

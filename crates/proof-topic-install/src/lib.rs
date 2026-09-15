@@ -26,6 +26,9 @@
 //! - [`routes`] is the **read** side of the routes an install recorded: the
 //!   dynamic mux the challenge answers `/challenge/{topic_id}/…` from, behind
 //!   a cache an install invalidates.
+//! - [`gate`] is the operator switch that stops a topic taking submissions
+//!   (`proof-admin topic disable`), read by the challenge on the submit path
+//!   and fail-closed there.
 //! - [`proof_topic_sql_guard`] is the migration deny-list (its own crate: it
 //!   is pure text analysis, and keeping it separate means it can be reasoned
 //!   about — and tested — without a database).
@@ -48,11 +51,13 @@
     clippy::doc_markdown
 )]
 
+pub mod gate;
 pub mod handler;
 pub mod install;
 pub mod routes;
 pub mod section;
 
+pub use gate::{disable, disabled, disabled_topics, enable, gate, set, Gate, GateState};
 pub use handler::{bound_runner, check_handler, resolve_handler, Handler, HandlerError};
 pub use install::{
     applied_install, install_history, is_installed, latest_install, topic_routes, ExecutorBinding,
@@ -66,8 +71,9 @@ pub use proof_topic_sql_guard::{
 };
 pub use routes::{is_topic_id, PgTopicRoutes, Resolved, TopicRouteMux, TopicRouteSource};
 pub use section::{
-    is_api_method, is_relative_api_path, read_section, ApiRoute, Migration, SectionPlan, MAX_APIS,
-    MAX_MIGRATIONS, MAX_MIGRATION_SQL_BYTES, READ_KEYS,
+    is_api_method, is_relative_api_path, is_reserved_api_path, read_section, ApiRoute, Migration,
+    SectionPlan, MAX_APIS, MAX_MIGRATIONS, MAX_MIGRATION_SQL_BYTES, READ_KEYS,
+    RESERVED_API_PREFIXES,
 };
 
 /// Why an install refused or failed.
@@ -162,6 +168,7 @@ mod tests {
         assert!(OWNED_TABLES.contains(&"proof_topic_version"));
         assert!(OWNED_TABLES.contains(&"proof_rule_version"));
         assert!(OWNED_TABLES.contains(&"proof_topic_install"));
+        assert!(OWNED_TABLES.contains(&"proof_topic_gate"));
     }
 
     #[test]

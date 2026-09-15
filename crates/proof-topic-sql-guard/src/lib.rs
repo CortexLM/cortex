@@ -105,7 +105,7 @@ pub const OWNED_TABLE_PREFIX: &str = "proof_";
 /// The prefix check above is the enforcement; this list is what makes the
 /// refusal *legible*, and a test asserts it covers every `proof_*` table the
 /// migrations create.
-pub const OWNED_TABLES: [&str; 9] = [
+pub const OWNED_TABLES: [&str; 10] = [
     "proof_topic_version",
     "proof_rule_version",
     "proof_checklist",
@@ -115,6 +115,7 @@ pub const OWNED_TABLES: [&str; 9] = [
     "proof_promotion_event",
     "proof_topic_alias",
     "proof_topic_install",
+    "proof_topic_gate",
 ];
 
 /// Names a topic migration may never name, whatever the verb.

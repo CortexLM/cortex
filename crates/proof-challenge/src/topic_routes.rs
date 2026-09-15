@@ -94,6 +94,12 @@ pub const PROOF_PREFIX: &str = "/challenge/proof";
 /// until the topic's newest install row is `applied`. The read is the same
 /// one `proof-admin topic install-log` shows, so the operator and the route
 /// cannot disagree about whether a topic is installed.
+///
+/// It is also the **operator gate** the submit path reads: a topic an operator
+/// disabled (`proof-admin topic disable`) is refused with the operator's
+/// reason, and an unreadable gate is a 503 rather than an admission. Both
+/// reads are over the same database, so a host that can prove an install can
+/// also answer whether the topic is switched off.
 pub struct PgInstallJournal {
     /// Pool over the shared challenge database.
     pub pool: sqlx::PgPool,
@@ -111,6 +117,22 @@ impl PgInstallJournal {
 impl proof_http::InstallJournal for PgInstallJournal {
     async fn applied(&self, topic_id: &str) -> Result<bool, String> {
         proof_topic_install::applied_install(&self.pool, topic_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn disabled(&self, topic_id: &str) -> Result<Option<String>, String> {
+        proof_topic_install::gate(&self.pool, topic_id)
+            .await
+            .map(|gate| {
+                gate.filter(proof_topic_install::Gate::is_disabled)
+                    .map(|g| g.reason)
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    async fn disabled_topics(&self) -> Result<std::collections::BTreeMap<String, String>, String> {
+        proof_topic_install::disabled_topics(&self.pool)
             .await
             .map_err(|e| e.to_string())
     }

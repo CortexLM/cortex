@@ -809,3 +809,93 @@ async fn the_engine_drives_the_store_it_is_given() {
     assert_eq!(row.state, InstallState::Applied.as_str());
     tp.drop_schema().await.expect("drop");
 }
+
+/// The operator gate, end to end against Postgres: a topic with no row is
+/// enabled, a `disable` row is what the submit path refuses on, and an
+/// `enable` row clears it **without deleting the history** — the point of the
+/// append-only shape is that an incident review can still see who turned it
+/// off, when, and why.
+#[tokio::test]
+async fn the_operator_gate_is_a_journal_and_the_newest_row_wins() {
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    // Never thrown: no row, not disabled.
+    assert!(
+        !proof_topic_install::disabled(&pool, "tb4")
+            .await
+            .expect("read"),
+        "a topic with no gate row is enabled"
+    );
+    assert!(proof_topic_install::gate(&pool, "tb4")
+        .await
+        .expect("read")
+        .is_none());
+    assert!(proof_topic_install::disabled_topics(&pool)
+        .await
+        .expect("list")
+        .is_empty());
+
+    // Disabled, with a reason: the read the submit path makes.
+    let disabled = proof_topic_install::disable(&pool, "tb4", "incident 42", "ops")
+        .await
+        .expect("disable");
+    assert!(disabled.is_disabled());
+    assert!(proof_topic_install::disabled(&pool, "tb4")
+        .await
+        .expect("read"));
+    assert_eq!(
+        proof_topic_install::disabled_topics(&pool)
+            .await
+            .expect("list")
+            .get("tb4")
+            .map(String::as_str),
+        Some("incident 42")
+    );
+
+    // Enabled again: the newest row wins, and the disable row is still there.
+    proof_topic_install::enable(&pool, "tb4", "fixed", "ops")
+        .await
+        .expect("enable");
+    assert!(!proof_topic_install::disabled(&pool, "tb4")
+        .await
+        .expect("read"));
+    assert!(proof_topic_install::disabled_topics(&pool)
+        .await
+        .expect("list")
+        .is_empty());
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT state, reason FROM proof_topic_gate WHERE topic_id = 'tb4' ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("history");
+    assert_eq!(
+        rows,
+        vec![
+            ("disabled".to_owned(), "incident 42".to_owned()),
+            ("enabled".to_owned(), "fixed".to_owned()),
+        ],
+        "the journal keeps both rows"
+    );
+
+    // The table is topic-scoped: another topic is unaffected by this one.
+    proof_topic_install::disable(&pool, "tb9", "other incident", "ops")
+        .await
+        .expect("disable");
+    assert!(proof_topic_install::disabled(&pool, "tb4")
+        .await
+        .expect("read")
+        .eq(&false));
+    assert_eq!(
+        proof_topic_install::disabled_topics(&pool)
+            .await
+            .expect("list")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["tb9".to_owned()]
+    );
+
+    tp.drop_schema().await.expect("drop");
+}

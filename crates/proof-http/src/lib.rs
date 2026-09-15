@@ -45,6 +45,7 @@
     clippy::too_many_arguments
 )]
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -192,6 +193,32 @@ pub trait InstallJournal: Send + Sync {
     /// The reason the journal could not be read. The caller refuses the
     /// publish: an unreadable journal is not an installed topic.
     async fn applied(&self, topic_id: &str) -> Result<bool, String>;
+
+    /// `Ok(Some(reason))` when an operator **disabled** `topic_id`, `Ok(None)`
+    /// when the topic was never disabled (or was enabled again).
+    ///
+    /// The submit path reads this and refuses a disabled topic with a 403
+    /// carrying the reason — before the single-use nonce is spent, so a miner
+    /// loses nothing to an operator's switch. It is the operator's incident
+    /// switch (`proof-admin topic disable`), and it needs no re-sign, no
+    /// restart, and no redeploy.
+    ///
+    /// # Errors
+    ///
+    /// The reason the gate could not be read. The caller answers **503**: an
+    /// unreadable gate is not an enabled topic.
+    async fn disabled(&self, topic_id: &str) -> Result<Option<String>, String>;
+
+    /// Every topic currently disabled, with the operator's reason.
+    ///
+    /// One read for the public listing, which annotates each topic with the
+    /// flag rather than paying a query per topic. The submit path uses
+    /// [`Self::disabled`] for the single topic it is admitting.
+    ///
+    /// # Errors
+    ///
+    /// The reason the gate could not be read. The caller answers **503**.
+    async fn disabled_topics(&self) -> Result<BTreeMap<String, String>, String>;
 }
 
 /// The journal read behind the publish gate, or `None` on a host that
@@ -420,9 +447,26 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-async fn list_topics(State(st): State<AppState>) -> impl IntoResponse {
-    let items = st.store.topics().unwrap_or_default();
-    Json(serde_json::json!({ "items": items }))
+/// `GET /v1/proof/topics` — every published topic, annotated with the
+/// operator gate.
+///
+/// The annotation is the point: a topic an operator disabled still has its
+/// document (and its `status`), so a miner reading the list would otherwise
+/// see work that the submit path refuses. The flag is read from the same gate
+/// the submit path consults, and an unreadable gate is a **503** rather than
+/// a list that reads as "nothing is disabled".
+async fn list_topics(
+    State(st): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let disabled = disabled_topics(&st).await?;
+    let items: Vec<serde_json::Value> = st
+        .store
+        .topics()
+        .unwrap_or_default()
+        .iter()
+        .map(|t| annotate_gate(t, disabled.get(&t.id).map(String::as_str)))
+        .collect();
+    Ok(Json(serde_json::json!({ "items": items })))
 }
 
 async fn get_topic(
@@ -433,7 +477,51 @@ async fn get_topic(
         .store
         .topic(&id)
         .map_err(|_| err(StatusCode::NOT_FOUND, "unknown topic"))?;
-    Ok(Json(doc))
+    let reason = disabled_topics(&st).await?.get(&id).cloned();
+    Ok(Json(annotate_gate(&doc, reason.as_deref())))
+}
+
+/// The public view of a topic: its signed document, plus the operator gate.
+///
+/// `disabled` is always present (`false` on a host that never threw the
+/// switch, and on one with no gate at all); `disabled_reason` appears only
+/// when an operator gave one. The document is never rewritten: the gate is
+/// operator state *about* the topic, not part of what was signed.
+fn annotate_gate(doc: &TopicDocument, disabled_reason: Option<&str>) -> serde_json::Value {
+    let mut value = serde_json::to_value(doc).unwrap_or(serde_json::Value::Null);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "disabled".to_owned(),
+            serde_json::Value::Bool(disabled_reason.is_some()),
+        );
+        if let Some(reason) = disabled_reason.filter(|r| !r.trim().is_empty()) {
+            obj.insert(
+                "disabled_reason".to_owned(),
+                serde_json::Value::String(reason.trim().to_owned()),
+            );
+        }
+    }
+    value
+}
+
+/// The disabled set the listing annotates from, or a 503.
+async fn disabled_topics(
+    st: &AppState,
+) -> Result<BTreeMap<String, String>, (StatusCode, Json<serde_json::Value>)> {
+    let Some(journal) = st.install_journal.as_deref() else {
+        // No gate on this host: no database, so no operator switch was ever
+        // thrown (and no topic was published either).
+        return Ok(BTreeMap::new());
+    };
+    journal.disabled_topics().await.map_err(|e| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!(
+                "the topic gate could not be read: {e}. The listing is refused rather than \
+                 served without the operator's switch; fix the database and re-read."
+            ),
+        )
+    })
 }
 
 /// Public executor contract: the live offer (every field is public), whether
@@ -641,6 +729,10 @@ async fn submit(
     if !topic.is_open_at(st.epoch) {
         return Err(err(StatusCode::BAD_REQUEST, "topic is not open"));
     }
+    // The operator gate, before anything is spent: a disabled topic refuses
+    // the submission here, so the single-use nonce the miner signed is still
+    // unspent and a re-submit after the operator enables the topic works.
+    disabled_gate(&st, &topic_id).await?;
     // Miner BYOK, held to what the signed topic declares. Checked before the
     // signature so a body with the wrong variable names is a plain 400 the
     // miner can fix and re-post: the `submit_nonce` they signed is still
@@ -1696,6 +1788,44 @@ async fn install_gate(st: &AppState, topic_id: &str) -> Result<(), String> {
     }
 }
 
+/// The operator gate on the **submit** path: is this topic disabled?
+///
+/// `Ok(())` admits the submission. A disabled topic is a **403** naming the
+/// operator's reason; an unreadable gate is a **503** — never an admission,
+/// and never a 404 that would read as "no such topic". A host that resolved
+/// no journal (no database) has no gate to read: it also has no published
+/// topics, so the submission is refused by the topic lookup above it.
+///
+/// This is deliberately **not cached**: a disable has to take effect on the
+/// next request, which is what makes it usable during an incident.
+async fn disabled_gate(st: &AppState, topic_id: &str) -> Result<(), ErrResp> {
+    let Some(journal) = st.install_journal.as_deref() else {
+        return Ok(());
+    };
+    match journal.disabled(topic_id).await {
+        Ok(None) => Ok(()),
+        Ok(Some(reason)) => Err(err(
+            StatusCode::FORBIDDEN,
+            &format!(
+                "topic {topic_id:?} is disabled by the operator{}",
+                if reason.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", reason.trim())
+                }
+            ),
+        )),
+        Err(e) => Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!(
+                "the topic gate could not be read for {topic_id:?}: {e}. The submission is \
+                 refused rather than admitted on an unread fact; fix the database and re-post \
+                 (the submit_nonce is unspent)."
+            ),
+        )),
+    }
+}
+
 fn store_err(e: &proof_store::StoreError) -> (StatusCode, Json<serde_json::Value>) {
     err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
 }
@@ -2700,6 +2830,148 @@ mod tests {
         assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
     }
 
+    /// `proof-admin topic disable` is an operator switch the submit path
+    /// reads: a disabled topic is refused with the operator's reason, no row
+    /// is written, and the miner's single-use nonce is **not** spent — the
+    /// same body lands once the operator enables the topic again.
+    #[tokio::test]
+    async fn a_disabled_topic_refuses_submit_and_does_not_spend_the_nonce() {
+        let gate = SwitchableGate::new("dt-no-ib-v0", "incident 42: harness regression");
+        let app = app_with_gate(Some(gate.clone()));
+
+        // Enabled (never thrown): the submission lands.
+        let body = submit_body("first", &serde_json::json!({}));
+        let (st, created) =
+            json_req(app.clone(), "POST", "/v1/submissions", body.clone(), None).await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+
+        // Disabled: 403 naming the operator's reason, and no row.
+        gate.set(true);
+        let body = submit_body("second", &serde_json::json!({}));
+        let (st, refused) =
+            json_req(app.clone(), "POST", "/v1/submissions", body.clone(), None).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{refused}");
+        let error = refused["error"].as_str().unwrap_or_default();
+        assert!(error.contains("disabled by the operator"), "{refused}");
+        assert!(error.contains("incident 42"), "{refused}");
+        let (_, list) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/submissions",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(
+            list["items"].as_array().map(Vec::len),
+            Some(1),
+            "the refusal writes no row: {list}"
+        );
+
+        // Enabled again: the *same* body — same signature, same submit_nonce
+        // — lands, so the refusal never spent it.
+        gate.set(false);
+        let (st, created) = json_req(app, "POST", "/v1/submissions", body, None).await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+    }
+
+    /// The public listing carries the gate, so a miner does not read a
+    /// disabled topic as open for work.
+    #[tokio::test]
+    async fn the_topic_listing_carries_the_operator_gate() {
+        let gate = SwitchableGate::new("dt-no-ib-v0", "incident 42");
+        let app = app_with_gate(Some(gate.clone()));
+
+        let (st, body) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/proof/topics",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["items"][0]["disabled"], false, "{body}");
+        assert!(
+            body["items"][0].get("disabled_reason").is_none(),
+            "no reason when there is no disable: {body}"
+        );
+
+        gate.set(true);
+        let (st, body) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/proof/topics",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["items"][0]["disabled"], true, "{body}");
+        assert_eq!(body["items"][0]["disabled_reason"], "incident 42", "{body}");
+
+        let (st, body) = json_req(
+            app,
+            "GET",
+            "/v1/proof/topics/dt-no-ib-v0",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["disabled"], true, "{body}");
+        assert_eq!(body["disabled_reason"], "incident 42", "{body}");
+        assert_eq!(
+            body["status"], "open",
+            "the gate is operator state about the topic, not a rewrite of it: {body}"
+        );
+    }
+
+    /// An unreadable gate is a **503** on both reads — never an admission,
+    /// and never a listing that reads as "nothing is disabled".
+    #[tokio::test]
+    async fn an_unreadable_gate_refuses_submit_and_the_listing() {
+        let app = app_with_gate(Some(Arc::new(BrokenJournal)));
+        let body = submit_body("x", &serde_json::json!({}));
+        let (st, refused) = json_req(app.clone(), "POST", "/v1/submissions", body, None).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+        let error = refused["error"].as_str().unwrap_or_default();
+        assert!(error.contains("gate could not be read"), "{refused}");
+        assert!(error.contains("unspent"), "{refused}");
+
+        let (st, body) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/proof/topics",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let (st, body) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/proof/topics/dt-no-ib-v0",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+        // A host with no gate at all (no database) is not this case: it
+        // serves the listing with the flag false rather than refusing.
+        let (st, body) = json_req(
+            app_with_gate(None),
+            "GET",
+            "/v1/proof/topics",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["items"][0]["disabled"], false, "{body}");
+    }
+
     #[tokio::test]
     async fn submit_requires_a_hotkey_signature() {
         let app = app("op");
@@ -3374,6 +3646,14 @@ mod tests {
         async fn applied(&self, _topic_id: &str) -> Result<bool, String> {
             Ok(true)
         }
+
+        async fn disabled(&self, _topic_id: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+
+        async fn disabled_topics(&self) -> Result<BTreeMap<String, String>, String> {
+            Ok(BTreeMap::new())
+        }
     }
 
     /// An install journal that refuses every read, for the gate's
@@ -3385,6 +3665,14 @@ mod tests {
         async fn applied(&self, _topic_id: &str) -> Result<bool, String> {
             Err("journal unavailable".into())
         }
+
+        async fn disabled(&self, _topic_id: &str) -> Result<Option<String>, String> {
+            Err("gate unavailable".into())
+        }
+
+        async fn disabled_topics(&self) -> Result<BTreeMap<String, String>, String> {
+            Err("gate unavailable".into())
+        }
     }
 
     /// An install journal that has no row for any topic.
@@ -3395,6 +3683,86 @@ mod tests {
         async fn applied(&self, _topic_id: &str) -> Result<bool, String> {
             Ok(false)
         }
+
+        async fn disabled(&self, _topic_id: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+
+        async fn disabled_topics(&self) -> Result<BTreeMap<String, String>, String> {
+            Ok(BTreeMap::new())
+        }
+    }
+
+    /// A gate an operator can throw while the host is running: the point of
+    /// the switch is that the **next** request sees it, with no restart.
+    struct SwitchableGate {
+        topic_id: String,
+        reason: String,
+        disabled: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl SwitchableGate {
+        fn new(topic_id: &str, reason: &str) -> Arc<Self> {
+            Arc::new(Self {
+                topic_id: topic_id.to_owned(),
+                reason: reason.to_owned(),
+                disabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            })
+        }
+
+        fn set(&self, disabled: bool) {
+            self.disabled
+                .store(disabled, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl InstallJournal for SwitchableGate {
+        async fn applied(&self, _topic_id: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        async fn disabled(&self, topic_id: &str) -> Result<Option<String>, String> {
+            let on = self.disabled.load(std::sync::atomic::Ordering::SeqCst);
+            Ok((on && topic_id == self.topic_id).then(|| self.reason.clone()))
+        }
+
+        async fn disabled_topics(&self) -> Result<BTreeMap<String, String>, String> {
+            let on = self.disabled.load(std::sync::atomic::Ordering::SeqCst);
+            Ok(if on {
+                BTreeMap::from([(self.topic_id.clone(), self.reason.clone())])
+            } else {
+                BTreeMap::new()
+            })
+        }
+    }
+
+    /// The `app("op")` host — one open topic, Sim, submitable — with `journal`
+    /// as the operator gate, so the submit path and the listing can be driven
+    /// against a gate the test controls.
+    fn app_with_gate(journal: InstallJournalSlot) -> Router {
+        let p = pin("");
+        let store = MemoryStore::new();
+        let recs = synthetic_holdout(STRATUM_SIZE, 1);
+        let (topic, meas) = seal_topic(&p, unsigned_topic(&recs));
+        store.put_topic(topic.clone()).expect("topic");
+        store.load_holdout(&topic.id, recs).expect("holdout");
+        store
+            .set_baseline(&topic.id, meas.into_sealed())
+            .expect("baseline");
+        proof_router(AppState {
+            store,
+            pin: p,
+            backend: EvalBackend::Sim,
+            live_scorer: None,
+            offer: Some(offer()),
+            executor: executor_slot(None),
+            judge_api_key: None,
+            admin_hashes: Arc::new(vec![hash_admin_token("op")]),
+            vm_probe: None,
+            install_journal: journal,
+            epoch: 0,
+        })
     }
 
     /// A host whose install journal says every topic is installed, and whose

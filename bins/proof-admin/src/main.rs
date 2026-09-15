@@ -74,7 +74,8 @@ List the installed topics (a read-only view of proof_topic_version):
 
 Nothing here writes a topic, opens a route, or changes how a score is
 computed. `install` prints the publish call and the host env for an operator
-to run; `topic enable` / `disable` / `seal` exit 3 as not-implemented."
+to run; `disable` / `enable` throw the operator gate the challenge reads on
+the submit path; `topic seal` exits 3 as not-implemented."
 )]
 struct Cli {
     /// Postgres URL for the topic registry view. Falls back to `BASE_DATABASE_URL`.
@@ -191,15 +192,38 @@ enum TopicCmd {
         #[command(subcommand)]
         cmd: AliasCmd,
     },
-    /// Not implemented in this slice.
-    Enable {
-        /// Topic slug.
-        topic_id: String,
-    },
-    /// Not implemented in this slice.
+    /// Stop a topic taking submissions, now.
+    ///
+    /// Appends a `disabled` row to `proof_topic_gate`; the challenge reads it
+    /// on the next `POST /v1/submissions` and refuses with your reason. No
+    /// re-sign, no restart, no redeploy — the document keeps its own `status`,
+    /// in-flight evaluations finish, and rows already scored keep their
+    /// verdicts. Use it when something is wrong with the topic, not to retire
+    /// one: retiring is a signed `closed` document.
     Disable {
-        /// Topic slug.
+        /// Topic slug, or an alias of one.
         topic_id: String,
+        /// Why, in your words. Shown to a miner in the 403, so no secrets.
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        /// Who is throwing the switch, for the audit trail. Never a token.
+        #[arg(long, env = "PROOF_GATE_ACTOR", value_name = "LABEL")]
+        actor: Option<String>,
+    },
+    /// Let a disabled topic take submissions again.
+    ///
+    /// Appends an `enabled` row — the only way back, so the history of who
+    /// turned it off (and who turned it on) stays readable. The topic's own
+    /// document is untouched.
+    Enable {
+        /// Topic slug, or an alias of one.
+        topic_id: String,
+        /// Why it is being re-enabled, for the audit trail.
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        /// Who is clearing the switch. Never a token.
+        #[arg(long, env = "PROOF_GATE_ACTOR", value_name = "LABEL")]
+        actor: Option<String>,
     },
     /// Not implemented in this slice.
     Seal {
@@ -332,8 +356,34 @@ async fn run_topic(opts: &Options, cmd: &TopicCmd) -> Result<(), Failure> {
         TopicCmd::InstallLog { topic } => cmd_install_log(opts, topic).await,
         TopicCmd::Show { topic_id } => cmd_show(opts, topic_id).await,
         TopicCmd::Alias { cmd } => run_alias(opts, cmd).await,
-        TopicCmd::Enable { topic_id } => Err(not_implemented("topic enable", topic_id)),
-        TopicCmd::Disable { topic_id } => Err(not_implemented("topic disable", topic_id)),
+        TopicCmd::Disable {
+            topic_id,
+            reason,
+            actor,
+        } => {
+            cmd_gate(
+                opts,
+                topic_id,
+                proof_topic_install::GateState::Disabled,
+                reason.as_deref(),
+                actor.as_deref(),
+            )
+            .await
+        }
+        TopicCmd::Enable {
+            topic_id,
+            reason,
+            actor,
+        } => {
+            cmd_gate(
+                opts,
+                topic_id,
+                proof_topic_install::GateState::Enabled,
+                reason.as_deref(),
+                actor.as_deref(),
+            )
+            .await
+        }
         TopicCmd::Seal { topic_id, value } => Err(not_implemented(
             &format!("topic seal (value {value})"),
             topic_id,
@@ -664,7 +714,8 @@ async fn cmd_list(opts: &Options) -> Result<(), Failure> {
 }
 
 async fn cmd_show(opts: &Options, topic_id: &str) -> Result<(), Failure> {
-    let store = open_store(opts).await?;
+    let pool = open_pool(opts).await?;
+    let store = PgRlmStore::new(pool.clone());
     // An alias resolves to its canonical slug first, so `show tbench` finds
     // `tb4`. Resolution is fail-closed in the store: an alias whose topic has
     // no published version resolves to nothing rather than to an empty row.
@@ -691,6 +742,12 @@ async fn cmd_show(opts: &Options, topic_id: &str) -> Result<(), Failure> {
         version,
         document,
     };
+    // The operator gate, read from the same table the challenge reads: `show`
+    // must not report a topic as open for work when the submit path refuses
+    // it. An unreadable gate is reported rather than assumed enabled.
+    let gate = proof_topic_install::gate(&pool, canonical)
+        .await
+        .map_err(|e| Failure::Error(format!("{canonical} gate: {e}")))?;
     if let Some(canonical) = resolved.as_deref() {
         if !opts.json {
             println!("{topic_id} is an alias of {canonical}");
@@ -698,11 +755,56 @@ async fn cmd_show(opts: &Options, topic_id: &str) -> Result<(), Failure> {
         }
     }
     if opts.json {
-        print_json(&topic_json(&row))?;
+        let mut body = topic_json(&row);
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert(
+                "disabled".to_owned(),
+                serde_json::Value::Bool(
+                    gate.as_ref()
+                        .is_some_and(proof_topic_install::Gate::is_disabled),
+                ),
+            );
+            if let Some(gate) = gate.as_ref().filter(|g| g.is_disabled()) {
+                obj.insert(
+                    "disabled_reason".to_owned(),
+                    serde_json::Value::String(gate.reason.clone()),
+                );
+            }
+        }
+        print_json(&body)?;
         return Ok(());
     }
     print_row(&row);
+    print_gate(gate.as_ref(), canonical);
     Ok(())
+}
+
+/// The operator gate line(s) for `topic show`.
+fn print_gate(gate: Option<&proof_topic_install::Gate>, topic_id: &str) {
+    println!();
+    match gate {
+        None => println!("Operator gate: enabled (no `proof_topic_gate` row)."),
+        Some(gate) if !gate.is_disabled() => {
+            println!(
+                "Operator gate: enabled (gate row {}; the newest row is an enable).",
+                gate.id
+            );
+        }
+        Some(gate) => {
+            println!("Operator gate: DISABLED (gate row {}).", gate.id);
+            if gate.reason.is_empty() {
+                println!("  reason            (none given)");
+            } else {
+                println!("  reason            {}", gate.reason);
+            }
+            if !gate.actor.is_empty() {
+                println!("  actor             {}", gate.actor);
+            }
+            println!();
+            println!("Submissions to this topic are refused. Re-enable with:");
+            println!("  proof-admin topic enable {topic_id}");
+        }
+    }
 }
 
 /// The topic registry: the existing `proof_topic_version` rows.
@@ -710,6 +812,19 @@ async fn cmd_show(opts: &Options, topic_id: &str) -> Result<(), Failure> {
 /// A configured but unreachable database is fatal: falling back to an empty
 /// in-memory view would report "nothing installed" for a host that has topics.
 async fn open_store(opts: &Options) -> Result<Box<dyn RlmStore>, Failure> {
+    let pool = open_pool(opts).await?;
+    // `PgRlmStore` is the production registry; the memory store exists for
+    // CI/local and is never selected here, so a real host never reads an
+    // empty view by accident.
+    let _ = MemoryRlmStore::new;
+    Ok(Box::new(PgRlmStore::new(pool)))
+}
+
+/// A connection pool over the topic database.
+///
+/// The gate commands write (`proof_topic_gate`) as well as read, so they need
+/// the pool itself and not only the registry trait object.
+async fn open_pool(opts: &Options) -> Result<sqlx::PgPool, Failure> {
     let Some(url) = database_url(opts)? else {
         return Err(Failure::Usage(
             "this command reads the topic registry and needs a database: set \
@@ -718,14 +833,90 @@ async fn open_store(opts: &Options) -> Result<Box<dyn RlmStore>, Failure> {
                 .into(),
         ));
     };
-    let pool = db::connect(&url)
+    db::connect(&url)
         .await
-        .map_err(|e| Failure::Error(format!("connect: {e}")))?;
-    // `PgRlmStore` is the production registry; the memory store exists for
-    // CI/local and is never selected here, so a real host never reads an
-    // empty view by accident.
-    let _ = MemoryRlmStore::new;
-    Ok(Box::new(PgRlmStore::new(pool)))
+        .map_err(|e| Failure::Error(format!("connect: {e}")))
+}
+
+/// `topic disable` / `topic enable`: throw the operator gate.
+///
+/// The topic must be published (or be an alias of one): a typo must not
+/// silently disable nothing, because the operator would then believe a topic
+/// is stopped while it is still taking submissions. The write is append-only
+/// — the newest row is the state, the rows before it are the history — and it
+/// is visible to the challenge on the next request, which is the point of the
+/// switch.
+async fn cmd_gate(
+    opts: &Options,
+    topic_id: &str,
+    state: proof_topic_install::GateState,
+    reason: Option<&str>,
+    actor: Option<&str>,
+) -> Result<(), Failure> {
+    let pool = open_pool(opts).await?;
+    let store = PgRlmStore::new(pool.clone());
+    let resolved = store
+        .resolve_alias(topic_id)
+        .await
+        .map_err(|e| Failure::Error(format!("resolve {topic_id}: {e}")))?;
+    let canonical = resolved.as_deref().unwrap_or(topic_id);
+    let row = store
+        .latest_topic(canonical)
+        .await
+        .map_err(|e| Failure::Error(format!("{canonical}: {e}")))?;
+    if row.is_none() {
+        return Err(Failure::Error(format!(
+            "no installed topic {topic_id:?}{}. Nothing was changed — check the id with \
+             `proof-admin topic list`.",
+            resolved
+                .as_deref()
+                .map(|c| format!(" (alias of {c:?})"))
+                .unwrap_or_default()
+        )));
+    }
+    let reason = reason.unwrap_or_default();
+    let actor = actor.unwrap_or_default();
+    let gate = proof_topic_install::set(&pool, canonical, state, reason, actor)
+        .await
+        .map_err(|e| Failure::Error(format!("{canonical}: {e}")))?;
+    let disabled = gate.is_disabled();
+    if opts.json {
+        print_json(&serde_json::json!({
+            "ok": true,
+            "topic_id": canonical,
+            "state": gate.state.as_str(),
+            "disabled": disabled,
+            "reason": gate.reason,
+            "actor": gate.actor,
+            "gate_row": gate.id,
+        }))?;
+        return Ok(());
+    }
+    if disabled {
+        println!("topic {canonical} is disabled (gate row {}).", gate.id);
+        if gate.reason.is_empty() {
+            println!("  reason            (none given)");
+        } else {
+            println!("  reason            {}", gate.reason);
+        }
+        println!();
+        println!(
+            "Submissions are refused from the next request on, with this reason. The document \
+             keeps its own status, in-flight evaluations finish, and rows already scored keep \
+             their verdicts. Nothing was re-signed and nothing was restarted."
+        );
+        println!();
+        println!("To let it take submissions again:");
+        println!("  proof-admin topic enable {canonical}");
+    } else {
+        println!("topic {canonical} is enabled again (gate row {}).", gate.id);
+        println!();
+        println!(
+            "Submissions are admitted from the next request on, under the topic's own document \
+             (`status`), which was never changed. The disable rows stay in the history."
+        );
+    }
+    Ok(())
 }
 
 /// `BASE_DATABASE_URL` value, or the contents of `BASE_DATABASE_URL_FILE`.
