@@ -2358,6 +2358,9 @@ mod tests {
             vms: 2,
             experiment_vms: 1,
             max_experiment_vms: 2,
+            total_mib: 16_384,
+            reserve_mib: 0,
+            used_mib: 8_192,
         });
         // The probe's own view of the host gates is overwritten by the route.
         wired.live_harvest_wired = false;

@@ -4154,6 +4154,7 @@ dependencies = [
  "axum",
  "http-body-util",
  "proof-canon",
+ "proof-experiment",
  "proof-rlm",
  "proof-vm-proto",
  "serde",

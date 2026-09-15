@@ -58,13 +58,13 @@ that in.
 | **Hard maximum** (`LOCK_MAX_EXPERIMENT_VCPUS` / `LOCK_MAX_EXPERIMENT_MEM_MIB`) | **16 vCPU / 32768 MiB** — not a knob. A ceiling set above it (`PROOF_EXPERIMENT_VM_MAX_VCPUS=32`, `PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB=65536`, …) fails `ExperimentCeilings::validate` and the process **refuses to boot**; a spec shaped above it is refused on both sides whatever the ceilings say. A smaller host may **lower** a ceiling. The disk ceiling is not locked | CP + KVM host (compiled in) |
 | Writable disk per experiment VM | **≥ 16 GiB** floor; **32 GiB** default and default max (`PROOF_EXPERIMENT_VM_DISK_MIB` / `…_MAX_DISK_MIB`; raise the max when the metal has more) | CP (default), CP + host (max) |
 | Experiment VMs at once | `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS` (default **2**; `0` disables) | KVM host |
+| Host memory kept out of the VM budget | `PROOF_VM_AGENT_MEMORY_RESERVE_MIB` (default **0**) | KVM host |
 | Image | `PROOF_EXPERIMENT_VM_IMAGE_DIGEST`, unset = `PROOF_RLM_VM_IMAGE_DIGEST` | CP |
 | Pack directory | `PROOF_VM_AGENT_EXPERIMENT_PACK_DIR=/var/lib/proof-vm/packs` | KVM host |
 
 A silent topic gets the defaults (the whole lock: one experiment, one
 16 / 32 machine); a topic may ask for less (`experiment_vcpus: 8`,
-`experiment_mem_mib: 16384`), never for more than a ceiling. Both sides
-enforce their own copy: the control
+`experiment_mem_mib: 16384`), never for more than a ceiling. Both sides enforce their own copy: the control
 plane sizes the spec under its ceilings and refuses an ask above them before
 any request; the KVM host refuses a spec above its ceilings with `400
 bad_spec` before any jail. Keep the two in step. A smaller host lowers a
@@ -85,6 +85,26 @@ file per boot under `/srv/jailer` (reflink filesystems make the rootfs copy
 free; the scratch is still allocated), so budget `max_experiment_vms × disk`
 there; set `PROOF_EXPERIMENT_VM_DISK_MIB=16384` when the metal disk cannot
 carry 32 GiB per VM.
+
+**The count is not a capacity cap — memory is admitted too.** The agent
+reads `MemTotal` at boot and refuses a boot that would not fit, with `503
+capacity` naming what holds the memory, what was asked for, and the ceiling
+(`GET /v1/health` carries `total_mib` / `reserve_mib` / `used_mib` for the
+same read). **Every live VM counts, the topic's RLM VM included**: it is
+resident for the topic's whole life and is not free capacity. Gate 4 lost
+**both** submissions this way on a 16 GiB host — two 8192 MiB experiment VMs
+beside the resident 8192 MiB topic VM satisfied `MAX_EXPERIMENT_VMS=2`, the
+kernel OOM-killed the guests, and both answered 503 with no row. Refusing
+one request is strictly better than losing both.
+
+`PROOF_VM_AGENT_MEMORY_RESERVE_MIB` (default **0**) is the headroom kept for
+the OS, the agent, and per-VM process overhead. The default is deliberately
+0 so the shape that already works keeps working: a topic VM beside one
+experiment VM fills a 16 GiB host exactly and must not be refused. Raise it
+when the host has other tenants, or lower the ceilings — a host that cannot
+fit its own ceiling set is a sizing problem the operator fixes, not one the
+agent papers over by clamping. The budget never sizes a VM; it only decides
+whether the host can carry what the topic asked for.
 
 ## What happens on a paid job
 
@@ -326,6 +346,7 @@ spend**. Use `proof-vm-wire-check.sh submit-probe --topic <id> --expect
 | `DELETE /v1/vms/{id}` fails or is not confirmed after a **successful** run | 503 `experiment vm <topic>-x<n> not confirmed destroyed after its job (…); the outcome is withheld, not scored` — no row, no baseline | the VM is still listed by the agent (`experiment_vms` ≥ 1); reconcile it by hand |
 | `DELETE /v1/vms/{id}` (`retain`) fails or is not confirmed after a **failed** run | 503 with the job's own error — no row | CP journal `experiment vm job failed and the vm was not confirmed retained (…); reconcile it on the kvm host`; the VM is still listed by the agent |
 | `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS` reached | 503 `orchestrator 503 … Capacity: this host runs N of at most N experiment vms` | no boot |
+| the boot would not fit the host's RAM | 503 `orchestrator 503 … Capacity: host memory: N MiB in use by M live vm(s) [topic <id> (N MiB), experiment <id> (N MiB)] + N MiB requested exceeds the N MiB ceiling (N MiB total − N MiB reserve); the vm was not booted` | **no boot** — the VMs that fit keep running. This is the Gate 4 shape: the count cap was satisfied and the kernel OOM-killed every guest instead |
 | runner id not baked (`/opt/proof/runners/<id>/run` missing) | 503 `runner … is not installed in this guest image` | `experiment vm booted` → guest `Failed` → retained; **no value reported** |
 | run report `sandboxed=false` on a `firecracker_required` topic | 503 `run report says miner code ran outside the Firecracker guest` | retained (final verification is part of the job outcome used for teardown policy) |
 | adaptor writes no `report.json` / non-finite value / outlives the deadline | 503 with the adaptor's exit + redacted tail / `cut at the deadline of Ns` | retained (read `console.log` and `root/scratch.ext4` under `PROOF_VM_AGENT_RETAIN_DIR/<topic>-x<n>`) |
@@ -349,7 +370,7 @@ Happy path evidence (one baseline or one submission):
 | run attested | agent journal | `experiment vm run attested` with `flops_used` from the guest and the VM id; no `sister guest` line |
 | host-stamped facts on the row | `GET /v1/submissions/<id>` · artefact `report.json` | `sandboxed: true`, `verdict.agent.flops_used` = the guest's figure, evidence `runner` / `pack_digest` |
 | VM destroyed | agent journal · KVM host | `jail released`; `/srv/jailer/firecracker/` has no `<topic>-x<n>` after the job |
-| capacity freed | `GET /v1/health` (agent) | `experiment_vms` back to 0 |
+| capacity freed | `GET /v1/health` (agent) | `experiment_vms` back to 0, and `used_mib` back to the topic VM's size alone |
 
 `GET /v1/health` on the agent now reports `experiment_vms` /
 `max_experiment_vms`; `GET /v1/status` and `GET /v1/proof/topics` on the CP
