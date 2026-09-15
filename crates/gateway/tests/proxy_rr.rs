@@ -792,6 +792,25 @@ async fn the_operator_publish_route_is_forwarded_with_a_bearer() {
         .expect("proxy");
     assert_eq!(resp.status().as_u16(), 401);
 
+    // A bare value (no `Bearer ` scheme) is refused too: the gateway is the
+    // public edge and forwards the documented form only. The challenge's own
+    // `admin_ok` accepts a bare token on a master-local call, so this is the
+    // gateway's floor and not a pass-through of whatever arrived.
+    let resp = client
+        .post(format!(
+            "http://{addr}/challenge/proof/v1/admin/proof/topics"
+        ))
+        .header("authorization", "operator-token")
+        .json(&serde_json::json!({"id": "tb4", "status": "draft"}))
+        .send()
+        .await
+        .expect("proxy");
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "a bare Authorization value must not reach the admin route"
+    );
+
     // Every other admin route stays master-local, bearer or not.
     for rest in [
         "v1/admin/proof/executor",

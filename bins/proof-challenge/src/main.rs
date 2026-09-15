@@ -26,9 +26,8 @@ use proof_challenge::{
     challenge_router, executor_slot, hash_admin_token, parse_holdout_file, AppState, ArtefactVault,
     BaselineMeasurement, EvalBackend, EvalExecutorOffer, GatewayClient, GatewayClientConfig,
     HarvestOverrides, InferenceOffer, LiveScorer, MemoryStore, MinerEnvVault, ProofEmitter,
-    ProofPin, TopicDocument, VmOrchestratorProbe, VmOrchestratorReport,
-    ARTEFACT_STAGING_DIR_ENV, CHALLENGE_ID, DEFAULT_EMIT_POLL_SECS, MINER_BYOK_DIR_ENV,
-    SCORING_VERSION,
+    ProofPin, TopicDocument, VmOrchestratorProbe, VmOrchestratorReport, ARTEFACT_STAGING_DIR_ENV,
+    CHALLENGE_ID, DEFAULT_EMIT_POLL_SECS, MINER_BYOK_DIR_ENV, SCORING_VERSION,
 };
 use proof_challenge::{InstallJournalSlot, PgInstallJournal};
 use proof_eval::{custom_ids_ref, registered_custom, FamilyMux};
