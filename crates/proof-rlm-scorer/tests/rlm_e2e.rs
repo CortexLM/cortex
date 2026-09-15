@@ -1611,6 +1611,112 @@ async fn a_degenerate_zero_baseline_is_refused_and_nothing_moves() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The seal is the **last** chance to notice that the vector moved: the store
+/// can be advanced between the measurement landing and the operator sealing
+/// it, and `mark_sealed` is what the runtime's own tests drive.
+///
+/// Sealing then would publish a bar measured under rules nobody scores with —
+/// miners judged by the newer checklist against an older number — so the
+/// wiring must call the staleness check, not just define it. This asserts on
+/// `mark_sealed` itself for that reason.
+#[tokio::test]
+async fn mark_sealed_refuses_a_measurement_taken_under_superseded_rules() {
+    let root = tmp_root("setup-stale-baseline");
+    let key = root.join("owner_key");
+    std::fs::write(&key, "not-a-real-secret\n").unwrap();
+    let pin = pin_with_topic_key();
+    let orchestrator = FakeOrchestrator::new(0.61);
+    let rlm_store: Arc<MemoryRlmStore> = Arc::new(MemoryRlmStore::new());
+    let mut draft = topic();
+    draft.status = TopicStatus::Draft;
+    draft.holdout_commitment = holdout_commitment(&synthetic_holdout(STRATUM_SIZE, 1));
+    draft.baseline.script_sha256 = "11".repeat(32);
+    draft.baseline.metrics_commitment.clear();
+    let registered = [draft.metric.custom_id.clone()];
+    let registered: Vec<&str> = registered.iter().map(String::as_str).collect();
+    let setup = TopicSetup {
+        orchestrator: orchestrator.clone(),
+        store: rlm_store.clone(),
+        template: pinned_template(),
+        experiments: proof_rlm::ExperimentPolicy::default(),
+        owner: Arc::new(StaticOwnerHook(OwnerDecision::Approve)),
+        keys: Arc::new(FileKeysProbe::new(&key)),
+        spend_cap_usd: None,
+        skip_baseline: false,
+    };
+    let out = setup
+        .run(&draft, &pin, Some(&offer()))
+        .await
+        .expect("setup");
+    let measured = out.rules_version;
+    let primary = out.baseline_primary.expect("measured");
+    assert_eq!(measured, 1, "the baseline was measured under version 1");
+
+    // A later RLM write advances the vector after the measurement.
+    rlm_store
+        .put_rules(&proof_rlm::RuleSet {
+            topic_id: draft.id.clone(),
+            version: 2,
+            source: proof_rlm::RuleSource::Rlm,
+            rules: vec![proof_task::ChecklistRule {
+                id: "rlm_rule_v2".into(),
+                text: "a later rule".into(),
+            }],
+        })
+        .await
+        .expect("v2");
+
+    let meas = sealed_measurement(&pin, &draft, primary);
+    let open = signed_open(&draft, &meas);
+    let err = setup
+        .mark_sealed(&open, &pin, &registered, &meas)
+        .await
+        .expect_err("a stale measurement must not seal");
+    assert!(
+        matches!(
+            err,
+            SetupError::BaselineStale {
+                measured: 1,
+                in_force: Some(2),
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert!(
+        err.to_string().contains("version 1") && err.to_string().contains("version 2"),
+        "{err}"
+    );
+
+    // Nothing moved: still baselining, still the draft version.
+    let lc = rlm_store.lifecycle(&draft.id).await.unwrap().unwrap();
+    assert_eq!(lc.state, RlmState::Baselining);
+    let (version, latest) = rlm_store.latest_topic(&draft.id).await.unwrap().unwrap();
+    assert_eq!(version, 1, "no new version was stored");
+    assert_eq!(latest.status, TopicStatus::Draft);
+
+    // Re-measuring under the version in force seals normally.
+    rlm_store
+        .put_baseline(&proof_rlm_store::BaselineRow {
+            topic_id: draft.id.clone(),
+            rules_version: 2,
+            primary_value: primary,
+            report: rlm_store.baseline(&draft.id).await.unwrap().unwrap().report,
+        })
+        .await
+        .unwrap();
+    let refreshed = sealed_measurement(&pin, &draft, primary);
+    let open_refreshed = signed_open(&draft, &refreshed);
+    assert_eq!(
+        setup
+            .mark_sealed(&open_refreshed, &pin, &registered, &refreshed)
+            .await
+            .unwrap(),
+        RlmState::Open
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A topic whose signed params select an in-guest runner measures its
 /// baseline in **one dedicated experiment VM** — created for the `Baseline`
 /// job, sized under the lock ceilings, carrying the pinned pack, destroyed

@@ -445,7 +445,30 @@ impl LifecycleReport {
                                stopped — re-run the same command to resume."
                 .to_owned(),
             "baselining" => {
-                if self.baseline_rules_version.is_some() {
+                // A measured baseline is only sealable while the rules it was
+                // measured under are still the ones in force: a vector that
+                // moved since would seal a bar nobody is scored against, and
+                // `mark_sealed` refuses it. Saying "seal it" from the mere
+                // existence of a row would send the operator into that refusal.
+                //
+                // The condition mirrors `baseline_still_in_force` exactly —
+                // the version in force must *equal* the measured one — so a
+                // topic with no rule row at all is stale too, not sealable.
+                let sealable = self.baseline_rules_version.is_some()
+                    && self.baseline_rules_version == self.rules_version;
+                if self.baseline_rules_version.is_some() && !sealable {
+                    format!(
+                        "A baseline is measured, but under rule version {} — version {} is in \
+                         force now, so sealing it would publish a bar measured under rules nobody \
+                         scores with. Re-run the baseline under the rules in force \
+                         (`proof-admin topic install --bundle <bundle> --env <target> \
+                         --drive-rlm --owner-approved`), then seal that number.",
+                        self.baseline_rules_version
+                            .map_or_else(|| "none".to_owned(), |v| v.to_string()),
+                        self.rules_version
+                            .map_or_else(|| "none".to_owned(), |v| v.to_string())
+                    )
+                } else if sealable {
                     "A baseline is measured. Seal it: `proof-admin topic baseline \
                      <topic>` then `topic seal … --publish`."
                         .to_owned()
@@ -568,6 +591,23 @@ fn seal_failure(err: &proof_topic_setup::SetupError, topic_id: &str) -> String {
                  `metrics_commitment` that is not the one `proof-admin topic baseline` printed \
                  for this topic (it is over the measured vector, not over the file), or a \
                  `custom_value` the RLM never measured. Re-read the measurement and re-sign."
+            );
+        }
+        SetupError::BaselineStale {
+            topic_id,
+            measured,
+            in_force,
+        } => {
+            return format!(
+                "the measured baseline is stale: it was taken under rule version {measured}, but \
+                 version {} is in force.\n  A baseline is a measurement **against a rule \
+                 version**: sealing this one would publish a bar measured under rules nobody \
+                 scores with, so miners would be judged by the newer checklist while the number \
+                 they must beat came from the older one. Nothing moved.\n  Re-run the baseline \
+                 under the rules in force:\n    proof-admin topic install --bundle <bundle> \
+                 --env <target> --drive-rlm --owner-approved\n  Then read \
+                 `proof-admin topic baseline {topic_id}` again and seal the new commitment.",
+                in_force.map_or_else(|| "none".to_owned(), |v| v.to_string())
             );
         }
         SetupError::DegenerateBar { topic_id, primary } => {
@@ -765,8 +805,51 @@ mod tests {
         // …and with one, the next step is the seal.
         let mut measured = make("baselining");
         measured.baseline_rules_version = Some(2);
+        measured.rules_version = Some(2);
         assert!(measured.next_steps().contains("Seal it"));
         // A topic nothing has driven says so rather than inventing advice.
         assert!(make("draft").next_steps().contains("Nothing has run yet"));
+    }
+
+    /// A baseline measured under a superseded vector is not sealable, so the
+    /// `baselining` advice must not send the operator into that refusal.
+    ///
+    /// The baseline is a measurement **against a rule version**: sealing a
+    /// stale one would publish a bar measured under rules nobody scores with,
+    /// while miners are judged by the vector in force.
+    #[test]
+    fn the_baselining_advice_refuses_to_recommend_sealing_a_stale_baseline() {
+        let make = |baseline: Option<u32>, current: Option<u32>| LifecycleReport {
+            topic_id: "tb4".into(),
+            state: "baselining".into(),
+            rules_version: current,
+            rules_source: Some("rlm".into()),
+            baseline_rules_version: baseline,
+            history: Vec::new(),
+        };
+
+        let stale = make(Some(1), Some(2)).next_steps();
+        assert!(
+            !stale.contains("Seal it"),
+            "a stale baseline must not be recommended for sealing: {stale}"
+        );
+        assert!(
+            stale.contains("version 1") && stale.contains("version 2"),
+            "the advice must name both versions: {stale}"
+        );
+        assert!(
+            stale.contains("--drive-rlm"),
+            "the advice must name the way to re-measure: {stale}"
+        );
+
+        // The version in force matching the measurement is still a seal.
+        assert!(make(Some(2), Some(2)).next_steps().contains("Seal it"));
+        // No rule row at all is a different problem, not a stale baseline:
+        // the message must not claim a version is in force when none is.
+        let no_rules = make(Some(2), None).next_steps();
+        assert!(
+            !no_rules.contains("Seal it"),
+            "a baseline with no rules in force is not sealable: {no_rules}"
+        );
     }
 }

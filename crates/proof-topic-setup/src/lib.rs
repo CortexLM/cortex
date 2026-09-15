@@ -105,6 +105,32 @@ pub enum SetupError {
         /// The measured primary that cannot be a bar.
         primary: f64,
     },
+    /// The measured baseline was taken under a rule version that is no longer
+    /// in force.
+    ///
+    /// A baseline is a measurement **against a rule version**, so sealing a
+    /// superseded one would publish a bar measured under rules nobody scores
+    /// with: miners would be judged by the newer checklist while the number
+    /// they must beat came from the older one. Nothing is sealed — re-run the
+    /// baseline under the rules in force.
+    #[error(
+        "topic {topic_id:?}: the measured baseline was taken under rule version {measured}, but \
+         version {} is in force; sealing it would publish a bar measured under rules nobody \
+         scores with. Nothing was sealed. Re-run the baseline under the rules in force, then \
+         seal that number",
+        match in_force {
+            Some(v) => v.to_string(),
+            None => "none".to_owned(),
+        }
+    )]
+    BaselineStale {
+        /// The topic whose baseline is stale.
+        topic_id: String,
+        /// The rule version the measurement was taken under.
+        measured: u32,
+        /// The rule version now in force (`None` when no rule row exists).
+        in_force: Option<u32>,
+    },
     /// A baseline would be measured but there is no judge offer to bind it to.
     #[error(
         "no inference offer: the baseline is a paid run and needs a live judge offer to bind \
@@ -403,6 +429,30 @@ impl TopicSetup {
         Ok(())
     }
 
+    /// Refuse when the measured baseline's rule version is no longer in force.
+    ///
+    /// [`Self::rules_still_in_force`] serializes the *write*; this is the same
+    /// invariant at *seal* time, where the store can have advanced between the
+    /// measurement landing and the operator sealing it. Sealing a stale
+    /// measurement would publish a bar measured under rules nobody scores
+    /// with — miners judged by the newer checklist against an older number.
+    async fn baseline_still_in_force(
+        &self,
+        topic_id: &str,
+        measured: u32,
+    ) -> Result<(), SetupError> {
+        let current = self.store.current_rules(topic_id).await?;
+        let in_force = current.as_ref().map(|r| r.version);
+        if in_force != Some(measured) {
+            return Err(SetupError::BaselineStale {
+                topic_id: topic_id.to_owned(),
+                measured,
+                in_force,
+            });
+        }
+        Ok(())
+    }
+
     /// Baseline shaped exactly like a miner run, persisted: inside the topic
     /// VM, or — when the topic's params select an in-guest runner — inside
     /// one dedicated experiment VM created for it and stopped after it
@@ -601,6 +651,15 @@ impl TopicSetup {
                 primary: sealed_primary,
             });
         }
+        // The baseline is a measurement **against a rule version**, so sealing
+        // one whose vector has since moved would publish a bar measured under
+        // rules nobody is scored with: miners would be judged by the newer
+        // checklist while the number they must beat came from the older one.
+        // `baseline` already refuses a superseded vector at write time; this is
+        // the same invariant at seal time, where a concurrent write between the
+        // two can still be observed.
+        self.baseline_still_in_force(&topic.id, measured.rules_version)
+            .await?;
         let mut lc = self.lifecycle(topic).await?;
         if lc.state != RlmState::Baselining {
             return Err(StateError::Illegal {
@@ -762,6 +821,57 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("fixture-topic"), "{text}");
         assert!(text.contains('3') && text.contains('4'), "{text}");
+    }
+
+    /// A baseline measured under a superseded vector must not seal.
+    ///
+    /// `baseline` already refuses a vector that moved while the run was
+    /// measuring, but the store can be advanced between that write and the
+    /// operator's seal. Sealing then would publish a bar measured under rules
+    /// nobody scores with — miners judged by the newer checklist against an
+    /// older number — so the seal compares the measurement's rule version to
+    /// the one in force and refuses, naming both.
+    #[tokio::test]
+    async fn a_stale_measured_baseline_must_not_seal() {
+        let store = Arc::new(MemoryRlmStore::new());
+        let topic_id = "fixture-topic";
+        store
+            .put_rules(&rules(topic_id, 1, RuleSource::Rlm))
+            .await
+            .expect("v1");
+
+        let setup = setup(store.clone());
+        // The version the measurement was taken under is in force: no refusal.
+        setup
+            .baseline_still_in_force(topic_id, 1)
+            .await
+            .expect("the measured version is in force");
+
+        // A later RLM write lands version 2 after the measurement.
+        store
+            .put_rules(&rules(topic_id, 2, RuleSource::Rlm))
+            .await
+            .expect("v2");
+        let err = setup
+            .baseline_still_in_force(topic_id, 1)
+            .await
+            .expect_err("a stale measurement must refuse");
+        assert!(
+            matches!(
+                err,
+                SetupError::BaselineStale {
+                    measured: 1,
+                    in_force: Some(2),
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("version 1") && text.contains("version 2"),
+            "the refusal must name both versions: {text}"
+        );
     }
 
     struct AlwaysApprove;
