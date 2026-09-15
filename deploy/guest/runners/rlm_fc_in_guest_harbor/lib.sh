@@ -291,6 +291,30 @@ proof_export_exec_timeout() {
     fi
 }
 
+# Append Harbor's concurrency flags for the values the topic signed
+# (params.n_concurrent, params.n_attempts). The guest's own RunPolicy check
+# runs before the adaptor, so this is the second line of defence — and the one
+# that holds when run-harbor is exercised directly. A non-integer is a refusal
+# naming the knob, never a silent fallback to Harbor's default: a topic that
+# asked for 5 concurrent trials and got 1 would take five times as long and
+# could miss the baseline deadline, which is exactly the LIVE Gate 1 shape.
+# Usage: proof_harbor_concurrency_flags ARRAY_NAME
+proof_harbor_concurrency_flags() {
+    local -n _cmd="$1"
+    if [ -n "${PROOF_PARAM_N_CONCURRENT:-}" ]; then
+        proof_positive_int "n_concurrent" "$PROOF_PARAM_N_CONCURRENT"
+        _cmd+=(--n-concurrent "$PROOF_PARAM_N_CONCURRENT")
+    else
+        _cmd+=(--n-concurrent 1)
+    fi
+    if [ -n "${PROOF_PARAM_N_ATTEMPTS:-}" ]; then
+        proof_positive_int "n_attempts" "$PROOF_PARAM_N_ATTEMPTS"
+        _cmd+=(--n-attempts "$PROOF_PARAM_N_ATTEMPTS")
+    else
+        _cmd+=(--n-attempts 1)
+    fi
+}
+
 # Append Harbor timeout flags for the multipliers the topic signed
 # (params.timeout_multiplier, agent_timeout_multiplier,
 # verifier_timeout_multiplier, env_build_timeout_multiplier). Nothing is
