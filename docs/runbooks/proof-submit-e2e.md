@@ -95,7 +95,7 @@ curl -sS "$BASE/v1/status"
 #   "open_topics": ["dt-no-ib-v0", "muon-vs-adamw-10m-v0"],
 #   "inference_offer": { "offer_id": "openrouter-glm53flash-v0", "status": "open", ... },
 #   "eval_executor": null,            # sim rents nothing; Lium needs an open 1x offer
-#   "executor": { "gpu_class": "1x", "max_proof_deadline_s_ceiling": 7200, ... }
+#   "executor": { "gpu_class": "1x", "max_proof_deadline_s_ceiling": 14400, ... }
 # }
 # Never contains api_key, base_url, or holdout records.
 

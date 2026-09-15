@@ -1847,10 +1847,10 @@ mod tests {
             ),
             (
                 HarvestOverrides {
-                    deadline_secs: Some(7_201),
+                    deadline_secs: Some(14_401),
                     ..HarvestOverrides::default()
                 },
-                "max_proof_deadline_s = 7201",
+                "max_proof_deadline_s = 14401",
             ),
             (
                 HarvestOverrides {

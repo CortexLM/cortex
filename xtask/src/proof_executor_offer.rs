@@ -245,7 +245,7 @@ mod tests {
         let p = pin();
         let err = build(&p, &args("8x", 7_200)).expect_err("8x");
         assert!(err.contains("machine_shape"), "{err}");
-        let err = build(&p, &args("1x", 7_201)).expect_err("over ceiling");
+        let err = build(&p, &args("1x", 14_401)).expect_err("over ceiling");
         assert!(err.contains("max_proof_deadline_s"), "{err}");
         let mut unbound = args("1x", 600);
         unbound.template_id = Some("prism-recipe-v10".into());

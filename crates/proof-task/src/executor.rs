@@ -20,8 +20,9 @@ pub const EVAL_EXECUTOR_GPU_CLASS: &str = "1x";
 pub const EVAL_EXECUTOR_GPU_COUNT: u32 = 1;
 
 /// Pin `max_proof_deadline_s_ceiling`: longest proof deadline an offer or a
-/// topic may declare (two hours).
-pub const MAX_PROOF_DEADLINE_S_CEILING: u64 = 7_200;
+/// topic may declare (four hours). A pin may only tighten it below this
+/// lock, and the live offer may be shorter still.
+pub const MAX_PROOF_DEADLINE_S_CEILING: u64 = 14_400;
 
 /// Pin `eval_executor_commitment_alg`.
 pub const EVAL_EXECUTOR_COMMITMENT_ALG: &str = "sha256";
@@ -88,7 +89,7 @@ mod tests {
         assert_eq!(EVAL_EXECUTOR_SCHEMA_VERSION, 1);
         assert_eq!(EVAL_EXECUTOR_GPU_CLASS, "1x");
         assert_eq!(EVAL_EXECUTOR_GPU_COUNT, 1);
-        assert_eq!(MAX_PROOF_DEADLINE_S_CEILING, 7_200);
+        assert_eq!(MAX_PROOF_DEADLINE_S_CEILING, 14_400);
         assert_eq!(EVAL_EXECUTOR_COMMITMENT_ALG, "sha256");
     }
 

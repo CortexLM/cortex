@@ -323,22 +323,22 @@ mod tests {
         // up to the ceiling — never past it.
         let short_offer = offer_for("proof-eval-78b614a1f51c", 600, &p);
         let longer = HarvestOverrides {
-            deadline_secs: Some(7_200),
+            deadline_secs: Some(14_400),
             ..HarvestOverrides::default()
         };
         assert_eq!(
             executor_plan(&p, Some(&short_offer), &topic(), &longer)
                 .expect("plan")
                 .deadline_s,
-            7_200
+            14_400
         );
         let past = HarvestOverrides {
-            deadline_secs: Some(7_201),
+            deadline_secs: Some(14_401),
             ..HarvestOverrides::default()
         };
         assert!(matches!(
             executor_plan(&p, Some(&offer()), &topic(), &past),
-            Err(ExecutorOfferError::BadDeadline(7_201, 7_200))
+            Err(ExecutorOfferError::BadDeadline(14_401, 14_400))
         ));
         let zero = HarvestOverrides {
             deadline_secs: Some(0),
@@ -346,7 +346,7 @@ mod tests {
         };
         assert!(matches!(
             executor_plan(&p, Some(&offer()), &topic(), &zero),
-            Err(ExecutorOfferError::BadDeadline(0, 7_200))
+            Err(ExecutorOfferError::BadDeadline(0, 14_400))
         ));
         // A topic tighten still applies on top of the override.
         let mut t = topic();

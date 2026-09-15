@@ -73,7 +73,7 @@ baseline + an open topic are on the host.
 - **Where** the image runs is the live `EvalExecutorOffer` — a sibling of
   the judge `InferenceOffer`, never the same document. The pin carries only
   ceilings: `eval_executor_schema_version = 1`, `gpu_class = "1x"`,
-  `max_proof_deadline_s_ceiling = 7200`, optional
+  `max_proof_deadline_s_ceiling = 14400`, optional
   `allowed_lium_template_prefixes` (`["proof-eval-"]`, the digest-scoped
   harvest template name `proof-eval-<12 hex>`), and
   `eval_executor_commitment_alg = sha256`. The live offer
@@ -828,7 +828,7 @@ id shapes shared with `proof-task`).
 | `constraints.params.experiment_vcpus` / `experiment_mem_mib` / `experiment_disk_mib` | The topic's size ask: silent = the operator defaults (lock 16 vCPU / 32 GiB / 32 GiB disk), an ask may go up to the ceilings (lock 16 vCPU / 32 GiB — the default is the ceiling; disk ≥ 16 GiB); over = 503, never a clamp |
 | `checklist` | ≤64 `{id, text}` anti-cheat rules (unique slug ids), version 1 of the rule set |
 | `eval_executor.require_offer_commitment` | 64-hex pin against the live `1x` `EvalExecutorOffer` (`proof-executor`) |
-| `eval_executor.max_proof_deadline_s` | Tighten-only against pin `max_proof_deadline_s_ceiling` (7200 s; the live offer may be shorter) |
+| `eval_executor.max_proof_deadline_s` | Tighten-only against pin `max_proof_deadline_s_ceiling` (14400 s; the live offer may be shorter) |
 
 ### Miner BYOK (`env` on the submit body)
 
