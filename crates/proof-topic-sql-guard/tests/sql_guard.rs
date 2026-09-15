@@ -14,8 +14,8 @@
 
 use proof_topic_sql_guard::MigrationDenied;
 use proof_topic_sql_guard::{
-    blank_statements, check_migration, is_topic_scoped, split_statements, topic_sql_prefix,
-    OWNED_TABLES,
+    blank_statements, check_migration, is_topic_scoped, referenced_objects, split_statements,
+    topic_sql_prefix, OWNED_TABLES,
 };
 
 const TOPIC: &str = "tb4";
@@ -342,6 +342,48 @@ fn a_hyphenated_topics_migration_is_admitted() {
 fn allowed_for(sql: &str, topic: &str) {
     check_migration(sql, topic)
         .unwrap_or_else(|e| panic!("{sql:?} must be allowed for {topic}: {e}"));
+}
+
+/// The **quoted** literal spelling is usable too.
+///
+/// `"fixture-topic-v0_scratch"` is one legal identifier, and `is_topic_scoped`
+/// accepts it. It is only reachable if the tokenizer keeps a quoted run whole:
+/// splitting at the `-` yields `fixture` / `topic` / `v0_scratch`, none of which
+/// is inside the topic's namespace, so a legal quoted name would be refused as
+/// unscoped.
+#[test]
+fn a_quoted_hyphenated_name_is_one_identifier() {
+    let topic = "fixture-topic-v0";
+    allowed_for(
+        r#"CREATE TABLE "fixture-topic-v0_scratch" (id TEXT)"#,
+        topic,
+    );
+    allowed_for(r#"CREATE TABLE "fixture-topic-v0".runs (id TEXT)"#, topic);
+    allowed_for(r#"SELECT id FROM "fixture-topic-v0_scratch""#, topic);
+
+    // Quoting is not an escape hatch: a sibling, a `topic_*` name, and a
+    // `proof_*` object are still refused when quoted.
+    for sql in [
+        r#"CREATE TABLE "fixture-topic-v1_scratch" (id TEXT)"#,
+        r#"CREATE TABLE "topic_scratch" (id TEXT)"#,
+        r#"DROP TABLE "proof_rule_version""#,
+    ] {
+        assert!(
+            check_migration(sql, topic).is_err(),
+            "{sql:?} must be refused for {topic}"
+        );
+    }
+}
+
+/// A quoted identifier with an escaped quote still reads as one name.
+#[test]
+fn an_escaped_quote_inside_a_quoted_name_is_kept() {
+    // `""` inside a quoted identifier is one literal quote in the name.
+    let names = referenced_objects(r#"CREATE TABLE "a""b" (id TEXT)"#);
+    assert!(
+        names.iter().any(|t| t == "a\"b"),
+        "the doubled quote is one name, got {names:?}"
+    );
 }
 
 /// A quoted identifier still names an object, so quoting cannot smuggle a

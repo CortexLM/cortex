@@ -916,16 +916,45 @@ pub fn has_word(haystack: &str, needle: &str) -> bool {
 }
 
 /// Identifier-shaped tokens, lower-cased, dots kept (`schema.table`).
+///
+/// A **double-quoted** run is one identifier, kept whole. That matters for a
+/// hyphenated topic: `"fixture-topic-v0_scratch"` is a single legal identifier,
+/// and splitting it at the `-` would yield `fixture`, `topic`, `v0_scratch` —
+/// none of which is inside the topic's namespace, so a legal quoted name would
+/// be refused as unscoped. Quotes are stripped on the way in, so the token is
+/// the name the database would store and the deny rules match it as before.
 fn tokens(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
-    for c in text.chars() {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            // A quoted identifier: its body is one token, hyphens included.
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '"' {
+                    if chars.get(i + 1) == Some(&'"') {
+                        cur.push('"'); // `""` is an escaped quote inside the name
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                cur.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
         if c.is_alphanumeric() || c == '_' || c == '.' {
             cur.push(c);
         } else if !cur.is_empty() {
             out.push(cur.trim_matches('.').to_ascii_lowercase());
             cur.clear();
         }
+        i += 1;
     }
     if !cur.is_empty() {
         out.push(cur.trim_matches('.').to_ascii_lowercase());
