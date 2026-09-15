@@ -1566,7 +1566,7 @@ mod tests {
     /// module. Running the same sources through the structural strip here
     /// means a literal hidden after such a marker is caught even if the
     /// crate-local guard misses it.
-    const PRODUCT_MODULES: [(&str, &str); 18] = [
+    const PRODUCT_MODULES: [(&str, &str); 32] = [
         (
             "proof-challenge/src/topic_routes.rs",
             include_str!("../../proof-challenge/src/topic_routes.rs"),
@@ -1638,6 +1638,62 @@ mod tests {
         (
             "proof-topic-install/src/handler.rs",
             include_str!("../../proof-topic-install/src/handler.rs"),
+        ),
+        (
+            "proof-topic-install/src/install.rs",
+            include_str!("../../proof-topic-install/src/install.rs"),
+        ),
+        (
+            "proof-topic-install/src/routes.rs",
+            include_str!("../../proof-topic-install/src/routes.rs"),
+        ),
+        (
+            "proof-topic-install/src/section.rs",
+            include_str!("../../proof-topic-install/src/section.rs"),
+        ),
+        (
+            "proof-topic-install/src/gate.rs",
+            include_str!("../../proof-topic-install/src/gate.rs"),
+        ),
+        (
+            "proof-vm-guest/src/fetch.rs",
+            include_str!("../../proof-vm-guest/src/fetch.rs"),
+        ),
+        (
+            "proof-vm-guest/src/staging.rs",
+            include_str!("../../proof-vm-guest/src/staging.rs"),
+        ),
+        (
+            "proof-vm-agent/src/lib.rs",
+            include_str!("../../proof-vm-agent/src/lib.rs"),
+        ),
+        (
+            "proof-vm-agent/src/auth.rs",
+            include_str!("../../proof-vm-agent/src/auth.rs"),
+        ),
+        (
+            "proof-vm-agent/src/hypervisor.rs",
+            include_str!("../../proof-vm-agent/src/hypervisor.rs"),
+        ),
+        (
+            "proof-vm-agent/src/stamp.rs",
+            include_str!("../../proof-vm-agent/src/stamp.rs"),
+        ),
+        (
+            "gateway-core/src/lib.rs",
+            include_str!("../../gateway-core/src/lib.rs"),
+        ),
+        (
+            "gateway-core/src/admin_auth.rs",
+            include_str!("../../gateway-core/src/admin_auth.rs"),
+        ),
+        (
+            "gateway-core/src/admin_attest.rs",
+            include_str!("../../gateway-core/src/admin_attest.rs"),
+        ),
+        (
+            "gateway-core/src/proxy_paths.rs",
+            include_str!("../../gateway-core/src/proxy_paths.rs"),
         ),
     ];
 
