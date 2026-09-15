@@ -121,14 +121,28 @@ impl proof_http::InstallJournal for PgInstallJournal {
             .map_err(|e| e.to_string())
     }
 
-    async fn disabled(&self, topic_id: &str) -> Result<Option<String>, String> {
-        proof_topic_install::gate(&self.pool, topic_id)
+    async fn submit_gate(&self, topic_id: &str) -> Result<proof_http::SubmitGate, String> {
+        let disabled = proof_topic_install::gate(&self.pool, topic_id)
             .await
-            .map(|gate| {
-                gate.filter(proof_topic_install::Gate::is_disabled)
-                    .map(|g| g.reason)
-            })
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?
+            .filter(proof_topic_install::Gate::is_disabled)
+            .map(|g| g.reason);
+        // The allocator pin the topic's newest install recorded, read from the
+        // same journal the publish gate reads: a topic installed under a
+        // different pin is one this host cannot run.
+        let vms_per_submission = proof_topic_install::latest_install(&self.pool, topic_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .and_then(|row| {
+                row.binding
+                    .get("vms_per_submission")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok())
+            });
+        Ok(proof_http::SubmitGate {
+            disabled_reason: disabled,
+            vms_per_submission,
+        })
     }
 
     async fn disabled_topics(&self) -> Result<std::collections::BTreeMap<String, String>, String> {

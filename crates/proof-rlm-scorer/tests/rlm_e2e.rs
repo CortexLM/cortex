@@ -16,9 +16,11 @@
 //! declaration is a persisted reject and a missing one is a 503;
 //! every scored row leaves its zip, the crown leaves `best.json` + a
 //! promotion row, and the store holds rules v1, every checklist, and the
-//! lifecycle. Runs hold their topic lease until persisted, so a worse run
+//! lifecycle. Two submissions of one topic evaluate **in parallel** — each
+//! holds its own lease, and the writes (the promotion compare-and-swap and
+//! the lifecycle moves) are serialized under the topic lock — so a worse run
 //! decided against a stale bar can never displace the champion, a moved
-//! best pointer refuses a stale crown, and an abandoned run releases its
+//! best pointer refuses a stale crown, and an abandoned run releases its own
 //! lease after the TTL. Then the setup driver walks `draft → … →
 //! baselining` with RLM-written rules and a baseline in the store, and
 //! `mark_sealed` opens the topic only for the signed, valid, open document
@@ -71,6 +73,14 @@ struct InstalledJournal;
 impl proof_http::InstallJournal for InstalledJournal {
     async fn applied(&self, _topic_id: &str) -> Result<bool, String> {
         Ok(true)
+    }
+
+    async fn submit_gate(&self, _topic_id: &str) -> Result<proof_http::SubmitGate, String> {
+        Ok(proof_http::SubmitGate::default())
+    }
+
+    async fn disabled_topics(&self) -> Result<std::collections::BTreeMap<String, String>, String> {
+        Ok(std::collections::BTreeMap::new())
     }
 }
 
@@ -833,6 +843,11 @@ async fn a_refused_paid_run_is_host_logged_with_its_error() {
 /// Two runs decided against the same old bar: the second cannot score until
 /// the first is persisted, its decision then sees the new best, and a moved
 /// best pointer refuses a crown that was decided before it moved.
+///
+/// The two runs are **not** serialized while they evaluate — that is
+/// [`two_submissions_of_one_topic_run_in_parallel`] — but each decision is
+/// taken under the topic lock against the store's best, which is what makes
+/// the ordering of the *writes* safe.
 #[tokio::test]
 async fn a_worse_run_never_displaces_the_champion_under_the_topic_lease() {
     let d = direct("lease", None);
@@ -843,38 +858,7 @@ async fn a_worse_run_never_displaces_the_champion_under_the_topic_lease() {
     assert!((doc_a.harness.custom_value.unwrap() - 0.7).abs() < 1e-12);
     assert_eq!(d.scorer.pending_len(), 1);
 
-    // B (0.60) is blocked on the lease, not scored against the stale world.
-    d.orchestrator.set_primary(0.6);
-    let scorer_b = d.scorer.clone();
-    let (pin_b, topic_b, plan_b) = (d.pin.clone(), d.topic.clone(), d.plan.clone());
-    let mut task_b = tokio::spawn(async move {
-        let budget = topic_b.flops_budget;
-        scorer_b
-            .score(
-                &pin_b,
-                &topic_b,
-                &offer(),
-                &plan_b,
-                "digest-b",
-                &digest("b"),
-                Some(&locator("b")),
-                budget,
-                &[],
-                "placeholder claim",
-                &proof_rlm::MinerEnv::new(),
-                None,
-            )
-            .await
-    });
-    assert!(
-        tokio::time::timeout(Duration::from_millis(300), &mut task_b)
-            .await
-            .is_err(),
-        "b must wait for a's row"
-    );
-    assert_eq!(paid_runs(&d.orchestrator), 1, "b has not run");
-
-    // A is decided against bar 0.50 and persisted under the lease.
+    // A is decided against bar 0.50 and persisted under its lease.
     assert!(
         d.scorer
             .auto_promote(&d.topic, "digest-a", true, Some(0.7), Some(0.5))
@@ -885,9 +869,10 @@ async fn a_worse_run_never_displaces_the_champion_under_the_topic_lease() {
         .await;
     assert_eq!(d.scorer.pending_len(), 0);
 
-    // The lease is free: b scores, and its decision — even handed the stale
-    // bar 0.50 — is taken against the store's best 0.70.
-    let doc_b = task_b.await.unwrap().expect("b scores after a persisted");
+    // B (0.60) scores — its own lease, not A's — and its decision, even
+    // handed the stale bar 0.50, is taken against the store's best 0.70.
+    d.orchestrator.set_primary(0.6);
+    let doc_b = score(&d, "b").await.expect("b scores");
     assert!((doc_b.harness.custom_value.unwrap() - 0.6).abs() < 1e-12);
     assert!(
         !d.scorer
@@ -971,34 +956,232 @@ async fn a_worse_run_never_displaces_the_champion_under_the_topic_lease() {
     let _ = std::fs::remove_dir_all(&d.root);
 }
 
-/// A run whose row never lands must not hold its topic hostage: past the
-/// lease TTL the next run reaps it, recovers the lifecycle, and proceeds.
+/// Two concurrent submissions to **one topic** are two paid runs, so the KVM
+/// host is asked for two VMs (one per submission: `vms_per_submission` is 1
+/// *per submission*, never a queue behind the topic).
+///
+/// The host models that: `inspect` attaches the topic's VM (shared, and the
+/// only VM for a topic with no in-guest runner), and each paid run is its own
+/// job. What this pins is the control plane's half — both submissions reach
+/// the runner concurrently, and neither waits for the other's row.
+#[tokio::test]
+async fn two_concurrent_submits_reach_the_runner_as_two_runs() {
+    let Stack {
+        app,
+        orchestrator,
+        root,
+        topic,
+        ..
+    } = stack(true);
+    let tid = topic.id.clone();
+
+    // Both bodies are accepted and scored on their own. `json_req` drives one
+    // request at a time; the two `oneshot` calls below are what makes them
+    // concurrent — the router is cloned, so each future owns its own service.
+    let a = submit_declaring(&tid, "concurrent-a", 1);
+    let b = submit_declaring(&tid, "concurrent-b", 1);
+    let (ra, rb) = tokio::join!(
+        json_req(app.clone(), "POST", "/v1/submissions", a),
+        json_req(app.clone(), "POST", "/v1/submissions", b),
+    );
+    assert_eq!(ra.0, StatusCode::CREATED, "{:?}", ra.1);
+    assert_eq!(rb.0, StatusCode::CREATED, "{:?}", rb.1);
+    let (id_a, id_b) = (
+        ra.1["id"].as_str().unwrap().to_owned(),
+        rb.1["id"].as_str().unwrap().to_owned(),
+    );
+    assert_ne!(id_a, id_b, "two submissions are two rows");
+
+    // Both are scored: two paid runs reached the orchestrator, and neither
+    // was rejected for arriving while the other was in flight.
+    let (_, row_a) = json_req(
+        app.clone(),
+        "GET",
+        &format!("/v1/submissions/{id_a}"),
+        serde_json::json!({}),
+    )
+    .await;
+    let (_, row_b) = json_req(
+        app.clone(),
+        "GET",
+        &format!("/v1/submissions/{id_b}"),
+        serde_json::json!({}),
+    )
+    .await;
+    for row in [&row_a, &row_b] {
+        assert_ne!(row["state"], "rejected", "{row}");
+        assert_eq!(row["verdict"]["agent"]["verdict"], "clean", "{row}");
+    }
+    assert_eq!(
+        paid_runs(&orchestrator),
+        2,
+        "each submission is its own paid run, not a queue entry"
+    );
+    // Exactly one of them is the champion (both measured the same primary, so
+    // the second is refused by the compare-and-swap, not by a queue).
+    let champions = [&row_a, &row_b]
+        .iter()
+        .filter(|r| r["state"] == "champion")
+        .count();
+    assert_eq!(champions, 1, "one crown: {row_a} / {row_b}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A topic that selects an in-guest runner gets **one dedicated experiment VM
+/// per paid job**, and two submissions in flight are two jobs: two VMs, never
+/// one shared. This is the allocator rule the live 2-VM check exercises, at
+/// the control plane's end of it.
+#[tokio::test]
+async fn two_submissions_of_an_experiment_topic_ask_for_two_vms() {
+    let mut d = direct("parallel-experiment", None);
+    // The topic selects an in-guest runner, so every paid job is its own VM.
+    d.topic.constraints.params.insert(
+        proof_experiment::PARAM_RUNNER.into(),
+        "placeholder_in_guest_runner".into(),
+    );
+    d.topic.constraints.params.insert(
+        proof_experiment::PARAM_PACK_DIGEST.into(),
+        format!("sha256:{}", "ee".repeat(32)),
+    );
+    d.plan = d
+        .scorer
+        .plan(&d.pin, &d.topic, &test_executor(&d.pin))
+        .expect("plan");
+    let d = Arc::new(d);
+
+    let a = tokio::spawn({
+        let d = d.clone();
+        async move { score(&d, "exp-a").await }
+    });
+    let b = tokio::spawn({
+        let d = d.clone();
+        async move { score(&d, "exp-b").await }
+    });
+    let (ra, rb) = (a.await.unwrap(), b.await.unwrap());
+    assert!(ra.is_ok(), "a scores: {ra:?}");
+    assert!(rb.is_ok(), "b scores: {rb:?}");
+    assert_eq!(
+        d.orchestrator.experiments().len(),
+        2,
+        "one experiment vm per paid job"
+    );
+    assert_eq!(paid_runs(&d.orchestrator), 2);
+    // Each experiment VM was destroyed after its job (the fake confirms it),
+    // so the host is not left holding capacity for either.
+    assert_eq!(
+        d.orchestrator
+            .teardowns()
+            .iter()
+            .filter(|(_, policy)| *policy == proof_rlm::RetainPolicy::Destroy)
+            .count(),
+        2,
+        "both experiment vms were destroyed after their jobs"
+    );
+    let _ = std::fs::remove_dir_all(&d.root);
+}
+
+/// A run whose row never lands must not hold its **own** lease forever: past
+/// the TTL it is reaped, so its entry leaves `pending` and a re-submission of
+/// the same digest is not blocked by it.
+///
+/// It no longer blocks *other* submissions either — that is the point of the
+/// per-submission lease ([`two_submissions_of_one_topic_run_in_parallel`]) —
+/// and the lifecycle is left `evaluating` because a live run is still in
+/// flight. The abandoned run is not "recovered" out from under that run: the
+/// phase is closed only once nothing of this topic is running.
 #[tokio::test]
 async fn an_abandoned_run_releases_its_topic_lease_after_the_ttl() {
     let d = direct("ttl", Some(Duration::ZERO));
     let tid = d.topic.id.clone();
     score(&d, "abandoned").await.expect("scores");
     assert_eq!(d.scorer.pending_len(), 1);
+
     let next = tokio::time::timeout(Duration::from_secs(10), score(&d, "next"))
         .await
         .expect("the abandoned lease is reaped, not waited on")
         .expect("scores");
     assert!((next.harness.custom_value.unwrap() - 0.7).abs() < 1e-12);
-    assert_eq!(d.scorer.pending_len(), 1, "only the live run is pending");
+    assert_eq!(
+        d.scorer.pending_len(),
+        1,
+        "the reaped run is gone; only the live one is pending"
+    );
     assert!(
         !d.scorer
             .auto_promote(&d.topic, "digest-abandoned", true, Some(0.7), Some(0.5))
             .await,
         "a reaped run cannot be promoted"
     );
+
+    // The live run persists; only then does the phase close, and the abandoned
+    // one's `evaluating` is recovered as stale — nothing is left in flight.
+    d.scorer
+        .on_persisted(&tid, "digest-next", "pf_0000000000000002", false)
+        .await;
+    assert_eq!(d.scorer.pending_len(), 0);
     let lc = d.rlm_store.lifecycle(&tid).await.unwrap().unwrap();
-    assert!(
-        lc.history
-            .iter()
-            .any(|h| h.event == RlmEvent::VerdictRecorded && h.note.contains("recovered")),
-        "{lc:?}"
+    assert_eq!(lc.state, RlmState::Open, "the topic is not stuck: {lc:?}");
+    let _ = std::fs::remove_dir_all(&d.root);
+}
+
+/// Two submissions of **one topic** are two runs, not a queue: each holds its
+/// own lease, so the second evaluates while the first is still in flight.
+/// (Its row cannot land first, though — `on_persisted` takes the topic lock —
+/// which is what keeps the promotion compare-and-swap honest.)
+#[tokio::test]
+async fn two_submissions_of_one_topic_run_in_parallel() {
+    let d = direct("parallel", None);
+    let tid = d.topic.id.clone();
+
+    // A scores and holds its lease: its row has not landed yet.
+    score(&d, "a").await.expect("a scores");
+    assert_eq!(d.scorer.pending_len(), 1);
+    assert_eq!(paid_runs(&d.orchestrator), 1);
+
+    // B is a *different* submission: it evaluates now, without waiting for
+    // A's row. The topic lock is not held across a run, so nothing here
+    // blocks on A.
+    d.orchestrator.set_primary(0.6);
+    let doc_b = tokio::time::timeout(Duration::from_secs(10), score(&d, "b"))
+        .await
+        .expect("b is not blocked behind a's row")
+        .expect("b scores");
+    assert!((doc_b.harness.custom_value.unwrap() - 0.6).abs() < 1e-12);
+    assert_eq!(
+        paid_runs(&d.orchestrator),
+        2,
+        "each submission is its own paid run"
     );
-    assert_eq!(lc.state, RlmState::Evaluating, "the live run is still open");
+    assert_eq!(d.scorer.pending_len(), 2, "both runs await their rows");
+
+    // Both rows land, and the better one keeps the crown: A (0.7) was decided
+    // first, B (0.6) decides against A's best and does not displace it.
+    assert!(
+        d.scorer
+            .auto_promote(&d.topic, "digest-a", true, Some(0.7), Some(0.5))
+            .await
+    );
+    d.scorer
+        .on_persisted(&tid, "digest-a", "pf_0000000000000001", true)
+        .await;
+    assert!(
+        !d.scorer
+            .auto_promote(&d.topic, "digest-b", true, Some(0.6), Some(0.5))
+            .await
+    );
+    d.scorer
+        .on_persisted(&tid, "digest-b", "pf_0000000000000002", false)
+        .await;
+    assert_eq!(d.scorer.pending_len(), 0);
+    let best = d.rlm_store.best(&tid).await.unwrap().expect("best");
+    assert_eq!(best.submission_id, "pf_0000000000000001");
+    assert!((best.primary_value - 0.7).abs() < 1e-12);
+    assert_eq!(d.rlm_store.promotions(&tid).await.unwrap().len(), 1);
+    assert_eq!(
+        d.rlm_store.lifecycle(&tid).await.unwrap().unwrap().state,
+        RlmState::Open,
+        "the topic is back to open after both runs"
+    );
     let _ = std::fs::remove_dir_all(&d.root);
 }
 

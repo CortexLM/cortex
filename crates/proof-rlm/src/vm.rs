@@ -573,6 +573,20 @@ pub async fn run_paid_job(
 /// VM — or, for a topic whose params select an in-guest runner, inside a
 /// dedicated experiment VM per paid job ([`run_paid_job`]). Registering it
 /// under a `custom_id` is an operator action; nothing registers it by default.
+///
+/// # One VM per submission, and parallel submissions
+///
+/// A topic's **topic VM** is shared (one per topic: `attach` finds it, and the
+/// KVM host refuses a second `create` for the same topic), and it is where the
+/// cheap, non-paid jobs run (`inspect`, `propose_rules`). Every **paid** job
+/// gets a VM of its own: an experiment VM for a topic that selects an in-guest
+/// runner ([`run_paid_job`]), or the topic VM for one that does not — and
+/// either way the *submission* is what it belongs to, not the topic. That is
+/// [`proof_topic_install::VMS_PER_SUBMISSION`] (1) read as a runtime rule:
+/// two submissions in flight are two runs and two VMs, never one VM shared or
+/// one submission queued behind the other. The scorer holds no per-topic
+/// lease across a run (see `proof-rlm-scorer`'s `RlmScorer` docs); what
+/// serializes is the *write* after each run, not the run itself.
 pub struct VmBackedRunner {
     orchestrator: Arc<dyn TopicVmOrchestrator>,
     template: VmTemplate,

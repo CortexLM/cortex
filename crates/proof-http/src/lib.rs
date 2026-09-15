@@ -179,6 +179,35 @@ pub trait VmOrchestratorProbe: Send + Sync {
     async fn probe(&self) -> VmOrchestratorReport;
 }
 
+/// What the **submit** path needs from the journal, in one read.
+///
+/// Both fields are about the topic's install and the operator's switch, and
+/// both are read before anything is spent, so they are one call: a submission
+/// costs one gate read, not two.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubmitGate {
+    /// The operator's reason, when the topic is disabled (`topic disable`).
+    pub disabled_reason: Option<String>,
+    /// The `vms_per_submission` the topic's newest install recorded.
+    ///
+    /// `None` when the topic has no install row or the row predates the
+    /// field. `Some(n)` with `n != 1` is refused on the submit path: this
+    /// build runs **one VM per submission**, and a topic installed with a
+    /// different pin is one it cannot honour.
+    pub vms_per_submission: Option<u32>,
+}
+
+impl SubmitGate {
+    /// The operator gate, as the submit path reads it.
+    #[must_use]
+    pub fn disabled(reason: impl Into<String>) -> Self {
+        Self {
+            disabled_reason: Some(reason.into()),
+            ..Self::default()
+        }
+    }
+}
+
 /// Whether a topic's install reached `applied`, as the publish route reads it.
 ///
 /// A trait rather than a pool so the route can be exercised without a
@@ -194,26 +223,20 @@ pub trait InstallJournal: Send + Sync {
     /// publish: an unreadable journal is not an installed topic.
     async fn applied(&self, topic_id: &str) -> Result<bool, String>;
 
-    /// `Ok(Some(reason))` when an operator **disabled** `topic_id`, `Ok(None)`
-    /// when the topic was never disabled (or was enabled again).
-    ///
-    /// The submit path reads this and refuses a disabled topic with a 403
-    /// carrying the reason — before the single-use nonce is spent, so a miner
-    /// loses nothing to an operator's switch. It is the operator's incident
-    /// switch (`proof-admin topic disable`), and it needs no re-sign, no
-    /// restart, and no redeploy.
+    /// The operator gate and the allocator pin for one topic, for the submit
+    /// path.
     ///
     /// # Errors
     ///
     /// The reason the gate could not be read. The caller answers **503**: an
     /// unreadable gate is not an enabled topic.
-    async fn disabled(&self, topic_id: &str) -> Result<Option<String>, String>;
+    async fn submit_gate(&self, topic_id: &str) -> Result<SubmitGate, String>;
 
     /// Every topic currently disabled, with the operator's reason.
     ///
     /// One read for the public listing, which annotates each topic with the
     /// flag rather than paying a query per topic. The submit path uses
-    /// [`Self::disabled`] for the single topic it is admitting.
+    /// [`Self::submit_gate`] for the single topic it is admitting.
     ///
     /// # Errors
     ///
@@ -1788,13 +1811,18 @@ async fn install_gate(st: &AppState, topic_id: &str) -> Result<(), String> {
     }
 }
 
-/// The operator gate on the **submit** path: is this topic disabled?
+/// The operator gate on the **submit** path: is this topic disabled, and is
+/// its allocator pin one this build runs?
 ///
 /// `Ok(())` admits the submission. A disabled topic is a **403** naming the
-/// operator's reason; an unreadable gate is a **503** — never an admission,
-/// and never a 404 that would read as "no such topic". A host that resolved
-/// no journal (no database) has no gate to read: it also has no published
-/// topics, so the submission is refused by the topic lookup above it.
+/// operator's reason; a topic whose install recorded a
+/// `vms_per_submission` other than 1 is a **503** — this build runs exactly
+/// one VM per submission, and silently running a different number would make
+/// the journal a lie; an unreadable gate is a **503** too — never an
+/// admission, and never a 404 that would read as "no such topic". A host that
+/// resolved no journal (no database) has no gate to read: it also has no
+/// published topics, so the submission is refused by the topic lookup above
+/// it.
 ///
 /// This is deliberately **not cached**: a disable has to take effect on the
 /// next request, which is what makes it usable during an incident.
@@ -1802,9 +1830,21 @@ async fn disabled_gate(st: &AppState, topic_id: &str) -> Result<(), ErrResp> {
     let Some(journal) = st.install_journal.as_deref() else {
         return Ok(());
     };
-    match journal.disabled(topic_id).await {
-        Ok(None) => Ok(()),
-        Ok(Some(reason)) => Err(err(
+    let gate = match journal.submit_gate(topic_id).await {
+        Ok(gate) => gate,
+        Err(e) => {
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!(
+                    "the topic gate could not be read for {topic_id:?}: {e}. The submission is \
+                     refused rather than admitted on an unread fact; fix the database and re-post \
+                     (the submit_nonce is unspent)."
+                ),
+            ))
+        }
+    };
+    if let Some(reason) = gate.disabled_reason.as_deref() {
+        return Err(err(
             StatusCode::FORBIDDEN,
             &format!(
                 "topic {topic_id:?} is disabled by the operator{}",
@@ -1814,16 +1854,24 @@ async fn disabled_gate(st: &AppState, topic_id: &str) -> Result<(), ErrResp> {
                     format!(": {}", reason.trim())
                 }
             ),
-        )),
-        Err(e) => Err(err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            &format!(
-                "the topic gate could not be read for {topic_id:?}: {e}. The submission is \
-                 refused rather than admitted on an unread fact; fix the database and re-post \
-                 (the submit_nonce is unspent)."
-            ),
-        )),
+        ));
     }
+    if let Some(n) = gate.vms_per_submission {
+        if n != proof_topic_install::VMS_PER_SUBMISSION {
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!(
+                    "topic {topic_id:?} was installed with vms_per_submission={n}, but this host \
+                     runs exactly {} VM per submission (the pin this build enforces). Re-install \
+                     the topic with the pin this host carries, or run the host that matches the \
+                     install. The submission is refused rather than run under a binding the \
+                     install did not record; the submit_nonce is unspent.",
+                    proof_topic_install::VMS_PER_SUBMISSION
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn store_err(e: &proof_store::StoreError) -> (StatusCode, Json<serde_json::Value>) {
@@ -2972,6 +3020,63 @@ mod tests {
         assert_eq!(body["items"][0]["disabled"], false, "{body}");
     }
 
+    /// The allocator pin, read from the same journal: a topic installed with
+    /// `vms_per_submission` 1 (or with no install row at all) submits, and a
+    /// topic installed with any other number is refused **before the nonce is
+    /// spent** — this build runs one VM per submission, and running a topic
+    /// under a binding its install never recorded would make the journal a
+    /// lie.
+    #[tokio::test]
+    async fn a_topic_installed_under_another_allocator_pin_is_refused() {
+        // The pin this build carries: the submission lands.
+        let app = app_with_gate(Some(Arc::new(PinnedJournal {
+            vms_per_submission: Some(proof_topic_install::VMS_PER_SUBMISSION),
+        })));
+        let body = submit_body("pinned-ok", &serde_json::json!({}));
+        let (st, created) = json_req(app, "POST", "/v1/submissions", body, None).await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+
+        // No install row (a topic staged before the journal existed): the pin
+        // is unknown, and the topic is not refused for that.
+        let app = app_with_gate(Some(Arc::new(PinnedJournal {
+            vms_per_submission: None,
+        })));
+        let body = submit_body("unpinned", &serde_json::json!({}));
+        let (st, created) = json_req(app, "POST", "/v1/submissions", body, None).await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+
+        // A different pin: refused, and the body is re-postable unchanged.
+        let app = app_with_gate(Some(Arc::new(PinnedJournal {
+            vms_per_submission: Some(2),
+        })));
+        let body = submit_body("two-vms", &serde_json::json!({}));
+        let (st, refused) =
+            json_req(app.clone(), "POST", "/v1/submissions", body.clone(), None).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+        let error = refused["error"].as_str().unwrap_or_default();
+        assert!(error.contains("vms_per_submission=2"), "{refused}");
+        assert!(error.contains("unspent"), "{refused}");
+        let (_, list) = json_req(
+            app.clone(),
+            "GET",
+            "/v1/submissions",
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert!(
+            list["items"].as_array().is_some_and(Vec::is_empty),
+            "no row: {list}"
+        );
+
+        // Re-installed under the pin this host runs: the same body lands.
+        let app = app_with_gate(Some(Arc::new(PinnedJournal {
+            vms_per_submission: Some(proof_topic_install::VMS_PER_SUBMISSION),
+        })));
+        let (st, created) = json_req(app, "POST", "/v1/submissions", body, None).await;
+        assert_eq!(st, StatusCode::CREATED, "{created}");
+    }
+
     #[tokio::test]
     async fn submit_requires_a_hotkey_signature() {
         let app = app("op");
@@ -3647,8 +3752,8 @@ mod tests {
             Ok(true)
         }
 
-        async fn disabled(&self, _topic_id: &str) -> Result<Option<String>, String> {
-            Ok(None)
+        async fn submit_gate(&self, _topic_id: &str) -> Result<SubmitGate, String> {
+            Ok(SubmitGate::default())
         }
 
         async fn disabled_topics(&self) -> Result<BTreeMap<String, String>, String> {
@@ -3666,7 +3771,7 @@ mod tests {
             Err("journal unavailable".into())
         }
 
-        async fn disabled(&self, _topic_id: &str) -> Result<Option<String>, String> {
+        async fn submit_gate(&self, _topic_id: &str) -> Result<SubmitGate, String> {
             Err("gate unavailable".into())
         }
 
@@ -3684,8 +3789,8 @@ mod tests {
             Ok(false)
         }
 
-        async fn disabled(&self, _topic_id: &str) -> Result<Option<String>, String> {
-            Ok(None)
+        async fn submit_gate(&self, _topic_id: &str) -> Result<SubmitGate, String> {
+            Ok(SubmitGate::default())
         }
 
         async fn disabled_topics(&self) -> Result<BTreeMap<String, String>, String> {
@@ -3722,9 +3827,13 @@ mod tests {
             Ok(true)
         }
 
-        async fn disabled(&self, topic_id: &str) -> Result<Option<String>, String> {
+        async fn submit_gate(&self, topic_id: &str) -> Result<SubmitGate, String> {
             let on = self.disabled.load(std::sync::atomic::Ordering::SeqCst);
-            Ok((on && topic_id == self.topic_id).then(|| self.reason.clone()))
+            Ok(if on && topic_id == self.topic_id {
+                SubmitGate::disabled(self.reason.clone())
+            } else {
+                SubmitGate::default()
+            })
         }
 
         async fn disabled_topics(&self) -> Result<BTreeMap<String, String>, String> {
@@ -3734,6 +3843,31 @@ mod tests {
             } else {
                 BTreeMap::new()
             })
+        }
+    }
+
+    /// A journal whose newest install recorded a `vms_per_submission` the
+    /// running host does not carry: the submit path must refuse rather than
+    /// run the topic under a binding the install never recorded.
+    struct PinnedJournal {
+        vms_per_submission: Option<u32>,
+    }
+
+    #[async_trait]
+    impl InstallJournal for PinnedJournal {
+        async fn applied(&self, _topic_id: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        async fn submit_gate(&self, _topic_id: &str) -> Result<SubmitGate, String> {
+            Ok(SubmitGate {
+                disabled_reason: None,
+                vms_per_submission: self.vms_per_submission,
+            })
+        }
+
+        async fn disabled_topics(&self) -> Result<BTreeMap<String, String>, String> {
+            Ok(BTreeMap::new())
         }
     }
 

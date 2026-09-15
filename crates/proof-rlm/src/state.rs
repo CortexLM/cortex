@@ -183,6 +183,26 @@ pub enum StateError {
 
 /// The transition table. Every edge is explicit; anything else is illegal.
 ///
+/// # More than one run at a time
+///
+/// A topic takes **several submissions at once** — each is its own paid run in
+/// its own Firecracker VM — so the table has the edges that state needs, and
+/// they are all of the "stay where you are" shape:
+///
+/// - `evaluating --submission_received--> evaluating`: a second run starts
+///   while the first is still evaluating.
+/// - `promoting --submission_received--> evaluating`: a new run arrives while
+///   an earlier one is settling its promotion.
+/// - `promoting --promotion_candidate--> promoting`: two runs both decide to
+///   promote; the store's compare-and-swap decides which crown lands.
+/// - `promoting --verdict_recorded--> open`: the last run out records a plain
+///   verdict while a promotion was still open; the promotion row (written
+///   under the same lock) is the record of what happened, not this state.
+///
+/// The lifecycle is therefore a *phase* marker ("is this topic evaluating
+/// something?"), not a per-run counter. The per-run count lives in the scorer,
+/// which is what decides when a phase is stale.
+///
 /// # Errors
 ///
 /// [`StateError::Illegal`] for a pair the table does not name.
@@ -194,15 +214,20 @@ pub fn transition(from: RlmState, event: RlmEvent) -> Result<RlmState, StateErro
         (S::OwnerPresend, E::OwnerApproved) => S::AwaitingOwnerKeys,
         (S::AwaitingOwnerKeys, E::OwnerKeysPresent) => S::Provisioning,
         (S::Provisioning, E::Provisioned) => S::Baselining,
-        (S::Open, E::SubmissionReceived) => S::Evaluating,
-        (S::Evaluating, E::PromotionCandidate) => S::Promoting,
+        // A submission on an open topic starts evaluating; another one while
+        // it is already evaluating (or settling a promotion) keeps the phase:
+        // the run is separate, the phase is not per-run.
+        (S::Open | S::Evaluating | S::Promoting, E::SubmissionReceived) => S::Evaluating,
+        // Two runs both deciding to promote keep the phase; the store's
+        // compare-and-swap decides which crown lands.
+        (S::Evaluating | S::Promoting, E::PromotionCandidate) => S::Promoting,
         // Back to draft: the owner said no, or the ceremony failed.
         (S::OwnerPresend, E::OwnerDeclined)
         | (S::Provisioning, E::ProvisionFailed)
         | (S::Baselining, E::BaselineFailed) => S::Draft,
         // Back to open: sealed, verdict recorded, or promotion settled.
         (S::Baselining, E::BaselineSealed)
-        | (S::Evaluating, E::VerdictRecorded)
+        | (S::Evaluating | S::Promoting, E::VerdictRecorded)
         | (S::Promoting, E::Promoted | E::PromotionRefused) => S::Open,
         (S::Closed, _) => return Err(StateError::Illegal { from, event }),
         (_, E::Close) => S::Closed,
@@ -618,6 +643,43 @@ mod tests {
             transition(RlmState::Promoting, RlmEvent::PromotionRefused),
             Ok(RlmState::Open)
         );
+    }
+
+    /// A topic takes several submissions at once, so the table has the edges
+    /// parallel runs need — and they are all "the phase stays, the run is
+    /// separate". The scorer owns the per-run count; the lifecycle is a phase
+    /// marker, not a counter.
+    #[test]
+    fn a_second_run_while_one_is_in_flight_keeps_the_phase() {
+        assert_eq!(
+            transition(RlmState::Evaluating, RlmEvent::SubmissionReceived),
+            Ok(RlmState::Evaluating),
+            "a second submission does not restart the phase"
+        );
+        assert_eq!(
+            transition(RlmState::Promoting, RlmEvent::SubmissionReceived),
+            Ok(RlmState::Evaluating),
+            "a new run arrives while an earlier one settles its promotion"
+        );
+        assert_eq!(
+            transition(RlmState::Promoting, RlmEvent::PromotionCandidate),
+            Ok(RlmState::Promoting),
+            "two runs both decide to promote; the store's cas decides"
+        );
+        assert_eq!(
+            transition(RlmState::Promoting, RlmEvent::VerdictRecorded),
+            Ok(RlmState::Open),
+            "the last run out records a plain verdict"
+        );
+        // Still no way to skip a state, and closed is still terminal.
+        assert!(matches!(
+            transition(RlmState::Open, RlmEvent::SubmissionReceived),
+            Ok(RlmState::Evaluating)
+        ));
+        assert!(matches!(
+            transition(RlmState::Closed, RlmEvent::SubmissionReceived),
+            Err(StateError::Illegal { .. })
+        ));
     }
 
     /// Without a hook the machine cannot leave owner_presend: nothing is
