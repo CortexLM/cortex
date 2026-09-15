@@ -1551,12 +1551,22 @@ mod tests {
     /// Every product module that decides what a topic may do, and must
     /// therefore be **topic-agnostic**.
     ///
-    /// Listed by directory rather than one file at a time: a new module in one
-    /// of these crates is guarded the moment it is added, instead of being
-    /// silently unguarded until someone remembers this list. That is how
-    /// `proof-challenge/src/topic_routes.rs` came to be missing here — the
-    /// hand-maintained list, not the check, was the hole.
-    const PRODUCT_MODULES: [(&str, &str); 10] = [
+    /// Listed one file at a time rather than by globbing the directories:
+    /// `include_str!` needs literal paths, and a glob would silently widen the
+    /// guard's surface when a new file lands. The cost is that a new product
+    /// module has to be added here — which is why
+    /// `the_product_branch_guard_catches_what_it_claims_to` asserts the list
+    /// still names the file the check was written for, and why the crates
+    /// carrying a module here are the ones whose whole surface is a product
+    /// branch.
+    ///
+    /// The modules the crates' own guards also cover are included: those
+    /// guards strip test code with `split("#[cfg(test)]").next()`, which
+    /// stops at the first marker even when it annotates a method rather than a
+    /// module. Running the same sources through the structural strip here
+    /// means a literal hidden after such a marker is caught even if the
+    /// crate-local guard misses it.
+    const PRODUCT_MODULES: [(&str, &str); 18] = [
         (
             "proof-challenge/src/topic_routes.rs",
             include_str!("../../proof-challenge/src/topic_routes.rs"),
@@ -1597,10 +1607,47 @@ mod tests {
             "proof-rlm/src/runner.rs",
             include_str!("../../proof-rlm/src/runner.rs"),
         ),
+        (
+            "proof-rlm/src/lib.rs",
+            include_str!("../../proof-rlm/src/lib.rs"),
+        ),
+        (
+            "proof-rlm/src/gate.rs",
+            include_str!("../../proof-rlm/src/gate.rs"),
+        ),
+        (
+            "proof-rlm/src/rules.rs",
+            include_str!("../../proof-rlm/src/rules.rs"),
+        ),
+        (
+            "proof-rlm/src/state.rs",
+            include_str!("../../proof-rlm/src/state.rs"),
+        ),
+        (
+            "proof-experiment/src/lib.rs",
+            include_str!("../../proof-experiment/src/lib.rs"),
+        ),
+        (
+            "proof-experiment/src/policy.rs",
+            include_str!("../../proof-experiment/src/policy.rs"),
+        ),
+        (
+            "proof-topic-install/src/lib.rs",
+            include_str!("../../proof-topic-install/src/lib.rs"),
+        ),
+        (
+            "proof-topic-install/src/handler.rs",
+            include_str!("../../proof-topic-install/src/handler.rs"),
+        ),
     ];
 
     /// The literals a product branch may not carry: a topic id, a benchmark
     /// name, or a results-contract id.
+    ///
+    /// `harbor-trials` is on the list even though `proof-results` legitimately
+    /// defines the contract id: that crate is not in [`PRODUCT_MODULES`]
+    /// because the id **is** its interface — a signed document pins it — while
+    /// no module here may branch on it.
     const FORBIDDEN_LITERALS: [&str; 5] = [
         "tbench",
         "tb4",
