@@ -2036,7 +2036,7 @@ mod tests {
         // ceilings are public regardless.
         assert!(body["eval_executor"].is_null(), "{body}");
         assert_eq!(body["executor"]["gpu_class"], "1x");
-        assert_eq!(body["executor"]["max_proof_deadline_s_ceiling"], 7_200);
+        assert_eq!(body["executor"]["max_proof_deadline_s_ceiling"], 14_400);
     }
 
     #[tokio::test]
@@ -2077,7 +2077,7 @@ mod tests {
         assert_eq!(view["ready"], true, "{view}");
         assert!(view["reason"].is_null(), "{view}");
         assert_eq!(view["eval_executor"]["offer_id"], "lium-1x-v0");
-        assert_eq!(view["pin"]["max_proof_deadline_s_ceiling"], 7_200);
+        assert_eq!(view["pin"]["max_proof_deadline_s_ceiling"], 14_400);
         let dump = view.to_string();
         assert!(!dump.contains("api_key"), "{dump}");
         assert!(!dump.contains("/run/base"), "{dump}");

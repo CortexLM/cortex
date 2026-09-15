@@ -108,7 +108,7 @@ fn committed_pin_is_proof_with_a_real_eval_digest() {
 }
 
 /// The executor ceilings are the 2026-09-08 lock: schema 1, `1x` only,
-/// two-hour deadline ceiling, sha256 commitment, and a `proof-eval-` template
+/// four-hour deadline ceiling, sha256 commitment, and a `proof-eval-` template
 /// allowlist that matches the digest-scoped harvest template name.
 #[test]
 fn committed_pin_locks_the_one_gpu_executor_ceilings() {
@@ -117,7 +117,7 @@ fn committed_pin_locks_the_one_gpu_executor_ceilings() {
     assert_eq!(p.gpu_class, EVAL_EXECUTOR_GPU_CLASS);
     assert_eq!(p.gpu_class, "1x");
     assert_eq!(p.max_proof_deadline_s_ceiling, MAX_PROOF_DEADLINE_S_CEILING);
-    assert_eq!(p.max_proof_deadline_s_ceiling, 7_200);
+    assert_eq!(p.max_proof_deadline_s_ceiling, 14_400);
     assert_eq!(p.eval_executor_commitment_alg, EVAL_EXECUTOR_COMMITMENT_ALG);
     assert_eq!(p.allowed_lium_template_prefixes, vec!["proof-eval-"]);
     let digest_hex = p.eval_image_digest.trim_start_matches("sha256:");

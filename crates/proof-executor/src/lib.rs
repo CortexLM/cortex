@@ -505,12 +505,12 @@ mod tests {
         );
         assert!(matches!(
             over.validate(&p),
-            Err(ExecutorOfferError::BadDeadline(7_201, 7_200))
+            Err(ExecutorOfferError::BadDeadline(14_401, 14_400))
         ));
         let zero = offer_for("proof-eval-78b614a1f51c", 0, &p);
         assert!(matches!(
             zero.validate(&p),
-            Err(ExecutorOfferError::BadDeadline(0, 7_200))
+            Err(ExecutorOfferError::BadDeadline(0, 14_400))
         ));
         let mut tight = p.clone();
         tight.max_proof_deadline_s_ceiling = 3_600;

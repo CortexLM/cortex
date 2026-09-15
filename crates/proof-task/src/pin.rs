@@ -508,7 +508,7 @@ max_output_tokens_ceiling = 8192
 inference_offer_commitment_alg = "sha256"
 eval_executor_schema_version = 1
 gpu_class = "1x"
-max_proof_deadline_s_ceiling = 7200
+max_proof_deadline_s_ceiling = 14400
 allowed_lium_template_prefixes = ["proof-eval-"]
 eval_executor_commitment_alg = "sha256"
 eval_image = "{EVAL_IMAGE}"
@@ -530,7 +530,7 @@ stratum_size = 24
         assert!(p.proxy_model.is_empty());
         assert!(p.proxy_models.is_empty());
         assert_eq!(p.gpu_class, "1x");
-        assert_eq!(p.max_proof_deadline_s_ceiling, 7_200);
+        assert_eq!(p.max_proof_deadline_s_ceiling, 14_400);
         assert_eq!(p.allowed_lium_template_prefixes, vec!["proof-eval-"]);
         assert!(p.allows_template("proof-eval-78b614a1f51c"));
         assert!(!p.allows_template("prism-recipe-v10"));
@@ -597,6 +597,9 @@ topic_pubkey = "{}"
     #[test]
     fn deadline_ceiling_may_tighten_never_loosen() {
         let mut p = pin();
+        p.max_proof_deadline_s_ceiling = MAX_PROOF_DEADLINE_S_CEILING;
+        p.validate().expect("the crate lock is legal");
+        assert_eq!(MAX_PROOF_DEADLINE_S_CEILING, 14_400);
         p.max_proof_deadline_s_ceiling = 3_600;
         p.validate().expect("tighter ceiling is legal");
         p.max_proof_deadline_s_ceiling = MAX_PROOF_DEADLINE_S_CEILING + 1;
