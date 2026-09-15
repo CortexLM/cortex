@@ -18,9 +18,11 @@
 //!   `VACUUM` / `CLUSTER` / `REINDEX`, `SECURITY DEFINER` functions, and
 //!   server-side file access (`pg_read_file`, `lo_import`, …).
 //! - **Namespace**: every table a statement creates, writes, or reads must be
-//!   inside the topic's own namespace (`{topic_id}_*`, `topic_*`, or
-//!   `{topic_id}.…`). Without this a topic could claim a generic name and
-//!   collide with the next topic's install, or read a sibling topic's rows.
+//!   inside the topic's own namespace (`{topic_sql_prefix}_*`, or
+//!   `{topic_sql_prefix}.…` — the id with `-` mapped to `_`, since a topic id
+//!   is a hyphen slug and a bare SQL identifier cannot contain a hyphen).
+//!   Without this a topic could claim a generic name and collide with the next
+//!   topic's install, or read a sibling topic's rows.
 //!
 //! # What this is not
 //!
@@ -1043,12 +1045,37 @@ fn copy_chars(
     idx
 }
 
+/// The SQL-safe spelling of a topic id.
+///
+/// A topic id is a hyphen slug (`[a-z0-9][a-z0-9-]{1,62}`) and **may not
+/// contain an underscore**, while a bare SQL identifier is
+/// `[a-z_][a-z0-9_$]*` and **may not contain a hyphen** — the two alphabets do
+/// not intersect except on `[a-z0-9]`. So the literal id can never prefix a
+/// bare identifier: `CREATE TABLE fixture-topic-v0_scratch` is a syntax error
+/// at the first `-`, and the guard's own `{topic_id}_*` requirement would be
+/// unsatisfiable for every real topic.
+///
+/// Mapping `-` → `_` gives the topic an identifier-safe prefix. It stays a
+/// **boundary**: ids contain no underscores, so the mapping is injective —
+/// two different ids cannot collide on one prefix, and a name scoped to
+/// another topic's prefix cannot match this one.
+#[must_use]
+pub fn topic_sql_prefix(topic_id: &str) -> String {
+    topic_id.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 /// Whether `name` is inside `topic_id`'s namespace.
 ///
 /// Two spellings are the topic's, and only two:
 ///
 /// - a `{topic_id}`-qualified name (`tb4.scores`, `tb4.runs`), or
 /// - a bare `{topic_id}_`-prefixed name (`tb4_scores`).
+///
+/// For an id containing a hyphen the identifier-safe form
+/// ([`topic_sql_prefix`], `fixture-topic-v0` → `fixture_topic_v0`) is accepted
+/// in both positions, because the literal id cannot appear in a bare SQL
+/// identifier at all. The literal spelling stays accepted too, for the ids
+/// that need no mapping and for quoted schema-qualified names.
 ///
 /// # Why there is no generic `topic_` allowance
 ///
@@ -1072,14 +1099,15 @@ pub fn is_topic_scoped(name: &str, topic_id: &str) -> bool {
         return false;
     }
     let topic = topic_id.trim().to_ascii_lowercase();
+    let sql_topic = topic_sql_prefix(&topic);
     let (schema, bare) = match n.split_once('.') {
         Some((s, b)) => (Some(s), b),
         None => (None, n.as_str()),
     };
-    if schema == Some(topic.as_str()) {
+    if schema == Some(topic.as_str()) || schema == Some(sql_topic.as_str()) {
         return true;
     }
-    bare.starts_with(&format!("{topic}_"))
+    bare.starts_with(&format!("{topic}_")) || bare.starts_with(&format!("{sql_topic}_"))
 }
 
 /// Check a statement's text against every deny rule.
@@ -1164,9 +1192,11 @@ fn check_text(
             return Err(deny(
                 &name,
                 &format!(
-                    "a topic migration may only touch objects named {topic_id}_*, topic_*, or \
-                     {topic_id}.*; an unscoped name would collide with — or read — another \
-                     topic's install"
+                    "a topic migration may only touch objects named {sql}_* (or {id}_*), \
+                     {sql}.* (or {id}.*); an unscoped name would collide with — or read — \
+                     another topic's install",
+                    sql = topic_sql_prefix(topic_id),
+                    id = topic_id
                 ),
             ));
         }

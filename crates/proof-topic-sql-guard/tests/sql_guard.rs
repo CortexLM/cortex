@@ -14,7 +14,8 @@
 
 use proof_topic_sql_guard::MigrationDenied;
 use proof_topic_sql_guard::{
-    blank_statements, check_migration, is_topic_scoped, split_statements, OWNED_TABLES,
+    blank_statements, check_migration, is_topic_scoped, split_statements, topic_sql_prefix,
+    OWNED_TABLES,
 };
 
 const TOPIC: &str = "tb4";
@@ -266,6 +267,81 @@ fn a_topics_own_namespace_is_allowed() {
     assert!(!is_topic_scoped("tb40_scratch", "tb4"));
     assert!(!is_topic_scoped("tb_scratch", "tb4"));
     assert!(!is_topic_scoped("", "tb4"));
+}
+
+/// A real topic id is a **hyphen slug**, and a bare SQL identifier cannot
+/// contain a hyphen — so the guard has to accept the identifier-safe spelling
+/// or no real topic could ever install a migration.
+///
+/// The defect this pins: the guard required a literal `{topic_id}_` prefix.
+/// Every live topic id is `[a-z0-9][a-z0-9-]{1,62}`, so the requirement was
+/// unsatisfiable: `CREATE TABLE fixture-topic-v0_scratch` is a syntax error at
+/// the first `-`, and the underscore spelling was refused. `--drive-rlm` would
+/// provision the VM, run the paid baseline, and only then fail the install on
+/// the deny-list — a paid run that could never publish.
+#[test]
+fn a_hyphenated_topic_id_has_an_identifier_safe_namespace() {
+    // The mapping is `-` → `_`. It is injective **over legal ids**: an id
+    // cannot contain an underscore (`[a-z0-9][a-z0-9-]{1,62}`), so two
+    // different real ids cannot collide on one prefix.
+    assert_eq!(topic_sql_prefix("fixture-topic-v0"), "fixture_topic_v0");
+    assert_eq!(topic_sql_prefix("tb4"), "tb4");
+    assert_ne!(
+        topic_sql_prefix("a-b"),
+        topic_sql_prefix("a-b-c"),
+        "different ids map to different prefixes"
+    );
+
+    // The identifier-safe spelling is inside the topic's namespace…
+    assert!(is_topic_scoped(
+        "fixture_topic_v0_scratch",
+        "fixture-topic-v0"
+    ));
+    assert!(is_topic_scoped("fixture_topic_v0.runs", "fixture-topic-v0"));
+    // …the literal spelling stays accepted where it is legal (quoted / schema)
+    assert!(is_topic_scoped("fixture-topic-v0.runs", "fixture-topic-v0"));
+    // …and a sibling is still refused, in both spellings.
+    assert!(!is_topic_scoped(
+        "fixture_topic_v1_scratch",
+        "fixture-topic-v0"
+    ));
+    assert!(!is_topic_scoped("other_topic_scratch", "fixture-topic-v0"));
+    assert!(!is_topic_scoped("topic_scratch", "fixture-topic-v0"));
+}
+
+/// The whole pipeline, end to end: a hyphenated topic's migration is
+/// **allowed**, and a sibling's table is still refused.
+#[test]
+fn a_hyphenated_topics_migration_is_admitted() {
+    let topic = "fixture-topic-v0";
+    // The exact statement the operator fixture carries.
+    allowed_for("CREATE TABLE fixture_topic_v0_scratch (id TEXT)", topic);
+    allowed_for(
+        "CREATE INDEX fixture_topic_v0_scratch_id ON fixture_topic_v0_scratch (id)",
+        topic,
+    );
+    allowed_for(
+        "INSERT INTO fixture_topic_v0_scratch (id) VALUES ('a')",
+        topic,
+    );
+
+    // A sibling topic's table is not this topic's, however similar.
+    for sql in [
+        "CREATE TABLE fixture_topic_v1_scratch (id TEXT)",
+        "CREATE TABLE topic_scratch (id TEXT)",
+        "SELECT id FROM proof_rule_version",
+    ] {
+        assert!(
+            check_migration(sql, topic).is_err(),
+            "{sql:?} must be refused for {topic}"
+        );
+    }
+}
+
+/// [`allowed`], for an arbitrary topic id.
+fn allowed_for(sql: &str, topic: &str) {
+    check_migration(sql, topic)
+        .unwrap_or_else(|e| panic!("{sql:?} must be allowed for {topic}: {e}"));
 }
 
 /// A quoted identifier still names an object, so quoting cannot smuggle a

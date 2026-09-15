@@ -67,8 +67,8 @@ pub use install::{
 };
 pub use proof_topic_sql_guard::{
     blank_statements, check_migration, check_statement, is_topic_scoped, split_statements,
-    MigrationDenied, Statement, DENIED_DROP_KINDS, DENIED_FUNCTIONS, DENIED_OBJECTS, DENIED_VERBS,
-    OWNED_TABLES, OWNED_TABLE_PREFIX,
+    topic_sql_prefix, MigrationDenied, Statement, DENIED_DROP_KINDS, DENIED_FUNCTIONS,
+    DENIED_OBJECTS, DENIED_VERBS, OWNED_TABLES, OWNED_TABLE_PREFIX,
 };
 pub use routes::{is_topic_id, PgTopicRoutes, Resolved, TopicRouteMux, TopicRouteSource};
 pub use section::{

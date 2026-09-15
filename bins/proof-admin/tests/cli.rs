@@ -1193,7 +1193,14 @@ async fn the_registry_view_lists_what_the_scoring_path_persisted() {
     let listed: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
     assert_eq!(listed[0]["topic_id"], "fixture-topic-v0");
     assert_eq!(listed[0]["version"], 1);
-    assert_eq!(listed[0]["custom_id"], "fixture-alias");
+    // `custom_id` is the runner-registry key the document names
+    // (`metric.custom_id`), not the topic's alias — the two are different
+    // mappings, and the alias is `fixture-alias`.
+    assert_eq!(listed[0]["custom_id"], "fixture_metric_v0");
+    assert_ne!(
+        listed[0]["custom_id"], "fixture-alias",
+        "an alias is a slug lookup, not the custom id"
+    );
 
     let out = run_db(&["--json", "topic", "show", "fixture-topic-v0"]);
     assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
