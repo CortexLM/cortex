@@ -486,7 +486,7 @@ mod tests {
     fn a_full_section_reads_every_part_this_install_applies() {
         let plan = read_section(
             r#"{"rules": [{"id": "no_short_circuit", "text": "run the task"}],
-                "migrations": [{"name": "0001_scratch", "sql": "CREATE TABLE tb4_scratch (id TEXT)"}],
+                "migrations": [{"name": "0001_scratch", "sql": "CREATE TABLE topic_scratch (id TEXT)"}],
                 "apis": [{"path": "status", "method": "get", "summary": "topic status"}],
                 "submission_format": {"kind": "tar", "max_bytes": 5242880},
                 "scoring": {"primary": "success_rate"},

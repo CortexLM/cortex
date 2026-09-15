@@ -262,10 +262,13 @@ the gateway, the orchestrator, or this CLI — no `if topic == "tb4"` branch,
 no rule list, no metric, no submit format. A topic's behavior travels in its
 signed document and its RLM section.
 
-The seed slug `tb4` and its temporary alias `tbench` are **strings** that
-appear in test fixtures and operator examples. They are never a condition in
-logic, and two tests fail the build if that changes: one over the bundle
-crate's non-test source, one over the CLI's.
+The topic's own slug and its alias are **strings** that appear in test
+fixtures and operator examples. They are never a condition in logic, and no
+slug is a system default: which topics exist is a fact about the published
+documents and the install journal. Guard tests fail the build if that changes
+— one over the bundle crate's non-test source, one over the CLI's, and a
+repo-wide one over the challenge / gateway / orchestrator / guest product
+branches.
 
 The install plan prints the hand-off first and the RLM's own lifecycle steps
 (`provision -> propose_rules -> baseline`, the existing `TopicSetup` driver),
@@ -286,15 +289,36 @@ with without claiming to understand them.
 
 ### Locked defaults
 
+There is **no compiled-in topic**. Which topics exist is a fact about the
+database (the signed documents in `proof_topic_version` plus the install
+journal), and every binding a topic needs travels in its own signed document
+or its RLM section. The table below is what the *system* pins; a topic's slug,
+alias, and custom id are its own data, chosen when the operator signs and
+installs it.
+
 | Default | Value | Where |
 |---------|-------|-------|
-| First topic slug | **`tb4`** | the signed document's `id` |
-| Temporary alias | **`tbench`** | `proof_topic_alias` row `tbench → tb4` (migration `0024`) |
+| Topic slug | **the signed document's `id`** — no default | `proof_topic_version` |
+| Alias | **whatever the bundle declares** — none by default | `proof_topic_alias` (migration `0024`) |
 | Storage | **shared challenge DB**, `topic_id` discriminant | `proof_topic_version` (no per-topic schema) |
 | Metal install | **Owner-only, staging first** | `--owner-metal-ack` gate |
 | Driving the RLM | **Owner-only** (provisions a VM, runs a paid baseline) | `--drive-rlm` + `--owner-approved` |
 | VMs per submission | **1** (the allocator pin) | recorded in `proof_topic_install.binding` |
-| Custom id | `tbench` | the document's `metric.custom_id` |
+| Custom id | **the document's `metric.custom_id`** — registered per host | `PROOF_VM_RUNNER_CUSTOM_IDS` |
+| Rule provenance | **`rlm`** for anything scored | `proof_rule_version.source` |
+
+**A topic's behavior is authored by its RLM, and the store proves it.** An
+install seeds rule version 1 from the operator's signed `checklist` with
+source `topic_document` — honest provenance, and *not* a substitute for RLM
+authorship. Only the topic's own `propose_rules` job inside its topic VM
+advances the store to `rlm`, and the guest refuses to echo the signed
+checklist back as if the RLM had written it. Two gates read that provenance
+and fail closed: the **publish gate** refuses an `open` document whose newest
+install is not `applied` or whose rules are not `rlm`-authored, and the
+challenge's topic loader **skips** such a document at boot (logging the
+provenance) rather than admitting it into `open_topics` / `scorable_topics`.
+A `draft` document is admitted as-is: it is not submitable, and holding it is
+how the host knows the topic exists while its install is still being applied.
 
 **Schema:** `0024_proof_topic_alias.sql` adds `proof_topic_alias` and a
 `BEFORE INSERT`/`UPDATE` trigger pair that makes an alias collision with a
@@ -306,17 +330,18 @@ nor `DROP`s anything, so the `0020` tables keep their columns, keys, and
 grants. The route table stores paths **relative** to the topic's prefix, so a
 row cannot carry an absolute path that escapes the topic's namespace.
 
-`tbench` is two different things and they are not the same mapping: it is the
-topic's **alias** (`show tbench` resolves to `tb4`) and also the runner
-registry's **custom id** (`PROOF_VM_RUNNER_CUSTOM_IDS=tbench`). The alias is
-temporary — retire it with `proof-admin topic alias rm tbench` once miner
-links move — while the custom id is the scoring binding and stays.
+An alias and a custom id are **two different mappings** and neither is
+derived from the other: the alias is a topic-slug lookup (`show <alias>`
+resolves to the canonical slug), while the custom id is the runner-registry
+key that makes a custom topic scorable (`PROOF_VM_RUNNER_CUSTOM_IDS`). An
+alias is temporary and retiring it is deleting the row; the custom id is the
+scoring binding and stays for as long as the document names it.
 
 ```bash
-proof-admin topic alias set tbench --topic tb4   # the locked default
-proof-admin topic alias list --topic tb4
-proof-admin topic show tbench                    # resolves to tb4
-proof-admin topic alias rm tbench                # retire the temporary alias
+proof-admin topic alias set <alias> --topic <slug>   # the bundle's own alias
+proof-admin topic alias list --topic <slug>
+proof-admin topic show <alias>                       # resolves to <slug>
+proof-admin topic alias rm <alias>                   # retire it
 ```
 
 An alias carries only `alias → topic_id`: no name, no pins, no status. It

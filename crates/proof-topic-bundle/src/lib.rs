@@ -32,9 +32,11 @@
 //! code. A topic's behavior travels in its signed document and its RLM
 //! section, never in this binary.
 //!
-//! Consequence for tests and fixtures: the seed slug `tb4` and its temporary
-//! alias `tbench` are **strings** that appear in test fixtures and operator
-//! examples. They are never a condition in logic.
+//! Consequence for tests and fixtures: topic slugs are **strings** that appear
+//! in test fixtures and operator examples. They are never a condition in
+//! logic, and no slug is an "owner default" — the topic registry is the
+//! database, and which topics exist is a fact about the operator's published
+//! documents, not about this build.
 //!
 //! Three rules carry the fail-closed posture:
 //!
@@ -529,11 +531,11 @@ pub struct TopicInstallBundle {
     /// Temporary compatibility slugs this topic answers to, if the bundle
     /// declares any.
     ///
-    /// Owner default: the first topic's slug is `tb4` with `tbench` as a
-    /// **temporary** alias so existing miner links keep resolving. An alias
-    /// is not topic data — the topic's identity is its signed document's
-    /// `id` — so this is a bundle field that becomes a `proof_topic_alias`
-    /// row, and retiring it is deleting the row.
+    /// An alias is a **lookup key**, not topic data: the topic's identity is
+    /// its signed document's `id`, so an alias is a bundle field that becomes
+    /// a `proof_topic_alias` row, and retiring it is deleting the row. There
+    /// is no owner default — a bundle declares the aliases its topic needs,
+    /// and a bundle that declares none installs none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
     /// What the topic's RLM installs. Opaque to Rust: see [`RlmSection`].
@@ -1265,6 +1267,77 @@ mod tests {
         // are the section's shape.
         for key in RLM_KEYS {
             assert!(logic.contains(key), "the section shape must name {key}");
+        }
+    }
+
+    /// No topic id is compiled into the **product** branches that decide what
+    /// a topic may do: the challenge service, the gateway, the topic-VM
+    /// orchestrator, or the guest.
+    ///
+    /// This is the repo-wide half of [`no_topic_literal_appears_in_this_crates_logic`].
+    /// Each of those crates has its own guard for its own logic; this one
+    /// exists because the boundary is **cross-crate** — a topic id that
+    /// appeared in, say, the gateway's routing or the guest's job dispatch
+    /// would be a data-driven path turning back into a hardcoded one, and no
+    /// single crate's guard would see it.
+    ///
+    /// The check reads the crates' own source at compile time, so it cannot
+    /// drift from the tree. Comments are stripped: prose may explain the rule,
+    /// a literal in a `let` / `match` / `if` may not.
+    #[test]
+    fn no_topic_id_is_compiled_into_the_product_branches() {
+        // Every entry is `(label, source)` for a product module whose
+        // behavior must be topic-agnostic. Test-only modules are excluded by
+        // construction: the paths name non-test files, and the strip below
+        // removes any `#[cfg(test)]` block.
+        let sources: [(&str, &str); 6] = [
+            (
+                "gateway-core/src/topic_routes.rs",
+                include_str!("../../gateway-core/src/topic_routes.rs"),
+            ),
+            (
+                "gateway-core/src/admin_route.rs",
+                include_str!("../../gateway-core/src/admin_route.rs"),
+            ),
+            (
+                "proof-vm-guest/src/runner.rs",
+                include_str!("../../proof-vm-guest/src/runner.rs"),
+            ),
+            (
+                "proof-vm-guest/src/lib.rs",
+                include_str!("../../proof-vm-guest/src/lib.rs"),
+            ),
+            (
+                "proof-rlm/src/vm.rs",
+                include_str!("../../proof-rlm/src/vm.rs"),
+            ),
+            (
+                "proof-rlm/src/runner.rs",
+                include_str!("../../proof-rlm/src/runner.rs"),
+            ),
+        ];
+        for (label, source) in sources {
+            let non_test = source.split("#[cfg(test)]").next().unwrap_or("");
+            let logic: String = non_test
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .to_lowercase();
+            for forbidden in [
+                "tbench",
+                "tb4",
+                "terminal-bench",
+                "terminal bench",
+                "harbor-trials",
+            ] {
+                assert!(
+                    !logic.contains(forbidden),
+                    "{label} names {forbidden:?}: which topics exist and what they score is \
+                     topic data (a signed document + the install journal), never a compiled \
+                     branch"
+                );
+            }
         }
     }
 

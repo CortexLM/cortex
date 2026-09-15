@@ -482,6 +482,14 @@ impl Installer<'_> {
     /// an existing current rule set is returned untouched, which is what keeps
     /// a topic whose RLM has already written version 2 from being reset to
     /// the bundle's vector.
+    ///
+    /// Provenance is the point here. What this seeds is `topic_document`: the
+    /// vector the **operator** signed. That is honest provenance, not a
+    /// substitute for RLM authorship — the topic's RLM advances the store to
+    /// `rlm` by running its own `propose_rules` job in its VM
+    /// ([`proof_topic_setup::TopicSetup`]). An install therefore never makes a
+    /// topic's behavior RLM-authored, and the gates that admit an `open` topic
+    /// read the provenance rather than this row's presence.
     async fn install_rules(
         &self,
         request: &InstallRequest<'_>,
@@ -732,6 +740,51 @@ pub async fn applied_install(pool: &PgPool, topic_id: &str) -> Result<bool, Inst
 /// [`InstallError::Db`].
 pub async fn is_installed(pool: &PgPool, topic_id: &str) -> Result<bool, InstallError> {
     applied_install(pool, topic_id).await
+}
+
+/// Whether the topic's **newest** rule version was authored by its RLM.
+///
+/// The provenance half of the publish gate. `proof_rule_version.source` is
+/// written by the store, not by a caller: `topic_document` means the vector is
+/// still the operator's signed checklist (the install seeds it that way) and
+/// `rlm` means the topic's own RLM authored it inside the topic VM. An
+/// `operator` edit is an operator's vector too, so it does not count.
+///
+/// Read straight from the column so the answer does not depend on the rule
+/// bodies still deserializing. A topic with **no** rule row is `false`: an
+/// install always leaves one, so its absence means nothing was installed.
+///
+/// # Errors
+///
+/// [`InstallError::Db`].
+pub async fn rlm_authored_rules(pool: &PgPool, topic_id: &str) -> Result<bool, InstallError> {
+    let source: Option<String> = sqlx::query_scalar(
+        "SELECT source FROM proof_rule_version WHERE topic_id = $1 ORDER BY version DESC LIMIT 1",
+    )
+    .bind(topic_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| InstallError::Db(e.to_string()))?;
+    Ok(source.as_deref() == Some("rlm"))
+}
+
+/// [`rlm_authored_rules`] as the operator-facing provenance word.
+///
+/// `None` when the topic has no rule row at all. Used by the gate refusals so
+/// an operator reads *which* provenance blocked the publish rather than only
+/// that one did.
+///
+/// # Errors
+///
+/// [`InstallError::Db`].
+pub async fn rules_source(pool: &PgPool, topic_id: &str) -> Result<Option<String>, InstallError> {
+    sqlx::query_scalar(
+        "SELECT source FROM proof_rule_version WHERE topic_id = $1 ORDER BY version DESC LIMIT 1",
+    )
+    .bind(topic_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| InstallError::Db(e.to_string()))
 }
 
 /// Every route a topic registered, for the dynamic mux.

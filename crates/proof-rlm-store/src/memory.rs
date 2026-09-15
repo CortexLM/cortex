@@ -152,6 +152,21 @@ impl RlmStore for MemoryRlmStore {
             .and_then(|v| v.iter().find(|r| r.version == version).cloned()))
     }
 
+    async fn current_rules_source(
+        &self,
+        topic_id: &str,
+    ) -> Result<Option<proof_rlm::RuleSource>, StoreError> {
+        Ok(self
+            .lock()?
+            .rules
+            .get(topic_id)
+            .and_then(|v| v.last().map(|r| r.source)))
+    }
+
+    async fn rlm_authored_rules(&self, topic_id: &str) -> Result<bool, StoreError> {
+        Ok(self.current_rules_source(topic_id).await? == Some(proof_rlm::RuleSource::Rlm))
+    }
+
     async fn put_checklist(&self, row: &ChecklistRow) -> Result<(), StoreError> {
         // Same digest may be re-inspected (miner resubmit). Overwrite.
         self.lock()?

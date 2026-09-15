@@ -65,10 +65,10 @@ const EXIT_USAGE: u8 = 2;
     long_about = "proof-admin wraps the existing Proof topic publish path (dynamic-topics P0).
 
 Validate a bundle — runs the same acceptance checks POST /v1/admin/proof/topics runs:
-  proof-admin topic validate --bundle tb4.json --pin config/proof-pin.toml
+  proof-admin topic validate --bundle topic.json --pin config/proof-pin.toml
 
 Resolve the publish call and host env without touching anything:
-  proof-admin topic install --bundle tb4.json --env metal --dry-run
+  proof-admin topic install --bundle topic.json --env metal --dry-run
 
 List the installed topics (a read-only view of proof_topic_version):
   proof-admin topic list
@@ -273,9 +273,9 @@ enum TopicCmd {
 enum AliasCmd {
     /// Point an alias at a topic. The topic must be published already.
     Set {
-        /// The alias slug (e.g. `tbench`).
+        /// The alias slug (a temporary compatibility spelling of the topic).
         alias: String,
-        /// The canonical topic slug it resolves to (e.g. `tb4`).
+        /// The canonical topic slug it resolves to.
         #[arg(long, value_name = "TOPIC_ID")]
         topic: String,
     },

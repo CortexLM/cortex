@@ -43,8 +43,9 @@ pub(crate) async fn cmd_list(opts: &Options) -> Result<(), Failure> {
 pub(crate) async fn cmd_show(opts: &Options, topic_id: &str) -> Result<(), Failure> {
     let pool = open_pool(opts).await?;
     let store = PgRlmStore::new(pool.clone());
-    // An alias resolves to its canonical slug first, so `show tbench` finds
-    // `tb4`. Resolution is fail-closed in the store: an alias whose topic has
+    // An alias resolves to its canonical slug first, so `show <alias>` finds
+    // the topic it points at. Resolution is fail-closed in the store: an alias
+    // whose topic has
     // no published version resolves to nothing rather than to an empty row.
     let resolved = store
         .resolve_alias(topic_id)

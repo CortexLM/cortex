@@ -965,24 +965,41 @@ pub async fn inspect(
     })
 }
 
-/// Rule proposal: the adaptor's `propose_rules` when the topic selects a
-/// runner that ships one, else the signed topic's own checklist.
+/// Why a topic whose runner ships no `propose_rules` entrypoint fails closed.
+///
+/// The guest never echoes the signed `checklist` back as a rule proposal: doing
+/// so would let the control plane record the operator's own vector as
+/// RLM-authored rules.
+pub const NO_RLM_RULES: &str = "the topic's runner ships no propose_rules entrypoint, so the RLM authored no rules: the signed checklist is the operator's vector (source topic_document), never a substitute for RLM authorship";
+
+/// Rule proposal: **only** the adaptor's `propose_rules`.
+///
+/// The topic's RLM authors its own anti-cheat vector inside its VM. This
+/// function therefore has **no** fallback to the signed document's
+/// `checklist`: echoing the operator's vector back would let the control plane
+/// record rules the RLM never wrote as [`proof_rlm::RuleSource::Rlm`], which
+/// is the operator-cloned document masquerading as RLM authorship. A topic
+/// whose runner ships no `propose_rules` entrypoint is `Failed` (503, no row,
+/// nothing scored) — never silently scored under the operator's own rules.
+///
+/// The signed `checklist` remains the topic's **version 1**
+/// ([`proof_rlm::RuleSet::from_topic`], source `topic_document`) and keeps its
+/// honest provenance; only a run of this entrypoint advances the store to
+/// `rlm`.
 pub async fn propose_rules(
     cfg: &GuestConfig,
     topic: &TopicDocument,
     current_version: Option<u32>,
     work: &Path,
 ) -> Result<Vec<ChecklistRule>, String> {
-    let adaptor = match Adaptor::binding_of(&topic.constraints.params)? {
-        Some(binding) => Adaptor::installed(&cfg.runners_dir, binding).ok(),
-        None => None,
-    };
+    let binding = Adaptor::binding_of(&topic.constraints.params)?;
+    let adaptor = binding.and_then(|b| Adaptor::installed(&cfg.runners_dir, b).ok());
     let Some(entry) = adaptor
         .as_ref()
         .and_then(|a| a.entrypoint(JobKind::ProposeRules).ok())
     else {
-        tracing::info!(topic_id = %topic.id, "no propose_rules adaptor; proposing the signed checklist");
-        return Ok(topic.checklist.clone());
+        tracing::error!(topic_id = %topic.id, "runner ships no propose_rules entrypoint");
+        return Err(NO_RLM_RULES.to_owned());
     };
     let adaptor = adaptor.ok_or_else(|| "adaptor vanished".to_owned())?;
     let params = param_env(&topic.constraints.params)?;

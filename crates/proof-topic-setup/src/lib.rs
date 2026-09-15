@@ -86,6 +86,25 @@ pub enum SetupError {
          (or set skip_baseline, which measures none)"
     )]
     NoOffer,
+    /// The rule version in force is not RLM-authored.
+    ///
+    /// The topic's behavior has to be authored by its own RLM inside the topic
+    /// VM. A vector still carrying the signed document's provenance
+    /// (`topic_document`) or an operator's edit (`operator`) means setup never
+    /// got the RLM to write rules, so nothing downstream may treat this topic
+    /// as set up.
+    #[error(
+        "topic {topic_id:?}: rule version {version} is not RLM-authored (source {provenance}); the \
+         topic's behavior is still the operator's document, so setup did not complete"
+    )]
+    RulesNotRlmAuthored {
+        /// The topic whose rules were read back.
+        topic_id: String,
+        /// The provenance found (`topic_document` / `operator` / no version).
+        provenance: String,
+        /// The version that was read back.
+        version: u32,
+    },
 }
 
 /// What setup produced for the operator to seal.
@@ -245,6 +264,16 @@ impl TopicSetup {
     }
 
     /// The RLM writes its rules inside the VM; the store versions them.
+    ///
+    /// **Fail-closed on authorship.** The rules land as
+    /// [`RuleSource::Rlm`] only because the RLM's own `propose_rules` job
+    /// produced them inside the topic VM — the guest refuses to echo the
+    /// signed `checklist` back ([`proof_vm_guest`] `propose_rules`), and this
+    /// method re-reads the store afterwards to confirm the version in force
+    /// really is `rlm`-sourced. A store that still shows the operator's
+    /// vector (`topic_document`) or an operator edit (`operator`) means the
+    /// topic's behavior was never authored by its RLM, which is a refusal
+    /// naming the provenance rather than a silent pass.
     async fn propose_rules(
         &self,
         topic: &TopicDocument,
@@ -271,6 +300,18 @@ impl TopicSetup {
             set
         };
         self.store.put_rules(&rules).await?;
+        // The read-back is the gate, not a formality: it is what makes "the
+        // RLM authored this topic's behavior" a fact the store can prove,
+        // rather than a label this driver attached.
+        let source = self.store.current_rules_source(&topic.id).await?;
+        if source != Some(RuleSource::Rlm) {
+            return Err(SetupError::RulesNotRlmAuthored {
+                topic_id: topic.id.clone(),
+                provenance: source
+                    .map_or_else(|| "no rule version".to_owned(), |s| format!("{s:?}")),
+                version: rules.version,
+            });
+        }
         Ok(rules)
     }
 
