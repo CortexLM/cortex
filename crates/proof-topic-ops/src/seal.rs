@@ -18,7 +18,7 @@
 //!
 //! [`baseline`] is the read half: the measured primary, the rule version it
 //! was measured under, and the `metrics_commitment` an `open` document must
-//! carry — the value that goes into the draft before it is signed (the CLI
+//! carry — the value that goes into the draft before it is signed (this crate
 //! never signs: the `proof` key stays with the operator, and `xtask
 //! proof-topic` is what signs a draft).
 //!
@@ -48,14 +48,15 @@
 //! against the document.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use proof_eval::BaselineMeasurement;
 use proof_rlm_store::{BaselineRow, PgRlmStore, RlmStore};
 use proof_task::{HoldoutSplit, ProofPin, TopicDocument, TopicStatus};
 use proof_topic_setup::TopicSetup;
 
-use crate::install::AdminTarget;
-use crate::{Failure, Options};
+use crate::publish::PublishTarget;
+use crate::OpsError;
 
 /// Everything `topic seal` was asked to do.
 pub struct SealArgs<'a> {
@@ -64,97 +65,122 @@ pub struct SealArgs<'a> {
     /// The signed `status: open` document.
     pub document: &'a Path,
     /// Pin the document is checked against.
-    pub pin: &'a Path,
+    pub pin: &'a ProofPin,
     /// Publish the sealed document through the admin route.
     pub publish: bool,
     /// Master base URL for the publish call (with `--publish`).
     pub admin_url: Option<&'a str>,
     /// File holding the operator bearer (with `--publish`).
     pub admin_token_file: Option<&'a Path>,
+    /// Custom ids this host registers for scoring
+    /// (`PROOF_VM_RUNNER_CUSTOM_IDS`): an open custom topic needs one.
+    pub registered_custom: Vec<String>,
+}
+
+/// What the RLM measured, and the commitment an `open` document must seal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BaselineReport {
+    /// Canonical topic slug (the alias resolved).
+    pub topic_id: String,
+    /// Rule version the baseline was measured under.
+    pub rules_version: u32,
+    /// The measured primary — what the document's `custom_value` seals.
+    pub primary_value: f64,
+    /// The document's metric primary name.
+    pub metric_primary: String,
+    /// The document's custom id.
+    pub custom_id: String,
+    /// The topic's holdout commitment.
+    pub holdout_commitment: String,
+    /// The `baseline.metrics_commitment` an open document must carry.
+    pub metrics_commitment: String,
+    /// The document's current status (a draft is not scorable).
+    pub document_status: TopicStatus,
+}
+
+impl BaselineReport {
+    /// The steps that turn this measurement into a scorable topic.
+    #[must_use]
+    pub fn next_steps(&self) -> String {
+        next_seal_steps(&self.topic_id, &self.metrics_commitment)
+    }
+}
+
+/// What sealing produced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SealOutcome {
+    /// Canonical topic slug.
+    pub topic_id: String,
+    /// New document version the seal stored.
+    pub document_version: u32,
+    /// The primary the RLM measured and the document sealed.
+    pub primary_value: f64,
+    /// The commitment the document carries.
+    pub metrics_commitment: String,
+    /// Whether the open document was published through the admin route.
+    pub published: bool,
+}
+
+impl SealOutcome {
+    /// What to do next, for the operator.
+    #[must_use]
+    pub fn after(&self) -> String {
+        after_seal(&self.topic_id, self.published)
+    }
 }
 
 /// `topic baseline`: what the RLM measured, and what to seal.
 ///
 /// # Errors
 ///
-/// [`Failure::Usage`] without a database, [`Failure::Error`] when the topic
-/// or its measurement cannot be read.
-pub async fn baseline(opts: &Options, topic_id: &str, pin_path: &Path) -> Result<(), Failure> {
-    let pool = crate::open_pool(opts).await?;
+/// [`OpsError::error`] when the topic or its measurement cannot be read.
+pub async fn baseline(
+    pool: &sqlx::PgPool,
+    pin: &ProofPin,
+    topic_id: &str,
+) -> Result<BaselineReport, OpsError> {
     let store = PgRlmStore::new(pool.clone());
-    let pin = crate::load_pin(pin_path)?;
     let (canonical, _, document) = resolve_topic(&store, topic_id).await?;
     let Some(measured) = store
         .baseline(&canonical)
         .await
-        .map_err(|e| Failure::Error(format!("{canonical} baseline: {e}")))?
+        .map_err(|e| OpsError::error(format!("{canonical} baseline: {e}")))?
     else {
-        return Err(Failure::Error(format!(
+        return Err(OpsError::error(format!(
             "no baseline measured for topic {canonical:?}. It is written by the RLM's baseline \
              job: run `proof-admin topic install --bundle <bundle> --env <target> --drive-rlm \
              --owner-approved` (without --skip-baseline) first. Nothing to seal yet."
         )));
     };
-    let commitment = seal_measurement(&pin, &document, &measured).commitment();
-    if opts.json {
-        crate::print_json(&serde_json::json!({
-            "topic_id": canonical,
-            "rules_version": measured.rules_version,
-            "primary_value": measured.primary_value,
-            "metric_primary": document.metric.primary,
-            "custom_id": document.metric.custom_id,
-            "holdout_commitment": document.holdout_commitment,
-            "metrics_commitment": commitment,
-            "document_status": document.status,
-            "document_version_signature": document.signature,
-            "next": next_seal_steps(&canonical, &commitment),
-        }))?;
-        return Ok(());
-    }
-    println!("topic {canonical} — measured baseline");
-    println!("  primary_value     {}", measured.primary_value);
-    println!("  metric_primary    {}", document.metric.primary);
-    println!(
-        "  custom_id         {}",
-        crate::dash_if_empty(&document.metric.custom_id)
-    );
-    println!("  rules_version     {}", measured.rules_version);
-    println!("  holdout           {}", document.holdout_commitment);
-    println!(
-        "  document_status   {}",
-        crate::status_word(document.status)
-    );
-    println!();
-    println!("An `open` document must seal this measurement. Its baseline block needs:");
-    println!("  metrics_commitment  {commitment}");
-    println!(
-        "  script_sha256       {}",
-        crate::dash_if_empty(&document.baseline.script_sha256)
-    );
-    println!();
-    println!("{}", next_seal_steps(&canonical, &commitment));
-    Ok(())
+    let commitment = seal_measurement(pin, &document, &measured).commitment();
+    Ok(BaselineReport {
+        topic_id: canonical,
+        rules_version: measured.rules_version,
+        primary_value: measured.primary_value,
+        metric_primary: document.metric.primary.clone(),
+        custom_id: document.metric.custom_id.clone(),
+        holdout_commitment: document.holdout_commitment.clone(),
+        metrics_commitment: commitment,
+        document_status: document.status,
+    })
 }
 
 /// `topic seal`: record the operator's seal and open the topic.
 ///
 /// # Errors
 ///
-/// [`Failure::Usage`] without a database or without a publish target when
-/// `--publish` was given, [`Failure::Error`] for a refused document, a
-/// missing measurement, a lifecycle that is not at `baselining`, or a
-/// refused publish.
-pub async fn seal(opts: &Options, args: &SealArgs<'_>) -> Result<(), Failure> {
-    let pool = crate::open_pool(opts).await?;
+/// [`OpsError::usage`] for a document that is not this topic's or is not
+/// `open`, [`OpsError::error`] for a missing measurement, a lifecycle that is
+/// not at `baselining`, a refused document, or a refused publish.
+pub async fn seal(pool: &sqlx::PgPool, args: &SealArgs<'_>) -> Result<SealOutcome, OpsError> {
     let store = PgRlmStore::new(pool.clone());
     let (canonical, version, _) = resolve_topic(&store, args.topic_id).await?;
-    let pin = crate::load_pin(args.pin)?;
     let body = std::fs::read_to_string(args.document)
-        .map_err(|e| Failure::Error(format!("read {}: {e}", args.document.display())))?;
+        .map_err(|e| OpsError::error(format!("read {}: {e}", args.document.display())))?;
     let document: TopicDocument = serde_json::from_str(&body)
-        .map_err(|e| Failure::Error(format!("{}: {e}", args.document.display())))?;
+        .map_err(|e| OpsError::error(format!("{}: {e}", args.document.display())))?;
     if document.id != canonical {
-        return Err(Failure::Usage(format!(
+        return Err(OpsError::usage(format!(
             "{} carries topic {:?}, but this command is sealing {canonical:?}{}. Nothing was \
              changed.",
             args.document.display(),
@@ -163,69 +189,50 @@ pub async fn seal(opts: &Options, args: &SealArgs<'_>) -> Result<(), Failure> {
         )));
     }
     if document.status != TopicStatus::Open {
-        return Err(Failure::Usage(format!(
+        return Err(OpsError::usage(format!(
             "{} is `{}`, not `open`. Sealing opens a topic, so the document has to be the open \
              one: set `status: open`, seal `baseline.metrics_commitment` from `proof-admin topic \
              baseline`, sign it, and re-run. Nothing was changed.",
             args.document.display(),
-            crate::status_word(document.status)
+            status_word(document.status)
         )));
     }
     let Some(measured) = store
         .baseline(&canonical)
         .await
-        .map_err(|e| Failure::Error(format!("{canonical} baseline: {e}")))?
+        .map_err(|e| OpsError::error(format!("{canonical} baseline: {e}")))?
     else {
-        return Err(Failure::Error(format!(
+        return Err(OpsError::error(format!(
             "no baseline measured for topic {canonical:?}, so there is nothing to seal. Run the \
              install with --drive-rlm (without --skip-baseline) first. Nothing was changed."
         )));
     };
-    let sealed = seal_measurement(&pin, &document, &measured);
+    let sealed = seal_measurement(args.pin, &document, &measured);
     // The one call that decides: the same `mark_sealed` the runtime's own
     // tests drive, so a document this command accepts is one the scoring path
     // would accept.
-    let registered = crate::registered_custom_from_env();
-    let registered: Vec<&str> = registered.iter().map(String::as_str).collect();
+    let registered: Vec<&str> = args.registered_custom.iter().map(String::as_str).collect();
     let setup = seal_setup(store);
-    let state = setup
-        .mark_sealed(&document, &pin, &registered, &sealed)
+    setup
+        .mark_sealed(&document, args.pin, &registered, &sealed)
         .await
-        .map_err(|e| Failure::Error(seal_failure(&e, &canonical)))?;
+        .map_err(|e| OpsError::error(seal_failure(&e, &canonical)))?;
     let commitment = sealed.commitment();
 
     if args.publish {
-        let admin = AdminTarget::resolve(args.admin_url, args.admin_token_file)?;
+        let admin = PublishTarget::resolve(args.admin_url, args.admin_token_file)?;
         admin
             .publish(&document)
             .await
-            .map_err(|e| Failure::Error(publish_failure(&e, &canonical)))?;
+            .map_err(|e| OpsError::error(publish_failure(&e, &canonical)))?;
     }
-    if opts.json {
-        crate::print_json(&serde_json::json!({
-            "ok": true,
-            "topic_id": canonical,
-            "state": format!("{state:?}").to_lowercase(),
-            "document_version": version + 1,
-            "metrics_commitment": commitment,
-            "primary_value": measured.primary_value,
-            "published": args.publish,
-        }))?;
-        return Ok(());
-    }
-    println!("topic {canonical} sealed and opened.");
-    println!("  state             open");
-    println!("  document_version  {}", version + 1);
-    println!("  primary_value     {}", measured.primary_value);
-    println!("  commitment        {commitment}");
-    if args.publish {
-        println!("  published         yes (the topic's routes and document are live)");
-    } else {
-        println!("  published         no (--publish was not given)");
-    }
-    println!();
-    println!("{}", after_seal(&canonical, args.publish));
-    Ok(())
+    Ok(SealOutcome {
+        topic_id: canonical,
+        document_version: version + 1,
+        primary_value: measured.primary_value,
+        metrics_commitment: commitment,
+        published: args.publish,
+    })
 }
 
 /// The `TopicSetup` `mark_sealed` needs: the store, and a VM boundary that is
@@ -237,14 +244,14 @@ pub async fn seal(opts: &Options, args: &SealArgs<'_>) -> Result<(), Failure> {
 /// here instead of quietly running on the control-plane host.
 fn seal_setup(store: PgRlmStore) -> TopicSetup {
     TopicSetup {
-        orchestrator: std::sync::Arc::new(proof_rlm::UnwiredVmOrchestrator),
-        store: std::sync::Arc::new(store) as std::sync::Arc<dyn RlmStore>,
+        orchestrator: Arc::new(proof_rlm::UnwiredVmOrchestrator),
+        store: Arc::new(store) as Arc<dyn RlmStore>,
         template: proof_rlm::VmTemplate::from_env(),
         experiments: proof_rlm::ExperimentPolicy::default(),
-        owner: std::sync::Arc::new(proof_rlm::StaticOwnerHook(
+        owner: Arc::new(proof_rlm::StaticOwnerHook(
             proof_rlm::OwnerDecision::Approve,
         )),
-        keys: std::sync::Arc::new(SealKeys),
+        keys: Arc::new(SealKeys),
         spend_cap_usd: None,
         skip_baseline: false,
     }
@@ -295,18 +302,18 @@ fn seal_measurement(
 async fn resolve_topic(
     store: &PgRlmStore,
     topic_id: &str,
-) -> Result<(String, u32, TopicDocument), Failure> {
+) -> Result<(String, u32, TopicDocument), OpsError> {
     let resolved = store
         .resolve_alias(topic_id)
         .await
-        .map_err(|e| Failure::Error(format!("resolve {topic_id}: {e}")))?;
+        .map_err(|e| OpsError::error(format!("resolve {topic_id}: {e}")))?;
     let canonical = resolved.as_deref().unwrap_or(topic_id);
     let row = store
         .latest_topic(canonical)
         .await
-        .map_err(|e| Failure::Error(format!("{canonical}: {e}")))?;
+        .map_err(|e| OpsError::error(format!("{canonical}: {e}")))?;
     let Some((version, document)) = row else {
-        return Err(Failure::Error(format!(
+        return Err(OpsError::error(format!(
             "no installed topic {topic_id:?}{}. Use `proof-admin topic list` to see the exact \
              ids.",
             alias_note(topic_id, canonical)
@@ -320,6 +327,15 @@ fn alias_note(topic_id: &str, canonical: &str) -> String {
         String::new()
     } else {
         format!(" (alias of {canonical:?})")
+    }
+}
+
+/// The lifecycle word, matching the wire spelling the document uses.
+fn status_word(status: TopicStatus) -> &'static str {
+    match status {
+        TopicStatus::Draft => "draft",
+        TopicStatus::Open => "open",
+        TopicStatus::Closed => "closed",
     }
 }
 
@@ -435,7 +451,7 @@ mod tests {
         }
     }
 
-    fn document(pin: &ProofPin) -> TopicDocument {
+    fn document() -> TopicDocument {
         let mut doc = TopicDocument {
             id: "tb4".into(),
             status: TopicStatus::Open,
@@ -446,7 +462,6 @@ mod tests {
         doc.holdout_commitment = "cd".repeat(32);
         doc.baseline.script_sha256 = "ee".repeat(32);
         doc.baseline.metrics_commitment.clear();
-        let _ = pin;
         doc
     }
 
@@ -458,7 +473,7 @@ mod tests {
     fn the_commitment_we_print_is_the_one_mark_sealed_verifies() {
         let pin = fixtures::pin();
         let row = measured(0.42);
-        let sealed = seal_measurement(&pin, &document(&pin), &row);
+        let sealed = seal_measurement(&pin, &document(), &row);
         assert_eq!(sealed.custom_value, Some(0.42));
         assert_eq!(
             sealed.eval_image_digest, pin.eval_image_digest,
@@ -471,7 +486,7 @@ mod tests {
         );
 
         // The document that carries what we printed verifies.
-        let mut open = document(&pin);
+        let mut open = document();
         open.baseline.metrics_commitment = sealed.commitment();
         sealed
             .verify(&pin, &open)
@@ -485,8 +500,8 @@ mod tests {
 
         // And a measurement that is not the measured primary is refused even
         // when the document agrees with itself.
-        let other = seal_measurement(&pin, &document(&pin), &measured(0.99));
-        let mut open_other = document(&pin);
+        let other = seal_measurement(&pin, &document(), &measured(0.99));
+        let mut open_other = document();
         open_other.baseline.metrics_commitment = other.commitment();
         assert!(other.verify(&pin, &open_other).is_ok());
         assert!(

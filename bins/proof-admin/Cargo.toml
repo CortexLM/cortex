@@ -21,6 +21,7 @@ proof-rlm-store = { path = "../../crates/proof-rlm-store" }
 proof-task = { path = "../../crates/proof-task" }
 proof-topic-bundle = { path = "../../crates/proof-topic-bundle" }
 proof-topic-install = { path = "../../crates/proof-topic-install" }
+proof-topic-ops = { path = "../../crates/proof-topic-ops" }
 proof-topic-setup = { path = "../../crates/proof-topic-setup" }
 proof-vm-fc = { path = "../../crates/proof-vm-fc" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

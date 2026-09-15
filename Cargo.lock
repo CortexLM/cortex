@@ -3697,6 +3697,7 @@ dependencies = [
  "proof-task",
  "proof-topic-bundle",
  "proof-topic-install",
+ "proof-topic-ops",
  "proof-topic-setup",
  "proof-vm-fc",
  "reqwest 0.12.28",
@@ -4033,7 +4034,10 @@ version = "0.1.0"
 dependencies = [
  "crypto",
  "hex",
+ "proof-canon",
+ "proof-store",
  "rand_core 0.6.4",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.19",
@@ -4087,6 +4091,24 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.19",
  "tokio",
+]
+
+[[package]]
+name = "proof-topic-ops"
+version = "0.1.0"
+dependencies = [
+ "db",
+ "proof-eval",
+ "proof-rlm",
+ "proof-rlm-store",
+ "proof-task",
+ "proof-topic-bundle",
+ "proof-topic-install",
+ "proof-topic-setup",
+ "proof-vm-fc",
+ "reqwest 0.12.28",
+ "serde_json",
+ "sqlx",
 ]
 
 [[package]]

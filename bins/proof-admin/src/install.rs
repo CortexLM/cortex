@@ -52,6 +52,7 @@ use proof_topic_install::install::{InstallRequest, Installer, SetupSummary};
 use proof_topic_install::InstallError;
 
 use crate::{Failure, Options};
+use proof_topic_ops::PublishTarget;
 
 /// What the operator asserted, and what the install is therefore allowed to do.
 ///
@@ -172,7 +173,8 @@ async fn run_real(
 ) -> Result<(), Failure> {
     // The bearer and the URL are resolved before anything is written, so a
     // misconfiguration cannot leave a half-installed topic.
-    let admin = AdminTarget::resolve(args.admin_url, args.admin_token_file)?;
+    let admin = PublishTarget::resolve(args.admin_url, args.admin_token_file)
+        .map_err(crate::ops_to_failure)?;
     let database_url = crate::database_url(opts)?.ok_or_else(|| {
         Failure::Usage(
             "a real install writes to the topic registry, so it needs a database: set \
@@ -421,7 +423,7 @@ async fn drive_rlm(
     pin: &ProofPin,
     pool: &sqlx::PgPool,
     store: &PgRlmStore,
-) -> Result<crate::drive::DriveOutcome, Failure> {
+) -> Result<proof_topic_ops::DriveOutcome, Failure> {
     let _ = store;
     let offer = if args.skip_baseline {
         None
@@ -433,7 +435,7 @@ async fn drive_rlm(
         .ok()
         .map(|p| PathBuf::from(p.trim().to_owned()));
     let digest = std::env::var(RLM_VM_IMAGE_DIGEST_ENV).ok();
-    crate::drive::drive(
+    proof_topic_ops::drive(
         topic,
         pin,
         PgRlmStore::new(pool.clone()),
@@ -446,6 +448,7 @@ async fn drive_rlm(
         args.owner_key_file,
     )
     .await
+    .map_err(crate::ops_to_failure)
 }
 
 /// Print the install report.
@@ -563,91 +566,6 @@ fn seal_steps(topic_id: &str) -> String {
          4. Confirm the host scores it: GET /v1/status reports `can_score` and lists the topic\n     \
          in `scorable_topics` (`ctx proof status` from a miner host)."
     )
-}
-
-/// Where the admin publish call goes, and the bearer it uses.
-pub(crate) struct AdminTarget {
-    base_url: String,
-    token: String,
-}
-
-impl AdminTarget {
-    /// Resolve the URL and bearer, refusing a half-configured pair.
-    pub(crate) fn resolve(
-        admin_url: Option<&str>,
-        admin_token_file: Option<&Path>,
-    ) -> Result<Self, Failure> {
-        let Some(base_url) = admin_url.map(str::trim).filter(|u| !u.is_empty()) else {
-            return Err(Failure::Usage(
-                "a real install publishes through the admin route, so it needs the master's \
-                 base URL: pass --admin-url (or set PROOF_ADMIN_URL), e.g. \
-                 --admin-url http://127.0.0.1:8100 for the challenge service directly, or the \
-                 gateway's address. `--dry-run` needs none."
-                    .to_owned(),
-            ));
-        };
-        let Some(path) = admin_token_file else {
-            return Err(Failure::Usage(
-                "a real install needs the operator bearer for /v1/admin/*: pass \
-                 --admin-token-file (or set PROOF_ADMIN_TOKEN_FILE). The file is read and never \
-                 logged or printed. `--dry-run` needs none."
-                    .to_owned(),
-            ));
-        };
-        let token = std::fs::read_to_string(path)
-            .map_err(|e| Failure::Error(format!("read {}: {e}", path.display())))?;
-        // A tokens file holds one bearer per line; the first non-comment line
-        // is the one this call uses.
-        let token = token
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty() && !l.starts_with('#'))
-            .map(str::to_owned);
-        let Some(token) = token else {
-            return Err(Failure::Error(format!(
-                "{} holds no bearer (every line is blank or a comment)",
-                path.display()
-            )));
-        };
-        Ok(Self {
-            base_url: base_url.trim_end_matches('/').to_owned(),
-            token,
-        })
-    }
-
-    /// How this target is printed: the URL, never the bearer.
-    fn redacted(&self) -> String {
-        format!("{} (bearer read, never printed)", self.base_url)
-    }
-
-    /// Publish the document through the existing admin route.
-    pub(crate) async fn publish(&self, doc: &proof_task::TopicDocument) -> Result<(), String> {
-        let url = format!("{}{}", self.base_url, proof_topic_bundle::PUBLISH_PATH);
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_mins(1))
-            .build()
-            .map_err(|e| format!("http client: {e}"))?;
-        let response = client
-            .post(&url)
-            .header("authorization", format!("Bearer {}", self.token))
-            .header("content-type", "application/json")
-            .body(
-                serde_json::to_string(doc)
-                    .map_err(|e| format!("serialize the signed document: {e}"))?,
-            )
-            .send()
-            .await
-            .map_err(|e| format!("POST {url}: {e}"))?;
-        let status = response.status();
-        if status.is_success() {
-            return Ok(());
-        }
-        let body = response.text().await.unwrap_or_default();
-        Err(format!(
-            "POST {url} answered {status}: {}",
-            body.trim().chars().take(400).collect::<String>()
-        ))
-    }
 }
 
 /// Turn a publish refusal into an operator instruction.

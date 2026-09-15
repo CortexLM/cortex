@@ -45,20 +45,25 @@
     clippy::too_many_arguments
 )]
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, PoisonError, RwLock};
 
-use async_trait::async_trait;
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
+mod operator;
 mod submit;
 
-use proof_canon::MinerEnv;
+pub use operator::{
+    InstallJournal, InstallJournalSlot, SubmitGate, VmAgentHealth, VmOrchestratorProbe,
+    VmOrchestratorReport,
+};
+
+use operator::{disabled_gate, disabled_topics, install_gate};
+
 use proof_eval::{
     contamination_evidence, custom_ids_ref, eval_after_freeze, force_sim, registered_custom,
     scoring_readiness, secret_backed_base_url, EvalBackend, EvalError, LiveScorer,
@@ -69,13 +74,10 @@ use proof_score::{
     MinerTopicRun, ProofKind, ProofVerdict,
 };
 use proof_store::{
-    freeze_submission_digest, is_staged_artefact_uri, staged_artefact_uri, ArtifactManifest,
-    Enqueued, LiveEval, MemoryStore, StoreError, Submission, SubmissionState, MAX_ARTEFACT_BYTES,
+    freeze_submission_digest, is_staged_artefact_uri, staged_artefact_uri, Enqueued, LiveEval,
+    MemoryStore, StoreError, Submission, SubmissionState, MAX_ARTEFACT_BYTES,
 };
-use proof_submit::{
-    is_lowercase_hex, parse_hotkey_hex, parse_signature_hex, parse_submit_nonce_hex, verify_submit,
-    SubmitFields,
-};
+use proof_submit::{is_digest_of_nothing, nonce_from, SubmitSigError};
 use proof_task::{
     resolve_inference, InferenceOffer, MetricFamily, OfferError, ProofPin, TopicDocument,
     TopicError, TopicStatus, CHALLENGE_ID, SCORE_MAX, SCORING_VERSION,
@@ -92,166 +94,6 @@ pub type ExecutorSlot = Arc<RwLock<Option<EvalExecutorOffer>>>;
 pub fn executor_slot(offer: Option<EvalExecutorOffer>) -> ExecutorSlot {
     Arc::new(RwLock::new(offer))
 }
-
-/// The KVM-host agent's health as the control plane saw it on one
-/// `GET /v1/health` (mirrors `proof_vm_proto::AgentHealth` field for field).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VmAgentHealth {
-    /// Wire version the agent speaks.
-    pub api_version: u32,
-    /// Whether the hypervisor could boot a VM right now.
-    pub ready: bool,
-    /// Why not (empty when ready). Never a secret.
-    pub reason: String,
-    /// Backend name (`firecracker`; `fake` only in tests).
-    pub hypervisor: String,
-    /// VMs currently bound on the host.
-    pub vms: usize,
-}
-
-/// `GET /v1/admin/proof/vm-orchestrator` body: what this host resolved for
-/// the topic-VM orchestrator and whether its agent answers. Operator data
-/// behind the admin bearer — it may name env vars and container paths, never
-/// the bearer, a key, or an origin the RLM could reach.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VmOrchestratorReport {
-    /// `firecracker` (live client resolved at boot) or `unwired`.
-    pub orchestrator: String,
-    /// The client's own `ready()`: bearer file present and non-empty, RLM
-    /// image digest pinned. Checked per request, so a fix needs no restart.
-    pub ready: bool,
-    /// Why not ready (empty when ready). Names the env var to fix.
-    pub reason: String,
-    /// `sha256:` pin of the RLM VM image the client asks the agent to boot
-    /// (empty = unpinned = nothing ever boots).
-    pub image_digest: String,
-    /// RLM VM vCPUs (locked default 4).
-    pub vcpus: u32,
-    /// RLM VM memory in MiB (locked default 8192).
-    pub mem_mib: u32,
-    /// The agent's answer to one health call, when it answered.
-    pub agent: Option<VmAgentHealth>,
-    /// Why the agent did not answer: unreachable, bearer refused, not wired.
-    pub agent_error: Option<String>,
-    /// Filled by the host: the digest-pinned Lium harvest (`nll` /
-    /// `throughput`) is wired. Lium only — informational for the custom
-    /// family, which is wired from the topic-VM env on its own.
-    #[serde(default)]
-    pub live_harvest_wired: bool,
-    /// Filled by the host: at least one custom id has a registered runner
-    /// (the custom family is routed, harvest or not).
-    #[serde(default)]
-    pub custom_family_wired: bool,
-    /// Filled by the host: custom ids with a registered runner.
-    #[serde(default)]
-    pub registered_custom: Vec<String>,
-}
-
-impl VmOrchestratorReport {
-    /// Report for a host that keeps `UnwiredVmOrchestrator`; `reason` names
-    /// the env vars a live one reads. `image_digest` is whatever pin the env
-    /// carries so "pinned but URL unset" is visible.
-    pub fn unwired(reason: &str, image_digest: &str) -> Self {
-        Self {
-            orchestrator: "unwired".into(),
-            ready: false,
-            reason: reason.trim().to_owned(),
-            image_digest: image_digest.trim().to_owned(),
-            vcpus: 0,
-            mem_mib: 0,
-            agent: None,
-            agent_error: None,
-            live_harvest_wired: false,
-            custom_family_wired: false,
-            registered_custom: Vec::new(),
-        }
-    }
-}
-
-/// Operator diagnostic over the topic-VM orchestrator this host resolved at
-/// boot. The binary implements it over the live `FirecrackerOrchestrator`
-/// (its `ready()` plus one agent health call) or the unwired stand-in; the
-/// route only adds what the host knows (harvest wired, registered ids). It
-/// changes nothing and spends nothing.
-#[async_trait]
-pub trait VmOrchestratorProbe: Send + Sync {
-    /// Snapshot as of now (bearer file and pin re-read; one agent round trip).
-    async fn probe(&self) -> VmOrchestratorReport;
-}
-
-/// What the **submit** path needs from the journal, in one read.
-///
-/// Both fields are about the topic's install and the operator's switch, and
-/// both are read before anything is spent, so they are one call: a submission
-/// costs one gate read, not two.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SubmitGate {
-    /// The operator's reason, when the topic is disabled (`topic disable`).
-    pub disabled_reason: Option<String>,
-    /// The `vms_per_submission` the topic's newest install recorded.
-    ///
-    /// `None` when the topic has no install row or the row predates the
-    /// field. `Some(n)` with `n != 1` is refused on the submit path: this
-    /// build runs **one VM per submission**, and a topic installed with a
-    /// different pin is one it cannot honour.
-    pub vms_per_submission: Option<u32>,
-}
-
-impl SubmitGate {
-    /// The operator gate, as the submit path reads it.
-    #[must_use]
-    pub fn disabled(reason: impl Into<String>) -> Self {
-        Self {
-            disabled_reason: Some(reason.into()),
-            ..Self::default()
-        }
-    }
-}
-
-/// Whether a topic's install reached `applied`, as the publish route reads it.
-///
-/// A trait rather than a pool so the route can be exercised without a
-/// database, and so a host that resolved no install journal can say so instead
-/// of answering from a table it never read.
-#[async_trait]
-pub trait InstallJournal: Send + Sync {
-    /// `Ok(true)` when the newest install row for `topic_id` is `applied`.
-    ///
-    /// # Errors
-    ///
-    /// The reason the journal could not be read. The caller refuses the
-    /// publish: an unreadable journal is not an installed topic.
-    async fn applied(&self, topic_id: &str) -> Result<bool, String>;
-
-    /// The operator gate and the allocator pin for one topic, for the submit
-    /// path.
-    ///
-    /// # Errors
-    ///
-    /// The reason the gate could not be read. The caller answers **503**: an
-    /// unreadable gate is not an enabled topic.
-    async fn submit_gate(&self, topic_id: &str) -> Result<SubmitGate, String>;
-
-    /// Every topic currently disabled, with the operator's reason.
-    ///
-    /// One read for the public listing, which annotates each topic with the
-    /// flag rather than paying a query per topic. The submit path uses
-    /// [`Self::submit_gate`] for the single topic it is admitting.
-    ///
-    /// # Errors
-    ///
-    /// The reason the gate could not be read. The caller answers **503**.
-    async fn disabled_topics(&self) -> Result<BTreeMap<String, String>, String>;
-}
-
-/// The journal read behind the publish gate, or `None` on a host that
-/// resolved none (no database).
-///
-/// `None` is **fail-closed**: [`install_applied`] refuses, so an `open`
-/// document cannot be published on a host that cannot prove the install ran.
-/// That is the same rule the gate enforces when the journal is unreadable —
-/// the only difference is which sentence the operator reads.
-pub type InstallJournalSlot = Option<Arc<dyn InstallJournal>>;
 
 /// Shared HTTP state.
 #[derive(Clone)]
@@ -527,26 +369,6 @@ fn annotate_gate(doc: &TopicDocument, disabled_reason: Option<&str>) -> serde_js
     value
 }
 
-/// The disabled set the listing annotates from, or a 503.
-async fn disabled_topics(
-    st: &AppState,
-) -> Result<BTreeMap<String, String>, (StatusCode, Json<serde_json::Value>)> {
-    let Some(journal) = st.install_journal.as_deref() else {
-        // No gate on this host: no database, so no operator switch was ever
-        // thrown (and no topic was published either).
-        return Ok(BTreeMap::new());
-    };
-    journal.disabled_topics().await.map_err(|e| {
-        err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            &format!(
-                "the topic gate could not be read: {e}. The listing is refused rather than \
-                 served without the operator's switch; fix the database and re-read."
-            ),
-        )
-    })
-}
-
 /// Public executor contract: the live offer (every field is public), whether
 /// it can rent right now, and the pin ceilings it is bound by. Always 200 —
 /// a missing offer is `eval_executor: null` with the reason, never a 404.
@@ -559,39 +381,6 @@ async fn get_executor(State(st): State<AppState>) -> impl IntoResponse {
         "reason": readiness.err().map(|e| e.to_string()),
         "pin": st.executor_pin_view(),
     }))
-}
-
-#[derive(Debug, Deserialize)]
-struct SubmitBody {
-    miner_hotkey: String,
-    /// sr25519 signature over [`SubmitFields::signing_payload`] (128 lowercase hex).
-    #[serde(default)]
-    hotkey_signature: Option<String>,
-    /// Client anti-replay nonce (64 lowercase hex), bound into the signature
-    /// and accepted once per hotkey.
-    #[serde(default)]
-    submit_nonce: Option<String>,
-    artifact_digest: String,
-    artifact_uri: Option<String>,
-    #[serde(default)]
-    claim: String,
-    #[serde(default)]
-    declared_flops: u64,
-    #[serde(default)]
-    topic_id: String,
-    /// Optional miner label. Not compared to an HF id (that check is retired).
-    #[serde(default)]
-    architecture: String,
-    #[serde(default)]
-    manifest: ArtifactManifest,
-    /// Miner BYOK: `{"<NAME>": "<value>"}` for the variables this topic's
-    /// signed document declares (`constraints.params.miner_byok` /
-    /// `miner_env_allowlist`). Never signed (v1 of the submit payload is
-    /// unchanged), never persisted on the row, never echoed back. A name the
-    /// topic does not declare is a **400** before the signature is checked,
-    /// so a mistake here never burns the single-use `submit_nonce`.
-    #[serde(default)]
-    env: MinerEnv,
 }
 
 /// What a submit — or a drain of one row — answers.
@@ -642,91 +431,6 @@ type ErrResp = (StatusCode, Json<serde_json::Value>);
 /// signed form: the host never normalises a hex field before verifying it,
 /// so a value a miner did not sign byte for byte is refused as their
 /// request, not silently rewritten into a signature mismatch.
-fn parse_hex64(s: &str, field: &str) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    if !is_lowercase_hex(s, 64) {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            &format!("invalid {field}: exactly 64 lowercase hex, no 0x"),
-        ));
-    }
-    Ok(s.to_owned())
-}
-
-/// A digest of **nothing** is not an artefact digest: the sha256 of zero
-/// bytes and of an empty tar archive (`tar cf - -T /dev/null`, 10240 zero
-/// bytes). Staging's happy path once matched exactly such a digest because
-/// the RLM guest could not fetch the artefact and fell back to an empty
-/// tree; refusing it at submit keeps that stub out of every row and rent.
-fn is_digest_of_nothing(hex64: &str) -> bool {
-    let empty_input = hex::encode(Sha256::digest(b""));
-    let empty_tar = hex::encode(Sha256::digest([0u8; 10_240]));
-    hex64.eq_ignore_ascii_case(&empty_input) || hex64.eq_ignore_ascii_case(&empty_tar)
-}
-
-fn parse_artifact_digest(s: &str) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    // Named before the encoding check so a pasted empty-tar digest gets the
-    // useful answer whatever its case.
-    if is_digest_of_nothing(&proof_submit::canonical_hex(s)) {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "artifact_digest is the sha256 of empty input (or of an empty tar archive): hash the recipe bytes you upload (or ship at artifact_uri)",
-        ));
-    }
-    parse_hex64(s, "artifact_digest")
-}
-
-/// Miner identity for one submit: `hotkey_signature` over every gate input
-/// (topic, artefact, FLOPs, claim, manifest) plus the client `submit_nonce`.
-/// Verified over the strings exactly as posted (`hotkey` and `artifact` are
-/// already in their only accepted form). Returns the nonce the caller must
-/// reserve before any row or rent.
-fn authenticate_submit(
-    hotkey: &str,
-    topic_id: &str,
-    artifact: &str,
-    body: &SubmitBody,
-) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    let sig_hex = body.hotkey_signature.as_deref().filter(|s| !s.is_empty());
-    let Some(sig_hex) = sig_hex else {
-        return Err(err(StatusCode::UNAUTHORIZED, "hotkey_signature required"));
-    };
-    let sig = parse_signature_hex(sig_hex)
-        .map_err(|_| err(StatusCode::UNAUTHORIZED, "hotkey_signature invalid"))?;
-    let nonce = body.submit_nonce.as_deref().filter(|s| !s.is_empty());
-    let Some(nonce) = nonce else {
-        return Err(err(StatusCode::UNAUTHORIZED, "submit_nonce required"));
-    };
-    parse_submit_nonce_hex(nonce)
-        .map_err(|_| err(StatusCode::UNAUTHORIZED, "submit_nonce invalid"))?;
-    let pk = parse_hotkey_hex(hotkey)
-        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid miner_hotkey"))?;
-    verify_submit(
-        &pk,
-        &SubmitFields {
-            hotkey_hex: hotkey,
-            topic_id,
-            artifact_digest: artifact,
-            declared_flops: body.declared_flops,
-            claim: &body.claim,
-            train_content_hashes: &body.manifest.train_content_hashes,
-            train_dataset_ids: &body.manifest.train_dataset_ids,
-            submit_nonce_hex: nonce,
-        },
-        &sig,
-    )
-    .map_err(|_| err(StatusCode::UNAUTHORIZED, "hotkey_signature invalid"))?;
-    Ok(nonce.to_owned())
-}
-
-fn nonce_from(hotkey: &str, topic_id: &str, digest: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(b"proof-nonce-v1");
-    h.update(hotkey.as_bytes());
-    h.update(topic_id.as_bytes());
-    h.update(digest.as_bytes());
-    hex::encode(h.finalize())
-}
-
 async fn submit(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -780,7 +484,9 @@ async fn submit(
     if topic.metric.family == MetricFamily::Custom && uploaded.is_none() && miner_uri.is_none() {
         return Err(err(StatusCode::BAD_REQUEST, "artifact required"));
     }
-    let submit_nonce = authenticate_submit(&hotkey, &body.topic_id, &artifact, &body)?;
+    let submit_nonce = body
+        .authenticate(&hotkey, &artifact)
+        .map_err(|e| submit_sig_err(&e))?;
     // A verified request is single-use, whatever happens to it next: a
     // replay must never reach evaluation or a second row.
     if !st
@@ -1772,106 +1478,42 @@ fn err(code: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     (code, Json(serde_json::json!({ "error": msg })))
 }
 
-/// Whether the topic's install reached `applied`, as the publish gate reads it.
-///
-/// **Fail-closed on every doubt**: no journal slot, an unreadable journal, and
-/// a topic with no install row all refuse, so an `open` document is never
-/// admitted on a fact the host cannot prove.
-///
-/// The refusal says **which** of those it was, because the operator has to
-/// tell "not installed yet" from "the journal could not be read" — one is a
-/// step to finish, the other is a host to fix. It is returned rather than
-/// logged: `proof-http` has no logging dependency, and this reason belongs in
-/// the response the operator is already reading.
-///
-/// # Errors
-///
-/// The reason the `open` document cannot be published.
-async fn install_gate(st: &AppState, topic_id: &str) -> Result<(), String> {
-    let Some(journal) = st.install_journal.as_deref() else {
-        return Err(format!(
-            "this host resolved no install journal (no database), so it cannot prove that topic \
-             {topic_id:?} was installed. Publish the document as `draft`, or wire \
-             BASE_DATABASE_URL and restart."
+/// Exactly 64 lowercase hex, no `0x`, no whitespace. The wire form **is** the
+/// signed form: the host never normalises a hex field before verifying it, so
+/// a value a miner did not sign byte for byte is refused as their request,
+/// not silently rewritten into a signature mismatch.
+fn parse_hex64(s: &str, field: &str) -> Result<String, ErrResp> {
+    if !proof_submit::is_lowercase_hex(s, 64) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid {field}: exactly 64 lowercase hex, no 0x"),
         ));
-    };
-    match journal.applied(topic_id).await {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(format!(
-            "topic {topic_id:?} has no `applied` install row: run `proof-admin topic install` to \
-             completion first (the journal is `proof_topic_install`; read it with `proof-admin \
-             topic install-log --topic {topic_id}`). A `pending` or `failed` row means the \
-             migrations, routes, or rules are not in place, and an `open` document is submitable \
-             the moment it is published."
-        )),
-        Err(e) => Err(format!(
-            "the install journal could not be read for topic {topic_id:?}: {e}. The publish is \
-             refused rather than admitted on an unread fact; fix the database and re-publish."
-        )),
     }
+    Ok(s.to_owned())
 }
 
-/// The operator gate on the **submit** path: is this topic disabled, and is
-/// its allocator pin one this build runs?
+/// The artefact digest, refused when it is the sha256 of **nothing**.
 ///
-/// `Ok(())` admits the submission. A disabled topic is a **403** naming the
-/// operator's reason; a topic whose install recorded a
-/// `vms_per_submission` other than 1 is a **503** — this build runs exactly
-/// one VM per submission, and silently running a different number would make
-/// the journal a lie; an unreadable gate is a **503** too — never an
-/// admission, and never a 404 that would read as "no such topic". A host that
-/// resolved no journal (no database) has no gate to read: it also has no
-/// published topics, so the submission is refused by the topic lookup above
-/// it.
-///
-/// This is deliberately **not cached**: a disable has to take effect on the
-/// next request, which is what makes it usable during an incident.
-async fn disabled_gate(st: &AppState, topic_id: &str) -> Result<(), ErrResp> {
-    let Some(journal) = st.install_journal.as_deref() else {
-        return Ok(());
-    };
-    let gate = match journal.submit_gate(topic_id).await {
-        Ok(gate) => gate,
-        Err(e) => {
-            return Err(err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &format!(
-                    "the topic gate could not be read for {topic_id:?}: {e}. The submission is \
-                     refused rather than admitted on an unread fact; fix the database and re-post \
-                     (the submit_nonce is unspent)."
-                ),
-            ))
-        }
-    };
-    if let Some(reason) = gate.disabled_reason.as_deref() {
+/// Named before the encoding check so a pasted empty-tar digest gets the
+/// useful answer whatever its case.
+fn parse_artifact_digest(s: &str) -> Result<String, ErrResp> {
+    if is_digest_of_nothing(&proof_submit::canonical_hex(s)) {
         return Err(err(
-            StatusCode::FORBIDDEN,
-            &format!(
-                "topic {topic_id:?} is disabled by the operator{}",
-                if reason.trim().is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", reason.trim())
-                }
-            ),
+            StatusCode::BAD_REQUEST,
+            "artifact_digest is the sha256 of empty input (or of an empty tar archive): hash the recipe bytes you upload (or ship at artifact_uri)",
         ));
     }
-    if let Some(n) = gate.vms_per_submission {
-        if n != proof_topic_install::VMS_PER_SUBMISSION {
-            return Err(err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &format!(
-                    "topic {topic_id:?} was installed with vms_per_submission={n}, but this host \
-                     runs exactly {} VM per submission (the pin this build enforces). Re-install \
-                     the topic with the pin this host carries, or run the host that matches the \
-                     install. The submission is refused rather than run under a binding the \
-                     install did not record; the submit_nonce is unspent.",
-                    proof_topic_install::VMS_PER_SUBMISSION
-                ),
-            ));
-        }
-    }
-    Ok(())
+    parse_hex64(s, "artifact_digest")
+}
+
+/// A submit-signature refusal, as the miner reads it: 401 for identity, 400
+/// for a hotkey that is not a hotkey.
+fn submit_sig_err(e: &SubmitSigError) -> (StatusCode, Json<serde_json::Value>) {
+    let code = match e {
+        SubmitSigError::InvalidHotkey => StatusCode::BAD_REQUEST,
+        _ => StatusCode::UNAUTHORIZED,
+    };
+    err(code, &e.to_string())
 }
 
 fn store_err(e: &proof_store::StoreError) -> (StatusCode, Json<serde_json::Value>) {
@@ -1926,6 +1568,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use proof_canon::MinerEnv;
+    use proof_store::ArtifactManifest;
+    use std::collections::BTreeMap;
 
     fn digest(label: &str) -> String {
         let mut h = Sha256::new();
@@ -2711,6 +2356,8 @@ mod tests {
             reason: String::new(),
             hypervisor: "firecracker".into(),
             vms: 2,
+            experiment_vms: 1,
+            max_experiment_vms: 2,
         });
         // The probe's own view of the host gates is overwritten by the route.
         wired.live_harvest_wired = false;

@@ -30,7 +30,7 @@ pub use proof_executor::{
 };
 pub use proof_http::{
     executor_slot, hash_admin_token, proof_router, AppState, ExecutorSlot, InstallJournal,
-    InstallJournalSlot, VmAgentHealth, VmOrchestratorProbe, VmOrchestratorReport,
+    InstallJournalSlot, VmOrchestratorProbe, VmOrchestratorReport,
 };
 pub use proof_store::{
     ArtefactVault, ArtifactManifest, MemoryStore, MinerEnvVault, ARTEFACT_STAGING_DIR_ENV,
