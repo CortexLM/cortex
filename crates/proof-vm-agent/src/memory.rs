@@ -87,6 +87,28 @@ impl MemoryBudget {
     /// for the topic's whole life and is not free capacity. An experiment
     /// budget that ignores it is how Gate 4 oversubscribed.
     ///
+    /// # What this is, and what it is not
+    ///
+    /// This compares **configured** guest memory against the host's. It is a
+    /// guard against the oversubscription that actually happened — three
+    /// 8 GiB guests on a 16 GiB host — and it is deliberately **not** a
+    /// residency model:
+    ///
+    /// - A guest's RAM is lazily populated. Firecracker maps the region; the
+    ///   guest touches pages as it works. Gate 3 proves it: a paid run on a
+    ///   topic VM beside one experiment VM is 8 GiB + 8 GiB + the 4 GiB
+    ///   **sister** guest = 20 GiB of configured memory on a 16 GiB host, and
+    ///   it passes.
+    /// - The **sister** guest is booted by the hypervisor inside a job and
+    ///   never enters this count, for that reason: counting it would refuse
+    ///   the proven Gate 3 shape.
+    ///
+    /// So do not "fix" this by summing every guest the host could ever boot:
+    /// that is the change that would take the working shape offline, which is
+    /// exactly the regression Greptile caught in `f0800353`. The guard is
+    /// sized to refuse the observed failure with margin, not to model the
+    /// kernel.
+    ///
     /// # Errors
     ///
     /// The refusal, naming what holds the memory, what was asked for, and the
@@ -355,6 +377,39 @@ mod tests {
                 .fits(std::slice::from_ref(&topic), 8_192)
                 .is_err(),
             "the unrounded figure refuses the shape that demonstrably runs"
+        );
+    }
+
+    /// The guard counts **configured** guest memory, and the sister guest is
+    /// deliberately not in it — the boundary, pinned so it is not "fixed"
+    /// into re-breaking Gate 3.
+    ///
+    /// A paid run on the proven Gate 3 shape is 8 GiB topic + 8 GiB
+    /// experiment + the 4 GiB sister = 20 GiB of configured memory on a
+    /// 16 GiB host, and it **passes**: guest RAM is lazily populated, so the
+    /// configured sum is not the resident set. Counting the sister here would
+    /// refuse that shape.
+    #[test]
+    fn the_guard_is_not_a_residency_model() {
+        let budget = MemoryBudget {
+            total_mib: 16_384,
+            reserve_mib: 0,
+        };
+        // The pair the host really runs — sister excluded, as it is in the
+        // agent (the hypervisor boots it inside a job, never in `state.vms`).
+        let live = [vm("tb4-0007", 8_192, false), vm("tb4-x0008", 8_192, true)];
+        assert!(
+            budget.fits(&live, 8_192).is_err(),
+            "the third configured guest is refused"
+        );
+        // With the sister's 4 GiB added, the same live set already exceeds a
+        // 16 GiB host *before* the third guest — which is why the sister is
+        // not counted. If a change makes this fail, it has turned the guard
+        // into a residency model and taken Gate 3 with it.
+        let with_sister: u64 = live.iter().map(|r| u64::from(r.mem_mib)).sum::<u64>() + 4_096;
+        assert!(
+            with_sister > budget.ceiling_mib(),
+            "configured memory with the sister exceeds the host, yet the shape runs"
         );
     }
 
