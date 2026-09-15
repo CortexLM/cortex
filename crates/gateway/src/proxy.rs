@@ -71,12 +71,9 @@ async fn proxy_inner(
     req: Request,
 ) -> Response {
     let method = req.method().clone();
-    if is_admin_path(&rest) {
-        return (
-            StatusCode::FORBIDDEN,
-            "admin API is not exposed via gateway; use master-local challenge port",
-        )
-            .into_response();
+    let headers = req.headers().clone();
+    if let Some(refusal) = admin_gate(&method, &challenge_id, &rest, &headers) {
+        return refusal;
     }
     if is_blocked_report_read(&method, &rest) {
         return (
@@ -85,7 +82,6 @@ async fn proxy_inner(
         )
             .into_response();
     }
-    let headers = req.headers().clone();
     let body = match axum::body::to_bytes(req.into_body(), PROXY_MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
@@ -184,6 +180,40 @@ async fn proxy_inner(
     }
 }
 
+/// The admin gate: `None` when the request may proceed, a refusal otherwise.
+///
+/// The rule itself lives in [`gateway_core::admin_route`] (which owns its
+/// tests); this is only the HTTP shape of the refusal.
+fn admin_gate(
+    method: &Method,
+    challenge_id: &str,
+    rest: &str,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    if !is_admin_path(rest) {
+        return None;
+    }
+    if !is_forwardable_admin_route(method, challenge_id, rest) {
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                "admin API is not exposed via gateway; use master-local challenge port",
+            )
+                .into_response(),
+        );
+    }
+    if !has_operator_bearer(headers) {
+        return Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                "the operator publish route needs an `authorization: Bearer <token>` header",
+            )
+                .into_response(),
+        );
+    }
+    None
+}
+
 /// Join base URL, remaining path, and optional query.
 #[must_use]
 pub fn upstream_url(base: &str, rest: &str, query: Option<&str>) -> String {
@@ -264,44 +294,18 @@ async fn forward(
     ForwardResult::Ok(response)
 }
 
-/// Collapse `.` / empty / `..` segments the same way `url`/`reqwest` will before
-/// the upstream request — used so gateway gates cannot be skipped via `v1/./admin`.
-pub use gateway_core::proxy_detach::normalize_proxy_path;
+/// Operator admin surfaces are master-local only, with **one** forwarded
+/// exception (the operator publish): the rule, its four gates, and its tests
+/// live in [`gateway_core::admin_route`]. Re-exported so callers of this crate
+/// keep one import.
+pub use gateway_core::admin_route::{
+    has_operator_bearer, is_admin_path, is_forwardable_admin_route,
+};
 
-/// Operator admin surfaces are master-local only (not on the public miner path).
-///
-/// Match after path normalization: raw `v1/./admin/…` must not bypass the gate
-/// when the HTTP client collapses `.` before dialing the challenge upstream.
-#[must_use]
-pub fn is_admin_path(rest: &str) -> bool {
-    let n = normalize_proxy_path(rest);
-    n.starts_with("v1/admin/") || n == "v1/admin"
-}
-
-/// Report bodies are operator-local. POST submit stays on the miner path.
-///
-/// HEAD is a read: Axum would otherwise map it onto the GET handler and leak
-/// status/headers (and whether a row exists) through the public gateway.
-#[must_use]
-pub fn is_blocked_report_read(method: &Method, rest: &str) -> bool {
-    let n = normalize_proxy_path(rest);
-    *method != Method::POST && (n == "v1/reports" || n.starts_with("v1/reports/"))
-}
-
-/// Miner-controlled viewer paths (`/challenge/{id}/v1/view/{run}/{page}`).
-#[must_use]
-pub fn is_view_path(rest: &str) -> bool {
-    normalize_proxy_path(rest).starts_with("v1/view/")
-}
-
-/// Captured PNG screenshot under `/v1/view/{run}/{page}.png`.
-#[must_use]
-pub fn is_view_png_path(path: &str) -> bool {
-    is_view_path(path)
-        && std::path::Path::new(path.trim_start_matches('/'))
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
-}
+/// The proxy's read gates — operator-local report bodies, and the
+/// miner-controlled viewer paths — live in [`gateway_core::proxy_paths`] with
+/// their tests. Re-exported so callers of this crate keep one import.
+pub use gateway_core::proxy_paths::{is_blocked_report_read, is_view_path, is_view_png_path};
 
 /// Re-apply the viewer header floor at the last serving layer (defense in
 /// depth). Non-PNG paths get the full HTML lockdown (CSP `sandbox`, CORP
@@ -365,50 +369,31 @@ mod tests {
         ));
     }
 
+    /// The admin predicates moved to `gateway-core::admin_route` with their
+    /// tests (the module owns the rule). This pins that the re-export is the
+    /// same rule the gate calls.
     #[test]
-    fn admin_paths_blocked_from_gateway() {
+    fn the_admin_rule_is_re_exported_not_re_implemented() {
         assert!(is_admin_path("v1/admin/rounds/1/winners"));
-        assert!(is_admin_path("/v1/admin/rounds/1/candidates"));
-        assert!(!is_admin_path("v1/harness"));
-        assert!(!is_admin_path("v1/runs/abc"));
-    }
-
-    #[test]
-    fn report_reads_are_blocked_from_gateway_but_submit_is_not() {
-        assert!(is_blocked_report_read(&Method::GET, "v1/reports"));
-        assert!(is_blocked_report_read(&Method::HEAD, "v1/reports"));
-        assert!(is_blocked_report_read(&Method::HEAD, "v1/reports/by_1"));
-        assert!(is_blocked_report_read(&Method::GET, "v1/reports/by_1"));
-        assert!(is_blocked_report_read(&Method::GET, "v1/./reports/by_1"));
-        assert!(is_blocked_report_read(&Method::OPTIONS, "v1/reports"));
-        assert!(!is_blocked_report_read(&Method::POST, "v1/reports"));
-        assert!(!is_blocked_report_read(&Method::GET, "v1/status"));
-        assert!(!is_blocked_report_read(&Method::HEAD, "v1/status"));
-        assert!(!is_blocked_report_read(&Method::GET, "v1/pair"));
-    }
-
-    #[test]
-    fn admin_paths_blocked_despite_dot_segment_confusion() {
-        // axum preserves `./` in `{*rest}`; reqwest then collapses to /v1/admin/…
         assert!(is_admin_path("v1/./admin/rounds/1/winners"));
-        assert!(is_admin_path("v1//admin/rounds/1/candidates"));
-        assert!(is_admin_path("./v1/admin/rounds/1/winners"));
-        assert!(is_admin_path("v1/admin/../admin/rounds/1/winners"));
-        assert!(is_admin_path("foo/../v1/admin/rounds/1/winners"));
-        assert!(!is_admin_path("v1/./harness"));
-        assert!(!is_admin_path("v1/not-admin/rounds/1/winners"));
-    }
-
-    #[test]
-    fn view_paths_detected() {
-        assert!(is_view_path("v1/view/abc/index.html"));
-        assert!(is_view_path("/v1/view/abc/pricing.html"));
-        assert!(is_view_path("v1/./view/abc/index.html"));
-        assert!(!is_view_path("v1/runs/abc"));
-        assert!(!is_view_path("v1/viewx/abc"));
-        assert!(!is_view_path("v1/admin/view"));
-        assert!(is_view_png_path("v1/view/abc/index.png"));
-        assert!(!is_view_png_path("v1/view/abc/index.html"));
+        assert!(!is_admin_path("v1/harness"));
+        assert!(is_forwardable_admin_route(
+            &Method::POST,
+            "proof",
+            "v1/admin/proof/topics"
+        ));
+        assert!(!is_forwardable_admin_route(
+            &Method::GET,
+            "proof",
+            "v1/admin/proof/topics"
+        ));
+        let mut headers = HeaderMap::new();
+        assert!(!has_operator_bearer(&headers));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer operator-token"),
+        );
+        assert!(has_operator_bearer(&headers));
     }
 
     #[test]

@@ -131,6 +131,49 @@ async fn only_a_registered_route_resolves() {
     }
 }
 
+/// A route inside the challenge's admin namespace is never served, even when
+/// the table holds a row for it: the install refuses to record one
+/// (`section::is_reserved_api_path`), and this is the read-side half for a row
+/// written before that rule existed. The answer is a 404 from the challenge,
+/// never a 200 that reads like an operator route.
+#[tokio::test]
+async fn a_route_inside_the_admin_namespace_never_resolves() {
+    let registry = FakeRegistry::new();
+    registry.install(
+        "tb4",
+        vec![("v1/admin/proof/topics", "POST"), ("v1/admin", "*")],
+    );
+    let mux = TopicRouteMux::new(registry.clone());
+
+    for path in [
+        "v1/admin/proof/topics",
+        "v1/admin",
+        "/v1/admin",
+        "v1/admin/x",
+    ] {
+        assert_eq!(
+            mux.resolve("tb4", "POST", path).await.expect("resolve"),
+            Resolved::NotRegistered,
+            "{path:?}"
+        );
+    }
+    // The reserved check runs before the table read, so a path in the admin
+    // namespace does not even cost a query.
+    assert_eq!(
+        registry.route_reads.load(Ordering::SeqCst),
+        0,
+        "the reservation is decided without reading the registry"
+    );
+    // A path that merely starts with the same characters is not reserved.
+    registry.install("tb4", vec![("v1/administrator", "GET")]);
+    assert!(matches!(
+        mux.resolve("tb4", "GET", "v1/administrator")
+            .await
+            .expect("resolve"),
+        Resolved::Route(_)
+    ));
+}
+
 /// **The regression this cache exists for:** an install in another process
 /// writes the table, and the next request sees it — with no signal beyond the
 /// generation probe and no restart.

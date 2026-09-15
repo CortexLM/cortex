@@ -168,6 +168,11 @@ impl TopicRouteMux {
     /// id the CHECK cannot hold is refused rather than trimmed into one that
     /// resolves.
     ///
+    /// A path inside the challenge's admin namespace
+    /// ([`crate::section::is_reserved_api_path`]) is never served, whatever
+    /// the table holds: the install refuses to record one, and this is the
+    /// read-side half for a row that predates that rule.
+    ///
     /// # Errors
     ///
     /// [`InstallError::Db`] when the registry cannot be read. The caller
@@ -181,9 +186,12 @@ impl TopicRouteMux {
         if !is_topic_id(topic_id) {
             return Ok(Resolved::NotRegistered);
         }
+        let path = path.trim().trim_matches('/');
+        if crate::section::is_reserved_api_path(path) {
+            return Ok(Resolved::NotRegistered);
+        }
         let routes = self.routes(topic_id).await?;
         let method = method.trim().to_ascii_uppercase();
-        let path = path.trim().trim_matches('/');
         match routes.iter().find(|r| r.path == path) {
             None => Ok(Resolved::NotRegistered),
             Some(route) if route.method == "*" || route.method == method => {

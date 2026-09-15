@@ -58,6 +58,12 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// Why a submit signature cannot be built or checked.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SubmitSigError {
+    /// `hotkey_signature` was absent or empty.
+    #[error("hotkey_signature required")]
+    MissingSignature,
+    /// `submit_nonce` was absent or empty.
+    #[error("submit_nonce required")]
+    MissingNonce,
     /// `hotkey_signature` was not exactly 128 lowercase hex characters.
     #[error("hotkey_signature invalid")]
     InvalidSignature,
@@ -667,4 +673,130 @@ mod tests {
             Err(SubmitSigError::NotAnObject)
         );
     }
+}
+
+/// The Proof submit body, as it arrives on the wire.
+///
+/// This is the **wire contract** — the shape `POST /v1/submissions` parses and
+/// the shape a miner signs over. It lives beside [`SubmitFields`] (the exact
+/// bytes signed) rather than in the HTTP crate, because the two have to agree:
+/// a field added here without a matching `SubmitFields` entry would be a value
+/// a miner sends but nobody authenticates.
+///
+/// The `manifest` and `env` types are the store's and the canonical-JSON
+/// crate's, so the wire shape cannot drift from the gate that reads it.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SubmitBody {
+    /// 64 hex sr25519 public key.
+    pub miner_hotkey: String,
+    /// sr25519 signature over [`SubmitFields::signing_payload`] (128 lowercase hex).
+    #[serde(default)]
+    pub hotkey_signature: Option<String>,
+    /// Client anti-replay nonce (64 lowercase hex), bound into the signature
+    /// and accepted once per hotkey.
+    #[serde(default)]
+    pub submit_nonce: Option<String>,
+    /// 64 lowercase hex sha256 of the artefact.
+    pub artifact_digest: String,
+    /// Where the bytes live, when the miner did not upload them.
+    #[serde(default)]
+    pub artifact_uri: Option<String>,
+    /// Claim text, signed.
+    #[serde(default)]
+    pub claim: String,
+    /// Declared FLOPs, signed.
+    #[serde(default)]
+    pub declared_flops: u64,
+    /// Topic submitted to.
+    #[serde(default)]
+    pub topic_id: String,
+    /// Optional miner label. Not compared to an HF id (that check is retired).
+    #[serde(default)]
+    pub architecture: String,
+    /// Training manifest the contamination gate reads.
+    #[serde(default)]
+    pub manifest: proof_store::ArtifactManifest,
+    /// Miner BYOK: `{"<NAME>": "<value>"}` for the variables this topic's
+    /// signed document declares (`constraints.params.miner_byok` /
+    /// `miner_env_allowlist`). Never signed (v1 of the submit payload is
+    /// unchanged), never persisted on the row, never echoed back. A name the
+    /// topic does not declare is a **400** before the signature is checked,
+    /// so a mistake here never burns the single-use `submit_nonce`.
+    #[serde(default)]
+    pub env: proof_canon::MinerEnv,
+}
+
+impl SubmitBody {
+    /// Miner identity for one submit: `hotkey_signature` over every gate input
+    /// (topic, artefact, FLOPs, claim, manifest) plus the client
+    /// `submit_nonce`, verified over the strings exactly as posted.
+    ///
+    /// Returns the nonce the caller must reserve before any row or rent, or
+    /// the [`SubmitSigError`] naming which field was wrong.
+    ///
+    /// # Errors
+    ///
+    /// [`SubmitSigError`] — a missing or malformed signature, nonce, or
+    /// hotkey, or a signature that does not verify.
+    pub fn authenticate(&self, hotkey: &str, artifact: &str) -> Result<String, SubmitSigError> {
+        let sig_hex = self
+            .hotkey_signature
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or(SubmitSigError::MissingSignature)?;
+        let sig = parse_signature_hex(sig_hex)?;
+        let nonce = self
+            .submit_nonce
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or(SubmitSigError::MissingNonce)?;
+        parse_submit_nonce_hex(nonce)?;
+        let pk = parse_hotkey_hex(hotkey)?;
+        // A signature that does not verify is the **wire** refusal
+        // (`hotkey_signature invalid`), not the crypto layer's own words: the
+        // miner reads this string, and it is the same one every other
+        // malformed-signature case answers.
+        verify_submit(
+            &pk,
+            &SubmitFields {
+                hotkey_hex: hotkey,
+                topic_id: &self.topic_id,
+                artifact_digest: artifact,
+                declared_flops: self.declared_flops,
+                claim: &self.claim,
+                train_content_hashes: &self.manifest.train_content_hashes,
+                train_dataset_ids: &self.manifest.train_dataset_ids,
+                submit_nonce_hex: nonce,
+            },
+            &sig,
+        )
+        .map_err(|_| SubmitSigError::InvalidSignature)?;
+        Ok(nonce.to_owned())
+    }
+}
+
+/// A digest of **nothing** is not an artefact digest.
+///
+/// The sha256 of zero bytes and of an empty tar archive (`tar cf - -T
+/// /dev/null`, 10240 zero bytes). Staging's happy path once matched exactly
+/// such a digest because the RLM guest could not fetch the artefact and fell
+/// back to an empty tree; refusing it at submit keeps that stub out of every
+/// row and rent.
+#[must_use]
+pub fn is_digest_of_nothing(hex64: &str) -> bool {
+    let empty_input = sha256_hex(b"");
+    let empty_tar = sha256_hex(&[0u8; 10_240]);
+    hex64.eq_ignore_ascii_case(&empty_input) || hex64.eq_ignore_ascii_case(&empty_tar)
+}
+
+/// The row nonce for `(hotkey, topic, digest)`: the frozen digest's own input,
+/// so a row can be re-derived from the wire fields that produced it.
+#[must_use]
+pub fn nonce_from(hotkey: &str, topic_id: &str, digest: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(b"proof-nonce-v1");
+    h.update(hotkey.as_bytes());
+    h.update(topic_id.as_bytes());
+    h.update(digest.as_bytes());
+    hex::encode(h.finalize())
 }

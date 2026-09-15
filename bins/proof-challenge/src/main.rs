@@ -26,9 +26,8 @@ use proof_challenge::{
     challenge_router, executor_slot, hash_admin_token, parse_holdout_file, AppState, ArtefactVault,
     BaselineMeasurement, EvalBackend, EvalExecutorOffer, GatewayClient, GatewayClientConfig,
     HarvestOverrides, InferenceOffer, LiveScorer, MemoryStore, MinerEnvVault, ProofEmitter,
-    ProofPin, TopicDocument, VmAgentHealth, VmOrchestratorProbe, VmOrchestratorReport,
-    ARTEFACT_STAGING_DIR_ENV, CHALLENGE_ID, DEFAULT_EMIT_POLL_SECS, MINER_BYOK_DIR_ENV,
-    SCORING_VERSION,
+    ProofPin, TopicDocument, VmOrchestratorProbe, VmOrchestratorReport, ARTEFACT_STAGING_DIR_ENV,
+    CHALLENGE_ID, DEFAULT_EMIT_POLL_SECS, MINER_BYOK_DIR_ENV, SCORING_VERSION,
 };
 use proof_challenge::{InstallJournalSlot, PgInstallJournal};
 use proof_eval::{custom_ids_ref, registered_custom, FamilyMux};
@@ -622,13 +621,7 @@ impl VmOrchestratorProbe for TopicVm {
             image_digest: template.image_digest.clone(),
             vcpus: template.vcpus,
             mem_mib: template.mem_mib,
-            agent: health.as_ref().ok().map(|h| VmAgentHealth {
-                api_version: h.api_version,
-                ready: h.ready,
-                reason: h.reason.clone(),
-                hypervisor: h.hypervisor.clone(),
-                vms: h.vms,
-            }),
+            agent: health.as_ref().ok().cloned(),
             agent_error: health.err().map(|e| e.to_string()),
             live_harvest_wired: false,
             custom_family_wired: false,

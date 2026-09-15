@@ -27,8 +27,7 @@
 //! - It touches no route, no allocator, and no scoring path.
 //! - It removes none of the compiled-in bindings the current live topic uses.
 //!
-//! Exit codes: `0` ok, `1` error, `2` usage or configuration, `3` not
-//! implemented in this slice.
+//! Exit codes: `0` ok, `1` error, `2` usage or configuration.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -37,12 +36,16 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use proof_rlm_store::{MemoryRlmStore, PgRlmStore, RlmStore, TopicVersionRow};
 use proof_task::ProofPin;
 use proof_topic_bundle::{InstallEnvironment, TopicInstallBundle, TopicInstallPlan, PUBLISH_PATH};
 
-mod drive;
 mod install;
+mod registry;
+
+pub(crate) use registry::print_json;
+use registry::{
+    cmd_gate, cmd_list, cmd_show, dash_if_empty, database_url, open_pool, open_store, status_word,
+};
 
 use install::InstallArgs;
 
@@ -52,8 +55,6 @@ const EXIT_OK: u8 = 0;
 const EXIT_ERROR: u8 = 1;
 /// Bad usage or missing configuration.
 const EXIT_USAGE: u8 = 2;
-/// The command exists but its behaviour belongs to a later slice.
-const EXIT_NOT_IMPLEMENTED: u8 = 3;
 
 /// Proof operator CLI.
 #[derive(Debug, Parser)]
@@ -72,9 +73,12 @@ Resolve the publish call and host env without touching anything:
 List the installed topics (a read-only view of proof_topic_version):
   proof-admin topic list
 
-Nothing here writes a topic, opens a route, or changes how a score is
-computed. `install` prints the publish call and the host env for an operator
-to run; `topic enable` / `disable` / `seal` exit 3 as not-implemented."
+Every command is implemented. Nothing here writes a topic document, opens a
+route, or changes how a score is computed: `install` publishes the document
+the bundle carries and applies the bundle's RLM section, `disable` / `enable`
+throw the operator gate the challenge reads on the submit path, and
+`seal` records the operator's seal of the baseline the RLM measured and
+publishes the open document."
 )]
 struct Cli {
     /// Postgres URL for the topic registry view. Falls back to `BASE_DATABASE_URL`.
@@ -191,23 +195,77 @@ enum TopicCmd {
         #[command(subcommand)]
         cmd: AliasCmd,
     },
-    /// Not implemented in this slice.
-    Enable {
-        /// Topic slug.
-        topic_id: String,
-    },
-    /// Not implemented in this slice.
+    /// Stop a topic taking submissions, now.
+    ///
+    /// Appends a `disabled` row to `proof_topic_gate`; the challenge reads it
+    /// on the next `POST /v1/submissions` and refuses with your reason. No
+    /// re-sign, no restart, no redeploy — the document keeps its own `status`,
+    /// in-flight evaluations finish, and rows already scored keep their
+    /// verdicts. Use it when something is wrong with the topic, not to retire
+    /// one: retiring is a signed `closed` document.
     Disable {
-        /// Topic slug.
+        /// Topic slug, or an alias of one.
         topic_id: String,
+        /// Why, in your words. Shown to a miner in the 403, so no secrets.
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        /// Who is throwing the switch, for the audit trail. Never a token.
+        #[arg(long, env = "PROOF_GATE_ACTOR", value_name = "LABEL")]
+        actor: Option<String>,
     },
-    /// Not implemented in this slice.
-    Seal {
-        /// Topic slug.
+    /// Let a disabled topic take submissions again.
+    ///
+    /// Appends an `enabled` row — the only way back, so the history of who
+    /// turned it off (and who turned it on) stays readable. The topic's own
+    /// document is untouched.
+    Enable {
+        /// Topic slug, or an alias of one.
         topic_id: String,
-        /// Measured baseline primary.
-        #[arg(long, value_name = "VALUE")]
-        value: f64,
+        /// Why it is being re-enabled, for the audit trail.
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        /// Who is clearing the switch. Never a token.
+        #[arg(long, env = "PROOF_GATE_ACTOR", value_name = "LABEL")]
+        actor: Option<String>,
+    },
+    /// Show what the RLM measured, and the commitment an open document must
+    /// seal. The read half of `topic seal`.
+    Baseline {
+        /// Topic slug, or an alias of one.
+        topic_id: String,
+        /// Pin the document is checked against. Defaults to `config/proof-pin.toml`.
+        #[arg(long, value_name = "PATH", default_value = "config/proof-pin.toml")]
+        pin: PathBuf,
+    },
+    /// Seal the RLM's measured baseline and open the topic.
+    ///
+    /// Takes the signed `status: open` document whose `baseline` carries the
+    /// commitment `topic baseline` printed, checks it exactly the way the
+    /// runtime does (`TopicSetup::mark_sealed`: open, valid on this host,
+    /// operator-signed, and sealing the value the RLM measured), records the
+    /// move to `open`, and — with `--publish` — publishes it through the
+    /// admin route, which is what makes the topic reachable and scorable.
+    Seal {
+        /// Topic slug, or an alias of one.
+        topic_id: String,
+        /// The signed `status: open` document (JSON).
+        #[arg(long, value_name = "PATH")]
+        document: PathBuf,
+        /// Pin the document is checked against. Defaults to `config/proof-pin.toml`.
+        #[arg(long, value_name = "PATH", default_value = "config/proof-pin.toml")]
+        pin: PathBuf,
+        /// Publish the sealed document through the admin route.
+        #[arg(long)]
+        publish: bool,
+        /// Master base URL for the publish call, e.g.
+        /// `http://10.116.0.3:8080` (the gateway) or
+        /// `http://127.0.0.1:8100` (the challenge service directly).
+        #[arg(long, env = "PROOF_ADMIN_URL", value_name = "URL")]
+        admin_url: Option<String>,
+        /// File holding the operator bearer for `/v1/admin/*`. Never logged,
+        /// never printed. Defaults to `PROOF_ADMIN_TOKENS_FILE`.
+        #[arg(long, env = "PROOF_ADMIN_TOKEN_FILE", value_name = "PATH")]
+        admin_token_file: Option<PathBuf>,
     },
 }
 
@@ -260,10 +318,6 @@ fn main() -> ExitCode {
             eprintln!("proof-admin: {msg}");
             ExitCode::from(EXIT_USAGE)
         }
-        Err(Failure::NotImplemented(msg)) => {
-            eprintln!("proof-admin: {msg}");
-            ExitCode::from(EXIT_NOT_IMPLEMENTED)
-        }
         Err(Failure::Error(msg)) => {
             eprintln!("proof-admin: {msg}");
             ExitCode::from(EXIT_ERROR)
@@ -276,8 +330,6 @@ fn main() -> ExitCode {
 enum Failure {
     /// Bad usage or missing configuration.
     Usage(String),
-    /// A later slice owns this behaviour.
-    NotImplemented(String),
     /// Anything else (bad bundle, refused document, database error).
     Error(String),
 }
@@ -332,12 +384,54 @@ async fn run_topic(opts: &Options, cmd: &TopicCmd) -> Result<(), Failure> {
         TopicCmd::InstallLog { topic } => cmd_install_log(opts, topic).await,
         TopicCmd::Show { topic_id } => cmd_show(opts, topic_id).await,
         TopicCmd::Alias { cmd } => run_alias(opts, cmd).await,
-        TopicCmd::Enable { topic_id } => Err(not_implemented("topic enable", topic_id)),
-        TopicCmd::Disable { topic_id } => Err(not_implemented("topic disable", topic_id)),
-        TopicCmd::Seal { topic_id, value } => Err(not_implemented(
-            &format!("topic seal (value {value})"),
+        TopicCmd::Disable {
             topic_id,
-        )),
+            reason,
+            actor,
+        } => {
+            cmd_gate(
+                opts,
+                topic_id,
+                proof_topic_install::GateState::Disabled,
+                reason.as_deref(),
+                actor.as_deref(),
+            )
+            .await
+        }
+        TopicCmd::Enable {
+            topic_id,
+            reason,
+            actor,
+        } => {
+            cmd_gate(
+                opts,
+                topic_id,
+                proof_topic_install::GateState::Enabled,
+                reason.as_deref(),
+                actor.as_deref(),
+            )
+            .await
+        }
+        TopicCmd::Seal {
+            topic_id,
+            document,
+            pin,
+            publish,
+            admin_url,
+            admin_token_file,
+        } => {
+            cmd_seal(
+                opts,
+                topic_id,
+                document,
+                pin,
+                *publish,
+                admin_url.as_deref(),
+                admin_token_file.as_deref(),
+            )
+            .await
+        }
+        TopicCmd::Baseline { topic_id, pin } => cmd_baseline(opts, topic_id, pin).await,
     }
 }
 
@@ -399,15 +493,6 @@ async fn run_alias(opts: &Options, cmd: &AliasCmd) -> Result<(), Failure> {
             Ok(())
         }
     }
-}
-
-/// A stub that names what is missing instead of guessing.
-fn not_implemented(command: &str, topic_id: &str) -> Failure {
-    Failure::NotImplemented(format!(
-        "`{command}` for topic {topic_id:?} is not implemented in this slice (P0: bundle + \
-         admin CLI skeleton). Nothing was changed. A topic's lifecycle is the signed document's \
-         `status`; re-sign and re-publish through POST /v1/admin/proof/topics instead."
-    ))
 }
 
 /// Read a bundle file.
@@ -531,6 +616,116 @@ async fn cmd_install_log(opts: &Options, topic_id: &str) -> Result<(), Failure> 
     install::install_log(opts, topic_id).await
 }
 
+/// `topic baseline`: read the measurement and print what to seal.
+///
+/// The procedure is [`proof_topic_ops::baseline`]; this is the printing.
+async fn cmd_baseline(opts: &Options, topic_id: &str, pin_path: &Path) -> Result<(), Failure> {
+    let pool = open_pool(opts).await?;
+    let pin = load_pin(pin_path)?;
+    let report = proof_topic_ops::baseline(&pool, &pin, topic_id)
+        .await
+        .map_err(ops_to_failure)?;
+    if opts.json {
+        return print_json(&serde_json::json!({
+            "topic_id": report.topic_id,
+            "rules_version": report.rules_version,
+            "primary_value": report.primary_value,
+            "metric_primary": report.metric_primary,
+            "custom_id": report.custom_id,
+            "holdout_commitment": report.holdout_commitment,
+            "metrics_commitment": report.metrics_commitment,
+            "document_status": report.document_status,
+            "next": report.next_steps(),
+        }));
+    }
+    println!("topic {} — measured baseline", report.topic_id);
+    println!("  primary_value     {}", report.primary_value);
+    println!("  metric_primary    {}", report.metric_primary);
+    println!("  custom_id         {}", dash_if_empty(&report.custom_id));
+    println!("  rules_version     {}", report.rules_version);
+    println!("  holdout           {}", report.holdout_commitment);
+    println!(
+        "  document_status   {}",
+        status_word(report.document_status)
+    );
+    println!();
+    println!("An `open` document must seal this measurement. Its baseline block needs:");
+    println!("  metrics_commitment  {}", report.metrics_commitment);
+    println!();
+    println!("{}", report.next_steps());
+    Ok(())
+}
+
+/// `topic seal`: record the seal, then optionally publish.
+///
+/// The procedure is [`proof_topic_ops::seal`]; this is the printing.
+async fn cmd_seal(
+    opts: &Options,
+    topic_id: &str,
+    document: &Path,
+    pin_path: &Path,
+    publish: bool,
+    admin_url: Option<&str>,
+    admin_token_file: Option<&Path>,
+) -> Result<(), Failure> {
+    let pool = open_pool(opts).await?;
+    let pin = load_pin(pin_path)?;
+    let outcome = proof_topic_ops::seal(
+        &pool,
+        &proof_topic_ops::SealArgs {
+            topic_id,
+            document,
+            pin: &pin,
+            publish,
+            admin_url,
+            admin_token_file,
+            registered_custom: registered_custom_from_env(),
+        },
+    )
+    .await
+    .map_err(ops_to_failure)?;
+    if opts.json {
+        return print_json(&serde_json::json!({
+            "ok": true,
+            "topic_id": outcome.topic_id,
+            "state": "open",
+            "document_version": outcome.document_version,
+            "metrics_commitment": outcome.metrics_commitment,
+            "primary_value": outcome.primary_value,
+            "published": outcome.published,
+            "already_sealed": outcome.already_sealed,
+        }));
+    }
+    if outcome.already_sealed {
+        println!(
+            "topic {} was already sealed (document version {}); this run only published.",
+            outcome.topic_id, outcome.document_version
+        );
+    } else {
+        println!("topic {} sealed and opened.", outcome.topic_id);
+        println!("  state             open");
+        println!("  document_version  {}", outcome.document_version);
+        println!("  primary_value     {}", outcome.primary_value);
+        println!("  commitment        {}", outcome.metrics_commitment);
+    }
+    if outcome.published {
+        println!("  published         yes (the topic's routes and document are live)");
+    } else {
+        println!("  published         no (--publish was not given)");
+    }
+    println!();
+    println!("{}", outcome.after());
+    Ok(())
+}
+
+/// An operator procedure's refusal, as the CLI's exit code and message.
+pub(crate) fn ops_to_failure(e: proof_topic_ops::OpsError) -> Failure {
+    match e {
+        proof_topic_ops::OpsError::Usage(m) => Failure::Usage(m),
+        proof_topic_ops::OpsError::Error(m) => Failure::Error(m),
+    }
+}
+
 pub(crate) fn print_plan(plan: &TopicInstallPlan, bundle_path: &Path, pin_path: &Path) {
     println!("topic install plan");
     println!("  topic_id          {}", plan.topic_id);
@@ -637,199 +832,4 @@ fn publish_block(bundle_path: &Path) -> String {
 /// different command than the operator read.
 fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
-}
-
-async fn cmd_list(opts: &Options) -> Result<(), Failure> {
-    let store = open_store(opts).await?;
-    let rows = store
-        .latest_topics()
-        .await
-        .map_err(|e| Failure::Error(format!("list topics: {e}")))?;
-    if opts.json {
-        let body: Vec<serde_json::Value> = rows.iter().map(topic_json).collect();
-        print_json(&body)?;
-        return Ok(());
-    }
-    if rows.is_empty() {
-        println!("No topics installed.");
-        return Ok(());
-    }
-    println!("{} topic(s) installed:", rows.len());
-    for row in &rows {
-        println!("  {}", summarize(row));
-    }
-    println!();
-    println!("Read from proof_topic_version; the signed document is the source of truth.");
-    Ok(())
-}
-
-async fn cmd_show(opts: &Options, topic_id: &str) -> Result<(), Failure> {
-    let store = open_store(opts).await?;
-    // An alias resolves to its canonical slug first, so `show tbench` finds
-    // `tb4`. Resolution is fail-closed in the store: an alias whose topic has
-    // no published version resolves to nothing rather than to an empty row.
-    let resolved = store
-        .resolve_alias(topic_id)
-        .await
-        .map_err(|e| Failure::Error(format!("resolve {topic_id}: {e}")))?;
-    let canonical = resolved.as_deref().unwrap_or(topic_id);
-    let row = store
-        .latest_topic(canonical)
-        .await
-        .map_err(|e| Failure::Error(format!("show {canonical}: {e}")))?;
-    let Some((version, document)) = row else {
-        return Err(Failure::Error(format!(
-            "no installed topic {topic_id:?}{}. Use `proof-admin topic list` to see the exact ids.",
-            resolved
-                .as_deref()
-                .map(|c| format!(" (alias of {c:?})"))
-                .unwrap_or_default()
-        )));
-    };
-    let row = TopicVersionRow {
-        topic_id: canonical.to_owned(),
-        version,
-        document,
-    };
-    if let Some(canonical) = resolved.as_deref() {
-        if !opts.json {
-            println!("{topic_id} is an alias of {canonical}");
-            println!();
-        }
-    }
-    if opts.json {
-        print_json(&topic_json(&row))?;
-        return Ok(());
-    }
-    print_row(&row);
-    Ok(())
-}
-
-/// The topic registry: the existing `proof_topic_version` rows.
-///
-/// A configured but unreachable database is fatal: falling back to an empty
-/// in-memory view would report "nothing installed" for a host that has topics.
-async fn open_store(opts: &Options) -> Result<Box<dyn RlmStore>, Failure> {
-    let Some(url) = database_url(opts)? else {
-        return Err(Failure::Usage(
-            "this command reads the topic registry and needs a database: set \
-             BASE_DATABASE_URL (or BASE_DATABASE_URL_FILE). `topic validate` and \
-             `topic install --dry-run` need no database."
-                .into(),
-        ));
-    };
-    let pool = db::connect(&url)
-        .await
-        .map_err(|e| Failure::Error(format!("connect: {e}")))?;
-    // `PgRlmStore` is the production registry; the memory store exists for
-    // CI/local and is never selected here, so a real host never reads an
-    // empty view by accident.
-    let _ = MemoryRlmStore::new;
-    Ok(Box::new(PgRlmStore::new(pool)))
-}
-
-/// `BASE_DATABASE_URL` value, or the contents of `BASE_DATABASE_URL_FILE`.
-///
-/// The two are mutually exclusive, matching `crates/config`: a value and a
-/// file that disagree would be a silent choice between two databases.
-pub(crate) fn database_url(opts: &Options) -> Result<Option<String>, Failure> {
-    let value = opts
-        .database_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let file = opts.database_url_file.as_deref();
-    match (value, file) {
-        (Some(_), Some(_)) => Err(Failure::Usage(
-            "set BASE_DATABASE_URL or BASE_DATABASE_URL_FILE, not both".into(),
-        )),
-        (Some(url), None) => Ok(Some(url.to_owned())),
-        (None, Some(path)) => {
-            let raw = std::fs::read_to_string(path)
-                .map_err(|e| Failure::Error(format!("read {}: {e}", path.display())))?;
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                return Err(Failure::Usage(format!("{} is empty", path.display())));
-            }
-            Ok(Some(trimmed.to_owned()))
-        }
-        (None, None) => Ok(None),
-    }
-}
-
-fn print_row(row: &TopicVersionRow) {
-    let doc = &row.document;
-    println!("topic {}", row.topic_id);
-    println!("  version           {}", row.version);
-    println!("  status            {}", status_word(doc.status));
-    println!("  metric_family     {}", doc.metric.family.as_str());
-    println!(
-        "  custom_id         {}",
-        dash_if_empty(&doc.metric.custom_id)
-    );
-    println!("  payout_mode       {}", doc.payout_mode.as_str());
-    println!("  valid_from_epoch  {}", doc.valid_from_epoch);
-    println!(
-        "  valid_until_epoch {}",
-        doc.valid_until_epoch
-            .map_or_else(|| "-".to_owned(), |e| e.to_string())
-    );
-    println!("  baseline_sealed   {}", doc.baseline.is_sealed());
-    println!(
-        "  signature         {}…",
-        doc.signature.get(..16).unwrap_or(doc.signature.as_str())
-    );
-    println!();
-    println!("The signed document is the source of truth; this view reads it verbatim.");
-}
-
-/// One-line summary for `topic list`.
-fn summarize(row: &TopicVersionRow) -> String {
-    let doc = &row.document;
-    format!(
-        "{:<24} v{:<3} {:<10} {:<10} custom_id={}",
-        row.topic_id,
-        row.version,
-        status_word(doc.status),
-        doc.metric.family.as_str(),
-        dash_if_empty(&doc.metric.custom_id)
-    )
-}
-
-/// Lifecycle word, matching the wire spelling the document uses.
-fn status_word(status: proof_task::TopicStatus) -> &'static str {
-    match status {
-        proof_task::TopicStatus::Draft => "draft",
-        proof_task::TopicStatus::Open => "open",
-        proof_task::TopicStatus::Closed => "closed",
-    }
-}
-
-fn topic_json(row: &TopicVersionRow) -> serde_json::Value {
-    serde_json::json!({
-        "topic_id": row.topic_id,
-        "version": row.version,
-        "status": row.document.status,
-        "metric_family": row.document.metric.family,
-        "custom_id": row.document.metric.custom_id,
-        "payout_mode": row.document.payout_mode.as_str(),
-        "valid_from_epoch": row.document.valid_from_epoch,
-        "valid_until_epoch": row.document.valid_until_epoch,
-        "baseline_sealed": row.document.baseline.is_sealed(),
-        "document": row.document,
-    })
-}
-
-pub(crate) fn print_json<T: serde::Serialize>(value: &T) -> Result<(), Failure> {
-    let body = serde_json::to_string_pretty(value).map_err(|e| Failure::Error(e.to_string()))?;
-    println!("{body}");
-    Ok(())
-}
-
-fn dash_if_empty(s: &str) -> String {
-    if s.trim().is_empty() {
-        "-".to_owned()
-    } else {
-        s.to_owned()
-    }
 }

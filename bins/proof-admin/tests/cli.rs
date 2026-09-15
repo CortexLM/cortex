@@ -1,13 +1,15 @@
-//! Process-level tests for `proof-admin` (dynamic-topics P0).
+//! Process-level tests for `proof-admin`.
 //!
 //! The commands that must work end to end are `topic validate` and
 //! `topic install --dry-run`: both run the same acceptance checks the existing
-//! `POST /v1/admin/proof/topics` route runs, and neither touches a host. The
-//! stubs must fail closed with exit code 3 rather than doing something partial.
+//! `POST /v1/admin/proof/topics` route runs, and neither touches a host. Every
+//! command that writes — a real install, the gate (`disable` / `enable`), the
+//! seal — is driven here only as far as its **refusals**: no test in this file
+//! reaches a master, spends, or provisions.
 //!
-//! A real install is deliberately **not** implemented in this slice, so the
-//! test asserts it refuses rather than writing anything; the registry view
-//! (`topic list` / `topic show`) is covered against Postgres in
+//! A real install is deliberately **not** run here, so the test asserts it
+//! refuses rather than writing anything; the registry view (`topic list` /
+//! `topic show`) is covered against Postgres in
 //! `crates/proof-rlm-store/tests/store_contract.rs` and by one DB-gated test
 //! here.
 
@@ -22,8 +24,6 @@ use std::sync::{Arc, Mutex};
 const EXIT_ERROR: i32 = 1;
 /// Exit code for bad usage or missing configuration.
 const EXIT_USAGE: i32 = 2;
-/// Exit code for a command a later slice owns.
-const EXIT_NOT_IMPLEMENTED: i32 = 3;
 
 fn workdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -971,38 +971,71 @@ fn database_url_and_file_are_mutually_exclusive() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// `topic seal` takes the signed open document; without one it is a usage
+/// error, not a guess. (The old stub exited 3 with "not implemented"; every
+/// command in this CLI is implemented now, so the exit codes are 0/1/2.)
 #[test]
-fn enable_disable_and_seal_fail_closed_with_exit_3() {
+fn seal_needs_the_open_document() {
+    let args = vec!["topic", "seal", "tb4"];
+    let out = run(&args);
+    assert_eq!(code(&out), EXIT_USAGE, "{args:?}: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("--document"), "{args:?}: {err}");
+    assert!(
+        stdout(&out).is_empty(),
+        "nothing is reported as changed: {args:?}"
+    );
+}
+
+/// `topic disable` / `topic enable` are implemented now, and they are
+/// **fail-closed without a database**: the gate is the table the challenge
+/// reads, so a CLI that could not write it must refuse rather than report a
+/// topic as stopped. Exit 2 (usage), nothing on stdout, and the message names
+/// the variable to set.
+#[test]
+fn disable_and_enable_need_the_gate_database() {
     for args in [
+        vec!["topic", "disable", "tb4", "--reason", "incident 42"],
         vec!["topic", "enable", "tb4"],
-        vec!["topic", "disable", "tb4"],
-        vec!["topic", "seal", "tb4", "--value", "0.42"],
     ] {
-        let out = run(&args);
-        assert_eq!(
-            code(&out),
-            EXIT_NOT_IMPLEMENTED,
-            "{args:?}: {}",
-            stderr(&out)
-        );
+        let out = Command::new(env!("CARGO_BIN_EXE_proof-admin"))
+            .args(&args)
+            .env_remove("BASE_DATABASE_URL")
+            .env_remove("BASE_DATABASE_URL_FILE")
+            .output()
+            .expect("run");
+        assert_eq!(code(&out), EXIT_USAGE, "{args:?}: {}", stderr(&out));
         let err = stderr(&out);
-        assert!(
-            err.contains("not implemented in this slice"),
-            "{args:?}: {err}"
-        );
-        assert!(
-            err.contains("Nothing was changed"),
-            "a stub must say it changed nothing: {args:?}: {err}"
-        );
+        assert!(err.contains("BASE_DATABASE_URL"), "{args:?}: {err}");
         assert!(
             stdout(&out).is_empty(),
-            "a stub prints nothing to stdout: {args:?}"
+            "nothing is reported as changed: {args:?}"
         );
     }
 }
 
+/// The commands that take an install to a **scorable** topic are implemented
+/// and fail closed when they cannot run: `topic baseline` needs the registry
+/// (it reads the measurement the RLM stored) and `topic seal` needs the signed
+/// open document. An install never makes a topic scorable on its own, so this
+/// is the path an operator is told to take.
 #[test]
-fn help_lists_every_subcommand_and_says_what_is_not_implemented() {
+fn the_scorable_path_fails_closed_on_its_inputs() {
+    let out = run(&["topic", "baseline", "tb4"]);
+    assert_eq!(code(&out), EXIT_USAGE, "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("BASE_DATABASE_URL"),
+        "{}",
+        stderr(&out)
+    );
+
+    let out = run(&["topic", "seal", "tb4"]);
+    assert_eq!(code(&out), EXIT_USAGE, "{}", stderr(&out));
+    assert!(stderr(&out).contains("--document"), "{}", stderr(&out));
+}
+
+#[test]
+fn help_lists_every_subcommand() {
     let out = run(&["topic", "--help"]);
     assert_eq!(code(&out), 0);
     let body = stdout(&out);
@@ -1014,17 +1047,15 @@ fn help_lists_every_subcommand_and_says_what_is_not_implemented() {
         "show",
         "enable",
         "disable",
+        "baseline",
         "seal",
     ] {
         assert!(body.contains(sub), "missing subcommand {sub} in:\n{body}");
     }
-    // `topic --help` lists subcommands; the flags live on `install --help`.
+    // Every command is implemented, so nothing advertises a stub.
     assert!(
-        !body.contains("not implemented in this slice")
-            || body.contains("enable")
-            || body.contains("disable")
-            || body.contains("seal"),
-        "the stubs must be the ones that say so:\n{body}"
+        !body.contains("not implemented in this slice"),
+        "no command is a stub any more:\n{body}"
     );
 
     let out = run(&["topic", "install", "--help"]);

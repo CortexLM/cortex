@@ -76,9 +76,13 @@ REDACTED = "[REDACTED]"
 POLICY_FAIL = "fail"
 POLICY_ZERO = "zero"
 EXCEPTION_POLICIES = (POLICY_FAIL, POLICY_ZERO)
-CONTRACT_TBENCH = "tbench-harbor-v1"
 CONTRACT_HARBOR_TRIALS = "harbor-trials-v1"
-HARBOR_CONTRACTS = (CONTRACT_TBENCH, CONTRACT_HARBOR_TRIALS)
+# Legacy alias for the same family, kept because it is a **wire value**: a
+# topic signed before the generic id existed pins this in its
+# `constraints.params.results_contract`, and a signed document cannot be
+# edited. New topics pin `harbor-trials-v1`; nothing here branches on a topic.
+CONTRACT_TBENCH = "tbench-harbor-v1"
+HARBOR_CONTRACTS = (CONTRACT_HARBOR_TRIALS, CONTRACT_TBENCH)
 
 
 def _fail(msg: str, code: int = 2) -> None:
@@ -110,12 +114,17 @@ def results_file_name(pin: str) -> str:
 
 
 def results_contract(pin: str) -> str:
-    """Harbor / tbench contract id. Unknown pin is fail-closed, never generic."""
-    name = (pin or "").strip() or CONTRACT_TBENCH
+    """Harbor contract id the topic pinned, or the generic one when it pinned none.
+
+    The pin is the topic's (`constraints.params.results_contract`); an absent
+    pin gets the **generic** Harbor id, never a topic-specific one. An unknown
+    pin is fail-closed, never silently generic.
+    """
+    name = (pin or "").strip() or CONTRACT_HARBOR_TRIALS
     if name not in HARBOR_CONTRACTS:
         _fail(
             f"results_contract {name!r} is not a Harbor trial contract "
-            f"({CONTRACT_TBENCH} / {CONTRACT_HARBOR_TRIALS})"
+            f"({CONTRACT_HARBOR_TRIALS} / {CONTRACT_TBENCH})"
         )
     return name
 
@@ -622,7 +631,7 @@ def build_results(
     report: dict[str, Any],
     trials: list[dict[str, Any]],
     log_tail: str,
-    contract: str = CONTRACT_TBENCH,
+    contract: str = CONTRACT_HARBOR_TRIALS,
 ) -> dict[str, Any]:
     """Complete Harbor display document. Trials are never truncated here."""
     ev = report["evidence"]

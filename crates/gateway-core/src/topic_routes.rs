@@ -137,4 +137,21 @@ mod tests {
         assert_eq!(topic_route_path("tb4", ""), "challenge/tb4");
         assert_eq!(topic_route_path("tb4", "/"), "challenge/tb4");
     }
+
+    /// The routing rule is **topic-agnostic**: no topic id is compiled in, so
+    /// a new topic needs no code change here. The names in this file's tests
+    /// are fixtures; the source above them must not mention any.
+    #[test]
+    fn no_topic_id_is_compiled_into_the_router() {
+        let src = include_str!("topic_routes.rs");
+        let non_test = src.split("#[cfg(test)]").next().unwrap_or("");
+        let lower = non_test.to_ascii_lowercase();
+        for forbidden in ["tb4", "tbench", "terminal-bench", "harbor"] {
+            assert!(
+                !lower.contains(forbidden),
+                "{forbidden:?} is compiled into the gateway router: the challenge a topic is \
+                 routed to is `PROOF_CHALLENGE_ID`, and which topics exist is a database fact"
+            );
+        }
+    }
 }

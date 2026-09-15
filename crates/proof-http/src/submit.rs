@@ -11,7 +11,8 @@ use proof_store::MAX_ARTEFACT_BYTES;
 use proof_vm_proto::tar::{verify_artifact, TarError};
 use sha2::{Digest, Sha256};
 
-use super::{err, ErrResp, SubmitBody};
+use super::{err, ErrResp};
+use proof_submit::SubmitBody;
 
 /// Multipart overhead budget on top of the 5 MiB artefact cap.
 pub const SUBMIT_BODY_LIMIT: usize = MAX_ARTEFACT_BYTES + 512 * 1024;

@@ -68,13 +68,33 @@ struct Decided {
 struct Pending {
     bundle: ArtefactBundle,
     decided: Option<Decided>,
-    /// Topic lease held since `score` returned; dropped when the row is
-    /// persisted (end of `on_persisted`) or the entry is reaped.
+    /// The submission's lease, held since `score` returned; dropped when the
+    /// row is persisted (end of `on_persisted`) or the entry is reaped.
     lease: Option<OwnedMutexGuard<()>>,
     since: Instant,
 }
 
 /// Family scorer over the runner registry, the RLM store, and the artefact store.
+///
+/// # Concurrency
+///
+/// Two submissions of the **same topic** are two separate paid runs, each in
+/// its own Firecracker VM (the topic VM is never shared, and
+/// `vms_per_submission` is 1 per submission), so they must be able to be in
+/// flight at once. What is shared is the topic's *state*: the lifecycle and
+/// the best pointer. Those are written under [`Self::topic_lock`], taken only
+/// for a write, while each run holds its own
+/// [`Self::lease`] for its whole life:
+///
+/// - `score` applies `SubmissionReceived` (a write, under the topic lock) and
+///   then evaluates **without** holding it, so a second submission is not
+///   blocked behind a paid run;
+/// - the promotion decision is a compare-and-swap under the topic lock, and
+///   [`Self::crown`] refuses a decision whose best pointer moved in between,
+///   so parallel runs cannot both crown off one stale bar;
+/// - a run that never persists releases its own lease after
+///   [`RlmScorer::lease_ttl`] (or immediately, when the topic lock is
+///   contended), never the whole topic's.
 pub struct RlmScorer {
     registry: Arc<RunnerRegistry>,
     store: Arc<dyn RlmStore>,
@@ -82,6 +102,14 @@ pub struct RlmScorer {
     pending: Mutex<BTreeMap<String, Pending>>,
     locks: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
     lease_ttl: Duration,
+    /// Runs of each topic that have taken `SubmissionReceived` and not yet
+    /// written a verdict. Read under the topic lock, so "0" means no run of
+    /// this topic is in flight — which is what makes a persisted `evaluating`
+    /// a *stale* phase rather than another submission's.
+    inflight: Mutex<BTreeMap<String, usize>>,
+    /// Per-topic locks for paid runs that share their topic's **one** VM (a
+    /// topic with no in-guest runner). See [`Self::shared_vm`].
+    shared_vms: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 fn unwired(custom_id: &str, detail: String) -> EvalError {
@@ -158,6 +186,8 @@ impl RlmScorer {
             pending: Mutex::new(BTreeMap::new()),
             locks: Mutex::new(BTreeMap::new()),
             lease_ttl: DEFAULT_LEASE_TTL,
+            inflight: Mutex::new(BTreeMap::new()),
+            shared_vms: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -182,6 +212,17 @@ impl RlmScorer {
         self.pending.lock().map_or(0, |m| m.len())
     }
 
+    /// Runs of `topic_id` between `SubmissionReceived` and their verdict.
+    ///
+    /// `0` means nothing of this topic is in flight, which is what lets the
+    /// next run treat a persisted `evaluating` / `promoting` as a dead run's
+    /// phase and recover it. Exposed so a test can pin that a reaped run
+    /// releases its count (a phantom count would skip that recovery).
+    #[must_use]
+    pub fn inflight_len(&self, topic_id: &str) -> usize {
+        self.inflight(topic_id)
+    }
+
     fn topic_lock(&self, topic_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.locks
             .lock()
@@ -191,28 +232,102 @@ impl RlmScorer {
             .clone()
     }
 
+    /// The lock that serializes the paid runs of `topic_id` on its **shared**
+    /// VM.
+    ///
+    /// Taken only by a run whose topic selects no in-guest runner (see
+    /// [`Self::evaluate`]): such a topic has one VM and no second one to ask
+    /// for, and the KVM host refuses a second concurrent job on one VM. A
+    /// topic that selects a runner takes no lock here — each paid job is its
+    /// own experiment VM, which is what makes two submissions of such a topic
+    /// genuinely parallel.
+    fn shared_vm(&self, topic_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.shared_vms
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(topic_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// Take the **topic** lock: held only around a write to the topic's
+    /// shared state (the lifecycle, the best pointer), never across a paid
+    /// run. See the type's `Concurrency` docs.
+    async fn topic_guard(&self, topic_id: &str) -> OwnedMutexGuard<()> {
+        self.topic_lock(topic_id).lock_owned().await
+    }
+
+    /// The lease one run holds from `score` until its row is persisted.
+    ///
+    /// Keyed `(topic_id, submission_digest)`, not by topic alone: two
+    /// submissions of the same topic are two **separate** paid runs, each in
+    /// its own Firecracker VM, so they must be able to be in flight at the
+    /// same time — `vms_per_submission` is 1, and that 1 belongs to the
+    /// submission, never to the topic. The topic itself is shared, and the
+    /// writes that touch it (the promotion compare-and-swap over the best
+    /// pointer, the lifecycle moves) are serialized by
+    /// [`Self::topic_lock`], which the write phases take for themselves:
+    ///
+    /// - two submissions of one topic evaluate **in parallel**;
+    /// - whichever writes first decides its promotion against the best pointer
+    ///   as it is then, and the other against the updated one — a bar that
+    ///   moved between a decision and its write is refused by [`Self::crown`],
+    ///   which is what makes the ordering safe without holding a topic lock
+    ///   across a paid run.
+    ///
+    /// A retry of the *same* digest is refused earlier still (the store's
+    /// per-digest claim), and would take the same lock here.
+    fn lease_lock(&self, topic_id: &str, submission_digest: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(format!("{topic_id}\u{1f}{}", submission_digest.trim()))
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
     /// Drop pending runs of `topic_id` whose row never landed within the TTL,
-    /// releasing the lease they hold.
+    /// releasing the lease they hold **and their evaluation-phase count**.
+    ///
+    /// The count matters as much as the lease: `recover_stale` reads it to
+    /// decide whether a persisted `evaluating` is a dead run or a live one, so
+    /// a reaped run that left its count behind would pin the topic at
+    /// "something is in flight" forever — and no later callback could repair
+    /// it, because the entry this reaps is the one that would have. Exactly
+    /// one `enter` is balanced per reaped entry, and `on_persisted` cannot
+    /// double-count it: `take` and this `remove` race for the same entry, and
+    /// only the winner calls `leave`.
     fn reap_abandoned(&self, topic_id: &str) {
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        let stale: Vec<String> = pending
-            .iter()
-            .filter(|(_, p)| p.bundle.topic_id == topic_id && p.since.elapsed() >= self.lease_ttl)
-            .map(|(digest, _)| digest.clone())
-            .collect();
-        for digest in stale {
-            pending.remove(&digest);
-            tracing::warn!(
-                topic_id,
-                submission_digest = %digest,
-                "scored run never persisted within the lease ttl; lease released"
-            );
+        let reaped = {
+            let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            let stale: Vec<String> = pending
+                .iter()
+                .filter(|(_, p)| {
+                    p.bundle.topic_id == topic_id && p.since.elapsed() >= self.lease_ttl
+                })
+                .map(|(digest, _)| digest.clone())
+                .collect();
+            for digest in &stale {
+                pending.remove(digest);
+                tracing::warn!(
+                    topic_id,
+                    submission_digest = %digest,
+                    "scored run never persisted within the lease ttl; lease released"
+                );
+            }
+            stale.len()
+        };
+        // The inflight lock is taken **after** the pending lock is released,
+        // so the two are never held at once and no ordering rule is needed.
+        for _ in 0..reaped {
+            self.leave(topic_id);
         }
     }
 
-    /// Take the topic lease, reaping abandoned holders while waiting.
-    async fn lease(&self, topic_id: &str) -> OwnedMutexGuard<()> {
-        let lock = self.topic_lock(topic_id);
+    /// Take the lease for one **submission**, reaping abandoned holders while
+    /// waiting. Runs of different submissions do not contend here.
+    async fn lease(&self, topic_id: &str, submission_digest: &str) -> OwnedMutexGuard<()> {
+        let lock = self.lease_lock(topic_id, submission_digest);
         loop {
             self.reap_abandoned(topic_id);
             if let Ok(guard) = tokio::time::timeout(LEASE_POLL, lock.clone().lock_owned()).await {
@@ -297,10 +412,19 @@ impl RlmScorer {
         }
     }
 
-    /// Called with the topic lease held: a persisted `evaluating` /
+    /// Called with the topic lock held: a persisted `evaluating` /
     /// `promoting` means the previous run's row never landed. Close that
     /// phase rather than refusing the topic forever.
+    ///
+    /// **Only when nothing of this topic is in flight.** With parallel
+    /// submissions a persisted `evaluating` is the normal state of another
+    /// run that is still working, and closing it would move the lifecycle out
+    /// from under a live run. `inflight` is read under the same topic lock the
+    /// count is taken under, so a non-zero count is a real run.
     async fn recover_stale(&self, topic: &TopicDocument) -> Result<(), EvalError> {
+        if self.inflight(topic.id.as_str()) > 0 {
+            return Ok(());
+        }
         match self.lifecycle(topic).await?.state {
             RlmState::Evaluating => {
                 self.apply(
@@ -321,6 +445,38 @@ impl RlmScorer {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Runs of `topic_id` between `SubmissionReceived` and their verdict.
+    fn inflight(&self, topic_id: &str) -> usize {
+        self.inflight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(topic_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Record that a run of `topic_id` entered its evaluation phase.
+    fn enter(&self, topic_id: &str) {
+        *self
+            .inflight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(topic_id.to_owned())
+            .or_insert(0) += 1;
+    }
+
+    /// Record that a run of `topic_id` left its evaluation phase. Called
+    /// exactly once per [`Self::enter`], whatever the outcome.
+    fn leave(&self, topic_id: &str) {
+        let mut inflight = self.inflight.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(n) = inflight.get_mut(topic_id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                inflight.remove(topic_id);
+            }
+        }
     }
 
     /// The topic's current rule version, seeding version 1 from the signed
@@ -506,6 +662,28 @@ impl RlmScorer {
         if let Some(bytes) = artifact_tar {
             req = req.with_artifact_tar(bytes);
         }
+        // The topic's **shared** VM, held for the whole paid run — inspect
+        // included.
+        //
+        // A topic whose signed params select an in-guest runner gets one
+        // experiment VM per paid job, so two submissions run in parallel by
+        // construction and take no lock. A topic that selects none has a
+        // single VM shared with the cheap jobs, and the KVM host refuses a
+        // second concurrent job on one VM — so this run takes `shared_vm`
+        // from its first job (the anti-cheat `inspect`, which is *also* a job
+        // on that VM) to its last, and the second submission waits here
+        // rather than racing into that refusal. That is what makes a
+        // submission parallel: either it has its own VM, or it takes its
+        // turn.
+        let shared_vm_lock = match req.experiment() {
+            Ok(Some(_)) => None,
+            Ok(None) => Some(self.shared_vm(&req.topic_id)),
+            Err(e) => return Err(EvalError::Backend(format!("experiment binding: {e}"))),
+        };
+        let _shared_vm = match &shared_vm_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         let inspected = runner
             .inspect(&req, &rules)
             .await
@@ -720,11 +898,21 @@ impl LiveScorer for RlmScorer {
         artifact_tar: Option<&[u8]>,
     ) -> Result<ProofEvalDocument, EvalError> {
         self.ready_for_topic(topic)?;
-        let lease = self.lease(&topic.id).await;
+        // The submission's own lease: a second submission of this topic is a
+        // second paid run, not a queue entry. The **writes** below take the
+        // topic lock for themselves, so nothing here holds it across the
+        // evaluation.
+        let lease = self.lease(&topic.id, frozen_digest).await;
         self.ensure_topic(topic).await?;
-        self.recover_stale(topic).await?;
-        self.apply(topic, RlmEvent::SubmissionReceived, frozen_digest)
-            .await?;
+        {
+            // The topic's shared state, written under its own lock: nothing
+            // else may move the lifecycle while this runs.
+            let _topic = self.topic_guard(&topic.id).await;
+            self.recover_stale(topic).await?;
+            self.apply(topic, RlmEvent::SubmissionReceived, frozen_digest)
+                .await?;
+            self.enter(&topic.id);
+        }
         let out = self
             .evaluate(
                 pin,
@@ -744,7 +932,7 @@ impl LiveScorer for RlmScorer {
             Ok(_) => {
                 // The lease now belongs to the pending run: promotion is
                 // decided and persisted under it, then it is released in
-                // `on_persisted`.
+                // `on_persisted` (which also leaves the in-flight count).
                 self.hold(frozen_digest, lease);
             }
             Err(err) => {
@@ -757,9 +945,12 @@ impl LiveScorer for RlmScorer {
                     error = %err,
                     "evaluate refused; no row"
                 );
-                // No row will follow a refusal, so the verdict phase is over now.
+                // No row will follow a refusal, so the verdict phase is over
+                // now — under the topic lock, since it moves shared state.
+                let _topic = self.topic_guard(&topic.id).await;
                 self.apply_logged(topic, RlmEvent::VerdictRecorded, "refused; no row")
                     .await;
+                self.leave(&topic.id);
                 drop(lease);
             }
         }
@@ -809,10 +1000,12 @@ impl LiveScorer for RlmScorer {
         false
     }
 
-    /// Decided under the topic lease this run has held since `score`
-    /// returned, against the harder of the caller's bar and the store's
-    /// current best: no other run of this topic can be between score and
-    /// persist, and a bar computed before an earlier crown cannot be reused.
+    /// Decided under the **topic lock** (see the type's `Concurrency` docs):
+    /// the bar is the harder of the caller's and the store's current best,
+    /// and the decision records the best it was taken against, so a crown
+    /// whose best pointer moved in between is refused ([`Self::crown`]).
+    /// Parallel runs of the same topic therefore cannot both crown off one
+    /// stale bar.
     async fn auto_promote(
         &self,
         topic: &TopicDocument,
@@ -829,6 +1022,7 @@ impl LiveScorer for RlmScorer {
         if !held {
             return false;
         }
+        let _topic = self.topic_guard(&topic.id).await;
         let current = match self.store.best(&topic.id).await {
             Ok(b) => b,
             Err(e) => {
@@ -881,12 +1075,16 @@ impl LiveScorer for RlmScorer {
         submission_id: &str,
         promoted: bool,
     ) {
-        // `pending` (and the topic lease inside it) lives to the end of this
-        // function: the artefact, the promotion row, and the best pointer
-        // land under the guard the decision was taken under.
+        // `pending` (and the submission's lease inside it) lives to the end of
+        // this function: the artefact, the promotion row, and the best pointer
+        // land under the guard the decision was taken under. The **topic**
+        // lock is taken here too, so the promotion compare-and-swap and the
+        // lifecycle moves are serialized against any other run of this topic
+        // that is writing at the same time.
         let Some(pending) = self.take(submission_digest) else {
             return;
         };
+        let _topic = self.topic_guard(topic_id).await;
         let topic = self
             .store
             .latest_topic(topic_id)
@@ -917,6 +1115,9 @@ impl LiveScorer for RlmScorer {
             };
             self.apply_logged(t, event, submission_id).await;
         }
+        // This run's evaluation phase is over: the topic may now be recovered
+        // if a *later* run finds the phase stale.
+        self.leave(topic_id);
         drop(pending);
     }
 }

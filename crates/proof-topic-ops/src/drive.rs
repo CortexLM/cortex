@@ -31,7 +31,7 @@ use proof_rlm_store::{PgRlmStore, RlmStore};
 use proof_task::{InferenceOffer, ProofPin, TopicDocument};
 use proof_topic_setup::{SetupError, SetupOutcome, TopicSetup};
 
-use crate::Failure;
+use crate::OpsError;
 
 /// What driving the RLM produced, for the install report and the operator.
 pub struct DriveOutcome {
@@ -71,8 +71,9 @@ impl DriveOutcome {
 ///
 /// # Errors
 ///
-/// [`Failure::Usage`] for a missing piece of host configuration (naming the
-/// env var), [`Failure::Error`] for a refusal from the orchestrator, the
+/// [`OpsError::usage`](crate::OpsError::usage) for a missing piece of host
+/// configuration (naming the env var), [`OpsError::error`](crate::OpsError::error)
+/// for a refusal from the orchestrator, the
 /// lifecycle, or the store.
 #[allow(clippy::too_many_arguments)]
 pub async fn drive(
@@ -86,9 +87,9 @@ pub async fn drive(
     rlm_image_digest: Option<&str>,
     offer: Option<InferenceOffer>,
     owner_key_file: Option<&Path>,
-) -> Result<DriveOutcome, Failure> {
+) -> Result<DriveOutcome, OpsError> {
     if !owner_approved {
-        return Err(Failure::Usage(
+        return Err(OpsError::usage(
             "driving the RLM provisions a topic VM and runs a paid baseline, so it requires \
              --owner-approved."
                 .to_owned(),
@@ -102,7 +103,7 @@ pub async fn drive(
     // A baseline is a paid run: without an offer there is nothing to measure
     // against. `--skip-baseline` is the path that does not need one.
     if offer.is_none() && !skip_baseline {
-        return Err(Failure::Usage(
+        return Err(OpsError::usage(
             "the RLM's baseline is a paid run that needs a live judge offer: set \
              PROOF_INFERENCE_OFFER_FILE to an open InferenceOffer (or pass --skip-baseline to \
              install the rules without measuring one). Without a baseline the topic cannot open \
@@ -122,7 +123,7 @@ pub async fn drive(
         store: Arc::new(store) as Arc<dyn RlmStore>,
         template: proof_rlm::VmTemplate::from_env(),
         experiments: proof_rlm::ExperimentPolicy::from_env().map_err(|e| {
-            Failure::Usage(format!(
+            OpsError::usage(format!(
                 "the per-experiment VM policy is malformed: {e}. Fix the \
                  PROOF_EXPERIMENT_VM_* env before driving the RLM."
             ))
@@ -138,7 +139,7 @@ pub async fn drive(
     let outcome = setup
         .run(topic, pin, offer.as_ref())
         .await
-        .map_err(|e| Failure::Error(drive_failure(&e)))?;
+        .map_err(|e| OpsError::error(drive_failure(&e)))?;
     Ok(outcome_summary(outcome))
 }
 
@@ -147,12 +148,12 @@ fn resolve_orchestrator(
     url: Option<&str>,
     token_file: Option<&Path>,
     image_digest: Option<&str>,
-) -> Result<Arc<dyn proof_rlm::TopicVmOrchestrator>, Failure> {
+) -> Result<Arc<dyn proof_rlm::TopicVmOrchestrator>, OpsError> {
     // Presence only: `FirecrackerOrchestrator::from_env` reads the env itself,
     // so the CLI checks that each piece *is* set (and names the missing one)
     // without duplicating the client's parsing and validation.
     if url.map(str::trim).is_none_or(str::is_empty) {
-        return Err(Failure::Usage(format!(
+        return Err(OpsError::usage(format!(
             "driving the RLM needs the topic-VM orchestrator: set {VM_ORCHESTRATOR_URL_ENV} \
              (https, the KVM host agent) plus {VM_ORCHESTRATOR_TOKEN_FILE_ENV} and \
              {RLM_VM_IMAGE_DIGEST_ENV}. Nothing is driven on the control-plane host — that is the \
@@ -160,24 +161,24 @@ fn resolve_orchestrator(
         )));
     }
     if token_file.is_none() {
-        return Err(Failure::Usage(format!(
+        return Err(OpsError::usage(format!(
             "driving the RLM needs {VM_ORCHESTRATOR_TOKEN_FILE_ENV}: a file holding the bearer \
              for the topic-VM orchestrator. It is re-read per request and never logged."
         )));
     }
     if image_digest.map(str::trim).is_none_or(str::is_empty) {
-        return Err(Failure::Usage(format!(
+        return Err(OpsError::usage(format!(
             "driving the RLM needs {RLM_VM_IMAGE_DIGEST_ENV}: the sha256 digest of the RLM VM \
              image the orchestrator boots. A digest is never invented."
         )));
     }
     match proof_vm_fc::FirecrackerOrchestrator::from_env() {
         Ok(Some(fc)) => Ok(Arc::new(fc)),
-        Ok(None) => Err(Failure::Usage(format!(
+        Ok(None) => Err(OpsError::usage(format!(
             "no topic-VM orchestrator resolved from {VM_ORCHESTRATOR_URL_ENV} / \
              {VM_ORCHESTRATOR_TOKEN_FILE_ENV} / {RLM_VM_IMAGE_DIGEST_ENV}"
         ))),
-        Err(e) => Err(Failure::Usage(format!(
+        Err(e) => Err(OpsError::usage(format!(
             "the topic-VM orchestrator configuration was refused: {e}"
         ))),
     }

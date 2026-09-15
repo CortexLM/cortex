@@ -1,0 +1,29 @@
+[package]
+name = "proof-topic-ops"
+description = "Proof operator procedures that reach a live host: drive the RLM setup, seal the measured baseline, and publish through the admin route"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+db = { path = "../db" }
+proof-eval = { path = "../proof-eval" }
+proof-rlm = { path = "../proof-rlm" }
+proof-rlm-store = { path = "../proof-rlm-store" }
+proof-task = { path = "../proof-task" }
+proof-topic-bundle = { path = "../proof-topic-bundle" }
+proof-topic-install = { path = "../proof-topic-install" }
+proof-topic-setup = { path = "../proof-topic-setup" }
+proof-vm-fc = { path = "../proof-vm-fc" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json"] }
+
+[dev-dependencies]
+proof-rlm = { path = "../proof-rlm", features = ["test-fixtures"] }
+
+[lints]
+workspace = true

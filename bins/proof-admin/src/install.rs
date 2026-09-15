@@ -52,6 +52,7 @@ use proof_topic_install::install::{InstallRequest, Installer, SetupSummary};
 use proof_topic_install::InstallError;
 
 use crate::{Failure, Options};
+use proof_topic_ops::PublishTarget;
 
 /// What the operator asserted, and what the install is therefore allowed to do.
 ///
@@ -172,7 +173,8 @@ async fn run_real(
 ) -> Result<(), Failure> {
     // The bearer and the URL are resolved before anything is written, so a
     // misconfiguration cannot leave a half-installed topic.
-    let admin = AdminTarget::resolve(args)?;
+    let admin = PublishTarget::resolve(args.admin_url, args.admin_token_file)
+        .map_err(crate::ops_to_failure)?;
     let database_url = crate::database_url(opts)?.ok_or_else(|| {
         Failure::Usage(
             "a real install writes to the topic registry, so it needs a database: set \
@@ -302,6 +304,11 @@ async fn run_real(
             "binding": report.binding,
             "setup": report.setup,
             "aliases": alias_notes,
+            // Whether the topic can be scored right now, and what is left.
+            // A machine caller needs this to decide whether to go on to the
+            // seal; the install never makes a topic scorable on its own.
+            "scorable": scorable(&report, args),
+            "remaining": remaining_steps(&report, args, &plan.topic_id),
         }))?;
         return Ok(());
     }
@@ -316,8 +323,68 @@ async fn run_real(
         }
     }
     println!();
+    println!("{}", scorable_line(&report, args));
+    println!();
     println!("{}", next_steps(plan, args));
     Ok(())
+}
+
+/// Whether this install left the topic **scorable**, and why not when it did
+/// not.
+///
+/// The install never makes a topic scorable by itself: scoring needs an
+/// `open` document whose baseline is sealed, and the seal is the operator's
+/// (the CLI holds no `proof` key). What this reports is which of the two
+/// halves is still missing, so an operator — or a script — can tell "run the
+/// next command" from "something is wrong".
+fn scorable(report: &proof_topic_install::InstallReport, args: &InstallArgs<'_>) -> bool {
+    matches!(report.setup, SetupSummary::Baselined { .. })
+        && report.document_status == proof_task::TopicStatus::Open
+        && !args.skip_baseline
+}
+
+/// The one-line answer to "can it score now?".
+fn scorable_line(report: &proof_topic_install::InstallReport, args: &InstallArgs<'_>) -> String {
+    if scorable(report, args) {
+        return "Scorable: the baseline is measured and the document is open. Confirm with \
+                GET /v1/status (`scorable_topics`)."
+            .to_owned();
+    }
+    let missing = if args.skip_baseline {
+        "--skip-baseline: no baseline was measured, and a topic cannot open without one"
+    } else if !matches!(report.setup, SetupSummary::Baselined { .. }) {
+        "the RLM setup was not driven: no baseline was measured"
+    } else {
+        "the document is not `open`: the signed open document has not been sealed and published"
+    };
+    format!("NOT scorable yet — {missing}.")
+}
+
+/// The steps still standing between this install and a scorable topic, for a
+/// machine caller. Empty when the topic is already scorable.
+fn remaining_steps(
+    report: &proof_topic_install::InstallReport,
+    args: &InstallArgs<'_>,
+    topic_id: &str,
+) -> Vec<String> {
+    if scorable(report, args) {
+        return Vec::new();
+    }
+    let mut steps = Vec::new();
+    if args.skip_baseline || !matches!(report.setup, SetupSummary::Baselined { .. }) {
+        steps.push(format!(
+            "proof-admin topic install --bundle {} --env {} --drive-rlm --owner-approved",
+            args.bundle.display(),
+            args.env
+        ));
+    }
+    steps.push(format!("proof-admin topic baseline {topic_id}"));
+    steps.push(format!(
+        "sign the open document sealing that commitment, then: proof-admin topic seal \
+         {topic_id} --document <open.json> --publish --admin-url <master-or-gateway> \
+         --admin-token-file <file>"
+    ));
+    steps
 }
 
 /// Read the live judge offer the baseline's paid run needs.
@@ -356,7 +423,7 @@ async fn drive_rlm(
     pin: &ProofPin,
     pool: &sqlx::PgPool,
     store: &PgRlmStore,
-) -> Result<crate::drive::DriveOutcome, Failure> {
+) -> Result<proof_topic_ops::DriveOutcome, Failure> {
     let _ = store;
     let offer = if args.skip_baseline {
         None
@@ -368,7 +435,7 @@ async fn drive_rlm(
         .ok()
         .map(|p| PathBuf::from(p.trim().to_owned()));
     let digest = std::env::var(RLM_VM_IMAGE_DIGEST_ENV).ok();
-    crate::drive::drive(
+    proof_topic_ops::drive(
         topic,
         pin,
         PgRlmStore::new(pool.clone()),
@@ -381,6 +448,7 @@ async fn drive_rlm(
         args.owner_key_file,
     )
     .await
+    .map_err(crate::ops_to_failure)
 }
 
 /// Print the install report.
@@ -438,119 +506,66 @@ fn print_install_report(report: &proof_topic_install::InstallReport) {
 }
 
 /// What the operator does next, which depends on where the install stopped.
+///
+/// The last two steps of the ceremony are the **same** for a draft and for an
+/// installed-and-measured topic, so they are named once: `topic baseline`
+/// reads the measurement and prints the commitment an `open` document must
+/// seal, and `topic seal --publish` records the seal and publishes the open
+/// document. Between them the operator signs the open document (the CLI never
+/// holds the `proof` key). That is the whole remaining path to a **scorable**
+/// topic — nothing else is required, and nothing here spends.
 fn next_steps(plan: &TopicInstallPlan, args: &InstallArgs<'_>) -> String {
+    let seal = seal_steps(&plan.topic_id);
     if plan.document_status == proof_task::TopicStatus::Draft {
         return format!(
             "The document is a draft, so miners cannot submit to it yet. To go live:\n  \
              1. Drive the RLM setup (provision, rules, baseline):\n       \
              proof-admin topic install --bundle {} --env {} --drive-rlm --owner-approved\n  \
-             2. Seal the baseline the RLM measured, re-sign the document as `open`, and\n     \
-             publish it through POST /v1/admin/proof/topics.\n  \
-             3. Confirm it is live: proof-admin topic show {}",
+             {}",
             args.bundle.display(),
             args.env,
-            plan.topic_id
+            seal
         );
     }
     if args.skip_baseline {
         return format!(
             "The document is {}, but --skip-baseline was given, so no baseline was measured.\n\
-             Re-run without it before the topic can score:\n    \
-             proof-admin topic install --bundle {} --env {} --drive-rlm --owner-approved",
+             Re-run without it — that is the only way to a scorable topic:\n    \
+             proof-admin topic install --bundle {} --env {} --drive-rlm --owner-approved\n  \
+             {}",
             crate::status_word(plan.document_status),
             args.bundle.display(),
-            args.env
+            args.env,
+            seal
         );
     }
     format!(
-        "The document is {}. If the RLM setup was not driven, do that before miners submit:\n    \
-         proof-admin topic install --bundle {} --env {} --drive-rlm --owner-approved",
+        "The document is {}. If the RLM setup was not driven, do that first:\n    \
+         proof-admin topic install --bundle {} --env {} --drive-rlm --owner-approved\n  \
+         {}",
         crate::status_word(plan.document_status),
         args.bundle.display(),
-        args.env
+        args.env,
+        seal
     )
 }
 
-/// Where the admin publish call goes, and the bearer it uses.
-struct AdminTarget {
-    base_url: String,
-    token: String,
-}
-
-impl AdminTarget {
-    /// Resolve the URL and bearer, refusing a half-configured pair.
-    fn resolve(args: &InstallArgs<'_>) -> Result<Self, Failure> {
-        let Some(base_url) = args.admin_url.map(str::trim).filter(|u| !u.is_empty()) else {
-            return Err(Failure::Usage(
-                "a real install publishes through the admin route, so it needs the master's \
-                 base URL: pass --admin-url (or set PROOF_ADMIN_URL), e.g. \
-                 --admin-url http://127.0.0.1:8100 for the challenge service directly, or the \
-                 gateway's address. `--dry-run` needs none."
-                    .to_owned(),
-            ));
-        };
-        let Some(path) = args.admin_token_file else {
-            return Err(Failure::Usage(
-                "a real install needs the operator bearer for /v1/admin/*: pass \
-                 --admin-token-file (or set PROOF_ADMIN_TOKEN_FILE). The file is read and never \
-                 logged or printed. `--dry-run` needs none."
-                    .to_owned(),
-            ));
-        };
-        let token = std::fs::read_to_string(path)
-            .map_err(|e| Failure::Error(format!("read {}: {e}", path.display())))?;
-        // A tokens file holds one bearer per line; the first non-comment line
-        // is the one this call uses.
-        let token = token
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty() && !l.starts_with('#'))
-            .map(str::to_owned);
-        let Some(token) = token else {
-            return Err(Failure::Error(format!(
-                "{} holds no bearer (every line is blank or a comment)",
-                path.display()
-            )));
-        };
-        Ok(Self {
-            base_url: base_url.trim_end_matches('/').to_owned(),
-            token,
-        })
-    }
-
-    /// How this target is printed: the URL, never the bearer.
-    fn redacted(&self) -> String {
-        format!("{} (bearer read, never printed)", self.base_url)
-    }
-
-    /// Publish the document through the existing admin route.
-    async fn publish(&self, doc: &proof_task::TopicDocument) -> Result<(), String> {
-        let url = format!("{}{}", self.base_url, proof_topic_bundle::PUBLISH_PATH);
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_mins(1))
-            .build()
-            .map_err(|e| format!("http client: {e}"))?;
-        let response = client
-            .post(&url)
-            .header("authorization", format!("Bearer {}", self.token))
-            .header("content-type", "application/json")
-            .body(
-                serde_json::to_string(doc)
-                    .map_err(|e| format!("serialize the signed document: {e}"))?,
-            )
-            .send()
-            .await
-            .map_err(|e| format!("POST {url}: {e}"))?;
-        let status = response.status();
-        if status.is_success() {
-            return Ok(());
-        }
-        let body = response.text().await.unwrap_or_default();
-        Err(format!(
-            "POST {url} answered {status}: {}",
-            body.trim().chars().take(400).collect::<String>()
-        ))
-    }
+/// The last two steps: read the measurement, sign the open document, seal it.
+///
+/// Shared by every branch above because they all end here, and because these
+/// are the commands that make the topic **scorable** — the install alone never
+/// does, whichever way it was run.
+fn seal_steps(topic_id: &str) -> String {
+    format!(
+        "2. Read the measured baseline and the commitment the open document must seal:\n       \
+         proof-admin topic baseline {topic_id}\n  \
+         3. Put that `metrics_commitment` into the document, set `status: open`, sign it\n     \
+         (the `proof` key stays with you: `xtask proof-topic` signs a draft), then:\n       \
+         proof-admin topic seal {topic_id} --document <open.json> --publish \\\n         \
+         --admin-url <master-or-gateway> --admin-token-file <file>\n  \
+         4. Confirm the host scores it: GET /v1/status reports `can_score` and lists the topic\n     \
+         in `scorable_topics` (`ctx proof status` from a miner host)."
+    )
 }
 
 /// Turn a publish refusal into an operator instruction.

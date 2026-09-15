@@ -29,8 +29,11 @@ need() {
 }
 
 need "$SUMMARIZE" 'def write_results_next_to_report'
-need "$SUMMARIZE" 'CONTRACT_TBENCH = "tbench-harbor-v1"'
+# The generic contract id is what an un-pinned topic gets; the tbench-named id
+# is a legacy wire value (a signed topic may still pin it) and stays accepted.
 need "$SUMMARIZE" 'CONTRACT_HARBOR_TRIALS = "harbor-trials-v1"'
+need "$SUMMARIZE" 'CONTRACT_TBENCH = "tbench-harbor-v1"'
+need "$SUMMARIZE" 'name = (pin or "").strip() or CONTRACT_HARBOR_TRIALS'
 need "$SUMMARIZE" 'results.json first'
 need "$SUMMARIZE" 'write_results_next_to_report(out, report, trials, log_tail, secrets)'
 need "$SUMMARIZE" 'atomic_write(out, dumped + "\n")'
@@ -64,4 +67,4 @@ if "def write_results_next_to_report" not in src:
 print("harbor runner tree: summarize writes results.json before report.json")
 PY
 
-echo "harbor runner tree on tip emits results.json (tbench-harbor-v1)"
+echo "harbor runner tree on tip emits results.json (harbor-trials-v1)"

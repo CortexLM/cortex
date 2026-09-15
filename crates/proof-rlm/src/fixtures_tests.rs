@@ -207,6 +207,12 @@ pub struct FakeOrchestrator {
     experiments: Mutex<Vec<(String, TopicVmSpec)>>,
     /// Every job with the VM it ran on.
     runs: Mutex<Vec<(String, VmJob)>>,
+    /// VMs with a job running right now, like the host's per-VM job lock.
+    busy: Mutex<Vec<String>>,
+    /// How long a paid job takes. `ZERO` (the default) runs the whole job
+    /// without suspending, so no second job can overlap it — a test that
+    /// needs the one-job-per-VM rule to be *observable* has to set this.
+    job_delay: Mutex<std::time::Duration>,
     teardowns: Mutex<Vec<(VmHandle, RetainPolicy)>>,
     proposed: Mutex<Vec<ChecklistRule>>,
 }
@@ -224,12 +230,19 @@ impl FakeOrchestrator {
             vms: Mutex::new(Vec::new()),
             experiments: Mutex::new(Vec::new()),
             runs: Mutex::new(Vec::new()),
+            busy: Mutex::new(Vec::new()),
+            job_delay: Mutex::new(std::time::Duration::ZERO),
             teardowns: Mutex::new(Vec::new()),
             proposed: Mutex::new(vec![ChecklistRule {
                 id: "rlm_rule".into(),
                 text: "a rule the fake rlm wrote".into(),
             }]),
         })
+    }
+
+    /// How long each job takes, so a test can make concurrent jobs overlap.
+    pub fn set_job_delay(&self, d: std::time::Duration) {
+        *self.job_delay.lock().unwrap() = d;
     }
 
     /// Every job fails inside the guest (`Backend`) until cleared.
@@ -359,10 +372,32 @@ impl TopicVmOrchestrator for FakeOrchestrator {
             self.vms.lock().unwrap().contains(handle),
             "job on an unknown vm"
         );
+        // The host's own rule: one job per VM at a time. A second concurrent
+        // job on the same VM is a `Busy`, exactly as `proof-vm-agent` answers
+        // it — which is what makes a shared-VM paid run need its caller to
+        // serialize rather than race.
+        {
+            let mut busy = self.busy.lock().unwrap();
+            if busy.contains(&handle.vm_id) {
+                return Err(VmError::Backend(format!(
+                    "vm {} is running a job",
+                    handle.vm_id
+                )));
+            }
+            busy.push(handle.vm_id.clone());
+        }
         self.runs
             .lock()
             .unwrap()
             .push((handle.vm_id.clone(), job.clone()));
+        // Hold the slot for the job's duration, so a concurrent job on the
+        // same VM really does see it busy (a test that needs the rule to be
+        // observable sets `job_delay`; the default is zero).
+        let delay = *self.job_delay.lock().unwrap();
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        self.busy.lock().unwrap().retain(|id| id != &handle.vm_id);
         if self.fail_run.load(Ordering::SeqCst) {
             return Err(VmError::Backend("guest: injected run failure".into()));
         }

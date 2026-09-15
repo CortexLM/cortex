@@ -270,6 +270,17 @@ pub fn read_apis(value: &Value) -> Result<Vec<ApiRoute>, InstallError> {
                 ),
             ));
         }
+        if is_reserved_api_path(&path) {
+            return Err(bad(
+                &part,
+                format!(
+                    "path {path:?} is inside the challenge's admin namespace ({}), which is not a \
+                     topic's to claim: a topic route that reads like an operator route is a route \
+                     a reader cannot tell apart from the real one. Register a different path.",
+                    RESERVED_API_PREFIXES.join(", ")
+                ),
+            ));
+        }
         let method = string_field(obj, "method", &part)?
             .trim()
             .to_ascii_uppercase();
@@ -332,6 +343,31 @@ pub fn is_relative_api_path(p: &str) -> bool {
 #[must_use]
 pub fn is_api_method(m: &str) -> bool {
     matches!(m, "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "*")
+}
+
+/// Path prefixes inside a topic's own namespace that are **not a topic's to
+/// claim**: the challenge's operator surface.
+///
+/// A topic route is served under the topic's prefix
+/// (`/challenge/{topic_id}/{path}`), so a stored `v1/admin/…` would answer at
+/// `/challenge/{topic_id}/v1/admin/…` — a path a reader cannot tell apart
+/// from the challenge's own admin surface, which is master-local. The install
+/// refuses to record one, and the mux refuses to resolve one that is already
+/// in the table (a row written before this rule existed).
+pub const RESERVED_API_PREFIXES: [&str; 1] = ["v1/admin"];
+
+/// Whether `p` is inside a [`RESERVED_API_PREFIXES`] namespace.
+///
+/// Segment-aware: `v1/admin` and `v1/admin/…` are reserved, `v1/administrator`
+/// is not.
+#[must_use]
+pub fn is_reserved_api_path(p: &str) -> bool {
+    let p = p.trim();
+    RESERVED_API_PREFIXES.iter().any(|prefix| {
+        p == *prefix
+            || p.strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
 }
 
 /// Read a section's rule vector.
@@ -553,6 +589,39 @@ mod tests {
             ))
             .unwrap_or_else(|e| panic!("{good:?} must be relative and legal: {e}"));
         }
+    }
+
+    /// The challenge's admin namespace is not a topic's to claim: a topic
+    /// route that reads like an operator route is refused at install time,
+    /// and the same predicate is what the mux checks on read.
+    #[test]
+    fn a_route_inside_the_admin_namespace_is_refused() {
+        for bad in [
+            "v1/admin",
+            "v1/admin/proof/topics",
+            "v1/admin/proof/queue/drain",
+        ] {
+            let err = read_section(&format!(
+                r#"{{"apis": [{{"path": "{bad}", "method": "POST"}}]}}"#
+            ))
+            .expect_err(bad);
+            let InstallError::Section { why, .. } = err else {
+                panic!("{bad:?}: expected Section");
+            };
+            assert!(why.contains("admin namespace"), "{bad:?}: {why}");
+            assert!(is_reserved_api_path(bad), "{bad:?}");
+        }
+        // Segment-aware: a path that merely starts with the same characters
+        // is not the reserved namespace.
+        for good in ["v1/administrator", "v1/adminx", "admin", "v1/admins"] {
+            read_section(&format!(
+                r#"{{"apis": [{{"path": "{good}", "method": "GET"}}]}}"#
+            ))
+            .unwrap_or_else(|e| panic!("{good:?} is not reserved: {e}"));
+            assert!(!is_reserved_api_path(good), "{good:?}");
+        }
+        // The predicate is the one the mux runs, on a trimmed path.
+        assert!(is_reserved_api_path(" v1/admin/x "));
     }
 
     #[test]

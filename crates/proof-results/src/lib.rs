@@ -78,10 +78,15 @@ pub const PARAM_RESULTS_PATH: &str = "results_path";
 /// Envelope-only contract every custom evaluate may satisfy.
 pub const CONTRACT_GENERIC: &str = "generic-custom-v1";
 
-/// Harbor trial-summary contract (tbench and any Harbor-scored topic).
+/// Harbor trial-summary contract: the generic id every Harbor-scored topic
+/// pins.
 pub const CONTRACT_HARBOR_TRIALS: &str = "harbor-trials-v1";
 
-/// Alias a tbench topic may pin; same shape as [`CONTRACT_HARBOR_TRIALS`].
+/// Legacy alias of [`CONTRACT_HARBOR_TRIALS`], kept because it is a **wire
+/// value**: a topic signed before the generic id existed pins this in its
+/// `constraints.params.results_contract`, and a signed document cannot be
+/// edited. New topics pin [`CONTRACT_HARBOR_TRIALS`]; the guest harness
+/// accepts both, and nothing branches on a topic.
 pub const CONTRACT_TBENCH_HARBOR: &str = "tbench-harbor-v1";
 
 /// Harbor trial that produced a verifier reward.
@@ -179,11 +184,12 @@ impl<'a> ReportBind<'a> {
 pub enum Contract {
     /// Envelope + a non-empty `display` object.
     Generic,
-    /// Harbor / tbench trial table.
+    /// Harbor trial table.
     HarborTrials,
 }
 
-/// Known contract id → family. [`CONTRACT_TBENCH_HARBOR`] aliases Harbor.
+/// Known contract id → family. [`CONTRACT_TBENCH_HARBOR`] is the legacy
+/// spelling of [`CONTRACT_HARBOR_TRIALS`].
 #[must_use]
 pub fn known_contract(id: &str) -> Option<Contract> {
     match id.trim() {

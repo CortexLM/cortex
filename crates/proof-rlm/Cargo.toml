@@ -10,7 +10,7 @@ publish = false
 
 [features]
 # Exposes `proof_rlm::fixtures` (fake orchestrator, canned report) to sibling crates' tests.
-test-fixtures = []
+test-fixtures = ["dep:tokio"]
 
 [dependencies]
 async-trait = "0.1"
@@ -25,6 +25,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+# Optional: the fixture orchestrator sleeps between jobs so a concurrency
+# test can observe the host's one-job-per-VM rule. The library itself needs
+# no runtime.
+tokio = { version = "1", default-features = false, features = ["time"], optional = true }
 tracing = "0.1"
 
 [dev-dependencies]
