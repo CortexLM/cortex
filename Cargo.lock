@@ -3884,6 +3884,7 @@ dependencies = [
  "proof-vm-agent",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

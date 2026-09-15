@@ -496,6 +496,46 @@ async fn the_created_vm_must_run_the_pinned_image_and_a_fake_answer_is_refused()
     reference.ready().expect("reference");
 }
 
+/// The attach fallback must not run a submission in a VM the spec did not ask
+/// for: a leftover booted from an **older image pin** (or another shape) would
+/// silently score a run in a guest the topic does not describe, and its
+/// evidence would be evidence about a configuration nobody signed.
+#[tokio::test]
+async fn a_duplicate_create_refuses_an_incompatible_existing_vm() {
+    let (agent, token) = live("pin-mismatch").await;
+    let mut old = pinned_template();
+    old.image_digest = format!("sha256:{}", "ee".repeat(32));
+    // The topic's VM is booted from the older pin the host still runs.
+    let orch_old = client(&agent, &token, &old.image_digest);
+    let existing = orch_old.create(&spec(old.clone())).await.expect("create");
+    assert_eq!(agent.hypervisor.boots().len(), 1);
+
+    // A run pinned to the newer image asks for the same topic. The agent
+    // answers 409; attaching would hand back a VM on the wrong image, so the
+    // client must refuse instead.
+    let orch_new = client(&agent, &token, &pinned_template().image_digest);
+    let err = orch_new
+        .create(&spec(pinned_template()))
+        .await
+        .expect_err("an incompatible leftover must not be attached");
+    let text = err.to_string();
+    assert!(text.contains("instead of the pinned"), "{text}");
+    assert_eq!(
+        agent.hypervisor.boots().len(),
+        1,
+        "nothing new was booted and nothing was reused"
+    );
+    assert_eq!(
+        orch_new.attach(&existing.topic_id).await.expect("attach"),
+        Some(existing.clone()),
+        "the vm itself is untouched; only this run refused it"
+    );
+    assert!(orch_old
+        .teardown(&existing, RetainPolicy::Destroy)
+        .await
+        .expect("destroy"));
+}
+
 /// An **experiment** spec must not take the attach path: a dedicated VM per
 /// paid job is the whole point, and attaching would hand back the topic's RLM
 /// VM and run the job in the wrong guest. The agent's `attach` answers only

@@ -20,6 +20,7 @@ proof-fc-harvest = { path = "../proof-fc-harvest" }
 proof-vm-agent = { path = "../proof-vm-agent" }
 serde_json = "1"
 tokio = { version = "1", features = ["process"] }
+tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

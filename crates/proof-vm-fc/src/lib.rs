@@ -232,6 +232,60 @@ fn is_already_exists(e: &VmError) -> bool {
     )
 }
 
+/// Refuse a VM that is not the one `spec` asked for.
+///
+/// Applies to a **created** record and to an attached leftover alike: a VM
+/// booted from an older image pin, or at another shape, would silently run
+/// the submission in a guest the topic does not describe, and the evidence it
+/// produced would be evidence about a configuration nobody signed.
+fn check_record(record: &VmRecord, spec: &TopicVmSpec) -> Result<(), VmError> {
+    if record.handle.topic_id != spec.topic_id {
+        return Err(backend(format!(
+            "orchestrator bound the vm to {:?}, asked for {:?}",
+            record.handle.topic_id, spec.topic_id
+        )));
+    }
+    if !record
+        .image_digest
+        .eq_ignore_ascii_case(&spec.template.image_digest)
+    {
+        return Err(backend(format!(
+            "orchestrator booted image {} instead of the pinned {}",
+            record.image_digest, spec.template.image_digest
+        )));
+    }
+    if record.vcpus != spec.template.vcpus || record.mem_mib != spec.template.mem_mib {
+        return Err(backend(format!(
+            "the topic's vm is {}vCPU/{}MiB, this run asks for {}vCPU/{}MiB; \
+             tear it down so the topic boots at the pinned shape",
+            record.vcpus, record.mem_mib, spec.template.vcpus, spec.template.mem_mib
+        )));
+    }
+    if record.sandbox != spec.sandbox {
+        return Err(backend(
+            "the topic's vm carries a different sandbox policy than this run asks for; \
+             tear it down so the topic boots under the signed policy",
+        ));
+    }
+    if record.experiment.is_some() != spec.experiment.is_some() {
+        return Err(backend(format!(
+            "orchestrator answered with {} vm {} for a {} create",
+            if record.experiment.is_some() {
+                "an experiment"
+            } else {
+                "a topic"
+            },
+            record.handle.vm_id,
+            if spec.experiment.is_some() {
+                "experiment"
+            } else {
+                "topic"
+            }
+        )));
+    }
+    Ok(())
+}
+
 impl FirecrackerOrchestrator {
     /// Build the client. Reads the CA file (if any) now; the token per request.
     pub fn new(config: FcConfig) -> Result<Self, FcConfigError> {
@@ -373,6 +427,26 @@ impl FirecrackerOrchestrator {
                 Duration::from_secs(d.saturating_add(JOB_GRACE_S))
             })
     }
+
+    /// The topic's record, bound to the topic it was asked about.
+    async fn attach_record(&self, topic_id: &str) -> Result<Option<VmRecord>, VmError> {
+        let found: Option<VmRecord> = self
+            .call::<(), VmRecord>(
+                Method::GET,
+                &paths::vm_by_topic(topic_id.trim()),
+                None,
+                self.config.connect_timeout,
+            )
+            .await?;
+        match found {
+            Some(r) if r.handle.topic_id == topic_id.trim() => Ok(Some(r)),
+            Some(r) => Err(backend(format!(
+                "orchestrator returned vm {} of topic {:?} for topic {topic_id:?}",
+                r.handle.vm_id, r.handle.topic_id
+            ))),
+            None => Ok(None),
+        }
+    }
 }
 
 fn check_echo(handle: &VmHandle, topic_id: &str, vm_id: &str) -> Result<(), VmError> {
@@ -424,54 +498,36 @@ impl TopicVmOrchestrator for FirecrackerOrchestrator {
                     topic_id = %spec.topic_id,
                     "topic vm already exists on the host; attaching instead of creating"
                 );
-                return self.attach(&spec.topic_id).await?.ok_or_else(|| {
+                let found = self.attach_record(&spec.topic_id).await?.ok_or_else(|| {
                     backend(format!(
                         "orchestrator reported the topic already has a vm, but attach found none \
                          for {:?}",
                         spec.topic_id
                     ))
-                });
+                })?;
+                // An existing VM is only usable if it is the VM this spec
+                // asked for. A leftover booted from an older image pin (or a
+                // different shape) would silently run the submission in a
+                // guest the topic does not describe, so it is refused here
+                // rather than scored under the wrong configuration.
+                check_record(&found, spec)?;
+                tracing::info!(
+                    topic_id = %spec.topic_id, vm_id = %found.handle.vm_id,
+                    "attached to the topic's existing vm"
+                );
+                return Ok(found.handle);
             }
             Err(e) => return Err(e),
             Ok(None) => return Err(backend("orchestrator has no create route")),
         };
-        if record.handle.topic_id != spec.topic_id {
-            return Err(backend(format!(
-                "orchestrator bound the vm to {:?}, asked for {:?}",
-                record.handle.topic_id, spec.topic_id
-            )));
-        }
-        if !record
-            .image_digest
-            .eq_ignore_ascii_case(&spec.template.image_digest)
-        {
-            return Err(backend(format!(
-                "orchestrator booted image {} instead of the pinned {}",
-                record.image_digest, spec.template.image_digest
-            )));
-        }
+        check_record(&record, spec)?;
         tracing::info!(topic_id = %spec.topic_id, vm_id = %record.handle.vm_id, "topic vm created");
         Ok(record.handle)
     }
 
     async fn attach(&self, topic_id: &str) -> Result<Option<VmHandle>, VmError> {
         self.ready()?;
-        let found: Option<VmRecord> = self
-            .call::<(), VmRecord>(
-                Method::GET,
-                &paths::vm_by_topic(topic_id.trim()),
-                None,
-                self.config.connect_timeout,
-            )
-            .await?;
-        match found {
-            Some(r) if r.handle.topic_id == topic_id.trim() => Ok(Some(r.handle)),
-            Some(r) => Err(backend(format!(
-                "orchestrator returned vm {} of topic {:?} for topic {topic_id:?}",
-                r.handle.vm_id, r.handle.topic_id
-            ))),
-            None => Ok(None),
-        }
+        Ok(self.attach_record(topic_id).await?.map(|r| r.handle))
     }
 
     async fn run(&self, handle: &VmHandle, job: VmJob) -> Result<VmJobOutput, VmError> {

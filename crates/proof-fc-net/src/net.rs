@@ -141,34 +141,52 @@ impl NetPlan {
     /// belongs to a live VM is never addressed or deleted by a boot that did
     /// not create it.
     ///
+    /// Once `ip tuntap add` succeeds the interface **is** this plan's, so a
+    /// later step failing (address, link, sysctl) rolls the whole plan back
+    /// here. Without that, the caller's guard would release a jail for a
+    /// network it was never told it owned, and the interface would outlive
+    /// every record of it — consuming a name that later boots then allocate
+    /// around.
+    ///
     /// # Errors
     ///
     /// [`HvError::Backend`] from the first failing command; a taken name is
     /// recognisable with [`Self::name_taken`].
     pub async fn up(&self, shell: &dyn Shell, jail_uid: u32) -> Result<(), HvError> {
         let uid = jail_uid.to_string();
-        sh(
+        let added = sh(
             shell,
             "ip",
             &[
                 "tuntap", "add", "dev", &self.tap, "mode", "tap", "user", &uid,
             ],
         )
-        .await
-        .map_err(|e| {
-            if Self::name_taken(&e) {
+        .await;
+        if let Err(e) = added {
+            return Err(if Self::name_taken(&e) {
                 HvError::Backend(format!(
                     "tap {} is already taken on this host ({e}); another vm holds it",
                     self.tap
                 ))
             } else {
                 e
+            });
+        }
+        let rest = async {
+            let cidr = format!("{}/30", self.host_ip);
+            sh(shell, "ip", &["addr", "add", &cidr, "dev", &self.tap]).await?;
+            sh(shell, "ip", &["link", "set", &self.tap, "up"]).await?;
+            sh(shell, "sysctl", &["-q", "-w", "net.ipv4.ip_forward=1"]).await?;
+            Ok(())
+        }
+        .await;
+        if let Err(e) = rest {
+            // The interface exists and nothing else knows about it yet.
+            for err in self.down(shell).await {
+                tracing::debug!(tap = %self.tap, "rollback of a half-built network: {err}");
             }
-        })?;
-        let cidr = format!("{}/30", self.host_ip);
-        sh(shell, "ip", &["addr", "add", &cidr, "dev", &self.tap]).await?;
-        sh(shell, "ip", &["link", "set", &self.tap, "up"]).await?;
-        sh(shell, "sysctl", &["-q", "-w", "net.ipv4.ip_forward=1"]).await?;
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -290,7 +308,7 @@ fn rule_accepts_tap(rule: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::RecordingShell;
+    use crate::shell::{FailingShell, RecordingShell};
 
     /// A shell that answers `ip -o link show` with a canned interface listing
     /// and fails anything else — the host state the allocator has to read.
@@ -392,6 +410,53 @@ mod tests {
             "ip exited Some(1): RTNETLINK answers: Operation not permitted".into()
         )));
         assert!(!NetPlan::name_taken(&HvError::Guest("busy".into())));
+    }
+
+    /// A step after `ip tuntap add` failing must roll the interface back.
+    ///
+    /// The guard's ownership flag is set from `up` returning `Ok`, so a
+    /// failure after the interface exists leaves the caller believing it owns
+    /// nothing — and the interface would outlive every record of it, holding
+    /// a name that later boots then allocate around.
+    #[tokio::test]
+    async fn a_failure_after_the_tap_exists_rolls_the_interface_back() {
+        for fail_on in ["ip addr add", "ip link set", "sysctl"] {
+            let shell = FailingShell::failing_on(fail_on);
+            let plan = NetPlan::for_index(&cfg(), 3);
+            let err = plan
+                .up(&shell, 65_534)
+                .await
+                .expect_err("injected failure after the tap exists");
+            assert!(err.to_string().contains("injected failure"), "{fail_on}");
+            let lines = shell.lines();
+            let added = lines
+                .iter()
+                .position(|l| l.starts_with("ip tuntap add"))
+                .expect("the tap was created");
+            let after = &lines[added + 1..];
+            assert!(
+                after.contains(&"nft delete table inet proof_vm_pfc3".to_owned()),
+                "{fail_on}: the table is rolled back: {after:?}"
+            );
+            assert!(
+                after.contains(&"ip link del pfc3".to_owned()),
+                "{fail_on}: the interface is rolled back: {after:?}"
+            );
+        }
+        // And a failure *at* the create does not roll anything back: this
+        // boot never had the interface, so there is nothing of its to remove.
+        let shell = FailingShell::failing_on("ip tuntap");
+        let plan = NetPlan::for_index(&cfg(), 3);
+        plan.up(&shell, 65_534).await.expect_err("taken name");
+        let lines = shell.lines();
+        assert!(
+            !lines.iter().any(|l| l.starts_with("ip link del")),
+            "a name this boot never took must not be deleted: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("nft delete table")),
+            "a name this boot never took must not be deleted: {lines:?}"
+        );
     }
 
     async fn gap_indices(shell: &LinkListing) -> Vec<u32> {
