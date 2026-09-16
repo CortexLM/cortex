@@ -207,7 +207,7 @@ def is_topic_scoped(name: str, topic_id: str) -> bool:
     """`proof_topic_sql_guard::is_topic_scoped`, in Python.
 
     Two spellings are the topic's and only two: a `{id}`-qualified name
-    (`tb4.scores`) or a bare `{id}_`-prefixed one (`tb4_scores`), with the
+    (`<id>.scores`) or a bare `{id}_`-prefixed one (`<id>_scores`), with the
     hyphen id's identifier-safe form accepted in both positions.
     """
     n = name.strip().strip('"').lower()

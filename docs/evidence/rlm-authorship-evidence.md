@@ -2,9 +2,11 @@
 
 Checklist: `RLM-AUTHORSHIP-EVIDENCE-CHECKLIST.md` · Pin: `ARCH-PIN-100PCT-RLM-AUTONOMOUS.md`
 
-**Tip under review:** `droid/2edcb0c8-100-rlm-autonomous-strip-tbe` @ **`945e143f`**
-(PR [#301](https://github.com/CortexLM/cortex/pull/301), draft — the stack head).
-Mirror PR [#302](https://github.com/CortexLM/cortex/pull/302) carries the same HEAD.
+**Tip under review:** `droid/8bcbefa3-sn100-stay-lit-harbor-propos` @ **`18a2532c`**
+(PR [#304](https://github.com/CortexLM/cortex/pull/304), draft — the stack head,
+stacked on #301 at `80bc2cdd`).
+Mirror PR [#302](https://github.com/CortexLM/cortex/pull/302) carries the same HEAD
+as #301.
 Every path below is in this repo; every SHA is a commit on that branch or its stack.
 
 > **How to read this pack.** Each item states the claim, the **code path** that makes it
@@ -12,6 +14,13 @@ Every path below is in this repo; every SHA is a commit on that branch or its st
 > source: **[staging]** = Dev's live `cortex-staging` dig, **[local-db]** = a real Postgres
 > in this container running the real install path, **[tree]** = read from this checkout.
 > Nothing is presented as live staging output that was not.
+
+> **`18a2532c` closes the last guest-side gap.** The control-plane half of authorship was
+> done at `80bc2cdd`; the reference adaptor still shipped **no `propose_rules`**, so every
+> `--drive-rlm` on a live image failed closed with `NO_RLM_RULES` (503, no row) and no topic
+> could reach `authorship: rlm`. Item 2h below is that entrypoint and the evidence that the
+> set it writes passes the **real** gates. A **guest rebake** is required for it to reach a
+> live topic — see § 2h.
 
 ## Verdict summary
 
@@ -536,13 +545,15 @@ Still **2**. The Gate 4 hardening added a *second* cap beside it (host memory ad
 | [#298](https://github.com/CortexLM/cortex/pull/298) | `droid/9f68584e-sn100-p1a-rlm-topic-install` | `b735f3358d3d` | #297 | yes | CLEAN |
 | [#299](https://github.com/CortexLM/cortex/pull/299) | `droid/9822d526-sn100-100-live-gaps-p1b-disa` | `37fa0920610c` | #298 | yes | CLEAN |
 | [#300](https://github.com/CortexLM/cortex/pull/300) | `droid/933f76bf-b1-raise-max-proof-deadline` | `870a3b875533` | #299 | yes | CLEAN |
-| [#301](https://github.com/CortexLM/cortex/pull/301) | `droid/2edcb0c8-100-rlm-autonomous-strip-tbe` | **`945e143f`** | #300 | yes | CLEAN |
-| [#302](https://github.com/CortexLM/cortex/pull/302) | `droid/1d0afa5f-sn100-stay-lit-cont-gate1-pa` | **`945e143f`** | #300 | yes | CLEAN |
+| [#301](https://github.com/CortexLM/cortex/pull/301) | `droid/2edcb0c8-100-rlm-autonomous-strip-tbe` | `80bc2cdd` | #300 | yes | CLEAN |
+| [#302](https://github.com/CortexLM/cortex/pull/302) | `droid/1d0afa5f-sn100-stay-lit-cont-gate1-pa` | `945e143f` | #300 | yes | CLEAN |
+| [#304](https://github.com/CortexLM/cortex/pull/304) | `droid/8bcbefa3-sn100-stay-lit-harbor-propos` | **`18a2532c`** | **#301** | yes | CLEAN |
 
-`main` is `aabd1724eb90`. The stack is linear: **#301 → #300 → #299 → #298 → #297 → `main`**.
+`main` is `aabd1724eb90`. The stack is linear: **#304 → #301 → #300 → #299 → #298 → #297 → `main`**.
 
-**#301 is the canonical stack position.** #302 is a mirror this session keeps at the same
-HEAD so the branch has its own URL. Both PRs carry the **same HEAD**; merge #301.
+**#304 is the stack head** (the guest-side authorship entrypoint), and #301 remains the
+canonical position for the control-plane change it stacks on. Both are draft; the merge
+HOLD stands.
 
 ### Checks
 
@@ -554,13 +565,34 @@ HEAD so the branch has its own URL. Both PRs carry the **same HEAD**; merge #301
 | #300 | not triggered | SUCCESS |
 | #301 | not triggered | **SUCCESS** — **5/5, "Safe to merge; there are no outstanding blocking issues"** at `dc6ca1a4` (33 reviews; every finding below is fixed) |
 | #302 | not triggered (mirror of #301) | see PR |
+| #304 | not triggered (base is a droid branch) | see PR — the guest-side entrypoint (§2h) |
 
 **Why CI runs only on #297:** `ci.yml` triggers on `pull_request: branches: [main]`. #297 is
 the only PR in the stack whose base is `main`; #298–#301 are stacked on each other, so
 GitHub never fires that workflow for them. To compensate, every gate `ci.yml` runs was
 executed locally on the tip — see below.
 
-### Local gate run on `945e143f` (CI parity)
+### Local gate run on `18a2532c` (CI parity)
+
+The gates were run on the **stack head** (`18a2532c`, which contains everything `80bc2cdd`
+does). `cargo deny` is unchanged from the caveat below — this branch adds no dependency.
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass on the changed crate (`-p proof-vm-guest --all-targets`) |
+| `cargo test --workspace` | pass except the pre-existing environmental failure (caveat 2) |
+| `cargo test -p proof-vm-guest --test reference_adaptor_authoring` | **pass** — 4/4, the new authorship gate (§2h) |
+| `cargo test -p proof-vm-guest --test bake_tooling` | pass — 7/7, incl. the `propose_rules` requirement |
+| adaptor suite (`tests/run.sh`, incl. `test_authoring_set.py` 25 cases) | pass |
+| `cargo run -p xtask -- loc-cap` | pass |
+| `cargo run -p xtask -- consensus-lint` | pass |
+| `cargo run -p xtask -- spec-check` | pass |
+| `cargo run -p xtask -- design-check` | pass |
+| `cargo run -p xtask -- external-docs-check` | pass |
+| `cargo deny check` | **advisories FAILED** — pre-existing, see caveat 1 |
+
+### Local gate run on `945e143f` (CI parity, the earlier tip)
 
 | Gate | Result |
 |---|---|
@@ -587,13 +619,15 @@ executed locally on the tip — see below.
    change and touches every crate that depends on rustls. Flagged, not silently ignored.
 2. **Four test failures in this container are environmental, not regressions.** They fail
    identically at the base commit (verified by running them in a detached worktree at
-   `c842598e`) because they assert on `0o000` permission denial, which **root bypasses** —
-   this container runs as uid 0:
+   `c842598e`; re-verified at `80bc2cdd` for this tip) because they assert on `0o000`
+   permission denial, which **root bypasses** — this container runs as uid 0:
    `seed_pf_allocator_refuses_boot_when_a_topic_dir_cannot_be_read`,
    `max_zip_numeric_id_fails_closed_when_a_topic_dir_cannot_be_read`,
    `paid_run_fails_closed_when_work_tree_cannot_be_synced`,
    `deadline_cut_still_persists_work_tree`. They are excluded from the "pass" above, not
-   hidden.
+   hidden. On `18a2532c` only the first of them reproduces in a plain `cargo test --workspace`
+   run (the two `proof-vm-guest` ones are filtered out by the default test harness); both
+   were re-confirmed failing at `80bc2cdd` in a detached worktree.
 3. **Six further failures appear only with `DATABASE_URL` set, in crates this branch does
    not touch** (`crates/db/tests/gateway_store.rs`, `crates/gateway-store-pg/tests/pg_stores.rs`;
    `git diff c842598e -- crates/db crates/gateway-store-pg` is empty). They are a fact about
@@ -607,16 +641,112 @@ executed locally on the tip — see below.
 | # | Item | Verdict |
 |---|---|---|
 | 1 | CLI trigger-only | **met** — zero topic literals in `bins/proof-admin/src` (raw and logic); no bundle-generating command; the CLI now also hands over the RLM's own set |
-| 2 | Journal: rules `source=rlm`, migrations, `proof_topic_api`, submission_format, pin_policy, runner | **met in code** — the RLM authors all five parts as one document; the install applies **that** and journals `binding.authorship` per part with digests. Live staging still shows the pre-change shape (§2d), and §2g is the Owner run that moves it |
+| 2 | Journal: rules `source=rlm`, migrations, `proof_topic_api`, submission_format, pin_policy, runner | **met in code** — the RLM authors all five parts as one document; the install applies **that** and journals `binding.authorship` per part with digests. The **guest now ships the entrypoint** that produces it (§2h), so the Owner run is no longer blocked on a missing adaptor. Live staging still shows the pre-change shape (§2d), and §2g is the Owner run that moves it |
 | 3 | SoT ≠ operator clone of legacy `tbench` | **met in code** — the RLM's set supersedes the bundle; an install from a bundle records `topic_document` provenance, which the publish gate refuses to open. The **document** remains the operator's, by design (§3e) |
 | 4 | Residual product hardcode ZERO | **met** — `proof-admin` production literals raw **6 → 0** (logic 2 → 0); `proof-topic-ops` raw 2 → 0; 33-module guard passes; every remaining hit is a comment (logic 0) |
 | 5 | 1 VM/submission | **met** — `VMS_PER_SUBMISSION = 1`, recorded per install (**1** on staging install #11), refused on the submit path when mismatched; `DEFAULT_MAX_EXPERIMENT_VMS` still 2 |
 | 6 | Tips / checks / PRs | **given** — stack table above; CI fires only on #297 by design, local CI-parity run on the tip |
 
-**What is left is the Owner LIVE run, not code.** §2g is the ceremony: an adaptor whose
-`propose_rules` writes `authoring.json`, then `--drive-rlm --owner-approved`, then the seal.
-It is the only step that can turn §2d's staging row into `authorship: rlm`, and it is the
-Owner's to run — it provisions a VM and spends on a baseline.
+**What is left is the Owner LIVE run, not code.** §2g is the ceremony. Its one hard
+precondition — an adaptor whose `propose_rules` writes `authoring.json` — is now shipped and
+gated (§2h); what remains is the **guest rebake** that puts it in the image, then
+`--drive-rlm --owner-approved`, then the seal. It is the only step that can turn §2d's
+staging row into `authorship: rlm`, and it is the Owner's to run — it provisions a VM and
+spends on a baseline.
+
+### 2h. The adaptor now ships `propose_rules` — and its set passes the real gates
+
+**The gap §2g named.** §2g required "an adaptor whose `propose_rules` writes
+`authoring.json`", and the reference adaptor did not ship one. The guest's
+resolution is `runner::Adaptor::entrypoint(JobKind::ProposeRules)` →
+`<runners_dir>/<runner id>/propose_rules`; a runner without it is
+`NO_RLM_RULES` (`crates/proof-vm-guest/src/runner.rs`), which is a 503 with no
+row. So on a live image every `--drive-rlm` refused **before** any install, and
+no topic could ever reach `authorship: rlm`. That is the guest half of the
+authorship pin, and it was the blocker for box 2 going LIVE green.
+
+**What ships at `18a2532c`.**
+
+| Path | Role |
+|---|---|
+| `deploy/guest/runners/rlm_fc_in_guest_harbor/propose_rules` | the entrypoint the guest discovers (0755, like `run` / `inspect`) |
+| `…/harness/authoring_set.py` | the author: builds the whole set from topic data and refuses an incomplete one |
+| `crates/proof-vm-guest/tests/reference_adaptor_authoring.rs` | the set it writes, held to the **Rust** gates |
+| `crates/proof-vm-guest/src/agent_tests.rs` | the same entrypoint, through the **real guest agent** |
+
+**Evidence — the authored set passes the gates the guest and the install run [tree].**
+The authoritative checks are `proof-topic-authoring` (linked by the guest) and
+`proof-topic-sql-guard` (run by the install); a Python test can only prove the
+module agrees with itself. This test runs the shipped entrypoint and feeds its
+`authoring.json` through the real thing:
+
+```
+$ cargo test -p proof-vm-guest --test reference_adaptor_authoring
+running 4 tests
+test a_topic_with_no_rule_policy_authors_nothing ... ok
+test the_authored_set_is_not_a_copy_of_the_signed_document ... ok
+test the_reference_adaptor_authors_a_set_the_guest_and_the_install_accept ... ok
+test a_re_authoring_run_retains_the_prior_set_and_is_still_validated ... ok
+test result: ok. 4 passed; 0 failed
+```
+
+`…_accept` asserts, in order: `authoring_from_json` parses it
+(`deny_unknown_fields`), `set.is_complete()` (every part present),
+`set.validate(&doc.id)` (the guest's shape + completeness + migration
+deny-list), `pin_policy.agrees_with_document` (the policy restates the signed
+document), and `set.validate_against_pin(&doc.id, &pin)` with the **shipped**
+`config/proof-pin.toml`. A change to the adaptor that would produce a set the
+guest refuses fails here — and so does a change to the gates that would start
+refusing the set the adaptor ships.
+
+**Evidence — discovery, through the real guest agent [tree].** The gap was
+discovery, so the test that matters drives the adaptor the way the host does:
+
+```
+$ cargo test -p proof-vm-guest --lib the_reference_adaptor_propose_rules
+test agent_tests::the_reference_adaptor_propose_rules_is_discovered_and_authors_the_whole_set ... ok
+```
+
+It copies the **shipped** tree into a guest runners dir under the id the topic
+selects, sends `VmJob::ProposeRules`, and requires
+`RlmToHost::Done { output: VmJobOutput::Authored(set) }` — the whole set, not a
+fragment. **Verified non-vacuous:** deleting
+`…/rlm_fc_in_guest_harbor/propose_rules` makes it fail with
+`the reference adaptor ships no propose_rules`.
+
+**The set is not a copy of the operator's bundle.** `the_authored_set_is_not_a_copy_…`
+asserts the rule text differs from the declared sentence for every rule and
+carries the RLM's own framing (`rlm:`), that every migration sits inside the
+topic's namespace and names no `proof_*` object, and that the policy left
+`eval_image_digest` / `gpu_class` **absent** rather than inventing the pin
+equalities the VM cannot read.
+
+**Refusals, so a fragment can never be a silent answer.** A declared rule the
+topic names in neither `inspect_marker_rules` nor `inspect_attested_rules` is a
+refusal (this RLM will not invent a check, and will not drop a rule either —
+dropping it would narrow the anti-cheat surface behind the operator's back,
+leaving it in would record it red forever so the topic could never open). A
+marker policy for an undeclared rule is a refusal too. Both are covered in
+`tests/test_authoring_set.py` (25 cases, wired into the adaptor suite that
+`cargo test -p proof-vm-guest` runs).
+
+**The bake gate holds it.** `deploy_guest_names_no_harness_or_benchmark` now
+requires `propose_rules` in the adaptor tree and asserts all three entrypoints
+are executable, so a lost bit or a rename fails CI rather than a live ceremony.
+
+**What this does not claim.** Not that a live image carries it yet — that needs
+a rebake (§ 2g's precondition, restated below). Not that the *document* is the
+RLM's (it stays operator-signed by design, §3e). And not that the staging
+journal already reads `authorship: rlm`: that is still the Owner LIVE run.
+
+**Guest rebake is mandatory, and it is the one step that makes this live.**
+`propose_rules` is an operator artefact: `bake-rootfs.sh --runner <id>=<dir>`
+copies the tree to `/opt/proof/runners/<id>/` and chmods `run` / `inspect` /
+`propose_rules`. Tipping `proof-challenge` (or the gateway) does **not** update
+`/opt/proof/runners`; the live pin keeps failing closed until the image is
+re-baked and `PROOF_RLM_VM_IMAGE_DIGEST` is set to the new image's own
+`sha256sum` (never invented). Runbook § 2b has the staging ceremony, the
+per-part journal check, and the clone-diff against the legacy document.
 
 ## Re-authoring (Greptile P1, fixed here)
 
@@ -771,10 +901,11 @@ A refusal rolls back, so it writes nothing at all — no row, no rule, no table.
 **Not claimed:** that the RLM authors the **document** (it authors the behavior; the document
 is operator-signed by design); that a rules-only adaptor can open a topic (it cannot, by
 construction); that B1's human YAML is the final authorship SoT; the `pin_policy` field by
-any other name.
+any other name; that a live guest image already carries `propose_rules` (it needs a rebake —
+§2h).
 
-**Greptile is green.** The last review (of `dc6ca1a4`) scores **5/5** and says "Safe to merge;
-there are no outstanding blocking issues." Every finding it raised on this branch is fixed in
+**Greptile is green on #301.** The last review (of `dc6ca1a4`) scores **5/5** and says "Safe to merge;
+there are no outstanding blocking issues." Every finding it raised on that branch is fixed in
 a commit on the branch, each with a regression test verified non-vacuous by neutering the fix:
 
 | Finding | Fixed in | Test |
@@ -789,4 +920,7 @@ a commit on the branch, each with a regression test verified non-vacuous by neut
 | rules and set written separately | `9bc55900` | `the_rules_and_the_set_land_in_one_write` |
 | the paired insert omitted the rule digest | `dc6ca1a4` | the shared store contract against Postgres |
 
-**Not merged.** PR #301 is a draft; the merge HOLD stands pending Mathis GO.
+**#304 is the guest-side stack head** (§2h). Its own review is requested on the PR; the
+authorship boundary it adds is pinned by the two tests §2h names, each verified non-vacuous.
+
+**Not merged.** #301 and #304 are both drafts; the merge HOLD stands pending Mathis GO.
