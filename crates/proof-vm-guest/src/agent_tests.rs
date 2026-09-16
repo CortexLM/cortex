@@ -1463,6 +1463,92 @@ async fn archive_and_later_jobs_ignore_stale_unsyncable_siblings() {
 }
 
 /// Framing over a stream, as the host drives it: hello, staging, a job, EOF.
+/// The real agent's authored set, **framed**: what the guest writes over the
+/// wire is what the host decodes, with every part and the `authored` tag.
+///
+/// The in-process tests above assert `VmJobOutput::Authored` on the Rust type;
+/// this one closes the loop the live FAIL fell through — the guest encodes,
+/// the frame carries it, and a reader with only the wire types gets the whole
+/// set back. A variant the host cannot decode would die here, before a VM.
+#[tokio::test]
+async fn the_real_agent_frames_the_whole_set_the_host_decodes() {
+    let r = root("framed-set");
+    let a = agent(&r);
+    hello(&a).await;
+    let t = topic();
+    let mut selecting = t.clone();
+    selecting
+        .constraints
+        .params
+        .insert(proof_experiment::PARAM_RUNNER.into(), RUNNER.into());
+    selecting
+        .constraints
+        .params
+        .insert(proof_experiment::PARAM_PACK_DIGEST.into(), pack().1);
+    install(&r, "run", "true");
+    install(
+        &r,
+        "propose_rules",
+        r#"
+cat > "$PROOF_OUTPUT_DIR/authoring.json" <<'JSON'
+{
+  "schema_version": 1,
+  "topic_id": "topic-a",
+  "rules": [{"id": "framed_rule", "text": "the rlm wrote this"}],
+  "migrations": [{"name": "0001_scratch", "sql": "CREATE TABLE topic_a_scratch (id TEXT)"}],
+  "apis": [{"path": "status", "method": "GET"}],
+  "submission_format": {"kind": "tar", "max_bytes": 5242880},
+  "pin_policy": {}
+}
+JSON
+echo '[{"id": "framed_rule", "text": "the rlm wrote this"}]' > "$PROOF_OUTPUT_DIR/rules.json"
+"#,
+    );
+
+    // Drive the real agent over a real frame channel, exactly as the host does.
+    let (mut host, guest) = tokio::io::duplex(1 << 20);
+    let server = {
+        let a = a.clone();
+        tokio::spawn(async move { a.serve_connection(guest).await })
+    };
+    write_frame(
+        &mut host,
+        &HostToRlm::Run {
+            job: Box::new(VmJob::ProposeRules {
+                topic: Box::new(selecting),
+                current_version: None,
+                current: None,
+            }),
+        },
+    )
+    .await
+    .expect("job");
+    let done: RlmToHost = read_frame(&mut host).await.expect("done");
+    let RlmToHost::Done {
+        output: VmJobOutput::Authored(set),
+    } = done
+    else {
+        panic!("the frame did not carry the set: {done:?}");
+    };
+    assert!(
+        set.is_complete(),
+        "the framed set lost parts: {:?}",
+        set.missing_parts()
+    );
+    assert_eq!(set.rules[0].id, "framed_rule");
+    assert_eq!(set.migrations.len(), 1);
+    assert_eq!(set.apis[0].path, "status");
+    // The raw frame carries the tag two separately built binaries agree on.
+    let raw = serde_json::to_string(&RlmToHost::Done {
+        output: VmJobOutput::Authored(set),
+    })
+    .expect("json");
+    assert!(raw.contains(r#""output":"authored""#), "{raw}");
+    drop(host);
+    let _ = server.await;
+    let _ = std::fs::remove_dir_all(&r);
+}
+
 #[tokio::test]
 async fn serve_connection_speaks_frames_until_the_host_hangs_up() {
     let r = root("frames");
