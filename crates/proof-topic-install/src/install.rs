@@ -286,30 +286,33 @@ impl Installer<'_> {
         // Check every migration up front: a bundle that would fail on its
         // third statement must not leave its first two applied.
         let checked = check_all_migrations(&plan, &request.topic.id)?;
-        // Cross-topic namespace collision, which the per-topic guard cannot
-        // see: `-` → `_` is injective but its prefixes are not prefix-free, so
-        // `aa_b_scratch` sits inside both `aa` and `aa-b`. Only the install
-        // knows the registry, so the check runs here — before the journal
-        // opens, so a collision writes nothing at all.
-        self.refuse_cross_topic_claims(&request.topic.id, &checked)
-            .await?;
         let handler = plan.handler.unwrap_or(Handler::VmBacked);
         let binding = resolve_binding(request, &plan, handler)?;
 
-        // The `pending` row lands first, so a crash mid-install is visible
-        // rather than silent. A failure appends its own `failed` row naming
-        // the step, so the journal says how far the run got.
+        // **Claim the namespace, and refuse a collision, atomically.**
+        //
+        // Two things have to be true together, and neither is sufficient
+        // alone:
+        //
+        // 1. The claim is against the **journal**, not only against published
+        //    documents. A topic claims its namespace by installing into it, so
+        //    a topic that has an install row (pending, applied, or failed) is
+        //    registered even before its document is published. Reading only
+        //    `proof_topic_version` let two unpublished installs whose prefixes
+        //    overlap — `aa` and `aa-b` — both pass the check and both create
+        //    `aa_b_scratch`. Greptile reproduced that.
+        // 2. The read and the claim are one atomic step. Under READ COMMITTED
+        //    two concurrent installs each see no row from the other and both
+        //    commit, which is the same defect with a race on top. The advisory
+        //    lock is the pattern this repo already uses for the alias slug
+        //    race (`proof-rlm-store`), and installs are rare operator actions,
+        //    so serializing them costs nothing worth measuring.
+        //
+        // The `pending` row that records the claim lands **inside** the locked
+        // transaction, so the next install to take the lock sees it. Nothing
+        // is written if the check refuses.
         let pending_id = self
-            .journal(
-                request,
-                InstallState::Pending,
-                None,
-                &[],
-                &[],
-                &binding,
-                "",
-                authored,
-            )
+            .claim_namespace(request, &checked, &binding, authored)
             .await?;
         match self
             .apply_all(request, &plan, &checked, &binding, setup, authored)
@@ -396,67 +399,120 @@ impl Installer<'_> {
         })
     }
 
-    /// Refuse a migration that names an object **another** registered topic
-    /// also claims.
+    /// Claim this topic's SQL namespace, or refuse a collision — atomically.
     ///
-    /// The per-topic guard ([`proof_topic_sql_guard::check_migration`]) proves
-    /// every name sits inside *this* topic's namespace. That is necessary but
-    /// not sufficient: `-` → `_` is injective, while its prefixes are not
-    /// prefix-free, so `aa_b_scratch` is inside `aa`'s namespace **and**
-    /// `aa-b`'s. A migration approved for `aa` could then read, modify, or
-    /// drop a table belonging to `aa-b` in the shared database.
+    /// Returns the `pending` journal row's id, which is the durable record of
+    /// the claim. Runs as **one transaction** that takes an advisory lock
+    /// first, so two installs cannot each read a registry that lacks the
+    /// other and both proceed:
     ///
-    /// Only the install can see this, because only the install has the
-    /// registry. The check runs **before the journal opens**, so a collision
-    /// writes nothing at all — no row, no rule, no table.
+    /// ```text
+    /// BEGIN
+    ///   SELECT pg_advisory_xact_lock(hashtextextended('proof_topic_install', 0))
+    ///   -- every topic with an install row, plus every published document
+    ///   -- (the claim is the union: a topic claims its namespace by
+    ///   -- installing into it, published or not)
+    ///   <collision check over both sets>
+    ///   INSERT proof_topic_install (… 'pending' …)   -- the claim itself
+    /// COMMIT
+    /// ```
+    ///
+    /// The lock is a *transaction* lock, so it is released on commit or
+    /// rollback and a crashed install cannot wedge it. It is deliberately
+    /// coarse — one lock for all installs — because installs are rare operator
+    /// actions and the alternative (per-namespace locks) would have to reason
+    /// about prefix overlap, which is the very thing that is hard here.
+    ///
+    /// A refusal writes **nothing**: the transaction rolls back, so there is
+    /// no `pending` row, no rule, and no table.
     ///
     /// # Errors
     ///
-    /// [`InstallError::CrossTopicClaim`], naming the migration, the object,
-    /// and both topics. A store that cannot be read is a refusal too: a
-    /// collision check that cannot enumerate the registry would pass by
-    /// default.
-    async fn refuse_cross_topic_claims(
+    /// [`InstallError::CrossTopicClaim`] naming the migration, the object, and
+    /// both topics; [`InstallError::Db`] when a read or the write fails. A
+    /// registry that cannot be read is a refusal too: a collision check that
+    /// cannot enumerate it would pass by default.
+    async fn claim_namespace(
         &self,
-        topic_id: &str,
+        request: &InstallRequest<'_>,
         checked: &[(String, Vec<Statement>)],
-    ) -> Result<(), InstallError> {
-        let registered = self
-            .store
-            .latest_topics()
+        binding: &ExecutorBinding,
+        authored: Option<&TopicAuthoring>,
+    ) -> Result<i64, InstallError> {
+        let mut tx = self
+            .pool
+            .begin()
             .await
-            .map_err(|e| InstallError::Store(e.to_string()))?;
-        let others: Vec<&str> = registered
+            .map_err(|e| InstallError::Db(e.to_string()))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(CLAIM_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| InstallError::Db(e.to_string()))?;
+        // Both sets, from inside the lock: published documents, and every
+        // topic that already has an install row (which is how a topic claims
+        // a namespace before it is published).
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT topic_id FROM proof_topic_version \
+             UNION \
+             SELECT topic_id FROM proof_topic_install",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| InstallError::Db(e.to_string()))?;
+        let others: Vec<&str> = rows
             .iter()
-            .map(|row| row.document.id.as_str())
-            .filter(|id| !id.eq_ignore_ascii_case(topic_id.trim()))
+            .map(|(id,)| id.as_str())
+            .filter(|id| !id.eq_ignore_ascii_case(request.topic.id.trim()))
             .collect();
-        if others.is_empty() {
-            return Ok(());
+        if let Some(err) = collision_in(checked, &request.topic.id, &others) {
+            // Roll back explicitly rather than relying on drop: the refusal is
+            // a *no-op*, and saying so here is what makes that readable.
+            tx.rollback()
+                .await
+                .map_err(|e| InstallError::Db(e.to_string()))?;
+            return Err(err);
         }
-        for (name, statements) in checked {
-            let mut named: Vec<String> = Vec::new();
-            for statement in statements {
-                named.extend(proof_topic_sql_guard::referenced_objects(
-                    &statement.blanked,
-                ));
-            }
-            // The first collision is the answer: the install refuses the
-            // bundle, so there is nothing to report about the others.
-            if let Some((object, other)) =
-                proof_topic_sql_guard::claim_collisions(&named, topic_id, others.iter().copied())
-                    .into_iter()
-                    .next()
-            {
-                return Err(InstallError::CrossTopicClaim {
-                    migration: name.clone(),
-                    object,
-                    this: topic_id.to_owned(),
-                    other,
-                });
-            }
+        let version: Option<i32> = None;
+        let json = |items: &[String]| {
+            serde_json::Value::Array(
+                items
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            )
+        };
+        let mut binding_json =
+            serde_json::to_value(binding).map_err(|e| InstallError::Db(e.to_string()))?;
+        if let Some(obj) = binding_json.as_object_mut() {
+            let authorship = match authored {
+                Some(set) => set.journal_entry(0),
+                None => operator_authorship(&[]),
+            };
+            obj.insert("authorship".to_owned(), authorship);
         }
-        Ok(())
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO proof_topic_install \
+             (topic_id, bundle_digest, environment, state, rules_version, rule_ids, migrations, \
+              binding, detail) \
+             VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $8) RETURNING id",
+        )
+        .bind(&request.topic.id)
+        .bind(&request.bundle_digest)
+        .bind(&request.environment)
+        .bind(version)
+        .bind(json(&[]))
+        .bind(json(&[]))
+        .bind(binding_json)
+        .bind("namespace claimed")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| InstallError::Db(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| InstallError::Db(e.to_string()))?;
+        Ok(id)
     }
 
     /// Migration names this topic has already applied, from the journal.
@@ -727,6 +783,60 @@ fn operator_authorship(rule_ids: &[String]) -> serde_json::Value {
             "pin_policy": part("declared"),
         },
     })
+}
+
+/// Advisory-lock key for the install claim. One lock for all installs: they
+/// are rare operator actions, and a per-namespace lock would have to reason
+/// about prefix overlap — the very thing that is hard here.
+const CLAIM_LOCK_KEY: &str = "proof_topic_install";
+
+/// The first cross-topic collision in `checked`, if any.
+///
+/// Both forms a statement can name an object in are scanned:
+///
+/// - `blanked`, the statement with string literals **and** dollar-quoted
+///   function bodies blanked; and
+/// - `bodies`, the function bodies themselves, with only their own literals
+///   blanked.
+///
+/// Scanning only the first was a hole, and Greptile reproduced it:
+/// `CREATE FUNCTION aa_delete() … $$ DELETE FROM aa_b_scratch $$` installs for
+/// topic `aa` while sibling `aa-b` is registered, and calling it deletes the
+/// sibling's rows. The body is what runs, so it is what the check reads.
+///
+/// The prefix rule in `is_topic_scoped` is per-topic, and `-` → `_` is
+/// injective while its **prefixes are not prefix-free**: `aa_b_scratch` sits
+/// inside both `aa` and `aa-b`. Only the install can see that, because only
+/// the install has the registry.
+fn collision_in(
+    checked: &[(String, Vec<Statement>)],
+    topic_id: &str,
+    others: &[&str],
+) -> Option<InstallError> {
+    for (name, statements) in checked {
+        let mut named: Vec<String> = Vec::new();
+        for statement in statements {
+            named.extend(proof_topic_sql_guard::referenced_objects(
+                &statement.blanked,
+            ));
+            named.extend(proof_topic_sql_guard::referenced_objects(&statement.bodies));
+        }
+        // The first collision is the answer: the install refuses, so there is
+        // nothing to report about the others.
+        if let Some((object, other)) =
+            proof_topic_sql_guard::claim_collisions(&named, topic_id, others.iter().copied())
+                .into_iter()
+                .next()
+        {
+            return Some(InstallError::CrossTopicClaim {
+                migration: name.clone(),
+                object,
+                this: topic_id.to_owned(),
+                other,
+            });
+        }
+    }
+    None
 }
 
 /// Resolve the executor binding from the signed document and the section.

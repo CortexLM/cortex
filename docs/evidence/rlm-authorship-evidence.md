@@ -618,34 +618,69 @@ executed locally on the tip — see below.
 It is the only step that can turn §2d's staging row into `authorship: rlm`, and it is the
 Owner's to run — it provisions a VM and spends on a baseline.
 
-## Security fix found during this review (not an authorship item)
+## Security fixes found during this review (not authorship items)
 
-Greptile's P1 on the earlier tip: the migration deny-list namespaces objects by the topic's
-mapped prefix (`-` → `_`), and **prefixes are not prefix-free**. `aa` and `aa-b` are both
-legal ids; `aa_b_scratch` reads as `aa` + `b_scratch` **and** as `aa-b` + `scratch`, so a
-migration approved for `aa` could create, read, or drop a table belonging to `aa-b` in the
-shared database. I reproduced it independently before fixing.
+Three P1 findings, each reproduced independently before fixing. The first is from the earlier
+tip; the second and third are Greptile's findings on that fix, and both are in the same
+registry-visible check.
+
+### 1. Prefix-overlapping namespaces
+
+The migration deny-list namespaces objects by the topic's mapped prefix (`-` → `_`), and
+**prefixes are not prefix-free**. `aa` and `aa-b` are both legal ids; `aa_b_scratch` reads as
+`aa` + `b_scratch` **and** as `aa-b` + `scratch`, so a migration approved for `aa` could
+create, read, or drop a table belonging to `aa-b` in the shared database.
 
 **The per-topic guard cannot fix this** — it sees one topic, and refusing every name with an
 underscore after the prefix would refuse ordinary names like `tb4_scratch_idx` (including the
 live shape's own index naming). The question is about the **registry**, so it is answered
-where the registry is visible:
+where the registry is visible: `proof_topic_sql_guard::claim_collisions` reports any name
+another registered topic also claims.
 
-- `proof_topic_sql_guard::claim_collisions(names, topic, others)` reports any name another
-  registered topic also claims.
-- `Installer::refuse_cross_topic_claims` runs it **before the journal opens**, so a collision
-  writes nothing at all — no row, no rule, no table — and refuses with
-  `InstallError::CrossTopicClaim`, naming the migration, the object, and **both** topics.
+### 2. Function bodies bypassed the check (Greptile P1)
 
-Tests: guard-level (`a_bare_name_two_topics_claim_is_reported_as_a_collision`,
-`a_name_no_registered_sibling_claims_is_not_a_collision`) and install-level
-(`a_migration_that_reaches_a_sibling_topics_namespace_is_refused`, which asserts the refusal
-and that no journal row and no table exist). Both non-vacuous — neutering the check fails
-them.
+The check scanned `statement.blanked` — the statement with string literals **and
+dollar-quoted function bodies** blanked — so object names *inside* a body were never compared
+to the registry. Greptile's reproduction: topic `aa` installs
+`CREATE FUNCTION aa_delete_sibling() … $$ DELETE FROM aa_b_scratch $$ LANGUAGE sql` while
+sibling `aa-b` is registered, the install completes, and calling the function deletes the
+sibling's rows.
 
-**Not claimed:** that the RLM authors the **document** (it authors the behavior; the
-document is operator-signed by design); that a rules-only adaptor can open a topic (it
-cannot, by construction); that B1's human YAML is the final authorship SoT; the `pin_policy`
-field by any other name.
+**The body is what runs, so the body is what the check reads.** `collision_in` now scans both
+`statement.blanked` and `statement.bodies`.
+
+### 3. Unpublished installs were invisible, and the check was not atomic (Greptile P1)
+
+The check enumerated `proof_topic_version` only, so a topic that had **installed but not yet
+published** was invisible to it: `aa` and `aa-b` could both install and both create
+`aa_b_scratch`. A topic claims a namespace by installing into it, so the claim has to be read
+from the **journal** too. And under READ COMMITTED two concurrent installs each see no row
+from the other and both commit — the same defect with a race on top.
+
+**Both are closed in one place.** `Installer::claim_namespace` is a single transaction that
+
+1. takes `pg_advisory_xact_lock` (the pattern this repo already uses for the alias slug race,
+   `proof-rlm-store`), so two installs cannot interleave;
+2. reads the union of `proof_topic_version` and `proof_topic_install` — every topic with a
+   published document **or** an install row, which is what "registered" means; and
+3. writes the `pending` row that records the claim **inside the same transaction**, so the
+   next install to take the lock sees it.
+
+A refusal rolls back, so it writes nothing at all — no row, no rule, no table.
+
+**Tests, each verified non-vacuous** (neutering the fix makes the test fail):
+
+| Test | What it pins |
+|---|---|
+| `a_function_body_that_reaches_a_sibling_is_refused` | the body scan; asserts the refusal names `aa_b_scratch` and that neither a journal row nor the function exists |
+| `two_unpublished_installs_cannot_claim_the_same_object` | the journal half of the registry read; `aa-b` is never published, and the refusal still names it |
+| `two_concurrent_installs_cannot_both_claim_a_namespace` | the atomicity; two racing installs, exactly one refused |
+| `a_migration_that_reaches_a_sibling_topics_namespace_is_refused` | the original collision, end to end |
+| guard-level `a_bare_name_two_topics_claim_is_reported_as_a_collision`, `a_name_no_registered_sibling_claims_is_not_a_collision` | `claim_collisions` itself |
+
+**Not claimed:** that the RLM authors the **document** (it authors the behavior; the document
+is operator-signed by design); that a rules-only adaptor can open a topic (it cannot, by
+construction); that B1's human YAML is the final authorship SoT; the `pin_policy` field by
+any other name.
 
 **Not merged.** PR #301 is a draft; the merge HOLD stands pending Mathis GO.

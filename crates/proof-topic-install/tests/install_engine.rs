@@ -545,6 +545,202 @@ async fn assert_authorship_journal_names_every_part(
     assert_eq!(authorship["parts"]["apis"]["routes"][0], "GET /rlm-status");
 }
 
+/// A migration whose **function body** reaches a sibling's namespace is
+/// refused.
+///
+/// Greptile's second P1, reproduced here before fixing. The collision check
+/// read `statement.blanked`, which blanks dollar-quoted bodies — so the object
+/// names *inside* a body were never compared to the registry. Topic `aa` could
+/// install `aa_delete_sibling()` whose body is `DELETE FROM aa_b_scratch`
+/// while sibling `aa-b` was registered, and calling it would delete the
+/// sibling's rows.
+///
+/// The body is what runs, so the body is what the check must read
+/// (`statement.bodies`).
+#[tokio::test]
+async fn a_function_body_that_reaches_a_sibling_is_refused() {
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    store
+        .put_topic_version(&topic("aa-b"))
+        .await
+        .expect("register the sibling");
+
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    let doc = topic("aa");
+    let body = r#"{
+        "rules": [{"id": "no_short_circuit", "text": "the harness must run the task"}],
+        "migrations": [{
+            "name": "0001_body",
+            "sql": "CREATE FUNCTION aa_delete_sibling() RETURNS void AS $$ DELETE FROM aa_b_scratch $$ LANGUAGE sql"
+        }]
+    }"#;
+    let err = installer
+        .install(
+            &request(&doc, body),
+            SetupSummary::Skipped {
+                reason: "--skip-baseline".into(),
+            },
+        )
+        .await
+        .expect_err("a function body reaching a sibling must be refused");
+    let InstallError::CrossTopicClaim {
+        ref object,
+        ref this,
+        ref other,
+        ..
+    } = err
+    else {
+        panic!("want CrossTopicClaim, got {err:?}");
+    };
+    assert_eq!(object, "aa_b_scratch");
+    assert_eq!(this, "aa");
+    assert_eq!(other, "aa-b");
+    // Nothing was written: the refusal is pre-flight.
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM proof_topic_install WHERE topic_id = 'aa'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(rows, 0, "a collision writes nothing at all");
+    let exists: Option<String> = sqlx::query_scalar("SELECT to_regproc('aa_delete_sibling')::text")
+        .fetch_one(&pool)
+        .await
+        .expect("probe");
+    assert_eq!(exists, None, "the function was not created");
+
+    tp.drop_schema().await.expect("drop");
+}
+
+/// Two **unpublished** installs whose prefixes overlap cannot both claim the
+/// same object.
+///
+/// Greptile's first P1, reproduced here before fixing. The collision check
+/// enumerated `proof_topic_version` only, so a topic that had installed but
+/// not yet published was invisible to it: `aa` and `aa-b` could both install
+/// and both create `aa_b_scratch`. A topic claims a namespace by installing
+/// into it, so the check has to read the **journal** too — and it has to do so
+/// under the claim's own lock, or two concurrent installs each read a registry
+/// that lacks the other.
+///
+/// This test installs `aa` (unpublished: it has a journal row and no
+/// `proof_topic_version` row for `aa` beyond what the install itself writes),
+/// then installs `aa-b` and asserts the refusal.
+#[tokio::test]
+async fn two_unpublished_installs_cannot_claim_the_same_object() {
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    // `aa` installs a table named `aa_b_scratch`, which `aa-b` also claims.
+    let first = r#"{
+        "rules": [{"id": "no_short_circuit", "text": "the harness must run the task"}],
+        "migrations": [{"name": "0001_shared", "sql": "CREATE TABLE aa_b_scratch (id TEXT)"}]
+    }"#;
+    installer
+        .install(
+            &request(&topic("aa"), first),
+            SetupSummary::Skipped {
+                reason: "--skip-baseline".into(),
+            },
+        )
+        .await
+        .expect("the first install is alone and therefore permitted");
+
+    // `aa-b` is **not** registered as a published document; the only record
+    // that `aa` exists is its install row. The check must still see it.
+    let err = installer
+        .install(
+            &request(&topic("aa-b"), first),
+            SetupSummary::Skipped {
+                reason: "--skip-baseline".into(),
+            },
+        )
+        .await
+        .expect_err("an unpublished sibling's claim must be visible");
+    assert!(
+        matches!(err, InstallError::CrossTopicClaim { .. }),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string().contains("aa_b_scratch"),
+        "the refusal names the object: {err}"
+    );
+
+    tp.drop_schema().await.expect("drop");
+}
+
+/// The claim is atomic: two installs racing for overlapping namespaces cannot
+/// both win.
+///
+/// The read-then-claim is one transaction under an advisory lock
+/// (`claim_namespace`), so the second install sees the first's `pending` row.
+/// Without the lock both read a registry lacking the other and both commit —
+/// the same defect with a race on top of it.
+#[tokio::test]
+async fn two_concurrent_installs_cannot_both_claim_a_namespace() {
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    let section = r#"{
+        "rules": [{"id": "no_short_circuit", "text": "the harness must run the task"}],
+        "migrations": [{"name": "0001_shared", "sql": "CREATE TABLE aa_b_scratch (id TEXT)"}]
+    }"#;
+    let doc_a = topic("aa");
+    let doc_b = topic("aa-b");
+    let req_a = request(&doc_a, section);
+    let req_b = request(&doc_b, section);
+    let installer_a = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    let installer_b = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    let (a, b) = tokio::join!(
+        installer_a.install(
+            &req_a,
+            SetupSummary::Skipped {
+                reason: "--skip-baseline".into(),
+            },
+        ),
+        installer_b.install(
+            &req_b,
+            SetupSummary::Skipped {
+                reason: "--skip-baseline".into(),
+            },
+        )
+    );
+    // Exactly one wins; the other is refused by name. Both succeeding would
+    // mean both created `aa_b_scratch`.
+    let refused = [&a, &b]
+        .iter()
+        .filter(|r| {
+            matches!(
+                r,
+                Err(InstallError::CrossTopicClaim { .. } | InstallError::MigrationFailed { .. })
+            )
+        })
+        .count();
+    assert_eq!(
+        refused, 1,
+        "exactly one of the two racing installs must be refused: a={a:?} b={b:?}"
+    );
+
+    tp.drop_schema().await.expect("drop");
+}
+
 /// The dynamic mux **reads** what an install **wrote**: the routes the
 /// challenge answers `/challenge/{topic_id}/…` from are the rows this install
 /// recorded, and a path nobody registered is not invented.
