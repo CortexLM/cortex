@@ -2,13 +2,20 @@
 
 Checklist: `RLM-AUTHORSHIP-EVIDENCE-CHECKLIST.md` · Pin: `ARCH-PIN-100PCT-RLM-AUTONOMOUS.md`
 
-**Tip under review:** `droid/8bcbefa3-sn100-stay-lit-harbor-propos` @ **`9f58c5e5`**
-(PR [#304](https://github.com/CortexLM/cortex/pull/304), draft — the stack head,
-stacked on #301 at `80bc2cdd`). The commits below it are the implementation
-(`18a2532c`), this pack (`7f226e00`), and the two Greptile P1 fixes plus the
-runnable staging ceremony (`3bc31a2e`, `9f58c5e5`).
-Mirror PR [#302](https://github.com/CortexLM/cortex/pull/302) carries the same HEAD
-as #301.
+**Tip under review:** `droid/8bcbefa3-sn100-stay-lit-harbor-propos` @ the branch head
+(PR [#304](https://github.com/CortexLM/cortex/pull/304), draft — the stack head, stacked
+on #301 at `80bc2cdd`). The commits it must contain, oldest first:
+
+| Commit | What it is |
+|---|---|
+| `18a2532c` | the implementation: `propose_rules` + `harness/authoring_set.py` (§2h) |
+| `7f226e00` | this pack, v4 |
+| `3bc31a2e` | the two Greptile P1 fixes (retained `DELETE`, intake format) |
+| `9f58c5e5` | the staging ceremony, runnable as written |
+
+Doc-only commits may ride on top of those; the four above are what the claims in this
+pack are made against. Mirror PR [#302](https://github.com/CortexLM/cortex/pull/302)
+carries the same HEAD as #301.
 Every path below is in this repo; every SHA is a commit on that branch or its stack.
 
 > **How to read this pack.** Each item states the claim, the **code path** that makes it
@@ -550,7 +557,7 @@ Still **2**. The Gate 4 hardening added a *second* cap beside it (host memory ad
 | [#300](https://github.com/CortexLM/cortex/pull/300) | `droid/933f76bf-b1-raise-max-proof-deadline` | `870a3b875533` | #299 | yes | CLEAN |
 | [#301](https://github.com/CortexLM/cortex/pull/301) | `droid/2edcb0c8-100-rlm-autonomous-strip-tbe` | `80bc2cdd` | #300 | yes | CLEAN |
 | [#302](https://github.com/CortexLM/cortex/pull/302) | `droid/1d0afa5f-sn100-stay-lit-cont-gate1-pa` | `945e143f` | #300 | yes | CLEAN |
-| [#304](https://github.com/CortexLM/cortex/pull/304) | `droid/8bcbefa3-sn100-stay-lit-harbor-propos` | `9f58c5e5` | **#301** | yes | CLEAN |
+| [#304](https://github.com/CortexLM/cortex/pull/304) | `droid/8bcbefa3-sn100-stay-lit-harbor-propos` | branch head (see the tip table above) | **#301** | yes | CLEAN |
 
 `main` is `aabd1724eb90`. The stack is linear: **#304 → #301 → #300 → #299 → #298 → #297 → `main`**.
 
