@@ -24,6 +24,18 @@
 //! [`RlmSection`]: its anti-cheat **rules**, the **SQL migrations** it needs,
 //! the **APIs** it exposes, its **submission format**, and its **scoring**.
 //!
+//! **Authorship is narrower than ownership.** The section is *topic-owned
+//! data*: Rust never interprets it, and it travels in the bundle. What the
+//! RLM **authors at runtime** today is the **rule vector** — it is asked to
+//! `propose_rules` inside its topic VM, and its answer becomes the version in
+//! force (`proof_rule_version.source = 'rlm'`, the gate an `open` document
+//! must pass). The `migrations` and `apis` parts are written by whoever
+//! authors the bundle and applied verbatim by the install; the RLM has no job
+//! that emits them and no wire message that could carry one
+//! (`the_rlm_authors_rules_and_the_bundle_carries_migrations_and_apis` pins
+//! that boundary, so a change making the RLM write schema or routes fails a
+//! test rather than silently outdating this paragraph).
+//!
 //! Rust never interprets any of it. This crate checks the section's *shape*
 //! (an object, bounded) and carries it byte-for-byte; it does not know what a
 //! rule, a migration, an API, or a scoring function *means*. That is the
@@ -1546,6 +1558,83 @@ mod tests {
             }
         }
         kept.join("\n")
+    }
+
+    /// What the RLM actually authors, and what it does not — the boundary the
+    /// docs must not overclaim.
+    ///
+    /// The RLM is asked to `ProposeRules` and answers `Rules`; that is the
+    /// **only** part of a topic's behavior it writes today. A topic's
+    /// `migrations` and `apis` travel in the operator's bundle `rlm` section
+    /// ([`SectionPlan`]) and are applied by the install — the RLM has no job
+    /// that emits them and no wire message that could carry one.
+    ///
+    /// This is pinned because the prose around this crate says "the bundle's
+    /// `rlm` section (rules / migrations / apis / …) is handed to the RLM",
+    /// which reads as authorship of all five parts. It is not: the section is
+    /// *topic-owned data* that Rust never interprets, and the **rules** are
+    /// additionally *RLM-authored* at runtime (`RuleSource::Rlm`, the gate
+    /// `open` must pass). Migrations and APIs are authored by whoever writes
+    /// the bundle, and are applied verbatim.
+    ///
+    /// The check is structural, not textual: it reads the job/output enums
+    /// that define the boundary and asserts no variant carries a migration or
+    /// an API. If a later change lets the RLM emit them, this test fails and
+    /// the docs get to claim it.
+    #[test]
+    fn the_rlm_authors_rules_and_the_bundle_carries_migrations_and_apis() {
+        const JOBS: &str = include_str!("../../proof-rlm/src/vm.rs");
+        const SECTION: &str = include_str!("../../proof-topic-install/src/section.rs");
+
+        // This test reads the **whole** file up to the first `#[cfg(test)]`,
+        // not [`production_logic`]: that helper tracks brace depth to drop
+        // test modules, and the job enums live inside braces, so it would
+        // drop exactly what this guard is about.
+        let head = |src: &str| -> String {
+            src.split("#[cfg(test)]")
+                .next()
+                .unwrap_or("")
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // The job surface the control plane can ask an RLM to run.
+        let jobs = head(JOBS);
+        for job in ["ProposeRules", "Baseline", "Inspect", "Evaluate", "Archive"] {
+            assert!(
+                jobs.contains(job),
+                "the RLM job surface still carries {job}; this guard is reading the wrong file"
+            );
+        }
+        // …and the only thing it can hand back about behavior is rules.
+        assert!(
+            jobs.contains("Rules(Vec<ChecklistRule>)"),
+            "the RLM still returns a rule vector"
+        );
+        // A variant the RLM could use to author schema or routes. Matched on
+        // the **name**, so it catches both spellings a variant may take
+        // (`Migrations { … }` and `Migrations(…)`) — the first version of this
+        // guard looked only for the tuple form and passed on an injected
+        // struct variant, i.e. it was vacuous.
+        for not_rlm in ["Migrations", "Migration", "ApiRoute", "Apis"] {
+            assert!(
+                !jobs.contains(not_rlm),
+                "the RLM job surface now carries {not_rlm:?}: it authors more than rules, so the \
+                 docs may claim it — but this test (and the prose) must be updated deliberately"
+            );
+        }
+
+        // Migrations and APIs are the install section's, applied by the
+        // install, authored by whoever writes the bundle.
+        let section = head(SECTION);
+        for part in ["migrations: Vec<Migration>", "apis: Vec<ApiRoute>"] {
+            assert!(
+                section.contains(part),
+                "the install section still supplies {part}; this guard is reading the wrong file"
+            );
+        }
     }
 
     /// Every product module that decides what a topic may do, and must

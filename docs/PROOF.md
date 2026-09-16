@@ -855,6 +855,16 @@ metric, model, rule list, or repository — is compiled in. Crates:
 (`LiveScorer` + artefacts + setup driver), `proof-canon` (canonical JSON +
 id shapes shared with `proof-task`).
 
+**What the RLM authors, exactly.** The rule vector: the control plane asks
+`propose_rules` inside the topic VM and its answer becomes the version in
+force (`proof_rule_version.source = 'rlm'`), which is the gate an `open`
+document must pass. A topic's `migrations` and `apis` are **topic-owned data
+carried by the bundle** and applied by the install — the RLM has no job that
+emits them. `the_rlm_authors_rules_and_the_bundle_carries_migrations_and_apis`
+(`proof-topic-bundle`) pins that boundary structurally, so a change that lets
+the RLM write schema or routes fails a test instead of quietly outdating this
+paragraph.
+
 ### Topic-carried, generic bindings (signed)
 
 | Field | Meaning |
