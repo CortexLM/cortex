@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use bounty_challenge::{
     bounty_router, hash_admin_token, legacy_sim_opt_in_present, resolve_scoring_backend, AppState,
-    BountyEmitter, BountyStore, GatewayClient, GatewayClientConfig, ScoringBackend, CHALLENGE_ID,
-    DEFAULT_EMIT_POLL_SECS, SCORING_VERSION,
+    BountyEmitter, BountyStore, EmitterStatus, GatewayClient, GatewayClientConfig, ScoringBackend,
+    CHALLENGE_ID, DEFAULT_EMIT_POLL_SECS, SCORING_VERSION,
 };
 use challenge_keys::load_challenge_secret;
 use clap::Parser;
@@ -124,17 +124,26 @@ fn run(cli: &Cli) -> Result<(), String> {
              503 and the emitter will pay nobody (the challenge share burns to uid 0) until then"
         ),
     }
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    // The emitter owns the read side published on GET /v1/status, so build it
+    // first and hand the same handle to the HTTP state. A host that wires no
+    // emitter (missing challenge key) publishes `emitter_wired: false`, which
+    // is the one condition that also 409s the seal.
+    let emitter = build_emitter(cli, scoring, sk)?;
+    let status = emitter
+        .as_ref()
+        .map_or_else(|| Arc::new(EmitterStatus::new(false)), |e| e.status());
     let state = AppState {
         store: BountyStore::new(),
         session_secret: Arc::new(session_secret),
         scoring,
         admin_hashes: Arc::new(admin_hashes),
+        emitter: Some(status),
     };
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
-    if let Some(emitter) = build_emitter(cli, scoring, sk)? {
+    if let Some(emitter) = emitter {
         let poll = Duration::from_secs(cli.emit_poll_secs.max(1));
         rt.spawn(emitter.run(poll));
     }

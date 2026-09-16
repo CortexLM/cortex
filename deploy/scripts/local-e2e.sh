@@ -426,10 +426,11 @@ PY
 import pathlib, sys
 
 # Mirrors config/challenges.toml. Shares must sum to 10000 or the validator
-# flags an emission-share mismatch (D23). Bounty 7000 + proof 3000.
+# flags an emission-share mismatch (D23). Bounty 2000 + proof 8000 — the live
+# 20/80 split, so a local seal exercises the same vector production seals.
 rows = [
-    ("bounty", sys.argv[2], 7000),
-    ("proof", sys.argv[3], 3000),
+    ("bounty", sys.argv[2], 2000),
+    ("proof", sys.argv[3], 8000),
 ]
 text = "version = 1\nintroduced_epoch = 0\n"
 for cid, pk, bps in rows:
@@ -641,6 +642,11 @@ probe_weights_latest() {
 #
 #   no BOUNTY_BACKEND_PUBLIC_URL → 503 (fail-closed; there is no offline scorer)
 #   feed configured              → 401 invalid_session (ingest open, gate off)
+#
+# Both cases also assert the emitter read side, because ingest being reachable
+# says nothing about weight being produced. The failure this catches is a host
+# that answers ingest, reports `can_score: true`, and still pays nobody every
+# epoch — which is invisible without the emitter fields.
 probe_bounty_fail_closed() {
   local base="http://127.0.0.1:${BOUNTY_HOST_PORT}"
   local status code body
@@ -650,6 +656,17 @@ probe_bounty_fail_closed() {
     return 0
   fi
   log "bounty status: $status"
+  # A host with a challenge key must wire the emitter even with no feed: bounty
+  # holds a paid trust-root row, so an uncovered E 409s the seal for every
+  # challenge, including proof's.
+  if [[ "$(echo "$status" | jq -r '.emitter_wired // "missing"')" == "false" ]]; then
+    log "warning: bounty emitter not wired (no BASE_CHALLENGE_SK_FILE); the seal will 409 until it is"
+  else
+    echo "$status" | jq -e '.emitter | objects' >/dev/null \
+      || die "bounty /v1/status has no emitter block; weight production is not observable"
+    echo "$status" | jq -e '.emitter | has("last_outcome") and has("last_feed_read") and has("last_paid")' >/dev/null \
+      || die "bounty emitter block is missing outcome/feed/paid fields"
+  fi
   body='{"session":"not-a-session","title":"probe","body":"probe","repro_steps":"probe"}'
   code="$(curl -sS -m 5 -o /tmp/local-e2e-bounty-report.json -w '%{http_code}' \
     -X POST -H 'content-type: application/json' -d "$body" "${base}/v1/reports" || true)"
@@ -661,6 +678,27 @@ probe_bounty_fail_closed() {
   else
     [[ "$code" == "401" ]] || die "bounty ingest answered HTTP $code with a feed configured (expected 401 invalid_session)"
     log "bounty ingest OK: feed configured → POST /v1/reports reaches session auth"
+    # Feed configured but nothing adjudicated is the quiet empty-payout case:
+    # the emitter covers E with ChallengeInternal and reports `unpaid`, which
+    # must not read as a healthy score.
+    local outcome paid
+    outcome="$(echo "$status" | jq -r '.emitter.last_outcome // "never"')"
+    paid="$(echo "$status" | jq -r '.emitter.last_paid // 0')"
+    case "$outcome" in
+      scored)
+        [[ "$paid" -gt 0 ]] || die "bounty reports a scored tick that paid nobody"
+        log "bounty reward linkage OK: last tick scored $paid hotkey(s)"
+        ;;
+      unpaid)
+        log "bounty emitter unpaid: feed read, nothing adjudicated yet (share burns to uid 0)"
+        ;;
+      burned|held|error|never)
+        log "bounty emitter last_outcome=$outcome (waiting on the backend feed)"
+        ;;
+      *)
+        die "bounty emitter reported an unknown outcome: $outcome"
+        ;;
+    esac
   fi
 }
 

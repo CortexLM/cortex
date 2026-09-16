@@ -28,6 +28,48 @@ board.
 | `challenge_scoring_version` | `1` |
 | Port | `8096` (local host `28096`) |
 | Emission | `2000` bps (20%; Proof has the other 80%) |
+| Trust-root row | `bounty` @ 2000 bps, `all_metagraph_hotkeys` |
+
+The row is committed in [`../config/challenges.toml`](../config/challenges.toml)
+and mirrored by [`../config/challenges.staging.toml`](../config/challenges.staging.toml)
+for staging. Both are owner-signed: changing a share without re-signing fails
+at load, and `crates/bounty-challenge/tests/trust_root_linkage.rs` asserts both
+files stay live, payable, and in step. Do not edit them by hand — see
+[`../config/CEREMONY.md`](../config/CEREMONY.md) and
+[`runbooks/trust-root-rotation.md`](runbooks/trust-root-rotation.md).
+
+## Operator environment
+
+Set on the **master** host (never baked into git; see
+[`../deploy/env/bounty-challenge.env.example`](../deploy/env/bounty-challenge.env.example)):
+
+| Variable | Role |
+|----------|------|
+| `BOUNTY_BACKEND_PUBLIC_URL` | Base URL of the CortexLM/backend public API. **The only scorer.** Unset → ingest 503s and every leaf is a cover. |
+| `BOUNTY_EMIT_POLL_SECS` | Seconds between emitter ticks (default 120). |
+| `BASE_CHALLENGE_SK_FILE` | Bounty leaf mini-secret. Its public key **must** match the trust-root `bounty` row, or every leaf is rejected. |
+| `BASE_CHALLENGE_GATEWAY_ENDPOINT` | Master gateway for `POST /v1/weights/raw` (default `http://gateway:8080`). |
+| `BASE_NETUID` | Subnet `E` is derived from. |
+| `BASE_CHAIN_ENDPOINT(S)` | Chain for `E`; `BASE_CHAIN_ENDPOINTS` is the ordered failover list and wins over the singular. |
+| `BOUNTY_ADMIN_TOKENS_FILE` | Operator bearer for `POST /v1/admin/adjudicate` and the report reads. Empty → admin **503**. |
+| `BOUNTY_SESSION_SECRET_FILE` | Pairing session HMAC. Empty → ephemeral (pairings do not survive restart). |
+| `BOUNTY_CHAT_COMMAND` | Chat inject command. Env-only; docs use the placeholder. |
+
+`BOUNTY_FORCE_SIM` is retired: it is ignored, warned about at boot, and
+`deploy/scripts/assert-compose-matrix.sh` fails if any compose file sets it.
+
+### What validators do and do not verify
+
+Validators **never** read the bounty feed and **never** re-run a report. They
+verify the sealed bundle: the gateway signature, the merkle root, D24
+completeness against the local owner-signed trust root, and the recomputed
+weight vector. So the feed → leaf → seal path is entirely on the challenge
+host, and a bug there is invisible to consensus until someone reads
+`/v1/status` or the sealed vector.
+
+That is why the emitter publishes its outcome: the reward linkage has two
+halves that fail independently — the backend publishing adjudications, and this
+host turning them into signed leaves. `can_score` covers only the first.
 
 ## Why bug reports need different evaluation
 
@@ -90,19 +132,50 @@ scorer. Each tick the challenge service:
 2. derives `E` from the metagraph at `last_epoch_block` (`AllMetagraphHotkeys`)
 3. maps published rows onto one leaf per hotkey in `E` for the current subnet
    epoch (champion → `Score`, net-malicious → `InvalidResponse`, everyone else
-   → `NotAttempted`); an unreadable feed pays nobody but still covers `E` with
-   `ChallengeInternal`
+   → `NotAttempted`)
 4. `POST /v1/weights/raw` on the gateway, which seals what validators fetch
+
+**A reachable feed is not a paying one**, and the difference is a separate
+outcome. When the feed answers and no row maps to payable weight — nothing
+adjudicated, everything still `pending`, or a `valid` row the operator never
+priced — the tick is `unpaid`: `E` is covered with
+`NoScore(ChallengeInternal)`, the share burns to uid 0, and `/v1/status`
+reports `last_outcome: "unpaid"` with `last_feed_read: true`. It is not signed
+as a scored epoch, because `NotAttempted` claims the challenge *chose* not to
+invoke the miner, which is false here and would report a healthy tick while
+paying nobody.
+
+Adjudication is therefore a hard dependency of the reward path, not a
+reporting one. A published row only becomes weight when it is `valid`, carries
+a `severity`, and is justified; anything short of that pays nothing that epoch.
 
 Operator knobs: `BASE_CHALLENGE_GATEWAY_ENDPOINT`, `BASE_NETUID`,
 `BASE_CHAIN_ENDPOINT(S)`, `BOUNTY_EMIT_POLL_SECS` (default 120s). Re-emitting
 the current epoch is normal: the gateway supersedes on a changed digest and
 409s an identical one.
 
+### Reading `/v1/status`
+
+| Field | Meaning |
+|-------|---------|
+| `scoring_backend` | `backend_public` or `unconfigured`. |
+| `can_score` | Whether this host *may* turn a report into weight. |
+| `emitter_wired` | Whether a leaf emitter was wired. `false` is the only condition that also 409s the seal (missing `BASE_CHALLENGE_SK_FILE`). |
+| `emitter.last_outcome` | `never` / `scored` / `unpaid` / `burned` / `held` / `error`. |
+| `emitter.last_feed_read` | Whether the feed answered on the last tick. |
+| `emitter.last_paid` | Positive leaves on the last tick. |
+| `emitter.last_reason` | Why nobody was paid, or why the epoch was held. |
+| `emitter.scored_epoch` | Highest epoch this process scored (in-process). |
+
+`can_score` alone does not mean anyone is being paid. `unpaid` with
+`last_feed_read: true` is the combination to watch: the backend is up and the
+epoch still pays nobody, which means adjudication is behind.
+
 ## Fail-closed ingest and emission
 
 `GET /v1/status` publishes `scoring_backend` (`backend_public` |
-`unconfigured`), `backend_public_configured`, and `can_score`.
+`unconfigured`), `backend_public_configured`, `can_score`, `emitter_wired`,
+and the `emitter` block.
 
 Without `BOUNTY_BACKEND_PUBLIC_URL` — or when the feed is unreachable, 5xx,
 unparseable, or moving under the read — the host cannot turn a report into
@@ -113,6 +186,16 @@ weight. Two things follow, and neither is a degraded mode:
 - the emitter pays **nobody**: it covers `E` with
   `NoScore(ChallengeInternal)` (`BUNDLE_SPEC` §3.3.1 — "challenge-side fault;
   still must cover the participant"), so the 2000 bps burns to uid 0.
+
+A feed that answers and crowns nobody is the third case, and it is treated as
+a cover rather than a score. `NotAttempted` on every leaf would claim the
+challenge chose not to invoke the miners, which is false, and it would seal as
+a legitimate-looking unpaid epoch while `/v1/status` reported success. The
+tick is `unpaid` instead: same `ChallengeInternal` cover, same burn, and the
+status says which half is missing. The three outcomes are deliberately
+distinct — `scored`, `unpaid` (feed read, nothing payable), `burned` (feed
+unreadable) — because an operator needs to know whether to wait on the backend
+or go look at adjudication.
 
 Covering `E` is not a hedge, it is the difference between bounty failing and
 the subnet failing. Bounty holds a **paid** trust-root row, and D24 requires a
@@ -137,18 +220,22 @@ and the paragraphs above apply. No backend change is needed for this; a
 published revision or ETag on both routes would let the moving-feed check
 collapse to a single round.
 
-A failed tick also tries not to take back a score. Once the process has scored
-an epoch, a feed outage inside that same epoch **holds** instead of superseding
-a champion's leaf with a burn; a backend hiccup does not get to decide the
-epoch. The watermark is in-process (the gateway has no read side for raw
-leaves), so a restart during an outage can still burn an epoch that had
-scores — the next successful tick supersedes it back. The bias is deliberate:
-burning pays nobody who was not already paid, while staying silent would 409
-the seal for every challenge.
+A tick that produces no weight also tries not to take back a score. Once the
+process has scored an epoch, a later unproductive tick inside that same epoch
+**holds** instead of superseding a champion's leaf with a cover — whether the
+feed went down or stayed up and simply stopped publishing the crowned hotkey.
+A backend hiccup, or a publish that reverts, does not get to decide the epoch.
+The watermark is in-process (the gateway has no read side for raw leaves), so a
+restart during an outage can still burn an epoch that had scores — the next
+successful tick supersedes it back. The bias is deliberate: burning pays nobody
+who was not already paid, while staying silent would 409 the seal for every
+challenge. Independently, the gateway refuses a `ChallengeInternal` cover from
+replacing a positive leaf for the same key (409, original kept), so a lost
+watermark cannot reseal a paid allocation into a uid-0 burn.
 
 Only a missing `BASE_CHALLENGE_SK_FILE` stops emission entirely — a leaf the
 trust root rejects is not weight — and that case is logged as the 409 it will
-cause.
+cause. It is also the only case that publishes `emitter_wired: false`.
 
 **There is no offline scorer.** `BOUNTY_FORCE_SIM` is retired: it is ignored,
 warned about at boot, and `deploy/scripts/assert-compose-matrix.sh` fails if

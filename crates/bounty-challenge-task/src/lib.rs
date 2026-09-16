@@ -16,6 +16,8 @@
 use keystore::{ss58_decode, ss58_encode, BITTENSOR_SS58_PREFIX, KEY_LEN};
 use schnorrkel::{signing_context, ExpansionMode, MiniSecretKey, PublicKey, Signature};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::Mutex;
 use thiserror::Error;
 
 /// Normative challenge id (trust-root / leaf `challenge_id` string).
@@ -204,6 +206,208 @@ pub fn resolve_scoring_backend() -> ScoringBackend {
     } else {
         ScoringBackend::Unconfigured
     }
+}
+
+// --- Emitter observability ---------------------------------------------------
+//
+// The reward linkage is a chain of two halves that fail independently: the
+// backend publishes adjudications, and this host turns them into signed
+// leaves. `/v1/status` already says whether a feed is *configured*; that is not
+// the same as whether weight is being produced. A readable feed that publishes
+// nothing payable, or a crowned hotkey that is not in `E`, is an empty payout
+// that no local store reading can see. These types are the surface that makes
+// it visible instead of leaving it to a log grep.
+
+/// What one completed emitter tick did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmitterOutcomeKind {
+    /// No tick has completed yet.
+    Never,
+    /// The feed published payable rows and they became signed scores.
+    Scored,
+    /// The feed was read, but nothing payable became weight this tick.
+    Unpaid,
+    /// The feed could not be read; `E` was covered with `ChallengeInternal`.
+    Burned,
+    /// A scored epoch was left in place through a feed outage.
+    Held,
+    /// The tick could not emit at all (chain, signing, or gateway).
+    Error,
+}
+
+impl EmitterOutcomeKind {
+    /// Stable code for the atomic slot.
+    const fn code(self) -> u8 {
+        match self {
+            Self::Never => 0,
+            Self::Scored => 1,
+            Self::Unpaid => 2,
+            Self::Burned => 3,
+            Self::Held => 4,
+            Self::Error => 5,
+        }
+    }
+
+    /// Inverse of [`Self::code`]; unknown codes read back as [`Self::Never`].
+    const fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Scored,
+            2 => Self::Unpaid,
+            3 => Self::Burned,
+            4 => Self::Held,
+            5 => Self::Error,
+            _ => Self::Never,
+        }
+    }
+}
+
+/// One completed tick, as recorded by [`EmitterStatus::record`].
+#[derive(Debug, Clone, Copy)]
+pub struct EmitterTick<'a> {
+    /// What the tick did.
+    pub kind: EmitterOutcomeKind,
+    /// Subnet epoch the leaves were signed for (0 when the tick never got there).
+    pub epoch: u64,
+    /// Block `E` was pinned at (0 when unknown).
+    pub pin_block: u64,
+    /// Size of `E`.
+    pub participants: usize,
+    /// Hotkeys that received a positive score.
+    pub paid: usize,
+    /// Whether the backend public feed answered this tick.
+    pub feed_read: bool,
+    /// Highest epoch this process has scored (0 = none).
+    pub scored_epoch: u64,
+    /// Why nobody was paid, or why the epoch was held.
+    pub reason: Option<&'a str>,
+    /// Why the tick emitted nothing at all.
+    pub error: Option<&'a str>,
+}
+
+/// Read-side view of the emitter, published on `GET /v1/status`.
+///
+/// `last_outcome: "unpaid"` with `last_feed_read: true` is the one an operator
+/// has to notice: the feed is reachable, the challenge is running, and the
+/// epoch still pays nobody. `last_reason` says which half is missing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmitterStatusView {
+    /// Whether this host wired an emitter at all (a missing challenge key
+    /// leaves `false`, which is the one case that also 409s the seal).
+    pub wired: bool,
+    /// Completed ticks since boot.
+    pub ticks: u64,
+    /// Outcome of the most recent tick.
+    pub last_outcome: EmitterOutcomeKind,
+    /// Epoch of the most recent tick (0 = none yet).
+    pub last_epoch: u64,
+    /// Pin block of the most recent tick (0 = none yet).
+    pub last_pin_block: u64,
+    /// Size of `E` on the most recent tick.
+    pub last_participants: u64,
+    /// Positive leaves on the most recent tick.
+    pub last_paid: u64,
+    /// Whether the feed answered on the most recent tick.
+    pub last_feed_read: bool,
+    /// Highest epoch this process scored (0 = none). In-process: a restart
+    /// inside an outage can still burn an epoch that had scores, and the next
+    /// successful tick supersedes it back.
+    pub scored_epoch: u64,
+    /// Why nobody was paid, or why the epoch was held.
+    pub last_reason: String,
+    /// Why the tick emitted nothing at all.
+    pub last_error: String,
+}
+
+/// Shared emitter state. The emitter writes it; `/v1/status` reads it.
+#[derive(Debug)]
+pub struct EmitterStatus {
+    wired: bool,
+    ticks: AtomicU64,
+    last_kind: AtomicU8,
+    last_epoch: AtomicU64,
+    last_pin_block: AtomicU64,
+    last_participants: AtomicU64,
+    last_paid: AtomicU64,
+    last_feed_read: AtomicBool,
+    scored_epoch: AtomicU64,
+    last_reason: Mutex<String>,
+    last_error: Mutex<String>,
+}
+
+impl EmitterStatus {
+    /// Fresh status for a host that did or did not wire an emitter.
+    #[must_use]
+    pub fn new(wired: bool) -> Self {
+        Self {
+            wired,
+            ticks: AtomicU64::new(0),
+            last_kind: AtomicU8::new(EmitterOutcomeKind::Never.code()),
+            last_epoch: AtomicU64::new(0),
+            last_pin_block: AtomicU64::new(0),
+            last_participants: AtomicU64::new(0),
+            last_paid: AtomicU64::new(0),
+            last_feed_read: AtomicBool::new(false),
+            scored_epoch: AtomicU64::new(0),
+            last_reason: Mutex::new(String::new()),
+            last_error: Mutex::new(String::new()),
+        }
+    }
+
+    /// Whether this host wired an emitter.
+    #[must_use]
+    pub fn wired(&self) -> bool {
+        self.wired
+    }
+
+    /// Record one completed tick.
+    pub fn record(&self, tick: EmitterTick<'_>) {
+        self.ticks.fetch_add(1, Ordering::Relaxed);
+        self.last_kind.store(tick.kind.code(), Ordering::Relaxed);
+        self.last_epoch.store(tick.epoch, Ordering::Relaxed);
+        self.last_pin_block.store(tick.pin_block, Ordering::Relaxed);
+        self.last_participants
+            .store(count_u64(tick.participants), Ordering::Relaxed);
+        self.last_paid
+            .store(count_u64(tick.paid), Ordering::Relaxed);
+        self.last_feed_read.store(tick.feed_read, Ordering::Relaxed);
+        self.scored_epoch
+            .fetch_max(tick.scored_epoch, Ordering::Relaxed);
+        tick.reason
+            .unwrap_or_default()
+            .clone_into(&mut lock(&self.last_reason));
+        tick.error
+            .unwrap_or_default()
+            .clone_into(&mut lock(&self.last_error));
+    }
+
+    /// Read-side snapshot for `/v1/status`.
+    #[must_use]
+    pub fn view(&self) -> EmitterStatusView {
+        EmitterStatusView {
+            wired: self.wired,
+            ticks: self.ticks.load(Ordering::Relaxed),
+            last_outcome: EmitterOutcomeKind::from_code(self.last_kind.load(Ordering::Relaxed)),
+            last_epoch: self.last_epoch.load(Ordering::Relaxed),
+            last_pin_block: self.last_pin_block.load(Ordering::Relaxed),
+            last_participants: self.last_participants.load(Ordering::Relaxed),
+            last_paid: self.last_paid.load(Ordering::Relaxed),
+            last_feed_read: self.last_feed_read.load(Ordering::Relaxed),
+            scored_epoch: self.scored_epoch.load(Ordering::Relaxed),
+            last_reason: lock(&self.last_reason).clone(),
+            last_error: lock(&self.last_error).clone(),
+        }
+    }
+}
+
+/// A poisoned lock here is a status string, not a consensus input: recover the
+/// guard rather than take the challenge down over a display field.
+fn lock(m: &Mutex<String>) -> std::sync::MutexGuard<'_, String> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn count_u64(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
 }
 
 /// Most reports one hotkey may leave awaiting adjudication.

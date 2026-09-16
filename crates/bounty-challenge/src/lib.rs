@@ -24,7 +24,8 @@ use challenge_common::{emit_signed_leaf_set, Hotkey, LeafEmitError};
 pub use backend::{fetch_public_snapshot, public_path, snapshot_from_json, BackendError};
 pub use bounty_challenge_task::{
     backend_public_url, chat_command_display, legacy_sim_opt_in_present, resolve_scoring_backend,
-    ScoringBackend, CHALLENGE_ID, CHALLENGE_ID_BYTES as BOUNTY_ID_BYTES, CHAT_COMMAND_PLACEHOLDER,
+    EmitterOutcomeKind, EmitterStatus, EmitterStatusView, EmitterTick, ScoringBackend,
+    CHALLENGE_ID, CHALLENGE_ID_BYTES as BOUNTY_ID_BYTES, CHAT_COMMAND_PLACEHOLDER,
     SCORE_MAX as BOUNTY_SCORE_MAX, SCORING_VERSION, TERMS_TEXT,
 };
 pub use bounty_http::{bounty_router, hash_admin_token, AppState};

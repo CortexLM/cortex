@@ -230,6 +230,35 @@ pub async fn status(client: &Client, json_out: bool) -> Result<(), String> {
     if let Some(v) = reply.body.get("champion_hotkey") {
         println!("champion_hotkey: {}", compact(v));
     }
+    // `can_score` says this host *may* pay; the emitter says whether it *is*.
+    // A reachable feed with nothing adjudicated pays nobody, and a miner
+    // deserves to see which of those they are looking at.
+    if let Some(v) = reply.body.get("emitter_wired") {
+        println!("emitter_wired: {}", compact(v));
+    }
+    if let Some(e) = reply.body.get("emitter").filter(|v| v.is_object()) {
+        println!("last_outcome: {}", compact(&e["last_outcome"]));
+        println!("last_feed_read: {}", compact(&e["last_feed_read"]));
+        println!("last_paid: {}", compact(&e["last_paid"]));
+        if let Some(reason) = e["last_reason"].as_str().filter(|s| !s.is_empty()) {
+            println!("last_reason: {reason}");
+        }
+        match e["last_outcome"].as_str().unwrap_or("never") {
+            "unpaid" => println!(
+                "  note: the feed answered and nothing was payable — reports become weight \
+                 once an operator adjudicates them valid with a severity."
+            ),
+            "burned" => println!(
+                "  note: the feed could not be read, so this epoch pays nobody. Not a fault \
+                 on your side; check again later."
+            ),
+            "error" => println!(
+                "  note: the emitter could not post leaves at all (chain, signing, or \
+                 gateway). An operator has to look at this."
+            ),
+            _ => {}
+        }
+    }
     if let Some(q) = reply.body.get("quotas") {
         println!("quotas: {q}");
     } else {

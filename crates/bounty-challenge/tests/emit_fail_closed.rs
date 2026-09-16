@@ -1,6 +1,6 @@
 //! Bounty emission is only as real as the backend feed behind it.
 //!
-//! Three properties are load-bearing and none is visible from a unit test of
+//! Five properties are load-bearing and none is visible from a unit test of
 //! the scorer:
 //!
 //! 1. A host that *can* read `{BOUNTY_BACKEND_PUBLIC_URL}/v1/bounty/public/*`
@@ -10,9 +10,15 @@
 //!    `NoScore(ChallengeInternal)`, so the challenge share burns to uid 0 —
 //!    while still covering `E`, because a paid challenge with no leaves fails
 //!    D24 and takes every other challenge's seal down with it.
-//! 3. A feed outage inside an already-scored epoch does not take back the
-//!    scores the backend really did publish.
-//! 4. The leaderboard and the reports are separate GETs, so a snapshot is only
+//! 3. A feed that answers and crowns nobody is the third case, and it is not
+//!    either of the first two: reachable, healthy, and worth nothing. It must
+//!    cover `E` with the same `ChallengeInternal` cover rather than sign
+//!    `NotAttempted` (which claims the challenge chose not to invoke anyone)
+//!    or report a successful score.
+//! 4. A feed outage, or a readable feed that stops paying, inside an
+//!    already-scored epoch does not take back the scores the backend really
+//!    did publish.
+//! 5. The leaderboard and the reports are separate GETs, so a snapshot is only
 //!    signed once the feed holds still across both of them.
 
 #![forbid(unsafe_code)]
@@ -26,8 +32,8 @@ use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bounty_challenge::{
-    fetch_public_snapshot, BackendError, BountyEmitter, EmitOutcome, GatewayClient,
-    GatewayClientConfig,
+    fetch_public_snapshot, BackendError, BountyEmitter, EmitOutcome, EmitterOutcomeKind,
+    GatewayClient, GatewayClientConfig,
 };
 use chain::{
     AxonInfo, ChainClient, ChainError, FakeChain, FakeChainConfig, Metagraph, WeightsTlockPayload,
@@ -266,6 +272,123 @@ async fn spawn_stable_torn_backend() -> String {
         .route(
             "/v1/bounty/public/reports",
             get(|| async { Json(serde_json::json!({ "items": [champion_valid_row(0, "one")] })) }),
+        );
+    serve(app).await
+}
+
+/// A backend that starts payable and can be switched to publishing nothing,
+/// without changing its URL. That is the "backend stopped paying a hotkey it
+/// had already crowned" case: still reachable, no longer payable.
+async fn spawn_switchable_backend() -> (String, Arc<AtomicBool>) {
+    let payable = Arc::new(AtomicBool::new(true));
+    let state = Arc::clone(&payable);
+    let app = Router::new()
+        .route(
+            "/v1/bounty/public/leaderboard",
+            get(move |State(payable): State<Arc<AtomicBool>>| async move {
+                if payable.load(Ordering::Relaxed) {
+                    Json(leaderboard_json())
+                } else {
+                    Json(serde_json::json!({ "items": [] }))
+                }
+            }),
+        )
+        .route(
+            "/v1/bounty/public/reports",
+            get(move |State(payable): State<Arc<AtomicBool>>| async move {
+                if payable.load(Ordering::Relaxed) {
+                    Json(reports_json())
+                } else {
+                    Json(serde_json::json!({ "items": [] }))
+                }
+            }),
+        )
+        .with_state(state);
+    (serve(app).await, payable)
+}
+
+/// A backend that answers 200 on both routes with nothing published yet: no
+/// reports adjudicated, so no leaderboard row to agree with. This is the shape
+/// of a backend that is *up* and has crowned nobody — a reachable feed that
+/// still produces no weight, which is not the same failure as an outage.
+async fn spawn_empty_backend() -> String {
+    let app = Router::new()
+        .route(
+            "/v1/bounty/public/leaderboard",
+            get(|| async { Json(serde_json::json!({ "items": [] })) }),
+        )
+        .route(
+            "/v1/bounty/public/reports",
+            get(|| async { Json(serde_json::json!({ "items": [] })) }),
+        );
+    serve(app).await
+}
+
+/// A backend that publishes reports but never adjudicates them: every row is
+/// still `pending`, which is not scorable. Reachable, justified-looking, and
+/// worth nothing — the trap an operator has to be able to see.
+async fn spawn_all_pending_backend() -> String {
+    let app = Router::new()
+        .route(
+            "/v1/bounty/public/leaderboard",
+            get(|| async {
+                Json(serde_json::json!({
+                    "items": [{ "hotkey": hex::encode(CHAMPION), "valid_count": 0 }]
+                }))
+            }),
+        )
+        .route(
+            "/v1/bounty/public/reports",
+            get(|| async {
+                Json(serde_json::json!({
+                    "items": [{
+                        "id": "pending-0",
+                        "hotkey": hex::encode(CHAMPION),
+                        "status": "pending",
+                        "problem_found": "something may be wrong",
+                        "adjudicator": "bounty-adjudicator@cortex",
+                        "justification": "awaiting triage",
+                        "adjudicated_at": "2026-08-30T00:00:00Z",
+                        "created_at": "2026-08-29T00:00:00Z",
+                    }]
+                }))
+            }),
+        );
+    serve(app).await
+}
+
+/// A backend whose champion is an unpriced `valid`: adjudicated, justified,
+/// and still not creditable, because nobody priced the bug. The crown gate
+/// refuses it, so the feed is readable and pays nobody.
+async fn spawn_unpriced_backend() -> String {
+    let app = Router::new()
+        .route(
+            "/v1/bounty/public/leaderboard",
+            get(|| async {
+                Json(serde_json::json!({
+                    "items": [{ "hotkey": hex::encode(CHAMPION), "valid_count": 3 }]
+                }))
+            }),
+        )
+        .route(
+            "/v1/bounty/public/reports",
+            get(|| async {
+                let items: Vec<_> = (0..3)
+                    .map(|i| {
+                        serde_json::json!({
+                            "id": format!("unpriced-{i}"),
+                            "hotkey": hex::encode(CHAMPION),
+                            "status": "valid",
+                            "problem_found": format!("regression {i}"),
+                            "adjudicator": "bounty-adjudicator@cortex",
+                            "justification": "reproduced on master",
+                            "adjudicated_at": "2026-08-30T00:00:00Z",
+                            "created_at": "2026-08-29T00:00:00Z",
+                        })
+                    })
+                    .collect();
+                Json(serde_json::json!({ "items": items }))
+            }),
         );
     serve(app).await
 }
@@ -606,4 +729,256 @@ async fn an_outage_after_a_scored_epoch_holds_instead_of_burning_it() {
             > 0,
         "the champion's score must still stand"
     );
+    let view = em.status().view();
+    assert_eq!(view.last_outcome, EmitterOutcomeKind::Held);
+    assert!(!view.last_feed_read, "an outage is not a read feed");
+}
+
+// --- The feed is up and pays nobody -----------------------------------------
+//
+// A reachable backend with no payable adjudication is the failure mode that
+// looks healthy from every other angle: `/health` is up, `can_score` is true,
+// the feed answers 200, and the epoch still pays nobody. It must not be signed
+// as a scored epoch, and it must not read like an outage either.
+
+/// An empty feed is reachable and crowns nobody. Signing it as `Scored` would
+/// emit `NotAttempted` for every participant — a claim that the challenge
+/// chose not to invoke them — and report a healthy tick while paying nothing.
+/// The honest leaf is the same `ChallengeInternal` cover a burn uses.
+#[tokio::test]
+async fn a_readable_feed_with_no_rows_covers_e_instead_of_claiming_a_score() {
+    let backend = spawn_empty_backend().await;
+    let (gateway, accepted) = spawn_gateway().await;
+    let em = emitter(Some(backend), &gateway);
+
+    match em.tick().await.expect("cover covers E") {
+        EmitOutcome::Unpaid {
+            epoch,
+            participants,
+            reason,
+        } => {
+            assert_eq!(epoch, chain::fake_defaults::SUBNET_EPOCH_INDEX);
+            assert_eq!(participants, 3);
+            assert!(reason.contains("no payable rows"), "{reason}");
+        }
+        other => panic!("a readable feed that pays nobody must not score: {other:?}"),
+    }
+    assert_eq!(accepted_count(&accepted), 3);
+    assert_burn_covers_e(&accepted);
+    assert_eq!(
+        em.scored_epoch(),
+        0,
+        "covering E without paying is not a score and must not mark the epoch scored"
+    );
+    // The whole point of the separate outcome: an operator can tell this apart
+    // from an outage.
+    let view = em.status().view();
+    assert_eq!(view.last_outcome, EmitterOutcomeKind::Unpaid);
+    assert!(
+        view.last_feed_read,
+        "the feed answered; this is not an outage"
+    );
+    assert_eq!(view.last_paid, 0);
+    assert_eq!(view.last_participants, 3);
+}
+
+/// Reports that are published but still `pending` are not adjudications. The
+/// feed is up and looks populated, and it is worth exactly nothing.
+#[tokio::test]
+async fn pending_only_rows_are_reachable_and_unpayable() {
+    let backend = spawn_all_pending_backend().await;
+    let (gateway, accepted) = spawn_gateway().await;
+    let em = emitter(Some(backend), &gateway);
+
+    assert!(matches!(
+        em.tick().await.expect("cover covers E"),
+        EmitOutcome::Unpaid { .. }
+    ));
+    assert_burn_covers_e(&accepted);
+    assert_eq!(em.scored_epoch(), 0);
+    let view = em.status().view();
+    assert!(view.last_feed_read);
+    assert_eq!(view.last_outcome, EmitterOutcomeKind::Unpaid);
+}
+
+/// A `valid` row nobody priced is adjudicated and justified, and still not
+/// creditable: the crown gate refuses it. The feed is readable, so this is an
+/// unpaid epoch rather than an outage.
+#[tokio::test]
+async fn an_unpriced_valid_row_leaves_the_epoch_unpaid_not_burned() {
+    let backend = spawn_unpriced_backend().await;
+    let (gateway, accepted) = spawn_gateway().await;
+    let em = emitter(Some(backend), &gateway);
+
+    assert!(matches!(
+        em.tick().await.expect("cover covers E"),
+        EmitOutcome::Unpaid { .. }
+    ));
+    assert_burn_covers_e(&accepted);
+    assert_eq!(em.scored_epoch(), 0);
+    assert!(em.status().view().last_feed_read);
+}
+
+/// The direction that protects a real payout: once the feed has crowned
+/// someone this epoch, a later readable-but-unpaid tick must not take it back
+/// by covering the epoch. This is the "backend stopped paying a hotkey it had
+/// already crowned" case, and it holds rather than burns.
+#[tokio::test]
+async fn a_readable_feed_that_stops_paying_holds_a_scored_epoch() {
+    let (backend, payable) = spawn_switchable_backend().await;
+    let (gateway, accepted) = spawn_gateway().await;
+    let em = emitter(Some(backend), &gateway);
+
+    assert!(matches!(
+        em.tick().await.expect("scored"),
+        EmitOutcome::Scored { paid: 1, .. }
+    ));
+    let after_scored = accepted_count(&accepted);
+
+    // The feed stays up, but it no longer publishes anything payable.
+    payable.store(false, Ordering::Relaxed);
+    match em.tick().await.expect("hold") {
+        EmitOutcome::Held { epoch, reason } => {
+            assert_eq!(epoch, chain::fake_defaults::SUBNET_EPOCH_INDEX);
+            assert!(reason.contains("no payable rows"), "{reason}");
+        }
+        other => panic!("a scored epoch must not be taken back: {other:?}"),
+    }
+    assert_eq!(
+        accepted_count(&accepted),
+        after_scored,
+        "holding must post nothing at all"
+    );
+    assert!(
+        leaf_for(&accepted, CHAMPION)["score_or_absence"]["score"]["value"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "the champion's score must still stand"
+    );
+    let view = em.status().view();
+    assert_eq!(view.last_outcome, EmitterOutcomeKind::Held);
+    assert!(view.last_feed_read);
+    assert_eq!(
+        view.scored_epoch,
+        chain::fake_defaults::SUBNET_EPOCH_INDEX,
+        "the hold must not forget the epoch was scored"
+    );
+}
+
+/// `/v1/status` has to distinguish "can this host pay" from "is it paying".
+/// Before any tick, `wired` is true and nothing has happened yet.
+#[tokio::test]
+async fn status_reports_a_wired_emitter_that_has_not_ticked_yet() {
+    let (gateway, _accepted) = spawn_gateway().await;
+    let em = emitter(None, &gateway);
+    let view = em.status().view();
+    assert!(view.wired);
+    assert_eq!(view.ticks, 0);
+    assert_eq!(view.last_outcome, EmitterOutcomeKind::Never);
+    assert!(!view.last_feed_read);
+    assert_eq!(view.last_paid, 0);
+}
+
+/// A scored tick publishes what was actually paid, so an operator can see the
+/// reward linkage land rather than infer it from a log line.
+#[tokio::test]
+async fn a_scored_tick_publishes_what_it_paid() {
+    let backend = spawn_backend().await;
+    let (gateway, _accepted) = spawn_gateway().await;
+    let em = emitter(Some(backend), &gateway);
+
+    assert!(matches!(
+        em.tick().await.expect("scored"),
+        EmitOutcome::Scored { paid: 1, .. }
+    ));
+    let view = em.status().view();
+    assert_eq!(view.last_outcome, EmitterOutcomeKind::Scored);
+    assert!(view.last_feed_read);
+    assert_eq!(view.ticks, 1);
+    assert_eq!(view.last_paid, 1);
+    assert_eq!(view.last_participants, 3);
+    assert_eq!(view.last_epoch, chain::fake_defaults::SUBNET_EPOCH_INDEX);
+    assert_eq!(view.scored_epoch, chain::fake_defaults::SUBNET_EPOCH_INDEX);
+    assert!(view.last_reason.is_empty());
+    assert!(view.last_error.is_empty());
+}
+
+/// A tick that could not emit at all must say so on the status surface: this
+/// is the case that leaves `E` uncovered and 409s the seal.
+#[tokio::test]
+async fn a_chain_failure_is_reported_as_an_error_not_a_payout() {
+    let (gateway, accepted) = spawn_gateway().await;
+    // Epoch 0 is the "subnet has not run an epoch yet" refusal.
+    let chain = LockedFake(Mutex::new(FakeChain::new(FakeChainConfig {
+        netuid: NETUID,
+        subnet_epoch_index: 0,
+        ..FakeChainConfig::default()
+    })));
+    let gateway_client = Arc::new(
+        GatewayClient::new(GatewayClientConfig {
+            base_url: gateway.clone(),
+            ..GatewayClientConfig::default()
+        })
+        .expect("gateway client"),
+    );
+    let em = BountyEmitter::new(chain, gateway_client, [7u8; 32], NETUID, None);
+
+    let err = em.tick().await.expect_err("epoch 0 cannot emit");
+    assert!(
+        matches!(err, bounty_challenge::EmitError::EpochZero),
+        "{err}"
+    );
+    assert_eq!(accepted_count(&accepted), 0, "nothing was posted");
+    let view = em.status().view();
+    assert_eq!(view.last_outcome, EmitterOutcomeKind::Error);
+    assert!(view.last_error.contains("epoch 0"), "{:?}", view.last_error);
+    assert_eq!(view.ticks, 1);
+}
+
+/// A tick that read the feed and then failed at the gateway is an error, but
+/// it is *not* a backend outage. Reporting `last_feed_read: false` there would
+/// send an operator to the wrong service — the live check that found this
+/// showed exactly that shape against a healthy stand-in feed.
+#[tokio::test]
+async fn a_gateway_failure_after_a_read_still_reports_the_feed_as_read() {
+    let backend = spawn_backend().await;
+    // Port 1 is closed: the feed is fine, the gateway is not.
+    let em = emitter(Some(backend), "http://127.0.0.1:1");
+
+    let err = em
+        .tick()
+        .await
+        .expect_err("a dead gateway cannot accept leaves");
+    assert!(
+        matches!(err, bounty_challenge::EmitError::Submit(_)),
+        "the failure must be the submit, not the read: {err}"
+    );
+    let view = em.status().view();
+    assert_eq!(view.last_outcome, EmitterOutcomeKind::Error);
+    assert!(
+        view.last_feed_read,
+        "the feed answered; blaming the backend would be wrong"
+    );
+    assert!(
+        view.last_error.contains("gateway"),
+        "the error must name the gateway: {:?}",
+        view.last_error
+    );
+    assert_eq!(view.last_paid, 0);
+}
+
+/// The mirror image: a tick that never reached the feed must not claim it did.
+#[tokio::test]
+async fn a_failed_read_is_not_reported_as_a_read_feed() {
+    let (gateway, _accepted) = spawn_gateway().await;
+    let em = emitter(Some("http://127.0.0.1:1".to_owned()), &gateway);
+
+    assert!(matches!(
+        em.tick().await.expect("cover E"),
+        EmitOutcome::Burned { .. }
+    ));
+    let view = em.status().view();
+    assert!(!view.last_feed_read);
+    assert_eq!(view.last_outcome, EmitterOutcomeKind::Burned);
 }

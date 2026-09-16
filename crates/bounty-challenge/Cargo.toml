@@ -26,8 +26,11 @@ trustroot = { path = "../trustroot" }
 
 [dev-dependencies]
 axum = "0.8"
+http-body-util = "0.1"
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
+toml = "0.8"
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true

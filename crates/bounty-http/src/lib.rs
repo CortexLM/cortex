@@ -39,7 +39,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use bounty_challenge_task::{
     backend_public_url, hotkey_hex, parse_hotkey, parse_signature, verify_pair_signature,
-    PairChallenge, ScoringBackend, CHALLENGE_ID, MAX_PENDING_REPORTS_PER_HOTKEY,
+    EmitterStatus, PairChallenge, ScoringBackend, CHALLENGE_ID, MAX_PENDING_REPORTS_PER_HOTKEY,
     MIN_REPORT_BODY_CHARS, MIN_REPORT_INTERVAL_SECS, MIN_REPRO_CHARS, MIN_UNIQUE_BODY_TOKENS,
     SCORE_MAX, SCORING_VERSION, TERMS_TEXT,
 };
@@ -61,12 +61,20 @@ pub struct AppState {
     pub scoring: ScoringBackend,
     /// Operator bearer hashes (sha256 hex). Empty → admin 503.
     pub admin_hashes: Arc<Vec<String>>,
+    /// Emitter read side. `None` (or an unwired status) means this host signs
+    /// no leaves at all, which is the only condition that also 409s the seal.
+    pub emitter: Option<Arc<EmitterStatus>>,
 }
 
 impl AppState {
     /// Whether an accepted report can ever become weight on this host.
     fn can_score(&self) -> bool {
         self.scoring != ScoringBackend::Unconfigured
+    }
+
+    /// Whether this host wired a leaf emitter.
+    fn emitter_wired(&self) -> bool {
+        self.emitter.as_ref().is_some_and(|e| e.wired())
     }
 }
 
@@ -92,6 +100,7 @@ async fn health() -> impl IntoResponse {
 
 async fn status(State(st): State<AppState>) -> impl IntoResponse {
     let champ = st.store.champion_hotkey().ok().flatten();
+    let emitter = st.emitter.as_ref().map(|e| e.view());
     Json(serde_json::json!({
         "challenge_id": CHALLENGE_ID,
         "scoring_version": SCORING_VERSION,
@@ -102,6 +111,14 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
         "scoring_backend": st.scoring,
         "can_score": st.can_score(),
         "backend_public_configured": backend_public_url().is_some(),
+        // Whether that scorer has actually turned into weight. `can_score` says
+        // this host *may* pay; `emitter_wired` plus `emitter` say whether it
+        // *is*. A readable feed that crowns nobody shows up here as
+        // `last_outcome: "unpaid"` with `last_feed_read: true` rather than as a
+        // successful score, because a silent empty payout is the failure this
+        // whole path exists to make visible.
+        "emitter_wired": st.emitter_wired(),
+        "emitter": emitter,
         // Published so miners can see what is being measured — and what is
         // not: `triage_noise` never enters the score they are paid on.
         "scoring": {
@@ -437,6 +454,7 @@ mod tests {
             session_secret: Arc::new(b"test-session-secret".to_vec()),
             scoring,
             admin_hashes: Arc::new(vec![hash_admin_token(token)]),
+            emitter: None,
         });
         (router, token.to_owned())
     }
@@ -728,6 +746,7 @@ mod tests {
             session_secret: Arc::new(b"test-session-secret".to_vec()),
             scoring: ScoringBackend::BackendPublic,
             admin_hashes: Arc::new(vec![]),
+            emitter: None,
         });
         let exp = unix_now().saturating_add(600);
         let (st, paired) = json_req(app.clone(), "POST", "/v1/pair", pair_payload(exp), None).await;

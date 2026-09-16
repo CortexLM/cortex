@@ -48,6 +48,16 @@ pub enum BackendError {
     /// `/reports` is stable under re-read and must still be refused.
     #[error("backend public leaderboard and reports do not agree")]
     Mismatched,
+    /// The feed answered, and every row it published maps to no payable
+    /// weight. Not an outage: the backend is reachable and simply has no
+    /// crowned miner, so this epoch pays nobody and the share burns.
+    ///
+    /// It is an error rather than a skip for the same reason a failed read is:
+    /// an emitter that treats "nothing payable" as a successful tick signs
+    /// `NotAttempted` for every participant, which claims the challenge chose
+    /// not to invoke them, and reports a healthy score while paying nobody.
+    #[error("backend public feed has no payable rows: {0}")]
+    NoPayableRows(String),
 }
 
 /// How many times one call re-reads the pair of routes looking for two

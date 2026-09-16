@@ -163,6 +163,24 @@ offline stand-in, so a 503 here is the honest answer rather than a temporary
 degradation you can submit through. Check `scoring_backend` and `can_score`
 before you go hunting.
 
+`can_score` is not the whole story, and it is worth knowing which half is
+missing when an epoch pays nobody. The feed being *reachable* is not the same
+as it *paying*: adjudication is what turns your report into weight, so a
+backend that is up with nothing adjudicated produces no weight either. `ctx
+bounty status` prints the emitter's last outcome alongside the scorer:
+
+| Outcome | Meaning |
+|---------|---------|
+| `scored` | The feed published payable rows and they became signed weight. |
+| `unpaid` | The feed answered, and nothing was payable. Wait on adjudication — the backend is up. |
+| `burned` | The feed could not be read. This one is a backend or network problem. |
+| `held` | The feed produced no weight, but this epoch already had a score, so the score stands. |
+| `error` | The tick could not emit at all (chain, signing, or gateway). |
+
+`unpaid` with the feed read is the one to expect right after you file: your
+report is real, and it becomes weight when an operator adjudicates it `valid`
+with a severity. Nothing about that is a fault on your side.
+
 ## Scoring (precision × severity, not volume)
 
 | Outcome | Result |

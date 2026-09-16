@@ -16,7 +16,19 @@
 //! - **It must still cover `E`.** A paid challenge with no leaves fails D24
 //!   completeness, so `POST /v1/admin/seal` answers 409 and the epoch seals
 //!   for *no* challenge. Silence here would make an unconfigured bounty host
-//!   take down relearn's weights too.
+//!   take down proof's weights too.
+//!
+//! Reading the feed and finding nothing payable is a *different* failure from
+//! not reading it, and it is treated as one. A feed that answers with zero
+//! adjudicated rows is reachable, but it still produces no weight, and the
+//! honest leaf for that epoch is the same `ChallengeInternal` cover. This case
+//! has to be separated out because treating it as a "score" emitted
+//! `NotAttempted` for every participant, which is a claim that the challenge
+//! *chose* not to invoke them. That claim is false, and it is the worse of the
+//! two: `NotAttempted` is not the burn cover, so it seals as a
+//! legitimate-looking unpaid epoch while `/v1/status` reports a successful
+//! score. An operator has to be able to tell "backend is down" from "backend
+//! is up and has crowned nobody".
 //!
 //! A failed tick also tries not to overwrite good leaves: once *this process*
 //! has scored an epoch, a later feed outage inside that same epoch holds
@@ -32,6 +44,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bounty_challenge_task::{EmitterOutcomeKind, EmitterStatus, EmitterTick};
 use bundle::{NoScoreReasonCode, ScoreOrAbsence};
 use chain::{gather_schedule_state, ChainClient};
 use challenge_common::{
@@ -45,6 +58,10 @@ use crate::{emission_from_public_snapshot, CHALLENGE_ID_BYTES};
 
 /// Default seconds between emitter ticks.
 pub const DEFAULT_EMIT_POLL_SECS: u64 = 120;
+
+/// Why a readable feed still paid nobody this tick.
+const NO_PAYABLE_ROWS_REASON: &str =
+    "backend public feed published no payable adjudication (nobody crowned)";
 
 /// Why a tick could not emit anything at all.
 #[derive(Debug, Error)]
@@ -77,6 +94,20 @@ pub enum EmitOutcome {
         /// Hotkeys that received a positive score.
         paid: usize,
     },
+    /// The feed answered but nothing payable became weight, so `E` was covered
+    /// with `NoScore(ChallengeInternal)`: nobody is paid, the share burns to
+    /// uid 0, and the bundle can still seal.
+    ///
+    /// Distinct from [`Self::Burned`] because the cause is not an outage: the
+    /// feed is up and still has no crowned hotkey.
+    Unpaid {
+        /// Subnet epoch the cover was signed for.
+        epoch: u64,
+        /// Size of `E`.
+        participants: usize,
+        /// Why nobody was paid.
+        reason: String,
+    },
     /// The feed could not be read, so `E` was covered with
     /// `NoScore(ChallengeInternal)`: nobody is paid, the share burns to uid 0,
     /// and the bundle can still seal.
@@ -88,13 +119,14 @@ pub enum EmitOutcome {
         /// Why the feed was unreadable.
         reason: String,
     },
-    /// The feed could not be read, but a scored set already stands for this
-    /// epoch. Overwriting it with a burn would take back a score the backend
-    /// really did publish.
+    /// The feed produced no weight, but a scored set already stands for this
+    /// epoch. Overwriting it with a cover would take back a score the backend
+    /// really did publish — whether the feed went down or stayed up and
+    /// stopped publishing the crowned hotkey.
     Held {
         /// Epoch whose scored leaves were left in place.
         epoch: u64,
-        /// Why the feed was unreadable.
+        /// Why this tick would have covered the epoch.
         reason: String,
     },
 }
@@ -107,6 +139,7 @@ pub struct BountyEmitter<C> {
     netuid: u16,
     backend_base: Option<String>,
     scored_epoch: AtomicU64,
+    status: Arc<EmitterStatus>,
 }
 
 impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
@@ -131,7 +164,21 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
                 .map(|s| s.trim().to_owned())
                 .filter(|s| !s.is_empty()),
             scored_epoch: AtomicU64::new(0),
+            status: Arc::new(EmitterStatus::new(true)),
         }
+    }
+
+    /// Share the read-side status published on `GET /v1/status`.
+    #[must_use]
+    pub fn with_status(mut self, status: Arc<EmitterStatus>) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// Read-side status handle (shared with the HTTP state).
+    #[must_use]
+    pub fn status(&self) -> Arc<EmitterStatus> {
+        Arc::clone(&self.status)
     }
 
     /// Highest epoch this process scored from the feed (0 = none yet).
@@ -144,9 +191,23 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
     /// # Errors
     /// See [`EmitError`] — those are the failures that leave `E` uncovered.
     /// A missing or broken feed is not among them; it is an
-    /// [`EmitOutcome::Burned`] (or [`EmitOutcome::Held`]) instead.
+    /// [`EmitOutcome::Burned`] (or [`EmitOutcome::Held`]) instead. A feed that
+    /// answers without payable rows is [`EmitOutcome::Unpaid`].
     pub async fn tick(&self) -> Result<EmitOutcome, EmitError> {
+        // Whether the feed answered is tracked here rather than inferred from
+        // the outcome: a tick that read the feed and then failed at the
+        // gateway is an error, and reporting `last_feed_read: false` for it
+        // would send an operator to the backend for a fault that is not there.
+        let mut feed_read = false;
+        let outcome = self.tick_inner(&mut feed_read).await;
+        self.record(&outcome, feed_read);
+        outcome
+    }
+
+    /// One tick, before its outcome is published to [`EmitterStatus`].
+    async fn tick_inner(&self, feed_read: &mut bool) -> Result<EmitOutcome, EmitError> {
         let feed = fetch_public_snapshot(self.backend_base.as_deref()).await;
+        *feed_read = feed.is_ok();
         let pinned = self.expected_set_at_last_epoch()?;
         let (epoch, pin_block, hotkeys) = pinned;
         let snapshot = match feed {
@@ -158,6 +219,19 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
             .values()
             .filter(|s| matches!(s, ScoreOrAbsence::Score { value } if *value > 0))
             .count();
+        // A readable feed that crowns nobody must not be signed as a scored
+        // epoch. `NotAttempted` claims the challenge chose not to invoke the
+        // miner; nobody was crowned, so the honest cover is
+        // `ChallengeInternal` and the share burns.
+        if paid == 0 {
+            return self
+                .cover_without_a_feed(
+                    epoch,
+                    &hotkeys,
+                    &BackendError::NoPayableRows(NO_PAYABLE_ROWS_REASON.to_owned()),
+                )
+                .await;
+        }
         self.submit(epoch, &hotkeys, &leaf_scores).await?;
         self.scored_epoch.fetch_max(epoch, Ordering::Relaxed);
         Ok(EmitOutcome::Scored {
@@ -166,6 +240,87 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
             participants: hotkeys.len(),
             paid,
         })
+    }
+
+    /// Publish one completed tick to `/v1/status`.
+    ///
+    /// `feed_read` is the tick's own record of whether the feed answered, not
+    /// something inferred from the outcome: an error after a successful read
+    /// is a gateway problem, and saying otherwise would point an operator at
+    /// the wrong service.
+    fn record(&self, outcome: &Result<EmitOutcome, EmitError>, feed_read: bool) {
+        let scored_epoch = self.scored_epoch();
+        let tick = match outcome {
+            Ok(EmitOutcome::Scored {
+                epoch,
+                pin_block,
+                participants,
+                paid,
+            }) => EmitterTick {
+                kind: EmitterOutcomeKind::Scored,
+                epoch: *epoch,
+                pin_block: *pin_block,
+                participants: *participants,
+                paid: *paid,
+                feed_read,
+                scored_epoch,
+                reason: None,
+                error: None,
+            },
+            Ok(EmitOutcome::Unpaid {
+                epoch,
+                participants,
+                reason,
+            }) => EmitterTick {
+                kind: EmitterOutcomeKind::Unpaid,
+                epoch: *epoch,
+                pin_block: 0,
+                participants: *participants,
+                paid: 0,
+                feed_read,
+                scored_epoch,
+                reason: Some(reason),
+                error: None,
+            },
+            Ok(EmitOutcome::Burned {
+                epoch,
+                participants,
+                reason,
+            }) => EmitterTick {
+                kind: EmitterOutcomeKind::Burned,
+                epoch: *epoch,
+                pin_block: 0,
+                participants: *participants,
+                paid: 0,
+                feed_read,
+                scored_epoch,
+                reason: Some(reason),
+                error: None,
+            },
+            Ok(EmitOutcome::Held { epoch, reason, .. }) => EmitterTick {
+                kind: EmitterOutcomeKind::Held,
+                epoch: *epoch,
+                pin_block: 0,
+                participants: 0,
+                paid: 0,
+                feed_read,
+                scored_epoch,
+                reason: Some(reason),
+                error: None,
+            },
+            Err(e) => EmitterTick {
+                kind: EmitterOutcomeKind::Error,
+                epoch: 0,
+                pin_block: 0,
+                participants: 0,
+                paid: 0,
+                feed_read,
+                scored_epoch,
+                reason: None,
+                error: Some(&e.to_string()),
+            },
+        };
+        self.status.record(tick);
     }
 
     /// Tick forever. A failed tick is logged and retried; it never falls back
@@ -190,6 +345,17 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
                     paid,
                     "bounty leaf set submitted from the backend public feed"
                 ),
+                Ok(EmitOutcome::Unpaid {
+                    epoch,
+                    participants,
+                    reason,
+                }) => tracing::warn!(
+                    epoch,
+                    participants,
+                    %reason,
+                    "bounty read the feed and found nothing payable: covered E with \
+                     ChallengeInternal, so the challenge share burns to uid 0"
+                ),
                 Ok(EmitOutcome::Burned {
                     epoch,
                     participants,
@@ -204,7 +370,7 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
                 Ok(EmitOutcome::Held { epoch, reason }) => tracing::warn!(
                     epoch,
                     %reason,
-                    "bounty could not read the feed; keeping this epoch's scored leaves"
+                    "bounty produced no weight this tick; keeping this epoch's scored leaves"
                 ),
                 Err(e) => tracing::warn!(
                     error = %e,
@@ -238,8 +404,14 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
         Ok((epoch, pin_block, expected.hotkeys()))
     }
 
-    /// Cover `E` when the feed is unreadable: burn, or hold an already-scored
-    /// epoch.
+    /// Cover `E` when no weight could be produced: burn, or hold an
+    /// already-scored epoch.
+    ///
+    /// `cause` is either an unreadable feed or [`BackendError::NoPayableRows`]
+    /// (the feed answered and crowned nobody). Both pay nobody, but only the
+    /// outage is reported as [`EmitOutcome::Burned`] — an operator reading
+    /// `/v1/status` has to be able to tell "the backend is down" from "the
+    /// backend is up and there is nothing to pay".
     async fn cover_without_a_feed(
         &self,
         epoch: u64,
@@ -262,9 +434,17 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
             })
             .collect();
         self.submit(epoch, hotkeys, &burn).await?;
+        let participants = hotkeys.len();
+        if matches!(cause, BackendError::NoPayableRows(_)) {
+            return Ok(EmitOutcome::Unpaid {
+                epoch,
+                participants,
+                reason,
+            });
+        }
         Ok(EmitOutcome::Burned {
             epoch,
-            participants: hotkeys.len(),
+            participants,
             reason,
         })
     }
