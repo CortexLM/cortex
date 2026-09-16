@@ -297,19 +297,33 @@ pub async fn retain(cfg: &HostConfig, shell: &dyn Shell, id: &str) -> Result<Pat
 }
 
 /// Kill the process (if any), tear the network down (if any), remove the jail.
+///
+/// `net_up` is whether **this** boot created the TAP. A boot that failed at
+/// `ip tuntap add` because the name was already taken did not create it, and
+/// tearing it down would delete a live VM's interface and nftables table —
+/// turning one VM's collision into another VM's outage. Only the plan whose
+/// `up` succeeded is released.
 async fn release(
     cfg: Arc<HostConfig>,
     shell: Arc<dyn Shell>,
     id: String,
     net: Option<NetPlan>,
+    net_up: bool,
     child: Option<tokio::process::Child>,
 ) {
     if let Some(mut child) = child {
         kill(&mut child).await;
     }
     if let Some(net) = net {
-        for e in net.down(shell.as_ref()).await {
-            tracing::debug!(jail = %id, "network teardown on release: {e}");
+        if net_up {
+            for e in net.down(shell.as_ref()).await {
+                tracing::debug!(jail = %id, "network teardown on release: {e}");
+            }
+        } else {
+            tracing::debug!(
+                jail = %id, tap = %net.tap,
+                "tap was never brought up by this boot; leaving it to its owner"
+            );
         }
     }
     if let Err(e) = destroy(&cfg, shell.as_ref(), &id).await {
@@ -332,6 +346,9 @@ pub struct JailGuard {
     id: String,
     root: PathBuf,
     net: Option<NetPlan>,
+    /// Whether this guard's boot created the TAP (`net.up` succeeded). A
+    /// guard that never got the interface must not delete it on release.
+    net_up: bool,
     child: Option<tokio::process::Child>,
     armed: bool,
 }
@@ -354,9 +371,16 @@ impl JailGuard {
             id: boot.id.clone(),
             root,
             net: boot.net.clone(),
+            net_up: false,
             child: None,
             armed: true,
         })
+    }
+
+    /// Record that this boot created the TAP. Only a guard that called this
+    /// may delete the interface on release.
+    pub fn net_brought_up(&mut self) {
+        self.net_up = true;
     }
 
     /// Jail id.
@@ -405,7 +429,8 @@ impl JailGuard {
     }
 
     /// Kill the process, tear the network down, remove the jail — now, and
-    /// to completion.
+    /// to completion. The network is released only when this guard's boot
+    /// created it ([`Self::net_brought_up`]).
     pub async fn destroy(mut self) {
         self.armed = false;
         release(
@@ -413,6 +438,7 @@ impl JailGuard {
             self.shell.clone(),
             std::mem::take(&mut self.id),
             self.net.take(),
+            self.net_up,
             self.child.take(),
         )
         .await;
@@ -432,6 +458,7 @@ impl Drop for JailGuard {
                 self.shell.clone(),
                 id,
                 self.net.take(),
+                self.net_up,
                 self.child.take(),
             ));
         } else {
@@ -662,16 +689,24 @@ mod tests {
     /// The guard is the no-leak contract: dropped armed (an aborted task, a
     /// request the client gave up on) it releases the jail on the runtime;
     /// handed over with `keep` it does nothing; `destroy` releases inline.
+    ///
+    /// The **network** half of that contract is ownership-scoped: a guard
+    /// releases the TAP only when its own boot brought it up
+    /// ([`JailGuard::net_brought_up`]). A boot that lost the name to another
+    /// VM must not delete the interface that VM is using — see
+    /// [`a_guard_that_did_not_create_the_tap_leaves_it_alone`].
     #[tokio::test]
     async fn a_dropped_guard_releases_the_jail_and_a_kept_one_does_not() {
         let c = Arc::new(cfg("guard"));
         let shell = Arc::new(RecordingShell::default());
         let plan = NetPlan::for_index(&c, 5);
-        let guard = JailGuard::prepare(c.clone(), shell.clone(), &boot(Some(plan)))
+        let mut guard = JailGuard::prepare(c.clone(), shell.clone(), &boot(Some(plan)))
             .await
             .expect("prepare");
         assert_eq!(guard.id(), "topic-a-0001");
         assert_eq!(guard.root(), c.jail_root("topic-a-0001"));
+        // This guard's boot brought the interface up, so it owns it.
+        guard.net_brought_up();
         let before = shell.calls().len();
         let aborted = tokio::spawn(async move {
             let _held = guard;
@@ -755,5 +790,43 @@ mod tests {
         kill(&mut child).await;
         let _ = std::fs::remove_dir_all(&c3.chroot_base);
         let _ = std::fs::remove_dir_all(&c2.chroot_base);
+    }
+
+    /// The ownership rule, on its own: a guard whose boot never brought the
+    /// TAP up — it lost the name to a live VM — releases its own jail and
+    /// leaves the interface and its nftables table to their owner.
+    ///
+    /// Deleting them would turn one VM's collision into another VM's outage:
+    /// the LIVE Gate 3 shape, where a leftover topic VM's `pfc0` was torn down
+    /// by the experiment boot that failed to take it.
+    #[tokio::test]
+    async fn a_guard_that_did_not_create_the_tap_leaves_it_alone() {
+        let c = Arc::new(cfg("not-mine"));
+        let shell = Arc::new(RecordingShell::default());
+        let plan = NetPlan::for_index(&c, 9);
+        let guard = JailGuard::prepare(c.clone(), shell.clone(), &boot(Some(plan)))
+            .await
+            .expect("prepare");
+        // No `net_brought_up`: this boot never got the interface.
+        let before = shell.calls().len();
+        guard.destroy().await;
+        let lines: Vec<String> = shell.calls()[before..]
+            .iter()
+            .map(|c| c.join(" "))
+            .collect();
+        assert!(
+            !lines.iter().any(|l| l.contains("nft delete table")),
+            "a tap this boot never created must not be deleted: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.starts_with("ip link del")),
+            "a tap this boot never created must not be deleted: {lines:?}"
+        );
+        assert_eq!(
+            lines,
+            vec![format!("rm -rf {}", c.jail_dir("topic-a-0001").display())],
+            "the jail is still this guard's to remove"
+        );
+        let _ = std::fs::remove_dir_all(&c.chroot_base);
     }
 }

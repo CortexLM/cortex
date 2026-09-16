@@ -122,21 +122,27 @@ impl SubmitGate {
     }
 }
 
-/// Whether a topic's install reached `applied`, as the publish route reads it.
+/// Whether a topic is ready to be published `open`, as the publish route
+/// reads it.
 ///
 /// A trait rather than a pool so the route can be exercised without a
 /// database, and so a host that resolved no install journal can say so instead
 /// of answering from a table it never read.
 #[async_trait::async_trait]
 pub trait InstallJournal: Send + Sync {
-    /// `Ok(true)` when the newest install row for `topic_id` is `applied`.
+    /// `Ok(true)` when the topic's install reached `applied` **and** its rule
+    /// vector in force is RLM-authored.
+    ///
+    /// Two facts, because an `open` document is submitable the moment it is
+    /// published: the install has to be in place, and the topic's behavior has
+    /// to have been authored by its own RLM rather than still being the
+    /// operator's signed `checklist` (`proof_rule_version.source`).
     ///
     /// # Errors
     ///
     /// The reason the journal could not be read. The caller refuses the
     /// publish: an unreadable journal is not an installed topic.
     async fn applied(&self, topic_id: &str) -> Result<bool, String>;
-
     /// The operator gate and the allocator pin for one topic, for the submit
     /// path.
     ///
@@ -167,11 +173,13 @@ pub trait InstallJournal: Send + Sync {
 /// the only difference is which sentence the operator reads.
 pub type InstallJournalSlot = Option<Arc<dyn InstallJournal>>;
 
-/// Whether the topic's install reached `applied`, as the publish gate reads it.
+/// Whether the topic is ready to be published `open`, as the publish gate
+/// reads it.
 ///
-/// **Fail-closed on every doubt**: no journal slot, an unreadable journal, and
-/// a topic with no install row all refuse, so an `open` document is never
-/// published before its migrations, routes, and rules are in place.
+/// **Fail-closed on every doubt**: no journal slot, an unreadable journal, a
+/// topic with no install row, and a topic whose rules are not RLM-authored all
+/// refuse, so an `open` document is never published before its migrations,
+/// routes, and rules are in place *and* its RLM has authored its behavior.
 pub(crate) async fn install_gate(st: &AppState, topic_id: &str) -> Result<(), String> {
     let Some(journal) = st.install_journal.as_deref() else {
         return Err(format!(
@@ -183,11 +191,12 @@ pub(crate) async fn install_gate(st: &AppState, topic_id: &str) -> Result<(), St
     match journal.applied(topic_id).await {
         Ok(true) => Ok(()),
         Ok(false) => Err(format!(
-            "topic {topic_id:?} has no `applied` install row: run `proof-admin topic install` to \
-             completion first (the journal is `proof_topic_install`; read it with `proof-admin \
-             topic install-log --topic {topic_id}`). A `pending` or `failed` row means the \
-             migrations, routes, or rules are not in place, and an `open` document is submitable \
-             the moment it is published."
+            "topic {topic_id:?} is not ready to be `open`: either its newest `proof_topic_install` \
+             row is not `applied`, or its rule vector is not RLM-authored \
+             (`proof_rule_version.source` is not `rlm`). Run `proof-admin topic install` \
+             --drive-rlm --owner-approved to completion, then read `proof-admin topic \
+             install-log --topic {topic_id}`. Rules still sourced from the signed document mean \
+             the topic's behavior was not authored by its RLM."
         )),
         Err(e) => Err(format!(
             "the install journal could not be read for topic {topic_id:?}: {e}. The publish is \

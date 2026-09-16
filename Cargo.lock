@@ -3764,6 +3764,7 @@ dependencies = [
  "proof-rlm",
  "proof-rlm-scorer",
  "proof-rlm-store",
+ "proof-score",
  "proof-store",
  "proof-submit",
  "proof-task",
@@ -3860,6 +3861,7 @@ dependencies = [
  "async-trait",
  "hex",
  "proof-fc-harvest",
+ "proof-fc-net",
  "proof-results",
  "proof-rlm",
  "proof-vm-agent",
@@ -3870,6 +3872,18 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "proof-fc-net"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "proof-fc-harvest",
+ "proof-vm-agent",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 
@@ -4101,6 +4115,7 @@ dependencies = [
  "proof-eval",
  "proof-rlm",
  "proof-rlm-store",
+ "proof-score",
  "proof-task",
  "proof-topic-bundle",
  "proof-topic-install",
@@ -4118,6 +4133,7 @@ dependencies = [
  "proof-eval",
  "proof-rlm",
  "proof-rlm-store",
+ "proof-score",
  "proof-task",
  "thiserror 2.0.19",
  "tokio",
@@ -4138,6 +4154,7 @@ dependencies = [
  "axum",
  "http-body-util",
  "proof-canon",
+ "proof-experiment",
  "proof-rlm",
  "proof-vm-proto",
  "serde",

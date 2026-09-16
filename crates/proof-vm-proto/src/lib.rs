@@ -94,6 +94,18 @@ pub struct AgentHealth {
     /// Most experiment VMs this host runs at once (0 = experiments disabled).
     #[serde(default)]
     pub max_experiment_vms: usize,
+    /// Host RAM the boots are admitted against (`MemTotal`), MiB. `0` when
+    /// the agent was built without a memory budget.
+    #[serde(default)]
+    pub total_mib: u64,
+    /// Headroom kept out of `total_mib` for the OS, the agent, and per-VM
+    /// process overhead, MiB.
+    #[serde(default)]
+    pub reserve_mib: u64,
+    /// Memory the live VMs hold, MiB — every VM counts, the topic's RLM VM
+    /// included, because it is resident for the topic's whole life.
+    #[serde(default)]
+    pub used_mib: u64,
 }
 
 /// `POST /v1/vms` body.
@@ -645,13 +657,22 @@ mod tests {
             vms: 1,
             experiment_vms: 1,
             max_experiment_vms: 2,
+            total_mib: 16_384,
+            reserve_mib: 0,
+            used_mib: 8_192,
         };
         let legacy: AgentHealth = serde_json::from_str(
             r#"{"api_version":1,"ready":true,"reason":"","hypervisor":"firecracker","vms":0}"#,
         )
         .expect("older agents omit the experiment counters");
         assert_eq!((legacy.experiment_vms, legacy.max_experiment_vms), (0, 0));
+        assert_eq!(
+            (legacy.total_mib, legacy.reserve_mib, legacy.used_mib),
+            (0, 0, 0),
+            "an older agent omits the memory budget too, and reports 0 rather than a guess"
+        );
         assert_eq!(health.experiment_vms, 1);
+        assert_eq!(health.total_mib, 16_384);
     }
 
     #[test]

@@ -87,11 +87,10 @@ impl ChecklistRow {
 
 /// One temporary compatibility alias for a topic slug.
 ///
-/// Owner default: the first topic's slug is `tb4` with `tbench` as a
-/// **temporary** alias, so existing miner links keep resolving while the
-/// canonical slug settles. A row carries the mapping and nothing else — no
-/// name, no pins, no status — so it cannot drift from the topic it names.
-/// Retiring the alias is deleting the row.
+/// An alias is a **lookup convenience**: a row carries the mapping and nothing
+/// else — no name, no pins, no status — so it cannot drift from the topic it
+/// names. Retiring the alias is deleting the row. There is no owner default:
+/// which aliases exist is what an operator's installs declared.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopicAliasRow {
     /// The alias slug that resolves to `topic_id`.
@@ -245,6 +244,43 @@ pub trait RlmStore: Send + Sync {
     async fn current_rules(&self, topic_id: &str) -> Result<Option<RuleSet>, StoreError>;
     /// One rule version.
     async fn rules_at(&self, topic_id: &str, version: u32) -> Result<Option<RuleSet>, StoreError>;
+
+    /// Whether the topic's **newest** rule version was authored by its RLM
+    /// ([`proof_rlm::RuleSource::Rlm`]).
+    ///
+    /// This is the provenance read, not a rules read: it answers "did the
+    /// topic's RLM author the vector in force", which is what separates a
+    /// topic that set itself up from one whose behavior is still the
+    /// operator's signed document. `Ok(false)` covers three states that are
+    /// deliberately not distinguished here — no rule row at all, a version
+    /// seeded from the signed document (`topic_document`), and an operator
+    /// edit (`operator`) — because every one of them means the RLM has not
+    /// authored the current vector, and the caller's answer is the same.
+    ///
+    /// **Fail-closed at the call site:** an `Err` is an unreadable store, not
+    /// a `false` that a caller could mistake for "not RLM-authored" (or, if
+    /// inverted, for "RLM-authored").
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError`] when the store cannot be read.
+    async fn rlm_authored_rules(&self, topic_id: &str) -> Result<bool, StoreError>;
+
+    /// The newest rule version's source, or `None` when the topic has no rule
+    /// row at all.
+    ///
+    /// The operator-facing half of [`Self::rlm_authored_rules`]: a caller that
+    /// has to explain *why* a topic is not RLM-authored needs the actual
+    /// provenance, not a boolean. Kept as its own read rather than a richer
+    /// return type so the fail-closed boolean stays trivial to audit.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError`] when the store cannot be read.
+    async fn current_rules_source(
+        &self,
+        topic_id: &str,
+    ) -> Result<Option<proof_rlm::RuleSource>, StoreError>;
 
     /// Persist a submission's checklist.
     ///

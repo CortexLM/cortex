@@ -991,10 +991,11 @@ echo '{"primary_value": 0.25}' > "$PROOF_OUTPUT_DIR/report.json"
 }
 
 /// Inspection ticks every rule through `inspect` (unanswered rules are red),
-/// and rule proposals come from `propose_rules` or, without one, from the
-/// signed checklist itself.
+/// and rule proposals come **only** from `propose_rules`: a runner without one
+/// fails closed rather than echoing the signed checklist back as if the RLM
+/// had authored it.
 #[tokio::test]
-async fn inspection_and_rule_proposals_go_through_the_adaptor_or_the_signed_topic() {
+async fn inspection_and_rule_proposals_go_through_the_adaptor_or_fail_closed() {
     let r = root("inspect");
     let a = agent(&r);
     hello(&a).await;
@@ -1058,22 +1059,24 @@ EOF
     assert!(by_id("rule_c").evidence.contains("no verdict"));
     assert!(inspected.artifact.is_empty(), "no locator, no tree");
 
+    // No `propose_rules` entrypoint: the guest refuses. Echoing the signed
+    // checklist would let the control plane record the operator's own vector
+    // as RLM-authored rules.
     let t = topic();
-    let out = a
-        .handle(HostToRlm::Run {
+    let err = failed(
+        a.handle(HostToRlm::Run {
             job: Box::new(VmJob::ProposeRules {
                 topic: Box::new(t.clone()),
                 current_version: None,
             }),
         })
-        .await;
-    let RlmToHost::Done {
-        output: VmJobOutput::Rules(proposed),
-    } = out
-    else {
-        panic!("expected rules, got {out:?}");
-    };
-    assert_eq!(proposed, t.checklist, "no adaptor: the signed vector");
+        .await,
+    );
+    assert!(err.contains("no propose_rules entrypoint"), "{err}");
+    assert!(
+        err.contains("never a substitute for RLM authorship"),
+        "the refusal says why echoing is wrong: {err}"
+    );
     let mut selecting = t.clone();
     selecting
         .constraints

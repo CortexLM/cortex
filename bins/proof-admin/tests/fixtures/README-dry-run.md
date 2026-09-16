@@ -5,8 +5,8 @@ Operator dry-run artifact for the dynamic-topics install path (P0 + P1a).
 
 | File | What it is |
 |------|------------|
-| `tb4.install-bundle.json` | A **Topic Install Bundle**: slug `tb4`, alias `tbench`, install target `staging`, carrying a signed `TopicDocument`, an `rlm` install section (`rules`, `migrations`, `apis`, `submission_format`, `scoring`), and the Owner-default alias. |
-| `tb4.pin.toml` | The `ProofPin` that document is checked against. |
+| `topic.install-bundle.json` | A **Topic Install Bundle**: slug `fixture-topic-v0`, alias `fixture-alias`, install target `staging`, carrying a signed `TopicDocument`, an `rlm` install section (`rules`, `migrations`, `apis`, `submission_format`, `scoring`), and the alias the bundle itself declares. |
+| `topic.pin.toml` | The `ProofPin` that document is checked against. |
 
 ## Exact commands
 
@@ -14,21 +14,21 @@ Run from the repository root:
 
 ```bash
 cargo run -p proof-admin-bin -- topic validate \
-  --bundle bins/proof-admin/tests/fixtures/tb4.install-bundle.json \
-  --pin bins/proof-admin/tests/fixtures/tb4.pin.toml
+  --bundle bins/proof-admin/tests/fixtures/topic.install-bundle.json \
+  --pin bins/proof-admin/tests/fixtures/topic.pin.toml
 
 cargo run -p proof-admin-bin -- topic install \
-  --bundle bins/proof-admin/tests/fixtures/tb4.install-bundle.json \
+  --bundle bins/proof-admin/tests/fixtures/topic.install-bundle.json \
   --env staging --dry-run \
-  --pin bins/proof-admin/tests/fixtures/tb4.pin.toml
+  --pin bins/proof-admin/tests/fixtures/topic.pin.toml
 ```
 
 `--bin proof-admin` works too and is package-name-agnostic:
 
 ```bash
 cargo run --bin proof-admin -- topic validate \
-  --bundle bins/proof-admin/tests/fixtures/tb4.install-bundle.json \
-  --pin bins/proof-admin/tests/fixtures/tb4.pin.toml
+  --bundle bins/proof-admin/tests/fixtures/topic.install-bundle.json \
+  --pin bins/proof-admin/tests/fixtures/topic.pin.toml
 ```
 
 Both write nothing and need no database.
@@ -39,16 +39,16 @@ Drop `--dry-run` and supply the master and the operator bearer:
 
 ```bash
 cargo run -p proof-admin-bin -- topic install \
-  --bundle bins/proof-admin/tests/fixtures/tb4.install-bundle.json \
+  --bundle bins/proof-admin/tests/fixtures/topic.install-bundle.json \
   --env staging \
-  --pin bins/proof-admin/tests/fixtures/tb4.pin.toml \
+  --pin bins/proof-admin/tests/fixtures/topic.pin.toml \
   --admin-url http://127.0.0.1:8100 \
   --admin-token-file /run/proof/admin_token
 ```
 
 This fixture's document is signed by the **test** key, so a real install
 against a live master would be refused at the publish step. Use it to exercise
-the gates and the dry run; the real `tb4` document is signed by the `proof`
+the gates and the dry run; the real document is signed by the `proof`
 row key and is a follow-up (see below).
 
 Add `--drive-rlm --owner-approved` to provision the topic VM and run the paid
@@ -59,7 +59,7 @@ baseline job.
 Read the journal back with:
 
 ```bash
-BASE_DATABASE_URL=… proof-admin topic install-log --topic tb4
+BASE_DATABASE_URL=… proof-admin topic install-log --topic <slug>
 ```
 
 ## The rest of the path to a scorable topic
@@ -76,11 +76,11 @@ proof-admin topic install --bundle <bundle> --env staging --drive-rlm --owner-ap
   --admin-url <master-or-gateway> --admin-token-file <file>
 
 # 2. Read what was measured and the commitment the open document must seal.
-proof-admin topic baseline tb4
+proof-admin topic baseline <slug>
 
 # 3. Put that `metrics_commitment` into the document, set `status: open`, sign
 #    it with the `proof` key (`xtask proof-topic`), then seal and publish.
-proof-admin topic seal tb4 --document <open.json> --publish \
+proof-admin topic seal <slug> --document <open.json> --publish \
   --admin-url <master-or-gateway> --admin-token-file <file>
 ```
 
@@ -108,25 +108,25 @@ must be checked against the fixture pin. Omitting `--pin` falls back to
 
 ```
 $ cargo run -p proof-admin -- topic validate \
-    --bundle bins/proof-admin/tests/fixtures/tb4.install-bundle.json
+    --bundle bins/proof-admin/tests/fixtures/topic.install-bundle.json
 proof-admin: topic signature: topic signature does not verify under the proof trust-root key
 ```
 
 That refusal is the signature check working correctly — a test-signed document
-is not this subnet's topic. The real `tb4` document is signed by the `proof`
+is not this subnet's topic. The real document is signed by the `proof`
 row key and is a follow-up (see below).
 
 ## What this fixture is not
 
 - **Not a production topic.** The document is signed with a test mini-secret;
-  `tb4.pin.toml` carries the matching `topic_pubkey`.
+  `topic.pin.toml` carries the matching `topic_pubkey`.
 - **Not a real RLM install.** The `rlm` section is a small illustrative sample
   (`rules`, `migrations`, `apis`, `submission_format`, `scoring`). A real
   bundle carries the topic's own — which the RLM consumes and this repository
-  never interprets. The sample's migration (`CREATE TABLE tb4_scratch`) is
+  never interprets. The sample's migration (`CREATE TABLE fixture_topic_v0_scratch`) is
   legal under the deny-list precisely because it stays inside the topic's own
   namespace.
-- **Not the metal artifact.** The metal signed Operator `tb4.json` is a
+- **Not the metal artifact.** The metal signed Operator document is a
   follow-up; this fixture exists so the staging A→Z walkthrough can exercise
   `validate`, `--dry-run`, and the install gates today.
 

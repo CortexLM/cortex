@@ -1,8 +1,9 @@
 -- Proof topic aliases: the temporary compatibility slug a topic answers to.
 --
--- Owner default: the first topic's slug is `tb4`, with `tbench` as a
--- **temporary** alias, so existing miner links keep resolving while the
--- canonical slug moves. This table is that mapping and nothing else.
+-- An alias is a lookup convenience, not topic data: the topic's identity is
+-- its signed document's `id`, and this table is that mapping and nothing else.
+-- There is no owner default — which aliases exist is what an operator's
+-- installs declared.
 --
 -- Why this is not a second topic table: a row here is `alias -> topic_id`.
 -- No display name, no pins, no status, no document — every one of those lives

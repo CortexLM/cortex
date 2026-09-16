@@ -62,7 +62,7 @@ pub const WRITE_RESULTS_EMIT: &str = "write_results_next_to_report";
 pub const MAX_RESULTS_BYTES: u64 = 256 * 1024;
 
 /// Harbor family cap (bytes): [`CONTRACT_HARBOR_TRIALS`] /
-/// [`CONTRACT_TBENCH_HARBOR`] only, after `contract` is identified.
+/// [`CONTRACT_HARBOR_TRIALS_LEGACY`] only, after `contract` is identified.
 ///
 /// [`load_file`] may *read* up to this ceiling so a Harbor document between
 /// [`MAX_RESULTS_BYTES`] and this size can parse; generic-custom-v1 over
@@ -82,12 +82,16 @@ pub const CONTRACT_GENERIC: &str = "generic-custom-v1";
 /// pins.
 pub const CONTRACT_HARBOR_TRIALS: &str = "harbor-trials-v1";
 
-/// Legacy alias of [`CONTRACT_HARBOR_TRIALS`], kept because it is a **wire
-/// value**: a topic signed before the generic id existed pins this in its
-/// `constraints.params.results_contract`, and a signed document cannot be
+/// Legacy wire value of [`CONTRACT_HARBOR_TRIALS`], kept because it is a
+/// **wire value**: a topic signed before the generic id existed pins this in
+/// its `constraints.params.results_contract`, and a signed document cannot be
 /// edited. New topics pin [`CONTRACT_HARBOR_TRIALS`]; the guest harness
 /// accepts both, and nothing branches on a topic.
-pub const CONTRACT_TBENCH_HARBOR: &str = "tbench-harbor-v1";
+///
+/// The constant name is deliberately topic-neutral: the value is a
+/// compatibility spelling, not a topic the code knows. Do not rename the
+/// string — it is signed topic data.
+pub const CONTRACT_HARBOR_TRIALS_LEGACY: &str = "tbench-harbor-v1";
 
 /// Harbor trial that produced a verifier reward.
 pub const HARBOR_OUTCOME_MEASURED: &str = "measured";
@@ -188,13 +192,13 @@ pub enum Contract {
     HarborTrials,
 }
 
-/// Known contract id → family. [`CONTRACT_TBENCH_HARBOR`] is the legacy
+/// Known contract id → family. [`CONTRACT_HARBOR_TRIALS_LEGACY`] is the legacy
 /// spelling of [`CONTRACT_HARBOR_TRIALS`].
 #[must_use]
 pub fn known_contract(id: &str) -> Option<Contract> {
     match id.trim() {
         CONTRACT_GENERIC => Some(Contract::Generic),
-        CONTRACT_HARBOR_TRIALS | CONTRACT_TBENCH_HARBOR => Some(Contract::HarborTrials),
+        CONTRACT_HARBOR_TRIALS | CONTRACT_HARBOR_TRIALS_LEGACY => Some(Contract::HarborTrials),
         _ => None,
     }
 }
@@ -742,7 +746,8 @@ mod tests {
         let b = bind();
         let g = generic_document(&b, &serde_json::json!({"note": "ok", "n": 2}));
         validate(&g, &b, None).expect("generic");
-        validate(&harbor_ok(&b), &b, Some(CONTRACT_TBENCH_HARBOR)).expect("harbor alias pin");
+        validate(&harbor_ok(&b), &b, Some(CONTRACT_HARBOR_TRIALS_LEGACY))
+            .expect("harbor alias pin");
         validate(&harbor_ok(&b), &b, Some(CONTRACT_HARBOR_TRIALS)).expect("harbor pin");
     }
 
@@ -793,7 +798,7 @@ mod tests {
             MAX_HARBOR_RESULTS_BYTES
         );
         assert_eq!(
-            results_size_cap(CONTRACT_TBENCH_HARBOR),
+            results_size_cap(CONTRACT_HARBOR_TRIALS_LEGACY),
             MAX_HARBOR_RESULTS_BYTES
         );
         assert_eq!(results_size_cap("not-a-contract"), MAX_RESULTS_BYTES);
@@ -861,7 +866,7 @@ mod tests {
         let path = write_contract_sized(&dir, CONTRACT_HARBOR_TRIALS, mid);
         load_file(&path).expect("harbor mid-size parses");
         let alias = scratch_dir("harbor-alias");
-        let path = write_contract_sized(&alias, CONTRACT_TBENCH_HARBOR, mid);
+        let path = write_contract_sized(&alias, CONTRACT_HARBOR_TRIALS_LEGACY, mid);
         load_file(&path).expect("tbench-harbor alias mid-size parses");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&alias);
@@ -1082,7 +1087,7 @@ mod tests {
             primary_value: 0.4,
             claim_holds: true,
         };
-        validate(&value, &b, Some(CONTRACT_TBENCH_HARBOR)).expect("fixture");
+        validate(&value, &b, Some(CONTRACT_HARBOR_TRIALS_LEGACY)).expect("fixture");
         assert_eq!(value["n_scored"], 10);
         assert_eq!(value["trials"].as_array().expect("trials").len(), 10);
         let trials = value["trials"].as_array().expect("trials");

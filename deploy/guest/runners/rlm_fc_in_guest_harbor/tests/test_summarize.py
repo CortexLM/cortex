@@ -1368,7 +1368,7 @@ class TrialLogHarvestTests(unittest.TestCase):
                 trials, "", 0, "harbor", "", "", summarize.POLICY_FAIL
             )
             inflated = summarize.build_results(
-                report, trials, "", summarize.CONTRACT_TBENCH
+                report, trials, "", summarize.CONTRACT_HARBOR_TRIALS_LEGACY
             )
             self.assertGreater(
                 summarize.results_payload_bytes(inflated, []),

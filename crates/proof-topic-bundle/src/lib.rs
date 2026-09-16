@@ -24,6 +24,18 @@
 //! [`RlmSection`]: its anti-cheat **rules**, the **SQL migrations** it needs,
 //! the **APIs** it exposes, its **submission format**, and its **scoring**.
 //!
+//! **Authorship is narrower than ownership.** The section is *topic-owned
+//! data*: Rust never interprets it, and it travels in the bundle. What the
+//! RLM **authors at runtime** today is the **rule vector** — it is asked to
+//! `propose_rules` inside its topic VM, and its answer becomes the version in
+//! force (`proof_rule_version.source = 'rlm'`, the gate an `open` document
+//! must pass). The `migrations` and `apis` parts are written by whoever
+//! authors the bundle and applied verbatim by the install; the RLM has no job
+//! that emits them and no wire message that could carry one
+//! (`the_rlm_authors_rules_and_the_bundle_carries_migrations_and_apis` pins
+//! that boundary, so a change making the RLM write schema or routes fails a
+//! test rather than silently outdating this paragraph).
+//!
 //! Rust never interprets any of it. This crate checks the section's *shape*
 //! (an object, bounded) and carries it byte-for-byte; it does not know what a
 //! rule, a migration, an API, or a scoring function *means*. That is the
@@ -32,9 +44,11 @@
 //! code. A topic's behavior travels in its signed document and its RLM
 //! section, never in this binary.
 //!
-//! Consequence for tests and fixtures: the seed slug `tb4` and its temporary
-//! alias `tbench` are **strings** that appear in test fixtures and operator
-//! examples. They are never a condition in logic.
+//! Consequence for tests and fixtures: topic slugs are **strings** that appear
+//! in test fixtures and operator examples. They are never a condition in
+//! logic, and no slug is an "owner default" — the topic registry is the
+//! database, and which topics exist is a fact about the operator's published
+//! documents, not about this build.
 //!
 //! Three rules carry the fail-closed posture:
 //!
@@ -529,11 +543,11 @@ pub struct TopicInstallBundle {
     /// Temporary compatibility slugs this topic answers to, if the bundle
     /// declares any.
     ///
-    /// Owner default: the first topic's slug is `tb4` with `tbench` as a
-    /// **temporary** alias so existing miner links keep resolving. An alias
-    /// is not topic data — the topic's identity is its signed document's
-    /// `id` — so this is a bundle field that becomes a `proof_topic_alias`
-    /// row, and retiring it is deleting the row.
+    /// An alias is a **lookup key**, not topic data: the topic's identity is
+    /// its signed document's `id`, so an alias is a bundle field that becomes
+    /// a `proof_topic_alias` row, and retiring it is deleting the row. There
+    /// is no owner default — a bundle declares the aliases its topic needs,
+    /// and a bundle that declares none installs none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
     /// What the topic's RLM installs. Opaque to Rust: see [`RlmSection`].
@@ -1266,6 +1280,702 @@ mod tests {
         for key in RLM_KEYS {
             assert!(logic.contains(key), "the section shape must name {key}");
         }
+    }
+
+    /// No topic id is compiled into the **product** branches that decide what
+    /// a topic may do: the challenge service, the gateway, the topic-VM
+    /// orchestrator, or the guest.
+    ///
+    /// This is the repo-wide half of [`no_topic_literal_appears_in_this_crates_logic`].
+    /// Each of those crates has its own guard for its own logic; this one
+    /// exists because the boundary is **cross-crate** — a topic id that
+    /// appeared in, say, the gateway's routing or the guest's job dispatch
+    /// would be a data-driven path turning back into a hardcoded one, and no
+    /// single crate's guard would see it.
+    ///
+    /// The check reads the crates' own source at compile time, so it cannot
+    /// drift from the tree. Comments are stripped: prose may explain the rule,
+    /// a literal in a `let` / `match` / `if` may not.
+    #[test]
+    fn no_topic_id_is_compiled_into_the_product_branches() {
+        for (label, source) in PRODUCT_MODULES {
+            let logic = production_logic(source);
+            for forbidden in FORBIDDEN_LITERALS {
+                assert!(
+                    !logic.contains(forbidden),
+                    "{label} names {forbidden:?}: which topics exist and what they score is \
+                     topic data (a signed document + the install journal), never a compiled \
+                     branch"
+                );
+            }
+        }
+    }
+
+    /// The **logic** of a product module: its production source with
+    /// `#[cfg(test)] mod …` blocks and full-line comments removed.
+    ///
+    /// Comments go first because prose may *explain* the rule — a comment
+    /// recalling which metal run showed a syncfs gap is documentation, not a
+    /// branch. What survives is code: a literal in a `let` / `match` / `if`
+    /// is caught.
+    fn production_logic(source: &str) -> String {
+        production_source(source)
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_lowercase()
+    }
+
+    /// Blank every byte that is **not** Rust code structure: comments, string
+    /// bodies (including raw and byte strings), and character literals.
+    ///
+    /// This is what makes brace counting honest. A `{` inside a `//` comment,
+    /// a `"…"` literal, or an `r#"…"#` block is *text*, not a delimiter; left
+    /// in place it would drive the depth counter and leave a `#[cfg(test)]`
+    /// module looking unclosed, so every line after it would be dropped from
+    /// the scan. That is precisely how a prohibited literal could hide.
+    ///
+    /// Masked bytes become spaces so byte offsets and line breaks survive
+    /// (a `//` comment ends at its newline, which is kept).
+    ///
+    /// Deliberately not a full Rust parser: it is a small lexer for the four
+    /// constructs that can contain a brace. It errs toward masking, which
+    /// makes the scan *more* inclusive of real code, never less.
+    ///
+    /// One function, not four: the cases are mutually exclusive branches of a
+    /// single left-to-right scan, and splitting them would mean re-deriving
+    /// "am I at a comment / a raw string / a string / a char?" in each helper.
+    #[allow(clippy::too_many_lines)]
+    fn mask_non_code(source: &str) -> String {
+        let bytes = source.as_bytes();
+        let mut out = vec![b' '; bytes.len()];
+        let mut i = 0usize;
+        while i < bytes.len() {
+            // Line comment: mask to end of line (newline kept).
+            if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            // Block comment (nesting is legal in Rust).
+            if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                let mut depth = 0usize;
+                while i < bytes.len() {
+                    if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                        depth += 1;
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                        continue;
+                    }
+                    if bytes[i] == b'\n' {
+                        out[i] = b'\n';
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            // Raw string: r"…", r#"…"#, br#"…"#, rb#"…"#.
+            let raw_at = {
+                let rest = &bytes[i..];
+                let (skip, hashes) = if rest.starts_with(b"br") || rest.starts_with(b"rb") {
+                    (2usize, 0usize)
+                } else if rest.starts_with(b"r") {
+                    (1usize, 0usize)
+                } else {
+                    (0usize, 0usize)
+                };
+                if skip == 0 {
+                    None
+                } else {
+                    let mut h = hashes;
+                    while i + skip + h < bytes.len() && bytes[i + skip + h] == b'#' {
+                        h += 1;
+                    }
+                    if i + skip + h < bytes.len() && bytes[i + skip + h] == b'"' {
+                        Some((skip + h + 1, h))
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some((body_start, hashes)) = raw_at {
+                i += body_start;
+                // Closing delimiter: `"` followed by `hashes` `#`.
+                loop {
+                    if i >= bytes.len() {
+                        break;
+                    }
+                    if bytes[i] == b'"' {
+                        let mut k = i + 1;
+                        let mut seen = 0usize;
+                        while seen < hashes && k < bytes.len() && bytes[k] == b'#' {
+                            seen += 1;
+                            k += 1;
+                        }
+                        if seen == hashes {
+                            i = k;
+                            break;
+                        }
+                    }
+                    if bytes[i] == b'\n' {
+                        out[i] = b'\n';
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            // Normal string or byte string.
+            let quote_at = if bytes[i] == b'"' {
+                Some(i)
+            } else if bytes[i] == b'b' && i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                Some(i + 1)
+            } else {
+                None
+            };
+            if let Some(q) = quote_at {
+                i = q + 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    }
+                    if bytes[i] == b'\n' {
+                        out[i] = b'\n';
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            // Character literal or a lifetime. A lifetime (`'a`) is code and
+            // must be kept; a char literal's contents are masked. The
+            // discriminator: a char literal closes within a few bytes, a
+            // lifetime is followed by an identifier.
+            if bytes[i] == b'\'' {
+                let closed = {
+                    let mut j = i + 1;
+                    if j < bytes.len() && bytes[j] == b'\\' {
+                        j += 2;
+                        while j < bytes.len() && bytes[j] != b'\'' {
+                            j += 1;
+                        }
+                        j + 1
+                    } else if j + 1 < bytes.len() && bytes[j + 1] == b'\'' {
+                        j + 2
+                    } else {
+                        0
+                    }
+                };
+                if closed > 0 && closed <= bytes.len() {
+                    i = closed;
+                    continue;
+                }
+            }
+            out[i] = bytes[i];
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Strip `#[cfg(test)] mod …` blocks from `source`, structurally.
+    ///
+    /// Brace depth over **code only** ([`mask_non_code`]), not "everything
+    /// after the first marker". A file may carry a `#[cfg(test)]` attribute on
+    /// a **method** (the guest's `Tail::bytes`) with production code after it;
+    /// splitting on the first marker would declare that production code
+    /// test-only and stop guarding it. And counting raw bytes would let a
+    /// brace in a comment or a string unbalance the depth, dropping every
+    /// later line from the scan.
+    ///
+    /// Only `mod` items are removed. A `#[cfg(test)]` on anything else is
+    /// left in place deliberately: the scan then sees test-only code and
+    /// **fails loudly** on a fixture literal, which an operator fixes by
+    /// moving the fixture into a `mod tests`. Over-scanning is a false alarm;
+    /// under-scanning is the hole this guards against.
+    fn production_source(source: &str) -> String {
+        let masked = mask_non_code(source);
+        let masked_lines: Vec<&str> = masked.lines().collect();
+        let mut kept: Vec<&str> = Vec::new();
+        let mut depth_test: Option<usize> = None;
+        let mut brace_depth = 0usize;
+        let mut pending_cfg_test = false;
+        for (idx, line) in source.lines().enumerate() {
+            // Braces are counted from the masked line, so a brace in a
+            // comment or a literal cannot move the depth. The attribute and
+            // `mod` markers are read from the masked line too, for the same
+            // reason (a `mod ` inside a string is not a module).
+            let code = masked_lines.get(idx).copied().unwrap_or("");
+            let trimmed = code.trim();
+            if pending_cfg_test {
+                if trimmed.starts_with("mod ") && code.contains('{') {
+                    depth_test = Some(brace_depth);
+                    pending_cfg_test = false;
+                } else if trimmed.ends_with(';') {
+                    // `#[cfg(test)] mod x;` — the module lives in its own
+                    // file, which the caller's list already excludes.
+                    pending_cfg_test = false;
+                    continue;
+                } else if !trimmed.is_empty() {
+                    // The attribute is on a non-`mod` item (a method, say):
+                    // keep it, so the scan still covers what follows.
+                    pending_cfg_test = false;
+                }
+            }
+            if trimmed.starts_with("#[cfg(test)]") {
+                pending_cfg_test = true;
+                if trimmed.contains("mod ") && code.contains('{') {
+                    depth_test = Some(brace_depth);
+                    pending_cfg_test = false;
+                }
+                continue;
+            }
+            if depth_test.is_none() {
+                kept.push(line);
+            }
+            brace_depth = brace_depth.saturating_add(code.matches('{').count());
+            for _ in 0..code.matches('}').count() {
+                brace_depth = brace_depth.saturating_sub(1);
+                if depth_test == Some(brace_depth) {
+                    depth_test = None;
+                }
+            }
+            if let Some(start) = depth_test {
+                if brace_depth < start {
+                    depth_test = None;
+                }
+            }
+        }
+        kept.join("\n")
+    }
+
+    /// Top-level variant names of the enum whose declaration starts at
+    /// `header` (e.g. `pub enum VmJob`), in source order.
+    ///
+    /// Textual and deliberately simple: it reads the enum body by brace depth
+    /// and takes each line at depth 1 whose first token is an identifier
+    /// followed by `,` / `{` / `(` — both variant shapes. Attributes and doc
+    /// comments are skipped. A missing enum yields an empty list, never a
+    /// guess (the caller asserts the list it expects, so an extractor that
+    /// silently stopped working would fail rather than pass).
+    fn enum_variants(source: &str, header: &str) -> Vec<String> {
+        let Some(start) = source.find(header) else {
+            return Vec::new();
+        };
+        let body = &source[start..];
+        let Some(open) = body.find('{') else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut depth = 0usize;
+        for line in body[open..].lines() {
+            let trimmed = line.trim();
+            if depth == 1 && !trimmed.starts_with("//") && !trimmed.starts_with("#[") {
+                if let Some(name) = trimmed.split(['{', '(', ',', ' ']).next() {
+                    if !name.is_empty()
+                        && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                        && !matches!(name, "Where" | "Self")
+                    {
+                        out.push(name.to_owned());
+                    }
+                }
+            }
+            depth = depth.saturating_add(line.matches('{').count());
+            for _ in 0..line.matches('}').count() {
+                depth = depth.saturating_sub(1);
+            }
+            if depth == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    /// What the RLM actually authors, and what it does not — the boundary the
+    /// docs must not overclaim.
+    ///
+    /// The RLM is asked to `ProposeRules` and answers `Rules`; that is the
+    /// **only** part of a topic's behavior it writes today. A topic's
+    /// `migrations` and `apis` travel in the operator's bundle `rlm` section
+    /// ([`SectionPlan`]) and are applied by the install — the RLM has no job
+    /// that emits them and no wire message that could carry one.
+    ///
+    /// This is pinned because the prose around this crate says "the bundle's
+    /// `rlm` section (rules / migrations / apis / …) is handed to the RLM",
+    /// which reads as authorship of all five parts. It is not: the section is
+    /// *topic-owned data* that Rust never interprets, and the **rules** are
+    /// additionally *RLM-authored* at runtime (`RuleSource::Rlm`, the gate
+    /// `open` must pass). Migrations and APIs are authored by whoever writes
+    /// the bundle, and are applied verbatim.
+    ///
+    /// The check is structural, not textual: it reads the job/output enums
+    /// that define the boundary and asserts no variant carries a migration or
+    /// an API. If a later change lets the RLM emit them, this test fails and
+    /// the docs get to claim it.
+    #[test]
+    fn the_rlm_authors_rules_and_the_bundle_carries_migrations_and_apis() {
+        const JOBS: &str = include_str!("../../proof-rlm/src/vm.rs");
+        const SECTION: &str = include_str!("../../proof-topic-install/src/section.rs");
+
+        // This test reads the **whole** file up to the first `#[cfg(test)]`,
+        // not [`production_logic`]: that helper tracks brace depth to drop
+        // test modules, and the job enums live inside braces, so it would
+        // drop exactly what this guard is about.
+        let head = |src: &str| -> String {
+            src.split("#[cfg(test)]")
+                .next()
+                .unwrap_or("")
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // The job surface the control plane can ask an RLM to run.
+        let jobs = head(JOBS);
+        for job in ["ProposeRules", "Baseline", "Inspect", "Evaluate", "Archive"] {
+            assert!(
+                jobs.contains(job),
+                "the RLM job surface still carries {job}; this guard is reading the wrong file"
+            );
+        }
+        // …and the only thing it can hand back about behavior is rules.
+        assert!(
+            jobs.contains("Rules(Vec<ChecklistRule>)"),
+            "the RLM still returns a rule vector"
+        );
+
+        // **Allow-list, not deny-list.** A denylist of names this test
+        // happens to think of cannot hold an authorship boundary: a variant
+        // called `ApplySchema(Vec<SchemaSpec>)` or `DeployRoutes { routes: … }`
+        // authors schema and routes without naming either, and Greptile
+        // demonstrated exactly that against the first version of this guard.
+        // So the check enumerates the **whole** permitted surface and fails on
+        // anything else — a new variant has to be added here deliberately,
+        // which is the moment the prose gets updated with it.
+        let variants = enum_variants(&jobs, "pub enum VmJob");
+        assert_eq!(
+            variants,
+            ["ProposeRules", "Baseline", "Inspect", "Evaluate", "Archive"],
+            "the RLM job surface changed: it authors more than rules, so the docs may claim it — \
+             add the variant here deliberately (and update the prose) rather than widening the \
+             boundary silently"
+        );
+        let outputs = enum_variants(&jobs, "pub enum VmJobOutput");
+        assert_eq!(
+            outputs,
+            ["Rules", "Baseline", "Inspected", "Evaluated", "Archived"],
+            "the RLM output surface changed: a new output is a new thing the RLM can author, so \
+             the docs may claim it — add it here deliberately"
+        );
+
+        // Migrations and APIs are the install section's, applied by the
+        // install, authored by whoever writes the bundle.
+        let section = head(SECTION);
+        for part in ["migrations: Vec<Migration>", "apis: Vec<ApiRoute>"] {
+            assert!(
+                section.contains(part),
+                "the install section still supplies {part}; this guard is reading the wrong file"
+            );
+        }
+
+        // The extractor is not vacuous: it finds a known enum's variants and
+        // refuses to guess when the enum is absent.
+        assert_eq!(
+            enum_variants(
+                "pub enum Probe {\n    One,\n    Two { x: u8 },\n}\n",
+                "pub enum Probe"
+            ),
+            ["One", "Two"],
+            "the extractor reads top-level variants of both shapes"
+        );
+        assert!(
+            enum_variants("pub enum Other {\n    One,\n}\n", "pub enum Probe").is_empty(),
+            "a missing enum yields nothing, never a guess"
+        );
+    }
+
+    /// Every product module that decides what a topic may do, and must
+    /// therefore be **topic-agnostic**.
+    ///
+    /// Listed one file at a time rather than by globbing the directories:
+    /// `include_str!` needs literal paths, and a glob would silently widen the
+    /// guard's surface when a new file lands. The cost is that a new product
+    /// module has to be added here — which is why
+    /// `the_product_branch_guard_catches_what_it_claims_to` asserts the list
+    /// still names the file the check was written for, and why the crates
+    /// carrying a module here are the ones whose whole surface is a product
+    /// branch.
+    ///
+    /// The modules the crates' own guards also cover are included: those
+    /// guards strip test code with `split("#[cfg(test)]").next()`, which
+    /// stops at the first marker even when it annotates a method rather than a
+    /// module. Running the same sources through the structural strip here
+    /// means a literal hidden after such a marker is caught even if the
+    /// crate-local guard misses it.
+    const PRODUCT_MODULES: [(&str, &str); 32] = [
+        (
+            "proof-challenge/src/topic_routes.rs",
+            include_str!("../../proof-challenge/src/topic_routes.rs"),
+        ),
+        (
+            "proof-challenge/src/lib.rs",
+            include_str!("../../proof-challenge/src/lib.rs"),
+        ),
+        (
+            "proof-challenge/src/emit.rs",
+            include_str!("../../proof-challenge/src/emit.rs"),
+        ),
+        (
+            "gateway-core/src/topic_routes.rs",
+            include_str!("../../gateway-core/src/topic_routes.rs"),
+        ),
+        (
+            "gateway-core/src/admin_route.rs",
+            include_str!("../../gateway-core/src/admin_route.rs"),
+        ),
+        (
+            "proof-vm-guest/src/runner.rs",
+            include_str!("../../proof-vm-guest/src/runner.rs"),
+        ),
+        (
+            "proof-vm-guest/src/lib.rs",
+            include_str!("../../proof-vm-guest/src/lib.rs"),
+        ),
+        (
+            "proof-vm-agent/src/router.rs",
+            include_str!("../../proof-vm-agent/src/router.rs"),
+        ),
+        (
+            "proof-rlm/src/vm.rs",
+            include_str!("../../proof-rlm/src/vm.rs"),
+        ),
+        (
+            "proof-rlm/src/runner.rs",
+            include_str!("../../proof-rlm/src/runner.rs"),
+        ),
+        (
+            "proof-rlm/src/lib.rs",
+            include_str!("../../proof-rlm/src/lib.rs"),
+        ),
+        (
+            "proof-rlm/src/gate.rs",
+            include_str!("../../proof-rlm/src/gate.rs"),
+        ),
+        (
+            "proof-rlm/src/rules.rs",
+            include_str!("../../proof-rlm/src/rules.rs"),
+        ),
+        (
+            "proof-rlm/src/state.rs",
+            include_str!("../../proof-rlm/src/state.rs"),
+        ),
+        (
+            "proof-experiment/src/lib.rs",
+            include_str!("../../proof-experiment/src/lib.rs"),
+        ),
+        (
+            "proof-experiment/src/policy.rs",
+            include_str!("../../proof-experiment/src/policy.rs"),
+        ),
+        (
+            "proof-topic-install/src/lib.rs",
+            include_str!("../../proof-topic-install/src/lib.rs"),
+        ),
+        (
+            "proof-topic-install/src/handler.rs",
+            include_str!("../../proof-topic-install/src/handler.rs"),
+        ),
+        (
+            "proof-topic-install/src/install.rs",
+            include_str!("../../proof-topic-install/src/install.rs"),
+        ),
+        (
+            "proof-topic-install/src/routes.rs",
+            include_str!("../../proof-topic-install/src/routes.rs"),
+        ),
+        (
+            "proof-topic-install/src/section.rs",
+            include_str!("../../proof-topic-install/src/section.rs"),
+        ),
+        (
+            "proof-topic-install/src/gate.rs",
+            include_str!("../../proof-topic-install/src/gate.rs"),
+        ),
+        (
+            "proof-vm-guest/src/fetch.rs",
+            include_str!("../../proof-vm-guest/src/fetch.rs"),
+        ),
+        (
+            "proof-vm-guest/src/staging.rs",
+            include_str!("../../proof-vm-guest/src/staging.rs"),
+        ),
+        (
+            "proof-vm-agent/src/lib.rs",
+            include_str!("../../proof-vm-agent/src/lib.rs"),
+        ),
+        (
+            "proof-vm-agent/src/auth.rs",
+            include_str!("../../proof-vm-agent/src/auth.rs"),
+        ),
+        (
+            "proof-vm-agent/src/hypervisor.rs",
+            include_str!("../../proof-vm-agent/src/hypervisor.rs"),
+        ),
+        (
+            "proof-vm-agent/src/stamp.rs",
+            include_str!("../../proof-vm-agent/src/stamp.rs"),
+        ),
+        (
+            "gateway-core/src/lib.rs",
+            include_str!("../../gateway-core/src/lib.rs"),
+        ),
+        (
+            "gateway-core/src/admin_auth.rs",
+            include_str!("../../gateway-core/src/admin_auth.rs"),
+        ),
+        (
+            "gateway-core/src/admin_attest.rs",
+            include_str!("../../gateway-core/src/admin_attest.rs"),
+        ),
+        (
+            "gateway-core/src/proxy_paths.rs",
+            include_str!("../../gateway-core/src/proxy_paths.rs"),
+        ),
+    ];
+
+    /// The literals a product branch may not carry: a topic id, a benchmark
+    /// name, or a results-contract id.
+    ///
+    /// `harbor-trials` is on the list even though `proof-results` legitimately
+    /// defines the contract id: that crate is not in [`PRODUCT_MODULES`]
+    /// because the id **is** its interface — a signed document pins it — while
+    /// no module here may branch on it.
+    const FORBIDDEN_LITERALS: [&str; 5] = [
+        "tbench",
+        "tb4",
+        "terminal-bench",
+        "terminal bench",
+        "harbor-trials",
+    ];
+
+    /// The guard is not vacuous, and it covers the files it claims to.
+    #[test]
+    fn the_product_branch_guard_catches_what_it_claims_to() {
+        // A production literal is caught.
+        let injected = format!(
+            "{}\npub const PROBE: &str = \"tbench\";\n",
+            PRODUCT_MODULES[0].1
+        );
+        assert!(
+            production_source(&injected)
+                .to_lowercase()
+                .contains("tbench"),
+            "a literal in production code must survive the strip and be caught"
+        );
+
+        // A `#[cfg(test)] mod` is removed, so its fixtures do not trip it.
+        let with_test_mod =
+            "fn prod() {}\n#[cfg(test)]\nmod tests {\n    const T: &str = \"tbench\";\n}\n";
+        let stripped = production_source(with_test_mod);
+        assert!(!stripped.contains("tbench"), "{stripped}");
+        assert!(stripped.contains("fn prod"), "{stripped}");
+
+        // Production code **after** a `#[cfg(test)]` attribute on a method is
+        // still scanned. This is the exact shape in the guest's `runner.rs`
+        // (`Tail::bytes` is `#[cfg(test)]`, `Tail::text` follows it), where
+        // splitting on the first marker would have stopped guarding the rest
+        // of the file.
+        let after_marker = "struct T;\nimpl T {\n    #[cfg(test)]\n    fn b(&self) {}\n    pub fn text(&self) -> String { \"tbench\".into() }\n}\n";
+        assert!(
+            production_source(after_marker)
+                .to_lowercase()
+                .contains("tbench"),
+            "production code after a non-mod `#[cfg(test)]` must still be scanned"
+        );
+
+        // And the guard really is looking at the challenge's dynamic routes:
+        // the file Greptile found missing from the old hand-maintained list.
+        assert!(
+            PRODUCT_MODULES
+                .iter()
+                .any(|(label, _)| *label == "proof-challenge/src/topic_routes.rs"),
+            "the dynamic topic routes are a product branch and must be guarded"
+        );
+    }
+
+    /// A brace that is *text* cannot unbalance the strip and hide code after a
+    /// test module.
+    ///
+    /// The defect this pins: the stripper counted `{` / `}` in raw bytes, so a
+    /// brace inside a comment, a string, a raw string, or a macro's input left
+    /// the depth non-zero after the test module closed — and every line after
+    /// it was silently dropped from the scan. A prohibited literal placed
+    /// there passed the guard.
+    #[test]
+    fn braces_inside_text_do_not_hide_code_from_the_guard() {
+        // Each case: a `#[cfg(test)]` module whose body contains a brace that
+        // is *not* a delimiter, followed by production code carrying a
+        // literal.
+        let cases: [(&str, &str); 4] = [
+            (
+                "comment",
+                "#[cfg(test)]\nmod m {\n    // an unbalanced brace in a comment: {\n}\nfn later() { let s = \"tbench\"; }\n",
+            ),
+            (
+                "normal string",
+                "#[cfg(test)]\nmod m {\n    fn f() { let s = \"a { brace\"; }\n}\nfn later() { let s = \"tbench\"; }\n",
+            ),
+            (
+                "raw string",
+                "#[cfg(test)]\nmod m {\n    fn f() { let s = r#\"a { brace\"#; }\n}\nfn later() { let s = \"tbench\"; }\n",
+            ),
+            (
+                "macro input",
+                "#[cfg(test)]\nmod m {\n    fn f() { println!(\"{{ literal brace\"); }\n}\nfn later() { let s = \"tbench\"; }\n",
+            ),
+        ];
+        for (label, source) in cases {
+            let stripped = production_source(source);
+            assert!(
+                stripped.to_lowercase().contains("tbench"),
+                "a brace in a {label} must not hide the production code after the test module: \
+                 {stripped:?}"
+            );
+            assert!(
+                !stripped.contains("mod m"),
+                "the test module is still stripped in the {label} case: {stripped:?}"
+            );
+        }
+    }
+
+    /// Masking removes exactly the non-code bytes and keeps structure.
+    #[test]
+    fn masking_blanks_text_and_keeps_code() {
+        let masked = mask_non_code("let a = 1; // { }\nlet b = \"}{ x\";\nlet c = 'x';\n");
+        assert!(
+            !masked.contains("}{ x"),
+            "string bodies are masked: {masked:?}"
+        );
+        assert!(
+            !masked.contains("// { }"),
+            "comment bodies are masked: {masked:?}"
+        );
+        assert!(masked.contains("let a = 1;"), "{masked:?}");
+        assert!(masked.contains("let c ="), "{masked:?}");
+        // Newlines survive, so line-by-line pairing with the original holds.
+        assert_eq!(masked.lines().count(), 3, "{masked:?}");
     }
 
     #[test]

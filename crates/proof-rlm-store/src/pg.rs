@@ -355,6 +355,30 @@ impl RlmStore for PgRlmStore {
         row.map(RuleRow::into_set).transpose()
     }
 
+    /// The newest rule version's `source`, read as a bare column.
+    ///
+    /// Deliberately its own query rather than a `current_rules` call: the
+    /// provenance question does not need the rule bodies, and reading the
+    /// source column directly keeps the answer independent of whether a row's
+    /// rules still deserialize. `None` means no rule row exists.
+    async fn current_rules_source(
+        &self,
+        topic_id: &str,
+    ) -> Result<Option<proof_rlm::RuleSource>, StoreError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT source FROM proof_rule_version \
+             WHERE topic_id = $1 ORDER BY version DESC LIMIT 1",
+        )
+        .bind(topic_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|(source,)| parse_source(&source)).transpose()
+    }
+
+    async fn rlm_authored_rules(&self, topic_id: &str) -> Result<bool, StoreError> {
+        Ok(self.current_rules_source(topic_id).await? == Some(proof_rlm::RuleSource::Rlm))
+    }
+
     async fn put_checklist(&self, row: &ChecklistRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO proof_checklist (submission_digest, topic_id, rules_version, green, failed_ids, document) \

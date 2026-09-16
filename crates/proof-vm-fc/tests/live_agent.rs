@@ -466,9 +466,22 @@ async fn the_created_vm_must_run_the_pinned_image_and_a_fake_answer_is_refused()
     let orch = client(&agent, &token, &other.image_digest);
     let handle = orch.create(&spec(other.clone())).await.expect("create");
     assert_eq!(agent.hypervisor.boots()[0].image_digest, other.image_digest);
-    // A second create for the same topic is the agent's one-VM-per-topic rule.
-    let err = orch.create(&spec(other)).await.expect_err("duplicate");
-    assert!(err.to_string().contains("AlreadyExists"), "{err}");
+    // A second create for the same topic meets the agent's one-VM-per-topic
+    // rule (409 `AlreadyExists`). The client turns that into the **same**
+    // handle instead of failing the submission: the VM the topic already has
+    // — a leftover from the RLM install/baseline that still holds its jail
+    // and TAP — is the VM this run wants, so a miner's submission does not
+    // depend on an operator clearing the host first.
+    let again = orch
+        .create(&spec(other))
+        .await
+        .expect("a duplicate create attaches, it does not fail");
+    assert_eq!(again, handle, "the topic's existing vm, not a new one");
+    assert_eq!(
+        agent.hypervisor.boots().len(),
+        1,
+        "attaching must not boot a second vm"
+    );
     assert!(orch
         .teardown(&handle, RetainPolicy::Retain)
         .await
@@ -481,6 +494,90 @@ async fn the_created_vm_must_run_the_pinned_image_and_a_fake_answer_is_refused()
     // The reference fake orchestrator and the live client agree on the contract.
     let reference = FakeOrchestrator::new(0.8);
     reference.ready().expect("reference");
+}
+
+/// The attach fallback must not run a submission in a VM the spec did not ask
+/// for: a leftover booted from an **older image pin** (or another shape) would
+/// silently score a run in a guest the topic does not describe, and its
+/// evidence would be evidence about a configuration nobody signed.
+#[tokio::test]
+async fn a_duplicate_create_refuses_an_incompatible_existing_vm() {
+    let (agent, token) = live("pin-mismatch").await;
+    let mut old = pinned_template();
+    old.image_digest = format!("sha256:{}", "ee".repeat(32));
+    // The topic's VM is booted from the older pin the host still runs.
+    let orch_old = client(&agent, &token, &old.image_digest);
+    let existing = orch_old.create(&spec(old.clone())).await.expect("create");
+    assert_eq!(agent.hypervisor.boots().len(), 1);
+
+    // A run pinned to the newer image asks for the same topic. The agent
+    // answers 409; attaching would hand back a VM on the wrong image, so the
+    // client must refuse instead.
+    let orch_new = client(&agent, &token, &pinned_template().image_digest);
+    let err = orch_new
+        .create(&spec(pinned_template()))
+        .await
+        .expect_err("an incompatible leftover must not be attached");
+    let text = err.to_string();
+    assert!(text.contains("instead of the pinned"), "{text}");
+    assert_eq!(
+        agent.hypervisor.boots().len(),
+        1,
+        "nothing new was booted and nothing was reused"
+    );
+    assert_eq!(
+        orch_new.attach(&existing.topic_id).await.expect("attach"),
+        Some(existing.clone()),
+        "the vm itself is untouched; only this run refused it"
+    );
+    assert!(orch_old
+        .teardown(&existing, RetainPolicy::Destroy)
+        .await
+        .expect("destroy"));
+}
+
+/// An **experiment** spec must not take the attach path: a dedicated VM per
+/// paid job is the whole point, and attaching would hand back the topic's RLM
+/// VM and run the job in the wrong guest. The agent's `attach` answers only
+/// topic VMs, so an experiment create is always a boot.
+#[tokio::test]
+async fn an_experiment_create_boots_its_own_vm_and_never_attaches() {
+    use proof_rlm::fixtures::experiment_request;
+    use proof_rlm::TopicVmSpec;
+    let (agent, token) = live("exp-dup").await;
+    let orch = client(&agent, &token, &pinned_template().image_digest);
+    let req = experiment_request(Some(2));
+    let exp = TopicVmSpec::for_experiment(
+        &req.topic_id,
+        pinned_template(),
+        req.sandbox.clone(),
+        proof_rlm::ExperimentSpec {
+            runner: "placeholder_runner".into(),
+            pack: proof_rlm::PackRef {
+                path: None,
+                digest: format!("sha256:{}", "ab".repeat(32)),
+            },
+            disk_mib: 16_384,
+        },
+    );
+    let first = orch.create(&exp).await.expect("experiment vm");
+    assert_eq!(agent.hypervisor.boots().len(), 1, "one dedicated vm");
+    // A second experiment VM is a second boot, never an attach: the topic's
+    // RLM VM is not in the way and `attach` does not answer experiment VMs.
+    let second = orch.create(&exp).await.expect("second experiment vm");
+    assert_ne!(first.vm_id, second.vm_id, "each job gets its own vm");
+    assert_eq!(agent.hypervisor.boots().len(), 2);
+    assert_eq!(
+        orch.attach(&req.topic_id).await.expect("attach"),
+        None,
+        "an experiment vm never answers attach"
+    );
+    for vm in [&first, &second] {
+        assert!(orch
+            .teardown(vm, RetainPolicy::Destroy)
+            .await
+            .expect("destroy"));
+    }
 }
 
 #[tokio::test]

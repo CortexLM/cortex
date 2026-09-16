@@ -126,12 +126,12 @@ Selection, in order, then filters:
 | Step | Source | Behaviour |
 |------|--------|-----------|
 | 1 | `params.tasks` (`PROOF_PARAM_TASKS`) | Exact ordered names (comma / space separated). A name the pack does not hold **fails closed** — a topic that names a task is never scored on a smaller set. **One name is the single-task smoke.** |
-| 2 | `constraints.task_slice` (`PROOF_TASK_SLICE`) | Resolved **through the pack**: `slices/<label>.json` (`["task-a", …]`), `slices/<label>.txt` (one per line), or `filter.json` → `slices.<label>`. A label the pack does not define fails closed when the pack defines any slice; a pack with no slices treats the label as informational (recorded in the summary). |
+| 2 | `constraints.task_slice` (`PROOF_TASK_SLICE`) | Resolved **through the pack**: `slices/<label>.json` (`["task-a", …]`), `slices/<label>.txt` (one per line), or `filter.json` → `slices.<label>`. A label the pack does not define **always fails closed** — whether or not the pack defines any other slice. The label is the topic's assertion about *which* tasks to score, so the guest never silently widens it to the whole pack. (That escape existed and cost a live run: a topic naming a 5-task slice on a pack with no `slices/` was scored on all 10 tasks the pack held, overran the wall clock, and measured no baseline.) |
 | 3 | pack `filter.json` → `allow` | The pack's own default set. |
 | 4 | every task directory under `params.tasks_dir` | Sorted. |
 | then | `params.task_exclude` (`PROOF_PARAM_TASK_EXCLUDE`) + pack `filter.json` → `deny` | Removed. **Exact names**, no alias / prefix matching. |
 | then | `params.max_task_duration_s` (pack `max_duration_s` may only **lower** it) | Drops tasks whose **known** duration is at or over the ceiling — pack `durations` / `task_durations.json` first, then duration keys in task metadata. A declared **timeout** (`agent.timeout_sec`, …) is a ceiling, not a duration, and never counts. **No gate at all when neither is set.** `params.exclude_unknown_duration = "true"` drops tasks with no duration under a gate. |
-| then | `params.n_tasks` (`PROOF_PARAM_N_TASKS`) | Keep the first N of what is left (`1` is the smoke shape). |
+| then | `params.n_tasks` (`PROOF_PARAM_N_TASKS`) | Keep the first N of what is left (`1` is the smoke shape). `params.task_count` is a **legacy alias** used only when `n_tasks` is absent; it is a **count, never a selector** — it cannot stand in for a `task_slice`, and a topic that sets a slice the pack does not define is refused regardless. |
 
 An empty result fails closed. The kept tasks are **copied** to
 `$PROOF_WORK_DIR/tasks-filtered` (never the pack itself) and

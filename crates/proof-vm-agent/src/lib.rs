@@ -44,6 +44,7 @@
 
 mod auth;
 mod hypervisor;
+pub mod memory;
 mod router;
 mod stamp;
 
@@ -55,6 +56,7 @@ pub mod fixtures;
 
 pub use auth::{AuthError, BearerAuth};
 pub use hypervisor::{BootedVm, HvError, Hypervisor, JobOutcome};
+pub use memory::{nominal_total_mib, parse_mem_total_mib, MemoryBudget, MEMINFO};
 pub use router::{agent_router, AgentError, AgentState, DEFAULT_MAX_EXPERIMENT_VMS};
 pub use stamp::{output_matches, stamp_output};
 
@@ -770,6 +772,150 @@ mod tests {
             rec2.handle.vm_id, rec.handle.vm_id,
             "fresh vm id after retain"
         );
+    }
+
+    /// The Gate 4 shape, on the agent: two 8192 MiB experiment VMs beside the
+    /// topic's resident 8192 MiB RLM VM on a 16 GiB host. The **count** cap
+    /// (2) is satisfied, so the pre-fix agent booted all three and the kernel
+    /// OOM-killed the guests — both submissions answered 503 with no row.
+    ///
+    /// The memory budget refuses the third boot with `503 capacity` **before
+    /// a jail exists**, so the two submissions that fit keep running and only
+    /// the one that does not fit is refused.
+    #[tokio::test]
+    async fn a_boot_that_does_not_fit_the_host_is_refused_before_any_jail() {
+        use proof_rlm::fixtures::experiment_request;
+        let hv = FakeHypervisor::new(0.8);
+        let auth = Arc::new(BearerAuth::from_file(&token_file("mem-budget", TOKEN)));
+        let state = AgentState::with_limits(
+            hv.clone(),
+            auth,
+            4, // the count cap is deliberately generous: memory is the gate
+            MemoryBudget {
+                total_mib: 16_384,
+                reserve_mib: 0,
+            },
+        );
+        let app = agent_router(state.clone());
+        let topic = create(&app).await;
+        assert_eq!(topic.mem_mib, 4_096, "the RLM VM shape in this fixture");
+
+        let req = experiment_request(Some(8));
+        let mut spec = experiment_spec(&req);
+        spec.template.mem_mib = 8_192;
+        let body = || serde_json::to_value(CreateVmRequest { spec: spec.clone() }).expect("json");
+        // Topic 4096 + experiment 8192 = 12288 ≤ 16384: fits.
+        let (status, first): (StatusCode, VmRecord) =
+            call(&app, "POST", paths::VMS, Some(TOKEN), Some(body())).await;
+        assert_eq!(status, StatusCode::CREATED, "{first:?}");
+
+        // 12288 + 8192 = 20480 > 16384: refused, and **nothing was booted**.
+        let (status, err): (StatusCode, ErrorBody) =
+            call(&app, "POST", paths::VMS, Some(TOKEN), Some(body())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{err:?}");
+        assert_eq!(err.code, ErrorCode::Capacity);
+        for want in [
+            "12288 MiB is held",
+            "topic",
+            topic.handle.vm_id.as_str(),
+            "8192 MiB requested",
+            "4096 MiB free",
+            "16384 MiB VM ceiling",
+        ] {
+            assert!(
+                err.error.contains(want),
+                "the refusal names {want:?}: {}",
+                err.error
+            );
+        }
+        assert_eq!(
+            hv.boots().len(),
+            2,
+            "the RLM VM and the one experiment VM that fit; the third never booted"
+        );
+
+        // The experiment that fit is untouched and still answers `attach`'s
+        // sibling routes; the topic VM is still the topic's.
+        assert_eq!(
+            state.running().await.len(),
+            2,
+            "a refused boot does not disturb what is running"
+        );
+        assert!(
+            state
+                .running()
+                .await
+                .iter()
+                .any(|r| r.handle.vm_id == topic.handle.vm_id),
+            "the topic's RLM VM is still running"
+        );
+
+        // Freeing the experiment VM makes room again: the refusal was about
+        // capacity, not about the request.
+        let (status, down): (StatusCode, TeardownResponse) = call(
+            &app,
+            "DELETE",
+            &paths::vm(&first.handle.vm_id),
+            Some(TOKEN),
+            Some(
+                serde_json::to_value(TeardownRequest {
+                    topic_id: first.handle.topic_id.clone(),
+                    policy: RetainPolicy::Destroy,
+                })
+                .expect("json"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{down:?}");
+        let (status, again): (StatusCode, VmRecord) =
+            call(&app, "POST", paths::VMS, Some(TOKEN), Some(body())).await;
+        assert_eq!(status, StatusCode::CREATED, "{again:?}");
+    }
+
+    /// Health carries the budget, so an operator reading a `503 capacity`
+    /// sees what the host thinks it has without reaching for `free`.
+    #[tokio::test]
+    async fn health_reports_the_memory_budget_and_what_is_held() {
+        let hv = FakeHypervisor::new(0.8);
+        let auth = Arc::new(BearerAuth::from_file(&token_file("mem-health", TOKEN)));
+        let state = AgentState::with_limits(
+            hv.clone(),
+            auth,
+            2,
+            MemoryBudget {
+                total_mib: 16_384,
+                reserve_mib: 1_024,
+            },
+        );
+        let app = agent_router(state.clone());
+        let (status, health): (StatusCode, AgentHealth) =
+            call(&app, "GET", paths::HEALTH, Some(TOKEN), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(health.total_mib, 16_384);
+        assert_eq!(health.reserve_mib, 1_024);
+        assert_eq!(health.used_mib, 0, "nothing booted yet");
+
+        let topic = create(&app).await;
+        let (_, health): (StatusCode, AgentHealth) =
+            call(&app, "GET", paths::HEALTH, Some(TOKEN), None).await;
+        assert_eq!(
+            health.used_mib,
+            u64::from(topic.mem_mib),
+            "the topic's RLM VM holds its memory"
+        );
+
+        // A state with no operator budget reports 0/0 rather than inventing
+        // a host size, and admits everything (the CI default).
+        let plain = AgentState::with_max_experiment_vms(
+            hv,
+            Arc::new(BearerAuth::from_file(&token_file("mem-unset", TOKEN))),
+            2,
+        );
+        assert!(plain.memory_budget().is_unlimited());
+        let plain_app = agent_router(plain);
+        let (_, health): (StatusCode, AgentHealth) =
+            call(&plain_app, "GET", paths::HEALTH, Some(TOKEN), None).await;
+        assert_eq!((health.total_mib, health.reserve_mib), (0, 0));
     }
 
     fn experiment_spec(req: &proof_rlm::CustomRunRequest) -> TopicVmSpec {

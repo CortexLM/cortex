@@ -38,6 +38,7 @@ use proof_rlm::{
 };
 use proof_rlm_scorer::{max_zip_numeric_id, ArtefactStore, RlmScorer};
 use proof_rlm_store::{MemoryRlmStore, PgRlmStore, RlmStore};
+use proof_task::TopicStatus;
 use proof_topic_install::{PgTopicRoutes, TopicRouteMux};
 use proof_vm_fc::{parse_custom_ids, FirecrackerOrchestrator, VM_RUNNER_CUSTOM_IDS_ENV};
 use sqlx::PgPool;
@@ -273,7 +274,18 @@ fn run(cli: &Cli) -> Result<(), String> {
     let live_scorer = live_scorer(backend, harvest, rlm_store, &cli.artefact_root, &vm);
     log_live_wiring(backend, live_scorer.as_deref(), &cli.artefact_root);
     let registered = registered_custom(live_scorer.as_deref());
-    match load_topics(&store, &pin, cli.topics_file.as_deref(), &registered) {
+    // Loaded **through** the runtime: an `open` document's admission reads the
+    // install journal, and a read outside an entered runtime would fail and
+    // silently skip the topic. Driving the loader with `rt.block_on` is what
+    // makes the gate run at all on a live host.
+    match rt.block_on(load_topics(
+        &store,
+        &pin,
+        cli.topics_file.as_deref(),
+        &registered,
+        db_pool.as_ref(),
+        backend,
+    )) {
         Ok(n) => tracing::info!(topics = n, "signed topics loaded"),
         Err(e) => tracing::warn!("topics unavailable ({e}); submissions will 400/503 until fixed"),
     }
@@ -814,24 +826,111 @@ fn load_pin(path: Option<&Path>) -> Result<ProofPin, String> {
     Ok(pin)
 }
 
-fn load_topics(
+/// Load the operator's signed topic documents into the store.
+///
+/// A `draft` document is admitted as-is: it is not submitable, and holding it
+/// in the store is how the host knows the topic exists while its install is
+/// still being applied.
+///
+/// On the **live** backend an `open` document is admitted only when the
+/// database proves the two facts the whole dynamic-topics path rests on, and a
+/// missing database is a refusal rather than a pass:
+///
+/// 1. its newest `proof_topic_install` row is `applied`; and
+/// 2. its rule vector in force is **RLM-authored**
+///    (`proof_rule_version.source = 'rlm'`).
+///
+/// Without (2) the topic's anti-cheat behavior is still the operator's signed
+/// `checklist`, and admitting the document would put a topic into
+/// `open_topics` / `scorable_topics` whose behavior nobody authored — the
+/// parallel, file-driven admission path this gate closes. The topic is
+/// **skipped** (not fatal): the host keeps serving whatever else is installed,
+/// and the refusal is logged with the provenance that blocked it.
+///
+/// Sim is exempt, deliberately: it is the CI / local opt-in backend
+/// (`PROOF_FORCE_SIM`, never a live fallback) that scores in-process with no
+/// install, no RLM, and no topic VM. Applying the gate there would test the
+/// fixture rather than the boundary.
+async fn load_topics(
     store: &MemoryStore,
     pin: &ProofPin,
     path: Option<&Path>,
     registered_custom: &[String],
+    db_pool: Option<&sqlx::PgPool>,
+    backend: EvalBackend,
 ) -> Result<usize, String> {
     let p = path.ok_or("PROOF_TOPICS_FILE not set")?;
     let body = std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?;
     let docs = TopicDocument::many_from_json(&body).map_err(|e| e.to_string())?;
-    let n = docs.len();
+    let mut n = 0usize;
     for doc in docs {
         doc.validate(pin, &custom_ids_ref(registered_custom))
             .map_err(|e| format!("topic {}: {e}", doc.id))?;
         doc.verify_signature(pin)
             .map_err(|e| format!("topic {}: {e}", doc.id))?;
+        if backend != EvalBackend::Sim && doc.status == TopicStatus::Open {
+            let Some(pool) = db_pool else {
+                tracing::warn!(
+                    topic_id = %doc.id,
+                    "open topic skipped: no database, so this host cannot prove the topic was \
+                     installed and that its RLM authored its rules"
+                );
+                continue;
+            };
+            if let Err(why) = open_topic_admissible(pool, &doc.id).await {
+                tracing::warn!(topic_id = %doc.id, "open topic skipped: {why}");
+                continue;
+            }
+        }
         store.put_topic(doc).map_err(|e| e.to_string())?;
+        n = n.saturating_add(1);
     }
     Ok(n)
+}
+
+/// Why an `open` document may not be admitted, or `Ok(())` when it may.
+///
+/// Fail-closed on every doubt: an unreadable database, a missing install row,
+/// and rules that are not RLM-authored all refuse. The reason names the
+/// provenance so an operator can tell "run the install" from "the RLM never
+/// wrote its rules".
+///
+/// The two facts come from **one bound read**
+/// ([`proof_topic_install::installed_rules`]): the newest install is
+/// `applied`, and the rule version *that install recorded* is `rlm`-sourced.
+/// Reading them as two independent predicates would admit a topic whose
+/// install landed the operator's signed vector while a later, unrelated
+/// version happened to be RLM-authored.
+async fn open_topic_admissible(pool: &sqlx::PgPool, topic_id: &str) -> Result<(), String> {
+    match proof_topic_install::installed_rules(pool, topic_id)
+        .await
+        .map_err(|e| format!("install journal unreadable: {e}"))?
+    {
+        proof_topic_install::InstalledRules::RlmAuthored { .. } => Ok(()),
+        proof_topic_install::InstalledRules::NotApplied { state } => Err(format!(
+            "the newest install row is {}; run `proof-admin topic install` to completion first",
+            match state.as_deref() {
+                Some(state) => format!("`{state}`"),
+                None => "absent".to_owned(),
+            }
+        )),
+        proof_topic_install::InstalledRules::NotRlmAuthored { provenance, .. } => Err(format!(
+            "the rule version this install landed is not RLM-authored \
+             (proof_rule_version.source is {}); drive the RLM's propose_rules job \
+             (`proof-admin topic install --drive-rlm --owner-approved`) so the topic authors \
+             its own behavior",
+            provenance.as_deref().unwrap_or("absent")
+        )),
+        proof_topic_install::InstalledRules::SupersededByOperator {
+            installed,
+            in_force,
+            provenance,
+        } => Err(format!(
+            "the install landed RLM-authored rule version {installed}, but version {in_force} \
+             ({provenance}) is in force; the topic's behavior is no longer its RLM's, so it is \
+             not admitted until the RLM's vector is the one in force again"
+        )),
+    }
 }
 
 fn load_holdouts(store: &MemoryStore, path: Option<&Path>) -> Result<usize, String> {
@@ -899,8 +998,21 @@ fn record_one_baseline(
 ) -> Result<(), String> {
     let topic = store.topic(&meas.topic_id).map_err(|e| e.to_string())?;
     meas.verify(pin, &topic).map_err(|e| e.to_string())?;
+    // The same refusal `mark_sealed` applies, on the other door into the
+    // store: a baseline file is operator-supplied, so it must not be able to
+    // install a bar no challenger can clear. A relative-win family compares
+    // `challenger >= bar * (1 + epsilon_rel)`, which has no solution at zero.
+    let sealed = meas.into_sealed();
+    if proof_score::sealed_bar_is_degenerate(&topic, &sealed) {
+        return Err(format!(
+            "baseline {}: the measured primary is a degenerate bar, so this family could never \
+             be passed by anyone (a relative win against zero has no solution). Nothing was \
+             recorded. Re-run the reference against something that scores and write that number.",
+            topic.id
+        ));
+    }
     store
-        .set_baseline(&topic.id, meas.into_sealed())
+        .set_baseline(&topic.id, sealed)
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1063,6 +1175,230 @@ mod tests {
 
     fn cli() -> Cli {
         Cli::try_parse_from(["proof-challenge"]).expect("defaults parse")
+    }
+
+    /// An `open` topic is not admitted into the store on a **live** host that
+    /// cannot prove its install: no database is a skip, not a pass.
+    ///
+    /// This is the file-driven admission path the RLM-authorship gate closes.
+    /// The document is skipped (the host keeps serving what else it has)
+    /// rather than admitted into `open_topics` / `scorable_topics`, so a topic
+    /// whose behavior nobody authored never becomes submitable.
+    #[tokio::test]
+    async fn a_live_host_admits_no_open_topic_it_cannot_prove_was_installed() {
+        let dir = std::env::temp_dir().join(format!(
+            "proof-topics-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("topics.json");
+
+        // A document that cannot be validated is a hard error either way, so
+        // the gate's own effect is what the rest of this test measures.
+        let pin = ProofPin::default();
+        let store = MemoryStore::new();
+        let missing = dir.join("does-not-exist.json");
+        assert!(
+            load_topics(&store, &pin, Some(&missing), &[], None, EvalBackend::Lium)
+                .await
+                .is_err(),
+            "an unreadable topics file is still an error"
+        );
+        // With no documents at all the loader is a no-op, which is the only
+        // shape that can be asserted without a signed fixture here: the
+        // per-document gate is exercised against a real database in
+        // `submit_e2e` / `install_engine`, where a row can actually exist.
+        std::fs::write(&path, "[]").expect("write");
+        assert_eq!(
+            load_topics(&store, &pin, Some(&path), &[], None, EvalBackend::Lium)
+                .await
+                .expect("empty list"),
+            0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The admission read really runs **inside** a runtime, so a live startup
+    /// does not silently skip every open topic.
+    ///
+    /// The defect this pins: `open_topic_admissible` used to reach for
+    /// `Handle::try_current()` and fail when the synchronous startup called it
+    /// after its `block_on` scopes had returned. Every valid open topic was
+    /// then logged as skipped and never loaded. The gate must therefore be
+    /// callable from the synchronous startup path *and* from an async caller,
+    /// which is only true if it is itself `async` (no ambient runtime needed).
+    #[test]
+    fn the_admission_gate_needs_no_ambient_runtime() {
+        // A synchronous context with no runtime entered: the shape startup
+        // has. A lazy pool pointed at a closed port fails fast on acquire, so
+        // the call reaches the read and returns the fail-closed `Err`.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        let pool = rt
+            .block_on(async {
+                sqlx::postgres::PgPoolOptions::new()
+                    .acquire_timeout(std::time::Duration::from_millis(250))
+                    .connect_lazy("postgres://127.0.0.1:1/none")
+            })
+            .expect("lazy pool builds without connecting");
+        // Outside any entered runtime — exactly where the old gate failed
+        // with "no async runtime to read the install journal".
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "this test must run outside an entered runtime to be meaningful"
+        );
+        let verdict = rt.block_on(open_topic_admissible(&pool, "any-topic"));
+        let why = verdict.expect_err("an unreadable journal is never an admission");
+        assert!(
+            why.contains("install journal unreadable"),
+            "the refusal names the unreadable journal, not a missing runtime: {why}"
+        );
+    }
+
+    /// The boot-time baseline file is the **other** door into the store, so it
+    /// applies the same degenerate-bar refusal `mark_sealed` does.
+    ///
+    /// Without it, a hand-written baseline file could install a bar no
+    /// challenger can clear on a relative-win family — a topic that is open,
+    /// scorable, and unwinnable by anyone (the LIVE Gate 1 shape: a reference
+    /// run that solved nothing, every trial `0.0`). Nothing is recorded when
+    /// it refuses, so the host fails closed with no sealed baseline rather
+    /// than with a dead one.
+    #[tokio::test]
+    async fn a_baseline_file_cannot_install_a_degenerate_bar() {
+        let dir = std::env::temp_dir().join(format!(
+            "proof-baseline-degenerate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("baseline.json");
+        let pin = ProofPin::default();
+        let store = MemoryStore::new();
+        let mut topic = proof_task::TopicDocument {
+            id: "baseline-gate-v0".into(),
+            status: proof_task::TopicStatus::Open,
+            ..proof_task::TopicDocument::default()
+        };
+        topic.metric.family = proof_task::MetricFamily::Custom;
+        topic.metric.custom_id = "placeholder_metric".into();
+        topic.metric.primary = "placeholder_primary".into();
+        topic.holdout_commitment = "cd".repeat(32);
+        topic.baseline.script_sha256 = "ee".repeat(32);
+        store.put_topic(topic.clone()).expect("topic");
+
+        // A measurement that binds to the topic (commitment + image digest),
+        // carrying a zero primary: the seal `verify` accepts, the bar the
+        // scoring path cannot.
+        let mut meas = BaselineMeasurement {
+            eval_image_digest: pin.eval_image_digest.clone(),
+            topic_id: topic.id.clone(),
+            holdout_commitment: topic.holdout_commitment.clone(),
+            holdout_nll: 0.0,
+            split_nll: proof_task::HoldoutSplit::SCORED
+                .iter()
+                .map(|s| (s.as_str().to_owned(), 0.0))
+                .collect(),
+            tokens_per_sec: None,
+            step_latency_ms: None,
+            custom_value: Some(0.0),
+        };
+        topic.baseline.metrics_commitment = meas.commitment();
+        store
+            .put_topic(topic.clone())
+            .expect("re-put with commitment");
+        std::fs::write(&path, serde_json::to_string(&meas).expect("json")).expect("write");
+
+        let err = load_baselines(&store, &pin, Some(&path)).expect_err("a zero bar must not load");
+        assert!(err.contains("degenerate bar"), "{err}");
+        assert!(
+            store.baseline("baseline-gate-v0").expect("read").is_none(),
+            "nothing may be recorded when the bar is refused"
+        );
+
+        // A real measurement still loads: the guard narrows nothing else.
+        // The topic's commitment has to move with it — `verify` binds the
+        // measurement to the document, which is the property that makes the
+        // guard above meaningful rather than a check on a file nobody reads.
+        meas.custom_value = Some(0.42);
+        topic.baseline.metrics_commitment = meas.commitment();
+        store
+            .put_topic(topic)
+            .expect("re-put with the new commitment");
+        std::fs::write(&path, serde_json::to_string(&meas).expect("json")).expect("write");
+        assert_eq!(load_baselines(&store, &pin, Some(&path)).expect("loads"), 1);
+        let sealed = store
+            .baseline("baseline-gate-v0")
+            .expect("read")
+            .expect("recorded");
+        assert!(
+            (sealed.custom_value.expect("custom") - 0.42).abs() < 1e-12,
+            "{sealed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The publish gate and the startup gate read the **same bound fact**: the
+    /// rule version the newest install recorded, not whichever version is
+    /// newest.
+    #[test]
+    fn the_admission_gate_reads_the_version_the_install_recorded() {
+        // `installed_rules` is the single read both gates call; the pairing is
+        // what makes "an install landed the operator's vector while a later
+        // version was RLM-authored" unable to open a topic.
+        let source = include_str!("main.rs");
+        let gate = source
+            .split("async fn open_topic_admissible")
+            .nth(1)
+            .expect("the gate");
+        assert!(
+            gate.contains("installed_rules"),
+            "the startup gate must read the install-bound fact, not two independent predicates"
+        );
+        assert!(
+            !gate.contains("rlm_authored_rules"),
+            "reading the newest rule version's provenance separately is the defect this gate \
+             fixes: it admits a topic whose install landed the operator's vector"
+        );
+    }
+
+    /// The rule-provenance read is fail-closed on a database error: it never
+    /// answers `true` for a topic it could not read.
+    #[test]
+    fn the_rlm_authorship_read_refuses_rather_than_guessing() {
+        // A lazy pool pointed at a closed port: `acquire` fails fast, so the
+        // read must be an `Err`, not `Ok(false)` and certainly not `Ok(true)`.
+        // The acquire timeout is trimmed so this stays a fast unit test.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        rt.block_on(async {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_millis(250))
+                .connect_lazy("postgres://127.0.0.1:1/none")
+                .expect("lazy pool builds without connecting");
+            assert!(
+                proof_topic_install::rlm_authored_rules(&pool, "any-topic")
+                    .await
+                    .is_err(),
+                "an unreadable store must not answer for a topic"
+            );
+            assert!(
+                proof_topic_install::rules_source(&pool, "any-topic")
+                    .await
+                    .is_err(),
+                "an unreadable store must not answer for a topic"
+            );
+        });
     }
 
     /// A leaf the trust root would reject is not weight, so a missing

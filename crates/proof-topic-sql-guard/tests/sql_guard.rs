@@ -14,7 +14,8 @@
 
 use proof_topic_sql_guard::MigrationDenied;
 use proof_topic_sql_guard::{
-    blank_statements, check_migration, is_topic_scoped, split_statements, OWNED_TABLES,
+    blank_statements, check_migration, claim_collisions, is_topic_scoped, referenced_objects,
+    split_statements, topic_sql_prefix, OWNED_TABLES,
 };
 
 const TOPIC: &str = "tb4";
@@ -266,6 +267,195 @@ fn a_topics_own_namespace_is_allowed() {
     assert!(!is_topic_scoped("tb40_scratch", "tb4"));
     assert!(!is_topic_scoped("tb_scratch", "tb4"));
     assert!(!is_topic_scoped("", "tb4"));
+}
+
+/// A real topic id is a **hyphen slug**, and a bare SQL identifier cannot
+/// contain a hyphen — so the guard has to accept the identifier-safe spelling
+/// or no real topic could ever install a migration.
+///
+/// The defect this pins: the guard required a literal `{topic_id}_` prefix.
+/// Every live topic id is `[a-z0-9][a-z0-9-]{1,62}`, so the requirement was
+/// unsatisfiable: `CREATE TABLE fixture-topic-v0_scratch` is a syntax error at
+/// the first `-`, and the underscore spelling was refused. `--drive-rlm` would
+/// provision the VM, run the paid baseline, and only then fail the install on
+/// the deny-list — a paid run that could never publish.
+#[test]
+fn a_hyphenated_topic_id_has_an_identifier_safe_namespace() {
+    // The mapping is `-` → `_`. It is injective **over legal ids**: an id
+    // cannot contain an underscore (`[a-z0-9][a-z0-9-]{1,62}`), so two
+    // different real ids cannot collide on one prefix.
+    assert_eq!(topic_sql_prefix("fixture-topic-v0"), "fixture_topic_v0");
+    assert_eq!(topic_sql_prefix("tb4"), "tb4");
+    assert_ne!(
+        topic_sql_prefix("a-b"),
+        topic_sql_prefix("a-b-c"),
+        "different ids map to different prefixes"
+    );
+
+    // The identifier-safe spelling is inside the topic's namespace…
+    assert!(is_topic_scoped(
+        "fixture_topic_v0_scratch",
+        "fixture-topic-v0"
+    ));
+    assert!(is_topic_scoped("fixture_topic_v0.runs", "fixture-topic-v0"));
+    // …the literal spelling stays accepted where it is legal (quoted / schema)
+    assert!(is_topic_scoped("fixture-topic-v0.runs", "fixture-topic-v0"));
+    // …and a sibling is still refused, in both spellings.
+    assert!(!is_topic_scoped(
+        "fixture_topic_v1_scratch",
+        "fixture-topic-v0"
+    ));
+    assert!(!is_topic_scoped("other_topic_scratch", "fixture-topic-v0"));
+    assert!(!is_topic_scoped("topic_scratch", "fixture-topic-v0"));
+}
+
+/// The residual ambiguity the per-topic check **cannot** see, and the
+/// cross-topic check that closes it.
+///
+/// `-` → `_` is injective, but its prefixes are not prefix-free: `aa` is a
+/// prefix of `aa-b`'s mapped form `aa_b`, so the bare name `aa_b_scratch` sits
+/// inside **both** namespaces — `aa` + `b_scratch` and `aa-b` + `scratch`. A
+/// migration approved for `aa` could read, modify, or drop a table belonging
+/// to `aa-b` in the shared database.
+///
+/// The per-topic guard is right to accept the name for each topic on its own
+/// (refusing every name with an underscore after the prefix would refuse
+/// ordinary names like `tb4_scratch_idx`). The question is about the
+/// **registry**, so `claim_collisions` answers it where the registry is
+/// visible — the install.
+#[test]
+fn a_bare_name_two_topics_claim_is_reported_as_a_collision() {
+    let name = "aa_b_scratch".to_owned();
+
+    // Each topic accepts it alone: the guard sees one topic at a time.
+    assert!(is_topic_scoped(&name, "aa"));
+    assert!(is_topic_scoped(&name, "aa-b"));
+
+    // The registry-aware check names both.
+    let collisions = claim_collisions(std::slice::from_ref(&name), "aa", ["aa-b"]);
+    assert_eq!(
+        collisions,
+        vec![(name.clone(), "aa-b".to_owned())],
+        "the collision is reported with the topic that also claims it"
+    );
+    // …and symmetrically.
+    assert_eq!(
+        claim_collisions(std::slice::from_ref(&name), "aa-b", ["aa"]),
+        vec![(name, "aa".to_owned())]
+    );
+}
+
+/// The collision check must not fire on names that only *look* ambiguous.
+///
+/// `tb4_scratch` is the live staging shape (`migrations=["0001_scratch"]`): no
+/// sibling claims it unless a topic `tb4-scratch` is actually registered, and
+/// the check only refuses when one is.
+#[test]
+fn a_name_no_registered_sibling_claims_is_not_a_collision() {
+    let names = vec![
+        "tb4_scratch".to_owned(),
+        "tb4_scratch_idx".to_owned(),
+        "tb4".to_owned(),
+    ];
+    // No other topic registered: nothing collides.
+    assert!(claim_collisions(&names, "tb4", Vec::<&str>::new()).is_empty());
+    // An unrelated topic: still nothing.
+    assert!(claim_collisions(&names, "tb4", ["other-topic"]).is_empty());
+    // A topic that *would* map onto `tb4_scratch` collides on the name that
+    // sits **inside** its namespace — and not on `tb4_scratch` itself, which
+    // has no trailing underscore and so is not `tb4-scratch`'s prefix.
+    let collisions = claim_collisions(&names, "tb4", ["tb4-scratch"]);
+    assert_eq!(
+        collisions
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
+        ["tb4_scratch_idx"],
+        "exactly the names the sibling maps onto"
+    );
+    assert!(
+        collisions.iter().all(|(_, other)| other == "tb4-scratch"),
+        "{collisions:?}"
+    );
+    // A topic cannot collide with itself.
+    assert!(claim_collisions(&names, "tb4", ["tb4"]).is_empty());
+}
+
+/// The whole pipeline, end to end: a hyphenated topic's migration is
+/// **allowed**, and a sibling's table is still refused.
+#[test]
+fn a_hyphenated_topics_migration_is_admitted() {
+    let topic = "fixture-topic-v0";
+    // The exact statement the operator fixture carries.
+    allowed_for("CREATE TABLE fixture_topic_v0_scratch (id TEXT)", topic);
+    allowed_for(
+        "CREATE INDEX fixture_topic_v0_scratch_id ON fixture_topic_v0_scratch (id)",
+        topic,
+    );
+    allowed_for(
+        "INSERT INTO fixture_topic_v0_scratch (id) VALUES ('a')",
+        topic,
+    );
+
+    // A sibling topic's table is not this topic's, however similar.
+    for sql in [
+        "CREATE TABLE fixture_topic_v1_scratch (id TEXT)",
+        "CREATE TABLE topic_scratch (id TEXT)",
+        "SELECT id FROM proof_rule_version",
+    ] {
+        assert!(
+            check_migration(sql, topic).is_err(),
+            "{sql:?} must be refused for {topic}"
+        );
+    }
+}
+
+/// [`allowed`], for an arbitrary topic id.
+fn allowed_for(sql: &str, topic: &str) {
+    check_migration(sql, topic)
+        .unwrap_or_else(|e| panic!("{sql:?} must be allowed for {topic}: {e}"));
+}
+
+/// The **quoted** literal spelling is usable too.
+///
+/// `"fixture-topic-v0_scratch"` is one legal identifier, and `is_topic_scoped`
+/// accepts it. It is only reachable if the tokenizer keeps a quoted run whole:
+/// splitting at the `-` yields `fixture` / `topic` / `v0_scratch`, none of which
+/// is inside the topic's namespace, so a legal quoted name would be refused as
+/// unscoped.
+#[test]
+fn a_quoted_hyphenated_name_is_one_identifier() {
+    let topic = "fixture-topic-v0";
+    allowed_for(
+        r#"CREATE TABLE "fixture-topic-v0_scratch" (id TEXT)"#,
+        topic,
+    );
+    allowed_for(r#"CREATE TABLE "fixture-topic-v0".runs (id TEXT)"#, topic);
+    allowed_for(r#"SELECT id FROM "fixture-topic-v0_scratch""#, topic);
+
+    // Quoting is not an escape hatch: a sibling, a `topic_*` name, and a
+    // `proof_*` object are still refused when quoted.
+    for sql in [
+        r#"CREATE TABLE "fixture-topic-v1_scratch" (id TEXT)"#,
+        r#"CREATE TABLE "topic_scratch" (id TEXT)"#,
+        r#"DROP TABLE "proof_rule_version""#,
+    ] {
+        assert!(
+            check_migration(sql, topic).is_err(),
+            "{sql:?} must be refused for {topic}"
+        );
+    }
+}
+
+/// A quoted identifier with an escaped quote still reads as one name.
+#[test]
+fn an_escaped_quote_inside_a_quoted_name_is_kept() {
+    // `""` inside a quoted identifier is one literal quote in the name.
+    let names = referenced_objects(r#"CREATE TABLE "a""b" (id TEXT)"#);
+    assert!(
+        names.iter().any(|t| t == "a\"b"),
+        "the doubled quote is one name, got {names:?}"
+    );
 }
 
 /// A quoted identifier still names an object, so quoting cannot smuggle a

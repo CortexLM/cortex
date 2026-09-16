@@ -124,6 +124,33 @@ fi
 unset PROOF_TASK_SLICE
 pass "task_slice resolves through the pack; an unknown label fails closed"
 
+# --- a label on a pack with NO slices is a refusal, not "score everything" ---
+# This is the LIVE Gate 1 configuration: the pack had only MANIFEST_FIRST15 +
+# tasks/, so `task_slice` resolved to nothing and the run scored every task,
+# overran its wall clock, and measured no baseline. A label is the topic's
+# assertion about which tasks to score; it is never silently widened.
+no_slices="$PROOF_WORK_DIR/no-slices-pack"
+rm -rf "$no_slices"
+mkdir -p "$no_slices/tasks"
+for t in alpha beta gamma; do
+    mkdir -p "$no_slices/tasks/$t"
+    printf '[task]\nname = "%s"\n' "$t" > "$no_slices/tasks/$t/task.toml"
+done
+if (export PROOF_PACK_DIR="$no_slices" PROOF_TASK_SLICE=tb4-first-5
+    proof_require_tasks; proof_filter_tasks) 2>"$PROOF_WORK_DIR/no-slices.err"; then
+    fail "a slice on a pack with no slices/ must fail closed, not score every task"
+fi
+grep -q "defines no slices" "$PROOF_WORK_DIR/no-slices.err" \
+    || fail "the refusal must say the pack defines no slices: $(cat "$PROOF_WORK_DIR/no-slices.err")"
+# The same pack with the set named explicitly still works: the documented path.
+if (export PROOF_PACK_DIR="$no_slices" PROOF_TASK_SLICE=
+    PROOF_PARAM_TASKS=alpha,beta proof_require_tasks; proof_filter_tasks); then
+    pass "a pack with no slices still scores a set the topic names explicitly"
+else
+    fail "params.tasks must be the escape from a missing slice"
+fi
+pass "an unresolved task_slice on a slice-less pack fails closed and names why"
+
 # --- exec timeout export: topic data only ---
 unset PROOF_PARAM_EXEC_TIMEOUT_S || true
 proof_export_exec_timeout
@@ -318,6 +345,7 @@ path=""
 jobs=""
 env=""
 model=""
+nconcurrent=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -a|--agent) agent="$2"; shift 2 ;;
@@ -325,6 +353,7 @@ while [ $# -gt 0 ]; do
         --jobs-dir) jobs="$2"; shift 2 ;;
         --env) env="$2"; shift 2 ;;
         -m|--model) model="$2"; shift 2 ;;
+        --n-concurrent) nconcurrent="$2"; shift 2 ;;
         *) shift ;;
     esac
 done
@@ -332,6 +361,7 @@ printf '%s\n' "$agent" > "${PROOF_WORK_DIR}/harbor.agent"
 printf '%s\n' "$path" > "${PROOF_WORK_DIR}/harbor.path"
 printf '%s\n' "$env" > "${PROOF_WORK_DIR}/harbor.env"
 printf '%s\n' "$model" > "${PROOF_WORK_DIR}/harbor.model"
+printf '%s\n' "$nconcurrent" > "${PROOF_WORK_DIR}/harbor.n_concurrent"
 job="$jobs/job1/task-alpha__1"
 mkdir -p "$job/verifier"
 cat > "$job/result.json" <<JSON
@@ -380,6 +410,30 @@ assert res["claim_holds"] == r.get("claim_holds", False)
 assert res["n_scored"] == 1
 PY
 pass "evaluate run-harbor passes miner -a and full OpenRouter -m"
+
+# --- n_concurrent is topic data, passed to Harbor verbatim -------------------
+# The signed value is honored as-is (no clamp, no ceiling): a topic that asks
+# for 5 gets 5, and a topic that asks for nothing gets Harbor's own default of
+# 1 rather than an invented number.
+export PROOF_PARAM_N_CONCURRENT=5
+proof_require_tasks
+proof_filter_tasks || fail "n_concurrent=5 must not affect selection"
+"$ADAPTOR/harness/run-harbor" || fail "run-harbor must accept n_concurrent=5"
+got_nc="$(cat "$PROOF_WORK_DIR/harbor.n_concurrent")"
+[ "$got_nc" = "5" ] || fail "harbor --n-concurrent was '$got_nc', want 5 (topic data must pass through)"
+unset PROOF_PARAM_N_CONCURRENT
+"$ADAPTOR/harness/run-harbor" || fail "run-harbor must accept an unset n_concurrent"
+got_nc="$(cat "$PROOF_WORK_DIR/harbor.n_concurrent")"
+[ "$got_nc" = "1" ] || fail "harbor --n-concurrent was '$got_nc', want the default 1 when the topic sets none"
+pass "n_concurrent passes to Harbor verbatim (5 when signed, 1 when silent)"
+
+# A malformed n_concurrent is a refusal before Harbor, not a silent default.
+export PROOF_PARAM_N_CONCURRENT=zero
+if "$ADAPTOR/harness/run-harbor" 2>"$WORKDIR/n-concurrent.err"; then
+    fail "a non-integer n_concurrent must fail closed"
+fi
+unset PROOF_PARAM_N_CONCURRENT
+pass "a malformed n_concurrent fails closed before Harbor"
 
 # Overlay that still only writes report.json (metal tbench-x0039): run-harbor
 # must emit results.json from that report before exiting 0.

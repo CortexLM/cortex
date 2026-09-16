@@ -133,11 +133,13 @@ harbor_cmd=(
     --path "$PROOF_TASKS"
     -a "$AGENT_ARG"
     --jobs-dir "$jobs_dir"
-    --n-concurrent "${PROOF_PARAM_N_CONCURRENT:-1}"
-    --n-attempts "${PROOF_PARAM_N_ATTEMPTS:-1}"
     --env "$harbor_env"
     --yes
 )
+# Concurrency and attempts are topic data, validated here (not interpolated
+# blind) so a malformed value refuses the run instead of silently falling back
+# to Harbor's default.
+proof_harbor_concurrency_flags harbor_cmd
 # Wall clocks are topic data: each multiplier is passed only when signed,
 # so a pack's own task.toml timeouts stand unless the topic scales them.
 proof_harbor_timeout_flags harbor_cmd

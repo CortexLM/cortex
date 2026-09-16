@@ -28,7 +28,7 @@ operator's view of it.
 |------|-----|--------------------------------------|
 | `run` (required) | `Baseline`, `Evaluate` | `report.json` — `{"primary_value": <finite number>, "claim_holds": bool, "flops_used": <int or omit>, "evidence": {...}}`. **Evaluate** also writes the topic-defined complete results JSON (default `results.json`; pin `results_path` / `results_contract` in `constraints.params`). Missing or non-conforming on evaluate is fail-closed (no Done) |
 | `inspect` | `Inspect` (anti-cheat rules, **before any paid inference**) | `checklist.json` — `[{"id": "<rule id>", "pass": bool, "evidence": "..."}]`; a rule left out is recorded **red** |
-| `propose_rules` (optional) | `ProposeRules` | `rules.json` — `[{"id": "<slug>", "text": "..."}]`; without this entrypoint the agent proposes the signed topic's own `checklist` |
+| `propose_rules` | `ProposeRules` (RLM authorship) | `rules.json` — `[{"id": "<slug>", "text": "..."}]`. **A runner whose topic must open needs this entrypoint**: without it the guest refuses the job (`Failed` → 503, no row, nothing scored), because there is **no** fallback that echoes the signed `checklist` back. Echoing it would let the control plane record the operator's own vector as `source = rlm`, which is an operator-cloned document masquerading as RLM authorship. The signed `checklist` stays the topic's version 1 with honest `topic_document` provenance, and only a run of this entrypoint advances the store to `rlm` — which the publish gate requires before a topic may be `open`. |
 
 A non-zero exit with no document, a missing document, a non-finite
 `primary_value`, a missing or non-conforming Evaluate `results.json`, or a
@@ -81,7 +81,7 @@ closed on an unmeasured one).
 |-------|-------|------------------------|
 | `tasks` | `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}` names, comma / space separated | The exact items to score, in order. An item the pack does not hold **fails closed** (never a smaller set). One name = the single-task smoke |
 | `task_exclude` | same list shape | Items never scored |
-| `n_tasks` | positive integer | Keep only the first N selected items (`1` = smoke) |
+| `n_tasks` | positive integer | Keep only the first N selected items (`1` = smoke). `task_count` is a legacy alias, used only when `n_tasks` is absent; it is a **count, never a selector** and cannot stand in for a slice |
 | `max_task_duration_s` | positive integer | Drop items whose **known** duration is at or over this; absent = no gate |
 | `exclude_unknown_duration` | `"true"` / `"false"` | Under a gate, drop items with no duration metadata |
 | `exec_timeout_s` | positive integer | Default wall clock for one command the miner's harness runs without its own timeout (the reference adaptor exports it as `PROOF_EXEC_TIMEOUT_S`) |
