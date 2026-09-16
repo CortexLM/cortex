@@ -1560,6 +1560,48 @@ mod tests {
         kept.join("\n")
     }
 
+    /// Top-level variant names of the enum whose declaration starts at
+    /// `header` (e.g. `pub enum VmJob`), in source order.
+    ///
+    /// Textual and deliberately simple: it reads the enum body by brace depth
+    /// and takes each line at depth 1 whose first token is an identifier
+    /// followed by `,` / `{` / `(` — both variant shapes. Attributes and doc
+    /// comments are skipped. A missing enum yields an empty list, never a
+    /// guess (the caller asserts the list it expects, so an extractor that
+    /// silently stopped working would fail rather than pass).
+    fn enum_variants(source: &str, header: &str) -> Vec<String> {
+        let Some(start) = source.find(header) else {
+            return Vec::new();
+        };
+        let body = &source[start..];
+        let Some(open) = body.find('{') else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut depth = 0usize;
+        for line in body[open..].lines() {
+            let trimmed = line.trim();
+            if depth == 1 && !trimmed.starts_with("//") && !trimmed.starts_with("#[") {
+                if let Some(name) = trimmed.split(['{', '(', ',', ' ']).next() {
+                    if !name.is_empty()
+                        && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                        && !matches!(name, "Where" | "Self")
+                    {
+                        out.push(name.to_owned());
+                    }
+                }
+            }
+            depth = depth.saturating_add(line.matches('{').count());
+            for _ in 0..line.matches('}').count() {
+                depth = depth.saturating_sub(1);
+            }
+            if depth == 0 {
+                break;
+            }
+        }
+        out
+    }
+
     /// What the RLM actually authors, and what it does not — the boundary the
     /// docs must not overclaim.
     ///
@@ -1613,18 +1655,30 @@ mod tests {
             jobs.contains("Rules(Vec<ChecklistRule>)"),
             "the RLM still returns a rule vector"
         );
-        // A variant the RLM could use to author schema or routes. Matched on
-        // the **name**, so it catches both spellings a variant may take
-        // (`Migrations { … }` and `Migrations(…)`) — the first version of this
-        // guard looked only for the tuple form and passed on an injected
-        // struct variant, i.e. it was vacuous.
-        for not_rlm in ["Migrations", "Migration", "ApiRoute", "Apis"] {
-            assert!(
-                !jobs.contains(not_rlm),
-                "the RLM job surface now carries {not_rlm:?}: it authors more than rules, so the \
-                 docs may claim it — but this test (and the prose) must be updated deliberately"
-            );
-        }
+
+        // **Allow-list, not deny-list.** A denylist of names this test
+        // happens to think of cannot hold an authorship boundary: a variant
+        // called `ApplySchema(Vec<SchemaSpec>)` or `DeployRoutes { routes: … }`
+        // authors schema and routes without naming either, and Greptile
+        // demonstrated exactly that against the first version of this guard.
+        // So the check enumerates the **whole** permitted surface and fails on
+        // anything else — a new variant has to be added here deliberately,
+        // which is the moment the prose gets updated with it.
+        let variants = enum_variants(&jobs, "pub enum VmJob");
+        assert_eq!(
+            variants,
+            ["ProposeRules", "Baseline", "Inspect", "Evaluate", "Archive"],
+            "the RLM job surface changed: it authors more than rules, so the docs may claim it — \
+             add the variant here deliberately (and update the prose) rather than widening the \
+             boundary silently"
+        );
+        let outputs = enum_variants(&jobs, "pub enum VmJobOutput");
+        assert_eq!(
+            outputs,
+            ["Rules", "Baseline", "Inspected", "Evaluated", "Archived"],
+            "the RLM output surface changed: a new output is a new thing the RLM can author, so \
+             the docs may claim it — add it here deliberately"
+        );
 
         // Migrations and APIs are the install section's, applied by the
         // install, authored by whoever writes the bundle.
@@ -1635,6 +1689,21 @@ mod tests {
                 "the install section still supplies {part}; this guard is reading the wrong file"
             );
         }
+
+        // The extractor is not vacuous: it finds a known enum's variants and
+        // refuses to guess when the enum is absent.
+        assert_eq!(
+            enum_variants(
+                "pub enum Probe {\n    One,\n    Two { x: u8 },\n}\n",
+                "pub enum Probe"
+            ),
+            ["One", "Two"],
+            "the extractor reads top-level variants of both shapes"
+        );
+        assert!(
+            enum_variants("pub enum Other {\n    One,\n}\n", "pub enum Probe").is_empty(),
+            "a missing enum yields nothing, never a guess"
+        );
     }
 
     /// Every product module that decides what a topic may do, and must
