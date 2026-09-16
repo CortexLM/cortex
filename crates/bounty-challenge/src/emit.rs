@@ -103,6 +103,10 @@ pub enum EmitOutcome {
     Unpaid {
         /// Subnet epoch the cover was signed for.
         epoch: u64,
+        /// Block `E` was pinned at. A cover is still signed against a specific
+        /// participant snapshot, so the pin is as meaningful here as it is on
+        /// [`Self::Scored`].
+        pin_block: u64,
         /// Size of `E`.
         participants: usize,
         /// Why nobody was paid.
@@ -114,6 +118,8 @@ pub enum EmitOutcome {
     Burned {
         /// Subnet epoch the burn set was signed for.
         epoch: u64,
+        /// Block `E` was pinned at (see [`Self::Unpaid`]).
+        pin_block: u64,
         /// Size of `E`.
         participants: usize,
         /// Why the feed was unreadable.
@@ -212,7 +218,11 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
         let (epoch, pin_block, hotkeys) = pinned;
         let snapshot = match feed {
             Ok(s) => s,
-            Err(e) => return self.cover_without_a_feed(epoch, &hotkeys, &e).await,
+            Err(e) => {
+                return self
+                    .cover_without_a_feed(epoch, pin_block, &hotkeys, &e)
+                    .await
+            }
         };
         let (_plan, leaf_scores) = emission_from_public_snapshot(&hotkeys, &snapshot);
         let paid = leaf_scores
@@ -227,6 +237,7 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
             return self
                 .cover_without_a_feed(
                     epoch,
+                    pin_block,
                     &hotkeys,
                     &BackendError::NoPayableRows(NO_PAYABLE_ROWS_REASON.to_owned()),
                 )
@@ -269,12 +280,13 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
             },
             Ok(EmitOutcome::Unpaid {
                 epoch,
+                pin_block,
                 participants,
                 reason,
             }) => EmitterTick {
                 kind: EmitterOutcomeKind::Unpaid,
                 epoch: *epoch,
-                pin_block: 0,
+                pin_block: *pin_block,
                 participants: *participants,
                 paid: 0,
                 feed_read,
@@ -284,12 +296,13 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
             },
             Ok(EmitOutcome::Burned {
                 epoch,
+                pin_block,
                 participants,
                 reason,
             }) => EmitterTick {
                 kind: EmitterOutcomeKind::Burned,
                 epoch: *epoch,
-                pin_block: 0,
+                pin_block: *pin_block,
                 participants: *participants,
                 paid: 0,
                 feed_read,
@@ -297,7 +310,10 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
                 reason: Some(reason),
                 error: None,
             },
-            Ok(EmitOutcome::Held { epoch, reason, .. }) => EmitterTick {
+            // A hold leaves an earlier tick's leaves standing, so it has no
+            // pin of its own to publish: `last_pin_block` stays 0 rather than
+            // claiming a block this tick never derived `E` at.
+            Ok(EmitOutcome::Held { epoch, reason }) => EmitterTick {
                 kind: EmitterOutcomeKind::Held,
                 epoch: *epoch,
                 pin_block: 0,
@@ -347,10 +363,12 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
                 ),
                 Ok(EmitOutcome::Unpaid {
                     epoch,
+                    pin_block,
                     participants,
                     reason,
                 }) => tracing::warn!(
                     epoch,
+                    pin_block,
                     participants,
                     %reason,
                     "bounty read the feed and found nothing payable: covered E with \
@@ -358,10 +376,12 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
                 ),
                 Ok(EmitOutcome::Burned {
                     epoch,
+                    pin_block,
                     participants,
                     reason,
                 }) => tracing::warn!(
                     epoch,
+                    pin_block,
                     participants,
                     %reason,
                     "bounty could not read the feed: covered E with ChallengeInternal, \
@@ -415,6 +435,7 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
     async fn cover_without_a_feed(
         &self,
         epoch: u64,
+        pin_block: u64,
         hotkeys: &BTreeSet<Hotkey>,
         cause: &BackendError,
     ) -> Result<EmitOutcome, EmitError> {
@@ -438,12 +459,14 @@ impl<C: ChainClient + Send + Sync> BountyEmitter<C> {
         if matches!(cause, BackendError::NoPayableRows(_)) {
             return Ok(EmitOutcome::Unpaid {
                 epoch,
+                pin_block,
                 participants,
                 reason,
             });
         }
         Ok(EmitOutcome::Burned {
             epoch,
+            pin_block,
             participants,
             reason,
         })

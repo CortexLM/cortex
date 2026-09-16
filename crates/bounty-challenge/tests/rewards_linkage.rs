@@ -657,10 +657,12 @@ async fn an_unreadable_feed_pays_nobody_without_breaking_the_seal() {
     let epoch = match em.tick().await.expect("cover E") {
         EmitOutcome::Burned {
             epoch,
+            pin_block,
             participants,
             reason,
         } => {
             assert_eq!(participants, 2);
+            assert_eq!(pin_block, chain::fake_defaults::LAST_EPOCH_BLOCK);
             assert!(reason.contains("503"), "{reason}");
             epoch
         }

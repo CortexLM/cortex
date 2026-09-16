@@ -33,7 +33,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use bounty_challenge::{
     fetch_public_snapshot, BackendError, BountyEmitter, EmitOutcome, EmitterOutcomeKind,
-    GatewayClient, GatewayClientConfig,
+    EmitterStatus, EmitterTick, GatewayClient, GatewayClientConfig,
 };
 use chain::{
     AxonInfo, ChainClient, ChainError, FakeChain, FakeChainConfig, Metagraph, WeightsTlockPayload,
@@ -273,6 +273,13 @@ async fn spawn_stable_torn_backend() -> String {
             "/v1/bounty/public/reports",
             get(|| async { Json(serde_json::json!({ "items": [champion_valid_row(0, "one")] })) }),
         );
+    serve(app).await
+}
+
+/// A backend that answers 503 on both routes — the shape of an outage, as
+/// opposed to [`spawn_empty_backend`]'s reachable-but-unpaid feed.
+async fn spawn_down_backend() -> String {
+    let app = Router::new().fallback(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE });
     serve(app).await
 }
 
@@ -533,10 +540,16 @@ async fn an_unset_backend_url_burns_without_paying_anyone() {
     match em.tick().await.expect("burn covers E") {
         EmitOutcome::Burned {
             epoch,
+            pin_block,
             participants,
             reason,
         } => {
             assert_eq!(epoch, chain::fake_defaults::SUBNET_EPOCH_INDEX);
+            assert_eq!(
+                pin_block,
+                chain::fake_defaults::LAST_EPOCH_BLOCK,
+                "a cover is signed against a pinned participant snapshot"
+            );
             assert_eq!(participants, 3);
             assert!(reason.contains("BOUNTY_BACKEND_PUBLIC_URL"), "{reason}");
         }
@@ -754,10 +767,16 @@ async fn a_readable_feed_with_no_rows_covers_e_instead_of_claiming_a_score() {
     match em.tick().await.expect("cover covers E") {
         EmitOutcome::Unpaid {
             epoch,
+            pin_block,
             participants,
             reason,
         } => {
             assert_eq!(epoch, chain::fake_defaults::SUBNET_EPOCH_INDEX);
+            assert_eq!(
+                pin_block,
+                chain::fake_defaults::LAST_EPOCH_BLOCK,
+                "a cover is signed against a pinned participant snapshot"
+            );
             assert_eq!(participants, 3);
             assert!(reason.contains("no payable rows"), "{reason}");
         }
@@ -878,6 +897,155 @@ async fn status_reports_a_wired_emitter_that_has_not_ticked_yet() {
     assert_eq!(view.last_outcome, EmitterOutcomeKind::Never);
     assert!(!view.last_feed_read);
     assert_eq!(view.last_paid, 0);
+    assert_eq!(view.last_pin_block, 0, "no tick has pinned a block yet");
+}
+
+/// A cover is signed against a pinned participant snapshot, so the status must
+/// publish that block rather than report zero. Reporting `last_pin_block: 0`
+/// beside a real epoch and participant count hides the block a validator would
+/// have to reproduce, and 0 is documented as "no tick yet".
+#[tokio::test]
+async fn a_cover_publishes_the_block_it_pinned_e() {
+    for backend in [spawn_empty_backend().await, spawn_down_backend().await] {
+        let (gateway, _accepted) = spawn_gateway().await;
+        let em = emitter(Some(backend), &gateway);
+        assert!(matches!(
+            em.tick().await.expect("cover covers E"),
+            EmitOutcome::Unpaid { .. } | EmitOutcome::Burned { .. }
+        ));
+        let view = em.status().view();
+        assert_eq!(
+            view.last_pin_block,
+            chain::fake_defaults::LAST_EPOCH_BLOCK,
+            "a cover pins E at a real block: {view:?}"
+        );
+        assert_eq!(view.last_epoch, chain::fake_defaults::SUBNET_EPOCH_INDEX);
+        assert_eq!(view.last_participants, 3);
+    }
+}
+
+/// A held tick publishes no pin of its own: the leaves it left standing came
+/// from an earlier tick, and claiming a block this tick never derived `E` at
+/// would be a fabrication.
+#[tokio::test]
+async fn a_held_tick_does_not_claim_a_pin_it_did_not_use() {
+    let (backend, payable) = spawn_switchable_backend().await;
+    let (gateway, _accepted) = spawn_gateway().await;
+    let em = emitter(Some(backend), &gateway);
+
+    assert!(matches!(
+        em.tick().await.expect("scored"),
+        EmitOutcome::Scored { .. }
+    ));
+    assert_eq!(
+        em.status().view().last_pin_block,
+        chain::fake_defaults::LAST_EPOCH_BLOCK
+    );
+
+    payable.store(false, Ordering::Relaxed);
+    assert!(matches!(
+        em.tick().await.expect("hold"),
+        EmitOutcome::Held { .. }
+    ));
+    let view = em.status().view();
+    assert_eq!(view.last_outcome, EmitterOutcomeKind::Held);
+    assert_eq!(view.last_pin_block, 0, "a hold has no pin of its own");
+    assert_eq!(view.last_participants, 0);
+}
+
+/// The published fields describe one tick, never a blend of two. A reader that
+/// saw `scored` beside the previous tick's `paid: 0` would be reading a state
+/// no tick produced — exactly the combination an operator is told to treat as
+/// a fault.
+///
+/// The writer alternates between two ticks whose fields differ in *every*
+/// position, so a torn write cannot coincidentally look coherent: a `scored`
+/// snapshot carrying the other tick's `paid`/`participants`/`reason` is
+/// detected immediately.
+#[tokio::test]
+async fn status_never_pairs_an_outcome_with_another_ticks_counts() {
+    let status = Arc::new(EmitterStatus::new(true));
+    let scored = EmitterTick {
+        kind: EmitterOutcomeKind::Scored,
+        epoch: 42,
+        pin_block: 1_000,
+        participants: 3,
+        paid: 1,
+        feed_read: true,
+        scored_epoch: 42,
+        reason: None,
+        error: None,
+    };
+    let unpaid = EmitterTick {
+        kind: EmitterOutcomeKind::Unpaid,
+        epoch: 43,
+        pin_block: 1_360,
+        participants: 7,
+        paid: 0,
+        feed_read: true,
+        scored_epoch: 43,
+        reason: Some("nothing payable"),
+        error: None,
+    };
+
+    let writer = {
+        let status = Arc::clone(&status);
+        tokio::task::spawn_blocking(move || {
+            for i in 0..20_000u32 {
+                status.record(if i % 2 == 0 { scored } else { unpaid });
+            }
+        })
+    };
+
+    let mut snapshots = 0u32;
+    while !writer.is_finished() {
+        let view = status.view();
+        match view.last_outcome {
+            EmitterOutcomeKind::Scored => {
+                assert_eq!(
+                    (
+                        view.last_epoch,
+                        view.last_pin_block,
+                        view.last_participants,
+                        view.last_paid
+                    ),
+                    (42, 1_000, 3, 1),
+                    "a scored snapshot must be exactly the scored tick: {view:?}"
+                );
+                assert!(view.last_reason.is_empty(), "{view:?}");
+            }
+            EmitterOutcomeKind::Unpaid => {
+                assert_eq!(
+                    (
+                        view.last_epoch,
+                        view.last_pin_block,
+                        view.last_participants,
+                        view.last_paid
+                    ),
+                    (43, 1_360, 7, 0),
+                    "an unpaid snapshot must be exactly the unpaid tick: {view:?}"
+                );
+                assert_eq!(view.last_reason, "nothing payable", "{view:?}");
+            }
+            // The reader can legitimately race ahead of the writer's first
+            // tick; that is the documented initial state, not a torn read.
+            EmitterOutcomeKind::Never => {
+                assert_eq!(view.ticks, 0, "Never is only before the first tick");
+                assert_eq!(view.last_participants, 0);
+                assert_eq!(view.last_paid, 0);
+            }
+            other => panic!("no other outcome was ever recorded: {other:?}"),
+        }
+        snapshots += 1;
+        tokio::task::yield_now().await;
+    }
+    writer.await.expect("writer");
+    assert!(
+        snapshots > 0,
+        "the reader must actually have raced the writer"
+    );
+    // The counters are monotonic and independent of which tick is last.
+    assert_eq!(status.view().scored_epoch, 43);
 }
 
 /// A scored tick publishes what was actually paid, so an operator can see the

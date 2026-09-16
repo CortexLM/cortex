@@ -16,7 +16,7 @@
 use keystore::{ss58_decode, ss58_encode, BITTENSOR_SS58_PREFIX, KEY_LEN};
 use schnorrkel::{signing_context, ExpansionMode, MiniSecretKey, PublicKey, Signature};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use thiserror::Error;
 
@@ -236,32 +236,6 @@ pub enum EmitterOutcomeKind {
     Error,
 }
 
-impl EmitterOutcomeKind {
-    /// Stable code for the atomic slot.
-    const fn code(self) -> u8 {
-        match self {
-            Self::Never => 0,
-            Self::Scored => 1,
-            Self::Unpaid => 2,
-            Self::Burned => 3,
-            Self::Held => 4,
-            Self::Error => 5,
-        }
-    }
-
-    /// Inverse of [`Self::code`]; unknown codes read back as [`Self::Never`].
-    const fn from_code(code: u8) -> Self {
-        match code {
-            1 => Self::Scored,
-            2 => Self::Unpaid,
-            3 => Self::Burned,
-            4 => Self::Held,
-            5 => Self::Error,
-            _ => Self::Never,
-        }
-    }
-}
-
 /// One completed tick, as recorded by [`EmitterStatus::record`].
 #[derive(Debug, Clone, Copy)]
 pub struct EmitterTick<'a> {
@@ -320,19 +294,51 @@ pub struct EmitterStatusView {
 }
 
 /// Shared emitter state. The emitter writes it; `/v1/status` reads it.
+///
+/// The per-tick fields live in one [`Mutex`] rather than in separate atomics:
+/// they describe a single tick and are read as a set (`unpaid` with a feed that
+/// was read, `scored` with a positive paid count). Publishing them one atomic
+/// at a time would let a concurrent reader pair the new outcome with the
+/// previous tick's paid count or reason, which is worse than a stale snapshot —
+/// it is a combination no tick ever produced, and the CLI and operators read
+/// these fields together to decide which half of the reward path is missing.
+///
+/// `ticks` and `scored_epoch` stay separate: they are monotonic counters whose
+/// value does not depend on which tick is "last".
 #[derive(Debug)]
 pub struct EmitterStatus {
     wired: bool,
     ticks: AtomicU64,
-    last_kind: AtomicU8,
-    last_epoch: AtomicU64,
-    last_pin_block: AtomicU64,
-    last_participants: AtomicU64,
-    last_paid: AtomicU64,
-    last_feed_read: AtomicBool,
     scored_epoch: AtomicU64,
-    last_reason: Mutex<String>,
-    last_error: Mutex<String>,
+    last: Mutex<LastTick>,
+}
+
+/// The fields of one completed tick, published and read as one value.
+#[derive(Debug, Clone)]
+struct LastTick {
+    kind: EmitterOutcomeKind,
+    epoch: u64,
+    pin_block: u64,
+    participants: u64,
+    paid: u64,
+    feed_read: bool,
+    reason: String,
+    error: String,
+}
+
+impl Default for LastTick {
+    fn default() -> Self {
+        Self {
+            kind: EmitterOutcomeKind::Never,
+            epoch: 0,
+            pin_block: 0,
+            participants: 0,
+            paid: 0,
+            feed_read: false,
+            reason: String::new(),
+            error: String::new(),
+        }
+    }
 }
 
 impl EmitterStatus {
@@ -342,15 +348,8 @@ impl EmitterStatus {
         Self {
             wired,
             ticks: AtomicU64::new(0),
-            last_kind: AtomicU8::new(EmitterOutcomeKind::Never.code()),
-            last_epoch: AtomicU64::new(0),
-            last_pin_block: AtomicU64::new(0),
-            last_participants: AtomicU64::new(0),
-            last_paid: AtomicU64::new(0),
-            last_feed_read: AtomicBool::new(false),
             scored_epoch: AtomicU64::new(0),
-            last_reason: Mutex::new(String::new()),
-            last_error: Mutex::new(String::new()),
+            last: Mutex::new(LastTick::default()),
         }
     }
 
@@ -360,49 +359,50 @@ impl EmitterStatus {
         self.wired
     }
 
-    /// Record one completed tick.
+    /// Record one completed tick as a single replacement, so no reader can
+    /// observe a mix of this tick and the previous one.
     pub fn record(&self, tick: EmitterTick<'_>) {
-        self.ticks.fetch_add(1, Ordering::Relaxed);
-        self.last_kind.store(tick.kind.code(), Ordering::Relaxed);
-        self.last_epoch.store(tick.epoch, Ordering::Relaxed);
-        self.last_pin_block.store(tick.pin_block, Ordering::Relaxed);
-        self.last_participants
-            .store(count_u64(tick.participants), Ordering::Relaxed);
-        self.last_paid
-            .store(count_u64(tick.paid), Ordering::Relaxed);
-        self.last_feed_read.store(tick.feed_read, Ordering::Relaxed);
         self.scored_epoch
             .fetch_max(tick.scored_epoch, Ordering::Relaxed);
-        tick.reason
-            .unwrap_or_default()
-            .clone_into(&mut lock(&self.last_reason));
-        tick.error
-            .unwrap_or_default()
-            .clone_into(&mut lock(&self.last_error));
+        *lock(&self.last) = LastTick {
+            kind: tick.kind,
+            epoch: tick.epoch,
+            pin_block: tick.pin_block,
+            participants: count_u64(tick.participants),
+            paid: count_u64(tick.paid),
+            feed_read: tick.feed_read,
+            reason: tick.reason.unwrap_or_default().to_owned(),
+            error: tick.error.unwrap_or_default().to_owned(),
+        };
+        // Bumped last: a reader that sees tick N may still see N-1's fields if
+        // it raced the lock, but the count never claims a tick whose fields
+        // have not landed.
+        self.ticks.fetch_add(1, Ordering::Release);
     }
 
     /// Read-side snapshot for `/v1/status`.
     #[must_use]
     pub fn view(&self) -> EmitterStatusView {
+        let last = lock(&self.last).clone();
         EmitterStatusView {
             wired: self.wired,
-            ticks: self.ticks.load(Ordering::Relaxed),
-            last_outcome: EmitterOutcomeKind::from_code(self.last_kind.load(Ordering::Relaxed)),
-            last_epoch: self.last_epoch.load(Ordering::Relaxed),
-            last_pin_block: self.last_pin_block.load(Ordering::Relaxed),
-            last_participants: self.last_participants.load(Ordering::Relaxed),
-            last_paid: self.last_paid.load(Ordering::Relaxed),
-            last_feed_read: self.last_feed_read.load(Ordering::Relaxed),
+            ticks: self.ticks.load(Ordering::Acquire),
+            last_outcome: last.kind,
+            last_epoch: last.epoch,
+            last_pin_block: last.pin_block,
+            last_participants: last.participants,
+            last_paid: last.paid,
+            last_feed_read: last.feed_read,
             scored_epoch: self.scored_epoch.load(Ordering::Relaxed),
-            last_reason: lock(&self.last_reason).clone(),
-            last_error: lock(&self.last_error).clone(),
+            last_reason: last.reason,
+            last_error: last.error,
         }
     }
 }
 
-/// A poisoned lock here is a status string, not a consensus input: recover the
-/// guard rather than take the challenge down over a display field.
-fn lock(m: &Mutex<String>) -> std::sync::MutexGuard<'_, String> {
+/// A poisoned lock here is a status snapshot, not a consensus input: recover
+/// the guard rather than take the challenge down over a display field.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
