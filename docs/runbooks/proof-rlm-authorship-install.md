@@ -163,6 +163,19 @@ produces `topic_document` provenance and the publish gate refuses to open the to
 ssh cortex-staging 'test -x /opt/proof/runners/rlm_fc_in_guest_harbor/propose_rules \
   && echo "propose_rules present" || echo "REBAKE REQUIRED"'
 
+#    Rebake (operator overlay + chroot-hook are the operator's own):
+deploy/guest/bake-rootfs.sh \
+  --guest-agent <proof-vm-guest-agent> \
+  --runner rlm_fc_in_guest_harbor="$(pwd)/deploy/guest/runners/rlm_fc_in_guest_harbor" \
+  --overlay <harbor-venv-overlay> --chroot-hook <install-harbor.sh> \
+  --resolver <allowlisted resolver> --out-dir ./out
+#    Stage the new rootfs on the KVM host, take ITS sha256sum, and set that
+#    value as PROOF_RLM_VM_IMAGE_DIGEST in deploy/env/proof-challenge.env
+#    (staging overlay: deploy/env/proof-challenge.staging-vm.example).
+install -m 0644 out/sha256-<img>.ext4 /var/lib/proof-vm/images/   # on the KVM host
+sha256sum /var/lib/proof-vm/images/sha256-<img>.ext4              # must print <img>
+#    Then restart the KVM-host agent and proof-challenge. Never invent a digest.
+
 # ── 1. Migrations 0027 / 0028 on the staging database ───────────────────────
 #    proof_topic_authoring (the stored sets) + the route-revision column and
 #    the DELETE grant register_apis reconciles with.
@@ -170,29 +183,36 @@ sqlx migrate run --source crates/db/migrations      # 26 → 28
 
 # ── 2. The RLM authors; the install applies ITS set ────────────────────────
 #    --drive-rlm provisions the topic VM and spends on a baseline: staging first.
-PROOF_VM_ORCHESTRATOR_URL=https://<kvm-host>:8200 \
+#    The bundle is the SIGNED TOPIC DOCUMENT (its `rlm` section is not the SoT
+#    when the drive succeeds — the RLM's set supersedes it).
+PROOF_VM_ORCHESTRATOR_URL=https://<kvm-host-vpc>:8200 \
 PROOF_VM_ORCHESTRATOR_TOKEN_FILE=/run/base/proof/vm_orchestrator_token \
+PROOF_VM_ORCHESTRATOR_CA_FILE=/run/base/proof/vm_orchestrator_ca.pem \
 PROOF_RLM_VM_IMAGE_DIGEST=sha256:<rebaked> \
-PROOF_RLM_OWNER_INFERENCE_KEY_FILE=/run/base/proof/owner_inference_key \
+PROOF_RLM_OWNER_INFERENCE_KEY_FILE=/run/base/proof/rlm_owner_inference_key \
 PROOF_INFERENCE_OFFER_FILE=/run/base/proof/inference_offer.json \
 BASE_DATABASE_URL=postgres://<staging-master> \
   proof-admin topic install \
-    --bundle <topic>.json \
+    --bundle <topic-document>.json \
     --env staging \
     --drive-rlm --owner-approved \
-    --admin-url https://gateway.cortex.foundation/challenge/proof \
+    --admin-url http://<staging-master-vpc>:8080 \
     --admin-token-file /run/base/proof/admin_tokens
 
 # ── 3. Read the measurement, seal the open document, publish ───────────────
 proof-admin topic baseline <topic-id>
 proof-admin topic seal <topic-id> --document <open>.json --publish \
-  --admin-url https://gateway.cortex.foundation/challenge/proof \
+  --admin-url http://<staging-master-vpc>:8080 \
   --admin-token-file /run/base/proof/admin_tokens
 
 # ── 4. The journal is the proof, per part ──────────────────────────────────
 proof-admin topic install-log --topic <topic-id> --json \
   | jq '.binding.authorship.parts | to_entries[] | "\(.key): \(.value.source)"'
 ```
+
+`--admin-url` is the master (gateway `http://10.116.0.3:8080` on the VPC, or the
+challenge service directly on `http://127.0.0.1:8100`); the publish call goes to
+`/challenge/proof/v1/admin/proof/topics` (`proof_topic_bundle::PUBLISH_PATH`).
 
 **What must read back** (the five parts, all `rlm`; see § 3 for the full shape):
 
@@ -209,8 +229,10 @@ baked adaptor wrote `rules.json`. Rebake with an adaptor whose `propose_rules` w
 `authoring.json` and re-run — the driver resumes rather than restarting.
 
 **Clone-diff against the legacy `tbench` behavior.** The point of the ceremony is that the
-topic's behavior is no longer the operator's YAML. Compare what landed against the B1 FIXED
-run:
+topic's behavior is no longer the operator's YAML, and the way to show that is to compare
+what landed against the B1 FIXED run rather than to assert it. `tb4-b1-first5-FIXED.yaml` is
+**not** the SoT here and is not re-run: a bundle-driven install records `topic_document`
+provenance and the publish gate refuses to open the topic on it.
 
 ```sql
 -- The rule vector in force, and who wrote it (v5–v7 were already rlm).
@@ -223,12 +245,28 @@ SELECT id, state, rules_version, migrations, binding -> 'authorship' AS authorsh
 
 -- The routes the topic exposes: the RLM's set, not the bundle's.
 SELECT path, method FROM proof_topic_api WHERE topic_id = '<topic-id>' ORDER BY path;
+
+-- The stored set itself, versioned and append-only (0027).
+SELECT version, digest, set -> 'migrations' AS migrations, set -> 'apis' AS apis
+  FROM proof_topic_authoring WHERE topic_id = '<topic-id>' ORDER BY version DESC LIMIT 1;
 ```
+
+**What to expect, and what would be a red flag:**
+
+| Compare | Legacy B1 FIXED | This run | Red flag |
+|---|---|---|---|
+| `binding.authorship.source` | `topic_document` (a bundle section) | **`rlm`** | `topic_document` — the drive produced no set, or a fragment |
+| rules | the compiled/declared vector | the signed `checklist`, framed by the RLM | a rule the document does not declare, or a missing declared rule |
+| migrations | `0001_scratch` (bundle) | the RLM's own `0001_rlm_state` (+ retained prior entries) | an unscoped name, or a `proof_*` object |
+| routes | the bundle's rows | `GET /status` (the RLM's) | a route outside the topic's prefix |
+| `submission_format` | the bundle's section | the host's real intake (5 MiB cap, `base-proof-submit-v1`) | a retained/previous contract |
+| `pin_policy` | absent | a **restatement** of the document's knobs | a value that diverges from the document, or an invented `eval_image_digest` |
 
 The legacy `tbench` document carried a 15-task slice with 5 INFRA excludes and a compiled
 rule list. The RLM's set instead carries the rules the **signed document declares** (framed
 by the RLM, ticked by the signed `inspect_*` policy) and the migrations/routes/format/policy
-the RLM authored — so the diff is expected to differ, and the journal is what says so.
+the RLM authored — so the diff is expected to differ, and the journal is what says so. A
+`topic_document` source on the newest row means the ceremony did not do what it is for.
 
 ---
 
