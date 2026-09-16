@@ -16,7 +16,6 @@
 use keystore::{ss58_decode, ss58_encode, BITTENSOR_SS58_PREFIX, KEY_LEN};
 use schnorrkel::{signing_context, ExpansionMode, MiniSecretKey, PublicKey, Signature};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use thiserror::Error;
 
@@ -295,22 +294,31 @@ pub struct EmitterStatusView {
 
 /// Shared emitter state. The emitter writes it; `/v1/status` reads it.
 ///
-/// The per-tick fields live in one [`Mutex`] rather than in separate atomics:
-/// they describe a single tick and are read as a set (`unpaid` with a feed that
-/// was read, `scored` with a positive paid count). Publishing them one atomic
-/// at a time would let a concurrent reader pair the new outcome with the
-/// previous tick's paid count or reason, which is worse than a stale snapshot —
-/// it is a combination no tick ever produced, and the CLI and operators read
-/// these fields together to decide which half of the reward path is missing.
+/// Everything a reader sees is published under **one** lock, counters
+/// included. The per-tick fields describe a single tick and are read as a set
+/// (`unpaid` with a feed that was read, `scored` with a positive paid count),
+/// so publishing them one atomic at a time would let a concurrent reader pair
+/// the new outcome with the previous tick's paid count or reason — a
+/// combination no tick ever produced, and the CLI and operators read these
+/// fields together to decide which half of the reward path is missing.
 ///
-/// `ticks` and `scored_epoch` stay separate: they are monotonic counters whose
-/// value does not depend on which tick is "last".
+/// The counters are in the same lock rather than beside it for the same
+/// reason: a reader that saw `ticks: 1` next to the pre-tick `Never` would be
+/// looking at two different states, and would have to know that pairing is
+/// legal to read the snapshot correctly. One lock makes the whole view a
+/// value that some tick actually produced.
 #[derive(Debug)]
 pub struct EmitterStatus {
     wired: bool,
-    ticks: AtomicU64,
-    scored_epoch: AtomicU64,
-    last: Mutex<LastTick>,
+    published: Mutex<Published>,
+}
+
+/// The complete published state: monotonic counters plus the last tick.
+#[derive(Debug, Default)]
+struct Published {
+    ticks: u64,
+    scored_epoch: u64,
+    last: LastTick,
 }
 
 /// The fields of one completed tick, published and read as one value.
@@ -347,9 +355,7 @@ impl EmitterStatus {
     pub fn new(wired: bool) -> Self {
         Self {
             wired,
-            ticks: AtomicU64::new(0),
-            scored_epoch: AtomicU64::new(0),
-            last: Mutex::new(LastTick::default()),
+            published: Mutex::new(Published::default()),
         }
     }
 
@@ -362,9 +368,10 @@ impl EmitterStatus {
     /// Record one completed tick as a single replacement, so no reader can
     /// observe a mix of this tick and the previous one.
     pub fn record(&self, tick: EmitterTick<'_>) {
-        self.scored_epoch
-            .fetch_max(tick.scored_epoch, Ordering::Relaxed);
-        *lock(&self.last) = LastTick {
+        let mut published = lock(&self.published);
+        published.ticks = published.ticks.saturating_add(1);
+        published.scored_epoch = published.scored_epoch.max(tick.scored_epoch);
+        published.last = LastTick {
             kind: tick.kind,
             epoch: tick.epoch,
             pin_block: tick.pin_block,
@@ -374,28 +381,30 @@ impl EmitterStatus {
             reason: tick.reason.unwrap_or_default().to_owned(),
             error: tick.error.unwrap_or_default().to_owned(),
         };
-        // Bumped last: a reader that sees tick N may still see N-1's fields if
-        // it raced the lock, but the count never claims a tick whose fields
-        // have not landed.
-        self.ticks.fetch_add(1, Ordering::Release);
     }
 
     /// Read-side snapshot for `/v1/status`.
+    ///
+    /// The whole snapshot is read under one lock, so the counters and the
+    /// last-tick fields always describe the same state. Reading them
+    /// separately would let a reader see `ticks: 1` beside the pre-tick
+    /// `Never`, which no observer should have to reason about.
     #[must_use]
     pub fn view(&self) -> EmitterStatusView {
-        let last = lock(&self.last).clone();
+        let published = lock(&self.published);
+        let last = &published.last;
         EmitterStatusView {
             wired: self.wired,
-            ticks: self.ticks.load(Ordering::Acquire),
+            ticks: published.ticks,
             last_outcome: last.kind,
             last_epoch: last.epoch,
             last_pin_block: last.pin_block,
             last_participants: last.participants,
             last_paid: last.paid,
             last_feed_read: last.feed_read,
-            scored_epoch: self.scored_epoch.load(Ordering::Relaxed),
-            last_reason: last.reason,
-            last_error: last.error,
+            scored_epoch: published.scored_epoch,
+            last_reason: last.reason.clone(),
+            last_error: last.error.clone(),
         }
     }
 }
