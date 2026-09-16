@@ -24,6 +24,8 @@ struct Inner {
     artefacts: BTreeMap<String, Vec<ArtefactRow>>,
     promotions: BTreeMap<String, Vec<PromotionRow>>,
     aliases: BTreeMap<String, String>,
+    /// The whole set each authoring run produced, oldest first.
+    authoring: BTreeMap<String, Vec<(u32, proof_topic_authoring::TopicAuthoring)>>,
 }
 
 /// In-memory store.
@@ -276,5 +278,33 @@ impl RlmStore for MemoryRlmStore {
             .get(topic_id)
             .cloned()
             .unwrap_or_default())
+    }
+
+    async fn put_authoring(
+        &self,
+        topic_id: &str,
+        set: &proof_topic_authoring::TopicAuthoring,
+    ) -> Result<u32, StoreError> {
+        let mut g = self.lock()?;
+        let rows = g.authoring.entry(topic_id.to_owned()).or_default();
+        let want = u32::try_from(rows.len())
+            .map_err(|_| StoreError::VersionGap("authoring"))?
+            .saturating_add(1);
+        if rows.iter().any(|(v, _)| *v == want) {
+            return Err(StoreError::VersionGap("authoring"));
+        }
+        rows.push((want, set.clone()));
+        Ok(want)
+    }
+
+    async fn authoring(
+        &self,
+        topic_id: &str,
+    ) -> Result<Option<(u32, proof_topic_authoring::TopicAuthoring)>, StoreError> {
+        Ok(self
+            .lock()?
+            .authoring
+            .get(topic_id)
+            .and_then(|v| v.last().cloned()))
     }
 }

@@ -31,6 +31,15 @@ say so if one is tried.
 | A registered custom id | `PROOF_VM_RUNNER_CUSTOM_IDS` on the host | the install refuses an open topic whose id is not registered |
 | **An adaptor whose `propose_rules` writes `authoring.json`** | the guest image, baked by the operator (`deploy/guest/bake-rootfs.sh`) | the run fails closed: a rules-only adaptor answers a **fragment**, which the driver refuses (`IncompleteAuthoring`) |
 
+**Re-authoring reads the previous set.** On a second authoring run the guest
+writes the set the RLM authored last time to `$PROOF_WORK_DIR/current-authoring.json`
+and exports its path as **`PROOF_CURRENT_AUTHORING_FILE`** (empty when there is
+no previous set). An adaptor reads it to **retain** the parts it is not
+changing — without it, a re-authoring run is a rewrite from nothing and a
+migration the topic still needs would silently vanish. The set is stored per
+topic (`proof_topic_authoring`, migration `0027`), so it survives a restart and
+a different operator process is handed the same one.
+
 **The last row is the one that changed.** An adaptor baked before this change writes
 `rules.json` only. Its topic can still be installed, but it **cannot open**: the rules land
 with honest `rlm` provenance and the driver stops, naming the four parts that have no author.

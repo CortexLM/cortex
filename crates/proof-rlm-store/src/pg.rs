@@ -604,4 +604,75 @@ impl RlmStore for PgRlmStore {
         .await?;
         Ok(rows.into_iter().map(PromotionRow::from).collect())
     }
+
+    /// Append the whole set, in **one transaction** that reads the current
+    /// version under a lock.
+    ///
+    /// The version has to advance by exactly one, and "read the newest, add
+    /// one, insert" is not atomic: two authoring runs for the same topic each
+    /// read the same newest and both try to insert the same version, which the
+    /// unique constraint turns into one failure rather than a silent overwrite
+    /// — but the *failure* would be a confusing duplicate-key error instead of
+    /// the honest `VersionGap` this contract promises. The advisory lock makes
+    /// the read-then-write one step, so the second run sees the first's row and
+    /// reports the gap the way the trait says it will.
+    async fn put_authoring(
+        &self,
+        topic_id: &str,
+        set: &proof_topic_authoring::TopicAuthoring,
+    ) -> Result<u32, StoreError> {
+        set.validate(topic_id)
+            .map_err(|e| StoreError::Malformed(e.to_string()))?;
+        let digest = format!("sha256:{}", set.digest());
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("proof_topic_authoring:{topic_id}"))
+            .execute(&mut *tx)
+            .await?;
+        let newest: Option<i32> = sqlx::query_scalar(
+            "SELECT version FROM proof_topic_authoring \
+             WHERE topic_id = $1 ORDER BY version DESC LIMIT 1",
+        )
+        .bind(topic_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let want = newest
+            .map(|v| to_u32(v).map(|v| v.saturating_add(1)))
+            .transpose()?
+            .unwrap_or(1);
+        let document =
+            serde_json::to_value(set).map_err(|e| StoreError::Malformed(e.to_string()))?;
+        let version = i32::try_from(want).map_err(malformed)?;
+        sqlx::query(
+            "INSERT INTO proof_topic_authoring (topic_id, version, document, digest) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(topic_id)
+        .bind(version)
+        .bind(document)
+        .bind(digest)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(want)
+    }
+
+    async fn authoring(
+        &self,
+        topic_id: &str,
+    ) -> Result<Option<(u32, proof_topic_authoring::TopicAuthoring)>, StoreError> {
+        let row: Option<(i32, Value)> = sqlx::query_as(
+            "SELECT version, document FROM proof_topic_authoring \
+             WHERE topic_id = $1 ORDER BY version DESC LIMIT 1",
+        )
+        .bind(topic_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((version, document)) = row else {
+            return Ok(None);
+        };
+        let set: proof_topic_authoring::TopicAuthoring =
+            serde_json::from_value(document).map_err(malformed)?;
+        Ok(Some((to_u32(version)?, set)))
+    }
 }

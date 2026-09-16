@@ -4023,6 +4023,7 @@ dependencies = [
  "db",
  "proof-rlm",
  "proof-task",
+ "proof-topic-authoring",
  "serde",
  "serde_json",
  "sqlx",

@@ -319,6 +319,30 @@ pub trait RlmStore: Send + Sync {
     async fn best(&self, topic_id: &str) -> Result<Option<PromotionRow>, StoreError>;
     /// Promotion history, oldest first.
     async fn promotions(&self, topic_id: &str) -> Result<Vec<PromotionRow>, StoreError>;
+
+    /// Append the whole set a topic's RLM authored. Returns its version.
+    ///
+    /// A topic's behavior is five parts and its RLM authors all of them in one
+    /// job; the rules have always been versioned in `proof_rule_version`, and
+    /// this is where the **whole set** is kept. It exists so a re-authoring
+    /// run can be handed the set it wrote last time
+    /// (`VmJob::ProposeRules.current`): an adaptor that cannot read its
+    /// previous set cannot *retain* the parts it is not changing, so a second
+    /// run would silently drop migrations the topic still needs.
+    ///
+    /// Append-only: a re-authoring appends, and "the set in force" is the
+    /// newest row. The version advances by one, like rule versions do, so a
+    /// gap or a repeat is a `VersionGap` rather than a silent overwrite.
+    async fn put_authoring(
+        &self,
+        topic_id: &str,
+        set: &proof_topic_authoring::TopicAuthoring,
+    ) -> Result<u32, StoreError>;
+    /// The set a topic's RLM authored last, if any.
+    async fn authoring(
+        &self,
+        topic_id: &str,
+    ) -> Result<Option<(u32, proof_topic_authoring::TopicAuthoring)>, StoreError>;
 }
 
 /// Numeric id from `pf_` + 16 hex. `None` if the string is not a store row id.

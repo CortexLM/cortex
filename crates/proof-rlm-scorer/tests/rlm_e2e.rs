@@ -1967,3 +1967,209 @@ async fn measuring_a_baseline_without_an_offer_is_refused() {
         .expect("a skipping run needs no offer");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A **second** authoring run is handed the set the first one wrote.
+///
+/// Greptile's P1 on the whole-set change: the job carried
+/// `VmJob::ProposeRules.current` but the driver always sent `None`, so an
+/// adaptor could not *retain* the parts it was not changing — a re-authoring
+/// run was a rewrite from nothing, and the install would apply that lossy set
+/// (a migration the topic still needs would vanish).
+///
+/// The fix has two halves and this test pins both: the driver reads the set
+/// back from the store (`current_authoring`) and the job carries it.
+#[tokio::test]
+async fn a_re_authoring_run_is_handed_the_set_the_first_one_wrote() {
+    let root = tmp_root("reauthor");
+    let key = root.join("owner_key");
+    std::fs::write(&key, "not-a-real-secret\n").unwrap();
+    let orchestrator = FakeOrchestrator::new(0.42);
+    let rlm_store: Arc<MemoryRlmStore> = Arc::new(MemoryRlmStore::new());
+    let mut draft = topic();
+    draft.status = TopicStatus::Draft;
+    draft.holdout_commitment = holdout_commitment(&synthetic_holdout(STRATUM_SIZE, 1));
+    draft.baseline.script_sha256 = "11".repeat(32);
+    draft.baseline.metrics_commitment.clear();
+    let setup = TopicSetup {
+        orchestrator: orchestrator.clone(),
+        store: rlm_store.clone(),
+        template: pinned_template(),
+        experiments: proof_rlm::ExperimentPolicy::default(),
+        owner: Arc::new(StaticOwnerHook(OwnerDecision::Approve)),
+        keys: Arc::new(FileKeysProbe::new(&key)),
+        spend_cap_usd: None,
+        skip_baseline: true,
+    };
+
+    // First run: the RLM authors a set. Nothing is stored yet, so the job
+    // carries no previous set.
+    setup
+        .run(&draft, &pin_with_topic_key(), None)
+        .await
+        .expect("first run");
+    let first = orchestrator
+        .jobs()
+        .into_iter()
+        .find_map(|j| match j {
+            VmJob::ProposeRules { current, .. } => Some(current),
+            _ => None,
+        })
+        .expect("a propose_rules job");
+    assert!(
+        first.is_none(),
+        "the first run has no previous set to carry"
+    );
+    // …and the set it wrote is now the store's newest.
+    let (version, stored) = rlm_store
+        .authoring(&draft.id)
+        .await
+        .expect("read")
+        .expect("the set was persisted");
+    assert_eq!(version, 1);
+
+    // Second run: same topic, and the job must carry **that** set so the
+    // adaptor can keep what it means to keep.
+    setup
+        .run(&draft, &pin_with_topic_key(), None)
+        .await
+        .expect("second run");
+    let carried = orchestrator
+        .jobs()
+        .into_iter()
+        .filter_map(|j| match j {
+            VmJob::ProposeRules { current, .. } => Some(current),
+            _ => None,
+        })
+        .nth(1)
+        .expect("a second propose_rules job")
+        .expect("the second run carries the previous set");
+    assert_eq!(
+        *carried, stored,
+        "the set handed to the RLM is the one it wrote last time"
+    );
+    assert_eq!(carried.topic_id, draft.id);
+    assert!(
+        !carried.migrations.is_empty() && !carried.apis.is_empty(),
+        "the carried set is complete, not just the rules: {carried:?}"
+    );
+    assert_eq!(
+        rlm_store
+            .authoring(&draft.id)
+            .await
+            .expect("read")
+            .expect("v2")
+            .0,
+        2,
+        "the store advanced, so a third run would be handed this one"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A **fragment** is not persisted as the set in force.
+///
+/// A rules-only answer is a fragment, and storing it as "the set the RLM
+/// authored" would hand the next run a set that was never authored — the
+/// re-authoring path would then treat a partial answer as the baseline for
+/// retention. The rules are still stored (with honest provenance); the *set*
+/// is not.
+#[tokio::test]
+async fn a_rules_only_answer_is_not_persisted_as_the_authored_set() {
+    let root = tmp_root("fragment");
+    let key = root.join("owner_key");
+    std::fs::write(&key, "not-a-real-secret\n").unwrap();
+    let orchestrator = FakeOrchestrator::new(0.42);
+    orchestrator.set_rules_only(true);
+    let rlm_store: Arc<MemoryRlmStore> = Arc::new(MemoryRlmStore::new());
+    let mut draft = topic();
+    draft.status = TopicStatus::Draft;
+    draft.holdout_commitment = holdout_commitment(&synthetic_holdout(STRATUM_SIZE, 1));
+    draft.baseline.script_sha256 = "11".repeat(32);
+    draft.baseline.metrics_commitment.clear();
+    let setup = TopicSetup {
+        orchestrator: orchestrator.clone(),
+        store: rlm_store.clone(),
+        template: pinned_template(),
+        experiments: proof_rlm::ExperimentPolicy::default(),
+        owner: Arc::new(StaticOwnerHook(OwnerDecision::Approve)),
+        keys: Arc::new(FileKeysProbe::new(&key)),
+        spend_cap_usd: None,
+        skip_baseline: true,
+    };
+
+    let err = setup
+        .run(&draft, &pin_with_topic_key(), None)
+        .await
+        .expect_err("a fragment is not a set");
+    assert!(
+        matches!(err, SetupError::IncompleteAuthoring { .. }),
+        "{err}"
+    );
+    assert!(
+        rlm_store
+            .authoring(&draft.id)
+            .await
+            .expect("read")
+            .is_none(),
+        "a fragment must not become 'the set in force'"
+    );
+    // The rules it did write are stored, with honest provenance.
+    let rules = rlm_store
+        .current_rules(&draft.id)
+        .await
+        .expect("read")
+        .expect("rules");
+    assert_eq!(rules.source, proof_rlm::RuleSource::Rlm);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A topic's set survives a **restart**: the driver reads it from the store,
+/// not from memory, so a re-authoring run from a fresh process is handed the
+/// same set.
+#[tokio::test]
+async fn the_previous_set_survives_a_new_driver() {
+    let root = tmp_root("restart");
+    let key = root.join("owner_key");
+    std::fs::write(&key, "not-a-real-secret\n").unwrap();
+    let orchestrator = FakeOrchestrator::new(0.42);
+    let rlm_store: Arc<MemoryRlmStore> = Arc::new(MemoryRlmStore::new());
+    let mut draft = topic();
+    draft.status = TopicStatus::Draft;
+    draft.holdout_commitment = holdout_commitment(&synthetic_holdout(STRATUM_SIZE, 1));
+    draft.baseline.script_sha256 = "11".repeat(32);
+    draft.baseline.metrics_commitment.clear();
+    let build = || TopicSetup {
+        orchestrator: orchestrator.clone(),
+        store: rlm_store.clone(),
+        template: pinned_template(),
+        experiments: proof_rlm::ExperimentPolicy::default(),
+        owner: Arc::new(StaticOwnerHook(OwnerDecision::Approve)),
+        keys: Arc::new(FileKeysProbe::new(&key)),
+        spend_cap_usd: None,
+        skip_baseline: true,
+    };
+    build()
+        .run(&draft, &pin_with_topic_key(), None)
+        .await
+        .expect("first run");
+
+    // A *different* driver over the same store: no in-memory carry-over.
+    build()
+        .run(&draft, &pin_with_topic_key(), None)
+        .await
+        .expect("second run");
+    let carried = orchestrator
+        .jobs()
+        .into_iter()
+        .filter_map(|j| match j {
+            VmJob::ProposeRules { current, .. } => Some(current),
+            _ => None,
+        })
+        .nth(1)
+        .expect("a second job")
+        .expect("carried");
+    assert!(
+        !carried.migrations.is_empty(),
+        "a fresh driver still gets the set from the store"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

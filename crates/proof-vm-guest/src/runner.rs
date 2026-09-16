@@ -102,6 +102,10 @@ pub mod env {
     pub const TOPIC_FILE: &str = "PROOF_TOPIC_FILE";
     /// Rule version the RLM is superseding (`propose_rules`; empty = none).
     pub const CURRENT_RULES_VERSION: &str = "PROOF_CURRENT_RULES_VERSION";
+    /// Where the set this RLM authored **last time** was written
+    /// (`propose_rules`; empty = no previous set). The adaptor reads it to
+    /// retain the parts it is not changing.
+    pub const CURRENT_AUTHORING_FILE: &str = "PROOF_CURRENT_AUTHORING_FILE";
     /// Prefix of one variable per `constraints.params` entry.
     pub const PARAM_PREFIX: &str = "PROOF_PARAM_";
 }
@@ -118,6 +122,9 @@ pub const MAX_OUTPUT_DOC_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The file the RLM writes its whole authored set to (`ProposeRules`).
 pub const AUTHORING_FILE: &str = "authoring.json";
+
+/// The file the guest writes the **previous** set to, for a re-authoring run.
+pub const CURRENT_AUTHORING_FILE: &str = "current-authoring.json";
 /// Deadline for jobs that carry none (`ProposeRules`).
 pub const DEFAULT_UNPAID_DEADLINE: Duration = Duration::from_mins(30);
 /// Host kills the process this long after its own deadline; the guest cuts
@@ -1033,6 +1040,7 @@ pub async fn propose_rules(
     cfg: &GuestConfig,
     topic: &TopicDocument,
     current_version: Option<u32>,
+    current: Option<&TopicAuthoring>,
     work: &Path,
 ) -> Result<AuthoredSet, String> {
     let binding = Adaptor::binding_of(&topic.constraints.params)?;
@@ -1049,6 +1057,18 @@ pub async fn propose_rules(
     let output = prepare(cfg, work)?;
     let topic_file = work.join("topic.json");
     write_doc(&topic_file, topic)?;
+    // The set this RLM authored last time, when the host has one: the adaptor
+    // reads it to **retain** the parts it is not changing. Without it a
+    // re-authoring run is a rewrite from nothing — an adaptor cannot keep a
+    // migration it still needs, and the install would apply that lossy set.
+    let current_file = match current {
+        Some(set) => {
+            let path = work.join(CURRENT_AUTHORING_FILE);
+            write_doc(&path, set)?;
+            path.display().to_string()
+        }
+        None => String::new(),
+    };
     let mut vars = vec![
         (env::RUNNER_ID.to_owned(), adaptor.binding.runner.clone()),
         (
@@ -1058,6 +1078,10 @@ pub async fn propose_rules(
         (env::TOPIC_ID.to_owned(), topic.id.clone()),
         (env::CUSTOM_ID.to_owned(), topic.metric.custom_id.clone()),
         (env::TOPIC_FILE.to_owned(), topic_file.display().to_string()),
+        // Where the previous set is, if there is one. Always set (empty when
+        // there is none) so an adaptor branches on one variable rather than on
+        // a variable's presence.
+        (env::CURRENT_AUTHORING_FILE.to_owned(), current_file),
         (env::OUTPUT_DIR.to_owned(), output.display().to_string()),
         (env::WORK_DIR.to_owned(), work.display().to_string()),
         (

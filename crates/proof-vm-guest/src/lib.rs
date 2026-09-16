@@ -317,10 +317,17 @@ impl GuestAgent {
             VmJob::ProposeRules {
                 topic,
                 current_version,
-                current: _,
+                current,
             } => {
                 let work = self.work_dir(JobKind::ProposeRules);
-                let result = runner::propose_rules(&self.cfg, &topic, current_version, &work).await;
+                let result = runner::propose_rules(
+                    &self.cfg,
+                    &topic,
+                    current_version,
+                    current.as_deref(),
+                    &work,
+                )
+                .await;
                 seal_job(
                     &work,
                     result.map(|set| match set {

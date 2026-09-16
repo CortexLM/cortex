@@ -618,6 +618,41 @@ executed locally on the tip — see below.
 It is the only step that can turn §2d's staging row into `authorship: rlm`, and it is the
 Owner's to run — it provisions a VM and spends on a baseline.
 
+## Re-authoring (Greptile P1, fixed here)
+
+The whole-set change added `VmJob::ProposeRules.current` to the wire but the driver always
+sent `None`, so an adaptor could not **retain** the parts it was not changing: a second
+authoring run was a rewrite from nothing, and the install would apply that lossy set — a
+migration the topic still needs would vanish. Greptile reproduced it.
+
+**Fixed in three places.**
+
+1. **Stored.** `proof_topic_authoring` (migration `0027`) keeps each set the RLM authored,
+   versioned and append-only, with the canonical digest beside it. It is read from the store
+   rather than held in memory, so a restart — or a different operator process — is handed the
+   same set.
+2. **Carried.** `TopicSetup::current_authoring` populates `VmJob::ProposeRules.current`, and
+   a topic with no prior set carries `None` (so the first run is unchanged).
+3. **Reachable by the adaptor.** The guest writes the previous set to
+   `$PROOF_WORK_DIR/current-authoring.json` and exports the path as
+   `PROOF_CURRENT_AUTHORING_FILE` — always set, empty when there is none, so an adaptor
+   branches on one variable rather than on a variable's presence.
+
+**A fragment is not stored as the set in force.** A rules-only answer is persisted as
+*rules* (honest `rlm` provenance) and **not** as the authored set: storing it would hand the
+next run a set that was never authored, and the re-authoring path would treat a partial
+answer as the baseline for retention.
+
+**Tests, each verified non-vacuous:**
+
+| Test | What it pins |
+|---|---|
+| `a_re_authoring_run_is_handed_the_set_the_first_one_wrote` | the first run carries `None`; the set is persisted (v1); the second run carries **that** set, complete; the store advances to v2. Neutering `current` back to `None` fails it |
+| `a_rules_only_answer_is_not_persisted_as_the_authored_set` | the fragment path: `IncompleteAuthoring`, no stored set, rules still stored as `rlm` |
+| `the_previous_set_survives_a_new_driver` | a **different** `TopicSetup` over the same store is handed the same set — no in-memory carry-over |
+
+---
+
 ## Security fixes found during this review (not authorship items)
 
 Three P1 findings, each reproduced independently before fixing. The first is from the earlier

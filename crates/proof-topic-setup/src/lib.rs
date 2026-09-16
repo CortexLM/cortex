@@ -429,7 +429,7 @@ impl TopicSetup {
         let job = VmJob::ProposeRules {
             topic: Box::new(topic.clone()),
             current_version: current.as_ref().map(|r| r.version),
-            current: None,
+            current: self.current_authoring(&topic.id).await?.map(Box::new),
         };
         let (proposed, authored, missing) = match self.orchestrator.run(vm, job).await? {
             VmJobOutput::Authored(set) => {
@@ -495,12 +495,39 @@ impl TopicSetup {
                 version: rules.version,
             });
         }
+        // The **whole set** is persisted too, so the next authoring run can be
+        // handed what this one wrote. Rules were always versioned; the other
+        // four parts had nowhere to live, and an adaptor that cannot read its
+        // previous set cannot retain the parts it is not changing — a second
+        // run would silently drop migrations the topic still needs.
+        //
+        // Only a complete set is stored: a rules-only answer is a fragment,
+        // and storing a fragment as "the set in force" would hand the next run
+        // a set that was never authored. The fragment's rules are already in
+        // the store above, with honest provenance.
+        if let Some(set) = authored.as_ref() {
+            self.store.put_authoring(&topic.id, set).await?;
+        }
         Ok(AuthoredOutcome {
             rules,
             authored,
             missing,
         })
     }
+
+    /// The set this topic's RLM authored last, if any.
+    ///
+    /// Read from the store rather than held in memory, so a re-authoring run
+    /// after a restart — or from a different operator process — is handed the
+    /// same set. A store that cannot be read is a refusal, never a `None` that
+    /// would silently turn a re-authoring into a rewrite from nothing.
+    async fn current_authoring(
+        &self,
+        topic_id: &str,
+    ) -> Result<Option<TopicAuthoring>, SetupError> {
+        Ok(self.store.authoring(topic_id).await?.map(|(_, set)| set))
+    }
+
     /// Refuse when the rule version in force is no longer the one this run
     /// wrote and measured its baseline against.
     ///
