@@ -68,3 +68,12 @@ jobs:
 
       - name: compose matrix assertions
         run: bash deploy/scripts/assert-compose-matrix.sh
+
+      - name: harbor runner results gate
+        run: bash deploy/scripts/assert-harbor-runner-results-emit.sh
+
+      - name: proof task-selection gates
+        run: |
+          python3 -m unittest discover -s deploy/guest/runners/rlm_fc_in_guest_harbor/tests -q
+          bash deploy/guest/runners/rlm_fc_in_guest_harbor/tests/test_adaptor.sh
+          bash deploy/scripts/test_proof_slice_preflight.sh

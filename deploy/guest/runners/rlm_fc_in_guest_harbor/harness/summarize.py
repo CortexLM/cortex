@@ -77,12 +77,17 @@ POLICY_FAIL = "fail"
 POLICY_ZERO = "zero"
 EXCEPTION_POLICIES = (POLICY_FAIL, POLICY_ZERO)
 CONTRACT_HARBOR_TRIALS = "harbor-trials-v1"
-# Legacy alias for the same family, kept because it is a **wire value**: a
-# topic signed before the generic id existed pins this in its
+# Legacy wire value of CONTRACT_HARBOR_TRIALS, kept because it is a **wire
+# value**: a topic signed before the generic id existed pins this in its
 # `constraints.params.results_contract`, and a signed document cannot be
 # edited. New topics pin `harbor-trials-v1`; nothing here branches on a topic.
-CONTRACT_TBENCH = "tbench-harbor-v1"
-HARBOR_CONTRACTS = (CONTRACT_HARBOR_TRIALS, CONTRACT_TBENCH)
+#
+# The constant name is deliberately topic-neutral, matching the Rust side
+# (`proof_results::CONTRACT_HARBOR_TRIALS_LEGACY`): the value is a
+# compatibility spelling, not a topic this harness knows. Do not rename the
+# string — it is signed topic data.
+CONTRACT_HARBOR_TRIALS_LEGACY = "tbench-harbor-v1"
+HARBOR_CONTRACTS = (CONTRACT_HARBOR_TRIALS, CONTRACT_HARBOR_TRIALS_LEGACY)
 
 
 def _fail(msg: str, code: int = 2) -> None:
@@ -124,7 +129,7 @@ def results_contract(pin: str) -> str:
     if name not in HARBOR_CONTRACTS:
         _fail(
             f"results_contract {name!r} is not a Harbor trial contract "
-            f"({CONTRACT_HARBOR_TRIALS} / {CONTRACT_TBENCH})"
+            f"({CONTRACT_HARBOR_TRIALS} / {CONTRACT_HARBOR_TRIALS_LEGACY})"
         )
     return name
 

@@ -1,11 +1,11 @@
 {
   "aliases": [
-    "tbench"
+    "fixture-alias"
   ],
-  "display_name": "Terminal-Bench 4",
+  "display_name": "Fixture Topic",
   "environment": "staging",
   "host": {
-    "custom_ids_entry": "tbench",
+    "custom_ids_entry": "fixture_metric_v0",
     "experiment_image_digest": "sha256:abababababababababababababababababababababababababababababababab",
     "pack_digest": "sha256:abababababababababababababababababababababababababababababababab",
     "pack_dir": "/var/lib/proof/packs",
@@ -22,7 +22,7 @@
     "migrations": [
       {
         "name": "0001_scratch",
-        "sql": "CREATE TABLE tb4_scratch (id TEXT)"
+        "sql": "CREATE TABLE fixture_topic_v0_scratch (id TEXT)"
       }
     ],
     "rules": [
@@ -80,7 +80,7 @@
     "flops_budget": 2000000000000000000,
     "holdout_commitment": "e2f97658a5ff704f1f20982c8e3bbda5aba9793ac390df7f96a3641f33e5483d",
     "holdout_size": 120,
-    "id": "tb4",
+    "id": "fixture-topic-v0",
     "inference": {
       "base_url": null,
       "max_input_tokens": null,
@@ -91,7 +91,7 @@
       "require_judge_offer_commitment": null
     },
     "metric": {
-      "custom_id": "tbench",
+      "custom_id": "fixture_metric_v0",
       "direction": "max",
       "epsilon_rel": 0.05,
       "family": "custom",
@@ -103,7 +103,7 @@
     "payout_mode": "discovery",
     "proxy_model": null,
     "schema_version": 1,
-    "signature": "c4396e7185c040d176efcff71ae8fe1cee590ee1ad7bbbaae0e7b2c4f6f5c5034ee03b3ec3b42c48f268ad5af0690cb058351968bfcd37792f15e50e34357f8d",
+    "signature": "70c4f0cb18b2f64ae788bcf908252ffc719c00a1b80d2024476f4f034334d05a665d9680e5157cc17991f9e79ec9c8ba1bc6826a90b67900162fc852f97a7d8b",
     "statement": "Score the pinned task pack with the pinned runner.",
     "status": "draft",
     "valid_from_epoch": 0,

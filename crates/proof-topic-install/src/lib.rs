@@ -60,14 +60,15 @@ pub mod section;
 pub use gate::{disable, disabled, disabled_topics, enable, gate, set, Gate, GateState};
 pub use handler::{bound_runner, check_handler, resolve_handler, Handler, HandlerError};
 pub use install::{
-    applied_install, install_history, is_installed, latest_install, topic_routes, ExecutorBinding,
-    InstallReport, InstallRequest, InstallRow, InstallState, Installer, SetupSummary,
+    applied_install, install_history, installed_rules, is_installed, latest_install,
+    rlm_authored_rules, rules_source, topic_routes, ExecutorBinding, InstallReport, InstallRequest,
+    InstallRow, InstallState, InstalledRules, Installer, SetupSummary, RULES_SOURCE_RLM,
     VMS_PER_SUBMISSION,
 };
 pub use proof_topic_sql_guard::{
     blank_statements, check_migration, check_statement, is_topic_scoped, split_statements,
-    MigrationDenied, Statement, DENIED_DROP_KINDS, DENIED_FUNCTIONS, DENIED_OBJECTS, DENIED_VERBS,
-    OWNED_TABLES, OWNED_TABLE_PREFIX,
+    topic_sql_prefix, MigrationDenied, Statement, DENIED_DROP_KINDS, DENIED_FUNCTIONS,
+    DENIED_OBJECTS, DENIED_VERBS, OWNED_TABLES, OWNED_TABLE_PREFIX,
 };
 pub use routes::{is_topic_id, PgTopicRoutes, Resolved, TopicRouteMux, TopicRouteSource};
 pub use section::{
@@ -97,6 +98,30 @@ pub enum InstallError {
     TooManyMigrations {
         /// How many it carried.
         count: usize,
+    },
+    /// A migration names an object another registered topic also claims.
+    ///
+    /// `-` → `_` is injective, but its prefixes are not prefix-free: `aa` is a
+    /// prefix of `aa-b`'s mapped form `aa_b`, so the bare name `aa_b_scratch`
+    /// sits inside **both** namespaces. The per-topic guard cannot see that
+    /// (it sees one topic), so the install checks it against the registry and
+    /// refuses — a migration from `aa` must not reach `aa-b`'s tables in the
+    /// shared database.
+    #[error(
+        "migration {migration:?} names {object:?}, which topic {other:?} also claims: the `-` → \
+         `_` mapping makes {object:?} read as both {this:?} and {other:?}, so applying it would \
+         let one topic reach another's tables. Rename the object, or scope it with the \
+         schema-qualified spelling ({other}.… / {this}.…), which is compared exactly"
+    )]
+    CrossTopicClaim {
+        /// The migration the object came from.
+        migration: String,
+        /// The object both topics claim.
+        object: String,
+        /// This topic.
+        this: String,
+        /// The registered topic that also claims it.
+        other: String,
     },
     /// A handler outside the allow-list.
     #[error("handler refused: {0}")]

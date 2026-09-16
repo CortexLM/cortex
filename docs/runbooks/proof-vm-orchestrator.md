@@ -674,8 +674,13 @@ start (§ Limitations).
 5. Cleanup probes on the KVM host (nothing a run started may outlive it):
    - make `ip tuntap add` fail once (e.g. a stale `pfc<n>` device) → the
      agent logs `topic vm boot failed; releasing its jail` and
-     `/srv/jailer/firecracker/<vm_id>` is gone, along with the
-     `proof_vm_pfc<n>` table;
+     `/srv/jailer/firecracker/<vm_id>` is gone. The stale TAP itself and its
+     `proof_vm_pfc<n>` table **stay**: this boot never created them, and the
+     VM that owns them is still using them. With a live topic VM holding
+     `pfc0`, a new experiment VM must come up on `pfc1` (agent journal:
+     `tap index raced another boot` only when two boots raced the same free
+     index) rather than fail with `ioctl(TUNSETIFF): Device or resource
+     busy`;
    - a paid run whose deadline passes while its sister is still up → the
      sister is killed and `/srv/jailer/firecracker/<vm_id>-s<n>` removed
      before the job answers (log `jail released`);
@@ -694,6 +699,7 @@ start (§ Limitations).
 | Close a topic | the CP tears the VM down with the topic's `retain` policy (default destroy). `retain` moves `/srv/jailer/firecracker/<vm_id>` to `/var/lib/proof-vm/retained/<vm_id>` when that name is free (scratch, console log, config); an occupied dest lands at `<vm_id>-<stamp>` instead of nesting |
 | Agent restart | live VMs die with the agent (no `--daemonize`); `attach` then answers 404 and the CP's next job creates a fresh VM. Rules, checklists, and promotions live in the CP's RLM store, not in the VM |
 | A topic VM crashed | nothing to do: the agent probes the process on every attach / create / job / health, reaps a dead VM per the topic's `retain` policy (destroy removes the jail; retain moves it for audit — read `console.log` there), records it `crashed`, and the CP's next job creates a fresh VM. A crashed record answers `DELETE` with `state: crashed, confirmed: true` |
+| Leftover topic VM from the install/baseline | nothing to do: `create` for a topic that already has a live VM answers 409 `AlreadyExists`, and the CP treats that as "this topic's VM is already here" — it attaches and runs the job there instead of failing the submission. The run no longer waits for an operator to clear the host. An **experiment** create is never turned into an attach (a dedicated VM per paid job is the point); it boots its own VM on the first free TAP index |
 | Egress change | edit `PROOF_VM_AGENT_EGRESS_ALLOW`, restart the agent; existing VMs keep their table until torn down |
 | Inspect a VM | `nft list table inet proof_vm_pfc<n>`, `cat /srv/jailer/firecracker/<vm_id>/console.log`, `ls /srv/jailer/firecracker/<vm_id>/root/` |
 
@@ -816,6 +822,16 @@ digest of the real file.
   the job answers), never aborted mid-flight. A VM whose process died is
   reaped per its retain policy and recorded `crashed`; its topic is free to
   create a fresh one.
+- **TAP ownership.** The interface and its table are released only by the
+  boot that created them. A boot that lost `ip tuntap add` to a live name
+  (another VM already holds it) removes its own jail and leaves the TAP
+  alone — deleting it would turn one VM's collision into another VM's
+  outage. The allocator asks the host which `pfc<n>` exist
+  (`ip -o link show`) and picks the first free index at or above its
+  counter, then retries on the next one if two boots race the same index;
+  the counter alone is not enough, because a jailed VM outlives the agent
+  that booted it, so after an agent restart a counter starting at zero names
+  a TAP that is still up.
 - **Jailer.** Firecracker runs chrooted under `/srv/jailer/firecracker/<vm_id>/root`
   as `PROOF_VM_AGENT_JAIL_UID`, with a read-only rootfs copy, a fresh scratch
   drive, and `/dev/kvm` + `/dev/net/tun` mknod'ed by the jailer. No

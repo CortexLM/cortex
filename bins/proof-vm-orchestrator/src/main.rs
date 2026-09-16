@@ -54,7 +54,7 @@ use proof_fc_experiment::{
 };
 use proof_fc_host::{EgressAllow, FirecrackerHypervisor, HostConfig};
 use proof_vm_agent::{
-    agent_router, AgentState, BearerAuth, Hypervisor, DEFAULT_MAX_EXPERIMENT_VMS,
+    agent_router, AgentState, BearerAuth, Hypervisor, MemoryBudget, DEFAULT_MAX_EXPERIMENT_VMS,
 };
 use proof_vm_proto::DEFAULT_AGENT_PORT;
 
@@ -197,6 +197,13 @@ struct Cli {
     /// Experiment VMs this host runs at once (each up to the ceilings; 0 = none).
     #[arg(long, env = "PROOF_VM_AGENT_MAX_EXPERIMENT_VMS", default_value_t = DEFAULT_MAX_EXPERIMENT_VMS)]
     max_experiment_vms: usize,
+    /// Host memory (MiB) kept out of the VM budget for the OS, this agent,
+    /// and per-VM process overhead. `0` (the default) admits VM memory up to
+    /// `MemTotal`, which is the shape Gate 3 passes on. Raise it to leave the
+    /// host slack; the budget refuses a boot that would not fit rather than
+    /// let the kernel OOM-kill running guests (Gate 4).
+    #[arg(long, env = "PROOF_VM_AGENT_MEMORY_RESERVE_MIB", default_value_t = 0)]
+    memory_reserve_mib: u64,
     /// Seconds the guest may take to verify and unpack a staged pack.
     #[arg(long, env = "PROOF_VM_AGENT_PACK_STAGE_TIMEOUT_SECS", default_value_t = DEFAULT_STAGE_TIMEOUT.as_secs())]
     pack_stage_timeout_secs: u64,
@@ -466,8 +473,19 @@ async fn run(cli: &Cli) -> Result<(), String> {
         Box::new(VsockPackStager::new(cfg, stage_timeout)),
     )
     .map_err(|e| e.to_string())?;
-    let state =
-        AgentState::with_max_experiment_vms(Arc::new(layered), auth, cli.max_experiment_vms);
+    // The host's own RAM, read once at boot: a host that cannot prove it has
+    // room does not get to boot VMs on a guess. This is the second cap beside
+    // `max_experiment_vms` — the kernel does not honour a count, and Gate 4
+    // lost both submissions to the OOM killer with a count cap satisfied.
+    let budget = MemoryBudget::read(cli.memory_reserve_mib)?;
+    tracing::info!(
+        total_mib = budget.total_mib,
+        reserve_mib = budget.reserve_mib,
+        ceiling_mib = budget.ceiling_mib(),
+        max_experiment_vms = cli.max_experiment_vms,
+        "memory admission budget"
+    );
+    let state = AgentState::with_limits(Arc::new(layered), auth, cli.max_experiment_vms, budget);
     let app = agent_router(state);
     let handle = axum_server::Handle::new();
     let shutdown = handle.clone();

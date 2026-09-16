@@ -257,6 +257,13 @@ impl Installer<'_> {
         // Check every migration up front: a bundle that would fail on its
         // third statement must not leave its first two applied.
         let checked = check_all_migrations(&plan, &request.topic.id)?;
+        // Cross-topic namespace collision, which the per-topic guard cannot
+        // see: `-` → `_` is injective but its prefixes are not prefix-free, so
+        // `aa_b_scratch` sits inside both `aa` and `aa-b`. Only the install
+        // knows the registry, so the check runs here — before the journal
+        // opens, so a collision writes nothing at all.
+        self.refuse_cross_topic_claims(&request.topic.id, &checked)
+            .await?;
         let handler = plan.handler.unwrap_or(Handler::VmBacked);
         let binding = resolve_binding(request, &plan, handler)?;
 
@@ -346,6 +353,69 @@ impl Installer<'_> {
             journal_id,
             document_status: request.topic.status,
         })
+    }
+
+    /// Refuse a migration that names an object **another** registered topic
+    /// also claims.
+    ///
+    /// The per-topic guard ([`proof_topic_sql_guard::check_migration`]) proves
+    /// every name sits inside *this* topic's namespace. That is necessary but
+    /// not sufficient: `-` → `_` is injective, while its prefixes are not
+    /// prefix-free, so `aa_b_scratch` is inside `aa`'s namespace **and**
+    /// `aa-b`'s. A migration approved for `aa` could then read, modify, or
+    /// drop a table belonging to `aa-b` in the shared database.
+    ///
+    /// Only the install can see this, because only the install has the
+    /// registry. The check runs **before the journal opens**, so a collision
+    /// writes nothing at all — no row, no rule, no table.
+    ///
+    /// # Errors
+    ///
+    /// [`InstallError::CrossTopicClaim`], naming the migration, the object,
+    /// and both topics. A store that cannot be read is a refusal too: a
+    /// collision check that cannot enumerate the registry would pass by
+    /// default.
+    async fn refuse_cross_topic_claims(
+        &self,
+        topic_id: &str,
+        checked: &[(String, Vec<Statement>)],
+    ) -> Result<(), InstallError> {
+        let registered = self
+            .store
+            .latest_topics()
+            .await
+            .map_err(|e| InstallError::Store(e.to_string()))?;
+        let others: Vec<&str> = registered
+            .iter()
+            .map(|row| row.document.id.as_str())
+            .filter(|id| !id.eq_ignore_ascii_case(topic_id.trim()))
+            .collect();
+        if others.is_empty() {
+            return Ok(());
+        }
+        for (name, statements) in checked {
+            let mut named: Vec<String> = Vec::new();
+            for statement in statements {
+                named.extend(proof_topic_sql_guard::referenced_objects(
+                    &statement.blanked,
+                ));
+            }
+            // The first collision is the answer: the install refuses the
+            // bundle, so there is nothing to report about the others.
+            if let Some((object, other)) =
+                proof_topic_sql_guard::claim_collisions(&named, topic_id, others.iter().copied())
+                    .into_iter()
+                    .next()
+            {
+                return Err(InstallError::CrossTopicClaim {
+                    migration: name.clone(),
+                    object,
+                    this: topic_id.to_owned(),
+                    other,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Migration names this topic has already applied, from the journal.
@@ -482,6 +552,14 @@ impl Installer<'_> {
     /// an existing current rule set is returned untouched, which is what keeps
     /// a topic whose RLM has already written version 2 from being reset to
     /// the bundle's vector.
+    ///
+    /// Provenance is the point here. What this seeds is `topic_document`: the
+    /// vector the **operator** signed. That is honest provenance, not a
+    /// substitute for RLM authorship — the topic's RLM advances the store to
+    /// `rlm` by running its own `propose_rules` job in its VM
+    /// ([`proof_topic_setup::TopicSetup`]). An install therefore never makes a
+    /// topic's behavior RLM-authored, and the gates that admit an `open` topic
+    /// read the provenance rather than this row's presence.
     async fn install_rules(
         &self,
         request: &InstallRequest<'_>,
@@ -698,6 +776,50 @@ fn strings(value: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// What the newest install row says about the rules **it** landed.
+///
+/// The publish gate's answer, as a value rather than a boolean, so a caller
+/// that has to explain *why* a topic is not ready reads the same fact the
+/// boolean was derived from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstalledRules {
+    /// The newest install is `applied` and the rule version **that install
+    /// recorded** is `rlm`-sourced.
+    RlmAuthored {
+        /// The rule version the install landed.
+        version: u32,
+    },
+    /// The newest install is `applied`, but the rule version it recorded is
+    /// not RLM-authored (or its row is gone).
+    NotRlmAuthored {
+        /// The rule version the install recorded, when it recorded one.
+        version: Option<u32>,
+        /// `topic_document` / `operator` / `rlm`, or `None` when no row.
+        provenance: Option<String>,
+    },
+    /// The install recorded an RLM-authored version, but a **different**
+    /// version is in force and it is not RLM-authored.
+    ///
+    /// The other half of the same defect, from the opposite direction: the
+    /// install landed the RLM's vector and a later `operator` edit superseded
+    /// it. The topic would open with rules no RLM wrote — refused exactly as a
+    /// document-sourced vector is.
+    SupersededByOperator {
+        /// The RLM-authored version the install recorded.
+        installed: u32,
+        /// The version now in force.
+        in_force: u32,
+        /// Its provenance (`operator`, or `topic_document`).
+        provenance: String,
+    },
+    /// The newest install is not `applied`, or the topic has no install row.
+    NotApplied {
+        /// The state the journal holds (`pending` / `failed`), or `None` when
+        /// no row exists at all.
+        state: Option<String>,
+    },
+}
+
 /// Whether `topic_id` has an install in the **`applied`** state.
 ///
 /// This is the durable fact a publish of an `open` document is gated on. The
@@ -725,6 +847,118 @@ pub async fn applied_install(pool: &PgPool, topic_id: &str) -> Result<bool, Inst
     Ok(state.as_deref() == Some(InstallState::Applied.as_str()))
 }
 
+/// The admission query's row: the newest install's state and recorded rule
+/// version with that version's provenance, plus the version in force and its
+/// provenance. A named alias rather than an inline tuple, because five
+/// positional `Option`s read as noise at the call site.
+type AdmissionRow = (
+    String,
+    Option<i32>,
+    Option<String>,
+    Option<i32>,
+    Option<String>,
+);
+
+/// The provenance of the rule version the newest install **recorded**, and of
+/// the version actually in force.
+///
+/// Two facts, read as **one statement** so they come from one snapshot:
+///
+/// 1. The newest install row is `applied`, and the rule version it recorded is
+///    `rlm`-sourced (joined on
+///    `proof_rule_version.version = proof_topic_install.rules_version`).
+/// 2. The version **in force** is also `rlm`-sourced.
+///
+/// That pair is the gate, and each half closes a different way for an
+/// operator-authored vector to reach a live topic:
+///
+/// - **Only (1)** would admit a topic whose install landed the RLM's version
+///   while a later `operator` edit superseded it: the vector in force would be
+///   one no RLM wrote.
+/// - **Only (2)** — the original defect — would admit a topic whose install
+///   landed the signed document's version 1 (`topic_document`) while an
+///   unrelated later version 2 happened to be RLM-authored: the topic would
+///   open with the operator's vector in force, which is the operator-cloned
+///   document the gate exists to refuse.
+///
+/// Requiring both is not "the install's version must equal the one in force":
+/// an RLM that rewrites its own rules after the install (version N → N+1, both
+/// `rlm`) is exactly the autonomy this track wants, and it stays admitted.
+///
+/// Fail-closed: an `applied` row that recorded **no** rule version, a missing
+/// rule row, and any non-`rlm` provenance are refusals, never an admission,
+/// and a database error is an `Err`.
+///
+/// # Errors
+///
+/// [`InstallError::Db`].
+pub async fn installed_rules(
+    pool: &PgPool,
+    topic_id: &str,
+) -> Result<InstalledRules, InstallError> {
+    // `LEFT JOIN` so an `applied` row whose rule version has no row is
+    // visible as "no provenance" rather than as "no install". The two scalar
+    // subqueries read the version in force in the same snapshot.
+    let row: Option<AdmissionRow> = sqlx::query_as(
+        "SELECT i.state, i.rules_version, r.source, \
+                    f.version, f.source \
+             FROM proof_topic_install i \
+             LEFT JOIN proof_rule_version r \
+               ON r.topic_id = i.topic_id AND r.version = i.rules_version \
+             LEFT JOIN LATERAL ( \
+                 SELECT version, source FROM proof_rule_version \
+                 WHERE topic_id = i.topic_id ORDER BY version DESC LIMIT 1 \
+             ) f ON true \
+             WHERE i.topic_id = $1 \
+             ORDER BY i.id DESC \
+             LIMIT 1",
+    )
+    .bind(topic_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| InstallError::Db(e.to_string()))?;
+    let Some((state, version, source, in_force_raw, in_force_source)) = row else {
+        return Ok(InstalledRules::NotApplied { state: None });
+    };
+    if state != InstallState::Applied.as_str() {
+        return Ok(InstalledRules::NotApplied { state: Some(state) });
+    }
+    let version = version.and_then(|v| u32::try_from(v).ok());
+    let in_force = in_force_raw.and_then(|v| u32::try_from(v).ok());
+    let Some(installed_version) = version else {
+        // An `applied` row with no recorded rule version cannot be admitted:
+        // there is no vector it can be shown to have landed.
+        return Ok(InstalledRules::NotRlmAuthored {
+            version: None,
+            provenance: source,
+        });
+    };
+    if source.as_deref() != Some(RULES_SOURCE_RLM) {
+        return Ok(InstalledRules::NotRlmAuthored {
+            version: Some(installed_version),
+            provenance: source,
+        });
+    }
+    if in_force_source.as_deref() == Some(RULES_SOURCE_RLM) {
+        return Ok(InstalledRules::RlmAuthored {
+            version: installed_version,
+        });
+    }
+    // The install landed an RLM vector and something else is in force. A rule
+    // row for the install's version exists (the join matched), so the version
+    // in force exists too; the fallback is unreachable and only avoids a
+    // panic in a read that must stay total.
+    Ok(InstalledRules::SupersededByOperator {
+        installed: installed_version,
+        in_force: in_force.unwrap_or(installed_version),
+        provenance: in_force_source.unwrap_or_else(|| "absent".to_owned()),
+    })
+}
+
+/// The `proof_rule_version.source` value meaning the topic's own RLM wrote
+/// the vector (the store's `RuleSource::Rlm` wire word).
+pub const RULES_SOURCE_RLM: &str = "rlm";
+
 /// [`applied_install`], as a plain boolean.
 ///
 /// # Errors
@@ -732,6 +966,51 @@ pub async fn applied_install(pool: &PgPool, topic_id: &str) -> Result<bool, Inst
 /// [`InstallError::Db`].
 pub async fn is_installed(pool: &PgPool, topic_id: &str) -> Result<bool, InstallError> {
     applied_install(pool, topic_id).await
+}
+
+/// Whether the topic's **newest** rule version was authored by its RLM.
+///
+/// The provenance half of the publish gate. `proof_rule_version.source` is
+/// written by the store, not by a caller: `topic_document` means the vector is
+/// still the operator's signed checklist (the install seeds it that way) and
+/// `rlm` means the topic's own RLM authored it inside the topic VM. An
+/// `operator` edit is an operator's vector too, so it does not count.
+///
+/// Read straight from the column so the answer does not depend on the rule
+/// bodies still deserializing. A topic with **no** rule row is `false`: an
+/// install always leaves one, so its absence means nothing was installed.
+///
+/// # Errors
+///
+/// [`InstallError::Db`].
+pub async fn rlm_authored_rules(pool: &PgPool, topic_id: &str) -> Result<bool, InstallError> {
+    let source: Option<String> = sqlx::query_scalar(
+        "SELECT source FROM proof_rule_version WHERE topic_id = $1 ORDER BY version DESC LIMIT 1",
+    )
+    .bind(topic_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| InstallError::Db(e.to_string()))?;
+    Ok(source.as_deref() == Some("rlm"))
+}
+
+/// [`rlm_authored_rules`] as the operator-facing provenance word.
+///
+/// `None` when the topic has no rule row at all. Used by the gate refusals so
+/// an operator reads *which* provenance blocked the publish rather than only
+/// that one did.
+///
+/// # Errors
+///
+/// [`InstallError::Db`].
+pub async fn rules_source(pool: &PgPool, topic_id: &str) -> Result<Option<String>, InstallError> {
+    sqlx::query_scalar(
+        "SELECT source FROM proof_rule_version WHERE topic_id = $1 ORDER BY version DESC LIMIT 1",
+    )
+    .bind(topic_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| InstallError::Db(e.to_string()))
 }
 
 /// Every route a topic registered, for the dynamic mux.

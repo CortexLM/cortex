@@ -37,6 +37,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
 use crate::auth::BearerAuth;
 use crate::hypervisor::{BootedVm, HvError, Hypervisor};
+use crate::memory::MemoryBudget;
 use crate::stamp::{output_matches, stamp_output};
 
 /// Longest `vm_id` the agent mints (jailer ids are capped at 64 chars).
@@ -116,6 +117,8 @@ struct Inner {
     create_lock: Mutex<()>,
     next_id: AtomicU64,
     max_experiment_vms: usize,
+    /// Host RAM the boots are admitted against ([`MemoryBudget`]).
+    memory: MemoryBudget,
 }
 
 /// Shared agent state.
@@ -135,11 +138,37 @@ impl AgentState {
     /// State over `hypervisor` allowing at most `max_experiment_vms`
     /// dedicated experiment VMs to run at once (`0` disables them: every
     /// experiment create is 503 `capacity`).
+    ///
+    /// Memory admission is **unlimited** here; a host that has RAM to defend
+    /// sets a real budget with [`Self::with_limits`].
     #[must_use]
     pub fn with_max_experiment_vms(
         hypervisor: Arc<dyn Hypervisor>,
         auth: Arc<BearerAuth>,
         max_experiment_vms: usize,
+    ) -> Self {
+        Self::with_limits(
+            hypervisor,
+            auth,
+            max_experiment_vms,
+            MemoryBudget::unlimited(),
+        )
+    }
+
+    /// State with both caps: `max_experiment_vms` concurrent experiments, and
+    /// boots admitted against the host's RAM ([`MemoryBudget`]).
+    ///
+    /// A **count** cap is not a capacity cap: two 8192 MiB experiment VMs
+    /// beside the topic's resident 8192 MiB RLM VM do not fit a 16 GiB host,
+    /// and letting them start cost **both** submissions to the OOM killer
+    /// instead of one request a `503 capacity` (Gate 4). The budget counts
+    /// every live VM, topic VMs included.
+    #[must_use]
+    pub fn with_limits(
+        hypervisor: Arc<dyn Hypervisor>,
+        auth: Arc<BearerAuth>,
+        max_experiment_vms: usize,
+        memory: MemoryBudget,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -149,8 +178,15 @@ impl AgentState {
                 create_lock: Mutex::new(()),
                 next_id: AtomicU64::new(1),
                 max_experiment_vms,
+                memory,
             }),
         }
+    }
+
+    /// The memory budget in force.
+    #[must_use]
+    pub fn memory_budget(&self) -> MemoryBudget {
+        self.inner.memory
     }
 
     /// VMs that are running **and** whose process is alive right now. Dead
@@ -410,6 +446,8 @@ async fn health(State(state): State<AgentState>) -> Json<AgentHealth> {
     };
     // Health is also where an idle host notices a VM that died in the meantime.
     let live = state.sweep().await;
+    let budget = state.inner.memory;
+    let used_mib: u64 = live.iter().map(|r| u64::from(r.mem_mib)).sum();
     Json(AgentHealth {
         api_version: API_VERSION,
         ready,
@@ -418,6 +456,13 @@ async fn health(State(state): State<AgentState>) -> Json<AgentHealth> {
         vms: state.inner.vms.read().await.len(),
         experiment_vms: live.iter().filter(|r| r.experiment.is_some()).count(),
         max_experiment_vms: state.inner.max_experiment_vms,
+        total_mib: if budget.is_unlimited() {
+            0
+        } else {
+            budget.total_mib
+        },
+        reserve_mib: budget.reserve_mib,
+        used_mib,
     })
 }
 
@@ -432,11 +477,22 @@ async fn create_vm(
     // Serialise creates: the topic ↔ VM check (or the capacity check) and
     // the insert must be one step.
     let _create = state.inner.create_lock.lock().await;
+    // Memory admission, before the count cap: the kernel does not honour a
+    // count. Two 8192 MiB experiment VMs beside the topic's resident RLM VM
+    // do not fit a 16 GiB host, and starting them cost **both** submissions
+    // to the OOM killer (Gate 4) instead of refusing one with `503 capacity`.
+    // Live VMs are reaped first, so a crashed one does not hold budget.
+    let live = state.sweep().await;
+    state
+        .inner
+        .memory
+        .fits(&live, spec.template.mem_mib)
+        .map_err(|why| AgentError::new(ErrorCode::Capacity, why))?;
     if spec.experiment.is_some() {
         // One VM per experiment: the topic's RLM VM is not in the way, and
         // other experiments of the same topic may run beside this one — up
         // to what this host can carry. Dead ones are reaped and do not count.
-        let running = state.running_experiments().await;
+        let running = live.iter().filter(|r| r.experiment.is_some()).count();
         let max = state.inner.max_experiment_vms;
         if running >= max {
             return Err(AgentError::new(

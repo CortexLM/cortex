@@ -239,6 +239,10 @@ proof_filter_tasks() {
     [ -n "${PROOF_PARAM_TASKS:-}" ] && extra+=(--tasks "$PROOF_PARAM_TASKS")
     [ -n "${PROOF_PARAM_TASK_EXCLUDE:-}" ] && extra+=(--exclude "$PROOF_PARAM_TASK_EXCLUDE")
     [ -n "${PROOF_PARAM_N_TASKS:-}" ] && extra+=(--n-tasks "$PROOF_PARAM_N_TASKS")
+    # `task_count` is a legacy alias for `n_tasks` (a count, never a slice
+    # selector). `n_tasks` wins when both are set.
+    [ -z "${PROOF_PARAM_N_TASKS:-}" ] && [ -n "${PROOF_PARAM_TASK_COUNT:-}" ] \
+        && extra+=(--task-count "$PROOF_PARAM_TASK_COUNT")
     [ -n "${PROOF_TASK_SLICE:-}" ] && extra+=(--task-slice "$PROOF_TASK_SLICE")
     [ -n "${PROOF_PARAM_TASK_FILTER:-}" ] && extra+=(--filter-rel "$PROOF_PARAM_TASK_FILTER")
     [ -n "${PROOF_PARAM_MAX_TASK_DURATION_S:-}" ] && extra+=(--max-duration-s "$PROOF_PARAM_MAX_TASK_DURATION_S")
@@ -284,6 +288,30 @@ proof_export_exec_timeout() {
         echo "rlm_fc_in_guest_harbor: harness exec default timeout ${PROOF_EXEC_TIMEOUT_S}s (topic exec_timeout_s)" >&2
     else
         unset PROOF_EXEC_TIMEOUT_S || true
+    fi
+}
+
+# Append Harbor's concurrency flags for the values the topic signed
+# (params.n_concurrent, params.n_attempts). The guest's own RunPolicy check
+# runs before the adaptor, so this is the second line of defence — and the one
+# that holds when run-harbor is exercised directly. A non-integer is a refusal
+# naming the knob, never a silent fallback to Harbor's default: a topic that
+# asked for 5 concurrent trials and got 1 would take five times as long and
+# could miss the baseline deadline, which is exactly the LIVE Gate 1 shape.
+# Usage: proof_harbor_concurrency_flags ARRAY_NAME
+proof_harbor_concurrency_flags() {
+    local -n _cmd="$1"
+    if [ -n "${PROOF_PARAM_N_CONCURRENT:-}" ]; then
+        proof_positive_int "n_concurrent" "$PROOF_PARAM_N_CONCURRENT"
+        _cmd+=(--n-concurrent "$PROOF_PARAM_N_CONCURRENT")
+    else
+        _cmd+=(--n-concurrent 1)
+    fi
+    if [ -n "${PROOF_PARAM_N_ATTEMPTS:-}" ]; then
+        proof_positive_int "n_attempts" "$PROOF_PARAM_N_ATTEMPTS"
+        _cmd+=(--n-attempts "$PROOF_PARAM_N_ATTEMPTS")
+    else
+        _cmd+=(--n-attempts 1)
     fi
 }
 

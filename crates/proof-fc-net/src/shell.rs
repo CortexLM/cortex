@@ -112,10 +112,10 @@ pub async fn sh(shell: &dyn Shell, program: &str, args: &[&str]) -> Result<CmdOu
     shell.run(program, &owned).await?.ok(program)
 }
 
-#[cfg(test)]
-pub(crate) use failing::FailingShell;
+#[cfg(any(test, feature = "test-fixtures"))]
+pub use failing::FailingShell;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-fixtures"))]
 mod failing {
     use super::{async_trait, CmdOutput, HvError, RecordingShell, Shell};
 

@@ -18,9 +18,11 @@
 //!   `VACUUM` / `CLUSTER` / `REINDEX`, `SECURITY DEFINER` functions, and
 //!   server-side file access (`pg_read_file`, `lo_import`, …).
 //! - **Namespace**: every table a statement creates, writes, or reads must be
-//!   inside the topic's own namespace (`{topic_id}_*`, `topic_*`, or
-//!   `{topic_id}.…`). Without this a topic could claim a generic name and
-//!   collide with the next topic's install, or read a sibling topic's rows.
+//!   inside the topic's own namespace (`{topic_sql_prefix}_*`, or
+//!   `{topic_sql_prefix}.…` — the id with `-` mapped to `_`, since a topic id
+//!   is a hyphen slug and a bare SQL identifier cannot contain a hyphen).
+//!   Without this a topic could claim a generic name and collide with the next
+//!   topic's install, or read a sibling topic's rows.
 //!
 //! # What this is not
 //!
@@ -914,16 +916,45 @@ pub fn has_word(haystack: &str, needle: &str) -> bool {
 }
 
 /// Identifier-shaped tokens, lower-cased, dots kept (`schema.table`).
+///
+/// A **double-quoted** run is one identifier, kept whole. That matters for a
+/// hyphenated topic: `"fixture-topic-v0_scratch"` is a single legal identifier,
+/// and splitting it at the `-` would yield `fixture`, `topic`, `v0_scratch` —
+/// none of which is inside the topic's namespace, so a legal quoted name would
+/// be refused as unscoped. Quotes are stripped on the way in, so the token is
+/// the name the database would store and the deny rules match it as before.
 fn tokens(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
-    for c in text.chars() {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            // A quoted identifier: its body is one token, hyphens included.
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '"' {
+                    if chars.get(i + 1) == Some(&'"') {
+                        cur.push('"'); // `""` is an escaped quote inside the name
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                cur.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
         if c.is_alphanumeric() || c == '_' || c == '.' {
             cur.push(c);
         } else if !cur.is_empty() {
             out.push(cur.trim_matches('.').to_ascii_lowercase());
             cur.clear();
         }
+        i += 1;
     }
     if !cur.is_empty() {
         out.push(cur.trim_matches('.').to_ascii_lowercase());
@@ -1043,12 +1074,94 @@ fn copy_chars(
     idx
 }
 
+/// The SQL-safe spelling of a topic id.
+///
+/// A topic id is a hyphen slug (`[a-z0-9][a-z0-9-]{1,62}`) and **may not
+/// contain an underscore**, while a bare SQL identifier is
+/// `[a-z_][a-z0-9_$]*` and **may not contain a hyphen** — the two alphabets do
+/// not intersect except on `[a-z0-9]`. So the literal id can never prefix a
+/// bare identifier: `CREATE TABLE fixture-topic-v0_scratch` is a syntax error
+/// at the first `-`, and the guard's own `{topic_id}_*` requirement would be
+/// unsatisfiable for every real topic.
+///
+/// Mapping `-` → `_` gives the topic an identifier-safe prefix. The mapping is
+/// injective **over legal ids** (an id cannot contain an underscore), so two
+/// ids never map to the same prefix.
+///
+/// Injectivity is not sufficient on its own — see [`is_topic_scoped`], which
+/// closes the prefix relation between a short id and a longer hyphenated one.
+#[must_use]
+pub fn topic_sql_prefix(topic_id: &str) -> String {
+    topic_id.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+/// Bare names in `names` that **another** topic in `others` also claims.
+///
+/// The prefix rule in [`is_topic_scoped`] is per-topic, and the `-` → `_`
+/// mapping is injective but its **prefixes are not prefix-free**: `aa` is a
+/// prefix of `aa-b`'s mapped form `aa_b`, so `aa_b_scratch` sits inside both
+/// namespaces. The guard cannot see that on its own — but the **install** can,
+/// because it has the topic registry.
+///
+/// Returns `(name, other_topic)` for each collision, so the install can refuse
+/// with both ids named. Empty means no other registered topic claims any of
+/// these names, which is the ordinary case: `tb4_scratch` collides with
+/// nothing unless a topic `tb4-scratch` exists.
+///
+/// `others` should be every topic id the host knows **except** `topic` — the
+/// install reads them from `proof_topic_version`.
+#[must_use]
+pub fn claim_collisions<'a, I>(names: &[String], topic: &str, others: I) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let others: Vec<&str> = others
+        .into_iter()
+        .filter(|o| !o.eq_ignore_ascii_case(topic.trim()))
+        .collect();
+    let mut out = Vec::new();
+    for name in names {
+        for other in &others {
+            if is_topic_scoped(name, other) {
+                out.push((name.clone(), (*other).to_owned()));
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Whether `name` is inside `topic_id`'s namespace.
 ///
 /// Two spellings are the topic's, and only two:
 ///
 /// - a `{topic_id}`-qualified name (`tb4.scores`, `tb4.runs`), or
 /// - a bare `{topic_id}_`-prefixed name (`tb4_scores`).
+///
+/// For an id containing a hyphen the identifier-safe form
+/// ([`topic_sql_prefix`], `fixture-topic-v0` → `fixture_topic_v0`) is accepted
+/// in both positions, because the literal id cannot appear in a bare SQL
+/// identifier at all. The literal spelling stays accepted too, for the ids
+/// that need no mapping and for quoted schema-qualified names.
+///
+/// # The residual ambiguity, and where it is closed
+///
+/// The mapped **prefixes are not prefix-free**: `aa` is a prefix of `aa-b`'s
+/// mapped form `aa_b`, so the bare name `aa_b_scratch` is inside *both*
+/// namespaces — `aa` + `b_scratch` and `aa-b` + `scratch`. A migration
+/// approved for `aa` could therefore read, modify, or drop a table belonging
+/// to `aa-b` in the shared database.
+///
+/// This function deliberately does **not** try to resolve that by refusing
+/// names with underscores after the prefix: that would refuse ordinary names
+/// like `tb4_scratch_idx`, which are exactly what topics use. It cannot be
+/// resolved here at all — the question "is a longer sibling registered?" is
+/// about the whole registry, not about this topic. [`claim_collisions`] answers
+/// it where the registry is visible (the install), and refuses the migration
+/// there, naming both topics.
+///
+/// So: this is the per-topic **shape** check, and [`claim_collisions`] is the
+/// cross-topic **collision** check. Both run before a migration is applied.
 ///
 /// # Why there is no generic `topic_` allowance
 ///
@@ -1072,14 +1185,15 @@ pub fn is_topic_scoped(name: &str, topic_id: &str) -> bool {
         return false;
     }
     let topic = topic_id.trim().to_ascii_lowercase();
+    let sql_topic = topic_sql_prefix(&topic);
     let (schema, bare) = match n.split_once('.') {
         Some((s, b)) => (Some(s), b),
         None => (None, n.as_str()),
     };
-    if schema == Some(topic.as_str()) {
+    if schema == Some(topic.as_str()) || schema == Some(sql_topic.as_str()) {
         return true;
     }
-    bare.starts_with(&format!("{topic}_"))
+    bare.starts_with(&format!("{topic}_")) || bare.starts_with(&format!("{sql_topic}_"))
 }
 
 /// Check a statement's text against every deny rule.
@@ -1164,9 +1278,11 @@ fn check_text(
             return Err(deny(
                 &name,
                 &format!(
-                    "a topic migration may only touch objects named {topic_id}_*, topic_*, or \
-                     {topic_id}.*; an unscoped name would collide with — or read — another \
-                     topic's install"
+                    "a topic migration may only touch objects named {sql}_* (or {id}_*), \
+                     {sql}.* (or {id}.*); an unscoped name would collide with — or read — \
+                     another topic's install",
+                    sql = topic_sql_prefix(topic_id),
+                    id = topic_id
                 ),
             ));
         }

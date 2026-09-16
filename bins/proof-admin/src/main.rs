@@ -65,10 +65,10 @@ const EXIT_USAGE: u8 = 2;
     long_about = "proof-admin wraps the existing Proof topic publish path (dynamic-topics P0).
 
 Validate a bundle — runs the same acceptance checks POST /v1/admin/proof/topics runs:
-  proof-admin topic validate --bundle tb4.json --pin config/proof-pin.toml
+  proof-admin topic validate --bundle topic.json --pin config/proof-pin.toml
 
 Resolve the publish call and host env without touching anything:
-  proof-admin topic install --bundle tb4.json --env metal --dry-run
+  proof-admin topic install --bundle topic.json --env metal --dry-run
 
 List the installed topics (a read-only view of proof_topic_version):
   proof-admin topic list
@@ -179,6 +179,18 @@ enum TopicCmd {
     },
     /// List installed topics: a read-only view of `proof_topic_version`.
     List,
+    /// Where a topic is in its RLM lifecycle, and what it is waiting on.
+    ///
+    /// Read-only. `topic install --drive-rlm` prints one line and then nothing
+    /// until the whole run returns — provisioning a VM, the RLM's
+    /// `propose_rules` job, and a paid baseline can take hours, so this is the
+    /// read that tells a working run from a stopped one. The durable progress
+    /// is `proof_lifecycle_event`; a run that died left its last transition
+    /// here.
+    Lifecycle {
+        /// Topic slug, or an alias of one.
+        topic_id: String,
+    },
     /// Show one topic's newest install: the `proof_topic_install` journal.
     InstallLog {
         /// Topic slug.
@@ -273,9 +285,9 @@ enum TopicCmd {
 enum AliasCmd {
     /// Point an alias at a topic. The topic must be published already.
     Set {
-        /// The alias slug (e.g. `tbench`).
+        /// The alias slug (a temporary compatibility spelling of the topic).
         alias: String,
-        /// The canonical topic slug it resolves to (e.g. `tb4`).
+        /// The canonical topic slug it resolves to.
         #[arg(long, value_name = "TOPIC_ID")]
         topic: String,
     },
@@ -382,6 +394,7 @@ async fn run_topic(opts: &Options, cmd: &TopicCmd) -> Result<(), Failure> {
         }
         TopicCmd::List => cmd_list(opts).await,
         TopicCmd::InstallLog { topic } => cmd_install_log(opts, topic).await,
+        TopicCmd::Lifecycle { topic_id } => cmd_lifecycle(opts, topic_id).await,
         TopicCmd::Show { topic_id } => cmd_show(opts, topic_id).await,
         TopicCmd::Alias { cmd } => run_alias(opts, cmd).await,
         TopicCmd::Disable {
@@ -616,6 +629,53 @@ async fn cmd_install_log(opts: &Options, topic_id: &str) -> Result<(), Failure> 
     install::install_log(opts, topic_id).await
 }
 
+/// `topic lifecycle`: read the journal and the provenance, and say what is next.
+async fn cmd_lifecycle(opts: &Options, topic_id: &str) -> Result<(), Failure> {
+    let pool = open_pool(opts).await?;
+    let report = proof_topic_ops::lifecycle(&pool, topic_id)
+        .await
+        .map_err(ops_to_failure)?;
+    if opts.json {
+        return print_json(&serde_json::json!({
+            "topic_id": report.topic_id,
+            "state": report.state,
+            "rules_version": report.rules_version,
+            "rules_source": report.rules_source,
+            "baseline_rules_version": report.baseline_rules_version,
+            "history": report.history,
+            "next": report.next_steps(),
+        }));
+    }
+    println!("topic {} — lifecycle", report.topic_id);
+    println!("  state             {}", report.state);
+    println!(
+        "  rules_version     {}",
+        report
+            .rules_version
+            .map_or_else(|| "-".to_owned(), |v| v.to_string())
+    );
+    println!(
+        "  rules_source      {}",
+        dash_if_empty(report.rules_source.as_deref().unwrap_or_default())
+    );
+    println!(
+        "  baseline          {}",
+        report.baseline_rules_version.map_or_else(
+            || "not measured".to_owned(),
+            |v| format!("measured (rules v{v})")
+        )
+    );
+    if !report.history.is_empty() {
+        println!("  history           (oldest first)");
+        for line in &report.history {
+            println!("    {line}");
+        }
+    }
+    println!();
+    println!("{}", report.next_steps());
+    Ok(())
+}
+
 /// `topic baseline`: read the measurement and print what to seal.
 ///
 /// The procedure is [`proof_topic_ops::baseline`]; this is the printing.
@@ -635,6 +695,7 @@ async fn cmd_baseline(opts: &Options, topic_id: &str, pin_path: &Path) -> Result
             "holdout_commitment": report.holdout_commitment,
             "metrics_commitment": report.metrics_commitment,
             "document_status": report.document_status,
+            "degenerate_bar": report.degenerate_bar,
             "next": report.next_steps(),
         }));
     }
@@ -648,6 +709,18 @@ async fn cmd_baseline(opts: &Options, topic_id: &str, pin_path: &Path) -> Result
         "  document_status   {}",
         status_word(report.document_status)
     );
+    if report.degenerate_bar {
+        // Printed **before** the commitment, because signing this number
+        // would only produce a document the seal refuses.
+        println!();
+        println!(
+            "⚠ degenerate bar: {} is zero, and this family scores a relative win",
+            report.metric_primary
+        );
+        println!("  (`challenger >= bar * (1 + epsilon_rel)`), so no miner could ever pass.");
+        println!("  Sealing this measurement will be refused. Re-run the reference against");
+        println!("  something that scores, or fix the task selection, then measure again.");
+    }
     println!();
     println!("An `open` document must seal this measurement. Its baseline block needs:");
     println!("  metrics_commitment  {}", report.metrics_commitment);

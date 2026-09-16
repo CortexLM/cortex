@@ -12,9 +12,12 @@ pure function of the signed topic (``constraints.params`` /
    is never scored on a smaller set. One name is the single-task smoke.
 2. else ``task_slice`` (``PROOF_TASK_SLICE``) when the pack defines it:
    ``slices/<label>.json`` / ``slices/<label>.txt`` or
-   ``filter.json`` → ``slices.<label>``. A label the pack does not define
-   fails closed **when the pack defines any slice at all**; a pack with no
-   slices treats the label as informational (recorded in the summary).
+   ``filter.json`` → ``slices.<label>``. A label the pack does **not** define
+   always fails closed, whether or not the pack defines any other slice: the
+   label is the topic's assertion about which tasks to score, so it is never
+   silently widened to the whole pack. (That escape existed and cost a live
+   run — a topic naming a 5-task slice was scored on all 10 tasks the pack
+   held, overran the wall clock, and measured no baseline at all.)
 3. else ``filter.json`` → ``allow`` (the pack's own default set).
 4. else every task directory under ``tasks_dir``.
 
@@ -265,6 +268,30 @@ def pack_defines_slices(pack_dir: Path, spec: dict[str, Any]) -> bool:
     return slices.is_dir() and any(p.is_file() for p in slices.iterdir())
 
 
+def describe_defined_slices(pack_dir: Path, spec: dict[str, Any]) -> str:
+    """What the pack *does* define, for a refusal an operator can act on.
+
+    Names the labels and their files, or says plainly that the pack defines
+    none — a topic that set a slice needs to know whether it mistyped a label
+    or is pointed at a pack that never had slices.
+    """
+    labels: list[str] = []
+    slices = pack_dir / SLICES_DIR
+    if slices.is_dir():
+        for path in sorted(slices.iterdir()):
+            if not path.is_file():
+                continue
+            stem = path.stem if path.suffix in (".json", ".txt") else path.name
+            if is_task_id(stem):
+                labels.append(f"{SLICES_DIR}/{path.name}")
+    defined = spec.get("slices")
+    if isinstance(defined, dict):
+        labels.extend(f"filter.json -> slices.{label}" for label in sorted(defined))
+    if not labels:
+        return f"this pack defines no slices at all (no {SLICES_DIR}/, no filter.json slices)"
+    return "this pack defines " + ", ".join(labels)
+
+
 def resolve_slice(pack_dir: Path, spec: dict[str, Any], label: str) -> list[str] | None:
     """Names the pack defines for ``label``; ``None`` when it defines none."""
     label = label.strip()
@@ -363,15 +390,26 @@ def select_base(
     label = (task_slice or "").strip()
     if label:
         names = resolve_slice(pack_dir, spec, label)
-        if names is not None:
-            if not names:
-                _fail(f"pack slice {label!r} names no task")
-            return must_exist(names, f"pack slice {label!r}"), f"pack slice {label}", True
-        if pack_defines_slices(pack_dir, spec):
+        # A label that does not resolve is **always** a refusal, whether or not
+        # the pack defines any slice. The earlier "the pack defines no slices,
+        # so treat the label as informational" escape was a fail-open: a topic
+        # that named a 5-task slice on a pack with no `slices/` was scored on
+        # every task the pack held, which is a different (and far larger) run
+        # than the one the operator signed — it overran the wall clock and
+        # produced no baseline at all. A label the topic set is an assertion
+        # about which tasks to score; the guest never silently widens it.
+        if names is None:
+            defined = describe_defined_slices(pack_dir, spec)
             _fail(
                 f"task_slice {label!r} is not a slice this pack defines "
-                f"({SLICES_DIR}/ or filter.json slices); refusing to guess a task set"
+                f"({defined}); refusing to guess a task set. Score a named set with "
+                "constraints.params.tasks, or add the slice to the pack "
+                f"({SLICES_DIR}/{label}.json, {SLICES_DIR}/{label}.txt, or filter.json "
+                f"-> slices.{label})"
             )
+        if not names:
+            _fail(f"pack slice {label!r} names no task")
+        return must_exist(names, f"pack slice {label!r}"), f"pack slice {label}", True
     allow = spec.get("allow")
     if allow:
         return must_exist(list(allow), "pack filter.json allow"), "pack allow", False
@@ -483,6 +521,25 @@ def _int_or_none(raw: str | None, what: str) -> int | None:
     return None
 
 
+def resolve_n_tasks(explicit: str | None, legacy: str | None) -> tuple[int | None, str]:
+    """`n_tasks`, with `task_count` as a legacy alias when `n_tasks` is absent.
+
+    Returns ``(value, source)`` where source is ``"n_tasks"``, ``"task_count"``
+    (the alias was used), or ``""``.
+
+    `task_count` is **a count, not a selector**: it only ever bounds the set,
+    so it cannot stand in for a `task_slice` — a topic that named a slice it
+    cannot resolve is refused before this matters, and never silently scored
+    on an arbitrary N tasks. `n_tasks` wins when both are set, so a topic that
+    carries both is read the documented way.
+    """
+    if explicit is not None and explicit.strip():
+        return _int_or_none(explicit, "n_tasks"), "n_tasks"
+    if legacy is not None and legacy.strip():
+        return _int_or_none(legacy, "task_count"), "task_count"
+    return None, ""
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tasks-dir", required=True)
@@ -491,6 +548,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tasks", default=os.environ.get("PROOF_PARAM_TASKS", ""))
     parser.add_argument("--exclude", default=os.environ.get("PROOF_PARAM_TASK_EXCLUDE", ""))
     parser.add_argument("--n-tasks", default=os.environ.get("PROOF_PARAM_N_TASKS", ""))
+    parser.add_argument(
+        "--task-count",
+        default=os.environ.get("PROOF_PARAM_TASK_COUNT", ""),
+        help="legacy alias for --n-tasks (a count, never a slice selector); "
+        "--n-tasks wins when both are set",
+    )
     parser.add_argument("--task-slice", default=os.environ.get("PROOF_TASK_SLICE", ""))
     parser.add_argument(
         "--max-duration-s",
@@ -510,13 +573,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     pack_dir = Path(args.pack_dir) if args.pack_dir else Path(args.tasks_dir).parent
+    n_tasks, n_tasks_from = resolve_n_tasks(args.n_tasks, args.task_count)
+    if n_tasks_from == "task_count":
+        print(
+            "filter_tasks: constraints.params.task_count is a legacy alias for n_tasks; "
+            "prefer n_tasks (task_count is a count, never a slice selector)",
+            file=sys.stderr,
+        )
     summary = filter_tasks(
         Path(args.tasks_dir),
         Path(args.dest_dir),
         pack_dir=pack_dir,
         tasks=parse_names(args.tasks, "constraints.params.tasks"),
         exclude=parse_names(args.exclude, "constraints.params.task_exclude"),
-        n_tasks=_int_or_none(args.n_tasks, "n_tasks"),
+        n_tasks=n_tasks,
         task_slice=args.task_slice,
         max_s=_int_or_none(args.max_duration_s, "max_task_duration_s"),
         drop_unknown=args.drop_unknown,

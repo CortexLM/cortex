@@ -2358,6 +2358,9 @@ mod tests {
             vms: 2,
             experiment_vms: 1,
             max_experiment_vms: 2,
+            total_mib: 16_384,
+            reserve_mib: 0,
+            used_mib: 8_192,
         });
         // The probe's own view of the host gates is overwritten by the route.
         wired.live_harvest_wired = false;
@@ -3605,7 +3608,8 @@ mod tests {
             "{body}"
         );
 
-        // A journal with no row for the topic: not installed.
+        // A journal with no row for the topic: not installed, and the refusal
+        // names both halves of the gate (install applied + RLM-authored rules).
         let (st, body) = json_req(
             app_with_install_journal(token, Some(Arc::new(EmptyJournal))),
             "POST",
@@ -3615,13 +3619,10 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::CONFLICT, "{body}");
-        assert!(
-            body["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("no `applied` install row"),
-            "{body}"
-        );
+        let refusal = body["error"].as_str().unwrap_or_default();
+        assert!(refusal.contains("not ready to be `open`"), "{body}");
+        assert!(refusal.contains("RLM-authored"), "{body}");
+        assert!(refusal.contains("proof_rule_version.source"), "{body}");
 
         // An unreadable journal is refused too, never admitted.
         let (st, body) = json_req(

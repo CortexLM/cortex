@@ -21,7 +21,8 @@ pub const DEFAULT_GATEWAY: &str = "https://gateway.cortex.foundation";
 pub const DEFAULT_GET_TIMEOUT_SECS: u64 = 60;
 
 /// Proof POST / multipart default. Evaluate is **synchronous** and can run
-/// for minutes (tbench); a client-wide 60 s timeout drops the TCP stream,
+/// for minutes on a custom topic; a client-wide 60 s timeout drops the TCP
+/// stream,
 /// the gateway cancels upstream, and the host is left with an orphan
 /// experiment VM and no score. `0` (via [`Client::with_submit_timeout_secs`])
 /// waits until the host answers.
@@ -94,7 +95,7 @@ impl Client {
     /// followed, so a 302 to `http://` cannot resend `X-Lium-Api-Key`.
     ///
     /// Proof submits use [`DEFAULT_SUBMIT_TIMEOUT_SECS`]. There is **no**
-    /// client-wide reqwest timeout: tbench evaluate is synchronous.
+    /// client-wide reqwest timeout: custom-topic evaluate is synchronous.
     pub fn new(gateway: &str, lium_key: Option<String>) -> Result<Self, String> {
         Self::with_submit_timeout_secs(gateway, lium_key, DEFAULT_SUBMIT_TIMEOUT_SECS)
     }
@@ -415,7 +416,7 @@ mod tests {
         let builder = builder.split(".build()").next().expect("build");
         assert!(
             !builder.contains(".timeout("),
-            "do not set a client-wide reqwest timeout (tbench evaluate is sync): {builder}"
+            "do not set a client-wide reqwest timeout (custom-topic evaluate is sync): {builder}"
         );
         assert_eq!(DEFAULT_GET_TIMEOUT_SECS, 60);
         assert_eq!(DEFAULT_SUBMIT_TIMEOUT_SECS, 7200);

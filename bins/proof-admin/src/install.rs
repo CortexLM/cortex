@@ -602,6 +602,9 @@ fn install_failure(err: &InstallError, topic_id: &str) -> String {
         InstallError::Store(_) => "the rule store refused",
         InstallError::Db(_) => "the database refused",
         InstallError::Binding(_) => "the signed document's runner binding is malformed",
+        InstallError::CrossTopicClaim { .. } => {
+            "a migration names an object another registered topic also claims"
+        }
     };
     format!(
         "the install stopped: {step}\n  {err}\n\n  Rollback notes — what is and is not changed:\n  \

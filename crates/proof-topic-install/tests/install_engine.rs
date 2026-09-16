@@ -114,6 +114,164 @@ fn section(id: &str) -> String {
     .replace("{id}", id)
 }
 
+/// The cross-topic namespace collision, end to end through the install.
+///
+/// `-` → `_` is injective, but its prefixes are not prefix-free: `aa` is a
+/// prefix of `aa-b`'s mapped form `aa_b`, so the bare name `aa_b_scratch` sits
+/// inside **both** namespaces. The per-topic guard accepts it for each topic
+/// on its own — it sees one topic — so a migration approved for `aa` could
+/// read, modify, or drop a table belonging to `aa-b` in the shared database.
+///
+/// The install is where the registry is visible, so it refuses there, before
+/// the journal opens (nothing is written).
+#[tokio::test]
+async fn a_migration_that_reaches_a_sibling_topics_namespace_is_refused() {
+    let Some((_tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    // A sibling is registered whose mapped prefix the shorter topic's
+    // migration would also match.
+    store
+        .put_topic_version(&topic("aa-b"))
+        .await
+        .expect("register the sibling");
+
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    let doc = topic("aa");
+    // A migration whose object is inside **both** namespaces: `aa` reads it as
+    // `aa` + `b_scratch`, `aa-b` reads it as `aa-b` + `scratch`.
+    let colliding = r#"{
+        "rules": [
+            {"id": "no_short_circuit", "text": "the harness must run the task"}
+        ],
+        "migrations": [
+            {"name": "0001_shared", "sql": "CREATE TABLE aa_b_scratch (id TEXT)"}
+        ]
+    }"#;
+    let err = installer
+        .install(
+            &request(&doc, colliding),
+            SetupSummary::Skipped {
+                reason: "--skip-baseline".into(),
+            },
+        )
+        .await
+        .expect_err("a migration reaching a sibling's namespace must be refused");
+
+    let InstallError::CrossTopicClaim {
+        ref object,
+        ref this,
+        ref other,
+        ..
+    } = err
+    else {
+        panic!("want CrossTopicClaim, got {err:?}");
+    };
+    assert_eq!(object, "aa_b_scratch");
+    assert_eq!(this, "aa");
+    assert_eq!(other, "aa-b");
+    assert!(
+        err.to_string().contains("aa_b_scratch"),
+        "the refusal names the object: {err}"
+    );
+
+    // Nothing was written: the refusal is pre-flight, so there is no journal
+    // row and no table.
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM proof_topic_install WHERE topic_id = 'aa'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(rows, 0, "a collision writes nothing at all");
+    let exists: Option<String> = sqlx::query_scalar("SELECT to_regclass('aa_b_scratch')::text")
+        .fetch_one(&pool)
+        .await
+        .expect("probe");
+    assert_eq!(exists, None, "the colliding table was not created");
+}
+
+/// A **hyphenated** topic id installs its migrations end to end.
+///
+/// Every real topic id is a hyphen slug (`[a-z0-9][a-z0-9-]{1,62}`), and a
+/// bare SQL identifier cannot contain a hyphen. The defect this pins: the
+/// migration guard required a literal `{topic_id}_` prefix, so its requirement
+/// was unsatisfiable — `CREATE TABLE real-topic_scratch` is a syntax error at
+/// the first `-`, and the underscore spelling was refused as unscoped. No real
+/// topic could install a migration, and `topic install --drive-rlm` would only
+/// discover it *after* the paid baseline.
+///
+/// The suite's other tests all use `tb4`, which is why this went unnoticed.
+#[tokio::test]
+async fn a_hyphenated_topic_id_installs_its_migrations() {
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    let id = "fixture-topic-v0";
+    let doc = topic(id);
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    // The table the migration creates, spelled with the identifier-safe
+    // prefix the guard maps the id to. `section()` appends `_scratch`.
+    let table = "fixture_topic_v0_scratch";
+    let report = installer
+        .install(
+            &request(&doc, &section("fixture_topic_v0")),
+            SetupSummary::Skipped {
+                reason: "--skip-baseline".into(),
+            },
+        )
+        .await
+        .expect("a hyphenated topic's bundle installs");
+
+    assert_eq!(report.topic_id, id);
+    assert_eq!(
+        report.migrations_applied,
+        ["0001_scratch", "0002_index"],
+        "both migrations apply for a hyphenated id"
+    );
+    // The migration really ran: its table exists in this test's schema.
+    let exists: Option<String> =
+        sqlx::query_scalar(&format!("SELECT to_regclass('{table}')::text"))
+            .fetch_one(&pool)
+            .await
+            .expect("probe the table");
+    assert_eq!(
+        exists.as_deref(),
+        Some(table),
+        "the hyphenated topic's migration created its table"
+    );
+
+    // And a migration reaching a sibling topic is still refused, in both
+    // spellings — the fix widened the namespace, it did not remove it.
+    for sql in [
+        "CREATE TABLE fixture_topic_v1_scratch (id TEXT)",
+        "CREATE TABLE topic_scratch (id TEXT)",
+        "CREATE TABLE proof_rule_version (id TEXT)",
+    ] {
+        let section = format!(r#"{{"migrations": [{{"name": "0003_bad", "sql": "{sql}"}}]}}"#);
+        let err = installer
+            .install(
+                &request(&doc, &section),
+                SetupSummary::Skipped { reason: "x".into() },
+            )
+            .await
+            .expect_err("a sibling's table is not this topic's");
+        assert!(
+            matches!(err, proof_topic_install::InstallError::MigrationDenied(_)),
+            "{sql:?} must be refused by the guard, got {err:?}"
+        );
+    }
+
+    tp.drop_schema().await.expect("drop");
+}
+
 /// The happy path: every step applies, and the journal records it.
 #[tokio::test]
 async fn a_permitted_bundle_installs_and_the_journal_records_it() {
@@ -314,6 +472,233 @@ async fn a_denied_migration_writes_nothing_at_all() {
             .expect("journal")
             .is_none(),
         "a pre-flight refusal writes no journal row: it is a no-op, not a failed attempt"
+    );
+
+    tp.drop_schema().await.expect("drop");
+}
+
+/// The admission read binds the install to **the rule version it recorded**.
+///
+/// The defect this pins: the publish gate composed "the newest install is
+/// `applied`" and "the newest rule version is `rlm`" as two independent
+/// predicates. A topic whose install landed rule version 1 from the signed
+/// document (`topic_document`) was therefore admitted as soon as *any* later
+/// version happened to be RLM-authored — so it could open with the operator's
+/// vector in force, which is exactly the operator-cloned document the gate
+/// exists to refuse.
+#[tokio::test]
+async fn the_admission_read_binds_the_install_to_the_version_it_recorded() {
+    use proof_topic_install::{installed_rules, InstallState, InstalledRules};
+
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    let doc = topic("tb4");
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    // The install seeds version 1 from the signed document.
+    installer
+        .install(
+            &request(&doc, &section("tb4")),
+            SetupSummary::NotDriven { reason: "x".into() },
+        )
+        .await
+        .expect("install");
+
+    // Nothing to admit yet: the version the install landed is the operator's.
+    let before = installed_rules(&pool, "tb4").await.expect("read");
+    assert!(
+        matches!(
+            before,
+            InstalledRules::NotRlmAuthored {
+                version: Some(1),
+                ..
+            }
+        ),
+        "version 1 is topic_document-sourced, so the topic is not admissible: {before:?}"
+    );
+
+    // An **unrelated later** version is RLM-authored. The install still
+    // recorded version 1, so the topic must stay refused: reading "the newest
+    // rule version is rlm" would admit it.
+    let rlm_v2 = store
+        .current_rules("tb4")
+        .await
+        .expect("rules")
+        .expect("version 1")
+        .next(
+            proof_rlm::RuleSource::Rlm,
+            vec![proof_task::ChecklistRule {
+                id: "r-1".into(),
+                text: "the RLM's own rule".into(),
+            }],
+        )
+        .expect("v2");
+    store.put_rules(&rlm_v2).await.expect("write v2");
+    let after = installed_rules(&pool, "tb4").await.expect("read");
+    assert!(
+        matches!(
+            after,
+            InstalledRules::NotRlmAuthored {
+                version: Some(1),
+                ..
+            }
+        ),
+        "the install recorded version 1; a newer RLM version must not admit it: {after:?}"
+    );
+
+    // A **new install row** that records version 2 is what admits the topic.
+    // This is the operator's real path: re-install after the RLM wrote rules.
+    let report = installer
+        .install(
+            &request(&doc, &section("tb4")),
+            SetupSummary::Baselined {
+                rules_version: 2,
+                baseline_primary: "0.42".into(),
+            },
+        )
+        .await
+        .expect("re-install");
+    assert_eq!(
+        report.rules_version, 2,
+        "the install keeps the RLM's version"
+    );
+    assert_eq!(
+        installed_rules(&pool, "tb4").await.expect("read"),
+        InstalledRules::RlmAuthored { version: 2 },
+        "an applied install recording an rlm-sourced version is the admission"
+    );
+
+    // And the states that are not `applied` are refused as their own shape.
+    sqlx::query(
+        "INSERT INTO proof_topic_install \
+         (topic_id, bundle_digest, environment, state, rules_version) \
+         VALUES ('tb4', 'sha256:' || repeat('ab', 32), 'staging', $1, 2)",
+    )
+    .bind(InstallState::Failed.as_str())
+    .execute(&pool)
+    .await
+    .expect("append a failed row");
+    assert_eq!(
+        installed_rules(&pool, "tb4").await.expect("read"),
+        InstalledRules::NotApplied {
+            state: Some("failed".into())
+        },
+        "the newest row being `failed` refuses regardless of rule provenance"
+    );
+
+    tp.drop_schema().await.expect("drop");
+}
+
+/// An `operator` edit that supersedes the RLM's vector refuses the topic.
+///
+/// The other direction of the same defect: the install recorded an
+/// RLM-authored version, but the vector **in force** is an operator's. A gate
+/// that bound only the install's version would admit the topic and serve rules
+/// no RLM wrote.
+#[tokio::test]
+async fn an_operator_edit_in_force_refuses_the_topic() {
+    use proof_rlm::RuleSource;
+    use proof_task::ChecklistRule;
+    use proof_topic_install::{installed_rules, InstalledRules};
+
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    let doc = topic("tb4");
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    installer
+        .install(
+            &request(&doc, &section("tb4")),
+            SetupSummary::NotDriven { reason: "x".into() },
+        )
+        .await
+        .expect("install");
+
+    // The RLM authors version 2, and an install records it.
+    let rlm = store
+        .current_rules("tb4")
+        .await
+        .expect("rules")
+        .expect("v1")
+        .next(
+            RuleSource::Rlm,
+            vec![ChecklistRule {
+                id: "rlm-1".into(),
+                text: "the RLM's rule".into(),
+            }],
+        )
+        .expect("v2");
+    store.put_rules(&rlm).await.expect("write v2");
+    installer
+        .install(
+            &request(&doc, &section("tb4")),
+            SetupSummary::Baselined {
+                rules_version: 2,
+                baseline_primary: "0.5".into(),
+            },
+        )
+        .await
+        .expect("re-install");
+    assert_eq!(
+        installed_rules(&pool, "tb4").await.expect("read"),
+        InstalledRules::RlmAuthored { version: 2 },
+        "the install landed the RLM's vector"
+    );
+
+    // An operator edit supersedes it. Both halves of the gate have to hold:
+    // the installed version is still `rlm`, but it is no longer in force.
+    let edited = store
+        .current_rules("tb4")
+        .await
+        .expect("rules")
+        .expect("v2")
+        .next(
+            RuleSource::Operator,
+            vec![ChecklistRule {
+                id: "hand-1".into(),
+                text: "an operator's rule".into(),
+            }],
+        )
+        .expect("v3");
+    store.put_rules(&edited).await.expect("write v3");
+    assert_eq!(
+        installed_rules(&pool, "tb4").await.expect("read"),
+        InstalledRules::SupersededByOperator {
+            installed: 2,
+            in_force: 3,
+            provenance: "operator".into(),
+        },
+        "an operator vector in force is not an admission, even when the install landed an RLM one"
+    );
+
+    // An RLM rewrite of its own rules stays admitted: that is the autonomy this
+    // gate protects, not something it may refuse.
+    let rewritten = store
+        .current_rules("tb4")
+        .await
+        .expect("rules")
+        .expect("v3")
+        .next(
+            RuleSource::Rlm,
+            vec![ChecklistRule {
+                id: "rlm-2".into(),
+                text: "the RLM rewrote its own rule".into(),
+            }],
+        )
+        .expect("v4");
+    store.put_rules(&rewritten).await.expect("write v4");
+    assert_eq!(
+        installed_rules(&pool, "tb4").await.expect("read"),
+        InstalledRules::RlmAuthored { version: 2 },
+        "an RLM rewrite (rlm -> rlm) stays admitted"
     );
 
     tp.drop_schema().await.expect("drop");

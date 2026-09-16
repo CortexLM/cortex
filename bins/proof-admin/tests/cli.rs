@@ -114,11 +114,12 @@ max_output_tokens = 8192
         )
     }
 
-    /// A signed custom topic selecting the in-guest runner, the shape the live
-    /// `tb4` topic has.
+    /// A signed custom topic selecting the in-guest runner, the shape a real
+    /// bundle carries. The slug is a fixture string: no topic id is special to
+    /// this build, and which topics exist is what an operator published.
     pub fn signed_topic(pack_digest: &str) -> TopicDocument {
         let mut doc = TopicDocument {
-            id: "tb4".into(),
+            id: "fixture-topic-v0".into(),
             statement: "Score the pinned task pack with the pinned runner.".into(),
             payout_mode: PayoutMode::Discovery,
             constraints: Constraints::default(),
@@ -128,7 +129,7 @@ max_output_tokens = 8192
                 direction: MetricDirection::Max,
                 unit: "rate".into(),
                 epsilon_rel: 0.05,
-                custom_id: "tbench".into(),
+                custom_id: "fixture_metric_v0".into(),
                 ..MetricSpec::default()
             },
             baseline: default_adamw(FLOPS_BUDGET_MAX),
@@ -148,8 +149,8 @@ max_output_tokens = 8192
         doc
     }
 
-    /// The Arch default bundle: slug `tb4`, custom id `tbench`, and the
-    /// temporary alias `tbench` the Owner default declares.
+    /// The fixture bundle: a signed custom topic, its alias, and the host env
+    /// that must agree with it.
     pub fn bundle_json(environment: &str) -> String {
         let hex = "ab".repeat(32);
         let pack = format!("sha256:{hex}");
@@ -157,15 +158,15 @@ max_output_tokens = 8192
         let bundle = serde_json::json!({
             "schema_version": 1,
             "environment": environment,
-            "display_name": "Terminal-Bench 4",
+            "display_name": "Fixture Topic",
             "topic": topic,
-            "aliases": ["tbench"],
+            "aliases": ["fixture-alias"],
             "host": {
                 "rlm_image_digest": format!("sha256:{hex}"),
                 "experiment_image_digest": format!("sha256:{hex}"),
                 "pack_digest": pack,
                 "pack_dir": "/var/lib/proof/packs",
-                "custom_ids_entry": "tbench"
+                "custom_ids_entry": "fixture_metric_v0"
             },
             // A small illustrative RLM section, so the committed fixture also
             // exercises the hand-off. A real bundle carries the topic's own
@@ -175,7 +176,7 @@ max_output_tokens = 8192
                     {"id": "no_short_circuit", "text": "the harness must run the task"}
                 ],
                 "migrations": [
-                    {"name": "0001_scratch", "sql": "CREATE TABLE tb4_scratch (id TEXT)"}
+                    {"name": "0001_scratch", "sql": "CREATE TABLE fixture_topic_v0_scratch (id TEXT)"}
                 ],
                 "apis": [
                     {"path": "status", "method": "GET", "summary": "topic status"}
@@ -218,25 +219,25 @@ fn regenerate_dry_run_fixture() {
     };
     fs::create_dir_all(&dir).expect("fixture dir");
     fs::write(
-        dir.join("tb4.install-bundle.json"),
+        dir.join("topic.install-bundle.json"),
         fixture::bundle_json("staging"),
     )
     .expect("bundle");
-    fs::write(dir.join("tb4.pin.toml"), fixture::pin_toml()).expect("pin");
+    fs::write(dir.join("topic.pin.toml"), fixture::pin_toml()).expect("pin");
     eprintln!("wrote the dry-run fixture to {}", dir.display());
 }
 
 /// The committed dry-run fixture must stay runnable.
 ///
-/// `tests/fixtures/tb4.bundle.json` + `tb4.pin.toml` are the operator artifact
-/// the A→Z walkthrough uses, so a schema change that quietly breaks them must
-/// fail here rather than in the Owner's hands. This runs the **same two
-/// commands** the fixture README documents.
+/// `tests/fixtures/topic.install-bundle.json` + `topic.pin.toml` are the
+/// operator artifact the A→Z walkthrough uses, so a schema change that quietly
+/// breaks them must fail here rather than in the Owner's hands. This runs the
+/// **same two commands** the fixture README documents.
 #[test]
 fn the_committed_dry_run_fixture_still_validates_and_plans() {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let bundle = fixtures.join("tb4.install-bundle.json");
-    let pin = fixtures.join("tb4.pin.toml");
+    let bundle = fixtures.join("topic.install-bundle.json");
+    let pin = fixtures.join("topic.pin.toml");
     assert!(bundle.is_file(), "missing {}", bundle.display());
     assert!(pin.is_file(), "missing {}", pin.display());
 
@@ -251,8 +252,11 @@ fn the_committed_dry_run_fixture_still_validates_and_plans() {
     ]);
     assert_eq!(code(&out), 0, "fixture must validate: {}", stderr(&out));
     let body = stdout(&out);
-    assert!(body.contains("topic_id         tb4"), "{body}");
-    assert!(body.contains("custom_id        tbench"), "{body}");
+    assert!(body.contains("topic_id         fixture-topic-v0"), "{body}");
+    assert!(
+        body.contains("custom_id        fixture_metric_v0"),
+        "{body}"
+    );
     assert!(
         body.contains("rlm_install      present"),
         "the fixture carries an RLM section: {body}"
@@ -278,10 +282,10 @@ fn the_committed_dry_run_fixture_still_validates_and_plans() {
         body.contains("Hand control to the topic's RLM"),
         "the plan must show the hand-off: {body}"
     );
-    // The fixture carries the Owner-default alias, so the plan must say so:
-    // an operator reads the plan to know what the install will do.
+    // The fixture declares an alias, so the plan must say so: an operator
+    // reads the plan to know what the install will do.
     assert!(
-        body.contains("tbench"),
+        body.contains("fixture-alias"),
         "the plan must name the alias the fixture declares: {body}"
     );
 
@@ -310,7 +314,7 @@ fn the_committed_dry_run_fixture_still_validates_and_plans() {
 #[test]
 fn validate_accepts_the_arch_default_bundle_and_writes_nothing() {
     let dir = workdir("validate-ok");
-    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("metal"));
+    let bundle = write_file(&dir, "topic.json", &fixture::bundle_json("metal"));
     let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
     let out = run(&[
         "topic",
@@ -324,9 +328,9 @@ fn validate_accepts_the_arch_default_bundle_and_writes_nothing() {
     let body = stdout(&out);
     for needle in [
         "is valid",
-        "topic_id         tb4",
+        "topic_id         fixture-topic-v0",
         "environment      metal",
-        "custom_id        tbench",
+        "custom_id        fixture_metric_v0",
         "runner_id        rlm_fc_in_guest_harbor",
         "bundle_digest    sha256:",
         "Nothing was written",
@@ -420,7 +424,7 @@ fn validate_refuses_a_document_the_publish_route_would_refuse() {
 #[test]
 fn validate_json_output_is_machine_readable() {
     let dir = workdir("validate-json");
-    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("metal"));
+    let bundle = write_file(&dir, "topic.json", &fixture::bundle_json("metal"));
     let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
     let out = run(&[
         "--json",
@@ -435,9 +439,9 @@ fn validate_json_output_is_machine_readable() {
     let parsed: serde_json::Value =
         serde_json::from_str(&stdout(&out)).expect("validate --json is JSON");
     assert_eq!(parsed["ok"], true);
-    assert_eq!(parsed["topic_id"], "tb4");
+    assert_eq!(parsed["topic_id"], "fixture-topic-v0");
     assert_eq!(parsed["environment"], "metal");
-    assert_eq!(parsed["custom_id"], "tbench");
+    assert_eq!(parsed["custom_id"], "fixture_metric_v0");
     assert_eq!(parsed["runner_id"], "rlm_fc_in_guest_harbor");
     assert!(
         parsed["bundle_digest"]
@@ -454,7 +458,7 @@ fn validate_json_output_is_machine_readable() {
 #[test]
 fn dry_run_install_prints_the_existing_publish_call_and_host_env() {
     let dir = workdir("dry-run");
-    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("metal"));
+    let bundle = write_file(&dir, "topic.json", &fixture::bundle_json("metal"));
     let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
     let out = run(&[
         "topic",
@@ -472,9 +476,9 @@ fn dry_run_install_prints_the_existing_publish_call_and_host_env() {
     let body = stdout(&out);
     for needle in [
         "topic install plan",
-        "topic_id          tb4",
+        "topic_id          fixture-topic-v0",
         "environment       metal",
-        "custom_id         tbench",
+        "custom_id         fixture_metric_v0",
         "runner_id         rlm_fc_in_guest_harbor",
         "Hand control to the topic's RLM (it installs and sets the topic up)",
         "provision -> propose_rules -> baseline",
@@ -484,7 +488,7 @@ fn dry_run_install_prints_the_existing_publish_call_and_host_env() {
         "chmod 600",
         "--data-binary @\"$PROOF_TOPIC_DIR/document.json\"",
         "/challenge/proof/v1/admin/proof/topics",
-        "PROOF_VM_RUNNER_CUSTOM_IDS=tbench",
+        "PROOF_VM_RUNNER_CUSTOM_IDS=fixture_metric_v0",
         "PROOF_RLM_VM_IMAGE_DIGEST=sha256:",
         "PROOF_EXPERIMENT_VM_IMAGE_DIGEST=sha256:",
         "PROOF_VM_AGENT_EXPERIMENT_PACK_DIR=/var/lib/proof/packs",
@@ -549,7 +553,7 @@ fn dry_run_install_prints_the_existing_publish_call_and_host_env() {
 #[test]
 fn dry_run_install_json_matches_the_plan_shape() {
     let dir = workdir("dry-run-json");
-    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("staging"));
+    let bundle = write_file(&dir, "topic.json", &fixture::bundle_json("staging"));
     let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
     let out = run(&[
         "--json",
@@ -566,9 +570,9 @@ fn dry_run_install_json_matches_the_plan_shape() {
     assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
     let parsed: serde_json::Value =
         serde_json::from_str(&stdout(&out)).expect("dry run --json is JSON");
-    assert_eq!(parsed["topic_id"], "tb4");
+    assert_eq!(parsed["topic_id"], "fixture-topic-v0");
     assert_eq!(parsed["environment"], "staging");
-    assert_eq!(parsed["custom_id"], "tbench");
+    assert_eq!(parsed["custom_id"], "fixture_metric_v0");
     assert_eq!(parsed["runner_id"], "rlm_fc_in_guest_harbor");
     assert_eq!(parsed["publish_route"], "POST /v1/admin/proof/topics");
     assert_eq!(parsed["pack_dir_env"], "PROOF_VM_AGENT_EXPERIMENT_PACK_DIR");
@@ -583,7 +587,7 @@ fn dry_run_install_json_matches_the_plan_shape() {
 #[test]
 fn install_refuses_an_environment_the_bundle_does_not_declare() {
     let dir = workdir("env-mismatch");
-    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("metal"));
+    let bundle = write_file(&dir, "topic.json", &fixture::bundle_json("metal"));
     let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
     let out = run(&[
         "topic",
@@ -616,7 +620,7 @@ fn install_refuses_an_environment_the_bundle_does_not_declare() {
 #[test]
 fn a_real_install_refuses_without_a_master_and_a_bearer_and_changes_nothing() {
     let dir = workdir("real-install-config");
-    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("metal"));
+    let bundle = write_file(&dir, "topic.json", &fixture::bundle_json("metal"));
     let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
 
     // No --admin-url: refused, and it says how to supply one.
@@ -727,7 +731,7 @@ fn a_real_install_refuses_without_a_master_and_a_bearer_and_changes_nothing() {
 #[test]
 fn driving_the_rlm_requires_the_owner_assertion() {
     let dir = workdir("drive-rlm-gate");
-    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("staging"));
+    let bundle = write_file(&dir, "topic.json", &fixture::bundle_json("staging"));
     let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
     let base = |extra: &[&str]| {
         let mut a = vec![
@@ -782,7 +786,7 @@ fn driving_the_rlm_requires_the_owner_assertion() {
 #[test]
 fn a_metal_install_requires_the_owner_acknowledgement() {
     let dir = workdir("metal-gate");
-    let bundle = write_file(&dir, "tb4.json", &fixture::bundle_json("metal"));
+    let bundle = write_file(&dir, "topic.json", &fixture::bundle_json("metal"));
     let pin = write_file(&dir, "pin.toml", &fixture::pin_toml());
     let args = |extra: &[&str]| {
         let mut a = vec![
@@ -826,7 +830,7 @@ fn a_metal_install_requires_the_owner_acknowledgement() {
     );
 
     // Staging is never gated: that is the default path.
-    let staging = write_file(&dir, "tb4-staging.json", &fixture::bundle_json("staging"));
+    let staging = write_file(&dir, "topic-staging.json", &fixture::bundle_json("staging"));
     let out = run(&[
         "topic",
         "install",
@@ -848,8 +852,7 @@ fn a_metal_install_requires_the_owner_acknowledgement() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// The Owner default: slug `tb4` with `tbench` as a temporary alias. The
-/// alias resolves through the store, and the CLI says which topic it hit.
+/// An alias resolves through the store, and the CLI says which topic it hit.
 #[tokio::test]
 async fn an_alias_resolves_to_its_topic() {
     let Some(url) = std::env::var("DATABASE_URL")
@@ -881,33 +884,51 @@ async fn an_alias_resolves_to_its_topic() {
     };
 
     // Before the alias exists, the temporary slug is unknown.
-    let out = run_db(&["topic", "show", "tbench"]);
+    let out = run_db(&["topic", "show", "fixture-alias"]);
     assert_eq!(code(&out), EXIT_ERROR, "stderr={}", stderr(&out));
 
     // Set the Owner default alias.
-    let out = run_db(&["topic", "alias", "set", "tbench", "--topic", "tb4"]);
+    let out = run_db(&[
+        "topic",
+        "alias",
+        "set",
+        "fixture-alias",
+        "--topic",
+        "fixture-topic-v0",
+    ]);
     assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
-    assert!(stdout(&out).contains("tbench -> tb4"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("fixture-alias -> fixture-topic-v0"),
+        "{}",
+        stdout(&out)
+    );
 
     // The alias now resolves, and the CLI says so.
-    let out = run_db(&["topic", "show", "tbench"]);
+    let out = run_db(&["topic", "show", "fixture-alias"]);
     assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
     let body = stdout(&out);
-    assert!(body.contains("tbench is an alias of tb4"), "{body}");
-    assert!(body.contains("topic tb4"), "{body}");
+    assert!(
+        body.contains("fixture-alias is an alias of fixture-topic-v0"),
+        "{body}"
+    );
+    assert!(body.contains("topic fixture-topic-v0"), "{body}");
 
-    let out = run_db(&["--json", "topic", "show", "tbench"]);
+    let out = run_db(&["--json", "topic", "show", "fixture-alias"]);
     assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
     let parsed: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
     assert_eq!(
-        parsed["topic_id"], "tb4",
+        parsed["topic_id"], "fixture-topic-v0",
         "the alias reports the canonical id"
     );
 
     // Listing shows the temporary mapping.
-    let out = run_db(&["topic", "alias", "list", "--topic", "tb4"]);
+    let out = run_db(&["topic", "alias", "list", "--topic", "fixture-topic-v0"]);
     assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
-    assert!(stdout(&out).contains("tbench -> tb4"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("fixture-alias -> fixture-topic-v0"),
+        "{}",
+        stdout(&out)
+    );
 
     // An alias for an unpublished topic is refused.
     let out = run_db(&[
@@ -926,11 +947,11 @@ async fn an_alias_resolves_to_its_topic() {
     );
 
     // Retiring the alias leaves the topic alone.
-    let out = run_db(&["topic", "alias", "rm", "tbench"]);
+    let out = run_db(&["topic", "alias", "rm", "fixture-alias"]);
     assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
-    let out = run_db(&["topic", "show", "tb4"]);
+    let out = run_db(&["topic", "show", "fixture-topic-v0"]);
     assert_eq!(code(&out), 0, "the topic survives: {}", stderr(&out));
-    let out = run_db(&["topic", "alias", "rm", "tbench"]);
+    let out = run_db(&["topic", "alias", "rm", "fixture-alias"]);
     assert_eq!(code(&out), EXIT_ERROR, "already gone: {}", stderr(&out));
 
     tp.drop_schema().await.expect("drop");
@@ -938,7 +959,11 @@ async fn an_alias_resolves_to_its_topic() {
 
 #[test]
 fn read_commands_without_a_database_are_usage_errors() {
-    for args in [vec!["topic", "list"], vec!["topic", "show", "tb4"]] {
+    for args in [
+        vec!["topic", "list"],
+        vec!["topic", "show", "fixture-topic-v0"],
+        vec!["topic", "lifecycle", "fixture-topic-v0"],
+    ] {
         let out = run(&args);
         assert_eq!(code(&out), EXIT_USAGE, "{args:?}: {}", stderr(&out));
         assert!(
@@ -976,7 +1001,7 @@ fn database_url_and_file_are_mutually_exclusive() {
 /// command in this CLI is implemented now, so the exit codes are 0/1/2.)
 #[test]
 fn seal_needs_the_open_document() {
-    let args = vec!["topic", "seal", "tb4"];
+    let args = vec!["topic", "seal", "fixture-topic-v0"];
     let out = run(&args);
     assert_eq!(code(&out), EXIT_USAGE, "{args:?}: {}", stderr(&out));
     let err = stderr(&out);
@@ -995,8 +1020,14 @@ fn seal_needs_the_open_document() {
 #[test]
 fn disable_and_enable_need_the_gate_database() {
     for args in [
-        vec!["topic", "disable", "tb4", "--reason", "incident 42"],
-        vec!["topic", "enable", "tb4"],
+        vec![
+            "topic",
+            "disable",
+            "fixture-topic-v0",
+            "--reason",
+            "incident 42",
+        ],
+        vec!["topic", "enable", "fixture-topic-v0"],
     ] {
         let out = Command::new(env!("CARGO_BIN_EXE_proof-admin"))
             .args(&args)
@@ -1021,7 +1052,7 @@ fn disable_and_enable_need_the_gate_database() {
 /// is the path an operator is told to take.
 #[test]
 fn the_scorable_path_fails_closed_on_its_inputs() {
-    let out = run(&["topic", "baseline", "tb4"]);
+    let out = run(&["topic", "baseline", "fixture-topic-v0"]);
     assert_eq!(code(&out), EXIT_USAGE, "{}", stderr(&out));
     assert!(
         stderr(&out).contains("BASE_DATABASE_URL"),
@@ -1029,7 +1060,7 @@ fn the_scorable_path_fails_closed_on_its_inputs() {
         stderr(&out)
     );
 
-    let out = run(&["topic", "seal", "tb4"]);
+    let out = run(&["topic", "seal", "fixture-topic-v0"]);
     assert_eq!(code(&out), EXIT_USAGE, "{}", stderr(&out));
     assert!(stderr(&out).contains("--document"), "{}", stderr(&out));
 }
@@ -1043,6 +1074,7 @@ fn help_lists_every_subcommand() {
         "validate",
         "install",
         "install-log",
+        "lifecycle",
         "list",
         "show",
         "enable",
@@ -1095,13 +1127,12 @@ fn the_cli_does_not_bake_in_topic_behavior() {
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
-    // The one place a seed id is allowed is the CLI's own help/examples.
-    let without_examples = logic
-        .replace("tb4.json", "")
-        .replace("`tbench`", "")
-        .replace("`tb4`", "");
+    // The one place a fixture slug is allowed is the CLI's own help/examples,
+    // which name a neutral placeholder file.
+    let without_examples = logic.replace("topic.json", "");
     assert!(
-        !without_examples.contains("tb4") && !without_examples.contains("tbench"),
+        !without_examples.contains("fixture-topic-v0")
+            && !without_examples.contains("fixture-alias"),
         "a topic id must not appear in CLI logic"
     );
     for forbidden in [
@@ -1162,15 +1193,22 @@ async fn the_registry_view_lists_what_the_scoring_path_persisted() {
     let out = run_db(&["--json", "topic", "list"]);
     assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
     let listed: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
-    assert_eq!(listed[0]["topic_id"], "tb4");
+    assert_eq!(listed[0]["topic_id"], "fixture-topic-v0");
     assert_eq!(listed[0]["version"], 1);
-    assert_eq!(listed[0]["custom_id"], "tbench");
+    // `custom_id` is the runner-registry key the document names
+    // (`metric.custom_id`), not the topic's alias — the two are different
+    // mappings, and the alias is `fixture-alias`.
+    assert_eq!(listed[0]["custom_id"], "fixture_metric_v0");
+    assert_ne!(
+        listed[0]["custom_id"], "fixture-alias",
+        "an alias is a slug lookup, not the custom id"
+    );
 
-    let out = run_db(&["--json", "topic", "show", "tb4"]);
+    let out = run_db(&["--json", "topic", "show", "fixture-topic-v0"]);
     assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
     let shown: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
-    assert_eq!(shown["topic_id"], "tb4");
-    assert_eq!(shown["document"]["id"], "tb4");
+    assert_eq!(shown["topic_id"], "fixture-topic-v0");
+    assert_eq!(shown["document"]["id"], "fixture-topic-v0");
     assert_eq!(shown["document"]["signature"], doc.signature);
 
     // An unknown id is an error that says what to do, not an empty success.
@@ -1180,6 +1218,115 @@ async fn the_registry_view_lists_what_the_scoring_path_persisted() {
         stderr(&out).contains("no installed topic"),
         "{}",
         stderr(&out)
+    );
+
+    tp.drop_schema().await.expect("drop");
+}
+
+/// `topic lifecycle` reports where a driven topic actually is.
+///
+/// This is the read that makes a long `--drive-rlm` legible: the command
+/// prints one line and then nothing until the whole run returns, so an
+/// operator watching a working run sees the same output as one watching a
+/// stopped run. The durable progress is the lifecycle journal, and the
+/// baseline's absence is what says the paid job has not landed yet — the
+/// exact question "0 rows in `proof_baseline_measurement`" raises.
+#[tokio::test]
+async fn the_lifecycle_view_says_where_a_driven_topic_is() {
+    use proof_rlm::{RlmEvent, RlmState};
+    use proof_rlm_store::{RlmStore, TransitionRow};
+
+    let Some(url) = std::env::var("DATABASE_URL")
+        .ok()
+        .map(|u| u.trim().to_owned())
+        .filter(|u| !u.is_empty())
+    else {
+        return;
+    };
+    let tp = match db::test_pool_with_url(&url).await {
+        Ok(tp) => tp,
+        Err(e) => panic!("test_pool: {e}"),
+    };
+    let store = proof_rlm_store::PgRlmStore::new(tp.pool().clone());
+    let doc = fixture::signed_topic(&format!("sha256:{}", "ab".repeat(32)));
+    RlmStore::put_topic_version(&store, &doc)
+        .await
+        .expect("persist the document");
+
+    let schema = tp.schema().to_owned();
+    let scoped = format!("{url}?options=-c%20search_path%3D{schema}%2Cpublic");
+    let run_db = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_proof-admin"))
+            .args(args)
+            .env("BASE_DATABASE_URL", &scoped)
+            .env_remove("BASE_DATABASE_URL_FILE")
+            .output()
+            .expect("run proof-admin")
+    };
+
+    // No transitions yet: an error that says nothing has driven it, not an
+    // empty success an operator could misread as "fine".
+    let out = run_db(&["topic", "lifecycle", "fixture-topic-v0"]);
+    assert_eq!(code(&out), EXIT_ERROR, "stderr={}", stderr(&out));
+    assert!(
+        stderr(&out).contains("no lifecycle rows"),
+        "{}",
+        stderr(&out)
+    );
+
+    // The shape a `--drive-rlm` run leaves mid-flight: past the owner gate,
+    // provisioning, with **no** baseline row yet.
+    for (from, event, to) in [
+        (
+            RlmState::Draft,
+            RlmEvent::SubmitForReview,
+            RlmState::OwnerPresend,
+        ),
+        (
+            RlmState::OwnerPresend,
+            RlmEvent::OwnerApproved,
+            RlmState::AwaitingOwnerKeys,
+        ),
+        (
+            RlmState::AwaitingOwnerKeys,
+            RlmEvent::OwnerKeysPresent,
+            RlmState::Provisioning,
+        ),
+    ] {
+        RlmStore::record_transition(
+            &store,
+            &TransitionRow {
+                topic_id: doc.id.clone(),
+                from,
+                event,
+                to,
+                note: "test".into(),
+            },
+        )
+        .await
+        .expect("record");
+    }
+
+    let out = run_db(&["--json", "topic", "lifecycle", "fixture-topic-v0"]);
+    assert_eq!(code(&out), 0, "stderr={}", stderr(&out));
+    let view: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
+    assert_eq!(view["topic_id"], "fixture-topic-v0");
+    assert_eq!(view["state"], "provisioning");
+    assert!(
+        view["baseline_rules_version"].is_null(),
+        "no baseline has been measured yet: {view}"
+    );
+    assert!(
+        view["history"].as_array().is_some_and(|h| h.len() == 3),
+        "every transition is reported, oldest first: {view}"
+    );
+    // The advice names the state, so an operator knows the run is in flight
+    // rather than lost.
+    assert!(
+        view["next"]
+            .as_str()
+            .is_some_and(|s| s.contains("VM is being created")),
+        "{view}"
     );
 
     tp.drop_schema().await.expect("drop");
@@ -1260,18 +1407,19 @@ impl AdminStub {
                             Some(pool) => {
                                 let state: Option<String> = sqlx::query_scalar(
                                     "SELECT state FROM proof_topic_install \
-                                     WHERE topic_id = 'tb4' ORDER BY id DESC LIMIT 1",
+                                     WHERE topic_id = 'fixture-topic-v0' ORDER BY id DESC LIMIT 1",
                                 )
                                 .fetch_optional(pool)
                                 .await
                                 .ok()
                                 .flatten();
-                                let table: Option<String> =
-                                    sqlx::query_scalar("SELECT to_regclass('tb4_scratch')::text")
-                                        .fetch_optional(pool)
-                                        .await
-                                        .ok()
-                                        .flatten();
+                                let table: Option<String> = sqlx::query_scalar(
+                                    "SELECT to_regclass('fixture_topic_v0_scratch')::text",
+                                )
+                                .fetch_optional(pool)
+                                .await
+                                .ok()
+                                .flatten();
                                 Some((
                                     state.unwrap_or_else(|| "no row".into()),
                                     table.unwrap_or_else(|| "no table".into()),
@@ -1387,13 +1535,13 @@ async fn the_publish_lands_only_after_the_install_is_green() {
         "the install must be green before the topic is published"
     );
     assert_eq!(
-        table, "tb4_scratch",
+        table, "fixture_topic_v0_scratch",
         "the migration must have applied before the topic is published"
     );
 
     // And the install is complete afterwards: the journal's newest row is
     // `applied` with the migration recorded.
-    let row = proof_topic_install::latest_install(&probe_pool, "tb4")
+    let row = proof_topic_install::latest_install(&probe_pool, "fixture-topic-v0")
         .await
         .expect("journal")
         .expect("a row");
@@ -1428,7 +1576,7 @@ async fn a_refused_install_never_publishes() {
     // The same bundle, with a migration the deny-list refuses. The document
     // and its signature are untouched, so the refusal comes from the install.
     let denied = fixture::bundle_json("staging").replace(
-        "CREATE TABLE tb4_scratch (id TEXT)",
+        "CREATE TABLE fixture_topic_v0_scratch (id TEXT)",
         "DROP TABLE proof_rule_version",
     );
     assert!(denied.contains("proof_rule_version"), "the swap applied");
@@ -1473,14 +1621,15 @@ async fn a_refused_install_never_publishes() {
     );
 
     // Nothing was installed either: no journal row, no table.
-    let row = proof_topic_install::latest_install(tp.pool(), "tb4")
+    let row = proof_topic_install::latest_install(tp.pool(), "fixture-topic-v0")
         .await
         .expect("journal");
     assert!(row.is_none(), "a pre-flight refusal writes no journal row");
-    let table: Option<String> = sqlx::query_scalar("SELECT to_regclass('tb4_scratch')::text")
-        .fetch_one(tp.pool())
-        .await
-        .expect("probe");
+    let table: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('fixture_topic_v0_scratch')::text")
+            .fetch_one(tp.pool())
+            .await
+            .expect("probe");
     assert!(table.is_none(), "and no migration ran: {table:?}");
 
     fs::remove_dir_all(&dir).ok();
