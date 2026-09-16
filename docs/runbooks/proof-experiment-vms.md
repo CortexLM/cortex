@@ -106,6 +106,16 @@ fit its own ceiling set is a sizing problem the operator fixes, not one the
 agent papers over by clamping. The budget never sizes a VM; it only decides
 whether the host can carry what the topic asked for.
 
+**Worked example — the tipped Gate 4 retry.** On a 16 GiB host
+(`total_mib: 16384`) with the topic's resident 8 GiB RLM VM, a topic that
+asks `experiment_mem_mib: 4096` runs **two** experiment VMs: 8192 + 4096 +
+4096 = 16,384 MiB, an exact fit, and both are admitted. A third has nothing
+left and is refused with the numbers. The same host with `experiment_mem_mib:
+8192` admits only **one** experiment VM; the second is refused (8192 + 8192 +
+8192 = 24,576 > 16,384) instead of OOM-killing every guest. That refusal is
+the Gate 4 failure turned into a clean, one-sided answer — the shape does not
+fit the host, and no accounting change makes it fit.
+
 ## What happens on a paid job
 
 ```text
@@ -346,7 +356,7 @@ spend**. Use `proof-vm-wire-check.sh submit-probe --topic <id> --expect
 | `DELETE /v1/vms/{id}` fails or is not confirmed after a **successful** run | 503 `experiment vm <topic>-x<n> not confirmed destroyed after its job (…); the outcome is withheld, not scored` — no row, no baseline | the VM is still listed by the agent (`experiment_vms` ≥ 1); reconcile it by hand |
 | `DELETE /v1/vms/{id}` (`retain`) fails or is not confirmed after a **failed** run | 503 with the job's own error — no row | CP journal `experiment vm job failed and the vm was not confirmed retained (…); reconcile it on the kvm host`; the VM is still listed by the agent |
 | `PROOF_VM_AGENT_MAX_EXPERIMENT_VMS` reached | 503 `orchestrator 503 … Capacity: this host runs N of at most N experiment vms` | no boot |
-| the boot would not fit the host's RAM | 503 `orchestrator 503 … Capacity: host memory: N MiB in use by M live vm(s) [topic <id> (N MiB), experiment <id> (N MiB)] + N MiB requested exceeds the N MiB ceiling (N MiB total − N MiB reserve); the vm was not booted` | **no boot** — the VMs that fit keep running. This is the Gate 4 shape: the count cap was satisfied and the kernel OOM-killed every guest instead |
+| the boot would not fit the host's RAM | 503 `orchestrator 503 … Capacity: host memory: N MiB requested, N MiB free of the N MiB VM ceiling (N MiB total − N MiB reserve); N MiB is held by M live vm(s) [topic <id> (N MiB), experiment <id> (N MiB)]. The vm was not booted — refusing here keeps the running vms alive instead of letting the host OOM-kill them` | **no boot** — the VMs that fit keep running. This is the Gate 4 shape: the count cap was satisfied and the kernel OOM-killed every guest instead. The wording is deliberately distinct from the `MAX_EXPERIMENT_VMS` refusal: a host too small for the shape is not "retry when one finishes" |
 | runner id not baked (`/opt/proof/runners/<id>/run` missing) | 503 `runner … is not installed in this guest image` | `experiment vm booted` → guest `Failed` → retained; **no value reported** |
 | run report `sandboxed=false` on a `firecracker_required` topic | 503 `run report says miner code ran outside the Firecracker guest` | retained (final verification is part of the job outcome used for teardown policy) |
 | adaptor writes no `report.json` / non-finite value / outlives the deadline | 503 with the adaptor's exit + redacted tail / `cut at the deadline of Ns` | retained (read `console.log` and `root/scratch.ext4` under `PROOF_VM_AGENT_RETAIN_DIR/<topic>-x<n>`) |

@@ -136,11 +136,14 @@ impl MemoryBudget {
                     )
                 })
                 .collect();
+            let free = ceiling.saturating_sub(used);
             return Err(format!(
-                "host memory: {used} MiB in use by {} live vm(s) [{}] + {want} MiB requested \
-                 exceeds the {ceiling} MiB ceiling ({total} MiB total − {reserve} MiB reserve); \
-                 the vm was not booted. Retry when one finishes, or lower the topic's ask \
-                 (PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB / the signed mem_mib)",
+                "host memory: {want} MiB requested, {free} MiB free of the {ceiling} MiB VM \
+                 ceiling ({total} MiB total − {reserve} MiB reserve); {used} MiB is held by {} \
+                 live vm(s) [{}]. The vm was not booted — refusing here keeps the running vms \
+                 alive instead of letting the host OOM-kill them. Free a vm, retry when one \
+                 finishes, or lower the ask (the signed mem_mib / \
+                 PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB)",
                 live.len(),
                 holders.join(", "),
                 total = self.total_mib,
@@ -253,13 +256,14 @@ mod tests {
             .fits(&live, 8_192)
             .expect_err("two experiments beside a topic do not fit");
         for want in [
-            "16384 MiB in use",
+            "16384 MiB is held",
             "tb4-0007",
             "tb4-x0008",
             "topic tb4-0007 (8192 MiB)",
             "experiment tb4-x0008 (8192 MiB)",
             "8192 MiB requested",
-            "16384 MiB ceiling",
+            "0 MiB free",
+            "16384 MiB VM ceiling",
         ] {
             assert!(err.contains(want), "the refusal names {want:?}: {err}");
         }
@@ -360,6 +364,91 @@ mod tests {
                 .is_err(),
             "and Gate 4's third guest is still refused: rounding restores the \
              operator's number, it does not invent headroom"
+        );
+    }
+
+    /// The shape the Owner is tipping staging to for the Gate 4 retry:
+    /// `experiment_mem_mib: 4096`, so a 16 GiB host runs the resident 8 GiB
+    /// topic VM **beside two 4 GiB experiment VMs** — 16,384 MiB, exactly the
+    /// ceiling.
+    ///
+    /// This is the retry Gate 4 depends on, so it is pinned here: an
+    /// off-by-one or a reserve default would refuse it and Gate 4 would stall
+    /// on the admission guard instead of the OOM.
+    #[test]
+    fn the_tipped_gate4_retry_shape_is_admitted() {
+        let budget = MemoryBudget {
+            total_mib: 16_384,
+            reserve_mib: 0,
+        };
+        let topic = vm("tb4-0007", 8_192, false);
+        let first = vm("tb4-x0008", 4_096, true);
+        // Topic + one experiment.
+        assert!(
+            budget.fits(&[topic.clone(), first.clone()], 4_096).is_ok(),
+            "the first 4 GiB experiment fits beside the topic vm"
+        );
+        // Topic + two experiments = exactly the ceiling: still admitted.
+        assert!(
+            budget.fits(&[topic.clone(), first.clone()], 4_096).is_ok(),
+            "the second 4 GiB experiment fills the host exactly and must be admitted"
+        );
+        let live = [topic.clone(), first.clone(), vm("tb4-x0009", 4_096, true)];
+        let used: u64 = live.iter().map(|r| u64::from(r.mem_mib)).sum();
+        assert_eq!(used, 16_384, "the tipped shape is an exact fit");
+        // A third experiment has nothing left.
+        assert!(
+            budget.fits(&live, 4_096).is_err(),
+            "a third experiment has no memory left"
+        );
+    }
+
+    /// The refusal names the **free** memory and what holds it, so an operator
+    /// reading a 503 knows what to free without reaching for `free` — and it
+    /// says the refusal is what keeps the running VMs alive.
+    #[test]
+    fn the_refusal_names_free_memory_and_its_holders() {
+        let budget = MemoryBudget {
+            total_mib: 16_384,
+            reserve_mib: 0,
+        };
+        let live = [vm("tb4-0007", 8_192, false), vm("tb4-x0008", 4_096, true)];
+        let err = budget.fits(&live, 8_192).expect_err("no room");
+        for want in [
+            "8192 MiB requested",
+            "4096 MiB free",
+            "16384 MiB VM ceiling",
+            "12288 MiB is held",
+            "topic tb4-0007 (8192 MiB)",
+            "experiment tb4-x0008 (4096 MiB)",
+            "OOM-kill",
+        ] {
+            assert!(err.contains(want), "the refusal names {want:?}: {err}");
+        }
+    }
+
+    /// The two capacity refusals are distinguishable: this one is about host
+    /// RAM, and the count cap (`max_experiment_vms`) has its own wording. An
+    /// operator must not read "retry when one finishes" for a host that is
+    /// simply too small for the shape.
+    #[test]
+    fn the_memory_refusal_does_not_read_as_the_count_cap() {
+        let budget = MemoryBudget {
+            total_mib: 16_384,
+            reserve_mib: 0,
+        };
+        // A shape that genuinely does not fit: the topic VM plus a 32 GiB ask
+        // on a 16 GiB host. (A lone 8 GiB topic VM has room for an 8 GiB
+        // experiment, so that shape is admitted and cannot be the probe.)
+        let live = [vm("tb4-0007", 8_192, false)];
+        let err = budget.fits(&live, 32_768).expect_err("no room");
+        assert!(
+            !err.contains("PROOF_VM_AGENT_MAX_EXPERIMENT_VMS"),
+            "the memory refusal must not be mistaken for the count cap: {err}"
+        );
+        assert!(
+            err.contains("host memory"),
+            "it names the constraint it is about: {err}"
         );
     }
 

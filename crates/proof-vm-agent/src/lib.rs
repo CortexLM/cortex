@@ -815,11 +815,12 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{err:?}");
         assert_eq!(err.code, ErrorCode::Capacity);
         for want in [
-            "12288 MiB in use",
+            "12288 MiB is held",
             "topic",
             topic.handle.vm_id.as_str(),
             "8192 MiB requested",
-            "16384 MiB ceiling",
+            "4096 MiB free",
+            "16384 MiB VM ceiling",
         ] {
             assert!(
                 err.error.contains(want),
