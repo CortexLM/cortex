@@ -140,6 +140,34 @@ guest emitting `Authored` needs a host that knows the tag. Rebuild the host
 binaries from the tip **before** an image whose agent emits the set reaches
 the host — or accept the 502 until the host catches up.
 
+**Which checkout is "the tip" is not a detail — check it before rebuilding.**
+`remote-deploy.sh` rsyncs the **local tree** to the host (`"$ROOT/"` →
+`$REMOTE_DIR/`), so `/opt/base`'s tip is whatever checkout was rsynced, and a
+host rebuilt from a `main`-based checkout gains **nothing**: `Authored`
+(`945e143f`) is not an ancestor of `main` as of `aabd1724`. Confirm the source
+compiles the variant before spending a rebuild:
+
+```bash
+# on whichever box holds the checkout that will be rsynced / compiled
+git merge-base --is-ancestor 945e143f HEAD \
+  && echo "can decode authored" \
+  || echo "CANNOT — this checkout predates the variant; use the stack tip"
+grep -c '"authored"' crates/proof-rlm/src/vm.rs   # 0 before 945e143f, >0 after
+```
+
+Two binaries must be rebuilt, and they do **not** ship the same way:
+
+| Binary | Where | How |
+|---|---|---|
+| `proof-challenge` | CP/master | compose image, rebuilt from the rsynced tree |
+| `proof-vm-orchestrator` | KVM host, **systemd unit** | `cargo build --release -p proof-vm-orchestrator-bin`, copied over, unit restarted — `remote-deploy.sh` does not reach it |
+
+Both decode through `proof-vm-proto`, so both need the variant. And the host
+rebuild alone does not open a topic: with an agent that predates the set, the
+dual-emit gives it the fragment, which the control plane records and refuses
+(`IncompleteAuthoring`). The **guest rebake** is what makes the set exist; the
+host rebuild is what lets it be read.
+
 ## Build
 
 The agent is a host binary (systemd unit), not a compose image. Build it on
