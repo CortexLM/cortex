@@ -2,13 +2,31 @@
 
 Checklist: `RLM-AUTHORSHIP-EVIDENCE-CHECKLIST.md` · Pin: `ARCH-PIN-100PCT-RLM-AUTONOMOUS.md`
 
-**Tip under review:** `droid/2edcb0c8-100-rlm-autonomous-strip-tbe` @ **`612bdbd1`** (PR #301, draft).
+**Tip under review:** `droid/2edcb0c8-100-rlm-autonomous-strip-tbe` @ **`e204b426`**
+(PR [#301](https://github.com/CortexLM/cortex/pull/301), draft — the stack head).
+Mirror PR [#302](https://github.com/CortexLM/cortex/pull/302) carries the same HEAD.
 Every path below is in this repo; every SHA is a commit on that branch or its stack.
 
 > **How to read this pack.** Each item states the claim, the **code path** that makes it
-> true, and the **command + observed result** that demonstrates it. Where evidence is from
-> this checkout rather than cortex-staging, it says so — nothing here is presented as live
-> staging output that was not.
+> true, and the **command + observed result** that demonstrates it. Evidence is labelled by
+> source: **[staging]** = Dev's live `cortex-staging` dig, **[local-db]** = a real Postgres
+> in this container running the real install path, **[tree]** = read from this checkout.
+> Nothing is presented as live staging output that was not.
+
+## Verdict summary
+
+| # | Item | Verdict |
+|---|---|---|
+| 1 | CLI trigger-only | **met** |
+| 2 | Journal: rules `source=rlm` + migrations + `proof_topic_api` + submission_format + pin_policy + runner | **partly met** — rules are RLM-authored **[staging]**; migrations/apis/submission_format come from the operator bundle, and `pin_policy` does not exist. See §2f |
+| 3 | SoT ≠ operator clone of legacy `tbench` | **met in code**, with a live gap: B1 FIXED used a human YAML (§3e) |
+| 4 | Residual product hardcode ZERO | **met** — before/after below |
+| 5 | 1 VM/submission | **met** |
+| 6 | Tips / checks / PRs | **given** |
+
+**The one open authorship gap is item 2**, and it is architectural, not a defect: the RLM
+authors **rules**; migrations, APIs, submission-format and scoring travel in the operator's
+bundle. §2f states exactly what would have to change, and why I did not change it unasked.
 
 ---
 
@@ -94,7 +112,32 @@ topic VM. Enforced in three places:
 | boot admission | `bins/proof-challenge/src/main.rs:854 load_topics` | an `open` doc whose install is not `applied` **or** whose rules are not RLM-authored (skipped, logged) |
 | seal-time | `crates/proof-topic-setup/src/lib.rs:415` + `:439` | a measurement taken under a superseded / no-longer-in-force rule version |
 
-### 2d. Observed result — DB-gated install tests, live Postgres
+### 2d. Observed result — live cortex-staging **[staging]**
+
+Dev's dig on `cortex-staging`, which is the strongest evidence in this pack because it is the
+real host:
+
+| Fact | Value |
+|---|---|
+| `proof_rule_version` for `tb4`, versions **v5–v7** | all **`source=rlm`** |
+| v7 digest | `7231a716…` |
+| install **#11** | `applied`, bundle `sha256:d2429e99…` |
+| └ `rules_version` | **7** |
+| └ `migrations` | `["0001_scratch"]` |
+| └ `binding.runner` | `rlm_fc_in_guest_harbor` |
+| └ `binding.vms_per_submission` | **1** |
+| └ `binding.custom_id` | `tbench` |
+| `proof_topic_api` | **only** `GET status` for `tb4` |
+
+**What this proves.** The rule vector in force on staging is RLM-authored, three versions
+deep (v5–v7), and the install journal's `rules_version` matches it (7). The VM pin is 1.
+The routes table is live and scoped to the topic.
+
+**What it also shows — and this is the gap.** `migrations = ["0001_scratch"]` and
+`apis = [GET status]` are the **bundle's** section, applied by the install. Nothing in the
+journal records an RLM as their author, because nothing can: see §2f.
+
+### 2e. Observed result — real database, real install path **[local-db]**
 
 The install engine's suite is DB-gated (`crates/proof-topic-install/tests/install_engine.rs:3`
 — runs when `DATABASE_URL` names a Postgres). Run here against a **real Postgres 18** with
@@ -126,51 +169,48 @@ report.apis.len() == 2
 SELECT to_regclass('tb4_scratch') == "tb4_scratch"             # the migration really ran
 ```
 
-**Caveat, stated plainly.** This is a **real database running the real install path**, but it
-is a scratch DB in this container, **not** cortex-staging. The staging-side journal rows
-(`proof_topic_install` / `proof_topic_api` / `proof_rule_version` for the live topic) are
-Owner/Dev evidence I cannot read from here. If Arch needs the staging rows verbatim, the
-query is:
+The scratch DB was dropped after the run. This is a real install path on a real database —
+but it is **not** cortex-staging; §2d is.
 
-```sql
-SELECT topic_id, state, rules_version, rule_ids, migrations,
-       binding->>'handler', binding->>'runner_id', binding->>'vms_per_submission',
-       binding->>'submission_format_digest', binding->>'scoring_digest'
-  FROM proof_topic_install ORDER BY id DESC LIMIT 5;
+### 2f. **The authorship gap, stated exactly**
 
-SELECT topic_id, method, path FROM proof_topic_api ORDER BY topic_id, path;
+The checklist asks to prove `migrations` / `apis` / `submission_format` / `pin_policy` are
+**RLM-authored**. They are not. Here is the whole boundary:
 
-SELECT topic_id, version, source FROM proof_rule_version ORDER BY version DESC LIMIT 5;
--- source must read 'rlm' for the version in force
-```
+| Part | Who authors it | Where it lands | Enforced how |
+|---|---|---|---|
+| **rules** | **the RLM** (`propose_rules` in its topic VM) | `proof_rule_version.source='rlm'` | three gates: `propose_rules` read-back (`proof-topic-setup/src/lib.rs:388`), boot admission (`bins/proof-challenge/src/main.rs:854`), seal-time version checks (`:415`, `:439`) |
+| `migrations` | the **operator** (bundle `rlm` section) | applied by the install; names in `proof_topic_install.migrations` | deny-list (`proof-topic-sql-guard`) before the first statement runs |
+| `apis` | the **operator** (bundle `rlm` section) | `proof_topic_api` rows | path/method shape checks; topic-relative paths only |
+| `submission_format` | the **operator** (bundle) | digest in `binding.submission_format_digest` | shape + digest |
+| `scoring` | the **operator** (bundle) | digest in `binding.scoring_digest` | shape + digest |
+| `pin_policy` | **does not exist** | — | the pin is global (`config/proof-pin.toml`); topics may only **tighten** (`TopicError::LoosenedFloor`, `crates/proof-task/src/topic.rs:506`) |
 
-### 2e. `pin_policy` — **not a field in this tree**
+**Why the RLM cannot author the others today:** the job surface is
+`VmJob::{ProposeRules, Baseline, Inspect, Evaluate, Archive}` and the only behavior it can
+return is `VmJobOutput::Rules(Vec<ChecklistRule>)`
+(`crates/proof-rlm/src/vm.rs:203`, `:315`). There is no variant that carries a migration or
+a route, and no wire message (`proof-vm-proto::guest`) that could transport one. The install
+seeds rule **version 1** as `RuleSource::TopicDocument` by design
+(`crates/proof-topic-install/src/install.rs:493`), and says so:
 
-The checklist names `pin_policy` as journal content. There is no such field, column, or
-parameter anywhere:
+> Provenance is the point here. What this seeds is `topic_document` … An install therefore
+> never makes a topic's behavior RLM-authored.
 
-```
-$ rg -rni 'pin_policy|pinpolicy|pin policy' . --glob '!target'
-(no output)
-```
+**What closing it would require** (scoped, not started — it is a real architectural change,
+not a doc fix):
 
-What exists instead, and is the substance of that item:
+1. Two new `VmJobOutput` variants (e.g. schema + routes) and the corresponding `VmJob`
+   inputs, so the RLM can propose them the way it proposes rules.
+2. A guest-side authorship path: the adaptor would have to emit them from the topic VM, with
+   the same read-back-and-verify provenance the rule path has.
+3. A new trust story for **RLM-written DDL** — the deny-list stays, but "the RLM authored
+   this table" becomes a claim the install must verify rather than assume.
+4. Versioning + supersede semantics matching the rule path (`rules_still_in_force` has no
+   analogue for schema), and journal columns recording provenance per part.
 
-- The **pin is global and per-challenge** (`config/proof-pin.toml`), not per-topic:
-  `gpu_class = "1x"`, `max_proof_deadline_s_ceiling = 14400`, `eval_image_digest`,
-  `flops_budget_max`, `epsilon_*` floors.
-- A topic may only **tighten** a pin floor, never loosen it:
-  `crates/proof-task/src/topic.rs:506 TopicError::LoosenedFloor` (`{field} = {got} loosens the
-  pin floor {floor}`), raised for `metric.quality_floor_nll`, `metric.epsilon_rel`, and the
-  budget ceiling.
-- The per-topic pins that do travel are in the signed document
-  (`constraints.model_pin`, `constraints.params.experiment_pack_digest`,
-  `eval_executor.{require_offer_commitment, max_proof_deadline_s}`) and are recorded in the
-  binding / the document itself, not in a `pin_policy` object.
-
-So item 2's `pin_policy` is **not satisfied as named**; the equivalent guarantee is
-tighten-only floors against a global pin, at the path above. Flagging rather than
-renaming something to match the checklist.
+I did not do this unasked: it changes what the RLM *is*, and the PIN reads as a claim about
+the system rather than a work order. Say the word and it becomes its own PR.
 
 ---
 
@@ -202,14 +242,40 @@ all **after** it. In `crates/gateway/tests/`, `crates/proof-rlm-store/tests/`, a
 
 **Evidence 3d — which topics exist is a DB fact.** `proof_topic_version` +
 `proof_topic_install`; the challenge's `load_topics` admits only documents whose install is
-`applied` and whose rules are RLM-authored (§2c).
+`applied` and whose rules are RLM-authored (§2c). On staging, `proof_rule_version` v5–v7 for
+`tb4` are all `source=rlm` **[staging]** (§2d).
 
-**Diff vs a human-minted `tb4` YAML:** there is no such YAML in this repo to diff against.
-The pre-`8e36538a` prose is the closest thing that existed, and it was documentation of an
-intended default, not a document the host read. If a human-minted `tb4` document exists
-**outside** this repo (operator-held), the SoT test is: the host serves what is in
-`proof_topic_version`, and it only admits it when the DB proves install + RLM authorship —
-so an operator's local YAML has no path to being served.
+### 3e. **The live SoT gap** — B1 FIXED used a human YAML
+
+Dev's dig found the thing that matters: **the B1 FIXED run that took Gates 1–6 to GO was
+driven by a human-authored YAML topic document.** That is not the final authorship SoT, and
+this pack does not claim otherwise.
+
+What it means precisely, and what it does not:
+
+| Question | Answer |
+|---|---|
+| Was the **rule vector** the RLM's? | **Yes** — `proof_rule_version` v5–v7 all `source=rlm` **[staging]**. The authorship gate for rules held on the live host. |
+| Was the **document** (statement, metric, constraints, floors, pack pin) the RLM's? | **No** — an operator wrote it. It is signed by the topic key, so the host trusts it, but a human chose its contents. |
+| Does a human YAML have a path to being served? | **No, not on its own.** The host serves what is in `proof_topic_version`, and only admits an `open` document whose install is `applied` **and** whose rules are RLM-authored. A local YAML that was never installed and never had rules proposed is not admitted. |
+| So is the SoT "operator clone of legacy tbench"? | **No** — but it is *operator-authored*, which is one step short of the PIN's intent. |
+
+**The honest distinction:** the PIN's first clause ("no operator-cloned `tb4` as SoT") holds —
+nothing in the tree is a clone of the legacy topic, and the host's registry is the DB. The
+PIN's deeper intent ("the topic authors itself") is **partly** met: the **rules** are the
+RLM's, the **document and the schema** are the operator's.
+
+**What would close it:** the same work as §2f — the RLM has to be able to propose the parts
+of the document that are currently hand-written (at minimum `constraints.params`, the metric
+choice, and the migrations/APIs), with the provenance recorded per part. Until then, a topic
+is "RLM-ruled, operator-declared", and the pack should say so rather than round up.
+
+**Diff vs a human-minted `tb4` YAML:** there is no such YAML **in this repo** to diff
+against. The pre-`8e36538a` prose ("Locked defaults: first slug `tb4` with temporary alias
+`tbench`") is the closest thing that existed, and it was documentation of an intended
+default, not a document the host read. The live B1 YAML is operator-held on staging, outside
+this repo; the check that matters is the one above — the host only serves what
+`proof_topic_version` holds under an `applied` install with RLM-authored rules.
 
 ---
 
@@ -230,17 +296,54 @@ $ cargo test -p proof-topic-bundle no_topic_id_is_compiled_into_the_product_bran
 test result: ok. 1 passed; 0 failed
 ```
 
-**Before/after grep, by hand, on the modules with the most historical hits** — counting only
-lines **before** each file's first `#[cfg(test)]`:
+**Before/after inventory.** "Production code" below means every line **before** the file's
+first `#[cfg(test)]`; the pre-strip column is `8e36538a^` (the commit that moved topic
+behavior out of product code), the tip column is `e204b426`.
 
-| Module | Raw hits | First `#[cfg(test)]` | **Hits in production code** |
+| Module | Pre-strip | **Tip** |
+|---|---|---|
+| `bins/proof-admin/src/main.rs` | **6** | **0** |
+| `crates/proof-challenge/src/topic_routes.rs` | 0 | 0 |
+| `crates/proof-challenge/src/lib.rs` | 0 | 0 |
+| `crates/proof-challenge/src/emit.rs` | 0 | 0 |
+| `crates/gateway-core/src/topic_routes.rs` | 0 | 0 |
+| `crates/gateway-core/src/admin_route.rs` | 0 | 0 |
+| `crates/gateway-core/src/proxy_paths.rs` | 0 | 0 |
+
+The six that were removed from `proof-admin`'s production code were CLI usage examples and
+doc-comment examples, e.g.:
+
+```
+62:   proof-admin topic validate --bundle tb4.json --pin config/proof-pin.toml
+65:   proof-admin topic install --bundle tb4.json --env metal --dry-run
+171:         /// The alias slug (e.g. `tbench`).
+173:         /// The canonical topic slug it resolves to (e.g. `tb4`).
+595:     // An alias resolves to its canonical slug first, so `show tbench` finds
+596:     // `tb4`. Resolution is fail-closed in the store: an alias whose topic has
+```
+
+They are now generic (`--bundle <path>`), which is the difference between "the CLI knows a
+topic" and "the CLI takes one".
+
+`bins/proof-admin/tests/cli.rs` carries **one** occurrence of `terminal-bench` — inside the
+CLI's own guard test, as a member of its `forbidden` list (`cli.rs:1139`). It is the check,
+not a usage.
+
+**Whole-tree production-code sweep on the tip** (the 32 guarded modules plus the CLI):
+
+```
+$ cargo test -p proof-topic-bundle no_topic_id_is_compiled_into_the_product_branches
+test result: ok. 1 passed; 0 failed
+```
+
+**Hand grep on the modules with the most historical hits** — raw hits vs hits before each
+file's first `#[cfg(test)]`:
+
+| Module | Raw hits | First `#[cfg(test)]` | **Production-code hits** |
 |---|---|---|---|
 | `crates/proof-challenge/src/topic_routes.rs` | 20 | line 257 | **0** |
 | `crates/gateway-core/src/topic_routes.rs` | 12 | line 103 | **0** |
 | `crates/gateway-core/src/admin_route.rs` | 1 | line 83 | **0** |
-| `crates/proof-challenge/src/lib.rs` | 0 | — | **0** |
-| `crates/proof-challenge/src/emit.rs` | 0 | — | **0** |
-| `crates/gateway-core/src/proxy_paths.rs` | 0 | — | **0** |
 
 **Known remaining occurrences on tip, none of which is a product branch:**
 
@@ -304,9 +407,15 @@ Still **2**. The Gate 4 hardening added a *second* cap beside it (host memory ad
 | [#298](https://github.com/CortexLM/cortex/pull/298) | `droid/9f68584e-sn100-p1a-rlm-topic-install` | `b735f3358d3d` | #297 | yes | CLEAN |
 | [#299](https://github.com/CortexLM/cortex/pull/299) | `droid/9822d526-sn100-100-live-gaps-p1b-disa` | `37fa0920610c` | #298 | yes | CLEAN |
 | [#300](https://github.com/CortexLM/cortex/pull/300) | `droid/933f76bf-b1-raise-max-proof-deadline` | `870a3b875533` | #299 | yes | CLEAN |
-| [#301](https://github.com/CortexLM/cortex/pull/301) | `droid/2edcb0c8-100-rlm-autonomous-strip-tbe` | **`612bdbd1`** | #300 | yes | CLEAN |
+| [#301](https://github.com/CortexLM/cortex/pull/301) | `droid/2edcb0c8-100-rlm-autonomous-strip-tbe` | **`e204b426`** | #300 | yes | CLEAN |
+| [#302](https://github.com/CortexLM/cortex/pull/302) | `droid/1d0afa5f-sn100-stay-lit-cont-gate1-pa` | **`e204b426`** | #300 | yes | CLEAN |
 
-`main` is `aabd1724eb90`. The stack is linear: #301 → #300 → #299 → #298 → #297 → `main`.
+`main` is `aabd1724eb90`. The stack is linear: **#301 → #300 → #299 → #298 → #297 → `main`**.
+
+**#301 is the canonical stack position.** #302 is a mirror this session opened so the branch
+has its own URL (the earlier "`pr_url` was null" report was accurate for
+`droid/1d0afa5f-…`, which had never been pushed — it is pushed now, and #302 is its PR).
+Both PRs carry the **same HEAD**; merge #301.
 
 ### Checks
 
@@ -317,6 +426,7 @@ Still **2**. The Gate 4 hardening added a *second* cap beside it (host memory ad
 | #299 | not triggered | SUCCESS |
 | #300 | not triggered | SUCCESS |
 | #301 | not triggered | **SUCCESS** (69 files reviewed, 0 comments) |
+| #302 | not triggered (mirror of #301) | see PR |
 
 **Why CI runs only on #297:** `ci.yml` triggers on `pull_request: branches: [main]`. #297 is
 the only PR in the stack whose base is `main`; #298–#301 are stacked on each other, so
@@ -364,14 +474,19 @@ executed locally on the tip — see below.
 
 | # | Item | Verdict |
 |---|---|---|
-| 1 | CLI trigger-only | **met** — zero topic literals in `bins/proof-admin/src`; no bundle-generating command |
-| 2 | Journal: rules `source=rlm`, migrations, `proof_topic_api`, submission_format, runner | **met** (DB-gated tests pass against real Postgres; journal fields asserted). **`pin_policy` does not exist** — the equivalent is a global pin + tighten-only floors, paths given |
-| 3 | SoT ≠ operator clone of legacy `tbench` | **met** — no committed topic document; "locked defaults" prose removed in `8e36538a`; remaining `tb4` refs are test fixtures |
-| 4 | Residual product hardcode ZERO | **met** — 32-module guard passes; hand grep shows 0 hits before every `#[cfg(test)]`; the legacy `tbench-harbor-v1` string is a signed-document wire value, not a branch |
-| 5 | 1 VM/submission | **met** — `VMS_PER_SUBMISSION = 1`, recorded per install, refused on the submit path when mismatched; `DEFAULT_MAX_EXPERIMENT_VMS` still 2 |
-| 6 | Tips / checks / PRs | **given** — table above; CI fires only on #297 by design, local CI-parity run on the tip |
+| 1 | CLI trigger-only | **met** — zero topic literals in `bins/proof-admin/src`; no bundle-generating command; six such literals removed by `8e36538a` (before/after in §4) |
+| 2 | Journal: rules `source=rlm`, migrations, `proof_topic_api`, submission_format, runner | **partly met** — rules are RLM-authored on **live staging** (v5–v7, `source=rlm`); migrations / apis / submission_format / scoring come from the **operator bundle**; **`pin_policy` does not exist** (§2f gives the exact boundary and what closing it needs) |
+| 3 | SoT ≠ operator clone of legacy `tbench` | **met in code**; **live gap flagged** — B1 FIXED was driven by a human YAML (§3e). The host's SoT is the DB, and an operator YAML has no path to being served without an `applied` install + RLM-authored rules |
+| 4 | Residual product hardcode ZERO | **met** — `proof-admin` production literals **6 → 0**; 32-module guard passes; hand grep shows 0 hits before every `#[cfg(test)]`; the legacy `tbench-harbor-v1` string is a signed-document wire value, not a branch |
+| 5 | 1 VM/submission | **met** — `VMS_PER_SUBMISSION = 1`, recorded per install (**1** on staging install #11), refused on the submit path when mismatched; `DEFAULT_MAX_EXPERIMENT_VMS` still 2 |
+| 6 | Tips / checks / PRs | **given** — stack table above; CI fires only on #297 by design, local CI-parity run on the tip |
 
-**Not claimed:** live cortex-staging journal rows (Owner/Dev territory), and the `pin_policy`
-field by that name. Everything else above is reproducible from this checkout at `612bdbd1`.
+**The open item is 2, and it is architectural.** The RLM authors the rule vector — proven
+live. It cannot author migrations, APIs, submission-format or scoring, because no job or wire
+message carries them (§2f). Closing that changes what the RLM *is*; it is scoped in §2f and
+not started.
+
+**Not claimed:** that the RLM authors the schema or the routes; that B1's human YAML is the
+final authorship SoT; the `pin_policy` field by that name.
 
 **Not merged.** PR #301 is a draft; the merge HOLD stands pending Mathis GO.
