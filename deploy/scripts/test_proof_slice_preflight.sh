@@ -88,6 +88,24 @@ if out="$("$PREFLIGHT" --pack-dir "$no_slices" --task-slice five 2>&1)"; then
 fi
 pass "the stale label alone is still refused (the escape is the explicit set)"
 
+# --- a whitespace-only selector is ABSENT, not a selection -------------------
+# The guest normalizes a whitespace-only value as absent (`present()` trims,
+# then rejects empty), so `--tasks "   "` beside a slice selects the **slice**.
+# Reading the raw shell variables instead of the summary made the preflight
+# claim "params.tasks named the set" on a run that took the slice branch —
+# the wrong explanation for the operator, on the exact shape a re-sign
+# produces. Both directions, against the guest's own answer.
+out="$("$PREFLIGHT" --pack-dir "$with_slices" --tasks "   " --task-slice five --expect 5 2>&1)" \
+    || fail "a whitespace-only --tasks must fall through to the slice: $out"
+grep -q "task_slice 'five' resolved through the pack" <<<"$out" \
+    || fail "the slice must be reported as the selector, not params.tasks: $out"
+pass "a whitespace-only --tasks beside a slice selects the slice (guest semantics)"
+out="$("$PREFLIGHT" --pack-dir "$no_slices" --task-slice "   " --tasks t-one,t-two --expect 2 2>&1)" \
+    || fail "a whitespace-only --task-slice must not be read as a label: $out"
+grep -q "is not read" <<<"$out" \
+    || fail "with the tasks naming the set, no label should be reported: $out"
+pass "a whitespace-only --task-slice beside params.tasks is not read"
+
 # --- a count that does not match is caught, not silently accepted ------------
 if out="$("$PREFLIGHT" --pack-dir "$with_slices" --task-slice five --expect 3 2>&1)"; then
     fail "--expect must fail when the selection is a different size, got: $out"

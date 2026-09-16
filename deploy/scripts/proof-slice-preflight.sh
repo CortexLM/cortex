@@ -182,14 +182,32 @@ echo
 # block the very fix this preflight is meant to prove, so the assertion follows
 # the guest: a label that did not resolve is a refusal only when it was the
 # selector.
-if [ -n "$task_slice" ] && [ -z "$tasks" ]; then
-    case "$resolved" in
-        true) pass "task_slice '$task_slice' resolved through the pack (resolved=true)" ;;
-        *) die "task_slice '$task_slice' did not resolve (resolved=$resolved) — the guest would refuse this run" ;;
-    esac
-elif [ -n "$task_slice" ] && [ -n "$tasks" ]; then
-    pass "task_slice '$task_slice' is not read: params.tasks named the set (source=$source)"
-fi
+#
+# "Was it the selector" is read from the **summary**, never from these shell
+# variables: the guest normalizes a whitespace-only value as absent
+# (`present()` trims, then rejects empty), so `--tasks "   "` beside a slice
+# selects the slice. Testing `-n "$tasks"` here would claim `params.tasks`
+# named the set — the wrong explanation, on a run that took a different branch.
+# `source` is what the guest actually used; that is what the operator is told.
+case "$source" in
+    "params.tasks")
+        # The tasks decided it; the label (resolved or not) was not read.
+        [ -z "$task_slice" ] \
+            || pass "task_slice '$task_slice' is not read: params.tasks named the set (source=$source)"
+        ;;
+    "pack slice "*)
+        # The label was the selector and it resolved.
+        pass "task_slice '$task_slice' resolved through the pack (resolved=$resolved)"
+        ;;
+    *)
+        # The label was the selector and it did not resolve: the LIVE refusal.
+        # The guest would already have refused above, so this is unreachable —
+        # asserted rather than assumed, because reaching it means the guest and
+        # this preflight disagree about what the topic asked for.
+        [ -z "$task_slice" ] \
+            || die "task_slice '$task_slice' did not resolve (resolved=$resolved, source=$source) — the guest would refuse this run"
+        ;;
+esac
 
 if [ -n "$expect" ]; then
     [ "$kept" = "$expect" ] \

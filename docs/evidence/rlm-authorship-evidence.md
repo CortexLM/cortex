@@ -954,8 +954,21 @@ install shape, with the preflight command to verify it.
 |---|---|---|
 | `test_proof_slice_preflight.sh` — "a stale label beside params.tasks passes" | the escape is not refused | restoring `if [ -n "$task_slice" ]` fails it (verified) |
 | `test_proof_slice_preflight.sh` — "the stale label alone is still refused" | the escape is the tasks, not the label | — |
+| `test_proof_slice_preflight.sh` — "a whitespace-only `--tasks` beside a slice selects the slice" | the selector is read from the guest's normalized `source`, not the raw shell variables | reinstating the raw-variable branch fails it (verified) |
 | `test_adaptor.sh` — "an unresolved slice refuses before Harbor exists" | no invocation, no jobs dir, no report | reintroducing the fail-open fails the suite (verified) |
 | `test_adaptor.sh` — "the explicit-set escape reaches Harbor" | the positive control | — |
+
+**Greptile's P2 on the first cut of this fix, and why it mattered.** My first
+version decided "was the label the selector?" from the shell's own
+`--tasks` / `--task-slice` values. The guest normalizes a whitespace-only
+value as **absent** (`present()` trims, then rejects empty), so `--tasks "   "`
+beside a resolvable slice selects the **slice** — while the preflight passed
+and told the operator "params.tasks named the set". That is the wrong
+explanation attached to a run that took a different branch, on the exact shape
+a re-sign produces. The branch now reads the summary's normalized `source`,
+which is what the guest actually used, and both whitespace directions are
+pinned. Greptile reproduced it with a runnable artifact; I reproduced it
+independently against throwaway packs before changing anything.
 
 **What this does not claim.** That `task_slice` is removed from the schema —
 it is still a valid selector when the pack defines the label. And not that the
