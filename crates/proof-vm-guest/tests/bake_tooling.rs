@@ -57,6 +57,10 @@ fn guest_scripts_parse() {
             "bash",
             "deploy/guest/runners/rlm_fc_in_guest_harbor/inspect",
         ),
+        (
+            "bash",
+            "deploy/guest/runners/rlm_fc_in_guest_harbor/propose_rules",
+        ),
         ("bash", "deploy/guest/runners/rlm_fc_in_guest_harbor/lib.sh"),
         (
             "bash",
@@ -389,8 +393,14 @@ fn deploy_guest_names_no_harness_or_benchmark() {
     for required in [
         "run",
         "inspect",
+        // Authorship: without this entrypoint the guest refuses every
+        // `ProposeRules` job (NO_RLM_RULES), so no topic on this runner can
+        // ever open — the RLM authored nothing and the bundle is not a
+        // substitute for its answer.
+        "propose_rules",
         "README.md",
         "harness/run-harbor",
+        "harness/authoring_set.py",
         "harness/summarize.py",
         "harness/filter_tasks.py",
         "harness/resolve_model.py",
@@ -404,10 +414,12 @@ fn deploy_guest_names_no_harness_or_benchmark() {
         let p = adaptor.join(required);
         assert!(p.is_file(), "reference adaptor missing {}", p.display());
     }
-    assert!(
-        adaptor.join("run").metadata().unwrap().permissions().mode() & 0o111 != 0,
-        "reference adaptor run must be executable"
-    );
+    for entry in ["run", "inspect", "propose_rules"] {
+        assert!(
+            adaptor.join(entry).metadata().unwrap().permissions().mode() & 0o111 != 0,
+            "reference adaptor {entry} must be executable (the guest execs it directly)"
+        );
+    }
     // The adaptor's selection / inspection code carries no task list, slice
     // name, filter mode, or rule id of any topic: those are topic data
     // (signed params + the pinned pack). Test fixtures are exempt.
@@ -419,6 +431,8 @@ fn deploy_guest_names_no_harness_or_benchmark() {
         "harness/filter_tasks.py",
         "harness/summarize.py",
         "harness/run-harbor",
+        "harness/authoring_set.py",
+        "propose_rules",
         "lib.sh",
         "inspect_scan.py",
     ] {

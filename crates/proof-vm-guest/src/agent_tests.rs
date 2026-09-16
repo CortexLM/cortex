@@ -1715,7 +1715,127 @@ sleep 30
     );
     assert!(
         err.contains("sync"),
-        "timeout must persist work before Failed, got {err}"
+        "timeout must persist work before Fail, got {err}"
     );
     let _ = std::fs::remove_dir_all(&r);
+}
+
+/// The reference adaptor's own `propose_rules`, through the real guest agent:
+/// discovery finds it under the runner id the topic names, and the whole set
+/// it writes comes back as `Authored` — the answer the install applies.
+///
+/// This is the discovery half of the authorship pin. `runner::propose_rules`
+/// resolves `<runners_dir>/<runner id>/propose_rules`; a tree without it is
+/// `NO_RLM_RULES`, which is the state the live guest image was in (every
+/// `--drive-rlm` refused, so no topic could open and no `authorship: rlm` row
+/// could ever be written). The test runs the shipped adaptor rather than a
+/// stand-in, so a rename or a lost execute bit fails here.
+#[tokio::test]
+async fn the_reference_adaptor_propose_rules_is_discovered_and_authors_the_whole_set() {
+    let Some(python3) = which("python3") else {
+        eprintln!("python3 not on PATH: skipping the reference-adaptor discovery test");
+        return;
+    };
+    let r = root("reference-authoring");
+    let a = agent(&r);
+    hello(&a).await;
+
+    // The shipped adaptor tree, copied to this guest's runners dir under the
+    // id the topic selects. `run` must exist for the adaptor to be installed
+    // at all (a `propose_rules`-only directory is not a runner).
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../deploy/guest/runners/rlm_fc_in_guest_harbor");
+    let dir = r.join("runners").join(RUNNER);
+    std::fs::create_dir_all(&dir).expect("adaptor dir");
+    let status = std::process::Command::new("cp")
+        .args([
+            "-a",
+            &format!("{}/.", src.display()),
+            &dir.display().to_string(),
+        ])
+        .status()
+        .expect("cp adaptor");
+    assert!(status.success(), "copy the reference adaptor");
+    for entry in ["run", "inspect", "propose_rules"] {
+        let path = dir.join(entry);
+        assert!(
+            path.is_file(),
+            "the reference adaptor ships no {entry} ({})",
+            path.display()
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    let mut t = topic();
+    t.constraints
+        .params
+        .insert(proof_experiment::PARAM_RUNNER.into(), RUNNER.into());
+    t.constraints.params.insert(
+        proof_experiment::PARAM_PACK_DIGEST.into(),
+        format!("sha256:{}", "ab".repeat(32)),
+    );
+    // The signed inspect policy: what makes each declared rule tickable. The
+    // adaptor authors the vector its inspector ticks, so a rule the topic does
+    // not say how to tick is a refusal rather than an invented check.
+    t.constraints.params.insert(
+        "inspect_marker_rules".into(),
+        "rule_a:off-limits-marker-a;rule_b:off-limits-marker-b".into(),
+    );
+    t.constraints
+        .params
+        .insert("inspect_attested_rules".into(), "rule_c".into());
+
+    // The guest execs the entrypoint directly with its own environment, so
+    // the interpreter must be on the path it sets. Point the entrypoint at
+    // the interpreter we resolved when it is not where the guest looks.
+    if python3 != Path::new("/usr/bin/python3") {
+        let entry = dir.join("propose_rules");
+        let body = std::fs::read_to_string(&entry).expect("entrypoint");
+        std::fs::write(
+            &entry,
+            body.replace("python3 ", &format!("{} ", python3.display())),
+        )
+        .expect("rewrite interpreter");
+    }
+
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::ProposeRules {
+                topic: Box::new(t),
+                current_version: None,
+                current: None,
+            }),
+        })
+        .await;
+    let RlmToHost::Done {
+        output: VmJobOutput::Authored(set),
+    } = out
+    else {
+        panic!("the reference adaptor must answer with the whole set, got {out:?}");
+    };
+    assert_eq!(set.topic_id, "topic-a");
+    assert!(set.is_complete(), "missing {:?}", set.missing_parts());
+    assert_eq!(
+        set.rules.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["rule_a", "rule_b", "rule_c"]
+    );
+    assert!(
+        set.rules.iter().all(|r| r.text.contains("rlm:")),
+        "the vector is the RLM's framing, not the document's sentences: {:?}",
+        set.rules.iter().map(|r| &r.text).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+/// `command -v` without assuming where the interpreter lives.
+fn which(bin: &str) -> Option<PathBuf> {
+    let out = std::process::Command::new("sh")
+        .args(["-c", &format!("command -v {bin}")])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }

@@ -1,0 +1,37 @@
+#!/bin/bash
+# propose_rules — the topic's RLM authors its **whole** behavior set.
+#
+# Writes `$PROOF_OUTPUT_DIR/authoring.json`: schema_version 1 plus every part
+# the install applies — rules, migrations, apis, submission_format,
+# pin_policy. A rules-only answer is a fragment, and the host refuses to open
+# a topic on one (`IncompleteAuthoring` / `RULES_ONLY_IS_NOT_AUTHORSHIP`), so
+# this entrypoint never writes `rules.json`.
+#
+# Where every part comes from is **topic data**, never a list compiled here:
+#
+#   * `$PROOF_TOPIC_FILE` — the signed document the VM is bound to. Its
+#     `checklist` seeds the rule vector (the RLM may rename, drop, split or
+#     add rules, and must say so), its `metric` / `eval_executor` /
+#     `flops_budget` / `holdout_size` are what a `pin_policy` may **restate**
+#     (never diverge from — scoring reads the document), and its id is the
+#     namespace every migration must sit inside.
+#   * `$PROOF_CURRENT_AUTHORING_FILE` — the set this RLM authored last time,
+#     empty on a first run. Every part not named by a seed is **retained**
+#     from it, so a re-authoring run is not a rewrite from nothing.
+#   * `PROOF_PARAM_*` — signed `constraints.params` seeds, one part each
+#     (see `harness/authoring_set.py` for the key list). A param the topic
+#     did not sign is absent, and an absent param authors nothing.
+#
+# An RLM with a model wired can replace `harness/authoring_set.py`'s answer
+# for any part (the seeds are inputs to the prompt, not a ceiling on it); the
+# parts it does not touch stay the ones above. What this entrypoint must
+# never do is echo the operator's `checklist` back as the whole answer.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib.sh
+. "$HERE/lib.sh"
+: "${PROOF_OUTPUT_DIR:?}" "${PROOF_WORK_DIR:?}" "${PROOF_JOB:?}"
+[ "$PROOF_JOB" = propose_rules ] || proof_die "propose_rules entrypoint invoked with PROOF_JOB=$PROOF_JOB"
+[ -f "${PROOF_TOPIC_FILE:?}" ] || proof_die "PROOF_TOPIC_FILE is missing"
+mkdir -p "$PROOF_OUTPUT_DIR" "$PROOF_WORK_DIR"
+exec python3 "$HERE/harness/authoring_set.py"

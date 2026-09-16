@@ -444,6 +444,59 @@ pass. Until it carries a task selection, the whole `tasks_dir` is scored.
 - `PROOF_HARNESS_SKIP_PODMAN=1` (or `PROOF_HARNESS_SKIP_RUNTIME=1`) skips
   the socket (unit tests).
 
+## Authorship (`propose_rules`)
+
+The entrypoint that makes a topic installable at all: without it the guest
+refuses every `ProposeRules` job (`NO_RLM_RULES` → 503, no row), so the topic
+has no RLM-authored behavior and the publish gate will not open it.
+
+It writes **`$PROOF_OUTPUT_DIR/authoring.json`** — `schema_version` 1 plus the
+five parts an install applies: `rules`, `migrations`, `apis`,
+`submission_format`, `pin_policy`. It never writes `rules.json`: a rules-only
+answer is a fragment, recorded with honest `rlm` provenance and refused
+downstream by name (`IncompleteAuthoring` / `RULES_ONLY_IS_NOT_AUTHORSHIP`).
+
+| Part | Authored from | What makes it the RLM's |
+|------|---------------|-------------------------|
+| `rules` | the signed `checklist` (ids and order) + the signed inspect policy | the **text** is the RLM's own statement of what it will prove and how, with the topic's sentence quoted as the declaration it enforces. The vector is exactly the declared rules: none invented, none dropped |
+| `migrations` | the topic's own namespace (`{id}` with `-` → `_`) | the RLM's own state table, inside its namespace. Prior entries the derivation does not name are **retained** |
+| `apis` | the topic's own prefix | the route row the install registers; prior routes retained the same way |
+| `submission_format` | this runtime's real intake | the staged cap, the `base-proof-submit-v1` domain, the single-use nonce — facts about the host, not a bundle section |
+| `pin_policy` | the signed document's own knobs | a **restatement**: scoring reads the document, so a policy may restate a knob and never diverge. `eval_image_digest` / `gpu_class` are equalities against the **pin**, which the VM does not hold, so they stay absent rather than invented |
+
+**Re-authoring retains what it is not changing.** The guest writes the set this
+RLM authored last time to `$PROOF_WORK_DIR/current-authoring.json` and exports
+`PROOF_CURRENT_AUTHORING_FILE` (always set; empty on a first run). `migrations`
+and `apis` are merged — prior order preserved, the current answer winning per
+name — while `rules` and `pin_policy` are re-derived, because a retained rule
+could be one the re-signed document dropped and a retained policy could diverge
+from it. A prior set for **another topic** is refused.
+
+**Two refusals, both deliberate:**
+
+- a declared rule the topic names in **neither** `inspect_marker_rules` nor
+  `inspect_attested_rules` — this RLM does not invent a check for a rule it was
+  handed, and does not drop one either (dropping it would narrow the topic's
+  anti-cheat surface without saying so; leaving it in would record it red
+  forever, so the topic could never open). The topic must say how each rule is
+  ticked;
+- a **marker** rule the checklist does not declare — a signed marker check for
+  a rule the topic does not carry is a typo, and ignoring it would discard a
+  check the operator asked for.
+
+The gates that matter are **not** in this directory: the guest runs
+`proof-topic-authoring`'s shape and completeness checks plus the migration
+deny-list before the answer becomes a job output, and the control plane runs
+the same shape checks plus the policy against the **global pin**
+(`set.validate_against_pin`). `harness/authoring_set.py` holds the set to the
+same shapes before writing it, so a malformed answer fails inside the VM with
+the part named.
+
+> **A guest rebake is required for this to reach a live topic.** The entrypoint
+> is an operator artefact copied into the image by `bake-rootfs.sh --runner`;
+> tipping `proof-challenge` alone leaves `/opt/proof/runners` on the old pin and
+> `--drive-rlm` keeps failing closed. See § Operator bake / deploy.
+
 ## Miner-facing guide
 
 Attach layout and BYOK: [`docs/external-miner/proof-tbench.md`](../../../../docs/external-miner/proof-tbench.md).
