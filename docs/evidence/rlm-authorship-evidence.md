@@ -592,9 +592,9 @@ does). `cargo deny` is unchanged from the caveat below — this branch adds no d
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --workspace --all-targets -- -D warnings` | pass on the changed crate (`-p proof-vm-guest --all-targets`) |
 | `cargo test --workspace` | pass except the pre-existing environmental failure (caveat 2) |
-| `cargo test -p proof-vm-guest --test reference_adaptor_authoring` | **pass** — 4/4, the new authorship gate (§2h) |
+| `cargo test -p proof-vm-guest --test reference_adaptor_authoring` | **pass** — 5/5, the new authorship gate (§2h) |
 | `cargo test -p proof-vm-guest --test bake_tooling` | pass — 7/7, incl. the `propose_rules` requirement |
-| adaptor suite (`tests/run.sh`, incl. `test_authoring_set.py` 25 cases) | pass |
+| adaptor suite (`tests/run.sh`, incl. `test_authoring_set.py` 26 cases) | pass |
 | `cargo run -p xtask -- loc-cap` | pass |
 | `cargo run -p xtask -- consensus-lint` | pass |
 | `cargo run -p xtask -- spec-check` | pass |
@@ -692,12 +692,13 @@ module agrees with itself. This test runs the shipped entrypoint and feeds its
 
 ```
 $ cargo test -p proof-vm-guest --test reference_adaptor_authoring
-running 4 tests
+running 5 tests
+test a_retained_topic_scoped_delete_survives_re_authoring ... ok
 test a_topic_with_no_rule_policy_authors_nothing ... ok
 test the_authored_set_is_not_a_copy_of_the_signed_document ... ok
 test the_reference_adaptor_authors_a_set_the_guest_and_the_install_accept ... ok
 test a_re_authoring_run_retains_the_prior_set_and_is_still_validated ... ok
-test result: ok. 4 passed; 0 failed
+test result: ok. 5 passed; 0 failed
 ```
 
 `…_accept` asserts, in order: `authoring_from_json` parses it
@@ -737,7 +738,7 @@ refusal (this RLM will not invent a check, and will not drop a rule either —
 dropping it would narrow the anti-cheat surface behind the operator's back,
 leaving it in would record it red forever so the topic could never open). A
 marker policy for an undeclared rule is a refusal too. Both are covered in
-`tests/test_authoring_set.py` (25 cases, wired into the adaptor suite that
+`tests/test_authoring_set.py` (26 cases, wired into the adaptor suite that
 `cargo test -p proof-vm-guest` runs).
 
 **The bake gate holds it.** `deploy_guest_names_no_harness_or_benchmark` now
