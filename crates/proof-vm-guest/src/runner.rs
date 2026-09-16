@@ -9,7 +9,7 @@
 //! |------------|-----|---------------------------------|
 //! | `run` | `Baseline`, `Evaluate` | `report.json` — [`RunnerReport`]; **Evaluate** also `results.json` |
 //! | `inspect` | `Inspect` | `checklist.json` — `[{"id", "pass", "evidence"}]` |
-//! | `propose_rules` | `ProposeRules` (optional) | `rules.json` — `[{"id", "text"}]` |
+//! | `propose_rules` | `ProposeRules` (optional) | `authoring.json` — the whole set ([`AuthoredSet::Complete`]); `rules.json` — `[{"id", "text"}]`, the same vector, read by a guest baked before the set existed |
 //!
 //! Every entrypoint receives the same environment contract
 //! ([`env::*`](env)): the job kind, the identities (topic, custom id,
@@ -117,11 +117,23 @@ pub mod env {
 pub const MAX_TAIL_BYTES: usize = 64 * 1024;
 /// Rolling tail kept per stream while draining (half of [`MAX_TAIL_BYTES`]).
 pub const STREAM_TAIL_BYTES: usize = MAX_TAIL_BYTES / 2;
-/// Largest `report.json` / `checklist.json` / `rules.json` read back.
+/// Largest `report.json` / `checklist.json` / `authoring.json` / `rules.json`
+/// read back.
 pub const MAX_OUTPUT_DOC_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The file the RLM writes its whole authored set to (`ProposeRules`).
 pub const AUTHORING_FILE: &str = "authoring.json";
+
+/// The file a `propose_rules` adaptor writes a bare rule vector to — the
+/// **compat fragment**, also written beside `authoring.json` so a guest baked
+/// before the set existed answers instead of failing the job
+/// (`adaptor wrote no rules.json`). It is not authorship: the host records
+/// what it carries with honest `rlm` provenance and refuses to open a topic
+/// on it ([`RULES_ONLY_IS_NOT_AUTHORSHIP`]).
+///
+/// Not to be confused with [`env::RULES_FILE`], the variable naming the
+/// **input** vector an `Inspect` job ticks.
+pub const RULES_FILE: &str = "rules.json";
 
 /// The file the guest writes the **previous** set to, for a re-authoring run.
 pub const CURRENT_AUTHORING_FILE: &str = "current-authoring.json";
@@ -999,6 +1011,23 @@ pub const NO_RLM_RULES: &str = "the topic's runner ships no propose_rules entryp
 /// operator-cloned document the authorship pin exists to refuse.
 pub const RULES_ONLY_IS_NOT_AUTHORSHIP: &str = "the runner wrote rules.json but no authoring.json: a topic's behavior is authored by its own RLM (rules, migrations, apis, submission_format, pin_policy), and a rules-only proposal is not that. Ship an adaptor whose propose_rules writes authoring.json; nothing is installed from the operator's bundle in its place";
 
+/// Why a `propose_rules` run that wrote neither file fails closed.
+///
+/// The guest has no answer to fall back on: the signed `checklist` is the
+/// operator's vector, and echoing it back would record the operator's own
+/// rules as [`proof_rlm::RuleSource::Rlm`]. A run that wrote nothing authored
+/// nothing.
+pub const NO_AUTHORING_OR_RULES: &str = "the runner wrote neither authoring.json (the whole set: rules, migrations, apis, submission_format, pin_policy) nor rules.json (the compat fragment): a propose_rules run that writes nothing authors nothing, and the signed checklist is the operator's vector, never a substitute for RLM authorship";
+
+/// Why a dual-written pair whose vectors disagree fails closed.
+///
+/// `rules.json` exists so a guest baked before `authoring.json` existed still
+/// answers; it is the **same** vector as the set's `rules`, or it is a second
+/// answer. A pair that disagrees is refused rather than resolved by preferring
+/// one: which file a stale guest read would then decide the topic's anti-cheat
+/// surface, and the two halves of one authorship claim could disagree forever.
+pub const DUAL_EMIT_RULES_DISAGREE: &str = "the runner wrote authoring.json and rules.json but their rule vectors disagree: rules.json is the compat copy of the set's own rules, not a second answer. A guest baked before the set existed reads rules.json, so a pair that disagrees would make the topic's anti-cheat surface depend on which guest harvested it";
+
 /// What the RLM authored, as the guest read it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthoredSet {
@@ -1028,7 +1057,9 @@ pub enum AuthoredSet {
 /// Two output shapes are read, and the difference matters:
 ///
 /// - `authoring.json` — the whole set ([`AuthoredSet::Complete`]). This is
-///   what a topic that must **open** needs.
+///   what a topic that must **open** needs, and it is read whichever guest
+///   harvests the run: a guest baked before the set existed reads the same
+///   answer out of `rules.json` (below) rather than failing the job.
 /// - `rules.json` — a bare vector ([`AuthoredSet::RulesOnly`]), kept because
 ///   an adaptor baked before the set existed still writes it. The host
 ///   records the rules with honest `rlm` provenance and refuses to open the
@@ -1036,6 +1067,11 @@ pub enum AuthoredSet {
 ///   ([`RULES_ONLY_IS_NOT_AUTHORSHIP`]) — it does not widen a rules-only
 ///   answer into a whole set, because the parts it would fill in would be the
 ///   operator's.
+///
+/// A dual-written pair is the **same** answer twice, so the compat copy is
+/// held to the set's own rules: a pair whose vectors disagree is refused
+/// ([`DUAL_EMIT_RULES_DISAGREE`]) rather than resolved by preference, because
+/// which guest harvested the run would otherwise decide the topic's vector.
 pub async fn propose_rules(
     cfg: &GuestConfig,
     topic: &TopicDocument,
@@ -1103,17 +1139,40 @@ pub async fn propose_rules(
     if exec.timed_out {
         return Err("propose_rules cut at its deadline".into());
     }
-    // The whole set is what a topic's behavior is. Read it first: an adaptor
-    // that writes it is authoring, and one that writes only rules is
-    // proposing a fragment.
+    let ctx = describe(&exec, &secrets, DEFAULT_UNPAID_DEADLINE.as_secs());
+    read_authored_set(topic, &output, &secrets, &ctx)
+}
+
+/// Read what a `propose_rules` run wrote, or refuse.
+///
+/// The two files are one answer, and the precedence between them is the whole
+/// point:
+///
+/// - `authoring.json` present → [`AuthoredSet::Complete`], held to the shape,
+///   the deny-list, and the policy-vs-document checks the control plane runs.
+///   A `rules.json` beside it must carry **the same** vector
+///   ([`DUAL_EMIT_RULES_DISAGREE`]), because a guest baked before the set
+///   existed harvests this run out of that file.
+/// - only `rules.json` → [`AuthoredSet::RulesOnly`], the compat fragment an
+///   older adaptor answers with. The host records it with honest `rlm`
+///   provenance and refuses to open a topic on it.
+/// - neither → [`NO_AUTHORING_OR_RULES`]. A run that wrote nothing authored
+///   nothing, and the signed `checklist` is the operator's vector.
+///
+/// `ctx` is the failure context of the run that produced the files (its exit
+/// status and redacted tail), appended to a read failure so the operator sees
+/// why the adaptor wrote nothing.
+fn read_authored_set(
+    topic: &TopicDocument,
+    output: &Path,
+    secrets: &[Vec<u8>],
+    ctx: &str,
+) -> Result<AuthoredSet, String> {
     let authoring_path = output.join(AUTHORING_FILE);
+    let rules_path = output.join(RULES_FILE);
     if authoring_path.is_file() {
-        let body = read_output_text(&authoring_path, AUTHORING_FILE).map_err(|e| {
-            format!(
-                "{e} ({})",
-                describe(&exec, &secrets, DEFAULT_UNPAID_DEADLINE.as_secs())
-            )
-        })?;
+        let body = read_output_text(&authoring_path, AUTHORING_FILE)
+            .map_err(|e| format!("{e} ({ctx})"))?;
         let mut set =
             proof_rlm::authoring_from_json(&body).map_err(|e| format!("{AUTHORING_FILE}: {e}"))?;
         if set.topic_id.trim() != topic.id.trim() {
@@ -1130,22 +1189,37 @@ pub async fn propose_rules(
         set.pin_policy
             .agrees_with_document(topic)
             .map_err(|e| format!("{AUTHORING_FILE}: {e}"))?;
+        if rules_path.is_file() {
+            let compat: Vec<ChecklistRule> =
+                read_output_doc(&rules_path, RULES_FILE).map_err(|e| format!("{e} ({ctx})"))?;
+            // Compared before redaction: the two files carry the same text, so
+            // a secret in one is a secret in the other, and redacting first
+            // would compare two redactions rather than the RLM's answer.
+            if compat != set.rules {
+                return Err(format!(
+                    "{DUAL_EMIT_RULES_DISAGREE} ({AUTHORING_FILE} carries {} rules, \
+                     {RULES_FILE} carries {})",
+                    set.rules.len(),
+                    compat.len()
+                ));
+            }
+        }
         for rule in &mut set.rules {
-            rule.text = redact(&rule.text, &secrets);
+            rule.text = redact(&rule.text, secrets);
         }
         return Ok(AuthoredSet::Complete(Box::new(set)));
     }
-    let mut rules: Vec<ChecklistRule> = read_output_doc(&output.join("rules.json"), "rules.json")
-        .map_err(|e| {
-        format!(
-            "{e} ({})",
-            describe(&exec, &secrets, DEFAULT_UNPAID_DEADLINE.as_secs())
-        )
-    })?;
-    for r in &mut rules {
-        r.text = redact(&r.text, &secrets);
+    if !rules_path.is_file() {
+        // Neither file: the run authored nothing. The signed checklist is the
+        // operator's vector, so there is no answer to fall back on.
+        return Err(format!("{NO_AUTHORING_OR_RULES} ({ctx})"));
     }
-    validate_rules(&rules).map_err(|e| format!("rules.json {}: {}", e.field, e.why))?;
+    let mut rules: Vec<ChecklistRule> =
+        read_output_doc(&rules_path, RULES_FILE).map_err(|e| format!("{e} ({ctx})"))?;
+    for r in &mut rules {
+        r.text = redact(&r.text, secrets);
+    }
+    validate_rules(&rules).map_err(|e| format!("{RULES_FILE} {}: {}", e.field, e.why))?;
     Ok(AuthoredSet::RulesOnly(rules))
 }
 
@@ -1183,5 +1257,189 @@ mod sync_tests {
         std::fs::write(d.join("sub").join("b"), b"y").unwrap();
         persist_work(&d).expect("persist");
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// The harvest reader itself, without a VM: which file decides, and what a
+/// pair of files means.
+#[cfg(test)]
+mod authored_set_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::{
+        read_authored_set, AuthoredSet, AUTHORING_FILE, DUAL_EMIT_RULES_DISAGREE,
+        NO_AUTHORING_OR_RULES, RULES_FILE,
+    };
+    use proof_task::TopicDocument;
+    use std::path::Path;
+
+    fn topic() -> TopicDocument {
+        let mut doc = TopicDocument {
+            id: "topic-a".into(),
+            ..TopicDocument::default()
+        };
+        doc.metric.family = proof_task::MetricFamily::Custom;
+        doc.metric.custom_id = "custom_a".into();
+        doc
+    }
+
+    fn dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "proof-vm-guest-authored-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("dir");
+        d
+    }
+
+    fn set_body(rules: &str) -> String {
+        format!(
+            r#"{{"schema_version":1,"topic_id":"topic-a","rules":{rules},"migrations":[{{"name":"0001_scratch","sql":"CREATE TABLE topic_a_scratch (id TEXT)"}}],"apis":[{{"path":"status","method":"GET"}}],"submission_format":{{"kind":"tar"}},"pin_policy":{{}}}}"#
+        )
+    }
+
+    /// `authoring.json` alone is the whole set, and it is what the harvest
+    /// reads first — the live FAIL was a guest that read only `rules.json`.
+    #[test]
+    fn the_set_is_harvested_from_authoring_json() {
+        let d = dir("set-only");
+        std::fs::write(
+            d.join(AUTHORING_FILE),
+            set_body(r#"[{"id":"rlm_rule","text":"t"}]"#),
+        )
+        .expect("write set");
+        let out = read_authored_set(&topic(), &d, &[], "ctx").expect("the set is read");
+        let AuthoredSet::Complete(set) = out else {
+            panic!("a set is authorship, got {out:?}");
+        };
+        assert_eq!(set.rules[0].id, "rlm_rule");
+        assert!(set.is_complete());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A dual-written pair whose vectors agree is the same answer twice, so
+    /// the harvest answers the set (and the compat copy is never the answer).
+    #[test]
+    fn a_dual_emit_pair_that_agrees_harvests_the_set() {
+        let d = dir("pair-agrees");
+        let rules = r#"[{"id":"rlm_rule","text":"t"}]"#;
+        std::fs::write(d.join(AUTHORING_FILE), set_body(rules)).expect("write set");
+        std::fs::write(d.join(RULES_FILE), rules).expect("write fragment");
+        let out = read_authored_set(&topic(), &d, &[], "ctx").expect("the pair is read");
+        assert!(
+            matches!(out, AuthoredSet::Complete(_)),
+            "an agreeing pair is the whole set, got {out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A pair that disagrees is refused by name: which guest harvested the run
+    /// must not decide the topic's vector.
+    #[test]
+    fn a_dual_emit_pair_that_disagrees_is_refused() {
+        let d = dir("pair-disagrees");
+        std::fs::write(
+            d.join(AUTHORING_FILE),
+            set_body(r#"[{"id":"rlm_rule","text":"t"}]"#),
+        )
+        .expect("write set");
+        std::fs::write(
+            d.join(RULES_FILE),
+            r#"[{"id":"a_different_rule","text":"u"}]"#,
+        )
+        .expect("write fragment");
+        let err =
+            read_authored_set(&topic(), &d, &[], "ctx").expect_err("a disagreement is refused");
+        assert!(err.contains(DUAL_EMIT_RULES_DISAGREE), "{err}");
+        assert!(err.contains("carries 1 rules"), "{err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Neither file: nothing was authored, and there is no fallback.
+    #[test]
+    fn a_run_that_wrote_neither_file_is_refused() {
+        let d = dir("neither");
+        let err = read_authored_set(&topic(), &d, &[], "the run exited 0").expect_err("nothing");
+        assert!(err.contains(NO_AUTHORING_OR_RULES), "{err}");
+        assert!(
+            err.contains("the run exited 0"),
+            "the refusal carries the run's own context: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `rules.json` alone stays a fragment: the guest never widens it.
+    #[test]
+    fn a_rules_only_run_stays_a_fragment() {
+        let d = dir("rules-only");
+        std::fs::write(d.join(RULES_FILE), r#"[{"id":"compat_rule","text":"t"}]"#).expect("write");
+        let out = read_authored_set(&topic(), &d, &[], "ctx").expect("a fragment is read");
+        let AuthoredSet::RulesOnly(rules) = out else {
+            panic!("a fragment stays a fragment, got {out:?}");
+        };
+        assert_eq!(rules[0].id, "compat_rule");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A set for another topic is refused however it is paired.
+    #[test]
+    fn a_set_for_another_topic_is_refused() {
+        let d = dir("wrong-topic");
+        std::fs::write(
+            d.join(AUTHORING_FILE),
+            set_body(r#"[{"id":"rlm_rule","text":"t"}]"#).replace("topic-a", "topic-b"),
+        )
+        .expect("write set");
+        let err = read_authored_set(&topic(), &d, &[], "ctx").expect_err("wrong topic");
+        assert!(err.contains("is for topic"), "{err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The compat file's own shape is still checked when it is the answer: a
+    /// malformed fragment is refused with the file named, not silently empty.
+    #[test]
+    fn a_malformed_fragment_is_refused_by_name() {
+        let d = dir("bad-fragment");
+        std::fs::write(d.join(RULES_FILE), r#"[{"id":"Bad Id","text":"t"}]"#).expect("write");
+        let err = read_authored_set(&topic(), &d, &[], "ctx").expect_err("bad id");
+        assert!(err.contains(RULES_FILE), "{err}");
+        assert!(err.contains("Bad Id"), "{err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A redacted secret never reaches the set's rules.
+    #[test]
+    fn a_staged_secret_is_redacted_out_of_the_harvested_rules() {
+        let d = dir("redacted");
+        std::fs::write(
+            d.join(AUTHORING_FILE),
+            set_body(r#"[{"id":"rlm_rule","text":"uses s3cret-value here"}]"#),
+        )
+        .expect("write set");
+        let out =
+            read_authored_set(&topic(), &d, &[b"s3cret-value".to_vec()], "ctx").expect("the set");
+        let AuthoredSet::Complete(set) = out else {
+            panic!("a set, got {out:?}");
+        };
+        assert!(
+            !set.rules[0].text.contains("s3cret-value"),
+            "a staged secret travels in a rule text: {}",
+            set.rules[0].text
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The reader takes a directory, and an absent one is "nothing written".
+    #[test]
+    fn a_missing_output_directory_reads_as_nothing_written() {
+        let err = read_authored_set(
+            &topic(),
+            Path::new("/no/such-proof-vm-guest-output-dir"),
+            &[],
+            "ctx",
+        )
+        .expect_err("nothing written");
+        assert!(err.contains(NO_AUTHORING_OR_RULES), "{err}");
     }
 }

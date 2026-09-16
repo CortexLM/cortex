@@ -5,7 +5,16 @@
 # the install applies — rules, migrations, apis, submission_format,
 # pin_policy. A rules-only answer is a fragment, and the host refuses to open
 # a topic on one (`IncompleteAuthoring` / `RULES_ONLY_IS_NOT_AUTHORSHIP`), so
-# this entrypoint never writes `rules.json`.
+# `authoring.json` is the answer.
+#
+# It also writes `rules.json` — the set's own `rules` vector, verbatim — as a
+# **compat copy**. A guest baked before the set existed harvests a
+# `propose_rules` run out of that file and fails the job when it is absent
+# (`adaptor wrote no rules.json`), so writing both is what makes one run
+# answer both guests. The pair is one answer: a guest that reads the set
+# compares the two vectors and refuses a disagreement, so this file must never
+# carry a vector the set does not. Fragment first, set second, so a run cut
+# between the writes leaves a fragment (which opens nothing).
 #
 # Where every part comes from is **topic data**, never a list compiled here:
 #

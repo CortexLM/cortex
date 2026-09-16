@@ -146,11 +146,28 @@ fn author(doc: &TopicDocument, root: &Path, current: Option<&str>) -> Result<Str
     }
     let path = output.join("authoring.json");
     if path.is_file() {
-        assert!(
-            !output.join("rules.json").exists(),
-            "the adaptor wrote rules.json: a fragment is not authorship, and the host refuses \
-             to open a topic on one"
-        );
+        // The compat copy travels with the set, and it is the **same** vector:
+        // a guest baked before the set existed reads `rules.json`, and one
+        // that reads the set refuses a pair that disagrees. Either way the two
+        // files are one answer, so the gate compares them here too.
+        let compat = output.join("rules.json");
+        if compat.is_file() {
+            let set: TopicAuthoring =
+                authoring_from_json(&std::fs::read_to_string(&path).expect("set")).expect("parses");
+            let fragment: Vec<ChecklistRule> =
+                serde_json::from_str(&std::fs::read_to_string(&compat).expect("fragment"))
+                    .expect("the compat fragment is a rule vector");
+            assert_eq!(
+                fragment, set.rules,
+                "rules.json is not the set's own vector: a guest baked before the set existed \
+                 would harvest a different anti-cheat surface than the set's"
+            );
+        } else {
+            panic!(
+                "the adaptor wrote no rules.json: a guest baked before the set existed fails \
+                 this run (`adaptor wrote no rules.json`), which is the live FAIL this pairs with"
+            );
+        }
     }
     std::fs::read_to_string(&path).map_err(|e| format!("read authoring.json: {e}"))
 }

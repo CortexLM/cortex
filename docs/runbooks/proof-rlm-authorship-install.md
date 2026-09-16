@@ -29,7 +29,8 @@ say so if one is tried.
 | Master database | `BASE_DATABASE_URL` (or `_FILE`) | the install refuses |
 | Operator bearer file | `--admin-token-file` (for the publish) | resolved before anything is written |
 | A registered custom id | `PROOF_VM_RUNNER_CUSTOM_IDS` on the host | the install refuses an open topic whose id is not registered |
-| **An adaptor whose `propose_rules` writes `authoring.json`** | the guest image, baked by the operator (`deploy/guest/bake-rootfs.sh`) | the run fails closed: a runner with no `propose_rules` at all is `NO_RLM_RULES`, and a rules-only adaptor answers a **fragment**, which the driver refuses (`IncompleteAuthoring`) |
+| **An adaptor whose `propose_rules` writes `authoring.json`** | the guest image, baked by the operator (`deploy/guest/bake-rootfs.sh`) | the run fails closed: a runner with no `propose_rules` at all is `NO_RLM_RULES`, a rules-only adaptor answers a **fragment**, which the driver refuses (`IncompleteAuthoring`), and one that writes neither file is refused as authoring nothing (`NO_AUTHORING_OR_RULES`) |
+| **An adaptor that writes `rules.json` beside the set** | the same adaptor tree | the run is harvested by whichever guest agent the image carries: an agent baked **before** `authoring.json` existed reads only `rules.json` and fails the job without it (`adaptor wrote no rules.json`). The two files are one answer — a pair whose vectors disagree is refused (`DUAL_EMIT_RULES_DISAGREE`) — and the fragment is written first, so a run cut between the writes leaves a fragment rather than a set a stale agent cannot read |
 
 **The guest image must be re-baked for the entrypoint to exist.** `propose_rules`
 is an operator artefact: `bake-rootfs.sh --runner <id>=<dir>` copies the runner
@@ -51,6 +52,15 @@ deploy/guest/bake-rootfs.sh --guest-agent <proof-vm-guest-agent> \
 test -x deploy/guest/runners/rlm_fc_in_guest_harbor/propose_rules \
   || echo "the adaptor tree ships no propose_rules: --drive-rlm will fail closed"
 ```
+
+**The agent and the adaptor are two halves of one pin.** The entrypoint above
+must exist *and* the agent that harvests the run must understand what it
+wrote. An image whose agent predates `authoring.json` reads only `rules.json`:
+a `propose_rules` run that writes the set alone answers that agent with
+`adaptor wrote no rules.json` and the job fails (502 from the orchestrator, 503
+at the control plane, no row). Writing the fragment beside the set is what
+makes the run correct on **both** sides of the rebake — and the rebake is what
+removes the need for it.
 
 **Re-authoring reads the previous set.** On a second authoring run the guest
 writes the set the RLM authored last time to `$PROOF_WORK_DIR/current-authoring.json`
@@ -310,7 +320,10 @@ topic. That is the property the B1 FIXED YAML did not have.
 
 | Refusal | What it means | What to do |
 |---|---|---|
-| `IncompleteAuthoring { missing: [...] }` | the RLM authored rules and nothing else — an adaptor baked before the set existed | bake an adaptor whose `propose_rules` writes `authoring.json`, then re-run |
+| `IncompleteAuthoring { missing: [...] }` | the RLM authored rules and nothing else — an adaptor baked before the set existed | bake an adaptor whose `propose_rules` writes `authoring.json` (and `rules.json` beside it), then re-run |
+| `NO_AUTHORING_OR_RULES` | the run wrote **neither** file: it authored nothing, and there is no fallback | the adaptor must write the set; nothing is widened from the signed `checklist` |
+| `DUAL_EMIT_RULES_DISAGREE` | the set and its compat copy carry different vectors | write `rules.json` as the set's own `rules`, verbatim: which guest harvested the run must not decide the topic's vector |
+| `adaptor wrote no rules.json` (502/503, no row) | the **agent** baked into the image predates `authoring.json` and read only the fragment | rebake with this tip's agent (the dual write covers the window before that) |
 | `Authoring { why: "… loosens the floor/ceiling …" }` | the RLM's pin policy is looser than the global pin | the topic's policy is wrong; re-author (the refusal names the knob and both numbers) |
 | `Section { part: "migrations[0]", why: "…proof_rule_version…" }` | the RLM's migration reached outside its namespace | the RLM's SQL is wrong; it is refused **before** anything runs |
 | `CrossTopicClaim { … }` | a migration names an object another registered topic also claims | rename the object, or scope it with the schema-qualified spelling |

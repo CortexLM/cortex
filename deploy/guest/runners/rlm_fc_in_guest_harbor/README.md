@@ -452,9 +452,19 @@ has no RLM-authored behavior and the publish gate will not open it.
 
 It writes **`$PROOF_OUTPUT_DIR/authoring.json`** — `schema_version` 1 plus the
 five parts an install applies: `rules`, `migrations`, `apis`,
-`submission_format`, `pin_policy`. It never writes `rules.json`: a rules-only
-answer is a fragment, recorded with honest `rlm` provenance and refused
-downstream by name (`IncompleteAuthoring` / `RULES_ONLY_IS_NOT_AUTHORSHIP`).
+`submission_format`, `pin_policy`.
+
+It also writes **`$PROOF_OUTPUT_DIR/rules.json`** — the set's own `rules`
+vector, verbatim — as a **compat copy**. A guest agent baked before the set
+existed harvests a `propose_rules` run out of that file and fails the job
+without it (`adaptor wrote no rules.json`), so writing both is what makes one
+run answer both guests. The pair is **one answer**, never two: a guest that
+reads the set compares the two vectors and refuses a disagreement, because
+which guest harvested the run would otherwise decide the topic's anti-cheat
+surface. The fragment is written **first**, so a run cut between the two writes
+leaves a fragment — recorded with honest `rlm` provenance and refused
+downstream by name (`IncompleteAuthoring` / `RULES_ONLY_IS_NOT_AUTHORSHIP`) —
+rather than a set whose compat copy a stale guest cannot find.
 
 | Part | Authored from | What makes it the RLM's |
 |------|---------------|-------------------------|

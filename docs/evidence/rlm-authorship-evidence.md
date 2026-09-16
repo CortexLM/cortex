@@ -12,6 +12,7 @@ on #301 at `80bc2cdd`). The commits it must contain, oldest first:
 | `7f226e00` | this pack, v4 |
 | `3bc31a2e` | the two Greptile P1 fixes (retained `DELETE`, intake format) |
 | `9f58c5e5` | the staging ceremony, runnable as written |
+| (this tip) | §2i: the LIVE FAIL — the guest harvests a complete `authoring.json`, and the adaptor dual-emits `rules.json` beside it |
 
 Doc-only commits may ride on top of those; the four above are what the claims in this
 pack are made against. Mirror PR [#302](https://github.com/CortexLM/cortex/pull/302)
@@ -770,6 +771,77 @@ the entrypoint against a populated prior set and found both:
 Both were re-verified by neutering the fix: restoring the old `FROM` handling
 fails the DELETE test (`SystemExit`), and restoring the old retention fails the
 format test with the stale object in the assertion.
+
+### 2i. The LIVE FAIL: the guest that harvested the run read only `rules.json`
+
+**What the Owner run did.** The surgical rebake carried the tip's runner tree
+(`propose_rules` + `harness/authoring_set.py`, which writes the whole set) but a
+**stale guest agent**, baked Sep 13 — before `authoring.json` existed. That
+agent's `propose_rules` read exactly one file:
+
+```rust
+// crates/proof-vm-guest/src/runner.rs at the Sep-13 tree (7bf20a4a):
+let mut rules: Vec<ChecklistRule> = read_output_doc(&output.join("rules.json"), "rules.json")…
+```
+
+The adaptor wrote a full `authoring.json` — 8 rules, 1 migration, 1 route —
+and no `rules.json`. The orchestrator answered **502** with `adaptor wrote no
+rules.json`, the control plane 503, and **no row**. Nothing was authored as far
+as the network could tell, and the drive never bound authorship parts.
+
+**Why the mismatch existed at all.** The agent and the adaptor are baked into
+the *same* image, but they are two artefacts from two sources: the agent is
+compiled from this repo, the adaptor tree is copied by `bake-rootfs.sh
+--runner`. A rebake that refreshes one and not the other is exactly this
+failure, and nothing in the pipeline compared them.
+
+**The fix, in two halves — neither alone is enough.**
+
+| Half | What it does | Where |
+|---|---|---|
+| **Harvest the set** | `read_authored_set` reads `authoring.json` **first** and answers `AuthoredSet::Complete`; `rules.json` is read beside it as the compat copy and must carry the **same** vector, or the pair is refused (`DUAL_EMIT_RULES_DISAGREE`). Neither file present is `NO_AUTHORING_OR_RULES` — a run that wrote nothing authored nothing | `crates/proof-vm-guest/src/runner.rs` |
+| **Dual-emit** | the reference adaptor writes `rules.json` (the set's own `rules`, verbatim) **before** `authoring.json`, so one run answers a tip agent *and* a pre-set agent — the latter now harvests the vector instead of failing the job | `…/rlm_fc_in_guest_harbor/harness/authoring_set.py` |
+
+**Why the harvest half is first, not the dual-emit.** The dual-emit only helps
+an adaptor that ships it: a topic whose runner writes the set and nothing else
+is still a 502 on an old agent. Reading the set is what makes a **complete
+`authoring.json` sufficient on any agent**, and it is the half that survives
+once every image is rebaked. The dual write is the compatibility window, not
+the contract.
+
+**Why a disagreement is refused rather than resolved.** `rules.json` exists so
+a stale agent can read the run. If the two files could differ, then *which
+guest harvested the run* would decide the topic's anti-cheat surface — the same
+run scoring under one vector on a rebaked image and another on the old one. The
+pair is one answer or it is a refusal.
+
+**Tests, each verified non-vacuous** (neutering the fix fails the test):
+
+| Test | What it pins |
+|---|---|
+| `the_set_is_harvested_from_authoring_json` | the live FAIL itself: a set with no fragment is harvested as `Complete`. Neutering the set-first precedence fails it |
+| `a_dual_emit_pair_that_agrees_harvests_the_set` | the shipped adaptor's shape: the pair is one answer, and the set is what is read |
+| `a_dual_emit_pair_that_disagrees_is_refused` | the disagreement is refused by name, with both counts. Neutering the comparison (`if false`) fails it — the run then answers `Complete` with the set's vector |
+| `a_run_that_wrote_neither_file_is_refused` | no silent empty answer: `NO_AUTHORING_OR_RULES`, carrying the run's own exit/tail context |
+| `a_rules_only_run_stays_a_fragment` | the compat path is unchanged: `rules.json` alone is still `Rules`, never widened |
+| `a_set_for_another_topic_is_refused` / `a_malformed_fragment_is_refused_by_name` / `a_staged_secret_is_redacted_out_of_the_harvested_rules` | the set's existing gates still run in the extracted reader, and redaction happens after the pair is compared |
+| `a_dual_emit_pair_whose_vectors_disagree_is_refused` (agent-level, `agent_tests.rs`) | the same three cases through the **real guest agent** over `HostToRlm::Run`, including the agreeing pair the reference adaptor writes |
+| `test_the_entrypoint_writes_the_set_and_the_compat_fragment` (Python) | the fragment is the set's `rules`, verbatim |
+| `test_the_fragment_is_written_before_the_set` (Python) | the ordering: a run cut between the writes leaves a fragment, not a set alone |
+| `test_a_declared_rule_with_no_signed_policy_is_refused_by_name` (Python, extended) | a refused run writes **neither** file |
+
+**Verified non-vacuous, both directions.** Neutering the set-first precedence
+(`if false` on `authoring_path.is_file()`) fails five of the nine reader tests;
+neutering the pair comparison (`if compat != set.rules` → `if false`) fails the
+agent-level disagreement test with `expected Failed, got Done { output:
+Authored(…) }`.
+
+**What this does not claim.** Not that the live image is fixed — the **rebake**
+is what carries this agent to the host, and it is the Owner/Dev step (§ 2g).
+Not that a stale agent can now harvest a set from an adaptor that does not
+dual-emit: that adaptor fails closed (`adaptor wrote no rules.json`), by
+design, until the image is rebaked. And not that the pair makes a fragment
+authorship: `rules.json` alone still cannot open a topic.
 
 ## Re-authoring (Greptile P1, fixed here)
 

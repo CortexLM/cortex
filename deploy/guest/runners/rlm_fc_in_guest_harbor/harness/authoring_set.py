@@ -2,10 +2,17 @@
 """Author the topic's whole behavior set — the RLM's answer to `ProposeRules`.
 
 Writes ``$PROOF_OUTPUT_DIR/authoring.json``: ``schema_version`` 1 plus the five
-parts an install applies. **Never** writes ``rules.json``: a rules-only answer
-is a fragment, the host records it honestly and refuses to open the topic
-(``SetupError::IncompleteAuthoring`` / ``RULES_ONLY_IS_NOT_AUTHORSHIP``), and a
-fragment is not this entrypoint's job.
+parts an install applies — and, beside it, ``rules.json`` as a **compat copy**
+of the set's own ``rules`` vector. The set is authorship; the fragment is not,
+and nothing may open a topic on it (``SetupError::IncompleteAuthoring`` /
+``RULES_ONLY_IS_NOT_AUTHORSHIP``). The copy exists because a guest **baked
+before the set existed** harvests a ``propose_rules`` run out of ``rules.json``
+and fails the job when it is absent (``adaptor wrote no rules.json``): one run
+therefore answers both guests, and a guest that reads the set refuses a pair
+whose vectors disagree rather than letting which guest harvested decide the
+topic's vector. The two files are always written together, fragment first, so a
+run cut between the writes leaves a fragment (which opens nothing) rather than
+a set whose compat copy a stale guest cannot find.
 
 What each part is authored *from*, and why it is the RLM's answer rather than
 a copy of the operator's bundle:
@@ -100,6 +107,7 @@ import inspect_scan  # noqa: E402
 
 AUTHORING_SCHEMA = 1
 AUTHORING_FILE = "authoring.json"
+RULES_FILE = "rules.json"
 CURRENT_AUTHORING_FILE = "current-authoring.json"
 
 MAX_RULES = 64
@@ -780,12 +788,31 @@ def check_set(set_: dict[str, Any], doc: dict[str, Any]) -> None:
             _fail(f"rule {rid!r} carries more than {MAX_RULE_TEXT_CHARS} chars")
 
 
-def write_set(set_: dict[str, Any], output_dir: Path) -> Path:
-    """Write `authoring.json` in one step: a partial set never lands."""
+def write_rules_fragment(set_: dict[str, Any], output_dir: Path) -> Path:
+    """Write the compat `rules.json`: the set's own vector, and nothing else.
+
+    A guest baked before `authoring.json` existed harvests a `propose_rules`
+    run out of this file and fails the job when it is absent
+    (``adaptor wrote no rules.json``). Writing the set's rules here as well is
+    what makes one run answer both guests.
+
+    It is a **copy**, never a second answer: the guest that reads the set
+    compares the two vectors and refuses a pair that disagrees, because
+    otherwise which guest harvested the run would decide the topic's
+    anti-cheat surface. Written first, so a run cut between the two writes
+    leaves a fragment (which nothing may open a topic on) rather than a set
+    whose compat copy a stale guest cannot find.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / AUTHORING_FILE
-    body = json.dumps(set_, indent=2, sort_keys=False) + "\n"
-    handle, tmp = tempfile.mkstemp(dir=str(output_dir), prefix=".authoring-", suffix=".json")
+    path = output_dir / RULES_FILE
+    body = json.dumps(set_["rules"], indent=2, sort_keys=False) + "\n"
+    _write_atomically(path, body)
+    return path
+
+
+def _write_atomically(path: Path, body: str) -> None:
+    """Replace `path` with `body` in one step: a partial file never lands."""
+    handle, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}-", suffix=".json")
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
             fh.write(body)
@@ -799,6 +826,14 @@ def write_set(set_: dict[str, Any], output_dir: Path) -> Path:
         except OSError:
             pass
         _fail(f"cannot write {path}: {e}")
+
+
+def write_set(set_: dict[str, Any], output_dir: Path) -> Path:
+    """Write `authoring.json` in one step: a partial set never lands."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / AUTHORING_FILE
+    body = json.dumps(set_, indent=2, sort_keys=False) + "\n"
+    _write_atomically(path, body)
     return path
 
 
@@ -815,11 +850,14 @@ def main(argv: list[str] | None = None) -> int:
     doc = topic_document()
     set_ = build_set(doc, current_set())
     check_set(set_, doc)
+    # The fragment first, the set second: the pair is one answer, and the
+    # ordering is what a run cut between the two writes leaves behind.
+    fragment = write_rules_fragment(set_, Path(output_dir))
     path = write_set(set_, Path(output_dir))
     print(
         f"authoring_set: authored {len(set_['rules'])} rules, "
         f"{len(set_['migrations'])} migrations, {len(set_['apis'])} routes for "
-        f"topic {set_['topic_id']} -> {path}",
+        f"topic {set_['topic_id']} -> {path} (+ compat {fragment.name})",
         file=sys.stderr,
     )
     return 0

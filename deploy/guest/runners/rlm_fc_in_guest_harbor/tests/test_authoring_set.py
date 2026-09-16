@@ -5,8 +5,10 @@ What is pinned here, in the order the failure modes matter:
 
 * a complete set — every one of the five parts present and shaped the way the
   guest and the install hold them (the same `proof-topic-authoring` checks);
-* **rules-only is not authorship**: the entrypoint writes `authoring.json` and
-  never `rules.json`, and a missing part is a refusal naming the part;
+* **the compat fragment**: `authoring.json` is the authorship and `rules.json`
+  is the set's own vector written beside it, so a guest baked before the set
+  existed harvests the run instead of failing it — and a missing part is still
+  a refusal naming the part;
 * the operator's bundle is not the source of truth: the vector is framed by
   the RLM, the migration sits in the topic's namespace, the pin policy
   **restates** the document, and a policy that would diverge is not written;
@@ -161,15 +163,67 @@ class CompleteSet(unittest.TestCase):
             ],
         )
 
-    def test_the_entrypoint_writes_authoring_json_and_never_rules_json(self):
-        """A rules-only answer is a fragment, and a fragment is not this job."""
+    def test_the_entrypoint_writes_the_set_and_the_compat_fragment(self):
+        """The set is authorship; `rules.json` is its compat copy, not a second answer."""
         h = Harness(topic_document())
         self.addCleanup(h.cleanup)
         self.assertEqual(h.run(), 0)
         self.assertTrue(h.set_path().is_file())
-        self.assertFalse(
-            (h.output / "rules.json").exists(),
-            "writing rules.json would answer with a fragment the host refuses to open on",
+        fragment = h.output / "rules.json"
+        self.assertTrue(
+            fragment.is_file(),
+            "a guest baked before the set existed harvests this run out of rules.json and "
+            "fails the job when it is absent (`adaptor wrote no rules.json`)",
+        )
+        # The fragment is the set's own vector, verbatim: one answer, two files.
+        self.assertEqual(
+            json.loads(fragment.read_text(encoding="utf-8")),
+            h.authored()["rules"],
+            "the compat copy must be the set's rules, or a stale guest would score a "
+            "different anti-cheat surface than the set's own",
+        )
+
+    def test_the_fragment_is_written_before_the_set(self):
+        """A run cut between the writes leaves a fragment, not a set alone.
+
+        The ordering is the fail-closed half of the dual emit: a fragment is
+        recorded honestly and refused downstream (`IncompleteAuthoring`),
+        while a set with no compat copy is the live FAIL (a guest baked before
+        the set existed fails the job with `adaptor wrote no rules.json`).
+        """
+        order: list[str] = []
+        real_fragment = authoring_set.write_rules_fragment
+        real_set = authoring_set.write_set
+
+        def fragment(set_, output_dir):
+            order.append(authoring_set.RULES_FILE)
+            return real_fragment(set_, output_dir)
+
+        def set_(set_dict, output_dir):
+            order.append(authoring_set.AUTHORING_FILE)
+            return real_set(set_dict, output_dir)
+
+        authoring_set.write_rules_fragment = fragment
+        authoring_set.write_set = set_
+        try:
+            h = Harness(topic_document())
+            self.addCleanup(h.cleanup)
+            self.assertEqual(h.run(), 0)
+        finally:
+            authoring_set.write_rules_fragment = real_fragment
+            authoring_set.write_set = real_set
+        self.assertEqual(
+            order,
+            [authoring_set.RULES_FILE, authoring_set.AUTHORING_FILE],
+            "the fragment must be written before the set, so a run cut between the two "
+            "writes leaves a fragment (which opens nothing) rather than a set whose compat "
+            "copy a stale guest cannot find",
+        )
+        # And both files are on disk with the set's own vector in the copy.
+        self.assertTrue((h.output / "rules.json").is_file())
+        self.assertEqual(
+            json.loads((h.output / "rules.json").read_text(encoding="utf-8")),
+            h.authored()["rules"],
         )
 
     def test_the_rules_are_the_rlms_framing_with_the_declaration_quoted(self):
@@ -266,6 +320,11 @@ class Refusals(unittest.TestCase):
             h.run()
         self.assertEqual(ctx.exception.code, 2)
         self.assertFalse(h.set_path().exists(), "a refused run writes no set")
+        self.assertFalse(
+            (h.output / "rules.json").exists(),
+            "a refused run writes no fragment either: the refusal is decided before either "
+            "file is written, so a partial answer never lands",
+        )
 
     def test_no_rule_policy_at_all_is_refused(self):
         h = Harness(topic_document(), markers=None, attested=None)

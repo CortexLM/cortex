@@ -19,14 +19,14 @@
 //! resolves `<runners_dir>/<runner id>/` and execs the entrypoint for the job
 //! kind — `run` (baseline / evaluate), `inspect`, `propose_rules` — with the
 //! environment contract in [`runner`]. The adaptor writes its answer under
-//! `PROOF_OUTPUT_DIR` (`report.json`, `checklist.json`, `rules.json`); the
-//! agent turns it into the protocol document with the identities copied
-//! from the request. **Nothing is defaulted:** no runner selected, no adaptor
-//! installed under that id, no staged pack matching the topic's digest, no
-//! artefact that verifies, no report, a non-finite value, or a run cut at the
-//! deadline is `RlmToHost::Failed` — the host answers 502, the control plane
-//! 503, and no row is written. A placeholder `primary_value` never leaves
-//! this process.
+//! `PROOF_OUTPUT_DIR` (`report.json`, `checklist.json`, `authoring.json`,
+//! `rules.json`); the agent turns it into the protocol document with the
+//! identities copied from the request. **Nothing is defaulted:** no runner
+//! selected, no adaptor installed under that id, no staged pack matching the
+//! topic's digest, no artefact that verifies, no report, a non-finite value,
+//! or a run cut at the deadline is `RlmToHost::Failed` — the host answers
+//! 502, the control plane 503, and no row is written. A placeholder
+//! `primary_value` never leaves this process.
 //!
 //! **No default exists for authorship.** `ProposeRules` is answered only by
 //! the adaptor's own `propose_rules` entrypoint: a runner that ships none is
@@ -36,6 +36,15 @@
 //! RLM-authored rules — and it never widens a fragment into a set, because
 //! the parts it would fill in are the operator's. What a topic *is* (rules,
 //! migrations, APIs, submission format, pin policy) comes from its own RLM.
+//!
+//! **One answer, two files.** `authoring.json` is the authorship; the
+//! `rules.json` an adaptor writes beside it is the **compat copy** that a
+//! guest baked before the set existed harvests the run out of, so a
+//! `propose_rules` run that must answer both guests writes both. They are
+//! held to being the same vector ([`runner::DUAL_EMIT_RULES_DISAGREE`]), and
+//! a run that writes neither file is refused as authoring nothing
+//! ([`runner::NO_AUTHORING_OR_RULES`]) rather than widened from the signed
+//! document.
 //!
 //! Secrets are files the adaptor reads (`PROOF_SECRETS_DIR`); their bytes
 //! are redacted from every log tail and evidence document the agent sends

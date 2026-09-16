@@ -1294,7 +1294,124 @@ JSON
     };
     assert_eq!(proposed[0].id, "rules_only_rule");
     assert_eq!(crate::runner::AUTHORING_FILE, "authoring.json");
+    assert_eq!(crate::runner::RULES_FILE, "rules.json");
     assert!(crate::runner::RULES_ONLY_IS_NOT_AUTHORSHIP.contains("authoring.json"));
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+/// The dual-emit pair is one answer: `authoring.json` is authorship and
+/// `rules.json` is its compat copy, so a pair whose vectors disagree is
+/// refused rather than resolved by preference.
+///
+/// This is the pair half of the live FAIL: the set's own harvest (a current
+/// guest) and the compat harvest (a guest baked before the set existed) must
+/// not disagree about the topic's anti-cheat surface — which file a stale
+/// guest read would otherwise decide.
+#[tokio::test]
+async fn a_dual_emit_pair_whose_vectors_disagree_is_refused() {
+    let r = root("dual-emit");
+    let a = agent(&r);
+    hello(&a).await;
+    let mut selecting = topic();
+    selecting
+        .constraints
+        .params
+        .insert(proof_experiment::PARAM_RUNNER.into(), RUNNER.into());
+    selecting
+        .constraints
+        .params
+        .insert(proof_experiment::PARAM_PACK_DIGEST.into(), pack().1);
+    install(&r, "run", "true");
+
+    let set = |rules: &str| {
+        format!(
+            r#"
+cat > "$PROOF_OUTPUT_DIR/authoring.json" <<'JSON'
+{{"schema_version":1,"topic_id":"topic-a","rules":{rules},"migrations":[{{"name":"0001_scratch","sql":"CREATE TABLE topic_a_scratch (id TEXT)"}}],"apis":[{{"path":"status","method":"GET"}}],"submission_format":{{"kind":"tar"}},"pin_policy":{{}}}}
+JSON
+"#
+        )
+    };
+
+    // A pair that agrees: the compat copy is the set's own vector, so the run
+    // is authorship. This is what the reference adaptor writes.
+    install(
+        &r,
+        "propose_rules",
+        &format!(
+            "{}{}",
+            set(r#"[{"id":"rlm_rule","text":"the rlm wrote this"}]"#),
+            r#"echo '[{"id": "rlm_rule", "text": "the rlm wrote this"}]' > "$PROOF_OUTPUT_DIR/rules.json""#
+        ),
+    );
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::ProposeRules {
+                topic: Box::new(selecting.clone()),
+                current_version: None,
+                current: None,
+            }),
+        })
+        .await;
+    let RlmToHost::Done {
+        output: VmJobOutput::Authored(agreed),
+    } = out
+    else {
+        panic!("an agreeing pair is the whole set, got {out:?}");
+    };
+    assert_eq!(agreed.rules[0].id, "rlm_rule");
+
+    // A pair that disagrees on the vector is refused: which guest harvested
+    // the run would otherwise decide what the topic's rules are.
+    install(
+        &r,
+        "propose_rules",
+        &format!(
+            "{}{}",
+            set(r#"[{"id":"rlm_rule","text":"the rlm wrote this"}]"#),
+            r#"echo '[{"id": "a_different_rule", "text": "a second answer"}]' > "$PROOF_OUTPUT_DIR/rules.json""#
+        ),
+    );
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::ProposeRules {
+                topic: Box::new(selecting.clone()),
+                current_version: None,
+                current: None,
+            }),
+        })
+        .await,
+    );
+    assert!(
+        err.contains("their rule vectors disagree"),
+        "the refusal names the disagreement: {err}"
+    );
+    assert!(
+        err.contains("rules.json is the compat copy"),
+        "the refusal says what the copy is for: {err}"
+    );
+
+    // A run that writes **neither** file authored nothing: there is no answer
+    // to fall back on, and the signed checklist is the operator's vector.
+    install(&r, "propose_rules", "true");
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::ProposeRules {
+                topic: Box::new(selecting),
+                current_version: None,
+                current: None,
+            }),
+        })
+        .await,
+    );
+    assert!(
+        err.contains("wrote neither authoring.json"),
+        "a run that wrote nothing is named as authoring nothing: {err}"
+    );
+    assert!(
+        err.contains("never a substitute for RLM authorship"),
+        "the refusal says why nothing cannot be widened: {err}"
+    );
     let _ = std::fs::remove_dir_all(&r);
 }
 
