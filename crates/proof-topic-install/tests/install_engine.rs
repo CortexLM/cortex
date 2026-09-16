@@ -741,6 +741,189 @@ async fn two_concurrent_installs_cannot_both_claim_a_namespace() {
     tp.drop_schema().await.expect("drop");
 }
 
+/// A re-install **replaces** the route set: a route the new set does not
+/// claim stops resolving.
+///
+/// Greptile's P1: `register_apis` was insert-only (`ON CONFLICT DO NOTHING`)
+/// and the table was `SELECT, INSERT` for the application role, so when an
+/// RLM-authored install superseded a bundle-authored one, the bundle's routes
+/// stayed in the table and the mux — which loads every row for the topic —
+/// kept answering them. A miner would reach an endpoint the topic's current
+/// install does not declare, while the journal said the newer set was in
+/// force.
+#[tokio::test]
+async fn a_re_install_replaces_the_route_set() {
+    use proof_topic_authoring::{AuthoredApi, AuthoredMigration, PinPolicy, TopicAuthoring};
+
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    let doc = topic("routes-topic");
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    // First install: the operator's bundle claims two routes.
+    let bundle = r#"{
+        "rules": [{"id": "operator_rule", "text": "the operator's vector"}],
+        "apis": [
+            {"path": "old-get", "method": "GET"},
+            {"path": "old-post", "method": "POST"}
+        ]
+    }"#;
+    installer
+        .install(
+            &request(&doc, bundle),
+            SetupSummary::NotDriven { reason: "x".into() },
+        )
+        .await
+        .expect("the bundle installs");
+    let mut routes = topic_routes(&pool, "routes-topic").await.expect("routes");
+    routes.sort_by(|a, b| a.path.cmp(&b.path));
+    assert_eq!(routes.len(), 2, "both bundle routes are registered");
+
+    // Second install: the RLM's set claims **one** route, and not the old two.
+    let authored = TopicAuthoring {
+        schema_version: proof_topic_authoring::AUTHORING_SCHEMA,
+        topic_id: "routes-topic".into(),
+        rules: vec![proof_task::ChecklistRule {
+            id: "rlm_rule".into(),
+            text: "the RLM's own vector".into(),
+        }],
+        migrations: vec![AuthoredMigration {
+            name: "0001_rlm".into(),
+            sql: "CREATE TABLE routes_topic_rlm (id TEXT)".into(),
+        }],
+        apis: vec![AuthoredApi {
+            path: "rlm-status".into(),
+            method: "GET".into(),
+            summary: "the RLM's own route".into(),
+        }],
+        submission_format: serde_json::json!({"kind": "rlm-tar", "max_bytes": 4_194_304}),
+        pin_policy: PinPolicy::none(),
+    };
+    let report = installer
+        .install(
+            &InstallRequest {
+                topic: &doc,
+                bundle_digest: digest(),
+                environment: "staging".into(),
+                rlm_raw: bundle,
+                registered_custom: vec!["routes-topic-metric".into()],
+                skip_baseline: false,
+                authored: Some(&authored),
+            },
+            SetupSummary::Baselined {
+                rules_version: 1,
+                baseline_primary: "0.5".into(),
+            },
+        )
+        .await
+        .expect("the RLM's set installs");
+    assert_eq!(report.apis, ["GET /rlm-status"]);
+
+    // The route table now holds **only** the RLM's route: the old ones were
+    // reconciled away, not left resolving.
+    let routes = topic_routes(&pool, "routes-topic").await.expect("routes");
+    assert_eq!(
+        routes.len(),
+        1,
+        "a replacement leaves only the new set: {routes:?}"
+    );
+    assert_eq!(routes[0].path, "rlm-status");
+
+    // …and the mux agrees: the old paths are gone, the new one resolves.
+    let mux = TopicRouteMux::new(Arc::new(PgTopicRoutes::new(pool.clone())));
+    assert_eq!(
+        mux.resolve("routes-topic", "GET", "old-get")
+            .await
+            .expect("resolve"),
+        Resolved::NotRegistered,
+        "a route the current set does not claim must not resolve"
+    );
+    assert_eq!(
+        mux.resolve("routes-topic", "POST", "old-post")
+            .await
+            .expect("resolve"),
+        Resolved::NotRegistered
+    );
+    assert!(
+        matches!(
+            mux.resolve("routes-topic", "GET", "rlm-status")
+                .await
+                .expect("resolve"),
+            Resolved::Route(_)
+        ),
+        "the new set's route resolves"
+    );
+
+    tp.drop_schema().await.expect("drop");
+}
+
+/// A replacement that keeps the **row count** the same still moves the mux's
+/// generation.
+///
+/// The cache's change signal used to be `count(*) FROM proof_topic_api`, which
+/// cannot see a replacement: delete one, insert one, and the count is
+/// unchanged while the *routes* are not. The signal is now the sum of the
+/// per-topic route revisions, bumped in the same transaction as the
+/// reconciliation.
+#[tokio::test]
+async fn a_same_count_replacement_still_moves_the_generation() {
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    let doc = topic("swap-topic");
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    let first = r#"{
+        "rules": [{"id": "operator_rule", "text": "the operator's vector"}],
+        "apis": [{"path": "one", "method": "GET"}]
+    }"#;
+    installer
+        .install(
+            &request(&doc, first),
+            SetupSummary::NotDriven { reason: "x".into() },
+        )
+        .await
+        .expect("first install");
+
+    let source = PgTopicRoutes::new(pool.clone());
+    let before = proof_topic_install::TopicRouteSource::generation(&source)
+        .await
+        .expect("generation");
+
+    // A second install with **one** route as well: the count is unchanged, so
+    // a count-based generation would miss it entirely.
+    let second = r#"{
+        "rules": [{"id": "operator_rule", "text": "the operator's vector"}],
+        "apis": [{"path": "two", "method": "GET"}]
+    }"#;
+    installer
+        .install(
+            &request(&doc, second),
+            SetupSummary::NotDriven { reason: "x".into() },
+        )
+        .await
+        .expect("second install");
+    let after = proof_topic_install::TopicRouteSource::generation(&source)
+        .await
+        .expect("generation");
+    assert!(
+        after > before,
+        "a same-count replacement must move the generation: {before} -> {after}"
+    );
+    let routes = topic_routes(&pool, "swap-topic").await.expect("routes");
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].path, "two");
+
+    tp.drop_schema().await.expect("drop");
+}
+
 /// The dynamic mux **reads** what an install **wrote**: the routes the
 /// challenge answers `/challenge/{topic_id}/…` from are the rows this install
 /// recorded, and a path nobody registered is not invented.
@@ -766,6 +949,10 @@ async fn mux_reads_what_the_install_wrote(pool: &PgPool) {
         Resolved::NotRegistered
     );
 
+    // A later install in **another process** writes a route and bumps the
+    // topic's revision — the pair the mux's generation probe watches. Writing
+    // the row alone would be a fixture that no install produces, and the cache
+    // would (correctly) not notice it.
     sqlx::query(
         "INSERT INTO proof_topic_api (topic_id, path, method, summary) \
          VALUES ('tb4', 'v2/runs', 'GET', 'a later install')",
@@ -773,6 +960,14 @@ async fn mux_reads_what_the_install_wrote(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("append the second install's route");
+    sqlx::query(
+        "INSERT INTO proof_topic_route_revision (topic_id, revision) VALUES ('tb4', 1) \
+         ON CONFLICT (topic_id) DO UPDATE \
+         SET revision = proof_topic_route_revision.revision + 1",
+    )
+    .execute(pool)
+    .await
+    .expect("bump the revision the way an install does");
     let later = mux.resolve("tb4", "GET", "v2/runs").await.expect("resolve");
     assert!(
         matches!(&later, Resolved::Route(r) if r.summary == "a later install"),

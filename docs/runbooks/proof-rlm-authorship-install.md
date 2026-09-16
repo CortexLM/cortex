@@ -78,7 +78,7 @@ by name rather than ignored.
 | `migrations` | names are ids; SQL is non-empty, ≤256 KiB, ≤64 migrations, and **inside this topic's namespace** under the same deny-list an operator's bundle faces | `authoring.json: migrations[0] ("0001_x"): …` — the statement and the object are named |
 | `apis` | relative path of plain segments (no leading `/`, no `..`), **not** inside `v1/admin`, method ∈ {GET,POST,PUT,PATCH,DELETE,*} | `authoring.json: apis[0]: …` |
 | `submission_format` | a non-empty object | `authored no submission_format` |
-| `pin_policy` | may be `{}` (tightens nothing). Any knob it sets may only **tighten**: floors up (`epsilon_nll_min`, `epsilon_throughput_rel_min`, `epsilon_topic_max_regress_min`), ceilings down (`max_proof_deadline_s`, `flops_budget_max`). `eval_image_digest`, `gpu_class`, and `holdout_size` are **equalities** — they must equal the pin's | `pin_policy.flops_budget_max = N loosens the ceiling M` |
+| `pin_policy` | may be `{}` (restates nothing). A knob it **does** set must match the signed document's own value: scoring reads the document, so a policy that named a different number would be a threshold no challenger is judged by. `eval_image_digest`, `gpu_class`, and `holdout_size` are equalities against the **pin** as well | `pin_policy.epsilon_nll_min = X diverges from the signed document's Y: scoring reads the document…` |
 
 **Two processes check it, and they cannot disagree** (both link `proof-topic-authoring`):
 

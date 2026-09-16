@@ -1128,7 +1128,7 @@ pub async fn propose_rules(
         set.validate(&topic.id)
             .map_err(|e| format!("{AUTHORING_FILE}: {e}"))?;
         set.pin_policy
-            .tightens_document(topic)
+            .agrees_with_document(topic)
             .map_err(|e| format!("{AUTHORING_FILE}: {e}"))?;
         for rule in &mut set.rules {
             rule.text = redact(&rule.text, &secrets);

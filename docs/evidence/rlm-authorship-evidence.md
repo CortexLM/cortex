@@ -653,6 +653,53 @@ answer as the baseline for retention.
 
 ---
 
+## Route replacement and pin policy (Greptile P1s, fixed here)
+
+Two more findings on the whole-set change, both reproduced before fixing.
+
+### 1. A re-install did not remove the routes of the set it replaced
+
+`register_apis` was insert-only (`ON CONFLICT DO NOTHING`) and `proof_topic_api` was
+`SELECT, INSERT` for the application role, so the table could only grow. When an RLM-authored
+install superseded a bundle-authored one, the bundle's routes were still in the table — and
+the mux loads **every** row for a topic, so a miner could still reach an endpoint the topic's
+current install does not declare, while the journal said the newer set was in force.
+
+**Fixed by reconciling, not appending.** `register_apis` now, in **one transaction**: deletes
+the topic's rows the new set does not claim, upserts the set's rows, and bumps the topic's
+route **revision** (migration `0028`, which also grants `DELETE` on `proof_topic_api`).
+
+**And the mux's change signal had to change with it.** The generation probe was
+`count(*) FROM proof_topic_api`, and a count cannot see a replacement — delete one, insert
+one, and it is unchanged while the routes are not. It now reads the sum of
+`proof_topic_route_revision`, which is monotonic per topic and bumped in the same transaction.
+
+### 2. An accepted pin policy had no effect on scoring
+
+The policy check accepted a policy that was **tighter** than the signed document, and the
+install recorded it — but scoring reads the *document*
+(`proof-score::nll_gates` takes `topic.epsilon_nll`, and the split-regression gate takes
+`topic.epsilon_topic_max_regress`). So the host would record the RLM's tighter number while
+challengers were still judged by the document's: a threshold nobody is scored against, in
+either direction.
+
+**Fixed by making it equality.** `PinPolicy::agrees_with_document` (renamed from
+`tightens_document`) refuses any knob that diverges from the document's value, with a refusal
+that says why: scoring reads the document, so a policy **restates** it — proving the RLM
+considered the knob — and cannot choose for it. A topic that wants a tighter floor puts it in
+the document, where it is signed and verifiable. `holdout_size` is an equality in both
+directions and is caught against the pin first.
+
+**Tests, each verified non-vacuous:**
+
+| Test | What it pins |
+|---|---|
+| `a_re_install_replaces_the_route_set` | bundle routes installed, then an RLM set with one different route: the table holds **only** the new route and the mux answers `NotRegistered` for both old paths. Neutering the delete shows all three routes, which is the bug |
+| `a_same_count_replacement_still_moves_the_generation` | one route replaced by one route: the count is unchanged and the generation must still move |
+| `a_pin_policy_restates_the_signed_document_and_cannot_diverge` | restating is accepted; diverging either way is refused, naming the knob and the reason |
+
+---
+
 ## Security fixes found during this review (not authorship items)
 
 Three P1 findings, each reproduced independently before fixing. The first is from the earlier

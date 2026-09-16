@@ -619,27 +619,78 @@ impl Installer<'_> {
         Ok(())
     }
 
-    /// Record the routes a topic claims.
+    /// Record the routes a topic claims, **replacing** whatever it claimed
+    /// before.
+    ///
+    /// Insert-only was wrong once a set can be replaced. When an RLM-authored
+    /// install supersedes a bundle-authored one, the old set's routes are not
+    /// in the new set — and an append-only table leaves them resolving, so a
+    /// miner reaches an endpoint the topic's current install does not declare
+    /// while the journal says the newer set is in force. Greptile reproduced
+    /// it.
+    ///
+    /// So the topic's rows are **reconciled** against the set being applied:
+    /// rows absent from it are deleted, the set's rows are inserted, and the
+    /// topic's route **revision** is bumped — all in **one transaction**, so a
+    /// reader never sees a half-replaced table and the mux's generation moves
+    /// even when a replacement happens to keep the row count the same.
     async fn register_apis(
         &self,
         topic_id: &str,
         apis: &[ApiRoute],
     ) -> Result<Vec<String>, InstallError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| InstallError::Db(e.to_string()))?;
+        // Delete what the new set does not claim. `(method, path)` is the key,
+        // so a set that renames a path removes the old one.
+        let keep: Vec<(String, String)> = apis
+            .iter()
+            .map(|r| (r.method.clone(), r.path.clone()))
+            .collect();
+        sqlx::query(
+            "DELETE FROM proof_topic_api \
+             WHERE topic_id = $1 \
+               AND NOT (method, path) IN (SELECT * FROM unnest($2::text[], $3::text[]))",
+        )
+        .bind(topic_id)
+        .bind(keep.iter().map(|(m, _)| m.clone()).collect::<Vec<String>>())
+        .bind(keep.iter().map(|(_, p)| p.clone()).collect::<Vec<String>>())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| InstallError::Db(e.to_string()))?;
         let mut out = Vec::with_capacity(apis.len());
         for route in apis {
             sqlx::query(
                 "INSERT INTO proof_topic_api (topic_id, path, method, summary) \
-                 VALUES ($1, $2, $3, $4) ON CONFLICT (topic_id, method, path) DO NOTHING",
+                 VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (topic_id, method, path) DO UPDATE SET summary = EXCLUDED.summary",
             )
             .bind(topic_id)
             .bind(&route.path)
             .bind(&route.method)
             .bind(&route.summary)
-            .execute(self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| InstallError::Db(e.to_string()))?;
             out.push(format!("{} /{}", route.method, route.path));
         }
+        // The revision is what the mux watches: a count cannot see a
+        // replacement, and this moves on every reconciliation.
+        sqlx::query(
+            "INSERT INTO proof_topic_route_revision (topic_id, revision) VALUES ($1, 1) \
+             ON CONFLICT (topic_id) DO UPDATE \
+             SET revision = proof_topic_route_revision.revision + 1, updated_at = now()",
+        )
+        .bind(topic_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| InstallError::Db(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| InstallError::Db(e.to_string()))?;
         Ok(out)
     }
 

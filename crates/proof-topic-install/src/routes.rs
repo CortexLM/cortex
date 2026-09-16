@@ -15,18 +15,18 @@
 //! A request must not pay a table read, and it must not be answered from a
 //! table an install has since changed. An install is a **different process**
 //! (the operator's `proof-admin`), so no in-process signal can carry it: the
-//! cache is therefore keyed by a **generation**, a cheap
-//! `SELECT count(*) FROM proof_topic_api`, and a cached topic is used only
-//! while the generation it was read under still holds.
+//! cache is therefore keyed by a **generation** — the sum of
+//! `proof_topic_route_revision` — and a cached topic is used only while the
+//! generation it was read under still holds.
 //!
-//! A count is a sound change signal here because the table is **append-only
-//! for the application role** — `GRANT SELECT, INSERT` and nothing else
-//! (migration `0025`), so a route row can be added and never rewritten or
-//! removed. A generation that moved is therefore an install that ran, and the
-//! next request reads the table again: an install is visible on the next
-//! request, which is what "invalidated on install" means across processes.
-//! [`TopicRouteMux::invalidate`] is the same thing for a caller in *this*
-//! process.
+//! The revision is what makes a **replacement** visible, and a row count is
+//! not: when an RLM-authored install supersedes a bundle-authored set, the
+//! install deletes the routes the new set does not claim and inserts its own,
+//! and a count can be unchanged by that (delete three, insert three). The
+//! revision is monotonic per topic and bumped in the same transaction as the
+//! reconciliation, so it moves on any change to the route table — addition or
+//! replacement. [`TopicRouteMux::invalidate`] is the in-process form of the
+//! same thing.
 //!
 //! # What a resolution means
 //!
@@ -110,16 +110,22 @@ impl TopicRouteSource for PgTopicRoutes {
         crate::install::topic_routes(&self.pool, topic_id).await
     }
 
-    /// Rows in the route table.
+    /// Sum of the per-topic route revisions.
     ///
-    /// The append-only grant is what makes a count a change signal: an
-    /// install can only add, so the count moves exactly when the registry
-    /// does. See the module docs.
+    /// A revision is bumped in the same transaction as the route
+    /// reconciliation (migration `0028`), so the sum moves on **any** change
+    /// to the route table — an addition and a replacement alike. A row count
+    /// cannot see a replacement, which is why this is not one. See the module
+    /// docs.
     async fn generation(&self) -> Result<i64, InstallError> {
-        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM proof_topic_api")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| InstallError::Db(e.to_string()))?;
+        // `sum` is NUMERIC in Postgres; the cast keeps the read an `i64` and
+        // the empty-table case a `0` rather than a decode error.
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(sum(revision), 0)::bigint FROM proof_topic_route_revision",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| InstallError::Db(e.to_string()))?;
         Ok(rows)
     }
 }

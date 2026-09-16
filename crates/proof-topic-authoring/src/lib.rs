@@ -323,13 +323,28 @@ impl PinPolicy {
         Ok(())
     }
 
-    /// Refuse a policy looser than the **signed document's own** knobs.
+    /// Refuse a policy that **diverges from the signed document**.
     ///
-    /// The document is what miners are scored against, so a policy that
-    /// accepted a *wider* range than the document declares would be a promise
-    /// the host does not keep. This is the check a guest can run with only the
-    /// job's own topic in hand (it has no pin).
-    pub fn tightens_document(&self, doc: &TopicDocument) -> Result<(), AuthoringError> {
+    /// The knobs a policy names are the same knobs the document carries, and
+    /// the document is what miners verify and what scoring reads
+    /// (`proof-score::nll_gates` reads `topic.epsilon_nll`, not a policy). So a
+    /// policy that asked for a **tighter** floor than the document's would be a
+    /// promise the host does not keep: the install would record the RLM's
+    /// tighter number while challengers were still scored against the
+    /// document's. Greptile reproduced exactly that.
+    ///
+    /// The rule is therefore **equality**, not "at least as tight": a policy
+    /// may restate what the document already declares — proving its RLM
+    /// considered the knob — and may not diverge from it in either direction.
+    /// A looser value is already refused by [`Self::tightens`] (against the
+    /// pin); a tighter one is refused here, because the only way to make it
+    /// effective would be to score miners against a threshold that is not in
+    /// the document they verified. If a topic wants a tighter floor, the
+    /// **document** says so, and it is signed.
+    ///
+    /// This is the check a guest can run with only the job's own topic in hand
+    /// (it has no pin).
+    pub fn agrees_with_document(&self, doc: &TopicDocument) -> Result<(), AuthoringError> {
         self.validate_shape()?;
         let floors: [(&str, Option<f64>, f64); 3] = [
             ("epsilon_nll_min", self.epsilon_nll_min, doc.epsilon_nll),
@@ -346,11 +361,11 @@ impl PinPolicy {
         ];
         for (field, asked, document) in floors {
             if let Some(v) = asked {
-                if v < document {
-                    return Err(AuthoringError::LoosenedFloor {
+                if !(v - document).abs().le(&f64::EPSILON) {
+                    return Err(AuthoringError::PinDivergesFromDocument {
                         field,
-                        got: v,
-                        floor: document,
+                        got: v.to_string(),
+                        document: document.to_string(),
                     });
                 }
             }
@@ -360,23 +375,26 @@ impl PinPolicy {
             // which the guest cannot read — so a policy that tightens *below*
             // it is accepted here and checked against the ceiling by the
             // control plane, which has the pin. A document that declares one
-            // is the tighter bound, and the policy may not exceed it.
+            // is what the runtime holds runs to, so the policy must restate it.
             if let Some(document) = doc.eval_executor.max_proof_deadline_s {
-                if asked > document {
-                    return Err(AuthoringError::LoosenedCeiling {
+                if asked != document {
+                    return Err(AuthoringError::PinDivergesFromDocument {
                         field: "max_proof_deadline_s",
-                        got: asked,
-                        ceiling: document,
+                        got: asked.to_string(),
+                        document: document.to_string(),
                     });
                 }
             }
         }
         if let Some(asked) = self.flops_budget_max {
-            if asked > doc.flops_budget {
-                return Err(AuthoringError::LoosenedCeiling {
+            // The document's own budget is what the runtime enforces and what
+            // miners are held to, so the policy restates it rather than
+            // choosing a different number.
+            if asked != doc.flops_budget {
+                return Err(AuthoringError::PinDivergesFromDocument {
                     field: "flops_budget_max",
-                    got: asked,
-                    ceiling: doc.flops_budget,
+                    got: asked.to_string(),
+                    document: doc.flops_budget.to_string(),
                 });
             }
         }
@@ -531,6 +549,27 @@ pub enum AuthoringError {
         got: String,
         /// What the pin says.
         want: String,
+    },
+    /// A pin-policy knob disagrees with the **signed document's** value.
+    ///
+    /// Scoring reads the document (`proof-score::nll_gates` takes
+    /// `topic.epsilon_nll`), so a policy that named a different number would
+    /// be a threshold nobody is scored against — a promise the host does not
+    /// keep, in either direction. A policy restates the document; it does not
+    /// choose for it.
+    #[error(
+        "pin_policy.{field} = {got:?} diverges from the signed document's {document:?}: scoring \
+         reads the document, so a policy that names a different number would be a threshold no \
+         challenger is judged by. Restate the document's value (or change the document and \
+         re-sign it)"
+    )]
+    PinDivergesFromDocument {
+        /// Which knob.
+        field: &'static str,
+        /// What the policy asked for.
+        got: String,
+        /// What the signed document says.
+        document: String,
     },
     /// The set is larger than the bounds allow.
     #[error("authored set carries {count} {part}, at most {max} are applied")]
@@ -1222,28 +1261,76 @@ mod tests {
     }
 
     /// The guest has the topic but not the pin, so it holds the policy to the
-    /// document's own knobs.
+    /// document's own knobs — and the rule there is **equality**.
+    ///
+    /// Scoring reads the document (`proof-score::nll_gates` takes
+    /// `topic.epsilon_nll`), so a policy that named a *different* number would
+    /// be a threshold no challenger is judged by. Greptile reproduced exactly
+    /// that: an accepted tighter policy was recorded and had no effect on
+    /// promotion. A policy may restate the document; it may not choose for it.
     #[test]
-    fn a_pin_policy_is_also_held_to_the_signed_document() {
+    fn a_pin_policy_restates_the_signed_document_and_cannot_diverge() {
         let doc = topic();
-        let wider = PinPolicy {
-            flops_budget_max: Some(doc.flops_budget + 1),
+        // Restating the document is accepted — that is what a policy is for.
+        let restated = PinPolicy {
+            epsilon_nll_min: Some(doc.epsilon_nll),
+            flops_budget_max: Some(doc.flops_budget),
+            holdout_size: Some(doc.holdout_size),
             ..PinPolicy::none()
         };
-        let err = wider
-            .tightens_document(&doc)
-            .expect_err("wider than the document");
-        assert!(err.to_string().contains("flops_budget_max"), "{err}");
-        let ok = PinPolicy {
-            flops_budget_max: Some(doc.flops_budget - 1),
-            ..PinPolicy::none()
-        };
-        ok.tightens_document(&doc).expect("tighter");
+        restated
+            .agrees_with_document(&doc)
+            .expect("restating the document is the policy's job");
+
+        // Diverging — either way — is refused, and the refusal says why.
+        for (field, policy) in [
+            (
+                "epsilon_nll_min",
+                PinPolicy {
+                    epsilon_nll_min: Some(doc.epsilon_nll + 0.01),
+                    ..PinPolicy::none()
+                },
+            ),
+            (
+                "flops_budget_max",
+                PinPolicy {
+                    flops_budget_max: Some(doc.flops_budget + 1),
+                    ..PinPolicy::none()
+                },
+            ),
+            (
+                "flops_budget_max",
+                PinPolicy {
+                    flops_budget_max: Some(doc.flops_budget - 1),
+                    ..PinPolicy::none()
+                },
+            ),
+            (
+                "epsilon_topic_max_regress_min",
+                PinPolicy {
+                    epsilon_topic_max_regress_min: Some(doc.epsilon_topic_max_regress + 0.01),
+                    ..PinPolicy::none()
+                },
+            ),
+        ] {
+            let err = policy.agrees_with_document(&doc).expect_err(field);
+            assert!(err.to_string().contains(field), "{field}: {err}");
+            assert!(
+                err.to_string().contains("scoring reads the document"),
+                "the refusal says why divergence is wrong: {err}"
+            );
+        }
+
+        // `holdout_size` is an equality in **both** directions, so it is
+        // refused against the pin before it ever reaches this check — a
+        // different number here is caught by `tightens`, and the refusal says
+        // which pin value it wanted.
         let holdout = PinPolicy {
             holdout_size: Some(doc.holdout_size + 1),
             ..PinPolicy::none()
         };
-        assert!(holdout.tightens_document(&doc).is_err());
+        let err = holdout.agrees_with_document(&doc).expect_err("holdout");
+        assert!(err.to_string().contains("holdout_size"), "{err}");
     }
 
     /// The journal entry is the proof: every part names its author and its
