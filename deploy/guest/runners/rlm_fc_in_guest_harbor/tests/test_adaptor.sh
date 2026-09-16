@@ -411,6 +411,71 @@ assert res["n_scored"] == 1
 PY
 pass "evaluate run-harbor passes miner -a and full OpenRouter -m"
 
+# --- the refusal is EARLY: it lands before Harbor is invoked ---------------
+# "Fail-closed" is only half the property. The Gate 1 cost was a provision +
+# boot + a Harbor run that overran its wall clock, so the refusal has to happen
+# in the selection, before any Harbor process exists — not after it. This runs
+# the real entrypoint with a fake `harbor` that records that it ran, and
+# requires: no record, no jobs dir, and no report.
+early_bin="$WORKDIR/early-bin"
+mkdir -p "$early_bin"
+cat > "$early_bin/harbor" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+printf 'invoked\n' >> "${PROOF_WORK_DIR}/early.harbor-invoked"
+jobs=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --jobs-dir) jobs="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+# One complete trial, so the control case (the escape) can summarize. The
+# refusal case must never get here at all.
+job="$jobs/job1/alpha__1"
+mkdir -p "$job/verifier"
+printf '%s\n' '{"trial_name": "alpha__1", "verifier_result": {"rewards": {"reward": 1.0}}}' > "$job/result.json"
+printf '1.0\n' > "$job/verifier/reward.txt"
+EOF
+chmod 0755 "$early_bin/harbor"
+early_out="$WORKDIR/out-early"
+early_work="$WORKDIR/work-early"
+rm -rf "$early_out" "$early_work"
+mkdir -p "$early_out" "$early_work"
+if (export PATH="$early_bin:$PATH" PROOF_JOB=evaluate PROOF_PACK_DIR="$no_slices" \
+    PROOF_PARAM_TASKS_DIR=tasks PROOF_TASK_SLICE=tb4-first-5 PROOF_PARAM_TASKS= \
+    PROOF_OUTPUT_DIR="$early_out" PROOF_WORK_DIR="$early_work" \
+    PROOF_HARNESS_SKIP_PODMAN=1
+    "$ADAPTOR/harness/run-harbor") 2>"$early_work/early.err"; then
+    fail "an unresolved slice must refuse the whole run, not just the filter"
+fi
+[ ! -f "$early_work/early.harbor-invoked" ] \
+    || fail "Harbor was invoked on a refused selection — the refusal is not early"
+[ ! -d "$early_work/harbor-jobs" ] \
+    || fail "a refused selection must not create a Harbor jobs dir"
+[ ! -f "$early_out/report.json" ] || fail "a refused selection must write no report"
+grep -q "defines no slices" "$early_work/early.err" \
+    || fail "the early refusal must name why: $(cat "$early_work/early.err")"
+pass "an unresolved slice refuses before Harbor exists (no run, no jobs dir, no report)"
+
+# --- the escape runs through the same entrypoint, and DOES reach Harbor ----
+# The negative control: with the set named explicitly the same entrypoint gets
+# as far as Harbor. Without this, "Harbor was never invoked" could pass because
+# the whole entrypoint was broken.
+rm -rf "$early_out" "$early_work" "$PROOF_WORK_DIR/early.harbor-invoked"
+mkdir -p "$early_out" "$early_work"
+if ! (export PATH="$early_bin:$PATH" PROOF_JOB=evaluate PROOF_PACK_DIR="$no_slices" \
+    PROOF_PARAM_TASKS_DIR=tasks PROOF_TASK_SLICE=tb4-first-5 PROOF_PARAM_TASKS=alpha \
+    PROOF_ARTIFACT_DIR="$FIXTURES" PROOF_MODEL_PIN="vendor/model" \
+    PROOF_OUTPUT_DIR="$early_out" PROOF_WORK_DIR="$early_work" \
+    PROOF_HARNESS_SKIP_PODMAN=1
+    "$ADAPTOR/harness/run-harbor") 2>"$early_work/escape.err"; then
+    fail "a named set beside a stale label must run: $(cat "$early_work/escape.err")"
+fi
+[ -f "$early_work/early.harbor-invoked" ] \
+    || fail "the escape must reach Harbor (the early test's control)"
+pass "the explicit-set escape reaches Harbor with the stale label still set"
+
 # --- n_concurrent is topic data, passed to Harbor verbatim -------------------
 # The signed value is honored as-is (no clamp, no ceiling): a topic that asks
 # for 5 gets 5, and a topic that asks for nothing gets Harbor's own default of

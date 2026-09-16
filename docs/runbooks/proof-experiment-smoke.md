@@ -253,7 +253,26 @@ informational `benchmark` / `task_count` / `task_scope` if room is needed):
 
 Until the two `inspect_*` params are signed, every submission is a persisted
 `rejected` row (red checklist, **no spend**) whose evidence names them —
-visible and recoverable, never a silent pass. `constraints.task_slice`
-(`tb4-first-15`) stays an informational label unless the pack gains a
-`slices/tb4-first-15.json`. Nothing here needs a baseline reseal; the
-scored set is unchanged (15 − 5 = 10 tasks).
+visible and recoverable, never a silent pass.
+
+**`constraints.task_slice` is an assertion, not a label.** `tb4-first-15`
+stays in the document, but a slice the pinned pack does not define is a
+**refusal** (`task_slice 'tb4-first-15' is not a slice this pack defines`) —
+the pre-`b2c8fe9e` escape that treated a label as informational is the LIVE
+Gate 1 fail-open, where a topic that named 5 tasks was scored on all 10 and
+measured no baseline. The supported fix is to **name the set explicitly**:
+add `params.tasks` (the exact names, in order) and, if the set is long,
+`params.n_tasks` to bound it. The guest reads `params.tasks` **instead of**
+the label, so the stale `task_slice` beside it is never resolved — that is the
+documented escape, and it is what an RLM-emitted SoT install should carry
+rather than a slice label whose resolution depends on the pack. Verify the
+selection before the re-sign with
+[`proof-slice-preflight.sh`](../../deploy/scripts/proof-slice-preflight.sh)
+(it runs the guest's own `filter_tasks.py`):
+
+```bash
+deploy/scripts/proof-slice-preflight.sh --pack-dir /var/lib/proof-vm/packs/<pack> \
+  --tasks <name-1>,<name-2>,<name-3> --n-tasks 3 --expect 3
+```
+
+Nothing here needs a baseline reseal; the scored set is unchanged (15 − 5 = 10 tasks).

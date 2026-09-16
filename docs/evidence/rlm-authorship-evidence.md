@@ -14,6 +14,7 @@ on #301 at `80bc2cdd`). The commits it must contain, oldest first:
 | `9f58c5e5` | the staging ceremony, runnable as written |
 | (this tip) | §2i: the LIVE FAIL — the guest harvests a complete `authoring.json`, and the adaptor dual-emits `rules.json` beside it |
 | (this tip) | §2j: the second skew — the `authored` wire variant is round-tripped, pinned as a contract, and a decoder that does not know it says so |
+| (this tip) | §2k: the Gate-1 class — the unresolved-slice refusal is pinned before Harbor, and the preflight no longer refuses the documented escape |
 
 Doc-only commits may ride on top of those; the four above are what the claims in this
 pack are made against. Mirror PR [#302](https://github.com/CortexLM/cortex/pull/302)
@@ -905,6 +906,61 @@ the two fixes cover different halves of the same wire. It also does not claim
 `api_version` was bumped — it was not, and the skew is now *diagnosed* rather
 than *prevented*; a bump would be a separate, breaking change to a wire the
 retained guest images already speak.
+
+### 2k. The Gate-1 class: an unresolved `task_slice` must refuse before Harbor
+
+**Arch GO's add-on, checked against the tree before changing anything.** The
+guest-side refusal already landed at `b2c8fe9e` ("an unresolved task_slice
+fails closed, always"), which **is** on this stack and **not** on `main`
+(`git merge-base --is-ancestor b2c8fe9e origin/main` → no). So the literal
+condition asked for — `task_slice` set, unresolved, `params.tasks` empty —
+already refuses. I proved it rather than assuming, by driving the shipped
+`filter_tasks.py` against throwaway packs:
+
+| Selection | Pack | Result |
+|---|---|---|
+| `task_slice=tb4-first-5` alone | no slices | **refused**, names "defines no slices" |
+| `task_slice=tb4-first-5` + `n_tasks=5` | no slices | **refused** (a count is not a selector) |
+| `task_slice=tb4-first-5` alone | `allow` list | **refused** (does not fall through to `allow`) |
+| `task_slice=five` alone | defines `slices/five.json` | resolves, `task_slice_resolved: true` |
+| `task_slice=tb4-first-5` + `params.tasks` | any | **runs** on the tasks; the label is not resolved |
+
+**What was actually broken: the preflight refused the escape.** The same
+matrix through `deploy/scripts/proof-slice-preflight.sh` — the tool whose job
+is to catch a bad selection *before* a VM — refused the documented escape
+(`--task-slice tb4-first-5 --tasks t-one,t-two`), because it asserted that any
+set label must have resolved. The guest reads `params.tasks` **instead of**
+the label, so the run is correct and the preflight was wrong: it blocked the
+very fix it exists to prove, on the exact shape the Owner's re-sign produces
+(a stale label beside the new explicit set). Fixed to follow the guest, both
+directions asserted.
+
+**The ordering property is now pinned, not assumed.** "Fail-closed" is only
+half of what Gate 1 needs: the cost was a provision + boot + a Harbor run that
+overran its wall clock. `test_adaptor.sh` now drives the real entrypoint with a
+fake `harbor` that records its own invocation, and requires that a refused
+selection leaves **no invocation, no jobs dir, and no report** — with a
+positive control (the escape reaches Harbor) so the assertion cannot pass
+because the entrypoint is broken.
+
+**The stale advice is corrected.** Two normative docs still said a label the
+pack does not define "stays an informational label" / "the pack treats it as
+informational" — the pre-`b2c8fe9e` behavior, and the fail-open that produced
+Gate 1. `docs/PROOF.md` and the smoke runbook now state the refusal and name
+the supported path: `params.tasks` (+ `n_tasks`) as the RLM-emitted SoT
+install shape, with the preflight command to verify it.
+
+| Test | What it pins | Neutering that fails it |
+|---|---|---|
+| `test_proof_slice_preflight.sh` — "a stale label beside params.tasks passes" | the escape is not refused | restoring `if [ -n "$task_slice" ]` fails it (verified) |
+| `test_proof_slice_preflight.sh` — "the stale label alone is still refused" | the escape is the tasks, not the label | — |
+| `test_adaptor.sh` — "an unresolved slice refuses before Harbor exists" | no invocation, no jobs dir, no report | reintroducing the fail-open fails the suite (verified) |
+| `test_adaptor.sh` — "the explicit-set escape reaches Harbor" | the positive control | — |
+
+**What this does not claim.** That `task_slice` is removed from the schema —
+it is still a valid selector when the pack defines the label. And not that the
+live `tbench` document is re-signed: the Owner's re-sign is what adds
+`params.tasks`, and the preflight now proves that shape instead of refusing it.
 
 ## Re-authoring (Greptile P1, fixed here)
 

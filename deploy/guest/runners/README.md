@@ -72,7 +72,7 @@ happened to be lying around.
 | `PROOF_SUBMISSION_DIGEST`, `PROOF_ARTIFACT_DIGEST` | the run's identities (echoed into the report by the agent) |
 | `PROOF_ARTIFACT_DIR` | the miner's artefact, fetched **by the agent** (streamed under a 64 MiB cap), verified against `PROOF_ARTIFACT_DIGEST`, unpacked (set only when the request carries a locator; always set for `evaluate`). `$PROOF_WORK_DIR/artifact.tar` holds the verbatim bytes |
 | `PROOF_PACK_DIR`, `PROOF_PACK_DIGEST` | the topic-pinned experiment pack, staged by the host at boot and verified by the agent (paid jobs) |
-| `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE` | `constraints.model_pin` / `constraints.task_slice` when the topic carries them |
+| `PROOF_MODEL_PIN`, `PROOF_TASK_SLICE` | `constraints.model_pin` / `constraints.task_slice` when the topic carries them. **`task_slice` is an assertion, not a hint**: a label the pinned pack does not define is a refusal (the LIVE Gate 1 fail-open scored a different, larger set). Name the set explicitly with `PROOF_PARAM_TASKS` (+ `n_tasks`) instead — the guest reads the tasks **instead of** the label, so a stale label beside them is never resolved |
 | `PROOF_SEED`, `PROOF_DEADLINE_S`, `PROOF_DECLARED_FLOPS`, `PROOF_FLOPS_BUDGET` | run parameters from the signed topic and the submission |
 | `PROOF_CLAIM_FILE` | the miner's claim text (`run`) |
 | `PROOF_RULES_FILE` | the rule set to tick (`inspect`); `PROOF_TOPIC_FILE` the signed topic (`propose_rules`); `PROOF_CURRENT_AUTHORING_FILE` where the set this RLM authored **last time** was written (`propose_rules`; always set, empty when there is none — read it to retain the parts a re-authoring run is not changing); `PROOF_CURRENT_RULES_VERSION` the version it supersedes (empty = none) |

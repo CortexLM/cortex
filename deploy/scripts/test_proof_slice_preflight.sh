@@ -70,6 +70,24 @@ out="$("$PREFLIGHT" --pack-dir "$no_slices" --tasks t-one,t-two --n-tasks 2 --ex
 grep -q "t-one,t-two" <<<"$out" || fail "the explicit set must be what is kept: $out"
 pass "an explicit params.tasks set resolves on a slice-less pack"
 
+# --- the escape WITH a stale label still set: the label is not read ----------
+# The Owner's migration shape: a topic carries an old `task_slice` it cannot
+# resolve *and* names the set explicitly. The guest reads `params.tasks` and
+# never resolves the label, so the run is correct — but this preflight refused
+# it, which blocks the very fix it exists to prove. Assert the guest's own
+# answer, both directions, so the two cannot drift apart again.
+out="$("$PREFLIGHT" --pack-dir "$no_slices" --task-slice five --tasks t-one,t-two --expect 2 2>&1)" \
+    || fail "a stale label beside an explicit set must not be refused: $out"
+grep -q "is not read: params.tasks named the set" <<<"$out" \
+    || fail "the preflight must say the label is not read: $out"
+pass "a stale label beside params.tasks passes (the guest reads the tasks)"
+# …and the label alone is still the LIVE refusal: the escape is the tasks, not
+# the label.
+if out="$("$PREFLIGHT" --pack-dir "$no_slices" --task-slice five 2>&1)"; then
+    fail "the label alone must still be refused, got: $out"
+fi
+pass "the stale label alone is still refused (the escape is the explicit set)"
+
 # --- a count that does not match is caught, not silently accepted ------------
 if out="$("$PREFLIGHT" --pack-dir "$with_slices" --task-slice five --expect 3 2>&1)"; then
     fail "--expect must fail when the selection is a different size, got: $out"

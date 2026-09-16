@@ -176,12 +176,19 @@ note "kept: $names"
 echo
 
 # A slice that was set but did not resolve is the LIVE Gate 1 failure. The guest
-# refuses it now, so reaching here with a label means it resolved — assert it.
-if [ -n "$task_slice" ]; then
+# refuses it now — **unless** the topic also named the set explicitly, in which
+# case `params.tasks` is the documented escape and the label is not read at all
+# (`filter_tasks.select_base` returns before resolving it). Refusing here would
+# block the very fix this preflight is meant to prove, so the assertion follows
+# the guest: a label that did not resolve is a refusal only when it was the
+# selector.
+if [ -n "$task_slice" ] && [ -z "$tasks" ]; then
     case "$resolved" in
         true) pass "task_slice '$task_slice' resolved through the pack (resolved=true)" ;;
         *) die "task_slice '$task_slice' did not resolve (resolved=$resolved) — the guest would refuse this run" ;;
     esac
+elif [ -n "$task_slice" ] && [ -n "$tasks" ]; then
+    pass "task_slice '$task_slice' is not read: params.tasks named the set (source=$source)"
 fi
 
 if [ -n "$expect" ]; then
