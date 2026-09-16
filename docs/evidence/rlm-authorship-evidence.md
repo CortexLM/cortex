@@ -552,7 +552,7 @@ HEAD so the branch has its own URL. Both PRs carry the **same HEAD**; merge #301
 | #298 | not triggered (base is a droid branch, not `main`) | SUCCESS |
 | #299 | not triggered | SUCCESS |
 | #300 | not triggered | SUCCESS |
-| #301 | not triggered | **SUCCESS** (69 files reviewed, 0 comments at `e204b426`; re-review pending at `945e143f`) |
+| #301 | not triggered | **SUCCESS** — **5/5, "Safe to merge; there are no outstanding blocking issues"** at `dc6ca1a4` (33 reviews; every finding below is fixed) |
 | #302 | not triggered (mirror of #301) | see PR |
 
 **Why CI runs only on #297:** `ci.yml` triggers on `pull_request: branches: [main]`. #297 is
@@ -772,5 +772,21 @@ A refusal rolls back, so it writes nothing at all — no row, no rule, no table.
 is operator-signed by design); that a rules-only adaptor can open a topic (it cannot, by
 construction); that B1's human YAML is the final authorship SoT; the `pin_policy` field by
 any other name.
+
+**Greptile is green.** The last review (of `dc6ca1a4`) scores **5/5** and says "Safe to merge;
+there are no outstanding blocking issues." Every finding it raised on this branch is fixed in
+a commit on the branch, each with a regression test verified non-vacuous by neutering the fix:
+
+| Finding | Fixed in | Test |
+|---|---|---|
+| prefix-overlapping namespaces | `c842598e` | `a_migration_that_reaches_a_sibling_topics_namespace_is_refused` |
+| function bodies bypassed the check | `ef9c35f3` | `a_function_body_that_reaches_a_sibling_is_refused` |
+| unpublished installs invisible + non-atomic claim | `ef9c35f3` | `two_unpublished_installs_cannot_claim_the_same_object`, `two_concurrent_installs_cannot_both_claim_a_namespace` |
+| re-authoring was handed nothing | `11090a94` | `a_re_authoring_run_is_handed_the_set_the_first_one_wrote` |
+| route replacement left stale routes | `4a0444e5` | `a_re_install_replaces_the_route_set` |
+| a same-count replacement missed the cache | `4a0444e5` | `a_same_count_replacement_still_moves_the_generation` |
+| an accepted pin policy had no scoring effect | `4a0444e5` | `a_pin_policy_restates_the_signed_document_and_cannot_diverge` |
+| rules and set written separately | `9bc55900` | `the_rules_and_the_set_land_in_one_write` |
+| the paired insert omitted the rule digest | `dc6ca1a4` | the shared store contract against Postgres |
 
 **Not merged.** PR #301 is a draft; the merge HOLD stands pending Mathis GO.
