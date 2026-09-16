@@ -605,20 +605,24 @@ impl RlmStore for PgRlmStore {
         Ok(rows.into_iter().map(PromotionRow::from).collect())
     }
 
-    /// Append the whole set, in **one transaction** that reads the current
-    /// version under a lock.
+    /// Append the set **and** the rule version it landed, in one transaction.
+    ///
+    /// The rules and the set are two halves of one fact — "this topic's RLM
+    /// authored *this* at rule version *N*" — and writing them separately
+    /// would let a failure land between them: newer rules with the previous
+    /// set, so a retry would be handed a set whose rules are not the ones in
+    /// force. Both go in one transaction, so the pair is wholly there or
+    /// wholly absent.
     ///
     /// The version has to advance by exactly one, and "read the newest, add
     /// one, insert" is not atomic: two authoring runs for the same topic each
-    /// read the same newest and both try to insert the same version, which the
-    /// unique constraint turns into one failure rather than a silent overwrite
-    /// — but the *failure* would be a confusing duplicate-key error instead of
-    /// the honest `VersionGap` this contract promises. The advisory lock makes
-    /// the read-then-write one step, so the second run sees the first's row and
-    /// reports the gap the way the trait says it will.
+    /// read the same newest and both try to insert the same version. The
+    /// advisory lock makes the read-then-write one step, so the second run
+    /// reports the gap the way the contract says it will.
     async fn put_authoring(
         &self,
         topic_id: &str,
+        rules: &RuleSet,
         set: &proof_topic_authoring::TopicAuthoring,
     ) -> Result<u32, StoreError> {
         set.validate(topic_id)
@@ -651,6 +655,28 @@ impl RlmStore for PgRlmStore {
         .bind(version)
         .bind(document)
         .bind(digest)
+        .execute(&mut *tx)
+        .await?;
+        // The rules, with the same version check `put_rules` runs: a vector
+        // that does not advance is a refusal, and the transaction rolls back
+        // so the set is not written either.
+        let current: Option<i32> = sqlx::query_scalar(
+            "SELECT version FROM proof_rule_version \
+             WHERE topic_id = $1 ORDER BY version DESC LIMIT 1",
+        )
+        .bind(topic_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        check_rules(rules, current.map(to_u32).transpose()?)?;
+        let rules_json = serde_json::to_value(&rules.rules).map_err(malformed)?;
+        sqlx::query(
+            "INSERT INTO proof_rule_version (topic_id, version, source, rules) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(topic_id)
+        .bind(i32::try_from(rules.version).map_err(malformed)?)
+        .bind(source_str(rules.source))
+        .bind(rules_json)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;

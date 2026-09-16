@@ -18,6 +18,7 @@ proof-topic-authoring = { path = "../proof-topic-authoring" }
 thiserror = "2"
 
 [dev-dependencies]
+serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [lints]

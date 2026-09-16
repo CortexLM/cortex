@@ -643,6 +643,14 @@ migration the topic still needs would vanish. Greptile reproduced it.
 next run a set that was never authored, and the re-authoring path would treat a partial
 answer as the baseline for retention.
 
+**One write, not two.** Greptile's follow-up was that the rules and the set went through
+separate store operations, so a failure between them would leave newer rules with the
+previous set — a retry would then be handed a set whose rules are not the ones in force.
+`RlmStore::put_authoring` now takes both and lands them in **one transaction**: the pair is
+wholly there or wholly absent, and a rules vector that does not advance rolls the set back
+with it. `the_rules_and_the_set_land_in_one_write` asserts that a refused write appends no
+set at all.
+
 **Tests, each verified non-vacuous:**
 
 | Test | What it pins |

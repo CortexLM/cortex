@@ -4165,6 +4165,7 @@ dependencies = [
  "proof-score",
  "proof-task",
  "proof-topic-authoring",
+ "serde_json",
  "thiserror 2.0.19",
  "tokio",
 ]

@@ -469,7 +469,25 @@ impl TopicSetup {
             set.validate()?;
             set
         };
-        self.store.put_rules(&rules).await?;
+        // The rules **and** the whole set land in one write: they are two
+        // halves of one fact — "this topic's RLM authored *this* at rule
+        // version *N*" — and a store that wrote them separately could fail
+        // between them, leaving newer rules with the previous set. A retry
+        // would then be handed a set whose rules are not the ones in force.
+        //
+        // Only a complete set is stored: a rules-only answer is a fragment,
+        // and storing a fragment as "the set in force" would hand the next run
+        // a set that was never authored. The fragment's rules are still
+        // recorded (with honest provenance), so the rules go through
+        // `put_rules` in that case.
+        match authored.as_ref() {
+            Some(set) => {
+                self.store.put_authoring(&topic.id, &rules, set).await?;
+            }
+            None => {
+                self.store.put_rules(&rules).await?;
+            }
+        }
         // The read-back is the gate, not a formality: it is what makes "the
         // RLM authored this topic's behavior" a fact the store can prove,
         // rather than a label this driver attached.
@@ -494,19 +512,6 @@ impl TopicSetup {
                 provenance,
                 version: rules.version,
             });
-        }
-        // The **whole set** is persisted too, so the next authoring run can be
-        // handed what this one wrote. Rules were always versioned; the other
-        // four parts had nowhere to live, and an adaptor that cannot read its
-        // previous set cannot retain the parts it is not changing — a second
-        // run would silently drop migrations the topic still needs.
-        //
-        // Only a complete set is stored: a rules-only answer is a fragment,
-        // and storing a fragment as "the set in force" would hand the next run
-        // a set that was never authored. The fragment's rules are already in
-        // the store above, with honest provenance.
-        if let Some(set) = authored.as_ref() {
-            self.store.put_authoring(&topic.id, set).await?;
         }
         Ok(AuthoredOutcome {
             rules,
@@ -1032,5 +1037,161 @@ mod tests {
         fn owner_keys_present(&self) -> Result<(), proof_rlm::HookError> {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod authoring_atomicity_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use proof_rlm_store::MemoryRlmStore;
+    use std::sync::Arc;
+
+    fn rules(topic_id: &str, version: u32) -> RuleSet {
+        RuleSet {
+            topic_id: topic_id.to_owned(),
+            version,
+            source: RuleSource::Rlm,
+            rules: vec![proof_task::ChecklistRule {
+                id: format!("r-{version}"),
+                text: "a rule".into(),
+            }],
+        }
+    }
+
+    fn set(topic_id: &str, api: &str) -> TopicAuthoring {
+        proof_topic_authoring::TopicAuthoring {
+            schema_version: proof_topic_authoring::AUTHORING_SCHEMA,
+            topic_id: topic_id.to_owned(),
+            rules: vec![proof_task::ChecklistRule {
+                id: "r-1".into(),
+                text: "a rule".into(),
+            }],
+            migrations: vec![proof_topic_authoring::AuthoredMigration {
+                name: "0001_scratch".into(),
+                sql: format!(
+                    "CREATE TABLE {}_scratch (id TEXT)",
+                    topic_id.replace('-', "_")
+                ),
+            }],
+            apis: vec![proof_topic_authoring::AuthoredApi {
+                path: api.into(),
+                method: "GET".into(),
+                summary: String::new(),
+            }],
+            submission_format: serde_json::json!({"kind": "tar"}),
+            pin_policy: proof_topic_authoring::PinPolicy::none(),
+        }
+    }
+
+    /// The rules and the set land **together**: a store that wrote them
+    /// separately could fail between the two writes and leave newer rules with
+    /// the previous set, so a retry would be handed a set whose rules are not
+    /// the ones in force.
+    ///
+    /// One call, one write, and a refusal leaves **neither**: the version
+    /// check runs before anything is appended.
+    #[tokio::test]
+    async fn the_rules_and_the_set_land_in_one_write() {
+        let store = MemoryRlmStore::new();
+        let topic_id = "atomic-topic";
+        // A first authoring run: both land.
+        let v = store
+            .put_authoring(topic_id, &rules(topic_id, 1), &set(topic_id, "one"))
+            .await
+            .expect("first authoring");
+        assert_eq!(v, 1);
+        assert_eq!(
+            store
+                .authoring(topic_id)
+                .await
+                .expect("read")
+                .expect("set")
+                .0,
+            1
+        );
+        assert_eq!(
+            store
+                .current_rules(topic_id)
+                .await
+                .expect("read")
+                .expect("rules")
+                .version,
+            1
+        );
+
+        // A second run whose rules do **not** advance is refused — and the set
+        // is not appended either, so the pair stays consistent.
+        let err = store
+            .put_authoring(topic_id, &rules(topic_id, 1), &set(topic_id, "two"))
+            .await
+            .expect_err("a version that does not advance is refused");
+        assert!(matches!(err, StoreError::VersionGap("rules")), "{err}");
+        assert_eq!(
+            store
+                .authoring(topic_id)
+                .await
+                .expect("read")
+                .expect("set")
+                .0,
+            1,
+            "a refused write appends no set"
+        );
+        let stored = store
+            .authoring(topic_id)
+            .await
+            .expect("read")
+            .expect("set")
+            .1;
+        assert_eq!(
+            stored.apis[0].path, "one",
+            "the set in force is the one that landed with the rules in force"
+        );
+
+        // The next valid run advances both.
+        let v = store
+            .put_authoring(topic_id, &rules(topic_id, 2), &set(topic_id, "two"))
+            .await
+            .expect("second authoring");
+        assert_eq!(v, 2);
+        assert_eq!(
+            store
+                .current_rules(topic_id)
+                .await
+                .expect("read")
+                .expect("rules")
+                .version,
+            2
+        );
+        assert_eq!(
+            store
+                .authoring(topic_id)
+                .await
+                .expect("read")
+                .expect("set")
+                .1
+                .apis[0]
+                .path,
+            "two"
+        );
+    }
+
+    /// The rule **provenance read-back** is unchanged by the atomic write: the
+    /// store still answers which source the version in force came from.
+    #[tokio::test]
+    async fn the_atomic_write_still_reports_rlm_provenance() {
+        let store = MemoryRlmStore::new();
+        let topic_id = "provenance-topic";
+        store
+            .put_authoring(topic_id, &rules(topic_id, 1), &set(topic_id, "one"))
+            .await
+            .expect("authoring");
+        assert!(store.rlm_authored_rules(topic_id).await.expect("read"));
+        assert_eq!(
+            store.current_rules_source(topic_id).await.expect("read"),
+            Some(RuleSource::Rlm)
+        );
+        let _ = Arc::new(store);
     }
 }

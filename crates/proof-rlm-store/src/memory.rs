@@ -283,17 +283,31 @@ impl RlmStore for MemoryRlmStore {
     async fn put_authoring(
         &self,
         topic_id: &str,
+        rules: &RuleSet,
         set: &proof_topic_authoring::TopicAuthoring,
     ) -> Result<u32, StoreError> {
+        // One lock, so the pair lands together: a caller that fails between
+        // two separate writes would leave newer rules with the previous set.
         let mut g = self.lock()?;
-        let rows = g.authoring.entry(topic_id.to_owned()).or_default();
-        let want = u32::try_from(rows.len())
+        // The rules first, with the same check `put_rules` runs: a version
+        // that does not advance is a refusal, and the set is not written.
+        let current = g
+            .rules
+            .get(topic_id)
+            .map(|v| v.last().map_or(0, |r| r.version));
+        check_rules(rules, current)?;
+        let want = u32::try_from(g.authoring.get(topic_id).map_or(0, std::vec::Vec::len))
             .map_err(|_| StoreError::VersionGap("authoring"))?
             .saturating_add(1);
-        if rows.iter().any(|(v, _)| *v == want) {
+        let existing = g.authoring.entry(topic_id.to_owned()).or_default();
+        if existing.iter().any(|(v, _)| *v == want) {
             return Err(StoreError::VersionGap("authoring"));
         }
-        rows.push((want, set.clone()));
+        existing.push((want, set.clone()));
+        g.rules
+            .entry(topic_id.to_owned())
+            .or_default()
+            .push(rules.clone());
         Ok(want)
     }
 

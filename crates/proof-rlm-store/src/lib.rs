@@ -320,7 +320,8 @@ pub trait RlmStore: Send + Sync {
     /// Promotion history, oldest first.
     async fn promotions(&self, topic_id: &str) -> Result<Vec<PromotionRow>, StoreError>;
 
-    /// Append the whole set a topic's RLM authored. Returns its version.
+    /// Append the whole set a topic's RLM authored, together with the rule
+    /// version it landed. Returns the set's version.
     ///
     /// A topic's behavior is five parts and its RLM authors all of them in one
     /// job; the rules have always been versioned in `proof_rule_version`, and
@@ -330,12 +331,20 @@ pub trait RlmStore: Send + Sync {
     /// previous set cannot *retain* the parts it is not changing, so a second
     /// run would silently drop migrations the topic still needs.
     ///
+    /// **One write, not two.** The rules and the set are two halves of one
+    /// fact — "this topic's RLM authored *this* at rule version *N*" — and a
+    /// store that wrote them separately could fail between them: newer rules
+    /// with the previous set, so a retry would be handed a set whose rules are
+    /// not the ones in force. Both land in one transaction, so the pair is
+    /// either wholly there or wholly absent.
+    ///
     /// Append-only: a re-authoring appends, and "the set in force" is the
     /// newest row. The version advances by one, like rule versions do, so a
     /// gap or a repeat is a `VersionGap` rather than a silent overwrite.
     async fn put_authoring(
         &self,
         topic_id: &str,
+        rules: &RuleSet,
         set: &proof_topic_authoring::TopicAuthoring,
     ) -> Result<u32, StoreError>;
     /// The set a topic's RLM authored last, if any.
