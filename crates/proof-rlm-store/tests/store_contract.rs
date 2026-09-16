@@ -142,6 +142,90 @@ async fn contract(store: &dyn RlmStore) {
     assert_eq!(store.rules_at(&t.id, 1).await.unwrap().unwrap(), v1);
     assert!(store.rules_at(&t.id, 3).await.unwrap().is_none());
 
+    // The whole authored set, written **with** the rule version it landed:
+    // one fact, two halves. This runs against both stores, which is the point
+    // — the Postgres half once omitted the rule digest, and only a real
+    // database could say so.
+    let authored = |api: &str, version: u32| proof_topic_authoring::TopicAuthoring {
+        schema_version: proof_topic_authoring::AUTHORING_SCHEMA,
+        topic_id: t.id.clone(),
+        rules: vec![ChecklistRule {
+            id: format!("rlm-{version}"),
+            text: "the rlm's vector".into(),
+        }],
+        migrations: vec![proof_topic_authoring::AuthoredMigration {
+            name: "0001_scratch".into(),
+            sql: format!("CREATE TABLE {}_scratch (id TEXT)", t.id.replace('-', "_")),
+        }],
+        apis: vec![proof_topic_authoring::AuthoredApi {
+            path: api.into(),
+            method: "GET".into(),
+            summary: String::new(),
+        }],
+        submission_format: serde_json::json!({"kind": "tar", "max_bytes": 5_242_880}),
+        pin_policy: proof_topic_authoring::PinPolicy::none(),
+    };
+    let v3 = v2
+        .next(
+            RuleSource::Rlm,
+            vec![ChecklistRule {
+                id: "rlm-3".into(),
+                text: "the rlm's third vector".into(),
+            }],
+        )
+        .unwrap();
+    let set_v1 = authored("one", 3);
+    assert_eq!(
+        store.put_authoring(&t.id, &v3, &set_v1).await.unwrap(),
+        1,
+        "the set's version is its own, starting at 1"
+    );
+    // Both halves are readable, and the rules are the ones that landed with
+    // the set — the digest is checked by the database on the way in, so a row
+    // that got there is a row that verified.
+    let (set_version, stored) = store.authoring(&t.id).await.unwrap().unwrap();
+    assert_eq!(set_version, 1);
+    assert_eq!(stored, set_v1);
+    assert_eq!(store.current_rules(&t.id).await.unwrap().unwrap(), v3);
+    assert_eq!(
+        store.current_rules_source(&t.id).await.unwrap(),
+        Some(RuleSource::Rlm),
+        "the paired rule version is readable by provenance too"
+    );
+
+    // A rule version that does not advance is refused **and the set is not
+    // written**: the pair cannot drift.
+    assert!(matches!(
+        store.put_authoring(&t.id, &v3, &authored("two", 3)).await,
+        Err(StoreError::VersionGap("rules"))
+    ));
+    let (set_version, stored) = store.authoring(&t.id).await.unwrap().unwrap();
+    assert_eq!(set_version, 1, "a refused write appends no set");
+    assert_eq!(stored.apis[0].path, "one");
+
+    // The next valid run advances both.
+    let v4 = v3
+        .next(
+            RuleSource::Rlm,
+            vec![ChecklistRule {
+                id: "rlm-4".into(),
+                text: "the rlm's fourth vector".into(),
+            }],
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .put_authoring(&t.id, &v4, &authored("two", 4))
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        store.authoring(&t.id).await.unwrap().unwrap().1.apis[0].path,
+        "two"
+    );
+    assert_eq!(store.current_rules(&t.id).await.unwrap().unwrap(), v4);
+
     // Checklists are keyed by the frozen digest.
     let digest = "ab".repeat(32);
     let mut c = green(&v1, &digest);

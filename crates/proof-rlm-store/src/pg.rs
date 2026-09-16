@@ -670,13 +670,18 @@ impl RlmStore for PgRlmStore {
         check_rules(rules, current.map(to_u32).transpose()?)?;
         let rules_json = serde_json::to_value(&rules.rules).map_err(malformed)?;
         sqlx::query(
-            "INSERT INTO proof_rule_version (topic_id, version, source, rules) \
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO proof_rule_version (topic_id, version, source, rules, digest) \
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(topic_id)
         .bind(i32::try_from(rules.version).map_err(malformed)?)
         .bind(source_str(rules.source))
         .bind(rules_json)
+        // `digest` is NOT NULL and CHECK'd as 64 hex: the canonical digest of
+        // the vector, exactly as `put_rules` writes it. Omitting it made the
+        // database reject every complete authoring, which is what Greptile
+        // caught.
+        .bind(rules.digest())
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
