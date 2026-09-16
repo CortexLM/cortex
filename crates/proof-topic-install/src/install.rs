@@ -257,6 +257,13 @@ impl Installer<'_> {
         // Check every migration up front: a bundle that would fail on its
         // third statement must not leave its first two applied.
         let checked = check_all_migrations(&plan, &request.topic.id)?;
+        // Cross-topic namespace collision, which the per-topic guard cannot
+        // see: `-` → `_` is injective but its prefixes are not prefix-free, so
+        // `aa_b_scratch` sits inside both `aa` and `aa-b`. Only the install
+        // knows the registry, so the check runs here — before the journal
+        // opens, so a collision writes nothing at all.
+        self.refuse_cross_topic_claims(&request.topic.id, &checked)
+            .await?;
         let handler = plan.handler.unwrap_or(Handler::VmBacked);
         let binding = resolve_binding(request, &plan, handler)?;
 
@@ -346,6 +353,69 @@ impl Installer<'_> {
             journal_id,
             document_status: request.topic.status,
         })
+    }
+
+    /// Refuse a migration that names an object **another** registered topic
+    /// also claims.
+    ///
+    /// The per-topic guard ([`proof_topic_sql_guard::check_migration`]) proves
+    /// every name sits inside *this* topic's namespace. That is necessary but
+    /// not sufficient: `-` → `_` is injective, while its prefixes are not
+    /// prefix-free, so `aa_b_scratch` is inside `aa`'s namespace **and**
+    /// `aa-b`'s. A migration approved for `aa` could then read, modify, or
+    /// drop a table belonging to `aa-b` in the shared database.
+    ///
+    /// Only the install can see this, because only the install has the
+    /// registry. The check runs **before the journal opens**, so a collision
+    /// writes nothing at all — no row, no rule, no table.
+    ///
+    /// # Errors
+    ///
+    /// [`InstallError::CrossTopicClaim`], naming the migration, the object,
+    /// and both topics. A store that cannot be read is a refusal too: a
+    /// collision check that cannot enumerate the registry would pass by
+    /// default.
+    async fn refuse_cross_topic_claims(
+        &self,
+        topic_id: &str,
+        checked: &[(String, Vec<Statement>)],
+    ) -> Result<(), InstallError> {
+        let registered = self
+            .store
+            .latest_topics()
+            .await
+            .map_err(|e| InstallError::Store(e.to_string()))?;
+        let others: Vec<&str> = registered
+            .iter()
+            .map(|row| row.document.id.as_str())
+            .filter(|id| !id.eq_ignore_ascii_case(topic_id.trim()))
+            .collect();
+        if others.is_empty() {
+            return Ok(());
+        }
+        for (name, statements) in checked {
+            let mut named: Vec<String> = Vec::new();
+            for statement in statements {
+                named.extend(proof_topic_sql_guard::referenced_objects(
+                    &statement.blanked,
+                ));
+            }
+            // The first collision is the answer: the install refuses the
+            // bundle, so there is nothing to report about the others.
+            if let Some((object, other)) =
+                proof_topic_sql_guard::claim_collisions(&named, topic_id, others.iter().copied())
+                    .into_iter()
+                    .next()
+            {
+                return Err(InstallError::CrossTopicClaim {
+                    migration: name.clone(),
+                    object,
+                    this: topic_id.to_owned(),
+                    other,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Migration names this topic has already applied, from the journal.

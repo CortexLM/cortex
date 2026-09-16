@@ -99,6 +99,30 @@ pub enum InstallError {
         /// How many it carried.
         count: usize,
     },
+    /// A migration names an object another registered topic also claims.
+    ///
+    /// `-` → `_` is injective, but its prefixes are not prefix-free: `aa` is a
+    /// prefix of `aa-b`'s mapped form `aa_b`, so the bare name `aa_b_scratch`
+    /// sits inside **both** namespaces. The per-topic guard cannot see that
+    /// (it sees one topic), so the install checks it against the registry and
+    /// refuses — a migration from `aa` must not reach `aa-b`'s tables in the
+    /// shared database.
+    #[error(
+        "migration {migration:?} names {object:?}, which topic {other:?} also claims: the `-` → \
+         `_` mapping makes {object:?} read as both {this:?} and {other:?}, so applying it would \
+         let one topic reach another's tables. Rename the object, or scope it with the \
+         schema-qualified spelling ({other}.… / {this}.…), which is compared exactly"
+    )]
+    CrossTopicClaim {
+        /// The migration the object came from.
+        migration: String,
+        /// The object both topics claim.
+        object: String,
+        /// This topic.
+        this: String,
+        /// The registered topic that also claims it.
+        other: String,
+    },
     /// A handler outside the allow-list.
     #[error("handler refused: {0}")]
     HandlerNotAllowed(String),

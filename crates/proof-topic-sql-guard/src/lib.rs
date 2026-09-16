@@ -1084,13 +1084,51 @@ fn copy_chars(
 /// at the first `-`, and the guard's own `{topic_id}_*` requirement would be
 /// unsatisfiable for every real topic.
 ///
-/// Mapping `-` → `_` gives the topic an identifier-safe prefix. It stays a
-/// **boundary**: ids contain no underscores, so the mapping is injective —
-/// two different ids cannot collide on one prefix, and a name scoped to
-/// another topic's prefix cannot match this one.
+/// Mapping `-` → `_` gives the topic an identifier-safe prefix. The mapping is
+/// injective **over legal ids** (an id cannot contain an underscore), so two
+/// ids never map to the same prefix.
+///
+/// Injectivity is not sufficient on its own — see [`is_topic_scoped`], which
+/// closes the prefix relation between a short id and a longer hyphenated one.
 #[must_use]
 pub fn topic_sql_prefix(topic_id: &str) -> String {
     topic_id.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+/// Bare names in `names` that **another** topic in `others` also claims.
+///
+/// The prefix rule in [`is_topic_scoped`] is per-topic, and the `-` → `_`
+/// mapping is injective but its **prefixes are not prefix-free**: `aa` is a
+/// prefix of `aa-b`'s mapped form `aa_b`, so `aa_b_scratch` sits inside both
+/// namespaces. The guard cannot see that on its own — but the **install** can,
+/// because it has the topic registry.
+///
+/// Returns `(name, other_topic)` for each collision, so the install can refuse
+/// with both ids named. Empty means no other registered topic claims any of
+/// these names, which is the ordinary case: `tb4_scratch` collides with
+/// nothing unless a topic `tb4-scratch` exists.
+///
+/// `others` should be every topic id the host knows **except** `topic` — the
+/// install reads them from `proof_topic_version`.
+#[must_use]
+pub fn claim_collisions<'a, I>(names: &[String], topic: &str, others: I) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let others: Vec<&str> = others
+        .into_iter()
+        .filter(|o| !o.eq_ignore_ascii_case(topic.trim()))
+        .collect();
+    let mut out = Vec::new();
+    for name in names {
+        for other in &others {
+            if is_topic_scoped(name, other) {
+                out.push((name.clone(), (*other).to_owned()));
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Whether `name` is inside `topic_id`'s namespace.
@@ -1105,6 +1143,25 @@ pub fn topic_sql_prefix(topic_id: &str) -> String {
 /// in both positions, because the literal id cannot appear in a bare SQL
 /// identifier at all. The literal spelling stays accepted too, for the ids
 /// that need no mapping and for quoted schema-qualified names.
+///
+/// # The residual ambiguity, and where it is closed
+///
+/// The mapped **prefixes are not prefix-free**: `aa` is a prefix of `aa-b`'s
+/// mapped form `aa_b`, so the bare name `aa_b_scratch` is inside *both*
+/// namespaces — `aa` + `b_scratch` and `aa-b` + `scratch`. A migration
+/// approved for `aa` could therefore read, modify, or drop a table belonging
+/// to `aa-b` in the shared database.
+///
+/// This function deliberately does **not** try to resolve that by refusing
+/// names with underscores after the prefix: that would refuse ordinary names
+/// like `tb4_scratch_idx`, which are exactly what topics use. It cannot be
+/// resolved here at all — the question "is a longer sibling registered?" is
+/// about the whole registry, not about this topic. [`claim_collisions`] answers
+/// it where the registry is visible (the install), and refuses the migration
+/// there, naming both topics.
+///
+/// So: this is the per-topic **shape** check, and [`claim_collisions`] is the
+/// cross-topic **collision** check. Both run before a migration is applied.
 ///
 /// # Why there is no generic `topic_` allowance
 ///

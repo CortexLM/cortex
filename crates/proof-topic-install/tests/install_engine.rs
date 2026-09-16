@@ -114,6 +114,86 @@ fn section(id: &str) -> String {
     .replace("{id}", id)
 }
 
+/// The cross-topic namespace collision, end to end through the install.
+///
+/// `-` → `_` is injective, but its prefixes are not prefix-free: `aa` is a
+/// prefix of `aa-b`'s mapped form `aa_b`, so the bare name `aa_b_scratch` sits
+/// inside **both** namespaces. The per-topic guard accepts it for each topic
+/// on its own — it sees one topic — so a migration approved for `aa` could
+/// read, modify, or drop a table belonging to `aa-b` in the shared database.
+///
+/// The install is where the registry is visible, so it refuses there, before
+/// the journal opens (nothing is written).
+#[tokio::test]
+async fn a_migration_that_reaches_a_sibling_topics_namespace_is_refused() {
+    let Some((_tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    // A sibling is registered whose mapped prefix the shorter topic's
+    // migration would also match.
+    store
+        .put_topic_version(&topic("aa-b"))
+        .await
+        .expect("register the sibling");
+
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    let doc = topic("aa");
+    // A migration whose object is inside **both** namespaces: `aa` reads it as
+    // `aa` + `b_scratch`, `aa-b` reads it as `aa-b` + `scratch`.
+    let colliding = r#"{
+        "rules": [
+            {"id": "no_short_circuit", "text": "the harness must run the task"}
+        ],
+        "migrations": [
+            {"name": "0001_shared", "sql": "CREATE TABLE aa_b_scratch (id TEXT)"}
+        ]
+    }"#;
+    let err = installer
+        .install(
+            &request(&doc, colliding),
+            SetupSummary::Skipped {
+                reason: "--skip-baseline".into(),
+            },
+        )
+        .await
+        .expect_err("a migration reaching a sibling's namespace must be refused");
+
+    let InstallError::CrossTopicClaim {
+        ref object,
+        ref this,
+        ref other,
+        ..
+    } = err
+    else {
+        panic!("want CrossTopicClaim, got {err:?}");
+    };
+    assert_eq!(object, "aa_b_scratch");
+    assert_eq!(this, "aa");
+    assert_eq!(other, "aa-b");
+    assert!(
+        err.to_string().contains("aa_b_scratch"),
+        "the refusal names the object: {err}"
+    );
+
+    // Nothing was written: the refusal is pre-flight, so there is no journal
+    // row and no table.
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM proof_topic_install WHERE topic_id = 'aa'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(rows, 0, "a collision writes nothing at all");
+    let exists: Option<String> = sqlx::query_scalar("SELECT to_regclass('aa_b_scratch')::text")
+        .fetch_one(&pool)
+        .await
+        .expect("probe");
+    assert_eq!(exists, None, "the colliding table was not created");
+}
+
 /// A **hyphenated** topic id installs its migrations end to end.
 ///
 /// Every real topic id is a hyphen slug (`[a-z0-9][a-z0-9-]{1,62}`), and a

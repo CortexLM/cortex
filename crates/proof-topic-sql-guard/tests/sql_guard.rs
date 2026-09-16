@@ -14,8 +14,8 @@
 
 use proof_topic_sql_guard::MigrationDenied;
 use proof_topic_sql_guard::{
-    blank_statements, check_migration, is_topic_scoped, referenced_objects, split_statements,
-    topic_sql_prefix, OWNED_TABLES,
+    blank_statements, check_migration, claim_collisions, is_topic_scoped, referenced_objects,
+    split_statements, topic_sql_prefix, OWNED_TABLES,
 };
 
 const TOPIC: &str = "tb4";
@@ -307,6 +307,78 @@ fn a_hyphenated_topic_id_has_an_identifier_safe_namespace() {
     ));
     assert!(!is_topic_scoped("other_topic_scratch", "fixture-topic-v0"));
     assert!(!is_topic_scoped("topic_scratch", "fixture-topic-v0"));
+}
+
+/// The residual ambiguity the per-topic check **cannot** see, and the
+/// cross-topic check that closes it.
+///
+/// `-` → `_` is injective, but its prefixes are not prefix-free: `aa` is a
+/// prefix of `aa-b`'s mapped form `aa_b`, so the bare name `aa_b_scratch` sits
+/// inside **both** namespaces — `aa` + `b_scratch` and `aa-b` + `scratch`. A
+/// migration approved for `aa` could read, modify, or drop a table belonging
+/// to `aa-b` in the shared database.
+///
+/// The per-topic guard is right to accept the name for each topic on its own
+/// (refusing every name with an underscore after the prefix would refuse
+/// ordinary names like `tb4_scratch_idx`). The question is about the
+/// **registry**, so `claim_collisions` answers it where the registry is
+/// visible — the install.
+#[test]
+fn a_bare_name_two_topics_claim_is_reported_as_a_collision() {
+    let name = "aa_b_scratch".to_owned();
+
+    // Each topic accepts it alone: the guard sees one topic at a time.
+    assert!(is_topic_scoped(&name, "aa"));
+    assert!(is_topic_scoped(&name, "aa-b"));
+
+    // The registry-aware check names both.
+    let collisions = claim_collisions(std::slice::from_ref(&name), "aa", ["aa-b"]);
+    assert_eq!(
+        collisions,
+        vec![(name.clone(), "aa-b".to_owned())],
+        "the collision is reported with the topic that also claims it"
+    );
+    // …and symmetrically.
+    assert_eq!(
+        claim_collisions(std::slice::from_ref(&name), "aa-b", ["aa"]),
+        vec![(name, "aa".to_owned())]
+    );
+}
+
+/// The collision check must not fire on names that only *look* ambiguous.
+///
+/// `tb4_scratch` is the live staging shape (`migrations=["0001_scratch"]`): no
+/// sibling claims it unless a topic `tb4-scratch` is actually registered, and
+/// the check only refuses when one is.
+#[test]
+fn a_name_no_registered_sibling_claims_is_not_a_collision() {
+    let names = vec![
+        "tb4_scratch".to_owned(),
+        "tb4_scratch_idx".to_owned(),
+        "tb4".to_owned(),
+    ];
+    // No other topic registered: nothing collides.
+    assert!(claim_collisions(&names, "tb4", Vec::<&str>::new()).is_empty());
+    // An unrelated topic: still nothing.
+    assert!(claim_collisions(&names, "tb4", ["other-topic"]).is_empty());
+    // A topic that *would* map onto `tb4_scratch` collides on the name that
+    // sits **inside** its namespace — and not on `tb4_scratch` itself, which
+    // has no trailing underscore and so is not `tb4-scratch`'s prefix.
+    let collisions = claim_collisions(&names, "tb4", ["tb4-scratch"]);
+    assert_eq!(
+        collisions
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
+        ["tb4_scratch_idx"],
+        "exactly the names the sibling maps onto"
+    );
+    assert!(
+        collisions.iter().all(|(_, other)| other == "tb4-scratch"),
+        "{collisions:?}"
+    );
+    // A topic cannot collide with itself.
+    assert!(claim_collisions(&names, "tb4", ["tb4"]).is_empty());
 }
 
 /// The whole pipeline, end to end: a hyphenated topic's migration is

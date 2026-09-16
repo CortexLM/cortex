@@ -486,6 +486,31 @@ live. It cannot author migrations, APIs, submission-format or scoring, because n
 message carries them (§2f). Closing that changes what the RLM *is*; it is scoped in §2f and
 not started.
 
+## Security fix found during this review (not an authorship item)
+
+Greptile's P1 on the tip: the migration deny-list namespaces objects by the topic's mapped
+prefix (`-` → `_`), and **prefixes are not prefix-free**. `aa` and `aa-b` are both legal ids;
+`aa_b_scratch` reads as `aa` + `b_scratch` **and** as `aa-b` + `scratch`, so a migration
+approved for `aa` could create, read, or drop a table belonging to `aa-b` in the shared
+database. I reproduced it independently before fixing.
+
+**The per-topic guard cannot fix this** — it sees one topic, and refusing every name with an
+underscore after the prefix would refuse ordinary names like `tb4_scratch_idx` (including the
+live shape's own index naming). The question is about the **registry**, so it is answered
+where the registry is visible:
+
+- `proof_topic_sql_guard::claim_collisions(names, topic, others)` reports any name another
+  registered topic also claims.
+- `Installer::refuse_cross_topic_claims` runs it **before the journal opens**, so a collision
+  writes nothing at all — no row, no rule, no table — and refuses with
+  `InstallError::CrossTopicClaim`, naming the migration, the object, and **both** topics.
+
+Tests: guard-level (`a_bare_name_two_topics_claim_is_reported_as_a_collision`,
+`a_name_no_registered_sibling_claims_is_not_a_collision`) and install-level
+(`a_migration_that_reaches_a_sibling_topics_namespace_is_refused`, which asserts the refusal
+and that no journal row and no table exist). Both non-vacuous — neutering the check fails
+them.
+
 **Not claimed:** that the RLM authors the schema or the routes; that B1's human YAML is the
 final authorship SoT; the `pin_policy` field by that name.
 
