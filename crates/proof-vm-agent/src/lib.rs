@@ -360,6 +360,81 @@ mod tests {
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 
+    /// The whole authored set crosses the orchestrator's **HTTP** hop, every
+    /// part, and comes back as the set.
+    ///
+    /// This is the hop the live FAIL travelled: the guest emits `Authored`,
+    /// the orchestrator stamps and re-encodes it, and the control plane reads
+    /// it. A host baked before `945e143f` has no `authored` variant and cannot
+    /// decode this response — so the shape is pinned here, at the layer that
+    /// does the re-encoding, rather than only inside the guest.
+    #[tokio::test]
+    async fn the_whole_authored_set_crosses_the_job_hop() {
+        let hv = FakeHypervisor::new(0.8);
+        let (app, _) = app(hv.clone(), "authored-hop");
+        let rec = create(&app).await;
+        let topic = proof_rlm::fixtures::topic();
+        let body = serde_json::to_vec(&RunJobRequest {
+            topic_id: rec.handle.topic_id.clone(),
+            job: VmJob::ProposeRules {
+                topic: Box::new(topic.clone()),
+                current_version: None,
+                current: None,
+            },
+        })
+        .expect("json");
+        let (status, bytes) = post_bytes(&app, &paths::vm_jobs(&rec.handle.vm_id), body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        // The wire the control plane reads: `output` / `body`, with the set as
+        // the body and the tag `authored`.
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(
+            value["output"]["output"], "authored",
+            "the hop must carry the set, not a fragment: {value}"
+        );
+        for part in proof_rlm::AUTHORING_PARTS {
+            assert!(
+                value["output"]["body"].get(part).is_some(),
+                "{part} did not cross the hop: {value}"
+            );
+        }
+        let out: RunJobResponse = serde_json::from_slice(&bytes).expect("response");
+        let VmJobOutput::Authored(set) = out.output else {
+            panic!("expected the set, got a fragment");
+        };
+        assert!(set.is_complete(), "missing {:?}", set.missing_parts());
+        assert_eq!(set.topic_id, topic.id);
+        assert!(!set.migrations.is_empty() && !set.apis.is_empty());
+        // And a guest baked before the set existed still crosses as `rules`.
+        hv.set_authored_complete(false);
+        let body = serde_json::to_vec(&RunJobRequest {
+            topic_id: rec.handle.topic_id.clone(),
+            job: VmJob::ProposeRules {
+                topic: Box::new(topic),
+                current_version: None,
+                current: None,
+            },
+        })
+        .expect("json");
+        let (status, bytes) = post_bytes(&app, &paths::vm_jobs(&rec.handle.vm_id), body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(
+            value["output"]["output"], "rules",
+            "a fragment keeps its own tag: {value}"
+        );
+    }
+
     /// A job or teardown that names another topic than the VM's never reaches
     /// the hypervisor — whether the mismatch is in the envelope or the job.
     #[tokio::test]

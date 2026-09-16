@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use proof_canon::ChecklistRule;
-use proof_rlm::fixtures::report_for;
+use proof_rlm::fixtures::{authored_set, report_for};
 use proof_rlm::{
     ArtifactFile, Checklist, CustomRunRequest, InspectOutcome, LogFile, RetainPolicy, RunOutcome,
     TopicVmSpec, VmJob, VmJobOutput,
@@ -62,6 +62,13 @@ pub struct FakeHypervisor {
     /// Whether an experiment VM attests the paid job it ran (the host's
     /// view). `false` models a host that lost track of what it booted.
     experiment_attests: AtomicBool,
+    /// Whether `ProposeRules` answers with the whole authored set
+    /// (`VmJobOutput::Authored`) instead of a bare rule vector
+    /// (`VmJobOutput::Rules`). Default **true**: the tip's guest emits the
+    /// set, so a fake that only ever answered `Rules` would let the whole
+    /// orchestrator hop be exercised without ever carrying the variant a
+    /// host baked before `945e143f` cannot decode.
+    authored_complete: AtomicBool,
     boots: Mutex<Vec<BootedVm>>,
     /// Specs of every VM booted, by id (experiment VMs carry `experiment`).
     specs: Mutex<Vec<(String, TopicVmSpec)>>,
@@ -96,6 +103,7 @@ impl FakeHypervisor {
             dead: Mutex::new(BTreeSet::new()),
             dies_under_job: AtomicBool::new(false),
             experiment_attests: AtomicBool::new(true),
+            authored_complete: AtomicBool::new(true),
             boots: Mutex::new(Vec::new()),
             specs: Mutex::new(Vec::new()),
             jobs: Mutex::new(Vec::new()),
@@ -169,6 +177,12 @@ impl FakeHypervisor {
 
     pub fn set_proposed(&self, rules: Vec<ChecklistRule>) {
         *self.proposed.lock().unwrap() = rules;
+    }
+
+    /// Answer `ProposeRules` with the whole authored set (default) or with a
+    /// bare rule vector (an adaptor/guest baked before the set existed).
+    pub fn set_authored_complete(&self, v: bool) {
+        self.authored_complete.store(v, Ordering::SeqCst);
     }
 
     /// Make every job take this long (to exercise `Busy`).
@@ -338,8 +352,19 @@ impl Hypervisor for FakeHypervisor {
             )));
         }
         Ok(match job {
-            VmJob::ProposeRules { .. } => JobOutcome {
-                output: VmJobOutput::Rules(self.proposed.lock().unwrap().clone()),
+            VmJob::ProposeRules { topic, .. } => JobOutcome {
+                // The tip's guest answers `Authored` (the whole set) when its
+                // adaptor wrote `authoring.json`, and `Rules` (a fragment)
+                // when it only had `rules.json`. Both travel this hop, so both
+                // are reachable here.
+                output: if self.authored_complete.load(Ordering::SeqCst) {
+                    VmJobOutput::Authored(Box::new(authored_set(
+                        topic,
+                        self.proposed.lock().unwrap().clone(),
+                    )))
+                } else {
+                    VmJobOutput::Rules(self.proposed.lock().unwrap().clone())
+                },
                 sister: None,
             },
             VmJob::Baseline { request } => JobOutcome {

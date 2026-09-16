@@ -13,6 +13,7 @@ on #301 at `80bc2cdd`). The commits it must contain, oldest first:
 | `3bc31a2e` | the two Greptile P1 fixes (retained `DELETE`, intake format) |
 | `9f58c5e5` | the staging ceremony, runnable as written |
 | (this tip) | §2i: the LIVE FAIL — the guest harvests a complete `authoring.json`, and the adaptor dual-emits `rules.json` beside it |
+| (this tip) | §2j: the second skew — the `authored` wire variant is round-tripped, pinned as a contract, and a decoder that does not know it says so |
 
 Doc-only commits may ride on top of those; the four above are what the claims in this
 pack are made against. Mirror PR [#302](https://github.com/CortexLM/cortex/pull/302)
@@ -842,6 +843,68 @@ Not that a stale agent can now harvest a set from an adaptor that does not
 dual-emit: that adaptor fails closed (`adaptor wrote no rules.json`), by
 design, until the image is rebaked. And not that the pair makes a fragment
 authorship: `rules.json` alone still cannot open a topic.
+
+### 2j. The second skew: the host decoder did not know the `authored` variant
+
+**Arch GO's finding, verified.** The LIVE FAIL has a second half, and it is
+independent of § 2i. The guest emits `VmJobOutput::Authored`; the host side
+that decodes the frame has to know that variant. `Authored` landed at
+`945e143f` (2026-09-16) and **`API_VERSION` stayed `1`** — the coarse guard on
+`Hello` does not cover a variant added without a bump. A host binary built
+before that commit cannot decode the frame, and `serde_json` says so with the
+newer build's own list:
+
+```
+unknown variant `<the tag the newer guest sent>`, expected one of `rules`, `baseline`, `inspected`, `evaluated`, `archived`
+```
+
+(reproduced in this container against the real decoder; the tip's list is
+`authored`, `rules`, `baseline`, `inspected`, `evaluated`, `archived`), and the
+job dies before any set is bound.
+
+**Why it shipped silently: the variant was never round-tripped anywhere.**
+Three gaps, each verified in the tree:
+
+| Gap | What it meant |
+|---|---|
+| `proof-rlm/src/vm.rs::jobs_name_their_topic_and_outputs_round_trip` enumerated **every** variant except `Authored` | the one variant whose payload is a whole document was the one never serialised |
+| `proof-vm-agent`'s `FakeHypervisor` answered `ProposeRules` with `Rules` **always** | the orchestrator's own HTTP hop was never exercised with the variant that actually travels |
+| `read_frame` mapped a serde failure to a bare `Decode(msg)` | an unknown variant read like a corrupt frame, not a build skew |
+
+**The fix, at each layer.**
+
+| Layer | Change |
+|---|---|
+| `proof-vm-proto/src/guest.rs` | `decode_error` names an unknown variant as a **build skew** with both remedies (rebake the image, or rebuild the reader) and prints the variant plus a bounded frame preview; a genuinely malformed body stays a plain decode error |
+| `proof-vm-proto/src/guest.rs` | `the_whole_authored_set_survives_a_frame`: the set crosses the real frame codec, all five parts, and the relay re-encode is byte-identical to the guest's |
+| `proof-rlm/src/vm.rs` | `Authored` added to the wire round trip (with an `is_complete()` assertion), and `the_authored_tag_is_a_wire_contract` pins the tag `authored` — the thing two separately built binaries agree on — plus `rules` for the fragment |
+| `proof-vm-agent` | `FakeHypervisor` emits `Authored` by default (`set_authored_complete(false)` for the fragment), and `the_whole_authored_set_crosses_the_job_hop` drives the real `POST /v1/vms/{id}/jobs` router: asserts the tag, every part in the body, `is_complete()`, and that a fragment keeps its own tag |
+
+**The full-set bind was already correct, and is pinned where it happens.** The
+control plane binds the whole set, not the vector:
+
+| Site | What it does |
+|---|---|
+| `proof-topic-setup/src/lib.rs:435` | `VmJobOutput::Authored(set)` → `validate_against_pin` → `(rules, Some(set), [])`; `Rules(rules)` → `missing = PARTS − rules`, which the drive turns into `IncompleteAuthoring` |
+| `proof-topic-install/src/install.rs:274` | `Some(set)` → the RLM's set **is** the plan (`set.as_section()`), the bundle's section is not applied; `None` → the operator's, with `topic_document` provenance the publish gate refuses |
+| `proof-topic-install/src/install.rs:489` | `binding.authorship = set.journal_entry(version)` — every part with its own `source: rlm` and digest |
+| `proof-topic-install/tests/install_engine.rs:521` | `assert_authorship_journal_names_every_part` walks `PARTS` against a **real Postgres**: each part `source == "rlm"`, each with a `sha256:` digest, plus the migration name and the route |
+
+**Tests, each verified non-vacuous:**
+
+| Test | Neutering that fails it |
+|---|---|
+| `the_authored_tag_is_a_wire_contract` | expecting any other tag value fails with the full set printed (verified) |
+| `an_unknown_variant_names_the_build_skew_not_a_corrupt_frame` | replacing the unknown-variant branch with `if false` fails it (verified) |
+| `the_whole_authored_set_crosses_the_job_hop` | forcing the fake back to `Rules` fails it (verified) |
+| `the_whole_authored_set_survives_a_frame` | (frame round trip; fails if a part stops serialising) |
+
+**What this does not claim.** That a rebuild alone makes a live topic green:
+the § 2i dual-emit is still what covers an image whose **agent** is old, and
+the two fixes cover different halves of the same wire. It also does not claim
+`api_version` was bumped — it was not, and the skew is now *diagnosed* rather
+than *prevented*; a bump would be a separate, breaking change to a wire the
+retained guest images already speak.
 
 ## Re-authoring (Greptile P1, fixed here)
 

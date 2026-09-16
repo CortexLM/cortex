@@ -104,6 +104,42 @@ Experiment packs live in `/var/lib/proof-vm/packs/sha256-<hex>.tar`
 (`PROOF_VM_AGENT_EXPERIMENT_PACK_DIR`), staged files the agent re-hashes
 before every boot.
 
+### The wire is a contract between two separately built binaries
+
+The guest agent is **baked into the image**; the orchestrator, the control
+plane, and the challenge are **host binaries rebuilt from the tip**. They are
+promoted on their own schedules, so the wire is the only thing keeping them
+honest — and a variant one side emits and the other cannot decode is a
+**build skew**, not a corrupt frame. `api_version` is a coarse guard
+(`check_version` on `Hello`); it does **not** cover a variant added without a
+bump, which is exactly how the authorship set travelled: `VmJobOutput::Authored`
+landed at `945e143f` while `API_VERSION` stayed `1`.
+
+What the code does about it:
+
+- **A decode failure names the skew.** `read_frame` reports an unknown variant
+  as a build skew with both remedies (rebake the guest image, or rebuild the
+  reader) and names the variant and the frame body, rather than the bare
+  `unknown variant` that reads like corruption
+  (`proof-vm-proto/src/guest.rs::decode_error`).
+- **The set is pinned at every hop.** `VmJobOutput::Authored` is round-tripped
+  through the frame codec with all five parts, the `authored` tag is asserted
+  as a wire contract (not a Rust name), and the whole set crosses the
+  orchestrator's HTTP job hop
+  (`proof-rlm/src/vm.rs::the_authored_tag_is_a_wire_contract`,
+  `proof-vm-proto/src/guest.rs::the_whole_authored_set_survives_a_frame`,
+  `proof-vm-agent/src/lib.rs::the_whole_authored_set_crosses_the_job_hop`).
+- **The orchestrator's fixture emits the set.** Its `ProposeRules` fake
+  answered `Rules` only, so the hop was never exercised with the variant that
+  actually travels; it now answers `Authored` by default
+  (`set_authored_complete(false)` for the fragment path).
+
+**Promotion order matters in one direction.** A host rebuilt from the tip can
+decode everything an older guest sends (the fragment tag is unchanged); a
+guest emitting `Authored` needs a host that knows the tag. Rebuild the host
+binaries from the tip **before** an image whose agent emits the set reaches
+the host — or accept the 502 until the host catches up.
+
 ## Build
 
 The agent is a host binary (systemd unit), not a compose image. Build it on

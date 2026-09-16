@@ -403,8 +403,15 @@ impl FirecrackerOrchestrator {
             )));
         }
         serde_json::from_slice::<T>(&bytes).map(Some).map_err(|e| {
+            // The control plane and the orchestrator are separately built
+            // binaries. An answer carrying a variant this build does not know
+            // is a **build skew**, not a malformed answer — the shape of the
+            // live FAIL, where the guest emitted the authored set and the
+            // reader could not decode it. `proof_vm_proto` owns the wording so
+            // both host decoders say the same thing.
             backend(format!(
-                "orchestrator answer ({method} {path}) did not parse: {e}"
+                "orchestrator answer ({method} {path}) did not parse: {}",
+                proof_vm_proto::guest::decode_skew(&bytes, &e)
             ))
         })
     }

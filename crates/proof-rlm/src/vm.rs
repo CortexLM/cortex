@@ -949,6 +949,14 @@ mod tests {
             "inspection runs no miner code"
         );
         let outputs = [
+            // The whole authored set, first: it is the variant a host baked
+            // before `945e143f` cannot decode, and the one whose payload is a
+            // whole document rather than a report. A wire round trip that
+            // skips it is exactly how a host↔guest skew ships.
+            VmJobOutput::Authored(Box::new(crate::fixtures::authored_set(
+                &crate::fixtures::topic(),
+                rules().rules,
+            ))),
             VmJobOutput::Rules(rules().rules),
             VmJobOutput::Baseline(crate::fixtures::report_for(&req, 0.5)),
             VmJobOutput::Inspected(crate::runner::InspectOutcome {
@@ -966,7 +974,44 @@ mod tests {
             assert!(json.contains("\"output\""), "{json}");
             let back: VmJobOutput = serde_json::from_str(&json).expect("round trip");
             assert_eq!(back, out);
+            // The set travels with **every** part, not only the vector: a
+            // guest that emits `Authored` and a host that reads it must agree
+            // on the whole document, and a part that did not survive the wire
+            // would arrive as an incomplete set (or not at all).
+            if let VmJobOutput::Authored(set) = &back {
+                assert!(
+                    set.is_complete(),
+                    "the set lost parts on the wire: {:?}",
+                    set.missing_parts()
+                );
+                assert_eq!(set.missing_parts(), Vec::<&str>::new());
+            }
         }
+    }
+
+    /// The wire tag is a **contract**: `Authored` travels as `"authored"`, and
+    /// a host that does not know that tag fails to decode the frame.
+    ///
+    /// This pins the tag rather than the Rust name, because the tag is what
+    /// two independently built binaries agree on — the guest emits it, the
+    /// control plane and the orchestrator decode it, and none of them share a
+    /// build.
+    #[test]
+    fn the_authored_tag_is_a_wire_contract() {
+        let set = crate::fixtures::authored_set(&crate::fixtures::topic(), rules().rules);
+        let json = serde_json::to_string(&VmJobOutput::Authored(Box::new(set))).expect("json");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(value["output"], "authored", "{json}");
+        // Adjacently tagged (`output` / `body`): the document is the body, and
+        // it is an object with the five parts rather than a bare vector.
+        let body = value["body"].as_object().expect("the set is the body");
+        for part in proof_topic_authoring::PARTS {
+            assert!(body.contains_key(part), "{part} did not travel: {json}");
+        }
+        // And the old tag still means what it meant: a fragment.
+        let rules_json = serde_json::to_string(&VmJobOutput::Rules(rules().rules)).expect("json");
+        let rules_value: serde_json::Value = serde_json::from_str(&rules_json).expect("json");
+        assert_eq!(rules_value["output"], "rules", "{rules_json}");
     }
 
     /// A topic whose params select an in-guest runner gets **one experiment

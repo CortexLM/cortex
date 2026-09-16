@@ -421,7 +421,61 @@ pub async fn read_frame<R: AsyncRead + Unpin, T: for<'de> Deserialize<'de>>(
     r.read_exact(&mut body)
         .await
         .map_err(|e| ProtoError::Io(e.to_string()))?;
-    serde_json::from_slice(&body).map_err(|e| ProtoError::Decode(e.to_string()))
+    serde_json::from_slice(&body).map_err(|e| decode_error(&body, &e))
+}
+
+/// A decode failure, named for the skew it usually is.
+///
+/// The guest and the host are **separately built** binaries pinned by digest:
+/// the guest image and the orchestrator on the KVM host are promoted on their
+/// own schedules, so a frame can carry a variant the reading side does not
+/// know. `serde_json` reports `unknown variant` and stops there, which reads
+/// like a corrupt frame rather than a build mismatch — the shape of the live
+/// FAIL this helper exists to name. An unknown variant is called out as a
+/// version skew with both remedies (rebake the image, or rebuild the reader);
+/// anything else stays a decode error.
+///
+/// Public because **both** host decoders face the same skew: the orchestrator
+/// reads the guest's frame ([`read_frame`]) and the control plane reads the
+/// orchestrator's HTTP answer, which is the same JSON one hop later.
+#[must_use]
+pub fn decode_skew(body: &[u8], e: &serde_json::Error) -> String {
+    let msg = e.to_string();
+    if !msg.contains("unknown variant") {
+        return msg;
+    }
+    // The frame is well-formed JSON the reader does not understand: the writer
+    // is newer than the reader, and only one of them can be promoted to fix
+    // it. `serde_json` writes the offending name between **backticks**
+    // (`unknown variant \`authored\`, expected one of …`), so the split is on
+    // a backtick; a double quote never matches, and the refusal would fall
+    // back to naming no variant at all.
+    let variant = msg
+        .split('`')
+        .nth(1)
+        .unwrap_or("a variant this build does not know");
+    format!(
+        "peer sent variant `{variant}`, which this build (api_version {API_VERSION}) does not \
+         decode: the two sides are built separately (the guest image and the host binaries are \
+         pinned by digest), so this is a build skew, not a corrupt frame. Rebake the guest image \
+         from the tip, or rebuild this reader from it, so both sides speak the same wire ({})",
+        preview(body)
+    )
+}
+
+fn decode_error(body: &[u8], e: &serde_json::Error) -> ProtoError {
+    ProtoError::Decode(decode_skew(body, e))
+}
+
+/// A short, bounded view of a frame body for an error message.
+fn preview(body: &[u8]) -> String {
+    const MAX: usize = 160;
+    let text = String::from_utf8_lossy(&body[..body.len().min(MAX)]);
+    if body.len() > MAX {
+        format!("{text}…")
+    } else {
+        text.into_owned()
+    }
 }
 
 #[cfg(test)]
@@ -460,6 +514,102 @@ mod tests {
         assert!(matches!(err, ProtoError::FrameTooLarge(_)), "{err}");
         assert!(check_version(API_VERSION).is_ok());
         assert_eq!(check_version(2), Err(ProtoError::WrongVersion { got: 2 }));
+    }
+
+    /// The guest and the host are **separately built** binaries. A frame
+    /// carrying a variant the reader does not know is a build skew, and it
+    /// must say so: the raw `unknown variant` reads like a corrupt frame, and
+    /// that is what made the live FAIL opaque.
+    #[tokio::test]
+    async fn an_unknown_variant_names_the_build_skew_not_a_corrupt_frame() {
+        // A frame from a newer guest: a `Done` whose output tag this build
+        // has no variant for. Hand-written rather than encoded, because the
+        // whole point is a body *this* build cannot produce. `RlmToHost` is
+        // internally tagged (`"type"`) and `VmJobOutput` is adjacently tagged
+        // inside `Done`'s `output` field, so the skew lands on the inner tag.
+        let body =
+            br#"{"type":"done","output":{"output":"a_variant_from_a_newer_guest","body":{}}}"#;
+        let mut frame = u32::try_from(body.len())
+            .expect("fits")
+            .to_be_bytes()
+            .to_vec();
+        frame.extend_from_slice(body);
+        let err = read_frame::<_, RlmToHost>(&mut std::io::Cursor::new(frame))
+            .await
+            .expect_err("unknown variant");
+        let text = err.to_string();
+        assert!(text.contains("build skew"), "{text}");
+        // The **extracted** name, not merely a substring of the preview: the
+        // preview also carries the body, so asserting on the whole message
+        // would pass even if the variant were never parsed out of serde's
+        // message. This is the assertion that would have caught that.
+        assert!(
+            text.contains("peer sent variant `a_variant_from_a_newer_guest`"),
+            "the refusal must name the variant it extracted: {text}"
+        );
+        assert!(
+            text.contains("Rebake the guest image"),
+            "the refusal names both remedies: {text}"
+        );
+        assert!(text.contains("api_version 1"), "{text}");
+        // The outer tag can skew too — a whole message this build does not
+        // know — and it is named the same way.
+        let body = br#"{"type":"a_message_from_a_newer_guest","x":1}"#;
+        let mut frame = u32::try_from(body.len())
+            .expect("fits")
+            .to_be_bytes()
+            .to_vec();
+        frame.extend_from_slice(body);
+        let err = read_frame::<_, RlmToHost>(&mut std::io::Cursor::new(frame))
+            .await
+            .expect_err("unknown message");
+        let text = err.to_string();
+        assert!(text.contains("build skew"), "{text}");
+        assert!(
+            text.contains("peer sent variant `a_message_from_a_newer_guest`"),
+            "{text}"
+        );
+        // And a genuinely corrupt body stays a decode error, not a skew.
+        let body = b"{not json at all";
+        let mut frame = u32::try_from(body.len())
+            .expect("fits")
+            .to_be_bytes()
+            .to_vec();
+        frame.extend_from_slice(body);
+        let err = read_frame::<_, RlmToHost>(&mut std::io::Cursor::new(frame))
+            .await
+            .expect_err("corrupt");
+        assert!(!err.to_string().contains("build skew"), "{err}");
+    }
+
+    /// The full authored set survives the **frame** codec, every part: the
+    /// guest emits it, the orchestrator relays it, the control plane reads it,
+    /// and each hop re-encodes the same document.
+    #[tokio::test]
+    async fn the_whole_authored_set_survives_a_frame() {
+        let set = proof_rlm::fixtures::authored_set(
+            &proof_rlm::fixtures::topic(),
+            proof_rlm::fixtures::rules().rules,
+        );
+        let msg = RlmToHost::Done {
+            output: VmJobOutput::Authored(Box::new(set.clone())),
+        };
+        let (mut a, mut b) = tokio::io::duplex(1 << 20);
+        write_frame(&mut a, &msg).await.expect("write");
+        let back: RlmToHost = read_frame(&mut b).await.expect("read");
+        let RlmToHost::Done {
+            output: VmJobOutput::Authored(got),
+        } = back
+        else {
+            panic!("the set did not survive the frame: {back:?}");
+        };
+        assert_eq!(*got, set);
+        assert!(got.is_complete(), "missing {:?}", got.missing_parts());
+        // The relay hop re-encodes the same document: what the orchestrator
+        // sends the control plane is byte-identical to what the guest sent.
+        let relayed = serde_json::to_vec(&VmJobOutput::Authored(got)).expect("relay");
+        let direct = serde_json::to_vec(&VmJobOutput::Authored(Box::new(set))).expect("direct");
+        assert_eq!(relayed, direct, "the relay changed the document");
     }
 
     #[test]
