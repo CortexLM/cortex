@@ -2,9 +2,10 @@
 
 Checklist: `RLM-AUTHORSHIP-EVIDENCE-CHECKLIST.md` · Pin: `ARCH-PIN-100PCT-RLM-AUTONOMOUS.md`
 
-**Tip under review:** `droid/8bcbefa3-sn100-stay-lit-harbor-propos` @ **`18a2532c`**
+**Tip under review:** `droid/8bcbefa3-sn100-stay-lit-harbor-propos` @ **`7f226e00`**
 (PR [#304](https://github.com/CortexLM/cortex/pull/304), draft — the stack head,
-stacked on #301 at `80bc2cdd`).
+stacked on #301 at `80bc2cdd`). The implementation commit is **`18a2532c`**; `7f226e00`
+is this pack on top of it, and the Greptile findings it fixed land on top of both.
 Mirror PR [#302](https://github.com/CortexLM/cortex/pull/302) carries the same HEAD
 as #301.
 Every path below is in this repo; every SHA is a commit on that branch or its stack.
@@ -19,8 +20,9 @@ Every path below is in this repo; every SHA is a commit on that branch or its st
 > done at `80bc2cdd`; the reference adaptor still shipped **no `propose_rules`**, so every
 > `--drive-rlm` on a live image failed closed with `NO_RLM_RULES` (503, no row) and no topic
 > could reach `authorship: rlm`. Item 2h below is that entrypoint and the evidence that the
-> set it writes passes the **real** gates. A **guest rebake** is required for it to reach a
-> live topic — see § 2h.
+> set it writes passes the **real** gates, including the two re-authoring defects Greptile
+> reproduced on it (both fixed and pinned by a test verified non-vacuous). A **guest rebake**
+> is required for it to reach a live topic — see § 2h.
 
 ## Verdict summary
 
@@ -547,7 +549,7 @@ Still **2**. The Gate 4 hardening added a *second* cap beside it (host memory ad
 | [#300](https://github.com/CortexLM/cortex/pull/300) | `droid/933f76bf-b1-raise-max-proof-deadline` | `870a3b875533` | #299 | yes | CLEAN |
 | [#301](https://github.com/CortexLM/cortex/pull/301) | `droid/2edcb0c8-100-rlm-autonomous-strip-tbe` | `80bc2cdd` | #300 | yes | CLEAN |
 | [#302](https://github.com/CortexLM/cortex/pull/302) | `droid/1d0afa5f-sn100-stay-lit-cont-gate1-pa` | `945e143f` | #300 | yes | CLEAN |
-| [#304](https://github.com/CortexLM/cortex/pull/304) | `droid/8bcbefa3-sn100-stay-lit-harbor-propos` | **`18a2532c`** | **#301** | yes | CLEAN |
+| [#304](https://github.com/CortexLM/cortex/pull/304) | `droid/8bcbefa3-sn100-stay-lit-harbor-propos` | `18a2532c` + this pack | **#301** | yes | CLEAN |
 
 `main` is `aabd1724eb90`. The stack is linear: **#304 → #301 → #300 → #299 → #298 → #297 → `main`**.
 
@@ -748,6 +750,18 @@ re-baked and `PROOF_RLM_VM_IMAGE_DIGEST` is set to the new image's own
 `sha256sum` (never invented). Runbook § 2b has the staging ceremony, the
 per-part journal check, and the clone-diff against the legacy document.
 
+**Two re-authoring defects Greptile reproduced, both fixed here.** Greptile ran
+the entrypoint against a populated prior set and found both:
+
+| Finding | Why it mattered | Fix | Test (verified non-vacuous) |
+|---|---|---|---|
+| retained topic-scoped `DELETE` migrations were refused | the scan skipped modifiers after a table keyword but not `FROM`, so `DELETE FROM <topic>_kept …` was refused for "touching `FROM`" — a topic that prunes its own table could not re-author | `SQL_KEYWORDS` is now skipped in that position, exactly as the guard's own `is_sql_keyword` does | `test_a_retained_topic_scoped_delete_is_not_refused` |
+| a prior `submission_format` was published as the current one | the part is a fact about the **host this run executes on** (staged cap, submit domain, nonce), so a retained copy published a previous host's contract — Greptile's run emitted a 1-byte cap | `submission_format` is **always derived**, never inherited; only `migrations` / `apis` are retained | `test_the_submission_format_is_re_derived_not_retained` |
+
+Both were re-verified by neutering the fix: restoring the old `FROM` handling
+fails the DELETE test (`SystemExit`), and restoring the old retention fails the
+format test with the stale object in the assertion.
+
 ## Re-authoring (Greptile P1, fixed here)
 
 The whole-set change added `VmJob::ProposeRules.current` to the wire but the driver always
@@ -919,6 +933,9 @@ a commit on the branch, each with a regression test verified non-vacuous by neut
 | an accepted pin policy had no scoring effect | `4a0444e5` | `a_pin_policy_restates_the_signed_document_and_cannot_diverge` |
 | rules and set written separately | `9bc55900` | `the_rules_and_the_set_land_in_one_write` |
 | the paired insert omitted the rule digest | `dc6ca1a4` | the shared store contract against Postgres |
+| retained topic-scoped `DELETE` refused (P1) | `7f226e00`+ | `test_a_retained_topic_scoped_delete_is_not_refused` |
+| prior `submission_format` published as current (P1) | `7f226e00`+ | `test_the_submission_format_is_re_derived_not_retained` |
+| the evidence header named the preceding commit (P2) | `7f226e00`+ | this pack's tip block |
 
 **#304 is the guest-side stack head** (§2h). Its own review is requested on the PR; the
 authorship boundary it adds is pinned by the two tests §2h names, each verified non-vacuous.

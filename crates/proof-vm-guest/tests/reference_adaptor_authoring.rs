@@ -328,6 +328,48 @@ fn a_re_authoring_run_retains_the_prior_set_and_is_still_validated() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A prior set whose migrations include a topic-scoped `DELETE` is retained and
+/// still accepted: the part the topic still needs must survive a re-authoring
+/// run, and the RLM's own scope check must read `DELETE FROM <topic>_table` as
+/// an in-namespace touch rather than a touch on `FROM`.
+///
+/// Greptile P1: the scan skipped modifiers after a table keyword but not
+/// `FROM`, so a retained pruning migration was refused and the topic could not
+/// re-author.
+#[test]
+fn a_retained_topic_scoped_delete_survives_re_authoring() {
+    if python3().is_none() {
+        eprintln!("python3 not on PATH: skipping the adaptor authoring gate");
+        return;
+    }
+    let doc = topic();
+    let root = tmp("retained-delete");
+    let first = author(&doc, &root, None).expect("first authoring run");
+    let prefix = doc.id.replace('-', "_");
+    let mut prior: TopicAuthoring = authoring_from_json(&first).expect("parses");
+    prior.migrations.push(proof_rlm::AuthoredMigration {
+        name: "0002_prune".into(),
+        sql: format!("DELETE FROM {prefix}_rlm_state WHERE key = 'stale'"),
+    });
+    let prior_body = serde_json::to_string(&prior).expect("encode prior");
+    let second = author(&doc, &root, Some(&prior_body)).expect("second authoring run");
+    let second_set: TopicAuthoring = authoring_from_json(&second).expect("parses");
+    let pruned = second_set
+        .migrations
+        .iter()
+        .find(|m| m.name == "0002_prune")
+        .expect("the retained pruning migration was dropped");
+    assert_eq!(
+        pruned.sql,
+        format!("DELETE FROM {prefix}_rlm_state WHERE key = 'stale'")
+    );
+    // And the set is still what the guest and the install accept.
+    second_set
+        .validate(&doc.id)
+        .expect("the guest accepts a set carrying a topic-scoped DELETE");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A topic that says nothing about how a rule is ticked is a refusal, not a
 /// silent pass: the adaptor never invents a check and never drops a rule.
 #[test]

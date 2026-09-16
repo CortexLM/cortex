@@ -424,6 +424,73 @@ class ReAuthoring(unittest.TestCase):
             h.run()
         self.assertFalse(h.set_path().exists())
 
+    def test_the_submission_format_is_re_derived_not_retained(self):
+        """A retained format would publish a previous host's intake contract.
+
+        Greptile P1: a populated prior `submission_format` was copied into the
+        new set, so a re-authoring run published the old contract (here a
+        1-byte cap) as the current one.
+        """
+        prior = self.previous_set()
+        prior["submission_format"] = {
+            "kind": "tar",
+            "max_bytes": 1,
+            "stale_marker": "prior-host-contract",
+        }
+        h = Harness(topic_document(), previous=prior)
+        self.addCleanup(h.cleanup)
+        self.assertEqual(h.run(), 0)
+        fmt = h.authored()["submission_format"]
+        self.assertNotEqual(fmt, prior["submission_format"], "the stale contract was retained")
+        self.assertNotIn("stale_marker", fmt)
+        self.assertEqual(fmt["max_bytes"], authoring_set.MAX_ARTIFACT_BYTES)
+        self.assertEqual(fmt["signature_domain"], authoring_set.SUBMIT_DOMAIN)
+        self.assertEqual(fmt, authoring_set.derive_submission_format())
+
+    def test_a_retained_topic_scoped_delete_is_not_refused(self):
+        """`DELETE FROM <topic>_table` is in the namespace, not a touch on FROM.
+
+        Greptile P1: the scan skipped modifiers after a table keyword but not
+        `FROM`, so a retained `DELETE FROM fixture_topic_v0_kept …` was refused
+        with "migration touches 'FROM'".
+        """
+        prior = self.previous_set()
+        prefix = TOPIC_ID.replace("-", "_")
+        prior["migrations"].append(
+            {
+                "name": "0003_prune",
+                "sql": f"DELETE FROM {prefix}_kept WHERE id = 'retained-row'",
+            }
+        )
+        h = Harness(topic_document(), previous=prior)
+        self.addCleanup(h.cleanup)
+        self.assertEqual(h.run(), 0)
+        names = [m["name"] for m in h.authored()["migrations"]]
+        self.assertIn("0003_prune", names, "the retained DELETE migration must survive")
+        # And the scope check itself, directly, for both spellings.
+        authoring_set.check_migration_scope(
+            f"DELETE FROM {prefix}_kept WHERE id = 'x'", TOPIC_ID
+        )
+        authoring_set.check_migration_scope(
+            f'DELETE FROM "{TOPIC_ID}_kept" WHERE id = \'x\'', TOPIC_ID
+        )
+        authoring_set.check_migration_scope(
+            f"DELETE FROM {prefix}_kept USING {prefix}_other WHERE 1 = 1", TOPIC_ID
+        )
+        authoring_set.check_migration_scope(
+            f"UPDATE {prefix}_kept SET value = 'x' WHERE id = 'y'", TOPIC_ID
+        )
+        authoring_set.check_migration_scope(
+            f"TRUNCATE {prefix}_kept", TOPIC_ID
+        )
+        # A DELETE that reaches a sibling is still refused.
+        with self.assertRaises(SystemExit):
+            authoring_set.check_migration_scope("DELETE FROM other_topic_rows", TOPIC_ID)
+        with self.assertRaises(SystemExit):
+            authoring_set.check_migration_scope(
+                "DELETE FROM proof_rule_version WHERE id = 'x'", TOPIC_ID
+            )
+
     def test_the_rules_and_the_policy_are_re_derived_not_retained(self):
         """A retained rule or policy could contradict the re-signed document."""
         h = Harness(topic_document(), previous=self.previous_set())
@@ -438,12 +505,6 @@ class ReAuthoring(unittest.TestCase):
         self.assertNotEqual(set_["pin_policy"], {"epsilon_nll_min": 0.02})
         self.assertEqual(set_["pin_policy"]["epsilon_nll_min"], 0.02)
         self.assertIn("max_proof_deadline_s", set_["pin_policy"])
-
-    def test_the_submission_format_is_retained_when_the_prior_set_carries_one(self):
-        h = Harness(topic_document(), previous=self.previous_set())
-        self.addCleanup(h.cleanup)
-        self.assertEqual(h.run(), 0)
-        self.assertEqual(h.authored()["submission_format"], {"kind": "tar", "max_bytes": 1})
 
 
 class Bounds(unittest.TestCase):

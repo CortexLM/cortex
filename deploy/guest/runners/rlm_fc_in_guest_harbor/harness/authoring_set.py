@@ -51,13 +51,22 @@ part                             source of the answer
 
 **Re-authoring retains what it is not changing.** ``PROOF_CURRENT_AUTHORING_FILE``
 (e.g. ``current-authoring.json``; empty on a first run) carries the set this
-RLM authored last time. ``rules``, ``submission_format`` and ``pin_policy`` are
-re-derived — each is a function of the signed document, and a retained value
-could contradict a re-signed one (a stale rule, a policy that diverges) —
-while ``migrations`` and ``apis`` are merged: the prior order is preserved, the
-RLM's current answer replaces the entries it names, and entries it does not
-name are kept. Without that a re-authoring run is a rewrite from nothing, and
-a migration the topic still needs would silently vanish.
+RLM authored last time. ``migrations`` and ``apis`` are merged: the prior order
+is preserved, the RLM's current answer replaces the entries it names, and
+entries it does not name are kept — without that a re-authoring run is a
+rewrite from nothing, and a migration the topic still needs would silently
+vanish.
+
+``rules``, ``submission_format`` and ``pin_policy`` are **always re-derived**,
+because each is a fact about *now* rather than a decision to keep:
+
+* a retained rule could be one the re-signed document dropped (the vector is
+  the topic's anti-cheat surface, and it must match the declaration);
+* a retained ``submission_format`` would publish a **previous host's** intake
+  contract — the staged cap, the submit domain, the nonce are properties of
+  the runtime this run is executing on, so they are re-read every run;
+* a retained policy could diverge from the document that scoring actually
+  reads.
 
 **What is checked here, and what is not.** The authoritative gates are the
 guest's (``crates/proof-vm-guest``, the same ``proof-topic-authoring`` the
@@ -117,6 +126,40 @@ RESERVED_API_PREFIXES = ("v1/admin",)
 # carries. A topic migration may not name one, whatever the verb.
 OWNED_TABLE_PREFIX = "proof_"
 TABLE_KEYWORDS = ("FROM", "JOIN", "INTO", "UPDATE", "TABLE", "INDEX", "TRUNCATE", "DELETE")
+# `proof_topic_sql_guard::is_sql_keyword`: tokens that are never a table name in
+# the position the scan reads. `FROM` is here for the same reason it is in the
+# guard — in `DELETE FROM x` the token after `DELETE` is `FROM`, and the table
+# is the token after *that* (which the scan reaches because `FROM` is itself a
+# table keyword). Without this a retained `DELETE FROM <topic-scoped table>`
+# is refused for "touching FROM".
+SQL_KEYWORDS = (
+    "select",
+    "from",
+    "where",
+    "values",
+    "set",
+    "and",
+    "or",
+    "not",
+    "null",
+    "default",
+    "lateral",
+    "unnest",
+    "true",
+    "false",
+)
+# Modifiers skipped between a table keyword and the name it introduces.
+TABLE_MODIFIERS = (
+    "IF",
+    "NOT",
+    "EXISTS",
+    "OR",
+    "REPLACE",
+    "ONLY",
+    "INTO",
+    "UNIQUE",
+    "CONCURRENTLY",
+)
 DENIED_OBJECTS = (
     "_sqlx_migrations",
     "base_app",
@@ -439,21 +482,17 @@ def check_migration_scope(sql: str, topic_id: str) -> None:
         if word.upper() not in TABLE_KEYWORDS:
             continue
         cursor = index + 1
-        while cursor < len(words) and words[cursor].upper() in (
-            "IF",
-            "NOT",
-            "EXISTS",
-            "OR",
-            "REPLACE",
-            "ONLY",
-            "INTO",
-            "UNIQUE",
-            "CONCURRENTLY",
-        ):
+        while cursor < len(words) and words[cursor].upper() in TABLE_MODIFIERS:
             cursor += 1
         if cursor >= len(words):
             continue
         name = words[cursor]
+        # A token that is itself a SQL keyword is never a table name in this
+        # position — `DELETE FROM x` reads `FROM` here, and the outer loop
+        # reaches `x` because `FROM` is a table keyword too. Refusing it would
+        # reject every topic-scoped `DELETE FROM <topic>_table`.
+        if name.lower() in SQL_KEYWORDS:
+            continue
         if name.lower().startswith(OWNED_TABLE_PREFIX):
             continue  # already refused above, by identifier
         if not is_topic_scoped(name, topic_id):
@@ -681,23 +720,19 @@ def build_set(doc: dict[str, Any], previous: dict[str, Any] | None) -> dict[str,
         check_migration_scope(item["sql"], topic_id)
     apis = merge_apis(derive_apis(doc), prior.get("apis"))
     apis = [check_api(item) for item in apis]
-    # `submission_format` is retained when the prior set carries one: it states
-    # the intake shape, which the document does not change. `rules` and
-    # `pin_policy` are always re-derived — a retained rule could be one the
-    # re-signed document dropped, and a retained policy could diverge from it.
-    retained_format = prior.get("submission_format")
-    submission_format = (
-        retained_format
-        if isinstance(retained_format, dict) and retained_format
-        else derive_submission_format()
-    )
     return {
         "schema_version": AUTHORING_SCHEMA,
         "topic_id": topic_id,
         "rules": derive_rules(doc),
         "migrations": migrations,
         "apis": apis,
-        "submission_format": submission_format,
+        # **Always derived.** `submission_format` states the intake contract of
+        # the host this run is executing on — the staged cap, the submit
+        # domain, the nonce — and a retained copy would be a previous host's
+        # contract published as the current one. Unlike a migration (which the
+        # topic still needs and the RLM therefore keeps), this part is a fact
+        # about the runtime, so it is re-read every run and never inherited.
+        "submission_format": derive_submission_format(),
         "pin_policy": check_pin_policy(derive_pin_policy(doc)),
     }
 
