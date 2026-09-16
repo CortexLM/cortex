@@ -243,6 +243,14 @@ async fn run_real(
                 rlm_raw: bundle.rlm.raw(),
                 registered_custom: registered,
                 skip_baseline: args.skip_baseline,
+                // The RLM's own set, when the drive produced one: it is the
+                // topic's behavior, and the install applies it instead of the
+                // bundle's section. Absent means the RLM has not authored yet
+                // (or authored only rules), and the install applies the
+                // operator's section with its honest `topic_document`
+                // provenance — which the publish gate will refuse to open a
+                // topic on.
+                authored: driven.as_ref().and_then(|o| o.authored.as_deref()),
             },
             setup,
         )
@@ -594,6 +602,7 @@ fn install_failure(err: &InstallError, topic_id: &str) -> String {
         InstallError::MigrationFailed { .. } => "a migration failed in the database",
         InstallError::TooManyMigrations { .. } => "the bundle declares too many migrations",
         InstallError::HandlerNotAllowed(_) => "the handler allow-list refused the run backend",
+        InstallError::Authoring(_) => "the set the topic's own RLM authored was refused",
         InstallError::CustomIdNotRegistered { .. } => {
             "the topic's custom id is not registered on this host"
         }

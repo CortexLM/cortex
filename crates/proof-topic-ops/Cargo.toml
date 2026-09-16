@@ -15,6 +15,7 @@ proof-rlm = { path = "../proof-rlm" }
 proof-rlm-store = { path = "../proof-rlm-store" }
 proof-score = { path = "../proof-score" }
 proof-task = { path = "../proof-task" }
+proof-topic-authoring = { path = "../proof-topic-authoring" }
 proof-topic-bundle = { path = "../proof-topic-bundle" }
 proof-topic-install = { path = "../proof-topic-install" }
 proof-topic-setup = { path = "../proof-topic-setup" }

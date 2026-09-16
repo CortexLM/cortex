@@ -1,17 +1,22 @@
 //! The handler allow-list: which run backends an install may bind.
 //!
-//! A bundle's `rlm` section is **operator-supplied JSON**, not a signed
-//! document, so a handler name in it is untrusted input. The install binds it
-//! to a run backend, and the only backends that exist are the generic
-//! in-guest runner (Firecracker) and an operator-baked Harbor adaptor over
-//! it. This suite is the proof that nothing else can be named — least of all
-//! a path, a URL, or a command line, which is what an RLM section would
-//! reach for if it could.
+//! The set handed to an install — an operator's bundle section, or an RLM's
+//! own authored answer — is **JSON**, and the handler name in it is untrusted
+//! input either way. The install binds it to a run backend, and the only
+//! backends that exist are the generic in-guest runner (Firecracker) and an
+//! operator-baked Harbor adaptor over it. This suite is the proof that
+//! nothing else can be named — least of all a path, a URL, or a command line,
+//! which is what a set would reach for if it could.
+//!
+//! The allow-list lives in `proof-topic-authoring` (the guest links it too,
+//! and the guest has no database so it cannot link the install); these tests
+//! exercise it through the install's re-exports, which is the path an install
+//! actually takes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proof_topic_install::handler::{allowed_list, resolve_handler, Handler, ALLOWED_HANDLERS};
-use proof_topic_install::{bound_runner, read_section, HandlerError, InstallError};
+use proof_topic_authoring::handler::{allowed_list, resolve_handler, Handler, ALLOWED_HANDLERS};
+use proof_topic_install::{bound_runner, read_section, HandlerError};
 
 /// Every allowed spelling resolves, and the two families are the two that
 /// exist.
@@ -112,10 +117,8 @@ fn the_section_reader_enforces_the_allow_list() {
         "arbitrary_binary",
     ] {
         let err = read_section(&format!(r#"{{"handler": "{bad}"}}"#)).expect_err(bad);
-        assert!(
-            matches!(err, InstallError::HandlerNotAllowed(_)),
-            "{bad:?}: {err:?}"
-        );
+        assert_eq!(err.part, "handler", "{bad:?}: {err:?}");
+        assert!(!err.why.is_empty(), "{bad:?}");
     }
 }
 
@@ -161,9 +164,12 @@ fn the_signed_document_wins_for_the_runner_and_the_section_names_the_family() {
 fn no_challenge_content_is_compiled_into_this_crate() {
     for src in [
         include_str!("../src/lib.rs"),
-        include_str!("../src/handler.rs"),
         include_str!("../src/install.rs"),
-        include_str!("../src/section.rs"),
+        include_str!("../src/routes.rs"),
+        include_str!("../src/gate.rs"),
+        include_str!("../../proof-topic-authoring/src/lib.rs"),
+        include_str!("../../proof-topic-authoring/src/handler.rs"),
+        include_str!("../../proof-topic-authoring/src/section.rs"),
         include_str!("../../proof-topic-sql-guard/src/lib.rs"),
     ] {
         let non_test = src.split("#[cfg(test)]").next().unwrap_or("");
@@ -195,9 +201,12 @@ fn no_challenge_content_is_compiled_into_this_crate() {
 fn no_topic_literal_appears_in_this_crates_logic() {
     for src in [
         include_str!("../src/lib.rs"),
-        include_str!("../src/handler.rs"),
         include_str!("../src/install.rs"),
-        include_str!("../src/section.rs"),
+        include_str!("../src/routes.rs"),
+        include_str!("../src/gate.rs"),
+        include_str!("../../proof-topic-authoring/src/lib.rs"),
+        include_str!("../../proof-topic-authoring/src/handler.rs"),
+        include_str!("../../proof-topic-authoring/src/section.rs"),
         include_str!("../../proof-topic-sql-guard/src/lib.rs"),
     ] {
         let non_test = src.split("#[cfg(test)]").next().unwrap_or("");

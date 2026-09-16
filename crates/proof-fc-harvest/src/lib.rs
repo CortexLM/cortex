@@ -226,7 +226,10 @@ fn report_from_output(output: &VmJobOutput) -> Option<&CustomRunReport> {
     match output {
         VmJobOutput::Baseline(report) => Some(report),
         VmJobOutput::Evaluated(run) => Some(&run.report),
-        VmJobOutput::Inspected(_) | VmJobOutput::Rules(_) | VmJobOutput::Archived => None,
+        VmJobOutput::Authored(_)
+        | VmJobOutput::Inspected(_)
+        | VmJobOutput::Rules(_)
+        | VmJobOutput::Archived => None,
     }
 }
 

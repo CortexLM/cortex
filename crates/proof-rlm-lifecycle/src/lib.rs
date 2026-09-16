@@ -539,7 +539,31 @@ pub fn await_owner_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::topic;
+    use proof_task::{MetricFamily, TopicStatus};
+
+    /// A sealed, open custom-family topic with placeholder bindings (the
+    /// lifecycle only reads `status`, the baseline seal, and the checklist
+    /// ids, so this is the smallest document those fields need).
+    fn topic() -> TopicDocument {
+        let mut doc = TopicDocument {
+            id: "topic-a".into(),
+            statement: "Placeholder research problem scored by a topic-minted custom metric."
+                .into(),
+            ..TopicDocument::default()
+        };
+        doc.metric.family = MetricFamily::Custom;
+        doc.metric.custom_id = "placeholder_metric".into();
+        doc.constraints.model_pin = Some("vendor/model-placeholder".into());
+        doc.constraints.task_slice = Some("slice-placeholder".into());
+        doc.checklist = vec![proof_task::ChecklistRule {
+            id: "rule_a".into(),
+            text: "placeholder rule a".into(),
+        }];
+        doc.baseline.script_sha256 = "11".repeat(32);
+        doc.baseline.metrics_commitment = "22".repeat(32);
+        doc.status = TopicStatus::Open;
+        doc
+    }
 
     #[test]
     fn the_happy_path_walks_every_state_in_ship_order() {
@@ -682,7 +706,7 @@ mod tests {
         ));
     }
 
-    /// Without a hook the machine cannot leave owner_presend: nothing is
+    /// Without a hook the machine cannot leave `owner_presend`: nothing is
     /// sent on the owner's behalf.
     #[test]
     fn owner_presend_needs_an_answer_and_a_decline_returns_to_draft() {

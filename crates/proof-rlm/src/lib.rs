@@ -47,7 +47,6 @@
 mod gate;
 mod rules;
 mod runner;
-mod state;
 mod vm;
 
 /// Shared test fixtures (fake orchestrator, canned report, placeholder topic).
@@ -66,7 +65,11 @@ pub use runner::{
     CustomRunner, InspectOutcome, JudgeRef, LogFile, ReportError, RunOutcome, RunnerError,
     RunnerRegistry, SandboxPolicy, RUN_REPORT_SCHEMA, RUN_REQUEST_SCHEMA, STAGED_ARTEFACT_SCHEME,
 };
-pub use state::{
+// The lifecycle moved to `proof-rlm-lifecycle` (the transition table and the
+// owner hooks, unchanged) so this crate keeps room under the per-crate LOC cap
+// while the topic-authoring surface grows. Re-exported here so every existing
+// `proof_rlm::RlmState` path keeps working.
+pub use proof_rlm_lifecycle::{
     await_owner_keys, owner_presend, transition, FileKeysProbe, HookError, Lifecycle, NoOwnerHook,
     OwnerDecision, OwnerHook, OwnerKeysProbe, OwnerPrompt, RlmEvent, RlmState, StateError,
     StaticOwnerHook, Transition, OWNER_INFERENCE_KEY_FILE_ENV,
@@ -88,6 +91,14 @@ pub use proof_canon::{
     is_env_name, MinerEnv, MinerEnvError, PARAM_INJECT_MINER_ENV_SISTER, PARAM_MINER_BYOK,
     PARAM_MINER_ENV_ALLOWLIST,
 };
+// What a topic's RLM authors (rules, migrations, apis, submission_format,
+// pin_policy) and the shape checks every part is held to. Re-exported so the
+// guest, the setup driver, and the install all name the same types.
+pub use proof_topic_authoring::{
+    from_json as authoring_from_json, AuthoredApi, AuthoredMigration, AuthoringError, PinPolicy,
+    TopicAuthoring, AUTHORING_SCHEMA, MAX_APIS as MAX_AUTHORED_APIS,
+    MAX_MIGRATIONS as MAX_AUTHORED_MIGRATIONS, PARTS as AUTHORING_PARTS,
+};
 
 #[cfg(test)]
 mod tests {
@@ -101,7 +112,6 @@ mod tests {
             include_str!("gate.rs"),
             include_str!("rules.rs"),
             include_str!("runner.rs"),
-            include_str!("state.rs"),
             include_str!("vm.rs"),
             include_str!("lib.rs"),
         ];

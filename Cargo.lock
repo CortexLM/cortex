@@ -3961,14 +3961,26 @@ dependencies = [
  "proof-canon",
  "proof-experiment",
  "proof-results",
+ "proof-rlm-lifecycle",
  "proof-score",
  "proof-task",
+ "proof-topic-authoring",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "proof-rlm-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "proof-task",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -4073,6 +4085,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "proof-topic-authoring"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "proof-canon",
+ "proof-task",
+ "proof-topic-sql-guard",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "proof-topic-bundle"
 version = "0.1.0"
 dependencies = [
@@ -4097,6 +4123,7 @@ dependencies = [
  "proof-rlm",
  "proof-rlm-store",
  "proof-task",
+ "proof-topic-authoring",
  "proof-topic-bundle",
  "proof-topic-sql-guard",
  "serde",
@@ -4117,6 +4144,7 @@ dependencies = [
  "proof-rlm-store",
  "proof-score",
  "proof-task",
+ "proof-topic-authoring",
  "proof-topic-bundle",
  "proof-topic-install",
  "proof-topic-setup",
@@ -4135,6 +4163,7 @@ dependencies = [
  "proof-rlm-store",
  "proof-score",
  "proof-task",
+ "proof-topic-authoring",
  "thiserror 2.0.19",
  "tokio",
 ]
@@ -4195,6 +4224,7 @@ dependencies = [
  "proof-rlm",
  "proof-task",
  "proof-vm-proto",
+ "proof-vm-staging",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4253,6 +4283,19 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.19",
  "tokio",
+]
+
+[[package]]
+name = "proof-vm-staging"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "proof-canon",
+ "proof-experiment",
+ "proof-vm-proto",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
 ]
 
 [[package]]

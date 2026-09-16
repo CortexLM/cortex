@@ -86,6 +86,7 @@ fn request<'a>(doc: &'a TopicDocument, rlm: &'a str) -> InstallRequest<'a> {
         rlm_raw: rlm,
         registered_custom: vec![format!("{}-metric", doc.id)],
         skip_baseline: false,
+        authored: None,
     }
 }
 
@@ -367,6 +368,181 @@ async fn a_permitted_bundle_installs_and_the_journal_records_it() {
     assert_eq!(row.binding["vms_per_submission"], 1);
 
     tp.drop_schema().await.expect("drop");
+}
+
+/// The **RLM's own set** is what an install applies, and the journal records
+/// its authorship per part.
+///
+/// This is the whole point of the authorship pin, end to end against a real
+/// database: when the topic's RLM authored a set, that set — not the
+/// operator's bundle section — is what lands. The migrations, routes,
+/// submission format, and pin policy come from the RLM's answer, and the
+/// journal's `binding.authorship` names `rlm` as the author of every part,
+/// with each part's digest.
+///
+/// The operator's section is deliberately **different** in this test (a
+/// different table, a different route, a different submission format), so a
+/// run that quietly applied the bundle would be visible in every assertion.
+#[tokio::test]
+async fn the_rlm_authored_set_is_what_an_install_applies() {
+    let Some((tp, pool)) = test_pool().await else {
+        return;
+    };
+    let store = PgRlmStore::new(pool.clone());
+    let doc = topic("rlm-topic");
+    let installer = Installer {
+        pool: &pool,
+        store: &store,
+    };
+    // The operator's bundle: a *different* set, which must not be applied.
+    let operator_section = r#"{
+            "rules": [{"id": "operator_rule", "text": "the operator's vector"}],
+            "migrations": [{"name": "0001_operator", "sql": "CREATE TABLE rlm_topic_operator (id TEXT)"}],
+            "apis": [{"path": "operator-route", "method": "GET"}],
+            "submission_format": {"kind": "operator-tar", "max_bytes": 1}
+        }"#;
+    // The RLM's answer: every part present, and every one of them different.
+    let authored = rlm_authored_set();
+    let request = InstallRequest {
+        topic: &doc,
+        bundle_digest: digest(),
+        environment: "staging".into(),
+        rlm_raw: operator_section,
+        registered_custom: vec!["rlm-topic-metric".into()],
+        skip_baseline: false,
+        authored: Some(&authored),
+    };
+    let report = installer
+        .install(
+            &request,
+            SetupSummary::Baselined {
+                rules_version: 1,
+                baseline_primary: "0.5".into(),
+            },
+        )
+        .await
+        .expect("the RLM's set installs");
+
+    // The RLM's parts landed, not the operator's.
+    assert_eq!(report.migrations_applied, ["0001_rlm"]);
+    assert_eq!(report.rule_ids, ["rlm_rule"]);
+    assert_eq!(report.apis, ["GET /rlm-status"]);
+    assert_eq!(
+        report.binding.submission_format_digest,
+        Some(proof_topic_authoring::digest_of(
+            &serde_json::json!({"kind": "rlm-tar", "max_bytes": 4_194_304})
+        )),
+        "the digest is the RLM's submission format, not the bundle's"
+    );
+    let rlm_table: Option<String> = sqlx::query_scalar("SELECT to_regclass('rlm_topic_rlm')::text")
+        .fetch_one(&pool)
+        .await
+        .expect("probe");
+    assert_eq!(rlm_table.as_deref(), Some("rlm_topic_rlm"));
+    let operator_table: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('rlm_topic_operator')::text")
+            .fetch_one(&pool)
+            .await
+            .expect("probe");
+    assert_eq!(
+        operator_table, None,
+        "the operator's migration never ran: the RLM's set is the topic's behavior"
+    );
+    let routes = topic_routes(&pool, "rlm-topic").await.expect("routes");
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].path, "rlm-status");
+    assert_authorship_journal_names_every_part(&pool, &authored).await;
+
+    // A second install of the **same** topic with no authored set falls back
+    // to the operator's section and says so: the journal's provenance is what
+    // distinguishes the two, and the publish gate reads it.
+    let fallback = installer
+        .install(
+            &InstallRequest {
+                authored: None,
+                ..request
+            },
+            SetupSummary::NotDriven {
+                reason: "no RLM set".into(),
+            },
+        )
+        .await
+        .expect("the operator's section still installs, with its own provenance");
+    assert_eq!(fallback.migrations_applied, ["0001_operator"]);
+    let row = latest_install(&pool, "rlm-topic")
+        .await
+        .expect("journal")
+        .expect("a row");
+    assert_eq!(
+        row.binding["authorship"]["source"], "topic_document",
+        "an install from the bundle says so: {row:?}"
+    );
+    assert_eq!(
+        row.binding["authorship"]["parts"]["rules"]["source"], "topic_document",
+        "the operator's vector is not RLM-authored, whatever it contains"
+    );
+
+    tp.drop_schema().await.expect("drop");
+}
+
+/// The set a topic's RLM authors in this suite: every part present, and every
+/// one of them distinguishable from the operator's bundle.
+fn rlm_authored_set() -> proof_topic_authoring::TopicAuthoring {
+    use proof_topic_authoring::{AuthoredApi, AuthoredMigration, PinPolicy, TopicAuthoring};
+    TopicAuthoring {
+        schema_version: proof_topic_authoring::AUTHORING_SCHEMA,
+        topic_id: "rlm-topic".into(),
+        rules: vec![proof_task::ChecklistRule {
+            id: "rlm_rule".into(),
+            text: "the RLM's own vector".into(),
+        }],
+        migrations: vec![AuthoredMigration {
+            name: "0001_rlm".into(),
+            sql: "CREATE TABLE rlm_topic_rlm (id TEXT, note TEXT)".into(),
+        }],
+        apis: vec![AuthoredApi {
+            path: "rlm-status".into(),
+            method: "GET".into(),
+            summary: "the RLM's own route".into(),
+        }],
+        submission_format: serde_json::json!({"kind": "rlm-tar", "max_bytes": 4_194_304}),
+        pin_policy: PinPolicy {
+            epsilon_nll_min: Some(0.05),
+            ..PinPolicy::none()
+        },
+    }
+}
+
+/// The journal says **who authored every part**, with a digest each.
+///
+/// This is what makes "the RLM authored this topic" a fact an audit reads back
+/// per part rather than a label on the row as a whole, and it is the entry the
+/// publish gate's provenance read is about.
+async fn assert_authorship_journal_names_every_part(
+    pool: &PgPool,
+    authored: &proof_topic_authoring::TopicAuthoring,
+) {
+    let row = latest_install(pool, "rlm-topic")
+        .await
+        .expect("journal")
+        .expect("a row");
+    let authorship = &row.binding["authorship"];
+    assert_eq!(authorship["source"], "rlm");
+    assert_eq!(authorship["digest"], authored.digest());
+    for part in proof_topic_authoring::PARTS {
+        assert_eq!(
+            authorship["parts"][part]["source"], "rlm",
+            "{part} must name the RLM as its author: {authorship}"
+        );
+        assert!(
+            authorship["parts"][part]["digest"]
+                .as_str()
+                .is_some_and(|d| d.starts_with("sha256:")),
+            "{part} must carry its own digest: {authorship}"
+        );
+    }
+    assert_eq!(authorship["parts"]["migrations"]["names"][0], "0001_rlm");
+    assert_eq!(authorship["parts"]["apis"]["routes"][0], "GET /rlm-status");
 }
 
 /// The dynamic mux **reads** what an install **wrote**: the routes the
@@ -915,9 +1091,15 @@ async fn an_arbitrary_handler_never_reaches_a_write() {
             .install(&req, SetupSummary::NotDriven { reason: "x".into() })
             .await
             .expect_err(bad);
+        // The refusal names the part and why: a path, a URL, or a command
+        // line is *not an identifier*; a well-formed id is *not on the list*.
+        let InstallError::Section(section) = &err else {
+            panic!("{bad}: expected a Section refusal, got {err:?}");
+        };
+        assert_eq!(section.part, "handler", "{bad}");
         assert!(
-            matches!(err, InstallError::HandlerNotAllowed(_)),
-            "{bad}: {err:?}"
+            section.why.contains("vm_backed") || section.why.contains("not an identifier"),
+            "{bad}: {err}"
         );
         assert!(
             latest_install(&pool, "tb4")

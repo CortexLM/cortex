@@ -44,6 +44,7 @@ use proof_rlm::{
 };
 use proof_rlm_store::{BaselineRow, RlmStore, StoreError, TransitionRow};
 use proof_task::{InferenceOffer, MetricFamily, ProofPin, TopicDocument, TopicError, TopicStatus};
+use proof_topic_authoring::TopicAuthoring;
 
 /// Why setup stopped.
 #[derive(Debug, thiserror::Error)]
@@ -180,6 +181,38 @@ pub enum SetupError {
         /// The version now in force (`None` when no rule row exists).
         in_force: Option<u32>,
     },
+    /// The RLM authored the rules but not the rest of the topic's behavior.
+    ///
+    /// A topic's behavior is five parts, and its own RLM authors all of them
+    /// in one job. A runner whose `propose_rules` writes only `rules.json` is
+    /// an adaptor baked before the set existed: the rules it wrote are
+    /// recorded with honest `rlm` provenance, and the topic still cannot be
+    /// installed or opened, because the parts it did not author have no
+    /// author. The refusal names them rather than filling them in from the
+    /// operator's bundle — that substitution is the operator-cloned document
+    /// the authorship gate exists to refuse.
+    #[error(
+        "topic {topic_id:?}: the RLM authored rules v{version} but no {missing:?}; a topic's \
+         behavior is authored by its own RLM (rules, migrations, apis, submission_format, \
+         pin_policy), so this set is incomplete and nothing downstream may treat the topic as \
+         set up. Ship an adaptor whose propose_rules writes authoring.json"
+    )]
+    IncompleteAuthoring {
+        /// The topic.
+        topic_id: String,
+        /// Rule version the RLM did write.
+        version: u32,
+        /// Parts it did not author.
+        missing: Vec<&'static str>,
+    },
+    /// The authored set is malformed, or loosens the pin.
+    #[error("topic {topic_id:?}: the RLM's authored set was refused: {why}")]
+    Authoring {
+        /// The topic.
+        topic_id: String,
+        /// What the refusal said.
+        why: String,
+    },
 }
 
 /// What setup produced for the operator to seal.
@@ -196,6 +229,26 @@ pub struct SetupOutcome {
     /// `None` when [`TopicSetup::skip_baseline`] was set: no baseline was
     /// measured, so there is nothing to seal and the topic cannot open yet.
     pub baseline_primary: Option<f64>,
+    /// The whole set the RLM authored, when it authored one.
+    ///
+    /// `None` means the run returned a bare rule vector (an adaptor baked
+    /// before the set existed). The rules are still RLM-authored and
+    /// versioned; what is missing is the rest of the topic's behavior, and
+    /// [`Self::missing_parts`] names it.
+    pub authored: Option<Box<TopicAuthoring>>,
+    /// Parts the RLM did **not** author. Empty for a complete set.
+    pub missing_parts: Vec<&'static str>,
+}
+
+/// What one authoring job produced.
+#[derive(Debug, Clone, PartialEq)]
+struct AuthoredOutcome {
+    /// The rule version the store now holds.
+    rules: RuleSet,
+    /// The whole set, when the RLM authored one.
+    authored: Option<Box<TopicAuthoring>>,
+    /// Parts the RLM did not author.
+    missing: Vec<&'static str>,
 }
 
 impl SetupOutcome {
@@ -203,6 +256,12 @@ impl SetupOutcome {
     #[must_use]
     pub const fn measured_baseline(&self) -> bool {
         self.baseline_primary.is_some()
+    }
+
+    /// Whether the RLM authored the topic's **whole** behavior.
+    #[must_use]
+    pub fn authored_complete_set(&self) -> bool {
+        self.authored.is_some() && self.missing_parts.is_empty()
     }
 }
 
@@ -338,29 +397,65 @@ impl TopicSetup {
         }
     }
 
-    /// The RLM writes its rules inside the VM; the store versions them.
+    /// The RLM authors its whole set inside the VM; the store versions the
+    /// rules and the driver carries the rest to the install.
     ///
-    /// **Fail-closed on authorship.** The rules land as
-    /// [`RuleSource::Rlm`] only because the RLM's own `propose_rules` job
-    /// produced them inside the topic VM — the guest refuses to echo the
-    /// signed `checklist` back ([`proof_vm_guest`] `propose_rules`), and this
-    /// method re-reads the store afterwards to confirm the version in force
-    /// really is `rlm`-sourced. A store that still shows the operator's
-    /// vector (`topic_document`) or an operator edit (`operator`) means the
-    /// topic's behavior was never authored by its RLM, which is a refusal
-    /// naming the provenance rather than a silent pass.
-    async fn propose_rules(
+    /// **Fail-closed on authorship.** The rules land as [`RuleSource::Rlm`]
+    /// only because the RLM's own `propose_rules` job produced them inside the
+    /// topic VM — the guest refuses to echo the signed `checklist` back
+    /// ([`proof_vm_guest`] `propose_rules`), and this method re-reads the store
+    /// afterwards to confirm the version in force really is `rlm`-sourced. A
+    /// store that still shows the operator's vector (`topic_document`) or an
+    /// operator edit (`operator`) means the topic's behavior was never
+    /// authored by its RLM, which is a refusal naming the provenance rather
+    /// than a silent pass.
+    ///
+    /// **The whole set, not only the rules.** A topic's behavior is five
+    /// parts — rules, migrations, APIs, submission format, pin policy — and
+    /// the job answers with all of them ([`TopicAuthoring`]). A run that
+    /// returns a bare rule vector (an adaptor baked before the set existed)
+    /// lands those rules with honest `rlm` provenance and is reported as
+    /// **incomplete**: the parts it did not author are named, and the install
+    /// refuses to open a topic whose behavior is not wholly its RLM's. What
+    /// the driver must never do is fill the gap from the operator's bundle —
+    /// that is the operator-cloned document the gate exists to refuse.
+    async fn author(
         &self,
         topic: &TopicDocument,
+        pin: &ProofPin,
         vm: &VmHandle,
-    ) -> Result<RuleSet, SetupError> {
+    ) -> Result<AuthoredOutcome, SetupError> {
         let current = self.store.current_rules(&topic.id).await?;
         let job = VmJob::ProposeRules {
             topic: Box::new(topic.clone()),
             current_version: current.as_ref().map(|r| r.version),
+            current: None,
         };
-        let VmJobOutput::Rules(proposed) = self.orchestrator.run(vm, job).await? else {
-            return Err(VmError::WrongOutput("propose_rules").into());
+        let (proposed, authored, missing) = match self.orchestrator.run(vm, job).await? {
+            VmJobOutput::Authored(set) => {
+                // The control plane holds the set to the pin as well as to
+                // the document: the guest checked shape, the deny-list, and
+                // the policy against the topic's own knobs (it has no pin),
+                // and this is where a policy that loosens a *global* floor is
+                // refused.
+                set.validate_against_pin(&topic.id, pin)
+                    .map_err(|e| SetupError::Authoring {
+                        topic_id: topic.id.clone(),
+                        why: e.to_string(),
+                    })?;
+                let rules = set.rules.clone();
+                (rules, Some(set), Vec::new())
+            }
+            VmJobOutput::Rules(rules) => {
+                // A fragment. Recorded honestly, refused downstream by name.
+                let missing = proof_topic_authoring::PARTS
+                    .iter()
+                    .copied()
+                    .filter(|p| *p != "rules")
+                    .collect::<Vec<_>>();
+                (rules, None, missing)
+            }
+            _ => return Err(VmError::WrongOutput("propose_rules").into()),
         };
         let rules = if let Some(cur) = current {
             cur.next(RuleSource::Rlm, proposed)?
@@ -400,9 +495,12 @@ impl TopicSetup {
                 version: rules.version,
             });
         }
-        Ok(rules)
+        Ok(AuthoredOutcome {
+            rules,
+            authored,
+            missing,
+        })
     }
-
     /// Refuse when the rule version in force is no longer the one this run
     /// wrote and measured its baseline against.
     ///
@@ -563,13 +661,29 @@ impl TopicSetup {
             .into());
         }
         let vm = self.provision(topic, pin, &mut lc).await?;
-        let rules = self.propose_rules(topic, &vm).await?;
+        let authored = self.author(topic, pin, &vm).await?;
+        // Fail closed on an incomplete set: the rules are recorded (honest
+        // provenance either way), and a run that authored only part of the
+        // topic's behavior stops here rather than letting anything downstream
+        // treat the topic as set up. Nothing is filled in from the operator's
+        // bundle — that substitution is the operator-cloned document the gate
+        // refuses.
+        if !authored.missing.is_empty() {
+            return Err(SetupError::IncompleteAuthoring {
+                topic_id: topic.id.clone(),
+                version: authored.rules.version,
+                missing: authored.missing,
+            });
+        }
+        let rules = authored.rules;
         if self.skip_baseline {
             return Ok(SetupOutcome {
                 topic_id: topic.id.clone(),
                 vm,
                 rules_version: rules.version,
                 baseline_primary: None,
+                authored: authored.authored,
+                missing_parts: Vec::new(),
             });
         }
         let Some(offer) = offer else {
@@ -585,6 +699,8 @@ impl TopicSetup {
             vm,
             rules_version: rules.version,
             baseline_primary: Some(report.primary_value),
+            authored: authored.authored,
+            missing_parts: Vec::new(),
         })
     }
 

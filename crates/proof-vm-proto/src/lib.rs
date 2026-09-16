@@ -303,7 +303,12 @@ impl EvidenceBinding {
         match output {
             VmJobOutput::Baseline(report) => Some(Self::of_report(report)),
             VmJobOutput::Evaluated(run) => Some(Self::of_report(&run.report)),
-            VmJobOutput::Rules(_) | VmJobOutput::Inspected(_) | VmJobOutput::Archived => None,
+            // An authored set and an inspection run no miner code: no
+            // submission, no artefact, nothing to bind.
+            VmJobOutput::Authored(_)
+            | VmJobOutput::Rules(_)
+            | VmJobOutput::Inspected(_)
+            | VmJobOutput::Archived => None,
         }
     }
 

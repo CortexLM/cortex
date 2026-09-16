@@ -302,7 +302,10 @@ fn reported_flops(output: &VmJobOutput) -> Option<u64> {
     match output {
         VmJobOutput::Baseline(r) => r.flops_used,
         VmJobOutput::Evaluated(run) => run.report.flops_used,
-        VmJobOutput::Rules(_) | VmJobOutput::Inspected(_) | VmJobOutput::Archived => None,
+        VmJobOutput::Authored(_)
+        | VmJobOutput::Rules(_)
+        | VmJobOutput::Inspected(_)
+        | VmJobOutput::Archived => None,
     }
 }
 

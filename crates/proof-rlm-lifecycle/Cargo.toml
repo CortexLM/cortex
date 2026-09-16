@@ -1,0 +1,20 @@
+[package]
+name = "proof-rlm-lifecycle"
+description = "The Proof topic lifecycle: a pure transition table (draft → owner review → keys → provisioning → baselining → open ⇄ evaluating → promoting → closed) plus the owner hooks a topic's setup ceremony answers to. No spend, no scoring, no challenge content — it moved out of the RLM engine so that crate keeps room under the repository's per-crate LOC cap while the topic-authoring surface grows."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+proof-task = { path = "../proof-task" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

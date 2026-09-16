@@ -37,6 +37,7 @@ use proof_experiment::{
     ExperimentBinding, ExperimentError, ExperimentPolicy, ExperimentSpec, RunPolicy,
 };
 use proof_task::{ChecklistRule, TopicDocument};
+use proof_topic_authoring::TopicAuthoring;
 use serde::{Deserialize, Serialize};
 
 use crate::gate::SpendToken;
@@ -201,12 +202,23 @@ pub struct VmHandle {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "job", rename_all = "snake_case")]
 pub enum VmJob {
-    /// Let the RLM read the signed topic and write (or rewrite) its rules.
+    /// Let the RLM read the signed topic and author its whole set — rules,
+    /// migrations, APIs, submission format, and pin policy — in one job.
+    ///
+    /// One job rather than five: the parts are one document (the topic's
+    /// behavior), they are validated together, and they land in one journal
+    /// entry. A separate job per part would let a topic be half-authored,
+    /// which is a state nothing downstream could interpret.
     ProposeRules {
         /// The signed topic (public document).
         topic: Box<TopicDocument>,
         /// Rule version to supersede, if any.
         current_version: Option<u32>,
+        /// The parts the RLM already authored, when the host has them: an
+        /// RLM asked to re-author keeps what it wrote for the parts it does
+        /// not change. Absent on a first authoring run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current: Option<Box<TopicAuthoring>>,
     },
     /// Run the baseline artefact so the operator can seal `custom_value`.
     Baseline {
@@ -313,7 +325,24 @@ impl VmJob {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "output", content = "body", rename_all = "snake_case")]
 pub enum VmJobOutput {
-    /// Rules the RLM proposes; the store versions them.
+    /// The topic's own RLM authored its behavior: the rule vector, the SQL
+    /// migrations, the routes it exposes, its submission format, and the pin
+    /// policy it tightens. One document, every part provenance-stamped by the
+    /// store and the install journal.
+    ///
+    /// Boxed because a set is a whole document: unboxed, every type that
+    /// carries an output (`RlmToHost::Done`, the agent's job record) would be
+    /// as large as the largest set, for a payload most jobs do not have. The
+    /// box is invisible on the wire — `Box<T>` serialises as `T`.
+    Authored(Box<TopicAuthoring>),
+    /// Rules the RLM proposes, and nothing else: the shape an adaptor baked
+    /// before the set existed writes (`rules.json`).
+    ///
+    /// A **fragment**, not authorship. The host records the rules with honest
+    /// `rlm` provenance and refuses to treat the topic as set up — naming the
+    /// parts that have no author — rather than widening this into a whole set
+    /// from the operator's bundle. A topic that must open ships an adaptor
+    /// whose `propose_rules` writes `authoring.json`.
     Rules(Vec<ChecklistRule>),
     /// Baseline measurement.
     Baseline(CustomRunReport),
@@ -890,6 +919,7 @@ mod tests {
             VmJob::ProposeRules {
                 topic: Box::new(crate::fixtures::topic()),
                 current_version: None,
+                current: None,
             },
             VmJob::Baseline {
                 request: req.clone(),

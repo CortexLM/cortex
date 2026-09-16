@@ -61,11 +61,12 @@ use std::collections::BTreeSet;
 use proof_rlm::{RuleSet, RuleSource};
 use proof_rlm_store::{RlmStore, StoreError};
 use proof_task::{MetricFamily, TopicDocument, TopicStatus};
+use proof_topic_authoring::{
+    bound_runner, ApiRoute, Handler, SectionPlan, TopicAuthoring, MAX_MIGRATIONS,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::handler::{bound_runner, Handler};
-use crate::section::{ApiRoute, SectionPlan, MAX_MIGRATIONS};
 use crate::InstallError;
 use proof_topic_sql_guard::{check_migration, Statement};
 
@@ -227,6 +228,16 @@ pub struct InstallRequest<'a> {
     pub registered_custom: Vec<String>,
     /// Stop before the RLM's baseline job.
     pub skip_baseline: bool,
+    /// The set the topic's **own RLM** authored, when the driver got one.
+    ///
+    /// This is the source of truth when it is present: the install applies
+    /// what the RLM wrote and journals every part's provenance as `rlm`. The
+    /// bundle's section is then **not** applied — it was the operator's
+    /// declaration of intent, and the RLM's set is what the topic actually
+    /// is. Absent means the RLM has not authored (yet): the bundle's section
+    /// is applied with its honest `topic_document` provenance, which the
+    /// publish gate refuses to open a topic on.
+    pub authored: Option<&'a TopicAuthoring>,
 }
 
 /// The install engine: a database to write through, plus the store the
@@ -253,7 +264,25 @@ impl Installer<'_> {
         request: &InstallRequest<'_>,
         setup: SetupSummary,
     ) -> Result<InstallReport, InstallError> {
-        let plan = crate::section::read_section(request.rlm_raw)?;
+        // **Whose set is this?** When the topic's own RLM authored one, that
+        // is the topic's behavior and the bundle's section is not applied: the
+        // RLM's answer supersedes the operator's declaration of intent, and
+        // the journal records `rlm` as the author of every part. The bundle's
+        // section is read only when no RLM set exists, and then with its own
+        // honest `topic_document` provenance — which the publish gate refuses
+        // to open a topic on.
+        let (plan, authored) = match request.authored {
+            Some(set) => {
+                // The set is held to the same shape checks the install applies
+                // to a bundle, plus the one a bundle cannot be held to: the
+                // parts must be complete and every one of them present.
+                set.validate(&request.topic.id)
+                    .map_err(|e| map_authoring(&e))?;
+                let section = set.as_section().map_err(|e| map_authoring(&e))?;
+                (proof_topic_authoring::read_section(&section)?, Some(set))
+            }
+            None => (proof_topic_authoring::read_section(request.rlm_raw)?, None),
+        };
         // Check every migration up front: a bundle that would fail on its
         // third statement must not leave its first two applied.
         let checked = check_all_migrations(&plan, &request.topic.id)?;
@@ -271,10 +300,19 @@ impl Installer<'_> {
         // rather than silent. A failure appends its own `failed` row naming
         // the step, so the journal says how far the run got.
         let pending_id = self
-            .journal(request, InstallState::Pending, None, &[], &[], &binding, "")
+            .journal(
+                request,
+                InstallState::Pending,
+                None,
+                &[],
+                &[],
+                &binding,
+                "",
+                authored,
+            )
             .await?;
         match self
-            .apply_all(request, &plan, &checked, &binding, setup)
+            .apply_all(request, &plan, &checked, &binding, setup, authored)
             .await
         {
             Ok(report) => Ok(report),
@@ -288,6 +326,7 @@ impl Installer<'_> {
                         &[],
                         &binding,
                         &e.to_string(),
+                        authored,
                     )
                     .await;
                 let _ = pending_id;
@@ -304,6 +343,7 @@ impl Installer<'_> {
         checked: &[(String, Vec<Statement>)],
         binding: &ExecutorBinding,
         setup: SetupSummary,
+        authored: Option<&TopicAuthoring>,
     ) -> Result<InstallReport, InstallError> {
         let already = self.applied_migrations(&request.topic.id).await?;
         let mut applied: Vec<String> = already.iter().cloned().collect();
@@ -337,6 +377,7 @@ impl Installer<'_> {
                 &applied,
                 binding,
                 "",
+                authored,
             )
             .await?;
         Ok(InstallReport {
@@ -604,6 +645,7 @@ impl Installer<'_> {
         migrations: &[String],
         binding: &ExecutorBinding,
         detail: &str,
+        authored: Option<&TopicAuthoring>,
     ) -> Result<i64, InstallError> {
         let version = rules_version
             .map(i32::try_from)
@@ -618,6 +660,21 @@ impl Installer<'_> {
                     .collect(),
             )
         };
+        // The binding carries the **authorship** of every part beside the
+        // executor it resolved. This is what makes "the RLM authored this
+        // topic" a fact an audit can read back per part, rather than a label
+        // the driver attached to the row as a whole: each part names its
+        // author (`rlm` when the topic's own RLM wrote it, `topic_document`
+        // when it is still the operator's signed declaration) and its digest.
+        let mut binding_json =
+            serde_json::to_value(binding).map_err(|e| InstallError::Db(e.to_string()))?;
+        if let Some(obj) = binding_json.as_object_mut() {
+            let authorship = match authored {
+                Some(set) => set.journal_entry(rules_version.unwrap_or(0)),
+                None => operator_authorship(rule_ids),
+            };
+            obj.insert("authorship".to_owned(), authorship);
+        }
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO proof_topic_install \
              (topic_id, bundle_digest, environment, state, rules_version, rule_ids, migrations, \
@@ -631,13 +688,45 @@ impl Installer<'_> {
         .bind(version)
         .bind(json(rule_ids))
         .bind(json(migrations))
-        .bind(serde_json::to_value(binding).map_err(|e| InstallError::Db(e.to_string()))?)
+        .bind(binding_json)
         .bind(detail)
         .fetch_one(self.pool)
         .await
         .map_err(|e| InstallError::Db(e.to_string()))?;
         Ok(id)
     }
+}
+
+/// The authorship entry for an install that applied the **operator's** set.
+///
+/// Every part is `topic_document`: the signed document the operator published
+/// is what the install applied, and the topic's own RLM has not authored
+/// anything yet. The publish gate refuses to open a topic on this entry, which
+/// is the whole point of recording it — the journal says which of the two
+/// sources a topic was installed from.
+fn operator_authorship(rule_ids: &[String]) -> serde_json::Value {
+    let part = |what: &str| {
+        serde_json::json!({
+            "source": "topic_document",
+            "digest": null,
+            what: true,
+        })
+    };
+    serde_json::json!({
+        "source": "topic_document",
+        "digest": null,
+        "parts": {
+            "rules": {
+                "source": "topic_document",
+                "digest": null,
+                "ids": rule_ids,
+            },
+            "migrations": part("declared"),
+            "apis": part("declared"),
+            "submission_format": part("declared"),
+            "pin_policy": part("declared"),
+        },
+    })
 }
 
 /// Resolve the executor binding from the signed document and the section.
@@ -703,6 +792,11 @@ fn check_all_migrations(
 /// Map a store failure.
 fn map_store(e: &StoreError) -> InstallError {
     InstallError::Store(e.to_string())
+}
+
+/// Map an authoring refusal onto the install error.
+fn map_authoring(e: &proof_topic_authoring::AuthoringError) -> InstallError {
+    InstallError::Authoring(e.to_string())
 }
 
 /// Read a topic's newest install row.

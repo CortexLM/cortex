@@ -1,0 +1,24 @@
+[package]
+name = "proof-topic-authoring"
+description = "What a topic's RLM authors: the rule vector, the SQL migrations, the dynamic APIs, the submission format, and the pin policy it tightens — plus the shape checks and canonical digests every one of them is held to. Pure data and text analysis: no database, no VM, no challenge content."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+hex = "0.4"
+proof-canon = { path = "../proof-canon" }
+proof-task = { path = "../proof-task" }
+proof-topic-sql-guard = { path = "../proof-topic-sql-guard" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+
+[lints]
+workspace = true

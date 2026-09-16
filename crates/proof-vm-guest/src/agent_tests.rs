@@ -766,6 +766,7 @@ echo "{\"primary_value\": 1.0, \"evidence\": {\"foo_bar\": \"$PROOF_PARAM_FOO_BA
             job: Box::new(VmJob::ProposeRules {
                 topic: Box::new(t),
                 current_version: None,
+                current: None,
             }),
         })
         .await,
@@ -1068,6 +1069,7 @@ EOF
             job: Box::new(VmJob::ProposeRules {
                 topic: Box::new(t.clone()),
                 current_version: None,
+                current: None,
             }),
         })
         .await,
@@ -1099,6 +1101,7 @@ echo '[{"id": "rlm_rule_x", "text": "an adaptor-written rule"}]' > "$PROOF_OUTPU
             job: Box::new(VmJob::ProposeRules {
                 topic: Box::new(selecting.clone()),
                 current_version: Some(1),
+                current: None,
             }),
         })
         .await;
@@ -1120,6 +1123,7 @@ echo '[{"id": "rlm_rule_x", "text": "an adaptor-written rule"}]' > "$PROOF_OUTPU
             job: Box::new(VmJob::ProposeRules {
                 topic: Box::new(selecting),
                 current_version: Some(1),
+                current: None,
             }),
         })
         .await,
@@ -1138,6 +1142,159 @@ echo '[{"id": "rlm_rule_x", "text": "an adaptor-written rule"}]' > "$PROOF_OUTPU
             output: VmJobOutput::Archived
         }
     );
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+/// The RLM's whole set travels: `authoring.json` is read, checked against the
+/// same gates the control plane runs, and answered as `Authored` — while a
+/// rules-only adaptor still answers `Rules`, which the host treats as a
+/// fragment rather than authorship.
+///
+/// This is the wire half of the authorship pin: what a topic *is* comes from
+/// its own RLM, and the guest is where that claim is first checked.
+#[tokio::test]
+async fn the_rlm_authors_its_whole_set_and_a_fragment_is_named_as_one() {
+    let r = root("authoring-set");
+    let a = agent(&r);
+    hello(&a).await;
+    let t = topic();
+    let mut selecting = t.clone();
+    selecting
+        .constraints
+        .params
+        .insert(proof_experiment::PARAM_RUNNER.into(), RUNNER.into());
+    selecting
+        .constraints
+        .params
+        .insert(proof_experiment::PARAM_PACK_DIGEST.into(), pack().1);
+    // The adaptor resolves only when its `run` entrypoint exists: a
+    // `propose_rules`-only directory is not an installed runner.
+    install(&r, "run", "true");
+
+    // A complete set: every part present, shaped like the document's own
+    // knobs, written by the adaptor.
+    install(
+        &r,
+        "propose_rules",
+        r#"
+test -f "$PROOF_TOPIC_FILE"
+cat > "$PROOF_OUTPUT_DIR/authoring.json" <<'JSON'
+{
+  "schema_version": 1,
+  "topic_id": "topic-a",
+  "rules": [{"id": "rlm_authored_rule", "text": "the rlm wrote this"}],
+  "migrations": [{"name": "0001_scratch", "sql": "CREATE TABLE topic_a_scratch (id TEXT)"}],
+  "apis": [{"path": "status", "method": "GET", "summary": "topic status"}],
+  "submission_format": {"kind": "tar", "max_bytes": 5242880},
+  "pin_policy": {}
+}
+JSON
+"#,
+    );
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::ProposeRules {
+                topic: Box::new(selecting.clone()),
+                current_version: None,
+                current: None,
+            }),
+        })
+        .await;
+    let RlmToHost::Done {
+        output: VmJobOutput::Authored(set),
+    } = out
+    else {
+        panic!("expected the whole set, got {out:?}");
+    };
+    assert_eq!(set.topic_id, "topic-a");
+    assert_eq!(set.rules[0].id, "rlm_authored_rule");
+    assert_eq!(set.migrations.len(), 1);
+    assert_eq!(set.apis[0].path, "status");
+    assert!(set.pin_policy.is_empty(), "tightening nothing is a policy");
+    assert!(set.is_complete());
+
+    // A set for **another topic** is refused: the VM is bound to one topic.
+    install(
+        &r,
+        "propose_rules",
+        r#"sed 's/"topic-a"/"topic-b"/' > /dev/null; echo '{"schema_version":1,"topic_id":"topic-b","rules":[{"id":"rlm_rule","text":"t"}],"migrations":[{"name":"0001_scratch","sql":"CREATE TABLE topic_a_scratch (id TEXT)"}],"apis":[{"path":"status","method":"GET"}],"submission_format":{"kind":"tar"},"pin_policy":{}}' > "$PROOF_OUTPUT_DIR/authoring.json""#,
+    );
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::ProposeRules {
+                topic: Box::new(selecting.clone()),
+                current_version: None,
+                current: None,
+            }),
+        })
+        .await,
+    );
+    assert!(err.contains("authoring.json is for topic"), "{err}");
+
+    // A migration that reaches outside the topic's namespace is refused where
+    // the RLM's answer arrives, not later at install time.
+    install(
+        &r,
+        "propose_rules",
+        r#"echo '{"schema_version":1,"topic_id":"topic-a","rules":[{"id":"rlm_rule","text":"t"}],"migrations":[{"name":"0001_scratch","sql":"DROP TABLE proof_rule_version"}],"apis":[{"path":"status","method":"GET"}],"submission_format":{"kind":"tar"},"pin_policy":{}}' > "$PROOF_OUTPUT_DIR/authoring.json""#,
+    );
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::ProposeRules {
+                topic: Box::new(selecting.clone()),
+                current_version: None,
+                current: None,
+            }),
+        })
+        .await,
+    );
+    assert!(err.contains("proof_rule_version"), "{err}");
+
+    // An incomplete set is refused by name: the parts the RLM did not author
+    // are not filled in from anywhere.
+    install(
+        &r,
+        "propose_rules",
+        r#"echo '{"schema_version":1,"topic_id":"topic-a","rules":[{"id":"rlm_rule","text":"t"}],"migrations":[],"apis":[{"path":"status","method":"GET"}],"submission_format":{"kind":"tar"},"pin_policy":{}}' > "$PROOF_OUTPUT_DIR/authoring.json""#,
+    );
+    let err = failed(
+        a.handle(HostToRlm::Run {
+            job: Box::new(VmJob::ProposeRules {
+                topic: Box::new(selecting.clone()),
+                current_version: None,
+                current: None,
+            }),
+        })
+        .await,
+    );
+    assert!(err.contains("authored no migrations"), "{err}");
+
+    // A rules-only adaptor still answers `Rules`: the guest does not widen a
+    // fragment into a set, because the parts it would fill in are the
+    // operator's. The host is what names it as incomplete.
+    install(
+        &r,
+        "propose_rules",
+        r#"echo '[{"id": "rules_only_rule", "text": "only rules were authored"}]' > "$PROOF_OUTPUT_DIR/rules.json""#,
+    );
+    let out = a
+        .handle(HostToRlm::Run {
+            job: Box::new(VmJob::ProposeRules {
+                topic: Box::new(selecting),
+                current_version: None,
+                current: None,
+            }),
+        })
+        .await;
+    let RlmToHost::Done {
+        output: VmJobOutput::Rules(proposed),
+    } = out
+    else {
+        panic!("a fragment stays a fragment, got {out:?}");
+    };
+    assert_eq!(proposed[0].id, "rules_only_rule");
+    assert_eq!(crate::runner::AUTHORING_FILE, "authoring.json");
+    assert!(crate::runner::RULES_ONLY_IS_NOT_AUTHORSHIP.contains("authoring.json"));
     let _ = std::fs::remove_dir_all(&r);
 }
 

@@ -855,15 +855,23 @@ metric, model, rule list, or repository — is compiled in. Crates:
 (`LiveScorer` + artefacts + setup driver), `proof-canon` (canonical JSON +
 id shapes shared with `proof-task`).
 
-**What the RLM authors, exactly.** The rule vector: the control plane asks
-`propose_rules` inside the topic VM and its answer becomes the version in
-force (`proof_rule_version.source = 'rlm'`), which is the gate an `open`
-document must pass. A topic's `migrations` and `apis` are **topic-owned data
-carried by the bundle** and applied by the install — the RLM has no job that
-emits them. `the_rlm_authors_rules_and_the_bundle_carries_migrations_and_apis`
-(`proof-topic-bundle`) pins that boundary structurally, so a change that lets
-the RLM write schema or routes fails a test instead of quietly outdating this
-paragraph.
+**What the RLM authors, exactly.** The **whole set**: the control plane asks
+`propose_rules` inside the topic VM and its answer is a
+`TopicAuthoring` — the rule vector, the SQL migrations the topic needs, the
+routes it exposes, its submission format, and the pin policy it tightens.
+The rules become the version in force
+(`proof_rule_version.source = 'rlm'`), the migrations apply under the same
+deny-list an operator's bundle goes through, the routes land in
+`proof_topic_api`, and the install journal records `rlm` as the author of
+every part with a digest each. When the RLM's set is what the install
+applied, the operator's bundle section is **not** applied: the declaration
+of intent is superseded by the topic's own answer. A runner that writes only
+`rules.json` (an adaptor baked before the set existed) answers with that
+fragment; the host records the rules and refuses to open the topic, naming
+the parts that have no author — it never fills them in from the bundle.
+`the_rlm_authors_the_whole_set_not_just_rules` (`proof-topic-bundle`) pins
+that boundary structurally, so a change to what the RLM can author fails a
+test instead of quietly outdating this paragraph.
 
 ### Topic-carried, generic bindings (signed)
 

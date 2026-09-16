@@ -1,8 +1,8 @@
-//! What a topic's RLM install may name as a run backend.
+//! What a topic's install may name as a run backend.
 //!
 //! A topic's paid runs are executed by an **operator-installed adaptor**,
 //! resolved inside the Firecracker guest from the image the operator baked
-//! (`/opt/proof/runners/<runner id>/`). The bundle's RLM section names that
+//! (`/opt/proof/runners/<runner id>/`). The set an install applies names that
 //! runner; the control plane never runs it.
 //!
 //! The boundary this module enforces is therefore about *which names an
@@ -10,30 +10,30 @@
 //!
 //! - A topic may select a runner through the **signed document**
 //!   (`constraints.params.in_guest_benchmark_runner` / `baseline_runner`).
-//!   That value is already shape-checked by [`proof_experiment`] and is
-//!   signed, so it is topic data.
-//! - A bundle's `rlm` section may also name a **handler** it wants bound.
-//!   That section is *not* signed — it is operator-supplied JSON handed to
-//!   the install — so a handler name from it is an **untrusted input**. This
-//!   module is the allow-list that input is checked against.
+//!   That value is already shape-checked by `proof_experiment` and is signed,
+//!   so it is topic data.
+//! - A set may also name a **handler** it wants bound. That part is *not*
+//!   signed — it is JSON handed to the install — so a handler name from it is
+//!   an **untrusted input**. This module is the allow-list that input is
+//!   checked against.
 //!
 //! Two handler families exist, and nothing else may be bound:
 //!
 //! | Family | What it is |
 //! |--------|------------|
-//! | [`Handler::VmBacked`] | the generic in-guest runner ([`proof_rlm::VmBackedRunner`]) — the Firecracker path |
+//! | [`Handler::VmBacked`] | the generic in-guest runner (`proof_rlm::VmBackedRunner`) — the Firecracker path |
 //! | [`Handler::Harbor`] | an operator-baked Harbor adaptor, i.e. a `VmBacked` runner whose adaptor directory ships the Harbor harness |
 //!
 //! The distinction is *documentation and audit*, not a second code path: both
 //! resolve to the same `VmBackedRunner` over the topic-VM orchestrator, and
 //! neither can be a path, a URL, or a shell command. What the allow-list
-//! prevents is an RLM section naming something like
-//! `/bin/sh -c 'curl … | sh'`, an absolute path, or an arbitrary binary: those
-//! are refused by shape before anything is bound, and the refusal names why.
+//! prevents is a set naming something like `/bin/sh -c 'curl … | sh'`, an
+//! absolute path, or an arbitrary binary: those are refused by shape before
+//! anything is bound, and the refusal names why.
 
 use proof_canon::is_custom_id;
 
-use crate::InstallError;
+use crate::SectionError;
 
 /// The handler families an install may bind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -60,13 +60,13 @@ impl Handler {
     pub const ALL: [Self; 2] = [Self::VmBacked, Self::Harbor];
 }
 
-/// Handler names an RLM section may use, mapped to their family.
+/// Handler names a set may use, mapped to their family.
 ///
-/// The left-hand names are what a bundle writes; the right-hand family is
-/// what the install binds. Only these two spellings (plus their documented
-/// synonyms) are accepted, and every one of them resolves to a `VmBacked`
-/// runner — the allow-list is closed, so a name that is not here is refused
-/// rather than defaulted.
+/// The left-hand names are what a set writes; the right-hand family is what
+/// the install binds. Only these spellings (plus their documented synonyms)
+/// are accepted, and every one of them resolves to a `VmBacked` runner — the
+/// allow-list is closed, so a name that is not here is refused rather than
+/// defaulted.
 pub const ALLOWED_HANDLERS: [(&str, Handler); 4] = [
     ("vm_backed", Handler::VmBacked),
     ("vm_backed_runner", Handler::VmBacked),
@@ -74,7 +74,7 @@ pub const ALLOWED_HANDLERS: [(&str, Handler); 4] = [
     ("harbor_trials", Handler::Harbor),
 ];
 
-/// Why a handler name was refused, in the terms the bundle wrote.
+/// Why a handler name was refused, in the terms the set wrote.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HandlerError {
     /// The name is not one of [`ALLOWED_HANDLERS`].
@@ -85,7 +85,7 @@ pub enum HandlerError {
         allowed = allowed_list()
     )]
     NotAllowed {
-        /// What the bundle named.
+        /// What the set named.
         got: String,
     },
     /// The name is shaped like a path, a URL, or a command rather than an id.
@@ -94,7 +94,7 @@ pub enum HandlerError {
          baked adaptor, never a path, a URL, or a command line"
     )]
     NotAnIdentifier {
-        /// What the bundle named.
+        /// What the set named.
         got: String,
     },
 }
@@ -109,13 +109,12 @@ pub fn allowed_list() -> String {
         .join(", ")
 }
 
-/// Resolve a handler name from an RLM section.
+/// Resolve a handler name from a set.
 ///
 /// Case and surrounding whitespace are tolerated, matching how the rest of
-/// the CLI's operator inputs parse (`InstallEnvironment` does the same). That
-/// tolerance cannot widen the allow-list: a path or a command line is still
-/// refused as *not an identifier* after folding, because the fold only
-/// touches case.
+/// the CLI's operator inputs parse. That tolerance cannot widen the
+/// allow-list: a path or a command line is still refused as *not an
+/// identifier* after folding, because the fold only touches case.
 ///
 /// # Errors
 ///
@@ -139,32 +138,35 @@ pub fn resolve_handler(name: &str) -> Result<Handler, HandlerError> {
         })
 }
 
-/// Resolve a handler for an install, mapping a refusal onto the install error.
+/// Resolve a handler for an install, mapping a refusal onto the section error.
 ///
 /// # Errors
 ///
-/// [`InstallError::HandlerNotAllowed`].
-pub fn check_handler(name: &str) -> Result<Handler, InstallError> {
-    resolve_handler(name).map_err(|e| InstallError::HandlerNotAllowed(e.to_string()))
+/// [`SectionError`] naming the part and the reason.
+pub fn check_handler(name: &str) -> Result<Handler, SectionError> {
+    resolve_handler(name).map_err(|e| SectionError {
+        part: "handler".to_owned(),
+        why: e.to_string(),
+    })
 }
 
-/// The run backend an install binds, from the document and the section.
+/// The run backend an install binds, from the document and the set.
 ///
 /// The two inputs answer two different questions, and both are recorded:
 ///
 /// - **Which runner** runs the topic's paid jobs is the **signed document's**
-///   answer (`constraints.params`). The section cannot override it: the
-///   signature is what the scoring path trusts.
-/// - **Which handler family** the install bound is the **section's** answer,
-///   and it must be on the allow-list. It is audit information — the family
-///   is what an operator baked into the guest image — so it is recorded even
+///   answer (`constraints.params`). The set cannot override it: the signature
+///   is what the scoring path trusts.
+/// - **Which handler family** the install bound is the **set's** answer, and
+///   it must be on the allow-list. It is audit information — the family is
+///   what an operator baked into the guest image — so it is recorded even
 ///   when the document also names a runner, because a Harbor topic and a
 ///   generic in-guest topic are operationally different and the journal
 ///   should say which one this is.
 ///
-/// Both resolve to the same [`proof_rlm::VmBackedRunner`] over the topic-VM
-/// orchestrator; the family never selects a second code path here, and it can
-/// never name a binary.
+/// Both resolve to the same `VmBackedRunner` over the topic-VM orchestrator;
+/// the family never selects a second code path here, and it can never name a
+/// binary.
 #[must_use]
 pub fn bound_runner(
     document_runner: Option<&str>,
@@ -174,4 +176,50 @@ pub fn bound_runner(
         document_runner.map(str::to_owned),
         handler.unwrap_or(Handler::VmBacked),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn handler_names_are_allow_listed_not_arbitrary() {
+        assert_eq!(resolve_handler("vm_backed"), Ok(Handler::VmBacked));
+        assert_eq!(resolve_handler("vm_backed_runner"), Ok(Handler::VmBacked));
+        assert_eq!(resolve_handler("harbor"), Ok(Handler::Harbor));
+        assert_eq!(resolve_handler("Harbor_Trials"), Ok(Handler::Harbor));
+        for bad in [
+            "/bin/sh",
+            "sh -c 'curl x | sh'",
+            "https://evil.invalid/payload",
+            "some_path/binary",
+            "",
+        ] {
+            let err = resolve_handler(bad).expect_err(bad);
+            assert!(
+                matches!(err, HandlerError::NotAnIdentifier { .. }),
+                "{bad:?}: {err:?}"
+            );
+        }
+        // A well-formed id this build does not resolve is a *different*
+        // refusal from a path or a command line: one is "not a name", the
+        // other is "not one of ours".
+        let err = resolve_handler("arbitrary_binary").expect_err("not allowed");
+        assert!(matches!(err, HandlerError::NotAllowed { .. }), "{err:?}");
+        assert!(err.to_string().contains("vm_backed"), "{err}");
+        assert!(allowed_list().contains("harbor_trials"));
+        assert_eq!(Handler::ALL.len(), 2);
+        assert_eq!(Handler::Harbor.as_str(), "harbor");
+    }
+
+    #[test]
+    fn the_document_names_the_runner_and_the_set_names_the_family() {
+        assert_eq!(
+            bound_runner(Some("adaptor-v1"), Some(Handler::Harbor)),
+            (Some("adaptor-v1".to_owned()), Handler::Harbor)
+        );
+        assert_eq!(bound_runner(None, None), (None, Handler::VmBacked));
+    }
 }

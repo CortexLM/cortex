@@ -37,7 +37,7 @@ use proof_experiment::{ExperimentBinding, RunPolicy};
 use proof_results::load_evaluate;
 use proof_rlm::{
     ArtifactFile, Checklist, CustomRunReport, CustomRunRequest, InspectOutcome, LogFile, RuleSet,
-    RunOutcome, RUN_REPORT_SCHEMA,
+    RunOutcome, TopicAuthoring, RUN_REPORT_SCHEMA,
 };
 use proof_task::{ChecklistRule, TopicDocument};
 use serde::Deserialize;
@@ -100,6 +100,8 @@ pub mod env {
     pub const RULES_FILE: &str = "PROOF_RULES_FILE";
     /// Signed topic JSON (`propose_rules`).
     pub const TOPIC_FILE: &str = "PROOF_TOPIC_FILE";
+    /// Rule version the RLM is superseding (`propose_rules`; empty = none).
+    pub const CURRENT_RULES_VERSION: &str = "PROOF_CURRENT_RULES_VERSION";
     /// Prefix of one variable per `constraints.params` entry.
     pub const PARAM_PREFIX: &str = "PROOF_PARAM_";
 }
@@ -113,6 +115,9 @@ pub const MAX_TAIL_BYTES: usize = 64 * 1024;
 pub const STREAM_TAIL_BYTES: usize = MAX_TAIL_BYTES / 2;
 /// Largest `report.json` / `checklist.json` / `rules.json` read back.
 pub const MAX_OUTPUT_DOC_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The file the RLM writes its whole authored set to (`ProposeRules`).
+pub const AUTHORING_FILE: &str = "authoring.json";
 /// Deadline for jobs that carry none (`ProposeRules`).
 pub const DEFAULT_UNPAID_DEADLINE: Duration = Duration::from_mins(30);
 /// Host kills the process this long after its own deadline; the guest cuts
@@ -698,6 +703,12 @@ pub(crate) fn persist_work(root: &Path) -> Result<(), String> {
 }
 
 fn read_output_doc<T: for<'de> Deserialize<'de>>(path: &Path, what: &str) -> Result<T, String> {
+    let body = read_output_text(path, what)?;
+    serde_json::from_str(&body).map_err(|e| format!("{what} did not parse: {e}"))
+}
+
+/// Read a bounded output document as text (the parse is the caller's).
+fn read_output_text(path: &Path, what: &str) -> Result<String, String> {
     let meta = std::fs::metadata(path)
         .map_err(|_| format!("adaptor wrote no {what} ({})", path.display()))?;
     if meta.len() > MAX_OUTPUT_DOC_BYTES {
@@ -706,8 +717,7 @@ fn read_output_doc<T: for<'de> Deserialize<'de>>(path: &Path, what: &str) -> Res
             meta.len()
         ));
     }
-    let body = std::fs::read_to_string(path).map_err(|e| format!("read {what}: {e}"))?;
-    serde_json::from_str(&body).map_err(|e| format!("{what} did not parse: {e}"))
+    std::fs::read_to_string(path).map_err(|e| format!("read {what}: {e}"))
 }
 
 /// The job's work + output directories, owned by the user adaptors run as
@@ -972,26 +982,59 @@ pub async fn inspect(
 /// RLM-authored rules.
 pub const NO_RLM_RULES: &str = "the topic's runner ships no propose_rules entrypoint, so the RLM authored no rules: the signed checklist is the operator's vector (source topic_document), never a substitute for RLM authorship";
 
-/// Rule proposal: **only** the adaptor's `propose_rules`.
+/// Why a rules-only proposal cannot open a topic.
 ///
-/// The topic's RLM authors its own anti-cheat vector inside its VM. This
-/// function therefore has **no** fallback to the signed document's
-/// `checklist`: echoing the operator's vector back would let the control plane
-/// record rules the RLM never wrote as [`proof_rlm::RuleSource::Rlm`], which
-/// is the operator-cloned document masquerading as RLM authorship. A topic
-/// whose runner ships no `propose_rules` entrypoint is `Failed` (503, no row,
-/// nothing scored) — never silently scored under the operator's own rules.
+/// A topic's behavior is authored by its RLM in full: the rule vector, the SQL
+/// migrations it needs, the routes it exposes, its submission format, and the
+/// pin policy it tightens. An adaptor that writes only `rules.json` has
+/// authored one part of five, and the host refuses to fill the rest in — from
+/// the operator's bundle or from anywhere else — because that is exactly the
+/// operator-cloned document the authorship pin exists to refuse.
+pub const RULES_ONLY_IS_NOT_AUTHORSHIP: &str = "the runner wrote rules.json but no authoring.json: a topic's behavior is authored by its own RLM (rules, migrations, apis, submission_format, pin_policy), and a rules-only proposal is not that. Ship an adaptor whose propose_rules writes authoring.json; nothing is installed from the operator's bundle in its place";
+
+/// What the RLM authored, as the guest read it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AuthoredSet {
+    /// The full set, from `authoring.json`.
+    Complete(Box<TopicAuthoring>),
+    /// A rules-only proposal, from `rules.json` (an older adaptor).
+    RulesOnly(Vec<ChecklistRule>),
+}
+
+/// The RLM authors its whole set inside its VM: **only** the adaptor's
+/// `propose_rules`.
+///
+/// The topic's RLM writes every part of its own behavior there. This function
+/// therefore has **no** fallback to the signed document's `checklist` or to
+/// anything else the operator wrote: echoing the operator's vector back would
+/// let the control plane record parts the RLM never wrote as
+/// [`proof_rlm::RuleSource::Rlm`], which is the operator-cloned document
+/// masquerading as RLM authorship. A topic whose runner ships no
+/// `propose_rules` entrypoint is `Failed` (503, no row, nothing scored) —
+/// never silently scored under the operator's own rules.
 ///
 /// The signed `checklist` remains the topic's **version 1**
 /// ([`proof_rlm::RuleSet::from_topic`], source `topic_document`) and keeps its
 /// honest provenance; only a run of this entrypoint advances the store to
 /// `rlm`.
+///
+/// Two output shapes are read, and the difference matters:
+///
+/// - `authoring.json` — the whole set ([`AuthoredSet::Complete`]). This is
+///   what a topic that must **open** needs.
+/// - `rules.json` — a bare vector ([`AuthoredSet::RulesOnly`]), kept because
+///   an adaptor baked before the set existed still writes it. The host
+///   records the rules with honest `rlm` provenance and refuses to open the
+///   topic, naming the missing parts
+///   ([`RULES_ONLY_IS_NOT_AUTHORSHIP`]) — it does not widen a rules-only
+///   answer into a whole set, because the parts it would fill in would be the
+///   operator's.
 pub async fn propose_rules(
     cfg: &GuestConfig,
     topic: &TopicDocument,
     current_version: Option<u32>,
     work: &Path,
-) -> Result<Vec<ChecklistRule>, String> {
+) -> Result<AuthoredSet, String> {
     let binding = Adaptor::binding_of(&topic.constraints.params)?;
     let adaptor = binding.and_then(|b| Adaptor::installed(&cfg.runners_dir, b).ok());
     let Some(entry) = adaptor
@@ -1026,7 +1069,7 @@ pub async fn propose_rules(
             secret_names(&cfg.secrets_dir).join(","),
         ),
         (
-            "PROOF_CURRENT_RULES_VERSION".to_owned(),
+            env::CURRENT_RULES_VERSION.to_owned(),
             current_version.map_or(String::new(), |v| v.to_string()),
         ),
     ];
@@ -1035,6 +1078,38 @@ pub async fn propose_rules(
     let exec = exec(cfg, &entry, vars, work, DEFAULT_UNPAID_DEADLINE).await?;
     if exec.timed_out {
         return Err("propose_rules cut at its deadline".into());
+    }
+    // The whole set is what a topic's behavior is. Read it first: an adaptor
+    // that writes it is authoring, and one that writes only rules is
+    // proposing a fragment.
+    let authoring_path = output.join(AUTHORING_FILE);
+    if authoring_path.is_file() {
+        let body = read_output_text(&authoring_path, AUTHORING_FILE).map_err(|e| {
+            format!(
+                "{e} ({})",
+                describe(&exec, &secrets, DEFAULT_UNPAID_DEADLINE.as_secs())
+            )
+        })?;
+        let mut set =
+            proof_rlm::authoring_from_json(&body).map_err(|e| format!("{AUTHORING_FILE}: {e}"))?;
+        if set.topic_id.trim() != topic.id.trim() {
+            return Err(format!(
+                "{AUTHORING_FILE} is for topic {:?}, this VM is bound to {:?}",
+                set.topic_id, topic.id
+            ));
+        }
+        // The guest holds the set to the same checks the control plane runs,
+        // minus the pin (which it does not have): shape, the migration
+        // deny-list, and the policy against the document's own knobs.
+        set.validate(&topic.id)
+            .map_err(|e| format!("{AUTHORING_FILE}: {e}"))?;
+        set.pin_policy
+            .tightens_document(topic)
+            .map_err(|e| format!("{AUTHORING_FILE}: {e}"))?;
+        for rule in &mut set.rules {
+            rule.text = redact(&rule.text, &secrets);
+        }
+        return Ok(AuthoredSet::Complete(Box::new(set)));
     }
     let mut rules: Vec<ChecklistRule> = read_output_doc(&output.join("rules.json"), "rules.json")
         .map_err(|e| {
@@ -1047,7 +1122,7 @@ pub async fn propose_rules(
         r.text = redact(&r.text, &secrets);
     }
     validate_rules(&rules).map_err(|e| format!("rules.json {}: {}", e.field, e.why))?;
-    Ok(rules)
+    Ok(AuthoredSet::RulesOnly(rules))
 }
 
 #[cfg(test)]

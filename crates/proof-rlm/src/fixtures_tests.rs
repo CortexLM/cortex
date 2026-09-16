@@ -36,6 +36,7 @@ use crate::vm::{
     RetainPolicy, TopicVmOrchestrator, TopicVmSpec, VmError, VmHandle, VmJob, VmJobOutput,
     VmTemplate,
 };
+use proof_topic_authoring::TopicAuthoring;
 
 /// Pin with a topic key and a judge model (no digest unless asked).
 pub fn pin() -> ProofPin {
@@ -215,6 +216,13 @@ pub struct FakeOrchestrator {
     job_delay: Mutex<std::time::Duration>,
     teardowns: Mutex<Vec<(VmHandle, RetainPolicy)>>,
     proposed: Mutex<Vec<ChecklistRule>>,
+    /// Whether `ProposeRules` answers with the whole authored set (the shape a
+    /// current adaptor writes) or with a bare rule vector (an adaptor baked
+    /// before the set existed). The latter is a *fragment*, which the driver
+    /// refuses to treat as authorship.
+    authored_complete: AtomicBool,
+    /// The set the fake RLM authors, when it authors one.
+    authored: Mutex<Option<TopicAuthoring>>,
 }
 
 impl FakeOrchestrator {
@@ -237,7 +245,23 @@ impl FakeOrchestrator {
                 id: "rlm_rule".into(),
                 text: "a rule the fake rlm wrote".into(),
             }]),
+            authored_complete: AtomicBool::new(true),
+            authored: Mutex::new(None),
         })
+    }
+
+    /// Answer `ProposeRules` with a bare rule vector instead of the whole
+    /// authored set — the shape an adaptor baked before the set existed
+    /// writes. The driver records the rules and refuses to treat the topic as
+    /// set up, naming the parts that have no author.
+    pub fn set_rules_only(&self, v: bool) {
+        self.authored_complete.store(!v, Ordering::SeqCst);
+    }
+
+    /// The set the fake RLM authors (default: one built from the topic the
+    /// job carries, with placeholder parts).
+    pub fn set_authored(&self, set: Option<TopicAuthoring>) {
+        *self.authored.lock().unwrap() = set;
     }
 
     /// How long each job takes, so a test can make concurrent jobs overlap.
@@ -402,7 +426,16 @@ impl TopicVmOrchestrator for FakeOrchestrator {
             return Err(VmError::Backend("guest: injected run failure".into()));
         }
         Ok(match job {
-            VmJob::ProposeRules { .. } => VmJobOutput::Rules(self.proposed.lock().unwrap().clone()),
+            VmJob::ProposeRules { ref topic, .. } => {
+                if self.authored_complete.load(Ordering::SeqCst) {
+                    let set = self.authored.lock().unwrap().clone().unwrap_or_else(|| {
+                        authored_set(topic, self.proposed.lock().unwrap().clone())
+                    });
+                    VmJobOutput::Authored(Box::new(set))
+                } else {
+                    VmJobOutput::Rules(self.proposed.lock().unwrap().clone())
+                }
+            }
             VmJob::Baseline { request } => VmJobOutput::Baseline(self.report(&request)),
             VmJob::Inspect { request, rules } => {
                 let red = self.red.lock().unwrap().clone();
@@ -463,4 +496,38 @@ pub fn experiment_request(vcpus: Option<u32>) -> CustomRunRequest {
         params.insert(proof_experiment::PARAM_VCPUS.into(), n.to_string());
     }
     req
+}
+
+/// The whole set a fake RLM authors for `topic`: placeholder parts, every one
+/// present, shaped exactly like the document it was handed.
+///
+/// The **rules** come from `rules`, so a test that sets
+/// [`FakeOrchestrator::set_proposed`] still controls the vector the RLM
+/// authored — which is what makes "the RLM's own rules, not the document's"
+/// observable. The other parts are placeholders: a set is only meaningful as
+/// a whole, and a test that cares about one of them sets it explicitly with
+/// [`FakeOrchestrator::set_authored`].
+pub fn authored_set(topic: &TopicDocument, rules: Vec<ChecklistRule>) -> TopicAuthoring {
+    use proof_topic_authoring::{AuthoredApi, AuthoredMigration, PinPolicy};
+    TopicAuthoring {
+        schema_version: proof_topic_authoring::AUTHORING_SCHEMA,
+        topic_id: topic.id.clone(),
+        rules,
+        migrations: vec![AuthoredMigration {
+            name: "0001_scratch".into(),
+            sql: format!(
+                "CREATE TABLE {}_scratch (id TEXT)",
+                topic.id.replace('-', "_")
+            ),
+        }],
+        apis: vec![AuthoredApi {
+            path: "status".into(),
+            method: "GET".into(),
+            summary: "topic status".into(),
+        }],
+        submission_format: serde_json::json!({"kind": "tar", "max_bytes": 5_242_880}),
+        // A policy that tightens nothing is still a policy: the part is
+        // present, and it is the RLM's answer rather than a gap.
+        pin_policy: PinPolicy::none(),
+    }
 }

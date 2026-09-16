@@ -9,10 +9,10 @@
 //!
 //! ```text
 //! # 1. What did the RLM measure, and what must the open document seal?
-//! proof-admin topic baseline tb4
+//! proof-admin topic baseline <topic-id>
 //!
 //! # 2. Sign the open document carrying that commitment, then:
-//! proof-admin topic seal tb4 --document open.json --publish \
+//! proof-admin topic seal <topic-id> --document open.json --publish \
 //!   --admin-url https://<gateway> --admin-token-file /run/base/proof/admin_tokens
 //! ```
 //!

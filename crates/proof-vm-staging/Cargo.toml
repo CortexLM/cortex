@@ -1,0 +1,23 @@
+[package]
+name = "proof-vm-staging"
+description = "What the Proof topic-VM host stages into a guest: owner key material (tmpfs), the pinned experiment pack (writable disk), a miner artefact inject (proof-artefact://), and the miner BYOK vault — by name-checked files only, every one verified against a digest before it is used. It moved out of the guest crate so the guest keeps room under the repository's per-crate LOC cap while the RLM authoring path grows."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+hex = "0.4"
+proof-canon = { path = "../proof-canon" }
+proof-experiment = { path = "../proof-experiment" }
+proof-vm-proto = { path = "../proof-vm-proto" }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+
+[dev-dependencies]
+
+[lints]
+workspace = true

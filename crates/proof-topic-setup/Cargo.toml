@@ -14,6 +14,7 @@ proof-rlm = { path = "../proof-rlm" }
 proof-rlm-store = { path = "../proof-rlm-store" }
 proof-score = { path = "../proof-score" }
 proof-task = { path = "../proof-task" }
+proof-topic-authoring = { path = "../proof-topic-authoring" }
 thiserror = "2"
 
 [dev-dependencies]

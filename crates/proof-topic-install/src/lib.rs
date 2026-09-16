@@ -15,13 +15,14 @@
 //! | Gate | What it refuses |
 //! |------|-----------------|
 //! | [`proof_topic_sql_guard`] | a migration that names a `proof_*` object, a role, the sqlx bookkeeping table, or any object outside the topic's own namespace; `DROP DATABASE` / `SCHEMA` / `ROLE`; privilege changes; server-side file access; `SECURITY DEFINER` |
-//! | [`handler`] | a handler that is not an allow-listed run backend — never a path, a URL, or a command line |
+//! | `proof_topic_authoring::handler` | a handler that is not an allow-listed run backend — never a path, a URL, or a command line |
 //!
 //! Both gates run **before** anything is applied, and both refuse on doubt.
 //!
 //! # Where the pieces live
 //!
-//! - [`section`] reads the RLM section's parts strictly, and carries the rest.
+//! - the section reader (`proof_topic_authoring::section`) reads a set's
+//!   parts strictly, and carries the rest.
 //! - [`install`] is the engine: migrations, routes, rules, binding, journal.
 //! - [`routes`] is the **read** side of the routes an install recorded: the
 //!   dynamic mux the challenge answers `/challenge/{topic_id}/…` from, behind
@@ -32,7 +33,7 @@
 //! - [`proof_topic_sql_guard`] is the migration deny-list (its own crate: it
 //!   is pure text analysis, and keeping it separate means it can be reasoned
 //!   about — and tested — without a database).
-//! - [`handler`] is the run-backend allow-list.
+//! - the run-backend allow-list (`proof_topic_authoring::handler`).
 //!
 //! # What this crate does not do
 //!
@@ -52,13 +53,10 @@
 )]
 
 pub mod gate;
-pub mod handler;
 pub mod install;
 pub mod routes;
-pub mod section;
 
 pub use gate::{disable, disabled, disabled_topics, enable, gate, set, Gate, GateState};
-pub use handler::{bound_runner, check_handler, resolve_handler, Handler, HandlerError};
 pub use install::{
     applied_install, install_history, installed_rules, is_installed, latest_install,
     rlm_authored_rules, rules_source, topic_routes, ExecutorBinding, InstallReport, InstallRequest,
@@ -71,8 +69,13 @@ pub use proof_topic_sql_guard::{
     DENIED_OBJECTS, DENIED_VERBS, OWNED_TABLES, OWNED_TABLE_PREFIX,
 };
 pub use routes::{is_topic_id, PgTopicRoutes, Resolved, TopicRouteMux, TopicRouteSource};
-pub use section::{
-    is_api_method, is_relative_api_path, is_reserved_api_path, read_section, ApiRoute, Migration,
+// The set reader and the handler allow-list moved to `proof-topic-authoring`,
+// where the guest can link them too (it has no database, so it cannot link
+// this crate). Re-exported so every existing path keeps working, and so both
+// sides validate an RLM's answer through the same code.
+pub use proof_topic_authoring::{
+    bound_runner, check_handler, is_api_method, is_relative_api_path, is_reserved_api_path,
+    read_section, resolve_handler, ApiRoute, Handler, HandlerError, Migration, SectionError,
     SectionPlan, MAX_APIS, MAX_MIGRATIONS, MAX_MIGRATION_SQL_BYTES, READ_KEYS,
     RESERVED_API_PREFIXES,
 };
@@ -141,14 +144,9 @@ pub enum InstallError {
         /// The ids this host registers.
         registered: Vec<String>,
     },
-    /// A part of the RLM section is malformed or carries an unknown key.
-    #[error("rlm.{part}: {why}")]
-    Section {
-        /// Which part (`migrations[0]`, `apis`, `rules`, …).
-        part: String,
-        /// What is wrong.
-        why: String,
-    },
+    /// A part of the authored set is malformed or carries an unknown key.
+    #[error("{0}")]
+    Section(#[from] proof_topic_authoring::SectionError),
     /// The rule vector was refused by the shared shape check.
     #[error("rules: {0}")]
     Rules(String),
@@ -158,6 +156,9 @@ pub enum InstallError {
     /// The database refused.
     #[error("db: {0}")]
     Db(String),
+    /// The set the topic's RLM authored was refused.
+    #[error("authored set: {0}")]
+    Authoring(String),
 }
 
 #[cfg(test)]

@@ -16,6 +16,7 @@ proof-results = { path = "../proof-results" }
 proof-rlm = { path = "../proof-rlm" }
 proof-task = { path = "../proof-task" }
 proof-vm-proto = { path = "../proof-vm-proto" }
+proof-vm-staging = { path = "../proof-vm-staging" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

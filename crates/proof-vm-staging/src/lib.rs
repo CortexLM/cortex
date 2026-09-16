@@ -2,6 +2,19 @@
 //! experiment pack (writable disk), and a miner artefact inject
 //! (`proof-artefact://`, held for the next job), all by name-checked files
 //! only.
+//!
+//! This module moved out of `proof-vm-guest` (where it was `staging`) so that
+//! crate keeps room under the repository's per-crate LOC cap while the RLM
+//! authoring path grows. The code is unchanged; the lint posture is the one
+//! the guest crate set for it, because every refusal here is a `String` that
+//! the caller turns into a job failure rather than a typed error.
+
+#![forbid(unsafe_code)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::module_name_repetitions,
+    clippy::must_use_candidate
+)]
 
 use std::path::{Path, PathBuf};
 

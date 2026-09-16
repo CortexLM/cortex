@@ -43,19 +43,43 @@ pub struct DriveOutcome {
     pub vm_id: String,
     /// The lifecycle state the driver left the topic in.
     pub state: String,
+    /// The whole set the RLM authored — the topic's behavior, which the
+    /// install applies in place of the bundle's section.
+    ///
+    /// `None` means the run returned a bare rule vector. The drive **refuses**
+    /// before returning in that case ([`SetupError::IncompleteAuthoring`]),
+    /// so an outcome with `authored: None` is only reachable from a run that
+    /// stopped earlier — and the install then falls back to the operator's
+    /// section, whose `topic_document` provenance the publish gate refuses to
+    /// open a topic on.
+    pub authored: Option<Box<proof_topic_authoring::TopicAuthoring>>,
 }
 
 impl DriveOutcome {
     /// One-line summary for the operator.
     #[must_use]
     pub fn summary(&self) -> String {
+        let parts = match &self.authored {
+            Some(set) => format!(
+                ", authoring {} ({} migrations, {} apis, pin policy {})",
+                set.digest(),
+                set.migrations.len(),
+                set.apis.len(),
+                if set.pin_policy.is_empty() {
+                    "none"
+                } else {
+                    "set"
+                }
+            ),
+            None => ", no authored set".to_owned(),
+        };
         match self.baseline_primary {
             Some(v) => format!(
-                "the RLM wrote rules v{} and measured a baseline of {v} on vm {}",
+                "the RLM wrote rules v{} and measured a baseline of {v} on vm {}{parts}",
                 self.rules_version, self.vm_id
             ),
             None => format!(
-                "the RLM wrote rules v{} on vm {} (no baseline: --skip-baseline)",
+                "the RLM wrote rules v{} on vm {} (no baseline: --skip-baseline){parts}",
                 self.rules_version, self.vm_id
             ),
         }
@@ -255,5 +279,6 @@ fn outcome_summary(outcome: SetupOutcome) -> DriveOutcome {
         } else {
             "baselining (no baseline measured: --skip-baseline)".to_owned()
         },
+        authored: outcome.authored,
     }
 }

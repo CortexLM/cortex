@@ -6,7 +6,7 @@
 //! exposes are the ones its install recorded — never a compiled-in list.
 //!
 //! A stored path is **relative** to the topic's own prefix
-//! ([`crate::section::is_relative_api_path`]), so the resolver owns the
+//! ([`proof_topic_authoring::is_relative_api_path`]), so the resolver owns the
 //! prefix and a row cannot carry an absolute path out of its topic's
 //! namespace.
 //!
@@ -43,8 +43,8 @@ use std::sync::{Arc, PoisonError, RwLock};
 use async_trait::async_trait;
 use sqlx::PgPool;
 
-use crate::section::ApiRoute;
 use crate::InstallError;
+use proof_topic_authoring::ApiRoute;
 
 /// Whether `id` has the shape of a topic id.
 ///
@@ -169,7 +169,7 @@ impl TopicRouteMux {
     /// resolves.
     ///
     /// A path inside the challenge's admin namespace
-    /// ([`crate::section::is_reserved_api_path`]) is never served, whatever
+    /// ([`proof_topic_authoring::is_reserved_api_path`]) is never served, whatever
     /// the table holds: the install refuses to record one, and this is the
     /// read-side half for a row that predates that rule.
     ///
@@ -187,7 +187,7 @@ impl TopicRouteMux {
             return Ok(Resolved::NotRegistered);
         }
         let path = path.trim().trim_matches('/');
-        if crate::section::is_reserved_api_path(path) {
+        if proof_topic_authoring::is_reserved_api_path(path) {
             return Ok(Resolved::NotRegistered);
         }
         let routes = self.routes(topic_id).await?;

@@ -24,17 +24,24 @@
 //! [`RlmSection`]: its anti-cheat **rules**, the **SQL migrations** it needs,
 //! the **APIs** it exposes, its **submission format**, and its **scoring**.
 //!
-//! **Authorship is narrower than ownership.** The section is *topic-owned
-//! data*: Rust never interprets it, and it travels in the bundle. What the
-//! RLM **authors at runtime** today is the **rule vector** — it is asked to
-//! `propose_rules` inside its topic VM, and its answer becomes the version in
-//! force (`proof_rule_version.source = 'rlm'`, the gate an `open` document
-//! must pass). The `migrations` and `apis` parts are written by whoever
-//! authors the bundle and applied verbatim by the install; the RLM has no job
-//! that emits them and no wire message that could carry one
-//! (`the_rlm_authors_rules_and_the_bundle_carries_migrations_and_apis` pins
-//! that boundary, so a change making the RLM write schema or routes fails a
-//! test rather than silently outdating this paragraph).
+//! **Authorship is the RLM's; this section is the operator's declaration.**
+//! The section is *topic-owned data*: Rust never interprets it, and it travels
+//! in the bundle. But a topic's behavior is **authored by its own RLM**, which
+//! is asked to `propose_rules` inside its topic VM and answers with the whole
+//! set — rules, migrations, APIs, submission format, and the pin policy it
+//! tightens (`proof_topic_authoring::TopicAuthoring`). When the driver gets
+//! that set, **the install applies it and not this section**: the RLM's answer
+//! supersedes the operator's declaration, and the journal records `rlm` as the
+//! author of every part.
+//!
+//! The section is still what an install applies when the RLM has authored
+//! nothing yet (or only a rule vector), and then its provenance is honestly
+//! `topic_document` — the operator's signed declaration — which is exactly
+//! what the publish gate refuses to open a topic on. So the section is the
+//! **declaration of intent** an operator writes, and the RLM's set is the
+//! topic. `the_rlm_authors_the_whole_set_not_just_rules` pins that boundary,
+//! so a change to what the RLM can author fails a test rather than silently
+//! outdating this paragraph.
 //!
 //! Rust never interprets any of it. This crate checks the section's *shape*
 //! (an object, bounded) and carries it byte-for-byte; it does not know what a
@@ -1602,31 +1609,29 @@ mod tests {
         out
     }
 
-    /// What the RLM actually authors, and what it does not — the boundary the
-    /// docs must not overclaim.
+    /// What the RLM authors: **all five parts** of a topic's behavior, in one
+    /// job, as one document.
     ///
-    /// The RLM is asked to `ProposeRules` and answers `Rules`; that is the
-    /// **only** part of a topic's behavior it writes today. A topic's
-    /// `migrations` and `apis` travel in the operator's bundle `rlm` section
-    /// ([`SectionPlan`]) and are applied by the install — the RLM has no job
-    /// that emits them and no wire message that could carry one.
+    /// The RLM is asked to `ProposeRules` and answers `Authored(TopicAuthoring)`
+    /// — the rule vector, the SQL migrations, the routes the topic exposes,
+    /// its submission format, and the pin policy it tightens. The install
+    /// applies them through exactly the gates an operator's bundle goes
+    /// through, and the journal records the author of every part.
     ///
-    /// This is pinned because the prose around this crate says "the bundle's
-    /// `rlm` section (rules / migrations / apis / …) is handed to the RLM",
-    /// which reads as authorship of all five parts. It is not: the section is
-    /// *topic-owned data* that Rust never interprets, and the **rules** are
-    /// additionally *RLM-authored* at runtime (`RuleSource::Rlm`, the gate
-    /// `open` must pass). Migrations and APIs are authored by whoever writes
-    /// the bundle, and are applied verbatim.
+    /// This guard used to assert the **opposite** boundary: that the RLM
+    /// authored rules only, with migrations and APIs travelling in the
+    /// operator's bundle. That was true, and it was the gap the authorship
+    /// pin named. The test flipped with the code — which is what it was for:
+    /// its doc comment said "if a later change lets the RLM emit them, this
+    /// test fails and the docs get to claim it", so the change that let the
+    /// RLM emit them is the change that rewrote it.
     ///
     /// The check is structural, not textual: it reads the job/output enums
-    /// that define the boundary and asserts no variant carries a migration or
-    /// an API. If a later change lets the RLM emit them, this test fails and
-    /// the docs get to claim it.
+    /// that define the boundary, and the authoring crate's own part list.
     #[test]
-    fn the_rlm_authors_rules_and_the_bundle_carries_migrations_and_apis() {
+    fn the_rlm_authors_the_whole_set_not_just_rules() {
         const JOBS: &str = include_str!("../../proof-rlm/src/vm.rs");
-        const SECTION: &str = include_str!("../../proof-topic-install/src/section.rs");
+        const AUTHORING: &str = include_str!("../../proof-topic-authoring/src/lib.rs");
 
         // This test reads the **whole** file up to the first `#[cfg(test)]`,
         // not [`production_logic`]: that helper tracks brace depth to drop
@@ -1650,10 +1655,14 @@ mod tests {
                 "the RLM job surface still carries {job}; this guard is reading the wrong file"
             );
         }
-        // …and the only thing it can hand back about behavior is rules.
+        // …and what it hands back about behavior is the whole authored set.
+        assert!(
+            jobs.contains("Authored(Box<TopicAuthoring>)"),
+            "the RLM returns the topic's whole authored set; this guard is reading the wrong file"
+        );
         assert!(
             jobs.contains("Rules(Vec<ChecklistRule>)"),
-            "the RLM still returns a rule vector"
+            "the rules-only output survives for an adaptor that writes only rules.json"
         );
 
         // **Allow-list, not deny-list.** A denylist of names this test
@@ -1668,27 +1677,43 @@ mod tests {
         assert_eq!(
             variants,
             ["ProposeRules", "Baseline", "Inspect", "Evaluate", "Archive"],
-            "the RLM job surface changed: it authors more than rules, so the docs may claim it — \
-             add the variant here deliberately (and update the prose) rather than widening the \
-             boundary silently"
+            "the RLM job surface changed: add the variant here deliberately (and update the \
+             prose) rather than widening the boundary silently"
         );
         let outputs = enum_variants(&jobs, "pub enum VmJobOutput");
         assert_eq!(
             outputs,
-            ["Rules", "Baseline", "Inspected", "Evaluated", "Archived"],
+            [
+                "Authored",
+                "Rules",
+                "Baseline",
+                "Inspected",
+                "Evaluated",
+                "Archived"
+            ],
             "the RLM output surface changed: a new output is a new thing the RLM can author, so \
              the docs may claim it — add it here deliberately"
         );
 
-        // Migrations and APIs are the install section's, applied by the
-        // install, authored by whoever writes the bundle.
-        let section = head(SECTION);
-        for part in ["migrations: Vec<Migration>", "apis: Vec<ApiRoute>"] {
+        // The five parts, named where the boundary is enforced: the authoring
+        // crate is the one description of them, and every part is required.
+        let authoring = head(AUTHORING);
+        for part in [
+            "rules",
+            "migrations",
+            "apis",
+            "submission_format",
+            "pin_policy",
+        ] {
             assert!(
-                section.contains(part),
-                "the install section still supplies {part}; this guard is reading the wrong file"
+                authoring.contains(&format!("\"{part}\"")),
+                "the authored set still carries {part}; this guard is reading the wrong file"
             );
         }
+        assert!(
+            authoring.contains("pub fn missing_parts"),
+            "the completeness gate is what makes a half-authored set a refusal"
+        );
 
         // The extractor is not vacuous: it finds a known enum's variants and
         // refuses to guess when the enum is absent.
@@ -1724,7 +1749,7 @@ mod tests {
     /// module. Running the same sources through the structural strip here
     /// means a literal hidden after such a marker is caught even if the
     /// crate-local guard misses it.
-    const PRODUCT_MODULES: [(&str, &str); 32] = [
+    const PRODUCT_MODULES: [(&str, &str); 33] = [
         (
             "proof-challenge/src/topic_routes.rs",
             include_str!("../../proof-challenge/src/topic_routes.rs"),
@@ -1778,8 +1803,20 @@ mod tests {
             include_str!("../../proof-rlm/src/rules.rs"),
         ),
         (
-            "proof-rlm/src/state.rs",
-            include_str!("../../proof-rlm/src/state.rs"),
+            "proof-rlm-lifecycle/src/lib.rs",
+            include_str!("../../proof-rlm-lifecycle/src/lib.rs"),
+        ),
+        (
+            "proof-topic-authoring/src/lib.rs",
+            include_str!("../../proof-topic-authoring/src/lib.rs"),
+        ),
+        (
+            "proof-topic-authoring/src/section.rs",
+            include_str!("../../proof-topic-authoring/src/section.rs"),
+        ),
+        (
+            "proof-topic-authoring/src/handler.rs",
+            include_str!("../../proof-topic-authoring/src/handler.rs"),
         ),
         (
             "proof-experiment/src/lib.rs",
@@ -1794,20 +1831,12 @@ mod tests {
             include_str!("../../proof-topic-install/src/lib.rs"),
         ),
         (
-            "proof-topic-install/src/handler.rs",
-            include_str!("../../proof-topic-install/src/handler.rs"),
-        ),
-        (
             "proof-topic-install/src/install.rs",
             include_str!("../../proof-topic-install/src/install.rs"),
         ),
         (
             "proof-topic-install/src/routes.rs",
             include_str!("../../proof-topic-install/src/routes.rs"),
-        ),
-        (
-            "proof-topic-install/src/section.rs",
-            include_str!("../../proof-topic-install/src/section.rs"),
         ),
         (
             "proof-topic-install/src/gate.rs",
@@ -1818,8 +1847,8 @@ mod tests {
             include_str!("../../proof-vm-guest/src/fetch.rs"),
         ),
         (
-            "proof-vm-guest/src/staging.rs",
-            include_str!("../../proof-vm-guest/src/staging.rs"),
+            "proof-vm-staging/src/lib.rs",
+            include_str!("../../proof-vm-staging/src/lib.rs"),
         ),
         (
             "proof-vm-agent/src/lib.rs",

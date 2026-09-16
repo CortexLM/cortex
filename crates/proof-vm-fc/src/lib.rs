@@ -575,7 +575,10 @@ impl TopicVmOrchestrator for FirecrackerOrchestrator {
         let claims_sandbox = match &resp.output {
             VmJobOutput::Baseline(r) => r.sandboxed,
             VmJobOutput::Evaluated(run) => run.report.sandboxed,
-            VmJobOutput::Rules(_) | VmJobOutput::Inspected(_) | VmJobOutput::Archived => false,
+            VmJobOutput::Authored(_)
+            | VmJobOutput::Rules(_)
+            | VmJobOutput::Inspected(_)
+            | VmJobOutput::Archived => false,
         };
         if claims_sandbox && !attested {
             return Err(backend(

@@ -23,8 +23,13 @@ use proof_vm_proto::SisterAttestation;
 pub fn output_matches(job: &VmJob, output: &VmJobOutput) -> bool {
     matches!(
         (job, output),
-        (VmJob::ProposeRules { .. }, VmJobOutput::Rules(_))
-            | (VmJob::Baseline { .. }, VmJobOutput::Baseline(_))
+        // An authored set answers a `ProposeRules` job; so does a bare rule
+        // vector, which is what an adaptor that writes only `rules.json`
+        // returns. The host widens the latter into the former.
+        (
+            VmJob::ProposeRules { .. },
+            VmJobOutput::Authored(_) | VmJobOutput::Rules(_)
+        ) | (VmJob::Baseline { .. }, VmJobOutput::Baseline(_))
             | (VmJob::Inspect { .. }, VmJobOutput::Inspected(_))
             | (VmJob::Evaluate { .. }, VmJobOutput::Evaluated(_))
             | (VmJob::Archive { .. }, VmJobOutput::Archived)
@@ -47,7 +52,10 @@ pub fn stamp_output(mut output: VmJobOutput, sister: Option<&SisterAttestation>)
     match &mut output {
         VmJobOutput::Baseline(report) => stamp_report(report, sister),
         VmJobOutput::Evaluated(run) => stamp_report(&mut run.report, sister),
-        VmJobOutput::Rules(_) | VmJobOutput::Inspected(_) | VmJobOutput::Archived => {}
+        VmJobOutput::Authored(_)
+        | VmJobOutput::Rules(_)
+        | VmJobOutput::Inspected(_)
+        | VmJobOutput::Archived => {}
     }
     output
 }

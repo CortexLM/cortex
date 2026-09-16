@@ -28,10 +28,14 @@
 //! 503, and no row is written. A placeholder `primary_value` never leaves
 //! this process.
 //!
-//! One deliberate default exists: `ProposeRules` without a `propose_rules`
-//! entrypoint answers with the signed topic's own `checklist` (v1 of the
-//! rule set is that vector by contract), so a topic whose adaptor writes no
-//! rules still scores under the rules its operator signed.
+//! **No default exists for authorship.** `ProposeRules` is answered only by
+//! the adaptor's own `propose_rules` entrypoint: a runner that ships none is
+//! `Failed`, and one that writes only `rules.json` answers with that fragment
+//! rather than a whole set. The guest never echoes the signed `checklist`
+//! back — that would let the control plane record the operator's vector as
+//! RLM-authored rules — and it never widens a fragment into a set, because
+//! the parts it would fill in are the operator's. What a topic *is* (rules,
+//! migrations, APIs, submission format, pin policy) comes from its own RLM.
 //!
 //! Secrets are files the adaptor reads (`PROOF_SECRETS_DIR`); their bytes
 //! are redacted from every log tail and evidence document the agent sends
@@ -42,7 +46,12 @@
 
 pub mod fetch;
 pub mod runner;
-pub mod staging;
+
+// The staging layer (secrets, pack, artefact inject, BYOK vault) moved to
+// `proof-vm-staging` so this crate keeps room under the per-crate LOC cap
+// while the RLM authoring path grows. Re-exported so every existing path
+// keeps working.
+pub use proof_vm_staging as staging;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,7 +63,7 @@ use proof_vm_proto::{ProtoError, API_VERSION};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 
-pub use runner::{JobKind, RunnerReport};
+pub use runner::{AuthoredSet, JobKind, RunnerReport};
 pub use staging::{StagedArtifact, StagedPack};
 
 /// Agent name reported on `Ready`.
@@ -308,10 +317,22 @@ impl GuestAgent {
             VmJob::ProposeRules {
                 topic,
                 current_version,
+                current: _,
             } => {
                 let work = self.work_dir(JobKind::ProposeRules);
                 let result = runner::propose_rules(&self.cfg, &topic, current_version, &work).await;
-                seal_job(&work, result.map(VmJobOutput::Rules))
+                seal_job(
+                    &work,
+                    result.map(|set| match set {
+                        runner::AuthoredSet::Complete(authored) => VmJobOutput::Authored(authored),
+                        // A rules-only answer is a *fragment*: the host records
+                        // the rules with honest provenance and refuses to open the
+                        // topic, naming the parts the RLM did not author. It is
+                        // never widened here into a whole set, because the parts
+                        // that would fill it are the operator's.
+                        runner::AuthoredSet::RulesOnly(rules) => VmJobOutput::Rules(rules),
+                    }),
+                )
             }
             VmJob::Archive { .. } => {
                 // No work directory and no completion sync. The host
