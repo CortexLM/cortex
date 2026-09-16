@@ -137,13 +137,27 @@ impl MemoryBudget {
                 })
                 .collect();
             let free = ceiling.saturating_sub(used);
+            // The advice has to be reachable. A request larger than the whole
+            // ceiling cannot be made to fit by freeing anything: "retry when
+            // one finishes" would send the operator round a loop that cannot
+            // end, when the only answers are a smaller ask or a bigger host.
+            let remedy = if want > ceiling {
+                format!(
+                    "The ask alone ({want} MiB) is larger than the whole {ceiling} MiB ceiling, \
+                     so freeing a vm cannot make it fit: lower the ask (the signed mem_mib / \
+                     PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB), or run this topic on a host whose \
+                     memory carries it"
+                )
+            } else {
+                "Free a vm, retry when one finishes, or lower the ask (the signed mem_mib / \
+                 PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB)"
+                    .to_owned()
+            };
             return Err(format!(
                 "host memory: {want} MiB requested, {free} MiB free of the {ceiling} MiB VM \
                  ceiling ({total} MiB total − {reserve} MiB reserve); {used} MiB is held by {} \
                  live vm(s) [{}]. The vm was not booted — refusing here keeps the running vms \
-                 alive instead of letting the host OOM-kill them. Free a vm, retry when one \
-                 finishes, or lower the ask (the signed mem_mib / \
-                 PROOF_VM_AGENT_EXPERIMENT_MAX_MEM_MIB)",
+                 alive instead of letting the host OOM-kill them. {remedy}",
                 live.len(),
                 holders.join(", "),
                 total = self.total_mib,
@@ -449,6 +463,44 @@ mod tests {
         assert!(
             err.contains("host memory"),
             "it names the constraint it is about: {err}"
+        );
+    }
+
+    /// A request bigger than the whole ceiling cannot be made to fit by
+    /// freeing anything, so the refusal must not recommend it.
+    ///
+    /// Greptile's P2: with **zero** live VMs the old wording still said "free
+    /// a vm, retry when one finishes", sending an operator round a loop that
+    /// cannot end. The only real answers are a smaller ask or a bigger host.
+    #[test]
+    fn an_impossible_ask_does_not_recommend_freeing_a_vm() {
+        let budget = MemoryBudget {
+            total_mib: 16_384,
+            reserve_mib: 0,
+        };
+        // Nothing is live, and the ask alone is over the ceiling.
+        let err = budget.fits(&[], 32_768).expect_err("cannot fit");
+        assert!(
+            !err.contains("Free a vm") && !err.contains("retry when one finishes"),
+            "freeing a vm cannot help here, so it must not be suggested: {err}"
+        );
+        assert!(
+            err.contains("larger than the whole 16384 MiB ceiling"),
+            "the refusal says why freeing cannot help: {err}"
+        );
+        assert!(
+            err.contains("lower the ask"),
+            "and names the remedy that can work: {err}"
+        );
+
+        // A request that *would* fit on an empty host still gets the normal
+        // advice: the two cases must not be conflated.
+        let roomy = budget
+            .fits(&[vm("tb4-0007", 8_192, false)], 16_384)
+            .expect_err("the topic vm is in the way");
+        assert!(
+            roomy.contains("Free a vm"),
+            "a request that fits an empty host gets the normal advice: {roomy}"
         );
     }
 
