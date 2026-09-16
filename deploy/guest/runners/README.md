@@ -12,6 +12,16 @@ ships under [`rlm_fc_in_guest_harbor/`](rlm_fc_in_guest_harbor/) so operators
 can bake Harbor evaluate with miner artefact attach; it is still selected
 only when a signed topic names that runner id.
 
+**A change here needs a guest rebake to have any effect.** The adaptor is the
+baked image, not the control-plane tip: tipping `proof-challenge` or the
+gateway leaves `/opt/proof/runners` on the old pin, and a missing or older
+entrypoint keeps failing closed (`NO_RLM_RULES` for `propose_rules`,
+`adaptor wrote no results.json` for a stale `run`). Rebake, stage the new
+rootfs on the KVM host, and re-pin `PROOF_RLM_VM_IMAGE_DIGEST` to that
+image's own `sha256sum` — never invent a digest. Runbook:
+[`docs/runbooks/proof-experiment-vms.md`](../../../docs/runbooks/proof-experiment-vms.md)
+§ Guest rebake after runner changes.
+
 This directory holds the **contract** and, when a live gap needs a bakeable
 fix, a reference adaptor directory named after the runner id. The Harbor
 CLI, its venv, and the task pack stay operator content (`--overlay` /
