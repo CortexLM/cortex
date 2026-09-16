@@ -24,10 +24,6 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -38,6 +34,9 @@ use bounty_challenge::{
 use chain::{
     AxonInfo, ChainClient, ChainError, FakeChain, FakeChainConfig, Metagraph, WeightsTlockPayload,
 };
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// `FakeChain` keeps its call log in a `RefCell`; the emitter needs `Sync`.
 struct LockedFake(Mutex<FakeChain>);
@@ -959,11 +958,14 @@ async fn a_held_tick_does_not_claim_a_pin_it_did_not_use() {
 /// a fault.
 ///
 /// The writer alternates between two ticks whose fields differ in *every*
-/// position, so a torn write cannot coincidentally look coherent: a `scored`
-/// snapshot carrying the other tick's `paid`/`participants`/`reason` is
-/// detected immediately.
+/// position, so a snapshot carrying one tick's outcome with the other's counts
+/// is caught. Termination does not depend on which interleaving happens: the
+/// loop is bounded by a hard iteration cap and breaks when the writer finishes,
+/// and the final assertion runs after `join` on a state the last write fixes.
+/// A writer that finishes early therefore ends the test rather than spinning.
 #[tokio::test]
 async fn status_never_pairs_an_outcome_with_another_ticks_counts() {
+    const WRITES: u32 = 200_000;
     let status = Arc::new(EmitterStatus::new(true));
     let scored = EmitterTick {
         kind: EmitterOutcomeKind::Scored,
@@ -991,18 +993,16 @@ async fn status_never_pairs_an_outcome_with_another_ticks_counts() {
     let writer = {
         let status = Arc::clone(&status);
         tokio::task::spawn_blocking(move || {
-            for i in 0..200_000u32 {
+            for i in 0..WRITES {
                 status.record(if i % 2 == 0 { scored } else { unpaid });
             }
         })
     };
 
+    // Read while the writer runs, asserting every snapshot is one whole tick.
+    // The cap makes this terminate even if the writer is descheduled forever.
     let mut snapshots = 0u32;
-    let mut saw_scored = false;
-    let mut saw_unpaid = false;
-    // Keep reading while the writer is live *and* until both states have been
-    // observed, so the test cannot pass by never overlapping the writer.
-    while !(writer.is_finished() && saw_scored && saw_unpaid) {
+    for _ in 0..WRITES {
         let view = status.view();
         match view.last_outcome {
             EmitterOutcomeKind::Scored => {
@@ -1017,7 +1017,6 @@ async fn status_never_pairs_an_outcome_with_another_ticks_counts() {
                     "a scored snapshot must be exactly the scored tick: {view:?}"
                 );
                 assert!(view.last_reason.is_empty(), "{view:?}");
-                saw_scored = true;
             }
             EmitterOutcomeKind::Unpaid => {
                 assert_eq!(
@@ -1031,7 +1030,6 @@ async fn status_never_pairs_an_outcome_with_another_ticks_counts() {
                     "an unpaid snapshot must be exactly the unpaid tick: {view:?}"
                 );
                 assert_eq!(view.last_reason, "nothing payable", "{view:?}");
-                saw_unpaid = true;
             }
             // `Never` is the pre-tick state, and the whole view is published
             // under one lock, so it can only be observed with `ticks: 0` —
@@ -1047,15 +1045,113 @@ async fn status_never_pairs_an_outcome_with_another_ticks_counts() {
             other => panic!("no other outcome was ever recorded: {other:?}"),
         }
         snapshots += 1;
+        if writer.is_finished() {
+            break;
+        }
         tokio::task::yield_now().await;
     }
     writer.await.expect("writer");
-    assert!(
-        snapshots > 0 && saw_scored && saw_unpaid,
-        "the reader must actually have raced the writer (snapshots={snapshots})"
+    assert!(snapshots > 0, "the reader must have observed the status");
+
+    // Deterministic final state: the last write is an odd index, so it is the
+    // `unpaid` tick, and the counters must agree with it.
+    let final_view = status.view();
+    assert_eq!(final_view.last_outcome, EmitterOutcomeKind::Unpaid);
+    assert_eq!(final_view.ticks, u64::from(WRITES));
+    assert_eq!(final_view.scored_epoch, 43);
+    assert_eq!(final_view.last_epoch, 43);
+    assert_eq!(final_view.last_pin_block, 1_360);
+    assert_eq!(final_view.last_participants, 7);
+    assert_eq!(final_view.last_paid, 0);
+}
+
+/// The exact field set of each outcome, read back deterministically.
+///
+/// The concurrency test above proves snapshots are consistent; this one proves
+/// they are *correct*, which is what a split-publish regression would break
+/// without necessarily losing a race on the machine running the tests.
+#[tokio::test]
+async fn each_outcome_publishes_its_own_fields_and_nothing_else() {
+    let status = EmitterStatus::new(true);
+
+    // Before any tick: the documented initial state, counters included.
+    let initial = status.view();
+    assert_eq!(initial.last_outcome, EmitterOutcomeKind::Never);
+    assert_eq!(initial.ticks, 0);
+    assert_eq!(initial.scored_epoch, 0);
+    assert_eq!(initial.last_epoch, 0);
+    assert_eq!(initial.last_pin_block, 0);
+    assert_eq!(initial.last_participants, 0);
+    assert_eq!(initial.last_paid, 0);
+    assert!(!initial.last_feed_read);
+
+    status.record(EmitterTick {
+        kind: EmitterOutcomeKind::Scored,
+        epoch: 42,
+        pin_block: 1_000,
+        participants: 3,
+        paid: 2,
+        feed_read: true,
+        scored_epoch: 42,
+        reason: None,
+        error: None,
+    });
+    let scored = status.view();
+    assert_eq!(scored.last_outcome, EmitterOutcomeKind::Scored);
+    assert_eq!(scored.ticks, 1);
+    assert_eq!(scored.last_epoch, 42);
+    assert_eq!(scored.last_pin_block, 1_000);
+    assert_eq!(scored.last_participants, 3);
+    assert_eq!(scored.last_paid, 2);
+    assert!(scored.last_feed_read);
+    assert_eq!(scored.scored_epoch, 42);
+    assert!(scored.last_reason.is_empty());
+    assert!(scored.last_error.is_empty());
+
+    // A later cover replaces every field rather than leaving the scored
+    // tick's counts behind.
+    status.record(EmitterTick {
+        kind: EmitterOutcomeKind::Unpaid,
+        epoch: 43,
+        pin_block: 1_360,
+        participants: 9,
+        paid: 0,
+        feed_read: true,
+        scored_epoch: 43,
+        reason: Some("nothing payable"),
+        error: None,
+    });
+    let unpaid = status.view();
+    assert_eq!(unpaid.last_outcome, EmitterOutcomeKind::Unpaid);
+    assert_eq!(unpaid.ticks, 2);
+    assert_eq!(unpaid.last_epoch, 43);
+    assert_eq!(unpaid.last_pin_block, 1_360);
+    assert_eq!(unpaid.last_participants, 9);
+    assert_eq!(unpaid.last_paid, 0, "a cover pays nobody");
+    assert_eq!(unpaid.last_reason, "nothing payable");
+    assert_eq!(unpaid.scored_epoch, 43);
+
+    // An error tick carries no reason and names the failure.
+    status.record(EmitterTick {
+        kind: EmitterOutcomeKind::Error,
+        epoch: 0,
+        pin_block: 0,
+        participants: 0,
+        paid: 0,
+        feed_read: false,
+        scored_epoch: 43,
+        reason: None,
+        error: Some("chain: block_hash@1: timeout"),
+    });
+    let errored = status.view();
+    assert_eq!(errored.last_outcome, EmitterOutcomeKind::Error);
+    assert_eq!(errored.ticks, 3);
+    assert!(errored.last_reason.is_empty());
+    assert!(errored.last_error.contains("timeout"));
+    assert_eq!(
+        errored.scored_epoch, 43,
+        "an error does not un-score an epoch"
     );
-    assert_eq!(status.view().scored_epoch, 43);
-    assert_eq!(status.view().ticks, 200_000);
 }
 
 /// A scored tick publishes what was actually paid, so an operator can see the
