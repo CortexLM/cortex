@@ -49,10 +49,12 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
 
 - [ ] Bounty `/v1/status` reports `can_score: true` after a real stable feed
   probe, and a report outage test returns 503 without a row.
-- [ ] Proof `/v1/status` reports a valid topic, sealed baseline, registered
-  runner, pinned image, open inference offer and compatible executor offer.
-- [ ] A Proof failure matrix confirms missing token, host outage, bad artifact,
-  closed offer and teardown failure all return 503 without a scored row.
+- [ ] In Bounty-only mode, `PROOF_VM_ORCHESTRATOR_URL` is empty, no Proof topic
+  is open, and a completed epoch contains signed `ChallengeInternal` Proof
+  leaves whose 8000 bps burn to UID 0 without blocking Bounty.
+- [ ] When Proof is enabled, `/v1/status` reports a valid topic, sealed baseline,
+  registered runner, pinned image, open inference offer and compatible executor
+  offer; its failure matrix returns 503 without a scored row.
 - [ ] Operator routes reject missing and wrong bearer values from a non-loopback
   client.
 - [ ] Gateway latest is sealed before validators are enabled. An unsealed UID0

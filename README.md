@@ -12,6 +12,15 @@ Cortex is experimental research software. Offline tests exercise submission, sco
 sealing and validator dispatch through fake external boundaries. A live model
 smoke is distinct from live KVM execution or confirmed on-chain payment.
 
+## Current launch mode
+
+The initial production mode enables Bounty against the configured
+`CortexLM/backend` public feed and leaves Proof execution unwired. The signed
+trust root still contains `bounty = 2000` and `proof = 8000`: Proof emits
+`ChallengeInternal` absences and its share burns to UID 0. Never renormalize
+Bounty to 100%. Production pairing, report intake and adjudication stay in
+`CortexLM/backend`; Cortex reads its immutable public scoring snapshots.
+
 ## Installation
 
 Linux, Python 3.12 or 3.13, `uv`, and libsodium 1.0.18 or newer are required.

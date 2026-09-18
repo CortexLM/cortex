@@ -32,7 +32,7 @@ class GatewayService:
         chain: SnapshotProvider,
         gateway_seed: Callable[[], bytes],
         clock: Callable[[], datetime] | None = None,
-        chain_endpoint: str = "",
+        chain_endpoint: str | Callable[[], str] = "",
         trust_loader: Callable[[int], TrustRoot] | None = None,
     ):
         trust.validate()
@@ -46,6 +46,13 @@ class GatewayService:
         self.chain_endpoint = chain_endpoint
         self.trust_loader = trust_loader
         self.store.trust_versions(trust.challenges_version, trust.measurements_version)
+
+    def _chain_endpoint(self) -> str:
+        try:
+            value = self.chain_endpoint() if callable(self.chain_endpoint) else self.chain_endpoint
+        except Exception:
+            return ""
+        return value if isinstance(value, str) else ""
 
     def refresh_trust(self, epoch: int) -> None:
         if self.trust_loader is None:
@@ -70,6 +77,40 @@ class GatewayService:
             raise ServiceError(401, "invalid challenge signature")
         try:
             return self.store.put_leaf(leaf)
+        except (sqlite3.Error, ProtocolError):
+            raise ServiceError(503, "raw weight store unavailable") from None
+
+    def replace_challenge_leaves(
+        self,
+        challenge_id: bytes,
+        epoch: int,
+        expected: set[bytes],
+        leaves: tuple[Leaf, ...],
+    ) -> tuple[dict, ...]:
+        """Atomically replace one challenge's complete authoritative epoch snapshot."""
+        self.refresh_trust(epoch)
+        entry = next((entry for entry in self.trust.challenges if entry.id == challenge_id), None)
+        if entry is None:
+            raise ServiceError(404, "challenge not registered")
+        if any(not isinstance(hotkey, bytes) or len(hotkey) != 32 for hotkey in expected):
+            raise ServiceError(400, "invalid challenge participant set")
+        if len(leaves) != len(expected) or {leaf.miner_hotkey for leaf in leaves} != expected:
+            raise ServiceError(409, "incomplete challenge participant set")
+        for leaf in leaves:
+            try:
+                leaf.encode()
+            except (ValueError, TypeError, ProtocolError):
+                raise ServiceError(400, "invalid challenge snapshot") from None
+            if leaf.challenge_id != challenge_id or leaf.epoch != epoch:
+                raise ServiceError(400, "challenge snapshot identity mismatch")
+            if not verify_raw(
+                entry.public_key, RAW_WEIGHT_DOMAIN, leaf.payload(), leaf.challenge_sig
+            ):
+                raise ServiceError(401, "invalid challenge signature")
+        try:
+            return self.store.replace_challenge_leaves(challenge_id, epoch, leaves)
+        except ServiceError:
+            raise
         except (sqlite3.Error, ProtocolError):
             raise ServiceError(503, "raw weight store unavailable") from None
 
@@ -131,13 +172,19 @@ class GatewayService:
             if stored is not None:
                 self.refresh_trust(stored.epoch)
             bundle = self._decode_stored(stored) if stored is not None else None
+            if stored is None:
+                computed_at = self.clock()
+            else:
+                computed_at = datetime.fromisoformat(stored.sealed_at.replace("Z", "+00:00"))
+                if timestamp(computed_at) != stored.sealed_at:
+                    raise ValueError("invalid stored seal timestamp")
             return project(
-                bundle, netuid=self.netuid, now=self.clock(), chain_endpoint=self.chain_endpoint
+                bundle, netuid=self.netuid, now=computed_at, chain_endpoint=self._chain_endpoint()
             )
         except (sqlite3.Error, ProtocolError, ValueError, TypeError, ServiceError):
             # Never serve an earlier seal in place of a corrupt latest seal.
             return project(
-                None, netuid=self.netuid, now=self.clock(), chain_endpoint=self.chain_endpoint
+                None, netuid=self.netuid, now=self.clock(), chain_endpoint=self._chain_endpoint()
             )
 
     async def seal(

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from cortex.bounty import PublicBackend
 from cortex.config import MasterConfig, read_seed
 from cortex.errors import ServiceError
 from cortex.master import BittensorEpochProvider, EpochClock, EpochState, build_master
@@ -21,6 +22,7 @@ from cortex.validator import ChainSnapshot, SubmissionJournal, Validator
 class FakeEpochChain:
     def __init__(self):
         self.state = EpochState(12, 90, 95)
+        self.subtensor = SimpleNamespace(chain_endpoint="wss://fixture-chain.invalid")
         self.rows = (
             MetagraphRow(public_key(bytes([20]) * 32), 0),
             MetagraphRow(public_key(bytes([21]) * 32), 1),
@@ -128,6 +130,7 @@ async def test_completed_epoch_seals_but_current_epoch_stays_open_for_submission
     latest = runtime.gateway.latest()
     assert latest["epoch"] == 12 and latest["sealed"] is True
     assert latest["metagraph_block"] == 99
+    assert latest["chain_endpoint"] == "wss://fixture-chain.invalid"
     assert latest["emission_shares"] == {"bounty": 0.2, "proof": 0.8}
     assert latest["final_vector"] == [[0, 65535]]
     assert runtime.gateway.store.bundle(13) is None
@@ -149,7 +152,40 @@ async def test_completed_epoch_seals_but_current_epoch_stays_open_for_submission
     assert master.chain.submissions == [((0, 65535),)]
 
 
-async def test_restart_recovers_epoch_pin_and_cannot_revoke_existing_positive_leaf(master):
+async def test_latest_projection_strips_rpc_credentials_and_provider_paths(master, tmp_path):
+    master.chain.subtensor.chain_endpoint = (
+        "wss://provider-user:provider-secret@rpc.invalid/provider-token?api_key=secret#fragment"
+    )
+    runtime = await build_master(
+        replace(master.config, state_dir=tmp_path / "sanitized-endpoint"),
+        chain=master.chain,
+        epochs=master.chain,
+        trust=master.trust,
+    )
+    try:
+        assert runtime.gateway.latest()["chain_endpoint"] == "wss://rpc.invalid"
+    finally:
+        await runtime.close()
+
+
+async def test_latest_projection_tracks_the_sdk_active_fallback_endpoint(master, tmp_path):
+    master.chain.subtensor.chain_endpoint = "wss://primary.invalid"
+    master.chain.subtensor.substrate = SimpleNamespace(chain_endpoint="wss://fallback-a.invalid")
+    runtime = await build_master(
+        replace(master.config, state_dir=tmp_path / "active-fallback-endpoint"),
+        chain=master.chain,
+        epochs=master.chain,
+        trust=master.trust,
+    )
+    try:
+        assert runtime.gateway.latest()["chain_endpoint"] == "wss://fallback-a.invalid"
+        master.chain.subtensor.substrate.chain_endpoint = "wss://fallback-b.invalid"
+        assert runtime.gateway.latest()["chain_endpoint"] == "wss://fallback-b.invalid"
+    finally:
+        await runtime.close()
+
+
+async def test_restart_recovers_epoch_pin_and_replaces_stale_positive_with_internal_burn(master):
     from cortex.protocol import sign_leaf
 
     runtime = master.runtime
@@ -162,7 +198,11 @@ async def test_restart_recovers_epoch_pin_and_cannot_revoke_existing_positive_le
     try:
         master.chain.state = EpochState(13, 100, 105)
         assert await restarted.emitter.tick() == [12]
-        assert restarted.gateway.latest()["final_vector"] == [[0, 13107], [1, 52428]]
+        assert restarted.gateway.latest()["final_vector"] == [[0, 65535]]
+        assert all(
+            leaf.score == NoScore(NoScoreReason.CHALLENGE_INTERNAL)
+            for leaf in restarted.gateway.store.leaves(12)
+        )
         original = restarted.gateway.bundle_bytes(12)
         assert await restarted.emitter.tick() == []
         assert restarted.gateway.bundle_bytes(12) == original
@@ -342,7 +382,10 @@ async def test_private_routes_require_rotating_file_and_master_routes_are_compos
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app), base_url="https://master"
     ) as client:
-        assert (await client.get("/readyz")).json()["epoch"] == 12
+        assert (await client.get("/livez")).json()["role"] == "master"
+        readiness = await client.get("/readyz")
+        assert readiness.status_code == 200
+        assert readiness.json() == {"ready": True, "epoch": 12, "role": "master"}
         assert (await client.get("/v1/proof/topics")).json() == {"topics": []}
         assert (await client.get("/bounty/v1/status")).json()["challenge_id"] == "bounty"
         assert (await client.get("/v1/reports")).status_code == 401
@@ -350,6 +393,65 @@ async def test_private_routes_require_rotating_file_and_master_routes_are_compos
         assert (
             await client.get("/v1/reports", headers={"authorization": "Bearer rotated-token"})
         ).status_code == 200
+
+
+async def test_master_ready_is_independent_of_a_readable_bounty_feed(master):
+    def empty_feed(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "status":
+            body = {
+                "api_version": 1,
+                "revision": "1",
+                "adjudication_available": True,
+                "published": 0,
+                "valid": 0,
+                "duplicate": 0,
+                "already_fixed_not_prod": 0,
+                "invalid_malicious": 0,
+                "hotkeys": 0,
+                "awaiting_adjudication": 0,
+                "unpriced_valid": 0,
+            }
+        else:
+            body = {
+                "api_version": 1,
+                "revision": "1",
+                "items": [],
+                "has_more": False,
+                **({"count": 0, "next_cursor": None} if route == "reports" else {}),
+            }
+        return httpx.Response(200, json=body)
+
+    master.runtime.bounty.backend = PublicBackend(
+        "https://backend.invalid",
+        transport=httpx.MockTransport(empty_feed),
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(master.runtime.app()), base_url="https://master"
+    ) as client:
+        readiness = await client.get("/readyz")
+
+    assert readiness.status_code == 200
+    assert readiness.json() == {"ready": True, "epoch": 12, "role": "master"}
+
+
+async def test_master_readiness_does_not_probe_the_bounty_feed(master):
+    def unexpected_probe(request):
+        raise AssertionError("master readiness must not call the external scorer")
+
+    master.runtime.bounty.backend = PublicBackend(
+        "https://backend.invalid",
+        transport=httpx.MockTransport(unexpected_probe),
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(master.runtime.app()), base_url="https://master"
+    ) as client:
+        readiness = await client.get("/readyz")
+
+    assert readiness.status_code == 200
+    assert readiness.json() == {"ready": True, "epoch": 12, "role": "master"}
 
 
 def test_private_seed_rejects_symlinks_permissions_and_accepts_raw_or_hex(tmp_path):

@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import UUID
 
-from cortex.protocol import Bundle, aggregate_leaves, bundle_digest
+from cortex.protocol import Bundle, Score, aggregate_leaves
 from cortex.protocol.crypto import encode_hotkey
 
 
@@ -43,7 +43,7 @@ def project(bundle: Bundle | None, *, netuid: int, now: datetime, chain_endpoint
         metagraph_hash=None,
         metagraph_block=None,
         burn_outcome=True,
-        metagraph_updated_at=computed,
+        metagraph_updated_at=None,
         merkle_root="",
         final_vector=[[0, 65535]],
         sealed=False,
@@ -55,7 +55,6 @@ def project(bundle: Bundle | None, *, netuid: int, now: datetime, chain_endpoint
         view.update(
             vector_id=_identity(digest),
             vector_digest=digest,
-            bundle_digest=bundle_digest(bundle),
             epoch=body.epoch,
             revision=1,
             netuid=body.netuid,
@@ -74,6 +73,7 @@ def project(bundle: Bundle | None, *, netuid: int, now: datetime, chain_endpoint
             metagraph_hash=body.metagraph_root.hex(),
             metagraph_block=body.block_b,
             burn_outcome=any(uid == 0 for uid, _ in body.final_vector),
+            metagraph_updated_at=computed,
             merkle_root=body.merkle_root.hex(),
             final_vector=[list(pair) for pair in body.final_vector],
             sealed=True,
@@ -86,14 +86,19 @@ def project(bundle: Bundle | None, *, netuid: int, now: datetime, chain_endpoint
             )
             snapshot_id = _identity(source_digest) if source_digest is not None else None
             outcome = "accepted" if leaves else "missing"
+            source_weights: dict[str, float] = {}
+            for leaf in leaves:
+                if isinstance(leaf.score, Score) and leaf.score.value > 0:
+                    hotkey = encode_hotkey(leaf.miner_hotkey)
+                    source_weights[hotkey] = source_weights.get(hotkey, 0.0) + leaf.score.value
             view["emission_shares"][slug] = bps / 10000
             view["source_challenges"].append(
                 dict(
                     slug=slug,
                     emission_percent=bps / 100,
-                    weights={},
+                    weights=source_weights,
                     ok=bool(leaves),
-                    error=None if leaves else "missing",
+                    error=None if leaves else outcome,
                 )
             )
             if leaves:

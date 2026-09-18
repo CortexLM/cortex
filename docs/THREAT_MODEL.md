@@ -65,10 +65,14 @@ from the historical metagraph; a challenge cannot shrink it by omission. A
 missing score becomes an explicit `NoScore`, and an unavailable challenge burns
 its share rather than blocking every other challenge.
 
-The gateway seals only complete exact-epoch data. Existing positive leaves are
-not replaced by an outage burn. `GET /v1/weights/latest` returns an unsealed UID0
-fallback when no valid seal exists; validators refuse that fallback. A sealed
-UID0 burn is valid and must still be submitted after independent verification.
+The gateway seals only complete exact-epoch data. Individual raw-leaf intake
+cannot downgrade a positive score, while the master emitter atomically replaces
+the complete participant set for one challenge and epoch. A feed outage therefore
+replaces every Bounty participant with `NoScore(ChallengeInternal)` and burns the
+full Bounty share without retaining stale positives. `GET /v1/weights/latest`
+returns an unsealed UID0 fallback when no valid seal exists; validators refuse
+that fallback. A sealed UID0 burn is valid and must still be submitted after
+independent verification.
 
 Validator dispatch is journaled. An ambiguous chain response stays pending and
 is not automatically retried, because a blind retry can submit twice. No test or

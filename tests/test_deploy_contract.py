@@ -38,6 +38,17 @@ def validator_config():
                 "user": "65532:65532",
                 "cap_drop": ["ALL"],
                 "security_opt": ["no-new-privileges:true"],
+                "healthcheck": {
+                    "test": [
+                        "CMD",
+                        "python",
+                        "-I",
+                        "-c",
+                        "import ssl,urllib.request; urllib.request.urlopen("
+                        "'https://127.0.0.1:8091/livez', "
+                        "context=ssl._create_unverified_context(), timeout=5).read()",
+                    ]
+                },
                 "command": [
                     "validator",
                     "--gateway",
@@ -48,12 +59,18 @@ def validator_config():
                     "e" * 64,
                     "--network",
                     "test",
+                    "--fallback-endpoints",
+                    "[]",
                     "--owner-public",
                     "/etc/base/config/owner.pubkey",
                     "--challenges",
                     "/etc/base/config/challenges.toml",
                     "--measurements",
                     "/etc/base/config/measurements.toml",
+                    "--minimum-challenges-version",
+                    "1",
+                    "--minimum-measurements-version",
+                    "1",
                     "--wallet-name",
                     "fixture",
                     "--wallet-hotkey",
@@ -76,6 +93,12 @@ def validator_config():
                     "/run/validator/tls.key",
                     "--poll-seconds",
                     "30",
+                    "--version-key",
+                    "123",
+                    "--min-peer-sample",
+                    "1",
+                    "--max-block-lag",
+                    "256",
                 ],
                 "ports": [{"target": 8091, "host_ip": "10.0.0.2"}],
                 "tmpfs": ["/tmp:size=32m,mode=1777"],
@@ -134,7 +157,8 @@ def master_config():
                         "CMD",
                         "python",
                         "-c",
-                        "urllib.request.urlopen('http://127.0.0.1:8080/readyz')",
+                        "import urllib.request; urllib.request.urlopen("
+                        "'http://127.0.0.1:8080/readyz', timeout=5).read()",
                     ]
                 },
                 "ports": [{"target": 8080, "host_ip": "10.0.0.1"}],
@@ -159,7 +183,7 @@ def master_config():
     }
 
 
-@pytest.mark.parametrize("mutation", ["gateway", "keys", "http", "privileged", "state"])
+@pytest.mark.parametrize("mutation", ["gateway", "keys", "http", "privileged", "state", "health"])
 def test_validator_refuses_control_plane_or_unsafe_runtime(mutation):
     config = deepcopy(validator_config())
     service = config["services"]["validator"]
@@ -171,6 +195,8 @@ def test_validator_refuses_control_plane_or_unsafe_runtime(mutation):
         service["command"][2] = "http://master.fixture.invalid"
     elif mutation == "privileged":
         service["privileged"] = True
+    elif mutation == "health":
+        service.pop("healthcheck")
     else:
         service["volumes"] = []
     with pytest.raises(ValueError):
@@ -188,9 +214,96 @@ def test_compose_command_must_match_the_installed_python_entrypoint(role):
 
 
 @pytest.mark.parametrize("role", ["master", "validator"])
+def test_compose_healthcheck_cannot_be_satisfied_by_an_unrelated_command(role):
+    config = master_config() if role == "master" else validator_config()
+    service = config["services"]["gateway" if role == "master" else "validator"]
+    route = "/readyz" if role == "master" else "/livez"
+    service["healthcheck"]["test"] = ["CMD", "true", route]
+
+    with pytest.raises(ValueError, match="healthcheck"):
+        CHECK["validate_compose"](config, role)
+
+
+@pytest.mark.parametrize("role", ["master", "validator"])
 def test_compose_accepts_isolated_python_roles_with_durable_state(role):
     config = master_config() if role == "master" else validator_config()
     CHECK["validate_compose"](config, role)
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--minimum-challenges-version", "0"),
+        ("--minimum-measurements-version", "0"),
+        ("--version-key", "-1"),
+        ("--min-peer-sample", "-1"),
+        ("--max-block-lag", "0"),
+    ],
+)
+def test_validator_deployment_rejects_unsafe_consensus_pins(flag, value):
+    config = validator_config()
+    command = config["services"]["validator"]["command"]
+    command[command.index(flag) + 1] = value
+
+    with pytest.raises(ValueError, match="numeric"):
+        CHECK["validate_compose"](config, "validator")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '["https://rpc.invalid"]',
+        '["wss://rpc.invalid", "wss://rpc.invalid"]',
+        '["wss://rpc.invalid?token=secret"]',
+        '["wss://rpc.invalid#fragment"]',
+        '["wss://rpc.invalid/provider-secret"]',
+        '["wss://rpc.invalid:invalid"]',
+        "not-json",
+    ],
+)
+def test_validator_deployment_rejects_unsafe_fallback_endpoints(value):
+    config = validator_config()
+    command = config["services"]["validator"]["command"]
+    command[command.index("--fallback-endpoints") + 1] = value
+
+    with pytest.raises(ValueError, match="fallback endpoints"):
+        CHECK["validate_compose"](config, "validator")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "unknown-network",
+        "https://rpc.invalid",
+        "ws://rpc.invalid",
+        "wss://user:secret@rpc.invalid",
+        "wss://rpc.invalid/provider-secret",
+        "wss://rpc.invalid?token=secret",
+        "wss://rpc.invalid#fragment",
+        "wss://rpc.invalid:invalid",
+    ],
+)
+def test_validator_deployment_rejects_unsafe_primary_chain_endpoint(value):
+    config = validator_config()
+    command = config["services"]["validator"]["command"]
+    command[command.index("--network") + 1] = value
+
+    with pytest.raises(ValueError, match="chain endpoint"):
+        CHECK["validate_compose"](config, "validator")
+
+
+@pytest.mark.parametrize("role", ["master", "validator"])
+def test_environment_examples_reject_unsafe_primary_chain_endpoint(role):
+    master = (ROOT / "deploy/env/master.env.example").read_text()
+    validator = (ROOT / "deploy/env/python-validator.env.example").read_text()
+    unsafe = "wss://user:secret@rpc.invalid"
+    if role == "master":
+        master = master.replace("BASE_CHAIN_ENDPOINT=test", f"BASE_CHAIN_ENDPOINT={unsafe}")
+    else:
+        validator = validator.replace("BASE_CHAIN_ENDPOINT=test", f"BASE_CHAIN_ENDPOINT={unsafe}")
+
+    with pytest.raises(ValueError, match="chain endpoint"):
+        CHECK["validate_env_examples"](master, validator)
 
 
 def master_resource_example(values):

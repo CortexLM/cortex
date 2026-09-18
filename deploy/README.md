@@ -15,6 +15,7 @@ dedicated machine reachable from the master over a private network and HTTPS.
 - [Validate the deployment source](#validate-the-deployment-source)
 - [Build and publish the Python image](#build-and-publish-the-python-image)
 - [Master](#master)
+- [Bounty-only launch](#bounty-only-launch)
 - [Validator](#validator)
 - [Proof VM host](#proof-vm-host)
 - [Promotion and rollback](#promotion-and-rollback)
@@ -23,10 +24,6 @@ dedicated machine reachable from the master over a private network and HTTPS.
 
 ```bash
 uv run python scripts/check_deploy.py --check-examples
-docker compose --env-file deploy/env/master.env.example \
-  -f deploy/compose/role-master.yml --profile master config >/dev/null
-docker compose --env-file deploy/env/python-validator.env.example \
-  -f deploy/compose/role-validator.yml config >/dev/null
 ```
 
 The contract check requires digest-pinned images, read-only non-root application
@@ -43,12 +40,15 @@ does not start a service.
 - `guest` excludes Bittensor and boots `proof-guest-init` for conversion into a
   Firecracker rootfs.
 
-The base image is an exact Python 3.12 Bookworm digest. The manual
-`.github/workflows/images.yml` workflow builds both targets and checks installed
-commands, imports and native dependencies without network access during the
-smoke checks. The guest check overrides the entry point; it does not boot init
-or KVM. Optional publication pushes only the tested runtime and records its
-registry digest. Do not deploy a local tag or copy a digest from another build.
+The base image is an exact Python 3.12 Bookworm digest. On every push to `main`,
+`.github/workflows/images.yml` waits for CI, builds the runtime once, exercises
+it without network access, generates a CycloneDX SBOM, rejects fixable high or
+critical vulnerabilities, publishes the tested bytes to GHCR under the source
+commit and records GitHub build provenance. Annotated release tags only alias
+that existing attested digest; they never rebuild it. The privileged workflow
+has no manual entry point. It does not build or publish the unwired Proof guest,
+boot init, Firecracker or KVM. Do not deploy a local tag or copy a digest from
+another build.
 
 ```bash
 docker build --file deploy/Dockerfile --target runtime \
@@ -68,7 +68,8 @@ digest.
 
 ## Master
 
-Create `deploy/env/master.env` from the example and set:
+Create `deploy/env/master.env` from the example and set the primary Bittensor
+network plus optional bounded `wss://` fallback RPC origins, then set:
 
 - `CORTEX_IMAGE` to the published `repository@sha256:<64 hex>`;
 - the master VPC bind address and netuid;
@@ -101,7 +102,7 @@ TOML documents and their adjacent `.sig` files. Verify them before startup with
 the [offline ceremony](../docs/how-to/trust-root.md).
 
 ```bash
-docker compose --env-file deploy/env/master.env \
+docker compose --project-directory . --env-file deploy/env/master.env \
   -f deploy/compose/role-master.yml --profile master up -d
 ```
 
@@ -110,11 +111,35 @@ epoch journal. Back it up as SQLite state, including WAL, through a quiesced cop
 or SQLite's backup API. A filesystem copy of only the main database while the
 service writes is not a valid backup.
 
+## Bounty-only launch
+
+Set `BOUNTY_BACKEND_PUBLIC_URL` to the reviewed HTTPS `CortexLM/backend` origin
+and leave `PROOF_VM_ORCHESTRATOR_URL` empty. Keep `proof.key` mounted and keep the
+owner-signed trust split at `bounty = 2000`, `proof = 8000`. With no open Proof
+topic, the master signs `ChallengeInternal` Proof leaves and that 8000 bps burns
+to UID 0; Bounty is never scaled to 100%.
+
+Keep `BOUNTY_GATEWAY_URL` empty in CortexLM/backend unless an authenticated,
+idempotent delivery contract is deployed. The production dependency for this
+mode is the public leaderboard/report feed, including severity, pagination and
+one shared snapshot revision.
+
+Production miners pair and file reports through CortexLM/backend. Do not expose
+the Python compatibility intake as an automatic payment path: it does not write
+to the backend publication.
+
+Before enabling validators, run a real Bounty intake failure probe, then a valid
+intake and public-feed publication. Confirm the completed epoch has signed leaves,
+a `sealed: true` latest response, the expected Bounty/Proof burn split and a
+successful validator `--verify-only --once` recomputation.
+
 ## Validator
 
 Create `deploy/env/python-validator.env` and set the exact master HTTPS origin,
 netuid, independently pinned gateway public key, chain network, wallet name and
-hotkey, VPC peer bind address and private host paths.
+hotkey, trust-version minimums, live subnet `version_key`, VPC peer bind address
+and private host paths. Optional fallback RPCs are a JSON list of at most eight
+credential-free `wss://` URLs.
 
 The wallet directory is mounted read-only at `/run/wallets`. The validator
 identity directory contains:
@@ -131,12 +156,13 @@ two validators with the same wallet: their commit/reveal or rate-limit state can
 conflict.
 
 ```bash
-docker compose --env-file deploy/env/python-validator.env \
+docker compose --project-directory . --env-file deploy/env/python-validator.env \
   -f deploy/compose/role-validator.yml up -d
 ```
 
 Enable chain submission only after the master returns a current `sealed: true`
-bundle and a validator dry run recomputes the same root/vector from historical
+bundle and the [validator `--verify-only --once` preflight](../docs/external-miner/validators.md#run-the-validator)
+reports `validator outcome=verified` for the same root/vector from historical
 chain state. The unsealed UID0 fallback is a readiness failure, not a weight to
 submit.
 
@@ -247,9 +273,18 @@ routes or prove a challenge reward path.
 ## Promotion and rollback
 
 CI builds distributions and tests both supported Python versions. Image
-publication is an explicit workflow and does not edit deployment pins or touch a
-host. Promotion consists of changing `CORTEX_IMAGE` to a reviewed digest,
-rendering Compose, backing up state, pulling that digest and recreating one role.
+publication is automatic for `main`, but it does not edit deployment pins or
+touch a host. Run `.github/workflows/approve-image-update.yml` from `main` with
+the candidate, source commit, expected digest and the exact approval phrase.
+The protected `production` environment verifies provenance and emits
+`update.json`; it still changes no host. Promotion consists of reviewing that
+evidence, changing `CORTEX_IMAGE` to its immutable digest, rendering Compose,
+backing up state, pulling that digest and recreating one role.
+
+There is deliberately no `git pull`, Docker-socket watcher, CI SSH deployment or
+unattended host updater. Safe automation must preserve the same operator gate,
+take a consistent SQLite backup, verify role health plus a fresh sealed bundle,
+and restore both the prior digest and schema-compatible state on failure.
 
 Rollback uses the prior reviewed digest and a schema-compatible state backup.
 Never roll a database backward by deleting rows or replacing the latest seal.

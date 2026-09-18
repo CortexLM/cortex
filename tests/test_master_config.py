@@ -42,6 +42,62 @@ def test_complete_vm_configuration_retains_separate_ca_and_bearer_files():
     assert config.proof_orchestrator_ca_file == Path("/run/secrets/vm-ca.pem")
 
 
+def test_master_configuration_retains_bounded_chain_fallbacks():
+    config = MasterConfig.from_env(
+        {
+            **configured_environment(),
+            "BASE_CHAIN_FALLBACK_ENDPOINTS": '["wss://rpc-a.invalid", "wss://rpc-b.invalid"]',
+        }
+    )
+
+    assert config.chain_fallback_endpoints == (
+        "wss://rpc-a.invalid",
+        "wss://rpc-b.invalid",
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "unknown-network",
+        "https://rpc.invalid",
+        "ws://rpc.invalid",
+        "wss://user:secret@rpc.invalid",
+        "wss://rpc.invalid/provider-secret",
+        "wss://rpc.invalid?token=secret",
+        "wss://rpc.invalid#fragment",
+        "wss://rpc.invalid:invalid",
+    ],
+)
+def test_master_configuration_rejects_unsafe_primary_chain_endpoint(value):
+    with pytest.raises(ValueError, match="chain endpoint"):
+        MasterConfig.from_env({**configured_environment(), "BASE_CHAIN_ENDPOINT": value})
+
+
+@pytest.mark.parametrize("value", ["finney", "test", "archive", "local", "wss://rpc.invalid:443"])
+def test_master_configuration_accepts_sdk_alias_or_safe_wss_origin(value):
+    config = MasterConfig.from_env({**configured_environment(), "BASE_CHAIN_ENDPOINT": value})
+
+    assert config.chain_endpoint == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not-json",
+        '["https://rpc.invalid"]',
+        '["wss://rpc.invalid", "wss://rpc.invalid"]',
+        '["wss://rpc.invalid/provider-secret"]',
+        '["wss://rpc.invalid?token=secret"]',
+        '["wss://rpc.invalid:invalid"]',
+        "[" + ",".join(f'"wss://rpc-{index}.invalid"' for index in range(9)) + "]",
+    ],
+)
+def test_master_configuration_rejects_unsafe_chain_fallbacks(value):
+    with pytest.raises(ValueError, match="fallback endpoints"):
+        MasterConfig.from_env({**configured_environment(), "BASE_CHAIN_FALLBACK_ENDPOINTS": value})
+
+
 def test_unwired_proof_configuration_requires_no_vm_credentials():
     env = {
         key: value

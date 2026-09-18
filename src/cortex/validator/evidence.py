@@ -96,6 +96,10 @@ class EvidenceStore:
 def peer_app(store: EvidenceStore) -> FastAPI:
     app = FastAPI(title="Cortex validator evidence")
 
+    @app.get("/livez")
+    async def health():
+        return {"ok": True, "role": "validator"}
+
     @app.get("/v1/consensus/root/{epoch}")
     async def root(epoch: int):
         statement = store.local_root(epoch)

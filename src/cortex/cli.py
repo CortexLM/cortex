@@ -27,6 +27,16 @@ def parser() -> argparse.ArgumentParser:
     master.add_argument("--bind", default="127.0.0.1")
     master.add_argument("--port", type=int, default=8080)
     commands.add_parser("validator", help="verify seals and submit Bittensor weights")
+    reconcile = commands.add_parser(
+        "validator-reconcile", help="resolve one ambiguous validator dispatch"
+    )
+    reconcile.add_argument("--state-db", type=Path, required=True)
+    reconcile.add_argument("--netuid", type=int, required=True)
+    reconcile.add_argument("--epoch", type=int, required=True)
+    reconcile.add_argument("--digest", required=True)
+    reconcile.add_argument("--attempt-id", required=True)
+    reconcile.add_argument("--result", choices=("submitted", "not_broadcast"), required=True)
+    reconcile.add_argument("--evidence-digest", required=True)
     keygen = commands.add_parser("keygen", help="generate an offline sr25519 operator key")
     keygen.add_argument("--seed-out", type=Path, required=True)
     keygen.add_argument("--public-out", type=Path, required=True)
@@ -177,7 +187,7 @@ async def run_master(args: argparse.Namespace) -> None:
     from cortex.master import BittensorEpochProvider, build_master
     from cortex.proof.backend import VmBackend
     from cortex.proof.service import EvaluationBackend, UnwiredBackend
-    from cortex.validator.chain import BittensorChain
+    from cortex.validator.chain import BittensorChain, close_subtensor
 
     try:
         from bittensor import Subtensor
@@ -199,7 +209,10 @@ async def run_master(args: argparse.Namespace) -> None:
             ),
             resources=config.proof_vm_resources,
         )
-    subtensor = Subtensor(network=config.chain_endpoint)
+    subtensor = Subtensor(
+        network=config.chain_endpoint,
+        fallback_endpoints=list(config.chain_fallback_endpoints),
+    )
     try:
         runtime = await build_master(
             config,
@@ -213,7 +226,7 @@ async def run_master(args: argparse.Namespace) -> None:
     finally:
         if isinstance(backend, VmBackend):
             await backend.close()
-        await asyncio.to_thread(subtensor.close)
+        await asyncio.to_thread(close_subtensor, subtensor)
 
 
 def run_keygen(args: argparse.Namespace) -> None:
@@ -262,6 +275,24 @@ def run_trust_verify(args: argparse.Namespace) -> None:
     )
 
 
+def run_validator_reconcile(args: argparse.Namespace) -> None:
+    from cortex.validator import SubmissionJournal
+
+    journal = SubmissionJournal(args.state_db)
+    try:
+        result = journal.reconcile(
+            netuid=args.netuid,
+            epoch=args.epoch,
+            digest=args.digest,
+            attempt_id=args.attempt_id,
+            result=args.result,
+            evidence_digest=args.evidence_digest,
+        )
+    finally:
+        journal.close()
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
 def main(argv: list[str] | None = None) -> None:
     values = sys.argv[1:] if argv is None else argv
     if values and values[0] == "validator":
@@ -290,6 +321,8 @@ def main(argv: list[str] | None = None) -> None:
             run_trust_sign(args)
         elif args.command == "trust-verify":
             run_trust_verify(args)
+        elif args.command == "validator-reconcile":
+            run_validator_reconcile(args)
         else:
             action = {"master": run_master, "miner": run_miner, "topic-create": run_topic_create}
             asyncio.run(action[args.command](args))

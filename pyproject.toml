@@ -38,11 +38,13 @@ only-include = [
   "config",
   "deploy",
   "docs",
+  ".github/workflows",
   ".dockerignore",
   ".env.example",
   "AGENTS.md",
   "scripts/check_deploy.py",
   "scripts/check_repo.py",
+  "scripts/verify_image_update.py",
   "scripts/rlm_smoke.py",
   "scripts/vm_smoke.py",
   "pyproject.toml",
@@ -69,7 +71,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src/cortex", "scripts/check_deploy.py", "scripts/check_repo.py", "scripts/rlm_smoke.py", "scripts/vm_smoke.py"]
+files = ["src/cortex", "scripts/check_deploy.py", "scripts/check_repo.py", "scripts/rlm_smoke.py", "scripts/verify_image_update.py", "scripts/vm_smoke.py"]
 check_untyped_defs = true
 warn_unused_ignores = true
 

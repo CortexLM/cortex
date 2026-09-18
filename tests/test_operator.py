@@ -6,6 +6,7 @@ from cortex.cli import main
 from cortex.operator import generate_key, sign_trust_document
 from cortex.protocol.crypto import decode_hotkey, public_key
 from cortex.protocol.trust import load_trust_root
+from cortex.validator import SubmissionJournal
 
 
 def _document(path: Path, body: str) -> Path:
@@ -115,3 +116,47 @@ policy = "all_metagraph_hotkeys"
     )
 
     assert '"challenges": {"bounty": 2000, "proof": 8000}' in capsys.readouterr().out
+
+
+def test_cli_reconciles_only_the_exact_pending_validator_attempt(tmp_path, capsys):
+    state = tmp_path / "validator.db"
+    journal = SubmissionJournal(state)
+    digest = "ab" * 32
+    attempt_id = journal.claim(541, 12, digest)
+    journal.record_uncertain(
+        541,
+        12,
+        attempt_id,
+        extrinsic_hash="0x" + "cd" * 32,
+        nonce=17,
+    )
+    journal.close()
+
+    main(
+        [
+            "validator-reconcile",
+            "--state-db",
+            str(state),
+            "--netuid",
+            "541",
+            "--epoch",
+            "12",
+            "--digest",
+            digest,
+            "--attempt-id",
+            attempt_id,
+            "--result",
+            "submitted",
+            "--evidence-digest",
+            "ef" * 32,
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert '"state": "reconciled_submitted"' in output
+    reopened = SubmissionJournal(state)
+    assert reopened.pending(541, 12) is None
+    assert reopened.connection.execute(
+        "SELECT state FROM weight_submissions WHERE netuid=541 AND epoch=12"
+    ).fetchone() == ("submitted",)
+    reopened.close()

@@ -1,6 +1,8 @@
 """Real sr25519 signatures, SQLite and ASGI; only upstream I/O and clock vary."""
 
+import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -49,9 +51,43 @@ def service(tmp_path):
     upstream = {"status": 200, "leaderboard": [], "reports": []}
 
     def transport(request):
-        return httpx.Response(
-            upstream["status"], json={"items": upstream[request.url.path.rsplit("/", 1)[-1]]}
-        )
+        if upstream["status"] != 200:
+            return httpx.Response(upstream["status"])
+        route = request.url.path.rsplit("/", 1)[-1]
+        reports = upstream["reports"]
+        if route == "status":
+            body = {
+                "api_version": 1,
+                "revision": "1",
+                "adjudication_available": True,
+                "published": len(reports),
+                "valid": sum(row["status"] == "valid" for row in reports),
+                "duplicate": sum(row["status"] == "duplicate" for row in reports),
+                "already_fixed_not_prod": sum(
+                    row["status"] == "already_fixed_not_prod" for row in reports
+                ),
+                "invalid_malicious": sum(row["status"] == "invalid_malicious" for row in reports),
+                "hotkeys": len({row["hotkey"] for row in reports}),
+                "awaiting_adjudication": 0,
+                "unpriced_valid": 0,
+            }
+        elif route == "leaderboard":
+            body = {
+                "api_version": 1,
+                "revision": "1",
+                "items": upstream["leaderboard"],
+                "has_more": False,
+            }
+        else:
+            body = {
+                "api_version": 1,
+                "revision": "1",
+                "items": reports,
+                "count": len(reports),
+                "has_more": False,
+                "next_cursor": None,
+            }
+        return httpx.Response(200, json=body)
 
     backend = PublicBackend("https://backend.invalid", transport=httpx.MockTransport(transport))
     store = BountyStore(tmp_path / "bounty.sqlite3")
@@ -98,6 +134,23 @@ async def grant_pair(client, payload):
     return response
 
 
+def test_bounded_write_routes_keep_their_openapi_request_schemas(service):
+    app = FastAPI()
+    app.include_router(create_router(service[0]))
+    schema = app.openapi()
+
+    expected = {
+        "/v1/pair": "PairBody",
+        "/v1/admin/pair-grants": "PairGrantBody",
+        "/v1/reports": "ReportBody",
+        "/v1/admin/adjudicate": "AdjudicateBody",
+    }
+    for path, title in expected.items():
+        body = schema["paths"][path]["post"]["requestBody"]
+        assert body["required"] is True
+        assert body["content"]["application/json"]["schema"]["title"] == title
+
+
 async def test_adjudication_is_durable_but_only_published_backend_rows_are_paid(service, client):
     svc, clock, upstream = service
     session = await pair(client)
@@ -138,6 +191,34 @@ async def test_adjudication_is_durable_but_only_published_backend_rows_are_paid(
 
     assert scores[hotkey].value == 500_000
     assert scores["ab" * 32].reason == "NotAttempted"
+
+
+@pytest.mark.parametrize(
+    "payload,error",
+    [
+        ({"verdict": "valid"}, "severity required for valid verdict"),
+        (
+            {"verdict": "invalid_malicious", "severity": "critical"},
+            "severity is only valid for a valid verdict",
+        ),
+    ],
+)
+async def test_adjudication_requires_severity_exactly_for_valid_reports(
+    service, client, payload, error
+):
+    svc, _, _ = service
+    session = await pair(client)
+    report = (await client.post("/v1/reports", json=report_body(session))).json()
+
+    response = await client.post(
+        "/v1/admin/adjudicate",
+        headers={"Authorization": "Bearer operator-token"},
+        json={"report_id": report["id"], **payload},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": error}
+    assert svc.store.get_report(report["id"])["state"] == "pending"
 
 
 @pytest.mark.parametrize("configured,status", [(False, 200), (True, 503)])
@@ -224,6 +305,42 @@ async def test_pair_grant_body_has_a_hard_size_limit(client):
     assert response.json() == {"error": "pair grant request too large"}
 
 
+@pytest.mark.parametrize(
+    "route,size,error",
+    [
+        ("/v1/pair", 4097, "pair request too large"),
+        ("/v1/reports", 256 * 1024 + 1, "report request too large"),
+    ],
+)
+async def test_public_bounty_writes_have_hard_body_limits(client, route, size, error):
+    response = await client.post(
+        route,
+        headers={"Content-Type": "application/json"},
+        content=b" " * size,
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {"error": error}
+
+
+async def test_adjudication_authentication_precedes_bounded_body_parsing(client):
+    unauthorized = await client.post(
+        "/v1/admin/adjudicate",
+        headers={"Authorization": "Bearer wrong", "Content-Type": "application/json"},
+        content=b"{not-json",
+    )
+    oversized = await client.post(
+        "/v1/admin/adjudicate",
+        headers={"Authorization": "Bearer operator-token", "Content-Type": "application/json"},
+        content=b" " * 4097,
+    )
+
+    assert unauthorized.status_code == 401
+    assert unauthorized.json() == {"error": "unauthorized"}
+    assert oversized.status_code == 413
+    assert oversized.json() == {"error": "adjudication request too large"}
+
+
 async def test_expired_pair_grant_does_not_authorize_or_burn_nonce(service, client):
     _, clock, _ = service
     payload = signed_pair()
@@ -296,17 +413,9 @@ async def test_used_nonce_refuses_different_identity_without_consuming_its_grant
 
     assert reused.status_code == 409
     assert reused.json() == {"error": "nonce reused"}
-    if account == "account-a":
-        assert retry.status_code == 409
-        assert retry.json() == {"error": "account already paired to another hotkey"}
-        # A conflicting account must also roll back grant deletion and nonce reservation.
-        repeated_conflict = await client.post("/v1/pair", json=fresh)
-        assert repeated_conflict.status_code == 409
-        assert repeated_conflict.json() == retry.json()
-    else:
-        assert retry.status_code == 201
+    assert retry.status_code == 201
     retained = await client.post("/v1/reports", json=report_body(original_session))
-    assert retained.status_code == 201
+    assert retained.status_code == (401 if account == "account-a" else 201)
 
 
 async def test_pair_grant_expiry_is_bounded_to_five_minutes(service, client):
@@ -366,17 +475,45 @@ async def test_repairing_an_account_revokes_its_previous_session(service, client
     assert new_report.status_code == 201
 
 
-async def test_different_hotkey_cannot_replace_an_existing_account_pairing(service, client):
+async def test_repairing_during_feed_validation_revokes_the_inflight_session(service, client):
+    svc, clock, _ = service
+    old_session = await pair(client)
+    original_fetch = svc.backend.fetch
+
+    async def fetch_after_repair():
+        replacement = signed_pair(nonce="34" * 16)
+        svc.grant_pair(
+            SimpleNamespace(
+                account_id=replacement["account_id"],
+                hotkey=replacement["hotkey"],
+                expires_at=clock.now + 300,
+            )
+        )
+        svc.pair(SimpleNamespace(**replacement))
+        return await original_fetch()
+
+    svc.backend.fetch = fetch_after_repair
+
+    response = await client.post("/v1/reports", json=report_body(old_session))
+
+    assert response.status_code == 401
+    assert response.json() == {"error": "invalid_session"}
+    assert svc.store.list_reports() == []
+
+
+async def test_operator_granted_hotkey_replacement_revokes_the_existing_session(service, client):
     original = await pair(client)
 
     payload = signed_pair(nonce="34" * 16, seed_byte=8)
     await grant_pair(client, payload)
     replacement = await client.post("/v1/pair", json=payload)
-    retained = await client.post("/v1/reports", json=report_body(original))
+    revoked = await client.post("/v1/reports", json=report_body(original))
+    accepted = await client.post("/v1/reports", json=report_body(replacement.json()["session"], 1))
 
-    assert replacement.status_code == 409
-    assert replacement.json() == {"error": "account already paired to another hotkey"}
-    assert retained.status_code == 201
+    assert replacement.status_code == 201
+    assert replacement.json()["miner_hotkey"] == payload["hotkey"]
+    assert revoked.status_code == 401
+    assert accepted.status_code == 201
 
 
 async def test_status_probes_the_external_feed_instead_of_claiming_configured_is_ready(
@@ -395,6 +532,61 @@ async def test_status_probes_the_external_feed_instead_of_claiming_configured_is
         "requires_operator_grant": True,
         "grant_max_ttl_secs": 300,
     }
+    assert status.json()["quotas"] == {
+        "max_pending_reports_per_hotkey": 5,
+        "max_concurrent_feed_validations_per_hotkey": 1,
+        "min_report_interval_secs": 60,
+        "min_report_body_chars": 80,
+        "min_repro_chars": 20,
+        "max_report_request_bytes": 256 * 1024,
+    }
+
+
+async def test_successful_status_cache_never_masks_an_intake_outage(service, client):
+    svc, _, upstream = service
+    session = await pair(client)
+    assert (await client.get("/v1/status")).json()["can_score"] is True
+    upstream["status"] = 503
+
+    response = await client.post("/v1/reports", json=report_body(session))
+
+    assert response.status_code == 503
+    assert svc.store.list_reports() == []
+
+
+async def test_concurrent_reports_from_one_hotkey_start_only_one_feed_snapshot(service, client):
+    svc, _, _ = service
+    session = await pair(client)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingBackend:
+        configured = True
+        reads = 0
+
+        async def fetch(self):
+            self.reads += 1
+            entered.set()
+            await release.wait()
+
+    backend = BlockingBackend()
+    svc.backend = backend
+    first = asyncio.create_task(client.post("/v1/reports", json=report_body(session)))
+    await entered.wait()
+    try:
+        second = await asyncio.wait_for(
+            client.post("/v1/reports", json=report_body(session, 1)),
+            timeout=0.1,
+        )
+    except TimeoutError:
+        second = None
+    finally:
+        release.set()
+    first_response = await first
+
+    assert first_response.status_code == 201
+    assert second is not None and second.status_code == 429
+    assert backend.reads == 1
 
 
 async def test_duplicate_of_closed_report_never_reopens_triage(service, client):

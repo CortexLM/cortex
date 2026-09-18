@@ -5,6 +5,7 @@ import io
 import json
 import os
 import tarfile
+import time
 from types import SimpleNamespace
 
 import httpx
@@ -12,10 +13,11 @@ from test_master import FakeEpochChain, master_config
 from vm.test_research import MemoryCallback
 from vm.test_setup_agent import ExecutingHypervisor, SetupProvider
 
+from cortex.bounty import PublicBackend
 from cortex.master import EpochState, build_master
 from cortex.miner import MinerClient
 from cortex.proof.backend import VmBackend
-from cortex.protocol import ChallengeEntry, TrustRoot
+from cortex.protocol import ChallengeEntry, NoScore, NoScoreReason, Score, TrustRoot
 from cortex.protocol.crypto import public_key
 from cortex.rlm.offer import InferenceOffer, sign_offer
 from cortex.rlm.provider import Completion
@@ -114,6 +116,195 @@ class GuestWire:
             callback=self.callback,
         )
         return await guest.handle(message)
+
+
+class BountyFeed:
+    def __init__(self):
+        self.available = True
+        self.leaderboard = []
+        self.reports = []
+        self.revision = "1"
+
+    def handle(self, request):
+        if not self.available:
+            return httpx.Response(503)
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "status":
+            body = {
+                "api_version": 1,
+                "revision": self.revision,
+                "adjudication_available": True,
+                "published": len(self.reports),
+                "valid": sum(row["status"] == "valid" for row in self.reports),
+                "duplicate": sum(row["status"] == "duplicate" for row in self.reports),
+                "already_fixed_not_prod": sum(
+                    row["status"] == "already_fixed_not_prod" for row in self.reports
+                ),
+                "invalid_malicious": sum(
+                    row["status"] == "invalid_malicious" for row in self.reports
+                ),
+                "hotkeys": len({row["hotkey"] for row in self.reports}),
+                "awaiting_adjudication": 0,
+                "unpriced_valid": 0,
+            }
+        elif route == "leaderboard":
+            body = {
+                "api_version": 1,
+                "revision": self.revision,
+                "items": self.leaderboard,
+                "has_more": False,
+            }
+        else:
+            body = {
+                "api_version": 1,
+                "revision": self.revision,
+                "items": self.reports,
+                "count": len(self.reports),
+                "has_more": False,
+                "next_cursor": None,
+            }
+        return httpx.Response(200, json=body)
+
+
+async def test_bounty_compatibility_intake_external_feed_seal_and_validator_dispatch(tmp_path):
+    config = master_config(tmp_path)
+    chain = FakeEpochChain()
+    trust = TrustRoot(
+        (
+            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 2000),
+            ChallengeEntry(b"proof", public_key(bytes([2]) * 32), 8000),
+        ),
+        hashlib.sha256(b"\x00").digest(),
+        public_key(bytes([7]) * 32),
+    )
+    feed = BountyFeed()
+    runtime = await build_master(
+        config,
+        chain=chain,
+        epochs=chain,
+        trust=trust,
+        bounty_backend=PublicBackend(
+            "https://backend.fixture",
+            transport=httpx.MockTransport(feed.handle),
+        ),
+    )
+    journal = SubmissionJournal(tmp_path / "validator.sqlite3")
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(runtime.app()),
+            base_url="https://master.fixture",
+        ) as http:
+            miner = MinerClient(
+                base_url="https://master.fixture",
+                seed=bytes([21]) * 32,
+                client=http,
+            )
+            now = int(time.time())
+            runtime.bounty.clock = lambda: now
+            grant = await http.post(
+                "/v1/admin/pair-grants",
+                headers={"authorization": "Bearer fixture-operator-token"},
+                json={
+                    "account_id": "bounty-fixture",
+                    "hotkey": miner.hotkey,
+                    "expires_at": now + 300,
+                },
+            )
+            assert grant.status_code == 201, grant.text
+            pairing = await miner.pair_bounty(account_id="bounty-fixture", accept_terms=True)
+
+            feed.available = False
+            refused = await http.post(
+                "/challenge/bounty/v1/reports",
+                json={
+                    "session": pairing["session"],
+                    "hotkey": miner.hotkey,
+                    "title": "External feed outage blocks durable intake",
+                    "body": (
+                        "The external scoring publication is unavailable during intake, so "
+                        "this otherwise substantive report must not create any durable local row."
+                    ),
+                    "repro_steps": "Disable the feed and submit the signed miner session report.",
+                },
+            )
+            assert refused.status_code == 503
+            assert runtime.bounty.store.list_reports() == []
+
+            feed.available = True
+            local_report = await miner.report_bounty(
+                session=pairing["session"],
+                title="Unauthorized configuration mutation",
+                body=(
+                    "An unauthenticated request changes the operator configuration and "
+                    "invalidates the current sealed bundle for every validator observing "
+                    "the gateway."
+                ),
+                repro_steps=(
+                    "Call the operator endpoint without authorization and read the changed value."
+                ),
+            )
+            assert local_report["state"] == "pending"
+            feed.leaderboard = [{"hotkey": miner.hotkey, "valid": 3}]
+            feed.reports = [
+                {
+                    "id": f"backend-{index}",
+                    "hotkey": miner.hotkey,
+                    "status": "valid",
+                    "severity": "critical",
+                    "problem_found": "Unauthorized configuration mutation",
+                    "adjudicator": "fixture-adjudicator",
+                    "justification": "Reproduced from a clean unauthenticated client.",
+                    "adjudicated_at": "2026-09-18T01:00:00Z",
+                    "created_at": "2026-09-18T00:00:00Z",
+                }
+                for index in range(3)
+            ]
+            feed.revision = "2"
+
+            await runtime.emitter.tick()
+            chain.state = EpochState(13, 100, 105)
+            assert await runtime.emitter.tick() == [12]
+            leaves = runtime.gateway.store.leaves(12)
+            miner_key = public_key(bytes([21]) * 32)
+            assert next(
+                leaf
+                for leaf in leaves
+                if leaf.challenge_id == b"bounty" and leaf.miner_hotkey == miner_key
+            ).score == Score(1_000_000)
+            assert all(
+                leaf.score == NoScore(NoScoreReason.CHALLENGE_INTERNAL)
+                for leaf in leaves
+                if leaf.challenge_id == b"proof"
+            )
+            latest = (await http.get("/v1/weights/latest")).json()
+            assert latest["sealed"] is True
+            assert latest["final_vector"] == [[0, 52428], [1, 13107]]
+
+            preflight = Validator(
+                gateway_url="https://master.fixture",
+                netuid=541,
+                trust=trust,
+                chain=chain,
+                journal=journal,
+                http=http,
+                verify_only=True,
+            )
+            assert (await preflight.run_once()).outcome == "verified"
+            assert chain.submissions == []
+
+            validator = Validator(
+                gateway_url="https://master.fixture",
+                netuid=541,
+                trust=trust,
+                chain=chain,
+                journal=journal,
+                http=http,
+            )
+            assert (await validator.run_once()).outcome == "submitted"
+            assert chain.submissions == [((0, 52428), (1, 13107))]
+    finally:
+        journal.close()
+        await runtime.close()
 
 
 async def test_owner_setup_miner_submission_seal_and_validator_dispatch(tmp_path, monkeypatch):

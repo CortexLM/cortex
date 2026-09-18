@@ -9,7 +9,8 @@ conflicting values are an error. Existing names and crypto domains are preserved
 | Variable | Meaning |
 | --- | --- |
 | `BASE_NETUID` | Required subnet UID |
-| `BASE_CHAIN_ENDPOINT` | Bittensor network name or RPC endpoint |
+| `BASE_CHAIN_ENDPOINT` | Official Bittensor SDK alias (`finney`, `test`, `archive`, `local`) or credential-free `wss://` RPC origin |
+| `BASE_CHAIN_FALLBACK_ENDPOINTS` | JSON list of up to eight credential-free `wss://` fallback RPC endpoints |
 | `BASE_STATE_DIR` | Durable private state directory; default `/var/lib/cortex` |
 | `BASE_OWNER_PUBKEY_FILE` | Trust-root signing public key |
 | `BASE_CHALLENGES_FILE` | Signed challenge configuration; adjacent `.sig` required |
@@ -36,6 +37,13 @@ Keys and tokens are files with mode 0400 or 0600, never image build arguments.
 Signing seeds are 32 bytes or 64 hexadecimal characters. SQLite state and miner
 credential vaults must be backed by durable private storage.
 
+For the Bounty-only launch, set `BOUNTY_BACKEND_PUBLIC_URL` to the HTTPS
+`CortexLM/backend` origin and leave `PROOF_VM_ORCHESTRATOR_URL` empty. The Proof
+seed remains required because every completed epoch still needs signed Proof
+absence leaves. The owner-signed trust root remains exactly `bounty = 2000` and
+`proof = 8000`; the unavailable Proof share burns and is never reassigned to
+Bounty.
+
 One resource shape applies to the persistent topic VM and each fresh experiment
 VM. The examples explicitly request 1 vCPU, 1024 MiB RAM and 16384 MiB disk;
 omitting these settings keeps the runtime defaults in the table. The host must
@@ -45,6 +53,28 @@ acceptance. Oversized requests are rejected, never clamped. Attaching an existin
 topic VM also requires its image and resource shape to match exactly: changing
 these settings does not resize a running topic. See the
 [small-host sizing guide](../../deploy/README.md#small-host-sizing).
+
+## Validator
+
+The Compose validator maps these host settings to required CLI arguments:
+
+| Variable | Meaning |
+| --- | --- |
+| `BASE_GATEWAY_ENDPOINT` | Master HTTPS origin |
+| `BASE_NETUID` | Exact deployed subnet UID |
+| `BASE_CHAIN_ENDPOINT` | Official Bittensor SDK alias (`finney`, `test`, `archive`, `local`) or credential-free `wss://` RPC origin |
+| `BASE_CHAIN_FALLBACK_ENDPOINTS` | JSON list of up to eight credential-free `wss://` fallback RPC endpoints |
+| `BASE_GATEWAY_HOTKEY` | Independently pinned gateway signing public key |
+| `BASE_CHALLENGES_MIN_VERSION` | Minimum accepted owner-signed challenge document version |
+| `BASE_MEASUREMENTS_MIN_VERSION` | Minimum accepted owner-signed measurement document version |
+| `BASE_VERSION_KEY` | Exact live subnet validator version key |
+| `BASE_MIN_PEER_SAMPLE` | Required independent permitted-validator peer sample, 0-64 |
+| `BASE_MAX_BLOCK_LAG` | Maximum age of a sealed metagraph block, at least 1 |
+
+The trust minimums and version key are intentionally blank in the example.
+Populate them from reviewed signed documents and the live subnet; do not infer
+them from tests. `--verify-only --once` is the non-dispatch preflight. It still
+requires wallet identity, peer consensus and full historical-chain access.
 
 ## VM host
 

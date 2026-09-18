@@ -25,10 +25,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           version: ${{ env.UV_VERSION }}
           python-version: "3.12"
@@ -40,8 +40,8 @@ jobs:
         run: uv sync --locked --extra chain --group build
       - name: Format and lint
         run: |
-          uv run --no-sync ruff format --check src tests scripts/check_deploy.py scripts/check_repo.py scripts/rlm_smoke.py scripts/vm_smoke.py
-          uv run --no-sync ruff check src tests scripts/check_deploy.py scripts/check_repo.py scripts/rlm_smoke.py scripts/vm_smoke.py
+          uv run --no-sync ruff format --check src tests scripts
+          uv run --no-sync ruff check src tests scripts
       - name: Type checking
         run: uv run --no-sync mypy
       - name: Validate frozen specs, public contracts and repository hygiene
@@ -65,9 +65,16 @@ jobs:
               members = archive.getmembers()
           prefix = archives[0].name.removesuffix(".tar.gz")
           names = {pathlib.PurePosixPath(member.name).relative_to(prefix) for member in members}
-          required = {"src/cortex/vm/preflight.py", "src/cortex/vm/smoke.py", "scripts/vm_smoke.py"}
-          assert required <= {str(name) for name in names}, "VM diagnostics missing from source archive"
-          roots = {"src", "tests", "scripts", "config", "deploy", "docs", ".dockerignore", ".env.example", "AGENTS.md", ".gitignore", "pyproject.toml", "uv.lock", "README.md", "CHANGELOG.md", "LICENSE", "PKG-INFO"}
+          required = {
+              ".github/workflows/approve-image-update.yml",
+              ".github/workflows/images.yml",
+              "scripts/verify_image_update.py",
+              "src/cortex/vm/preflight.py",
+              "src/cortex/vm/smoke.py",
+              "scripts/vm_smoke.py",
+          }
+          assert required <= {str(name) for name in names}, "required source files missing from archive"
+          roots = {"src", "tests", "scripts", "config", "deploy", "docs", ".github", ".dockerignore", ".env.example", "AGENTS.md", ".gitignore", "pyproject.toml", "uv.lock", "README.md", "CHANGELOG.md", "LICENSE", "PKG-INFO"}
           assert all(name.parts and name.parts[0] in roots and ".." not in name.parts for name in names), "unexpected archive root"
           assert not any(name.suffix == ".rs" or name.name in {"Cargo.toml", "Cargo.lock"} for name in names), "legacy Rust sources in Python archive"
           assert all(member.isfile() or member.isdir() for member in members), "special archive entry"
@@ -75,7 +82,7 @@ jobs:
               with tarfile.open(archives[0]) as archive:
                   archive.extractall(destination, filter="data")
               subprocess.run(
-                  [sys.executable, "-m", "pytest", "tests/test_repo_contract.py", "tests/test_deploy_contract.py", "-q"],
+                  [sys.executable, "-m", "pytest", "tests/test_repo_contract.py", "tests/test_deploy_contract.py", "tests/test_supply_chain.py", "-q"],
                   cwd=pathlib.Path(destination) / prefix,
                   check=True,
               )
@@ -94,7 +101,7 @@ jobs:
           "$cortex_python" -I -m cortex.vm.smoke --help
           "$cortex_python" -I -c 'from cortex.vm.preflight import check_host'
           "$cortex_python" -I -c 'from cortex.protocol.crypto import public_key, sign_raw, verify_raw; key = bytes(range(32)); body = b"installed-wheel-smoke"; assert verify_raw(public_key(key), b"smoke", body, sign_raw(key, b"smoke", body))'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: python-distributions
           path: dist/*
@@ -110,10 +117,10 @@ jobs:
       matrix:
         python: ["3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ matrix.python }}
@@ -125,7 +132,7 @@ jobs:
         run: uv sync --locked --extra chain
       - name: Full offline suite
         run: uv run --no-sync pytest -m 'not live' --junitxml=test-results/pytest.xml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()
         with:
           name: tests-python-${{ matrix.python }}

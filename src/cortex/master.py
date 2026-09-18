@@ -11,6 +11,7 @@ from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -20,7 +21,7 @@ from cortex.bounty import create_router as bounty_router
 from cortex.bounty.store import StoreError
 from cortex.config import MasterConfig, read_seed
 from cortex.errors import ServiceError
-from cortex.gateway import GatewayService, GatewayStore, RawWeightConflict
+from cortex.gateway import GatewayService, GatewayStore
 from cortex.gateway import create_router as gateway_router
 from cortex.http import OperatorAuth, read_private_file
 from cortex.proof.api import create_router as proof_router
@@ -34,6 +35,22 @@ from cortex.protocol.merkle import canonical_rows
 from cortex.protocol.scale import uint
 from cortex.state import prepare_master_state
 from cortex.validator import ChainSnapshot
+
+
+def _public_chain_endpoint(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value) > 2048:
+        return ""
+    parsed = urlsplit(value)
+    if not parsed.scheme:
+        return value if len(value) <= 64 and all(c.isalnum() or c in "._-" for c in value) else ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
+        return ""
+    hostname = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    return f"{parsed.scheme}://{hostname}{f':{port}' if port is not None else ''}"
 
 
 @dataclass(frozen=True)
@@ -292,18 +309,15 @@ class EpochEmitter:
                 raise ServiceError(503, "challenge signing key does not match owner trust")
             outcomes = await self._scores(challenge.id, epoch, expected)
             # No unknown score key can expand E; missing scores are explicit signed absences.
+            leaves = []
             for hotkey in sorted(expected):
                 score = outcomes.get(hotkey, NoScore(NoScoreReason.NOT_ATTEMPTED))
                 try:
                     score.encode()
                 except ValueError:
                     score = NoScore()
-                leaf = sign_leaf(seed, challenge.id, hotkey, epoch, score)
-                try:
-                    self.gateway.accept_leaf(leaf)
-                except RawWeightConflict:
-                    # Identical retry or a protected positive score survives a failed feed.
-                    pass
+                leaves.append(sign_leaf(seed, challenge.id, hotkey, epoch, score))
+            self.gateway.replace_challenge_leaves(challenge.id, epoch, expected, tuple(leaves))
 
     async def tick(self) -> list[int]:
         async with self._lock:
@@ -455,9 +469,20 @@ class MasterRuntime:
         )
         app.include_router(direct_bounty)
 
+        @app.get("/livez")
+        async def health():
+            return {"ok": True, "role": "master"}
+
         @app.get("/readyz")
         async def ready():
-            return {"ready": True, "epoch": self.clock(), "role": "master"}
+            try:
+                epoch = self.clock()
+            except ServiceError as error:
+                return JSONResponse(
+                    {"ready": False, "role": "master", "reason": str(error)},
+                    status_code=503,
+                )
+            return {"ready": True, "epoch": epoch, "role": "master"}
 
         return app
 
@@ -486,13 +511,24 @@ async def build_master(
         journal = EmissionJournal(config.state_dir / "emission.sqlite3")
         cleanup.callback(journal.close)
         journal.observe(state)
+
+        def chain_endpoint() -> str:
+            subtensor = getattr(chain, "subtensor", None)
+            substrate = getattr(subtensor, "substrate", None)
+            value = getattr(substrate, "chain_endpoint", None)
+            if not isinstance(value, str) or not value:
+                value = getattr(subtensor, "chain_endpoint", None)
+            if not isinstance(value, str) or not value:
+                value = config.chain_endpoint
+            return _public_chain_endpoint(value)
+
         gateway = GatewayService(
             store=gateway_store,
             trust=local_trust,
             netuid=config.netuid,
             chain=chain,
             gateway_seed=lambda: read_seed(config.gateway_seed_file),
-            chain_endpoint=config.chain_endpoint,
+            chain_endpoint=chain_endpoint,
             trust_loader=None if trust is not None else config.trust_root,
         )
         bounty = _FileAuthenticatedBounty(

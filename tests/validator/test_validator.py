@@ -20,6 +20,7 @@ from cortex.protocol import (
 )
 from cortex.protocol.crypto import BUNDLE_DOMAIN, public_key, sign_raw
 from cortex.validator import ChainSnapshot, SubmissionJournal, Validator
+from cortex.validator.service import DispatchNotBroadcast, DispatchUncertain
 
 
 class FakeChain:
@@ -30,6 +31,8 @@ class FakeChain:
         self.submissions = []
         self.success = True
         self.error = None
+        self.preflight_error = None
+        self.preflights = []
 
     async def snapshot(self, block, netuid):
         assert block == 99 and netuid == 541
@@ -43,6 +46,11 @@ class FakeChain:
         if self.error:
             raise self.error
         return self.success
+
+    async def preflight(self, netuid, vector, version_key):
+        self.preflights.append((netuid, vector, version_key))
+        if self.preflight_error:
+            raise self.preflight_error
 
 
 @pytest.fixture
@@ -134,6 +142,47 @@ async def test_valid_seal_submits_recomputed_vector_once_across_restart(network)
     assert len(network.chain.submissions) == 1
 
 
+async def test_verify_only_checks_the_seal_without_claiming_or_submitting(network):
+    network.validator.verify_only = True
+
+    assert (await network.validator.run_once()).outcome == "verified"
+    assert network.chain.submissions == []
+    assert network.chain.preflights == [(541, ((1, 65535),), 1)]
+
+    network.validator.verify_only = False
+    assert (await network.validator.run_once()).outcome == "submitted"
+
+
+async def test_verify_only_refuses_a_live_chain_preflight_failure(network):
+    network.validator.verify_only = True
+    network.chain.preflight_error = DispatchNotBroadcast("weight rate limit not elapsed")
+
+    assert (await network.validator.run_once()).outcome == "chain_preflight_failed"
+    assert network.chain.submissions == []
+
+
+@pytest.mark.parametrize(
+    "gateway_url",
+    [
+        "http://master.invalid",
+        "https://user:secret@master.invalid",
+        "https://master.invalid/path",
+        "https://master.invalid?token=secret",
+        "https://master.invalid#fragment",
+    ],
+)
+def test_validator_requires_a_credential_free_https_gateway_origin(network, gateway_url):
+    with pytest.raises(ValueError, match="gateway URL requires HTTPS"):
+        Validator(
+            gateway_url=gateway_url,
+            netuid=541,
+            trust=network.validator.trust,
+            chain=network.chain,
+            journal=network.journal,
+            http=network.validator.http,
+        )
+
+
 async def test_unsealed_latest_never_uses_previous_verified_seal(network):
     await network.validator.run_once()
     network.chain.submissions.clear()
@@ -192,6 +241,116 @@ async def test_known_dispatch_rejection_can_retry(network):
     assert (await network.validator.run_once()).outcome == "dispatch_failed"
     network.chain.success = True
     assert (await network.validator.run_once()).outcome == "submitted"
+
+
+async def test_pre_broadcast_dispatch_failure_releases_claim(network):
+    network.chain.error = DispatchNotBroadcast("validator hotkey is not registered")
+    assert (await network.validator.run_once()).outcome == "dispatch_failed"
+
+    network.chain.error = None
+    assert (await network.validator.run_once()).outcome == "submitted"
+    assert len(network.chain.submissions) == 2
+
+
+async def test_classified_ambiguous_dispatch_keeps_claim_pending(network):
+    network.chain.error = DispatchUncertain(
+        "RPC disconnected after broadcasting",
+        extrinsic_hash="0x" + "ab" * 32,
+        nonce=17,
+    )
+    result = await network.validator.run_once()
+    assert result.outcome == "dispatch_pending"
+    assert result.attempt_id
+    assert result.extrinsic_hash == "0x" + "ab" * 32
+    assert result.nonce == 17
+    assert network.journal.pending(541, 12) == {
+        "attempt_id": result.attempt_id,
+        "digest": bundle_digest(network.bundle),
+        "extrinsic_hash": "0x" + "ab" * 32,
+        "nonce": 17,
+        "state": "uncertain",
+    }
+
+    network.chain.error = None
+    assert (await network.validator.run_once()).outcome == "already_submitted_or_pending"
+    assert len(network.chain.submissions) == 1
+
+
+async def test_operator_reconciliation_can_release_a_proven_not_broadcast_attempt(network):
+    network.chain.error = DispatchUncertain("RPC disconnected")
+    pending = await network.validator.run_once()
+
+    reconciled = network.journal.reconcile(
+        netuid=541,
+        epoch=12,
+        digest=bundle_digest(network.bundle),
+        attempt_id=pending.attempt_id,
+        result="not_broadcast",
+        evidence_digest="cd" * 32,
+    )
+    network.chain.error = None
+
+    assert reconciled["state"] == "reconciled_not_broadcast"
+    assert (await network.validator.run_once()).outcome == "submitted"
+    assert len(network.chain.submissions) == 2
+
+
+def test_reconciliation_refuses_the_wrong_bundle_digest_or_attempt(network):
+    digest = bundle_digest(network.bundle)
+    attempt_id = network.journal.claim(541, 12, digest)
+
+    with pytest.raises(ProtocolError, match="reconciliation identity"):
+        network.journal.reconcile(
+            netuid=541,
+            epoch=12,
+            digest="00" * 32,
+            attempt_id=attempt_id,
+            result="submitted",
+            evidence_digest="cd" * 32,
+        )
+
+    assert network.journal.pending(541, 12)["attempt_id"] == attempt_id
+
+
+def test_reconciliation_cannot_release_an_active_dispatch(network):
+    digest = bundle_digest(network.bundle)
+    attempt_id = network.journal.claim(541, 12, digest)
+
+    with pytest.raises(ProtocolError, match="reconciliation identity"):
+        network.journal.reconcile(
+            netuid=541,
+            epoch=12,
+            digest=digest,
+            attempt_id=attempt_id,
+            result="not_broadcast",
+            evidence_digest="cd" * 32,
+        )
+
+    network.journal.complete(541, 12, attempt_id)
+    assert network.journal.claim(541, 12, digest) is None
+
+
+def test_validator_startup_marks_an_interrupted_dispatch_uncertain(network):
+    digest = bundle_digest(network.bundle)
+    attempt_id = network.journal.claim(541, 12, digest)
+    assert network.journal.pending(541, 12)["state"] == "dispatching"
+
+    Validator(
+        gateway_url="https://master.invalid",
+        netuid=541,
+        trust=network.validator.trust,
+        chain=network.chain,
+        journal=network.journal,
+        http=network.validator.http,
+    )
+
+    assert network.journal.pending(541, 12) == {
+        "attempt_id": attempt_id,
+        "digest": digest,
+        "extrinsic_hash": None,
+        "nonce": None,
+        "state": "uncertain",
+    }
 
 
 async def test_ambiguous_dispatch_exception_requires_reconciliation(network):
@@ -288,6 +447,18 @@ async def test_class_a_submits_independent_vector_and_signed_dissent_after_peer_
     assert dissent.actual_vector_hash != dissent.expected_vector_hash
 
 
+async def test_verify_only_reports_vector_dissent_as_a_degraded_outcome(network):
+    body = replace(network.bundle.body, final_vector=((2, 65535),))
+    network.bundle = Bundle(body, sign_raw(bytes([7]) * 32, BUNDLE_DOMAIN, body.encode()))
+    signed_peers(network)
+    network.validator.verify_only = True
+
+    result = await network.validator.run_once()
+
+    assert result.outcome == "dissent_vector_mismatch"
+    assert network.chain.submissions == []
+
+
 @pytest.mark.parametrize("challenge,can_submit", [(b"bounty", True), (b"proof", False)])
 async def test_quarantine_uses_surviving_signed_mass_threshold(network, challenge, can_submit):
     from cortex.protocol.merkle import merkle_root
@@ -374,6 +545,7 @@ async def test_peer_api_serves_signed_evidence_and_never_claims_dcap_verified(ne
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app), base_url="https://peer"
     ) as http:
+        assert (await http.get("/livez")).json() == {"ok": True, "role": "validator"}
         response = await http.get("/v1/consensus/root/12")
         statement = RootStatement.from_json(response.json())
         assert statement.hotkey == public_key(bytes([20]) * 32)

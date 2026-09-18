@@ -13,12 +13,18 @@ services:
       - ${BASE_GATEWAY_HOTKEY:?Set the independently pinned gateway public key}
       - --network
       - ${BASE_CHAIN_ENDPOINT:-finney}
+      - --fallback-endpoints
+      - ${BASE_CHAIN_FALLBACK_ENDPOINTS:-[]}
       - --owner-public
       - /etc/base/config/owner.pubkey
       - --challenges
       - /etc/base/config/challenges.toml
       - --measurements
       - /etc/base/config/measurements.toml
+      - --minimum-challenges-version
+      - ${BASE_CHALLENGES_MIN_VERSION:?Set the minimum signed challenge version}
+      - --minimum-measurements-version
+      - ${BASE_MEASUREMENTS_MIN_VERSION:?Set the minimum signed measurement version}
       - --wallet-name
       - ${BASE_WALLET_NAME:?Set the validator wallet name}
       - --wallet-hotkey
@@ -41,6 +47,12 @@ services:
       - /run/validator/tls.key
       - --poll-seconds
       - ${BASE_COORDINATION_INTERVAL_SECS:-30}
+      - --version-key
+      - ${BASE_VERSION_KEY:?Set the subnet validator version key}
+      - --min-peer-sample
+      - ${BASE_MIN_PEER_SAMPLE:-1}
+      - --max-block-lag
+      - ${BASE_MAX_BLOCK_LAG:-256}
     restart: unless-stopped
     init: true
     read_only: true
@@ -72,5 +84,11 @@ services:
       - base-validator-state:/var/lib/base
     tmpfs:
       - /tmp:size=32m,mode=1777
+    healthcheck:
+      test: [CMD, python, -I, -c, "import ssl,urllib.request; urllib.request.urlopen('https://127.0.0.1:8091/livez', context=ssl._create_unverified_context(), timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
 volumes:
   base-validator-state:

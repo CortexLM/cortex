@@ -168,6 +168,51 @@ class GatewayStore:
             )
         return _ack(row_id, leaf, previous is not None)
 
+    def replace_challenge_leaves(
+        self, challenge_id: bytes, epoch: int, leaves: tuple[Leaf, ...]
+    ) -> tuple[dict, ...]:
+        encoded = []
+        hotkeys = set()
+        for leaf in sorted(leaves, key=lambda item: item.miner_hotkey):
+            if leaf.challenge_id != challenge_id or leaf.epoch != epoch:
+                raise ProtocolError("challenge snapshot identity mismatch")
+            if leaf.miner_hotkey in hotkeys:
+                raise ProtocolError("duplicate challenge snapshot participant")
+            hotkeys.add(leaf.miner_hotkey)
+            raw = leaf.encode()
+            encoded.append((leaf, raw, sha256(leaf.payload()).digest()))
+
+        epoch_key = _epoch(epoch)
+        with self._transaction() as connection:
+            if connection.execute(
+                "SELECT 1 FROM gateway_bundles WHERE epoch=?", (epoch_key,)
+            ).fetchone():
+                raise ServiceError(409, "sealed epoch is immutable")
+            existing = connection.execute(
+                "SELECT row_id,leaf_scale FROM gateway_raw_leaves "
+                "WHERE challenge_id=? AND epoch=? ORDER BY miner_hotkey",
+                (challenge_id, epoch_key),
+            ).fetchall()
+            if len(existing) == len(encoded) and all(
+                row[1] == item[1] for row, item in zip(existing, encoded, strict=True)
+            ):
+                return tuple(
+                    _ack(row[0], item[0]) for row, item in zip(existing, encoded, strict=True)
+                )
+            connection.execute(
+                "DELETE FROM gateway_raw_leaves WHERE challenge_id=? AND epoch=?",
+                (challenge_id, epoch_key),
+            )
+            result = []
+            for leaf, raw, digest in encoded:
+                row_id = str(uuid4())
+                connection.execute(
+                    "INSERT INTO gateway_raw_leaves VALUES (?, ?, ?, ?, ?, ?)",
+                    (challenge_id, epoch_key, leaf.miner_hotkey, row_id, digest, raw),
+                )
+                result.append(_ack(row_id, leaf))
+        return tuple(result)
+
     def leaves(self, epoch: int) -> tuple[Leaf, ...]:
         with self._lock:
             rows = self._connection.execute(

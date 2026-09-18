@@ -22,12 +22,29 @@ PYTHON_IMAGE = re.compile(
 HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}")
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
+CHAIN_ALIASES = frozenset({"archive", "finney", "local", "test"})
 VM_HOST_EXEC = "/opt/base/venv/bin/cortex vm-host --config /etc/proof-vm/host.toml"
 VM_RESOURCE_ENV = {
     "PROOF_RLM_VM_VCPUS": (1, 16),
     "PROOF_RLM_VM_MEM_MIB": (128, 32768),
     "PROOF_RLM_VM_DISK_MIB": (16384, 1048576),
 }
+MASTER_HEALTHCHECK = [
+    "CMD",
+    "python",
+    "-c",
+    "import urllib.request; urllib.request.urlopen("
+    "'http://127.0.0.1:8080/readyz', timeout=5).read()",
+]
+VALIDATOR_HEALTHCHECK = [
+    "CMD",
+    "python",
+    "-I",
+    "-c",
+    "import ssl,urllib.request; urllib.request.urlopen("
+    "'https://127.0.0.1:8091/livez', context=ssl._create_unverified_context(), "
+    "timeout=5).read()",
+]
 
 MASTER_ENVIRONMENT = {
     "BASE_STATE_DIR": "/var/lib/base",
@@ -46,9 +63,12 @@ VALIDATOR_OPTIONS = {
     "--netuid",
     "--gateway-public",
     "--network",
+    "--fallback-endpoints",
     "--owner-public",
     "--challenges",
     "--measurements",
+    "--minimum-challenges-version",
+    "--minimum-measurements-version",
     "--wallet-name",
     "--wallet-hotkey",
     "--wallet-path",
@@ -60,6 +80,9 @@ VALIDATOR_OPTIONS = {
     "--peer-tls-certificate",
     "--peer-tls-key",
     "--poll-seconds",
+    "--version-key",
+    "--min-peer-sample",
+    "--max-block-lag",
 }
 
 
@@ -127,6 +150,65 @@ def _compose_options(command) -> dict[str, str]:
     if set(options) != VALIDATOR_OPTIONS:
         raise ValueError("validator command differs from the audited Python runtime contract")
     return options
+
+
+def _wss_endpoints(value: str, label: str) -> list[str]:
+    try:
+        endpoints = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{label} must be a JSON list") from error
+    if (
+        not isinstance(endpoints, list)
+        or len(endpoints) > 8
+        or any(not isinstance(endpoint, str) for endpoint in endpoints)
+        or len(set(endpoints)) != len(endpoints)
+    ):
+        raise ValueError(f"{label} must contain up to 8 unique WSS URLs")
+    for endpoint in endpoints:
+        try:
+            parsed = urlsplit(endpoint)
+            port = parsed.port
+        except ValueError:
+            raise ValueError(f"{label} must contain up to 8 unique WSS URLs") from None
+        if (
+            endpoint != endpoint.strip()
+            or parsed.scheme != "wss"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or port == 0
+        ):
+            raise ValueError(f"{label} must contain up to 8 unique WSS URLs")
+    return endpoints
+
+
+def _chain_endpoint(value: str, label: str) -> str:
+    if value in CHAIN_ALIASES:
+        return value
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        raise ValueError(f"{label} must be an official alias or WSS origin") from None
+    if (
+        not value
+        or len(value) > 2048
+        or not value.isascii()
+        or any(ord(character) < 33 or ord(character) == 127 for character in value)
+        or parsed.scheme != "wss"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or port == 0
+    ):
+        raise ValueError(f"{label} must be an official alias or WSS origin")
+    return value
 
 
 def _explicit_host_port(service: dict, target: int) -> None:
@@ -230,7 +312,7 @@ def validate_compose(config: dict, role: str) -> None:
         if "/run/wallets" in mounts:
             raise ValueError("master must not hold the validator wallet")
         health = service.get("healthcheck", {}).get("test", [])
-        if not isinstance(health, list) or "/readyz" not in " ".join(map(str, health)):
+        if health != MASTER_HEALTHCHECK:
             raise ValueError("master healthcheck must use its Python readiness endpoint")
         _explicit_host_port(service, 8080)
         return
@@ -244,6 +326,8 @@ def validate_compose(config: dict, role: str) -> None:
     if "/run/secrets" in mounts:
         raise ValueError("validator must not hold challenge signing keys")
     options = _compose_options(command)
+    _chain_endpoint(options["--network"], "validator chain endpoint")
+    _wss_endpoints(options["--fallback-endpoints"], "validator fallback endpoints")
     gateway = urlsplit(options["--gateway"])
     if (
         gateway.scheme != "https"
@@ -258,9 +342,23 @@ def validate_compose(config: dict, role: str) -> None:
     try:
         netuid = int(options["--netuid"])
         poll = float(options["--poll-seconds"])
+        challenge_version = int(options["--minimum-challenges-version"])
+        measurement_version = int(options["--minimum-measurements-version"])
+        version_key = int(options["--version-key"])
+        min_peer_sample = int(options["--min-peer-sample"])
+        max_block_lag = int(options["--max-block-lag"])
     except ValueError:
         raise ValueError("validator numeric options are invalid") from None
-    if not 0 <= netuid <= 65535 or not math.isfinite(poll) or poll <= 0:
+    if (
+        not 0 <= netuid <= 65535
+        or not math.isfinite(poll)
+        or poll <= 0
+        or challenge_version < 1
+        or measurement_version < 1
+        or not 0 <= version_key <= 2**64 - 1
+        or not 0 <= min_peer_sample <= 64
+        or max_block_lag < 1
+    ):
         raise ValueError("validator numeric options are invalid")
     fixed = {
         "--owner-public": "/etc/base/config/owner.pubkey",
@@ -282,6 +380,9 @@ def validate_compose(config: dict, role: str) -> None:
         for name in ("--gateway-public", "--network", "--wallet-name", "--wallet-hotkey")
     ):
         raise ValueError("validator identity and network pins are required")
+    health = service.get("healthcheck", {}).get("test", [])
+    if health != VALIDATOR_HEALTHCHECK:
+        raise ValueError("validator healthcheck must use its Python liveness endpoint")
     _explicit_host_port(service, 8091)
 
 
@@ -674,6 +775,7 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         "BASE_GATEWAY_BIND_ADDRESS",
         "BASE_NETUID",
         "BASE_CHAIN_ENDPOINT",
+        "BASE_CHAIN_FALLBACK_ENDPOINTS",
         "BASE_EMIT_POLL_SECS",
         "BASE_EPOCH_REFRESH_SECS",
         "BASE_EPOCH_STALE_SECS",
@@ -723,6 +825,8 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         or measurement_version < 1
     ):
         raise ValueError("master example contains unsafe timing or netuid settings")
+    _wss_endpoints(master["BASE_CHAIN_FALLBACK_ENDPOINTS"], "master fallback endpoints")
+    _chain_endpoint(master["BASE_CHAIN_ENDPOINT"], "master chain endpoint")
 
     validator = _env_file(validator_source)
     validator_required = {
@@ -730,10 +834,16 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         "BASE_GATEWAY_ENDPOINT",
         "BASE_NETUID",
         "BASE_CHAIN_ENDPOINT",
+        "BASE_CHAIN_FALLBACK_ENDPOINTS",
         "BASE_GATEWAY_HOTKEY",
         "BASE_WALLET_NAME",
         "BASE_WALLET_HOTKEY",
         "BASE_COORDINATION_INTERVAL_SECS",
+        "BASE_CHALLENGES_MIN_VERSION",
+        "BASE_MEASUREMENTS_MIN_VERSION",
+        "BASE_VERSION_KEY",
+        "BASE_MIN_PEER_SAMPLE",
+        "BASE_MAX_BLOCK_LAG",
         "BASE_VALIDATOR_WALLETS_DIR",
         "BASE_TRUST_ROOT_DIR",
         "BASE_VALIDATOR_IDENTITY_DIR",
@@ -744,22 +854,30 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
     for name in validator_required - {
         "BASE_NETUID",
         "BASE_CHAIN_ENDPOINT",
+        "BASE_CHAIN_FALLBACK_ENDPOINTS",
         "BASE_COORDINATION_INTERVAL_SECS",
+        "BASE_MIN_PEER_SAMPLE",
+        "BASE_MAX_BLOCK_LAG",
     }:
         if validator[name]:
             raise ValueError("validator host-specific identity fields must remain blank")
     try:
         validator_netuid = int(validator["BASE_NETUID"])
         validator_poll = float(validator["BASE_COORDINATION_INTERVAL_SECS"])
+        validator_min_peer_sample = int(validator["BASE_MIN_PEER_SAMPLE"])
+        validator_max_block_lag = int(validator["BASE_MAX_BLOCK_LAG"])
     except ValueError:
         raise ValueError("validator example contains invalid numeric settings") from None
     if (
         not 0 <= validator_netuid <= 65535
         or not math.isfinite(validator_poll)
         or validator_poll <= 0
-        or not validator["BASE_CHAIN_ENDPOINT"]
+        or not 0 <= validator_min_peer_sample <= 64
+        or validator_max_block_lag < 1
     ):
         raise ValueError("validator example contains unsafe network settings")
+    _chain_endpoint(validator["BASE_CHAIN_ENDPOINT"], "validator chain endpoint")
+    _wss_endpoints(validator["BASE_CHAIN_FALLBACK_ENDPOINTS"], "validator fallback endpoints")
 
 
 def _default_sources(config: dict, role: str) -> None:
@@ -808,6 +926,9 @@ def check_examples() -> None:
             "BASE_GATEWAY_HOTKEY": "e" * 64,
             "BASE_WALLET_NAME": "fixture",
             "BASE_WALLET_HOTKEY": "validator",
+            "BASE_CHALLENGES_MIN_VERSION": "1",
+            "BASE_MEASUREMENTS_MIN_VERSION": "1",
+            "BASE_VERSION_KEY": "1",
             "BASE_VALIDATOR_BIND_ADDRESS": "127.0.0.2",
             "BASE_VALIDATOR_IDENTITY_DIR": "/fixture/identity",
         }

@@ -1,60 +1,138 @@
 name: python-images
 
-# Explicit image publication; this workflow never changes deployed pins or hosts.
+# Build and scan the runtime automatically. Publication stops at GHCR; deployment is separate.
 on:
-  workflow_dispatch:
-    inputs:
-      python_image:
-        description: "Python 3.12 slim Bookworm image with verified @sha256 digest"
-        required: true
-        type: string
-        default: python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
-      publish:
-        description: "Publish the tested runtime image to GHCR (guest is validated only)"
-        required: true
-        default: false
-        type: boolean
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: python-images-${{ github.ref }}
-  cancel-in-progress: true
+  group: python-images-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  DEFAULT_PYTHON_IMAGE: python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
 
 jobs:
-  image:
+  publish:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45
     permissions:
-      contents: read
       actions: read
+      attestations: write
+      contents: read
+      id-token: write
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - name: Validate base pin and publication branch
-        env:
-          PYTHON_IMAGE: ${{ inputs.python_image }}
-          PUBLISH: ${{ inputs.publish }}
+
+      - name: Validate source and publication policy
+        id: policy
         run: |
-          python3 scripts/check_deploy.py --base-image "$PYTHON_IMAGE"
-          if [[ "$PUBLISH" == "true" && "$GITHUB_REF" != "refs/heads/main" ]]; then
-            echo "Publish images only from main." >&2
+          set -euo pipefail
+          python_image="$DEFAULT_PYTHON_IMAGE"
+          python3 scripts/check_deploy.py --base-image "$python_image"
+
+          release_tag=
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            release_tag="$GITHUB_REF_NAME"
+            [[ "$release_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]
+            test "$(git cat-file -t "refs/tags/$release_tag")" = tag
+            test "$(git rev-list -n 1 "refs/tags/$release_tag")" = "$GITHUB_SHA"
+            git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          fi
+
+          if ! test "$python_image" = "$DEFAULT_PYTHON_IMAGE"; then
+            echo "Published images must use the Python base pinned by this source commit." >&2
             exit 1
           fi
-          printf 'IMAGE=ghcr.io/%s/python\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+          alias_release=false
+          if [[ -n "$release_tag" ]]; then
+            alias_release=true
+          fi
+
+          image="ghcr.io/${GITHUB_REPOSITORY,,}/python"
+          {
+            echo "IMAGE=$image"
+            echo "PYTHON_IMAGE=$python_image"
+          } >> "$GITHUB_ENV"
+          {
+            echo "release_tag=$release_tag"
+            echo "alias_release=$alias_release"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Require passing CI for the exact source commit
-        if: inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          success=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=completed" --jq '[.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main")] | length')
-          test "$success" -gt 0
-      - uses: docker/setup-buildx-action@v3
-      - name: Build and load the runtime
-        uses: docker/build-push-action@v6
+          set -euo pipefail
+          for attempt in $(seq 1 120); do
+            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=completed" \
+              --jq '[.workflow_runs[] | select(.head_branch == "main")] | sort_by(.run_number) | last | .conclusion // empty')
+            case "$conclusion" in
+              success) exit 0 ;;
+              "") echo "Waiting for CI ($attempt/120)"; sleep 15 ;;
+              *) echo "CI concluded $conclusion for $GITHUB_SHA" >&2; exit 1 ;;
+            esac
+          done
+          echo "No successful CI run for $GITHUB_SHA within thirty minutes." >&2
+          exit 1
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve any existing immutable SHA image
+        id: existing
+        env:
+          ALIAS_RELEASE: ${{ steps.policy.outputs.alias_release }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha_ref="$IMAGE:$GITHUB_SHA"
+          inspect_error=$(mktemp)
+          trap 'rm -f "$inspect_error"' EXIT
+          if docker buildx imagetools inspect "$sha_ref" --format '{{json .Manifest}}' > source-manifest.json 2>"$inspect_error"; then
+            digest=$(python3 -c 'import json; print(json.load(open("source-manifest.json"))["digest"])')
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            gh attestation verify "oci://$IMAGE@$digest" \
+              --repo "$GITHUB_REPOSITORY" \
+              --source-digest "$GITHUB_SHA" \
+              --source-ref refs/heads/main \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/images.yml" \
+              --deny-self-hosted-runners \
+              --bundle-from-oci \
+              --format json > source-attestation.json
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          else
+            if [[ "$ALIAS_RELEASE" == true ]]; then
+              cat "$inspect_error" >&2
+              echo "Release tags require the existing attested SHA image $sha_ref." >&2
+              exit 1
+            fi
+            if ! grep -Eiq 'manifest unknown|no such manifest|not found' "$inspect_error"; then
+              cat "$inspect_error" >&2
+              exit 1
+            fi
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the runtime once for tests and publication
+        if: steps.policy.outputs.release_tag == '' && steps.existing.outputs.exists != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: deploy/Dockerfile
@@ -63,87 +141,161 @@ jobs:
           platforms: linux/amd64
           tags: cortex-python:test
           build-args: |
-            PYTHON_IMAGE=${{ inputs.python_image }}
+            PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          provenance: false
+          sbom: false
           cache-from: type=gha,scope=cortex-python
           cache-to: type=gha,mode=max,scope=cortex-python
+
       - name: Exercise installed runtime
+        if: steps.policy.outputs.release_tag == '' && steps.existing.outputs.exists != 'true'
         run: |
+          set -euo pipefail
           docker run --rm --network none --read-only --cap-drop ALL cortex-python:test --help
           docker run --rm --network none --read-only --cap-drop ALL cortex-python:test validator --help
           docker run --rm --network none --read-only --cap-drop ALL cortex-python:test vm-host --help
           docker run --rm --network none --read-only --cap-drop ALL --entrypoint python cortex-python:test -I -c 'import bittensor, cortex.master, cortex.vm.server; from cortex.protocol.crypto import public_key, sign_raw, verify_raw; key = bytes(range(32)); assert verify_raw(public_key(key), b"smoke", b"container", sign_raw(key, b"smoke", b"container"))'
-      - name: Build and load the guest for validation only
-        uses: docker/build-push-action@v6
+
+      - name: Generate CycloneDX SBOM
+        if: steps.policy.outputs.release_tag == '' && steps.existing.outputs.exists != 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          context: .
-          file: deploy/Dockerfile
-          target: guest
-          load: true
-          platforms: linux/amd64
-          tags: cortex-python-guest:test
-          build-args: |
-            PYTHON_IMAGE=${{ inputs.python_image }}
-          cache-from: |
-            type=gha,scope=cortex-python-guest
-            type=gha,scope=cortex-python
-          cache-to: type=gha,mode=max,scope=cortex-python-guest
-      - name: Check guest imports and native dependencies without booting init
+          image-ref: cortex-python:test
+          format: cyclonedx
+          output: sbom.cdx.json
+          exit-code: "0"
+          version: v0.70.0
+
+      - name: Reject fixable high or critical vulnerabilities
+        if: steps.policy.outputs.release_tag == '' && steps.existing.outputs.exists != 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: cortex-python:test
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          version: v0.70.0
+
+      - name: Publish the exact tested runtime candidate
+        if: steps.policy.outputs.release_tag == '' && steps.existing.outputs.exists != 'true'
+        id: publish
         run: |
-          docker run --rm -i --network none --read-only --cap-drop ALL \
-            --security-opt no-new-privileges --user 65532:65532 \
-            --entrypoint /opt/cortex/bin/python cortex-python-guest:test -I -B - <<'PYTHON'
-          import ctypes
-          import ctypes.util
-          import importlib
+          set -euo pipefail
+          candidate_ref="$IMAGE:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker tag cortex-python:test "$candidate_ref"
+          docker push "$candidate_ref"
+          docker buildx imagetools inspect "$candidate_ref" --format '{{json .Manifest}}' > candidate-manifest.json
+          digest=$(python3 -c 'import json; print(json.load(open("candidate-manifest.json"))["digest"])')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        if: steps.publish.outputs.digest != ''
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+
+      - name: Publish the immutable SHA tag
+        if: steps.publish.outputs.digest != ''
+        id: immutable
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          sha_ref="$IMAGE:$GITHUB_SHA"
+          inspect_error=$(mktemp)
+          trap 'rm -f "$inspect_error"' EXIT
+          if docker buildx imagetools inspect "$sha_ref" --format '{{json .Manifest}}' > source-manifest.json 2>"$inspect_error"; then
+            sha_digest=$(python3 -c 'import json; print(json.load(open("source-manifest.json"))["digest"])')
+            test "$sha_digest" = "$DIGEST"
+          else
+            if ! grep -Eiq 'manifest unknown|no such manifest|not found' "$inspect_error"; then
+              cat "$inspect_error" >&2
+              exit 1
+            fi
+            docker buildx imagetools create --prefer-index=false \
+              --tag "$sha_ref" "$IMAGE@$DIGEST"
+            docker buildx imagetools inspect "$sha_ref" --format '{{json .Manifest}}' > source-manifest.json
+            sha_digest=$(python3 -c 'import json; print(json.load(open("source-manifest.json"))["digest"])')
+            test "$sha_digest" = "$DIGEST"
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Alias the existing SHA digest to the release tag
+        if: steps.policy.outputs.alias_release == 'true'
+        id: release
+        env:
+          DIGEST: ${{ steps.existing.outputs.digest }}
+          RELEASE_TAG: ${{ steps.policy.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          release_ref="$IMAGE:$RELEASE_TAG"
+          inspect_error=$(mktemp)
+          trap 'rm -f "$inspect_error"' EXIT
+          if docker buildx imagetools inspect "$release_ref" --format '{{json .Manifest}}' > release-manifest.json 2>"$inspect_error"; then
+            release_digest=$(python3 -c 'import json; print(json.load(open("release-manifest.json"))["digest"])')
+            test "$release_digest" = "$DIGEST"
+          else
+            if ! grep -Eiq 'manifest unknown|no such manifest|not found' "$inspect_error"; then
+              cat "$inspect_error" >&2
+              exit 1
+            fi
+            docker buildx imagetools create --prefer-index=false \
+              --tag "$release_ref" "$IMAGE@$DIGEST"
+            docker buildx imagetools inspect "$release_ref" --format '{{json .Manifest}}' > release-manifest.json
+            release_digest=$(python3 -c 'import json; print(json.load(open("release-manifest.json"))["digest"])')
+            test "$release_digest" = "$DIGEST"
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Record immutable image metadata
+        env:
+          DIGEST: ${{ steps.immutable.outputs.digest || steps.existing.outputs.digest }}
+          RELEASE_TAG: ${{ steps.policy.outputs.release_tag }}
+        run: |
+          python3 - <<'PYTHON'
+          import json
           import os
           import pathlib
-          import shutil
-          import subprocess
 
-          for module in ("cortex.vm.init", "cortex.vm.guest_server", "cortex.vm.candidate", "cortex.rlm"):
-              importlib.import_module(module)
-          init = pathlib.Path("/sbin/init")
-          assert init.resolve() == pathlib.Path("/opt/cortex/bin/proof-guest-init")
-          assert init.is_file() and os.access(init, os.X_OK), "guest init is not executable"
-          for name in ("sodium", "seccomp"):
-              library = ctypes.util.find_library(name)
-              assert library, f"missing guest library: {name}"
-              ctypes.CDLL(library)
-          for binary, version_option in (("bwrap", "--version"), ("prlimit", "--version"), ("ip", "-Version"), ("tini", "--version")):
-              executable = shutil.which(binary)
-              assert executable, f"missing guest executable: {binary}"
-              subprocess.run([executable, version_option], check=True, timeout=5, capture_output=True)
-          from cortex.protocol.crypto import public_key, sign_raw, verify_raw
+          image = os.environ["IMAGE"]
+          digest = os.environ["DIGEST"]
+          value = {
+              "schema_version": 1,
+              "commit": os.environ["GITHUB_SHA"],
+              "image": f"{image}@{digest}",
+              "platform": "linux/amd64",
+              "provenance": "github-artifact-attestation",
+              "ref": os.environ["GITHUB_REF"],
+              "release_tag": os.environ.get("RELEASE_TAG") or None,
+              "sbom": "sbom.cdx.json" if pathlib.Path("sbom.cdx.json").is_file() else None,
+          }
+          pathlib.Path("image.json").write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+          PYTHON
 
-          key = bytes(range(32))
-          assert verify_raw(public_key(key), b"smoke", b"guest", sign_raw(key, b"smoke", b"guest"))
-          print("Guest imports, init entry point and native dependencies verified; no VM boot performed.")
-          PYTHON
-      - uses: docker/login-action@v3
-        if: inputs.publish
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish the exact tested image and record its digest
-        if: inputs.publish
-        run: |
-          docker tag cortex-python:test "$IMAGE:$GITHUB_SHA"
-          docker push "$IMAGE:$GITHUB_SHA"
-          image_digest=$(docker image inspect "$IMAGE:$GITHUB_SHA" --format '{{index .RepoDigests 0}}')
-          IMAGE_DIGEST="$image_digest" python3 - <<'PYTHON'
-          import json, os, pathlib, re
-          image = os.environ["IMAGE_DIGEST"]
-          if not re.fullmatch(re.escape(os.environ["IMAGE"]) + r"@sha256:[0-9a-f]{64}", image):
-              raise SystemExit("registry did not return a valid digest")
-          pathlib.Path("image.json").write_text(json.dumps({"image": image, "commit": os.environ["GITHUB_SHA"]}, indent=2) + "\n")
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
-              stream.write("Published runtime: `" + image + "`\n")
-          PYTHON
-      - uses: actions/upload-artifact@v4
-        if: inputs.publish
+      - name: Upload immutable image evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: python-image-${{ github.sha }}
-          path: image.json
+          path: |
+            candidate-manifest.json
+            image.json
+            release-manifest.json
+            source-attestation.json
+            source-manifest.json
+            sbom.cdx.json
           if-no-files-found: error
           retention-days: 90
+
+      - name: Report immutable image
+        env:
+          DIGEST: ${{ steps.immutable.outputs.digest || steps.existing.outputs.digest }}
+        run: printf 'Published immutable runtime %s@%s\n' "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"

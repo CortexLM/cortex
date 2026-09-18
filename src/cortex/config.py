@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from collections.abc import Mapping
@@ -15,6 +16,43 @@ from cortex.protocol import TrustRoot
 from cortex.protocol.crypto import decode_hotkey, public_key
 from cortex.protocol.trust import load_trust_root
 from cortex.vm.models import Resources
+
+CHAIN_ALIASES = frozenset({"archive", "finney", "local", "test"})
+
+
+def _wss_origin(value: object, message: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 2048
+        or not value.isascii()
+        or any(ord(character) < 33 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(message)
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        raise ValueError(message) from None
+    if (
+        parsed.scheme != "wss"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or port == 0
+    ):
+        raise ValueError(message)
+    return value
+
+
+def validate_chain_endpoint(value: object) -> str:
+    """Accept official SDK aliases or a credential-free WSS origin."""
+    if isinstance(value, str) and value in CHAIN_ALIASES:
+        return value
+    return _wss_origin(value, "chain endpoint must be an official alias or WSS origin")
 
 
 def read_seed(path: Path) -> bytes:
@@ -45,6 +83,19 @@ def _setting(env: Mapping[str, str], name: str, default: str = "") -> str:
     return existing if existing is not None else alternate if alternate is not None else default
 
 
+def _chain_fallback_endpoints(value: object) -> tuple[str, ...]:
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) > 8
+        or any(not isinstance(endpoint, str) for endpoint in value)
+        or len(set(value)) != len(value)
+    ):
+        raise ValueError("chain fallback endpoints must be up to 8 unique WSS URLs")
+    for endpoint in value:
+        _wss_origin(endpoint, "chain fallback endpoints must be up to 8 unique WSS URLs")
+    return tuple(value)
+
+
 @dataclass(frozen=True)
 class MasterConfig:
     netuid: int
@@ -58,6 +109,7 @@ class MasterConfig:
     bounty_session_secret_file: Path
     operator_token_file: Path
     chain_endpoint: str = "finney"
+    chain_fallback_endpoints: tuple[str, ...] = ()
     bounty_backend_url: str | None = None
     emit_poll_seconds: float = 120
     epoch_refresh_seconds: float = 12
@@ -87,6 +139,8 @@ class MasterConfig:
             raise ValueError("invalid epoch refresh/emission intervals")
         if self.minimum_challenges_version < 1 or self.minimum_measurements_version < 1:
             raise ValueError("trust versions must be positive")
+        validate_chain_endpoint(self.chain_endpoint)
+        _chain_fallback_endpoints(self.chain_fallback_endpoints)
         for url in (self.bounty_backend_url, self.proof_orchestrator_url):
             if url:
                 parsed = urlsplit(url)
@@ -122,6 +176,12 @@ class MasterConfig:
 
         if not value("BASE_NETUID"):
             raise ValueError("BASE_NETUID is required")
+        try:
+            chain_fallback_endpoints = _chain_fallback_endpoints(
+                json.loads(value("BASE_CHAIN_FALLBACK_ENDPOINTS", "[]"))
+            )
+        except json.JSONDecodeError:
+            raise ValueError("chain fallback endpoints must be a JSON list") from None
         return cls(
             netuid=int(value("BASE_NETUID")),
             state_dir=Path(value("BASE_STATE_DIR", "/var/lib/cortex")),
@@ -134,6 +194,7 @@ class MasterConfig:
             bounty_session_secret_file=required_path("BOUNTY_SESSION_SECRET_FILE"),
             operator_token_file=required_path("BASE_GATEWAY_ADMIN_TOKEN_FILE"),
             chain_endpoint=value("BASE_CHAIN_ENDPOINT", "finney"),
+            chain_fallback_endpoints=chain_fallback_endpoints,
             bounty_backend_url=value("BOUNTY_BACKEND_PUBLIC_URL") or None,
             emit_poll_seconds=float(
                 value("BASE_EMIT_POLL_SECS", value("PROOF_EMIT_POLL_SECS", "120"))

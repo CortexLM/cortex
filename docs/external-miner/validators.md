@@ -59,9 +59,13 @@ and local paths to the intended deployment before running it:
 uv run cortex validator \
   --gateway "$GATEWAY" --gateway-public "$GATEWAY_PUBLIC_KEY" \
   --network "$CHAIN_NETWORK" --netuid "$NETUID" \
+  --fallback-endpoints "$CHAIN_FALLBACK_ENDPOINTS_JSON" \
   --owner-public ./trust/owner.pubkey \
   --challenges ./trust/challenges.toml \
   --measurements ./trust/measurements.toml \
+  --minimum-challenges-version "$CHALLENGES_MIN_VERSION" \
+  --minimum-measurements-version "$MEASUREMENTS_MIN_VERSION" \
+  --version-key "$VALIDATOR_VERSION_KEY" \
   --wallet-name validator --wallet-hotkey default \
   --consensus-seed-file /private/consensus.key \
   --peers ./trust/peers.json \
@@ -72,9 +76,20 @@ uv run cortex validator \
 ```
 
 `--wallet-path` defaults to `~/.bittensor/wallets`; polling defaults to
-30 seconds. The peer listener defaults to loopback and requires TLS when bound
-outside loopback. `--once` executes one tick and can still submit weights; it
-is not a dry run. There is no separate verify-only CLI mode.
+30 seconds. Trust minimums and the subnet validator version key are required;
+obtain them from the signed production ceremony and live subnet instead of
+guessing. `--fallback-endpoints` is a JSON list of at most eight unique `wss://`
+RPC origins without credentials, queries or fragments. The Bittensor SDK uses
+them when the primary endpoint fails. Fallbacks are origins only: URL paths are
+also rejected so provider bearer material cannot appear in the process argv or
+container metadata.
+
+The peer listener defaults to loopback and requires TLS when bound outside
+loopback. `--once` executes one tick and can submit weights. Add both
+`--verify-only --once` for a preflight that recomputes the current seal but
+never claims its epoch in the journal and never creates an extrinsic. It exits
+successfully only for the exact `verified` outcome; unsealed, changed, degraded
+or peer-unavailable states return a nonzero process status.
 
 For Compose use the Python
 [validator environment example](../../deploy/env/python-validator.env.example)
@@ -118,21 +133,44 @@ bundle overrides that rule.
 
 ## Chain submission and evidence
 
-The dispatcher preserves the recomputed `u16` weights without an SDK
-renormalization step. When chain commit-reveal is enabled, it requires CRv4
-and drand timelock encryption. An unsupported version, unknown state or drand
-failure cannot fall back to public weights. When commit-reveal is explicitly
-disabled, it uses the chain's normal weights call. Inclusion and finalization
-are awaited.
+The validator verifies the exact sealed `u16` vector, then uses the official
+Bittensor SDK pallet-call builder, drand helper and `Subtensor` signer without
+renormalizing those values. This preserves the frozen on-chain payload; the
+high-level SDK weight helper is not used because it rescales multi-UID vectors.
+Preflight requires live registration, permit, rate-limit, minimum-weight,
+maximum-weight and CRv4 metadata compatible with the sealed bundle. Unknown
+state fails closed. Inclusion and finalization are awaited, with the Cortex
+journal as the only retry authority.
 
 The persistent journal is bound to one netuid and prevents duplicate dispatch
-for an epoch. A known rejected dispatch can be retried; an ambiguous exception
-remains pending until reconciled. Do not delete the database to force a retry.
+for an epoch. Active calls are recorded as `dispatching`; only an `uncertain`
+attempt may be reconciled, so an operator cannot release a claim while the SDK
+call is still running. A failure before broadcast or a finalized on-chain
+rejection releases the claim and can be retried. A timeout or failure after
+submission may have reached the chain; it returns `dispatch_pending`, logs a durable
+`attempt_id` plus any SDK extrinsic hash/nonce, and keeps the claim until the
+operator reconciles chain evidence. Validator startup changes an interrupted
+`dispatching` attempt to `uncertain`; the reconciliation CLI itself never does.
+Hash the private evidence file, then resolve
+the exact attempt with either `submitted` or `not_broadcast`:
+
+```bash
+cortex validator-reconcile \
+  --state-db /var/lib/base/validator.sqlite3 \
+  --netuid 100 --epoch 25203 \
+  --digest <bundle-digest> --attempt-id <attempt-id> \
+  --result submitted --evidence-digest <sha256-of-private-evidence>
+```
+
+Only `not_broadcast` releases the epoch for a retry. Keep the underlying chain
+receipt or nonce query private; the journal stores its digest. Do not delete the
+database to force a retry.
 
 The peer listener exposes:
 
 | Route | Response |
 |-------|----------|
+| `GET /livez` | Process liveness for the local container healthcheck |
 | `GET /v1/consensus/root/{epoch}` | Signed observed root, or `404` |
 | `GET /v1/bundle/root/{root}` | Persisted binary bundle, or `404` |
 | `GET /v1/dissent/{epoch}` | Signed SCALE dissent records encoded as hex |

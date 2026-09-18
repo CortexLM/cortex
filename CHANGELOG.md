@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bounty-only launch mode with a revision-pinned, fully paginated CortexLM
+  backend feed, bounded public writes and readiness checks that fail closed.
+- Validator production preflight, resilient bounded master/validator Bittensor RPC failover and
+  retry-safe official-SDK commit/reveal dispatch with ambiguous broadcasts held
+  pending and non-exact preflights returning failure.
+- Automatic GHCR runtime builds from `main` with vulnerability scanning, SBOM,
+  immutable source tags, provenance attestations and operator-approved update
+  evidence.
 - Python gateway, Bounty, Proof, validator and miner commands with durable
   submission state and independent verification of sealed rewards.
 - Cortex's recursive research engine with shared execution budgets, private
@@ -24,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Initial production operation keeps the signed 2000/8000 Bounty/Proof split;
+  unwired Proof burns its share instead of scaling Bounty to 100%.
 - **BREAKING:** Proof topic and VM JSON documents use schema version 2. Operators
   must generate compatible signed topics and guest images; old JSON signatures
   are not reinterpreted. Frozen bundle and signature domains remain unchanged.
@@ -38,8 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Positive challenge leaves cannot be replaced by nonpositive results before
-  sealing, and validators refuse unsealed fallback weights.
+- Bounty reconstructs a backend-capped leaderboard from the complete report
+  snapshot, avoiding a permanent burn after the public log exceeds 1,000 hotkeys.
+- Bounty adjudication rejects missing or misplaced severity, and external
+  snapshots reject unverifiable duplicate references before scoring.
+- Operator-authorized Bounty re-pairing may replace a hotkey and always revokes
+  the account's previous session.
+- The raw single-leaf endpoint cannot replace a positive challenge leaf with a
+  nonpositive result; authoritative challenge emitters may atomically replace
+  their complete unsealed snapshot. Validators refuse unsealed fallback weights.
+- Validator dispatch preserves the exact sealed `u16` vector and prevents
+  reconciliation from releasing an epoch while its SDK call is still active.
 - Proof jobs preserve their frozen topic revision and already-earned rewards
   when topics are revised or closed.
 - Accepted submissions survive client disconnects; pending credentials are
@@ -67,6 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Public Bounty status/readiness probes share short success/failure caches, and
+  report intake permits one feed validation per hotkey, preventing snapshot
+  amplification before quota checks.
 - Private state paths reject unsafe file aliases and permissions, while BYOK
   remains in private files and is excluded from public receipts and status.
 - Bounty operator grant authentication precedes bounded request parsing.

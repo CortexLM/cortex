@@ -1,5 +1,6 @@
 """Bounty intake and scoring service; backend availability gates every report."""
 
+import asyncio
 import hashlib
 import hmac
 import re
@@ -54,6 +55,7 @@ class BountyService:
         self._admin_hashes = tuple(admin_hashes) + tuple(
             hashlib.sha256(t.encode()).hexdigest() for t in admin_tokens if t
         )
+        self._submission_locks: dict[str, asyncio.Lock] = {}
 
     def require_operator(self, authorization: str | None) -> None:
         if not self._admin_hashes:
@@ -120,11 +122,24 @@ class BountyService:
                 raise StoreError(403, "hotkey_mismatch")
         repro = body.repro_steps or ""
         validate_substance(body.title, body.body, repro)
-        try:
-            await self.backend.fetch()
-        except BackendUnavailable as exc:
-            raise StoreError(503, str(exc)) from None
-        return self.store.insert_report(pairing, body.title, body.body, repro, int(self.clock()))
+        hotkey = pairing["miner_hotkey"]
+        lock = self._submission_locks.get(hotkey)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._submission_locks[hotkey] = lock
+        if lock.locked():
+            raise StoreError(429, "report validation already in progress for this hotkey")
+        async with lock:
+            pairing = self.store.lookup_session(body.session, self._secret)
+            self.store.check_report_admission(pairing, int(self.clock()))
+            try:
+                await self.backend.fetch()
+            except BackendUnavailable as exc:
+                raise StoreError(503, str(exc)) from None
+            pairing = self.store.lookup_session(body.session, self._secret)
+            return self.store.insert_report(
+                pairing, body.title, body.body, repro, int(self.clock())
+            )
 
     async def score(self, expected: list[str]) -> dict[str, BountyScore]:
         """Produce exact-E outcomes, including ChallengeInternal on feed failure."""

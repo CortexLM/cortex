@@ -127,14 +127,6 @@ class BountyStore:
             )
             if consumed.rowcount != 1:
                 raise StoreError(403, "pairing not authorized by account operator")
-            pairing = db.execute(
-                "SELECT s.miner_hotkey FROM bounty_pairings p "
-                "JOIN bounty_sessions s ON s.session_id=p.session_id "
-                "WHERE p.account_id=?",
-                (account,),
-            ).fetchone()
-            if pairing is not None and pairing["miner_hotkey"] != hotkey:
-                raise StoreError(409, "account already paired to another hotkey")
             db.execute("INSERT INTO bounty_nonces VALUES (?)", (nonce,))
             session_id = self._next_id("bs")
             token = session_token(secret, session_id, account, hotkey)
@@ -171,23 +163,29 @@ class BountyStore:
                 key: row[key] for key in ("account_id", "miner_hotkey", "session_id", "bound_at")
             }
 
+    @staticmethod
+    def _check_report_admission(db: sqlite3.Connection, hotkey: str, now: int) -> None:
+        pending = db.execute(
+            "SELECT count(*) FROM bounty_reports WHERE miner_hotkey=? AND state='pending'",
+            (hotkey,),
+        ).fetchone()[0]
+        if pending >= 5:
+            raise StoreError(429, "5 reports already awaiting adjudication for this hotkey (max 5)")
+        last = db.execute(
+            "SELECT max(created_at) FROM bounty_reports WHERE miner_hotkey=?", (hotkey,)
+        ).fetchone()[0]
+        if last is not None and now - last < 60:
+            raise StoreError(429, "one report per 60s per hotkey")
+
+    def check_report_admission(self, pairing: dict, now: int) -> None:
+        with self._lock:
+            self._check_report_admission(self._db, pairing["miner_hotkey"], now)
+
     def insert_report(self, pairing: dict, title: str, body: str, repro: str, now: int) -> dict:
         fingerprint = report_fingerprint(title, body)
         hotkey = pairing["miner_hotkey"]
         with self._transaction() as db:
-            pending = db.execute(
-                "SELECT count(*) FROM bounty_reports WHERE miner_hotkey=? AND state='pending'",
-                (hotkey,),
-            ).fetchone()[0]
-            if pending >= 5:
-                raise StoreError(
-                    429, "5 reports already awaiting adjudication for this hotkey (max 5)"
-                )
-            last = db.execute(
-                "SELECT max(created_at) FROM bounty_reports WHERE miner_hotkey=?", (hotkey,)
-            ).fetchone()[0]
-            if last is not None and now - last < 60:
-                raise StoreError(429, "one report per 60s per hotkey")
+            self._check_report_admission(db, hotkey, now)
             original = db.execute(
                 "SELECT id FROM bounty_reports WHERE fingerprint=? ORDER BY id LIMIT 1",
                 (fingerprint,),
@@ -232,6 +230,10 @@ class BountyStore:
     def adjudicate(
         self, report_id: str, verdict: str, severity: str | None, duplicate_of: str | None
     ) -> dict:
+        if verdict == "valid" and severity is None:
+            raise StoreError(409, "severity required for valid verdict")
+        if verdict != "valid" and severity is not None:
+            raise StoreError(409, "severity is only valid for a valid verdict")
         with self._transaction() as db:
             row = self.get_report(report_id)
             if row["state"] != "pending" and row["adjudication"] != "duplicate":

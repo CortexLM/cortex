@@ -1,13 +1,15 @@
 """Fetch-only validator: independently verify a current seal before chain submission."""
 
 import asyncio
+import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import httpx
 
@@ -21,6 +23,25 @@ from cortex.protocol.models import encode_final_vector
 from cortex.protocol.scale import fixed, uint
 
 from .evidence import EvidenceStore
+
+
+class DispatchNotBroadcast(ProtocolError):
+    """Dispatch failed before the SDK could submit an extrinsic."""
+
+
+class DispatchUncertain(ProtocolError):
+    """The SDK may have submitted an extrinsic; reconciliation is required."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        extrinsic_hash: str | None = None,
+        nonce: int | None = None,
+    ):
+        super().__init__(message)
+        self.extrinsic_hash = extrinsic_hash
+        self.nonce = nonce
 
 
 @dataclass(frozen=True)
@@ -56,6 +77,28 @@ class SubmissionJournal:
             "state TEXT NOT NULL CHECK(state IN ('pending','submitted')), "
             "PRIMARY KEY(netuid, epoch))"
         )
+        self.connection.execute(
+            "CREATE TABLE IF NOT EXISTS weight_submission_attempts ("
+            "attempt_id TEXT PRIMARY KEY, netuid INTEGER NOT NULL, epoch INTEGER NOT NULL, "
+            "digest TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN "
+            "('pending','dispatching','uncertain','submitted','not_broadcast','reconciled_submitted',"
+            "'reconciled_not_broadcast')), extrinsic_hash TEXT, nonce TEXT, "
+            "evidence_digest TEXT)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS weight_submission_attempt_epoch "
+            "ON weight_submission_attempts(netuid, epoch, state)"
+        )
+        for netuid, epoch, digest, state in self.connection.execute(
+            "SELECT s.netuid,s.epoch,s.digest,s.state FROM weight_submissions s "
+            "WHERE NOT EXISTS (SELECT 1 FROM weight_submission_attempts a "
+            "WHERE a.netuid=s.netuid AND a.epoch=s.epoch)"
+        ).fetchall():
+            self.connection.execute(
+                "INSERT INTO weight_submission_attempts "
+                "(attempt_id,netuid,epoch,digest,state) VALUES (?,?,?,?,?)",
+                (f"legacy-{netuid}-{epoch}", netuid, epoch, digest, state),
+            )
         self.evidence = EvidenceStore(self.connection)
 
     def bind_netuid(self, netuid: int) -> None:
@@ -68,24 +111,197 @@ class SubmissionJournal:
         if row[0] != str(netuid):
             raise ProtocolError("validator journal belongs to another subnet")
 
-    def claim(self, netuid: int, epoch: int, digest: str) -> bool:
+    def claim(self, netuid: int, epoch: int, digest: str) -> str | None:
+        attempt_id = str(uuid4())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self.connection.execute(
+                "INSERT OR IGNORE INTO weight_submissions VALUES (?, ?, ?, 'pending')",
+                (netuid, epoch, digest),
+            )
+            if cursor.rowcount != 1:
+                self.connection.execute("ROLLBACK")
+                return None
+            self.connection.execute(
+                "INSERT INTO weight_submission_attempts "
+                "(attempt_id,netuid,epoch,digest,state) VALUES (?,?,?,?, 'dispatching')",
+                (attempt_id, netuid, epoch, digest),
+            )
+            self.connection.execute("COMMIT")
+            return attempt_id
+        except BaseException:
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
+
+    def complete(self, netuid: int, epoch: int, attempt_id: str) -> None:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            attempt = self.connection.execute(
+                "UPDATE weight_submission_attempts SET state='submitted' "
+                "WHERE attempt_id=? AND netuid=? AND epoch=? AND state='dispatching'",
+                (attempt_id, netuid, epoch),
+            )
+            if attempt.rowcount != 1:
+                raise ProtocolError("dispatch attempt is not active")
+            submission = self.connection.execute(
+                "UPDATE weight_submissions SET state='submitted' "
+                "WHERE netuid=? AND epoch=? AND state='pending'",
+                (netuid, epoch),
+            )
+            if submission.rowcount != 1:
+                raise ProtocolError("pending weight submission unavailable")
+            self.connection.execute("COMMIT")
+        except BaseException:
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
+
+    def release_failed(self, netuid: int, epoch: int, attempt_id: str) -> None:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            attempt = self.connection.execute(
+                "UPDATE weight_submission_attempts SET state='not_broadcast' "
+                "WHERE attempt_id=? AND netuid=? AND epoch=? AND state='dispatching'",
+                (attempt_id, netuid, epoch),
+            )
+            if attempt.rowcount != 1:
+                raise ProtocolError("dispatch attempt is not active")
+            submission = self.connection.execute(
+                "DELETE FROM weight_submissions WHERE netuid=? AND epoch=? AND state='pending'",
+                (netuid, epoch),
+            )
+            if submission.rowcount != 1:
+                raise ProtocolError("pending weight submission unavailable")
+            self.connection.execute("COMMIT")
+        except BaseException:
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
+
+    def record_uncertain(
+        self,
+        netuid: int,
+        epoch: int,
+        attempt_id: str,
+        *,
+        extrinsic_hash: str | None = None,
+        nonce: int | None = None,
+    ) -> None:
+        if extrinsic_hash is not None and not re.fullmatch(r"0x[0-9a-f]{64}", extrinsic_hash):
+            raise ProtocolError("invalid extrinsic hash")
+        if nonce is not None:
+            uint(nonce, 8)
         cursor = self.connection.execute(
-            "INSERT OR IGNORE INTO weight_submissions VALUES (?, ?, ?, 'pending')",
-            (netuid, epoch, digest),
+            "UPDATE weight_submission_attempts "
+            "SET state='uncertain',extrinsic_hash=?,nonce=? "
+            "WHERE attempt_id=? AND netuid=? AND epoch=? AND state='dispatching'",
+            (extrinsic_hash, str(nonce) if nonce is not None else None, attempt_id, netuid, epoch),
         )
-        return cursor.rowcount == 1
+        if cursor.rowcount != 1:
+            raise ProtocolError("active dispatch attempt unavailable")
 
-    def complete(self, netuid: int, epoch: int) -> None:
-        self.connection.execute(
-            "UPDATE weight_submissions SET state='submitted' WHERE netuid=? AND epoch=?",
-            (netuid, epoch),
+    def recover_interrupted(self, netuid: int) -> int:
+        """Make attempts left by a stopped validator explicitly reconcilable."""
+        cursor = self.connection.execute(
+            "UPDATE weight_submission_attempts SET state='uncertain' "
+            "WHERE netuid=? AND state='dispatching' AND EXISTS ("
+            "SELECT 1 FROM weight_submissions s "
+            "WHERE s.netuid=weight_submission_attempts.netuid "
+            "AND s.epoch=weight_submission_attempts.epoch AND s.state='pending')",
+            (netuid,),
         )
+        return cursor.rowcount
 
-    def release_failed(self, netuid: int, epoch: int) -> None:
-        self.connection.execute(
-            "DELETE FROM weight_submissions WHERE netuid=? AND epoch=? AND state='pending'",
+    def pending(self, netuid: int, epoch: int) -> dict[str, object] | None:
+        row = self.connection.execute(
+            "SELECT a.attempt_id,a.digest,a.extrinsic_hash,a.nonce,a.state "
+            "FROM weight_submission_attempts a JOIN weight_submissions s "
+            "ON s.netuid=a.netuid AND s.epoch=a.epoch "
+            "WHERE a.netuid=? AND a.epoch=? "
+            "AND a.state IN ('pending','dispatching','uncertain') AND s.state='pending'",
             (netuid, epoch),
-        )
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "attempt_id": row[0],
+            "digest": row[1],
+            "extrinsic_hash": row[2],
+            "nonce": int(row[3]) if row[3] is not None else None,
+            "state": row[4],
+        }
+
+    def reconcile(
+        self,
+        *,
+        netuid: int,
+        epoch: int,
+        digest: str,
+        attempt_id: str,
+        result: str,
+        evidence_digest: str,
+    ) -> dict[str, object]:
+        uint(netuid, 2)
+        uint(epoch, 8)
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ProtocolError("invalid bundle digest")
+        if not attempt_id or len(attempt_id) > 128:
+            raise ProtocolError("invalid dispatch attempt id")
+        if result not in {"submitted", "not_broadcast"}:
+            raise ProtocolError("invalid reconciliation result")
+        if not re.fullmatch(r"[0-9a-f]{64}", evidence_digest):
+            raise ProtocolError("invalid reconciliation evidence digest")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT a.digest,a.extrinsic_hash,a.nonce,a.state,s.state "
+                "FROM weight_submission_attempts a JOIN weight_submissions s "
+                "ON s.netuid=a.netuid AND s.epoch=a.epoch "
+                "WHERE a.attempt_id=? AND a.netuid=? AND a.epoch=?",
+                (attempt_id, netuid, epoch),
+            ).fetchone()
+            if (
+                row is None
+                or row[0] != digest
+                or row[3] not in {"pending", "uncertain"}
+                or row[4] != "pending"
+            ):
+                raise ProtocolError("reconciliation identity does not match pending dispatch")
+            state = f"reconciled_{result}"
+            attempt = self.connection.execute(
+                "UPDATE weight_submission_attempts SET state=?,evidence_digest=? "
+                "WHERE attempt_id=? AND state=?",
+                (state, evidence_digest, attempt_id, row[3]),
+            )
+            if attempt.rowcount != 1:
+                raise ProtocolError("pending dispatch changed during reconciliation")
+            if result == "submitted":
+                submission = self.connection.execute(
+                    "UPDATE weight_submissions SET state='submitted' "
+                    "WHERE netuid=? AND epoch=? AND state='pending'",
+                    (netuid, epoch),
+                )
+            else:
+                submission = self.connection.execute(
+                    "DELETE FROM weight_submissions WHERE netuid=? AND epoch=? AND state='pending'",
+                    (netuid, epoch),
+                )
+            if submission.rowcount != 1:
+                raise ProtocolError("pending weight submission unavailable")
+            self.connection.execute("COMMIT")
+        except BaseException:
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
+        return {
+            "attempt_id": attempt_id,
+            "digest": digest,
+            "evidence_digest": evidence_digest,
+            "extrinsic_hash": row[1],
+            "nonce": int(row[2]) if row[2] is not None else None,
+            "state": state,
+        }
 
     def close(self) -> None:
         self.connection.close()
@@ -95,6 +311,9 @@ class SubmissionJournal:
 class TickResult:
     outcome: str
     epoch: int | None = None
+    attempt_id: str | None = None
+    extrinsic_hash: str | None = None
+    nonce: int | None = None
 
 
 def forbidden_monopoly(vector: tuple[tuple[int, int], ...], snapshot: ChainSnapshot) -> bool:
@@ -122,16 +341,30 @@ class Validator:
         min_peer_sample: int = 1,
         max_block_lag: int = 256,
         trust_loader: Callable[[int], TrustRoot] | None = None,
+        verify_only: bool = False,
     ):
         uint(netuid, 2)
         uint(version_key, 8)
         trust.validate()
+        gateway = urlsplit(gateway_url)
+        if (
+            gateway_url != gateway_url.strip()
+            or gateway.scheme != "https"
+            or not gateway.hostname
+            or gateway.username
+            or gateway.password
+            or gateway.path not in {"", "/"}
+            or gateway.query
+            or gateway.fragment
+        ):
+            raise ValueError("gateway URL requires HTTPS without credentials or path")
         self.gateway_url = gateway_url.rstrip("/")
         self.netuid = netuid
         self.trust = trust
         self.chain = chain
         self.journal = journal
         self.journal.bind_netuid(netuid)
+        self.journal.recover_interrupted(netuid)
         self.http = http
         self.version_key = version_key
         if min_peer_sample < 0 or max_block_lag < 1:
@@ -155,6 +388,7 @@ class Validator:
                 raise ValueError("peer URLs require HTTPS without credentials")
         self.min_peer_sample, self.max_block_lag = min_peer_sample, max_block_lag
         self.trust_loader = trust_loader
+        self.verify_only = verify_only
         self._observed: Bundle | None = None
         self._lock = asyncio.Lock()
 
@@ -318,6 +552,7 @@ class Validator:
         floats = recompute(body, quarantined)
         local_vector = floats.final_vector
         vector_mismatch = body.final_vector != local_vector
+        preflight_outcome = "verified"
         if not vector_mismatch and "uids" in latest and latest["uids"] != list(floats.uids):
             raise ProtocolError("latest uid vector mismatch")
         if (
@@ -334,10 +569,16 @@ class Validator:
             if self.consensus_seed is None:
                 raise ProtocolError("final vector mismatch requires signed dissent")
             self._dissent(DissentReason.VECTOR_MISMATCH, local_vector)
+            preflight_outcome = "dissent_vector_mismatch"
         if quarantined:
             if self.consensus_seed is None:
                 raise ProtocolError("quarantine requires signed dissent")
             self._dissent(DissentReason.LEAF_SIGNATURE_INVALID, local_vector)
+            preflight_outcome = (
+                "dissent_vector_mismatch_and_quarantine"
+                if vector_mismatch
+                else "dissent_quarantine"
+            )
         final_snapshot = await self.chain.snapshot(body.block_b, self.netuid)
         if final_snapshot != snapshot:
             raise ProtocolError("chain block changed before dispatch")
@@ -360,12 +601,49 @@ class Validator:
         )
         if any(fresh.get(name) != latest.get(name) for name in identity_fields):
             return TickResult("latest_changed", epoch)
-        if not self.journal.claim(self.netuid, epoch, bundle_digest(bundle)):
-            return TickResult("already_submitted_or_pending", epoch)
-        # An exception is ambiguous: retain pending rather than double-spend on retry.
-        success = await self.chain.submit(self.netuid, local_vector, self.version_key)
-        if not success:
-            self.journal.release_failed(self.netuid, epoch)
+        if self.verify_only:
+            preflight = getattr(self.chain, "preflight", None)
+            if preflight is not None:
+                try:
+                    await preflight(self.netuid, local_vector, self.version_key)
+                except DispatchNotBroadcast:
+                    return TickResult("chain_preflight_failed", epoch)
+            return TickResult(preflight_outcome, epoch)
+        attempt_id = self.journal.claim(self.netuid, epoch, bundle_digest(bundle))
+        if attempt_id is None:
+            pending = self.journal.pending(self.netuid, epoch)
+            return TickResult(
+                "already_submitted_or_pending",
+                epoch,
+                cast(str | None, pending["attempt_id"]) if pending else None,
+                cast(str | None, pending["extrinsic_hash"]) if pending else None,
+                cast(int | None, pending["nonce"]) if pending else None,
+            )
+        try:
+            success = await self.chain.submit(self.netuid, local_vector, self.version_key)
+        except DispatchNotBroadcast:
+            self.journal.release_failed(self.netuid, epoch, attempt_id)
             return TickResult("dispatch_failed", epoch)
-        self.journal.complete(self.netuid, epoch)
+        except DispatchUncertain as error:
+            self.journal.record_uncertain(
+                self.netuid,
+                epoch,
+                attempt_id,
+                extrinsic_hash=error.extrinsic_hash,
+                nonce=error.nonce,
+            )
+            return TickResult(
+                "dispatch_pending",
+                epoch,
+                attempt_id,
+                error.extrinsic_hash,
+                error.nonce,
+            )
+        except Exception:
+            self.journal.record_uncertain(self.netuid, epoch, attempt_id)
+            raise
+        if not success:
+            self.journal.release_failed(self.netuid, epoch, attempt_id)
+            return TickResult("dispatch_failed", epoch)
+        self.journal.complete(self.netuid, epoch, attempt_id)
         return TickResult("submitted", epoch)

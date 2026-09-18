@@ -6,6 +6,12 @@ Bounty (`bounty`, 2000 bps) accepts reproducible Cortex product and backend bug
 reports associated with your Bittensor hotkey. Install the [Python CLI](README.md)
 and obtain the gateway URL from the subnet operator.
 
+The initial production miner flow pairs and files reports in CortexLM/backend.
+The Python gateway routes documented here remain compatibility/operator-test
+surfaces; they do not publish a local report into the backend and cannot make it
+creditable by themselves. Only a report published by the backend public feed can
+earn weight.
+
 ## Check scoring availability
 
 ```bash
@@ -13,10 +19,11 @@ curl --fail-with-body "$GATEWAY/challenge/bounty/v1/status"
 ```
 
 The response publishes research terms, quotas and `scoring_backend`.
-`can_score` reflects a live read and validation of the external backend feed;
-on failure it is `false` and `reason` explains the refusal. Every report POST
-checks the feed again, so an outage or inconsistent publication after a
-successful status check can still return `503`.
+`can_score` reflects a recent validated external-feed snapshot: successful
+status probes are shared for up to 15 seconds and failures for up to 5 seconds.
+Concurrent refreshes fail closed instead of multiplying full snapshot reads.
+Every report POST performs its own uncached feed check, so an outage or
+inconsistent publication after a successful status check can still return `503`.
 
 ## Pair a dedicated account
 
@@ -71,8 +78,10 @@ returns `409 nonce reused` with no session data, including after a restart.
 This refusal does not consume a fresh operator authorization. If the response
 or session file is lost, request a new authorization and pair with a new nonce.
 Pairing the same account again revokes its previous session, which then returns
-`401 invalid_session`.
+`401 invalid_session`, including an operator-authorized hotkey replacement.
 Sessions do not currently expire automatically by age.
+The complete pairing JSON body is limited to 4096 bytes; larger requests return
+`413 pair request too large` before signature processing.
 
 ## Submit a report
 
@@ -94,12 +103,15 @@ mismatch). The API validates substance before inserting a report.
 |-------|-------|
 | Reports awaiting adjudication per hotkey | 5 |
 | Minimum interval between reports | 60 seconds |
+| Concurrent feed validations per hotkey | 1 |
 | Minimum body length | 80 characters |
 | Minimum reproduction length | 20 characters |
+| Maximum complete report request body | 262144 bytes |
 
 An empty or repeated title/body and low-substance repeated-token content
-return `400`. A quota violation returns `429`. Framework schema failures may
-return `422`. Successful intake returns `201` with `id`, `miner_hotkey`,
+return `400`. A quota violation or concurrent validation returns `429`. Framework schema failures may
+return `422`; an oversized request returns `413`. Successful intake returns
+`201` with `id`, `miner_hotkey`,
 `state` and `fingerprint`; acceptance into triage is not a reward.
 
 Report reads (`GET /v1/reports` and `/v1/reports/{id}`) and
@@ -110,14 +122,24 @@ gateway denies report reads. There is no public `bounty show` command.
 
 Cortex **reads** the CortexLM/backend public API configured by
 `BOUNTY_BACKEND_PUBLIC_URL`. The required backend routes are
-`/v1/bounty/public/leaderboard` and `/v1/bounty/public/reports`. This subnet
-does not serve `/v1/public/*` or a substitute public leaderboard.
+`/v1/bounty/public/status`, `/v1/bounty/public/leaderboard` and
+`/v1/bounty/public/reports`. Status pins an immutable revision; Cortex requests
+the leaderboard and every cursor-paginated report page for exactly that
+revision. This subnet does not serve `/v1/public/*` or a substitute public
+leaderboard.
 
 The external publication is the only scoring source. A local operator
 adjudication alone does not place a report in that publication; the backend
 must publish consistent, justified records. The Python subnet does not export
 local reports or adjudications into the external backend automatically.
-Leaderboard counts alone are not creditable evidence.
+Leaderboard counts alone are not creditable evidence. Mixed revisions,
+truncated report pagination, unavailable adjudication, unpriced valid reports
+or any invalid duplicate reference or disagreement between status counters,
+reports and leaderboard fails closed. A leaderboard capped by the backend is
+accepted only as an exact ranked prefix; Cortex rebuilds the complete ranking
+from the report pages. The complete snapshot must arrive within 30 seconds. A
+waiting adjudication backlog with no published report also fails closed instead
+of scoring every miner as `NotAttempted`.
 
 | Adjudication | Effect |
 |--------------|--------|

@@ -11,7 +11,8 @@ from .scoring import MAX_TRIAGE_NOISE_BPS, MIN_PRECISION_BPS, SCORE_MAX, SEVERIT
 from .service import PAIR_GRANT_MAX_TTL_SECONDS, TERMS_TEXT, BountyService
 from .store import StoreError
 
-PAIR_GRANT_MAX_BODY_BYTES = 4096
+SMALL_WRITE_MAX_BODY_BYTES = 4096
+REPORT_MAX_BODY_BYTES = 256 * 1024
 
 
 class RequestBody(BaseModel):
@@ -52,16 +53,31 @@ def _error(exc: StoreError) -> JSONResponse:
     return JSONResponse({"error": str(exc)}, status_code=exc.status)
 
 
-async def _read_pair_grant(request: Request) -> PairGrantBody:
+def _request_openapi(model: type[RequestBody]) -> dict[str, object]:
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": model.model_json_schema()}},
+        }
+    }
+
+
+async def _read_request[RequestModel: RequestBody](
+    request: Request,
+    model: type[RequestModel],
+    *,
+    limit: int,
+    label: str,
+) -> RequestModel:
     encoded = bytearray()
     async for chunk in request.stream():
-        if len(encoded) + len(chunk) > PAIR_GRANT_MAX_BODY_BYTES:
-            raise StoreError(413, "pair grant request too large")
+        if len(encoded) + len(chunk) > limit:
+            raise StoreError(413, f"{label} request too large")
         encoded.extend(chunk)
     try:
-        return PairGrantBody.model_validate_json(bytes(encoded))
+        return model.model_validate_json(bytes(encoded))
     except ValidationError:
-        raise StoreError(422, "invalid pair grant request") from None
+        raise StoreError(422, f"invalid {label} request") from None
 
 
 def create_router(service: BountyService) -> APIRouter:
@@ -75,7 +91,7 @@ def create_router(service: BountyService) -> APIRouter:
     async def status():
         reason = None
         try:
-            await service.backend.fetch()
+            await service.backend.probe()
             can_score = True
         except BackendUnavailable as error:
             can_score = False
@@ -102,32 +118,55 @@ def create_router(service: BountyService) -> APIRouter:
             },
             "quotas": {
                 "max_pending_reports_per_hotkey": 5,
+                "max_concurrent_feed_validations_per_hotkey": 1,
                 "min_report_interval_secs": 60,
                 "min_report_body_chars": 80,
                 "min_repro_chars": 20,
+                "max_report_request_bytes": REPORT_MAX_BODY_BYTES,
             },
             "terms": TERMS_TEXT,
         }
 
-    @router.post("/v1/pair", status_code=201)
-    async def pair(body: PairBody):
+    @router.post("/v1/pair", status_code=201, openapi_extra=_request_openapi(PairBody))
+    async def pair(request: Request):
         try:
+            body = await _read_request(
+                request,
+                PairBody,
+                limit=SMALL_WRITE_MAX_BODY_BYTES,
+                label="pair",
+            )
             return service.pair(body)
         except StoreError as exc:
             return _error(exc)
 
-    @router.post("/v1/admin/pair-grants", status_code=201)
+    @router.post(
+        "/v1/admin/pair-grants",
+        status_code=201,
+        openapi_extra=_request_openapi(PairGrantBody),
+    )
     async def grant_pair(request: Request, authorization: Annotated[str | None, Header()] = None):
         try:
             service.require_operator(authorization)
-            body = await _read_pair_grant(request)
+            body = await _read_request(
+                request,
+                PairGrantBody,
+                limit=SMALL_WRITE_MAX_BODY_BYTES,
+                label="pair grant",
+            )
             return service.grant_pair(body)
         except StoreError as exc:
             return _error(exc)
 
-    @router.post("/v1/reports", status_code=201)
-    async def submit(body: ReportBody):
+    @router.post("/v1/reports", status_code=201, openapi_extra=_request_openapi(ReportBody))
+    async def submit(request: Request):
         try:
+            body = await _read_request(
+                request,
+                ReportBody,
+                limit=REPORT_MAX_BODY_BYTES,
+                label="report",
+            )
             row = await service.submit(body)
             return {key: row[key] for key in ("id", "miner_hotkey", "state", "fingerprint")}
         except StoreError as exc:
@@ -149,12 +188,19 @@ def create_router(service: BountyService) -> APIRouter:
         except StoreError as exc:
             return _error(exc)
 
-    @router.post("/v1/admin/adjudicate")
+    @router.post("/v1/admin/adjudicate", openapi_extra=_request_openapi(AdjudicateBody))
     async def adjudicate(
-        body: AdjudicateBody, authorization: Annotated[str | None, Header()] = None
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
     ):
         try:
             service.require_operator(authorization)
+            body = await _read_request(
+                request,
+                AdjudicateBody,
+                limit=SMALL_WRITE_MAX_BODY_BYTES,
+                label="adjudication",
+            )
             return service.store.adjudicate(
                 body.report_id, body.verdict, body.severity, body.duplicate_of
             )
