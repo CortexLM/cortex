@@ -133,13 +133,15 @@ adjudication alone does not place a report in that publication; the backend
 must publish consistent, justified records. The Python subnet does not export
 local reports or adjudications into the external backend automatically.
 Leaderboard counts alone are not creditable evidence. Mixed revisions,
-truncated report pagination, unavailable adjudication, unpriced valid reports
-or any invalid duplicate reference or disagreement between status counters,
-reports and leaderboard fails closed. A leaderboard capped by the backend is
+truncated report pagination, unavailable adjudication, unpriced valid reports,
+any duplicate chain without a non-duplicate root, or disagreement between
+status counters, reports and leaderboard fails closed. A leaderboard capped by the backend is
 accepted only as an exact ranked prefix; Cortex rebuilds the complete ranking
-from the report pages. The complete snapshot must arrive within 30 seconds. A
-waiting adjudication backlog with no published report also fails closed instead
-of scoring every miner as `NotAttempted`.
+from the report pages. Transient transport, HTTP, JSON or revision errors receive
+at most three read-only attempts, all within the same 30-second snapshot deadline.
+Stable adjudication, pricing and backlog gates are not retried. A waiting
+adjudication backlog with no published report also fails closed instead of
+scoring every miner as `NotAttempted`.
 
 | Adjudication | Effect |
 |--------------|--------|

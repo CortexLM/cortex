@@ -87,13 +87,16 @@ For each scoring read, Cortex fetches:
 Each response is bounded to 8 MiB and the complete report snapshot to 64 MiB.
 Cortex requires API version 1, available adjudication, no unpriced valid report,
 one revision across every response, complete pagination, unique report IDs and
-leaderboard hotkeys, nonempty evidence, valid duplicate references, and exact
+leaderboard hotkeys, nonempty evidence, duplicate chains ending at a
+non-duplicate report, and exact
 agreement between status, leaderboard `valid_count` and the published reports.
 A truncated leaderboard is accepted only when it is an exact ranked prefix;
 Cortex reconstructs the complete ranking from the fully paginated reports.
 Moving revisions, truncated report pagination or any inconsistency fail closed.
-The complete read has a 30-second deadline. A nonempty adjudication backlog with
-no published report is treated as an unavailable scorer, not as a zero score.
+Transient transport, HTTP, JSON or revision errors receive at most three
+read-only attempts inside one 30-second deadline; stable adjudication, pricing
+and backlog gates fail immediately. A nonempty adjudication backlog with no
+published report is treated as an unavailable scorer, not as a zero score.
 
 ## Score
 

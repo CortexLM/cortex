@@ -36,6 +36,10 @@ class BackendUnavailable(Exception):
     """A public scoring snapshot cannot be trusted. Contains no upstream body."""
 
 
+class _RetryableBackendUnavailable(BackendUnavailable):
+    """A read-only snapshot attempt may succeed against the next rollout replica."""
+
+
 class FeedModel(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
 
@@ -192,6 +196,26 @@ class PublicSnapshot(FeedModel):
             for report in self.reports
         ):
             raise BackendUnavailable("backend public duplicate reference is invalid")
+        reports_by_id = {report.id: report for report in self.reports}
+        rooted = {report.id for report in self.reports if report.status != "duplicate"}
+        for report in self.reports:
+            if report.status != "duplicate" or report.id in rooted:
+                continue
+            path = []
+            traversed = set()
+            current = report
+            while current.id not in rooted:
+                if current.id in traversed:
+                    raise BackendUnavailable(
+                        "backend public duplicate chain has no non-duplicate root"
+                    )
+                traversed.add(current.id)
+                path.append(current.id)
+                target = reports_by_id.get(current.related_report_id or "")
+                if target is None:
+                    raise BackendUnavailable("backend public duplicate reference is invalid")
+                current = target
+            rooted.update(path)
         if any(leaderboard.get(k) != count for k, count in valid_counts.items()) or any(
             valid_counts.get(k, 0) != count for k, count in leaderboard.items()
         ):
@@ -259,6 +283,8 @@ class PublicBackend:
     _MAX_REPORT_BYTES = 64 * 1024 * 1024
     _MAX_REPORT_PAGES = 10_000
     _SNAPSHOT_TIMEOUT_SECONDS = 30.0
+    _SNAPSHOT_ATTEMPTS = 3
+    _SNAPSHOT_RETRY_DELAY_SECONDS = 0.25
     _PROBE_SUCCESS_TTL_SECONDS = 15.0
     _PROBE_FAILURE_TTL_SECONDS = 5.0
 
@@ -319,44 +345,57 @@ class PublicBackend:
             raise BackendUnavailable("scoring unconfigured: set BOUNTY_BACKEND_PUBLIC_URL")
         try:
             async with asyncio.timeout(self._SNAPSHOT_TIMEOUT_SECONDS):
-                async with httpx.AsyncClient(
-                    timeout=20,
-                    transport=self.transport,
-                    follow_redirects=False,
-                    trust_env=False,
-                    headers={"User-Agent": "cortex-bounty-challenge/python"},
-                ) as client:
-                    status, _ = await self._read_model(client, "status", PublicationStatus)
-                    if not status.adjudication_available:
-                        raise BackendUnavailable("backend public adjudication is unavailable")
-                    if status.unpriced_valid:
-                        raise BackendUnavailable("backend public feed has unpriced valid reports")
-                    if status.awaiting_adjudication and not status.published:
-                        raise BackendUnavailable(
-                            "backend public adjudication backlog has no published reports"
+                last_error: BackendUnavailable | None = None
+                for attempt in range(self._SNAPSHOT_ATTEMPTS):
+                    if attempt:
+                        await asyncio.sleep(self._SNAPSHOT_RETRY_DELAY_SECONDS * attempt)
+                    try:
+                        async with httpx.AsyncClient(
+                            timeout=20,
+                            transport=self.transport,
+                            follow_redirects=False,
+                            trust_env=False,
+                            headers={"User-Agent": "cortex-bounty-challenge/python"},
+                        ) as client:
+                            return await self._fetch_once(client)
+                    except _RetryableBackendUnavailable as error:
+                        last_error = error
+                    except (httpx.HTTPError, ValueError, ValidationError):
+                        last_error = _RetryableBackendUnavailable(
+                            "backend public fetch or JSON validation failed"
                         )
-                    leaderboard, _ = await self._read_model(
-                        client,
-                        "leaderboard",
-                        LeaderboardPage,
-                        params={"revision": status.revision},
-                    )
-                    if leaderboard.revision != status.revision:
-                        raise BackendUnavailable("backend public leaderboard revision changed")
-                    reports = await self._read_reports(client, status.revision)
-                    complete_leaderboard = PublicSnapshot.leaderboard_from_reports(reports)
-                    snapshot = PublicSnapshot(
-                        leaderboard=complete_leaderboard,
-                        reports=reports,
-                    )
-                    snapshot.validate_publication()
-                    PublicSnapshot.validate_leaderboard_page(leaderboard, complete_leaderboard)
-                    snapshot.validate_status(status)
-                    return snapshot
+                if last_error is None:
+                    raise BackendUnavailable("backend public snapshot attempt unavailable")
+                raise last_error
         except TimeoutError:
             raise BackendUnavailable("backend public snapshot deadline exceeded") from None
-        except (httpx.HTTPError, ValueError, ValidationError):
-            raise BackendUnavailable("backend public fetch or JSON validation failed") from None
+
+    async def _fetch_once(self, client: httpx.AsyncClient) -> PublicSnapshot:
+        status, _ = await self._read_model(client, "status", PublicationStatus)
+        if not status.adjudication_available:
+            raise BackendUnavailable("backend public adjudication is unavailable")
+        if status.unpriced_valid:
+            raise BackendUnavailable("backend public feed has unpriced valid reports")
+        if status.awaiting_adjudication and not status.published:
+            raise BackendUnavailable("backend public adjudication backlog has no published reports")
+        leaderboard, _ = await self._read_model(
+            client,
+            "leaderboard",
+            LeaderboardPage,
+            params={"revision": status.revision},
+        )
+        if leaderboard.revision != status.revision:
+            raise _RetryableBackendUnavailable("backend public leaderboard revision changed")
+        reports = await self._read_reports(client, status.revision)
+        complete_leaderboard = PublicSnapshot.leaderboard_from_reports(reports)
+        snapshot = PublicSnapshot(
+            leaderboard=complete_leaderboard,
+            reports=reports,
+        )
+        snapshot.validate_publication()
+        PublicSnapshot.validate_leaderboard_page(leaderboard, complete_leaderboard)
+        snapshot.validate_status(status)
+        return snapshot
 
     async def _read_reports(
         self, client: httpx.AsyncClient, revision: str
@@ -379,7 +418,7 @@ class PublicBackend:
             if total_bytes > self._MAX_REPORT_BYTES:
                 raise BackendUnavailable("backend public report snapshot is too large")
             if page.revision != revision:
-                raise BackendUnavailable("backend public report revision changed")
+                raise _RetryableBackendUnavailable("backend public report revision changed")
             if page.count != len(page.items):
                 raise BackendUnavailable("backend public report page count is invalid")
             reports.extend(page.items)
@@ -405,9 +444,10 @@ class PublicBackend:
             "GET", f"{self.base_url}/v1/bounty/public/{route}", params=params
         ) as response:
             if not 200 <= response.status_code < 300:
-                raise BackendUnavailable(
-                    f"backend public fetch failed: HTTP {response.status_code}"
-                )
+                error = f"backend public fetch failed: HTTP {response.status_code}"
+                if response.status_code in {404, 408, 409, 425, 429} or response.status_code >= 500:
+                    raise _RetryableBackendUnavailable(error)
+                raise BackendUnavailable(error)
             content = bytearray()
             async for part in response.aiter_bytes():
                 if len(content) + len(part) > self._MAX_RESPONSE_BYTES:

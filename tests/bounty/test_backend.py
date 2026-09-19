@@ -111,6 +111,45 @@ async def test_moving_feed_cannot_be_mistaken_for_stable_scores():
         await backend.fetch()
 
 
+async def test_transient_json_and_revision_rollout_errors_are_retried():
+    status_reads = 0
+
+    def handle(request):
+        nonlocal status_reads
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "status":
+            status_reads += 1
+            if status_reads == 1:
+                return httpx.Response(200, content=b"{")
+        revision = "2" if route == "leaderboard" and status_reads == 2 else "1"
+        return httpx.Response(200, json=feed_body(route, [], [], revision=revision))
+
+    backend = PublicBackend("https://backend.invalid", transport=httpx.MockTransport(handle))
+    backend._SNAPSHOT_RETRY_DELAY_SECONDS = 0
+
+    snapshot = await backend.fetch()
+
+    assert snapshot.reports == ()
+    assert status_reads == 3
+
+
+async def test_transient_failures_stop_after_the_bounded_attempt_count():
+    requests = 0
+
+    def unavailable(request):
+        nonlocal requests
+        requests += 1
+        return httpx.Response(503)
+
+    backend = PublicBackend("https://backend.invalid", transport=httpx.MockTransport(unavailable))
+    backend._SNAPSHOT_RETRY_DELAY_SECONDS = 0
+
+    with pytest.raises(BackendUnavailable, match="HTTP 503"):
+        await backend.fetch()
+
+    assert requests == backend._SNAPSHOT_ATTEMPTS
+
+
 async def test_ignored_metadata_does_not_make_a_stable_feed_unreadable():
     request_number = 0
 
@@ -353,7 +392,11 @@ async def test_backend_enforces_per_response_and_complete_report_size_limits():
     ],
 )
 async def test_backend_status_must_be_ready_and_fully_priced(change, reason):
+    requests = 0
+
     def handle(request):
+        nonlocal requests
+        requests += 1
         route = request.url.path.rsplit("/", 1)[-1]
         if route == "status":
             body = {
@@ -386,6 +429,8 @@ async def test_backend_status_must_be_ready_and_fully_priced(change, reason):
 
     with pytest.raises(BackendUnavailable, match=reason):
         await backend.fetch()
+
+    assert requests == 1, "a stable gate is not retried"
 
 
 async def test_backend_refuses_an_empty_publication_with_a_waiting_backlog():
@@ -480,7 +525,7 @@ async def test_public_probe_caches_failures_briefly():
         with pytest.raises(BackendUnavailable, match="HTTP 503"):
             await backend.probe()
 
-    assert requests == 1
+    assert requests == backend._SNAPSHOT_ATTEMPTS, "a failure is cached after bounded retries"
 
 
 async def test_unpriced_valid_is_a_gate_even_after_three_priced_reports():
@@ -516,6 +561,30 @@ async def test_backend_rejects_invalid_duplicate_references(report):
 
     with pytest.raises(BackendUnavailable, match="duplicate reference"):
         await backend.fetch()
+
+
+async def test_backend_rejects_a_duplicate_cycle_without_a_root_report():
+    reports = [
+        published_report("r1", status="duplicate", severity=None, related_report_id="r2"),
+        published_report("r2", status="duplicate", severity=None, related_report_id="r1"),
+    ]
+    backend = backend_for([], reports)
+
+    with pytest.raises(BackendUnavailable, match="non-duplicate root"):
+        await backend.fetch()
+
+
+async def test_backend_accepts_a_duplicate_chain_with_a_root_report():
+    reports = [
+        published_report("r1", status="duplicate", severity=None, related_report_id="r2"),
+        published_report("r2", status="duplicate", severity=None, related_report_id="r3"),
+        published_report("r3"),
+    ]
+    backend = backend_for([{"hotkey": HOTKEY, "valid": 1}], reports)
+
+    snapshot = await backend.fetch()
+
+    assert [report.id for report in snapshot.reports] == ["r1", "r2", "r3"]
 
 
 async def test_malicious_published_row_without_severity_burns_the_hotkey():
