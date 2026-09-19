@@ -898,18 +898,18 @@ def _default_sources(config: dict, role: str) -> None:
     expected = {"/etc/base/config": ROOT / "config"}
     if role == "master":
         expected["/run/secrets"] = ROOT / "deploy/secrets/master"
+        # Some Compose releases fold `env_file` into `environment` in the JSON
+        # render, so the committed YAML is the source of truth for the default.
+        text = (ROOT / "deploy/compose/role-master.yml").read_text()
+        if "${BASE_MASTER_ENV_FILE:-deploy/env/master.env}" not in text:
+            raise ValueError("master default env file resolves outside the repository deploy tree")
         env_files = service.get("env_file", [])
-        # Compose releases render `path` as a string or a mapping, relative or
-        # absolute. Resolve against the project directory before comparing.
         resolved = [
             (ROOT / (item["path"] if isinstance(item, dict) else item)).resolve()
             for item in env_files
         ]
-        if resolved != [(ROOT / "deploy/env/master.env").resolve()]:
-            raise ValueError(
-                "master default env file resolves outside the repository deploy tree: "
-                f"{env_files!r}"
-            )
+        if resolved not in ([], [(ROOT / "deploy/env/master.env").resolve()]):
+            raise ValueError("master default env file resolves outside the repository deploy tree")
     else:
         expected["/run/wallets"] = ROOT / "deploy/secrets/wallets"
     for target, source in expected.items():
