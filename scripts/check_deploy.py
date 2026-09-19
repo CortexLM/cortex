@@ -899,7 +899,13 @@ def _default_sources(config: dict, role: str) -> None:
     if role == "master":
         expected["/run/secrets"] = ROOT / "deploy/secrets/master"
         env_files = service.get("env_file", [])
-        if len(env_files) != 1 or Path(env_files[0]["path"]) != ROOT / "deploy/env/master.env":
+        # Compose releases render `path` as a string or a mapping, relative or
+        # absolute. Resolve against the project directory before comparing.
+        resolved = [
+            (ROOT / (item["path"] if isinstance(item, dict) else item)).resolve()
+            for item in env_files
+        ]
+        if resolved != [(ROOT / "deploy/env/master.env").resolve()]:
             raise ValueError("master default env file resolves outside the repository deploy tree")
     else:
         expected["/run/wallets"] = ROOT / "deploy/secrets/wallets"
