@@ -1,54 +1,44 @@
-# AGENTS.md — docs
+# Documentation contract
 
-How to treat documentation in this repo.
+Documentation describes the current Python implementation. Historical evidence
+is not operational proof, and frozen specifications are compatibility artifacts,
+not live product instructions.
 
-## Normative vs non-normative
+## Canonical pages
 
-| Kind | Paths | Treat as |
-|------|-------|----------|
-| **Normative** | `ARCHITECTURE.md`, `NAMING.md`, frozen specs (`BUNDLE_SPEC.md`, `DESIGN_CHALLENGE.md`, `PRISM.md`, …), `THREAT_MODEL.md`, `OPERATOR_SECURITY.md`, `COMPLETENESS.md`, `runbooks/`, `external-miner/` | Source of truth for contracts, ops, naming, and status |
-| **Non-normative** | `evidence/`, `spikes/` | Historical ops notes / experiments. **Do not** implement against them as spec; **do not** delete in cleanup passes without an explicit ops decision |
-| **Explanatory** | `README.md`, `OVERVIEW.md`, `WHITEPAPER.md`, `CLEANUP.md`, `../whitepaper.pdf` | Navigation, product rationale, proposal-to-code comparison, and cleanup evidence; not replacements for current contracts |
+| Subject | Page |
+| --- | --- |
+| system topology and source map | `ARCHITECTURE.md` |
+| Proof control plane and RLM | `PROOF.md` |
+| Bounty intake and score | `BOUNTY.md` |
+| compatibility names and domains | `NAMING.md` |
+| trust assumptions and residual risk | `THREAT_MODEL.md` |
+| operator release checklist | `OPERATOR_SECURITY.md` |
+| environment and service settings | `reference/configuration.md` |
+| miner workflows | `external-miner/` |
 
-When a spike or evidence report conflicts with a frozen spec or runbook, the normative doc wins.
+Every reader-facing page must be linked from `index.md` directly or through one
+clearly indexed section. Keep one canonical page per topic and link to it instead
+of copying the same contract into a second runbook.
 
-## Runbook index
+## Frozen and historical material
 
-| Runbook | Use when |
-|---------|----------|
-| [`runbooks/promote-rollback-restore.md`](runbooks/promote-rollback-restore.md) | Digest promote, rollback, Postgres backup/restore |
-| [`runbooks/local-testnet-e2e.md`](runbooks/local-testnet-e2e.md) | Local laptop/VM full subnet stack on testnet 541 + ephemeral gateway tunnel |
-| [`runbooks/staging-testnet-e2e.md`](runbooks/staging-testnet-e2e.md) | Staging droplet testnet end-to-end validation |
-| [`runbooks/proof-submit-e2e.md`](runbooks/proof-submit-e2e.md) | Proof (and Bounty) submit → score: cargo tests, local `--force-sim`, staging curl/ctx |
-| [`runbooks/proof-vm-orchestrator.md`](runbooks/proof-vm-orchestrator.md) | Proof topic VMs: Firecracker + jailer agent on the dedicated KVM host, CP wiring, DigitalOcean staging wire + fail-closed matrix + happy path (`deploy/scripts/proof-vm-wire-check.sh`), sister-guest verification, security model |
-| [`runbooks/proof-experiment-vms.md`](runbooks/proof-experiment-vms.md) | Proof experiment VMs: one Firecracker VM per paid job for topics whose signed params select an in-guest runner — generic params, resource caps (lock 16 vCPU / 32 GiB, disk ≥ 16 GiB), pack staging, guest image bake (`deploy/guest/bake-rootfs.sh`, rootless podman), RE-LOCK steps, fail-closed rows, limitations |
-| [`runbooks/proof-experiment-smoke.md`](runbooks/proof-experiment-smoke.md) | Proof single-task smoke: run one task of any custom-family topic through the real guest agent + adaptor (`deploy/scripts/proof-experiment-smoke.py`: agent / exec / orch drivers, `--dry-run`), the operator-run metal hop (`deploy/scripts/proof-metal-smoke.sh`; cloud agents hold no metal key), the off-limits list, expected output, the `tbench-x0032` RCA, and the live-topic re-sign params |
-| [`runbooks/trust-root-rotation.md`](runbooks/trust-root-rotation.md) | Trust-root key rotation |
-| [`runbooks/gateway-failover.md`](runbooks/gateway-failover.md) | Gateway kill/restart / failover checks |
-| [`runbooks/measurement-repin-socket-proxy.md`](runbooks/measurement-repin-socket-proxy.md) | Socket-proxy measurement re-pin |
+`BUNDLE_SPEC.md`, `DESIGN_CHALLENGE.md` and `PRISM.md` are byte-pinned by
+`scripts/check_repo.py`. Do not edit them. Design, Prism and Relearn are not live
+products. The Relearn files under `external-miner/` and `proof-tbench.md` remain
+short historical pointers so old URLs do not disappear.
 
-Deploy topology and CI lanes: [`../deploy/README.md`](../deploy/README.md) and [`../deploy/AGENTS.md`](../deploy/AGENTS.md).  
-Repo-wide agent contract: [`../AGENTS.md`](../AGENTS.md).
+## API changes
 
-## Challenge public miner repos
+When Bounty or Proof changes a public route, payload, authentication rule, quota,
+timeout, scoring rule or failure response, update its miner guide in the same
+change. Examples must run against the Python CLI or current HTTP surface.
 
-Current miner guides live in this monorepo. Separate public miner repositories,
-when present, contain examples and human guides only, not network service code:
+Use exact capability language. Offline fake-provider tests prove deterministic
+control-plane behavior; they do not prove a live KVM boot, scientific validity,
+provider execution or on-chain payment. Never call an empty or guessed digest a
+pin.
 
-| Challenge | Repo |
-|-----------|------|
-| Bounty | this repo [`external-miner/bounty.md`](./external-miner/bounty.md) (subnet **reads** CortexLM/backend public API; it does not serve one) |
-| Proof | this repo [`external-miner/proof.md`](./external-miner/proof.md) |
-
-Off/archived miner pointers stay under [`external-miner/`](./external-miner/) (`relearn.md`, `relearn-image.md`, `relearn-agent.md`, `relearn-mm.md`) so historical links do not 404; they are not live products. Validators: [`external-miner/validators.md`](./external-miner/validators.md). When challenge APIs change, update **both** the public repo (when one exists) and `external-miner/` (see root [`../AGENTS.md`](../AGENTS.md) § Challenge public docs).
-
-## Challenge / local E2E verification
-
-When updating challenge or local-subnet docs/runbooks, keep these invariants:
-
-- **Master-only eval** — live challenge services (`bounty-challenge`, `proof-challenge`) run on master; validator has **no challenge exec** (fetch sealed weights only). Retired challenge code is gone from the tree.
-- **Simulate submissions** — Bounty: pair + `POST /v1/reports`; Proof: `POST /v1/submissions` with a `topic_id`. Do not treat `/health` alone as proof.
-- **Bounty adjudicate** — operator bearer `POST /v1/admin/adjudicate` (`valid` / `already_fixed_not_prod` / `invalid_malicious` / `duplicate`). Public leaderboard/reports are **CortexLM/backend**; Cortex **reads** `BOUNTY_BACKEND_PUBLIC_URL` (unset → 503). Do not serve `/v1/public/*` from this repo.
-- **No host Sim in staging/prod** — Docker only; `SimSandbox` / `BASE_ALLOW_HOST_SIM` are CI/local opt-in.
-- **Seal path** — `POST /v1/weights/raw` → seal → `GET /v1/weights/latest` with `sealed: true` (unsealed burn fallback is always available). That path needs `challenge_sk` + `gateway_sk`, **not** a gateway owner wallet. Validator wallets are for on-chain submit only.
-- Normative local procedure: [`runbooks/local-testnet-e2e.md`](runbooks/local-testnet-e2e.md). Repo contract: [`../AGENTS.md`](../AGENTS.md) § Challenge verification.
+Do not add phase reports, audit logs, generated transcripts, evidence dumps or
+duplicate README files. Release history belongs in `CHANGELOG.md`; temporary
+validation output belongs in CI artifacts or private operator storage.

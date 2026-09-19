@@ -1,0 +1,117 @@
+from pathlib import Path
+
+import pytest
+
+from cortex.cli import main
+from cortex.operator import generate_key, sign_trust_document
+from cortex.protocol.crypto import decode_hotkey, public_key
+from cortex.protocol.trust import load_trust_root
+
+
+def _document(path: Path, body: str) -> Path:
+    path.write_text(body)
+    return path
+
+
+def test_generated_key_signs_both_documents_for_runtime_verification(tmp_path):
+    seed_path, owner_path = tmp_path / "owner.seed", tmp_path / "owner.pubkey"
+    generated = generate_key(seed_path, owner_path)
+    challenge_seed = bytes([4]) * 32
+    challenges = _document(
+        tmp_path / "challenges.toml",
+        f"""version = 1
+introduced_epoch = 0
+[[challenges]]
+id = "bounty"
+public_key = "{public_key(challenge_seed).hex()}"
+emission_share_bps = 2000
+policy = "all_metagraph_hotkeys"
+[[challenges]]
+id = "proof"
+public_key = "{public_key(bytes([5]) * 32).hex()}"
+emission_share_bps = 8000
+policy = "all_metagraph_hotkeys"
+""",
+    )
+    measurements = _document(
+        tmp_path / "measurements.toml", "version = 1\nintroduced_epoch = 0\nmeasurements = []\n"
+    )
+    for kind, document in (("challenges", challenges), ("measurements", measurements)):
+        sign_trust_document(
+            input_path=document,
+            kind=kind,
+            seed_path=seed_path,
+            signature_path=Path(str(document) + ".sig"),
+        )
+
+    trust = load_trust_root(
+        challenges_path=challenges,
+        challenges_signature=Path(str(challenges) + ".sig"),
+        measurements_path=measurements,
+        measurements_signature=Path(str(measurements) + ".sig"),
+        owner_public=decode_hotkey(owner_path.read_text().strip()),
+        gateway_public=public_key(bytes([7]) * 32),
+        epoch=0,
+    )
+
+    assert generated == owner_path.read_text().strip()
+    assert seed_path.stat().st_mode & 0o777 == 0o600
+    assert trust.shares == ((b"bounty", 2000), (b"proof", 8000))
+
+
+def test_key_generation_refuses_to_overwrite_operator_material(tmp_path):
+    seed_path, owner_path = tmp_path / "owner.seed", tmp_path / "owner.pubkey"
+    generate_key(seed_path, owner_path)
+
+    with pytest.raises(FileExistsError):
+        generate_key(seed_path, tmp_path / "other.pubkey")
+
+    assert len(seed_path.read_bytes()) == 32
+
+
+def test_cli_verifies_the_signed_files_before_operator_install(tmp_path, capsys):
+    seed_path, owner_path = tmp_path / "owner.seed", tmp_path / "owner.pubkey"
+    generate_key(seed_path, owner_path)
+    challenges = tmp_path / "challenges.toml"
+    challenges.write_text(
+        f'''version = 1
+introduced_epoch = 0
+[[challenges]]
+id = "bounty"
+public_key = "{public_key(bytes([4]) * 32).hex()}"
+emission_share_bps = 2000
+policy = "all_metagraph_hotkeys"
+[[challenges]]
+id = "proof"
+public_key = "{public_key(bytes([5]) * 32).hex()}"
+emission_share_bps = 8000
+policy = "all_metagraph_hotkeys"
+'''
+    )
+    measurements = tmp_path / "measurements.toml"
+    measurements.write_text("version = 1\nmeasurements = []\n")
+    for kind, document in (("challenges", challenges), ("measurements", measurements)):
+        sign_trust_document(
+            input_path=document,
+            kind=kind,
+            seed_path=seed_path,
+            signature_path=Path(str(document) + ".sig"),
+        )
+
+    main(
+        [
+            "trust-verify",
+            "--challenges",
+            str(challenges),
+            "--measurements",
+            str(measurements),
+            "--owner-public",
+            str(owner_path),
+            "--gateway-public",
+            public_key(bytes([7]) * 32).hex(),
+            "--epoch",
+            "1",
+        ]
+    )
+
+    assert '"challenges": {"bounty": 2000, "proof": 8000}' in capsys.readouterr().out

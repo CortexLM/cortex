@@ -1,91 +1,60 @@
 # Contributing to Cortex
 
-This repository implements Cortex, an autonomous research network on Bittensor.
-Start with the [overview](docs/OVERVIEW.md) and
-[whitepaper comparison](docs/WHITEPAPER.md) for the purpose and current limits.
-Network services use Rust; the research evaluation image uses Python.
-
-## Before you start
-
-1. Read [AGENTS.md](AGENTS.md) (repo map, gates, what must not break).
-2. Read [docs/NAMING.md](docs/NAMING.md) before renaming anything that looks
-   like `base` / `BASE_*`.
-3. Frozen specs (`docs/BUNDLE_SPEC.md`, `docs/DESIGN_CHALLENGE.md`) are
-   pinned by xtask. Do not change incentive, scoring, or consensus semantics
-   unless that is the explicit task.
+Cortex is a Python Bittensor subnet with two live challenges: Bounty and Proof.
+Read [AGENTS.md](AGENTS.md), the [architecture](docs/ARCHITECTURE.md), and the
+[naming contract](docs/NAMING.md) before changing protocol or deployment code.
 
 ## Development setup
 
-- Rust **1.96.0** via `rust-toolchain.toml` (`rustfmt`, `clippy`).
-- Optional: `./scripts/install-githooks.sh` so `commit-msg` / `pre-commit`
-  match CI.
+Linux, Python 3.12 or 3.13, `uv`, Docker Compose, and libsodium are required.
 
 ```bash
-cargo test --workspace
+sudo apt-get install libsodium23
+uv sync --locked --extra chain --group build
 ```
 
-That is the core gate. Before opening a PR, also run what CI runs:
+Run the same offline gates as CI:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo deny check
-cargo run -p xtask -- loc-cap
-cargo run -p xtask -- consensus-lint
-cargo run -p xtask -- spec-check
-cargo run -p xtask -- design-check
-cargo run -p xtask -- external-docs-check
-cargo clippy -p validator-bin --features dcap --all-targets -- -D warnings
-bash deploy/scripts/assert-compose-matrix.sh
+uv run --no-sync ruff format --check src tests scripts
+uv run --no-sync ruff check src tests scripts
+uv run --no-sync mypy
+uv run --no-sync pytest -m 'not live'
+uv run --no-sync python scripts/check_repo.py --final
+uv run --no-sync python scripts/check_deploy.py --check-examples
+uv build --no-build-isolation
 ```
 
-For changes to the Python evaluation image, install its development dependencies
-in an isolated environment and run `python -m pytest eval/tests` from the repo
-root. GPU/runtime validation is separate from these contract tests.
+CI never rents a GPU, contacts OpenRouter, boots Firecracker, or submits chain
+weights. Tests substitute those external boundaries while exercising real HTTP,
+SQLite, signatures, RLM state, scoring, sealing, and validator verification.
 
-Local subnet stack (Docker Compose, secrets via age): see
-[deploy/README.md](deploy/README.md) and
-[docs/runbooks/local-testnet-e2e.md](docs/runbooks/local-testnet-e2e.md).
+## Behavioral contracts
 
-```bash
-./deploy/scripts/materialize-env.sh
-./deploy/scripts/local-e2e.sh --smoke
-```
+- Do not change the frozen files named by `scripts/check_repo.py`.
+- Preserve the `BASE_*` aliases and `base-*-v1` signature domains.
+- Keep challenge content out of Git. Proof topics are signed operator data.
+- A product/API change must update the matching `docs/external-miner/` page.
+- Never weaken a fail-closed path to make a smoke test pass.
+- Every bug fix needs a regression test at the public boundary it affected.
 
 ## Pull requests
 
-- Target **`main`**.
-- Use a [pull request template](.github/PULL_REQUEST_TEMPLATE.md).
-- Keep diffs scoped. Branding and docs PRs must not rewrite protocol bytes.
-- `unsafe_code` is forbidden. No `unwrap` / `expect` outside tests.
-
-## Commit messages
-
-A `commit-msg` hook enforces Conventional Commits:
+Target `main`, fill in the pull request template, and request a Greptile review.
+Use Conventional Commit subjects no longer than 72 characters:
 
 ```text
-type(scope): summary
+type(scope): lowercase summary
 ```
 
-- `type` is one of: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`,
-  `chore`, `build`, `ci`, `style`, `revert`.
-- Subject starts with a **lowercase** letter.
-- Entire subject ≤ **72** characters.
-- `Merge` and `Revert` subjects are allowed as-is.
-
-Examples: `docs(readme): describe cortex miner http path`,
-`feat(config): accept CORTEX_* env aliases`.
-
-## Issues
-
-Use the GitHub issue templates (bug / feature). GitHub Discussions are
-**not** enabled on this repository.
+Supported types are `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `chore`,
+`build`, `ci`, `style`, and `revert`.
 
 ## Security
 
-Do not file public issues for vulnerabilities. See [SECURITY.md](SECURITY.md).
+Do not publish vulnerability details or credentials in issues, logs, fixtures, or
+test output. Use the process in [SECURITY.md](SECURITY.md).
 
 ## Code of conduct
 
-[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Contact owners listed in
-[CODEOWNERS](CODEOWNERS) via GitHub.
+Participation is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).

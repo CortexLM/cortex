@@ -1,36 +1,32 @@
 # Cortex review rules
 
-This implements an autonomous research network on Bittensor (`CortexLM/cortex`), not an app-platform
-or SOC2 checklist. Two **live** challenge ids: `bounty` (2000 bps) and
-`proof` (8000). Proof-weighted 20%/80% regardless of eval digest. Proof's
-eval digest is pinned (`ghcr.io/cortexlm/proof-eval@sha256:78b614a1…`); do not invent a different sha256. Empty digest stays fail-closed (503). Sum is 10000. `relearn`, `relearn-image`,
-`relearn-agent`, `relearn-mm`, `design`, and `prism` are **removed as products** (no trust-root
-row, no compose services). Historical miner stubs stay under `docs/external-miner/`. Frozen
-specs remain for xtask gates. Leftover `prism-*` crates are the Lium harvest stack used by Proof.
+Cortex is a Python Bittensor research subnet with exactly two live challenges:
+`bounty` at 2,000 basis points and `proof` at 8,000. The trust-root sum is always
+10,000. Design, Prism and Relearn are historical only.
 
-- **Distinguish vision from implementation.** `docs/WHITEPAPER.md` maps the
-  proposal to code. Do not market unfinished judging, research persistence,
-  synthesis, or Proof emission as deployed capabilities.
-- **Fail-closed.** Missing holdout file, commitment mismatch, unpinned eval
-  digest, or unset judge credentials → refuse / 503. Never score the public split as a
-  substitute. `*_FORCE_SIM` is CI/local only and must be the *only* way to
-  reach a sim scorer: sim is never a fallback for a missing live eval, and the
-  resolved backend belongs on `/v1/status` and on the submit row.
-- **Absence of evidence is a failed gate.** Empty public split or an undeclared
-  miner `manifest` must fail the corresponding gate rather than skip it.
-- **A refusal is not a submission.** Fail-closed paths must not persist a row,
-  charge a miner, or rent a pod before scoring starts. Report the root cause
-  (unpinned digest) rather than a downstream symptom (missing baseline).
-- **Champions are measured by the scorer challengers face.** Never seed a live
-  host's baseline with sim numbers, and never leave a live host with no
-  baseline — the gates are comparisons and cannot run without one.
-- **Holdout stays off git.** Pins may carry `public_ids`, `holdout_commitment`,
-  `holdout_size`. Do not commit holdout items, prompts, salts, or canary benches.
-- **No Modal.** No Modal tokens, deploy files, profile names, or `modal.com`
-  hosts. No teacher/judge hostnames, API keys, or endpoints — env var names only.
-- **Do not rename** `BASE_*` env vars, deployed paths (`/opt/base`, `/run/base`),
-  or `base-*-v1` crypto domain tags.
-- `unsafe_code = forbid`. No `unwrap` / `expect` in non-test code.
-- Digest-only images in deploy paths. `evil-gateway` is test-only.
-- Frozen specs (`BUNDLE_SPEC`, `DESIGN_CHALLENGE`) — do not weaken scoring or
-  consensus semantics.
+- Preserve frozen SCALE encodings, Merkle construction, aggregation and every
+  `base-*-v1` signature preimage. Cross-language vectors must remain green.
+- Preserve existing `BASE_*` names and deployed compatibility paths. New master
+  settings may add the matching `CORTEX_*` alias but conflicting values fail.
+- Missing or unknown image digests, offers, baselines, topics, keys, feeds and
+  VM evidence fail closed. Never add a guessed digest or a simulation fallback.
+- Refused Proof intake does not reserve a nonce, create a row or start paid work
+  unless the documented durable acceptance point has been reached.
+- Proof environment values are checked before signatures, stored only in the
+  private vault, injected only into paid jobs and removed at terminal state.
+- A measured result scores only after topic/job/image/artifact binding and
+  confirmed dedicated VM teardown. Experiment guests have no network.
+- Recursive children share the parent's hard call, token, tool, depth and wall
+  budgets. External side effects require durable intent and idempotent recovery.
+- Shared observations are untrusted and private until owner-signed approval.
+- Bounty scoring reads only the stable CortexLM/backend public feed. An outage
+  returns 503 at intake and explicit `ChallengeInternal` leaves at emission.
+- Validators independently fetch historical chain state, recompute exact u16
+  weights and refuse the unsealed UID0 fallback. A sealed UID0 burn is valid.
+- Production images are digest-pinned. Secrets are private files and must never
+  enter Git, image layers, request/status output, fixtures or logs.
+- CI remains offline: no OpenRouter call, Lium rent, Firecracker boot or chain
+  submission. Fake-boundary tests cannot be described as live evidence.
+- API changes update the matching `docs/external-miner/` guide.
+- Do not edit the three byte-pinned frozen specifications. Do not weaken
+  `scripts/check_repo.py` to accept protocol drift.

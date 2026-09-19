@@ -1,30 +1,76 @@
-# Validator role — NO gateway, NO owner hotkey, NO challenge execution.
-# Points at the master gateway (staging VPC default; env-prod.yml pins
-# https://gateway.cortex.foundation). Used with:
-# docker compose -f docker-compose.yml -f deploy/compose/role-validator.yml
+# Standalone validator role. Never start a second submitter with the same wallet.
+name: cortex-validator
 services:
   validator:
-    environment:
-      # Default is the STAGING master VPC IP. env-prod.yml pins the public
-      # prod API. Never carry a prod pin in a shell var or an uncommitted
-      # .env — a bare `docker compose up` silently drops it.
-      BASE_GATEWAY_ENDPOINT: ${BASE_GATEWAY_ENDPOINT:-http://10.116.0.2:8080}
-      BASE_COORDINATION_INTERVAL_SECS: "3"
+    image: ${CORTEX_IMAGE:?Set the published image repository@sha256:digest}
+    command:
+      - validator
+      - --gateway
+      - ${BASE_GATEWAY_ENDPOINT:?Set the master gateway HTTPS URL}
+      - --netuid
+      - ${BASE_NETUID:?Set the Bittensor netuid}
+      - --gateway-public
+      - ${BASE_GATEWAY_HOTKEY:?Set the independently pinned gateway public key}
+      - --network
+      - ${BASE_CHAIN_ENDPOINT:-finney}
+      - --owner-public
+      - /etc/base/config/owner.pubkey
+      - --challenges
+      - /etc/base/config/challenges.toml
+      - --measurements
+      - /etc/base/config/measurements.toml
+      - --wallet-name
+      - ${BASE_WALLET_NAME:?Set the validator wallet name}
+      - --wallet-hotkey
+      - ${BASE_WALLET_HOTKEY:?Set the validator wallet hotkey name}
+      - --wallet-path
+      - /run/wallets
+      - --state-db
+      - /var/lib/base/validator.sqlite3
+      - --consensus-seed-file
+      - /run/validator/consensus.key
+      - --peers
+      - /etc/base/config/peers.json
+      - --peer-bind
+      - 0.0.0.0
+      - --peer-port
+      - "8091"
+      - --peer-tls-certificate
+      - /run/validator/tls.crt
+      - --peer-tls-key
+      - /run/validator/tls.key
+      - --poll-seconds
+      - ${BASE_COORDINATION_INTERVAL_SECS:-30}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 2m
+    ports:
+      - "${BASE_VALIDATOR_BIND_ADDRESS:?Set the validator VPC address}:8091:8091"
     volumes:
-      - ./config:/etc/base/config:ro
-      - base-validator-lkg:/var/lib/base
-  # Gateway must not run on the validator host.
-  gateway:
-    profiles: ["never"]
-  # Updater disabled on validator until GHCR pins wired.
-  updater:
-    profiles: ["never"]
-  # Challenges + Docker sock proxy are master-only.
-  # Validators fetch sealed weights from the master gateway; they do not run
-  # miner code or hold challenge mini-secrets.
-  bounty-challenge:
-    profiles: ["never"]
-  proof-challenge:
-    profiles: ["never"]
-  socket-proxy:
-    profiles: ["never"]
+      - type: bind
+        source: ${BASE_TRUST_ROOT_DIR:-config}
+        target: /etc/base/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${BASE_VALIDATOR_WALLETS_DIR:-deploy/secrets/wallets}
+        target: /run/wallets
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${BASE_VALIDATOR_IDENTITY_DIR:?Set private validator identity directory}
+        target: /run/validator
+        read_only: true
+        bind:
+          create_host_path: false
+      - base-validator-state:/var/lib/base
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+volumes:
+  base-validator-state:

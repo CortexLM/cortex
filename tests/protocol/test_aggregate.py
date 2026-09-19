@@ -1,0 +1,70 @@
+import json
+import struct
+from pathlib import Path
+
+import pytest
+
+from cortex.protocol.aggregate import (
+    ChallengeWeights,
+    aggregate_challenge_weights,
+    aggregate_leaves,
+)
+from cortex.protocol.models import LIVE_SHARES, Leaf, NoScore, Score
+from cortex.protocol.scale import ProtocolError
+
+VECTORS = sorted(
+    path
+    for path in (Path(__file__).parent / "vectors").glob("*.json")
+    if path.name != "rust_wire.json"
+)
+
+
+@pytest.mark.parametrize("path", VECTORS, ids=lambda path: path.stem)
+def test_upstream_served_vector_parity_bit_for_bit(path):
+    vector = json.loads(path.read_text())
+    inputs = vector["inputs"]
+    results = [
+        ChallengeWeights(
+            result["slug"], result["emission_percent"], result["weights"], result.get("ok", True)
+        )
+        for result in inputs["challenge_results"]
+    ]
+    if "python_error" in vector:
+        with pytest.raises(ProtocolError) as error:
+            aggregate_challenge_weights(
+                results, inputs["hotkey_to_uid"], **inputs.get("kwargs", {})
+            )
+        assert str(error.value) == vector["python_error"]
+        return
+    actual = aggregate_challenge_weights(
+        results, inputs["hotkey_to_uid"], **inputs.get("kwargs", {})
+    )
+    assert [list(pair) for pair in actual.final_vector] == vector["expected_vector"]
+    expected = vector["python_float_output"]
+    assert actual.uids == tuple(expected["uids"])
+    assert [struct.pack("d", value) for value in actual.weights] == [
+        struct.pack("d", value) for value in expected["weights"]
+    ]
+    assert list(actual.hotkey_weights) == list(expected["hotkey_weights"])
+    assert actual.hotkey_weights == expected["hotkey_weights"]
+
+
+def test_unavailable_proof_burns_its_eighty_percent_without_reallocating_to_bounty():
+    miner = bytes([1]) * 32
+    leaves = (
+        Leaf(b"bounty", miner, 1, Score(20), bytes(64)),
+        Leaf(b"proof", miner, 1, NoScore(), bytes(64)),
+    )
+    result = aggregate_leaves(leaves, LIVE_SHARES, ((miner, 1),))
+    assert result.weights == (0.8, 0.2)
+    assert result.final_vector == ((0, 52428), (1, 13107))
+
+
+def test_no_score_does_not_erase_other_miner_scores():
+    miners = (bytes([1]) * 32, bytes([2]) * 32)
+    leaves = (
+        Leaf(b"proof", miners[0], 1, Score(100), bytes(64)),
+        Leaf(b"proof", miners[1], 1, NoScore(), bytes(64)),
+    )
+    result = aggregate_leaves(leaves, LIVE_SHARES, ((miners[0], 1), (miners[1], 2)))
+    assert result.final_vector == ((0, 13107), (1, 52428))

@@ -1008,4 +1008,3 @@ Further risks worth tracking: **complexity as an attack surface** — the Jigsaw
 - `research-novelty-bounties.md` — evidence review for §5–§6 (novelty measurement and its evasion, full Numerai originality→MMC→TC→MMC history, Shapley cost wall, funding concentration vs dispersal, lottery funding, registered reports, tea.xyz / RetroPGF / Gitcoin / thanks.dev lineage failures)
 - `research-nas-competition.md` — evidence review for §2.3–§2.5 (NAS benchmarks and reproducibility, weight-sharing rank-correlation failures, zero-cost proxies, cross-fidelity correlation, Ladder/Thresholdout mechanics, Kaggle overfitting meta-analysis, best-arm identification, contest theory under noise)
 - `research-bittensor.md` — evidence review for §2.1 (SN9 scoring pipeline and epsilon implementations, WTA parameters, documented failure modes, IOTA, SN37 competition framework, and comparable networks)
-

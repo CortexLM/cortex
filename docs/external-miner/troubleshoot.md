@@ -1,57 +1,111 @@
 <!-- protocol_version: 1 -->
 
-# External miner — troubleshoot (HTTP)
+# Miner and validator troubleshooting
 
-**Path:** HTTP submit through [https://gateway.cortex.foundation](https://gateway.cortex.foundation).
-Install `ctx` from [README](./README.md). Proof harvest families (`nll` /
-`throughput`) pay Lium (`LIUM_API_KEY` / `X-Lium-Api-Key`). **`tbench` does
-not:** it scores on Proof Firecracker VMs. A red `tbench` checklist is
-inspect, not a Lium rent.
+Use the [Python CLI](README.md) and the gateway selected by the operator. Read
+the actual HTTP error and signed topic before retrying. Do not include wallet
+files, provider keys, Bounty sessions or private artifacts in diagnostics.
 
-## Installer and connectivity
+## Installation and identity
 
-| Symptom | Likely cause | What to check |
-|---------|--------------|---------------|
-| `install-ctx` aborts on checksum | Missing or mismatched `SHA256SUMS.txt` | The installer refuses an unverified binary. Wait for a `v*.*.*` release, or build `ctx` from this repo |
-| `request to … failed` | Gateway not reachable | `ctx status --gateway https://gateway.cortex.foundation`. A local stack needs `--gateway http://127.0.0.1:8080` |
-| `can_score: NO` / HTTP 503 | The host cannot score right now | Nothing was stored and nothing was rented. Read the error; do not retry-spend |
+| Symptom | Check |
+|---------|-------|
+| `ctx` examples do not match the CLI | Use `uv run cortex miner --help`; the Python client is `cortex` |
+| Bittensor wallet support unavailable | Install the existing `chain` extra with `uv sync --locked --extra chain` |
+| `Bittensor hotkey unavailable` | Check wallet name, hotkey name, wallet root and the password file; loading does not create keys |
+| Encrypted hotkey password file required | Add miner `--wallet-password-file` before the action; the miner does not prompt interactively |
+| Credential file unavailable or not private | Use a regular, non-symlink file with no group/other permissions, such as `0600` |
+| Proof owner public key required | Add miner `--proof-public` with the independently pinned Proof key, not the gateway key |
+| Invalid Proof signature from `wallet.sign()` | Proof needs Cortex context `base-sr25519-v1`, domain `base-proof-submit-v1`; use the Python wallet signer |
+| HTTP connection failure | Verify the selected gateway URL and TLS; there is no implicit deployment URL |
+
+The miner's `--dev-seed-file` is for local development fixtures. Bittensor
+wallets are the normal path. Validator identity currently has a separate
+consensus-seed requirement; see the [validator guide](validators.md).
 
 ## Bounty
 
-| Symptom | Likely cause | What to check |
-|---------|--------------|---------------|
-| CLI prints terms and stops | `--accept-terms` missing | Pairing is blocking; re-run with `--accept-terms` |
-| `403 terms_required` on `POST /v1/pair` | Terms not accepted | Same as above |
-| `401` on pair | Bad hotkey signature | Sign `cortex-bounty-v1\|{account_id}\|{nonce}\|{exp}` with that hotkey |
-| `401 invalid_session` on reports | Session claim expired or wrong | Re-run `ctx bounty pair` |
-| `already_fixed_not_prod` | Bug already patched, not in prod | Ack only — no reward, no penalty |
-| `invalid_malicious` | Fabricated / does not exist | Penalty (burn toward uid 0) |
-| `duplicate` | Same fingerprint as a prior report | No extra reward, no penalty. Whitespace-only edits of the same title+body still match |
-| `400 title_and_body_must_differ` / `body_lacks_distinct_evidence` | Title pasted as the body, or a repeated-token farm | Write a real report: distinct title, body, and repro |
-| HTTP 503 on report | Adjudication feed unreadable | `ctx bounty status` → `can_score`. The share burns; there is no offline scorer |
+| Symptom | Meaning and next action |
+|---------|-------------------------|
+| `403 terms_required` | Read the terms and explicitly pass `--accept-terms` when pairing |
+| `403 pairing not authorized by account operator` | Ask the operator to verify the Cortex Chat account and issue a fresh grant for this exact account and hotkey |
+| `401 signature verification failed` | Sign `cortex-bounty-v1\|{account_id}\|{nonce}\|{exp}` in the Substrate sr25519 context |
+| `400 invalid or expired pairing window` | Correct the local clock and pair with a future expiry |
+| `409 nonce reused` | The nonce was already accepted, even for an identical request; a lost session requires a new operator grant and nonce, which revoke the old session on successful pairing |
+| `401 invalid_session` | Check the private session file and deployment; pairing the same account again revokes its previous session |
+| `403 hotkey_mismatch` | The selected wallet hotkey differs from the session's paired hotkey |
+| CLI cannot write the session file | Select a new writable file; the CLI never overwrites an existing session file |
+| `400` thin or repetitive report | Supply a distinct title, at least 80 body characters and 20 reproduction characters with concrete evidence |
+| `429` | Wait for the 60-second interval or for pending adjudications to fall below five |
+| `422` | Match the API JSON field names and types; unknown fields are refused |
+| `can_score: false` | Status could not read and validate the backend feed; inspect `reason` and wait for operator recovery |
+| `503` on reports after `can_score: true` | Submit rechecks the feed; availability or publication consistency changed after the successful status probe |
+| Locally adjudicated report has no paid score | Scoring reads CortexLM/backend; local adjudications are not automatically exported there |
+| Public report GET is denied | Reports require operator access; the gateway does not expose private report reads |
 
-## Proof
+A Bounty feed outage stores no new report and emits no positive bounty score.
+It covers participants with `NoScore(ChallengeInternal)` so the share can burn
+through a valid seal. Do not enable a substitute local scorer.
 
-| Symptom | Likely cause | What to check |
-|---------|--------------|---------------|
-| `400` missing / unknown / not-open `topic_id` | Topic is not currently open | `ctx proof topics`. The refusal is not a submission |
-| `400` `declared_flops exceeds the topic budget` | Harvest `nll` / `throughput` only: `declared_flops > topic.flops_budget`. Custom / agent (`tbench`) ignore this gate | Cap declared FLOPs on harvest topics; omit or send `0` on `tbench` |
-| `400` invalid hotkey / `artifact_digest` | Not exactly 64 lowercase hex (`0x`, uppercase, whitespace) | Post the same lowercase bytes you signed; the host never normalises a hex field |
-| `400` `artifact required` / `artifact exceeds 5 MiB` / digest mismatch / gzip / not a tar | Custom / `tbench`: no upload and no URI, oversize tar, sha256 ≠ file, gzip, or non-tar bytes | `ctx proof submit --artifact recipe.tar` (≤5 MiB uncompressed). Upload is the evaluate path (vsock inject); URI-only `https://` remains compat |
-| `503` staged artefact missing / digest mismatch | Upload-only evaluate: this host no longer holds matching vault bytes | The row is untouched. Re-submit (new nonce) or wait for a deferred drain while the vault still holds |
-| `401` `hotkey_signature` / `submit_nonce` required, invalid, or reused | Unsigned, wrong key, a `claim` / `declared_flops` / `manifest` that differs from what was signed, or a replayed `(hotkey, submit_nonce)` | `ctx proof sign` over `base-proof-submit-v1` with a fresh nonce; post the manifest you signed. `X-Lium-Api-Key` is not identity |
-| `rejected` with `contamination_evidence_missing` | Empty `manifest` on a topic that requires training evidence | Harvest (`nll` / `throughput`): declare `train_content_hashes` or `train_dataset_ids`. Custom / agent (`tbench`): omit `--train-dataset`; do not invent a fake id |
-| `rejected` with contamination / cheat code | Holdout overlap, unreproduced claim, strawman AdamW, … | Read the verdict `cheat_codes`. Contamination rejects without rent |
-| `tbench` `rejected` + `failed_ids` naming `no_eval_short_circuit` / `no_tb4_hardcoding` | Inspect ticked those rules. Evidence that quotes the **rule id** as the marker is a false positive (naming the rule in a README is not a cheat). Real fails quote `skip_eval`, `skip_verifier`, `always_pass_eval`, `short_circuit_eval`, `tb4_answers`, or `hardcoded_tb4` | `tbench` is Proof Firecracker inspect, not Lium. A prompt-only `terminus-2` subclass is not a cheat; importing it still needs the guest Harbor overlay. Re-submit after the host ships the scan that ignores rule-id text |
-| `tbench` `rejected` with `flops_used = 0`, `custom_value = null`, `cheat_codes: other` | Checklist was red, so **evaluate never ran** — by design, before any paid inference | Read checklist evidence. Not a Lium/harvest miss and not a missing Harbor trial |
-| HTTP 503 on submit | Empty `eval_image_digest`, zero open topics, unsealed baseline, harvest down, or missing/closed RLM judge | `ctx proof status` → `can_score`. Live digest is `sha256:78b614a1…`. Empty digest still 503. Do not invent a digest. Nothing was rented |
-| Submit drops at ~60 s / `error sending request` / Broken pipe, no row | Old `ctx` used a **client-wide 60 s** timeout. `tbench` evaluate is sync and runs for minutes | Upgrade `ctx`. Default Proof POST wait is **7200 s** (`--submit-timeout-secs` / `CTX_PROOF_SUBMIT_TIMEOUT_SECS`; `0` = wait). GET stays ~60 s. After the body is accepted the host still scores if you hang up; a client that holds still gets **201-after-score** |
+## Proof intake
 
-## Off challenges
+| Symptom | Meaning and next action |
+|---------|-------------------------|
+| `400 topic missing, unknown or not open` | Rediscover `/challenge/proof/v1/proof/topics` and check status and epoch window |
+| `401` missing/invalid signature, hotkey or nonce | Use the exact signed fields; hotkey and nonce are 64 lowercase hex, signature is 128 lowercase hex |
+| `401 submit_nonce reused` | The hotkey/nonce pair was already reserved; reconcile the earlier attempt before paying for a new one |
+| `400` undeclared/missing/invalid `env` | Follow the signed topic's `params.miner_byok` and `miner_env_allowlist`; send a body map using private `--env-file` |
+| `400 artifact required` | Upload the `artifact` tar part or supply a valid HTTPS artifact URI |
+| `400` size, digest, tar or member error | Send the exact nonempty uncompressed tar, no links/traversal/special entries, within the 5 MiB upload limit |
+| `413` | The full HTTP request exceeds the bounded intake limit |
+| `429` | Too many pending jobs for this miner; default limit is four |
+| `201` with `rejected` and contamination reason | Holdout overlap or required training evidence failed before paid evaluation; do not invent training ids |
 
-`relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and
-`prism` have no trust-root row, no compose services, and no `ctx`
-subcommands. Submitting to them earns nothing. Historical stubs stay under
-[`relearn.md`](./relearn.md) so old links do not 404; they are not live work.
+`env` validation precedes cryptographic signature checking and nonce
+reservation. A malformed environment is not silently dropped. The artifact
+digest covers exact bytes; uploading a differently packed tar changes the
+digest even when its extracted files look identical.
 
-Never paste `LIUM_API_KEY`, challenge secrets, or mnemonics into tickets or git.
+## Proof execution
+
+| Symptom | Meaning and next action |
+|---------|-------------------------|
+| `503 UnwiredVmOrchestrator` | No live VM execution path is configured; operator action is required |
+| `503` image pin or inference offer mismatch | The signed topic and live host configuration disagree; do not invent or substitute a digest |
+| `503 custom runner unavailable` | This signed custom runner is not registered on the live host |
+| `503 harvest executor unavailable` | Python Lium harvest execution is unavailable; a custom runner does not make `nll` or `throughput` ready |
+| `503` baseline evidence error | A baseline needs verified execution evidence and a sealed comparison; a model claim alone cannot open scoring |
+| `503` credential vault or stored artifact error | Required private inputs are unavailable; the operator must restore or reconcile the accepted job |
+| `503` teardown or evaluation infrastructure failure | No score may be fabricated; failed work may still have a durable job and consumed nonce |
+| `201` with `queued` | The topic explicitly sets `params.defer_scoring: "true"`; the response is not a completed score |
+| `201` with `accepted` but no payment | Topic payout, signed leaves, sealing and chain submission are additional stages |
+| POST times out or client disconnects | Accepted work continues; check its returned id or reconcile with the operator before resubmitting |
+
+Normal Proof POST responses are **201-after-score**. The CLI waits 7200 seconds
+by default; `--submit-timeout-secs` or `CTX_PROOF_SUBMIT_TIMEOUT_SECS` overrides
+that wait and `0` disables the read timeout. GET requests keep their separate
+60-second timeout. A `404` from a result lookup can mean no result row exists
+yet; it is not proof that a job or nonce was never accepted.
+
+Status family flags describe wiring. They do not establish successful paid
+execution, scientific validity or end-to-end payment. There is no fixed topic
+catalog; follow the documentation and checklist in the current signed topic.
+
+## Validators
+
+| Symptom | Meaning and next action |
+|---------|-------------------------|
+| Latest is `sealed: false` with UID 0 weight 1.0 | Fail-closed fallback; do not submit it or a persisted last-known-good seal |
+| Verified sealed burn has UID 0 weight 1.0 | Submit this real seal; `burn_outcome: true` is not itself a refusal reason |
+| Sealed vector pays only a nonzero owner or permitted validator | Refuse; this is not the burn UID |
+| Consensus seed mismatch | The required consensus seed must identify the same hotkey as the Bittensor wallet |
+| Missing/invalid peer sample | Configure independently selected HTTPS peers with metagraph `validator_permit`; do not disable verification |
+| Conflicting signed roots or equivocation | Preserve the journal and signed evidence; reconcile the network state |
+| Stale block, future epoch, reorg or changed latest | Wait for a current valid seal; do not force-submit the old one |
+| Ambiguous chain dispatch remains pending | Reconcile inclusion/finalization before retrying; retain the SQLite journal |
+| CRv4 or drand failure | Do not fall back to public weights while chain commit-reveal is enabled |
+| `/v1/attest/*` returns `503` and `verified: false` | DCAP verification is not implemented in the Python validator |
+
+Validators fetch and verify sealed results; evaluation runs on master and the
+dedicated VM host. See [the validator guide](validators.md) for peer consensus,
+quarantine and Class A handling.

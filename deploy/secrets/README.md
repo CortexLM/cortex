@@ -1,51 +1,46 @@
-# Deploy secrets (NEVER commit secret bytes)
+# Private deployment files
 
-Containers run as `base` (uid **65532**). Host secret files MUST be:
+This directory contains documentation only. Secret bytes are never committed.
+Application containers run as UID/GID 65532; mounted files must be private
+regular files, owned/readable by that identity, with mode 0400 or 0600.
 
-```bash
-for f in gateway_sk bounty_sk proof_sk; do
-  chown 65532:65532 "deploy/secrets/$f"
-  chmod 0400 "deploy/secrets/$f"
-done
-```
+## Master mount
 
-Bind-mounts use the file inode; directory mode 0700 is OK.
+`deploy/secrets/master/` is mounted read-only at `/run/secrets`:
 
-## Challenge / gateway keys
+| File | Purpose |
+| --- | --- |
+| `gateway.key` | 32-byte sr25519 seed for bundle seals |
+| `bounty.key` | Bounty leaf seed matching the trust root |
+| `proof.key` | Proof topic/leaf seed matching the trust root |
+| `bounty-session.key` | at least 32 random bytes for opaque pairing sessions |
+| `operator.token` | bearer for master administrative routes |
+| `proof-vm.token` | bearer shared with the dedicated VM host |
+| `proof-vm-ca.pem` | CA used to verify the VM-host TLS certificate |
 
-| Path | Used by | Notes |
-|------|---------|-------|
-| `gateway_sk` | gateway | Bundle seal mini-secret (`BASE_GATEWAY_SK_FILE`) |
-| `gateway_admin_token` | gateway + seal scripts | Bearer for `/v1/admin/*` (`BASE_GATEWAY_ADMIN_TOKEN_FILE`). **Required** when `BASE_GATEWAY_REQUIRE_OWNER=1`. Mode **0400**, uid **65532** |
-| `bounty_sk` | bounty-challenge | Bounty leaf mini-secret; pub must match `config/challenges.toml` |
-| `proof_sk` | proof-challenge | Proof leaf + topic-document mini-secret; pub must match `config/challenges.toml` |
+The final two files are required only when Proof VM orchestration is configured.
+The CA certificate is public material but remains operator-managed because it
+controls the authenticated host boundary.
 
-```bash
-# Generate once per environment; never commit the bytes.
-openssl rand -hex 32 > deploy/secrets/gateway_admin_token
-chown 65532:65532 deploy/secrets/gateway_admin_token
-chmod 0400 deploy/secrets/gateway_admin_token
-```
+## Validator mounts
 
-## Proof + Bounty operator files
+The wallet tree is mounted read-only at `/run/wallets`. A separate validator
+identity directory is mounted at `/run/validator` and contains
+`consensus.key`, `tls.crt` and `tls.key`. The validator never receives gateway,
+Bounty, Proof, operator or provider credentials.
 
-| Path | Used by | Notes |
-|------|---------|-------|
-| `proof/topics.json` | proof-challenge | Signed topic documents (JSON array). **Never commit secrets**; the documents themselves are operator-published. Mode **0400**, uid **65532** |
-| `proof/holdouts.json` | proof-challenge | Per-topic holdout records (array or map keyed by `topic_id`). **Never commit.** Verified at boot against each topic's `holdout_commitment`. Mode **0400**, uid **65532** |
-| `proof/baselines.json` | proof-challenge | Sealed baseline measurements keyed by topic id. **Never commit.** Mode **0400**, uid **65532** |
-| `proof/admin_tokens` | proof-challenge | One operator bearer per line for `POST /v1/admin/proof/topics`, `POST /v1/admin/proof/executor`, and `GET /v1/admin/proof/vm-orchestrator` (`deploy/scripts/proof-vm-wire-check.sh cp` reads the first line) |
-| `proof/inference_offer.json` | proof-challenge | Live RLM judge `InferenceOffer` (provider kind, origin, mode, model_ref, token caps, `config_commitment`, status). Consumed by proof-eval; **not** a miner training proxy. **Never commit.** Missing/closed → `can_score=false` / 503. Mode **0400**, uid **65532** |
-| `proof/inference_api_key` | proof-challenge | Provider API key for the eval image. **Never commit, never log.** Mode **0400**, uid **65532** |
-| `proof/inference_base_url` | proof-challenge | Optional secret-backed origin (`PROOF_INFERENCE_BASE_URL_FILE`) when pin `[inference].base_url` and the topic omit one. **Never commit, never log.** Mode **0400**, uid **65532** |
-| `proof/eval_executor_offer.json` | proof-challenge | Live `1x` `EvalExecutorOffer` (`offer_id`, `lium_template_id`, `machine_shape`, `max_proof_deadline_s`, `eval_image_digest`, `config_commitment`, status). Sibling of the judge offer, no secret inside; still operator state, **never commit**. Build with `cargo run -p xtask -- proof-executor-offer …`; rotate live via `POST /v1/admin/proof/executor`. Missing/closed/shape ≠ pin `gpu_class` → `can_score=false` / 503. Mode **0400**, uid **65532** |
-| `proof/vm_orchestrator_token` | proof-challenge | Bearer for the topic-VM orchestrator agent on the dedicated KVM host (`PROOF_VM_ORCHESTRATOR_TOKEN_FILE`); same bytes as the host's `/etc/proof-vm/token`. Re-read per request (rotate by rewriting both). **Never commit, never log.** Missing/empty → custom topics 503. Mode **0400**, uid **65532** |
-| `proof/vm_orchestrator_ca.pem` | proof-challenge | Optional PEM root the agent's TLS certificate chains to (`PROOF_VM_ORCHESTRATOR_CA_FILE`). Public material, still operator state. Mode **0400**, uid **65532** |
-| `proof/rlm_owner_inference_key` | proof-challenge | Probed for **presence only** at `awaiting_owner_keys` (`PROOF_RLM_OWNER_INFERENCE_KEY_FILE`). The material the RLM uses is staged by the KVM-host agent from its own `PROOF_VM_AGENT_OWNER_KEY_DIR`; this host never reads or sends it. **Never commit, never log.** Mode **0400**, uid **65532** |
-| `bounty/admin_tokens` | bounty-challenge | Operator bearer for `POST /v1/admin/adjudicate` |
-| `bounty/session_secret` | bounty-challenge | Pairing session HMAC secret. Empty/missing no longer crashes boot (`/health` stays up; pairing will not survive restart). `remote-deploy.sh` fills a 32-byte value from urandom when the file is missing or 0-length. |
+## VM-host files
 
-## Other
+Private host files live under `/etc/proof-vm`, outside this repository:
 
-- `lium/` — Lium API + SSH keys for Proof harvest (BYOK). Never log or commit `LIUM_API_KEY`.
-- `wallets/` — btcli wallet trees for gateway owner / validator hotkeys
+| File | Purpose |
+| --- | --- |
+| `token` | counterpart of the master's `proof-vm.token` |
+| `tls.key` / `tls.crt` | SAN-valid HTTPS identity |
+| `openrouter.key` | owner-funded RLM inference credential |
+| `inference-offer.json` | signed model/provider offer; contains no API key |
+| `owner.pubkey` | optional Ed25519 key for shared-knowledge approvals |
+
+Runtime state, miner BYOK, evaluator offers, topic evidence, experiment packs,
+rootfs images, kernels and retained consoles also stay outside Git. Compute every
+pin from the final installed bytes; never create a digest-shaped placeholder.

@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cortex-subnet"
+version = "0.1.0"
+description = "Cortex research subnet: Bounty and agentic Proof on Bittensor"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.135,<0.136",
+  "httpx>=0.28,<0.29",
+  "pydantic>=2.12,<3",
+  "py-sr25519-bindings>=0.2.3,<0.3",
+  "cryptography>=46,<51",
+  "python-multipart>=0.0.22,<0.1",
+  "uvicorn>=0.41,<0.42",
+]
+
+[project.optional-dependencies]
+chain = ["bittensor>=10.5,<11"]
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "pytest-asyncio>=1.3,<2", "ruff>=0.15,<0.16", "mypy>=1.19,<2"]
+build = ["hatchling>=1.27,<2"]
+
+[project.scripts]
+cortex = "cortex.cli:main"
+proof-guest-init = "cortex.vm.init:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cortex"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+  "src/cortex",
+  "tests",
+  "config",
+  "deploy",
+  "docs",
+  ".dockerignore",
+  ".env.example",
+  "AGENTS.md",
+  "scripts/check_deploy.py",
+  "scripts/check_repo.py",
+  "scripts/rlm_smoke.py",
+  "scripts/vm_smoke.py",
+  "pyproject.toml",
+  "uv.lock",
+  "README.md",
+  "CHANGELOG.md",
+  "LICENSE",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+markers = ["live: opt-in external service tests (excluded from offline CI)"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/cortex", "scripts/check_deploy.py", "scripts/check_repo.py", "scripts/rlm_smoke.py", "scripts/vm_smoke.py"]
+check_untyped_defs = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["sr25519"]
+ignore_missing_imports = true

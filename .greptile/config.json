@@ -2,8 +2,10 @@
   "labels": true,
   "commentOnChanges": true,
   "ignorePatterns": [
-    "docs/evidence/**",
-    "docs/spikes/**",
-    "Cargo.lock"
+    "docs/BUNDLE_SPEC.md",
+    "docs/DESIGN_CHALLENGE.md",
+    "docs/PRISM.md",
+    "docs/external-miner/relearn*.md",
+    "docs/external-miner/proof-tbench.md"
   ]
 }

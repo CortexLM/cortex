@@ -1,12 +1,53 @@
-# Master role — gateway enabled, published on VPC for validator peers.
-# Used with: docker compose -f docker-compose.yml -f deploy/compose/role-master.yml --profile master
-#
-# On-chain weight submit must NOT run here (sole submitter = validator host).
-# Co-located validator is local-e2e only — env-local.yml clears the profile.
+# Standalone master role; activate only on the master droplet with --profile master.
+name: cortex-master
 services:
   gateway:
-    profiles: ["master"]
+    profiles: [master]
+    image: ${CORTEX_IMAGE:?Set the published image repository@sha256:digest}
+    command: [master, --bind, 0.0.0.0, --port, "8080"]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 125m
+    env_file:
+      - path: ${BASE_MASTER_ENV_FILE:-deploy/env/master.env}
+        required: true
+    environment:
+      BASE_STATE_DIR: /var/lib/base
+      BASE_OWNER_PUBKEY_FILE: /etc/base/config/owner.pubkey
+      BASE_CHALLENGES_FILE: /etc/base/config/challenges.toml
+      BASE_MEASUREMENTS_FILE: /etc/base/config/measurements.toml
+      BASE_GATEWAY_SK_FILE: /run/secrets/gateway.key
+      BOUNTY_SK_FILE: /run/secrets/bounty.key
+      PROOF_SK_FILE: /run/secrets/proof.key
+      BOUNTY_SESSION_SECRET_FILE: /run/secrets/bounty-session.key
+      BASE_GATEWAY_ADMIN_TOKEN_FILE: /run/secrets/operator.token
     ports:
-      - "8080:8080"
-  validator:
-    profiles: ["never"]
+      - "${BASE_GATEWAY_BIND_ADDRESS:?Set the master VPC address}:8080:8080"
+    volumes:
+      - type: bind
+        source: ${BASE_TRUST_ROOT_DIR:-config}
+        target: /etc/base/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${BASE_MASTER_SECRETS_DIR:-deploy/secrets/master}
+        target: /run/secrets
+        read_only: true
+        bind:
+          create_host_path: false
+      - base-master-state:/var/lib/base
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+volumes:
+  base-master-state:

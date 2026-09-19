@@ -1,70 +1,134 @@
 name: ci
 
-# Gate-only workflow: fmt / clippy / test / deny / xtask. It touches no
-# infrastructure. The DigitalOcean staging soak was retired (owner decision,
-# 2026-09-10) — main pushes now go straight to prod through
-# images.yml (GHCR digests → prod pins) and deploy-prod.yml.
-
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
+  UV_VERSION: "0.11.17"
+  UV_NO_PROGRESS: "1"
+  PYTHONUTF8: "1"
 
 jobs:
-  ci:
-    name: fmt · clippy · test · deny · xtask
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+  quality:
+    name: lint, types, wheel and deployment contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@v4
         with:
-          toolchain: "1.96.0"
-          components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy -D warnings
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: cargo test
-        run: cargo test --workspace
-
-      - name: Install cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
         with:
-          command: check
-          # cargo-deny ≥0.17 dropped bare --all-features; graph features live in deny.toml
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install consensus crypto library
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsodium23
+      - name: Install locked dependencies
+        run: uv sync --locked --extra chain --group build
+      - name: Format and lint
+        run: |
+          uv run --no-sync ruff format --check src tests scripts/check_deploy.py scripts/check_repo.py scripts/rlm_smoke.py scripts/vm_smoke.py
+          uv run --no-sync ruff check src tests scripts/check_deploy.py scripts/check_repo.py scripts/rlm_smoke.py scripts/vm_smoke.py
+      - name: Type checking
+        run: uv run --no-sync mypy
+      - name: Validate frozen specs, public contracts and repository hygiene
+        run: uv run --no-sync python scripts/check_repo.py --final
+      - name: Validate deployment isolation and image pins
+        run: uv run --no-sync python scripts/check_deploy.py --check-examples
+      - name: Build wheel and source distribution with locked backend
+        run: uv build --no-build-isolation
+      - name: Check source archive and test fixtures
+        run: |
+          uv run --no-sync python - <<'PYTHON'
+          import pathlib
+          import subprocess
+          import sys
+          import tarfile
+          import tempfile
 
-      - name: xtask loc-cap
-        run: cargo run -p xtask -- loc-cap
+          archives = list(pathlib.Path("dist").glob("*.tar.gz"))
+          assert len(archives) == 1, "expected exactly one source archive"
+          with tarfile.open(archives[0]) as archive:
+              members = archive.getmembers()
+          prefix = archives[0].name.removesuffix(".tar.gz")
+          names = {pathlib.PurePosixPath(member.name).relative_to(prefix) for member in members}
+          required = {"src/cortex/vm/preflight.py", "src/cortex/vm/smoke.py", "scripts/vm_smoke.py"}
+          assert required <= {str(name) for name in names}, "VM diagnostics missing from source archive"
+          roots = {"src", "tests", "scripts", "config", "deploy", "docs", ".dockerignore", ".env.example", "AGENTS.md", ".gitignore", "pyproject.toml", "uv.lock", "README.md", "CHANGELOG.md", "LICENSE", "PKG-INFO"}
+          assert all(name.parts and name.parts[0] in roots and ".." not in name.parts for name in names), "unexpected archive root"
+          assert not any(name.suffix == ".rs" or name.name in {"Cargo.toml", "Cargo.lock"} for name in names), "legacy Rust sources in Python archive"
+          assert all(member.isfile() or member.isdir() for member in members), "special archive entry"
+          with tempfile.TemporaryDirectory(prefix="cortex-sdist-") as destination:
+              with tarfile.open(archives[0]) as archive:
+                  archive.extractall(destination, filter="data")
+              subprocess.run(
+                  [sys.executable, "-m", "pytest", "tests/test_repo_contract.py", "tests/test_deploy_contract.py", "-q"],
+                  cwd=pathlib.Path(destination) / prefix,
+                  check=True,
+              )
+          PYTHON
+      - name: Install and exercise wheel outside the source tree
+        run: |
+          uv export --quiet --locked --no-dev --extra chain --no-emit-project --output-file "$RUNNER_TEMP/cortex-runtime.txt"
+          uv venv "$RUNNER_TEMP/cortex-wheel"
+          uv pip install --python "$RUNNER_TEMP/cortex-wheel/bin/python" --require-hashes -r "$RUNNER_TEMP/cortex-runtime.txt"
+          uv pip install --python "$RUNNER_TEMP/cortex-wheel/bin/python" --no-deps dist/*.whl
+          cd "$RUNNER_TEMP"
+          cortex_python="$RUNNER_TEMP/cortex-wheel/bin/python"
+          "$RUNNER_TEMP/cortex-wheel/bin/cortex" --help
+          "$RUNNER_TEMP/cortex-wheel/bin/cortex" validator --help
+          "$RUNNER_TEMP/cortex-wheel/bin/cortex" vm-host --help
+          "$cortex_python" -I -m cortex.vm.smoke --help
+          "$cortex_python" -I -c 'from cortex.vm.preflight import check_host'
+          "$cortex_python" -I -c 'from cortex.protocol.crypto import public_key, sign_raw, verify_raw; key = bytes(range(32)); body = b"installed-wheel-smoke"; assert verify_raw(public_key(key), b"smoke", body, sign_raw(key, b"smoke", body))'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: xtask consensus-lint
-        run: cargo run -p xtask -- consensus-lint
-
-      - name: xtask spec-check
-        run: cargo run -p xtask -- spec-check
-
-      - name: xtask design-check
-        run: cargo run -p xtask -- design-check
-
-      - name: xtask external-docs-check
-        run: cargo run -p xtask -- external-docs-check
-
-      - name: clippy with dcap feature (release path)
-        run: cargo clippy -p validator-bin --features dcap --all-targets -- -D warnings
-
-      - name: compose matrix assertions
-        run: bash deploy/scripts/assert-compose-matrix.sh
+  tests:
+    name: tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install consensus crypto library
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsodium23
+      - name: Install locked dependencies
+        run: uv sync --locked --extra chain
+      - name: Full offline suite
+        run: uv run --no-sync pytest -m 'not live' --junitxml=test-results/pytest.xml
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: tests-python-${{ matrix.python }}
+          path: test-results/pytest.xml
+          if-no-files-found: ignore
+          retention-days: 7

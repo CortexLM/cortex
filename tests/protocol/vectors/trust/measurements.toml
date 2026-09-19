@@ -1,0 +1,9 @@
+# Owner-signed measurements allowlist.
+#
+# base-agent / Phala CVM miner path removed — allowlist cleared (fail-closed).
+# Attest crates + BUNDLE_SPEC measurements_digest machinery remain; new design
+# runtime rows (if any) land via owner ceremony (CEREMONY.md).
+version = 5
+introduced_epoch = 0
+
+measurements = []

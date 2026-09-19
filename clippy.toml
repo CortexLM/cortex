@@ -1,3 +1,0 @@
-# Allow unwrap/expect in tests so workspace deny does not block TDD fixtures.
-allow-unwrap-in-tests = true
-allow-expect-in-tests = true

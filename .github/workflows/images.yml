@@ -1,349 +1,149 @@
-name: images
+name: python-images
 
-# Build service images, push by commit SHA + branch tag, record digests as an artifact.
-# Digests-only pins are consumed by deploy/scripts/promote.sh.
-# After merge: promote pin services into deploy/pins/prod.json and publish the
-# result as the `prod-pins-<sha>` artifact that deploy-prod.yml consumes.
-# Nothing is pushed to main: main is protected (PR + Greptile review required),
-# so a pin commit from CI is rejected with GH013. Service images use GHCR.
-
+# Explicit image publication; this workflow never changes deployed pins or hosts.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/**"
-      - "bins/**"
-      - "deploy/Dockerfile"
-      - "deploy/attest-helper/**"
-      # Ops scripts (promote/remote-deploy/burn-seal) — keep the
-      # digest → prod-pin ladder reachable for ops-only commits.
-      - "deploy/scripts/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "deny.toml"
-      - ".github/workflows/images.yml"
   workflow_dispatch:
+    inputs:
+      python_image:
+        description: "Python 3.12 slim Bookworm image with verified @sha256 digest"
+        required: true
+        type: string
+        default: python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+      publish:
+        description: "Publish the tested runtime image to GHCR (guest is validated only)"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
-  packages: write
-
-env:
-  REGISTRY: ghcr.io
 
 concurrency:
-  group: images-${{ github.ref }}
-  cancel-in-progress: false
+  group: python-images-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-push-digests:
-    name: build · push · record digests
-    if: ${{ github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: validator
-            image_suffix: validator
-            dockerfile: deploy/Dockerfile
-          - target: gateway
-            image_suffix: gateway
-            dockerfile: deploy/Dockerfile
-          - target: updater
-            image_suffix: updater
-            dockerfile: deploy/Dockerfile
-          - target: bounty-challenge
-            image_suffix: bounty-challenge
-            dockerfile: deploy/Dockerfile
-          - target: proof-challenge
-            image_suffix: proof-challenge
-            dockerfile: deploy/Dockerfile
-          - target: ""
-            image_suffix: base-attest-helper
-            dockerfile: deploy/attest-helper/Dockerfile
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Lowercase GHCR image prefix
-        run: |
-          set -euo pipefail
-          # GHCR rejects mixed-case repository paths (e.g. BaseIntelligence).
-          owner_repo="${GITHUB_REPOSITORY,,}"
-          echo "IMAGE_PREFIX=ghcr.io/${owner_repo}" >> "$GITHUB_ENV"
-          echo "IMAGE_PREFIX=ghcr.io/${owner_repo}"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.image_suffix == 'base-attest-helper' && 'deploy/attest-helper' || '.' }}
-          file: ${{ matrix.dockerfile }}
-          target: ${{ matrix.target }}
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ env.IMAGE_PREFIX }}/${{ matrix.image_suffix }}:${{ github.sha }}
-            ${{ env.IMAGE_PREFIX }}/${{ matrix.image_suffix }}:${{ github.ref_name }}
-          build-args: |
-            BUILD_FROM=source
-          provenance: false
-
-      - name: Write digest fragment
-        run: |
-          set -euo pipefail
-          mkdir -p digests-out
-          DIGEST="${{ steps.build.outputs.digest }}"
-          test -n "$DIGEST"
-          test "${DIGEST#sha256:}" != "$DIGEST"
-          REPO="${{ env.IMAGE_PREFIX }}/${{ matrix.image_suffix }}"
-          SVC="${{ matrix.image_suffix }}"
-          cat > "digests-out/${SVC}.json" <<EOF
-          {
-            "service": "${SVC}",
-            "repository": "${REPO}",
-            "tag_sha": "${{ github.sha }}",
-            "digest": "${DIGEST}",
-            "image": "${REPO}@${DIGEST}",
-            "commit_sha": "${{ github.sha }}"
-          }
-          EOF
-          cat "digests-out/${SVC}.json"
-
-      - name: Upload digest fragment
-        uses: actions/upload-artifact@v4
-        with:
-          name: digest-${{ matrix.image_suffix }}
-          path: digests-out/${{ matrix.image_suffix }}.json
-          if-no-files-found: error
-
-  merge-digests:
-    name: merge digest manifest
-    needs: build-push-digests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download fragments
-        uses: actions/download-artifact@v4
-        with:
-          pattern: digest-*
-          path: digests-in
-          merge-multiple: true
-
-      - name: Merge + validate
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json, pathlib, os
-          from datetime import datetime, timezone
-          root = pathlib.Path("digests-in")
-          images = {}
-          for p in sorted(root.glob("*.json")):
-              d = json.loads(p.read_text())
-              assert d["digest"].startswith("sha256:") and len(d["digest"]) == 71
-              assert "@sha256:" in d["image"]
-              images[d["service"]] = d
-          expected = {
-              "validator",
-              "gateway",
-              "updater",
-              "bounty-challenge",
-              "proof-challenge",
-              "base-attest-helper",
-          }
-          assert set(images) == expected, (set(images), expected)
-          out = {
-              "commit_sha": os.environ.get("GITHUB_SHA", ""),
-              "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-              "registry": "ghcr.io",
-              "images": images,
-          }
-          pathlib.Path("deploy/digests").mkdir(parents=True, exist_ok=True)
-          path = pathlib.Path("deploy/digests") / f"{out['commit_sha']}.json"
-          path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
-          print(path.read_text())
-          PY
-
-      - name: Upload merged digests
-        uses: actions/upload-artifact@v4
-        with:
-          name: base-image-digests-${{ github.sha }}
-          path: deploy/digests/${{ github.sha }}.json
-          if-no-files-found: error
-
-  # ---------------------------------------------------------------------------
-  # Digest → prod pin ladder. Writes deploy/digests/<sha>.json and promotes the
-  # pin services into deploy/pins/prod.json, then publishes both as the
-  # `prod-pins-<sha>` artifact. deploy-prod.yml downloads that artifact instead
-  # of reading pins from git: main is protected, so CI cannot push a pin commit.
-  # ---------------------------------------------------------------------------
-  prod-pins:
-    name: record prod pins
-    needs: merge-digests
-    # Also on workflow_dispatch: re-running images for a commit whose pin
-    # artifact expired is the documented prod rollback path, so a manual run
-    # must rebuild the artifact too. Nothing reaches prod from a stray ref —
-    # deploy-prod refuses any SHA that is not an ancestor of origin/main.
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     permissions:
       contents: read
-      packages: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download merged digests
-        uses: actions/download-artifact@v4
-        with:
-          name: base-image-digests-${{ github.sha }}
-          path: /tmp/digests-in
-
-      - name: Record digests + promote prod pins
-        run: |
-          set -euo pipefail
-          SHA="${{ github.sha }}"
-          mkdir -p deploy/digests
-          # Artifact may be the file itself or nested under deploy/digests/
-          SRC=""
-          if [[ -f "/tmp/digests-in/${SHA}.json" ]]; then
-            SRC="/tmp/digests-in/${SHA}.json"
-          elif [[ -f "/tmp/digests-in/deploy/digests/${SHA}.json" ]]; then
-            SRC="/tmp/digests-in/deploy/digests/${SHA}.json"
-          else
-            SRC=$(find /tmp/digests-in -name "${SHA}.json" -type f | head -1)
-          fi
-          test -n "$SRC" && test -f "$SRC"
-          cp "$SRC" "deploy/digests/${SHA}.json"
-          echo "Recorded digest manifest: deploy/digests/${SHA}.json"
-          chmod +x deploy/scripts/promote.sh
-          # --force-prod skips the staging-digest ladder check: the staging soak
-          # was retired, so deploy/pins/staging.json is no longer written by any
-          # workflow and comparing against it would pin prod to a dead lane.
-          # --skip-backup: this job only records pins into an artifact and never
-          # deploys; the fail-closed Postgres backup runs in deploy-prod.yml.
-          for svc in validator gateway updater bounty-challenge proof-challenge; do
-            IMAGE=$(python3 -c '
-          import json, sys
-          d = json.load(open(sys.argv[1]))
-          print(d["images"][sys.argv[2]]["image"])
-          ' "deploy/digests/${SHA}.json" "$svc")
-            echo "prod pin $svc → $IMAGE"
-            ./deploy/scripts/promote.sh \
-              --env prod \
-              --service "$svc" \
-              --image "$IMAGE" \
-              --confirm-prod \
-              --force-prod \
-              --commit "$SHA" \
-              --skip-backup
-          done
-          python3 -c '
-          import json, sys
-          p = json.load(open("deploy/pins/prod.json"))
-          assert p["commit_sha"] == sys.argv[1], (p["commit_sha"], sys.argv[1])
-          for s in ("validator", "gateway", "updater", "bounty-challenge", "proof-challenge"):
-              assert s in p["services"], s
-              assert p["services"][s]["digest"].startswith("sha256:")
-          print("prod pins ok", p["commit_sha"])
-          ' "$SHA"
-
-      - name: Stage pins artifact
-        run: |
-          set -euo pipefail
-          SHA="${{ github.sha }}"
-          STAGE="/tmp/prod-pins-artifact"
-          mkdir -p "$STAGE/deploy/pins" "$STAGE/deploy/digests"
-          cp deploy/pins/prod.json "$STAGE/deploy/pins/prod.json"
-          cp "deploy/digests/${SHA}.json" "$STAGE/deploy/digests/${SHA}.json"
-          python3 - >> "$GITHUB_STEP_SUMMARY" <<'PY'
-          import json
-          pin = json.load(open("deploy/pins/prod.json", encoding="utf-8"))
-          sha = pin["commit_sha"]
-          out = [f"### prod pins for `{sha}`", "", "| service | digest |", "| --- | --- |"]
-          for svc in sorted(pin["services"]):
-              out.append(f"| {svc} | `{pin['services'][svc]['digest']}` |")
-          out += ["", f"deploy-prod.yml consumes these as artifact `prod-pins-{sha}`."]
-          print("\n".join(out))
-          PY
-
-      - name: Upload prod pins artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: prod-pins-${{ github.sha }}
-          path: /tmp/prod-pins-artifact
-          if-no-files-found: error
-
-  # ---------------------------------------------------------------------------
-  # Make GHCR packages public so unauthenticated / Phala pulls work. Lives here
-  # rather than in ghcr-public.yml so it runs inline right after digests merge;
-  # ghcr-public.yml remains for manual re-runs.
-  # ---------------------------------------------------------------------------
-  ghcr-public:
-    needs: merge-digests
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
+      actions: read
       packages: write
     steps:
-      - name: Set package visibility public
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate base pin and publication branch
+        env:
+          PYTHON_IMAGE: ${{ inputs.python_image }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          python3 scripts/check_deploy.py --base-image "$PYTHON_IMAGE"
+          if [[ "$PUBLISH" == "true" && "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Publish images only from main." >&2
+            exit 1
+          fi
+          printf 'IMAGE=ghcr.io/%s/python\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - name: Require passing CI for the exact source commit
+        if: inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
-          OWNER: ${{ github.repository_owner }}
         run: |
-          set -euo pipefail
-          # Nested image names: ghcr.io/<owner>/<repo>/<suffix> → package "<repo>/<suffix>".
-          # Derive the repo segment: the hardcoded "base/" prefix went stale when
-          # the repo was renamed, so every visibility call 404'd and the droplets
-          # were left pulling private packages.
-          repo="${GITHUB_REPOSITORY##*/}"
-          repo="${repo,,}"
-          pkgs=(
-            "${repo}/base-attest-helper"
-            "${repo}/gateway"
-            "${repo}/validator"
-            "${repo}/updater"
-            "${repo}/bounty-challenge"
-            "${repo}/proof-challenge"
-          )
-          ok=0
-          # First list packages to Learn exact names (debug)
-          curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/orgs/${OWNER}/packages?package_type=container&per_page=100" \
-            | tee /tmp/pkg-list.json | head -c 2000 || true
-          echo
-          for pkg in "${pkgs[@]}"; do
-            enc=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$pkg")
-            code=$(curl -sS -o "/tmp/vis-${enc}.json" -w "%{http_code}" \
-              -X PUT \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/orgs/${OWNER}/packages/container/${enc}/visibility" \
-              -d '{"visibility":"public"}' || true)
-            echo "pkg=${pkg} http=${code} body=$(head -c 200 "/tmp/vis-${enc}.json" || true)"
-            if [ "$code" = "204" ] || [ "$code" = "200" ]; then
-              ok=$((ok + 1))
-            fi
-          done
-          echo "publicized_ok=${ok}/${#pkgs[@]}"
-          # Soft fail while packages may not exist yet on first base build
-          if [ "$ok" -lt 1 ]; then
-            echo "WARNING: no packages publicized yet (may be missing until images run)"
-            exit 0
-          fi
+          success=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=completed" --jq '[.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main")] | length')
+          test "$success" -gt 0
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and load the runtime
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: runtime
+          load: true
+          platforms: linux/amd64
+          tags: cortex-python:test
+          build-args: |
+            PYTHON_IMAGE=${{ inputs.python_image }}
+          cache-from: type=gha,scope=cortex-python
+          cache-to: type=gha,mode=max,scope=cortex-python
+      - name: Exercise installed runtime
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL cortex-python:test --help
+          docker run --rm --network none --read-only --cap-drop ALL cortex-python:test validator --help
+          docker run --rm --network none --read-only --cap-drop ALL cortex-python:test vm-host --help
+          docker run --rm --network none --read-only --cap-drop ALL --entrypoint python cortex-python:test -I -c 'import bittensor, cortex.master, cortex.vm.server; from cortex.protocol.crypto import public_key, sign_raw, verify_raw; key = bytes(range(32)); assert verify_raw(public_key(key), b"smoke", b"container", sign_raw(key, b"smoke", b"container"))'
+      - name: Build and load the guest for validation only
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: guest
+          load: true
+          platforms: linux/amd64
+          tags: cortex-python-guest:test
+          build-args: |
+            PYTHON_IMAGE=${{ inputs.python_image }}
+          cache-from: |
+            type=gha,scope=cortex-python-guest
+            type=gha,scope=cortex-python
+          cache-to: type=gha,mode=max,scope=cortex-python-guest
+      - name: Check guest imports and native dependencies without booting init
+        run: |
+          docker run --rm -i --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 65532:65532 \
+            --entrypoint /opt/cortex/bin/python cortex-python-guest:test -I -B - <<'PYTHON'
+          import ctypes
+          import ctypes.util
+          import importlib
+          import os
+          import pathlib
+          import shutil
+          import subprocess
+
+          for module in ("cortex.vm.init", "cortex.vm.guest_server", "cortex.vm.candidate", "cortex.rlm"):
+              importlib.import_module(module)
+          init = pathlib.Path("/sbin/init")
+          assert init.resolve() == pathlib.Path("/opt/cortex/bin/proof-guest-init")
+          assert init.is_file() and os.access(init, os.X_OK), "guest init is not executable"
+          for name in ("sodium", "seccomp"):
+              library = ctypes.util.find_library(name)
+              assert library, f"missing guest library: {name}"
+              ctypes.CDLL(library)
+          for binary, version_option in (("bwrap", "--version"), ("prlimit", "--version"), ("ip", "-Version"), ("tini", "--version")):
+              executable = shutil.which(binary)
+              assert executable, f"missing guest executable: {binary}"
+              subprocess.run([executable, version_option], check=True, timeout=5, capture_output=True)
+          from cortex.protocol.crypto import public_key, sign_raw, verify_raw
+
+          key = bytes(range(32))
+          assert verify_raw(public_key(key), b"smoke", b"guest", sign_raw(key, b"smoke", b"guest"))
+          print("Guest imports, init entry point and native dependencies verified; no VM boot performed.")
+          PYTHON
+      - uses: docker/login-action@v3
+        if: inputs.publish
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the exact tested image and record its digest
+        if: inputs.publish
+        run: |
+          docker tag cortex-python:test "$IMAGE:$GITHUB_SHA"
+          docker push "$IMAGE:$GITHUB_SHA"
+          image_digest=$(docker image inspect "$IMAGE:$GITHUB_SHA" --format '{{index .RepoDigests 0}}')
+          IMAGE_DIGEST="$image_digest" python3 - <<'PYTHON'
+          import json, os, pathlib, re
+          image = os.environ["IMAGE_DIGEST"]
+          if not re.fullmatch(re.escape(os.environ["IMAGE"]) + r"@sha256:[0-9a-f]{64}", image):
+              raise SystemExit("registry did not return a valid digest")
+          pathlib.Path("image.json").write_text(json.dumps({"image": image, "commit": os.environ["GITHUB_SHA"]}, indent=2) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write("Published runtime: `" + image + "`\n")
+          PYTHON
+      - uses: actions/upload-artifact@v4
+        if: inputs.publish
+        with:
+          name: python-image-${{ github.sha }}
+          path: image.json
+          if-no-files-found: error
+          retention-days: 90

@@ -1,269 +1,31 @@
-# AGENTS.md — deploy (DigitalOcean + Compose)
+# Deployment agent contract
 
-Operator/agent contract for staging and prod. Full procedures live in [`README.md`](README.md); do not duplicate them here.
+Read [the deployment guide](README.md) and the repository [security
+checklist](../docs/OPERATOR_SECURITY.md) before changing this directory.
 
-## Topology (4 droplets, NYC1)
+- Keep master and validator in separate Compose files. The master service has
+  profile `master`; the validator file contains no gateway or challenge service.
+- All application images and the Python base image are `repository@sha256`.
+  Never add `latest`, a mutable release tag or a placeholder that can boot.
+- Master/validator containers run UID/GID 65532, read-only, with all capabilities
+  dropped and `no-new-privileges`. They use a bounded `/tmp` tmpfs and a durable
+  state volume.
+- Credentials are read-only bind-mounted files. Do not add secret environment
+  values, Docker socket mounts, host namespaces or privileged application roles.
+- The validator mounts wallets and peer identity only. The master mounts gateway
+  and challenge signing material only. Neither role receives VM-host provider
+  keys.
+- The Firecracker host is a systemd service on a KVM-capable machine. Its config
+  requires explicit TLS, token, kernel/rootfs pins, resource ceilings and egress.
+  Production has no fake-hypervisor or host-process fallback.
+- Experiment limits never exceed 16 vCPU or 32 GiB RAM. An oversized request or
+  host setting fails instead of being clamped.
+- `scripts/check_deploy.py --check-examples` is the executable contract. Add a
+  focused regression before changing a validated invariant.
+- CI may render Compose and build containers. It must not deploy a host, contact
+  OpenRouter, rent Lium, boot Firecracker or submit Bittensor weights.
+- Do not commit materialized env files, state, wallets, certificates, keys,
+  offers, rootfs images, kernels, packs or retained VM output.
 
-| Host | Role | Gateway |
-|------|------|---------|
-| `base-staging` | staging master | yes (`role-master` + `env-staging`) |
-| `base-staging-validator` | staging validator | no — VPC → staging master `:8080` |
-| `base-prod` | prod master | yes (`role-master` + `env-prod`) |
-| `base-prod-validator` | prod validator | no — VPC → prod master `:8080` |
-
-Terraform: [`terraform/`](terraform/). Firewall: SSH from operator IP; CI uses ephemeral `/32` via `.github/actions/do-firewall` (always tear down). Spaces for Postgres backups (promote/restore).
-
-## Compose matrix
-
-`remote-deploy.sh --env staging|prod --role master|validator` stacks:
-
-| File | Purpose |
-|------|---------|
-| `compose/role-master.yml` | gateway profile, VPC publish; **no validator** (avoids dual CRV4 submit) |
-| `compose/role-validator.yml` | no gateway; external gateway endpoint; sole on-chain submitter |
-| `compose/env-staging.yml` | testnet 541, faster coordination |
-| `compose/env-prod.yml` | mainnet, conservative intervals |
-| `compose/env-local.yml` | **local only** — ports/smoke knobs/tunnel env; always on top of `env-staging` |
-
-Verify: `./deploy/scripts/assert-compose-matrix.sh`.  
-Root `docker-compose.staging-*.yml` overrides are **obsolete** — use `deploy/compose/` only.  
-`remote-deploy.sh` never selects `env-local*.yml`.
-
-## Postgres vs ephemeral state
-
-Compose always runs a digest-pinned `postgres` service (`base-pgdata` volume, healthcheck, `deploy/env/postgres.env`). App `BASE_DATABASE_URL` must match that file (materialize via `./deploy/scripts/materialize-env.sh`; local-e2e also injects `LOCAL_DATABASE_URL` from it).
-
-| Data | Store |
-|------|--------|
-| Gateway raw weight leaves + sealed bundles | **Postgres** (`raw_weight_snapshot`, `epoch_bundle`, …) |
-| Validator attestations (when DB configured) | **Postgres** |
-| Gateway challenge **backend registry** | **in-memory** — re-seed after gateway restart (`remote-deploy.sh` does this on master) |
-| site-api (`GET /v1/site/*`) | no DB — proxies bounty/proof upstreams via gateway |
-| Proof submissions + scores | **in-memory** — the current service uses `MemoryStore`; Postgres in Compose does not make these durable |
-| Unit/integration tests | may construct `Memory*Store` directly; omit `BASE_DATABASE_URL` only there |
-
-Migrations (`crates/db/migrations`) run on boot in gateway when `BASE_DATABASE_URL` is set. Compose requires `deploy/env/bounty-challenge.env` and `deploy/env/proof-challenge.env` so live challenges cannot silently boot without operator config.
-
-## Bounty scorer (host-set, fail-closed)
-
-Bounty scores **only** from the CortexLM/backend public feed. Set `BOUNTY_BACKEND_PUBLIC_URL` on the host (`deploy/env/bounty-challenge.env`; never bake a hostname into git). The service fetches `/v1/bounty/public/leaderboard` + `/reports`, signs an exact-`E` leaf set every `BOUNTY_EMIT_POLL_SECS` (default 120), and posts to the master gateway — validators only ever verify the sealed bundle.
-
-With no readable feed the host answers **503** on `POST /v1/reports` and pays nobody: it covers `E` with `NoScore(ChallengeInternal)`, so the 2000 bps burns to uid 0 while D24 still holds (leaving `E` uncovered would 409 the seal for *every* challenge, since bounty holds a paid trust-root row). `BOUNTY_FORCE_SIM` is retired and ignored; `assert-compose-matrix.sh` fails if any compose file reintroduces it. Verify with `./deploy/scripts/local-e2e.sh --smoke` (it POSTs ingest and asserts 503 without a feed, 401 with one) or by hand: `GET /challenge/bounty/v1/status` → `scoring_backend`, `can_score`. Details: [`docs/BOUNTY.md`](../docs/BOUNTY.md).
-
-## Proof harvest (Lium)
-
-Proof scores on a digest-pinned eval image. Miners pay Lium (BYOK
-`LIUM_API_KEY`). Leftover `prism-*` crates are that harvest stack, not a live
-Prism challenge. Do **not** reintroduce `prism-challenge` compose or
-`:28092`. Details: [`docs/PROOF.md`](../docs/PROOF.md).
-
-`PROOF_FORCE_SIM` is CI/local only (`assert-compose-matrix.sh` fails if a
-droplet overlay sets it). Live submits stay fail-closed until harvest is
-wired, a baseline is sealed, and ≥1 topic is open. Do not invent an eval
-digest.
-
-Current Proof judging is incomplete: the Python judge uses static checks and
-an acknowledgement request. The binary now drives a leaf emitter
-(`PROOF_EMIT_POLL_SECS`, default 120 — same cadence as bounty): positive
-store lattices become signed leaves; otherwise `E` is covered with
-`NoScore(ChallengeInternal)` so D24 can seal. A scored epoch is persisted
-(`PROOF_SCORED_EPOCH_FILE`) so a restart does not burn it. That is not the
-paper's automatic research-to-payment path. See [`docs/WHITEPAPER.md`](../docs/WHITEPAPER.md).
-
-## Proof topic VMs (Firecracker on a dedicated KVM host)
-
-Custom-family topics run their RLM in one Firecracker microVM per `topic_id`
-and every miner run in a **sister** Firecracker guest with no network — on a
-host with a working `/dev/kvm`: production — **a dedicated DO droplet
-(`g-8vcpu-32gb`, nyc1, nested `/dev/kvm`) on the VPC, never colocated on
-the CP**; staging — colocating the agent on the CP droplet with nested
-`/dev/kvm` is an **allowed exception, proven** on `cortex-staging` (nested
-stays fragile — if the boot fails, provision the dedicated droplet); never
-Lium. The agent's certificate must carry a SAN for the host the CP's URL
-names (`PROOF_VM_AGENT_TLS_SANS`, checked at boot;
-[`scripts/proof-vm-agent-tls.sh`](scripts/proof-vm-agent-tls.sh) mints it). That host runs
-`proof-vm-orchestrator` as a systemd unit
-([`systemd/proof-vm-orchestrator.service`](systemd/proof-vm-orchestrator.service),
-env [`env/proof-vm-orchestrator.env.example`](env/proof-vm-orchestrator.env.example)),
-**not** a compose service. The master's `proof-challenge` is only its HTTPS
-client: set `PROOF_VM_ORCHESTRATOR_URL`, `PROOF_VM_ORCHESTRATOR_TOKEN_FILE`
-(bearer **file** under `deploy/secrets/proof/`, same bytes as the host's
-`/etc/proof-vm/token`, mode 0400), `PROOF_RLM_VM_IMAGE_DIGEST`, and
-`PROOF_VM_RUNNER_CUSTOM_IDS` in `deploy/env/proof-challenge.env`. Unset →
-unwired (503); token missing, digest unpinned, or agent down → 503, never a
-host-local fallback. Those four are the whole custom-family prerequisite: with
-them set and no `LIUM_API_KEY` / `LIUM_SSH_PUBLIC_KEY_FILE`, custom topics
-score and `nll` / `throughput` answer 503 — do not stage a placeholder Lium
-key to open custom topics. On `/v1/status` that host reads
-`live_harvest_wired: false` (Lium only) with `custom_family_wired: true` and
-its ids in `registered_custom` / `custom_ready`. Kernel / RLM / sister image digests are computed from the
-files the operator stages (`sha256sum`) — never invented, never in git.
-Procedure and the mandatory submission verification:
-[`docs/runbooks/proof-vm-orchestrator.md`](../docs/runbooks/proof-vm-orchestrator.md).
-
-**Experiment VMs.** Topics whose signed `constraints.params` select an
-in-guest runner get one dedicated Firecracker VM per paid job on that same
-host, under configurable caps (lock 16 vCPU / 32 GiB RAM — a **hard**
-maximum: a ceiling set above it does not boot, a smaller host may only lower
-it — writable disk ≥ 16 GiB; `PROOF_VM_AGENT_EXPERIMENT_MAX_*`,
-`PROOF_VM_AGENT_MAX_EXPERIMENT_VMS`, packs in
-`PROOF_VM_AGENT_EXPERIMENT_PACK_DIR`; CP side `PROOF_EXPERIMENT_VM_*`). A
-result scores only once the agent confirms the VM destroyed (`DELETE`
-failed / unconfirmed → 503, no row). The guest image is baked with
-[`guest/bake-rootfs.sh`](guest/bake-rootfs.sh) (rootless podman on
-run-as-owned scratch paths + `proof-vm-guest-agent` + operator adaptors per
-[`guest/runners/README.md`](guest/runners/README.md), harness tooling via the
-generic `--extra-pkgs` / `--overlay` / `--chroot-hook`) and named after its
-own `sha256sum`; packs and the Harbor CLI/venv are operator artefacts. The
-adaptor contract plus the versioned Harbor evaluate reference live under
-[`guest/runners/`](guest/runners/README.md).
-Procedure, RE-LOCK, and limits:
-[`docs/runbooks/proof-experiment-vms.md`](../docs/runbooks/proof-experiment-vms.md).
-The run itself is steered by the signed topic's generic run policy (`tasks`,
-`n_tasks`, `exec_timeout_s`, `agent_exception_policy`, …), so one task of
-any custom topic is a development smoke: `deploy/scripts/proof-experiment-smoke.py`
-(real guest agent over `--stdio`, adaptor direct, or a KVM-host experiment
-VM) and the operator-run hop `deploy/scripts/proof-metal-smoke.sh` —
-[`docs/runbooks/proof-experiment-smoke.md`](../docs/runbooks/proof-experiment-smoke.md).
-Neither persists a row or tips anything; cloud agents hold no metal key, the
-metal evidence is pasted by the operator, scratch stays under
-`/var/lib/proof/<wd>/`, and the `orch` driver refuses while an experiment VM
-is live or until the pinned image carries this adaptor.
-
-**Staging wire (DO):** the CP is the existing staging master; the agent runs
-as a host systemd unit on the same droplet (`cortex-staging`, nested
-`/dev/kvm` — the allowed, proven staging exception) bound on the VPC address
-the CP container reaches over HTTPS — or on a dedicated droplet when nested
-KVM does not boot there (production never colocates). Overlays with placeholders
-only:
-[`env/proof-challenge.staging-vm.example`](env/proof-challenge.staging-vm.example)
-(CP) and
-[`env/proof-vm-orchestrator.staging.example`](env/proof-vm-orchestrator.staging.example)
-(KVM host); every `REPLACE_WITH_*` fails closed as written. Prove the wire
-on the master with
-[`scripts/proof-vm-wire-check.sh`](scripts/proof-vm-wire-check.sh) — `all`
-(env + agent + `GET /v1/admin/proof/vm-orchestrator` through the CP's own
-client), `boot-probe` (one RLM VM created and destroyed, no job), `matrix`
-+ `submit-probe --expect 503 --reason …` (every fail-closed flip), and the
-one `--allow-live-run` happy path. Runbook § DigitalOcean staging.
-
-## Local testnet E2E
-
-Full procedure: [`docs/runbooks/local-testnet-e2e.md`](../docs/runbooks/local-testnet-e2e.md).
-
-```bash
-./deploy/scripts/materialize-env.sh
-./deploy/scripts/local-e2e.sh --dry-run          # plan + compose render
-./deploy/scripts/local-e2e.sh --smoke            # healthz + weights seal smoke + tunnel
-./deploy/scripts/local-e2e.sh --live             # owner wallet + REQUIRE_OWNER=1
-./deploy/scripts/local-e2e.sh --down
-```
-
-| Prereq | smoke | live |
-|--------|-------|------|
-| Docker, Compose v2 | yes | yes |
-| `cloudflared` (or `--no-tunnel`) | yes | yes |
-| `deploy/env/*.env` (examples OK) | yes | yes |
-| `gateway_sk` (seal) + `bounty_sk` / `proof_sk` (leaf sigs; pubs ↔ trust root) | yes (prefer `~/.base-secrets/challenge-*.sk`) | real preferred |
-| `deploy/secrets/wallets/base-owner` | **no** (not needed for `/v1/weights/latest`) | **yes** (netuid 541 owner) |
-| `base-validator` wallet | **no** (fetch-only) | for on-chain weight submit |
-| Fresh `target/release/{gateway,validator,…}` (or `BASE_DOCKER_BUILD_FROM=source`) | recommended | **required** for real chain |
-
-**Weights seal smoke (default on `--smoke`):** after healthz, `local-e2e.sh` runs `weights-smoke` — signed bounty leaves for the live metagraph → `POST /v1/admin/seal` → assert `GET /v1/weights/latest` is **200** with **`sealed: true`**. Skip with `--no-weights-smoke`. Pre-seal, latest is **200 burn** (`sealed: false`, uid 0 = 100%) — never 404; that is unrelated to a missing gateway owner wallet. Prefer `--burn` on mainnet when sealing without real challenge scores (all `NoScore` → uid 0).
-
-**Emergency burn seal:** `weights-smoke --burn` posts all-`NoScore` at a **block-scale** epoch. Keep the script for explicitly approved burn-only windows; **do not** enable `base-burn-seal.timer` alongside real challenge scores. `remote-deploy` on master enables real-seal and disables the burn timer. Historical Prism behavior is not a reason to restore that retired product.
-
-Historical install (burn-only, no live scores):
-
-```bash
-install -m 0755 target/release/weights-smoke /opt/base/bin/weights-smoke
-install -m 0755 deploy/scripts/prod-burn-seal.sh /opt/base/deploy/scripts/prod-burn-seal.sh
-install -m 0644 deploy/systemd/base-burn-seal.{service,timer} /etc/systemd/system/
-systemctl daemon-reload && systemctl enable --now base-burn-seal.timer
-```
-
-Manual one-shot (from an operator host with secrets) is still:
-
-```bash
-cargo run -q --release -p weights-smoke -- \
-  --gateway https://gateway.cortex.foundation --burn
-```
-
-A seal older than ~256 blocks can never be verified by the validator (public RPC prunes state) — if `GET /v1/weights/latest` shows `metagraph_block` lagging tip by thousands of blocks, check `systemctl status base-burn-seal.timer` and `/var/log/base-burn-seal.log` on the master.
-
-**Real-epoch sealer (default on master):** `base-real-seal.timer` (every **2 min**) drives [`scripts/prod-real-seal.sh`](scripts/prod-real-seal.sh), which walks **current … current−N** chain epochs (`REAL_SEAL_WALK_BACK`, default 16) with `block_b = LastEpochBlock − k×tempo`. Tip reseal is expected: when a challenge supersedes leaves mid-epoch, seal rebuilds and appends `epoch_bundle.revision`; identical merkle/vector is a no-op 200. The gateway excludes non-paying challenge leaves and prefers chain-scale bundles over the reserved smoke range (`>= 8_000_000`). The sealer does not generate missing Proof leaves. Install / `remote-deploy` does this:
-
-```bash
-install -m 0755 deploy/scripts/prod-real-seal.sh /opt/base/deploy/scripts/prod-real-seal.sh
-install -m 0644 deploy/systemd/base-real-seal.{service,timer} /etc/systemd/system/
-systemctl daemon-reload && systemctl enable --now base-real-seal.timer
-```
-
-## Chain endpoint failover (`BASE_CHAIN_ENDPOINTS`)
-
-Public Finney RPCs rate-limit per source IP (entrypoint-finney: HTTP 429 `http_60s` policy, or HTTP 200 with `"Too many requests from this source."`). Every Rust consumer (gateway, validator, both challenges, `weights-smoke`) goes through `chain-live`, which accepts an **ordered comma-separated endpoint list** and cools a faulted endpoint (429 / `-32005` / transport error) for 60s before retrying it; request-level JSON-RPC errors never fail over.
-
-| Knob | Where | Notes |
-|------|-------|-------|
-| `BASE_CHAIN_ENDPOINTS` | compose `env-*.yml` / host `deploy/env/*.env` | Ordered list, primary first. **Wins over** `BASE_CHAIN_ENDPOINT`; the singular var is the fallback. |
-| `BASE_CHAIN_ENDPOINT` | same | Single endpoint; also accepts a comma list (legacy path). |
-| Cooldown | — | Fixed 60s in `chain-live` (matches the Finney `retry_after_seconds: 60`). |
-
-Prod (`env-prod.yml` + `base-burn-seal.service`): onfinality `public-ws` primary, entrypoint-finney fallback — entrypoint hard-429'd the prod master IP for ~3h on 2026-08-06 while onfinality only burst-429'd boot/submit spikes (free tier), which failover absorbed with zero seal/submit impact. Keep onfinality primary while entrypoint's per-IP standing is suspect — a 2026-08-07 flip-back attempt reverted within ~15 min: solo probes from the host were clean (15/15 HTTP 200 over ~2 min incl. a rapid burst) but full service load re-tripped entrypoint's http_60s budget (boot/submit storm ~385 faults over 4 min, then sustained ~1-2/min cooled-retry 429s), all absorbed by failover with zero tick/seal/submit impact. If onfinality's burst limits start failing whole ticks, flip the order (both directions are exercised in prod logs). Probe from the host: `curl -X POST -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"chain_getHeader","params":[]}' https://entrypoint-finney.opentensor.ai:443`. Failover events surface as `chain endpoint fault; failing over` WARN lines in service logs. Staging (`env-staging.yml`): each service keeps its current primary and gains the other testnet host as fallback (validator: test.finney→test.chain; gateway/challenges: reverse).
-
-**On-chain WeightsSetRateLimit vs smoke:** validators fail fast with `RateLimited` *before* pool-submitting when the hotkey is inside its 100-block window (no doomed extrinsic, no ~45s confirm block of the async runtime). Previously a restart inside the window re-stormed every tick and wedged `/healthz` past the healthcheck's retry budget — the staging validator smoke failure mode. A validator that logs `weights rate limited; retry after N blocks` immediately after a Match is inside the window, not broken; it submits when the window opens.
-
-Validator logs should show `Match epoch=` then `Match → submit_intent` / `submit_timelocked ok`. Keep legacy Python weight submit **stopped** to avoid double-commit.
-
-**Sole on-chain submitter (mainnet hotkey `5Gzi…`):** Rust `base-validator-1` on **`base-prod-validator` (`192.81.218.11`) only**. `role-master.yml` profiles the validator under `never`; `remote-deploy.sh --role master` force-removes any leftover container. Do **not** run a second validator (or Python weight submitter) with the same wallet — dual submitters fight `WeightsSetRateLimit` and can leave CRV4 commits stuck while incentive still shows a prior monopoly UID.
-
-**Legacy Python agents (mainnet):** `validator-5gzi` (`95.133.252.120`) may point `master_url` / `weights_url` / `registry_url` at `https://gateway.cortex.foundation` with **`submit_on_chain_enabled: false`**. Coordination shims live in `gateway-compat` (`/v1/validators/*`, `/v1/registry`, empty assignments). `GET /v1/weights/latest` refreshes `computed_at` / `expires_at` at serve time so Python pydantic clients accept sealed vectors older than 720s. Do **not** start `base-weight-submitter-5gzi` on `validator-root` unless CR ownership is moved off Rust.
-
-**Challenge verification:** on **master** only (validator has **no challenge exec**). Bounty: pair, report, probe quota/auth/fail-closed paths, then verify feed-driven leaves. Proof: submit against a signed `topic_id`, probe rejected and unavailable-evaluation paths, and verify the live emitter covers `E` (`ChallengeInternal` when nobody scored). Verify leaf → seal → `GET /v1/weights/latest` **`sealed: true`** where the full path is available. Follow the root [verification contract](../AGENTS.md#challenge-verification-mandatory-path-coverage); do not use retired Design run/winner endpoints. **Never host Sim in staging/prod** (`BASE_ALLOW_HOST_SIM` / host `SimSandbox` are CI/local only). Healthz alone is insufficient.
-
-Tunnel writes gitignored `deploy/env/local-tunnel.env` (`BASE_GATEWAY_PUBLIC_URL`). Co-located validator stays on `http://gateway:8080`; external clients use the tunnel URL. Host probe ports default to `2808x` (avoid staging SSH on `1808x`).
-
-## CI: prod only
-
-**No CI staging lane.** The DigitalOcean staging soak was retired (owner
-decision, 2026-09-10): `deploy-staging.yml` is deleted and `ci.yml` deploys
-nothing. The staging droplets and `deploy/compose/env-staging.yml` remain for
-manual `remote-deploy.sh` work and for `local-e2e.sh`.
-
-| Lane | Trigger | Build stance |
-|------|---------|--------------|
-| CI | Push / PR on `main` (`ci.yml`) | fmt · clippy · test · deny · xtask — no droplet is touched |
-| Images | Push to `main` (`images.yml`) | Build/push GHCR digests; `promote.sh --env prod` over those digests; publish `deploy/pins/prod.json` + `deploy/digests/<sha>.json` as artifact `prod-pins-<sha>` |
-| Prod | Green `images` run on `main`, `v*.*.*` tag, or dispatch (`deploy-prod.yml`) | **`--build-from registry` only** — pull GHCR digests; no Rust source build on prod hosts |
-
-Ladder: CI green + GHCR digests → prod pins artifact → preflight (SHA on
-`origin/main`, CI green, artifact live) → fail-closed Spaces backup →
-`remote-deploy.sh --build-from registry`. **CI never pushes pins to `main`** —
-branch protection (PR + Greptile review) rejects it with GH013, which is why
-pins travel as a run artifact. Rollback = dispatch `deploy-prod` with the
-previous good commit SHA. Details: [`README.md`](README.md) § Auto CI deploy and
-§ Promotion pipeline.
-
-## Secrets / age
-
-- Identity OOB on host: `/etc/base/age-identity.txt` (or `AGE_IDENTITY`) — never in Terraform/cloud-init.
-- Materialize: `./deploy/scripts/materialize-env.sh` → `deploy/env/*.env` mode **0600**.
-- Runtime secret files (wallets, keys): mode **0400**, owner **uid 65532**.
-- Helpers: `age-encrypt-env.sh`, `age-push-env.sh`. Checklist: [`docs/OPERATOR_SECURITY.md`](../docs/OPERATOR_SECURITY.md).
-
-## Prod deploy checklist
-
-1. `ci` and `images` both green on the commit; the `images` run published `prod-pins-<sha>`.
-2. Digests recorded / promoted for services you will ship (`promote.sh`, `verify-task-43.sh` locally if needed).
-3. Age identity + env ages present on both prod hosts; wallets hotkeys under `deploy/secrets/wallets/` (0400 / 65532).
-4. Mainnet owner wallet on disk matches SubnetOwnerHotkey; `env-prod.yml` sets `BASE_GATEWAY_REQUIRE_OWNER=1` (`gateway_admin_token` required). Recreate the gateway on droplets after compose changes.
-5. Merging to `main` deploys prod once `images` is green; a `vX.Y.Z` tag or a `deploy-prod` dispatch re-deploys the same digests.
-6. Smoke `/healthz` on both prod hosts; confirm `evil-gateway` absent.
-
-## Out of scope for agents (ops)
-
-- DO Spaces backup credentials — set in GitHub (repo + `production` env): `BASE_BACKUP_ENDPOINT`, `SPACES_ACCESS_KEY_ID`, `SPACES_SECRET_ACCESS_KEY`, `BASE_BACKUP_BUCKET` (bucket `base-intelligence-backups` in nyc3; name `base-backups` was globally taken). Prod promote dumps Postgres over SSH then uploads from the runner (`deploy-prod.yml`).
-- GitHub `production` environment required reviewers / `main` branch protection
-- Gateway in-process TLS ACME (task 42 / `rustls-acme`) — **interim:** prod `gateway.cortex.foundation` HTTPS via host Caddy on `:443` (TLS-ALPN-01) → `127.0.0.1:8080`; cleartext `:80` still docker→gateway
-- Terraform remote state backend (recommended, not blocking app deploy)
-- Bootstrap of age/secrets on brand-new droplets (OOB)
+When a setting changes, update its `.example`, `scripts/check_deploy.py`, tests
+and `docs/reference/configuration.md` together.

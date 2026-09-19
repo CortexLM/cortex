@@ -1,0 +1,52 @@
+# Copy to /etc/proof-vm/host.toml. Empty pins deliberately fail to boot; obtain
+# each digest or commitment from the exact measured bytes/document it names.
+[host]
+bind = "127.0.0.1"
+port = 8443
+token_file = "/etc/proof-vm/token"
+kernel = "/var/lib/proof/images/vmlinux"
+kernel_digest = ""
+jail_root = "/var/lib/proof/jails"
+retain_root = "/var/lib/proof/retained"
+pack_dir = "/var/lib/proof/packs"
+state_db = "/var/lib/proof/orchestrator.sqlite3"
+firecracker = "/usr/local/bin/firecracker"
+jailer = "/usr/local/bin/jailer"
+uid = 10000
+gid = 10000
+uplink = "eth0"
+max_experiments = 1
+max_topics = 64
+custom_ids = []
+
+[tls]
+certificate = "/etc/proof-vm/tls.crt"
+private_key = "/etc/proof-vm/tls.key"
+names = [] # Every hostname/IP used by the master's orchestrator URL must be a SAN.
+
+[inference]
+# If model is present it must equal the model inside the signed offer.
+model = "deepseek/deepseek-v4.1-flash"
+api_key_file = "/etc/proof-vm/openrouter.key"
+offer_file = "/etc/proof-vm/inference-offer.json"
+# sha256 of the signed offer payload (excluding its signature), without a prefix.
+offer_commitment = ""
+
+[images]
+# "<sha256 of exact rootfs bytes>" = "/var/lib/proof/images/<digest>.ext4"
+
+[caps]
+vcpus = 16
+mem_mib = 32768
+disk_mib = 32768
+
+[knowledge]
+# Shared RLM observations remain proposals until the owner signs an approval.
+state_db = "/var/lib/proof/knowledge.sqlite3"
+owner_public_file = "/etc/proof-vm/owner.pubkey"
+
+# Topic VM egress is operator-owned, explicitly allowed IPv4/port pairs.
+# Paid experiment VMs always have no network.
+# [[egress]]
+# cidr = "<allowed public IPv4>/32"
+# port = 443
