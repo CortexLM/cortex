@@ -484,3 +484,16 @@ def test_runtime_requires_installed_ssh_client_for_provider_transport(location):
 
     with pytest.raises(ValueError, match="runtime must install openssh-client"):
         CHECK["validate_dockerfile"](source)
+
+
+@pytest.mark.parametrize("role", ["master", "validator"])
+def test_committed_bind_mounts_opt_out_of_host_path_creation(role, tmp_path):
+    CHECK["_bind_sources"](role)
+
+    source = ROOT / "deploy/compose" / f"role-{role}.yml"
+    (tmp_path / f"role-{role}.yml").write_text(
+        source.read_text().replace("create_host_path: false", "create_host_path: true", 1)
+    )
+
+    with pytest.raises(ValueError, match="bind paths must already exist"):
+        CHECK["_bind_sources"](role, tmp_path)

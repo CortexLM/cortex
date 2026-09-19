@@ -144,8 +144,16 @@ def test_inode_ctime_normalization_makes_ext4_bytes_reproducible(tmp_path):
         with image.open("xb") as stream:
             stream.truncate(32 * 1024 * 1024)
         subprocess.run(mkfs_command(root, image, image_ref), check=True, env=environment)
+        # Host ctime on the root, and a relatime host refreshing atime while
+        # mke2fs reads the last source file. debugfs keeps only the last -R,
+        # so both edits go through one command file.
+        script = tmp_path / f"{image.stem}.debugfs"
+        script.write_text(
+            f"set_inode_field <2> ctime @{ctime}\n"
+            f"set_inode_field <{10 + source_inodes}> atime @{ctime}\n"
+        )
         subprocess.run(
-            ["debugfs", "-w", "-R", f"set_inode_field <2> ctime @{ctime}", str(image)],
+            ["debugfs", "-w", "-f", str(script), str(image)],
             check=True,
             env=environment,
             stdout=subprocess.DEVNULL,

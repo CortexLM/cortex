@@ -236,8 +236,10 @@ def _mounts(service: dict) -> dict[str, dict]:
         if mount.get("type") == "bind":
             if mount.get("read_only") is not True:
                 raise ValueError("operator files must be mounted read-only")
+            # Compose releases disagree on whether a `false` default survives
+            # the JSON render; the committed YAML is checked in `_bind_sources`.
             bind = mount.get("bind")
-            if isinstance(bind, dict) and bind.get("create_host_path") is not False:
+            if isinstance(bind, dict) and bind.get("create_host_path") is True:
                 raise ValueError("operator bind paths must already exist")
         if "docker.sock" in str(mount.get("source", "")):
             raise ValueError("application roles must not control Docker")
@@ -880,6 +882,15 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
     _wss_endpoints(validator["BASE_CHAIN_FALLBACK_ENDPOINTS"], "validator fallback endpoints")
 
 
+def _bind_sources(role: str, compose_dir: Path = ROOT / "deploy/compose") -> None:
+    """Every bind mount in the committed role file opts out of host-path creation."""
+    text = (compose_dir / f"role-{role}.yml").read_text()
+    binds = text.count("type: bind")
+    explicit = text.count("create_host_path: false")
+    if binds == 0 or binds != explicit or "create_host_path: true" in text:
+        raise ValueError("operator bind paths must already exist")
+
+
 def _default_sources(config: dict, role: str) -> None:
     service_name = "gateway" if role == "master" else "validator"
     service = config["services"][service_name]
@@ -973,6 +984,7 @@ def _render_examples(env: dict[str, str]) -> None:
         )
         config = json.loads(result.stdout)
         validate_compose(config, role)
+        _bind_sources(role)
         _default_sources(config, role)
 
 

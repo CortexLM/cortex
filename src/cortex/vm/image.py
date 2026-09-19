@@ -156,7 +156,12 @@ def normalize_inode_ctimes(
     expected_source_inodes: int,
     environment: dict[str, str],
 ) -> None:
-    """Normalize ctime, which mke2fs copies from the host and os.utime cannot set."""
+    """Normalize ctime and atime after mke2fs.
+
+    ctime is copied from the host and os.utime cannot set it. atime is set by
+    os.utime, but a relatime mount refreshes it again when mke2fs reads the
+    file, so the copied value depends on the build host's mount options.
+    """
     inode_count, free_inodes = _filesystem_counts(image, environment)
     used = inode_count - free_inodes
     # A fresh mke2fs image allocates the ten reserved/lost+found inodes and then
@@ -176,6 +181,7 @@ def normalize_inode_ctimes(
         commands = Path(file.name)
         for inode in range(2, used + 1):
             file.write(f"set_inode_field <{inode}> ctime @{source_date_epoch}\n")
+            file.write(f"set_inode_field <{inode}> atime @{source_date_epoch}\n")
     try:
         subprocess.run(
             ["debugfs", "-w", "-f", str(commands), str(image)],
