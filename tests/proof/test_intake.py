@@ -165,7 +165,9 @@ async def test_bad_env_does_not_consume_nonce_and_secrets_never_enter_store(setu
         assert b"sensitive-fixture-value" not in path.read_bytes()
 
 
-async def test_vault_failure_after_enqueue_removes_job_and_credentials(setup, monkeypatch):
+async def test_enqueue_failure_after_credential_write_leaves_no_job_or_credentials(
+    setup, monkeypatch
+):
     service, _, topic, _ = setup
     await service.publish(
         sign_topic(
@@ -174,20 +176,18 @@ async def test_vault_failure_after_enqueue_removes_job_and_credentials(setup, mo
         )
     )
     signed, data = submission(env={"MINER_API_KEY": "private-test-value"})
-    original_put = service.vault.put
+    original_enqueue = service.store.enqueue
 
-    def fail_after_write(job_id, environment):
-        with service.store.transaction() as connection:
-            row = connection.execute(
-                "SELECT state FROM proof_jobs WHERE id=?", (job_id,)
-            ).fetchone()
-        assert row is not None and row["state"] == "queued"
-        original_put(job_id, environment)
-        raise ServiceError(503, "injected vault failure")
+    def fail_after_credentials(job_id, *args, **kwargs):
+        # The credential directory must already exist when the row is written:
+        # a crash between the two must never leave a queued job without it.
+        assert (service.vault.root / job_id).is_dir()
+        original_enqueue(job_id, *args, **kwargs)
+        raise ServiceError(503, "injected enqueue failure")
 
-    monkeypatch.setattr(service.vault, "put", fail_after_write)
+    monkeypatch.setattr(service.store, "enqueue", fail_after_credentials)
 
-    with pytest.raises(ServiceError, match="injected vault failure"):
+    with pytest.raises(ServiceError, match="injected enqueue failure"):
         await service.submit(signed, data)
 
     with service.store.transaction() as connection:
@@ -715,3 +715,26 @@ async def test_status_excludes_deferred_topics_from_immediate_scoring(setup):
     assert response.json()["deferred_topics"] == [topic.id]
     assert response.json()["scorable_topics"] == []
     assert response.json()["reason"] == "all open topics defer scoring"
+
+
+async def test_an_orphan_credential_directory_does_not_block_startup(setup):
+    service, _, topic, _ = setup
+    await service.publish(
+        sign_topic(
+            topic.model_copy(
+                update={
+                    "revision": 2,
+                    "params": {"miner_byok": "MINER_API_KEY", "defer_scoring": "true"},
+                }
+            ),
+            OWNER,
+        )
+    )
+    # A crash after the credential write but before enqueue leaves this behind.
+    service.vault.put("ab" * 32, {"MINER_API_KEY": "private-test-value"})
+    signed, data = submission(env={"MINER_API_KEY": "private-test-value"})
+    queued = await service.submit(signed, data)
+
+    await service.resume()
+
+    assert [entry.name for entry in service.vault.root.iterdir()] == [queued["id"]]

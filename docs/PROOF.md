@@ -158,6 +158,9 @@ experiment.
 
 Topic params may declare `miner_byok` and a name allowlist. Accepted values go
 to a 0700 per-job vault with 0600 files and are not stored on the submission row.
+The vault directory is written before the queued row, so a crash between the two
+leaves an orphan that startup reconciliation removes, never a queued job without
+its declared credentials.
 The `miner_byok` name is itself a declaration and does not need to appear again
 in `miner_env_allowlist`; the VM host validates it before starting the agent.
 Deferred work reads them after restart. They enter only the paid guest process

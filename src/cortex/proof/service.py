@@ -324,21 +324,25 @@ class ProofService:
                 update={"artifact_uri": f"proof-artefact://{submission.artifact_digest}"}
             )
         submission = submission.model_copy(update={"env": {}})
-        self.store.enqueue(
-            job_id,
-            topic,
-            submission,
-            epoch,
-            sorted(env),
-            max_pending=self.max_pending_per_miner,
-        )
+        # Credentials land before the durable row, with no await in between. A
+        # crash after the vault write leaves an orphan directory that startup
+        # reconciliation removes; a crash after enqueue leaves a complete job.
+        # The reverse order left a queued row whose declared credentials did
+        # not exist, and reconciliation refused to start anything.
+        self.vault.put(job_id, env)
         try:
-            # No await may split the durable row from its private credential write.
-            self.vault.put(job_id, env)
+            self.store.enqueue(
+                job_id,
+                topic,
+                submission,
+                epoch,
+                sorted(env),
+                max_pending=self.max_pending_per_miner,
+            )
         except BaseException as caught:
             try:
                 self.vault.delete(job_id)
-                self.store.discard_unstarted(job_id)
+                self.store.discard_unstarted(job_id, missing_ok=True)
             except ServiceError as cleanup:
                 raise cleanup from caught
             raise

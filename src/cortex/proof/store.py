@@ -357,7 +357,7 @@ class ProofStore:
             expected[row["id"]] = self.decode_env_names(row["env_names"])
         return expected
 
-    def discard_unstarted(self, job_id: str) -> None:
+    def discard_unstarted(self, job_id: str, *, missing_ok: bool = False) -> None:
         """Remove only an intake row that cannot have been claimed by a worker."""
         with self.transaction() as connection:
             cursor = connection.execute(
@@ -365,7 +365,7 @@ class ProofStore:
                 "AND NOT EXISTS (SELECT 1 FROM proof_submissions WHERE id=?)",
                 (job_id, job_id),
             )
-            if cursor.rowcount != 1:
+            if cursor.rowcount != 1 and not (missing_ok and cursor.rowcount == 0):
                 raise ServiceError(503, "queued proof job cleanup failed")
 
     def protect_finalization(
