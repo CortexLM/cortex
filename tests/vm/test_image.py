@@ -167,17 +167,12 @@ def test_inode_ctime_normalization_makes_ext4_bytes_reproducible(tmp_path):
         )
 
     if digest(images[0]) != digest(images[1]):
-        dumps = []
-        for image in images:
-            dumps.append(
-                subprocess.run(
-                    ["debugfs", "-R", "stat <2>", str(image)],
-                    env=environment,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                ).stdout
-            )
+        first, second = (image.read_bytes() for image in images)
+        offsets = [index for index, (a, b) in enumerate(zip(first, second, strict=True)) if a != b]
+        version = subprocess.run(
+            ["mkfs.ext4", "-V"], capture_output=True, text=True, check=False
+        ).stderr.strip()
         raise AssertionError(
-            "ext4 bytes differ after ctime normalization\n" + "\n---\n".join(dumps)
+            f"ext4 bytes differ after ctime normalization ({version}); "
+            f"{len(offsets)} bytes at {offsets[:32]}"
         )

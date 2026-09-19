@@ -933,6 +933,23 @@ def check_examples() -> None:
             "BASE_VALIDATOR_IDENTITY_DIR": "/fixture/identity",
         }
     )
+    # The runner's Compose still stats the default `env_file` even under
+    # --no-env-resolution. An empty placeholder keeps the render offline and
+    # secret-free; it never outlives this check and is gitignored.
+    placeholder = ROOT / "deploy/env/master.env"
+    created = False
+    if not placeholder.exists():
+        placeholder.touch(mode=0o600)
+        created = True
+    try:
+        _render_examples(env)
+    finally:
+        if created:
+            placeholder.unlink(missing_ok=True)
+    print("Python images, roles, VM host and fail-closed pins validated; no services started.")
+
+
+def _render_examples(env: dict[str, str]) -> None:
     for role in ("master", "validator"):
         result = subprocess.run(
             [
@@ -957,7 +974,6 @@ def check_examples() -> None:
         config = json.loads(result.stdout)
         validate_compose(config, role)
         _default_sources(config, role)
-    print("Python images, roles, VM host and fail-closed pins validated; no services started.")
 
 
 def main() -> None:
