@@ -1,127 +1,54 @@
-# syntax=docker/dockerfile:1.7
-# Multi-stage Rust build for base service binaries
-#
-# Source build (default, CI/prod):
-#   docker build -f deploy/Dockerfile --target validator -t validator:0.1.0 .
-#
-# Fast local path (host already ran `cargo build --release -p …`):
-#   docker build -f deploy/Dockerfile --target validator \
-#     --build-arg BUILD_FROM=prebuilt -t validator:0.1.0 .
-#
-# Digests only for base images — never floating tags.
+# Official Python manifest verified on 2026-09-17; override only with another digest.
+ARG PYTHON_IMAGE=python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+FROM ${PYTHON_IMAGE} AS builder
 
-ARG DEBIAN_IMAGE=debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
-ARG RUST_IMAGE=rust@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4
-ARG BUILD_FROM=source
+ARG PYTHON_IMAGE
+RUN python -c 'import re, sys; assert re.fullmatch(r"(?:docker.io/library/)?python:3\.12(?:\.[0-9]+)?-slim-bookworm@sha256:[0-9a-f]{64}", sys.argv[1]), "digest-pinned Python 3.12 slim Bookworm image required"' "$PYTHON_IMAGE"
+ENV UV_LINK_MODE=copy UV_NO_PROGRESS=1 UV_PYTHON_DOWNLOADS=never
+RUN pip install --no-cache-dir uv==0.11.17
+WORKDIR /build
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --group build --no-install-project
+COPY src ./src
+RUN uv build --wheel --no-build-isolation
 
-# -----------------------------------------------------------------------------
-# Toolchain: workspace pin is Rust 1.96.0 (rust-toolchain.toml)
-# -----------------------------------------------------------------------------
-FROM ${RUST_IMAGE} AS rust-base
-RUN rustup toolchain install 1.96.0 --profile minimal \
-    && rustup default 1.96.0 \
-    && rustc --version
-WORKDIR /src
+FROM builder AS guest-builder
+RUN uv export --quiet --locked --no-dev --no-emit-project --output-file /guest.txt \
+    && uv venv /opt/cortex \
+    && uv pip install --python /opt/cortex/bin/python --require-hashes -r /guest.txt \
+    && uv pip install --python /opt/cortex/bin/python --no-deps dist/*.whl
 
-# -----------------------------------------------------------------------------
-# Source builder — compiles all service bins once
-# -----------------------------------------------------------------------------
-FROM rust-base AS source-builder
-COPY Cargo.toml Cargo.lock rust-toolchain.toml clippy.toml ./
-COPY crates ./crates
-COPY bins ./bins
-COPY xtask ./xtask
-# Keep workspace metadata members that Docker context needs
-COPY config ./config
-# validator-bin/dcap turns on real Intel DCAP quote verification; without it the
-# validator parks every attestation instead of verifying it.
-RUN cargo build --release \
-      --features validator-bin/dcap \
-      -p validator-bin \
-      -p gateway-bin \
-      -p updater-bin \
-      -p bounty-challenge-bin \
-      -p proof-challenge-bin \
- && strip target/release/validator \
-           target/release/gateway \
-           target/release/updater \
-           target/release/bounty-challenge \
-           target/release/proof-challenge \
- && mkdir -p /out \
- && cp target/release/validator \
-       target/release/gateway \
-       target/release/updater \
-       target/release/bounty-challenge \
-       target/release/proof-challenge /out/
+FROM builder AS runtime-builder
+RUN uv export --quiet --locked --no-dev --extra chain --no-emit-project --output-file /runtime.txt \
+    && uv venv /opt/cortex \
+    && uv pip install --python /opt/cortex/bin/python --require-hashes -r /runtime.txt \
+    && uv pip install --python /opt/cortex/bin/python --no-deps dist/*.whl
 
-# -----------------------------------------------------------------------------
-# Prebuilt path — copy host target/release artifacts (local verify only)
-# -----------------------------------------------------------------------------
-FROM ${DEBIAN_IMAGE} AS prebuilt-builder
+# Export this stage as an ext4 rootfs; it is never the master runtime.
+FROM ${PYTHON_IMAGE} AS guest
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates libsodium23 \
+       libseccomp2 bubblewrap util-linux iproute2 tini \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /out
-COPY target/release/validator \
-     target/release/gateway \
-     target/release/updater \
-     target/release/bounty-challenge \
-     target/release/proof-challenge \
-     /out/
+    && mkdir -p /workspace /proc /sys /dev /run /tmp /etc/proof /opt/proof/runners
+COPY --from=guest-builder /opt/cortex /opt/cortex
+RUN ln -sf /opt/cortex/bin/proof-guest-init /sbin/init \
+    && ln -sf /usr/local/bin/python3 /usr/bin/python3
+ENV PATH=/opt/cortex/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
+    PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENTRYPOINT ["/sbin/init"]
 
-# -----------------------------------------------------------------------------
-# Select artifact source
-# -----------------------------------------------------------------------------
-FROM source-builder AS artifacts-source
-FROM prebuilt-builder AS artifacts-prebuilt
-
-FROM artifacts-${BUILD_FROM} AS artifacts
-
-# -----------------------------------------------------------------------------
-# Runtime base (non-root)
-# -----------------------------------------------------------------------------
-FROM ${DEBIAN_IMAGE} AS runtime-base
+FROM ${PYTHON_IMAGE} AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libssl3 curl \
+    && apt-get install -y --no-install-recommends ca-certificates libsodium23 openssh-client \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 65532 base \
-    && useradd --system --uid 65532 --gid base --home-dir /home/base --create-home base \
-    && mkdir -p /var/lib/base \
-    && chown -R base:base /var/lib/base
-USER base
-WORKDIR /home/base
-
-FROM runtime-base AS validator
-COPY --from=artifacts --chown=base:base /out/validator /usr/local/bin/validator
-# Owner-signed trust root for /v1/attest allowlist (todo 34 staging Verified path).
-COPY --chown=base:base config /etc/base/config
-ENV BASE_TRUST_ROOT_DIR=/etc/base/config
-ENTRYPOINT ["/usr/local/bin/validator"]
-
-FROM runtime-base AS gateway
-COPY --from=artifacts --chown=base:base /out/gateway /usr/local/bin/gateway
-ENTRYPOINT ["/usr/local/bin/gateway"]
-
-FROM runtime-base AS updater
-COPY --from=artifacts --chown=base:base /out/updater /usr/local/bin/updater
-ENTRYPOINT ["/usr/local/bin/updater"]
-
-FROM runtime-base AS bounty-challenge
-USER root
-RUN mkdir -p /var/lib/bounty \
-    && chown -R base:base /var/lib/bounty
-USER base
-COPY --from=artifacts --chown=base:base /out/bounty-challenge /usr/local/bin/bounty-challenge
-ENTRYPOINT ["/usr/local/bin/bounty-challenge"]
-
-FROM runtime-base AS proof-challenge
-# RLM judge + harness run on rented GPUs over SSH.
-USER root
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssh-client \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/lib/proof \
-    && chown -R base:base /var/lib/proof
-USER base
-COPY --from=artifacts --chown=base:base /out/proof-challenge /usr/local/bin/proof-challenge
-ENTRYPOINT ["/usr/local/bin/proof-challenge"]
+    && groupadd --gid 65532 cortex \
+    && useradd --uid 65532 --gid cortex --home-dir /home/cortex --create-home cortex \
+    && install -d -o cortex -g cortex -m 0700 /var/lib/cortex /var/lib/base
+COPY --from=runtime-builder /opt/cortex /opt/cortex
+# Bittensor's READ_ONLY disables implicit ~/.bittensor directory/log creation.
+ENV PATH=/opt/cortex/bin:$PATH PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 READ_ONLY=1
+USER 65532:65532
+WORKDIR /var/lib/cortex
+ENTRYPOINT ["cortex"]
+CMD ["--help"]

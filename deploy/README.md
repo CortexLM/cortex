@@ -1,251 +1,292 @@
-# Cortex deploy (compose)
+# Deploy Cortex
 
-Operator reference for Cortex's autonomous research network. For the product
-purpose and current research limits, start with the
-[overview](../docs/OVERVIEW.md). This guide describes deployment, not evidence
-that the complete Proof research loop is ready.
+Cortex uses three independently operated roles:
 
-## Services
+| Role | Runtime | Responsibility |
+| --- | --- | --- |
+| master | Docker Compose | public gateway, Bounty, Proof and durable epoch emission |
+| validator | Docker Compose | independent bundle verification, peer roots and Bittensor submission |
+| Proof VM host | systemd on a KVM machine | Firecracker topic and experiment VMs |
 
-| Service | Profile | Image |
-|---------|---------|--------|
-| `postgres` | default | `postgres@sha256:33f9…` (16) |
-| `validator` | default | build `deploy/Dockerfile` target `validator` |
-| `updater` | optional **`auto-update`** | build target `updater` |
-| `socket-proxy` | default | `tecnativa/docker-socket-proxy@sha256:9e4b…` |
-| `gateway` | **`master`** | build target `gateway` |
-| `bounty-challenge` | default; disabled on validator hosts | build target `bounty-challenge` |
-| `proof-challenge` | default; disabled on validator hosts | build target `proof-challenge` |
+The gateway exists only on the master. A validator never receives challenge
+signing keys and never executes miner code. Production runs the VM host on a
+dedicated machine reachable from the master over a private network and HTTPS.
 
-The base Compose file has **5 default services**, without gateway or updater.
-Adding `--profile master` adds the gateway. Operator hosts must also use the role
-overlays: `role-master.yml` disables the validator, and `role-validator.yml`
-keeps only Postgres and the validator. A co-located validator is for local E2E,
-not a second production weight submitter.
+- [Validate the deployment source](#validate-the-deployment-source)
+- [Build and publish the Python image](#build-and-publish-the-python-image)
+- [Master](#master)
+- [Bounty-only launch](#bounty-only-launch)
+- [Validator](#validator)
+- [Proof VM host](#proof-vm-host)
+- [Promotion and rollback](#promotion-and-rollback)
 
-## Hard rules
-
-- No floating image tags (digest pins only).
-- `/var/run/docker.sock` only on `socket-proxy` (read-only).
-- socket-proxy allowlist: `CONTAINERS=1 IMAGES=1 POST=1` (matches `updater`).
-- Secrets via age-decrypted env files mode **0600** under `deploy/env/*.env` — never in images or cloud-init.
-
-## Quick start (local)
-
-Master + gateway + validator + challenges on **testnet 541**, with an ephemeral
-cloudflared public URL for the gateway. Procedure:
-[`docs/runbooks/local-testnet-e2e.md`](../docs/runbooks/local-testnet-e2e.md).
+## Validate the deployment source
 
 ```bash
-./deploy/scripts/local-e2e.sh --help
-./deploy/scripts/materialize-env.sh
-./deploy/scripts/local-e2e.sh --dry-run
-./deploy/scripts/local-e2e.sh --smoke    # or --live when wallets are present
+uv run python scripts/check_deploy.py --check-examples
 ```
 
-Follow the runbook's build and key prerequisites before `--smoke`. Health checks
-alone do not validate scoring; simulate submissions and verify a real sealed
-bundle. See [the challenge verification contract](../AGENTS.md#challenge-verification-mandatory-path-coverage).
+The contract check requires digest-pinned images, read-only non-root application
+containers, dropped capabilities, explicit bind addresses, private file mounts,
+durable state and strict separation between master and validator credentials. It
+does not start a service.
 
-## Age secrets (production)
+## Build and publish the Python image
+
+`deploy/Dockerfile` has two final targets:
+
+- `runtime` includes the chain dependency and the `cortex` entry point for
+  master and validator;
+- `guest` excludes Bittensor and boots `proof-guest-init` for conversion into a
+  Firecracker rootfs.
+
+The base image is an exact Python 3.12 Bookworm digest. On every push to `main`,
+`.github/workflows/images.yml` waits for CI, builds the runtime once, exercises
+it without network access, generates a CycloneDX SBOM, rejects fixable high or
+critical vulnerabilities, publishes the tested bytes to GHCR under the source
+commit and records GitHub build provenance. Annotated release tags only alias
+that existing attested digest; they never rebuild it. The privileged workflow
+has no manual entry point. It does not build or publish the unwired Proof guest,
+boot init, Firecracker or KVM. Do not deploy a local tag or copy a digest from
+another build.
 
 ```bash
-# On operator machine
-age -r "$RECIPIENT" -o deploy/env/postgres.env.age deploy/env/postgres.env
-# On droplet (identity delivered out of band)
-export AGE_IDENTITY=/etc/base/age-identity.txt
-./deploy/scripts/materialize-env.sh
+docker build --file deploy/Dockerfile --target runtime \
+  --build-arg PYTHON_IMAGE='python:3.12-slim-bookworm@sha256:<verified-digest>' \
+  --tag cortex-python:test .
+docker run --rm --network none --read-only --cap-drop ALL cortex-python:test --help
 ```
 
+The guest rootfs and kernel are operator artifacts. Build the Python `guest`
+stage and convert it to ext4 with `deploy/guest/bake-rootfs.sh`. The builder
+normalizes filesystem time and ext4 metadata, verifies the result with
+`e2fsck`, names it from the SHA-256 of the final bytes and never writes a live
+pin. Follow the [guest rootfs procedure](../docs/how-to/build-guest-rootfs.md),
+install the measured image under `/var/lib/proof/images`, and put only that
+value in `host.toml`. The repository contains no fabricated rootfs or kernel
+digest.
 
-## Host topology (4 hosts: 2 staging + 2 prod)
+## Master
 
-| Host | Droplet | VPC IP | Role | Hotkey | Gateway |
-|------|---------|--------|------|--------|---------|
-| staging master | `base-staging` (`68.183.23.51`) | 10.116.0.2 | network master | **yes** (`BASE_GATEWAY_HOTKEY`) | **yes** (`--profile master`) — public API **`staging.api.joinbase.ai`** (`BASE_DOMAIN`, cleartext `:80`/`:8080`) |
-| staging validator | `base-staging-validator` | 10.116.0.4 | normal validator | **no** | **no** — uses master gateway over VPC `:8080` |
-| prod master | `base-prod` | 10.116.0.3 | network master | yes | yes |
-| prod validator | `base-prod-validator` | 10.116.0.5 (assigned) | normal validator | **no** | **no** — uses prod master gateway over VPC `:8080` |
+Create `deploy/env/master.env` from the example and set the primary Bittensor
+network plus optional bounded `wss://` fallback RPC origins, then set:
 
-DNS (operator): `staging.api.joinbase.ai` **A** → staging master public IPv4 (`STAGING_MASTER_HOST` / `68.183.23.51`).
-The hotkey column refers to gateway owner identity. Validators need their own
-wallet to submit weights; they do not need the owner's key.
+- `CORTEX_IMAGE` to the published `repository@sha256:<64 hex>`;
+- the master VPC bind address and netuid;
+- the external Bounty feed when Bounty should accept reports;
+- the Proof VM URL, CA, exact rootfs digest, signed inference-offer commitment
+  and registered custom IDs when Proof custom topics should open;
+- explicit `PROOF_RLM_VM_VCPUS`, `PROOF_RLM_VM_MEM_MIB` and
+  `PROOF_RLM_VM_DISK_MIB` values that fit the VM host ceilings and capacity.
 
-Deploy (manual or via CI):
+Prepare a private directory, owned so container UID 65532 can read it:
+
+```text
+deploy/secrets/master/
+  gateway.key
+  bounty.key
+  proof.key
+  bounty-session.key
+  operator.token
+  proof-vm.token
+  proof-vm-ca.pem
+```
+
+Seeds are raw 32 bytes or 64 hexadecimal characters. `bounty-session.key` has at
+least 32 random bytes. Bearers are nonempty opaque values. Files are regular,
+not hardlinks or symlinks, and mode 0400 or 0600. The Proof VM token and CA are
+needed only when `PROOF_VM_ORCHESTRATOR_URL` is set.
+
+The trust bind defaults to `config/` and contains `owner.pubkey`, both signed
+TOML documents and their adjacent `.sig` files. Verify them before startup with
+the [offline ceremony](../docs/how-to/trust-root.md).
 
 ```bash
-export BASE_SSH_IDENTITY=~/.ssh/id_ed25519
-
-# Staging master (testnet 541)
-./deploy/scripts/remote-deploy.sh \
-  --host root@68.183.23.51 --role master --env staging \
-  --bootstrap-secrets-from root@68.183.23.51
-
-# Staging validator (points at master VPC gateway)
-./deploy/scripts/remote-deploy.sh \
-  --host root@142.93.197.253 --role validator --env staging \
-  --gateway-endpoint http://10.116.0.2:8080 \
-  --bootstrap-secrets-from root@68.183.23.51
-
-# Prod master
-./deploy/scripts/remote-deploy.sh \
-  --host root@206.189.224.155 --role master --env prod \
-  --bootstrap-secrets-from root@206.189.224.155
-
-# Prod validator (points at prod master VPC gateway)
-./deploy/scripts/remote-deploy.sh \
-  --host root@<prod-validator-ip> --role validator --env prod \
-  --gateway-endpoint http://10.116.0.3:8080 \
-  --bootstrap-secrets-from root@206.189.224.155
+docker compose --project-directory . --env-file deploy/env/master.env \
+  -f deploy/compose/role-master.yml --profile master up -d
 ```
 
-### Compose matrix (role × env)
+The state volume contains gateway seals, Bounty state, Proof jobs/topics and the
+epoch journal. Back it up as SQLite state, including WAL, through a quiesced copy
+or SQLite's backup API. A filesystem copy of only the main database while the
+service writes is not a valid backup.
 
-| File | Purpose |
-|------|---------|
-| `deploy/compose/role-master.yml` | gateway profile, VPC `:8080` publish, loopback tunnels |
-| `deploy/compose/role-validator.yml` | gateway disabled, VPC gateway endpoint |
-| `deploy/compose/env-staging.yml` | testnet 541, `wss://test.finney.opentensor.ai:443`, 3s coordination |
-| `deploy/compose/env-prod.yml` | mainnet, conservative intervals |
-| `deploy/compose/env-local.yml` | local-only overlay (on top of staging); used by `local-e2e.sh` |
-`remote-deploy.sh --env staging|prod --role master|validator` selects the correct
-combination. Verify locally: `./deploy/scripts/assert-compose-matrix.sh`.
+## Bounty-only launch
 
-### Auto CI deploy
+Set `BOUNTY_BACKEND_PUBLIC_URL` to the reviewed HTTPS `CortexLM/backend` origin
+and leave `PROOF_VM_ORCHESTRATOR_URL` empty. Keep `proof.key` mounted and keep the
+owner-signed trust split at `bounty = 2000`, `proof = 8000`. With no open Proof
+topic, the master signs `ChallengeInternal` Proof leaves and that 8000 bps burns
+to UID 0; Bounty is never scaled to 100%.
 
-**The DigitalOcean staging soak is retired** (owner decision, 2026-09-10). CI no
-longer deploys staging droplets: `ci.yml` is fmt/clippy/test/deny/xtask only and
-`deploy-staging.yml` is deleted. `deploy/compose/env-staging.yml` stays — it is
-the testnet overlay `local-e2e.sh` builds on, not a CI deploy lane.
+Keep `BOUNTY_GATEWAY_URL` empty in CortexLM/backend unless an authenticated,
+idempotent delivery contract is deployed. The production dependency for this
+mode is the public leaderboard/report feed, including severity, pagination and
+one shared snapshot revision.
 
-- `.github/workflows/images.yml` — on push to `main`: build/push GHCR digests, then record prod pins as the `prod-pins-<sha>` artifact
-- `.github/workflows/deploy-prod.yml` — on a successful `images` run on `main`, on `v*.*.*` tags, or manual dispatch with a SHA
+Production miners pair and file reports through CortexLM/backend. Do not expose
+the Python compatibility intake as an automatic payment path: it does not write
+to the backend publication.
 
-**Prod deploy flow (every main update):**
-1. CI passes on `main` for commit X; `images.yml` builds/pushes GHCR digests for X.
-2. `images.yml` job `prod-pins` runs `promote.sh --env prod` over those digests and uploads `deploy/pins/prod.json` + `deploy/digests/X.json` as artifact `prod-pins-X`. **Nothing is pushed to `main`** — branch protection (PR + Greptile review) rejects a CI pin commit with GH013.
-3. `deploy-prod.yml` preflight: X is an ancestor of `origin/main`, CI is green for X (it polls, since `ci` and `images` run in parallel), and the `images` run for X has a live `prod-pins-X` artifact.
-4. Fail-closed Postgres backup (SSH dump on prod master → DO Spaces).
-5. Both prod hosts: `remote-deploy.sh --build-from registry` (pull GHCR `@sha256`, retag to Compose tags, `up --no-build`).
-6. Smoke `/healthz` (fail-closed).
+Before enabling validators, run a real Bounty intake failure probe, then a valid
+intake and public-feed publication. Confirm the completed epoch has signed leaves,
+a `sealed: true` latest response, the expected Bounty/Proof burn split and a
+successful validator `--verify-only --once` recomputation.
 
-`deploy/pins/prod.json` in git is a **template**, not the deployed state: CI
-derives the deployed pins per commit from the GHCR digests and keeps them in the
-run artifact. **Rollback = dispatch `deploy-prod` with the previous good commit
-SHA** (its `images` run artifact is still the pin set for that commit); the
-in-tree `promote.sh --rollback` path stays for local/manual pin work.
+## Validator
 
-Artifacts expire. If the pin artifact for the commit you want is gone,
-`deploy-prod` preflight refuses rather than deploying something unpinned — re-run
-that commit's `images` run, or dispatch `images.yml` on a ref pointing at it
-(`prod-pins` runs on manual dispatch too, exactly for this recovery).
+Create `deploy/env/python-validator.env` and set the exact master HTTPS origin,
+netuid, independently pinned gateway public key, chain network, wallet name and
+hotkey, trust-version minimums, live subnet `version_key`, VPC peer bind address
+and private host paths. Optional fallback RPCs are a JSON list of at most eight
+credential-free `wss://` URLs.
 
-Prod hosts pull GHCR anonymously (`remote-deploy.sh` never logs in), so the
-`ghcr-public` job must keep the packages public.
+The wallet directory is mounted read-only at `/run/wallets`. The validator
+identity directory contains:
 
-Required GitHub secrets:
+```text
+consensus.key
+tls.crt
+tls.key
+```
 
-| Secret | Purpose |
-|--------|---------|
-| `PROD_HOST` | public IPv4 of `base-prod` |
-| `PROD_SSH_KEY` | private key for prod droplet SSH (falls back to `STAGING_SSH_KEY`, which is the same operator key) |
-| `PROD_VALIDATOR_HOST` | public IPv4 of `base-prod-validator` |
-| `PROD_MASTER_GATEWAY_URL` | optional, default `http://10.116.0.3:8080` |
-| `BASE_BACKUP_ENDPOINT` | DO Spaces endpoint (e.g. `https://nyc3.digitaloceanspaces.com`) — **required for prod promote (fail-closed)** |
-| `SPACES_ACCESS_KEY_ID` | Spaces access key (fallback: `AWS_ACCESS_KEY_ID`) |
-| `SPACES_SECRET_ACCESS_KEY` | Spaces secret (fallback: `AWS_SECRET_ACCESS_KEY`) |
-| `BASE_BACKUP_BUCKET` | optional, default `base-backups` |
-
-> **Not AWS EKS.** Network services stay on Docker Compose on DigitalOcean droplets. A separate DOKS cluster on this account (`basecrawl-prod-nyc3`) is unrelated and must not host Cortex.
-
-
-## Infrastructure (DigitalOcean)
-
-Terraform lives in [`terraform/`](./terraform/): staging and production master
-and validator droplets, plus the firewall. See the four-host topology above and
-the Terraform inputs for sizes. Cloud-init installs Docker + Compose only.
-
-Age delivery helpers:
+The trust directory additionally contains `peers.json`, a JSON object mapping
+each validator public-key hex string to one SAN-valid HTTPS origin. Do not run
+two validators with the same wallet: their commit/reveal or rate-limit state can
+conflict.
 
 ```bash
-# Encrypt (operator machine; recipient = age public key)
-./deploy/scripts/age-encrypt-env.sh \
-  --recipient "$(age-keygen -y /path/to/age-identity.txt)" \
-  --src-dir deploy/env \
-  --out-dir /tmp/base-env-age
-
-# After OOB identity install on the droplet:
-./deploy/scripts/age-push-env.sh --host root@DROPLET_IP --age-dir /tmp/base-env-age --materialize
+docker compose --project-directory . --env-file deploy/env/python-validator.env \
+  -f deploy/compose/role-validator.yml up -d
 ```
 
-See [`terraform/README.md`](./terraform/README.md) for apply steps and R11 notes.
+Enable chain submission only after the master returns a current `sealed: true`
+bundle and the [validator `--verify-only --once` preflight](../docs/external-miner/validators.md#run-the-validator)
+reports `validator outcome=verified` for the same root/vector from historical
+chain state. The unsealed UID0 fallback is a readiness failure, not a weight to
+submit.
 
-### SSH access from CI
+## Proof VM host
 
-The `base-hosts` firewall allows port 22 from the operator IP only. GitHub
-runners get ephemeral Azure addresses that cannot be allowlisted ahead of time,
-so the deploy jobs use [`.github/actions/do-firewall`](../.github/actions/do-firewall):
-it adds an inbound rule for the runner's own `/32`, and an `if: always()` step
-removes exactly that rule afterwards. Port 22 is closed to the world at rest.
+The host requires Linux, `/dev/kvm`, Firecracker, jailer, nftables/network
+namespace support, a reviewed kernel and one or more measured ext4 images. Install
+the locked Cortex wheel in `/opt/base/venv`, copy
+`deploy/env/proof-vm-host.toml.example` to `/etc/proof-vm/host.toml`, and fill
+every blank pin from exact local bytes or a signed offer.
 
-This needs a `DIGITALOCEAN_TOKEN` repository secret. Two caveats:
+Private `/etc/proof-vm` files include the rotating master bearer, TLS private key,
+OpenRouter key, signed inference offer and optional knowledge-approval public
+key. The TLS certificate must cover every hostname or IP used in the master's
+URL. The host binds one explicit address; the example loopback value is not a
+production wire.
 
-- A runner killed between the two steps leaves its `/32` behind. Audit with
-  `doctl compute firewall get base-hosts` and delete anything that is not the
-  operator IP.
-- `terraform apply` rewrites the firewall's whole rule set, so it will drop a
-  live ephemeral rule. Do not apply Terraform while a deploy is running.
+The `[images]` table maps each raw 64-hex rootfs digest to its absolute installed
+path. `[host].kernel_digest` binds the kernel. `custom_ids` is empty by default;
+only listed IDs can open custom topics. `[egress]` permits exact topic-setup
+IPv4/port pairs. Experiment VMs receive no network regardless of that list.
 
-## Test-only: evil-gateway profile (task 48)
+### Small-host sizing
 
-**Never enable in production.** Adversarial staging harness:
+For the local KVM smoke, plan for a dedicated host with at least 4 vCPU, 8 GiB RAM
+and 80 GiB storage, with working KVM support. This is a sizing starting point,
+not evidence that a particular host can boot the guest or run a research topic.
+In the local copy of `host.toml`, set:
+
+```toml
+[host]
+# Keep the other required host fields from the example.
+max_topics = 1
+max_experiments = 1
+
+[caps]
+vcpus = 1
+mem_mib = 1024
+disk_mib = 16384
+```
+
+Both master environment examples request this same per-VM shape. The resource
+settings apply to the persistent topic VM and each fresh experiment VM, so leave
+capacity for both at once. Reserve additional space for the OS, installed images
+and retained failed experiments. Larger topics need explicit capacity planning;
+the general host template retains its larger ceilings and topic count.
+
+Requests above host ceilings fail rather than being clamped. A restarted master
+cannot attach to an existing topic VM with a different image or resource shape;
+changing environment values does not resize it. Resource ranges and omitted-value
+defaults are in the [configuration reference](../docs/reference/configuration.md#master).
+
+### Local checks and KVM smoke
+
+Run the local preflight before enabling the host service:
 
 ```bash
-docker compose --profile evil-gateway config --services   # must list evil-gateway
-docker compose --profile master config --services         # must NOT list evil-gateway
-./deploy/scripts/assert-evil-gateway-not-default.sh
+sudo /opt/base/venv/bin/cortex vm-host --config /etc/proof-vm/host.toml --check
 ```
 
-Offline proofs (no live TAO): `cargo test -p validator a48_`
+The JSON report exits successfully only when all local prerequisite checks pass.
+It requires effective UID 0, matching the service and jailer, and checks that
+`cp`, `chown` and `mkfs.ext4` resolve to safe executable files. Only when topic
+egress is configured does it also check `ip`, `nft` and `sysctl`, and verify that
+`/dev/net/tun` opens read/write as a character device. It creates no TAP interface.
+It does not create state, boot VMs, execute binaries or contact inference/provider
+services. A passing preflight is not live execution evidence.
 
-
-## Promotion pipeline (task 43)
-
-Digest-only rollout with backup-before-pin and fail-closed prod.
+The separate smoke explicitly starts real Firecracker guests on that host:
 
 ```bash
-# 1) CI (or local) records digests after build
-./deploy/scripts/record-image-digests.sh
-
-# 2) Promote known-good digest to staging (backs up Postgres first)
-export PGHOST=... PGUSER=... PGPASSWORD=... PGDATABASE=base
-export BASE_BACKUP_ENDPOINT=https://nyc3.digitaloceanspaces.com   # or local MinIO
-export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
-export BASE_BACKUP_BUCKET=base-backups
-./deploy/scripts/promote.sh \
-  --env staging --service validator \
-  --image ghcr.io/org/validator@sha256:<64-hex>
-
-# 3) Promote a digest to prod
-#    --force-prod skips the staging-digest ladder, which no longer exists:
-#    nothing writes deploy/pins/staging.json since the staging soak was retired.
-./deploy/scripts/promote.sh \
-  --env prod --service validator --confirm-prod --force-prod \
-  --image ghcr.io/org/validator@sha256:<64-hex>
-
-# 4) Rollback = re-promote previous snapshot
-./deploy/scripts/promote.sh --env staging --service validator --rollback
-
-# 5) Restore drill (scratch DB row-count match)
-./deploy/scripts/pg-restore-drill.sh --s3-uri s3://base-backups/pg/staging/<stamp>.sql.gz
+sudo /opt/base/venv/bin/python -m cortex.vm.smoke --run-live \
+  --config /etc/proof-vm/host.toml \
+  --state-dir /var/lib/proof/smoke-first \
+  --vcpus 1 --mem-mib 1024 --disk-mib 16384
 ```
 
-Pin files: `deploy/pins/staging.json`, `deploy/pins/prod.json`.  
-Staging promote **never** writes the prod pin; the staging pin file is now only a
-local/manual scratch env (`verify-task-43.sh` exercises it) and no workflow
-writes it. Prod promote still requires `--confirm-prod`.  
-Updater consumes `BASE_UPDATER_DESIRED_IMAGE` (also written to `deploy/pins/<env>.desired.env`).  
-In CI the prod rollback is a `deploy-prod` dispatch on the previous good commit
-SHA, not a pin-file edit — pins are rebuilt from that commit's GHCR digests.
+Choose a new private state directory for each run; its parent must already exist.
+Keep its absolute path short: generated UNIX socket paths must fit Linux's
+107-byte limit. An excessive path length is rejected before any VM is created.
+If several images are configured, select the installed rootfs with
+`--image-digest sha256:<actual-digest>`. From a source checkout, the equivalent
+entry point is `uv run --no-sync python scripts/vm_smoke.py` with the same flags.
+The smoke reads local artifact and hypervisor settings without reading TLS or
+inference credentials. It leaves the running orchestrator configuration untouched.
 
-Verify locally: `./deploy/scripts/verify-task-43.sh`
+The smoke checks two separate guest identities and boot IDs, a read-only root,
+a separate writable workspace, loopback-only network interfaces and confirmed
+teardown. It records private evidence in `smoke.json`. It does not run inference,
+reproduce a scientific result, score a submission or submit chain weights. CI
+tests this command with an injected hypervisor; only a successful real host run
+provides KVM lifecycle evidence.
+
+After preflight and the separate smoke, install and start the service:
+
+```bash
+sudo install -m 0644 deploy/systemd/proof-vm-orchestrator.service \
+  /etc/systemd/system/proof-vm-orchestrator.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now proof-vm-orchestrator.service
+```
+
+Before opening a topic, additionally test authenticated orchestrator health and
+the topic/experiment API lifecycle, including retention after failure and
+destruction after success. The isolated smoke does not exercise those HTTPS
+routes or prove a challenge reward path.
+
+## Promotion and rollback
+
+CI builds distributions and tests both supported Python versions. Image
+publication is automatic for `main`, but it does not edit deployment pins or
+touch a host. Run `.github/workflows/approve-image-update.yml` from `main` with
+the candidate, source commit, expected digest and the exact approval phrase.
+The protected `production` environment verifies provenance and emits
+`update.json`; it still changes no host. Promotion consists of reviewing that
+evidence, changing `CORTEX_IMAGE` to its immutable digest, rendering Compose,
+backing up state, pulling that digest and recreating one role.
+
+There is deliberately no `git pull`, Docker-socket watcher, CI SSH deployment or
+unattended host updater. Safe automation must preserve the same operator gate,
+take a consistent SQLite backup, verify role health plus a fresh sealed bundle,
+and restore both the prior digest and schema-compatible state on failure.
+
+Rollback uses the prior reviewed digest and a schema-compatible state backup.
+Never roll a database backward by deleting rows or replacing the latest seal.
+Trust-root rotations are separate signed ceremonies and do not happen as a side
+effect of an image rollback.

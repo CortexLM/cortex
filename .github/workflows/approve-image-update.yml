@@ -1,0 +1,142 @@
+name: approve-image-update
+
+# Resolve and approve an immutable runtime digest. This workflow never deploys it.
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: "GHCR runtime tagged by a full commit SHA or annotated v*.*.* release"
+        required: true
+        type: string
+      expected_digest:
+        description: "Expected sha256 digest from the successful python-images run"
+        required: true
+        type: string
+      source_commit:
+        description: "Full source commit SHA on main"
+        required: true
+        type: string
+      approval:
+        description: "Type APPROVE sha256:<64 lowercase hex>"
+        required: true
+        type: string
+
+permissions:
+  attestations: read
+  contents: read
+  packages: read
+
+concurrency:
+  group: approve-image-update
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify operator-approved runtime digest
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate main source and candidate scope
+        id: scope
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+          EXPECTED_DIGEST: ${{ inputs.expected_digest }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}/python"
+          case "$CANDIDATE" in
+            "$repository":*|"$repository"@sha256:*) ;;
+            *) echo "Candidate is outside $repository" >&2; exit 1 ;;
+          esac
+          git cat-file -e "$SOURCE_COMMIT^{commit}"
+          git merge-base --is-ancestor "$SOURCE_COMMIT" refs/remotes/origin/main
+          echo "IMAGE_REPOSITORY=$repository" >> "$GITHUB_ENV"
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR read-only
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Resolve registry manifest
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+        run: docker buildx imagetools inspect "$CANDIDATE" --format '{{json .Manifest}}' > manifest.json
+
+      - name: Verify GitHub build provenance
+        env:
+          EXPECTED_DIGEST: ${{ inputs.expected_digest }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "oci://$IMAGE_REPOSITORY@$EXPECTED_DIGEST" \
+            --repo "$GITHUB_REPOSITORY" \
+            --source-digest "$SOURCE_COMMIT" \
+            --source-ref refs/heads/main \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/images.yml" \
+            --deny-self-hosted-runners \
+            --bundle-from-oci \
+            --format json > attestation.json
+
+      - name: Re-scan immutable digest for current vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.scope.outputs.repository }}@${{ inputs.expected_digest }}
+          format: json
+          output: trivy-results.json
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          cache: false
+          version: v0.70.0
+
+      - name: Bind operator approval to the resolved digest
+        env:
+          APPROVAL: ${{ inputs.approval }}
+          CANDIDATE: ${{ inputs.candidate }}
+          EXPECTED_DIGEST: ${{ inputs.expected_digest }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          python3 scripts/verify_image_update.py \
+            --candidate "$CANDIDATE" \
+            --repository "$IMAGE_REPOSITORY" \
+            --expected-digest "$EXPECTED_DIGEST" \
+            --source-commit "$SOURCE_COMMIT" \
+            --approval "$APPROVAL" \
+            --requested-by "$GITHUB_ACTOR" \
+            --manifest manifest.json \
+            --output update.json
+
+      - name: Upload approved update evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: approved-image-update-${{ inputs.source_commit }}
+          path: |
+            attestation.json
+            manifest.json
+            trivy-results.json
+            update.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Report approval without deployment
+        env:
+          EXPECTED_DIGEST: ${{ inputs.expected_digest }}
+        run: printf 'Approved %s@%s; no host was changed.\n' "$IMAGE_REPOSITORY" "$EXPECTED_DIGEST" >> "$GITHUB_STEP_SUMMARY"

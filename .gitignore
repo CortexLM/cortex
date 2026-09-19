@@ -1,24 +1,58 @@
-# Rust
-/target/
-**/*.rs.bk
-*.pdb
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
 
-# Cargo.lock is tracked for this binary workspace
-
-# Secrets & keys (never commit)
+# Secrets and private operator material
 .env
 .env.*
 !.env.example
 *.pem
-*.age
 *.key
+*.age
+*.token
+*.secret
+*.seed
 **/wallets/
 **/coldkey*
 **/hotkey*
-**/*secret*
 **/*mnemonic*
+deploy/env/*.env
+!deploy/env/*.env.example
+deploy/secrets/*
+!deploy/secrets/README.md
 
-# OS / editor
+# Runtime state and local operations
+.local/
+.cache/
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.log
+tmp/
+test-results/
+coverage/
+.firecrawl/
+
+# Terraform local state
+deploy/terraform/.terraform/
+deploy/terraform/*.tfstate
+deploy/terraform/*.tfstate.*
+deploy/terraform/terraform.tfvars
+deploy/terraform/*.auto.tfvars
+deploy/terraform/tfplan
+
+# Editors and operating systems
 .DS_Store
 Thumbs.db
 *.swp
@@ -27,48 +61,3 @@ Thumbs.db
 .idea/
 .vscode/
 *.code-workspace
-
-# Local / ops noise
-*.log
-!deploy/guest/runners/rlm_fc_in_guest_harbor/tests/fixtures/**/trial.log
-tmp/
-.cache/
-coverage/
-lcov.info
-.omo/
-handoffs/
-
-# Accidental local design/junk at repo root
-/test-hero-*.png
-/humane-ui-digest.md
-
-# Materialized local env (age-decrypted or copied examples); keep *.env.example
-deploy/env/*.env
-!deploy/env/*.env.example
-
-# Local e2e runtime (state + cloudflared pid/log); tunnel URL is under deploy/env/
-.local/
-
-# Terraform local state / vars (deploy/terraform also has its own .gitignore)
-deploy/terraform/.terraform/
-deploy/terraform/*.tfstate
-deploy/terraform/*.tfstate.*
-deploy/terraform/terraform.tfvars
-deploy/terraform/*.auto.tfvars
-deploy/terraform/tfplan
-
-# Promote-generated updater desired-image sidecars (local/ops)
-deploy/pins/*.desired.env
-
-# Miner self-deploy runtime (install.sh)
-miner-runtime/
-/receipt_sk
-# **/*secret* above matches the directory name "secrets"; un-ignore the tree
-# then keep only README tracked (materialized key files stay ignored).
-!deploy/secrets/
-deploy/secrets/*
-!deploy/secrets/README.md
-
-
-__pycache__/
-*.pyc

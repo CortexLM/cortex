@@ -1,2 +1,0 @@
-hello-world agent stdout: ran ls
-secret-should-stay-if-not-in-redact-set

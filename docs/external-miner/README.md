@@ -1,87 +1,86 @@
 <!-- protocol_version: 1 -->
 
-# How to mine
+# Cortex mining
 
-Cortex aims to reward reproducible research that can improve shared methods,
-rather than only selecting a finished model. New to the project? Read the
-[overview](../OVERVIEW.md).
+Submit research to Proof or report product bugs to Bounty using a Bittensor hotkey.
 
-**Before spending compute on Proof:** review the
-[implementation limits](../WHITEPAPER.md#proposal-versus-current-code). The judge
-is partial, submission state is in memory, and automatic Proof reward emission
-is not wired into the service. A ready status is not an end-to-end payment guarantee.
+The Python implementation is under integration. A healthy service, a successful
+model call or an accepted submission does not prove deployment, scientific
+reproduction or on-chain payment.
 
-**Bundle `protocol_version`:** `1`  
-**Miner pays Lium** (`LIUM_API_KEY` / `X-Lium-Api-Key`) on Proof.
+| Challenge | Emission share | Guide |
+|-----------|----------------|-------|
+| `bounty` | 2000 bps (20%) | [Pair an account and report bugs](bounty.md) |
+| `proof` | 8000 bps (80%) | [Discover topics and submit research](proof.md) |
 
-This badge must match `bundle::PROTOCOL_VERSION` in crate `bundle`.
-CI gate: `cargo run -p xtask -- external-docs-check`.
+These are the only live challenge ids. Proof topics are operator-published,
+signed documents discovered through the API, never a built-in catalog. No
+particular benchmark, runner, model or topic is promised by this repository.
 
-Two live challenges: **Bounty** (`bounty`) and **Proof** (`proof`). Both take
-HTTP submits through the public gateway. Emission is **bounty 2000 bps /
-proof 8000 bps** (20/80). `relearn`, `relearn-image`, `relearn-agent`,
-`relearn-mm`, `design`, and `prism` are **off** — they have no trust-root
-row, so they earn nothing.
+## Installation
 
-Install the CLI:
+Use Linux, Python 3.12 or 3.13, `uv` and libsodium 1.0.18 or newer. From this
+repository:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CortexLM/cortex/main/scripts/install-ctx.sh | sh
-ctx --help
-ctx challenges
-ctx status
+sudo apt-get install libsodium23
+uv sync --locked --extra chain
+uv run cortex miner --help
 ```
 
-Default gateway is [https://gateway.cortex.foundation](https://gateway.cortex.foundation).
-`--gateway` overrides it for a local stack. `LIUM_API_KEY` is forwarded as
-`X-Lium-Api-Key` and never printed.
+`cortex` is the Python CLI. The historical `ctx` installer and command examples
+do not describe this implementation. See the [repository README](../../README.md)
+for installation and development commands.
 
-| Challenge | Id | Guide | Notes |
-|-----------|----|-------|-------|
-| Bounty | `bounty` | [bounty.md](./bounty.md) | Real bug reports. Pair with `ctx bounty pair`, then `ctx bounty report`. Cortex reads CortexLM/backend for scoring. **2000 bps** |
-| Proof | `proof` | [proof.md](./proof.md) | Reproducible experiments (claim + code + FLOPs) against **operator-published** topics. Digest-pinned RLM judge (`sha256:78b614a1…`). Empty eval digest → 503. **8000 bps** |
+## Usage
 
-Proof topics are signed documents, not a git catalog, so `ctx proof topics` is
-always the live list. Topics that additionally have a written miner guide here:
+Get the gateway URL and independently pinned Proof public key from the subnet
+operator. `--gateway` is required; the CLI does not select a deployment for you.
+The public challenge route prefixes are `/challenge/bounty` and
+`/challenge/proof`.
 
-| Topic | Guide | What it scores |
-|-------|-------|----------------|
-| `tbench` | [proof-tbench.md](./proof-tbench.md) | `custom` topic on `success_rate`, `discovery` payout, Firecracker sister, miner-supplied model key |
-
-Emission: `bounty` 2000 bps, `proof` 8000 bps (sum 10000). Off challenges have
-no row and earn 0.
-Bundle bytes: [`BUNDLE_SPEC.md`](../BUNDLE_SPEC.md).
-
-## What every challenge pays for
-
-Neither live challenge pays for a published split you can grind:
-
-- Proof scores operator-published topics against a **private per-topic holdout**.
-  You submit a claim + reproducible recipe vs `topic_id`. `declared_flops`
-  is optional on custom / agent topics.
-  The pin has no catalog; `GET /challenge/proof/v1/proof/topics` is the live
-  list (operators inject topics at any time). The canary stays
-  **off the number you are paid on**. Paid score is the **sum of per-topic**
-  masses (`wta` or `discovery`). Empty `eval_image_digest` still **503**;
-  the live pin is
-  `sha256:78b614a1f51ce5dd80076c4e343a2b31b85d6c36025e02836cb83929867e7009`.
-- Bounty pays precision times severity. The triage-noise ratio stays off the
-  visible score. An unpriced `valid` row is not creditable.
-- **Missing evidence fails closed.** An empty training manifest is not a clean
-  contamination check, and a host that cannot score answers `503` instead of
-  inventing a verdict. Check `GET /challenge/proof/v1/status` (or
-  `GET /challenge/bounty/v1/status`, or `ctx status`) before you spend
-  anything. Bare `GET /v1/status` on the public gateway is not the Proof
-  status path.
-
-```text
-https://gateway.cortex.foundation/challenge/bounty/...
-https://gateway.cortex.foundation/challenge/proof/...
+```bash
+uv run cortex miner --gateway "$GATEWAY" \
+  --wallet-name research --wallet-hotkey miner proof-submit --help
 ```
 
-Never put mnemonics or challenge signing keys in miner clients.
-Read `LIUM_API_KEY` from the environment. Do not commit it.
+The miner uses a standard Bittensor wallet. `--wallet-name` selects the coldkey
+wallet directory; `--wallet-hotkey` selects its signing hotkey. The coldkey
+secret is not needed for research submissions.
 
-Network software PRs on `CortexLM/cortex` need a Greptile review before merge
-(`.greptile/`; comment `@greptileai review` if the bot is silent). That is
-an operator gate, not a miner submit step.
+| Option | Meaning |
+|--------|---------|
+| `--wallet-name NAME` | Existing Bittensor wallet directory name |
+| `--wallet-hotkey NAME` | Existing hotkey name; default `default` |
+| `--wallet-path PATH` | Wallet root; default `~/.bittensor/wallets` |
+| `--wallet-password-file PATH` | Private password file required for an encrypted hotkey; no interactive prompt |
+| `--proof-public KEY` | Independently pinned Proof signing public key, SS58 or hex; required for `proof-submit` |
+| `--dev-seed-file PATH` | Development-only 32-byte hexadecimal seed in a private file; mutually exclusive with `--wallet-name` |
+
+Place these options before the miner action. Password, development seed, BYOK
+and Bounty session files must be private (for example mode `0600`) and must not
+be symlinks. Wallet loading never creates a wallet or rewrites its key files.
+Never put a mnemonic, private key, session token or provider credential in Git
+or a support ticket. Public challenge signing keys are verification material,
+not miner secrets.
+
+## Support
+
+- [Proof guide](proof.md): signed topics, artifacts, BYOK and submission outcomes.
+- [Bounty guide](bounty.md): terms, pairing, reports and the external scoring feed.
+- [Validator guide](validators.md): independently verify seals and peer roots.
+- [Troubleshooting](troubleshoot.md): refusal codes and safe retry behavior.
+
+Bundle `protocol_version` remains `1`; Python Proof topic documents use
+`schema_version: 2`. The [bundle specification](../BUNDLE_SPEC.md) defines the
+frozen consensus wire format. The public documentation contract is checked by
+`uv run python scripts/check_repo.py`.
+
+`relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design` and `prism`
+are retired products with no trust-root row or emission. Their historical
+[Relearn](relearn.md), [image](relearn-image.md), [agent](relearn-agent.md) and
+[multimodal](relearn-mm.md) pointers remain for old links only.
+
+## License
+
+[Apache-2.0](../../LICENSE).

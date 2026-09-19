@@ -1,2 +1,0 @@
-verifier: reward=1.0
-pytest passed

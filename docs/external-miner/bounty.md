@@ -1,197 +1,174 @@
 <!-- protocol_version: 1 -->
 
-# Bounty Challenge — miners
+# Bounty miner guide
 
-Challenge id is `bounty`. One of two live challenges (`bounty` **2000 bps**,
-`proof` **8000 bps**, 20/80). Report real Cortex product and backend bugs. Valid
-unique reports earn subnet weight. Every report is tagged with your Bittensor
-hotkey so operators can patch in real time and pay (or penalize) the right miner.
+Bounty (`bounty`, 2000 bps) accepts reproducible Cortex product and backend bug
+reports associated with your Bittensor hotkey. Install the [Python CLI](README.md)
+and obtain the gateway URL from the subnet operator.
 
-**Gateway:** `https://gateway.cortex.foundation`  
-**CLI:** `ctx bounty status`, then `ctx bounty pair`, then `ctx bounty report`
-(install: [README](./README.md))
+The initial production miner flow pairs and files reports in CortexLM/backend.
+The Python gateway routes documented here remain compatibility/operator-test
+surfaces; they do not publish a local report into the backend and cannot make it
+creditable by themselves. Only a report published by the backend public feed can
+earn weight.
 
-From zero:
+## Check scoring availability
 
-1. `ctx bounty status` — only file reports when `can_score` is yes
-2. `ctx bounty pair --hotkey your-ss58-hotkey --account-id your-chat-account-id --wallet-name your-wallet --accept-terms`
-3. `ctx bounty report --title "…" --body-file report.md --repro-file repro.md`
+```bash
+curl --fail-with-body "$GATEWAY/challenge/bounty/v1/status"
+```
 
-Validators do **not** re-run your reports. They verify the sealed weight
-bundle. Ingest goes through the gateway:
+The response publishes research terms, quotas and `scoring_backend`.
+`can_score` reflects a recent validated external-feed snapshot: successful
+status probes are shared for up to 15 seconds and failures for up to 5 seconds.
+Concurrent refreshes fail closed instead of multiplying full snapshot reads.
+Every report POST performs its own uncached feed check, so an outage or
+inconsistent publication after a successful status check can still return `503`.
+
+## Pair a dedicated account
+
+Use a dedicated Cortex Chat mining account. Read these terms before passing
+`--accept-terms`:
+
+> By pairing a Bittensor hotkey to a Cortex Chat account for Bounty Challenge,
+> you accept that this dedicated mining account, its logs, and its conversations
+> may be used for research, to fix product and backend bugs, and to remunerate
+> (or penalize) the bound miner hotkey. Do not pair a private personal account.
+
+Ask the subnet operator to verify that you control this account and authorize
+the exact account/hotkey pair. That one-use authorization lasts at most five
+minutes. Pairing without it, or after it expires, returns `403 pairing not
+authorized by account operator`; request a fresh authorization and reuse your
+unspent nonce.
+
+```bash
+uv run cortex miner --gateway "$GATEWAY" \
+  --wallet-name research --wallet-hotkey miner \
+  bounty-pair --account-id "$CORTEX_ACCOUNT_ID" \
+  --accept-terms --session-file ./bounty-session
+```
+
+For an encrypted hotkey add `--wallet-password-file /private/hotkey-password`
+before `bounty-pair`. The wallet coldkey secret and a Proof public key are not
+required. Wallet options and the development-only `--dev-seed-file` path are
+described in the [mining index](README.md#usage).
+
+The CLI signs locally and posts to `/challenge/bounty/v1/pair`. It writes the
+returned session to the specified new file with mode `0600`, refuses to
+overwrite an existing file, and prints only `paired` and the public hotkey.
+There is no automatic session cache or CLI-driven Chat activation flow in
+this Python implementation. A session is a secret bearer credential.
+
+The pair API accepts `account_id`, `hotkey` (SS58 or public-key hex), `nonce`,
+`exp`, `signature` and `terms_accepted: true`. The exact UTF-8 signing payload
+is:
 
 ```text
-https://gateway.cortex.foundation/challenge/bounty/v1/pair
-https://gateway.cortex.foundation/challenge/bounty/v1/reports
-https://gateway.cortex.foundation/challenge/bounty/v1/status
+cortex-bounty-v1|{account_id}|{nonce}|{exp}
 ```
 
-## Dedicated account (required)
+Use sr25519's **Substrate** signing context. This is different from the Cortex
+context used by Proof and bundle signatures. The CLI supplies a random
+32-character hexadecimal nonce and an expiry five minutes in the future.
+Pairing requires explicit terms acceptance (`403` otherwise), a valid signature
+and an unexpired signing window, plus the operator authorization above.
+Successful pairing consumes the authorization and nonce and returns `201` with
+session metadata. A nonce is single-use: retrying an accepted signed request
+returns `409 nonce reused` with no session data, including after a restart.
+This refusal does not consume a fresh operator authorization. If the response
+or session file is lost, request a new authorization and pair with a new nonce.
+Pairing the same account again revokes its previous session, which then returns
+`401 invalid_session`, including an operator-authorized hotkey replacement.
+Sessions do not currently expire automatically by age.
+The complete pairing JSON body is limited to 4096 bytes; larger requests return
+`413 pair request too large` before signature processing.
 
-Create a **dedicated** Cortex Chat mining account. Do **not** pair a private
-personal account. Pairing is confidential to that account: operators see the
-bound hotkey and the reports you file from it.
-
-A private personal account is for your own chats. A mining account is for
-bounty work and is used to fix bugs and to remunerate (or penalize) the
-bound hotkey.
-
-## Terms (blocking)
-
-You must accept these terms before pairing. `ctx bounty pair` prints them and
-refuses to pair until you pass `--accept-terms`; the pair API rejects
-`terms_accepted: false`.
-
-> By pairing a Bittensor hotkey to a Cortex Chat account for Bounty
-> Challenge, you accept that this dedicated mining account, its logs, and
-> its conversations may be used for research, to fix product and backend
-> bugs, and to remunerate (or penalize) the bound miner hotkey. Do not pair
-> a private personal account.
-
-## 1. Pair your hotkey
-
-Never paste a mnemonic anywhere. `ctx` signs the pairing challenge locally
-with sr25519 and sends only the signature.
+## Submit a report
 
 ```bash
-# Read the terms first (no signing, no network write):
-ctx bounty pair --hotkey your-ss58-hotkey --account-id your-chat-account-id
-
-# Then pair, signing from a Bittensor wallet on this machine:
-ctx bounty pair \
-  --hotkey your-ss58-hotkey \
-  --account-id your-chat-account-id \
-  --wallet-name your-wallet \
-  --wallet-hotkey default \
-  --accept-terms
+uv run cortex miner --gateway "$GATEWAY" \
+  --wallet-name research --wallet-hotkey miner \
+  bounty-report --session-file ./bounty-session \
+  --title "Reproducible failure in the research upload path" \
+  --body-file report.md --repro-file reproduction.md
 ```
 
-Other ways to sign the same challenge:
-
-| You have | Flag |
-|----------|------|
-| A 32-byte hotkey mini-secret file (not a mnemonic) | `--secret-file /path/to/hotkey.sk` |
-| An offline signer | run pair without a signing flag, sign the printed `cortex-bounty-v1\|…` string, then re-run with `--signature` and the 128-hex result |
-| Several linked hotkeys | pick with `--hotkey` and `--wallet-hotkey`; pair again to switch |
-
-On success the CLI prints the bound hotkey, the session id, and the Chat
-activation step, and caches the session claim under
-`~/.config/cortex/bounty-session.json` (mode 0600). There is no token for you
-to export and no environment variable for you to set: activation is whatever
-the CLI prints after pairing. Paste the pairing code it shows into your
-dedicated mining account in Cortex Chat and Chat confirms the binding.
-
-Session claims expire. When a report answers `401`, pair again.
-
-## 2. File a report
-
-```bash
-ctx bounty report \
-  --title "gateway 500 on artifact_uri with a query string" \
-  --body-file report.md \
-  --repro-file repro.md
-```
-
-`--body` and `--repro` take inline text instead of files, and `--session`
-overrides the cached claim. `ctx` checks the shape locally — a real title, at
-least 80 characters of body, at least 20 characters of repro steps, and a body
-that is not just the title pasted twice — so a thin report does not burn a
-rate-limit window.
-
-The same thing with `curl` (the Lium header is optional and never logged):
-
-```bash
-curl -sS -X POST https://gateway.cortex.foundation/challenge/bounty/v1/reports \
-  -H 'content-type: application/json' \
-  -H "X-Lium-Api-Key: $LIUM_API_KEY" \
-  -d '{
-    "session": "session claim from pair",
-    "title": "short bug title",
-    "body": "what broke, in at least 80 characters",
-    "repro_steps": "how to reproduce, in at least 20 characters"
-  }'
-```
-
-The POST reply already carries `id`, `state`, `miner_hotkey`, and
-`fingerprint`. Report bodies (repro, account, hotkey) stay on the operator
-host: `GET /v1/reports` requires the same operator bearer as adjudicate, and
-the public gateway returns 403 on GET/HEAD of those paths (POST submit stays open).
-`ctx bounty show` does not fetch them.
-
-**Public consumers** (leaderboard and published reports) hit
-**CortexLM/backend** — not this subnet. Cortex **reads**
-`/v1/bounty/public/leaderboard` and `/v1/bounty/public/reports` from that
-backend, and scoring uses `problem_found` + `justification` + `severity` +
-hotkey counts on those payloads.
-
-Those published rows are the whole path from a bug to weight: the challenge
-service fetches them each tick, signs one leaf per metagraph hotkey for the
-current epoch, and posts them to the gateway. Validators then verify the
-sealed bundle — they never read the bounty feed and never re-run your report.
-
-The published leaderboard is **informational**. Topping it is worth nothing on
-its own: only adjudicated, justified reports are scored, so a hotkey with a
-high `valid_count` and no adjudications is paid zero.
-
-## Report quotas
-
-Adjudication is the scarce resource here: every pending report costs a human or
-an agent a triage pass. The service enforces, per hotkey:
+The request goes to `/challenge/bounty/v1/reports`. Include enough distinct
+evidence to reproduce the problem and explain its impact. The API accepts
+`session`, optional `hotkey`, `title`, `body` and `repro_steps`; the CLI includes
+its selected hotkey. A supplied hotkey must match the session (`403` on
+mismatch). The API validates substance before inserting a report.
 
 | Limit | Value |
 |-------|-------|
-| Reports awaiting adjudication | 5 |
-| Interval between reports | 60s |
-| Minimum body | 80 characters |
-| Minimum `repro_steps` | 20 characters |
+| Reports awaiting adjudication per hotkey | 5 |
+| Minimum interval between reports | 60 seconds |
+| Concurrent feed validations per hotkey | 1 |
+| Minimum body length | 80 characters |
+| Minimum reproduction length | 20 characters |
+| Maximum complete report request body | 262144 bytes |
 
-Over the pending cap or inside the interval returns `429`; too thin returns
-`400`. Neither is a penalty — nothing is recorded against you — but neither is
-a report either. `ctx bounty status` publishes the live numbers.
+An empty or repeated title/body and low-substance repeated-token content
+return `400`. A quota violation or concurrent validation returns `429`. Framework schema failures may
+return `422`; an oversized request returns `413`. Successful intake returns
+`201` with `id`, `miner_hotkey`,
+`state` and `fingerprint`; acceptance into triage is not a reward.
 
-## The scorer fails closed
+Report reads (`GET /v1/reports` and `/v1/reports/{id}`) and
+`POST /v1/admin/adjudicate` require operator bearer authentication. The public
+gateway denies report reads. There is no public `bounty show` command.
 
-```bash
-ctx bounty status
-```
+## Scoring and adjudication
 
-The adjudication feed published by CortexLM/backend is the **only** scorer. If
-the host cannot read it, `POST /v1/reports` answers **503** rather than
-accepting work it could never pay for, and that epoch pays nobody — every
-bounty leaf is an explicit no-score, so the share burns to uid 0. There is no
-offline stand-in, so a 503 here is the honest answer rather than a temporary
-degradation you can submit through. Check `scoring_backend` and `can_score`
-before you go hunting.
+Cortex **reads** the CortexLM/backend public API configured by
+`BOUNTY_BACKEND_PUBLIC_URL`. The required backend routes are
+`/v1/bounty/public/status`, `/v1/bounty/public/leaderboard` and
+`/v1/bounty/public/reports`. Status pins an immutable revision; Cortex requests
+the leaderboard and every cursor-paginated report page for exactly that
+revision. This subnet does not serve `/v1/public/*` or a substitute public
+leaderboard.
 
-## Scoring (precision × severity, not volume)
+The external publication is the only scoring source. A local operator
+adjudication alone does not place a report in that publication; the backend
+must publish consistent, justified records. The Python subnet does not export
+local reports or adjudications into the external backend automatically.
+Leaderboard counts alone are not creditable evidence. Mixed revisions,
+truncated report pagination, unavailable adjudication, unpriced valid reports,
+any duplicate chain without a non-duplicate root, or disagreement between
+status counters, reports and leaderboard fails closed. A leaderboard capped by the backend is
+accepted only as an exact ranked prefix; Cortex rebuilds the complete ranking
+from the report pages. Transient transport, HTTP, JSON or revision errors receive
+at most three read-only attempts, all within the same 30-second snapshot deadline.
+Stable adjudication, pricing and backlog gates are not retried. A waiting
+adjudication backlog with no published report also fails closed instead of
+scoring every miner as `NotAttempted`.
 
-| Outcome | Result |
-|---------|--------|
-| Valid unique bug that reproduces, with an operator severity | Reward (weight), scaled by that severity |
-| Valid bug the operator did not assign a severity to | Not creditable — an unpriced bug cannot be paid for, and it blocks your crown until it is priced |
-| Already fixed, not yet in prod | Ack only — no reward, no penalty, but it counts as triage noise |
-| Malicious, fabricated, or does not exist | Penalty (burn toward uid 0) |
-| Duplicate of an open report | No reward, no penalty, counts as triage noise |
+| Adjudication | Effect |
+|--------------|--------|
+| `valid` with severity | Eligible evidence, subject to the scoring gates |
+| `valid` without severity | Not creditable; missing severity prevents eligibility |
+| `already_fixed_not_prod` | No reward or direct penalty; counts as triage noise |
+| `invalid_malicious` | Negative credit; may lead to a burn outcome |
+| `duplicate` | No extra reward or direct penalty; counts as triage noise |
 
-Your score is displacement vs the previous bounty champion on adjudicated
-reports, and it is the **product of two things**:
+Paid score is precision times mean severity impact, subject to champion
+displacement and eligibility gates. Precision is priced valid reports divided
+by priced valid plus malicious reports. The minimum precision is 6000 bps,
+and at least three decided reports are required. Severity levels are
+`trivial`, `minor`, `major` and `critical`. Unpriced valid rows cannot be used
+to manufacture credit.
 
-- **precision** — `valid / (valid + malicious)`. Junk is subtracted, not
-  ignored, and a net-negative miner burns toward uid 0. A champion also needs
-  at least 6000 bps of precision outright, so beating a sloppy incumbent while
-  still filing mostly junk does not crown you.
-- **impact** — the mean severity operators assigned (`trivial`, `minor`,
-  `major`, `critical`). This is what stops the volume play: forty cosmetic
-  findings at perfect precision are worth a fraction of four critical ones, and
-  the arithmetic says so.
+The duplicate/already-fixed triage-noise ratio is an **off-score gate**. It is
+not multiplied into the visible precision-times-severity score; exceeding
+5000 bps rejects eligibility. A high report count is not a substitute for
+precision and severity.
 
-One measurement is deliberately **not** in the number you are paid on: the
-share of your adjudications that were duplicates or re-files of already-fixed
-issues. Precision cannot see those, so a miner tuning precision cannot tune
-them away — and above 5000 bps of triage noise they are a hard zero. Re-filing
-the same finding is free in your visible score and fatal in your actual one.
+If the backend is unreadable, unconfigured or inconsistent, report intake
+returns `503` without storing a report. Emission pays nobody from Bounty and
+covers the expected participant set with `NoScore(ChallengeInternal)` leaves.
+The 2000 bps share then burns to uid 0 through normal sealing. There is no
+offline scorer or forced simulation path.
 
-Unmatched emission burns to uid 0.
-
-Never commit `LIUM_API_KEY`, pairing secrets, or a mnemonic. If something
-fails, see [troubleshoot.md](./troubleshoot.md).
+Validators independently verify the [sealed bundle](validators.md); they do
+not rerun reports or fetch the Bounty feed. See [troubleshooting](troubleshoot.md)
+for refusal and retry guidance.

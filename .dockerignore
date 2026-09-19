@@ -1,12 +1,8 @@
-.git
-**/target/debug
-**/target/tmp
-**/*.rs.bk
-.env
-deploy/env/*.env
-**/*secret*
-**/*.age
-**/*.key
-**/*mnemonic*
-task-*.txt
-.omo
+# The runtime build consumes only Python source and its lockfile.
+**
+!pyproject.toml
+!uv.lock
+!src/
+!src/**
+src/**/__pycache__/
+src/**/*.pyc

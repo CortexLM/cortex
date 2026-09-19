@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Push gate: cargo check + lib tests (no identity checks).
+# Complete offline gate. It never contacts OpenRouter, rents compute, or boots KVM.
 set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
-if ! command -v cargo >/dev/null 2>&1; then
-  echo "pre-push: cargo not found on PATH" >&2
+if ! command -v uv >/dev/null 2>&1; then
+  echo "pre-push: uv is required" >&2
   exit 1
 fi
-echo "pre-push: cargo check --workspace --all-targets"
-cargo check --workspace --all-targets
-echo "pre-push: cargo test --workspace --lib"
-cargo test --workspace --lib
-echo "pre-push: ok"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$root/.cache/uv}"
+uv run --no-sync ruff format --check src tests scripts
+uv run --no-sync ruff check src tests scripts
+uv run --no-sync mypy
+uv run --no-sync pytest -m 'not live'
+uv run --no-sync python scripts/check_repo.py --final
+uv run --no-sync python scripts/check_deploy.py --check-examples

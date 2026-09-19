@@ -5,9 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        Frozen specs (`docs/BUNDLE_SPEC.md`, `docs/DESIGN_CHALLENGE.md`) pin
-        incentive / scoring / consensus semantics. A feature that changes those
-        needs an explicit spec + xtask pin update, not a drive-by PR.
+        Frozen specs are guarded by `scripts/check_repo.py`. Explain any proposed
+        protocol migration explicitly; never weaken a gate to accept drift.
   - type: textarea
     id: problem
     attributes:
@@ -19,7 +18,7 @@ body:
     id: proposal
     attributes:
       label: Proposal
-      description: What should Cortex do instead? Name crates/binaries if you know them.
+      description: What should Cortex do instead? Name Python modules or public APIs if you know them.
     validations:
       required: true
   - type: dropdown
@@ -31,7 +30,9 @@ body:
         - gateway / weights
         - validator / chain
         - deploy / ops
-        - docs / branding
+        - RLM / shared memory
+        - Firecracker isolation
+        - docs / developer experience
         - other
     validations:
       required: true
@@ -40,7 +41,7 @@ body:
     attributes:
       label: Constraints
       options:
-        - label: I have read AGENTS.md and docs/NAMING.md (BASE_* / domain tags stay).
+        - label: I have read AGENTS.md and docs/NAMING.md (`BASE_*` names and signature domains stay compatible).
           required: true
-        - label: This is not a request to fork cryptographic domain tags or on-chain names.
+        - label: The proposal does not put a challenge catalog, benchmark, holdout, credential, or floating production image in Git.
           required: true

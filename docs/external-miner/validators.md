@@ -1,55 +1,189 @@
 <!-- protocol_version: 1 -->
 
-# Validators
+# Validator guide
 
-Bounty scoring reads CortexLM/backend on master. Proof scoring is centralized
-(master + digest-pinned RLM judge). You still run a validator.
+Python validators independently verify gateway bundles, compare authenticated
+peer roots and submit weights on Bittensor. They never run Bounty or Proof
+evaluation, rent GPUs or receive miner provider credentials. The only live
+challenge shares are `bounty` 2000 bps and `proof` 8000 bps.
 
-Live ids and emission: `bounty` 2000 bps, `proof` 8000 bps (sum 10000).
-`relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design`, and
-`prism` have no row and earn 0 — a leaf claiming those ids fails the
-trust-root check, which is the point.
+## Prepare local trust and identity
 
-## Job
+Install the [Python package with its chain extra](README.md#installation).
+Obtain the gateway URL and independently pinned gateway public key, plus the
+owner public key and signed `challenges.toml` and `measurements.toml` trust
+files. Detached signatures live beside each TOML as `.toml.sig`. Do not replace
+local trust files with unverified content received from the gateway.
 
-1. Pull `GET /v1/weights/latest` from the master gateway.
-   - Prod: `https://gateway.cortex.foundation/v1/weights/latest`
-   - Staging / VPC: `$BASE_GATEWAY_ENDPOINT/v1/weights/latest` (compose default `http://10.116.0.2:8080`)
-2. Verify the sealed bundle: signatures, D24 completeness (every declared participant has a leaf), owner trust root on **local disk** (`config/challenges.toml`, `config/measurements.toml`), no forged leaves.
-3. `set_weights` on-chain.
+Use a registered Bittensor hotkey in a standard wallet. The current validator
+CLI also requires `--consensus-seed-file`: a private file containing the
+32-byte hexadecimal seed for **that same hotkey**. Startup refuses a mismatch.
+This additional seed requirement is a current validator limitation; the miner
+CLI's encrypted-wallet adapter and `--dev-seed-file` option do not apply here.
+Do not assume that a derived wallet key has an exportable matching seed.
 
-If you skip verification, a bad gateway can publish fake weights. That is the job: consensus check on a sealed result, not a second eval farm.
+The Bittensor wallet signs on-chain extrinsics. The consensus seed signs peer
+roots and dissent using the frozen Cortex context. No gateway wallet or
+gateway administrative token is required on a validator.
 
-Unsealed or decode-error latest is a **burn vector** (`sealed: false`, uid 0 = 100%). Do not treat that as a real seal. Do not submit it, and do not submit a previously verified seal (LKG) while latest is unsealed. A **sealed** burn-uid0 Match (`uids: [0]`, `weights: [1.0]`, `burn_outcome=true`) MUST still be submitted on-chain. A sealed 100% allocation to a nonzero owner or validator-permit UID must not be submitted — Yuma would pay that hotkey, which is not a burn.
+## Configure peers
 
-## Not your job
+`--peers` reads a JSON object mapping independently selected validator hotkeys
+(SS58 or hex) to HTTPS origins. Use actual registered peers, for example the
+structure below with your own hotkey and origin:
 
-- Run evals
-- Rent Lium
-- Promote champions (`POST /v1/admin/promote` is master / operator; Relearn is off)
-- Adjudicate Bounty reports (`POST /challenge/bounty/v1/admin/adjudicate`)
-- Read the Bounty public feed. Bounty adjudications live in CortexLM/backend;
-  the challenge service on master fetches them and signs leaves, and you verify
-  the sealed bundle like any other challenge. An epoch where that host could
-  not read the feed still carries a full bounty leaf set — every leaf a
-  `NoScore`, reason `ChallengeInternal` (6) — so D24 holds and the 2000 bps
-  burns to uid 0. That is fail-closed working, not a bundle to dissent on.
-
-## Run
-
-Binary: [`bins/validator`](../../bins/validator) (`validator-bin`, bin name `validator`).
-Compose role: [`deploy/compose/role-validator.yml`](../../deploy/compose/role-validator.yml)
-(no gateway, no challenge services at all).
-Env: [`deploy/env/validator.env.example`](../../deploy/env/validator.env.example).
-
-```bash
-# required: BASE_ROLE=validator, BASE_NETUID, database URL, BASE_CHAIN_ENDPOINT
-# BASE_GATEWAY_ENDPOINT = master gateway (prod pin: https://gateway.cortex.foundation)
-# wallet: BASE_VALIDATOR_WALLET or BASE_VALIDATOR_MNEMONIC_FILE (for set_weights)
-
-./deploy/scripts/materialize-env.sh
-docker compose -f docker-compose.yml \
-  -f deploy/compose/role-validator.yml up -d
+```json
+{
+  "<peer hotkey>": "https://<peer host>:8091"
+}
 ```
 
-The process probes `/v1/weights/latest`, runs `compare_bundle` against the local trust root, and submits on Match. No signing key → verify still runs, `set_weights` does not.
+Origins may not include credentials, paths, queries or fragments. The default
+`--min-peer-sample 1` requires one other validator with `validator_permit` in
+the same metagraph snapshot. If there is no other permitted validator, the
+single-validator case is allowed. Setting the sample to zero cannot bypass
+peer checking when another permitted validator exists. Peer endpoint discovery
+is manual in this implementation.
+
+Each peer serves a signed root for the requested epoch. Wrong identity,
+invalid signature, insufficient reachable peers, conflicting roots or
+persisted equivocation prevent submission. A matching HTTP response alone is
+not authentication; the expected hotkey signature is required.
+
+## Run the validator
+
+This command can submit on-chain weights. Set its network, netuid, peer address
+and local paths to the intended deployment before running it:
+
+```bash
+uv run cortex validator \
+  --gateway "$GATEWAY" --gateway-public "$GATEWAY_PUBLIC_KEY" \
+  --network "$CHAIN_NETWORK" --netuid "$NETUID" \
+  --fallback-endpoints "$CHAIN_FALLBACK_ENDPOINTS_JSON" \
+  --owner-public ./trust/owner.pubkey \
+  --challenges ./trust/challenges.toml \
+  --measurements ./trust/measurements.toml \
+  --minimum-challenges-version "$CHALLENGES_MIN_VERSION" \
+  --minimum-measurements-version "$MEASUREMENTS_MIN_VERSION" \
+  --version-key "$VALIDATOR_VERSION_KEY" \
+  --wallet-name validator --wallet-hotkey default \
+  --consensus-seed-file /private/consensus.key \
+  --peers ./trust/peers.json \
+  --state-db ./state/validator.sqlite3 \
+  --peer-bind "$PEER_BIND" --peer-port 8091 \
+  --peer-tls-certificate /private/tls.crt \
+  --peer-tls-key /private/tls.key
+```
+
+`--wallet-path` defaults to `~/.bittensor/wallets`; polling defaults to
+30 seconds. Trust minimums and the subnet validator version key are required;
+obtain them from the signed production ceremony and live subnet instead of
+guessing. `--fallback-endpoints` is a JSON list of at most eight unique `wss://`
+RPC origins without credentials, queries or fragments. The Bittensor SDK uses
+them when the primary endpoint fails. Fallbacks are origins only: URL paths are
+also rejected so provider bearer material cannot appear in the process argv or
+container metadata.
+
+The peer listener defaults to loopback and requires TLS when bound outside
+loopback. `--once` executes one tick and can submit weights. Add both
+`--verify-only --once` for a preflight that recomputes the current seal but
+never claims its epoch in the journal and never creates an extrinsic. It exits
+successfully only for the exact `verified` outcome; unsealed, changed, degraded
+or peer-unavailable states return a nonzero process status.
+
+For Compose use the Python
+[validator environment example](../../deploy/env/python-validator.env.example)
+and [validator role](../../deploy/compose/role-validator.yml). Keep the SQLite
+state persistent and wallet, identity and trust directories read-only. The
+role points to the master gateway and has no gateway or challenge service.
+
+## Verify before dispatch
+
+The validator reads `GET /v1/weights/latest`, obtains the corresponding binary
+bundle, then verifies the independently pinned gateway signature and local
+owner-signed trust root. It checks protocol version, epoch and block hash,
+metagraph stakes and UID mapping, challenge keys and emission shares,
+participant completeness, measurements and Merkle root. Frozen wire details
+are in the [bundle specification](../BUNDLE_SPEC.md).
+
+Trust files are reloaded, their activation windows and minimum versions are
+checked, and durable watermarks reject rollback. The sealed block must not be
+in the future or more than `--max-block-lag` blocks old (default `256`). Before
+dispatch the validator rechecks both chain snapshot and latest gateway state;
+a reorg or a changed/unsealed latest response prevents submission.
+
+| Latest state or verification outcome | Validator action |
+|-------------------------------------|------------------|
+| `sealed: false`, including no bundle or decode failure | Do not submit; do not reuse a previously verified seal |
+| Verified sealed Match with `burn_outcome: true`, `uids: [0]`, `weights: [1.0]` | Submit the sealed burn to UID 0 |
+| Verified sealed vector allocating 100% to a nonzero owner or validator-permit UID | Refuse; this is not a burn |
+| Valid inputs and agreeing peers, but gateway's final vector differs | Class A: submit independently recomputed weights and persist signed dissent |
+| A challenge has invalid leaf signatures, wrong leaf epoch or incomplete participants | Quarantine that challenge; submit only if surviving signed mass is at least 5000 bps |
+| Structural failure, unknown challenge, invalid Merkle root or peer disagreement | Refuse |
+
+With the fixed split, quarantining Bounty can retain Proof's 8000 bps;
+quarantining Proof leaves only 2000 bps and cannot be submitted. Valid
+`NoScore(ChallengeInternal)` leaves from an unavailable scorer still cover the
+expected participants and are not themselves a consensus fault.
+
+The unsealed fallback is deliberately a 100% UID 0 vector with `sealed: false`.
+A missing gateway owner wallet is unrelated. Only a verified **sealed** burn
+is eligible for submission. Neither a status response nor a last-known-good
+bundle overrides that rule.
+
+## Chain submission and evidence
+
+The validator verifies the exact sealed `u16` vector, then uses the official
+Bittensor SDK pallet-call builder, drand helper and `Subtensor` signer without
+renormalizing those values. This preserves the frozen on-chain payload; the
+high-level SDK weight helper is not used because it rescales multi-UID vectors.
+Preflight requires live registration, permit, rate-limit, minimum-weight,
+maximum-weight and CRv4 metadata compatible with the sealed bundle. Unknown
+state fails closed. Inclusion and finalization are awaited, with the Cortex
+journal as the only retry authority.
+
+The persistent journal is bound to one netuid and prevents duplicate dispatch
+for an epoch. Active calls are recorded as `dispatching`; only an `uncertain`
+attempt may be reconciled, so an operator cannot release a claim while the SDK
+call is still running. A failure before broadcast or a finalized on-chain
+rejection releases the claim and can be retried. A timeout or failure after
+submission may have reached the chain; it returns `dispatch_pending`, logs a durable
+`attempt_id` plus any SDK extrinsic hash/nonce, and keeps the claim until the
+operator reconciles chain evidence. Validator startup changes an interrupted
+`dispatching` attempt to `uncertain`; the reconciliation CLI itself never does.
+Hash the private evidence file, then resolve
+the exact attempt with either `submitted` or `not_broadcast`:
+
+```bash
+cortex validator-reconcile \
+  --state-db /var/lib/base/validator.sqlite3 \
+  --netuid 100 --epoch 25203 \
+  --digest <bundle-digest> --attempt-id <attempt-id> \
+  --result submitted --evidence-digest <sha256-of-private-evidence>
+```
+
+Only `not_broadcast` releases the epoch for a retry. Keep the underlying chain
+receipt or nonce query private; the journal stores its digest. Do not delete the
+database to force a retry.
+
+The peer listener exposes:
+
+| Route | Response |
+|-------|----------|
+| `GET /livez` | Process liveness for the local container healthcheck |
+| `GET /v1/consensus/root/{epoch}` | Signed observed root, or `404` |
+| `GET /v1/bundle/root/{root}` | Persisted binary bundle, or `404` |
+| `GET /v1/dissent/{epoch}` | Signed SCALE dissent records encoded as hex |
+| `POST /v1/attest/nonce` and `/v1/attest/submit` | `503`, `verified: false`; DCAP verification is not implemented |
+
+Consensus uses sr25519 signing context `base-sr25519-v1` and SCALE-encoded
+domain/payload vectors. Exact domains are `base-root-v1`, `base-dissent-v1`,
+`base-bundle-v1`, `base-rawweight-v1` and `base-trustroot-v1`. Generic Substrate
+`wallet.sign()` signatures cannot replace these signatures.
+
+The Python metagraph projection uses chain-provided integer stakes. Validate
+interoperability before mixing it with historical validators that projected
+different metagraph data. This implementation does not claim DCAP attestation
+or demonstrated production payment merely because peer roots agree.
+
+See [troubleshooting](troubleshoot.md) for refusal outcomes.

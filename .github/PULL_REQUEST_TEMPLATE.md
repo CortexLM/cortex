@@ -1,27 +1,27 @@
-## Summary
+## Problem and behavior
 
-<!-- What does this PR change, and why? -->
+<!-- State the trigger, previous behavior, and resulting behavior. -->
+
+## Validation
+
+- [ ] Ruff format and lint
+- [ ] Mypy
+- [ ] Offline test suite
+- [ ] `scripts/check_repo.py --final`
+- [ ] Deployment contracts when deploy files changed
+- [ ] Wheel build when packaging/runtime files changed
+
+## Public contract
+
+- [ ] Miner documentation is updated, or the public API did not change
+- [ ] No challenge content, credential, floating production image, or invented digest was added
+- [ ] Frozen protocol specifications and `BASE_*`/domain compatibility remain intact
 
 ## Greptile
 
-Every PR is reviewed by Greptile before merge. Config: `.greptile/`.
-
-- [ ] Greptile has reviewed this PR; findings are fixed or answered
+- [ ] Greptile reviewed this PR and findings are resolved or answered
 - [ ] If the bot was silent, I commented `@greptileai review`
-
-## Test plan
-
-- [ ] `cargo test --workspace` (or note the subset and why)
-- [ ] `cargo fmt --all -- --check`
-- [ ] Clippy / deny / xtask gates if this PR touches crates they cover
 
 ## Risk
 
-<!-- Deploy, miner CVM measurement, signature domain, or emission impact. -->
-
-## Naming
-
-I did **not** rename `BASE_*` environment variables, deployed host paths
-(`/opt/base`, `/run/base`, …), GHCR `baseintelligence/base` package names, or
-`base-*-v1` cryptographic domain tags, unless this PR’s purpose is a coordinated
-cutover documented in `docs/NAMING.md`.
+<!-- Note emission, signature, VM isolation, migration, and rollback impact. -->

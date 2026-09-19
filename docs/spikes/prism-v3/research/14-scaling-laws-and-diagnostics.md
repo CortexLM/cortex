@@ -667,4 +667,3 @@ re-measured against this worktree and is now asserted in
 | `calc6.py` | **FLOP-matched G2 anchor** (§ 4.4) — log-FLOP interpolation between Cerebras-111M/256M, plus the constant-zero normalization demonstration |
 
 Assumptions were set at the top of each script and are restated inline in the sections above: 5090 dense bf16 = 209.5e12 FLOP/s; `C = 6ND`; Chinchilla E/A/B/α/β where used, with the caveat in § 2.3.
-

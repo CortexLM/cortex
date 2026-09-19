@@ -1,29 +1,9 @@
 # Support
 
-## How to get help
+- Software bugs: use the GitHub bug issue template.
+- Feature and documentation changes: use the feature issue template.
+- Miner questions: start in [docs/external-miner/](docs/external-miner/).
+- Operator deployment: read [deploy/README.md](deploy/README.md).
+- Vulnerabilities: follow [SECURITY.md](SECURITY.md) and report privately.
 
-| Kind | Where |
-|------|--------|
-| Bug in the network software | [GitHub issue — bug](https://github.com/CortexLM/cortex/issues/new?template=bug.yml) |
-| Feature or docs change | [GitHub issue — feature](https://github.com/CortexLM/cortex/issues/new?template=feature.yml) |
-| Miner submit / scoring questions | [docs/external-miner/](docs/external-miner/) and the public miner repos linked there |
-| Operator deploy | [deploy/README.md](deploy/README.md), [docs/runbooks/](docs/runbooks/) |
-| Security | [SECURITY.md](SECURITY.md) — private vulnerability reporting only |
-
-GitHub **Discussions are disabled** on this repository. Use issues.
-
-There is no public support email and no Slack/Discord operated from this
-repo. Mentions of maintainers go through GitHub and
-[CODEOWNERS](CODEOWNERS).
-
-## What this repo is (and is not)
-
-- **Is:** the implementation of Cortex's autonomous research network: gateway,
-  validators, Bounty and Proof services, research evaluation, and deployment tools.
-- **Start here:** [overview](docs/OVERVIEW.md) for the purpose;
-  [implementation status](docs/COMPLETENESS.md) for current limits.
-- **Is not:** a miner SDK rewrite, a protocol fork, or a live Relearn /
-  Design / Prism product.
-
-If you are about to rename `BASE_*` or a `base-*-v1` domain tag, stop and
-read [docs/NAMING.md](docs/NAMING.md).
+GitHub Discussions and a public support chat are not operated from this repository.
