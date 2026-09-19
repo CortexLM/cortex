@@ -26,7 +26,10 @@ RUN uv export --quiet --locked --no-dev --extra chain --no-emit-project --output
 
 # Export this stage as an ext4 rootfs; it is never the master runtime.
 FROM ${PYTHON_IMAGE} AS guest
+# Security updates that landed after the base digest was pinned; the publish
+# workflow refuses any fixable high or critical finding.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends ca-certificates libsodium23 \
        libseccomp2 bubblewrap util-linux iproute2 tini \
     && rm -rf /var/lib/apt/lists/* \
@@ -40,6 +43,7 @@ ENTRYPOINT ["/sbin/init"]
 
 FROM ${PYTHON_IMAGE} AS runtime
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends ca-certificates libsodium23 openssh-client \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 65532 cortex \
