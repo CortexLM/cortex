@@ -984,7 +984,11 @@ def main() -> None:
             parser.error("--config requires --role; --vm-host-config forbids it")
     except ValueError as error:
         raise SystemExit(f"Deployment check failed: {error}") from None
-    except (OSError, subprocess.CalledProcessError) as error:
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or "").strip().splitlines()
+        tail = f": {detail[-1]}" if detail else ""
+        raise SystemExit(f"Deployment check failed: CalledProcessError{tail}") from None
+    except OSError as error:
         raise SystemExit(f"Deployment check failed: {type(error).__name__}") from None
 
 

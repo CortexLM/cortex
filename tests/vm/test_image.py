@@ -166,4 +166,18 @@ def test_inode_ctime_normalization_makes_ext4_bytes_reproducible(tmp_path):
             environment=environment,
         )
 
-    assert digest(images[0]) == digest(images[1])
+    if digest(images[0]) != digest(images[1]):
+        dumps = []
+        for image in images:
+            dumps.append(
+                subprocess.run(
+                    ["debugfs", "-R", "stat <2>", str(image)],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                ).stdout
+            )
+        raise AssertionError(
+            "ext4 bytes differ after ctime normalization\n" + "\n---\n".join(dumps)
+        )
