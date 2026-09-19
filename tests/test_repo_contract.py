@@ -59,13 +59,15 @@ def test_trust_root_rejects_emission_drift_or_extra_products(tmp_path, mutation)
     assert len(CHECK["check_trust_roots"](tmp_path)) == 1
 
 
-def test_public_api_must_be_an_actual_route_not_a_comment_or_mapping_access():
+@pytest.mark.parametrize("method", ["get", "post"])
+@pytest.mark.parametrize("path_argument", ['"/v1/status"', 'path="/v1/status"'])
+def test_public_api_must_be_an_actual_route_not_a_comment_or_mapping_access(method, path_argument):
     source = (
         '# @router.post("/v1/submissions")\n'
         'mapping.get("/v1/proof/topics")\n'
-        '@router.get("/v1/status")\nasync def status(): return {}\n'
+        f"@router.{method}({path_argument})\nasync def status(): return {{}}\n"
     )
-    assert CHECK["declared_routes"](source) == {("get", "/v1/status")}
+    assert CHECK["declared_routes"](source) == {(method, "/v1/status")}
 
 
 def test_miner_contract_detects_removed_route_and_undocumented_nonce(tmp_path):

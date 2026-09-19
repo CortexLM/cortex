@@ -181,12 +181,15 @@ def declared_routes(source: str) -> set[tuple[str, str]]:
                 continue
             if node.func.attr not in {"get", "post", "put", "patch", "delete", "head", "options"}:
                 continue
-            if (
-                node.args
-                and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)
-            ):
-                routes.add((node.func.attr, node.args[0].value))
+            path = (
+                node.args[0]
+                if node.args
+                else next(
+                    (keyword.value for keyword in node.keywords if keyword.arg == "path"), None
+                )
+            )
+            if isinstance(path, ast.Constant) and isinstance(path.value, str):
+                routes.add((node.func.attr, path.value))
     return routes
 
 
