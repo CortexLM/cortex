@@ -906,7 +906,10 @@ def _default_sources(config: dict, role: str) -> None:
             for item in env_files
         ]
         if resolved != [(ROOT / "deploy/env/master.env").resolve()]:
-            raise ValueError("master default env file resolves outside the repository deploy tree")
+            raise ValueError(
+                "master default env file resolves outside the repository deploy tree: "
+                f"{env_files!r}"
+            )
     else:
         expected["/run/wallets"] = ROOT / "deploy/secrets/wallets"
     for target, source in expected.items():
