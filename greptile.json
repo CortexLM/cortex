@@ -1,0 +1,4 @@
+{
+  "triggerOnDrafts": true,
+  "autoReview": ["open", "push"]
+}

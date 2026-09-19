@@ -6,6 +6,8 @@ from enum import IntEnum
 from .scale import ProtocolError, Reader, byte_vec, fixed, uint, vector
 
 LIVE_SHARES = ((b"bounty", 2000), (b"proof", 8000))
+PROPORTIONAL_SHARES = ((b"bounty", 3000), (b"proof", 7000))
+BOUNTY_FULL_SHARE_REPORTS = 10
 
 
 class NoScoreReason(IntEnum):
@@ -155,13 +157,20 @@ class TrustRoot:
     def shares(self) -> tuple[tuple[bytes, int], ...]:
         return tuple((entry.id, entry.emission_share_bps) for entry in self.challenges)
 
+    @property
+    def algorithm_version(self) -> int:
+        self.validate()
+        return 2 if self.shares == PROPORTIONAL_SHARES else 1
+
     def challenges_body(self) -> bytes:
         self.validate()
         return vector(self.challenges, ChallengeEntry.encode)
 
     def validate(self) -> None:
-        if self.shares != LIVE_SHARES:
-            raise ProtocolError("live shares must be bounty=2000, proof=8000")
+        if self.shares not in (LIVE_SHARES, PROPORTIONAL_SHARES):
+            raise ProtocolError("shares must be bounty/proof=2000/8000 or 3000/7000")
+        if self.shares == PROPORTIONAL_SHARES and self.challenges_version < 2:
+            raise ProtocolError("proportional shares require challenges version >= 2")
         fixed(self.measurements_digest, 32)
         fixed(self.gateway_hotkey, 32)
         uint(self.challenges_version, 4)

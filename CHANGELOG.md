@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Owner-activated algorithm 2: each valid Bounty report earns one point, all
+  authors share proportionally, and ten valid reports unlock its full 30% of
+  emission. Proof retains 70%; unused Bounty mass burns to UID0. The legacy
+  signed 20/80 profile, algorithm 1 and historical sealed bytes remain intact.
+  Activation requires coordinated gateway/validator upgrades and an offline
+  owner signature over the new profile and epoch.
 - Bounty-only launch mode with a revision-pinned, fully paginated CortexLM
   backend feed, bounded public writes and readiness checks that fail closed.
 - Validator production preflight, resilient bounded master/validator Bittensor RPC failover and

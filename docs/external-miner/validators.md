@@ -5,7 +5,16 @@
 Python validators independently verify gateway bundles, compare authenticated
 peer roots and submit weights on Bittensor. They never run Bounty or Proof
 evaluation, rent GPUs or receive miner provider credentials. The only live
-challenge shares are `bounty` 2000 bps and `proof` 8000 bps.
+challenge shares are `bounty` 3000 bps and `proof` 7000 bps under algorithm 2.
+The legacy 2000/8000 owner profile retains algorithm 1 until
+[activation](../how-to/trust-root.md#activate-proportional-bounty).
+
+Sealed `GET /v1/weights/latest` responses expose `algorithm_version` from the
+signed bundle. `emission_shares` contains the configured ceilings; each
+`source_challenges[].emission_percent` reflects its allocated share, including
+the ten-report Bounty ramp under algorithm 2. Author allocations to UID0 or
+unmapped hotkeys still burn. Validators always recompute from signed leaves;
+they never trust these display fields as consensus inputs.
 
 ## Prepare local trust and identity
 
@@ -121,8 +130,10 @@ a reorg or a changed/unsealed latest response prevents submission.
 | A challenge has invalid leaf signatures, wrong leaf epoch or incomplete participants | Quarantine that challenge; submit only if surviving signed mass is at least 5000 bps |
 | Structural failure, unknown challenge, invalid Merkle root or peer disagreement | Refuse |
 
-With the fixed split, quarantining Bounty can retain Proof's 8000 bps;
-quarantining Proof leaves only 2000 bps and cannot be submitted. Valid
+Under algorithm 2, quarantining Bounty retains Proof's absolute 7000 bps
+and burns Bounty's 3000 bps. Quarantining Proof leaves only 3000 bps and
+cannot be submitted. No quarantined share is reassigned. Legacy algorithm 1
+keeps its original 5000-bps gate and survivor renormalization. Valid
 `NoScore(ChallengeInternal)` leaves from an unavailable scorer still cover the
 expected participants and are not themselves a consensus fault.
 

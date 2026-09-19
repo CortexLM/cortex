@@ -134,7 +134,8 @@ class GatewayService:
         body = bundle.body
         if (
             body.protocol_version != 1
-            or body.algorithm_version != 1
+            or body.algorithm_version != self.trust.algorithm_version
+            or body.epoch < self.trust.introduced_epoch
             or body.netuid != self.netuid
             or body.gateway_hotkey != self.trust.gateway_hotkey
             or body.emission_shares != self.trust.shares
@@ -144,7 +145,12 @@ class GatewayService:
             raise ProtocolError("invalid stored seal")
         if merkle_root(leaf.encode() for leaf in body.leaves) != body.merkle_root:
             raise ProtocolError("invalid stored leaf root")
-        final = aggregate_leaves(body.leaves, body.emission_shares, body.uid_map)
+        final = aggregate_leaves(
+            body.leaves,
+            body.emission_shares,
+            body.uid_map,
+            algorithm_version=body.algorithm_version,
+        )
         if final.final_vector != body.final_vector:
             raise ProtocolError("invalid stored final vector")
         return bundle

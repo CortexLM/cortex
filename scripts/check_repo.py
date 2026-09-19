@@ -24,8 +24,9 @@ FROZEN_SPECS = {
     "docs/PRISM.md": "bce5789ac64cbc75e62ac78daa8452b8ae3a5eaff0b0134afb6f9ff9dd372925",
 }
 SHARES = {"bounty": 2000, "proof": 8000}
+PROPORTIONAL_SHARES = {"bounty": 3000, "proof": 7000}
 DOC_CONTRACTS = {
-    "docs/external-miner/README.md": ("bounty", "proof", "2000", "8000"),
+    "docs/external-miner/README.md": ("bounty", "proof", "3000", "7000"),
     "docs/external-miner/bounty.md": (
         "/v1/pair",
         "/v1/reports",
@@ -54,8 +55,8 @@ DOC_CONTRACTS = {
         "/v1/weights/latest",
         "sealed",
         "burn_outcome",
-        "2000",
-        "8000",
+        "3000",
+        "7000",
     ),
 }
 PUBLIC_ROUTES = {
@@ -164,10 +165,15 @@ def check_trust_roots(root: Path) -> list[str]:
                 if not re.fullmatch(r"[0-9a-f]{64}", row["public_key"]):
                     raise ValueError("invalid challenge public key")
                 actual[identifier] = share
-            if actual != SHARES:
-                raise ValueError("only bounty=2000 and proof=8000 are permitted")
+            version = document["version"]
+            if type(version) is not int or version < 1:
+                raise ValueError("invalid trust document version")
+            if actual != SHARES and not (actual == PROPORTIONAL_SHARES and version >= 2):
+                raise ValueError("unsupported shares or activation version")
         except (OSError, UnicodeError, ValueError, KeyError, TypeError):
-            failures.append(f"{name}: trust root must contain only bounty=2000 and proof=8000")
+            failures.append(
+                f"{name}: expected bounty/proof=2000/8000 or version >=2 with 3000/7000"
+            )
     return failures
 
 

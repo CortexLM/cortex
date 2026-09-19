@@ -205,6 +205,7 @@ async def test_sealed_burn_exposes_the_public_weights_contract(network):
     bundle = Bundle.decode(network.service.bundle_bytes(12))
     required = {
         "protocol_version",
+        "algorithm_version",
         "vector_id",
         "vector_digest",
         "epoch",
@@ -236,6 +237,7 @@ async def test_sealed_burn_exposes_the_public_weights_contract(network):
 
     assert set(latest) == required
     assert latest["protocol_version"] == "1.0"
+    assert latest["algorithm_version"] == 1
     assert UUID(latest["vector_id"]).version == 5
     assert latest["vector_digest"] == sha256(bundle.body.encode()).hexdigest()
     assert latest["epoch"] == 12 and latest["revision"] == 1
@@ -519,6 +521,47 @@ async def test_seal_and_raw_rows_survive_restart_byte_identically(network):
     assert restarted_again.bundle_bytes(12) == sealed.encode()
     assert restarted_again.latest() == network.service.latest()
     third.close()
+
+
+async def test_profile_rotation_preserves_archives_and_waits_for_new_sealed_epoch(network):
+    await intake(network)
+    assert (await seal(network)).status_code == 200
+    original = network.service.bundle_bytes(12)
+    trust = replace(
+        network.trust,
+        challenges=tuple(
+            replace(entry, emission_share_bps=3000 if entry.id == b"bounty" else 7000)
+            for entry in network.trust.challenges
+        ),
+        challenges_version=2,
+        introduced_epoch=13,
+    )
+    network.service.trust_loader = lambda epoch: trust
+    network.service.refresh_trust(13)
+    assert network.service.latest()["sealed"] is False
+    assert (await network.client.get("/v1/bundle/12")).content == original
+    validator = Validator(
+        gateway_url="https://master.invalid",
+        netuid=541,
+        trust=trust,
+        chain=network.chain,
+        journal=network.journal,
+        http=network.client,
+    )
+    assert (await validator.run_once()).outcome == "unsealed"
+    assert network.chain.submissions == []
+    await intake(network, epoch=13)
+    assert (await seal(network, epoch=13)).status_code == 200
+    assert network.service.latest()["algorithm_version"] == 2
+    assert (await validator.run_once()).outcome == "submitted"
+    second = GatewayStore(network.db_path)
+    try:
+        restarted = GatewayService(store=second, **{**network.settings, "trust": trust})
+        assert restarted.latest()["sealed"] is True
+        assert restarted.latest()["algorithm_version"] == 2
+        assert restarted.bundle_bytes(12) == original
+    finally:
+        second.close()
 
 
 async def test_corrupt_latest_seal_burns_without_falling_back_to_older_seal(network):

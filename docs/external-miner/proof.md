@@ -2,8 +2,8 @@
 
 # Proof miner guide
 
-Proof (`proof`, 8000 bps) rewards reproducible submissions against signed,
-operator-published research topics. Install the [Python CLI](README.md) and use
+Proof (`proof`, 7000 bps under algorithm 2) rewards reproducible submissions
+against signed, operator-published research topics. Install the [Python CLI](README.md) and use
 your Bittensor hotkey. The operator supplies the gateway URL and an
 independently pinned Proof public key.
 
@@ -240,7 +240,9 @@ mass to the best eligible result, sharing exact ties. `discovery` divides a
 pass-floor pool among eligible miners and a novelty pool according to new
 improvement; duplicates receive no novelty pool. A miner's Proof score is the
 **sum of per-topic masses**, not a mean of binary passes. The fixed subnet
-split remains Bounty 2000 / Proof 8000 bps.
+split is Bounty 3000 / Proof 7000 bps under algorithm 2. Legacy owner-signed
+2000/8000 deployments retain algorithm 1 until
+[activation](../how-to/trust-root.md#activate-proportional-bounty).
 
 Actual payment additionally needs signed leaves, a valid gateway seal and
 validator submission on Bittensor. See [validators](validators.md) and

@@ -9,7 +9,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from .models import Leaf, Score
+from .models import BOUNTY_FULL_SHARE_REPORTS, PROPORTIONAL_SHARES, Leaf, Score
 from .scale import ProtocolError, fixed, uint
 
 
@@ -114,8 +114,12 @@ def aggregate_leaves(
     *,
     algorithm_version: int = 1,
 ) -> FinalWeights:
-    if algorithm_version != 1:
+    if algorithm_version not in (1, 2):
         raise ProtocolError("unsupported algorithm version")
+    if algorithm_version == 2 and shares != PROPORTIONAL_SHARES:
+        raise ProtocolError("algorithm 2 requires proportional shares")
+    if algorithm_version == 1 and shares == PROPORTIONAL_SHARES:
+        raise ProtocolError("proportional shares require algorithm version 2")
     if len(dict(shares)) != len(shares) or sum(bps for _, bps in shares) != 10000:
         raise ProtocolError("emission shares must be unique and sum to 10000")
     if len(dict(uid_map)) != len(uid_map) or len({uid for _, uid in uid_map}) != len(uid_map):
@@ -135,5 +139,10 @@ def aggregate_leaves(
         uint(bps, 2)
         miners = scores.get(challenge, {})
         weights = {key.hex(): float(value) for key, value in sorted(miners.items()) if value > 0}
-        results.append(ChallengeWeights(challenge.hex(), bps / 100.0, weights))
+        emission_percent = bps / 100.0
+        if algorithm_version == 2 and challenge == b"bounty":
+            emission_percent *= (
+                min(sum(miners.values()), BOUNTY_FULL_SHARE_REPORTS) / BOUNTY_FULL_SHARE_REPORTS
+            )
+        results.append(ChallengeWeights(challenge.hex(), emission_percent, weights))
     return aggregate_challenge_weights(results, {key.hex(): uid for key, uid in sorted(uid_map)})

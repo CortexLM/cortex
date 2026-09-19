@@ -9,6 +9,7 @@ import time
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from test_master import FakeEpochChain, master_config
 from vm.test_research import MemoryCallback
 from vm.test_setup_agent import ExecutingHypervisor, SetupProvider
@@ -17,8 +18,8 @@ from cortex.bounty import PublicBackend
 from cortex.master import EpochState, build_master
 from cortex.miner import MinerClient
 from cortex.proof.backend import VmBackend
-from cortex.protocol import ChallengeEntry, NoScore, NoScoreReason, Score, TrustRoot
-from cortex.protocol.crypto import public_key
+from cortex.protocol import ChallengeEntry, MetagraphRow, NoScore, NoScoreReason, Score, TrustRoot
+from cortex.protocol.crypto import encode_hotkey, public_key
 from cortex.rlm.offer import InferenceOffer, sign_offer
 from cortex.rlm.provider import Completion
 from cortex.validator import SubmissionJournal, Validator
@@ -166,16 +167,34 @@ class BountyFeed:
         return httpx.Response(200, json=body)
 
 
-async def test_bounty_compatibility_intake_external_feed_seal_and_validator_dispatch(tmp_path):
+@pytest.mark.parametrize(
+    "version,counts,payouts",
+    [
+        (1, (3, 0), (0.2, 0)),
+        (2, (0, 0), (0, 0)),
+        (2, (1, 0), (0.03, 0)),
+        (2, (2, 3), (0.06, 0.09)),
+        (2, (4, 5), (0.12, 0.15)),
+        (2, (4, 6), (0.12, 0.18)),
+        (2, (8, 12), (0.12, 0.18)),
+    ],
+)
+async def test_bounty_intake_external_feed_seal_and_validator_dispatch(
+    tmp_path, version, counts, payouts
+):
     config = master_config(tmp_path)
     chain = FakeEpochChain()
+    second_key = public_key(bytes([22]) * 32)
+    chain.rows += (MetagraphRow(second_key, 2),)
+    bounty_share = 2000 if version == 1 else 3000
     trust = TrustRoot(
         (
-            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 2000),
-            ChallengeEntry(b"proof", public_key(bytes([2]) * 32), 8000),
+            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), bounty_share),
+            ChallengeEntry(b"proof", public_key(bytes([2]) * 32), 10000 - bounty_share),
         ),
         hashlib.sha256(b"\x00").digest(),
         public_key(bytes([7]) * 32),
+        challenges_version=version,
     )
     feed = BountyFeed()
     runtime = await build_master(
@@ -244,20 +263,29 @@ async def test_bounty_compatibility_intake_external_feed_seal_and_validator_disp
                 ),
             )
             assert local_report["state"] == "pending"
-            feed.leaderboard = [{"hotkey": miner.hotkey, "valid": 3}]
+            authors = (miner.hotkey, encode_hotkey(second_key))
+            feed.leaderboard = sorted(
+                [
+                    {"hotkey": author, "valid": count}
+                    for author, count in zip(authors, counts, strict=True)
+                    if count
+                ],
+                key=lambda row: (-row["valid"], row["hotkey"]),
+            )
             feed.reports = [
                 {
-                    "id": f"backend-{index}",
-                    "hotkey": miner.hotkey,
+                    "id": f"backend-{author}-{index}",
+                    "hotkey": author,
                     "status": "valid",
-                    "severity": "critical",
+                    "severity": "critical" if version == 1 else "trivial",
                     "problem_found": "Unauthorized configuration mutation",
                     "adjudicator": "fixture-adjudicator",
                     "justification": "Reproduced from a clean unauthenticated client.",
                     "adjudicated_at": "2026-09-18T01:00:00Z",
                     "created_at": "2026-09-18T00:00:00Z",
                 }
-                for index in range(3)
+                for author, count in zip(authors, counts, strict=True)
+                for index in range(count)
             ]
             feed.revision = "2"
 
@@ -270,7 +298,11 @@ async def test_bounty_compatibility_intake_external_feed_seal_and_validator_disp
                 leaf
                 for leaf in leaves
                 if leaf.challenge_id == b"bounty" and leaf.miner_hotkey == miner_key
-            ).score == Score(1_000_000)
+            ).score == (
+                Score(1_000_000 if version == 1 else counts[0])
+                if counts[0]
+                else NoScore(NoScoreReason.NOT_ATTEMPTED)
+            )
             assert all(
                 leaf.score == NoScore(NoScoreReason.CHALLENGE_INTERNAL)
                 for leaf in leaves
@@ -278,7 +310,18 @@ async def test_bounty_compatibility_intake_external_feed_seal_and_validator_disp
             )
             latest = (await http.get("/v1/weights/latest")).json()
             assert latest["sealed"] is True
-            assert latest["final_vector"] == [[0, 52428], [1, 13107]]
+            assert latest["algorithm_version"] == version
+            assert latest["source_challenges"][0]["emission_percent"] == pytest.approx(
+                20 if version == 1 else sum(payouts) * 100
+            )
+            weights = dict(zip(latest["uids"], latest["weights"], strict=True))
+            assert weights[0] == pytest.approx(1 - sum(payouts))
+            assert weights.get(1, 0) == pytest.approx(payouts[0])
+            assert weights.get(2, 0) == pytest.approx(payouts[1])
+            status = (await http.get("/challenge/bounty/v1/status")).json()
+            assert status["scoring_version"] == version
+            if version == 2:
+                assert status["scoring"]["paid_on"] == ["valid_report_count"]
 
             preflight = Validator(
                 gateway_url="https://master.fixture",
@@ -301,7 +344,7 @@ async def test_bounty_compatibility_intake_external_feed_seal_and_validator_disp
                 http=http,
             )
             assert (await validator.run_once()).outcome == "submitted"
-            assert chain.submissions == [((0, 52428), (1, 13107))]
+            assert chain.submissions == [tuple(tuple(pair) for pair in latest["final_vector"])]
     finally:
         journal.close()
         await runtime.close()
