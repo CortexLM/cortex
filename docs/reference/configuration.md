@@ -40,9 +40,11 @@ credential vaults must be backed by durable private storage.
 For the Bounty-only launch, set `BOUNTY_BACKEND_PUBLIC_URL` to the HTTPS
 `CortexLM/backend` origin and leave `PROOF_VM_ORCHESTRATOR_URL` empty. The Proof
 seed remains required because every completed epoch still needs signed Proof
-absence leaves. The owner-signed trust root remains exactly `bounty = 2000` and
-`proof = 8000`; the unavailable Proof share burns and is never reassigned to
-Bounty.
+absence leaves. The legacy owner-signed trust root is `bounty = 2000` and
+`proof = 8000`; algorithm 2 requires a signed `bounty = 3000`, `proof = 7000`
+profile with challenge-document version >=2 (see
+[activation](../how-to/trust-root.md#activate-proportional-bounty)). The unavailable
+Proof share burns and is never reassigned to Bounty.
 
 One resource shape applies to the persistent topic VM and each fresh experiment
 VM. The examples explicitly request 1 vCPU, 1024 MiB RAM and 16384 MiB disk;

@@ -221,9 +221,23 @@ class PublicSnapshot(FeedModel):
         ):
             raise BackendUnavailable("backend public leaderboard and reports do not agree")
 
-    def score(self, expected: list[str]) -> dict[str, BountyScore]:
+    def score(self, expected: list[str], *, scoring_version: int = 1) -> dict[str, BountyScore]:
         self.validate_publication()
         expected_keys = {decode_hotkey(raw).hex() for raw in expected}
+        if scoring_version == 2:
+            counts = Counter(
+                decode_hotkey(report.hotkey).hex()
+                for report in self.reports
+                if report.status == "valid"
+            )
+            return {
+                key: BountyScore(value=counts[key])
+                if counts[key]
+                else BountyScore(reason="NotAttempted")
+                for key in sorted(expected_keys)
+            }
+        if scoring_version != 1:
+            raise BackendUnavailable("unsupported Bounty scoring version")
         holdouts: dict[str, Holdout] = {}
         for report in self.reports:
             hotkey = decode_hotkey(report.hotkey).hex()

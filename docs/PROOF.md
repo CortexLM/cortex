@@ -1,6 +1,7 @@
 # Proof operator reference
 
-Proof is 80% of Cortex emission. An operator supplies a research objective; a
+Proof is 70% of Cortex emission under algorithm 2 (80% under the legacy
+owner-signed profile). An operator supplies a research objective; a
 topic-scoped recursive language-model agent installs its environment, proposes
 measurable rules, creates private evaluation material, measures a baseline and
 publishes miner documentation. Miners submit code and artifacts against the
@@ -287,7 +288,8 @@ Proof score is the sum of its topic masses.
 
 When no topic is open, no baseline is sealed or scoring infrastructure is
 unavailable, Proof emits `NoScore(ChallengeInternal)` for the expected set. Its
-8,000 basis points burn to UID 0 while preserving complete bundle coverage.
+7,000 basis points (8,000 under algorithm 1) burn to UID 0 while preserving
+complete bundle coverage.
 
 ## Readiness and verification
 

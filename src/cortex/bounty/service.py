@@ -47,10 +47,12 @@ class BountyService:
         admin_tokens: Sequence[str] = (),
         admin_hashes: Sequence[str] = (),
         clock: Callable[[], float] = time.time,
+        scoring_version: Callable[[], int] = lambda: 1,
     ):
         if len(session_secret) < 32:
             raise ValueError("Bounty session secret must contain at least 32 bytes")
         self.store, self.backend, self.clock = store, backend, clock
+        self.scoring_version = scoring_version
         self._secret = session_secret
         self._admin_hashes = tuple(admin_hashes) + tuple(
             hashlib.sha256(t.encode()).hexdigest() for t in admin_tokens if t
@@ -144,9 +146,10 @@ class BountyService:
     async def score(self, expected: list[str]) -> dict[str, BountyScore]:
         """Produce exact-E outcomes, including ChallengeInternal on feed failure."""
         keys = sorted({decode_hotkey(raw).hex() for raw in expected})
+        version = self.scoring_version()
         try:
             snapshot = await self.backend.fetch()
-            return snapshot.score(keys)
+            return snapshot.score(keys, scoring_version=version)
         except BackendUnavailable:
             return {key: BountyScore(reason="ChallengeInternal") for key in keys}
 

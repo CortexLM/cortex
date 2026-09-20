@@ -1,7 +1,10 @@
 # Bounty operator reference
 
 Bounty rewards useful vulnerability reports about the CortexLM backend. It is
-20% of subnet emission. Initial production pairing, intake and adjudication live
+up to 30% of subnet emission after
+[algorithm 2 activation](how-to/trust-root.md#activate-proportional-bounty).
+The legacy owner-signed profile retains its 20% allocation and algorithm 1.
+Initial production pairing, intake and adjudication live
 in CortexLM/backend. The Python subnet retains the compatibility intake below
 and emits signed leaves, but does not export those local rows; the external
 CortexLM/backend public feed is the sole scoring source.
@@ -100,22 +103,37 @@ published report is treated as an unavailable scorer, not as a zero score.
 
 ## Score
 
-Scoring uses integer arithmetic only. A contender needs at least three decided
-valid/malicious reports, nonnegative net credit, no unpriced valid report, at
-least 60% precision, no more than 50% duplicate/already-fixed triage noise, and
-strictly better precision than the current champion. Severity weights are 6.25%,
-25%, 50% and 100% for trivial through critical.
+Algorithm 2 signs each expected hotkey's exact count of `valid` reports as its
+raw score. One valid report is one point regardless of severity. There is no
+champion, precision gate, minimum author count or triage-noise gate. Invalid,
+duplicate and already-fixed reports contribute zero points. Severity remains
+required evidence for a valid publication, with no effect on its point value.
 
-An eligible champion receives:
+Let `n_i` be author i's valid count and `N = sum(n_i)` over the epoch's expected
+participants, selected by the owner-signed policy and sealed metagraph:
 
 ```text
-1_000_000 * precision_bps * average_severity_bps / 100_000_000
+Bounty payout = 0.30 * min(N / 10, 1)
+author i payout = 0.30 * n_i / max(10, N)
 ```
 
-Only one hotkey is champion for the snapshot. A miner with negative net credit
-gets `InvalidResponse`; other expected hotkeys get `NotAttempted`. Feed failure
-produces `ChallengeInternal` for every expected participant, so the Bounty mass
-burns to UID 0 while the bundle remains complete.
+Five valid reports distribute 15% of subnet emission; ten or more distribute
+30%, proportionally across authors. The remaining Bounty mass burns to UID0;
+it never increases Proof's 70%. UID0 and unmapped author allocations also burn
+without increasing other authors' allocations. Existing owner/permit submission
+constraints are unchanged.
+
+Counts use the complete cumulative report history in one pinned external
+publication, with no epoch reset or new rolling window. Only expected hotkeys
+enter `N`; historical authors outside the metagraph/policy are excluded.
+Validated report IDs and rooted duplicate chains prevent duplicate credit.
+An author with zero valid reports gets `NotAttempted`. Feed failure produces
+`ChallengeInternal` for every expected participant and burns the Bounty share.
+
+The legacy 2,000/8,000 owner profile retains algorithm 1, including its champion,
+precision/severity scoring and signed encodings. A 3,000/7,000 owner profile
+requires challenge-document version >=2 and algorithm 2. An algorithm 1 body
+under that profile is rejected, even with a valid gateway signature.
 
 ## Operational checks
 

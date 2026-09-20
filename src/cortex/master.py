@@ -536,6 +536,7 @@ async def build_master(
             bounty_backend or PublicBackend(config.bounty_backend_url),
             session_secret=read_seed(config.bounty_session_secret_file),
             token_file=config.operator_token_file,
+            scoring_version=lambda: gateway.trust.algorithm_version,
         )
         proof = _EpochTrackedProof(
             store=proof_store,

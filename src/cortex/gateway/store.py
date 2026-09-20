@@ -1,16 +1,26 @@
 """SQLite durability for raw leaves and immutable epoch seals."""
 
+import json
 import sqlite3
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
 from cortex.errors import ServiceError
-from cortex.protocol import Bundle, Leaf, NoScore, ProtocolError, Score
+from cortex.protocol import (
+    Bundle,
+    ChallengeEntry,
+    Leaf,
+    NoScore,
+    ParticipantPolicy,
+    ProtocolError,
+    Score,
+    TrustRoot,
+)
 from cortex.protocol.scale import Reader, uint
 from cortex.state import secure_sqlite_path
 
@@ -81,6 +91,9 @@ class GatewayStore:
             CREATE TABLE IF NOT EXISTS gateway_bundle_roots (
                 root BLOB PRIMARY KEY, epoch TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS gateway_trust_profiles (
+                digest BLOB PRIMARY KEY, profile TEXT NOT NULL
+            );
         """)
         for epoch, encoded in self._connection.execute(
             "SELECT epoch,bundle_scale FROM gateway_bundles "
@@ -118,11 +131,13 @@ class GatewayStore:
             if row[0] != str(netuid):
                 raise ServiceError(503, "gateway database belongs to another subnet")
 
-    def trust_versions(self, challenges: int, measurements: int) -> None:
+    def accept_trust(self, trust: TrustRoot) -> None:
+        trust.validate()
+        profile = json.dumps(asdict(trust), default=bytes.hex, sort_keys=True)
         with self._transaction() as connection:
             for name, value in (
-                ("challenges_version", challenges),
-                ("measurements_version", measurements),
+                ("challenges_version", trust.challenges_version),
+                ("measurements_version", trust.measurements_version),
             ):
                 row = connection.execute(
                     "SELECT value FROM gateway_metadata WHERE name=?", (name,)
@@ -134,6 +149,44 @@ class GatewayStore:
                     "ON CONFLICT(name) DO UPDATE SET value=excluded.value",
                     (name, str(value)),
                 )
+            connection.execute(
+                "INSERT OR IGNORE INTO gateway_trust_profiles VALUES (?,?)",
+                (sha256(profile.encode()).digest(), profile),
+            )
+
+    def trust_profiles(self) -> tuple[TrustRoot, ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT digest,profile FROM gateway_trust_profiles"
+            ).fetchall()
+        profiles = []
+        try:
+            for digest, profile in rows:
+                if not isinstance(profile, str) or sha256(profile.encode()).digest() != digest:
+                    raise ProtocolError("corrupt stored trust profile")
+                values = json.loads(profile)
+                if not isinstance(values, dict):
+                    raise ProtocolError("corrupt stored trust profile")
+                challenges = []
+                for entry in values.pop("challenges"):
+                    policy = entry["policy"]
+                    policy["hotkeys"] = tuple(bytes.fromhex(key) for key in policy["hotkeys"])
+                    challenges.append(
+                        ChallengeEntry(
+                            bytes.fromhex(entry["id"]),
+                            bytes.fromhex(entry["public_key"]),
+                            entry["emission_share_bps"],
+                            ParticipantPolicy(**policy),
+                        )
+                    )
+                values["measurements_digest"] = bytes.fromhex(values["measurements_digest"])
+                values["gateway_hotkey"] = bytes.fromhex(values["gateway_hotkey"])
+                trust = TrustRoot(challenges=tuple(challenges), **values)
+                trust.validate()
+                profiles.append(trust)
+        except (KeyError, TypeError, ValueError) as error:
+            raise ProtocolError("corrupt stored trust profile") from error
+        return tuple(profiles)
 
     def put_leaf(self, leaf: Leaf) -> dict:
         encoded = leaf.encode()

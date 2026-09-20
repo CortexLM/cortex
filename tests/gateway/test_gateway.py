@@ -205,6 +205,7 @@ async def test_sealed_burn_exposes_the_public_weights_contract(network):
     bundle = Bundle.decode(network.service.bundle_bytes(12))
     required = {
         "protocol_version",
+        "algorithm_version",
         "vector_id",
         "vector_digest",
         "epoch",
@@ -236,6 +237,7 @@ async def test_sealed_burn_exposes_the_public_weights_contract(network):
 
     assert set(latest) == required
     assert latest["protocol_version"] == "1.0"
+    assert latest["algorithm_version"] == 1
     assert UUID(latest["vector_id"]).version == 5
     assert latest["vector_digest"] == sha256(bundle.body.encode()).hexdigest()
     assert latest["epoch"] == 12 and latest["revision"] == 1
@@ -521,6 +523,52 @@ async def test_seal_and_raw_rows_survive_restart_byte_identically(network):
     third.close()
 
 
+async def test_profile_rotation_preserves_archives_and_waits_for_new_sealed_epoch(network):
+    await intake(network)
+    assert (await seal(network)).status_code == 200
+    original = network.service.bundle_bytes(12)
+    original_root = Bundle.decode(original).body.merkle_root.hex()
+    trust = replace(
+        network.trust,
+        challenges=tuple(
+            replace(entry, emission_share_bps=3000 if entry.id == b"bounty" else 7000)
+            for entry in network.trust.challenges
+        ),
+        challenges_version=2,
+        introduced_epoch=13,
+    )
+    network.service.trust_loader = lambda epoch: trust
+    network.service.refresh_trust(13)
+    assert network.service.latest()["sealed"] is False
+    assert (await network.client.get("/v1/bundle/12")).content == original
+    archived = await network.client.get(f"/v1/bundle/root/{original_root}")
+    assert archived.status_code == 200
+    assert archived.content == original
+    validator = Validator(
+        gateway_url="https://master.invalid",
+        netuid=541,
+        trust=trust,
+        chain=network.chain,
+        journal=network.journal,
+        http=network.client,
+    )
+    assert (await validator.run_once()).outcome == "unsealed"
+    assert network.chain.submissions == []
+    await intake(network, epoch=13)
+    assert (await seal(network, epoch=13)).status_code == 200
+    assert network.service.latest()["algorithm_version"] == 2
+    assert (await validator.run_once()).outcome == "submitted"
+    second = GatewayStore(network.db_path)
+    try:
+        restarted = GatewayService(store=second, **{**network.settings, "trust": trust})
+        assert restarted.latest()["sealed"] is True
+        assert restarted.latest()["algorithm_version"] == 2
+        assert restarted.bundle_bytes(12) == original
+        assert restarted.bundle_by_root(original_root) == original
+    finally:
+        second.close()
+
+
 async def test_corrupt_latest_seal_burns_without_falling_back_to_older_seal(network):
     for epoch in (12, 13):
         await intake(network, epoch=epoch)
@@ -570,10 +618,58 @@ async def test_corrupted_signature_in_latest_never_projects_as_a_sealed_vector(n
     await intake(network)
     assert (await seal(network)).status_code == 200
     raw = bytearray(network.service.bundle_bytes(12))
+    root = Bundle.decode(bytes(raw)).body.merkle_root.hex()
     raw[-1] ^= 1
     with sqlite3.connect(network.db_path) as connection:
         connection.execute("UPDATE gateway_bundles SET bundle_scale=?", (bytes(raw),))
     assert network.service.latest()["sealed"] is False
+    assert (await network.client.get(f"/v1/bundle/root/{root}")).status_code == 503
+
+
+@pytest.mark.parametrize("profile", [None, "null", "true", "3", '"text"', "[]", "{}", "{", b"{}"])
+async def test_historical_root_refuses_corrupt_or_missing_accepted_profile(network, profile):
+    await intake(network)
+    assert (await seal(network)).status_code == 200
+    root = network.service.latest()["merkle_root"]
+    with sqlite3.connect(network.db_path) as connection:
+        if profile is None:
+            connection.execute("DELETE FROM gateway_trust_profiles")
+        else:
+            raw = profile.encode() if isinstance(profile, str) else profile
+            connection.execute(
+                "UPDATE gateway_trust_profiles SET profile=?,digest=?",
+                (profile, sha256(raw).digest()),
+            )
+
+    response = await network.client.get(f"/v1/bundle/root/{root}")
+
+    assert response.status_code == 503
+
+
+async def test_historical_root_uses_accepted_challenge_keys_after_key_rotation(network):
+    await intake(network)
+    assert (await seal(network)).status_code == 200
+    original = network.service.bundle_bytes(12)
+    root = Bundle.decode(original).body.merkle_root.hex()
+    trust = replace(
+        network.trust,
+        challenges=tuple(
+            replace(entry, public_key=public_key(bytes([70 + index]) * 32))
+            for index, entry in enumerate(network.trust.challenges)
+        ),
+        challenges_version=2,
+        introduced_epoch=13,
+    )
+    network.service.trust_loader = lambda epoch: trust
+    network.service.refresh_trust(13)
+    second = GatewayStore(network.db_path)
+    try:
+        restarted = GatewayService(store=second, **{**network.settings, "trust": trust})
+        assert restarted.latest()["sealed"] is False
+        assert restarted.bundle_by_root(root) == original
+        assert restarted.trust == trust
+    finally:
+        second.close()
 
 
 async def test_duplicate_json_and_oversized_request_are_rejected_before_store(network):

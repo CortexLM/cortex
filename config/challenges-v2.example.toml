@@ -1,0 +1,17 @@
+# UNSIGNED activation template. Replace development public keys, choose the
+# next owner document version and activation epoch, then sign offline using
+# docs/how-to/trust-root.md. No production activation occurs from this file.
+version = 2
+introduced_epoch = "CHOOSE_ACTIVATION_EPOCH"
+
+[[challenges]]
+id = "bounty"
+public_key = "743688a1e1b2848b309205706b4dcae54bffe4233a5d7018053471e1dce45c21"
+emission_share_bps = 3000
+policy = "all_metagraph_hotkeys"
+
+[[challenges]]
+id = "proof"
+public_key = "3e7f70f09165e265ab89ab04a4fc91dc0531d54a100c538fb14c6f008421c375"
+emission_share_bps = 7000
+policy = "all_metagraph_hotkeys"

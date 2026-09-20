@@ -68,3 +68,50 @@ def test_no_score_does_not_erase_other_miner_scores():
     )
     result = aggregate_leaves(leaves, LIVE_SHARES, ((miners[0], 1), (miners[1], 2)))
     assert result.final_vector == ((0, 13107), (1, 52428))
+
+
+@pytest.mark.parametrize("reports", [0, 1, 5, 9, 10, 20])
+def test_v2_bounty_pays_proportionally_up_to_thirty_percent(reports):
+    miners = (bytes([1]) * 32, bytes([2]) * 32, bytes([3]) * 32)
+    counts = (reports // 2, reports - reports // 2)
+    leaves = tuple(
+        Leaf(b"bounty", key, 1, Score(count), bytes(64))
+        for key, count in zip(miners[:2], counts, strict=True)
+    ) + (Leaf(b"proof", miners[2], 1, Score(100), bytes(64)),)
+    result = aggregate_leaves(
+        leaves,
+        ((b"bounty", 3000), (b"proof", 7000)),
+        tuple((key, index + 1) for index, key in enumerate(miners)),
+        algorithm_version=2,
+    )
+    weights = dict(zip(result.uids, result.weights, strict=True))
+    assert weights[3] == pytest.approx(0.7)
+    assert weights.get(0, 0) == pytest.approx(0.3 * (1 - min(reports / 10, 1)))
+    for uid, count in enumerate(counts, 1):
+        assert weights.get(uid, 0) == pytest.approx(0.3 * count / max(10, reports))
+
+
+def test_v2_burns_uid0_and_unmapped_authors_without_transferring_their_mass():
+    miners = tuple(bytes([index]) * 32 for index in range(3))
+    result = aggregate_leaves(
+        tuple(Leaf(b"bounty", key, 1, Score(5), bytes(64)) for key in miners),
+        ((b"bounty", 3000), (b"proof", 7000)),
+        ((miners[0], 0), (miners[1], 1)),
+        algorithm_version=2,
+    )
+    assert result.weights == pytest.approx((0.9, 0.1))
+
+
+def test_v2_rejects_other_share_profiles():
+    with pytest.raises(ProtocolError, match="shares"):
+        aggregate_leaves((), LIVE_SHARES, (), algorithm_version=2)
+
+
+def test_proportional_profile_cannot_silently_use_default_legacy_algorithm():
+    miner = bytes([1]) * 32
+    with pytest.raises(ProtocolError, match="version 2"):
+        aggregate_leaves(
+            (Leaf(b"bounty", miner, 1, Score(1), bytes(64)),),
+            ((b"bounty", 3000), (b"proof", 7000)),
+            ((miner, 1),),
+        )

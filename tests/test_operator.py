@@ -4,6 +4,7 @@ import pytest
 
 from cortex.cli import main
 from cortex.operator import generate_key, sign_trust_document
+from cortex.protocol import ProtocolError
 from cortex.protocol.crypto import decode_hotkey, public_key
 from cortex.protocol.trust import load_trust_root
 from cortex.validator import SubmissionJournal
@@ -68,6 +69,34 @@ def test_key_generation_refuses_to_overwrite_operator_material(tmp_path):
         generate_key(seed_path, tmp_path / "other.pubkey")
 
     assert len(seed_path.read_bytes()) == 32
+
+
+def test_proportional_template_requires_an_explicit_activation_epoch_before_signing(tmp_path):
+    seed_path = tmp_path / "owner.seed"
+    generate_key(seed_path, tmp_path / "owner.pubkey")
+    template = Path(__file__).resolve().parents[1] / "config/challenges-v2.example.toml"
+    signature = tmp_path / "challenges.toml.sig"
+
+    with pytest.raises(ProtocolError):
+        sign_trust_document(
+            input_path=template,
+            kind="challenges",
+            seed_path=seed_path,
+            signature_path=signature,
+        )
+
+    assert not signature.exists()
+    selected = _document(
+        tmp_path / "challenges.toml",
+        template.read_text().replace('"CHOOSE_ACTIVATION_EPOCH"', "123"),
+    )
+    sign_trust_document(
+        input_path=selected,
+        kind="challenges",
+        seed_path=seed_path,
+        signature_path=signature,
+    )
+    assert len(bytes.fromhex(signature.read_text())) == 64
 
 
 def test_cli_verifies_the_signed_files_before_operator_install(tmp_path, capsys):
