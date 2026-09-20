@@ -2,7 +2,7 @@
 # next owner document version and activation epoch, then sign offline using
 # docs/how-to/trust-root.md. No production activation occurs from this file.
 version = 2
-introduced_epoch = 0
+introduced_epoch = "CHOOSE_ACTIVATION_EPOCH"
 
 [[challenges]]
 id = "bounty"

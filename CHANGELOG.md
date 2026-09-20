@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Historical bundle-root lookup retains accepted trust profiles across rotation
+  and restart; current weights still require the current profile. The unsigned
+  activation template requires an explicit epoch before it can be signed.
 - Bounty reconstructs a backend-capped leaderboard from the complete report
   snapshot, avoiding a permanent burn after the public log exceeds 1,000 hotkeys.
 - Bounty adjudication rejects missing or misplaced severity, and external

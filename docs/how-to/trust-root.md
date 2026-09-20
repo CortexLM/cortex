@@ -29,7 +29,9 @@ key into `config/owner.pubkey`. Put the Bounty and Proof public keys in the
 matching rows of the selected challenges document. The preserved development
 `config/challenges.toml` is the signed legacy 2000/8000 profile (algorithm 1).
 The unsigned `config/challenges-v2.example.toml` is the 3000/7000 activation
-template (algorithm 2, challenge-document version >=2). The gateway public key
+template (algorithm 2, challenge-document version >=2). Replace its
+`"CHOOSE_ACTIVATION_EPOCH"` placeholder with the coordinated integer epoch;
+the unchanged template cannot be signed. The gateway public key
 is supplied to verification and is never a challenge row.
 
 ## Sign both documents
@@ -90,7 +92,10 @@ requires bundle algorithm 2; changing only raw scores cannot implement it.
 
 1. Upgrade the gateway/master and every submitting validator to a release that
    supports both algorithms. Keep the old signed profile while validating
-   historical chain snapshots and recomputation. Existing algorithm 1 signed
+   historical chain snapshots and recomputation. The upgraded gateway persists
+   the accepted profile, including challenge keys and policies, for historical
+   root lookup after rotation and restart. Missing profiles fail closed; do not
+   skip this upgrade under the old trust document. Existing algorithm 1 signed
    bytes and frozen vectors remain unchanged; never relax metagraph-root checks
    to admit an incompatible historical implementation.
 2. Choose the activation epoch and drain every pending emission epoch older than
