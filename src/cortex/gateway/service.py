@@ -45,7 +45,7 @@ class GatewayService:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.chain_endpoint = chain_endpoint
         self.trust_loader = trust_loader
-        self.store.trust_versions(trust.challenges_version, trust.measurements_version)
+        self.store.accept_trust(trust)
 
     def _chain_endpoint(self) -> str:
         try:
@@ -59,7 +59,7 @@ class GatewayService:
             return
         trust = self.trust_loader(epoch)
         trust.validate()
-        self.store.trust_versions(trust.challenges_version, trust.measurements_version)
+        self.store.accept_trust(trust)
         self.trust = trust
 
     def accept_leaf(self, leaf: Leaf) -> dict:
@@ -125,7 +125,8 @@ class GatewayService:
             raise ServiceError(404, "bundle not found")
         return stored.encoded
 
-    def _decode_stored(self, stored: StoredBundle) -> Bundle:
+    def _decode_stored(self, stored: StoredBundle, trust: TrustRoot | None = None) -> Bundle:
+        trust = self.trust if trust is None else trust
         bundle = Bundle.decode(stored.encoded)
         if bundle.body.epoch != stored.epoch:
             raise ProtocolError("stored epoch mismatch")
@@ -134,17 +135,34 @@ class GatewayService:
         body = bundle.body
         if (
             body.protocol_version != 1
-            or body.algorithm_version != 1
+            or body.algorithm_version != trust.algorithm_version
+            or body.epoch < trust.introduced_epoch
             or body.netuid != self.netuid
             or body.gateway_hotkey != self.trust.gateway_hotkey
-            or body.emission_shares != self.trust.shares
-            or body.measurements_digest != self.trust.measurements_digest
+            or body.gateway_hotkey != trust.gateway_hotkey
+            or body.emission_shares != trust.shares
+            or body.measurements_digest != trust.measurements_digest
             or not verify_raw(body.gateway_hotkey, BUNDLE_DOMAIN, body.encode(), bundle.gateway_sig)
         ):
             raise ProtocolError("invalid stored seal")
         if merkle_root(leaf.encode() for leaf in body.leaves) != body.merkle_root:
             raise ProtocolError("invalid stored leaf root")
-        final = aggregate_leaves(body.leaves, body.emission_shares, body.uid_map)
+        keys = {entry.id: entry.public_key for entry in trust.challenges}
+        for leaf in body.leaves:
+            if (
+                leaf.epoch != body.epoch
+                or leaf.challenge_id not in keys
+                or not verify_raw(
+                    keys[leaf.challenge_id], RAW_WEIGHT_DOMAIN, leaf.payload(), leaf.challenge_sig
+                )
+            ):
+                raise ProtocolError("invalid stored challenge signature")
+        final = aggregate_leaves(
+            body.leaves,
+            body.emission_shares,
+            body.uid_map,
+            algorithm_version=body.algorithm_version,
+        )
         if final.final_vector != body.final_vector:
             raise ProtocolError("invalid stored final vector")
         return bundle
@@ -160,11 +178,18 @@ class GatewayService:
         if stored is None:
             raise ServiceError(404, "bundle not found")
         try:
-            if self._decode_stored(stored).body.merkle_root != raw:
-                raise ProtocolError("indexed root mismatch")
-        except ProtocolError:
+            # Archived profiles never become the current profile or lower its watermarks.
+            for trust in self.store.trust_profiles():
+                try:
+                    bundle = self._decode_stored(stored, trust)
+                except ProtocolError:
+                    continue
+                if bundle.body.merkle_root != raw:
+                    raise ProtocolError("indexed root mismatch")
+                return stored.encoded
+        except (sqlite3.Error, ProtocolError):
             raise ServiceError(503, "stored bundle unavailable") from None
-        return stored.encoded
+        raise ServiceError(503, "stored bundle unavailable")
 
     def latest(self) -> dict:
         try:

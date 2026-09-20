@@ -4,7 +4,8 @@ Cortex research subnet: Bounty and agentic Proof on Bittensor.
 
 The Python implementation runs the gateway and both challenges on a master,
 verifies sealed rewards in independent validators, and isolates research work
-in Firecracker guests. Bounty receives 20% of emission; Proof receives 80%.
+in Firecracker guests. Algorithm 2 assigns up to 30% of emission to Bounty
+and 70% to Proof; activating it requires a new owner-signed trust root.
 Proof uses Cortex's own recursive language-model engine with persistent memory,
 context compaction and bounded tool execution.
 
@@ -20,6 +21,11 @@ trust root still contains `bounty = 2000` and `proof = 8000`: Proof emits
 `ChallengeInternal` absences and its share burns to UID 0. Never renormalize
 Bounty to 100%. Production pairing, report intake and adjudication stay in
 `CortexLM/backend`; Cortex reads its immutable public scoring snapshots.
+Algorithm 2 pays one point per valid report, proportionally across authors;
+ten valid reports across expected participants unlock the full Bounty share.
+The unsigned [30/70 template](config/challenges-v2.example.toml) changes nothing
+until the [trust-root migration](docs/how-to/trust-root.md#activate-proportional-bounty)
+is completed on the gateway and validators.
 
 ## Installation
 

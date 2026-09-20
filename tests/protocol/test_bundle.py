@@ -17,6 +17,7 @@ from cortex.protocol import (
     sign_leaf,
     verify_bundle,
 )
+from cortex.protocol.bundle import recompute
 from cortex.protocol.crypto import BUNDLE_DOMAIN, public_key, sign_raw, verify_raw
 from cortex.protocol.merkle import merkle_root
 from cortex.protocol.scale import Reader
@@ -58,6 +59,71 @@ def test_complete_signed_seal_roundtrip_and_independent_recompute(network):
     assert verified.final_vector == ((1, 32768), (2, 32768))
     assert sum(value for _, value in verified.final_vector) == 65536  # No post-round adjustment.
     assert Bundle.decode(bundle.encode()) == bundle
+
+
+@pytest.fixture
+def proportional_network(network):
+    previous, arguments = network
+    trust = replace(
+        arguments["trust"],
+        challenges=tuple(
+            replace(entry, emission_share_bps=3000 if entry.id == b"bounty" else 7000)
+            for entry in arguments["trust"].challenges
+        ),
+        challenges_version=2,
+        introduced_epoch=12,
+    )
+    bundle = build_bundle(
+        gateway_seed=bytes([7]) * 32,
+        epoch=12,
+        netuid=541,
+        block_b=99,
+        block_hash=arguments["block_hash"],
+        rows=arguments["rows"],
+        leaves=previous.body.leaves,
+        trust=trust,
+    )
+    return bundle, {**arguments, "trust": trust}
+
+
+def test_v2_owner_profile_selects_algorithm_and_cannot_downgrade(proportional_network):
+    bundle, arguments = proportional_network
+    assert verify_bundle(Bundle.decode(bundle.encode()), **arguments).algorithm_version == 2
+    body = replace(bundle.body, algorithm_version=1)
+    downgraded = Bundle(body, sign_raw(bytes([7]) * 32, BUNDLE_DOMAIN, body.encode()))
+    with pytest.raises(ProtocolError, match="version"):
+        verify_bundle(downgraded, **arguments)
+    with pytest.raises(ProtocolError, match="version"):
+        recompute(body, {b"bounty"})
+
+
+def test_v2_quarantine_burns_mass_without_changing_the_other_share(proportional_network):
+    bundle, _ = proportional_network
+    result = recompute(bundle.body, {b"bounty"})
+    assert result.weights == pytest.approx((0.3, 0.35, 0.35))
+    with pytest.raises(ProtocolError, match="surviving share"):
+        recompute(bundle.body, {b"proof"})
+    assert recompute(bundle.body, {b"proof"}, minimum_share_mass=0).weights == pytest.approx(
+        (0.7, 0.15, 0.15)
+    )
+
+
+def test_v2_profile_cannot_activate_before_its_owner_signed_epoch(proportional_network):
+    bundle, arguments = proportional_network
+    future_trust = replace(arguments["trust"], introduced_epoch=13)
+    with pytest.raises(ProtocolError, match="not active"):
+        verify_bundle(bundle, **{**arguments, "trust": future_trust})
+    with pytest.raises(ProtocolError, match="not active"):
+        build_bundle(
+            gateway_seed=bytes([7]) * 32,
+            epoch=12,
+            netuid=541,
+            block_b=99,
+            block_hash=arguments["block_hash"],
+            rows=arguments["rows"],
+            leaves=bundle.body.leaves,
+            trust=future_trust,
+        )
 
 
 def test_frozen_rust_wire_fixture_matches_exact_fields_and_signature():

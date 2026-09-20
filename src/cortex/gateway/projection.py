@@ -7,6 +7,7 @@ from uuid import UUID
 
 from cortex.protocol import Bundle, Score, aggregate_leaves
 from cortex.protocol.crypto import encode_hotkey
+from cortex.protocol.models import BOUNTY_FULL_SHARE_REPORTS
 
 
 def _identity(digest: str) -> str:
@@ -50,13 +51,19 @@ def project(bundle: Bundle | None, *, netuid: int, now: datetime, chain_endpoint
     )
     if bundle is not None:
         body = bundle.body
-        floats = aggregate_leaves(body.leaves, body.emission_shares, body.uid_map)
+        floats = aggregate_leaves(
+            body.leaves,
+            body.emission_shares,
+            body.uid_map,
+            algorithm_version=body.algorithm_version,
+        )
         digest = sha256(body.encode()).hexdigest()
         view.update(
             vector_id=_identity(digest),
             vector_digest=digest,
             epoch=body.epoch,
             revision=1,
+            algorithm_version=body.algorithm_version,
             netuid=body.netuid,
             uids=list(floats.uids),
             weights=list(floats.weights),
@@ -92,10 +99,16 @@ def project(bundle: Bundle | None, *, netuid: int, now: datetime, chain_endpoint
                     hotkey = encode_hotkey(leaf.miner_hotkey)
                     source_weights[hotkey] = source_weights.get(hotkey, 0.0) + leaf.score.value
             view["emission_shares"][slug] = bps / 10000
+            emission_percent = bps / 100
+            if body.algorithm_version == 2 and challenge == b"bounty":
+                emission_percent *= (
+                    min(sum(source_weights.values()), BOUNTY_FULL_SHARE_REPORTS)
+                    / BOUNTY_FULL_SHARE_REPORTS
+                )
             view["source_challenges"].append(
                 dict(
                     slug=slug,
-                    emission_percent=bps / 100,
+                    emission_percent=emission_percent,
                     weights=source_weights,
                     ok=bool(leaves),
                     error=None if leaves else outcome,

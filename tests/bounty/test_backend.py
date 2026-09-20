@@ -176,6 +176,36 @@ async def test_backend_public_leaderboard_valid_field_is_supported():
     assert snapshot.leaderboard[0].valid_count == 1
 
 
+async def test_v2_counts_every_valid_report_without_precision_severity_or_champion_gates():
+    other = "02" * 32
+    historical = "03" * 32
+    reports = [
+        published_report(id="a", severity="trivial"),
+        published_report(id="b", hotkey=other, severity="critical"),
+        published_report(id="c", hotkey=other, severity="minor"),
+        published_report(id="old", hotkey=historical),
+        *[
+            published_report(id=f"invalid-{index}", status="invalid_malicious", severity=None)
+            for index in range(5)
+        ],
+        published_report(id="duplicate", status="duplicate", severity=None, related_report_id="a"),
+    ]
+    backend = backend_for(
+        [
+            {"hotkey": other, "valid": 2},
+            {"hotkey": historical, "valid": 1},
+            {"hotkey": HOTKEY, "valid": 1},
+        ],
+        reports,
+    )
+    snapshot = await backend.fetch()
+    scores = snapshot.score([HOTKEY, other, "04" * 32], scoring_version=2)
+    assert set(scores) == {HOTKEY, other, "04" * 32}
+    assert scores[HOTKEY].value == 1 and scores[HOTKEY].reason is None
+    assert scores[other].value == 2 and scores[other].reason is None
+    assert scores["04" * 32].value == 0 and scores["04" * 32].reason == "NotAttempted"
+
+
 async def test_backend_rejects_conflicting_leaderboard_count_aliases():
     backend = backend_for(
         [{"hotkey": HOTKEY, "valid": 1, "valid_count": 2}],

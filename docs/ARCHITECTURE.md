@@ -1,6 +1,8 @@
 # Architecture
 
-Cortex has two scoring products: Bounty (2,000 basis points) and Proof (8,000).
+Cortex has two scoring products. Algorithm 2 assigns Bounty 3,000 basis points
+and Proof 7,000. The owner-signed legacy 2,000/8,000 profile retains algorithm 1;
+see [activation](how-to/trust-root.md#activate-proportional-bounty).
 The signed trust root fixes their shares. All challenge execution belongs to
 the master; validators independently verify sealed bundles and submit weights.
 

@@ -8,13 +8,15 @@ canonical documentation instead of duplicating runbooks.
 Cortex is an autonomous research subnet on Bittensor. It has exactly two live
 challenge IDs:
 
-| Challenge | Share | Purpose |
+| Challenge | Algorithm 2 share | Purpose |
 | --- | ---: | --- |
-| `bounty` | 2,000 bps | useful vulnerability reports, scored from the CortexLM/backend public feed |
-| `proof` | 8,000 bps | operator-created research topics evaluated by Cortex's recursive language-model engine |
+| `bounty` | 3,000 bps | useful vulnerability reports, scored from the CortexLM/backend public feed |
+| `proof` | 7,000 bps | operator-created research topics evaluated by Cortex's recursive language-model engine |
 
-The sum is always 10,000 basis points. Design, Prism and Relearn are retired
-products. Their frozen specifications and historical miner pointers remain for
+The sum is always 10,000 basis points. The owner-signed legacy 2,000/8,000
+profile retains algorithm 1. The 3,000/7,000 profile requires challenge-document
+version >=2 and algorithm 2; activation is an offline owner ceremony. Design,
+Prism and Relearn are retired products. Their frozen specifications and historical miner pointers remain for
 compatibility; no active code, service, trust-root row or leaf may register
 them.
 
@@ -88,6 +90,11 @@ Follow [the trust-root ceremony](docs/how-to/trust-root.md).
 - Scores come only from `BOUNTY_BACKEND_PUBLIC_URL`. Never add an offline live
   scorer. On feed failure, cover every expected participant with
   `NoScore(ChallengeInternal)` so the Bounty share burns without blocking Proof.
+- Under algorithm 2, each valid report contributes one point regardless of severity.
+  Reward authors proportionally; Bounty pays `0.30 * min(total_valid / 10, 1)`.
+  Count cumulative published reports only for the expected participant set.
+  Burn unused or unmapped mass to UID0; never increase Proof or surviving
+  challenge shares. Keep algorithm 1 and its frozen vectors unchanged.
 - A public API, quota or scoring change must update
   `docs/external-miner/bounty.md` in the same change.
 

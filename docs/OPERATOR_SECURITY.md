@@ -22,7 +22,10 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
   documents at the deployment epoch.
 - [ ] Bounty and Proof public keys match their mounted signing seeds, and the
   gateway public key is different from both.
-- [ ] The trust root contains only `bounty = 2000` and `proof = 8000`.
+- [ ] The trust root contains only Bounty and Proof: legacy 2000/8000 with
+  algorithm 1, or 3000/7000 with algorithm 2 and challenge-document version >=2.
+  Complete [activation](how-to/trust-root.md#activate-proportional-bounty) before
+  switching profiles; preserve old journals and sealed bytes.
 - [ ] Runtime, kernel, rootfs, evaluator and experiment-pack references use
   verified SHA-256 digests. No production image uses a floating tag.
 - [ ] Empty or unknown pins remain fail-closed; no digest was copied from an
@@ -51,7 +54,7 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
   probe, and a report outage test returns 503 without a row.
 - [ ] In Bounty-only mode, `PROOF_VM_ORCHESTRATOR_URL` is empty, no Proof topic
   is open, and a completed epoch contains signed `ChallengeInternal` Proof
-  leaves whose 8000 bps burn to UID 0 without blocking Bounty.
+  leaves whose 7000 bps (8000 under algorithm 1) burn to UID 0 without blocking Bounty.
 - [ ] When Proof is enabled, `/v1/status` reports a valid topic, sealed baseline,
   registered runner, pinned image, open inference offer and compatible executor
   offer; its failure matrix returns 503 without a scored row.

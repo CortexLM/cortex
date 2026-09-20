@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 
 from cortex.protocol import ProtocolError
-from cortex.protocol.crypto import decode_hotkey, public_key
-from cortex.protocol.trust import load_trust_root
+from cortex.protocol.crypto import TRUST_ROOT_DOMAIN, decode_hotkey, public_key, sign_raw
+from cortex.protocol.trust import load_trust_root, signing_payload
 
 REFERENCE = Path(__file__).parent / "vectors/trust"
 
@@ -47,3 +47,31 @@ def test_cannot_resign_trust_by_substituting_challenge_key(tmp_path):
 def test_local_version_pin_prevents_rollback():
     with pytest.raises(ProtocolError, match="rollback"):
         load_trust_root(**arguments(), minimum_challenges_version=2)
+
+
+@pytest.mark.parametrize("version,epoch,valid", [(1, 123, False), (2, 122, False), (2, 123, True)])
+def test_owner_signed_proportional_profile_requires_version_and_activation(
+    tmp_path, version, epoch, valid
+):
+    values = arguments()
+    seed = bytes([31]) * 32
+    values.update(owner_public=public_key(seed), epoch=epoch)
+    for kind in ("challenges", "measurements"):
+        path = tmp_path / f"{kind}.toml"
+        source = values[f"{kind}_path"].read_text()
+        if kind == "challenges":
+            source = (
+                source.replace("version = 1", f"version = {version}")
+                .replace("introduced_epoch = 0", "introduced_epoch = 123")
+                .replace("2000", "3000")
+                .replace("8000", "7000")
+            )
+        path.write_text(source)
+        signature = path.with_suffix(".sig")
+        signature.write_bytes(sign_raw(seed, TRUST_ROOT_DOMAIN, signing_payload(path, kind)))
+        values.update({f"{kind}_path": path, f"{kind}_signature": signature})
+    if valid:
+        assert load_trust_root(**values).algorithm_version == 2
+    else:
+        with pytest.raises(ProtocolError, match="version|activation"):
+            load_trust_root(**values)

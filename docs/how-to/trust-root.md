@@ -26,9 +26,13 @@ cortex keygen \
 `keygen` creates files exclusively and refuses to overwrite an existing path.
 Seeds are raw 32-byte sr25519 seeds with mode 0600. Copy only the public owner
 key into `config/owner.pubkey`. Put the Bounty and Proof public keys in the
-matching rows of `config/challenges.toml`; their shares must remain exactly
-2000 and 8000 basis points. The gateway public key is supplied to verification
-and is never a challenge row.
+matching rows of the selected challenges document. The preserved development
+`config/challenges.toml` is the signed legacy 2000/8000 profile (algorithm 1).
+The unsigned `config/challenges-v2.example.toml` is the 3000/7000 activation
+template (algorithm 2, challenge-document version >=2). Replace its
+`"CHOOSE_ACTIVATION_EPOCH"` placeholder with the coordinated integer epoch;
+the unchanged template cannot be signed. The gateway public key
+is supplied to verification and is never a challenge row.
 
 ## Sign both documents
 
@@ -77,3 +81,46 @@ uv run python scripts/check_repo.py --final
 Install seeds and bearer tokens as private regular files. The master re-reads
 signing material from its configured paths and fails closed if a file is
 missing, group-readable, symlinked, or does not match the signed public key.
+
+## Activate proportional Bounty
+
+Code installation does not activate the reward change. The committed
+`config/challenges.toml` and its detached signature remain the legacy development
+fixture. `config/challenges-v2.example.toml` is unsigned and cannot authorize
+production rewards. The new profile fixes Bounty/Proof at 3000/7000 bps and
+requires bundle algorithm 2; changing only raw scores cannot implement it.
+
+1. Upgrade the gateway/master and every submitting validator to a release that
+   supports both algorithms. Keep the old signed profile while validating
+   historical chain snapshots and recomputation. The upgraded gateway persists
+   the accepted profile, including challenge keys and policies, for historical
+   root lookup after rotation and restart. Missing profiles fail closed; do not
+   skip this upgrade under the old trust document. Existing algorithm 1 signed
+   bytes and frozen vectors remain unchanged; never relax metagraph-root checks
+   to admit an incompatible historical implementation.
+2. Choose the activation epoch and drain every pending emission epoch older than
+   it using the old profile. Pause the master scheduler for the coordinated
+   rotation. A new profile cannot sign or verify an older pending epoch; leaving
+   one behind blocks recovery. Back up the database, journals, old documents and
+   detached signatures privately. Never clear a journal or rewrite a seal.
+3. Prepare the 3000/7000 template privately, preserving the actual production
+   challenge keys and participant policies. Set a monotonic challenge-document
+   `version` of at least 2 and the agreed `introduced_epoch`. Sign offline using
+   the existing owner. Retain the independently signed measurement document.
+4. At activation, install the exact signed documents and corresponding minimum
+   version pins on the gateway and validators. Use the existing verification
+   command with the activation epoch. Resume the master scheduler. Missing
+   owner signatures, keys or compatible chain snapshots are explicit blockers.
+5. Until a new completed epoch seals under algorithm 2, latest is unsealed;
+   validators must wait and must not reuse a legacy seal. Raw historical bundle
+   bytes remain retrievable by epoch and must be verified using their original
+   owner profile. Check `scoring_version: 2`, algorithm 2 signed leaves, a new
+   `sealed: true` latest response and independent validator recomputation before
+   claiming activation. A health response or local fake-provider test is not
+   proof of live chain submission.
+
+If Proof is unavailable, its 70% burns. Bounty pays at most 30%, with unused mass
+burned according to [the report-count formula](../BOUNTY.md#score). Rollback must
+respect persisted version watermarks: restoring an older trust file is rejected.
+Stop submission and prepare an owner-authorized higher-version recovery profile
+through the same ceremony rather than deleting watermarks or replaying epochs.

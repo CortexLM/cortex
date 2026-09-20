@@ -1,11 +1,18 @@
 # Cortex review rules
 
 Cortex is a Python Bittensor research subnet with exactly two live challenges:
-`bounty` at 2,000 basis points and `proof` at 8,000. The trust-root sum is always
-10,000. Design, Prism and Relearn are historical only.
+`bounty` at 3,000 basis points and `proof` at 7,000 under algorithm 2. The
+owner-signed legacy 2,000/8,000 profile retains algorithm 1. The trust-root sum
+is always 10,000; the new profile requires challenge-document version >=2.
+Design, Prism and Relearn are historical only.
 
 - Preserve frozen SCALE encodings, Merkle construction, aggregation and every
   `base-*-v1` signature preimage. Cross-language vectors must remain green.
+  Algorithm 2 counts each valid Bounty report once, distributes proportionally,
+  scales its 30% share by min(total_valid/10, 1), and burns unused/quarantined
+  mass. The total includes only the signed expected participant population.
+  Never allow an algorithm 1 body under the new profile or activate before
+  the owner-signed epoch; historical seals and journals stay immutable.
 - Preserve existing `BASE_*` names and deployed compatibility paths. New master
   settings may add the matching `CORTEX_*` alias but conflicting values fail.
 - Missing or unknown image digests, offers, baselines, topics, keys, feeds and
