@@ -10,9 +10,11 @@ reproduction or on-chain payment.
 
 | Challenge | Emission share | Guide |
 |-----------|----------------|-------|
-| `bounty` | 2000 bps (20%) | [Pair an account and report bugs](bounty.md) |
-| `proof` | 8000 bps (80%) | [Discover topics and submit research](proof.md) |
+| `bounty` | up to 3000 bps (30%), algorithm 2 | [Pair an account and report bugs](bounty.md) |
+| `proof` | 7000 bps (70%), algorithm 2 | [Discover topics and submit research](proof.md) |
 
+The legacy owner-signed profile remains 2000/8000 until
+[algorithm 2 activation](../how-to/trust-root.md#activate-proportional-bounty).
 These are the only live challenge ids. Proof topics are operator-published,
 signed documents discovered through the API, never a built-in catalog. No
 particular benchmark, runner, model or topic is promised by this repository.

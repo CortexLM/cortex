@@ -1,11 +1,7 @@
 {
-  "labels": true,
-  "commentOnChanges": true,
-  "ignorePatterns": [
-    "docs/BUNDLE_SPEC.md",
-    "docs/DESIGN_CHALLENGE.md",
-    "docs/PRISM.md",
-    "docs/external-miner/relearn*.md",
-    "docs/external-miner/proof-tbench.md"
-  ]
+  "triggerOnDrafts": true,
+  "autoReview": ["open", "push"],
+  "statusCheck": true,
+  "statusCommentsEnabled": true,
+  "ignorePatterns": "docs/BUNDLE_SPEC.md\ndocs/DESIGN_CHALLENGE.md\ndocs/PRISM.md\ndocs/external-miner/relearn*.md\ndocs/external-miner/proof-tbench.md"
 }

@@ -114,10 +114,14 @@ service writes is not a valid backup.
 ## Bounty-only launch
 
 Set `BOUNTY_BACKEND_PUBLIC_URL` to the reviewed HTTPS `CortexLM/backend` origin
-and leave `PROOF_VM_ORCHESTRATOR_URL` empty. Keep `proof.key` mounted and keep the
-owner-signed trust split at `bounty = 2000`, `proof = 8000`. With no open Proof
-topic, the master signs `ChallengeInternal` Proof leaves and that 8000 bps burns
-to UID 0; Bounty is never scaled to 100%.
+and leave `PROOF_VM_ORCHESTRATOR_URL` empty. Keep `proof.key` mounted. Legacy
+deployments retain the signed `bounty = 2000`, `proof = 8000` profile until
+[algorithm 2 activation](../docs/how-to/trust-root.md#activate-proportional-bounty)
+coordinates the gateway and validators with a signed 3000/7000 profile.
+With no open Proof topic, its entire configured share burns to UID0 through
+signed `ChallengeInternal` leaves. Algorithm 2 pays up to 30% for Bounty,
+proportionally to valid reports with a global ten-report ramp; Bounty is never
+scaled to 100%.
 
 Keep `BOUNTY_GATEWAY_URL` empty in CortexLM/backend unless an authenticated,
 idempotent delivery contract is deployed. The production dependency for this

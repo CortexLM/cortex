@@ -2,8 +2,8 @@
 
 # Bounty miner guide
 
-Bounty (`bounty`, 2000 bps) accepts reproducible Cortex product and backend bug
-reports associated with your Bittensor hotkey. Install the [Python CLI](README.md)
+Bounty (`bounty`, up to 3000 bps under algorithm 2) accepts reproducible Cortex
+product and backend bug reports associated with your Bittensor hotkey. Install the [Python CLI](README.md)
 and obtain the gateway URL from the subnet operator.
 
 The initial production miner flow pairs and files reports in CortexLM/backend.
@@ -143,31 +143,43 @@ Stable adjudication, pricing and backlog gates are not retried. A waiting
 adjudication backlog with no published report also fails closed instead of
 scoring every miner as `NotAttempted`.
 
-| Adjudication | Effect |
-|--------------|--------|
-| `valid` with severity | Eligible evidence, subject to the scoring gates |
-| `valid` without severity | Not creditable; missing severity prevents eligibility |
-| `already_fixed_not_prod` | No reward or direct penalty; counts as triage noise |
-| `invalid_malicious` | Negative credit; may lead to a burn outcome |
-| `duplicate` | No extra reward or direct penalty; counts as triage noise |
+| Adjudication | Algorithm 2 points |
+|--------------|--------------------|
+| `valid` with severity | 1, regardless of severity |
+| `valid` without severity | Invalid publication; scoring fails closed |
+| `already_fixed_not_prod` | 0 |
+| `invalid_malicious` | 0 |
+| `duplicate` | 0; the original valid report is counted once |
 
-Paid score is precision times mean severity impact, subject to champion
-displacement and eligibility gates. Precision is priced valid reports divided
-by priced valid plus malicious reports. The minimum precision is 6000 bps,
-and at least three decided reports are required. Severity levels are
-`trivial`, `minor`, `major` and `critical`. Unpriced valid rows cannot be used
-to manufacture credit.
+Every author with valid evidence participates proportionally. There is no
+champion, precision gate, minimum of three reports, severity weighting or
+triage-noise gate. Severity (`trivial`, `minor`, `major`, `critical`) remains
+required publication evidence and does not affect point value.
 
-The duplicate/already-fixed triage-noise ratio is an **off-score gate**. It is
-not multiplied into the visible precision-times-severity score; exceeding
-5000 bps rejects eligibility. A high report count is not a substitute for
-precision and severity.
+For `N` valid reports across the epoch's expected participants, the total Bounty
+payout is `0.30 * min(N / 10, 1)` of subnet emission. An author with `n` valid
+reports gets `0.30 * n / max(10, N)`. Thus five valid reports distribute 15%;
+ten or more distribute 30%. Unused mass burns to UID0, never to Proof or other
+authors. Proof retains its separate 70% share. An allocation to UID0 or an
+unmapped author burns without increasing another author's allocation.
+
+Counts include cumulative published history at one immutable revision, without
+an epoch reset or rolling window. The population is the sealed metagraph's
+hotkeys selected by the owner-signed participant policy. Historical authors
+outside that population do not enter the total. Duplicate and rejected reports
+never add points. Chain weights retain the protocol's independent u16 rounding.
+
+`GET /v1/status` exposes the active `scoring_version`, `points_per_valid_report`,
+`full_share_reports`, population and window. Algorithm 2 requires the owner-signed
+3000/7000 profile and document version >=2. Until the gateway and validators
+complete [activation](../how-to/trust-root.md#activate-proportional-bounty),
+legacy 2000/8000 deployments retain algorithm 1 and its champion/precision rules.
 
 If the backend is unreadable, unconfigured or inconsistent, report intake
 returns `503` without storing a report. Emission pays nobody from Bounty and
 covers the expected participant set with `NoScore(ChallengeInternal)` leaves.
-The 2000 bps share then burns to uid 0 through normal sealing. There is no
-offline scorer or forced simulation path.
+The configured Bounty share then burns to uid 0 through normal sealing. There
+is no offline scorer or forced simulation path.
 
 Validators independently verify the [sealed bundle](validators.md); they do
 not rerun reports or fetch the Bounty feed. See [troubleshooting](troubleshoot.md)

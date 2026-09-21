@@ -6,6 +6,8 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from cortex.protocol.models import BOUNTY_FULL_SHARE_REPORTS
+
 from .backend import BackendUnavailable, Severity, Verdict
 from .scoring import MAX_TRIAGE_NOISE_BPS, MIN_PRECISION_BPS, SCORE_MAX, SEVERITY_BPS
 from .service import PAIR_GRANT_MAX_TTL_SECONDS, TERMS_TEXT, BountyService
@@ -85,10 +87,11 @@ def create_router(service: BountyService) -> APIRouter:
 
     @router.get("/health")
     async def health():
-        return {"ok": True, "challenge_id": "bounty", "scoring_version": 1}
+        return {"ok": True, "challenge_id": "bounty", "scoring_version": service.scoring_version()}
 
     @router.get("/v1/status")
     async def status():
+        version = service.scoring_version()
         reason = None
         try:
             await service.backend.probe()
@@ -98,8 +101,8 @@ def create_router(service: BountyService) -> APIRouter:
             reason = str(error)
         return {
             "challenge_id": "bounty",
-            "scoring_version": 1,
-            "score_max": SCORE_MAX,
+            "scoring_version": version,
+            "score_max": SCORE_MAX if version == 1 else 2**64 - 1,
             "champion_hotkey": None,
             "scoring_backend": "backend_public" if service.backend.configured else "unconfigured",
             "can_score": can_score,
@@ -110,6 +113,17 @@ def create_router(service: BountyService) -> APIRouter:
                 "grant_max_ttl_secs": PAIR_GRANT_MAX_TTL_SECONDS,
             },
             "scoring": {
+                "paid_on": ["valid_report_count"],
+                "points_per_valid_report": 1,
+                "full_share_reports": BOUNTY_FULL_SHARE_REPORTS,
+                "emission_share_bps": 3000,
+                "population": "expected_metagraph_hotkeys",
+                "window": "cumulative_published_history",
+                "off_score_gates": [],
+                "severities": list(SEVERITY_BPS),
+            }
+            if version == 2
+            else {
                 "paid_on": ["precision", "severity_impact"],
                 "off_score_gates": ["triage_noise"],
                 "min_precision_bps": MIN_PRECISION_BPS,
