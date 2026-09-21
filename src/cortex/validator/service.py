@@ -338,11 +338,22 @@ class Validator:
         version_key: int = 1,
         consensus_seed: Callable[[], bytes] | None = None,
         peers: dict[bytes, str] | None = None,
+        peer_consensus: bool = False,
         min_peer_sample: int = 1,
         max_block_lag: int = 256,
         trust_loader: Callable[[int], TrustRoot] | None = None,
         verify_only: bool = False,
     ):
+        """Verify the gateway seal and submit weights.
+
+        ``peer_consensus`` selects the deployment model. Cortex runs a centralized
+        authoritative gateway: the master gateway is the authority for weights and a
+        validator consumes ``/v1/weights/latest``, so peer-root cross-check is off by
+        default and ``peers``/``min_peer_sample`` are inert. Enable it only for an
+        independently-operated multi-validator deployment, where a peer-root sample
+        of at least ``min_peer_sample`` becomes a precondition for submission. The
+        local equivocation guard runs in both models.
+        """
         uint(netuid, 2)
         uint(version_key, 8)
         trust.validate()
@@ -386,6 +397,7 @@ class Validator:
                 or parsed.fragment
             ):
                 raise ValueError("peer URLs require HTTPS without credentials")
+        self.peer_consensus = peer_consensus
         self.min_peer_sample, self.max_block_lag = min_peer_sample, max_block_lag
         self.trust_loader = trust_loader
         self.verify_only = verify_only
@@ -462,7 +474,10 @@ class Validator:
             self.journal.evidence.root(
                 RootStatement.sign(self.consensus_seed(), body.epoch, body.merkle_root), local=True
             )
-        if not others:
+        # The gateway is authoritative for weights, so a peer-root sample is required
+        # only in an opt-in multi-validator deployment. The local equivocation guard
+        # above is self-consistency and runs in both models.
+        if not self.peer_consensus or not others:
             return True
         if self.min_peer_sample == 0 or own is None:
             self._dissent(DissentReason.PEER_SAMPLE_INSUFFICIENT)

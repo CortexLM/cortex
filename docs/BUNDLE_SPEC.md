@@ -593,12 +593,22 @@ Default `min_share_mass_bps = 5000` (half of `10_000`).
 
 ### 11.3 Peer sample (D26)
 
+**Deployment model.** Cortex runs a centralized authoritative gateway. The master
+gateway is the authority for weights: it serves `/v1/weights/latest`,
+`/v1/weights/{epoch}` and `/v1/bundle/{epoch}`, and a validator consumes those
+endpoints and submits the verified vector on-chain. Peer-root consensus between
+independently-operated validators is therefore an **opt-in hardening**, not a
+precondition for submission; it is off by default (`--peer-consensus`). The wire
+format and the `DissentReason` values below are unchanged and remain frozen.
+
 | Rule | Requirement |
 |------|-------------|
-| `min_peer_sample` | Default `1`. May be `0` only when the metagraph contains no other validator with `validator_permit` (single-validator testnet) |
-| Below threshold | Do not submit; status `Degraded`; dissent `PeerSampleInsufficient` |
+| Peer cross-check | **Opt-in, off by default.** Without it a validator submits on the gateway's authority alone and `min_peer_sample` is inert |
+| `min_peer_sample` | Applies only when peer cross-check is enabled. Default `1`. May be `0` only when the metagraph contains no other validator with `validator_permit` (single-validator testnet) |
+| Below threshold | When enabled: do not submit; status `Degraded`; dissent `PeerSampleInsufficient` |
 | Identity | Peer responses authenticated by **sr25519 over response body** bound to metagraph hotkey — never IP allowlists alone |
 | Root exchange | `GET`-style peer API returns signed `(epoch, merkle_root)` under tag `base-root-v1` |
+| Local equivocation | **Always enforced, both models.** A validator that has already signed a different root for an epoch refuses and dissents `PeerRootConflict`; this is self-consistency, not peer consensus |
 
 ---
 
