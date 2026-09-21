@@ -76,6 +76,8 @@ def test_proportional_trust_template_requires_new_owner_version(tmp_path, versio
 @pytest.mark.parametrize("path_argument", ['"/v1/status"', 'path="/v1/status"'])
 def test_public_api_must_be_an_actual_route_not_a_comment_or_mapping_access(method, path_argument):
     source = (
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
         '# @router.post("/v1/submissions")\n'
         'mapping.get("/v1/proof/topics")\n'
         f"@router.{method}({path_argument})\nasync def status(): return {{}}\n"
@@ -88,18 +90,21 @@ def test_public_api_must_be_an_actual_route_not_a_comment_or_mapping_access(meth
     "receiver,assignment,named_credited",
     [
         ("router", "router = APIRouter()", True),
-        ("router_status", "router_status = APIRouter()", True),
+        ("router_status", "router_status = APIRouter(prefix='/v1')", True),
+        ("api", "api = fastapi.APIRouter()", True),
+        ("router", "router = object()", False),
+        ("router_fake", "router_fake = object()", False),
         ("other", "other = object()", False),
         ("mapping", "mapping = {}", False),
         ("routerlike", "routerlike = object()", False),
         ("holder.router", "", False),
     ],
 )
-def test_named_routes_require_router_names_but_positional_receivers_stay_compatible(
+def test_named_routes_require_apirouter_bindings_but_positional_receivers_stay_compatible(
     method, receiver, assignment, named_credited
 ):
     source = (
-        "from fastapi import APIRouter\n"
+        "import fastapi\nfrom fastapi import APIRouter\n"
         f"{assignment}\n"
         f'@{receiver}.{method}("/v1/positional")\nasync def positional(): return {{}}\n'
         f'@{receiver}.{method}(path="/v1/named")\nasync def named(): return {{}}\n'

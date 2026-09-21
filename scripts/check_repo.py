@@ -177,9 +177,25 @@ def check_trust_roots(root: Path) -> list[str]:
     return failures
 
 
+def router_bindings(tree: ast.AST) -> set[str]:
+    # ponytail: literal `name = APIRouter(...)` only; add alias tracking when routers get re-bound.
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        callee = node.value.func
+        called = callee.attr if isinstance(callee, ast.Attribute) else getattr(callee, "id", None)
+        if called != "APIRouter":
+            continue
+        names.update(target.id for target in node.targets if isinstance(target, ast.Name))
+    return names
+
+
 def declared_routes(source: str) -> set[tuple[str, str]]:
     routes = set()
-    for function in ast.walk(ast.parse(source)):
+    tree = ast.parse(source)
+    routers = router_bindings(tree)
+    for function in ast.walk(tree):
         if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
         for node in function.decorator_list:
@@ -187,11 +203,9 @@ def declared_routes(source: str) -> set[tuple[str, str]]:
                 continue
             if node.func.attr not in {"get", "post", "put", "patch", "delete", "head", "options"}:
                 continue
-            # Named paths require bare router/router_* names; positional receivers stay unchecked.
-            # ponytail: Resolve APIRouter bindings if actual receiver types must be verified.
+            # Named paths need a receiver bound to APIRouter(); positional receivers stay unchecked.
             if not node.args and not (
-                isinstance(node.func.value, ast.Name)
-                and (node.func.value.id == "router" or node.func.value.id.startswith("router_"))
+                isinstance(node.func.value, ast.Name) and node.func.value.id in routers
             ):
                 continue
             path = (
