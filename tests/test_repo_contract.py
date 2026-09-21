@@ -72,13 +72,47 @@ def test_proportional_trust_template_requires_new_owner_version(tmp_path, versio
     assert (CHECK["check_trust_roots"](tmp_path) == []) is accepted
 
 
-def test_public_api_must_be_an_actual_route_not_a_comment_or_mapping_access():
+@pytest.mark.parametrize("method", ["get", "post"])
+@pytest.mark.parametrize("path_argument", ['"/v1/status"', 'path="/v1/status"'])
+def test_public_api_must_be_an_actual_route_not_a_comment_or_mapping_access(method, path_argument):
     source = (
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
         '# @router.post("/v1/submissions")\n'
         'mapping.get("/v1/proof/topics")\n'
-        '@router.get("/v1/status")\nasync def status(): return {}\n'
+        f"@router.{method}({path_argument})\nasync def status(): return {{}}\n"
     )
-    assert CHECK["declared_routes"](source) == {("get", "/v1/status")}
+    assert CHECK["declared_routes"](source) == {(method, "/v1/status")}
+
+
+@pytest.mark.parametrize("method", ["get", "post"])
+@pytest.mark.parametrize(
+    "receiver,assignment,named_credited",
+    [
+        ("router", "router = APIRouter()", True),
+        ("router_status", "router_status = APIRouter(prefix='/v1')", True),
+        ("api", "api = fastapi.APIRouter()", True),
+        ("router", "router = object()", False),
+        ("router_fake", "router_fake = object()", False),
+        ("other", "other = object()", False),
+        ("mapping", "mapping = {}", False),
+        ("routerlike", "routerlike = object()", False),
+        ("holder.router", "", False),
+    ],
+)
+def test_named_routes_require_apirouter_bindings_but_positional_receivers_stay_compatible(
+    method, receiver, assignment, named_credited
+):
+    source = (
+        "import fastapi\nfrom fastapi import APIRouter\n"
+        f"{assignment}\n"
+        f'@{receiver}.{method}("/v1/positional")\nasync def positional(): return {{}}\n'
+        f'@{receiver}.{method}(path="/v1/named")\nasync def named(): return {{}}\n'
+    )
+    expected = {(method, "/v1/positional")}
+    if named_credited:
+        expected.add((method, "/v1/named"))
+    assert CHECK["declared_routes"](source) == expected
 
 
 def test_miner_contract_detects_removed_route_and_undocumented_nonce(tmp_path):
