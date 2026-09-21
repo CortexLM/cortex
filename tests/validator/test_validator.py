@@ -362,11 +362,12 @@ async def test_ambiguous_dispatch_exception_requires_reconciliation(network):
     assert len(network.chain.submissions) == 1
 
 
-def signed_peers(network, *, root=None, signer=22, epoch=12, offline=False):
+def signed_peers(network, *, root=None, signer=22, epoch=12, offline=False, peer_consensus=True):
     from cortex.protocol.consensus import RootStatement
 
     validator = network.validator
     validator.consensus_seed = lambda: bytes([20]) * 32
+    validator.peer_consensus = peer_consensus
     validator.peers = {public_key(bytes([22]) * 32): "https://peer.invalid"}
     network.chain.view = replace(network.chain.view, validator_permits=frozenset({0, 2}))
 
@@ -405,6 +406,7 @@ async def test_multi_validator_requires_metagraph_authenticated_peer_sample(netw
         signer=23 if failure == "impostor" else 22,
         epoch=11 if failure == "wrong_epoch" else 12,
         offline=failure == "offline",
+        peer_consensus=True,
     )
     if failure == "zero_sample":
         network.validator.min_peer_sample = 0
@@ -430,6 +432,34 @@ async def test_peer_equivocation_persists_both_signed_roots_and_refuses_dispatch
         ).fetchone()[0]
         == 2
     )
+
+
+async def test_centralized_gateway_default_submits_without_a_peer_root_sample(network):
+    """The gateway is authoritative: another permitted validator is not a precondition."""
+    network.validator.consensus_seed = lambda: bytes([20]) * 32
+    network.chain.view = replace(network.chain.view, validator_permits=frozenset({0, 2}))
+    assert network.validator.peer_consensus is False
+
+    result = await network.validator.run_once()
+
+    assert result.outcome == "submitted"
+    assert network.chain.submissions == [(541, ((1, 65535),), 1)]
+    assert network.journal.evidence.local_root(12).merkle_root == network.bundle.body.merkle_root
+    assert not network.journal.evidence.dissents()
+
+
+async def test_local_equivocation_still_refuses_dispatch_without_peer_consensus(network):
+    from cortex.protocol.consensus import DissentReason, RootStatement
+
+    network.validator.consensus_seed = lambda: bytes([20]) * 32
+    assert network.validator.peer_consensus is False
+    network.journal.evidence.root(
+        RootStatement.sign(bytes([20]) * 32, 12, bytes([99]) * 32), local=True
+    )
+
+    assert (await network.validator.run_once()).outcome == "peer_consensus_unavailable"
+    assert not network.chain.submissions
+    assert network.journal.evidence.dissents()[-1].reason == DissentReason.PEER_ROOT_CONFLICT
 
 
 async def test_class_a_submits_independent_vector_and_signed_dissent_after_peer_agreement(network):

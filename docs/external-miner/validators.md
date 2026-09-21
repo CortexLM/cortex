@@ -2,8 +2,15 @@
 
 # Validator guide
 
-Python validators independently verify gateway bundles, compare authenticated
-peer roots and submit weights on Bittensor. They never run Bounty or Proof
+Cortex runs a centralized authoritative gateway. The master gateway is the
+authority for weights: it serves `/v1/weights/latest`, `/v1/weights/{epoch}`
+and `/v1/bundle/{epoch}`. A Python validator consumes those endpoints,
+independently verifies the bundle against local owner-signed trust and the
+chain, and submits the verified vector on Bittensor. Cross-checking
+authenticated peer roots against other independently-operated validators is an
+opt-in hardening (`--peer-consensus`), off by default.
+
+Validators never run Bounty or Proof
 evaluation, rent GPUs or receive miner provider credentials. The only live
 challenge shares are `bounty` 3000 bps and `proof` 7000 bps under algorithm 2.
 The legacy 2000/8000 owner profile retains algorithm 1 until
@@ -35,7 +42,18 @@ The Bittensor wallet signs on-chain extrinsics. The consensus seed signs peer
 roots and dissent using the frozen Cortex context. No gateway wallet or
 gateway administrative token is required on a validator.
 
-## Configure peers
+## Configure peers (opt-in)
+
+Peer cross-check is **off by default**: with the centralized gateway as the
+weight authority, a validator submits on the gateway's authority alone and
+`--peers` and `--min-peer-sample` are inert. Pass `--peer-consensus` to require
+a peer-root sample; do that only in a deployment with other independently
+operated validators whose endpoints you have configured, because the sample
+then becomes a precondition for submission. The local equivocation guard
+applies in both models: a validator that has already signed a different root
+for an epoch refuses and persists a `PeerRootConflict` dissent.
+
+With `--peer-consensus` enabled, the options below apply as written.
 
 `--peers` reads a JSON object mapping independently selected validator hotkeys
 (SS58 or hex) to HTTPS origins. Use actual registered peers, for example the
@@ -51,8 +69,10 @@ Origins may not include credentials, paths, queries or fragments. The default
 `--min-peer-sample 1` requires one other validator with `validator_permit` in
 the same metagraph snapshot. If there is no other permitted validator, the
 single-validator case is allowed. Setting the sample to zero cannot bypass
-peer checking when another permitted validator exists. Peer endpoint discovery
-is manual in this implementation.
+peer checking when another permitted validator exists, so a single validator on
+a subnet that has other permitted validators must leave `--peer-consensus` off
+rather than lower the sample. Peer endpoint discovery is manual in this
+implementation.
 
 Each peer serves a signed root for the requested epoch. Wrong identity,
 invalid signature, insufficient reachable peers, conflicting roots or
@@ -93,8 +113,14 @@ them when the primary endpoint fails. Fallbacks are origins only: URL paths are
 also rejected so provider bearer material cannot appear in the process argv or
 container metadata.
 
+The example passes `--peers` without `--peer-consensus`, so the file is loaded
+and validated but no peer sample is required; add `--peer-consensus` to enforce
+it in a multi-validator deployment.
+
 The peer listener defaults to loopback and requires TLS when bound outside
-loopback. `--once` executes one tick and can submit weights. Add both
+loopback. It serves this validator's signed roots to peers regardless of
+`--peer-consensus`, which governs only what this validator requires of others.
+`--once` executes one tick and can submit weights. Add both
 `--verify-only --once` for a preflight that recomputes the current seal but
 never claims its epoch in the journal and never creates an extrinsic. It exits
 successfully only for the exact `verified` outcome; unsealed, changed, degraded
@@ -126,9 +152,9 @@ a reorg or a changed/unsealed latest response prevents submission.
 | `sealed: false`, including no bundle or decode failure | Do not submit; do not reuse a previously verified seal |
 | Verified sealed Match with `burn_outcome: true`, `uids: [0]`, `weights: [1.0]` | Submit the sealed burn to UID 0 |
 | Verified sealed vector allocating 100% to a nonzero owner or validator-permit UID | Refuse; this is not a burn |
-| Valid inputs and agreeing peers, but gateway's final vector differs | Class A: submit independently recomputed weights and persist signed dissent |
+| Valid inputs (and agreeing peers where required), but gateway's final vector differs | Class A: submit independently recomputed weights and persist signed dissent |
 | A challenge has invalid leaf signatures, wrong leaf epoch or incomplete participants | Quarantine that challenge; submit only if surviving signed mass is at least 5000 bps |
-| Structural failure, unknown challenge, invalid Merkle root or peer disagreement | Refuse |
+| Structural failure, unknown challenge, invalid Merkle root, own prior root for the epoch disagrees, or peer disagreement with `--peer-consensus` | Refuse |
 
 Under algorithm 2, quarantining Bounty retains Proof's absolute 7000 bps
 and burns Bounty's 3000 bps. Quarantining Proof leaves only 3000 bps and

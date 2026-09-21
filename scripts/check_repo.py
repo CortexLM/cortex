@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FROZEN_SPECS = {
-    "docs/BUNDLE_SPEC.md": "821a209baeefef10aac29cbc16e75a4955afb8e2acc70ca4b69eaa3da3298f90",
+    "docs/BUNDLE_SPEC.md": "c7a43fca324a2f44e7c40bca5acde1bd5ea30cabde1e8c0a0011aeedbb4330a3",
     "docs/DESIGN_CHALLENGE.md": "c93051da4e08f16390dbbef33747aee8ccc7451a2cb4660acc105a8fff231617",
     "docs/PRISM.md": "bce5789ac64cbc75e62ac78daa8452b8ae3a5eaff0b0134afb6f9ff9dd372925",
 }

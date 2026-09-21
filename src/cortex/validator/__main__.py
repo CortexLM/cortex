@@ -93,6 +93,14 @@ def parser() -> argparse.ArgumentParser:
     arguments.add_argument(
         "--peers", type=Path, help="JSON mapping independent validator hotkeys to HTTPS origins"
     )
+    arguments.add_argument(
+        "--peer-consensus",
+        action="store_true",
+        help="require a peer-root sample before submitting; off by default because the "
+        "master gateway is authoritative for weights and this validator consumes "
+        "/v1/weights/latest. Opt in only for independently-operated multi-validator "
+        "deployments, where --peers and --min-peer-sample then apply",
+    )
     arguments.add_argument("--min-peer-sample", type=int, default=1)
     arguments.add_argument("--max-block-lag", type=int, default=256)
     arguments.add_argument(
@@ -170,6 +178,7 @@ async def run(arguments: argparse.Namespace, subtensor, wallet) -> TickResult | 
                 version_key=arguments.version_key,
                 consensus_seed=consensus_seed,
                 peers=peers,
+                peer_consensus=arguments.peer_consensus,
                 min_peer_sample=arguments.min_peer_sample,
                 max_block_lag=arguments.max_block_lag,
                 trust_loader=load_trust,
