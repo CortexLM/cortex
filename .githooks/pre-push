@@ -3,6 +3,8 @@
 set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
+# Tests create foreign repositories; discard this worktree's inherited Git context.
+unset $(git rev-parse --local-env-vars)
 if ! command -v uv >/dev/null 2>&1; then
   echo "pre-push: uv is required" >&2
   exit 1
