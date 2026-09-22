@@ -97,8 +97,6 @@ def validator_config():
                     "123",
                     "--min-peer-sample",
                     "1",
-                    "--max-block-lag",
-                    "256",
                 ],
                 "ports": [{"target": 8091, "host_ip": "10.0.0.2"}],
                 "tmpfs": ["/tmp:size=32m,mode=1777"],
@@ -237,7 +235,6 @@ def test_compose_accepts_isolated_python_roles_with_durable_state(role):
         ("--minimum-measurements-version", "0"),
         ("--version-key", "-1"),
         ("--min-peer-sample", "-1"),
-        ("--max-block-lag", "0"),
     ],
 )
 def test_validator_deployment_rejects_unsafe_consensus_pins(flag, value):

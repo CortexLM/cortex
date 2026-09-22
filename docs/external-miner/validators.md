@@ -142,8 +142,11 @@ participant completeness, measurements and Merkle root. Frozen wire details
 are in the [bundle specification](../BUNDLE_SPEC.md).
 
 Trust files are reloaded, their activation windows and minimum versions are
-checked, and durable watermarks reject rollback. The sealed block must not be
-in the future or more than `--max-block-lag` blocks old (default `256`). Before
+checked, and durable watermarks reject rollback. A seal names the epoch it
+closes, so freshness is measured in epochs: the bundle must name the current
+epoch or the one immediately before it, which is the only seal the master
+offers between epoch boundaries. An older epoch is a replay and is refused.
+Before
 dispatch the validator rechecks both chain snapshot and latest gateway state;
 a reorg or a changed/unsealed latest response prevents submission.
 

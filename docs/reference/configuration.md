@@ -71,7 +71,6 @@ The Compose validator maps these host settings to required CLI arguments:
 | `BASE_MEASUREMENTS_MIN_VERSION` | Minimum accepted owner-signed measurement document version |
 | `BASE_VERSION_KEY` | Exact live subnet validator version key |
 | `BASE_MIN_PEER_SAMPLE` | Required independent permitted-validator peer sample, 0-64 |
-| `BASE_MAX_BLOCK_LAG` | Maximum age of a sealed metagraph block, at least 1 |
 
 The trust minimums and version key are intentionally blank in the example.
 Populate them from reviewed signed documents and the live subnet; do not infer

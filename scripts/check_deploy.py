@@ -82,7 +82,6 @@ VALIDATOR_OPTIONS = {
     "--poll-seconds",
     "--version-key",
     "--min-peer-sample",
-    "--max-block-lag",
 }
 
 
@@ -348,7 +347,6 @@ def validate_compose(config: dict, role: str) -> None:
         measurement_version = int(options["--minimum-measurements-version"])
         version_key = int(options["--version-key"])
         min_peer_sample = int(options["--min-peer-sample"])
-        max_block_lag = int(options["--max-block-lag"])
     except ValueError:
         raise ValueError("validator numeric options are invalid") from None
     if (
@@ -359,7 +357,6 @@ def validate_compose(config: dict, role: str) -> None:
         or measurement_version < 1
         or not 0 <= version_key <= 2**64 - 1
         or not 0 <= min_peer_sample <= 64
-        or max_block_lag < 1
     ):
         raise ValueError("validator numeric options are invalid")
     fixed = {
@@ -845,7 +842,6 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         "BASE_MEASUREMENTS_MIN_VERSION",
         "BASE_VERSION_KEY",
         "BASE_MIN_PEER_SAMPLE",
-        "BASE_MAX_BLOCK_LAG",
         "BASE_VALIDATOR_WALLETS_DIR",
         "BASE_TRUST_ROOT_DIR",
         "BASE_VALIDATOR_IDENTITY_DIR",
@@ -859,7 +855,6 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         "BASE_CHAIN_FALLBACK_ENDPOINTS",
         "BASE_COORDINATION_INTERVAL_SECS",
         "BASE_MIN_PEER_SAMPLE",
-        "BASE_MAX_BLOCK_LAG",
     }:
         if validator[name]:
             raise ValueError("validator host-specific identity fields must remain blank")
@@ -867,7 +862,6 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         validator_netuid = int(validator["BASE_NETUID"])
         validator_poll = float(validator["BASE_COORDINATION_INTERVAL_SECS"])
         validator_min_peer_sample = int(validator["BASE_MIN_PEER_SAMPLE"])
-        validator_max_block_lag = int(validator["BASE_MAX_BLOCK_LAG"])
     except ValueError:
         raise ValueError("validator example contains invalid numeric settings") from None
     if (
@@ -875,7 +869,6 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         or not math.isfinite(validator_poll)
         or validator_poll <= 0
         or not 0 <= validator_min_peer_sample <= 64
-        or validator_max_block_lag < 1
     ):
         raise ValueError("validator example contains unsafe network settings")
     _chain_endpoint(validator["BASE_CHAIN_ENDPOINT"], "validator chain endpoint")

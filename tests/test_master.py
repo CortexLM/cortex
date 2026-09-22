@@ -38,6 +38,10 @@ class FakeEpochChain:
     async def current_block(self):
         return self.state.current_block
 
+    async def current_epoch(self, netuid):
+        assert netuid == 541
+        return self.state.epoch
+
     async def snapshot(self, block, netuid):
         return ChainSnapshot(
             block, sha256(str(block).encode()).digest(), self.rows, self.rows[0].hotkey, frozenset()

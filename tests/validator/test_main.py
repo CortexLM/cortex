@@ -158,7 +158,6 @@ def test_main_rejects_nonpositive_trust_version_pins(flag, tmp_path):
         ("--netuid", "-1", "fit u16"),
         ("--version-key", "-1", "fit u64"),
         ("--min-peer-sample", "65", "between 0 and 64"),
-        ("--max-block-lag", "0", "must be positive"),
     ],
 )
 def test_main_rejects_unsafe_consensus_settings_before_connecting(flag, value, message, tmp_path):

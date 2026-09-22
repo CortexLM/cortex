@@ -47,10 +47,15 @@ class FakeChain:
         self.submissions = []
         self.tip_reads = 0
         self.barrier = None
+        self.epoch = 12
 
     async def current_block(self):
         self.tip_reads += 1
         return 99
+
+    async def current_epoch(self, netuid):
+        assert netuid == 541
+        return self.epoch
 
     async def snapshot(self, block, netuid):
         assert netuid == 541
@@ -557,6 +562,7 @@ async def test_profile_rotation_preserves_archives_and_waits_for_new_sealed_epoc
     await intake(network, epoch=13)
     assert (await seal(network, epoch=13)).status_code == 200
     assert network.service.latest()["algorithm_version"] == 2
+    network.chain.epoch = 13
     assert (await validator.run_once()).outcome == "submitted"
     second = GatewayStore(network.db_path)
     try:

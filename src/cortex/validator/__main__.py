@@ -102,7 +102,6 @@ def parser() -> argparse.ArgumentParser:
         "deployments, where --peers and --min-peer-sample then apply",
     )
     arguments.add_argument("--min-peer-sample", type=int, default=1)
-    arguments.add_argument("--max-block-lag", type=int, default=256)
     arguments.add_argument(
         "--verify-only",
         action="store_true",
@@ -180,7 +179,6 @@ async def run(arguments: argparse.Namespace, subtensor, wallet) -> TickResult | 
                 peers=peers,
                 peer_consensus=arguments.peer_consensus,
                 min_peer_sample=arguments.min_peer_sample,
-                max_block_lag=arguments.max_block_lag,
                 trust_loader=load_trust,
                 verify_only=arguments.verify_only,
             )
@@ -222,8 +220,6 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--version-key must fit u64")
     if not 0 <= arguments.min_peer_sample <= 64:
         raise SystemExit("--min-peer-sample must be between 0 and 64")
-    if arguments.max_block_lag < 1:
-        raise SystemExit("--max-block-lag must be positive")
     try:
         from bittensor import Subtensor
         from bittensor_wallet import Wallet

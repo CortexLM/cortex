@@ -55,7 +55,7 @@ class ChainSnapshot:
 
 
 class Chain(Protocol):
-    async def current_block(self) -> int: ...
+    async def current_epoch(self, netuid: int) -> int: ...
 
     async def snapshot(self, block: int, netuid: int) -> ChainSnapshot: ...
 
@@ -340,7 +340,6 @@ class Validator:
         peers: dict[bytes, str] | None = None,
         peer_consensus: bool = False,
         min_peer_sample: int = 1,
-        max_block_lag: int = 256,
         trust_loader: Callable[[int], TrustRoot] | None = None,
         verify_only: bool = False,
     ):
@@ -353,6 +352,15 @@ class Validator:
         independently-operated multi-validator deployment, where a peer-root sample
         of at least ``min_peer_sample`` becomes a precondition for submission. The
         local equivocation guard runs in both models.
+
+        A seal names the epoch it closes: ``block_B`` is that epoch's inclusive
+        last block (BUNDLE_SPEC.md §4.2), so the only seal on offer between epoch
+        boundaries is the last closed epoch's. Freshness is therefore measured in
+        epochs, not blocks: the seal must name the current epoch or the one
+        immediately before it. A fixed block window cannot bound staleness here,
+        because ``tempo`` is larger than any window that still rejects a replay,
+        and a closed epoch's bundle carries a fixed ``block_B`` that never becomes
+        fresh again.
         """
         uint(netuid, 2)
         uint(version_key, 8)
@@ -378,8 +386,8 @@ class Validator:
         self.journal.recover_interrupted(netuid)
         self.http = http
         self.version_key = version_key
-        if min_peer_sample < 0 or max_block_lag < 1:
-            raise ValueError("invalid peer sample or block freshness limit")
+        if min_peer_sample < 0:
+            raise ValueError("invalid peer sample limit")
         self.consensus_seed = consensus_seed
         self.peers = peers or {}
         if len(self.peers) > 64:
@@ -398,7 +406,7 @@ class Validator:
             ):
                 raise ValueError("peer URLs require HTTPS without credentials")
         self.peer_consensus = peer_consensus
-        self.min_peer_sample, self.max_block_lag = min_peer_sample, max_block_lag
+        self.min_peer_sample = min_peer_sample
         self.trust_loader = trust_loader
         self.verify_only = verify_only
         self._observed: Bundle | None = None
@@ -514,6 +522,21 @@ class Validator:
             return False
         return True
 
+    async def _require_current_epoch(self, bundle: Bundle) -> None:
+        """Refuse a seal older than the one the previous epoch boundary produced.
+
+        ``block_B`` names the epoch it closes, so age is an epoch count, not a
+        block count. The master seals one bundle per completed epoch, and that
+        seal is the only one on offer until the next boundary, so the accepted
+        window is exactly ``{current, current - 1}``. An older epoch is a replay
+        and is refused; a block-height window cannot express this, because it
+        would have to exceed ``tempo`` to stay live and would then also admit a
+        stale closed epoch.
+        """
+        current = await self.chain.current_epoch(self.netuid)
+        if bundle.body.epoch not in (current, current - 1):
+            raise ProtocolError("bundle block is stale or in the future")
+
     async def _run_once(self) -> TickResult:
         latest = decode_json(await self._read("/v1/weights/latest", 1024 * 1024))
         # Never read an LKG on disk, even when this process previously verified a seal.
@@ -528,9 +551,7 @@ class Validator:
         data = await self._read(f"/v1/bundle/{epoch}", 32 * 1024 * 1024)
         bundle = Bundle.decode(data)
         self._observed = bundle
-        tip = await self.chain.current_block()
-        if not 0 <= tip - bundle.body.block_b <= self.max_block_lag:
-            raise ProtocolError("bundle block is stale or in the future")
+        await self._require_current_epoch(bundle)
         snapshot = await self.chain.snapshot(bundle.body.block_b, self.netuid)
         if snapshot.block != bundle.body.block_b:
             raise ProtocolError("chain snapshot block mismatch")
@@ -597,8 +618,7 @@ class Validator:
         final_snapshot = await self.chain.snapshot(body.block_b, self.netuid)
         if final_snapshot != snapshot:
             raise ProtocolError("chain block changed before dispatch")
-        if not 0 <= await self.chain.current_block() - body.block_b <= self.max_block_lag:
-            raise ProtocolError("bundle block expired before dispatch")
+        await self._require_current_epoch(bundle)
         # Verification may perform slow historical RPCs. A seal that was current
         # before those reads is not a submission path after latest becomes unsealed.
         fresh = decode_json(await self._read("/v1/weights/latest", 1024 * 1024))

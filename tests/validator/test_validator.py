@@ -33,13 +33,21 @@ class FakeChain:
         self.error = None
         self.preflight_error = None
         self.preflights = []
+        self.epoch = 12
+        # Measured live cadence: tempo 360, bundle sealed at the epoch boundary
+        # read 313 blocks later. The old block-count window (256) refused it.
+        self.tip = 99 + 313
+
+    async def current_block(self):
+        return self.tip
 
     async def snapshot(self, block, netuid):
         assert block == 99 and netuid == 541
         return self.view
 
-    async def current_block(self):
-        return 100
+    async def current_epoch(self, netuid):
+        assert netuid == 541
+        return self.epoch
 
     async def submit(self, netuid, vector, version_key):
         self.submissions.append((netuid, vector, version_key))
@@ -513,14 +521,21 @@ async def test_quarantine_uses_surviving_signed_mass_threshold(network, challeng
         assert not network.chain.submissions
 
 
-async def test_seal_older_than_chain_freshness_window_refuses_dispatch(network):
-    async def current():
-        return 99 + 257
-
-    network.chain.current_block = current
+async def test_seal_from_an_epoch_older_than_the_previous_refuses_dispatch(network):
+    network.chain.epoch = 14  # bundle names epoch 12; only 13 and 14 are live
     with pytest.raises(ProtocolError, match="stale"):
         await network.validator.run_once()
     assert not network.chain.submissions
+
+
+async def test_previous_epoch_seal_313_blocks_old_is_still_consumable(network):
+    # Measured defect (tempo 360, window 256): the epoch-boundary seal is read
+    # 313 blocks into the next epoch. The master offers no fresher vector, so
+    # this seal must be consumable rather than refused as "stale".
+    assert network.chain.tip - network.bundle.body.block_b == 313
+    network.chain.epoch = 13  # bundle names the previous epoch
+    assert (await network.validator.run_once()).outcome == "submitted"
+    assert network.chain.submissions == [(541, ((1, 65535),), 1)]
 
 
 async def test_reorg_after_peer_check_refuses_dispatch(network):
