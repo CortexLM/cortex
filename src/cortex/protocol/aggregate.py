@@ -84,6 +84,17 @@ def aggregate_challenge_weights(
         kept[key] = score
     miner_total = compensated_sum(by_uid.values())
     if miner_total <= 1e-12:
+        # Nothing was claimed. The mass that burns is the allocation no miner
+        # took, which the challenge document states: the bounty share burns only
+        # when there is no payable report, and the proof share burns when no
+        # submission is credited. Burning less than the full proof share here
+        # would mint emission nobody earned.
+        burn_mass = compensated_sum(fractions.values())
+        if burn_mass <= 1e-12:
+            raise ProtocolError("no challenge carries an emission share")
+        # The chain still requires a minimum number of positive weights, so the
+        # burn is spread over that many uids. It stays a burn either way, but it
+        # is the declared allocations that decide how much burns.
         if max_weight_limit <= 0:
             raise ProtocolError(f"max_weight_limit={max_weight_limit} admits no positive weight")
         candidates = [0] + sorted(set(hotkey_to_uid.values()) - {0})
@@ -95,7 +106,7 @@ def aggregate_challenge_weights(
                 f"max_weight_limit={max_weight_limit}) but only {len(candidates)} "
                 "usable uid(s) available"
             )
-        by_uid = dict.fromkeys(candidates[:needed], 1.0 / needed)
+        by_uid = dict.fromkeys(candidates[:needed], burn_mass / needed)
         kept = {}
     else:
         burn = 1.0 - miner_total
