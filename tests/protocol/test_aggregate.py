@@ -102,6 +102,38 @@ def test_v2_burns_uid0_and_unmapped_authors_without_transferring_their_mass():
     assert result.weights == pytest.approx((0.9, 0.1))
 
 
+def test_v2_with_no_miner_burns_only_the_declared_proof_share():
+    """Zero miners: bounty must not burn as much as proof.
+
+    The operator's rule is that the burn at the end is the proof share, because
+    the bounty allocation exists to pay reports. Padding the vector across
+    arbitrary uids at equal weight said nothing about that: it burned the same
+    amount whichever challenge was empty.
+    """
+    result = aggregate_leaves(
+        (),
+        ((b"bounty", 3000), (b"proof", 7000)),
+        (),
+        algorithm_version=2,
+    )
+    # The whole declared allocation burns, and proof is the larger part of it.
+    assert sum(result.weights) == pytest.approx(0.7)
+    assert result.hotkey_weights == {}
+
+
+def test_v2_with_no_miner_keeps_bounty_below_proof():
+    """The bounty side is the smaller burn, whichever uid carries it."""
+    result = aggregate_leaves(
+        (),
+        ((b"bounty", 3000), (b"proof", 7000)),
+        ((bytes([9]) * 32, 5),),
+        algorithm_version=2,
+    )
+    # 0.7 spread over the uids the chain needs, never the full 1.0 the old
+    # equal-padding produced.
+    assert sum(result.weights) == pytest.approx(0.7)
+
+
 def test_v2_rejects_other_share_profiles():
     with pytest.raises(ProtocolError, match="shares"):
         aggregate_leaves((), LIVE_SHARES, (), algorithm_version=2)
