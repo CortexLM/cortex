@@ -405,7 +405,10 @@ class MasterRuntime:
             try:
                 await operation()
             except Exception as error:
-                logging.warning("master background operation failed (%s)", type(error).__name__)
+                # The type alone is not diagnosable: an epoch loop that fails
+                # every tick emits nothing, and the only symptom upstream is a
+                # burn. Keep the message and the traceback.
+                logging.warning("master background operation failed", exc_info=error)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=seconds)
             except TimeoutError:
