@@ -7,7 +7,7 @@ from typing import Protocol
 
 from cortex.errors import ServiceError
 from cortex.protocol import Bundle, Leaf, ProtocolError, TrustRoot, aggregate_leaves, build_bundle
-from cortex.protocol.crypto import BUNDLE_DOMAIN, RAW_WEIGHT_DOMAIN, verify_raw
+from cortex.protocol.crypto import BUNDLE_DOMAIN, RAW_WEIGHT_DOMAIN, encode_hotkey, verify_raw
 from cortex.protocol.merkle import merkle_root
 from cortex.protocol.scale import uint
 from cortex.validator import ChainSnapshot
@@ -211,6 +211,23 @@ class GatewayService:
             return project(
                 None, netuid=self.netuid, now=self.clock(), chain_endpoint=self._chain_endpoint()
             )
+
+    def metagraph(self) -> dict:
+        """Hotkeys of the latest verified seal, for challenge intake filters."""
+        try:
+            stored = self.store.latest()
+            if stored is None:
+                raise ServiceError(503, "no sealed metagraph")
+            self.refresh_trust(stored.epoch)
+            body = self._decode_stored(stored).body
+        except (sqlite3.Error, ProtocolError, ValueError):
+            raise ServiceError(503, "no sealed metagraph") from None
+        return {
+            "epoch": body.epoch,
+            "block": body.block_b,
+            "netuid": body.netuid,
+            "hotkeys": {encode_hotkey(key): uid for key, uid in body.uid_map},
+        }
 
     async def seal(
         self, epoch: int, *, netuid: int | None = None, block_b: int | None = None

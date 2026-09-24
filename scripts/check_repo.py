@@ -25,14 +25,22 @@ FROZEN_SPECS = {
 }
 SHARES = {"bounty": 2000, "proof": 8000}
 PROPORTIONAL_SHARES = {"bounty": 3000, "proof": 7000}
+CHALLENGE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 DOC_CONTRACTS = {
+    "docs/CHALLENGES.md": (
+        "/internal/v1/get_weights",
+        "X-Platform-Challenge-Slug",
+        "full_share_mass",
+        "io.cortex.challenge.contract",
+        "10^12",
+        "/v1/metagraph/latest",
+    ),
     "docs/external-miner/README.md": ("bounty", "proof", "3000", "7000"),
     "docs/external-miner/bounty.md": (
-        "/v1/pair",
-        "/v1/reports",
+        "/challenge/bounty/v1/pair",
+        "/challenge/bounty/v1/reports",
         "terms_accepted",
-        "severity",
-        "503",
+        "CortexLM/bounty",
         "CortexLM/backend",
     ),
     "docs/external-miner/proof.md": (
@@ -60,18 +68,16 @@ DOC_CONTRACTS = {
     ),
 }
 PUBLIC_ROUTES = {
-    "src/cortex/bounty/api.py": {
-        ("post", "/v1/pair"),
-        ("post", "/v1/reports"),
-        ("get", "/v1/status"),
-    },
     "src/cortex/proof/api.py": {
         ("get", "/v1/proof/topics"),
         ("post", "/v1/submissions"),
         ("post", "/v1/submissions/lookup"),
         ("get", "/v1/status"),
     },
-    "src/cortex/gateway/api.py": {("get", "/v1/weights/latest")},
+    "src/cortex/gateway/api.py": {
+        ("get", "/v1/weights/latest"),
+        ("get", "/v1/metagraph/latest"),
+    },
 }
 ARTIFACT_DIRS = {
     "__pycache__",
@@ -155,24 +161,30 @@ def check_trust_roots(root: Path) -> list[str]:
                 raise ValueError("symlinked trust root")
             document = tomllib.loads(path.read_text())
             rows = document["challenges"]
-            if not isinstance(rows, list) or len(rows) != 2:
-                raise ValueError("exactly two challenges required")
-            actual = {}
-            for row in rows:
-                identifier, share = row["id"], row["emission_share_bps"]
-                if identifier in actual or type(share) is not int:
-                    raise ValueError("duplicate id or invalid share")
-                if not re.fullmatch(r"[0-9a-f]{64}", row["public_key"]):
-                    raise ValueError("invalid challenge public key")
-                actual[identifier] = share
             version = document["version"]
             if type(version) is not int or version < 1:
                 raise ValueError("invalid trust document version")
-            if actual != SHARES and not (actual == PROPORTIONAL_SHARES and version >= 2):
+            if not isinstance(rows, list) or not 1 <= len(rows) <= (64 if version >= 3 else 2):
+                raise ValueError("unsupported challenge count")
+            actual = {}
+            for row in rows:
+                identifier, share = row["id"], row["emission_share_bps"]
+                if identifier in actual or type(share) is not int or share < 0:
+                    raise ValueError("duplicate id or invalid share")
+                if not CHALLENGE_ID.fullmatch(identifier):
+                    raise ValueError("invalid challenge id")
+                if not re.fullmatch(r"[0-9a-f]{64}", row["public_key"]):
+                    raise ValueError("invalid challenge public key")
+                actual[identifier] = share
+            if version >= 3:
+                if sum(actual.values()) != 10000:
+                    raise ValueError("version 3 shares must sum to 10000")
+            elif actual != SHARES and not (actual == PROPORTIONAL_SHARES and version >= 2):
                 raise ValueError("unsupported shares or activation version")
         except (OSError, UnicodeError, ValueError, KeyError, TypeError):
             failures.append(
-                f"{name}: expected bounty/proof=2000/8000 or version >=2 with 3000/7000"
+                f"{name}: expected bounty/proof=2000/8000, version 2 with 3000/7000, "
+                "or version >=3 with unique ids summing to 10000"
             )
     return failures
 
@@ -241,8 +253,6 @@ def check_public_contracts(root: Path) -> list[str]:
             routes = declared_routes(path.read_text())
             for method, route in sorted(required - routes):
                 failures.append(f"{name}: public API removed: {method.upper()} {route}")
-            if "bounty" in name and any("/public/" in route for _, route in routes):
-                failures.append(f"{name}: Bounty public feed must remain an external backend API")
         except (OSError, UnicodeError, ValueError, SyntaxError):
             failures.append(f"{name}: public API source missing or invalid")
     return failures

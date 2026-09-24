@@ -25,6 +25,9 @@ consensus-seed requirement; see the [validator guide](validators.md).
 
 ## Bounty
 
+Bounty runs as the [CortexLM/bounty](https://github.com/CortexLM/bounty) container;
+its routes are under `/challenge/bounty/`.
+
 | Symptom | Meaning and next action |
 |---------|-------------------------|
 | `403 terms_required` | Read the terms and explicitly pass `--accept-terms` when pairing |
@@ -44,8 +47,8 @@ consensus-seed requirement; see the [validator guide](validators.md).
 | Public report GET is denied | Reports require operator access; the gateway does not expose private report reads |
 
 A Bounty feed outage stores no new report and emits no positive bounty score.
-It covers participants with `NoScore(ChallengeInternal)` so the share can burn
-through a valid seal. Do not enable a substitute local scorer.
+Any challenge-container outage covers participants with
+`NoScore(ChallengeInternal)` so the share can burn through a valid seal. Do not enable a substitute local scorer.
 
 ## Proof intake
 

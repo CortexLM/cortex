@@ -1,5 +1,6 @@
 """Immutable SCALE v1 types. Field order mirrors the frozen Rust contract."""
 
+import re
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -8,6 +9,9 @@ from .scale import ProtocolError, Reader, byte_vec, fixed, uint, vector
 LIVE_SHARES = ((b"bounty", 2000), (b"proof", 8000))
 PROPORTIONAL_SHARES = ((b"bounty", 3000), (b"proof", 7000))
 BOUNTY_FULL_SHARE_REPORTS = 10
+# Algorithm 3: a challenge's leaves sum to at most this; the shortfall burns to UID0.
+FULL_SHARE_SCORE = 10**12
+CHALLENGE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 
 
 class NoScoreReason(IntEnum):
@@ -160,6 +164,8 @@ class TrustRoot:
     @property
     def algorithm_version(self) -> int:
         self.validate()
+        if self.challenges_version >= 3:
+            return 3
         return 2 if self.shares == PROPORTIONAL_SHARES else 1
 
     def challenges_body(self) -> bytes:
@@ -167,7 +173,18 @@ class TrustRoot:
         return vector(self.challenges, ChallengeEntry.encode)
 
     def validate(self) -> None:
-        if self.shares not in (LIVE_SHARES, PROPORTIONAL_SHARES):
+        if self.challenges_version >= 3:
+            ids = [entry.id for entry in self.challenges]
+            if (
+                not 1 <= len(ids) <= 64
+                or len(set(ids)) != len(ids)
+                or sum(entry.emission_share_bps for entry in self.challenges) != 10000
+                or not all(CHALLENGE_ID.fullmatch(key.decode("ascii", "replace")) for key in ids)
+            ):
+                raise ProtocolError(
+                    "version 3 challenges need 1..64 unique lowercase ids summing to 10000 bps"
+                )
+        elif self.shares not in (LIVE_SHARES, PROPORTIONAL_SHARES):
             raise ProtocolError("shares must be bounty/proof=2000/8000 or 3000/7000")
         if self.shares == PROPORTIONAL_SHARES and self.challenges_version < 2:
             raise ProtocolError("proportional shares require challenges version >= 2")

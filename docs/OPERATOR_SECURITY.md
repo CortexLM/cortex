@@ -9,8 +9,8 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
   untracked regular file with mode 0400 or 0600 inside a 0700 directory.
 - [ ] No credential is present in an environment example, image layer, compose
   build argument, Terraform state, cloud-init payload, log or shell history.
-- [ ] Master, Bounty, Proof and VM-host tokens are distinct and rotated
-  independently.
+- [ ] Master operator, per-challenge internal/admin, Proof and VM-host tokens are
+  distinct and rotated independently.
 - [ ] Miner BYOK vault storage is durable only as long as queued work requires,
   and terminal jobs have no remaining secret files.
 - [ ] The OpenRouter owner key stays on the VM host and is not exposed to miner
@@ -20,12 +20,16 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
 
 - [ ] `cortex trust-verify` accepts the installed challenge and measurement
   documents at the deployment epoch.
-- [ ] Bounty and Proof public keys match their mounted signing seeds, and the
-  gateway public key is different from both.
-- [ ] The trust root contains only Bounty and Proof: legacy 2000/8000 with
-  algorithm 1, or 3000/7000 with algorithm 2 and challenge-document version >=2.
-  Complete [activation](how-to/trust-root.md#activate-proportional-bounty) before
-  switching profiles; preserve old journals and sealed bytes.
+- [ ] Every challenge public key matches its mounted `<id>.key` (or
+  `PROOF_SK_FILE`) seed, and the gateway public key differs from all of them.
+- [ ] The trust root is legacy bounty/proof 2000/8000 (algorithm 1), 3000/7000
+  (algorithm 2, version >=2), or unique ids summing to 10000 (algorithm 3,
+  version >=3). Complete the matching
+  [activation](how-to/trust-root.md#activate-container-challenges-algorithm-3)
+  before switching profiles; preserve old journals and sealed bytes.
+- [ ] Every registry entry names the challenge's own `ghcr.io` repository and
+  GitHub `source`, keeps `attestation = true`, and runs on `stable` or a pin in
+  production.
 - [ ] Runtime, kernel, rootfs, evaluator and experiment-pack references use
   verified SHA-256 digests. No production image uses a floating tag.
 - [ ] Empty or unknown pins remain fail-closed; no digest was copied from an
@@ -35,7 +39,9 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
 
 ## Network and isolation
 
-- [ ] The gateway and both challenge APIs run only on the master role.
+- [ ] The gateway, Proof and challenge containers run only on the master role.
+- [ ] Only `challenge-supervisor` mounts the Docker socket; challenge containers
+  publish no host port and join only `cortex-challenges`.
 - [ ] The validator role exposes no challenge execution route and reaches the
   master only through the configured VPC/TLS endpoint.
 - [ ] The VM orchestrator runs on a dedicated KVM-capable host with mutual
@@ -50,11 +56,13 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
 
 ## Service readiness
 
-- [ ] Bounty `/v1/status` reports `can_score: true` after a real stable feed
-  probe, and a report outage test returns 503 without a row.
-- [ ] In Bounty-only mode, `PROOF_VM_ORCHESTRATOR_URL` is empty, no Proof topic
-  is open, and a completed epoch contains signed `ChallengeInternal` Proof
-  leaves whose 7000 bps (8000 under algorithm 1) burn to UID 0 without blocking Bounty.
+- [ ] Every registered challenge answers `GET /challenge/<id>/version`, and its
+  own readiness probe passes (for Bounty, `/challenge/bounty/v1/status` reports
+  `can_score: true` after a real stable feed probe).
+- [ ] Stopping a challenge container makes the next epoch contain signed
+  `ChallengeInternal` leaves for it and burn its share without blocking others.
+- [ ] While Proof is unwired, `PROOF_VM_ORCHESTRATOR_URL` is empty, no Proof topic
+  is open, and its share burns to UID 0 through signed `ChallengeInternal` leaves.
 - [ ] When Proof is enabled, `/v1/status` reports a valid topic, sealed baseline,
   registered runner, pinned image, open inference offer and compatible executor
   offer; its failure matrix returns 503 without a scored row.
@@ -68,7 +76,8 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
 - [ ] Master SQLite files and WAL state reside on a durable private volume and
   are backed up with the service quiesced or through SQLite's backup API.
 - [ ] Restore testing covers gateway seals, epoch journal, Proof jobs, setup
-  jobs, topic evidence, Bounty sessions and validator dispatch state.
+  jobs, topic evidence, each `cortex-challenge-<id>-data` volume and validator
+  dispatch state.
 - [ ] Pending external jobs are reconciled by stable job ID after restart; an
   uncertain paid operation is not blindly repeated.
 - [ ] Failed experiment VMs and bounded console tails are retained in the

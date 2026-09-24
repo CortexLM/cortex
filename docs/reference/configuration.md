@@ -16,11 +16,11 @@ conflicting values are an error. Existing names and crypto domains are preserved
 | `BASE_CHALLENGES_FILE` | Signed challenge configuration; adjacent `.sig` required |
 | `BASE_MEASUREMENTS_FILE` | Signed measurement configuration; adjacent `.sig` required |
 | `BASE_GATEWAY_SK_FILE` | Gateway seal seed file |
-| `BOUNTY_SK_FILE` | Bounty leaf seed file |
 | `PROOF_SK_FILE` | Proof topic and leaf seed file |
-| `BOUNTY_SESSION_SECRET_FILE` | Separate pairing session secret |
 | `BASE_GATEWAY_ADMIN_TOKEN_FILE` | Required operator bearer file |
-| `BOUNTY_BACKEND_PUBLIC_URL` | CortexLM/backend HTTPS public feed |
+| `BASE_CHALLENGE_KEYS_DIR` | Directory of container challenge leaf seeds, `<id>.key`; default `/run/secrets` |
+| `BASE_CHALLENGE_REGISTRY_FILE` | Optional [challenge registry](../CHALLENGES.md); unset runs no container challenge |
+| `BASE_CHALLENGE_SECRETS_DIR` | Per-challenge `<id>/internal.token` bearers; default `/run/challenge-secrets` |
 | `PROOF_VM_ORCHESTRATOR_URL` | Dedicated VM host HTTPS origin |
 | `PROOF_VM_ORCHESTRATOR_TOKEN_FILE` | Rotating bearer file for that host |
 | `PROOF_VM_ORCHESTRATOR_CA_FILE` | CA file for the host's TLS certificate |
@@ -37,14 +37,13 @@ Keys and tokens are files with mode 0400 or 0600, never image build arguments.
 Signing seeds are 32 bytes or 64 hexadecimal characters. SQLite state and miner
 credential vaults must be backed by durable private storage.
 
-For the Bounty-only launch, set `BOUNTY_BACKEND_PUBLIC_URL` to the HTTPS
-`CortexLM/backend` origin and leave `PROOF_VM_ORCHESTRATOR_URL` empty. The Proof
-seed remains required because every completed epoch still needs signed Proof
-absence leaves. The legacy owner-signed trust root is `bounty = 2000` and
-`proof = 8000`; algorithm 2 requires a signed `bounty = 3000`, `proof = 7000`
-profile with challenge-document version >=2 (see
-[activation](../how-to/trust-root.md#activate-proportional-bounty)). The unavailable
-Proof share burns and is never reassigned to Bounty.
+Container challenges such as Bounty take their settings from the registry
+`env` table, never from master variables; see [the challenge contract](../CHALLENGES.md).
+A trusted challenge that is not registered, unhealthy or returns invalid weights
+burns its share. The Proof seed remains required because every completed epoch
+still needs signed Proof absence leaves. The unavailable Proof share burns and is
+never reassigned. Trust-root profiles and their activation are described in
+[the trust-root ceremony](../how-to/trust-root.md).
 
 One resource shape applies to the persistent topic VM and each fresh experiment
 VM. The examples explicitly request 1 vCPU, 1024 MiB RAM and 16384 MiB disk;
@@ -55,6 +54,22 @@ acceptance. Oversized requests are rejected, never clamped. Attaching an existin
 topic VM also requires its image and resource shape to match exactly: changing
 these settings does not resize a running topic. See the
 [small-host sizing guide](../../deploy/README.md#small-host-sizing).
+
+## Challenge supervisor
+
+`cortex challenge-supervisor` takes only arguments:
+
+| Option | Meaning |
+| --- | --- |
+| `--registry` | registry TOML, re-read every tick |
+| `--secrets-host-dir` | absolute HOST path of `<id>/` secret directories, bind-mounted read-only |
+| `--docker-socket` | default `/var/run/docker.sock` |
+| `--network` | private challenge network; default `cortex-challenges` |
+| `--master-url` | URL challenges use for `/v1/metagraph/latest`; default `http://cortex-master:8080` |
+| `--once` | reconcile every entry once and exit |
+
+The Compose role also needs `BASE_CHALLENGE_SECRETS_HOST_DIR` and
+`BASE_DOCKER_GID` (the group owning the Docker socket).
 
 ## Validator
 

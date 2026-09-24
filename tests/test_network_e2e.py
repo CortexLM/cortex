@@ -5,18 +5,20 @@ import io
 import json
 import os
 import tarfile
-import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import httpx
 import pytest
+import sr25519
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from test_master import FakeEpochChain, master_config
 from vm.test_research import MemoryCallback
 from vm.test_setup_agent import ExecutingHypervisor, SetupProvider
 
-from cortex.bounty import PublicBackend
 from cortex.master import EpochState, build_master
-from cortex.miner import MinerClient
+from cortex.miner import MinerClient, pair_payload
 from cortex.proof.backend import VmBackend
 from cortex.protocol import ChallengeEntry, MetagraphRow, NoScore, NoScoreReason, Score, TrustRoot
 from cortex.protocol.crypto import encode_hotkey, public_key
@@ -119,52 +121,70 @@ class GuestWire:
         return await guest.handle(message)
 
 
-class BountyFeed:
-    def __init__(self):
-        self.available = True
-        self.leaderboard = []
-        self.reports = []
-        self.revision = "1"
+class FakeChallenges:
+    """Contract-v1 challenge containers, routed by the container host name."""
 
-    def handle(self, request):
-        if not self.available:
-            return httpx.Response(503)
-        route = request.url.path.rsplit("/", 1)[-1]
-        if route == "status":
-            body = {
-                "api_version": 1,
-                "revision": self.revision,
-                "adjudication_available": True,
-                "published": len(self.reports),
-                "valid": sum(row["status"] == "valid" for row in self.reports),
-                "duplicate": sum(row["status"] == "duplicate" for row in self.reports),
-                "already_fixed_not_prod": sum(
-                    row["status"] == "already_fixed_not_prod" for row in self.reports
-                ),
-                "invalid_malicious": sum(
-                    row["status"] == "invalid_malicious" for row in self.reports
-                ),
-                "hotkeys": len({row["hotkey"] for row in self.reports}),
-                "awaiting_adjudication": 0,
-                "unpriced_valid": 0,
+    def __init__(self):
+        self.weights: dict[str, dict[str, float]] = {}
+        self.full_share_mass: dict[str, float | None] = {}
+        self.failing: set[str] = set()
+        self.calls: list[tuple[str, int]] = []
+        self.pairs: list[dict] = []
+        app = FastAPI()
+
+        @app.get("/internal/v1/get_weights")
+        async def get_weights(request: Request, epoch: int):
+            slug = request.headers["host"].removeprefix("cortex-challenge-").split(":")[0]
+            if request.headers.get("authorization") != f"Bearer {slug}-internal":
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            if request.headers.get("x-platform-challenge-slug") != slug:
+                return JSONResponse({"error": "forbidden"}, status_code=403)
+            self.calls.append((slug, epoch))
+            if slug in self.failing:
+                return JSONResponse({"error": "feed unavailable"}, status_code=503)
+            return {
+                "challenge_slug": slug,
+                "epoch": epoch,
+                "weights": self.weights.get(slug, {}),
+                "full_share_mass": self.full_share_mass.get(slug),
+                "metadata": {},
+                "computed_at": "2026-09-24T00:00:00Z",
             }
-        elif route == "leaderboard":
-            body = {
-                "api_version": 1,
-                "revision": self.revision,
-                "items": self.leaderboard,
-                "has_more": False,
-            }
-        else:
-            body = {
-                "api_version": 1,
-                "revision": self.revision,
-                "items": self.reports,
-                "count": len(self.reports),
-                "has_more": False,
-                "next_cursor": None,
-            }
-        return httpx.Response(200, json=body)
+
+        @app.post("/v1/pair", status_code=201)
+        async def pair(request: Request):
+            body = await request.json()
+            payload = pair_payload(body["account_id"], body["nonce"], body["exp"])
+            public = bytes.fromhex(body["hotkey"]) if len(body["hotkey"]) == 64 else None
+            assert public is None or sr25519.verify(
+                bytes.fromhex(body["signature"]), payload, public
+            )
+            self.pairs.append(body)
+            return {"session": "fixture-session"}
+
+        self.transport = httpx.ASGITransport(app)
+
+
+def challenge_secrets(config, *slugs):
+    for slug in slugs:
+        directory = config.challenge_secrets_dir / slug
+        directory.mkdir(parents=True, exist_ok=True)
+        token = directory / "internal.token"
+        token.write_text(f"{slug}-internal")
+        token.chmod(0o600)
+
+
+def registry_file(tmp_path, *slugs):
+    path = tmp_path / "challenge-registry.toml"
+    path.write_text(
+        "version = 1\n"
+        + "".join(
+            f'[[challenge]]\nid = "{slug}"\nimage = "ghcr.io/fixture/{slug}"\n'
+            f'source = "https://github.com/fixture/{slug}"\n'
+            for slug in slugs
+        )
+    )
+    return path
 
 
 @pytest.mark.parametrize(
@@ -177,12 +197,21 @@ class BountyFeed:
         (2, (4, 5), (0.12, 0.15)),
         (2, (4, 6), (0.12, 0.18)),
         (2, (8, 12), (0.12, 0.18)),
+        (3, (0, 0), (0, 0)),
+        (3, (1, 0), (0.03, 0)),
+        (3, (2, 3), (0.06, 0.09)),
+        (3, (4, 6), (0.12, 0.18)),
+        (3, (8, 12), (0.12, 0.18)),
     ],
 )
-async def test_bounty_intake_external_feed_seal_and_validator_dispatch(
+async def test_bounty_container_weights_seal_and_validator_dispatch(
     tmp_path, version, counts, payouts
 ):
-    config = master_config(tmp_path)
+    """Algorithm 3 with full_share_mass=10 pays exactly what algorithm 2 pays."""
+    config = replace(
+        master_config(tmp_path), challenge_registry_file=registry_file(tmp_path, "bounty")
+    )
+    challenge_secrets(config, "bounty")
     chain = FakeEpochChain()
     second_key = public_key(bytes([22]) * 32)
     chain.rows += (MetagraphRow(second_key, 2),)
@@ -196,16 +225,21 @@ async def test_bounty_intake_external_feed_seal_and_validator_dispatch(
         public_key(bytes([7]) * 32),
         challenges_version=version,
     )
-    feed = BountyFeed()
+    fake = FakeChallenges()
+    miner_key = public_key(bytes([21]) * 32)
+    fake.weights["bounty"] = {
+        encode_hotkey(key): count
+        for key, count in zip((miner_key, second_key), counts, strict=True)
+        if count
+    }
+    fake.weights["bounty"][encode_hotkey(public_key(bytes([99]) * 32))] = 50  # not registered
+    fake.full_share_mass["bounty"] = 10
     runtime = await build_master(
         config,
         chain=chain,
         epochs=chain,
         trust=trust,
-        bounty_backend=PublicBackend(
-            "https://backend.fixture",
-            transport=httpx.MockTransport(feed.handle),
-        ),
+        challenge_http=httpx.AsyncClient(transport=fake.transport),
     )
     journal = SubmissionJournal(tmp_path / "validator.sqlite3")
     try:
@@ -214,95 +248,33 @@ async def test_bounty_intake_external_feed_seal_and_validator_dispatch(
             base_url="https://master.fixture",
         ) as http:
             miner = MinerClient(
-                base_url="https://master.fixture",
-                seed=bytes([21]) * 32,
-                client=http,
+                base_url="https://master.fixture", seed=bytes([21]) * 32, client=http
             )
-            now = int(time.time())
-            runtime.bounty.clock = lambda: now
-            grant = await http.post(
-                "/v1/admin/pair-grants",
-                headers={"authorization": "Bearer fixture-operator-token"},
-                json={
-                    "account_id": "bounty-fixture",
-                    "hotkey": miner.hotkey,
-                    "expires_at": now + 300,
-                },
-            )
-            assert grant.status_code == 201, grant.text
-            pairing = await miner.pair_bounty(account_id="bounty-fixture", accept_terms=True)
-
-            feed.available = False
-            refused = await http.post(
-                "/challenge/bounty/v1/reports",
-                json={
-                    "session": pairing["session"],
-                    "hotkey": miner.hotkey,
-                    "title": "External feed outage blocks durable intake",
-                    "body": (
-                        "The external scoring publication is unavailable during intake, so "
-                        "this otherwise substantive report must not create any durable local row."
-                    ),
-                    "repro_steps": "Disable the feed and submit the signed miner session report.",
-                },
-            )
-            assert refused.status_code == 503
-            assert runtime.bounty.store.list_reports() == []
-
-            feed.available = True
-            local_report = await miner.report_bounty(
-                session=pairing["session"],
-                title="Unauthorized configuration mutation",
-                body=(
-                    "An unauthenticated request changes the operator configuration and "
-                    "invalidates the current sealed bundle for every validator observing "
-                    "the gateway."
-                ),
-                repro_steps=(
-                    "Call the operator endpoint without authorization and read the changed value."
-                ),
-            )
-            assert local_report["state"] == "pending"
-            authors = (miner.hotkey, encode_hotkey(second_key))
-            feed.leaderboard = sorted(
-                [
-                    {"hotkey": author, "valid": count}
-                    for author, count in zip(authors, counts, strict=True)
-                    if count
-                ],
-                key=lambda row: (-row["valid"], row["hotkey"]),
-            )
-            feed.reports = [
-                {
-                    "id": f"backend-{author}-{index}",
-                    "hotkey": author,
-                    "status": "valid",
-                    "severity": "critical" if version == 1 else "trivial",
-                    "problem_found": "Unauthorized configuration mutation",
-                    "adjudicator": "fixture-adjudicator",
-                    "justification": "Reproduced from a clean unauthenticated client.",
-                    "adjudicated_at": "2026-09-18T01:00:00Z",
-                    "created_at": "2026-09-18T00:00:00Z",
-                }
-                for author, count in zip(authors, counts, strict=True)
-                for index in range(count)
-            ]
-            feed.revision = "2"
+            paired = await miner.pair_bounty(account_id="bounty-fixture", accept_terms=True)
+            assert paired == {"session": "fixture-session"}
+            assert fake.pairs[0]["hotkey"] == miner.hotkey
+            internal = await http.get("/challenge/bounty/internal/v1/get_weights?epoch=12")
+            assert internal.status_code == 404
 
             await runtime.emitter.tick()
             chain.state = EpochState(13, 100, 105)
             assert await runtime.emitter.tick() == [12]
+            assert fake.calls == [("bounty", 12)]
             leaves = runtime.gateway.store.leaves(12)
-            miner_key = public_key(bytes([21]) * 32)
-            assert next(
+            assert {leaf.miner_hotkey for leaf in leaves if leaf.challenge_id == b"bounty"} == {
+                row.hotkey for row in chain.rows
+            }
+            mine = next(
                 leaf
                 for leaf in leaves
                 if leaf.challenge_id == b"bounty" and leaf.miner_hotkey == miner_key
-            ).score == (
-                Score(1_000_000 if version == 1 else counts[0])
-                if counts[0]
-                else NoScore(NoScoreReason.NOT_ATTEMPTED)
             )
+            if not counts[0]:
+                assert mine.score == NoScore(NoScoreReason.NOT_ATTEMPTED)
+            elif version == 3:
+                assert mine.score == Score(10**12 * counts[0] // max(10, sum(counts)))
+            else:
+                assert mine.score == Score(counts[0])
             assert all(
                 leaf.score == NoScore(NoScoreReason.CHALLENGE_INTERNAL)
                 for leaf in leaves
@@ -311,17 +283,12 @@ async def test_bounty_intake_external_feed_seal_and_validator_dispatch(
             latest = (await http.get("/v1/weights/latest")).json()
             assert latest["sealed"] is True
             assert latest["algorithm_version"] == version
-            assert latest["source_challenges"][0]["emission_percent"] == pytest.approx(
-                20 if version == 1 else sum(payouts) * 100
-            )
             weights = dict(zip(latest["uids"], latest["weights"], strict=True))
             assert weights[0] == pytest.approx(1 - sum(payouts))
             assert weights.get(1, 0) == pytest.approx(payouts[0])
             assert weights.get(2, 0) == pytest.approx(payouts[1])
-            status = (await http.get("/challenge/bounty/v1/status")).json()
-            assert status["scoring_version"] == version
-            if version == 2:
-                assert status["scoring"]["paid_on"] == ["valid_report_count"]
+            metagraph = (await http.get("/v1/metagraph/latest")).json()
+            assert metagraph["hotkeys"][miner.hotkey] == 1
 
             preflight = Validator(
                 gateway_url="https://master.fixture",
@@ -334,7 +301,6 @@ async def test_bounty_intake_external_feed_seal_and_validator_dispatch(
             )
             assert (await preflight.run_once()).outcome == "verified"
             assert chain.submissions == []
-
             validator = Validator(
                 gateway_url="https://master.fixture",
                 netuid=541,
@@ -347,6 +313,62 @@ async def test_bounty_intake_external_feed_seal_and_validator_dispatch(
             assert chain.submissions == [tuple(tuple(pair) for pair in latest["final_vector"])]
     finally:
         journal.close()
+        await runtime.close()
+
+
+async def test_three_container_challenges_burn_failures_and_unpaid_mass(tmp_path):
+    config = replace(
+        master_config(tmp_path),
+        challenge_registry_file=registry_file(tmp_path, "bounty", "opentype"),
+    )
+    challenge_secrets(config, "bounty", "opentype")
+    for slug, seed in (("opentype", 3), ("audit", 4)):
+        key = tmp_path / f"{slug}.key"
+        key.write_bytes(bytes([seed]) * 32)
+        key.chmod(0o600)
+    chain = FakeEpochChain()
+    trust = TrustRoot(
+        (
+            ChallengeEntry(b"audit", public_key(bytes([4]) * 32), 1000),
+            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 3000),
+            ChallengeEntry(b"opentype", public_key(bytes([3]) * 32), 4000),
+            ChallengeEntry(b"proof", public_key(bytes([2]) * 32), 2000),
+        ),
+        hashlib.sha256(b"\x00").digest(),
+        public_key(bytes([7]) * 32),
+        challenges_version=3,
+    )
+    fake = FakeChallenges()
+    miner = encode_hotkey(chain.rows[1].hotkey)
+    fake.weights["opentype"] = {miner: 0.25}
+    fake.full_share_mass["opentype"] = 1.0
+    fake.failing.add("bounty")
+    runtime = await build_master(
+        config,
+        chain=chain,
+        epochs=chain,
+        trust=trust,
+        challenge_http=httpx.AsyncClient(transport=fake.transport),
+    )
+    try:
+        await runtime.emitter.tick()
+        chain.state = EpochState(13, 100, 105)
+        assert await runtime.emitter.tick() == [12]
+        leaves = {
+            (leaf.challenge_id, leaf.miner_hotkey): leaf.score
+            for leaf in runtime.gateway.store.leaves(12)
+        }
+        # Registered in trust but not in the registry, and a failing container: both burn.
+        for challenge in (b"audit", b"bounty"):
+            assert {score for (cid, _), score in leaves.items() if cid == challenge} == {
+                NoScore(NoScoreReason.CHALLENGE_INTERNAL)
+            }
+        assert leaves[(b"opentype", chain.rows[1].hotkey)] == Score(250_000_000_000)
+        latest = runtime.gateway.latest()
+        weights = dict(zip(latest["uids"], latest["weights"], strict=True))
+        assert weights[1] == pytest.approx(0.4 * 0.25)
+        assert weights[0] == pytest.approx(1 - 0.4 * 0.25)
+    finally:
         await runtime.close()
 
 

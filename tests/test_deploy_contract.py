@@ -147,10 +147,11 @@ def master_config():
                     "BASE_CHALLENGES_FILE": "/etc/base/config/challenges.toml",
                     "BASE_MEASUREMENTS_FILE": "/etc/base/config/measurements.toml",
                     "BASE_GATEWAY_SK_FILE": "/run/secrets/gateway.key",
-                    "BOUNTY_SK_FILE": "/run/secrets/bounty.key",
                     "PROOF_SK_FILE": "/run/secrets/proof.key",
-                    "BOUNTY_SESSION_SECRET_FILE": "/run/secrets/bounty-session.key",
                     "BASE_GATEWAY_ADMIN_TOKEN_FILE": "/run/secrets/operator.token",
+                    "BASE_CHALLENGE_KEYS_DIR": "/run/secrets",
+                    "BASE_CHALLENGE_REGISTRY_FILE": "/etc/base/challenges/registry.toml",
+                    "BASE_CHALLENGE_SECRETS_DIR": "/run/challenge-secrets",
                 },
                 "healthcheck": {
                     "test": [
@@ -228,6 +229,115 @@ def test_compose_healthcheck_cannot_be_satisfied_by_an_unrelated_command(role):
 def test_compose_accepts_isolated_python_roles_with_durable_state(role):
     config = master_config() if role == "master" else validator_config()
     CHECK["validate_compose"](config, role)
+
+
+def supervised_master_config():
+    config = master_config()
+    gateway = config["services"]["gateway"]
+    gateway["networks"] = {"default": None, "challenges": {"aliases": ["cortex-master"]}}
+    gateway["volumes"] += [
+        {
+            "type": "bind",
+            "source": "/fixture/challenges",
+            "target": "/etc/base/challenges",
+            "read_only": True,
+        },
+        {
+            "type": "bind",
+            "source": "/fixture/challenge-secrets",
+            "target": "/run/challenge-secrets",
+            "read_only": True,
+        },
+    ]
+    config["networks"] = {"challenges": {"name": "cortex-challenges"}}
+    config["services"]["challenge-supervisor"] = {
+        "profiles": ["master"],
+        "image": PINNED_IMAGE,
+        "init": True,
+        "read_only": True,
+        "restart": "unless-stopped",
+        "user": "65532:65532",
+        "group_add": ["999"],
+        "cap_drop": ["ALL"],
+        "security_opt": ["no-new-privileges:true"],
+        "command": [
+            "challenge-supervisor",
+            "--registry",
+            "/etc/base/challenges/registry.toml",
+            "--secrets-host-dir",
+            "/fixture/challenge-secrets",
+            "--network",
+            "cortex-challenges",
+            "--master-url",
+            "http://cortex-master:8080",
+        ],
+        "networks": {"challenges": None},
+        "tmpfs": ["/tmp:size=16m,mode=1777"],
+        "volumes": [
+            {
+                "type": "bind",
+                "source": "/var/run/docker.sock",
+                "target": "/var/run/docker.sock",
+                "read_only": True,
+            },
+            {
+                "type": "bind",
+                "source": "/fixture/challenges",
+                "target": "/etc/base/challenges",
+                "read_only": True,
+            },
+        ],
+    }
+    return config
+
+
+def test_master_accepts_the_one_docker_controlling_challenge_supervisor():
+    CHECK["validate_compose"](supervised_master_config(), "master")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["gateway-socket", "secrets", "ports", "env", "privileged", "network", "registry", "command"],
+)
+def test_docker_control_stays_confined_to_the_secretless_supervisor(mutation):
+    config = supervised_master_config()
+    gateway = config["services"]["gateway"]
+    supervisor = config["services"]["challenge-supervisor"]
+    if mutation == "gateway-socket":
+        gateway["volumes"].append(
+            {
+                "type": "bind",
+                "source": "/var/run/docker.sock",
+                "target": "/var/run/docker.sock",
+                "read_only": True,
+            }
+        )
+    elif mutation == "secrets":
+        supervisor["volumes"].append(
+            {
+                "type": "bind",
+                "source": "/fixture/secrets",
+                "target": "/run/secrets",
+                "read_only": True,
+            }
+        )
+    elif mutation == "ports":
+        supervisor["ports"] = [{"target": 2375, "host_ip": "10.0.0.1"}]
+    elif mutation == "env":
+        supervisor["environment"] = {"PROOF_SK_FILE": "/run/secrets/proof.key"}
+    elif mutation == "privileged":
+        supervisor["privileged"] = True
+    elif mutation == "network":
+        supervisor["networks"] = {"challenges": None, "default": None}
+    elif mutation == "registry":
+        gateway["volumes"] = [
+            item for item in gateway["volumes"] if item["target"] != "/etc/base/challenges"
+        ]
+    else:
+        supervisor["command"] += ["--once"]
+
+    with pytest.raises(ValueError):
+        CHECK["validate_compose"](config, "master")
 
 
 @pytest.mark.parametrize(

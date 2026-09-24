@@ -21,10 +21,11 @@ services:
       BASE_CHALLENGES_FILE: /etc/base/config/challenges.toml
       BASE_MEASUREMENTS_FILE: /etc/base/config/measurements.toml
       BASE_GATEWAY_SK_FILE: /run/secrets/gateway.key
-      BOUNTY_SK_FILE: /run/secrets/bounty.key
       PROOF_SK_FILE: /run/secrets/proof.key
-      BOUNTY_SESSION_SECRET_FILE: /run/secrets/bounty-session.key
       BASE_GATEWAY_ADMIN_TOKEN_FILE: /run/secrets/operator.token
+      BASE_CHALLENGE_KEYS_DIR: /run/secrets
+      BASE_CHALLENGE_REGISTRY_FILE: /etc/base/challenges/registry.toml
+      BASE_CHALLENGE_SECRETS_DIR: /run/challenge-secrets
     ports:
       - "${BASE_GATEWAY_BIND_ADDRESS:?Set the master VPC address}:8080:8080"
     volumes:
@@ -40,7 +41,23 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - type: bind
+        source: ${BASE_CHALLENGE_REGISTRY_DIR:-deploy/challenges}
+        target: /etc/base/challenges
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${BASE_CHALLENGE_SECRETS_HOST_DIR:?Set the absolute host directory of challenge secrets}
+        target: /run/challenge-secrets
+        read_only: true
+        bind:
+          create_host_path: false
       - base-master-state:/var/lib/base
+    networks:
+      default: {}
+      challenges:
+        aliases: [cortex-master]
     tmpfs:
       - /tmp:size=64m,mode=1777
     healthcheck:
@@ -49,5 +66,46 @@ services:
       timeout: 10s
       retries: 3
       start_period: 90s
+  # The only service with Docker control: pulls, verifies, canaries and updates
+  # challenge containers listed in the registry. It never reads a secret.
+  challenge-supervisor:
+    profiles: [master]
+    image: ${CORTEX_IMAGE:?Set the published image repository@sha256:digest}
+    command:
+      - challenge-supervisor
+      - --registry
+      - /etc/base/challenges/registry.toml
+      - --secrets-host-dir
+      - ${BASE_CHALLENGE_SECRETS_HOST_DIR:?Set the absolute host directory of challenge secrets}
+      - --network
+      - cortex-challenges
+      - --master-url
+      - http://cortex-master:8080
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "65532:65532"
+    group_add: ["${BASE_DOCKER_GID:?Set the host docker group id}"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${BASE_CHALLENGE_REGISTRY_DIR:-deploy/challenges}
+        target: /etc/base/challenges
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [challenges]
+    tmpfs:
+      - /tmp:size=16m,mode=1777
 volumes:
   base-master-state:
+networks:
+  challenges:
+    name: cortex-challenges
