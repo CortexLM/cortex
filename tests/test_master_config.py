@@ -12,9 +12,7 @@ def configured_environment():
     return {
         "BASE_NETUID": "541",
         "BASE_GATEWAY_SK_FILE": "/run/secrets/gateway",
-        "BOUNTY_SK_FILE": "/run/secrets/bounty",
         "PROOF_SK_FILE": "/run/secrets/proof",
-        "BOUNTY_SESSION_SECRET_FILE": "/run/secrets/session",
         "BASE_GATEWAY_ADMIN_TOKEN_FILE": "/run/secrets/operator",
         "PROOF_VM_ORCHESTRATOR_URL": "https://vm.example",
         "PROOF_VM_ORCHESTRATOR_TOKEN_FILE": "/run/secrets/vm-token",

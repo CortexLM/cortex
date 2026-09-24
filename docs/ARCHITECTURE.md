@@ -1,16 +1,25 @@
 # Architecture
 
-Cortex has two scoring products. Algorithm 2 assigns Bounty 3,000 basis points
-and Proof 7,000. The owner-signed legacy 2,000/8,000 profile retains algorithm 1;
-see [activation](how-to/trust-root.md#activate-proportional-bounty).
-The signed trust root fixes their shares. All challenge execution belongs to
-the master; validators independently verify sealed bundles and submit weights.
+The owner-signed trust root lists the scoring challenges and their emission
+shares:
+
+- algorithm 1: legacy bounty/proof 2,000/8,000;
+- algorithm 2: bounty/proof 3,000/7,000;
+- algorithm 3: any 1..64 challenges.
+
+Proof runs inside the master. Every other challenge is a Docker container
+([contract](CHALLENGES.md)) started and auto-updated by `challenge-supervisor`.
+All challenge execution belongs to the master; validators independently verify
+sealed bundles and submit weights.
 
 ```mermaid
 flowchart LR
   Owner --> Master
   Miner --> Master
   Master --> Gateway[Durable gateway seals]
+  Supervisor[challenge-supervisor] -->|Docker API| Containers[Challenge containers]
+  Master -->|get_weights, /challenge/id proxy| Containers
+  Registry[GHCR + provenance] --> Supervisor
   Master --> Host[HTTPS KVM orchestrator]
   Host --> Topic[Persistent topic RLM guest]
   Topic --> Broker[Inference and memory broker]
@@ -27,13 +36,36 @@ flowchart LR
 | `src/cortex/protocol` | SCALE wire format, signatures, Merkle roots, aggregation, trust roots |
 | `src/cortex/gateway` | Durable raw leaves and immutable sealed bundles |
 | `src/cortex/validator` | Independent historical chain reads and exact weight submission |
-| `src/cortex/bounty` | Pairing, reports, adjudication and external-feed scoring |
+| `src/cortex/challenges` | Registry, weights client, public proxy and auto-updating supervisor |
 | `src/cortex/proof` | Signed topics, setup, intake, evidence, quotas and payouts |
 | `src/cortex/rlm` | OpenRouter protocol, recursion, budgets, checkpoints and memory |
 | `src/cortex/vm` | Firecracker lifecycle, guest tools, setup export and host callbacks |
 | `src/cortex/master.py` | Composition, epoch tracking, job recovery and leaf emission |
 | `src/cortex/cli.py` | Operator, miner, master and validator commands |
 | `tests` | Domain, service, protocol and lifecycle regressions |
+
+## Container challenge epoch
+
+1. At the end of each epoch, the master calls
+   `GET /internal/v1/get_weights?epoch=` on each trusted, registered container,
+   with its private bearer.
+2. It converts the weights of the sealed participant set into signed leaves:
+   `floor(10^12 * w / max(W, full_share_mass))` under algorithm 3.
+3. A missing, failing or invalid answer becomes `NoScore(ChallengeInternal)`,
+   and that challenge's share burns.
+4. The gateway seals all leaves.
+5. Validators recompute `share * min(sum(leaves), 10^12) / 10^12` per challenge
+   from the signed leaves alone.
+
+The supervisor does the following:
+
+- pulls `stable`, `edge` or a pinned digest;
+- verifies the labels and GitHub build provenance;
+- runs a secretless canary;
+- replaces the container and rolls back on failure.
+
+It holds the Docker socket and nothing else. Public challenge routes are
+proxied under `/challenge/<id>/`; `internal/` paths never are.
 
 ## Proof lifecycle
 

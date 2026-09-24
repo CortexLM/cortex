@@ -11,9 +11,8 @@ regular files, owned/readable by that identity, with mode 0400 or 0600.
 | File | Purpose |
 | --- | --- |
 | `gateway.key` | 32-byte sr25519 seed for bundle seals |
-| `bounty.key` | Bounty leaf seed matching the trust root |
+| `<id>.key` | leaf seed of each trusted container challenge, e.g. `bounty.key` |
 | `proof.key` | Proof topic/leaf seed matching the trust root |
-| `bounty-session.key` | at least 32 random bytes for opaque pairing sessions |
 | `operator.token` | bearer for master administrative routes |
 | `proof-vm.token` | bearer shared with the dedicated VM host |
 | `proof-vm-ca.pem` | CA used to verify the VM-host TLS certificate |
@@ -22,12 +21,25 @@ The final two files are required only when Proof VM orchestration is configured.
 The CA certificate is public material but remains operator-managed because it
 controls the authenticated host boundary.
 
+## Challenge secrets
+
+`$BASE_CHALLENGE_SECRETS_HOST_DIR/<id>/` is outside this repository. The gateway
+mounts the whole directory read-only at `/run/challenge-secrets` and reads only
+`<id>/internal.token`. The supervisor bind-mounts `<id>/` read-only at
+`/run/secrets` inside that challenge container, without reading it:
+
+| File | Purpose |
+| --- | --- |
+| `internal.token` | master bearer for `get_weights` |
+| `admin.token` | optional operator bearer for the challenge's admin routes |
+| challenge-specific | e.g. Bounty `session.key`; see the challenge's operator guide |
+
 ## Validator mounts
 
 The wallet tree is mounted read-only at `/run/wallets`. A separate validator
 identity directory is mounted at `/run/validator` and contains
 `consensus.key`, `tls.crt` and `tls.key`. The validator never receives gateway,
-Bounty, Proof, operator or provider credentials.
+challenge, Proof, operator or provider credentials.
 
 ## VM-host files
 

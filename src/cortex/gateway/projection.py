@@ -6,8 +6,8 @@ from hashlib import sha256
 from uuid import UUID
 
 from cortex.protocol import Bundle, Score, aggregate_leaves
+from cortex.protocol.aggregate import challenge_emission_percent
 from cortex.protocol.crypto import encode_hotkey
-from cortex.protocol.models import BOUNTY_FULL_SHARE_REPORTS
 
 
 def _identity(digest: str) -> str:
@@ -99,12 +99,14 @@ def project(bundle: Bundle | None, *, netuid: int, now: datetime, chain_endpoint
                     hotkey = encode_hotkey(leaf.miner_hotkey)
                     source_weights[hotkey] = source_weights.get(hotkey, 0.0) + leaf.score.value
             view["emission_shares"][slug] = bps / 10000
-            emission_percent = bps / 100
-            if body.algorithm_version == 2 and challenge == b"bounty":
-                emission_percent *= (
-                    min(sum(source_weights.values()), BOUNTY_FULL_SHARE_REPORTS)
-                    / BOUNTY_FULL_SHARE_REPORTS
-                )
+            raw_total = sum(
+                leaf.score.value
+                for leaf in leaves
+                if isinstance(leaf.score, Score) and leaf.score.value > 0
+            )
+            emission_percent = challenge_emission_percent(
+                challenge, bps, raw_total, algorithm_version=body.algorithm_version
+            )
             view["source_challenges"].append(
                 dict(
                     slug=slug,

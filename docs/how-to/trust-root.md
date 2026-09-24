@@ -1,7 +1,7 @@
 # Sign and verify the trust root
 
-The owner signs two immutable TOML documents: the two-challenge allocation and
-the measurement allowlist. Cortex verifies both before serving or submitting a
+The owner signs two immutable TOML documents: the challenge allocation and the
+measurement allowlist. Cortex verifies both before serving or submitting a
 bundle. The committed keys are development fixtures; production ceremonies run
 offline with private files that never enter Git.
 
@@ -19,19 +19,26 @@ cortex keygen \
   --seed-out /private/cortex-ceremony/bounty.seed \
   --public-out /private/cortex-ceremony/bounty.pubkey
 cortex keygen \
+  --seed-out /private/cortex-ceremony/opentype.seed \
+  --public-out /private/cortex-ceremony/opentype.pubkey
+cortex keygen \
   --seed-out /private/cortex-ceremony/proof.seed \
   --public-out /private/cortex-ceremony/proof.pubkey
 ```
 
 `keygen` creates files exclusively and refuses to overwrite an existing path.
 Seeds are raw 32-byte sr25519 seeds with mode 0600. Copy only the public owner
-key into `config/owner.pubkey`. Put the Bounty and Proof public keys in the
-matching rows of the selected challenges document. The preserved development
+key into `config/owner.pubkey`. Put each challenge public key in its row of the
+selected challenges document. The master reads the seed of container challenge
+`<id>` from `$BASE_CHALLENGE_KEYS_DIR/<id>.key` and the Proof seed from
+`PROOF_SK_FILE`. The preserved development
 `config/challenges.toml` is the signed legacy 2000/8000 profile (algorithm 1).
 The unsigned `config/challenges-v2.example.toml` is the 3000/7000 activation
 template (algorithm 2, challenge-document version >=2). Replace its
 `"CHOOSE_ACTIVATION_EPOCH"` placeholder with the coordinated integer epoch;
-the unchanged template cannot be signed. The gateway public key
+the unchanged template cannot be signed. The unsigned
+`config/challenges-v3.example.toml` is the algorithm 3 template (version >=3):
+any 1..64 unique ids summing to 10,000 bps. The gateway public key
 is supplied to verification and is never a challenge row.
 
 ## Sign both documents
@@ -120,7 +127,33 @@ requires bundle algorithm 2; changing only raw scores cannot implement it.
    proof of live chain submission.
 
 If Proof is unavailable, its 70% burns. Bounty pays at most 30%, with unused mass
-burned according to [the report-count formula](../BOUNTY.md#score). Rollback must
+burned according to the report-count formula in
+[the challenge contract](../CHALLENGES.md#leaves-the-master-signs). Rollback must
 respect persisted version watermarks: restoring an older trust file is rejected.
 Stop submission and prepare an owner-authorized higher-version recovery profile
 through the same ceremony rather than deleting watermarks or replaying epochs.
+
+## Activate container challenges (algorithm 3)
+
+Algorithm 3 adds challenges without code changes: each trusted id pays
+`share * min(sum(leaves), 10^12) / 10^12` and the rest burns to UID0. Bounty
+keeps its algorithm 2 payout when its container returns `full_share_mass = 10`.
+
+1. Upgrade the master and every submitting validator to a release that accepts
+   algorithm 3. Validators only recompute signed leaves; they need no registry,
+   container or challenge credential.
+2. On the master, add each container to `deploy/challenges/registry.toml`, put
+   its `internal.token` under `$BASE_CHALLENGE_SECRETS_HOST_DIR/<id>/` and its
+   leaf seed at `<id>.key` in the master secrets directory. A registered id that
+   is not yet trusted runs without emission, which is the burn-in period: check
+   `GET /challenge/<id>/version` and its logs before you sign.
+3. Drain and pause as for algorithm 2, then sign a `version >= 3` document from
+   `config/challenges-v3.example.toml` with the agreed `introduced_epoch`.
+4. Install the signed documents and minimum version pins on the master and
+   validators, resume, and check a new `sealed: true` latest response with
+   algorithm 3 leaves and an independent validator recomputation.
+
+A trusted id that is missing from the registry, unhealthy or returning invalid
+weights emits `NoScore(ChallengeInternal)`, so its share burns and never moves
+to another challenge. To retire a challenge, sign a higher version without its
+row first, then remove its registry entry.

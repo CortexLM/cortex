@@ -10,16 +10,18 @@ chain, and submits the verified vector on Bittensor. Cross-checking
 authenticated peer roots against other independently-operated validators is an
 opt-in hardening (`--peer-consensus`), off by default.
 
-Validators never run Bounty or Proof
-evaluation, rent GPUs or receive miner provider credentials. The only live
-challenge shares are `bounty` 3000 bps and `proof` 7000 bps under algorithm 2.
-The legacy 2000/8000 owner profile retains algorithm 1 until
-[activation](../how-to/trust-root.md#activate-proportional-bounty).
+Validators never run challenge containers or Proof evaluation, rent GPUs or
+receive miner provider credentials; they need no registry, Docker or challenge
+token. Challenge shares come from the owner-signed trust root: legacy
+bounty/proof 2000/8000 (algorithm 1), `bounty` 3000 bps and `proof` 7000 bps
+(algorithm 2), or any unique challenge set summing to 10000 bps (algorithm 3,
+see [activation](../how-to/trust-root.md#activate-container-challenges-algorithm-3)).
 
 Sealed `GET /v1/weights/latest` responses expose `algorithm_version` from the
 signed bundle. `emission_shares` contains the configured ceilings; each
 `source_challenges[].emission_percent` reflects its allocated share, including
-the ten-report Bounty ramp under algorithm 2. Author allocations to UID0 or
+the ten-report Bounty ramp under algorithm 2 and
+`min(sum(leaves), 10^12) / 10^12` of the share under algorithm 3. Author allocations to UID0 or
 unmapped hotkeys still burn. Validators always recompute from signed leaves;
 they never trust these display fields as consensus inputs.
 
@@ -158,7 +160,9 @@ a reorg or a changed/unsealed latest response prevents submission.
 
 Under algorithm 2, quarantining Bounty retains Proof's absolute 7000 bps
 and burns Bounty's 3000 bps. Quarantining Proof leaves only 3000 bps and
-cannot be submitted. No quarantined share is reassigned. Legacy algorithm 1
+cannot be submitted. Algorithm 3 applies the same rule to every challenge: the
+quarantined share burns and the rest must keep at least 5000 bps. No
+quarantined share is reassigned. Legacy algorithm 1
 keeps its original 5000-bps gate and survivor renormalization. Valid
 `NoScore(ChallengeInternal)` leaves from an unavailable scorer still cover the
 expected participants and are not themselves a consensus fault.

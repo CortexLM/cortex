@@ -1,0 +1,29 @@
+# Unsigned operator registry: which challenge containers the master runs.
+# Emission is decided only by the owner-signed trust root (config/challenges.toml);
+# a registered id absent from it runs without emission. See docs/CHALLENGES.md.
+# The supervisor re-reads this file every tick and the master on every change.
+version = 1
+
+[[challenge]]
+id = "bounty"
+image = "ghcr.io/cortexlm/bounty"
+channel = "stable"
+source = "https://github.com/CortexLM/bounty"
+poll_seconds = 300
+cpus = 1.0
+memory_mib = 512
+pids = 128
+
+[challenge.env]
+BOUNTY_BACKEND_PUBLIC_URL = ""
+
+[[challenge]]
+id = "opentype"
+image = "ghcr.io/opentypeai/challenge"
+channel = "stable"
+source = "https://github.com/OpentypeAI/challenge"
+poll_seconds = 300
+cpus = 2.0
+memory_mib = 2048
+pids = 256
+proxy_body_limit = 5242880

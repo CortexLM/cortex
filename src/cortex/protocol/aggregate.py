@@ -9,7 +9,13 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from .models import BOUNTY_FULL_SHARE_REPORTS, PROPORTIONAL_SHARES, Leaf, Score
+from .models import (
+    BOUNTY_FULL_SHARE_REPORTS,
+    FULL_SHARE_SCORE,
+    PROPORTIONAL_SHARES,
+    Leaf,
+    Score,
+)
 from .scale import ProtocolError, fixed, uint
 
 
@@ -107,6 +113,18 @@ def aggregate_challenge_weights(
     return FinalWeights(tuple(uid for uid, _ in ordered), tuple(w for _, w in ordered), kept)
 
 
+def challenge_emission_percent(
+    challenge: bytes, bps: int, raw_total: int, *, algorithm_version: int
+) -> float:
+    """Share a challenge pays; the unpaid remainder burns and never moves elsewhere."""
+    emission_percent = bps / 100.0
+    if algorithm_version == 2 and challenge == b"bounty":
+        emission_percent *= min(raw_total, BOUNTY_FULL_SHARE_REPORTS) / BOUNTY_FULL_SHARE_REPORTS
+    elif algorithm_version == 3:
+        emission_percent *= min(raw_total, FULL_SHARE_SCORE) / FULL_SHARE_SCORE
+    return emission_percent
+
+
 def aggregate_leaves(
     leaves: Sequence[Leaf],
     shares: tuple[tuple[bytes, int], ...],
@@ -114,7 +132,7 @@ def aggregate_leaves(
     *,
     algorithm_version: int = 1,
 ) -> FinalWeights:
-    if algorithm_version not in (1, 2):
+    if algorithm_version not in (1, 2, 3):
         raise ProtocolError("unsupported algorithm version")
     if algorithm_version == 2 and shares != PROPORTIONAL_SHARES:
         raise ProtocolError("algorithm 2 requires proportional shares")
@@ -139,10 +157,8 @@ def aggregate_leaves(
         uint(bps, 2)
         miners = scores.get(challenge, {})
         weights = {key.hex(): float(value) for key, value in sorted(miners.items()) if value > 0}
-        emission_percent = bps / 100.0
-        if algorithm_version == 2 and challenge == b"bounty":
-            emission_percent *= (
-                min(sum(miners.values()), BOUNTY_FULL_SHARE_REPORTS) / BOUNTY_FULL_SHARE_REPORTS
-            )
+        emission_percent = challenge_emission_percent(
+            challenge, bps, sum(miners.values()), algorithm_version=algorithm_version
+        )
         results.append(ChallengeWeights(challenge.hex(), emission_percent, weights))
     return aggregate_challenge_weights(results, {key.hex(): uid for key, uid in sorted(uid_map)})

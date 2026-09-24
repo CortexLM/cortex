@@ -59,6 +59,21 @@ def test_trust_root_rejects_emission_drift_or_extra_products(tmp_path, mutation)
     assert len(CHECK["check_trust_roots"](tmp_path)) == 1
 
 
+def test_version_three_accepts_any_unique_challenge_set_summing_to_full_emission(tmp_path):
+    rows = "".join(
+        f'[[challenges]]\nid = "{name}"\npublic_key = "{"c" * 64}"\nemission_share_bps = {share}\n'
+        for name, share in (("bounty", 3000), ("opentype", 5000), ("proof", 2000))
+    )
+    path = put(tmp_path, "config/challenges.toml", "version = 3\n" + rows)
+    assert CHECK["check_trust_roots"](tmp_path) == []
+    path.write_text("version = 3\n" + rows.replace("5000", "4999"))
+    assert len(CHECK["check_trust_roots"](tmp_path)) == 1
+    path.write_text("version = 3\n" + rows.replace('"opentype"', '"Open_Type"'))
+    assert len(CHECK["check_trust_roots"](tmp_path)) == 1
+    path.write_text("version = 2\n" + rows)
+    assert len(CHECK["check_trust_roots"](tmp_path)) == 1
+
+
 @pytest.mark.parametrize("version,accepted", [(1, False), (2, True), (3, True)])
 def test_proportional_trust_template_requires_new_owner_version(tmp_path, version, accepted):
     put(tmp_path, "config/challenges.toml", trust_root())

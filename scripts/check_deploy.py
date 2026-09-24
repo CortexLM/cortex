@@ -52,11 +52,14 @@ MASTER_ENVIRONMENT = {
     "BASE_CHALLENGES_FILE": "/etc/base/config/challenges.toml",
     "BASE_MEASUREMENTS_FILE": "/etc/base/config/measurements.toml",
     "BASE_GATEWAY_SK_FILE": "/run/secrets/gateway.key",
-    "BOUNTY_SK_FILE": "/run/secrets/bounty.key",
     "PROOF_SK_FILE": "/run/secrets/proof.key",
-    "BOUNTY_SESSION_SECRET_FILE": "/run/secrets/bounty-session.key",
     "BASE_GATEWAY_ADMIN_TOKEN_FILE": "/run/secrets/operator.token",
+    "BASE_CHALLENGE_KEYS_DIR": "/run/secrets",
+    "BASE_CHALLENGE_REGISTRY_FILE": "/etc/base/challenges/registry.toml",
+    "BASE_CHALLENGE_SECRETS_DIR": "/run/challenge-secrets",
 }
+CHALLENGE_NETWORK = "cortex-challenges"
+DOCKER_SOCKET = "/var/run/docker.sock"
 
 VALIDATOR_OPTIONS = {
     "--gateway",
@@ -249,6 +252,66 @@ def _mounts(service: dict) -> dict[str, dict]:
     return by_target
 
 
+def _network_names(service: dict) -> set[str]:
+    networks = service.get("networks") or {}
+    return set(networks if isinstance(networks, dict | list) else ())
+
+
+def validate_supervisor(config: dict, service: dict) -> None:
+    """The one master service allowed to hold the Docker socket; it holds nothing else."""
+    validate_pin(service.get("image", ""))
+    if (
+        service.get("init") is not True
+        or service.get("read_only") is not True
+        or service.get("restart") != "unless-stopped"
+        or service.get("privileged", False)
+        or service.get("user") != "65532:65532"
+        or set(service.get("cap_drop", [])) != {"ALL"}
+        or "no-new-privileges:true" not in service.get("security_opt", [])
+        or service.get("profiles") != ["master"]
+        or service.get("entrypoint") not in (None, [], ())
+    ):
+        raise ValueError("challenge supervisor requires the hardened read-only master runtime")
+    if any(service.get(field) for field in ("cap_add", "devices", "ports", "environment")):
+        raise ValueError("challenge supervisor may not publish ports, add privileges or read env")
+    if any(service.get(field) == "host" for field in ("network_mode", "pid", "ipc")):
+        raise ValueError("challenge supervisor may not join host namespaces")
+    volumes = service.get("volumes", [])
+    mounts = {item.get("target"): item for item in volumes if isinstance(item, dict)}
+    if len(mounts) != len(volumes) or set(mounts) != {DOCKER_SOCKET, "/etc/base/challenges"}:
+        raise ValueError("challenge supervisor mounts only the Docker socket and the registry")
+    if any(item.get("type") != "bind" or item.get("read_only") is not True for item in volumes):
+        raise ValueError("challenge supervisor mounts must be read-only binds")
+    if mounts[DOCKER_SOCKET].get("source") != DOCKER_SOCKET:
+        raise ValueError("challenge supervisor must use the host Docker socket")
+    command = service.get("command", [])
+    if not isinstance(command, list) or command[:1] != ["challenge-supervisor"]:
+        raise ValueError("challenge supervisor command differs from its entrypoint")
+    options = dict(zip(command[1::2], command[2::2], strict=False))
+    if len(command) % 2 == 0 or set(options) != {
+        "--registry",
+        "--secrets-host-dir",
+        "--network",
+        "--master-url",
+    }:
+        raise ValueError("challenge supervisor options differ from the runtime contract")
+    if (
+        options["--registry"] != "/etc/base/challenges/registry.toml"
+        or options["--network"] != CHALLENGE_NETWORK
+        or options["--master-url"] != "http://cortex-master:8080"
+        or not options["--secrets-host-dir"].startswith(("/", "${"))
+    ):
+        raise ValueError("challenge supervisor paths differ from the runtime contract")
+    tmpfs = service.get("tmpfs", [])
+    if not isinstance(tmpfs, list) or not any(str(item).startswith("/tmp:") for item in tmpfs):
+        raise ValueError("challenge supervisor requires a bounded /tmp tmpfs")
+    networks = config.get("networks") or {}
+    if _network_names(service) != {"challenges"} or (
+        (networks.get("challenges") or {}).get("name") != CHALLENGE_NETWORK
+    ):
+        raise ValueError("challenge supervisor must join only the cortex-challenges network")
+
+
 def _validate_common_service(service: dict) -> dict[str, dict]:
     validate_pin(service.get("image", ""))
     if (
@@ -279,8 +342,11 @@ def _validate_common_service(service: dict) -> dict[str, dict]:
 def validate_compose(config: dict, role: str) -> None:
     expected = "gateway" if role == "master" else "validator"
     services = _mapping(config.get("services"), "services")
-    if set(services) != {expected}:
+    allowed = {expected, "challenge-supervisor"} if role == "master" else {expected}
+    if expected not in services or set(services) - allowed:
         raise ValueError(f"{role} role must contain only its {expected} service")
+    if "challenge-supervisor" in services:
+        validate_supervisor(config, _mapping(services["challenge-supervisor"], "supervisor"))
     service = _mapping(services[expected], expected)
     mounts = _validate_common_service(service)
     command = service.get("command", [])
@@ -297,10 +363,8 @@ def validate_compose(config: dict, role: str) -> None:
         forbidden_values = {
             "OPENROUTER_API_KEY",
             "BASE_GATEWAY_SK",
-            "BOUNTY_SK",
             "PROOF_SK",
             "BASE_GATEWAY_ADMIN_TOKEN",
-            "BOUNTY_SESSION_SECRET",
             "PROOF_VM_ORCHESTRATOR_TOKEN",
         }
         if forbidden_values.intersection(environment):
@@ -313,6 +377,14 @@ def validate_compose(config: dict, role: str) -> None:
             raise ValueError("master credentials must be an operator bind mount")
         if "/run/wallets" in mounts:
             raise ValueError("master must not hold the validator wallet")
+        for target in ("/etc/base/challenges", "/run/challenge-secrets"):
+            if target in mounts and mounts[target].get("type") != "bind":
+                raise ValueError("master challenge registry and secrets must be operator binds")
+        if "challenge-supervisor" in services and not (
+            {"/etc/base/challenges", "/run/challenge-secrets"} <= set(mounts)
+            and "challenges" in _network_names(service)
+        ):
+            raise ValueError("master must mount the challenge registry and join its network")
         health = service.get("healthcheck", {}).get("test", [])
         if health != MASTER_HEALTHCHECK:
             raise ValueError("master healthcheck must use its Python readiness endpoint")
@@ -775,6 +847,8 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
     master_required = {
         "CORTEX_IMAGE",
         "BASE_GATEWAY_BIND_ADDRESS",
+        "BASE_CHALLENGE_SECRETS_HOST_DIR",
+        "BASE_DOCKER_GID",
         "BASE_NETUID",
         "BASE_CHAIN_ENDPOINT",
         "BASE_CHAIN_FALLBACK_ENDPOINTS",
@@ -783,7 +857,6 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         "BASE_EPOCH_STALE_SECS",
         "BASE_CHALLENGES_MIN_VERSION",
         "BASE_MEASUREMENTS_MIN_VERSION",
-        "BOUNTY_BACKEND_PUBLIC_URL",
         "PROOF_VM_ORCHESTRATOR_URL",
         "PROOF_VM_ORCHESTRATOR_TOKEN_FILE",
         "PROOF_VM_ORCHESTRATOR_CA_FILE",
@@ -797,7 +870,8 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
     intentionally_unset = {
         "CORTEX_IMAGE",
         "BASE_GATEWAY_BIND_ADDRESS",
-        "BOUNTY_BACKEND_PUBLIC_URL",
+        "BASE_CHALLENGE_SECRETS_HOST_DIR",
+        "BASE_DOCKER_GID",
         "PROOF_VM_ORCHESTRATOR_URL",
         "PROOF_RLM_VM_IMAGE_DIGEST",
         "PROOF_INFERENCE_OFFER_COMMITMENT",
@@ -898,6 +972,7 @@ def _default_sources(config: dict, role: str) -> None:
     expected = {"/etc/base/config": ROOT / "config"}
     if role == "master":
         expected["/run/secrets"] = ROOT / "deploy/secrets/master"
+        expected["/etc/base/challenges"] = ROOT / "deploy/challenges"
         # Some Compose releases fold `env_file` into `environment` in the JSON
         # render, so the committed YAML is the source of truth for the default.
         text = (ROOT / "deploy/compose/role-master.yml").read_text()
@@ -934,12 +1009,15 @@ def check_examples() -> None:
         "BASE_MASTER_SECRETS_DIR",
         "BASE_TRUST_ROOT_DIR",
         "BASE_VALIDATOR_WALLETS_DIR",
+        "BASE_CHALLENGE_REGISTRY_DIR",
     }
     env = {key: value for key, value in os.environ.items() if key not in removed}
     env.update(
         {
             "CORTEX_IMAGE": "fixture.invalid/cortex@sha256:" + "f" * 64,
             "BASE_GATEWAY_BIND_ADDRESS": "127.0.0.1",
+            "BASE_CHALLENGE_SECRETS_HOST_DIR": "/fixture/challenge-secrets",
+            "BASE_DOCKER_GID": "999",
             "BASE_GATEWAY_ENDPOINT": "https://master.fixture.invalid",
             "BASE_NETUID": "541",
             "BASE_CHAIN_ENDPOINT": "test",

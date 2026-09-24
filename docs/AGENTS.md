@@ -10,7 +10,7 @@ not live product instructions.
 | --- | --- |
 | system topology and source map | `ARCHITECTURE.md` |
 | Proof control plane and RLM | `PROOF.md` |
-| Bounty intake and score | `BOUNTY.md` |
+| challenge container contract and updates | `CHALLENGES.md` |
 | compatibility names and domains | `NAMING.md` |
 | trust assumptions and residual risk | `THREAT_MODEL.md` |
 | operator release checklist | `OPERATOR_SECURITY.md` |
@@ -30,7 +30,7 @@ short historical pointers so old URLs do not disappear.
 
 ## API changes
 
-When Bounty or Proof changes a public route, payload, authentication rule, quota,
+When Proof or a challenge contract changes a public route, payload, authentication rule, quota,
 timeout, scoring rule or failure response, update its miner guide in the same
 change. Examples must run against the Python CLI or current HTTP surface.
 

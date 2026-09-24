@@ -1,6 +1,7 @@
 # Contributing to Cortex
 
-Cortex is a Python Bittensor subnet with two live challenges: Bounty and Proof.
+Cortex is a Python Bittensor subnet with Proof built in and further challenges loaded as Docker containers
+(see docs/CHALLENGES.md).
 Read [AGENTS.md](AGENTS.md), the [architecture](docs/ARCHITECTURE.md), and the
 [naming contract](docs/NAMING.md) before changing protocol or deployment code.
 

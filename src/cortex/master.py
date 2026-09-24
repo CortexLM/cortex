@@ -13,12 +13,13 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, FastAPI, Request
+import httpx
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from cortex.bounty import BountyService, BountyStore, PublicBackend
-from cortex.bounty import create_router as bounty_router
-from cortex.bounty.store import StoreError
+from cortex.challenges.client import ChallengeClient, leaf_scores
+from cortex.challenges.proxy import create_router as challenge_router
+from cortex.challenges.registry import RegistryEntry, load_registry
 from cortex.config import MasterConfig, read_seed
 from cortex.errors import ServiceError
 from cortex.gateway import GatewayService, GatewayStore
@@ -27,11 +28,13 @@ from cortex.http import OperatorAuth, read_private_file
 from cortex.proof.api import create_router as proof_router
 from cortex.proof.artifacts import FileVault
 from cortex.proof.models import Submission
+from cortex.proof.scoring import SCORE_MAX
 from cortex.proof.service import EvaluationBackend, ProofService, UnwiredBackend
 from cortex.proof.store import ProofStore
 from cortex.protocol import NoScore, NoScoreReason, Score, TrustRoot, sign_leaf
 from cortex.protocol.crypto import decode_hotkey, public_key
 from cortex.protocol.merkle import canonical_rows
+from cortex.protocol.models import FULL_SHARE_SCORE
 from cortex.protocol.scale import uint
 from cortex.state import prepare_master_state
 from cortex.validator import ChainSnapshot
@@ -216,11 +219,25 @@ class EmissionJournal:
         self.connection.close()
 
 
-_REASONS = {
-    "NotAttempted": NoScoreReason.NOT_ATTEMPTED,
-    "InvalidResponse": NoScoreReason.INVALID_RESPONSE,
-    "ChallengeInternal": NoScoreReason.CHALLENGE_INTERNAL,
-}
+class ChallengeRegistry:
+    """Re-read the operator registry when it changes; an invalid edit burns, never guesses."""
+
+    def __init__(self, path: Path | None):
+        self.path = path
+        self._stamp: int | None = None
+        self._entries: dict[str, RegistryEntry] = {}
+
+    def __call__(self) -> dict[str, RegistryEntry]:
+        if self.path is None:
+            return {}
+        try:
+            stamp = self.path.stat().st_mtime_ns
+            if stamp != self._stamp:
+                self._entries, self._stamp = load_registry(self.path), stamp
+        except (OSError, ValueError) as error:
+            logging.warning("challenge registry unavailable (%s)", error)
+            self._entries, self._stamp = {}, None
+        return self._entries
 
 
 class _EpochTrackedProof(ProofService):
@@ -249,28 +266,28 @@ class EpochEmitter:
         self,
         *,
         gateway: GatewayService,
-        bounty: BountyService,
         proof: _EpochTrackedProof,
         clock: EpochClock,
         journal: EmissionJournal,
-        challenge_seeds: dict[bytes, Callable[[], bytes]],
+        challenge_seed: Callable[[bytes], bytes],
+        registry: Callable[[], dict[str, RegistryEntry]],
+        challenges: ChallengeClient,
     ):
-        self.gateway, self.bounty, self.proof = gateway, bounty, proof
-        self.clock, self.journal, self.challenge_seeds = clock, journal, challenge_seeds
+        self.gateway, self.proof, self.clock, self.journal = gateway, proof, clock, journal
+        self.challenge_seed, self.registry, self.challenges = challenge_seed, registry, challenges
         self._lock = asyncio.Lock()
 
     async def _scores(self, challenge: bytes, epoch: int, expected: set[bytes]):
+        algorithm = self.gateway.trust.algorithm_version
         try:
-            if challenge == b"bounty":
-                outcomes = await self.bounty.score([key.hex() for key in sorted(expected)])
-                return {
-                    decode_hotkey(key): (
-                        Score(value.value)
-                        if value.reason is None
-                        else NoScore(_REASONS.get(value.reason, NoScoreReason.CHALLENGE_INTERNAL))
-                    )
-                    for key, value in outcomes.items()
-                }
+            if challenge != b"proof":
+                entry = self.registry().get(challenge.decode())
+                if entry is None:
+                    raise ServiceError(503, "challenge container not registered")
+                if algorithm == 1:
+                    raise ServiceError(503, "container challenges need algorithm 2 or 3")
+                answer = await self.challenges.weights(entry, epoch)
+                return leaf_scores(answer, expected, algorithm_version=algorithm)
             # Backend readiness is still required before old rows can be emitted.
             readiness = await self.proof.backend.readiness()
             active = [topic for topic in self.proof.store.topics_at(epoch) if topic.active(epoch)]
@@ -289,7 +306,10 @@ class EpochEmitter:
                 ):
                     raise ServiceError(503, "Proof topic cannot score")
             scores = self.proof.scores(epoch)
-            return {decode_hotkey(key): Score(value) for key, value in scores.items()}
+            # Algorithm 3 pays a challenge sum(leaves) / 10^12 of its share, so topic mass
+            # without a winner burns instead of moving to other topics.
+            scale = FULL_SHARE_SCORE // SCORE_MAX if algorithm == 3 else 1
+            return {decode_hotkey(key): Score(value * scale) for key, value in scores.items()}
         except Exception:
             logging.warning(
                 "challenge emission unavailable challenge=%s epoch=%d", challenge.decode(), epoch
@@ -299,12 +319,13 @@ class EpochEmitter:
     async def _emit(self, epoch: int, snapshot: ChainSnapshot) -> None:
         self.gateway.refresh_trust(epoch)
         self.proof.topic_public_key = next(
-            entry.public_key for entry in self.gateway.trust.challenges if entry.id == b"proof"
+            (entry.public_key for entry in self.gateway.trust.challenges if entry.id == b"proof"),
+            self.proof.topic_public_key,
         )
         rows = canonical_rows(snapshot.rows)
         for challenge in self.gateway.trust.challenges:
             expected = challenge.policy.expected(rows)
-            seed = self.challenge_seeds[challenge.id]()
+            seed = self.challenge_seed(challenge.id)
             if public_key(seed) != challenge.public_key:
                 raise ServiceError(503, "challenge signing key does not match owner trust")
             outcomes = await self._scores(challenge.id, epoch, expected)
@@ -361,33 +382,18 @@ class EpochEmitter:
             return completed
 
 
-class _FileAuthenticatedBounty(BountyService):
-    def __init__(self, *args, token_file: Path, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._operator = OperatorAuth(token_file)
-
-    def require_operator(self, authorization: str | None) -> None:
-        request = Request(
-            {"type": "http", "headers": [(b"authorization", (authorization or "").encode())]}
-        )
-        try:
-            self._operator.require(request)
-        except ServiceError as error:
-            raise StoreError(error.status, error.reason) from None
-
-
 class MasterRuntime:
     def __init__(
         self,
         config: MasterConfig,
         gateway: GatewayService,
-        bounty: BountyService,
         proof: ProofService,
         clock: EpochClock,
         emitter: EpochEmitter,
+        http: httpx.AsyncClient,
     ):
-        self.config, self.gateway, self.bounty, self.proof = config, gateway, bounty, proof
-        self.clock, self.emitter = clock, emitter
+        self.config, self.gateway, self.proof = config, gateway, proof
+        self.clock, self.emitter, self.http = clock, emitter, http
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
         self.topic_setup = None
@@ -432,9 +438,9 @@ class MasterRuntime:
         if self.topic_setup is not None:
             await self.topic_setup.drain()
         self.gateway.store.close()
-        self.bounty.store.close()
         self.proof.store.close()
         self.emitter.journal.close()
+        await self.http.aclose()
 
     def app(self) -> FastAPI:
         @asynccontextmanager
@@ -456,18 +462,7 @@ class MasterRuntime:
         proof = proof_router(self.proof, operator, self.topic_setup)
         app.include_router(proof)
         app.include_router(proof, prefix="/challenge/proof", include_in_schema=False)
-        bounty = bounty_router(self.bounty)
-        app.include_router(bounty, prefix="/bounty")
-        app.include_router(bounty, prefix="/challenge/bounty", include_in_schema=False)
-        # Historical direct pair/report routes stay available; status is namespaced.
-        direct_bounty = APIRouter(
-            routes=[
-                route
-                for route in bounty.routes
-                if getattr(route, "path", "") not in {"/v1/status", "/health"}
-            ]
-        )
-        app.include_router(direct_bounty)
+        app.include_router(challenge_router(self.emitter.registry, self.http))
 
         @app.get("/livez")
         async def health():
@@ -493,19 +488,18 @@ async def build_master(
     chain,
     epochs: EpochProvider,
     proof_backend: EvaluationBackend | None = None,
-    bounty_backend: PublicBackend | None = None,
     trust: TrustRoot | None = None,
+    challenge_http: httpx.AsyncClient | None = None,
 ) -> MasterRuntime:
     prepare_master_state(config.state_dir)
     clock = EpochClock(epochs, config.netuid, stale_seconds=config.epoch_stale_seconds)
     state = await clock.refresh()
     local_trust = trust or config.trust_root(state.epoch)
     read_private_file(config.operator_token_file)
+    load_registry(config.challenge_registry_file)  # fail fast on an invalid operator registry
     with ExitStack() as cleanup:
         gateway_store = GatewayStore(config.state_dir / "gateway.sqlite3")
         cleanup.callback(gateway_store.close)
-        bounty_store = BountyStore(config.state_dir / "bounty.sqlite3")
-        cleanup.callback(bounty_store.close)
         proof_store = ProofStore(config.state_dir / "proof.sqlite3")
         cleanup.callback(proof_store.close)
         journal = EmissionJournal(config.state_dir / "emission.sqlite3")
@@ -531,32 +525,27 @@ async def build_master(
             chain_endpoint=chain_endpoint,
             trust_loader=None if trust is not None else config.trust_root,
         )
-        bounty = _FileAuthenticatedBounty(
-            bounty_store,
-            bounty_backend or PublicBackend(config.bounty_backend_url),
-            session_secret=read_seed(config.bounty_session_secret_file),
-            token_file=config.operator_token_file,
-            scoring_version=lambda: gateway.trust.algorithm_version,
-        )
         proof = _EpochTrackedProof(
             store=proof_store,
-            topic_public_key=next(c.public_key for c in local_trust.challenges if c.id == b"proof"),
+            topic_public_key=next(
+                (c.public_key for c in local_trust.challenges if c.id == b"proof"),
+                public_key(read_seed(config.proof_seed_file)),
+            ),
             vault=FileVault(config.state_dir / "miner-byok"),
             artifact_dir=config.state_dir / "artifacts",
             backend=proof_backend or UnwiredBackend(),
             epoch=clock,
         )
+        http = challenge_http or httpx.AsyncClient(trust_env=False, follow_redirects=False)
         emitter = EpochEmitter(
             gateway=gateway,
-            bounty=bounty,
             proof=proof,
             clock=clock,
             journal=journal,
-            challenge_seeds={
-                b"bounty": lambda: read_seed(config.bounty_seed_file),
-                b"proof": lambda: read_seed(config.proof_seed_file),
-            },
+            challenge_seed=lambda challenge: read_seed(config.challenge_seed_file(challenge)),
+            registry=ChallengeRegistry(config.challenge_registry_file),
+            challenges=ChallengeClient(http, config.challenge_secrets_dir),
         )
-        runtime = MasterRuntime(config, gateway, bounty, proof, clock, emitter)
+        runtime = MasterRuntime(config, gateway, proof, clock, emitter, http)
         cleanup.pop_all()
         return runtime

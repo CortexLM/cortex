@@ -240,8 +240,9 @@ mass to the best eligible result, sharing exact ties. `discovery` divides a
 pass-floor pool among eligible miners and a novelty pool according to new
 improvement; duplicates receive no novelty pool. A miner's Proof score is the
 **sum of per-topic masses**, not a mean of binary passes. The fixed subnet
-split is Bounty 3000 / Proof 7000 bps under algorithm 2. Legacy owner-signed
-2000/8000 deployments retain algorithm 1 until
+split is Bounty 3000 / Proof 7000 bps under algorithm 2; algorithm 3 takes any
+owner-signed split. Legacy owner-signed 2000/8000 deployments retain algorithm 1
+until
 [activation](../how-to/trust-root.md#activate-proportional-bounty).
 
 Actual payment additionally needs signed leaves, a valid gateway seal and

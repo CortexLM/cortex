@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from cortex.bounty import PublicBackend
 from cortex.config import MasterConfig, read_seed
 from cortex.errors import ServiceError
 from cortex.master import BittensorEpochProvider, EpochClock, EpochState, build_master
@@ -76,6 +75,7 @@ def master_config(tmp_path):
         path.chmod(0o600)
         return path
 
+    secret("bounty.key", bytes([1]) * 32)
     return MasterConfig(
         netuid=541,
         state_dir=tmp_path / "state",
@@ -83,10 +83,10 @@ def master_config(tmp_path):
         challenges_file=tmp_path / "challenges.toml",
         measurements_file=tmp_path / "measurements.toml",
         gateway_seed_file=secret("gateway.key", bytes([7]) * 32),
-        bounty_seed_file=secret("bounty.key", bytes([1]) * 32),
         proof_seed_file=secret("proof.key", bytes([2]) * 32),
-        bounty_session_secret_file=secret("session.key", bytes([8]) * 32),
         operator_token_file=secret("operator.token", b"fixture-operator-token"),
+        challenge_keys_dir=tmp_path,
+        challenge_secrets_dir=tmp_path / "challenge-secrets",
     )
 
 
@@ -387,71 +387,13 @@ async def test_private_routes_require_rotating_file_and_master_routes_are_compos
         assert readiness.status_code == 200
         assert readiness.json() == {"ready": True, "epoch": 12, "role": "master"}
         assert (await client.get("/v1/proof/topics")).json() == {"topics": []}
-        assert (await client.get("/bounty/v1/status")).json()["challenge_id"] == "bounty"
-        assert (await client.get("/v1/reports")).status_code == 401
+        assert (await client.get("/challenge/bounty/v1/status")).status_code == 404
+        drain = "/v1/admin/proof/drain"
+        assert (await client.post(drain)).status_code == 401
         master.config.operator_token_file.write_text("rotated-token")
         assert (
-            await client.get("/v1/reports", headers={"authorization": "Bearer rotated-token"})
-        ).status_code == 200
-
-
-async def test_master_ready_is_independent_of_a_readable_bounty_feed(master):
-    def empty_feed(request):
-        route = request.url.path.rsplit("/", 1)[-1]
-        if route == "status":
-            body = {
-                "api_version": 1,
-                "revision": "1",
-                "adjudication_available": True,
-                "published": 0,
-                "valid": 0,
-                "duplicate": 0,
-                "already_fixed_not_prod": 0,
-                "invalid_malicious": 0,
-                "hotkeys": 0,
-                "awaiting_adjudication": 0,
-                "unpriced_valid": 0,
-            }
-        else:
-            body = {
-                "api_version": 1,
-                "revision": "1",
-                "items": [],
-                "has_more": False,
-                **({"count": 0, "next_cursor": None} if route == "reports" else {}),
-            }
-        return httpx.Response(200, json=body)
-
-    master.runtime.bounty.backend = PublicBackend(
-        "https://backend.invalid",
-        transport=httpx.MockTransport(empty_feed),
-    )
-
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(master.runtime.app()), base_url="https://master"
-    ) as client:
-        readiness = await client.get("/readyz")
-
-    assert readiness.status_code == 200
-    assert readiness.json() == {"ready": True, "epoch": 12, "role": "master"}
-
-
-async def test_master_readiness_does_not_probe_the_bounty_feed(master):
-    def unexpected_probe(request):
-        raise AssertionError("master readiness must not call the external scorer")
-
-    master.runtime.bounty.backend = PublicBackend(
-        "https://backend.invalid",
-        transport=httpx.MockTransport(unexpected_probe),
-    )
-
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(master.runtime.app()), base_url="https://master"
-    ) as client:
-        readiness = await client.get("/readyz")
-
-    assert readiness.status_code == 200
-    assert readiness.json() == {"ready": True, "epoch": 12, "role": "master"}
+            await client.post(drain, headers={"authorization": "Bearer rotated-token"})
+        ).status_code != 401
 
 
 def test_private_seed_rejects_symlinks_permissions_and_accepts_raw_or_hex(tmp_path):
@@ -472,10 +414,9 @@ def test_config_base_aliases_fail_closed_and_do_not_accept_inline_secret_values(
     env = {
         "BASE_NETUID": "541",
         "BASE_GATEWAY_SK_FILE": "/private/gateway",
-        "BOUNTY_SK_FILE": "/private/bounty",
         "PROOF_SK_FILE": "/private/proof",
-        "BOUNTY_SESSION_SECRET_FILE": "/private/session",
         "BASE_GATEWAY_ADMIN_TOKEN_FILE": "/private/token",
+        "BASE_CHALLENGE_KEYS_DIR": "/private",
     }
     alias = {key.replace("BASE_", "CORTEX_"): value for key, value in env.items()}
     assert MasterConfig.from_env(env) == MasterConfig.from_env(alias)
@@ -489,7 +430,12 @@ def test_config_base_aliases_fail_closed_and_do_not_accept_inline_secret_values(
 
 def test_backend_config_rejects_credentials_in_url(tmp_path):
     with pytest.raises(ValueError, match="HTTPS without credentials"):
-        replace(master_config(tmp_path), bounty_backend_url="https://key@example.org")
+        replace(
+            master_config(tmp_path),
+            proof_orchestrator_url="https://key@example.org",
+            proof_orchestrator_token_file=tmp_path / "token",
+            proof_orchestrator_ca_file=tmp_path / "ca",
+        )
 
 
 @pytest.mark.parametrize("value", [float("inf"), float("nan"), 0, -1])

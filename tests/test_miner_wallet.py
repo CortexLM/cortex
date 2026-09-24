@@ -13,10 +13,9 @@ import httpx
 import pytest
 from bittensor_wallet import Keypair, Wallet
 
-from cortex.bounty.service import pair_payload
 from cortex.cli import parser
 from cortex.errors import ServiceError
-from cortex.miner import MinerClient
+from cortex.miner import MinerClient, pair_payload
 from cortex.proof.models import Baseline, Metric, Submission, Topic, digest
 from cortex.proof.service import SUBMIT_DOMAIN, sign_topic
 from cortex.protocol.crypto import public_key, verify_raw, verify_substrate

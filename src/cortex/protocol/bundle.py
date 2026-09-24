@@ -169,14 +169,14 @@ def verify_inputs(
 
 
 def recompute(body: BundleBody, quarantined: set[bytes], minimum_share_mass: int = 5000):
-    if body.emission_shares == PROPORTIONAL_SHARES and body.algorithm_version != 2:
+    if body.emission_shares == PROPORTIONAL_SHARES and body.algorithm_version == 1:
         raise ProtocolError("proportional shares require algorithm version 2")
     shares = tuple(pair for pair in body.emission_shares if pair[0] not in quarantined)
     mass = sum(value for _, value in shares)
     if mass < minimum_share_mass or not mass:
         raise ProtocolError("surviving share mass below threshold")
-    if body.algorithm_version == 2:
-        # Quarantined mass burns; the surviving challenge cannot inherit its share.
+    if body.algorithm_version >= 2:
+        # Quarantined mass burns; the surviving challenges cannot inherit its share.
         shares = body.emission_shares
     elif quarantined:
         apportioned = {name: value * 10000 // mass for name, value in shares}

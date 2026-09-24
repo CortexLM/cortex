@@ -121,6 +121,6 @@ def prepare_master_state(path: str | Path) -> Path:
     """Prepare every durable database before a master service opens SQLite."""
 
     directory = secure_state_directory(path)
-    for name in ("gateway.sqlite3", "bounty.sqlite3", "proof.sqlite3", "emission.sqlite3"):
+    for name in ("gateway.sqlite3", "proof.sqlite3", "emission.sqlite3"):
         secure_sqlite_path(directory / name)
     return directory

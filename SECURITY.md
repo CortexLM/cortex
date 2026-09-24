@@ -11,7 +11,7 @@ reproduction. State whether the issue is already public.
 
 ## Scope
 
-The gateway, validator, Bounty/Proof services, RLM, Firecracker host, miner CLI,
+The gateway, validator, Proof service, challenge supervisor and proxy, RLM, Firecracker host, miner CLI,
 deployment definitions, signature formats, and sealed-weight path are in scope.
 Third-party model/GPU providers and miner artifacts remain untrusted external
 boundaries, but failures in Cortex's validation of them are in scope.

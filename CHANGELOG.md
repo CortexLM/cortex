@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Challenge containers (`docs/CHALLENGES.md`): the master loads any Docker
+  challenge from an operator registry, polls its authenticated `get_weights`
+  once per epoch, signs its leaves and proxies its public routes under
+  `/challenge/<id>/`. `cortex challenge-supervisor` pulls `stable`/`edge`/pinned
+  GHCR images, checks labels and GitHub build provenance, canaries without
+  secrets, updates and rolls back automatically. It alone holds the Docker socket.
+- Owner-activated algorithm 3 (trust document version >=3): 1..64 challenges,
+  each paying `share * min(sum(leaves), 10^12) / 10^12`, remainder burned.
+  Validators need no change beyond the release; they recompute signed leaves.
+- `GET /v1/metagraph/latest` serves the sealed hotkey map to challenges.
+
+### Removed
+
+- The in-process Bounty service (`src/cortex/bounty`, `docs/BOUNTY.md` and the
+  `BOUNTY_*` master settings). Bounty now runs as the CortexLM/bounty container;
+  its operator guide migrates `bounty.sqlite3` and the session key unchanged.
+
 - Owner-activated algorithm 2: each valid Bounty report earns one point, all
   authors share proportionally, and ten valid reports unlock its full 30% of
   emission. Proof retains 70%; unused Bounty mass burns to UID0. The legacy

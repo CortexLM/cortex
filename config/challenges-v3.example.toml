@@ -1,0 +1,25 @@
+# UNSIGNED algorithm 3 template (document version >= 3). Choose the shares, the
+# next owner document version and the activation epoch, replace development
+# public keys, then sign offline using docs/how-to/trust-root.md.
+# Each challenge pays share * min(sum(leaves), 10^12) / 10^12; the rest burns.
+# Container ids also need a row in deploy/challenges/registry.toml to run.
+version = 3
+introduced_epoch = "CHOOSE_ACTIVATION_EPOCH"
+
+[[challenges]]
+id = "bounty"
+public_key = "743688a1e1b2848b309205706b4dcae54bffe4233a5d7018053471e1dce45c21"
+emission_share_bps = 3000
+policy = "all_metagraph_hotkeys"
+
+[[challenges]]
+id = "opentype"
+public_key = "ac6cad384e46122a7000a6efa71d084a9a2d6407ab22e86aa2b2e5e9dcb2e43f"
+emission_share_bps = 3500
+policy = "all_metagraph_hotkeys"
+
+[[challenges]]
+id = "proof"
+public_key = "3e7f70f09165e265ab89ab04a4fc91dc0531d54a100c538fb14c6f008421c375"
+emission_share_bps = 3500
+policy = "all_metagraph_hotkeys"
