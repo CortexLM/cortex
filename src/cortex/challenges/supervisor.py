@@ -29,6 +29,10 @@ class SupervisorError(Exception):
     """A refused image or failed rollout; the running container is left as it was."""
 
 
+class TransientError(SupervisorError):
+    """An outage (GitHub 429/5xx, network) that decides nothing; retried next poll."""
+
+
 @dataclass(frozen=True)
 class SupervisorConfig:
     registry_file: Path
@@ -91,11 +95,16 @@ class Supervisor:
         # ponytail: checks that GitHub holds build provenance for this digest in the source
         # repository, not the Sigstore bundle signature. Upgrade: verify the returned bundle
         # with sigstore-python (or `gh attestation verify`) before trusting a new digest.
-        response = await self.http.get(
-            f"https://api.github.com/repos/{entry.owner_repo}/attestations/{digest}",
-            headers={"accept": "application/vnd.github+json"},
-            timeout=30,
-        )
+        try:
+            response = await self.http.get(
+                f"https://api.github.com/repos/{entry.owner_repo}/attestations/{digest}",
+                headers={"accept": "application/vnd.github+json"},
+                timeout=30,
+            )
+        except httpx.HTTPError as error:
+            raise TransientError(f"{entry.id}: attestation lookup failed: {error}") from None
+        if response.status_code in {403, 429} or response.status_code >= 500:
+            raise TransientError(f"{entry.id}: attestation lookup HTTP {response.status_code}")
         if response.status_code != 200 or not response.json().get("attestations"):
             raise SupervisorError(f"{entry.id}: no build provenance for {digest}")
 
@@ -235,6 +244,8 @@ class Supervisor:
             self.verify_labels(entry, labels)
             if entry.attestation:
                 await self.verify_attestation(entry, digest)
+        except TransientError:
+            raise
         except SupervisorError:
             self.refused[entry.id] = fingerprint
             raise

@@ -8,7 +8,12 @@ import httpx
 import pytest
 
 from cortex.challenges.registry import parse_registry
-from cortex.challenges.supervisor import Supervisor, SupervisorConfig, SupervisorError
+from cortex.challenges.supervisor import (
+    Supervisor,
+    SupervisorConfig,
+    SupervisorError,
+    TransientError,
+)
 
 IMAGE = "ghcr.io/cortexlm/bounty"
 GOOD, NEXT, BROKEN = ("sha256:" + c * 64 for c in "abc")
@@ -28,6 +33,7 @@ class FakeEngine:
         self.containers: dict[str, dict] = {}
         self.created: list[tuple[str, dict]] = []
         self.fail: set[str] = set()  # "create" or "start" of the production container
+        self.github_outage = 0  # HTTP status the attestation API answers while down
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = unquote(request.url.path).removeprefix("/v1.44")
@@ -102,6 +108,8 @@ class FakeEngine:
 
 def network(engine: FakeEngine, attested: set[str]):
     def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.github.com" and engine.github_outage:
+            return httpx.Response(engine.github_outage)
         if request.url.host == "api.github.com":
             digest = request.url.path.rsplit("/", 1)[1]
             return httpx.Response(200, json={"attestations": [{}] if digest in attested else []})
@@ -295,3 +303,23 @@ async def test_source_edit_with_the_same_digest_is_verified_before_rollout(world
     assert len(engine.created) == created
     assert engine.digest("cortex-challenge-bounty") == GOOD
     assert engine.containers["cortex-challenge-bounty"]["Running"]
+
+
+@pytest.mark.parametrize("status", [429, 503])
+async def test_github_outage_is_retried_not_remembered_as_a_refusal(world, status):
+    engine, _, supervisor = world
+    await supervisor.reconcile(registry())
+    changed = registry(memory_mib=2048)
+    engine.github_outage = status
+
+    with pytest.raises(TransientError):
+        await supervisor.reconcile(changed)
+    assert (
+        engine.containers["cortex-challenge-bounty"]["Spec"]["HostConfig"]["Memory"] == 1024 * 2**20
+    )
+
+    engine.github_outage = 0
+    await supervisor.reconcile(changed)
+    assert (
+        engine.containers["cortex-challenge-bounty"]["Spec"]["HostConfig"]["Memory"] == 2048 * 2**20
+    )
