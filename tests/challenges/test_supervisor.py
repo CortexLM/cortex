@@ -262,3 +262,36 @@ async def test_registry_change_with_the_same_digest_redeploys_without_a_canary(w
     created = len(engine.created)
     await supervisor.reconcile(changed)
     assert len(engine.created) == created  # converged: no redeploy loop
+
+
+async def test_restart_mid_rollout_recovers_the_set_aside_container(world):
+    engine, _, supervisor = world
+    await supervisor.reconcile(registry())
+    # The supervisor died after stopping and renaming the serving container.
+    engine.containers["cortex-challenge-bounty-previous"] = engine.containers.pop(
+        "cortex-challenge-bounty"
+    )
+    engine.containers["cortex-challenge-bounty-previous"]["Running"] = False
+    engine.tags["stable"] = NEXT
+    engine.fail.add("start")
+
+    with pytest.raises(SupervisorError, match="after rollout"):
+        await supervisor.reconcile(registry())
+
+    assert set(engine.containers) == {"cortex-challenge-bounty"}
+    assert engine.digest("cortex-challenge-bounty") == GOOD
+    assert engine.containers["cortex-challenge-bounty"]["Running"]
+
+
+async def test_source_edit_with_the_same_digest_is_verified_before_rollout(world):
+    engine, attested, supervisor = world
+    await supervisor.reconcile(registry())
+    created = len(engine.created)
+
+    moved = registry(source="https://github.com/Other/bounty", memory_mib=2048)
+    with pytest.raises(SupervisorError, match="labels"):
+        await supervisor.reconcile(moved)
+
+    assert len(engine.created) == created
+    assert engine.digest("cortex-challenge-bounty") == GOOD
+    assert engine.containers["cortex-challenge-bounty"]["Running"]

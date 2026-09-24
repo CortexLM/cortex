@@ -215,18 +215,32 @@ class Supervisor:
         spec = self._spec(entry, digest, canary=False)
         fingerprint = spec["Labels"][CONFIG]
         deployed = await self._inspect(name)
+        if deployed is None and await self._inspect(f"{name}-previous") is not None:
+            # A restart mid-rollout left only the set-aside container: it is the last
+            # known-good service, so restore it instead of letting _rollout delete it.
+            await self._docker("POST", f"/containers/{name}-previous/rename", params={"name": name})
+            deployed = await self._inspect(name)
+            LOG.warning(
+                "challenge %s recovered its container from an interrupted rollout", entry.id
+            )
         if deployed is not None and deployed[0].get(CONFIG) == fingerprint:
             if not deployed[1]:
                 await self._docker("POST", f"/containers/{name}/start")
             return digest
         if self.refused.get(entry.id) == fingerprint:
             raise SupervisorError(f"{entry.id}: {digest} was refused; waiting for a change")
-        # A configuration-only change reuses the running, already verified digest.
+        try:
+            # Every new spec re-checks labels and provenance against the current entry,
+            # so a source edit is verified even when the digest stays the same.
+            self.verify_labels(entry, labels)
+            if entry.attestation:
+                await self.verify_attestation(entry, digest)
+        except SupervisorError:
+            self.refused[entry.id] = fingerprint
+            raise
+        # A configuration-only change skips the canary: that digest already booted here.
         if deployed is None or deployed[0].get("io.cortex.challenge.digest") != digest:
             try:
-                self.verify_labels(entry, labels)
-                if entry.attestation:
-                    await self.verify_attestation(entry, digest)
                 canary = f"{name}-canary"
                 await self._remove(canary)
                 try:

@@ -162,8 +162,11 @@ For each registry entry, the supervisor runs this loop every `poll_seconds`:
    restart the previous container unchanged. The refused digest and
    configuration are not retried until the channel or the registry entry moves.
 
-A registry change that keeps the same digest, such as `env`, resources or limits,
-redeploys through steps 5 and 6 without a new canary. The container carries a
+A registry change that keeps the same digest, such as `env`, `source`, resources
+or limits, redeploys through steps 2, 3, 5 and 6: labels and provenance are always
+re-checked against the current entry, and only the canary is skipped. A supervisor
+restart in the middle of step 5 restores the set-aside container before anything
+else. The container carries a
 fingerprint of its full specification for this purpose.
 
 A managed container whose id is no longer in the registry is stopped and
