@@ -190,7 +190,7 @@ def registry_file(tmp_path, *slugs):
 @pytest.mark.parametrize(
     "version,counts,payouts",
     [
-        (1, (3, 0), (0.2, 0)),
+        (1, (3, 0), (0, 0)),
         (2, (0, 0), (0, 0)),
         (2, (1, 0), (0.03, 0)),
         (2, (2, 3), (0.06, 0.09)),
@@ -259,7 +259,8 @@ async def test_bounty_container_weights_seal_and_validator_dispatch(
             await runtime.emitter.tick()
             chain.state = EpochState(13, 100, 105)
             assert await runtime.emitter.tick() == [12]
-            assert fake.calls == [("bounty", 12)]
+            # Algorithm 1 never asks a container: its legacy lattice is not a weight.
+            assert fake.calls == ([] if version == 1 else [("bounty", 12)])
             leaves = runtime.gateway.store.leaves(12)
             assert {leaf.miner_hotkey for leaf in leaves if leaf.challenge_id == b"bounty"} == {
                 row.hotkey for row in chain.rows
@@ -269,7 +270,9 @@ async def test_bounty_container_weights_seal_and_validator_dispatch(
                 for leaf in leaves
                 if leaf.challenge_id == b"bounty" and leaf.miner_hotkey == miner_key
             )
-            if not counts[0]:
+            if version == 1:
+                assert mine.score == NoScore(NoScoreReason.CHALLENGE_INTERNAL)
+            elif not counts[0]:
                 assert mine.score == NoScore(NoScoreReason.NOT_ATTEMPTED)
             elif version == 3:
                 assert mine.score == Score(10**12 * counts[0] // max(10, sum(counts)))

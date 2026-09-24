@@ -7,11 +7,13 @@ it passes host secret directories to Docker as read-only binds.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -19,6 +21,7 @@ from .registry import RegistryEntry, container_name, load_registry
 
 CONTRACT = "1"
 MANAGED = "io.cortex.managed"
+CONFIG = "io.cortex.challenge.config"
 LOG = logging.getLogger("cortex.challenges")
 
 
@@ -119,7 +122,7 @@ class Supervisor:
                     "ReadOnly": True,
                 },
             ]
-        return {
+        spec: dict[str, Any] = {
             "Image": f"{entry.image}@{digest}",
             "Env": [f"{name}={value}" for name, value in sorted(env.items())],
             "User": "65532:65532",
@@ -143,6 +146,11 @@ class Supervisor:
                 "LogConfig": {"Type": "json-file", "Config": {"max-size": "20m", "max-file": "3"}},
             },
         }
+        # Any registry, secret-path or network change alters this, so it redeploys even
+        # when the image digest stays the same.
+        canonical = json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
+        spec["Labels"][CONFIG] = hashlib.sha256(canonical).hexdigest()
+        return spec
 
     async def _remove(self, name: str) -> None:
         await self._docker("DELETE", f"/containers/{name}", params={"force": "true"})
@@ -165,61 +173,77 @@ class Supervisor:
             await self.sleep(1)
         return False
 
-    async def running_digest(self, entry: RegistryEntry) -> str | None:
-        response = await self._docker("GET", f"/containers/{container_name(entry.id)}/json")
+    async def _inspect(self, name: str) -> tuple[dict[str, str], bool] | None:
+        """(labels, running) of a container, or None when it does not exist."""
+        response = await self._docker("GET", f"/containers/{name}/json")
         if response.status_code == 404:
             return None
         state = response.json()
-        if not (state.get("State") or {}).get("Running"):
-            return None
-        return ((state.get("Config") or {}).get("Labels") or {}).get("io.cortex.challenge.digest")
+        labels = (state.get("Config") or {}).get("Labels") or {}
+        return labels, bool((state.get("State") or {}).get("Running"))
 
-    async def deployed_digest(self, entry: RegistryEntry) -> str | None:
-        response = await self._docker("GET", f"/containers/{container_name(entry.id)}/json")
-        if response.status_code == 404:
-            return None
-        return ((response.json().get("Config") or {}).get("Labels") or {}).get(
-            "io.cortex.challenge.digest"
-        )
+    async def _rollout(self, entry: RegistryEntry, spec: dict, *, replace: bool) -> bool:
+        """Swap in `spec`; any failure restores the exact previous container."""
+        name = container_name(entry.id)
+        backup = f"{name}-previous"
+        await self._remove(backup)
+        if replace:
+            await self._docker("POST", f"/containers/{name}/stop", params={"t": "30"})
+            await self._docker("POST", f"/containers/{name}/rename", params={"name": backup})
+        try:
+            await self._start(name, spec)
+            ready = await self._answers_version(name, entry)
+        except (SupervisorError, httpx.HTTPError):
+            ready = False
+        if ready:
+            await self._remove(backup)
+            return True
+        await self._remove(name)
+        if replace:
+            await self._docker("POST", f"/containers/{backup}/rename", params={"name": name})
+            await self._docker("POST", f"/containers/{name}/start")
+            if await self._answers_version(name, entry):
+                LOG.warning("challenge %s rolled back to its previous container", entry.id)
+            else:
+                LOG.error("challenge %s previous container did not come back", entry.id)
+        return False
 
     async def reconcile(self, entry: RegistryEntry) -> str:
         """Converge one challenge; returns the digest that is running afterwards."""
         digest, labels = await self.resolve(entry)
-        previous = await self.deployed_digest(entry)
-        if digest == previous:
-            if await self.running_digest(entry) != digest:
-                await self._docker("POST", f"/containers/{container_name(entry.id)}/start")
-            return digest
-        if self.refused.get(entry.id) == digest:
-            raise SupervisorError(f"{entry.id}: {digest} was refused; waiting for a new digest")
-        try:
-            self.verify_labels(entry, labels)
-            if entry.attestation:
-                await self.verify_attestation(entry, digest)
-            canary = container_name(entry.id) + "-canary"
-            await self._remove(canary)
-            await self._start(canary, self._spec(entry, digest, canary=True))
-            try:
-                if not await self._answers_version(canary, entry):
-                    raise SupervisorError(f"{entry.id}: canary did not answer /version")
-            finally:
-                await self._remove(canary)
-        except SupervisorError:
-            self.refused[entry.id] = digest
-            raise
         name = container_name(entry.id)
-        await self._remove(name)
-        await self._start(name, self._spec(entry, digest, canary=False))
-        if await self._answers_version(name, entry):
-            self.refused.pop(entry.id, None)
-            LOG.info("challenge %s now runs %s", entry.id, digest)
+        spec = self._spec(entry, digest, canary=False)
+        fingerprint = spec["Labels"][CONFIG]
+        deployed = await self._inspect(name)
+        if deployed is not None and deployed[0].get(CONFIG) == fingerprint:
+            if not deployed[1]:
+                await self._docker("POST", f"/containers/{name}/start")
             return digest
-        self.refused[entry.id] = digest
-        await self._remove(name)
-        if previous is not None:
-            await self._start(name, self._spec(entry, previous, canary=False))
-            LOG.warning("challenge %s rolled back to %s", entry.id, previous)
-        raise SupervisorError(f"{entry.id}: {digest} failed after rollout")
+        if self.refused.get(entry.id) == fingerprint:
+            raise SupervisorError(f"{entry.id}: {digest} was refused; waiting for a change")
+        # A configuration-only change reuses the running, already verified digest.
+        if deployed is None or deployed[0].get("io.cortex.challenge.digest") != digest:
+            try:
+                self.verify_labels(entry, labels)
+                if entry.attestation:
+                    await self.verify_attestation(entry, digest)
+                canary = f"{name}-canary"
+                await self._remove(canary)
+                try:
+                    await self._start(canary, self._spec(entry, digest, canary=True))
+                    if not await self._answers_version(canary, entry):
+                        raise SupervisorError(f"{entry.id}: canary did not answer /version")
+                finally:
+                    await self._remove(canary)
+            except SupervisorError:
+                self.refused[entry.id] = fingerprint
+                raise
+        if not await self._rollout(entry, spec, replace=deployed is not None):
+            self.refused[entry.id] = fingerprint
+            raise SupervisorError(f"{entry.id}: {digest} failed after rollout")
+        self.refused.pop(entry.id, None)
+        LOG.info("challenge %s now runs %s", entry.id, digest)
+        return digest
 
     async def prune(self, registry: dict[str, RegistryEntry]) -> None:
         filters = json.dumps({"label": [f"{MANAGED}=true"]})

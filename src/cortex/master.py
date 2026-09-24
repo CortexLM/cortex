@@ -284,6 +284,8 @@ class EpochEmitter:
                 entry = self.registry().get(challenge.decode())
                 if entry is None:
                     raise ServiceError(503, "challenge container not registered")
+                if algorithm == 1:
+                    raise ServiceError(503, "container challenges need algorithm 2 or 3")
                 answer = await self.challenges.weights(entry, epoch)
                 return leaf_scores(answer, expected, algorithm_version=algorithm)
             # Backend readiness is still required before old rows can be emitted.

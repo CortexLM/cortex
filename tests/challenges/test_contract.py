@@ -63,11 +63,18 @@ def test_algorithm_three_scores_are_exact_and_ignore_hotkeys_outside_the_expecte
     assert sum(score.value for score in normalized.values()) == FULL_SHARE_SCORE - 1
 
 
-def test_legacy_algorithms_refuse_fractional_weights():
-    with pytest.raises(ValueError, match="integers"):
-        leaf_scores(
-            ChallengeWeights({b"\1" * 32: Fraction(1, 2)}), {b"\1" * 32}, algorithm_version=2
-        )
+@pytest.mark.parametrize("weight", [Fraction(1, 2), Fraction(2**64)])
+def test_algorithm_two_refuses_the_whole_answer_on_one_non_u64_weight(weight):
+    good, bad = b"\1" * 32, b"\2" * 32
+    answer = ChallengeWeights({good: Fraction(3), bad: weight})
+    with pytest.raises(ValueError, match="u64"):
+        leaf_scores(answer, {good, bad}, algorithm_version=2)
+
+
+def test_algorithm_one_never_signs_a_container_weight():
+    hotkey = b"\1" * 32
+    with pytest.raises(ValueError, match="algorithm 1"):
+        leaf_scores(ChallengeWeights({hotkey: Fraction(3)}), {hotkey}, algorithm_version=1)
 
 
 @pytest.mark.parametrize(

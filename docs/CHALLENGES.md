@@ -92,11 +92,14 @@ changes `D`.
 | Algorithm | Leaf score for `i` in `E` with `w_i > 0` | Challenge payout |
 | --- | --- | --- |
 | 3 (trust root version >= 3) | `floor(10^12 * w_i / D)` | `share * sum(leaves) / 10^12` |
-| 2 (bounty/proof 3000/7000) | `w_i`, which must be an integer | Bounty: `share * min(N, 10) / 10`; Proof: `share` |
-| 1 (legacy bounty/proof 2000/8000) | `w_i`, which must be an integer | `share` when any leaf is positive |
+| 2 (bounty/proof 3000/7000) | `w_i`, which must be an integer below 2^64 | Bounty: `share * min(N, 10) / 10`; Proof: `share` |
+| 1 (legacy bounty/proof 2000/8000) | not scored: every hotkey in `E` gets `NoScore(ChallengeInternal)` | nothing; the share burns |
 
 Every other hotkey in `E` receives `NoScore(NotAttempted)`. A failed or invalid
-call gives `NoScore(ChallengeInternal)` to every hotkey in `E`. Unpaid mass
+call gives `NoScore(ChallengeInternal)` to every hotkey in `E`: one invalid
+weight invalidates the whole answer, so an answer is never partially paid.
+Algorithm 1 signed Bounty's legacy champion score, which no container computes,
+so containers are not scored under it; trust watermarks never return to it. Unpaid mass
 always burns to UID0 and never moves to another challenge. Under algorithm 3,
 Bounty with `full_share_mass = 10` pays exactly what algorithm 2 pays:
 `share * min(N, 10) / 10` in total and `share * n_i / max(10, N)` per author.
@@ -150,12 +153,18 @@ For each registry entry, the supervisor runs this loop every `poll_seconds`:
    for the digest in the `source` repository.
 4. Start a canary with the same image, no secrets and a tmpfs `/data`. It must
    answer `/version` with the expected slug and contract within 60 seconds.
-5. Replace the container: stop the old one and start the new one on the same
-   volume. Then wait until `/version` returns the expected slug and contract.
+5. Replace the container: stop the old one and keep it aside, then start the new
+   one on the same volume. Then wait until `/version` returns the expected slug
+   and contract.
    `/health` is readiness and is only reported, because an external outage must
    not trigger a rollback.
-6. If the new container fails, recreate the previous digest and log the refusal.
-   The refused digest is not retried until the channel moves.
+6. If the new container cannot be created, started or reached, remove it and
+   restart the previous container unchanged. The refused digest and
+   configuration are not retried until the channel or the registry entry moves.
+
+A registry change that keeps the same digest, such as `env`, resources or limits,
+redeploys through steps 5 and 6 without a new canary. The container carries a
+fingerprint of its full specification for this purpose.
 
 A managed container whose id is no longer in the registry is stopped and
 removed. Its volume is kept.

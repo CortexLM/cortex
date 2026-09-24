@@ -27,6 +27,7 @@ class FakeEngine:
         self.labels = {GOOD: LABELS, NEXT: LABELS, BROKEN: LABELS}
         self.containers: dict[str, dict] = {}
         self.created: list[tuple[str, dict]] = []
+        self.fail: set[str] = set()  # "create" or "start" of the production container
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = unquote(request.url.path).removeprefix("/v1.44")
@@ -54,7 +55,13 @@ class FakeEngine:
             )
         if path == "/containers/create":
             spec = json.loads(request.content)
-            self.containers[params["name"]] = {"Labels": spec["Labels"], "Running": False}
+            if "create" in self.fail and params["name"] == "cortex-challenge-bounty":
+                return httpx.Response(500)
+            self.containers[params["name"]] = {
+                "Labels": spec["Labels"],
+                "Running": False,
+                "Spec": spec,
+            }
             self.created.append((params["name"], spec))
             return httpx.Response(201, json={"Id": params["name"]})
         name = path.split("/")[2]
@@ -63,7 +70,18 @@ class FakeEngine:
         if name not in self.containers:
             return httpx.Response(404)
         if path.endswith("/start"):
+            fresh = self.containers[name]["Spec"] is self.created[-1][1]
+            if "start" in self.fail and name == "cortex-challenge-bounty" and fresh:
+                return httpx.Response(500)
             self.containers[name]["Running"] = True
+            return httpx.Response(204)
+        if path.endswith("/stop"):
+            self.containers[name]["Running"] = False
+            return httpx.Response(204)
+        if path.endswith("/rename"):
+            if params["name"] in self.containers:
+                return httpx.Response(409)
+            self.containers[params["name"]] = self.containers.pop(name)
             return httpx.Response(204)
         container = self.containers[name]
         return httpx.Response(
@@ -77,6 +95,9 @@ class FakeEngine:
     def digest(self, name: str) -> str | None:
         container = self.containers.get(name)
         return container and container["Labels"]["io.cortex.challenge.digest"]
+
+    def env(self, name: str) -> list[str]:
+        return self.containers[name]["Spec"]["Env"]
 
 
 def network(engine: FakeEngine, attested: set[str]):
@@ -209,3 +230,35 @@ async def test_unregistered_container_is_pruned_on_tick(world):
     supervisor.config.registry_file.write_text("version = 1\n")
     await supervisor.tick(0)
     assert engine.containers == {}
+
+
+@pytest.mark.parametrize("fault", ["create", "start"])
+async def test_production_create_or_start_failure_restores_the_serving_container(world, fault):
+    engine, _, supervisor = world
+    await supervisor.reconcile(registry())
+    engine.tags["stable"] = NEXT
+    engine.fail.add(fault)
+
+    with pytest.raises(SupervisorError, match="after rollout"):
+        await supervisor.reconcile(registry())
+
+    assert set(engine.containers) == {"cortex-challenge-bounty"}
+    assert engine.digest("cortex-challenge-bounty") == GOOD
+    assert engine.containers["cortex-challenge-bounty"]["Running"]
+
+
+async def test_registry_change_with_the_same_digest_redeploys_without_a_canary(world):
+    engine, _, supervisor = world
+    await supervisor.reconcile(registry())
+    created = len(engine.created)
+
+    changed = registry(memory_mib=2048, env={"BOUNTY_BACKEND_PUBLIC_URL": "https://new.invalid"})
+    assert await supervisor.reconcile(changed) == GOOD
+
+    assert [name for name, _ in engine.created[created:]] == ["cortex-challenge-bounty"]
+    host = engine.containers["cortex-challenge-bounty"]["Spec"]["HostConfig"]
+    assert host["Memory"] == 2048 * 1024 * 1024
+    assert "BOUNTY_BACKEND_PUBLIC_URL=https://new.invalid" in engine.env("cortex-challenge-bounty")
+    created = len(engine.created)
+    await supervisor.reconcile(changed)
+    assert len(engine.created) == created  # converged: no redeploy loop

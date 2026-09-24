@@ -20,6 +20,7 @@ from .registry import RegistryEntry
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_WEIGHTS = 65536
+MAX_SCORE = 2**64 - 1
 ATTEMPTS = 3
 
 
@@ -66,11 +67,15 @@ def leaf_scores(
         raw = {
             key: math.floor(FULL_SHARE_SCORE * value / denominator) for key, value in kept.items()
         }
-    else:
-        # Algorithms 1 and 2 sign raw integer counts; the protocol applies the Bounty cap.
-        if any(value.denominator != 1 for value in kept.values()):
-            raise ValueError("algorithm 1 and 2 weights must be integers")
+    elif algorithm_version == 2:
+        # Algorithm 2 signs raw integer counts; the protocol applies the Bounty cap.
+        if any(value.denominator != 1 or value > MAX_SCORE for value in kept.values()):
+            raise ValueError("algorithm 2 weights must be u64 integers")
         raw = {key: int(value) for key, value in kept.items()}
+    else:
+        # Algorithm 1 signed Bounty's legacy champion lattice, which a container never
+        # computes; its share burns instead of paying a score with other semantics.
+        raise ValueError("container challenges are not scored under algorithm 1")
     return {
         key: Score(raw[key]) if raw.get(key, 0) > 0 else NoScore(NoScoreReason.NOT_ATTEMPTED)
         for key in expected
