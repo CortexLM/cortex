@@ -323,17 +323,19 @@ async def test_bounty_container_weights_seal_and_validator_dispatch(
 
 
 @pytest.mark.parametrize(
-    "quality,runtime_uid,payouts",
+    "quality,runtime_uid,payouts,final_vector",
     [
-        pytest.param(0, 1, (0.25, 0), id="runtime-only"),
-        pytest.param(0.75, 1, (1, 0), id="same-hotkey"),
-        pytest.param(0.75, 2, (0.75, 0.25), id="different-hotkeys"),
-        pytest.param(0.75, None, (0.75, 0), id="unused-runtime-burns"),
-        pytest.param(0.75, 99, (0.75, 0), id="filtered-runtime-burns"),
+        pytest.param(0, 1, (0.25, 0), [[0, 58982], [1, 6554]], id="runtime-only"),
+        pytest.param(0.75, 1, (1, 0), [[0, 39321], [1, 26214]], id="same-hotkey"),
+        pytest.param(
+            0.75, 2, (0.75, 0.25), [[0, 39321], [1, 19661], [2, 6554]], id="different-hotkeys"
+        ),
+        pytest.param(0.75, None, (0.75, 0), [[0, 45874], [1, 19660]], id="unused-runtime-burns"),
+        pytest.param(0.75, 99, (0.75, 0), [[0, 45874], [1, 19660]], id="filtered-runtime-burns"),
     ],
 )
 async def test_three_container_challenges_burn_failures_and_unpaid_mass(
-    tmp_path, quality, runtime_uid, payouts
+    tmp_path, quality, runtime_uid, payouts, final_vector
 ):
     config = replace(
         master_config(tmp_path),
@@ -404,6 +406,7 @@ async def test_three_container_challenges_burn_failures_and_unpaid_mass(
             assert weights.get(1, 0) == pytest.approx(0.4 * payouts[0])
             assert weights.get(2, 0) == pytest.approx(0.4 * payouts[1])
             assert weights[0] == pytest.approx(1 - 0.4 * sum(payouts))
+            assert latest["final_vector"] == final_vector
             journal = SubmissionJournal(tmp_path / "validator.sqlite3")
             try:
                 validator = Validator(
