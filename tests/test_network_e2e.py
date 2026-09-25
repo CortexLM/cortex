@@ -322,7 +322,19 @@ async def test_bounty_container_weights_seal_and_validator_dispatch(
         await runtime.close()
 
 
-async def test_three_container_challenges_burn_failures_and_unpaid_mass(tmp_path):
+@pytest.mark.parametrize(
+    "quality,runtime_uid,payouts",
+    [
+        pytest.param(0, 1, (0.25, 0), id="runtime-only"),
+        pytest.param(0.75, 1, (1, 0), id="same-hotkey"),
+        pytest.param(0.75, 2, (0.75, 0.25), id="different-hotkeys"),
+        pytest.param(0.75, None, (0.75, 0), id="unused-runtime-burns"),
+        pytest.param(0.75, 99, (0.75, 0), id="filtered-runtime-burns"),
+    ],
+)
+async def test_three_container_challenges_burn_failures_and_unpaid_mass(
+    tmp_path, quality, runtime_uid, payouts
+):
     config = replace(
         master_config(tmp_path),
         challenge_registry_file=registry_file(tmp_path, "bounty", "opentype"),
@@ -333,6 +345,7 @@ async def test_three_container_challenges_burn_failures_and_unpaid_mass(tmp_path
         key.write_bytes(bytes([seed]) * 32)
         key.chmod(0o600)
     chain = FakeEpochChain()
+    chain.rows += (MetagraphRow(public_key(bytes([22]) * 32), 2),)
     trust = TrustRoot(
         (
             ChallengeEntry(b"audit", public_key(bytes([4]) * 32), 1000),
@@ -346,7 +359,12 @@ async def test_three_container_challenges_burn_failures_and_unpaid_mass(tmp_path
     )
     fake = FakeChallenges()
     miner = encode_hotkey(chain.rows[1].hotkey)
-    fake.weights["opentype"] = {miner: 0.25}
+    fake.weights["opentype"] = {miner: quality}
+    if runtime_uid is not None:
+        runtime_key = encode_hotkey(public_key(bytes([20 + runtime_uid]) * 32))
+        fake.weights["opentype"][runtime_key] = fake.weights["opentype"].get(runtime_key, 0) + 0.25
+    # Out-of-metagraph mass must neither dilute nor inflate the eligible lanes.
+    fake.weights["opentype"][encode_hotkey(public_key(bytes([99]) * 32))] = 50
     fake.full_share_mass["opentype"] = 1.0
     fake.failing.add("bounty")
     runtime = await build_master(
@@ -369,11 +387,38 @@ async def test_three_container_challenges_burn_failures_and_unpaid_mass(tmp_path
             assert {score for (cid, _), score in leaves.items() if cid == challenge} == {
                 NoScore(NoScoreReason.CHALLENGE_INTERNAL)
             }
-        assert leaves[(b"opentype", chain.rows[1].hotkey)] == Score(250_000_000_000)
-        latest = runtime.gateway.latest()
-        weights = dict(zip(latest["uids"], latest["weights"], strict=True))
-        assert weights[1] == pytest.approx(0.4 * 0.25)
-        assert weights[0] == pytest.approx(1 - 0.4 * 0.25)
+        assert {key for cid, key in leaves if cid == b"opentype"} == {
+            row.hotkey for row in chain.rows
+        }
+        for row, payout in zip(chain.rows[1:], payouts, strict=True):
+            assert leaves[(b"opentype", row.hotkey)] == (
+                Score(int(payout * 10**12)) if payout else NoScore(NoScoreReason.NOT_ATTEMPTED)
+            )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(runtime.app()), base_url="https://master.fixture"
+        ) as http:
+            latest = (await http.get("/v1/weights/latest")).json()
+            assert latest["sealed"] is True
+            assert latest["algorithm_version"] == 3
+            weights = dict(zip(latest["uids"], latest["weights"], strict=True))
+            assert weights.get(1, 0) == pytest.approx(0.4 * payouts[0])
+            assert weights.get(2, 0) == pytest.approx(0.4 * payouts[1])
+            assert weights[0] == pytest.approx(1 - 0.4 * sum(payouts))
+            journal = SubmissionJournal(tmp_path / "validator.sqlite3")
+            try:
+                validator = Validator(
+                    gateway_url="https://master.fixture",
+                    netuid=541,
+                    trust=trust,
+                    chain=chain,
+                    journal=journal,
+                    http=http,
+                    verify_only=True,
+                )
+                assert (await validator.run_once()).outcome == "verified"
+                assert chain.submissions == []
+            finally:
+                journal.close()
     finally:
         await runtime.close()
 
