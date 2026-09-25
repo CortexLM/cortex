@@ -286,7 +286,10 @@ async def test_bounty_container_weights_seal_and_validator_dispatch(
             latest = (await http.get("/v1/weights/latest")).json()
             assert latest["sealed"] is True
             assert latest["algorithm_version"] == version
-            weights = dict(zip(latest["uids"], latest["weights"], strict=True))
+            # The chain normalizes: a zero-miner vector burns only the declared shares
+            # (the prod zero-miner burn fix), which is still a full burn once normalized.
+            total = sum(latest["weights"])
+            weights = {u: w / total for u, w in zip(latest["uids"], latest["weights"], strict=True)}
             assert weights[0] == pytest.approx(1 - sum(payouts))
             assert weights.get(1, 0) == pytest.approx(payouts[0])
             assert weights.get(2, 0) == pytest.approx(payouts[1])

@@ -18,6 +18,8 @@ from cortex.protocol.trust import load_trust_root
 
 from .chain import BittensorChain, close_subtensor
 from .evidence import peer_app
+from .keystore import PrivateKeyWallet, load_private_key_wallet
+from .keystore import carries_private_key as _carries_private_key
 from .service import SubmissionJournal, TickResult, Validator
 
 
@@ -87,8 +89,10 @@ def parser() -> argparse.ArgumentParser:
     arguments.add_argument(
         "--consensus-seed-file",
         type=Path,
-        required=True,
-        help="private sr25519 seed for the same validator hotkey",
+        help="private sr25519 seed for the same validator hotkey. Required only "
+        "with --peer-consensus: the seed signs cross-validator root statements "
+        "and dissents, and the default deployment submits from the gateway "
+        "without either.",
     )
     arguments.add_argument(
         "--peers", type=Path, help="JSON mapping independent validator hotkeys to HTTPS origins"
@@ -133,13 +137,23 @@ async def run(arguments: argparse.Namespace, subtensor, wallet) -> TickResult | 
             minimum_measurements_version=arguments.minimum_measurements_version,
         )
 
+    # The seed signs cross-validator root statements and dissents, which only
+    # exist in a peer-consensus deployment (_crosscheck returns immediately
+    # otherwise, and _dissent does nothing without a seed). Checking it
+    # unconditionally refused a plain gateway-backed validator whose hotkey is
+    # an exported keystore key rather than a mnemonic: such a key carries an
+    # expanded secret, not the 32-byte seed this check wants, so the check
+    # failed for a deployment that would never have read the seed at all.
     def consensus_seed():
+        if arguments.consensus_seed_file is None:
+            raise ProtocolError("--peer-consensus requires --consensus-seed-file")
         seed = read_seed(arguments.consensus_seed_file)
         if public_key(seed) != wallet.hotkey.public_key:
             raise ProtocolError("consensus seed must match validator wallet hotkey")
         return seed
 
-    consensus_seed()
+    if arguments.peer_consensus:
+        consensus_seed()
     peers = {}
     if arguments.peers:
         values = json.loads(arguments.peers.read_text())
@@ -176,7 +190,10 @@ async def run(arguments: argparse.Namespace, subtensor, wallet) -> TickResult | 
                 journal=journal,
                 http=http,
                 version_key=arguments.version_key,
-                consensus_seed=consensus_seed,
+                # A callable only when peer consensus will read it. Passing one
+                # unconditionally made `_crosscheck` verify a seed the
+                # deployment does not use, and refuse every tick over it.
+                consensus_seed=consensus_seed if arguments.peer_consensus else None,
                 peers=peers,
                 peer_consensus=arguments.peer_consensus,
                 min_peer_sample=arguments.min_peer_sample,
@@ -198,7 +215,10 @@ async def run(arguments: argparse.Namespace, subtensor, wallet) -> TickResult | 
                         result.nonce,
                     )
                 except (ProtocolError, httpx.HTTPError, OSError) as error:
-                    logging.warning("validator tick refused (%s)", type(error).__name__)
+                    # The type alone is not diagnosable: a validator that refuses
+                    # every tick submits nothing, and the only upstream symptom is
+                    # a burn. Same reasoning as the master's background loop.
+                    logging.warning("validator tick refused", exc_info=error)
                     if arguments.once:
                         raise
                 if arguments.once:
@@ -233,11 +253,29 @@ def main(argv: list[str] | None = None) -> None:
     subtensor = Subtensor(
         network=arguments.network, fallback_endpoints=arguments.fallback_endpoints
     )
-    wallet = Wallet(
-        name=arguments.wallet_name,
-        hotkey=arguments.wallet_hotkey,
-        path=str(Path(arguments.wallet_path).expanduser()),
-    )
+    # A hotkey exported from a Polkadot-style keystore has no mnemonic, so the
+    # wallet library cannot load it (see .hotkey). That file is an alternative
+    # source, and exactly one source must be given: a wallet whose hotkey is not
+    # the key the operator means is worse than a refusal at startup.
+    # A hotkey exported from a Polkadot-style keystore lives at the same path a
+    # mnemonic wallet does — <path>/<name>/hotkeys/<hotkey> — so the file
+    # decides how it is read, and the command line stays what the deploy gate
+    # audits. A mnemonic wallet keeps working exactly as before.
+    wallet_path = Path(arguments.wallet_path).expanduser()
+    hotkey_file = wallet_path / arguments.wallet_name / "hotkeys" / arguments.wallet_hotkey
+    wallet: Wallet | PrivateKeyWallet
+    try:
+        private = hotkey_file.is_file() and _carries_private_key(hotkey_file)
+        if private:
+            wallet = load_private_key_wallet(hotkey_file)
+    except ProtocolError as error:
+        raise SystemExit(f"validator wallet refused: {error}") from None
+    if not private:
+        wallet = Wallet(
+            name=arguments.wallet_name,
+            hotkey=arguments.wallet_hotkey,
+            path=str(wallet_path),
+        )
     try:
         result = asyncio.run(run(arguments, subtensor, wallet))
         if (

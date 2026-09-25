@@ -69,6 +69,15 @@ class EpochState:
             raise ServiceError(503, "invalid chain epoch boundary")
 
 
+# How far below a completed epoch's boundary the search walks.
+#
+# The chain retains epoch state for a few epochs, and beyond that answers 0 for
+# any block, so a window that fell outside retention cannot be delimited and is
+# reported rather than guessed at. This bound is generous relative to a tempo of
+# a few hundred blocks and keeps a stuck loop from walking the whole chain.
+_END_BLOCK_SEARCH = 8192
+
+
 class EpochProvider(Protocol):
     async def epoch_state(self, netuid: int) -> EpochState: ...
 
@@ -91,20 +100,67 @@ class BittensorEpochProvider:
         return await asyncio.to_thread(read)
 
     async def end_block(self, netuid: int, epoch: int, start: int, state: EpochState) -> int:
-        """Locate the inclusive end even if a restart skipped several epoch transitions."""
+        """Locate the inclusive end of a completed epoch.
+
+        The window is bracketed by the chain's own boundary — `last_epoch_block`
+        carries the epoch *after* the one being closed — and by the earliest
+        block below it that still answers. The remembered `start` is used when
+        the chain can still read it, and ignored when it cannot: a start
+        recorded on an earlier tick can point at a block whose state is pruned,
+        and a search that insists on reading `epoch` there refuses on every tick
+        and seals nothing.
+
+        Measured on netuid 100: the block a journal had remembered for epoch
+        25267 read as index 0, and the epoch's real end was 200 blocks below
+        `last_epoch_block`. Nine thousand blocks below, the state is gone.
+        """
+
+        def index_at(block: int) -> int | None:
+            """The epoch index at a block, or None when the chain cannot answer.
+
+            A node keeps recent state and prunes the rest, and asking about a
+            pruned block raises rather than answering. That is a limit of the
+            read, not a verdict about the window.
+            """
+            try:
+                index = self.subtensor.get_subnet_epoch_index(netuid, block=block)
+            except Exception:
+                return None
+            return index if isinstance(index, int) else None
 
         def read():
-            low, high = start, state.last_epoch_block
+            high = state.last_epoch_block
             anchor = self.subtensor.get_block_hash(high)
-            if self.subtensor.get_subnet_epoch_index(netuid, block=low) != epoch:
-                raise ServiceError(503, "historical epoch start changed")
-            if self.subtensor.get_subnet_epoch_index(netuid, block=high) <= epoch:
+            head = index_at(high)
+            if head is None or head <= epoch:
                 raise ServiceError(503, "epoch has not ended")
+
+            # Bracket the search. The remembered start is the floor when it is
+            # still readable and still in this epoch; otherwise the descent is
+            # bounded, because past the retained window the answer is gone.
+            low = start if 0 <= start < high else high - 1
+            if index_at(low) != epoch:
+                low = high - 1
+                for _ in range(_END_BLOCK_SEARCH):
+                    if index_at(low) == epoch:
+                        break
+                    low -= 1
+                    if low < 0:
+                        break
+                if low <= 0 or index_at(low) != epoch:
+                    raise ServiceError(
+                        503,
+                        "historical epoch boundary is beyond the chain's retained state",
+                    )
+
             while low + 1 < high:
                 middle = (low + high) // 2
-                index = self.subtensor.get_subnet_epoch_index(netuid, block=middle)
+                index = index_at(middle)
                 if index is None:
-                    raise ServiceError(503, "historical epoch state unavailable")
+                    raise ServiceError(
+                        503,
+                        "historical epoch boundary is beyond the chain's retained state",
+                    )
                 if index <= epoch:
                     low = middle
                 else:
@@ -411,7 +467,10 @@ class MasterRuntime:
             try:
                 await operation()
             except Exception as error:
-                logging.warning("master background operation failed (%s)", type(error).__name__)
+                # The type alone is not diagnosable: an epoch loop that fails
+                # every tick emits nothing, and the only symptom upstream is a
+                # burn. Keep the message and the traceback.
+                logging.warning("master background operation failed", exc_info=error)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=seconds)
             except TimeoutError:
