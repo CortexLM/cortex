@@ -95,9 +95,11 @@ def aggregate_challenge_weights(
         # when there is no payable report, and the proof share burns when no
         # submission is credited. Burning less than the full proof share here
         # would mint emission nobody earned.
+        # Algorithm 3 scales every share by its claimed score, so an epoch nobody
+        # scored in declares no mass at all; then the whole vector is the burn.
         burn_mass = compensated_sum(fractions.values())
         if burn_mass <= 1e-12:
-            raise ProtocolError("no challenge carries an emission share")
+            burn_mass = 1.0
         # The chain still requires a minimum number of positive weights, so the
         # burn is spread over that many uids. It stays a burn either way, but it
         # is the declared allocations that decide how much burns.
