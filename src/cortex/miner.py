@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import time
 from pathlib import Path
 
 import httpx
 
-from cortex.bounty.service import pair_payload
 from cortex.errors import ServiceError
 from cortex.http import read_private_file
 from cortex.proof.artifacts import verify_artifact
@@ -19,6 +19,15 @@ from cortex.proof.models import Submission, SubmissionLookup, Topic
 from cortex.proof.service import SUBMIT_DOMAIN, TOPIC_DOMAIN
 from cortex.protocol.crypto import verify_raw
 from cortex.wallet import HotkeySigner
+
+
+def pair_payload(account: str, nonce: str, expiry: int) -> bytes:
+    """Exact Substrate-context preimage verified by the CortexLM/bounty challenge."""
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", account):
+        raise ValueError("invalid account_id")
+    if not re.fullmatch(r"[a-fA-F0-9]{16,64}", nonce) or not 0 < expiry <= 2**64 - 1:
+        raise ValueError("invalid pairing nonce or expiry")
+    return f"cortex-bounty-v1|{account}|{nonce}|{expiry}".encode()
 
 
 def load_seed(path: Path) -> bytes:

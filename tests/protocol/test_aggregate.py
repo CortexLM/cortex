@@ -147,3 +147,10 @@ def test_proportional_profile_cannot_silently_use_default_legacy_algorithm():
             ((b"bounty", 3000), (b"proof", 7000)),
             ((miner, 1),),
         )
+
+
+def test_v3_with_no_score_burns_everything():
+    shares = ((b"bounty", 3000), (b"opentype", 7000))
+    uid_map = ((b"\x01" * 32, 1),)
+    final = aggregate_leaves((), shares, uid_map, algorithm_version=3)
+    assert final.uids == (0,) and final.weights == (1.0,)

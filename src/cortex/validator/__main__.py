@@ -79,8 +79,8 @@ def parser() -> argparse.ArgumentParser:
     arguments.add_argument("--minimum-measurements-version", type=int, required=True)
     arguments.add_argument("--network", type=primary_endpoint, default="finney")
     arguments.add_argument("--fallback-endpoints", type=fallback_endpoints, default=[])
-    arguments.add_argument("--wallet-name")
-    arguments.add_argument("--wallet-hotkey")
+    arguments.add_argument("--wallet-name", required=True)
+    arguments.add_argument("--wallet-hotkey", required=True)
     arguments.add_argument("--wallet-path", default="~/.bittensor/wallets")
     arguments.add_argument("--state-db", type=Path, required=True)
     arguments.add_argument("--poll-seconds", type=float, default=30)
@@ -152,7 +152,8 @@ async def run(arguments: argparse.Namespace, subtensor, wallet) -> TickResult | 
             raise ProtocolError("consensus seed must match validator wallet hotkey")
         return seed
 
-    consensus_seed() if arguments.peer_consensus else None
+    if arguments.peer_consensus:
+        consensus_seed()
     peers = {}
     if arguments.peers:
         values = json.loads(arguments.peers.read_text())
@@ -189,7 +190,10 @@ async def run(arguments: argparse.Namespace, subtensor, wallet) -> TickResult | 
                 journal=journal,
                 http=http,
                 version_key=arguments.version_key,
-                consensus_seed=consensus_seed,
+                # A callable only when peer consensus will read it. Passing one
+                # unconditionally made `_crosscheck` verify a seed the
+                # deployment does not use, and refuse every tick over it.
+                consensus_seed=consensus_seed if arguments.peer_consensus else None,
                 peers=peers,
                 peer_consensus=arguments.peer_consensus,
                 min_peer_sample=arguments.min_peer_sample,
@@ -211,7 +215,10 @@ async def run(arguments: argparse.Namespace, subtensor, wallet) -> TickResult | 
                         result.nonce,
                     )
                 except (ProtocolError, httpx.HTTPError, OSError) as error:
-                    logging.warning("validator tick refused (%s)", type(error).__name__)
+                    # The type alone is not diagnosable: a validator that refuses
+                    # every tick submits nothing, and the only upstream symptom is
+                    # a burn. Same reasoning as the master's background loop.
+                    logging.warning("validator tick refused", exc_info=error)
                     if arguments.once:
                         raise
                 if arguments.once:
@@ -257,12 +264,13 @@ def main(argv: list[str] | None = None) -> None:
     wallet_path = Path(arguments.wallet_path).expanduser()
     hotkey_file = wallet_path / arguments.wallet_name / "hotkeys" / arguments.wallet_hotkey
     wallet: Wallet | PrivateKeyWallet
-    if hotkey_file.is_file() and _carries_private_key(hotkey_file):
-        try:
+    try:
+        private = hotkey_file.is_file() and _carries_private_key(hotkey_file)
+        if private:
             wallet = load_private_key_wallet(hotkey_file)
-        except ProtocolError as error:
-            raise SystemExit(f"validator wallet refused: {error}") from None
-    else:
+    except ProtocolError as error:
+        raise SystemExit(f"validator wallet refused: {error}") from None
+    if not private:
         wallet = Wallet(
             name=arguments.wallet_name,
             hotkey=arguments.wallet_hotkey,

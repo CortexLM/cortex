@@ -5,23 +5,28 @@ canonical documentation instead of duplicating runbooks.
 
 ## Product
 
-Cortex is an autonomous research subnet on Bittensor. It has exactly two live
-challenge IDs:
+Cortex is an autonomous research subnet on Bittensor. Proof runs inside the
+master. Every other challenge is a Docker container that implements
+[the challenge contract](docs/CHALLENGES.md); the master loads it from an
+operator registry and signs its leaves.
 
-| Challenge | Algorithm 2 share | Purpose |
-| --- | ---: | --- |
-| `bounty` | 3,000 bps | useful vulnerability reports, scored from the CortexLM/backend public feed |
-| `proof` | 7,000 bps | operator-created research topics evaluated by Cortex's recursive language-model engine |
+| Challenge | Source | Purpose |
+| --- | --- | --- |
+| `proof` | this repository | operator-created research topics evaluated by Cortex's recursive language-model engine |
+| `bounty` | [CortexLM/bounty](https://github.com/CortexLM/bounty) container | useful vulnerability reports, scored from the CortexLM/backend public feed |
+| `opentype` | [OpentypeAI/challenge](https://github.com/OpentypeAI/challenge) container | exact-gold typed-decision duels on DiffusionGemma weights |
 
-The sum is always 10,000 basis points. The owner-signed legacy 2,000/8,000
-profile retains algorithm 1. The 3,000/7,000 profile requires challenge-document
-version >=2 and algorithm 2; activation is an offline owner ceremony. Design,
-Prism and Relearn are retired products. Their frozen specifications and historical miner pointers remain for
+Shares always sum to 10,000 basis points. Algorithm 1 is the legacy signed
+bounty/proof 2,000/8,000 profile; algorithm 2 is bounty/proof 3,000/7,000
+(document version >=2); algorithm 3 (document version >=3) admits any 1..64
+unique ids and pays each challenge `share * min(sum(leaves), 10^12) / 10^12`.
+Activation is an offline owner ceremony. Design, Prism and Relearn are retired
+products. Their frozen specifications and historical miner pointers remain for
 compatibility; no active code, service, trust-root row or leaf may register
 them.
 
 Start with [the architecture](docs/ARCHITECTURE.md),
-[Proof](docs/PROOF.md), [Bounty](docs/BOUNTY.md) and
+[Proof](docs/PROOF.md), [challenge containers](docs/CHALLENGES.md) and
 [the threat model](docs/THREAT_MODEL.md). Do not describe a fake-boundary test,
 one model call or a pinned image as proof of live KVM execution, scientific
 reproduction or on-chain payment.
@@ -33,7 +38,7 @@ reproduction or on-chain payment.
 | `src/cortex/protocol/` | frozen SCALE, signatures, Merkle and aggregation |
 | `src/cortex/gateway/` | durable leaves, immutable seals and burn fallback |
 | `src/cortex/validator/` | independent recomputation, root consensus and chain dispatch |
-| `src/cortex/bounty/` | pairing, report intake, external-feed scoring and adjudication |
+| `src/cortex/challenges/` | container registry, weights client, public proxy and auto-updating supervisor |
 | `src/cortex/proof/` | topics, submissions, setup, executor offers and reward allocation |
 | `src/cortex/rlm/` | recursive agent, budgets, compaction, journals and shared knowledge |
 | `src/cortex/vm/` | Firecracker host, guest protocol and measured experiment lifecycle |
@@ -68,35 +73,33 @@ or permit UID is not a submit path.
 | --- | --- |
 | owner seed | signs challenge and measurement trust documents offline |
 | gateway seed | signs immutable epoch bundles |
-| Bounty seed | signs Bounty leaves and must match the trust root |
+| challenge seed | `<id>.key`; signs that container challenge's leaves and must match the trust root |
 | Proof seed | signs Proof topics and leaves and must match the trust root |
 | operator bearer | protects master administrative routes |
 | VM orchestrator bearer | authenticates master to the dedicated KVM host; not a wallet |
 | validator hotkey | signs root/dissent evidence and Bittensor submissions |
+| challenge internal token | master bearer for a container's `get_weights`; never a signing key |
 | miner hotkey | signs Bounty pairing or Proof submission payloads |
 
 Do not conflate gateway sealing, master ownership and validator chain signing.
 Follow [the trust-root ceremony](docs/how-to/trust-root.md).
 
-## Bounty contracts
+## Challenge container contracts
 
-- `/v1/pair` verifies a Substrate-context hotkey signature, explicit terms and
-  a single-use nonce. Re-pairing an account revokes its prior session.
-- `/v1/reports` reads the external feed before storing anything. Missing,
-  moving or malformed feed data returns 503 with no row.
-- Local adjudication supports only `valid`, `already_fixed_not_prod`,
-  `invalid_malicious` and `duplicate`. A valid report without severity is not
-  creditable.
-- Scores come only from `BOUNTY_BACKEND_PUBLIC_URL`. Never add an offline live
-  scorer. On feed failure, cover every expected participant with
-  `NoScore(ChallengeInternal)` so the Bounty share burns without blocking Proof.
-- Under algorithm 2, each valid report contributes one point regardless of severity.
-  Reward authors proportionally; Bounty pays `0.30 * min(total_valid / 10, 1)`.
-  Count cumulative published reports only for the expected participant set.
-  Burn unused or unmapped mass to UID0; never increase Proof or surviving
-  challenge shares. Keep algorithm 1 and its frozen vectors unchanged.
-- A public API, quota or scoring change must update
-  `docs/external-miner/bounty.md` in the same change.
+- The owner-signed trust root decides emission; the unsigned registry
+  (`deploy/challenges/registry.toml`) only decides what runs. A container never
+  receives a leaf-signing seed.
+- `challenge-supervisor` is the only process with the Docker socket. It verifies
+  image labels and GitHub build provenance, canaries without secrets, rolls back
+  on failure and never reads a secret.
+- A missing, failing or invalid `get_weights` answer covers every expected
+  participant with `NoScore(ChallengeInternal)`: that share burns to UID0 and
+  never moves to another challenge.
+- The public proxy `/challenge/<id>/` never forwards `internal/` paths or
+  credentials other than `authorization`.
+- A contract change must update `docs/CHALLENGES.md`, both challenge
+  repositories and the E2E tests in the same change. Bounty API changes belong
+  to CortexLM/bounty; keep `docs/external-miner/bounty.md` pointing there.
 
 ## Proof contracts
 

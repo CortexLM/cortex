@@ -104,13 +104,13 @@ class MasterConfig:
     challenges_file: Path
     measurements_file: Path
     gateway_seed_file: Path
-    bounty_seed_file: Path
     proof_seed_file: Path
-    bounty_session_secret_file: Path
     operator_token_file: Path
+    challenge_keys_dir: Path = Path("/run/secrets")
+    challenge_registry_file: Path | None = None
+    challenge_secrets_dir: Path = Path("/run/challenge-secrets")
     chain_endpoint: str = "finney"
     chain_fallback_endpoints: tuple[str, ...] = ()
-    bounty_backend_url: str | None = None
     emit_poll_seconds: float = 120
     epoch_refresh_seconds: float = 12
     epoch_stale_seconds: float = 60
@@ -141,17 +141,16 @@ class MasterConfig:
             raise ValueError("trust versions must be positive")
         validate_chain_endpoint(self.chain_endpoint)
         _chain_fallback_endpoints(self.chain_fallback_endpoints)
-        for url in (self.bounty_backend_url, self.proof_orchestrator_url):
-            if url:
-                parsed = urlsplit(url)
-                if (
-                    parsed.scheme != "https"
-                    or not parsed.hostname
-                    or parsed.username
-                    or parsed.password
-                    or parsed.fragment
-                ):
-                    raise ValueError("backend URLs must be HTTPS without credentials")
+        if self.proof_orchestrator_url:
+            parsed = urlsplit(self.proof_orchestrator_url)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+                or parsed.fragment
+            ):
+                raise ValueError("backend URLs must be HTTPS without credentials")
         if self.proof_orchestrator_url and self.proof_orchestrator_token_file is None:
             raise ValueError("Proof orchestrator token file required")
         if self.proof_orchestrator_url and self.proof_orchestrator_ca_file is None:
@@ -189,13 +188,15 @@ class MasterConfig:
             challenges_file=Path(value("BASE_CHALLENGES_FILE", "config/challenges.toml")),
             measurements_file=Path(value("BASE_MEASUREMENTS_FILE", "config/measurements.toml")),
             gateway_seed_file=required_path("BASE_GATEWAY_SK_FILE"),
-            bounty_seed_file=required_path("BOUNTY_SK_FILE"),
             proof_seed_file=required_path("PROOF_SK_FILE"),
-            bounty_session_secret_file=required_path("BOUNTY_SESSION_SECRET_FILE"),
             operator_token_file=required_path("BASE_GATEWAY_ADMIN_TOKEN_FILE"),
+            challenge_keys_dir=Path(value("BASE_CHALLENGE_KEYS_DIR", "/run/secrets")),
+            challenge_registry_file=optional_path("BASE_CHALLENGE_REGISTRY_FILE"),
+            challenge_secrets_dir=Path(
+                value("BASE_CHALLENGE_SECRETS_DIR", "/run/challenge-secrets")
+            ),
             chain_endpoint=value("BASE_CHAIN_ENDPOINT", "finney"),
             chain_fallback_endpoints=chain_fallback_endpoints,
-            bounty_backend_url=value("BOUNTY_BACKEND_PUBLIC_URL") or None,
             emit_poll_seconds=float(
                 value("BASE_EMIT_POLL_SECS", value("PROOF_EMIT_POLL_SECS", "120"))
             ),
@@ -213,6 +214,12 @@ class MasterConfig:
             ),
         )
 
+    def challenge_seed_file(self, challenge: bytes) -> Path:
+        """Proof keeps its topic key; every other challenge id uses <keys dir>/<id>.key."""
+        if challenge == b"proof":
+            return self.proof_seed_file
+        return self.challenge_keys_dir / f"{challenge.decode()}.key"
+
     def trust_root(self, epoch: int) -> TrustRoot:
         try:
             trust = load_trust_root(
@@ -226,10 +233,8 @@ class MasterConfig:
                 minimum_challenges_version=self.minimum_challenges_version,
                 minimum_measurements_version=self.minimum_measurements_version,
             )
-            for entry, path in zip(
-                trust.challenges, (self.bounty_seed_file, self.proof_seed_file), strict=True
-            ):
-                if public_key(read_seed(path)) != entry.public_key:
+            for entry in trust.challenges:
+                if public_key(read_seed(self.challenge_seed_file(entry.id))) != entry.public_key:
                     raise ServiceError(503, "challenge signing key does not match owner trust")
             return trust
         except (OSError, ValueError):

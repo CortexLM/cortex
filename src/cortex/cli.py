@@ -23,10 +23,13 @@ from cortex.wallet import HotkeySigner, load_wallet_hotkey
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="cortex", description="Cortex research network")
     commands = root.add_subparsers(dest="command", required=True)
-    master = commands.add_parser("master", help="serve gateway, Bounty and Proof")
+    master = commands.add_parser("master", help="serve the gateway, Proof and challenge proxy")
     master.add_argument("--bind", default="127.0.0.1")
     master.add_argument("--port", type=int, default=8080)
     commands.add_parser("validator", help="verify seals and submit Bittensor weights")
+    commands.add_parser(
+        "challenge-supervisor", help="run and auto-update registered challenge containers"
+    )
     reconcile = commands.add_parser(
         "validator-reconcile", help="resolve one ambiguous validator dispatch"
     )
@@ -299,6 +302,11 @@ def main(argv: list[str] | None = None) -> None:
         from cortex.validator.__main__ import main as validator
 
         validator(values[1:])
+        return
+    if values and values[0] == "challenge-supervisor":
+        from cortex.challenges.__main__ import main as supervisor
+
+        supervisor(values[1:])
         return
     args = parser().parse_args(values)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")

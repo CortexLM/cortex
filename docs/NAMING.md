@@ -30,8 +30,8 @@ The preserved signing domains are:
 | `base-dissent-v1` | validator dissent evidence |
 | `base-proof-topic-v1` | published Proof topics |
 | `base-proof-submit-v1` | miner Proof submissions |
-| `base-bounty-report-v1` | Bounty report fingerprints |
-| `base-bounty-session-v1` | Bounty session tokens |
+| `base-bounty-report-v1` | Bounty report fingerprints, now in CortexLM/bounty |
+| `base-bounty-session-v1` | Bounty session tokens, now in CortexLM/bounty |
 
 Inference and executor offer domains use the newer `cortex-*` prefix because
 they were introduced by the Python implementation and have no deployed legacy
@@ -39,17 +39,14 @@ preimage.
 
 ## Live products
 
-Only two challenge IDs are live:
-
-| ID | Emission share |
-| --- | ---: |
-| `bounty` | 2,000 bps |
-| `proof` | 8,000 bps |
-
-The signed trust root must contain exactly those rows and total 10,000 basis
-points. Design, Prism and Relearn names may appear in frozen or historical
-documentation only. They are not services, routes, trust-root rows or emission
-recipients.
+The signed trust root lists the live challenge ids and their shares, which total
+10,000 basis points: legacy `bounty` 2,000 / `proof` 8,000 (algorithm 1),
+3,000 / 7,000 (algorithm 2), or any 1..64 ids matching `[a-z0-9][a-z0-9-]{0,62}`
+(algorithm 3). `proof` is built in; every other id is a
+[challenge container](CHALLENGES.md) named `cortex-challenge-<id>`, with state in
+the `cortex-challenge-<id>-data` volume and routes under `/challenge/<id>/`.
+Design, Prism and Relearn names may appear in frozen or historical documentation
+only. They are not services, routes, trust-root rows or emission recipients.
 
 ## File and command names
 

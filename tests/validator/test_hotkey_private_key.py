@@ -133,3 +133,25 @@ def test_detection_picks_a_keystore_and_leaves_a_mnemonic_wallet_alone(tmp_path)
 def test_detection_refuses_a_keystore_with_no_usable_key(tmp_path):
     path = write(tmp_path, {"privateKey": "0x00"})
     assert carries_private_key(path) is False
+
+
+def test_the_hotkey_exposes_the_crypto_type_the_substrate_signer_reads(tmp_path):
+    path = write(tmp_path, {"privateKey": "0x" + _EXPANDED.hex(), "cryptoType": 1})
+    assert load_private_key_wallet(path).hotkey.crypto_type == 1
+
+
+def test_a_phrase_that_names_another_account_is_refused(tmp_path):
+    from bittensor_wallet import Keypair
+
+    phrase = Keypair.generate_mnemonic()
+    own = Keypair.create_from_mnemonic(phrase).ss58_address
+    matching = write(
+        tmp_path, {"secretPhrase": phrase, "privateKey": "0x" + _EXPANDED.hex(), "ss58Address": own}
+    )
+    assert carries_private_key(matching) is False  # the wallet library reads it, as before
+    mixed = write(
+        tmp_path,
+        {"secretPhrase": phrase, "privateKey": "0x" + _EXPANDED.hex(), "ss58Address": _SS58},
+    )
+    with pytest.raises(ProtocolError, match="secretPhrase does not derive"):
+        carries_private_key(mixed)

@@ -1,6 +1,7 @@
 """Fetch-only validator: independently verify a current seal before chain submission."""
 
 import asyncio
+import logging
 import re
 import sqlite3
 from collections.abc import Callable
@@ -636,7 +637,11 @@ class Validator:
             )
         try:
             success = await self.chain.submit(self.netuid, local_vector, self.version_key)
-        except DispatchNotBroadcast:
+        except DispatchNotBroadcast as error:
+            # The chain's own message is the only account of why it refused, and
+            # a refusal that repeats every epoch is indistinguishable from a bug
+            # without it. The outcome stays the same; the reason is logged.
+            logging.warning("validator dispatch refused by the chain", exc_info=error)
             self.journal.release_failed(self.netuid, epoch, attempt_id)
             return TickResult("dispatch_failed", epoch)
         except DispatchUncertain as error:

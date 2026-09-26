@@ -1,31 +1,25 @@
 # Cortex
 
-Cortex research subnet: Bounty and agentic Proof on Bittensor.
+Cortex research subnet on Bittensor: agentic Proof plus Docker challenge containers.
 
-The Python implementation runs the gateway and both challenges on a master,
-verifies sealed rewards in independent validators, and isolates research work
-in Firecracker guests. Algorithm 2 assigns up to 30% of emission to Bounty
-and 70% to Proof; activating it requires a new owner-signed trust root.
-Proof uses Cortex's own recursive language-model engine with persistent memory,
-context compaction and bounded tool execution.
+The master runs the gateway, Proof and every challenge container, then signs one
+leaf per miner and seals each epoch. Validators only verify the sealed bundle
+from the gateway API and submit the weights.
+
+| Role | Runs | Command |
+| --- | --- | --- |
+| validator master | gateway, Proof, [challenge containers](docs/CHALLENGES.md), auto-updater | `cortex master` + `cortex challenge-supervisor` |
+| validator | verification and weight submission, nothing else | `cortex validator` |
+
+Challenges live in their own repositories and are loaded automatically:
+[CortexLM/bounty](https://github.com/CortexLM/bounty) (vulnerability reports) and
+[OpentypeAI/challenge](https://github.com/OpentypeAI/challenge) (exact-gold
+DiffusionGemma duels). The owner-signed trust root sets each challenge's emission
+share. The shortfall of a challenge burns to UID 0 and never moves to another one.
 
 Cortex is experimental research software. Offline tests exercise submission, scoring,
 sealing and validator dispatch through fake external boundaries. A live model
 smoke is distinct from live KVM execution or confirmed on-chain payment.
-
-## Current launch mode
-
-The initial production mode enables Bounty against the configured
-`CortexLM/backend` public feed and leaves Proof execution unwired. The signed
-trust root still contains `bounty = 2000` and `proof = 8000`: Proof emits
-`ChallengeInternal` absences and its share burns to UID 0. Never renormalize
-Bounty to 100%. Production pairing, report intake and adjudication stay in
-`CortexLM/backend`; Cortex reads its immutable public scoring snapshots.
-Algorithm 2 pays one point per valid report, proportionally across authors;
-ten valid reports across expected participants unlock the full Bounty share.
-The unsigned [30/70 template](config/challenges-v2.example.toml) changes nothing
-until the [trust-root migration](docs/how-to/trust-root.md#activate-proportional-bounty)
-is completed on the gateway and validators.
 
 ## Installation
 
@@ -42,6 +36,7 @@ uv run cortex --help
 
 ```bash
 uv run cortex master --help
+uv run cortex challenge-supervisor --help
 uv run cortex validator --help
 uv run cortex vm-host --help
 uv run cortex miner --help
@@ -56,6 +51,8 @@ receipts and signs the resulting document. No research task catalog is built in.
 
 - [Operator configuration](docs/reference/configuration.md)
 - [Architecture and trust boundaries](docs/ARCHITECTURE.md)
+- [Challenge container contract](docs/CHALLENGES.md)
+- [Deployment](deploy/README.md)
 - [Proof miner guide](docs/external-miner/proof.md)
 - [Bounty miner guide](docs/external-miner/bounty.md)
 - [Validator guide](docs/external-miner/validators.md)
@@ -72,8 +69,8 @@ uv run python scripts/check_deploy.py --check-examples
 uv build --no-build-isolation
 ```
 
-Tests cover signatures and Rust wire vectors, replay protection, feed outages,
-artifact validation, topic setup, rejected submissions, VM lifecycle failures,
+Tests cover signatures and Rust wire vectors, replay protection, challenge
+container outages, auto-update rollback, artifact validation, topic setup, rejected submissions, VM lifecycle failures,
 RLM recursion/compaction, reward allocation and sealed-weight submission.
 CI runs offline and never rents a GPU or boots Firecracker.
 

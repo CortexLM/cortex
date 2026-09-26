@@ -103,6 +103,11 @@ class Hotkey:
         return self._public
 
     @property
+    def crypto_type(self) -> int:
+        """The substrate signer reads this before signing (the file is checked to be sr25519)."""
+        return _SR25519_CRYPTO_TYPE
+
+    @property
     def ss58_address(self) -> str:
         return encode_hotkey(self._public)
 
@@ -178,7 +183,8 @@ def carries_private_key(path: Path) -> bool:
     audited deploy surface stays what the gate checks.
 
     Unreadable or malformed files answer False: the caller falls back to the
-    wallet library, which reports the problem in its own terms.
+    wallet library, which reports the problem in its own terms. A phrase that does
+    not derive the declared ss58Address raises ProtocolError.
     """
     try:
         raw = _read_private_file(path)
@@ -187,10 +193,23 @@ def carries_private_key(path: Path) -> bool:
         return False
     if not isinstance(document, dict):
         return False
-    # A phrase means the wallet library owns this file, even if a privateKey is
-    # also present: it derives from the phrase and ignores the key.
+    # A phrase means the wallet library owns this file: it derives from the phrase
+    # and ignores the key (btcli writes both). The phrase must then name the account
+    # the file declares, or the validator would sign as someone else.
     phrase = document.get("secretPhrase")
     if isinstance(phrase, str) and phrase.strip():
+        declared = document.get("ss58Address")
+        if isinstance(declared, str) and declared:
+            from bittensor_wallet import Keypair
+
+            try:
+                derived = Keypair.create_from_mnemonic(phrase.strip()).ss58_address
+            except Exception:
+                raise ProtocolError("hotkey secretPhrase is not a valid mnemonic") from None
+            if derived != declared:
+                raise ProtocolError(
+                    "hotkey secretPhrase does not derive the ss58Address it declares"
+                )
         return False
     try:
         _private_bytes(document.get("privateKey"))

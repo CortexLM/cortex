@@ -54,6 +54,13 @@ def create_router(service: GatewayService, operator_auth: OperatorAuth) -> APIRo
     async def latest():
         return service.latest()
 
+    @router.get("/v1/metagraph/latest")
+    async def metagraph():
+        try:
+            return service.metagraph()
+        except ServiceError as error:
+            return _error(error)
+
     @router.get("/v1/bundle/{epoch}")
     async def bundle(epoch: str):
         try:

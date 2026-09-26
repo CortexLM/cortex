@@ -4,7 +4,7 @@ Cortex uses three independently operated roles:
 
 | Role | Runtime | Responsibility |
 | --- | --- | --- |
-| master | Docker Compose | public gateway, Bounty, Proof and durable epoch emission |
+| master | Docker Compose | public gateway, Proof, challenge containers and durable epoch emission |
 | validator | Docker Compose | independent bundle verification, peer roots and Bittensor submission |
 | Proof VM host | systemd on a KVM machine | Firecracker topic and experiment VMs |
 
@@ -15,7 +15,7 @@ dedicated machine reachable from the master over a private network and HTTPS.
 - [Validate the deployment source](#validate-the-deployment-source)
 - [Build and publish the Python image](#build-and-publish-the-python-image)
 - [Master](#master)
-- [Bounty-only launch](#bounty-only-launch)
+- [Challenge containers](#challenge-containers)
 - [Validator](#validator)
 - [Proof VM host](#proof-vm-host)
 - [Promotion and rollback](#promotion-and-rollback)
@@ -73,7 +73,8 @@ network plus optional bounded `wss://` fallback RPC origins, then set:
 
 - `CORTEX_IMAGE` to the published `repository@sha256:<64 hex>`;
 - the master VPC bind address and netuid;
-- the external Bounty feed when Bounty should accept reports;
+- `BASE_CHALLENGE_SECRETS_HOST_DIR`, the absolute host directory of challenge
+  bearers, and `BASE_DOCKER_GID`, the group owning `/var/run/docker.sock`;
 - the Proof VM URL, CA, exact rootfs digest, signed inference-offer commitment
   and registered custom IDs when Proof custom topics should open;
 - explicit `PROOF_RLM_VM_VCPUS`, `PROOF_RLM_VM_MEM_MIB` and
@@ -84,16 +85,14 @@ Prepare a private directory, owned so container UID 65532 can read it:
 ```text
 deploy/secrets/master/
   gateway.key
-  bounty.key
   proof.key
-  bounty-session.key
+  bounty.key          # one <id>.key per trusted container challenge
   operator.token
   proof-vm.token
   proof-vm-ca.pem
 ```
 
-Seeds are raw 32 bytes or 64 hexadecimal characters. `bounty-session.key` has at
-least 32 random bytes. Bearers are nonempty opaque values. Files are regular,
+Seeds are raw 32 bytes or 64 hexadecimal characters. Bearers are nonempty opaque values. Files are regular,
 not hardlinks or symlinks, and mode 0400 or 0600. The Proof VM token and CA are
 needed only when `PROOF_VM_ORCHESTRATOR_URL` is set.
 
@@ -106,36 +105,59 @@ docker compose --project-directory . --env-file deploy/env/master.env \
   -f deploy/compose/role-master.yml --profile master up -d
 ```
 
-The state volume contains gateway seals, Bounty state, Proof jobs/topics and the
-epoch journal. Back it up as SQLite state, including WAL, through a quiesced copy
+The state volume contains gateway seals, Proof jobs/topics and the epoch
+journal. Each challenge keeps its own state in the `cortex-challenge-<id>-data`
+volume. Back it up as SQLite state, including WAL, through a quiesced copy
 or SQLite's backup API. A filesystem copy of only the main database while the
 service writes is not a valid backup.
 
-## Bounty-only launch
+## Challenge containers
 
-Set `BOUNTY_BACKEND_PUBLIC_URL` to the reviewed HTTPS `CortexLM/backend` origin
-and leave `PROOF_VM_ORCHESTRATOR_URL` empty. Keep `proof.key` mounted. Legacy
-deployments retain the signed `bounty = 2000`, `proof = 8000` profile until
-[algorithm 2 activation](../docs/how-to/trust-root.md#activate-proportional-bounty)
-coordinates the gateway and validators with a signed 3000/7000 profile.
-With no open Proof topic, its entire configured share burns to UID0 through
-signed `ChallengeInternal` leaves. Algorithm 2 pays up to 30% for Bounty,
-proportionally to valid reports with a global ten-report ramp; Bounty is never
-scaled to 100%.
+The master role runs a second service, `challenge-supervisor`, which is the only
+Cortex process holding the Docker socket. It reads
+`deploy/challenges/registry.toml`, and for each entry it:
 
-Keep `BOUNTY_GATEWAY_URL` empty in CortexLM/backend unless an authenticated,
-idempotent delivery contract is deployed. The production dependency for this
-mode is the public leaderboard/report feed, including severity, pagination and
-one shared snapshot revision.
+1. pulls the channel or pin;
+2. checks the slug, contract and source labels and the GitHub build provenance;
+3. runs a secretless canary;
+4. replaces the container `cortex-challenge-<id>` on the private
+   `cortex-challenges` network;
+5. rolls back when the new digest does not answer `/version`.
 
-Production miners pair and file reports through CortexLM/backend. Do not expose
-the Python compatibility intake as an automatic payment path: it does not write
-to the backend publication.
+The gateway joins that network as `cortex-master`, polls `get_weights` once per
+completed epoch and proxies public routes under `/challenge/<id>/`. The full
+contract is in [docs/CHALLENGES.md](../docs/CHALLENGES.md).
 
-Before enabling validators, run a real Bounty intake failure probe, then a valid
-intake and public-feed publication. Confirm the completed epoch has signed leaves,
-a `sealed: true` latest response, the expected Bounty/Proof burn split and a
-successful validator `--verify-only --once` recomputation.
+Per challenge, on the master host:
+
+```bash
+dir="$BASE_CHALLENGE_SECRETS_HOST_DIR/bounty"
+install -d -m 0700 -o 65532 -g 65532 "$dir"
+(umask 077; openssl rand -hex 32 >"$dir/internal.token"; openssl rand -hex 32 >"$dir/admin.token")
+chown 65532:65532 "$dir"/*.token
+```
+
+Put the matching leaf seed at `deploy/secrets/master/<id>.key` (its public key
+is the trust-root row) and any challenge settings in the registry `env` table,
+for example `BOUNTY_BACKEND_PUBLIC_URL`. Challenge-specific secrets, such as
+Bounty's `session.key`, go next to the tokens; see each challenge's operator
+guide ([Bounty](https://github.com/CortexLM/bounty/blob/main/docs/operator.md),
+[OpenType](https://github.com/OpentypeAI/challenge/blob/main/docs/operator.md)).
+
+A registered id that the trust root does not list runs without emission. Use this
+burn-in to check `GET /challenge/<id>/version` and the logs. Then activate it with
+a signed [algorithm 3 profile](../docs/how-to/trust-root.md#activate-container-challenges-algorithm-3).
+A trusted id that is missing, unhealthy or invalid burns its share.
+
+Operator switches:
+
+- `channel = "edge"` follows `main`;
+- `pin = "sha256:..."` freezes a digest;
+- `attestation = false` is for local images only;
+- deleting a registry row stops that container and keeps its volume.
+
+The master re-reads the registry when the file changes, and the supervisor
+re-reads it every 15 seconds.
 
 ## Validator
 
@@ -285,8 +307,10 @@ The protected `production` environment verifies provenance and emits
 evidence, changing `CORTEX_IMAGE` to its immutable digest, rendering Compose,
 backing up state, pulling that digest and recreating one role.
 
-There is deliberately no `git pull`, Docker-socket watcher, CI SSH deployment or
-unattended host updater. Safe automation must preserve the same operator gate,
+The Cortex image itself has deliberately no `git pull`, Docker-socket watcher,
+CI SSH deployment or unattended host updater; only challenge containers
+auto-update, through the supervisor gates above, and they never hold a leaf
+seed. Safe automation of the Cortex image must preserve the same operator gate,
 take a consistent SQLite backup, verify role health plus a fresh sealed bundle,
 and restore both the prior digest and schema-compatible state on failure.
 

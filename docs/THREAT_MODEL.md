@@ -22,9 +22,11 @@ challenge keys or generated topic rules that validators will faithfully accept.
 
 | Boundary | Trusted property | Residual risk |
 | --- | --- | --- |
-| owner trust root | challenge keys, 20/80 shares, measurement digest | owner can sign a malicious replacement |
+| owner trust root | challenge ids, keys, shares, measurement digest | owner can sign a malicious replacement |
 | master gateway | durable intake and immutable seals | availability and censorship remain operator risks |
 | validator | independent chain snapshot, recomputation and dispatch journal | chain RPC eclipse or colluding validators |
+| challenge container | weights it returns for its own share | can misallocate or zero its own share; never holds a leaf seed, cannot move another challenge's mass |
+| challenge-supervisor | Docker control, image provenance and label checks | holds the Docker socket (host-root equivalent); a compromised GitHub repository with valid provenance ships code |
 | CortexLM/backend feed | Bounty scoring publication | backend controls the underlying adjudication truth |
 | topic RLM guest | topic-scoped setup state | model output is untrusted until checked and signed |
 | experiment guest | measured run with no network and confirmed teardown | a compromised KVM host can forge its own evidence |
@@ -58,6 +60,26 @@ of replayed. Compaction stores removed exchanges by digest but does not turn a
 model assertion into evidence. Shared knowledge is private and untrusted until
 an owner signature approves exact content and visibility.
 
+## Challenge container controls
+
+- **The container.** Each container runs as UID 65532 with a read-only root,
+  no capabilities, `no-new-privileges`, memory, CPU and PID limits, and a single
+  `/data` volume. It is reachable only on the private `cortex-challenges`
+  network, never through a host port.
+- **What the master exposes.** The master proxies public paths only, refuses
+  `internal/`, dot segments, `%` and `\`, forwards three request headers and caps
+  both bodies.
+- **Weights.** Weights come only from the authenticated internal route and are
+  validated before signing: they must be finite, non-negative, at most 65,536
+  entries and 8 MiB, and slug and epoch must match.
+- **Image updates.** A new digest must carry the slug, contract and source
+  labels, and GitHub build provenance from the registered repository. It must
+  also pass a secretless canary. A failed rollout restores the previous digest.
+- **Residual risk.** The supervisor checks that a provenance attestation
+  exists, but does not verify its Sigstore signature (documented upgrade path).
+  The Docker socket is host-root equivalent, so only that one supervisor service
+  mounts it.
+
 ## Reward controls
 
 Challenge leaves are signed under keys in the owner root. The expected set comes
@@ -67,9 +89,11 @@ its share rather than blocking every other challenge.
 
 The gateway seals only complete exact-epoch data. Individual raw-leaf intake
 cannot downgrade a positive score, while the master emitter atomically replaces
-the complete participant set for one challenge and epoch. A feed outage therefore
-replaces every Bounty participant with `NoScore(ChallengeInternal)` and burns the
-full Bounty share without retaining stale positives. `GET /v1/weights/latest`
+the complete participant set for one challenge and epoch. A challenge-container
+outage or invalid answer therefore replaces every participant of that challenge
+with `NoScore(ChallengeInternal)` and burns its full share without retaining
+stale positives. A container's first answer per epoch is final, and the master
+signs it once, so a later change cannot rewrite a sealed epoch. `GET /v1/weights/latest`
 returns an unsealed UID0 fallback when no valid seal exists; validators refuse
 that fallback. A sealed UID0 burn is valid and must still be submitted after
 independent verification.

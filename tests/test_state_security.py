@@ -5,7 +5,6 @@ import stat
 
 import pytest
 
-from cortex.bounty import BountyStore
 from cortex.gateway import GatewayStore
 from cortex.proof.store import ProofStore
 from cortex.state import (
@@ -26,7 +25,6 @@ def test_prepare_master_state_creates_private_directory_and_databases(tmp_path):
     assert mode(state) == 0o700
     assert {path.name for path in state.iterdir()} == {
         "gateway.sqlite3",
-        "bounty.sqlite3",
         "proof.sqlite3",
         "emission.sqlite3",
     }
@@ -76,7 +74,7 @@ def test_sqlite_path_refuses_a_group_writable_parent(tmp_path):
         secure_sqlite_path(state / "database.sqlite3")
 
 
-@pytest.mark.parametrize("store_type", [BountyStore, ProofStore, GatewayStore])
+@pytest.mark.parametrize("store_type", [ProofStore, GatewayStore])
 def test_stores_create_private_regular_databases(tmp_path, store_type):
     path = tmp_path / f"{store_type.__name__}.sqlite3"
 

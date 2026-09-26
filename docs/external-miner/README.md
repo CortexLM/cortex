@@ -13,11 +13,13 @@ reproduction or on-chain payment.
 | `bounty` | up to 3000 bps (30%), algorithm 2 | [Pair an account and report bugs](bounty.md) |
 | `proof` | 7000 bps (70%), algorithm 2 | [Discover topics and submit research](proof.md) |
 
-The legacy owner-signed profile remains 2000/8000 until
-[algorithm 2 activation](../how-to/trust-root.md#activate-proportional-bounty).
-These are the only live challenge ids. Proof topics are operator-published,
-signed documents discovered through the API, never a built-in catalog. No
-particular benchmark, runner, model or topic is promised by this repository.
+The legacy owner-signed profile remains 2000/8000 (algorithm 1) until
+[activation](../how-to/trust-root.md#activate-proportional-bounty).
+A version-3 owner document may add further [challenge containers](../CHALLENGES.md),
+such as [OpentypeAI/challenge](https://github.com/OpentypeAI/challenge), with
+their own shares; each documents its miner API in its repository and is served
+under `/challenge/<id>/`. Proof topics are operator-published, signed documents
+discovered through the API, never a built-in catalog.
 
 ## Installation
 
@@ -38,8 +40,8 @@ for installation and development commands.
 
 Get the gateway URL and independently pinned Proof public key from the subnet
 operator. `--gateway` is required; the CLI does not select a deployment for you.
-The public challenge route prefixes are `/challenge/bounty` and
-`/challenge/proof`.
+Public challenge routes are prefixed with `/challenge/<id>`, for example
+`/challenge/bounty` and `/challenge/proof`.
 
 ```bash
 uv run cortex miner --gateway "$GATEWAY" \
@@ -69,7 +71,7 @@ not miner secrets.
 ## Support
 
 - [Proof guide](proof.md): signed topics, artifacts, BYOK and submission outcomes.
-- [Bounty guide](bounty.md): terms, pairing, reports and the external scoring feed.
+- [Bounty guide](bounty.md): pairing and reports; the challenge lives in CortexLM/bounty.
 - [Validator guide](validators.md): independently verify seals and peer roots.
 - [Troubleshooting](troubleshoot.md): refusal codes and safe retry behavior.
 
