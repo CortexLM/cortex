@@ -102,6 +102,18 @@ class BittensorChain:
         owner = self.subtensor.get_subnet_owner_hotkey(netuid, block=block)
         epoch = self.subtensor.get_subnet_epoch_index(netuid, block=block)
         uint(epoch, 8)
+        timestamp_seconds = None
+        try:
+            timestamp = self.subtensor.substrate.query(
+                module="Timestamp", storage_function="Now", params=[], block_hash=before
+            ).value
+            uint(timestamp, 8)
+            if timestamp < 1000:
+                raise ProtocolError("invalid chain timestamp")
+            timestamp_seconds = timestamp // 1000
+        except Exception:
+            # Validators do not need time; the master gates time-dependent emission.
+            logging.warning("historical chain timestamp unavailable block=%d", block)
         after = self.subtensor.get_block_hash(block)
         if before != after:
             raise ProtocolError("chain reorganized during metagraph read")
@@ -126,6 +138,7 @@ class BittensorChain:
             decode_hotkey(owner),
             frozenset(permits),
             epoch,
+            timestamp_seconds,
         )
 
     async def submit(

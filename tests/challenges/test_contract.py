@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from cortex.challenges.client import ChallengeWeights, leaf_scores, parse_weights
+from cortex.challenges.client import ChallengeClient, ChallengeWeights, leaf_scores, parse_weights
 from cortex.challenges.proxy import create_router
 from cortex.challenges.registry import parse_registry
 from cortex.protocol.models import FULL_SHARE_SCORE, NoScore, NoScoreReason, Score
@@ -90,6 +90,42 @@ def test_algorithm_one_never_signs_a_container_weight():
 def test_weights_for_another_challenge_epoch_or_with_invalid_values_are_rejected(body):
     with pytest.raises(ValueError):
         parse_weights(body, slug="opentype", epoch=7)
+
+
+@pytest.mark.parametrize("epoch_at", [None, 1_790_000_123])
+async def test_weights_transports_optional_epoch_at_with_authentication(tmp_path, epoch_at):
+    entry = parse_registry({"version": 1, "challenge": [ROW]})["opentype"]
+    secret = tmp_path / "opentype" / "internal.token"
+    secret.parent.mkdir()
+    secret.write_text("fixture-internal")
+    secret.chmod(0o600)
+    seen = []
+
+    def upstream(request):
+        seen.append(request)
+        return httpx.Response(200, json={"challenge_slug": "opentype", "epoch": 7, "weights": {}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as http:
+        answer = await ChallengeClient(http, tmp_path).weights(entry, 7, epoch_at=epoch_at)
+    assert answer.weights == {}
+    assert len(seen) == 1
+    assert dict(seen[0].url.params) == (
+        {"epoch": "7"} if epoch_at is None else {"epoch": "7", "epoch_at": str(epoch_at)}
+    )
+    assert seen[0].headers["authorization"] == "Bearer fixture-internal"
+    assert seen[0].headers["x-platform-challenge-slug"] == "opentype"
+
+
+@pytest.mark.parametrize("epoch_at", [True, False, 0, -1, 1.5, "1790000123", 2**64])
+async def test_weights_rejects_invalid_epoch_at_before_http_or_secrets(tmp_path, epoch_at):
+    entry = parse_registry({"version": 1, "challenge": [ROW]})["opentype"]
+
+    def upstream(request):
+        pytest.fail("invalid epoch_at must never reach HTTP")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as http:
+        with pytest.raises(ValueError):
+            await ChallengeClient(http, tmp_path).weights(entry, 7, epoch_at=epoch_at)
 
 
 def test_proxy_forwards_public_routes_only():

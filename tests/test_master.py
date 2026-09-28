@@ -28,6 +28,7 @@ class FakeEpochChain:
         )
         self.submissions = []
         self.fail = False
+        self.timestamp_seconds = 1_790_000_123
 
     async def epoch_state(self, netuid):
         if self.fail:
@@ -39,7 +40,12 @@ class FakeEpochChain:
 
     async def snapshot(self, block, netuid):
         return ChainSnapshot(
-            block, sha256(str(block).encode()).digest(), self.rows, self.rows[0].hotkey, frozenset()
+            block,
+            sha256(str(block).encode()).digest(),
+            self.rows,
+            self.rows[0].hotkey,
+            frozenset(),
+            timestamp_seconds=self.timestamp_seconds,
         )
 
     async def submit(self, netuid, vector, version_key):
@@ -442,3 +448,149 @@ def test_backend_config_rejects_credentials_in_url(tmp_path):
 def test_config_rejects_invalid_emission_intervals(tmp_path, value):
     with pytest.raises(ValueError, match="intervals"):
         replace(master_config(tmp_path), emit_poll_seconds=value)
+
+
+@pytest.fixture
+async def decay_master(tmp_path):
+    from cortex.challenges.registry import parse_registry
+
+    config = master_config(tmp_path)
+    key = tmp_path / "opentype.key"
+    key.write_bytes(bytes([3]) * 32)
+    key.chmod(0o600)
+    entries = []
+    for slug in ("bounty", "opentype"):
+        token = config.challenge_secrets_dir / slug / "internal.token"
+        token.parent.mkdir(parents=True)
+        token.write_text(f"{slug}-internal")
+        token.chmod(0o600)
+        entries.append(
+            {
+                "id": slug,
+                "image": f"ghcr.io/fixture/{slug}",
+                "source": f"https://github.com/fixture/{slug}",
+            }
+        )
+    chain = FakeEpochChain()
+    trust = TrustRoot(
+        (
+            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 3000),
+            ChallengeEntry(b"opentype", public_key(bytes([3]) * 32), 7000),
+        ),
+        sha256(b"\x00").digest(),
+        public_key(bytes([7]) * 32),
+        challenges_version=3,
+    )
+    seen = []
+
+    def upstream(request):
+        slug = request.headers["x-platform-challenge-slug"]
+        assert request.headers["authorization"] == f"Bearer {slug}-internal"
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "challenge_slug": slug,
+                "epoch": 12,
+                "weights": {chain.rows[1].hotkey.hex(): 0.5} if slug == "opentype" else {},
+                "full_share_mass": 1.0,
+            },
+        )
+
+    runtime = await build_master(
+        config,
+        chain=chain,
+        epochs=chain,
+        trust=trust,
+        challenge_http=httpx.AsyncClient(transport=httpx.MockTransport(upstream)),
+    )
+    runtime.emitter.registry = lambda: parse_registry({"version": 1, "challenge": entries})
+    try:
+        yield SimpleNamespace(runtime=runtime, chain=chain, trust=trust, seen=seen)
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.parametrize("timestamp", [None, True, False, 0, -1, 1.5, "1790000123", 2**64])
+async def test_missing_or_invalid_epoch_time_postpones_before_any_leaves_or_seal(
+    decay_master, timestamp
+):
+    from cortex.protocol import sign_leaf
+
+    master = decay_master
+    runtime = master.runtime
+    await runtime.emitter.tick()
+    original = sign_leaf(bytes([1]) * 32, b"bounty", master.chain.rows[1].hotkey, 12, Score(123))
+    runtime.gateway.accept_leaf(original)
+    before = runtime.gateway.store.leaves(12)
+    master.chain.timestamp_seconds = timestamp
+    master.chain.state = EpochState(13, 100, 105)
+    with pytest.raises(ServiceError, match="epoch timestamp unavailable"):
+        await runtime.emitter.tick()
+    assert runtime.gateway.store.leaves(12) == before
+    assert runtime.gateway.store.bundle(12) is None
+    assert master.seen == []
+    assert runtime.emitter.journal.pending(13)
+    master.chain.timestamp_seconds = 1_790_000_123
+    assert await runtime.emitter.tick() == [12]
+    assert runtime.emitter.journal.pending(13) == []
+
+
+async def test_historical_epoch_time_reaches_http_and_decayed_mass_seals_without_renormalization(
+    decay_master,
+):
+    master = decay_master
+    runtime = master.runtime
+    await runtime.emitter.tick()
+    master.chain.state = EpochState(13, 100, 105)
+    assert await runtime.emitter.tick() == [12]
+    assert all(
+        dict(request.url.params) == {"epoch": "12", "epoch_at": "1790000123"}
+        for request in master.seen
+    )
+    assert len(master.seen) == 2
+    leaves = runtime.gateway.store.leaves(12)
+    assert next(
+        leaf.score
+        for leaf in leaves
+        if leaf.challenge_id == b"opentype" and leaf.miner_hotkey == master.chain.rows[1].hotkey
+    ) == Score(500_000_000_000)
+    latest = runtime.gateway.latest()
+    assert latest["sealed"] is True
+    assert latest["final_vector"] == [[0, 42598], [1, 22937]]
+    original = runtime.gateway.bundle_bytes(12)
+    master.chain.timestamp_seconds = None
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app()), base_url="https://master"
+    ) as http:
+        journal = SubmissionJournal(":memory:")
+        try:
+            validator = Validator(
+                gateway_url="https://master",
+                netuid=541,
+                trust=master.trust,
+                chain=master.chain,
+                journal=journal,
+                http=http,
+            )
+            assert (await validator.run_once()).outcome == "submitted"
+        finally:
+            journal.close()
+    assert master.chain.submissions == [((0, 42598), (1, 22937))]
+    assert await runtime.emitter.tick() == []
+    assert runtime.gateway.bundle_bytes(12) == original
+
+
+async def test_bounty_only_algorithm_three_still_seals_without_epoch_time(decay_master):
+    master = decay_master
+    runtime = master.runtime
+    runtime.gateway.trust = replace(
+        master.trust, challenges=(ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 10000),)
+    )
+    master.chain.timestamp_seconds = None
+    await runtime.emitter.tick()
+    master.chain.state = EpochState(13, 100, 105)
+    assert await runtime.emitter.tick() == [12]
+    assert len(master.seen) == 1
+    assert dict(master.seen[0].url.params) == {"epoch": "12"}
+    assert runtime.gateway.latest()["sealed"] is True

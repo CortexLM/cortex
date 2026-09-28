@@ -55,6 +55,16 @@ receives a leaf-signing seed.
 
 `capabilities` is a subset of `get_weights` and `proxy_routes`.
 
+The master also sends `epoch_at=<positive integer Unix seconds>` when available:
+`Timestamp.Now` at the completed epoch's pinned end-block hash, validated as
+integer milliseconds and floored to seconds. There is no wall-clock or estimated
+block-time fallback. Algorithm 3 epochs with trusted OpenType require this time;
+missing or invalid time postpones emission before any leaves are replaced or the
+epoch is sealed, rather than signing `NoScore`. Other challenge configurations
+and legacy client calls remain compatible without `epoch_at`. Containers that do
+not use epoch time may ignore this optional query parameter. Persisted epoch
+responses remain immutable regardless of subsequent request parameters.
+
 `get_weights` requires `Authorization: Bearer <internal token>` (`401`
 otherwise) and `X-Platform-Challenge-Slug: <slug>` (`403` on mismatch). It
 returns:

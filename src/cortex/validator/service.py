@@ -53,6 +53,7 @@ class ChainSnapshot:
     owner_hotkey: bytes
     validator_permits: frozenset[int]
     epoch: int | None = None
+    timestamp_seconds: int | None = None
 
 
 class Chain(Protocol):
