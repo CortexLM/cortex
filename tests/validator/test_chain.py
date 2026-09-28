@@ -457,3 +457,59 @@ async def test_snapshot_uses_one_hash_for_integer_stakes_uids_permits_and_epoch(
         ("get_subnet_owner_hotkey", 541, 99),
         ("get_subnet_epoch_index", 541, 99),
     ]
+
+
+@pytest.mark.parametrize(
+    "timestamp,seconds",
+    [
+        (1_790_000_123_999, 1_790_000_123),
+        (1000, 1),
+        (2**64 - 1, (2**64 - 1) // 1000),
+        (None, None),
+        (True, None),
+        (0, None),
+        (999, None),
+        (-1, None),
+        (1.5, None),
+        ("1790000123000", None),
+        (2**64, None),
+    ],
+)
+async def test_historical_timestamp_is_validated_and_read_at_pinned_hash(timestamp, seconds):
+    digest = "0x" + "04" * 32
+
+    def query(*, module, storage_function, params, block_hash):
+        assert (module, storage_function, params, block_hash) == ("Timestamp", "Now", [], digest)
+        return SimpleNamespace(value=timestamp)
+
+    subtensor = SimpleNamespace(
+        get_block_hash=lambda block: digest,
+        neurons_lite=lambda netuid, *, block: [],
+        get_subnet_owner_hotkey=lambda netuid, *, block: encode_hotkey(bytes([1]) * 32),
+        get_subnet_epoch_index=lambda netuid, *, block: 12,
+        substrate=SimpleNamespace(query=query),
+    )
+    snapshot = await BittensorChain(subtensor, None).snapshot(99, 541)
+    assert snapshot.timestamp_seconds == seconds
+    assert snapshot.block_hash == bytes.fromhex(digest[2:])
+
+
+@pytest.mark.parametrize("reorg", [False, True])
+async def test_timestamp_rpc_failure_preserves_validator_snapshot_but_not_reorg(reorg):
+    hashes = iter(["0x" + "01" * 32, "0x" + ("02" if reorg else "01") * 32])
+
+    def query(**kwargs):
+        raise OSError("historical state unavailable")
+
+    subtensor = SimpleNamespace(
+        get_block_hash=lambda block: next(hashes),
+        neurons_lite=lambda netuid, *, block: [],
+        get_subnet_owner_hotkey=lambda netuid, *, block: encode_hotkey(bytes([1]) * 32),
+        get_subnet_epoch_index=lambda netuid, *, block: 12,
+        substrate=SimpleNamespace(query=query),
+    )
+    if reorg:
+        with pytest.raises(ProtocolError, match="reorganized"):
+            await BittensorChain(subtensor, None).snapshot(99, 541)
+    else:
+        assert (await BittensorChain(subtensor, None).snapshot(99, 541)).timestamp_seconds is None

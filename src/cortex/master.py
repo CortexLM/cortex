@@ -333,7 +333,9 @@ class EpochEmitter:
         self.challenge_seed, self.registry, self.challenges = challenge_seed, registry, challenges
         self._lock = asyncio.Lock()
 
-    async def _scores(self, challenge: bytes, epoch: int, expected: set[bytes]):
+    async def _scores(
+        self, challenge: bytes, epoch: int, expected: set[bytes], epoch_at: int | None = None
+    ):
         algorithm = self.gateway.trust.algorithm_version
         try:
             if challenge != b"proof":
@@ -342,7 +344,7 @@ class EpochEmitter:
                     raise ServiceError(503, "challenge container not registered")
                 if algorithm == 1:
                     raise ServiceError(503, "container challenges need algorithm 2 or 3")
-                answer = await self.challenges.weights(entry, epoch)
+                answer = await self.challenges.weights(entry, epoch, epoch_at=epoch_at)
                 return leaf_scores(answer, expected, algorithm_version=algorithm)
             # Backend readiness is still required before old rows can be emitted.
             readiness = await self.proof.backend.readiness()
@@ -374,6 +376,15 @@ class EpochEmitter:
 
     async def _emit(self, epoch: int, snapshot: ChainSnapshot) -> None:
         self.gateway.refresh_trust(epoch)
+        epoch_at = snapshot.timestamp_seconds
+        if type(epoch_at) is not int or not 0 < epoch_at < 2**64:
+            epoch_at = None
+        if (
+            self.gateway.trust.algorithm_version == 3
+            and any(entry.id == b"opentype" for entry in self.gateway.trust.challenges)
+            and epoch_at is None
+        ):
+            raise ServiceError(503, "completed epoch timestamp unavailable")
         self.proof.topic_public_key = next(
             (entry.public_key for entry in self.gateway.trust.challenges if entry.id == b"proof"),
             self.proof.topic_public_key,
@@ -384,7 +395,7 @@ class EpochEmitter:
             seed = self.challenge_seed(challenge.id)
             if public_key(seed) != challenge.public_key:
                 raise ServiceError(503, "challenge signing key does not match owner trust")
-            outcomes = await self._scores(challenge.id, epoch, expected)
+            outcomes = await self._scores(challenge.id, epoch, expected, epoch_at)
             # No unknown score key can expand E; missing scores are explicit signed absences.
             leaves = []
             for hotkey in sorted(expected):

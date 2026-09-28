@@ -15,6 +15,7 @@ from cortex.errors import ServiceError
 from cortex.http import read_private_file
 from cortex.protocol.crypto import decode_hotkey
 from cortex.protocol.models import FULL_SHARE_SCORE, NoScore, NoScoreReason, Score
+from cortex.protocol.scale import uint
 
 from .registry import RegistryEntry
 
@@ -88,14 +89,22 @@ class ChallengeClient:
     def __init__(self, http: httpx.AsyncClient, secrets_dir: Path, *, retry_seconds: float = 5):
         self.http, self.secrets_dir, self.retry_seconds = http, secrets_dir, retry_seconds
 
-    async def weights(self, entry: RegistryEntry, epoch: int) -> ChallengeWeights:
+    async def weights(
+        self, entry: RegistryEntry, epoch: int, *, epoch_at: int | None = None
+    ) -> ChallengeWeights:
+        params = {"epoch": str(epoch)}
+        if epoch_at is not None:
+            uint(epoch_at, 8)
+            if epoch_at == 0:
+                raise ValueError("epoch_at must be positive")
+            params["epoch_at"] = str(epoch_at)
         token = read_private_file(self.secrets_dir / entry.id / "internal.token")
         for attempt in range(ATTEMPTS):
             try:
                 async with self.http.stream(
                     "GET",
                     f"{entry.url}/internal/v1/get_weights",
-                    params={"epoch": str(epoch)},
+                    params=params,
                     headers={
                         "authorization": f"Bearer {token}",
                         "x-platform-challenge-slug": entry.id,
