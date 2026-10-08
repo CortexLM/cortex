@@ -147,6 +147,7 @@ def test_put_spacing_evidence_ignores_raw_persistence_delay(
     assert vm == completions, f"response completions={completions}, journal timestamps={vm}"
     assert all(b - a >= 5.0 for a, b in zip(vm, vm[1:], strict=False))
 
+
 def test_happy_e2e_three_hosts_identical_roots(
     mock_factory: Any, run_cfg: Any, tmp_path: Path
 ) -> None:
