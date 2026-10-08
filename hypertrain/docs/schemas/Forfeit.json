@@ -1,0 +1,70 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "blacklist": {
+      "title": "Blacklist",
+      "type": "boolean"
+    },
+    "cause": {
+      "enum": [
+        "MISMATCH",
+        "WITHHELD",
+        "DISPUTE_LOST",
+        "ASSIGNMENT_VIOLATION",
+        "TRANSIENT",
+        "NO_UPLOAD"
+      ],
+      "title": "Cause",
+      "type": "string"
+    },
+    "debt_units": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Debt Units",
+      "type": "integer"
+    },
+    "escrow_burned_units": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Escrow Burned Units",
+      "type": "integer"
+    },
+    "evidence": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Evidence",
+      "type": "array"
+    },
+    "hotkey": {
+      "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+      "title": "Hotkey",
+      "type": "string"
+    },
+    "round_reward_burned": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Round Reward Burned",
+      "type": "integer"
+    },
+    "w": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "W",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "w",
+    "hotkey",
+    "cause",
+    "evidence",
+    "round_reward_burned",
+    "escrow_burned_units",
+    "blacklist",
+    "debt_units"
+  ],
+  "title": "Forfeit",
+  "type": "object"
+}

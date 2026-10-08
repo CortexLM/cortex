@@ -1,0 +1,12 @@
+# UNSIGNED example row for an algorithm-3 trust root (cortex@d738424
+# config/challenges-v3.example.toml, docs/how-to/trust-root.md "Activate container challenges").
+# Add it to the owner's next v>=3 document, rebalance every share so the sum is exactly 10000,
+# then sign offline (cortex trust-sign) and verify (cortex trust-verify). public_key is the
+# hypertrain LEAF key from `cortex keygen`; its seed lives only at
+# deploy/secrets/master/hypertrain.key on the master, never in the container.
+
+[[challenges]]
+id = "hypertrain"
+public_key = "REPLACE_WITH_64_HEX_LEAF_PUBLIC_KEY"
+emission_share_bps = 0
+policy = "all_metagraph_hotkeys"

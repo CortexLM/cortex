@@ -1,0 +1,25 @@
+# Row to append to deploy/challenges/registry.toml in CortexLM/cortex (unsigned operator
+# registry, cortex@d738424 src/cortex/challenges/registry.py). Registered but absent from the
+# signed trust root = burn-in without emission. Secrets in
+# $BASE_CHALLENGE_SECRETS_HOST_DIR/hypertrain/ (0700, owner 65532): internal.token, admin.token,
+# worker.token, coord.key (K_coord seed, never the Cortex leaf seed).
+# HYPERTRAIN_OWNER_HOTKEY is the ss58 of K_owner; replace before enabling.
+version = 1
+
+[[challenge]]
+id = "hypertrain"
+image = "ghcr.io/cortexlm/hypertrain"
+channel = "stable"
+source = "https://github.com/CortexLM/hypertrain"
+attestation = true
+poll_seconds = 300
+cpus = 2.0
+memory_mib = 2048
+pids = 256
+proxy_body_limit = 1048576
+proxy_timeout_seconds = 30.0
+
+[challenge.env]
+CHALLENGE_WORKER_TOKEN_FILE = "/run/secrets/worker.token"
+HYPERTRAIN_COORD_KEY_FILE = "/run/secrets/coord.key"
+HYPERTRAIN_OWNER_HOTKEY = "REPLACE_WITH_K_OWNER_SS58"

@@ -1,0 +1,48 @@
+{
+  "cumulative_detection": {
+    "q005": {
+      "1": 0.05,
+      "10": 0.4012630607616211,
+      "20": 0.6415140775914577,
+      "5": 0.2262190625
+    },
+    "q010": {
+      "1": 0.1,
+      "10": 0.6513215599,
+      "20": 0.8784233454094307,
+      "5": 0.40951
+    },
+    "q025": {
+      "1": 0.25,
+      "10": 0.9436864852905273,
+      "20": 0.996828788061066,
+      "5": 0.7626953125
+    }
+  },
+  "deterrence": {
+    "g": 1.0,
+    "rule": "q*(S+R) >= G with S=E*R, G=g*R, g<=1 gives E >= g/q - 1; E=ceil(1/q)"
+  },
+  "reward_example": {
+    "burn_with_one_faulty_of_three": 333334,
+    "f_max": 1.0,
+    "f_min": 0.8,
+    "round_budget_units": 1000000,
+    "three_equal_miners_entitlement": 333333
+  },
+  "segments_U30_k3": {
+    "last_step_only_with_final_rule": 1.0,
+    "last_step_only_without_final_rule": 0.1,
+    "no_final_involved": {
+      "1": 0.09999999999999998,
+      "10": 0.7192118226600985,
+      "29": 1.0,
+      "3": 0.2795566502463054
+    }
+  },
+  "vesting_rounds_E": {
+    "q005": 20,
+    "q010": 10,
+    "q025": 4
+  }
+}

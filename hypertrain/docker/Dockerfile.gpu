@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1.7
+# hypertrain GPU image: miner (hypertrain-miner), auditor (python -m hypertrain.auditor) and the
+# trainer, on the same public Vast PyTorch base the Phase A determinism run used
+# (torch 2.14.0+cu130, CPython 3.12, Ubuntu 24.04), pinned by Docker Hub index digest.
+# Determinism env is baked; hypertrain.trainer still sets torch flags on import and refuses a
+# late CUBLAS_WORKSPACE_CONFIG. No secret enters any layer (hotkey/token files are mounted).
+#   podman build -f docker/Dockerfile.gpu -t hypertrain-gpu:local .
+
+ARG GPU_IMAGE=docker.io/vastai/pytorch:2.14.0-cu130-cuda-13.2-mini-py312-2026-09-08@sha256:450710d89268fcd55632f28fdd80508ee920a53075b3f8e9f828bdc154e3d856
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.12.17@sha256:10787c682e4184e4f290de1171fd4703dc63de99221f10fe1c99002ce7fa9acc
+
+FROM ${UV_IMAGE} AS uv
+
+FROM ${GPU_IMAGE} AS gpu
+ARG VERSION=0.1.0
+ARG REVISION=unknown
+ARG GPU_IMAGE
+LABEL org.opencontainers.image.source="https://github.com/CortexLM/hypertrain" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="hypertrain miner/auditor (GPU)" \
+      io.cortex.challenge.slug="hypertrain" \
+      io.cortex.challenge.contract="1"
+COPY --from=uv /uv /usr/local/bin/uv-pinned
+WORKDIR /opt/hypertrain/src
+COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY src ./src
+# Everything except torch comes from the lock with hashes; torch (and its CUDA wheels) stay the
+# base image's 2.14.0+cu130, which the check below enforces.
+RUN uv-pinned venv /opt/hypertrain/venv --python /venv/main/bin/python3.12 --system-site-packages \
+ && uv-pinned export --frozen --no-dev --no-emit-project -o /tmp/requirements.txt \
+ && VIRTUAL_ENV=/opt/hypertrain/venv uv-pinned pip install --no-cache --require-hashes -r /tmp/requirements.txt \
+ && VIRTUAL_ENV=/opt/hypertrain/venv uv-pinned pip install --no-cache --no-deps . \
+ && rm -f /tmp/requirements.txt \
+ && printf '{"gpu_image": "%s"}\n' "${GPU_IMAGE}" > /opt/hypertrain/build.json \
+ && chmod 0444 /opt/hypertrain/build.json \
+ && /opt/hypertrain/venv/bin/python -c "import hypertrain.trainer, torch; assert torch.__version__ == '2.14.0+cu130', torch.__version__; import hypertrain.auditor.__main__, hypertrain.miner.cli"
+ENV PATH=/opt/hypertrain/venv/bin:$PATH \
+    CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+    CUDA_DISABLE_PTX_JIT=1 \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    PYTHONHASHSEED=0 \
+    NVIDIA_TF32_OVERRIDE=0 \
+    PYTHONUNBUFFERED=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    DO_NOT_TRACK=1
+WORKDIR /work
+# Default: miner. Auditor: --entrypoint python ... -m hypertrain.auditor; trainer QA: python -m ...
+ENTRYPOINT ["hypertrain-miner"]
+CMD ["--help"]

@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hypertrain"
+version = "0.1.0"
+description = "Cortex challenge: verifiable decentralized full pretraining (DiLoCo-style) on public datasets"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = "==3.12.*"
+dependencies = [
+  "fastapi>=0.133",
+  "uvicorn>=0.34",
+  "httpx>=0.28,<1",
+  "pydantic>=2.12,<3",
+  "py-sr25519-bindings>=0.2.3,<0.3",
+  "numpy>=2",
+  "safetensors>=0.5",
+  "py-ecc>=8,<9",
+  "pyarrow>=25.0.1",
+  "tokenizers>=0.23.2",
+]
+
+[project.scripts]
+hypertrain = "hypertrain.aggregator.cli:main"
+hypertrain-miner = "hypertrain.miner.cli:main"
+
+[project.optional-dependencies]
+trainer = ["torch==2.14.0"]
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "ruff>=0.16,<0.17", "mypy>=2,<3"]
+
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hypertrain"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/data"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests", "scripts"]
+extend-exclude = ["./data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S"]
+ignore = ["S101", "S311"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S"]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["sr25519"]
+ignore_missing_imports = true

@@ -1,0 +1,1155 @@
+{
+  "cells": {
+    "M2_H30": {
+      "tuning": {
+        "A0": {
+          "0.2": {
+            "mean_loss": 1.9325133462746937,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 1.866359646121661,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.887669508655866,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 2.0016559635599456,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "A1": {
+          "0.2": {
+            "mean_loss": 2.061925023794174,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 1.9301900913317998,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.9077115481098492,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.9454205880562465,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "A2": {
+          "0.2": {
+            "mean_loss": 2.019608070453008,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 1.8914597729841869,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.8799700041611989,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.9447500482201576,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "A3": {
+          "0.2": {
+            "mean_loss": 2.245713551839193,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 2.1160587867101035,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 2.062597267329693,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 2.149555504322052,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "NEG": {
+          "0.2": {
+            "mean_loss": 2.5092776169379554,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 2.1934468944867453,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 2.0340423434972763,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.9639338329434395,
+            "complete": true,
+            "any_divergent": false
+          }
+        }
+      },
+      "arms": {
+        "A0": {
+          "outer_lr": 0.4,
+          "status": "MEASURED",
+          "gaps": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mean_gap": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "losses": {
+            "0": 1.8781159445643425,
+            "1": 1.8312928155064583,
+            "2": 1.8896701782941818
+          },
+          "pass": true,
+          "gap_vs_dp": {
+            "mean": 0.1294464213578491,
+            "ci95": [
+              0.10458219484000897,
+              0.1543106478756892
+            ]
+          }
+        },
+        "A1": {
+          "outer_lr": 0.7,
+          "status": "MEASURED",
+          "gaps": [
+            0.015622863309466963,
+            0.03850501440931992,
+            0.012806574032084047
+          ],
+          "mean_gap": 0.022311483916956976,
+          "ci95": [
+            -0.012704088242293438,
+            0.05732705607620739
+          ],
+          "losses": {
+            "0": 1.9074574932456017,
+            "1": 1.9018067717552185,
+            "2": 1.9138703793287277
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.15463470125172563,
+            "ci95": [
+              0.11044975827757553,
+              0.19881964422587572
+            ]
+          }
+        },
+        "A2": {
+          "outer_lr": 0.7,
+          "status": "MEASURED",
+          "gaps": [
+            0.006299981487759339,
+            0.016894445949759928,
+            -0.0010264749245899212
+          ],
+          "mean_gap": 0.007389317504309782,
+          "ci95": [
+            -0.014994534040481833,
+            0.029773169049101395
+          ],
+          "losses": {
+            "0": 1.8899480402469635,
+            "1": 1.8622314929962158,
+            "2": 1.8877304792404175
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.13780406666752157,
+            "ci95": [
+              0.09900481415534607,
+              0.17660331917969707
+            ]
+          }
+        },
+        "A3": {
+          "outer_lr": 0.7,
+          "status": "MEASURED",
+          "gaps": [
+            0.09403775533101653,
+            0.13900406205718013,
+            0.08337005980406569
+          ],
+          "mean_gap": 0.10547062573075412,
+          "ci95": [
+            0.032116635095889204,
+            0.17882461636561903
+          ],
+          "losses": {
+            "0": 2.054729752242565,
+            "1": 2.085849955677986,
+            "2": 2.047212094068527
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.24856208767319488,
+            "ci95": [
+              0.16263890422897562,
+              0.3344852711174141
+            ]
+          }
+        },
+        "NEG": {
+          "outer_lr": 1.0,
+          "status": "MEASURED",
+          "gaps": [
+            0.049315982327663245,
+            0.04469826008670804,
+            0.06257484852632429
+          ],
+          "mean_gap": 0.05219636364689852,
+          "ci95": [
+            0.029142086432367403,
+            0.07525064086142964
+          ],
+          "losses": {
+            "0": 1.9707370772957802,
+            "1": 1.9131484180688858,
+            "2": 2.0079160034656525
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.18836575816081602,
+            "ci95": [
+              0.16351873122285365,
+              0.2132127850987784
+            ]
+          }
+        }
+      }
+    },
+    "M2_H100": {
+      "tuning": {
+        "A0": {
+          "0.2": {
+            "mean_loss": 2.0461385771632195,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 1.8850610703229904,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.8404879470666249,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.898295131822427,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "A1": {
+          "0.2": {
+            "mean_loss": 2.1002897123495736,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 1.926370990773042,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.846587747335434,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.8894057845075924,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "A2": {
+          "0.2": {
+            "mean_loss": 2.0656922037402787,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 1.9038599282503128,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.8515360454718273,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.9001779506603877,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "A3": {
+          "0.2": {
+            "mean_loss": 2.260220622022947,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 2.088859004278978,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.985035387178262,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.972140446305275,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "NEG": {
+          "0.2": {
+            "mean_loss": 2.8280874838431678,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 2.374775474270185,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 2.1163224230209985,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 2.031150539716085,
+            "complete": true,
+            "any_divergent": false
+          }
+        }
+      },
+      "arms": {
+        "A0": {
+          "outer_lr": 0.7,
+          "status": "MEASURED",
+          "gaps": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mean_gap": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "losses": {
+            "0": 1.836976371705532,
+            "1": 1.8119933009147644,
+            "2": 1.8724941685795784
+          },
+          "pass": true,
+          "gap_vs_dp": {
+            "mean": 0.11149666245231799,
+            "ci95": [
+              0.10412731537366239,
+              0.11886600953097358
+            ]
+          }
+        },
+        "A1": {
+          "outer_lr": 0.7,
+          "status": "MEASURED",
+          "gaps": [
+            0.0017803953072581696,
+            0.0029085455449096836,
+            0.005211547152277167
+          ],
+          "mean_gap": 0.0033001626681483398,
+          "ci95": [
+            -0.0010443927889148565,
+            0.007644718125211536
+          ],
+          "losses": {
+            "0": 1.8402469158172607,
+            "1": 1.8172635659575462,
+            "2": 1.882252760231495
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.11516383437743283,
+            "ci95": [
+              0.10752444906197194,
+              0.12280321969289372
+            ]
+          }
+        },
+        "A2": {
+          "outer_lr": 0.7,
+          "status": "MEASURED",
+          "gaps": [
+            0.0033711045854938654,
+            0.004681029597072098,
+            0.009863668354299054
+          ],
+          "mean_gap": 0.005971934178955006,
+          "ci95": [
+            -0.002557769649156807,
+            0.01450163800706682
+          ],
+          "losses": {
+            "0": 1.8431690111756325,
+            "1": 1.8204752951860428,
+            "2": 1.8909638300538063
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.11813349216933196,
+            "ci95": [
+              0.10695421308866622,
+              0.12931277124999768
+            ]
+          }
+        },
+        "A3": {
+          "outer_lr": 1.0,
+          "status": "MEASURED",
+          "gaps": [
+            0.07776775543951599,
+            0.08595707403664377,
+            0.05145347194615696
+          ],
+          "mean_gap": 0.07172610047410556,
+          "ci95": [
+            0.026938998937699514,
+            0.1165132020105116
+          ],
+          "losses": {
+            "0": 1.9798339009284973,
+            "1": 1.9677469432353973,
+            "2": 1.9688404947519302
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.19121013423603853,
+            "ci95": [
+              0.14302887927066676,
+              0.2393913892014103
+            ]
+          }
+        },
+        "NEG": {
+          "outer_lr": 1.0,
+          "status": "MEASURED",
+          "gaps": [
+            0.0996518644060441,
+            0.11177391644391323,
+            0.09954427252827731
+          ],
+          "mean_gap": 0.10365668445941155,
+          "ci95": [
+            0.08619194847533071,
+            0.12112142044349239
+          ],
+          "losses": {
+            "0": 2.0200344920158386,
+            "1": 2.014526888728142,
+            "2": 2.058890238404274
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.22669839321043428,
+            "ci95": [
+              0.21396230501790084,
+              0.23943448140296772
+            ]
+          }
+        }
+      }
+    },
+    "M4_H30": {
+      "tuning": {
+        "A0": {
+          "0.2": {
+            "mean_loss": 1.924908975760142,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 1.8429503043492634,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.8439797336856525,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.9562385951479275,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "A1": {
+          "0.2": {
+            "mean_loss": 2.0653422623872757,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 1.923015591998895,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.8593890517950058,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.870657409230868,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "A2": {
+          "0.2": {
+            "mean_loss": 2.019735313951969,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 1.872879073023796,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.832270269592603,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.8797369400660198,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "A3": {
+          "0.2": {
+            "mean_loss": 2.233760262529055,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 2.076884080966314,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.9983822430173557,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 2.08838701993227,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "NEG": {
+          "0.2": {
+            "mean_loss": 2.506501297156016,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 2.1867038359244666,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 2.0205399865905442,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.9501925483345985,
+            "complete": true,
+            "any_divergent": false
+          }
+        }
+      },
+      "arms": {
+        "A0": {
+          "outer_lr": 0.4,
+          "status": "MEASURED",
+          "gaps": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mean_gap": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "losses": {
+            "0": 1.8480166345834732,
+            "1": 1.815754160284996,
+            "2": 1.8650801181793213
+          },
+          "pass": true,
+          "gap_vs_dp": {
+            "mean": 0.1933005879496661,
+            "ci95": [
+              0.16824474598700107,
+              0.21835642991233112
+            ]
+          }
+        },
+        "A1": {
+          "outer_lr": 0.7,
+          "status": "MEASURED",
+          "gaps": [
+            0.008968245225944362,
+            0.01728158568902241,
+            0.0007311561858398743
+          ],
+          "mean_gap": 0.00899366236693555,
+          "ci95": [
+            -0.011564842552814104,
+            0.0295521672866852
+          ],
+          "losses": {
+            "0": 1.8645901009440422,
+            "1": 1.8471332713961601,
+            "2": 1.866443783044815
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.2039791086762586,
+            "ci95": [
+              0.19711537695916842,
+              0.21084284039334877
+            ]
+          }
+        },
+        "A2": {
+          "outer_lr": 0.7,
+          "status": "MEASURED",
+          "gaps": [
+            -0.0042649634190671075,
+            -0.0028018591452818567,
+            -0.010225240910666159
+          ],
+          "mean_gap": -0.005764021158338375,
+          "ci95": [
+            -0.015532883089755742,
+            0.004004840773078992
+          ],
+          "losses": {
+            "0": 1.8401349112391472,
+            "1": 1.810666672885418,
+            "2": 1.846009224653244
+          },
+          "pass": true,
+          "gap_vs_dp": {
+            "mean": 0.1864006969300106,
+            "ci95": [
+              0.16962886613313433,
+              0.20317252772688688
+            ]
+          }
+        },
+        "A3": {
+          "outer_lr": 0.7,
+          "status": "MEASURED",
+          "gaps": [
+            0.07223792550545989,
+            0.09804246501562917,
+            0.08298727372460168
+          ],
+          "mean_gap": 0.08442255474856358,
+          "ci95": [
+            0.05222054904018406,
+            0.11662456045694311
+          ],
+          "losses": {
+            "0": 1.9815135225653648,
+            "1": 1.9937751740217209,
+            "2": 2.019858032464981
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.293974213488799,
+            "ci95": [
+              0.26973978199651033,
+              0.31820864498108764
+            ]
+          }
+        },
+        "NEG": {
+          "outer_lr": 1.0,
+          "status": "MEASURED",
+          "gaps": [
+            0.052724502417574724,
+            0.0523314656679633,
+            0.069310640694603
+          ],
+          "mean_gap": 0.05812220292671368,
+          "ci95": [
+            0.03404532864604912,
+            0.08219907720737825
+          ],
+          "losses": {
+            "0": 1.9454523921012878,
+            "1": 1.9107752367854118,
+            "2": 1.994350016117096
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.2627043480004539,
+            "ci95": [
+              0.211512383216552,
+              0.3138963127843558
+            ]
+          }
+        }
+      }
+    },
+    "M4_H100": {
+      "tuning": {
+        "A0": {
+          "0.2": {
+            "mean_loss": 2.0397298807899156,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 1.8736236890157063,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.8104078968365986,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.8508629972736041,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "A1": {
+          "0.2": {
+            "mean_loss": 2.0980618645747504,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 1.904922902584076,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.8254815091689427,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.845934897661209,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "A2": {
+          "0.2": {
+            "mean_loss": 2.068640857934952,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 1.894161728521188,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.8189662024378777,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.8510464280843735,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "A3": {
+          "0.2": {
+            "mean_loss": 2.2490387161572776,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 2.081622881193956,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 1.9801541045308113,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 1.9425337438782055,
+            "complete": true,
+            "any_divergent": false
+          }
+        },
+        "NEG": {
+          "0.2": {
+            "mean_loss": 2.8256265421708426,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.4": {
+            "mean_loss": 2.3817418267329535,
+            "complete": true,
+            "any_divergent": false
+          },
+          "0.7": {
+            "mean_loss": 2.1172340561946235,
+            "complete": true,
+            "any_divergent": false
+          },
+          "1.0": {
+            "mean_loss": 2.019357554614544,
+            "complete": true,
+            "any_divergent": false
+          }
+        }
+      },
+      "arms": {
+        "A0": {
+          "outer_lr": 0.7,
+          "status": "MEASURED",
+          "gaps": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mean_gap": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "losses": {
+            "0": 1.7935418337583542,
+            "1": 1.7954547926783562,
+            "2": 1.8422270640730858
+          },
+          "pass": true,
+          "gap_vs_dp": {
+            "mean": 0.16949476172997788,
+            "ci95": [
+              0.14958115069950184,
+              0.1894083727604539
+            ]
+          }
+        },
+        "A1": {
+          "outer_lr": 0.7,
+          "status": "MEASURED",
+          "gaps": [
+            0.0069133959477679745,
+            0.009616694680462322,
+            0.008443601714993141
+          ],
+          "mean_gap": 0.008324564114407813,
+          "ci95": [
+            0.004956857446912485,
+            0.01169227078190314
+          ],
+          "losses": {
+            "0": 1.8059412986040115,
+            "1": 1.8127211332321167,
+            "2": 1.8577820956707
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.17923476905468205,
+            "ci95": [
+              0.15652588072681145,
+              0.20194365738255265
+            ]
+          }
+        },
+        "A2": {
+          "outer_lr": 0.7,
+          "status": "MEASURED",
+          "gaps": [
+            0.004851280367054355,
+            0.003081634404992545,
+            0.006210421874495912
+          ],
+          "mean_gap": 0.004714445548847604,
+          "ci95": [
+            0.0008168280033952627,
+            0.008612063094299946
+          ],
+          "losses": {
+            "0": 1.8022428080439568,
+            "1": 1.8009877279400826,
+            "2": 1.8536680713295937
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.17501140742171153,
+            "ci95": [
+              0.15287922970473672,
+              0.19714358513868635
+            ]
+          }
+        },
+        "A3": {
+          "outer_lr": 1.0,
+          "status": "MEASURED",
+          "gaps": [
+            0.08195136768241584,
+            0.07790355990400821,
+            0.05945087714333649
+          ],
+          "mean_gap": 0.07310193490992019,
+          "ci95": [
+            0.04330440084677942,
+            0.10289946897306096
+          ],
+          "losses": {
+            "0": 1.9405250400304794,
+            "1": 1.9353271126747131,
+            "2": 1.9517490789294243
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.2549285656042573,
+            "ci95": [
+              0.23716524069918662,
+              0.272691890509328
+            ]
+          }
+        },
+        "NEG": {
+          "outer_lr": 1.0,
+          "status": "MEASURED",
+          "gaps": [
+            0.11780826271094029,
+            0.11701283926085342,
+            0.11153004249611717
+          ],
+          "mean_gap": 0.11545038148930363,
+          "ci95": [
+            0.10695809802464182,
+            0.12394266495396544
+          ],
+          "losses": {
+            "0": 2.00483588129282,
+            "1": 2.0055460557341576,
+            "2": 2.047690726816654
+          },
+          "pass": false,
+          "gap_vs_dp": {
+            "mean": 0.30449711564754817,
+            "ci95": [
+              0.2903800283951942,
+              0.3186142028999021
+            ]
+          }
+        }
+      }
+    }
+  },
+  "arms": {
+    "A1": {
+      "pass": false,
+      "cells_pass": [
+        false,
+        false,
+        false,
+        false
+      ],
+      "verdict": "FAIL"
+    },
+    "A2": {
+      "pass": false,
+      "cells_pass": [
+        false,
+        false,
+        true,
+        false
+      ],
+      "verdict": "FAIL"
+    },
+    "A3": {
+      "pass": false,
+      "cells_pass": [
+        false,
+        false,
+        false,
+        false
+      ],
+      "verdict": "FAIL"
+    },
+    "A0": {
+      "verdict": "CONTROL"
+    },
+    "NEG": {
+      "verdict": "WORSE (gate holds)"
+    }
+  },
+  "neg_gate": {
+    "rule": "every cell: NEG mean gap > +0.25% and CI95 lower bound > 0",
+    "pass": true
+  },
+  "decision": {
+    "chosen_arm": "A0",
+    "state_policy": "carry",
+    "rewarmup_steps_frac_H": 0.0,
+    "audit_mode": "carry + segment audits (ultrabrain 3b)",
+    "why": "no arm of A1/A2/A3 passed"
+  },
+  "mode": "full",
+  "sabotage_outer_lr": null,
+  "grid": {
+    "M": [
+      2,
+      4
+    ],
+    "H": [
+      30,
+      100
+    ],
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "outer_lr": [
+      0.2,
+      0.4,
+      0.7,
+      1.0
+    ],
+    "steps": 600
+  },
+  "model_params": 4329216,
+  "base_config": {
+    "model": {
+      "n_layers": 4,
+      "d_model": 256,
+      "n_heads": 4,
+      "n_kv_heads": 4,
+      "d_ff": 1024,
+      "vocab": 259,
+      "seq_len": 256,
+      "n_experts": 1,
+      "top_k_experts": 1,
+      "capacity_factor": 1.25,
+      "rope_theta": 10000.0,
+      "init_seed": 0,
+      "init_std": 0.019999999552965164,
+      "aux_loss_coef": 0.009999999776482582,
+      "compute_dtype": "fp32"
+    },
+    "inner": {
+      "lr": 0.0003000000142492354,
+      "H": 30,
+      "J": 5,
+      "micro_batch": 8,
+      "opt": "adamw",
+      "beta1": 0.8999999761581421,
+      "beta2": 0.949999988079071,
+      "eps": 9.99999993922529e-09,
+      "wd": 0.10000000149011612,
+      "grad_clip": 1.0,
+      "grad_accum": 1,
+      "warmup": 60,
+      "stable": 426,
+      "decay": 114,
+      "state_policy": "reset",
+      "rewarmup_steps": 3,
+      "muon_momentum": 0.949999988079071,
+      "ns_steps": 5
+    },
+    "compress": {
+      "codec": "dense-int8",
+      "topk_frac": 1.0,
+      "bits": 8,
+      "ef_beta": 0.0
+    },
+    "n_stages": 1,
+    "cpu_threads": 1
+  },
+  "outer": {
+    "opt": "nesterov",
+    "momentum": 0.8999999761581421,
+    "codec": "dense-int8 (manifest bits=8)"
+  },
+  "init_heldout_loss": {
+    "0": 5.570890694856644,
+    "1": 5.508274078369141,
+    "2": 5.608262807130814
+  },
+  "divergent_runs": [],
+  "censored": [],
+  "errors": [],
+  "wall_s": 20544.0,
+  "provenance": {
+    "model.*, inner.lr/betas/eps/wd/grad_clip/micro_batch, outer.momentum=0.9, outer.bits=8": "hypertrain.protocol.example.example_manifest (docs/schemas/example-run-manifest.json)",
+    "inner.lr_schedule WSD": "example manifest shape (warmup 100, decay 19% of 10000 steps) rescaled to the run length: warmup=min(100, steps//10), decay=round(0.19*steps), stable=rest",
+    "outer.lr": "tuned per arm per (M,H) cell on grid {0.2,0.4,0.7,1.0} (plan todo 7)",
+    "arms": "ultrabrain section 2 (A0 carry, A1 reset, A2 re-warmup 10% H, A3 derived, NEG)",
+    "NEG outer momentum=-0.9": "sign-flipped manifest momentum (deliberately wrong)",
+    "grid M{2,4} x H{30,100} x seeds{0,1,2}": "plan todo 7",
+    "PASS thresholds 0.25% / 0.5% CI95": "plan todo 7 / ultrabrain section 2",
+    "cpu_threads": "example manifest reference_spec.env.cpu_threads",
+    "held-out": "256 fixed windows of data/holdout (evenly spaced ids)"
+  },
+  "caveat": "tiny CPU proxy (~4M params, few tokens/param); proves nothing about GPU/BF16 numerics or quality at scale; confirm on a 0.5-1B GPU proxy (needs approval)"
+}

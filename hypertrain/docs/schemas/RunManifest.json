@@ -1,0 +1,877 @@
+{
+  "$defs": {
+    "BeaconSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "chain_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Chain Hash",
+          "type": "string"
+        },
+        "genesis_time": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Genesis Time",
+          "type": "integer"
+        },
+        "period": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Period",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "chain_hash",
+        "period",
+        "genesis_time"
+      ],
+      "title": "BeaconSpec",
+      "type": "object"
+    },
+    "Budget": {
+      "additionalProperties": false,
+      "properties": {
+        "epochs_per_round": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Epochs Per Round",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "epochs_per_round"
+      ],
+      "title": "Budget",
+      "type": "object"
+    },
+    "ComputeBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "gpus_per_instance": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Gpus Per Instance",
+          "type": "integer"
+        },
+        "instances": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Instances",
+          "type": "integer"
+        },
+        "usd_micro_per_round": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Usd Micro Per Round",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "instances",
+        "gpus_per_instance",
+        "usd_micro_per_round"
+      ],
+      "title": "ComputeBudget",
+      "type": "object"
+    },
+    "DatasetSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "depth": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Depth",
+          "type": "integer"
+        },
+        "holdout_commit": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Holdout Commit",
+          "type": "string"
+        },
+        "merkle_root": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Merkle Root",
+          "type": "string"
+        },
+        "n_samples": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "N Samples",
+          "type": "integer"
+        },
+        "sample_format": {
+          "const": "u32[seq_len+1] token ids",
+          "title": "Sample Format",
+          "type": "string"
+        },
+        "shard_sha256_root": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Shard Sha256 Root",
+          "type": "string"
+        },
+        "shard_uri_template": {
+          "title": "Shard Uri Template",
+          "type": "string"
+        }
+      },
+      "required": [
+        "merkle_root",
+        "depth",
+        "n_samples",
+        "sample_format",
+        "shard_uri_template",
+        "shard_sha256_root",
+        "holdout_commit"
+      ],
+      "title": "DatasetSpec",
+      "type": "object"
+    },
+    "HoneypotBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "gpus_per_instance": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Gpus Per Instance",
+          "type": "integer"
+        },
+        "instances": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Instances",
+          "type": "integer"
+        },
+        "rate": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Rate",
+          "type": "string"
+        },
+        "usd_micro_per_round": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Usd Micro Per Round",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "instances",
+        "gpus_per_instance",
+        "usd_micro_per_round",
+        "rate"
+      ],
+      "title": "HoneypotBudget",
+      "type": "object"
+    },
+    "InnerSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "H": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "H",
+          "type": "integer"
+        },
+        "J": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "J",
+          "type": "integer"
+        },
+        "betas": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "pattern": "^[0-9a-f]{8}$",
+              "type": "string"
+            },
+            {
+              "pattern": "^[0-9a-f]{8}$",
+              "type": "string"
+            }
+          ],
+          "title": "Betas",
+          "type": "array"
+        },
+        "eps": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Eps",
+          "type": "string"
+        },
+        "grad_accum": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Grad Accum",
+          "type": "integer"
+        },
+        "grad_clip": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Grad Clip",
+          "type": "string"
+        },
+        "lr_schedule": {
+          "$ref": "#/$defs/LrSchedule"
+        },
+        "micro_batch": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Micro Batch",
+          "type": "integer"
+        },
+        "muon_momentum": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Muon Momentum",
+          "type": "string"
+        },
+        "ns_steps": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Ns Steps",
+          "type": "integer"
+        },
+        "opt": {
+          "enum": [
+            "adamw",
+            "muon"
+          ],
+          "title": "Opt",
+          "type": "string"
+        },
+        "rewarmup_steps": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Rewarmup Steps",
+          "type": "integer"
+        },
+        "state_policy": {
+          "enum": [
+            "reset",
+            "derived",
+            "carry"
+          ],
+          "title": "State Policy",
+          "type": "string"
+        },
+        "wd": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Wd",
+          "type": "string"
+        }
+      },
+      "required": [
+        "opt",
+        "betas",
+        "eps",
+        "wd",
+        "grad_clip",
+        "micro_batch",
+        "grad_accum",
+        "H",
+        "J",
+        "lr_schedule",
+        "state_policy",
+        "rewarmup_steps",
+        "muon_momentum",
+        "ns_steps"
+      ],
+      "title": "InnerSpec",
+      "type": "object"
+    },
+    "Layout": {
+      "additionalProperties": false,
+      "description": "Island layout (todo 11): n_gpus ranks = dp_size data-parallel x ep_size expert-parallel.",
+      "properties": {
+        "dp_size": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Dp Size",
+          "type": "integer"
+        },
+        "ep_size": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Ep Size",
+          "type": "integer"
+        },
+        "n_gpus": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "N Gpus",
+          "type": "integer"
+        },
+        "pp": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Pp",
+          "type": "integer"
+        },
+        "zero1": {
+          "title": "Zero1",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "pp",
+        "n_gpus",
+        "dp_size",
+        "ep_size",
+        "zero1"
+      ],
+      "title": "Layout",
+      "type": "object"
+    },
+    "LrSchedule": {
+      "additionalProperties": false,
+      "properties": {
+        "decay": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Decay",
+          "type": "integer"
+        },
+        "peak_lr": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Peak Lr",
+          "type": "string"
+        },
+        "stable": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Stable",
+          "type": "integer"
+        },
+        "type": {
+          "const": "wsd",
+          "title": "Type",
+          "type": "string"
+        },
+        "warmup": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Warmup",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "peak_lr",
+        "warmup",
+        "stable",
+        "decay"
+      ],
+      "title": "LrSchedule",
+      "type": "object"
+    },
+    "ModelSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "arch": {
+          "const": "decoder",
+          "title": "Arch",
+          "type": "string"
+        },
+        "aux_loss_coef": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Aux Loss Coef",
+          "type": "string"
+        },
+        "capacity_factor": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Capacity Factor",
+          "type": "string"
+        },
+        "compute_dtype": {
+          "enum": [
+            "bf16",
+            "fp32"
+          ],
+          "title": "Compute Dtype",
+          "type": "string"
+        },
+        "d_ff": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "D Ff",
+          "type": "integer"
+        },
+        "d_model": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "D Model",
+          "type": "integer"
+        },
+        "init_seed": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Init Seed",
+          "type": "integer"
+        },
+        "init_std": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Init Std",
+          "type": "string"
+        },
+        "master_dtype": {
+          "const": "fp32",
+          "title": "Master Dtype",
+          "type": "string"
+        },
+        "n_experts": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "N Experts",
+          "type": "integer"
+        },
+        "n_heads": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "N Heads",
+          "type": "integer"
+        },
+        "n_kv_heads": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "N Kv Heads",
+          "type": "integer"
+        },
+        "n_layers": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "N Layers",
+          "type": "integer"
+        },
+        "param_count": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Param Count",
+          "type": "integer"
+        },
+        "rope_theta": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Rope Theta",
+          "type": "integer"
+        },
+        "router_tiebreak": {
+          "const": "lowest_index",
+          "title": "Router Tiebreak",
+          "type": "string"
+        },
+        "seq_len": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Seq Len",
+          "type": "integer"
+        },
+        "top_k_experts": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Top K Experts",
+          "type": "integer"
+        },
+        "vocab": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Vocab",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "arch",
+        "n_layers",
+        "d_model",
+        "n_heads",
+        "n_kv_heads",
+        "d_ff",
+        "n_experts",
+        "top_k_experts",
+        "router_tiebreak",
+        "vocab",
+        "seq_len",
+        "rope_theta",
+        "init_seed",
+        "param_count",
+        "compute_dtype",
+        "master_dtype",
+        "capacity_factor",
+        "aux_loss_coef",
+        "init_std"
+      ],
+      "title": "ModelSpec",
+      "type": "object"
+    },
+    "OperatorBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "auditor": {
+          "$ref": "#/$defs/ComputeBudget"
+        },
+        "honeypot": {
+          "$ref": "#/$defs/HoneypotBudget"
+        },
+        "relay": {
+          "$ref": "#/$defs/ComputeBudget"
+        }
+      },
+      "required": [
+        "relay",
+        "auditor",
+        "honeypot"
+      ],
+      "title": "OperatorBudget",
+      "type": "object"
+    },
+    "OuterSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "bits": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Bits",
+          "type": "integer"
+        },
+        "cclip_iters": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Cclip Iters",
+          "type": "integer"
+        },
+        "cclip_tau": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Cclip Tau",
+          "type": "string"
+        },
+        "center": {
+          "const": "prev_outer_update",
+          "title": "Center",
+          "type": "string"
+        },
+        "ef_beta": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Ef Beta",
+          "type": "string"
+        },
+        "lr": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Lr",
+          "type": "string"
+        },
+        "momentum": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Momentum",
+          "type": "string"
+        },
+        "opt": {
+          "enum": [
+            "nesterov",
+            "sparseloco"
+          ],
+          "title": "Opt",
+          "type": "string"
+        },
+        "preclip_norm": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Preclip Norm",
+          "type": "string"
+        },
+        "topk_frac": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Topk Frac",
+          "type": "string"
+        }
+      },
+      "required": [
+        "opt",
+        "lr",
+        "momentum",
+        "topk_frac",
+        "bits",
+        "ef_beta",
+        "preclip_norm",
+        "cclip_tau",
+        "cclip_iters",
+        "center"
+      ],
+      "title": "OuterSpec",
+      "type": "object"
+    },
+    "ReferenceEnv": {
+      "additionalProperties": false,
+      "properties": {
+        "CUBLAS_WORKSPACE_CONFIG": {
+          "const": ":4096:8",
+          "title": "Cublas Workspace Config",
+          "type": "string"
+        },
+        "CUDA_DISABLE_PTX_JIT": {
+          "const": "1",
+          "title": "Cuda Disable Ptx Jit",
+          "type": "string"
+        },
+        "cpu_threads": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Cpu Threads",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "CUBLAS_WORKSPACE_CONFIG",
+        "CUDA_DISABLE_PTX_JIT",
+        "cpu_threads"
+      ],
+      "title": "ReferenceEnv",
+      "type": "object"
+    },
+    "ReferenceSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "driver_allowlist": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Driver Allowlist",
+          "type": "array"
+        },
+        "env": {
+          "$ref": "#/$defs/ReferenceEnv"
+        },
+        "image_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Image Digest",
+          "type": "string"
+        },
+        "layout": {
+          "$ref": "#/$defs/Layout"
+        },
+        "sm_count": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Sm Count",
+          "type": "integer"
+        },
+        "spec_doc_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Spec Doc Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "image_digest",
+        "spec_doc_sha256",
+        "driver_allowlist",
+        "sm_count",
+        "env",
+        "layout"
+      ],
+      "title": "ReferenceSpec",
+      "type": "object"
+    },
+    "Timeouts": {
+      "additionalProperties": false,
+      "properties": {
+        "assign_after_open": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Assign After Open",
+          "type": "integer"
+        },
+        "audit_after_commit": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Audit After Commit",
+          "type": "integer"
+        },
+        "dispute_per_level": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Dispute Per Level",
+          "type": "integer"
+        },
+        "serve_deadline": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Serve Deadline",
+          "type": "integer"
+        },
+        "upload_after_commit": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Upload After Commit",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "assign_after_open",
+        "audit_after_commit",
+        "upload_after_commit",
+        "serve_deadline",
+        "dispute_per_level"
+      ],
+      "title": "Timeouts",
+      "type": "object"
+    },
+    "TokenizerSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "sha256"
+      ],
+      "title": "TokenizerSpec",
+      "type": "object"
+    },
+    "VerifySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "E_vest_rounds": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "E Vest Rounds",
+          "type": "integer"
+        },
+        "Q_top": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Q Top",
+          "type": "integer"
+        },
+        "T": {
+          "$ref": "#/$defs/Timeouts"
+        },
+        "cluster_rules_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Cluster Rules Sha256",
+          "type": "string"
+        },
+        "forgive_per_epoch": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Forgive Per Epoch",
+          "type": "integer"
+        },
+        "influence_cap": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Influence Cap",
+          "type": "string"
+        },
+        "k_segments": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "K Segments",
+          "type": "integer"
+        },
+        "probation_rounds": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Probation Rounds",
+          "type": "integer"
+        },
+        "q_base": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Q Base",
+          "type": "string"
+        },
+        "s_min_reward_multiple": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "S Min Reward Multiple",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "q_base",
+        "k_segments",
+        "Q_top",
+        "probation_rounds",
+        "E_vest_rounds",
+        "s_min_reward_multiple",
+        "forgive_per_epoch",
+        "influence_cap",
+        "cluster_rules_sha256",
+        "T"
+      ],
+      "title": "VerifySpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "auditors": {
+      "items": {
+        "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+        "type": "string"
+      },
+      "title": "Auditors",
+      "type": "array"
+    },
+    "beacon": {
+      "$ref": "#/$defs/BeaconSpec"
+    },
+    "budget": {
+      "$ref": "#/$defs/Budget"
+    },
+    "coord_pubkey": {
+      "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+      "title": "Coord Pubkey",
+      "type": "string"
+    },
+    "dataset": {
+      "$ref": "#/$defs/DatasetSpec"
+    },
+    "init_state_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Init State Hash",
+      "type": "string"
+    },
+    "inner": {
+      "$ref": "#/$defs/InnerSpec"
+    },
+    "model": {
+      "$ref": "#/$defs/ModelSpec"
+    },
+    "operator_budget": {
+      "$ref": "#/$defs/OperatorBudget"
+    },
+    "outer": {
+      "$ref": "#/$defs/OuterSpec"
+    },
+    "reference_spec": {
+      "$ref": "#/$defs/ReferenceSpec"
+    },
+    "tokenizer": {
+      "$ref": "#/$defs/TokenizerSpec"
+    },
+    "verify": {
+      "$ref": "#/$defs/VerifySpec"
+    }
+  },
+  "required": [
+    "model",
+    "tokenizer",
+    "dataset",
+    "inner",
+    "outer",
+    "verify",
+    "reference_spec",
+    "init_state_hash",
+    "beacon",
+    "auditors",
+    "coord_pubkey",
+    "budget",
+    "operator_budget"
+  ],
+  "title": "RunManifest",
+  "type": "object"
+}

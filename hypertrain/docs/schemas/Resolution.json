@@ -1,0 +1,38 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "dispute_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Dispute Id",
+      "type": "string"
+    },
+    "inputs_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Inputs Hash",
+      "type": "string"
+    },
+    "loser": {
+      "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+      "title": "Loser",
+      "type": "string"
+    },
+    "op_spec": {
+      "title": "Op Spec",
+      "type": "string"
+    },
+    "output_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Output Hash",
+      "type": "string"
+    }
+  },
+  "required": [
+    "dispute_id",
+    "op_spec",
+    "inputs_hash",
+    "output_hash",
+    "loser"
+  ],
+  "title": "Resolution",
+  "type": "object"
+}

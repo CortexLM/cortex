@@ -1,0 +1,9 @@
+# Only what the image builds need (data/ is 2.8 GB and never enters an image).
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src/
+**/__pycache__
+**/*.pyc

@@ -1,0 +1,15 @@
+Hypertrain
+Copyright 2026 CortexLM contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes software patterns derived from OpentypeAI/challenge
+(https://github.com/OpentypeAI/challenge), Apache License 2.0: hotkey decoding
+and signature checks, and the auditor job-lease routes.
+
+Training data: FineWeb-Edu (https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
+by Hugging Face, licensed under the Open Data Commons Attribution License (ODC-By) v1.0.
+FineWeb-Edu is derived from Common Crawl and is subject to the Common Crawl Terms of Use
+(https://commoncrawl.org/terms-of-use). Data files are not distributed in this repository.
+
+Public randomness: drand quicknet (https://drand.love).

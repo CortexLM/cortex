@@ -1,0 +1,85 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "delta_bytes": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Delta Bytes",
+      "type": "integer"
+    },
+    "delta_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Delta Hash",
+      "type": "string"
+    },
+    "ef_in_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Ef In Hash",
+      "type": "string"
+    },
+    "ef_out_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Ef Out Hash",
+      "type": "string"
+    },
+    "final_theta_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Final Theta Hash",
+      "type": "string"
+    },
+    "hotkey": {
+      "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+      "title": "Hotkey",
+      "type": "string"
+    },
+    "leaf_scheme": {
+      "const": "ht-leaf-v1",
+      "title": "Leaf Scheme",
+      "type": "string"
+    },
+    "leaves_root": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Leaves Root",
+      "type": "string"
+    },
+    "metrics_root": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Metrics Root",
+      "type": "string"
+    },
+    "n_leaves": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "N Leaves",
+      "type": "integer"
+    },
+    "tokens": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Tokens",
+      "type": "integer"
+    },
+    "w": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "W",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "w",
+    "hotkey",
+    "leaf_scheme",
+    "n_leaves",
+    "leaves_root",
+    "metrics_root",
+    "final_theta_hash",
+    "ef_in_hash",
+    "ef_out_hash",
+    "delta_hash",
+    "delta_bytes",
+    "tokens"
+  ],
+  "title": "Commit",
+  "type": "object"
+}

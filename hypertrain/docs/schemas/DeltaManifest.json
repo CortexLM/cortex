@@ -1,0 +1,88 @@
+{
+  "$defs": {
+    "Chunk": {
+      "additionalProperties": false,
+      "properties": {
+        "len": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Len",
+          "type": "integer"
+        },
+        "off": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Off",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "off",
+        "len",
+        "sha256"
+      ],
+      "title": "Chunk",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "chunks": {
+      "items": {
+        "$ref": "#/$defs/Chunk"
+      },
+      "title": "Chunks",
+      "type": "array"
+    },
+    "delta_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Delta Hash",
+      "type": "string"
+    },
+    "format": {
+      "enum": [
+        "ht-sparse-v1",
+        "ht-dense-int8-v1"
+      ],
+      "title": "Format",
+      "type": "string"
+    },
+    "hotkey": {
+      "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+      "title": "Hotkey",
+      "type": "string"
+    },
+    "size": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Size",
+      "type": "integer"
+    },
+    "uri": {
+      "title": "Uri",
+      "type": "string"
+    },
+    "w": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "W",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "w",
+    "hotkey",
+    "delta_hash",
+    "uri",
+    "size",
+    "format",
+    "chunks"
+  ],
+  "title": "DeltaManifest",
+  "type": "object"
+}

@@ -1,0 +1,88 @@
+{
+  "provenance": {
+    "inner.H=30, inner.J=5": "plan todo 16 / ultrabrain.md section 5 Phase B (one DiLoCo round H=30, J=5)",
+    "model MoE 654,965,760 params (n_layers=12, d_model=1024, n_heads=16, d_ff=2048, n_experts=8, top_k=2)": "plan todo 16 0.5-1B MoE; dims UNSOURCED within that range (n_experts=8 so ep_size=8 puts one expert per GPU)",
+    "model.compute_dtype=bf16": "ultrabrain.md section 5 (BF16 deterministic stack, same as Phase A)",
+    "model.seq_len=1024, vocab=259": "todo 4 shards (data/manifest.json seq_len=1024, ht-byte-259)",
+    "layout pp=1, n_gpus=8, dp_size=1, ep_size=8, zero1=true": "plan todo 16 'todo-11 layout (EP within host + ZeRO-1)' on 8x5090 hosts",
+    "inner.micro_batch=2 per rank, grad_accum=1": "UNSOURCED; sized for 32 GB RTX 5090 memory headroom (full-state gathers at leaves)",
+    "outer sparseloco topk_frac=0.0156 (24977f3c), bits=2, ef_beta=0.95 (3333733f)": "hypertrain-ctx/local.md:133 (SparseLoCo top-k 1.5-3%, 2 bits, EF beta=0.95); ultrabrain Phase B PASS needs top-k index/value sets",
+    "inner other fields, outer lr/momentum, verify": "protocol example_manifest (UNSOURCED provisional values, todo 13)",
+    "assignment sample ids 0..H*mb*n_gpus-1 of data/train/shard-00000.u32, identical on every host": "plan todo 16 'same assignment on every host'",
+    "tiny profile": "CPU test-only shape (mock e2e, gloo, fake-device proxy); never used for paid runs",
+    "inner.state_policy=reset, rewarmup_steps=3": "single round from the public start; pinned by todo 13 when the example manifest default switched to carry, so run_ids equal the pre-switch (paid Phase A) manifests",
+    "inner.state_policy=reset, rewarmup_steps=0": "Phase B is one round from init: no previous round state exists (example_manifest switched to carry by todo 7 at 23:07; carry requires prior state); pinned here so example drift cannot change the workload"
+  },
+  "profiles": {
+    "phase_b": {
+      "model": {
+        "n_layers": 12,
+        "d_model": 1024,
+        "n_heads": 16,
+        "n_kv_heads": 16,
+        "d_ff": 2048,
+        "n_experts": 8,
+        "top_k_experts": 2,
+        "seq_len": 1024,
+        "vocab": 259,
+        "compute_dtype": "bf16"
+      },
+      "inner": {
+        "H": 30,
+        "J": 5,
+        "micro_batch": 2,
+        "grad_accum": 1,
+        "state_policy": "reset",
+        "rewarmup_steps": 0
+      },
+      "outer": {
+        "opt": "sparseloco",
+        "topk_frac": "24977f3c",
+        "bits": 2,
+        "ef_beta": "3333733f"
+      },
+      "layout": {
+        "pp": 1,
+        "n_gpus": 8,
+        "dp_size": 1,
+        "ep_size": 8,
+        "zero1": true
+      }
+    },
+    "tiny": {
+      "model": {
+        "n_layers": 2,
+        "d_model": 32,
+        "n_heads": 4,
+        "n_kv_heads": 4,
+        "d_ff": 48,
+        "n_experts": 8,
+        "top_k_experts": 2,
+        "seq_len": 16,
+        "vocab": 259,
+        "compute_dtype": "bf16"
+      },
+      "inner": {
+        "H": 4,
+        "J": 2,
+        "micro_batch": 1,
+        "grad_accum": 1,
+        "state_policy": "reset",
+        "rewarmup_steps": 0
+      },
+      "outer": {
+        "opt": "sparseloco",
+        "topk_frac": "24977f3c",
+        "bits": 2,
+        "ef_beta": "3333733f"
+      },
+      "layout": {
+        "pp": 1,
+        "n_gpus": 8,
+        "dp_size": 1,
+        "ep_size": 8,
+        "zero1": true
+      }
+    }
+  }
+}

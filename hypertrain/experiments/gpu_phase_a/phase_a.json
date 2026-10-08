@@ -1,0 +1,69 @@
+{
+  "provenance": {
+    "inner.H=200, inner.J=10": "plan todo 12 (200 inner steps BF16, J=10)",
+    "model.compute_dtype=bf16": "plan todo 12 (BF16)",
+    "model MoE ~60M params (n_layers=8, d_model=512, n_experts=4, top_k=2, d_ff=1024)": "plan todo 12 tiny MoE 50-100M params; dims UNSOURCED within that range",
+    "model.seq_len=1024, vocab=259": "todo 4 shards (data/manifest.json seq_len=1024, ht-byte-259)",
+    "inner other fields, outer, verify": "protocol example_manifest (UNSOURCED provisional values, todo 13)",
+    "hosts=3, runs_per_host=2, negative control one changed batch id": "plan todo 12",
+    "negative_control.step=101 -> expected first divergent leaf 11": "leaf t=110 is the first leaf whose batch window (101..110) contains the changed id",
+    "tiny profile": "CPU test-only shape; never used for paid runs",
+    "inner.state_policy=reset, rewarmup_steps=3": "single round from the public start; pinned by todo 13 when the example manifest default switched to carry, so run_ids equal the pre-switch (paid Phase A) manifests"
+  },
+  "profiles": {
+    "phase_a": {
+      "model": {
+        "n_layers": 8,
+        "d_model": 512,
+        "n_heads": 8,
+        "n_kv_heads": 8,
+        "d_ff": 1024,
+        "n_experts": 4,
+        "top_k_experts": 2,
+        "seq_len": 1024,
+        "vocab": 259,
+        "compute_dtype": "bf16"
+      },
+      "inner": {
+        "H": 200,
+        "J": 10,
+        "micro_batch": 8,
+        "grad_accum": 1,
+        "state_policy": "reset",
+        "rewarmup_steps": 3
+      },
+      "negative_control": {
+        "step": 101,
+        "slot": 0,
+        "replacement_id": 1600
+      }
+    },
+    "tiny": {
+      "model": {
+        "n_layers": 2,
+        "d_model": 32,
+        "n_heads": 4,
+        "n_kv_heads": 4,
+        "d_ff": 48,
+        "n_experts": 4,
+        "top_k_experts": 2,
+        "seq_len": 16,
+        "vocab": 259,
+        "compute_dtype": "bf16"
+      },
+      "inner": {
+        "H": 4,
+        "J": 2,
+        "micro_batch": 2,
+        "grad_accum": 1,
+        "state_policy": "reset",
+        "rewarmup_steps": 3
+      },
+      "negative_control": {
+        "step": 3,
+        "slot": 0,
+        "replacement_id": 8
+      }
+    }
+  }
+}

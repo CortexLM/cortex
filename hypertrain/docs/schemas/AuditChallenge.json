@@ -1,0 +1,91 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "beacon_round": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "Beacon Round",
+      "type": "integer"
+    },
+    "beacon_sig_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Beacon Sig Sha256",
+      "type": "string"
+    },
+    "mode": {
+      "enum": [
+        "full",
+        "segments"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "reasons": {
+      "items": {
+        "enum": [
+          "random",
+          "final",
+          "topQ",
+          "probation",
+          "outlier",
+          "cluster",
+          "honeypot"
+        ],
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Reasons",
+      "type": "array"
+    },
+    "segments": {
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        ],
+        "type": "array"
+      },
+      "title": "Segments",
+      "type": "array"
+    },
+    "serve_deadline": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "Serve Deadline",
+      "type": "integer"
+    },
+    "target": {
+      "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+      "title": "Target",
+      "type": "string"
+    },
+    "w": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "W",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "w",
+    "target",
+    "beacon_round",
+    "beacon_sig_sha256",
+    "mode",
+    "segments",
+    "reasons",
+    "serve_deadline"
+  ],
+  "title": "AuditChallenge",
+  "type": "object"
+}

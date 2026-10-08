@@ -1,0 +1,46 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "assignment_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Assignment Hash",
+      "type": "string"
+    },
+    "driver_version": {
+      "title": "Driver Version",
+      "type": "string"
+    },
+    "hotkey": {
+      "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+      "title": "Hotkey",
+      "type": "string"
+    },
+    "image_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Image Digest",
+      "type": "string"
+    },
+    "n_gpus": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "N Gpus",
+      "type": "integer"
+    },
+    "w": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "W",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "w",
+    "hotkey",
+    "assignment_hash",
+    "image_digest",
+    "driver_version",
+    "n_gpus"
+  ],
+  "title": "Accept",
+  "type": "object"
+}
