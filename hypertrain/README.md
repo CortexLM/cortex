@@ -5,6 +5,19 @@
 </p>
 
 <p align="center">
+  <b>Verifiable decentralized pretraining for the Cortex subnet.</b> GPU clusters anywhere in the world train one model together. Every update can be replayed bit for bit, and pay only arrives after the checks are done.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="license Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6aa84f"></a>
+  <img alt="python 3.12" src="https://img.shields.io/badge/python-3.12-1f6feb">
+  <img alt="version 0.1.0" src="https://img.shields.io/badge/version-0.1.0-555555">
+  <img alt="status research" src="https://img.shields.io/badge/status-research-e07b39">
+  <img alt="GPU RTX 5090 bitwise" src="https://img.shields.io/badge/GPU-RTX%205090%20bitwise-76b900">
+  <a href="https://github.com/CortexLM/cortex"><img alt="Cortex challenge" src="https://img.shields.io/badge/Cortex-challenge-8957e5"></a>
+</p>
+
+<p align="center">
   <a href="docs/index.md">Documentation</a> ·
   <a href="https://cortex.foundation">Website</a> ·
   <a href="https://github.com/CortexLM/cortex">Cortex</a> ·
@@ -18,10 +31,8 @@
   <a href="LICENSE">License</a>
 </p>
 
-<p align="center">
-  <b>Verifiable decentralized pretraining for the Cortex subnet.</b><br>
-  GPU clusters anywhere in the world train one model together. Every update can be replayed bit for bit, and pay only arrives after the checks are done.
-</p>
+> [!WARNING]
+> **Research project, not stable.** Hypertrain is under active research and the code is not stable yet: interfaces, protocol messages and results can change without notice. For now it is used only for research, to refine the code and build the best possible decentralized training. Do not use it in production or to manage real funds.
 
 ---
 
@@ -42,19 +53,13 @@ Hypertrain is research software. The protocol, ledger, challenge service, traine
 ### 1. One training round
 
 ```mermaid
-flowchart TD
-    A["Round opens<br/>public start model + data assignment"] --> B["Miners train H inner steps<br/>on their assigned samples"]
-    B --> C["Miners commit<br/>a Merkle root of checkpoint hashes"]
-    C --> D["Public drand beacon<br/>published after the commit deadline"]
-    D --> E["Beacon picks who gets audited<br/>and which pieces to replay"]
-    E --> F["Auditors replay those pieces<br/>and compare bytes"]
-    C --> G["Miners upload compressed updates"]
-    G --> H["Aggregator merges updates<br/>with robust clipping"]
-    F -->|match| I["Ledger: reward goes to escrow"]
-    F -->|mismatch| J["Fault: round reward and unvested escrow burn"]
-    H --> K["Next round starts from the merged model"]
-    I --> L["Escrow vests over the following rounds"]
+flowchart LR
+    A["Open"] --> B["Train"] --> C["Commit"] --> D["Beacon"] --> E["Audit"] --> F["Merge"] --> G["Next round"]
+    E -->|match| H["Escrow"]
+    E -.->|mismatch| I["Burn"]
 ```
+
+The round opens with a public start model and a data assignment. Miners train H inner steps on their assigned samples, then commit a Merkle root of their checkpoint hashes and upload compressed updates. The public drand beacon is published only after the commit deadline. It picks who gets audited and which pieces to replay, and auditors replay them and compare bytes. A match sends the reward to escrow, where it vests over the following rounds. A mismatch burns the round reward and the unvested escrow. The aggregator merges the uploaded updates with robust clipping, and the next round starts from the merged model.
 
 Every miner starts from the same public model and gets a slice of the dataset picked by public randomness. Before anyone knows who will be checked, each miner locks in a fingerprint of its whole run. Only then does the beacon decide which miners and which pieces get replayed, so a cheater can't guess which parts are safe to fake.
 
@@ -62,42 +67,26 @@ Every miner starts from the same public model and gets a slice of the dataset pi
 
 ```mermaid
 flowchart LR
-    subgraph EU["Region: Europe"]
-        E1["GPU island"] --- E2["GPU island"]
-    end
-    subgraph US["Region: Americas"]
-        U1["GPU island"] --- U2["GPU island"]
-    end
-    subgraph AS["Region: Asia"]
-        S1["GPU island"] --- S2["GPU island"]
-    end
-    EU --> RE["Regional relay"]
-    US --> RU["Regional relay"]
-    AS --> RA["Regional relay"]
-    RE --> AGG["Aggregator"]
-    RU --> AGG
-    RA --> AGG
-    AGG <--> CH["Challenge service<br/>rounds, receipts, ledger"]
-    AUD["Auditors"] <--> CH
-    BEA["drand beacon"] --> CH
-    CH --> CX["Cortex master<br/>reads get_weights"]
+    R["Regional islands"] --> L["Regional relays"] --> G["Aggregator"] <--> C["Challenge service"]
+    A["Auditors"] --> C
+    B["drand beacon"] --> C
+    C --> X["Cortex"]
 ```
 
-An island is one machine or a cluster of GPUs in one datacenter, and it trains on its own. Updates from nearby islands are combined by a regional relay first, so the long-distance links only carry a few merged updates. The challenge service keeps the round state and the ledger, auditors replay work, and Cortex reads the final weights from it each epoch.
+Regions hold several islands each, and the diagram collapses them into one node. An island is one machine or a cluster of GPUs in one datacenter, and it trains on its own. Updates from nearby islands are combined by a regional relay first, so the long-distance links only carry a few merged updates. The challenge service keeps the round state and the ledger, auditors replay work, and Cortex reads the final weights from it each epoch.
 
 ### 3. When rewards are paid
 
 ```mermaid
 flowchart LR
-    R["Round w<br/>train, commit, upload"] --> A["Audit window<br/>sampled replays"]
-    A --> D{"Dispute?"}
-    D -->|no| F["Round w final"]
-    D -->|yes| B["Bisection finds the first<br/>differing step, a referee decides"]
-    B --> F
-    F --> V["Reward in escrow<br/>vests over about 10 rounds"]
-    V --> P["Paid through get_weights"]
-    F -.->|fault found| X["Round reward and<br/>unvested escrow burned"]
+    R["Round w"] --> A["Audit window"] --> D{"Dispute?"}
+    D -->|no| F["Final"]
+    D -->|yes| B["Referee"] --> F
+    F --> V["Escrow vests"] --> P["Paid"]
+    F -.->|fault| X["Burn"]
 ```
+
+Round w is trained, committed and uploaded, then enters the audit window. If a dispute opens, bisection finds the first differing step and a referee decides. The reward vests over about 10 rounds and is paid through get_weights. A fault found at any point burns the round reward and the unvested escrow.
 
 Nothing is paid the moment work is submitted. A round is final only after its audits and any disputes close, and even then the reward vests slowly. If a miner thinks an auditor got it wrong, the dispute narrows the disagreement down to one step and an independent referee settles it; a miner who wins gets the held-back pay back.
 

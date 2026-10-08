@@ -109,7 +109,7 @@ case "$TMP" in "$ROOT"*) echo "temp inside workspace" >&2; exit 5;; esac
 list_files | while IFS= read -r f; do mkdir -p "$TMP/$(dirname "$f")"; cp -p "$ROOT/$f" "$TMP/$f"; done
 cd "$TMP"
 if [ "$TAG" = 0 ]; then
-  git init -q -b main; git add -A; git -c user.name="Hypertrain" -c user.email="noreply@cortex.foundation" commit -qm "Hypertrain v0.1.0"
+  git init -q -b main; git add -A; git -c user.name="echobt" -c user.email="154886644+echobt@users.noreply.github.com" commit -qm "Hypertrain v0.1.0"
   git remote add origin "https://github.com/$REPO.git"; git push origin main
 else
   git clone -q "https://github.com/$REPO.git" . ; git tag v0.1.0; git push origin v0.1.0
