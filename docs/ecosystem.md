@@ -9,27 +9,19 @@ Anything marked PLANNED doesn't exist yet.
 ```mermaid
 flowchart LR
     subgraph Miners
-        MP["Proof miners"]
         MB["Bounty miners"]
-        MO["Opentype miners"]
         MH["Hypertrain miners"]
         MS["Sentinel miners (PLANNED)"]
     end
     subgraph Challenges
-        P["proof"]
         B["bounty"]
-        O["opentype"]
         H["hypertrain"]
         S["sentinel (PLANNED)"]
     end
-    MP --> P
     MB --> B
-    MO --> O
     MH --> H
     MS -.-> S
-    P --> GW["Gateway: signed leaves, sealed epoch"]
     B --> GW
-    O --> GW
     H --> GW
     S -.-> GW
     GW --> VAL["Validators"] --> CHAIN["Bittensor weights"]
@@ -42,9 +34,7 @@ flowchart LR
 
 | Challenge | Repository | What it produces | Status |
 | --- | --- | --- | --- |
-| `proof` | this repository | Research results on operator-defined topics | Under integration |
 | `bounty` | [CortexLM/bounty](https://github.com/CortexLM/bounty) | Vulnerability reports | Loaded as a container |
-| `opentype` | [OpentypeAI/challenge](https://github.com/OpentypeAI/challenge) | Exact-gold DiffusionGemma duel results | Loaded as a container |
 | `hypertrain` | [CortexLM/hypertrain](https://github.com/CortexLM/hypertrain) | Models from decentralized, verifiable pretraining | Research stage |
 | `sentinel` | none yet | Detectors for code review and security | PLANNED, not live |
 
@@ -55,7 +45,7 @@ Each challenge is its own container with its own repository. The owner-signed tr
 | App | Relation to Cortex |
 | --- | --- |
 | Cortex Chat | Meant to use models that Hypertrain produces. PLANNED. |
-| Cortex Decisions | Meant to draw on research and evaluation work from Proof. PLANNED. |
+| Cortex Decisions | Meant to use models that Hypertrain produces. PLANNED. |
 | Cortex Security Cloud | Can use Bounty findings. Sentinel is PLANNED to improve it. |
 | Cortex Code | Meant to use models that Hypertrain produces. PLANNED. |
 | Cortex Bot | Meant to use models that Hypertrain produces. PLANNED. |

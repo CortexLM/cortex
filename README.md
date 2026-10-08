@@ -47,9 +47,7 @@ Challenges today:
 
 | Challenge | What miners do | Repository |
 | --- | --- | --- |
-| `proof` | Research topics set by the operator, with recursive agents and VM evaluation | this repository |
 | `bounty` | Report vulnerabilities in products | [CortexLM/bounty](https://github.com/CortexLM/bounty) |
-| `opentype` | Exact-gold DiffusionGemma duels | [OpentypeAI/challenge](https://github.com/OpentypeAI/challenge) |
 | `hypertrain` | Decentralized, verifiable LLM pretraining (research stage) | [CortexLM/hypertrain](https://github.com/CortexLM/hypertrain) |
 
 A further challenge, Sentinel, is planned and is not live. See [docs/ecosystem.md](docs/ecosystem.md).
@@ -64,11 +62,11 @@ Cortex is the engine behind a family of products. Miners improve models and dete
 
 | App | What the challenges give it | Status |
 | --- | --- | --- |
-| Cortex Chat | Models from Hypertrain, and research from Proof | Hypertrain is research stage; monetization is PLANNED |
-| Cortex Decisions | Research and evaluation work from Proof | Depends on Proof output; monetization is PLANNED |
+| Cortex Chat | Models from Hypertrain | Hypertrain is research stage; monetization is PLANNED |
+| Cortex Decisions | Models from Hypertrain | Hypertrain is research stage; monetization is PLANNED |
 | Cortex Security Cloud | Vulnerability findings from Bounty today; Sentinel is PLANNED to improve it | Sentinel is PLANNED, not live |
-| Cortex Code | Models from Hypertrain, and research from Proof | Hypertrain is research stage; monetization is PLANNED |
-| Cortex Bot | Models from Hypertrain, and research from Proof | Hypertrain is research stage; monetization is PLANNED |
+| Cortex Code | Models from Hypertrain | Hypertrain is research stage; monetization is PLANNED |
+| Cortex Bot | Models from Hypertrain | Hypertrain is research stage; monetization is PLANNED |
 
 Sentinel is planned as a miner-improved competitor to CodeRabbit and Greptile, positioned inside Cortex Security Cloud. None of it exists yet. Monetizing Hypertrain models in the apps is also a plan, not a shipped feature. Details are in [docs/ecosystem.md](docs/ecosystem.md).
 
