@@ -107,7 +107,7 @@ Validators never run challenge containers or Proof evaluation, rent GPUs or hold
 
 ## Run a validator in one command
 
-The master runs only on the master operator's machine. Everyone else runs a validator, and a script does the setup.
+The master runs only on the master operator's machine. Any operator with a registered hotkey can run a validator, and a script does the setup. Miners use the miner CLI instead.
 
 ```bash
 sudo apt-get install libsodium23

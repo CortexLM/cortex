@@ -52,6 +52,7 @@ NETUID="${NETUID:-100}"
 NETWORK="${NETWORK:-finney}"
 STATE_DB="${STATE_DB:-$HOME/.cortex/validator.sqlite3}"
 WALLET_PATH="${WALLET_PATH:-$HOME/.bittensor/wallets}"
+WALLET_PATH="${WALLET_PATH/#\~/$HOME}" # cortex validator expands a leading ~ too
 : "${WALLET_NAME:?set WALLET_NAME to your validator wallet name}"
 : "${WALLET_HOTKEY:?set WALLET_HOTKEY to your registered validator hotkey}"
 [[ -n "${GATEWAY_PUBLIC:-}" ]] || die "GATEWAY_PUBLIC is not set: export the gateway hotkey you pinned from an independent, trusted source (never copy it from the gateway response)"

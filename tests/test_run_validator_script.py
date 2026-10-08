@@ -88,3 +88,12 @@ def test_dry_run_prints_masked_validator_command(env):
     ):
         assert expected in command
     assert "epoch=4242 sealed=true" in result.stderr
+
+
+def test_tilde_wallet_path_is_expanded_before_the_hotkey_check(env, tmp_path):
+    hotkeys = tmp_path / "w" / "coldwallet-secret" / "hotkeys"
+    hotkeys.mkdir(parents=True)
+    (hotkeys / "hotkey-secret").write_text("{}")
+    result = run(env | {"WALLET_PATH": "~/w"}, "--dry-run")
+    assert result.returncode == 0
+    assert "hotkey file not found" not in result.stderr
