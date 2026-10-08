@@ -35,8 +35,18 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("data_dir", type=Path)
     pb = sub.add_parser("publish")
     pb.add_argument("data_dir", type=Path)
-    pb.add_argument("--r2", type=Path, required=True, help="target dir (content-addressed)")
+    pb.add_argument("--r2", type=Path, help="local target dir (content-addressed copy, tests)")
     pb.add_argument("--hf-mirror", type=Path, help="mirror target dir")
+    pb.add_argument("--to", choices=["r2"], help="upload to Cloudflare R2 (R2_* env / --env-file)")
+    pb.add_argument("--prefix", default="", help="key prefix inside the bucket")
+    pb.add_argument("--env-file", type=Path)
+    pb.add_argument(
+        "--verify-units", type=int, default=8, help="random units re-read via R2_PUBLIC_BASE"
+    )
+    pl = sub.add_parser("publish-labels", help="upload an opaque teacher-label cache dir to R2")
+    pl.add_argument("label_dir", type=Path)
+    pl.add_argument("--prefix", required=True)
+    pl.add_argument("--env-file", type=Path)
     s = sub.add_parser("sources")
     s.add_argument("repo", type=Path, help="pinned parquet file or directory")
     s.add_argument("--column", default="source")
@@ -49,9 +59,31 @@ def main(argv: list[str] | None = None) -> int:
         errs = verify_shards16(a.data_dir, m)
         print("\n".join(errs) or "OK")
         return 1 if errs else 0
+    elif a.cmd == "publish-labels":
+        from hypertrain.storage.publish import publish_dir
+        from hypertrain.storage.r2 import R2Client, load_config
+
+        rep = publish_dir(R2Client(load_config(env_file=a.env_file)), a.label_dir, prefix=a.prefix)
+        print(f"uploaded {len(rep.uploaded)}, skipped {len(rep.skipped)}")
     elif a.cmd == "publish":
-        # ponytail: local content-addressed export; the R2/HF uploaders need credentials. Add
-        # them behind the same flags when a bucket exists.
+        if a.to == "r2":
+            from hypertrain.storage.publish import publish_shardset
+            from hypertrain.storage.r2 import R2Client, load_config
+
+            rep = publish_shardset(
+                R2Client(load_config(env_file=a.env_file)),
+                a.data_dir,
+                prefix=a.prefix,
+                verify_units=a.verify_units,
+            )
+            print(
+                f"uploaded {len(rep.uploaded)}, skipped {len(rep.skipped)}, "
+                f"verified units {rep.verified_units}"
+            )
+            return 0
+        if not (a.r2 or a.hf_mirror):
+            p.error("publish needs --to r2, --r2 DIR or --hf-mirror DIR")
+        # HF mirror stays a local dir export (secondary, not the hot path).
         m = ShardSet16Manifest.from_json((a.data_dir / "manifest.json").read_text())
         for dest in filter(None, [a.r2, a.hf_mirror]):
             dest.mkdir(parents=True, exist_ok=True)

@@ -66,7 +66,7 @@ Owned instances: 0{ev:experiments/results/final_results.json#budget.owned_instan
 
 ## 8. Publication
 
-The code is at github.com/CortexLM/hypertrain, pushed by echobt after the user's go (push-main-r2.log, verify-20.json). GitHub Actions are disabled, by the user's choice, so CI does not run there.
+The code is at github.com/CortexLM/hypertrain, pushed by echobt after the user's go (push-main-r2.log, verify-20.json). CI (`ci.yml`) runs on every push to main and on pull requests; image publishing (`images.yml`) is manual.
 
 ## 9. Gated next steps and residual decisions
 

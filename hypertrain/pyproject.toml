@@ -28,6 +28,7 @@ hypertrain-miner = "hypertrain.miner.cli:main"
 
 [project.optional-dependencies]
 trainer = ["torch==2.14.0"]
+od = ["opendecision @ git+https://github.com/CortexLM/opendecision@e125ff756d57b726fbce44c430e3d2207e7bbda8"]
 
 [dependency-groups]
 dev = ["pytest>=9,<10", "ruff>=0.16,<0.17", "mypy>=2,<3"]
@@ -42,6 +43,9 @@ torch = [{ index = "pytorch-cpu" }]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hypertrain"]

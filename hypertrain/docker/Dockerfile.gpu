@@ -27,15 +27,20 @@ WORKDIR /opt/hypertrain/src
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
 # Everything except torch comes from the lock with hashes; torch (and its CUDA wheels) stay the
-# base image's 2.14.0+cu130, which the check below enforces.
+# base image's 2.14.0+cu130, which the check below enforces. opendecision (arch od-encoder) is
+# pinned by commit and has no hash, so it is a separate --no-deps install from the commit tarball
+# (no git needed in the base); its deps (torch, pydantic, numpy) are already in the venv.
+ARG OPENDECISION_SHA=e125ff756d57b726fbce44c430e3d2207e7bbda8
 RUN uv-pinned venv /opt/hypertrain/venv --python /venv/main/bin/python3.12 --system-site-packages \
  && uv-pinned export --frozen --no-dev --no-emit-project -o /tmp/requirements.txt \
  && VIRTUAL_ENV=/opt/hypertrain/venv uv-pinned pip install --no-cache --require-hashes -r /tmp/requirements.txt \
  && VIRTUAL_ENV=/opt/hypertrain/venv uv-pinned pip install --no-cache --no-deps . \
+ && VIRTUAL_ENV=/opt/hypertrain/venv uv-pinned pip install --no-cache --no-deps \
+      "https://github.com/CortexLM/opendecision/archive/${OPENDECISION_SHA}.tar.gz" \
  && rm -f /tmp/requirements.txt \
  && printf '{"gpu_image": "%s"}\n' "${GPU_IMAGE}" > /opt/hypertrain/build.json \
  && chmod 0444 /opt/hypertrain/build.json \
- && /opt/hypertrain/venv/bin/python -c "import hypertrain.trainer, torch; assert torch.__version__ == '2.14.0+cu130', torch.__version__; import hypertrain.auditor.__main__, hypertrain.miner.cli"
+ && /opt/hypertrain/venv/bin/python -c "import hypertrain.trainer, torch; assert torch.__version__ == '2.14.0+cu130', torch.__version__; import hypertrain.auditor.__main__, hypertrain.miner.cli; import opendecision, hypertrain.models.opendecision"
 ENV PATH=/opt/hypertrain/venv/bin:$PATH \
     CUBLAS_WORKSPACE_CONFIG=:4096:8 \
     CUDA_DISABLE_PTX_JIT=1 \

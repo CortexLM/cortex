@@ -1,11 +1,11 @@
 name: images
 
-# After CI passes on main: build each image once, push sha-<commit> and edge, and attest the
+# Manual run, after CI passes: build each image once, push sha-<commit> and edge, and attest the
 # exact pushed digest (the Cortex supervisor refuses a digest without build provenance).
 # vX.Y.Z and stable are aliases of an already attested sha- digest, made by release.yml.
+# To publish on every push to main again, add: push: {branches: [main]} under on:.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read

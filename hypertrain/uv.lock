@@ -239,6 +239,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+od = [
+    { name = "opendecision" },
+]
 trainer = [
     { name = "torch" },
 ]
@@ -255,6 +258,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.133" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "numpy", specifier = ">=2" },
+    { name = "opendecision", marker = "extra == 'od'", git = "https://github.com/CortexLM/opendecision?rev=e125ff756d57b726fbce44c430e3d2207e7bbda8" },
     { name = "py-ecc", specifier = ">=8,<9" },
     { name = "py-sr25519-bindings", specifier = ">=0.2.3,<0.3" },
     { name = "pyarrow", specifier = ">=25.0.1" },
@@ -264,7 +268,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'trainer'", specifier = "==2.14.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "uvicorn", specifier = ">=0.34" },
 ]
-provides-extras = ["trainer"]
+provides-extras = ["trainer", "od"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -376,6 +380,16 @@ sdist = { url = "https://files.pythonhosted.org/packages/13/01/11703282db468b85f
 wheels = [
     { url = "https://files.pythonhosted.org/packages/65/af/aa78d1a88805456e212b65461354cd943197fb9acecc4c90fd12295123a3/numpy-2.5.3-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b7e18c623bb5c95acb3b3328861272816ba199fb531921c5d6d0b675f1fde9e3", size = 16717410, upload-time = "2026-09-06T16:24:42.745Z" },
     { url = "https://files.pythonhosted.org/packages/62/4a/8877e629445a7176297dffcaf9c485faa96a95d81728a62521ad55bd4c0f/numpy-2.5.3-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:b5d93cf48f687479941d12b69c873ad2cc76bbd487f0091c2200636497f34034", size = 18476479, upload-time = "2026-09-06T16:24:49.35Z" },
+]
+
+[[package]]
+name = "opendecision"
+version = "0.1.0"
+source = { git = "https://github.com/CortexLM/opendecision?rev=e125ff756d57b726fbce44c430e3d2207e7bbda8#e125ff756d57b726fbce44c430e3d2207e7bbda8" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pydantic" },
+    { name = "torch" },
 ]
 
 [[package]]

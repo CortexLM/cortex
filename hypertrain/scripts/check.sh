@@ -5,4 +5,5 @@ cd "$(dirname "$0")/.."
 uv run --frozen ruff format --check
 uv run --frozen ruff check
 uv run --frozen mypy src
-uv run --frozen pytest -q
+# Extra args go to pytest (CI splits the slow sim/e2e tests into their own job).
+uv run --frozen pytest -q --durations=25 "$@"

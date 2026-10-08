@@ -61,7 +61,9 @@ for f in sys.stdin.read().split("\n"):
 sys.exit(bad)')
 }
 # raw tree (before .publishignore), only venv/caches skipped; exact-path allowlist FORBID_ALLOW (add path + comment why)
-FORBID_ALLOW=()
+FORBID_ALLOW=(
+  .env.example # R2 variable names with placeholder values only (docs/r2.md); content still goes through scan below
+)
 tracked_bad() {
   (cd "$ROOT" && find . \( -name .venv -o -name __pycache__ -o -name '.*_cache' -o -name .git \) -prune -o -type f -print | sed 's|^\./||' \
     | grep -E '(^|/)(\.env(\.[^/]*)?|known_hosts[^/]*|id_(ed25519|rsa)[^/]*|[^/]*\.(pem|key|keyfile)|fal\.key)$' || true) \

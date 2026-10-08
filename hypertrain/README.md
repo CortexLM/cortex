@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="license Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6aa84f"></a>
+  <a href="https://github.com/CortexLM/hypertrain/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/CortexLM/hypertrain/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="python 3.12" src="https://img.shields.io/badge/python-3.12-1f6feb">
   <img alt="version 0.1.0" src="https://img.shields.io/badge/version-0.1.0-555555">
   <img alt="status research" src="https://img.shields.io/badge/status-research-e07b39">
@@ -140,7 +141,7 @@ uv run --frozen python -m hypertrain.auditor --help
 uv run --frozen pytest -q tests/protocol tests/ledger
 ```
 
-The full quality gate (format, lint, types and every test) is `bash scripts/check.sh`. CI runs it on each push. It takes a while.
+The full quality gate (format, lint, types and every test) is `bash scripts/check.sh`. CI runs it on each push to main and each pull request (the slow sim/e2e tests in a parallel job); images are published manually. It takes a while.
 
 ### Run the challenge service locally
 

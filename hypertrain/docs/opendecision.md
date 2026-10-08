@@ -9,3 +9,7 @@ Operator notes for `arch = "od-encoder"` manifests (design: OpenDecision x Hyper
 - **Dispatch**: `trainer.model.param_shapes/stage_of/init_params/forward` route to `hypertrain.models.opendecision` when `cfg.arch != "decoder"`.
 - Old (decoder) manifests keep byte-identical bodies and run IDs; new optional fields are omitted when unset.
 - Registry and public API sections: see lanes L4 and L5.
+
+## Teacher labels (stage B)
+
+Soft labels for `od-b-v1` records come from an offline, configurable OpenAI-compatible teacher (default OpenRouter, `deepseek/deepseek-v4.1-flash`): see [teacher.md](teacher.md). Tulu-3 rows are not convertible yet (design gap).

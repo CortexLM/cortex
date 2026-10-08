@@ -13,6 +13,7 @@ Contents:
 7. [Production on a Cortex master](#7-production-on-a-cortex-master)
 8. [Budget and teardown](#8-budget-and-teardown)
 9. [Known limits](#9-known-limits)
+10. [Hosting data on R2](#10-hosting-data-on-r2)
 
 ## 1. Local setup
 
@@ -357,3 +358,7 @@ Exit codes: 0 ok, 2 admission rejected, 3 failed but cleaned up, 4 a rental may 
 - The canary needs docker, since podman rejects `--tmpfs ...:uid=`.
 - The journal anchor is optional.
 - Parity thresholds and tuned hyperparameters: not available, the CPU grid was CENSORED (0 jobs finished); see [parity.md section 5](parity.md#5-results-of-the-cpu-grid).
+
+## 10. Hosting data on R2
+
+Shard sets, `manifest.json`, `build_record.json` and teacher-label caches are published to Cloudflare R2 with `python -m hypertrain.datasets publish <dir> --to r2` (and `publish-labels`). Run `python -m hypertrain.storage doctor` first. Setup, token scope, CORS and the full flow: [r2.md](r2.md).

@@ -14,9 +14,10 @@ import json
 import os
 import re
 import stat
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qsl, quote, urlsplit
 
 import httpx
 
@@ -172,26 +173,36 @@ def sigv4_headers(
     amz_date: str,
     payload_sha256: str,
     service: str = "s3",
+    *,
+    extra: Mapping[str, str] | None = None,
+    content_sha_header: bool = True,
 ) -> dict[str, str]:
-    """Authorization-header SigV4 over host, x-amz-content-sha256, x-amz-date (no query)."""
+    """Authorization-header SigV4 over host, x-amz-date, x-amz-content-sha256 (unless
+    content_sha_header=False) and every header in `extra`; the URL query is signed. Returns the
+    headers to add to the request (extra ones are signed, not returned)."""
     u = urlsplit(url)
     date = amz_date[:8]
     scope = f"{date}/{region}/{service}/aws4_request"
-    hdrs = {"host": u.netloc, "x-amz-content-sha256": payload_sha256, "x-amz-date": amz_date}
+    out = {"x-amz-date": amz_date}
+    if content_sha_header:
+        out["x-amz-content-sha256"] = payload_sha256
+    hdrs = {"host": u.netloc, **out}
+    hdrs.update({k.lower(): " ".join(v.split()) for k, v in (extra or {}).items()})
     signed = ";".join(sorted(hdrs))
     canon_h = "".join(f"{k}:{hdrs[k]}\n" for k in sorted(hdrs))
-    canon = "\n".join([method, u.path or "/", "", canon_h, signed, payload_sha256])
+    query = _canon_query(dict(parse_qsl(u.query, keep_blank_values=True)))
+    canon = "\n".join([method, u.path or "/", query, canon_h, signed, payload_sha256])
     sts = "\n".join(
         ["AWS4-HMAC-SHA256", amz_date, scope, hashlib.sha256(canon.encode()).hexdigest()]
     )
     sig = hmac.new(
         _signing_key(creds.secret_access_key, date, region, service), sts.encode(), hashlib.sha256
     ).hexdigest()
-    auth = (
+    out["Authorization"] = (
         f"AWS4-HMAC-SHA256 Credential={creds.access_key_id}/{scope}, "
         f"SignedHeaders={signed}, Signature={sig}"
     )
-    return {"x-amz-content-sha256": payload_sha256, "x-amz-date": amz_date, "Authorization": auth}
+    return out
 
 
 def _now() -> str:
