@@ -75,9 +75,43 @@
       "title": "ComputeBudget",
       "type": "object"
     },
+    "DatasetSource": {
+      "additionalProperties": false,
+      "properties": {
+        "mix_id": {
+          "title": "Mix Id",
+          "type": "string"
+        },
+        "registry_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Registry Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mix_id",
+        "registry_sha256"
+      ],
+      "title": "DatasetSource",
+      "type": "object"
+    },
     "DatasetSpec": {
       "additionalProperties": false,
       "properties": {
+        "assign_unit": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Assign Unit"
+        },
         "depth": {
           "maximum": 9007199254740991,
           "minimum": 0,
@@ -101,7 +135,10 @@
           "type": "integer"
         },
         "sample_format": {
-          "const": "u32[seq_len+1] token ids",
+          "enum": [
+            "u32[seq_len+1] token ids",
+            "u16[seq_len+1] token ids"
+          ],
           "title": "Sample Format",
           "type": "string"
         },
@@ -113,6 +150,30 @@
         "shard_uri_template": {
           "title": "Shard Uri Template",
           "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatasetSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "unit_sha256_root": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit Sha256 Root"
         }
       },
       "required": [
@@ -367,7 +428,10 @@
       "additionalProperties": false,
       "properties": {
         "arch": {
-          "const": "decoder",
+          "enum": [
+            "decoder",
+            "od-encoder"
+          ],
           "title": "Arch",
           "type": "string"
         },
@@ -441,6 +505,17 @@
           "title": "N Layers",
           "type": "integer"
         },
+        "od": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ODSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "param_count": {
           "maximum": 9007199254740991,
           "minimum": 1,
@@ -499,6 +574,142 @@
         "init_std"
       ],
       "title": "ModelSpec",
+      "type": "object"
+    },
+    "ODRecordSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "instr_len": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Instr Len",
+          "type": "integer"
+        },
+        "n_options": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "N Options",
+          "type": "integer"
+        },
+        "n_questions": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "N Questions",
+          "type": "integer"
+        },
+        "opt_len": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Opt Len",
+          "type": "integer"
+        },
+        "state_len": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "State Len",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "state_len",
+        "n_questions",
+        "n_options",
+        "opt_len",
+        "instr_len"
+      ],
+      "title": "ODRecordSpec",
+      "type": "object"
+    },
+    "ODSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "decision_rule": {
+          "enum": [
+            "log",
+            "brier"
+          ],
+          "title": "Decision Rule",
+          "type": "string"
+        },
+        "distill_temp": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Distill Temp",
+          "type": "string"
+        },
+        "head_layers": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Head Layers",
+          "type": "integer"
+        },
+        "mask_ratio": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Mask Ratio",
+          "type": "string"
+        },
+        "mask_seed": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Mask Seed",
+          "type": "integer"
+        },
+        "objective": {
+          "enum": [
+            "mlm",
+            "distill",
+            "decision"
+          ],
+          "title": "Objective",
+          "type": "string"
+        },
+        "preset": {
+          "enum": [
+            "od-tiny",
+            "od-base",
+            "od-large"
+          ],
+          "title": "Preset",
+          "type": "string"
+        },
+        "record": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ODRecordSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rps_weight": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Rps Weight",
+          "type": "string"
+        },
+        "tokenizer_offset": {
+          "const": 3,
+          "title": "Tokenizer Offset",
+          "type": "integer"
+        },
+        "warm_start": {
+          "title": "Warm Start",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "preset",
+        "head_layers",
+        "objective",
+        "mask_ratio",
+        "mask_seed",
+        "tokenizer_offset",
+        "warm_start",
+        "record",
+        "decision_rule",
+        "rps_weight",
+        "distill_temp"
+      ],
+      "title": "ODSpec",
       "type": "object"
     },
     "OperatorBudget": {
@@ -644,6 +855,22 @@
         },
         "layout": {
           "$ref": "#/$defs/Layout"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "enum": [
+                "od-bf16-det-eager-v1",
+                "od-fp32-ref-v1"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile"
         },
         "sm_count": {
           "maximum": 9007199254740991,

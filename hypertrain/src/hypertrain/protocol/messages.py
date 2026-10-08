@@ -44,8 +44,47 @@ class _M(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+def _omit_none(v: object) -> bool:
+    return v is None
+
+
+OD_PRESETS: dict[str, tuple[int, int, int, int, int]] = {
+    # preset: (d_model, n_layers, n_heads, head_layers, vocab)
+    "od-tiny": (64, 2, 4, 1, 259),
+    "od-base": (768, 12, 12, 2, 50432),
+    "od-large": (1024, 24, 16, 4, 50432),
+}
+
+
+class ODRecordSpec(_M):
+    state_len: Pos
+    n_questions: Pos
+    n_options: Pos
+    opt_len: Pos
+    instr_len: Pos
+
+    def record_len(self) -> int:
+        """Flat u16 layout: state | instr | opts | qtype | y | teacher_q (A11)."""
+        q, k = self.n_questions, self.n_options
+        return self.state_len + q * self.instr_len + q * k * self.opt_len + 2 * q + q * (k + 1)
+
+
+class ODSpec(_M):
+    preset: Literal["od-tiny", "od-base", "od-large"]
+    head_layers: Pos
+    objective: Literal["mlm", "distill", "decision"]
+    mask_ratio: F32
+    mask_seed: U
+    tokenizer_offset: Literal[3]
+    warm_start: StrictBool
+    record: ODRecordSpec | None
+    decision_rule: Literal["log", "brier"]
+    rps_weight: F32
+    distill_temp: F32
+
+
 class ModelSpec(_M):
-    arch: Literal["decoder"]
+    arch: Literal["decoder", "od-encoder"]
     n_layers: Pos
     d_model: Pos
     n_heads: Pos
@@ -64,6 +103,13 @@ class ModelSpec(_M):
     capacity_factor: F32
     aux_loss_coef: F32
     init_std: F32
+    od: ODSpec | None = Field(None, exclude_if=_omit_none)
+
+    @model_validator(mode="after")
+    def _od_iff_encoder(self) -> ModelSpec:
+        if (self.arch == "od-encoder") != (self.od is not None):
+            raise ValueError('od must be set iff arch == "od-encoder"')
+        return self
 
 
 class TokenizerSpec(_M):
@@ -71,14 +117,22 @@ class TokenizerSpec(_M):
     sha256: Hex64
 
 
+class DatasetSource(_M):
+    mix_id: str
+    registry_sha256: Hex64
+
+
 class DatasetSpec(_M):
     merkle_root: Hex64
     depth: U
     n_samples: Pos
-    sample_format: Literal["u32[seq_len+1] token ids"]
+    sample_format: Literal["u32[seq_len+1] token ids", "u16[seq_len+1] token ids"]
     shard_uri_template: str
     shard_sha256_root: Hex64
     holdout_commit: Hex64
+    source: DatasetSource | None = Field(None, exclude_if=_omit_none)
+    assign_unit: Pos | None = Field(None, exclude_if=_omit_none)
+    unit_sha256_root: Hex64 | None = Field(None, exclude_if=_omit_none)
 
 
 class LrSchedule(_M):
@@ -220,6 +274,9 @@ class ReferenceSpec(_M):
     sm_count: Pos
     env: ReferenceEnv
     layout: Layout
+    profile: Literal["od-bf16-det-eager-v1", "od-fp32-ref-v1"] | None = Field(
+        None, exclude_if=_omit_none
+    )
 
 
 class BeaconSpec(_M):
@@ -263,6 +320,25 @@ class RunManifest(_M):
     budget: Budget
     operator_budget: OperatorBudget
 
+    @model_validator(mode="after")
+    def _assign_unit_and_od(self) -> RunManifest:
+        ds, inn = self.dataset, self.inner
+        if ds.assign_unit is not None:
+            u = ds.assign_unit
+            if inn.micro_batch * inn.grad_accum * inn.H % u:
+                raise ValueError("micro_batch*grad_accum*H must be divisible by assign_unit")
+            if ds.n_samples % u:
+                raise ValueError("n_samples must be divisible by assign_unit")
+            if ds.unit_sha256_root is None:
+                raise ValueError("assign_unit requires unit_sha256_root")
+        elif ds.unit_sha256_root is not None:
+            raise ValueError("unit_sha256_root requires assign_unit")
+        if self.model.arch == "od-encoder":
+            _check_od(self)
+        elif self.reference_spec.profile is not None:
+            raise ValueError("profile is only valid for arch == od-encoder")
+        return self
+
     def body(self) -> dict[str, object]:
         return self.model_dump(mode="json")
 
@@ -271,6 +347,38 @@ class RunManifest(_M):
 
     def drand_round_at(self, epoch_at: int) -> int:
         return drand_round_at(epoch_at, self.beacon.genesis_time, self.beacon.period)
+
+
+def _check_od(m: RunManifest) -> None:
+    """OD rules (design B2 check_manifest, A6/A11/A16/A17); torch-free by design."""
+    ms, od, lay = m.model, m.model.od, m.reference_spec.layout
+    prof = m.reference_spec.profile
+    assert od is not None
+    if (lay.pp, lay.n_gpus, lay.dp_size, lay.ep_size, lay.zero1) != (1, 1, 1, 1, False):
+        raise ValueError("OD layout must be pp=1,n_gpus=1,dp_size=1,ep_size=1,zero1=false")
+    if ms.n_kv_heads != ms.n_heads:
+        raise ValueError("OD requires n_kv_heads == n_heads")
+    if ms.d_ff != 4 * ms.d_model:
+        raise ValueError("OD requires d_ff == 4*d_model")
+    if ms.n_experts != 1 or ms.top_k_experts != 1:
+        raise ValueError("OD requires n_experts == top_k_experts == 1")
+    if f32val(ms.capacity_factor) != 1.0:
+        raise ValueError("OD requires capacity_factor == 1.0")
+    if f32val(ms.aux_loss_coef) != 0.0:
+        raise ValueError("OD requires aux_loss_coef == 0")
+    if prof is None:
+        raise ValueError("OD requires reference_spec.profile")
+    if ms.compute_dtype != ("fp32" if prof == "od-fp32-ref-v1" else "bf16"):
+        raise ValueError("compute_dtype does not match reference_spec.profile")
+    d, n_layers, n_heads, head_layers, vocab = OD_PRESETS[od.preset]
+    if (ms.d_model, ms.n_layers, ms.n_heads, ms.vocab) != (d, n_layers, n_heads, vocab):
+        raise ValueError(f"model dims do not match preset {od.preset}")
+    if od.head_layers != head_layers:
+        raise ValueError(f"head_layers must be {head_layers} for preset {od.preset}")
+    if (od.record is None) != (od.objective == "mlm"):
+        raise ValueError("od.record must be set iff objective != mlm")
+    if od.record is not None and ms.seq_len != od.record.record_len() - 1:
+        raise ValueError("seq_len must equal record length - 1")
 
 
 def drand_round_at(epoch_at: int, genesis: int, period: int = QUICKNET_PERIOD) -> int:

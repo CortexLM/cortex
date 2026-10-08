@@ -604,6 +604,7 @@ class ChallengeStore:
             n_slots=len(body.roster),
             batch=self._batch(manifest),
             base_w=row["base"],
+            unit=manifest.dataset.assign_unit or 1,
         )
         return a.slices
 

@@ -25,6 +25,7 @@ from hypertrain.data.store import Store as ObjectStore
 from hypertrain.ledger import Params, vest_rounds_for_q
 from hypertrain.protocol.keys import KeyError_, Keypair, decode_hotkey
 from hypertrain.protocol.messages import QUICKNET_GENESIS
+from hypertrain.public_api import create_public_app
 
 VERSION = "0.1.0"
 BODY_MAX = 1024 * 1024
@@ -41,6 +42,7 @@ class _Strict(BaseModel):
 class RunConfig(_Strict):
     train_rounds: StrictInt = Field(ge=1, le=10**6)
     final_after_upload: StrictInt = Field(ge=1, le=10**6)
+    total_rounds: StrictInt | None = Field(default=None, ge=1, le=10**6)
 
 
 class Paused(_Strict):
@@ -349,7 +351,7 @@ def create_app(
     async def configure(run_id: str, request: Request, authorization: Auth = None) -> Any:
         admin(authorization)
         item = await read_model(request, RunConfig)
-        return await run(store.configure, run_id, item.model_dump())
+        return await run(store.configure, run_id, item.model_dump(exclude_none=True))
 
     @app.put("/v1/admin/runs/{run_id}/paused")
     async def paused(run_id: str, request: Request, authorization: Auth = None) -> Any:
@@ -515,6 +517,12 @@ def create_app(
     aggregator_route("/v1/aggregator/runs/{run_id}/rounds/{w}/rollback", store.rollback)
     aggregator_route("/v1/aggregator/runs/{run_id}/rounds/{w}/finalize", store.finalize)
 
+    app.mount(
+        "/public",
+        create_public_app(
+            config.state_dir / "challenge.db", config.state_dir / "public" / "metrics.jsonl"
+        ),
+    )
     return app
 
 

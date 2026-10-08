@@ -75,3 +75,12 @@ disallow_untyped_defs = true
 [[tool.mypy.overrides]]
 module = ["sr25519"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["opendecision", "opendecision.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true

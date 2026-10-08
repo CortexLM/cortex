@@ -1,0 +1,413 @@
+{
+ "build_records": {},
+ "mixes": {
+  "od-a-proxy-v1": {
+   "components": [
+    [
+     "fineweb-edu-sample10bt",
+     1.0
+    ]
+   ],
+   "decontam_against": [
+    "mmlu-test",
+    "arc-challenge-test",
+    "hellaswag-validation",
+    "fineweb-edu-holdout"
+   ],
+   "holdout": "fineweb-edu-holdout",
+   "record": null,
+   "seq_len": 1024,
+   "tokenizer": "modernbert-base"
+  },
+  "od-a-v1": {
+   "components": [
+    [
+     "fineweb-edu",
+     0.55
+    ],
+    [
+     "dclm-baseline",
+     0.3
+    ],
+    [
+     "wikipedia-en",
+     0.05
+    ],
+    [
+     "finemath-4plus",
+     0.05
+    ],
+    [
+     "pes2o-v2",
+     0.05
+    ]
+   ],
+   "decontam_against": [
+    "mmlu-test",
+    "arc-challenge-test",
+    "hellaswag-validation",
+    "fineweb-edu-holdout"
+   ],
+   "holdout": "fineweb-edu-holdout",
+   "record": null,
+   "seq_len": 1024,
+   "tokenizer": "modernbert-base"
+  },
+  "od-b-v1": {
+   "components": [
+    [
+     "multi-nli",
+     0.3125
+    ],
+    [
+     "boolq",
+     0.125
+    ],
+    [
+     "commonsense-qa",
+     0.125
+    ],
+    [
+     "qasc",
+     0.0625
+    ],
+    [
+     "cosmos-qa",
+     0.125
+    ],
+    [
+     "tulu-3-sft",
+     0.25
+    ]
+   ],
+   "decontam_against": [
+    "mmlu-test",
+    "arc-challenge-test",
+    "hellaswag-validation"
+   ],
+   "holdout": null,
+   "record": {
+    "instr_len": 64,
+    "n_options": 8,
+    "n_questions": 4,
+    "opt_len": 32,
+    "state_len": 512
+   },
+   "seq_len": null,
+   "tokenizer": "modernbert-base"
+  },
+  "od-c-v1": {
+   "components": [
+    [
+     "multi-nli",
+     0.2
+    ],
+    [
+     "snli",
+     0.1
+    ],
+    [
+     "boolq",
+     0.1
+    ],
+    [
+     "commonsense-qa",
+     0.08
+    ],
+    [
+     "qasc",
+     0.07
+    ],
+    [
+     "cosmos-qa",
+     0.1
+    ],
+    [
+     "banking77",
+     0.1
+    ],
+    [
+     "helpsteer3",
+     0.1
+    ],
+    [
+     "squad-v2",
+     0.1
+    ],
+    [
+     "typed-decisions",
+     0.05
+    ]
+   ],
+   "decontam_against": [
+    "mmlu-test",
+    "arc-challenge-test",
+    "hellaswag-validation"
+   ],
+   "holdout": null,
+   "record": {
+    "instr_len": 64,
+    "n_options": 8,
+    "n_questions": 4,
+    "opt_len": 32,
+    "state_len": 512
+   },
+   "seq_len": null,
+   "tokenizer": "modernbert-base"
+  }
+ },
+ "sources": {
+  "arc-challenge-test": {
+   "config": "ARC-Challenge",
+   "files": [
+    "ARC-Challenge/test-*.parquet"
+   ],
+   "licence": "CC-BY-SA-4.0",
+   "repo": "allenai/ai2_arc",
+   "revision": "210d026faf9955653af8916fad021475a3f00453",
+   "role": "eval",
+   "text_field": "question"
+  },
+  "banking77": {
+   "config": null,
+   "files": [
+    "data/train-*.parquet"
+   ],
+   "licence": "CC-BY-4.0",
+   "repo": "PolyAI/banking77",
+   "revision": "90d4e2ee5521c04fc1488f065b8b083658768c57",
+   "role": "finetune",
+   "text_field": "text"
+  },
+  "boolq": {
+   "config": null,
+   "files": [
+    "data/train-*.parquet"
+   ],
+   "licence": "CC-BY-SA-3.0",
+   "repo": "google/boolq",
+   "revision": "35b264d03638db9f4ce671b711558bf7ff0f80d5",
+   "role": "distill",
+   "text_field": "question"
+  },
+  "commonsense-qa": {
+   "config": null,
+   "files": [
+    "data/train-*.parquet"
+   ],
+   "licence": "MIT",
+   "repo": "tau/commonsense_qa",
+   "revision": "94630fe30dad47192a8546eb75f094926d47e155",
+   "role": "distill",
+   "text_field": "question"
+  },
+  "cosmos-qa": {
+   "config": null,
+   "files": [
+    "data/train-*.parquet"
+   ],
+   "licence": "CC-BY-4.0",
+   "repo": "allenai/cosmos_qa",
+   "revision": "28d9d5e2aae025e73e11177891a88dba51190013",
+   "role": "distill",
+   "text_field": "question"
+  },
+  "dclm-baseline": {
+   "config": null,
+   "files": [
+    "*.parquet"
+   ],
+   "licence": "CC-BY-4.0",
+   "repo": "mlfoundations/dclm-baseline-1.0",
+   "revision": "a3b142c183aebe5af344955ae20836eb34dcf69b",
+   "role": "pretrain",
+   "text_field": "text"
+  },
+  "finemath-4plus": {
+   "config": "finemath-4plus",
+   "files": [
+    "finemath-4plus/*.parquet"
+   ],
+   "licence": "ODC-By-1.0",
+   "repo": "HuggingFaceTB/finemath",
+   "revision": "e92b25a616738fe95dc186b64dfb19f9c8525594",
+   "role": "pretrain",
+   "text_field": "text"
+  },
+  "fineweb-edu": {
+   "config": "default",
+   "exclude": [
+    "data/CC-MAIN-2025-26/*"
+   ],
+   "files": [
+    "data/CC-MAIN-*/*.parquet"
+   ],
+   "licence": "ODC-By-1.0",
+   "repo": "HuggingFaceFW/fineweb-edu",
+   "revision": "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9",
+   "role": "pretrain",
+   "text_field": "text"
+  },
+  "fineweb-edu-holdout": {
+   "config": "default",
+   "files": [
+    "data/CC-MAIN-2025-26/*.parquet"
+   ],
+   "licence": "ODC-By-1.0",
+   "repo": "HuggingFaceFW/fineweb-edu",
+   "revision": "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9",
+   "role": "holdout",
+   "text_field": "text"
+  },
+  "fineweb-edu-sample10bt": {
+   "config": "sample-10BT",
+   "exclude": [
+    "data/CC-MAIN-2025-26/*"
+   ],
+   "files": [
+    "sample/10BT/*.parquet"
+   ],
+   "licence": "ODC-By-1.0",
+   "repo": "HuggingFaceFW/fineweb-edu",
+   "revision": "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9",
+   "role": "pretrain",
+   "text_field": "text"
+  },
+  "hellaswag-validation": {
+   "config": null,
+   "files": [
+    "data/validation-*.parquet"
+   ],
+   "licence": "MIT",
+   "repo": "Rowan/hellaswag",
+   "revision": "218ec52e09a7e7462a5400043bb9a69a41d06b76",
+   "role": "eval",
+   "text_field": "ctx"
+  },
+  "helpsteer3": {
+   "config": null,
+   "files": [
+    "preference/train-*.parquet"
+   ],
+   "licence": "CC-BY-4.0",
+   "repo": "nvidia/HelpSteer3",
+   "revision": "f6d145777bcbde96137596340fab89793acd1031",
+   "role": "finetune",
+   "text_field": "context"
+  },
+  "mmlu-test": {
+   "config": "all",
+   "files": [
+    "all/test-*.parquet"
+   ],
+   "licence": "MIT",
+   "repo": "cais/mmlu",
+   "revision": "c30699e8356da336a370243923dbaf21066bb9fe",
+   "role": "eval",
+   "text_field": "question"
+  },
+  "multi-nli": {
+   "config": null,
+   "files": [
+    "plain_text/train-*.parquet"
+   ],
+   "licence": "mixed-permissive",
+   "repo": "nyu-mll/multi_nli",
+   "revision": "da70db2af9d09693783c3320c4249840212ee221",
+   "role": "distill",
+   "text_field": "premise"
+  },
+  "pes2o-v2": {
+   "config": "v2",
+   "files": [
+    "data/v2/*.parquet"
+   ],
+   "licence": "ODC-By-1.0",
+   "repo": "allenai/peS2o",
+   "revision": "636a503e44a3ca1b58e01fb61eab0825cd574de0",
+   "role": "pretrain",
+   "text_field": "text"
+  },
+  "qasc": {
+   "config": null,
+   "files": [
+    "data/train-*.parquet"
+   ],
+   "licence": "CC-BY-4.0",
+   "repo": "allenai/qasc",
+   "revision": "a34ba204eb9a33b919c10cc08f4f1c8dae5ec070",
+   "role": "distill",
+   "text_field": "question"
+  },
+  "snli": {
+   "config": null,
+   "files": [
+    "plain_text/train-*.parquet"
+   ],
+   "licence": "CC-BY-SA-4.0",
+   "repo": "stanfordnlp/snli",
+   "revision": "cdb5c3d5eed6ead6e5a341c8e56e669bb666725b",
+   "role": "finetune",
+   "text_field": "premise"
+  },
+  "squad-v2": {
+   "config": null,
+   "files": [
+    "squad_v2/train-*.parquet"
+   ],
+   "licence": "CC-BY-SA-4.0",
+   "repo": "rajpurkar/squad_v2",
+   "revision": "3ffb306f725f7d2ce8394bc1873b24868140c412",
+   "role": "finetune",
+   "text_field": "question"
+  },
+  "tulu-3-sft": {
+   "config": null,
+   "files": [
+    "data/train-*.parquet"
+   ],
+   "filter": {
+    "allow": {},
+    "column": "source",
+    "deny": []
+   },
+   "licence": "ODC-By-1.0 (per-subset)",
+   "repo": "allenai/tulu-3-sft-mixture",
+   "revision": "b14afda60f1bbebe55d5d2fa1e4df5042f97f8be",
+   "role": "distill",
+   "text_field": "messages"
+  },
+  "typed-decisions": {
+   "config": null,
+   "files": [
+    "data/train-*.parquet"
+   ],
+   "licence": "TBD-verify",
+   "repo": "LocalLLaMA/typed-decisions",
+   "revision": "e039ebffcc280174dd354227424fb2b249f191de",
+   "role": "finetune",
+   "text_field": "text"
+  },
+  "wikipedia-en": {
+   "config": "20231101.en",
+   "files": [
+    "20231101.en/*.parquet"
+   ],
+   "licence": "CC-BY-SA-3.0",
+   "repo": "wikimedia/wikipedia",
+   "revision": "b04c8d1ceb2f5cd4588862100d08de323dccfbaa",
+   "role": "pretrain",
+   "text_field": "text"
+  }
+ },
+ "tokenizers": {
+  "modernbert-base": {
+   "filename": "tokenizer.json",
+   "license": "Apache-2.0",
+   "repo": "answerdotai/ModernBERT-base",
+   "revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8",
+   "sha256": "9fd55248d51d33976b324fc11592e28071da7d41e0e9401dfb7082e30574b7b1"
+  }
+ },
+ "version": 1
+}

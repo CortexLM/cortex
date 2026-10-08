@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from types import ModuleType
 
 import torch
 import torch.nn.functional as F
@@ -21,6 +22,13 @@ from hypertrain.trainer.rng import rng_ctr, uniform_f64
 Params = dict[str, Tensor]
 
 
+def _arch_impl(cfg: ModelConfig) -> ModuleType:
+    """Non-decoder architecture module (patch point for tests)."""
+    import hypertrain.models.opendecision as impl
+
+    return impl
+
+
 def compute_dtype(cfg: ModelConfig) -> torch.dtype:
     return torch.bfloat16 if cfg.compute_dtype == "bf16" else torch.float32
 
@@ -28,6 +36,8 @@ def compute_dtype(cfg: ModelConfig) -> torch.dtype:
 def param_shapes(cfg: ModelConfig) -> dict[str, tuple[int, ...]]:
     d, hd = cfg.d_model, cfg.d_model // cfg.n_heads
     kv = cfg.n_kv_heads * hd
+    if cfg.arch != "decoder":
+        return _arch_impl(cfg).param_shapes(cfg)
     shapes: dict[str, tuple[int, ...]] = {"emb.weight": (cfg.vocab, d)}
     for i in range(cfg.n_layers):
         p = f"layers.{i:03d}."
@@ -54,6 +64,8 @@ def param_shapes(cfg: ModelConfig) -> dict[str, tuple[int, ...]]:
 
 
 def stage_of(name: str, cfg: ModelConfig, n_stages: int) -> int:
+    if cfg.arch != "decoder":
+        return _arch_impl(cfg).stage_of(name, cfg, n_stages)
     if name.startswith("emb."):
         return 0
     if name.startswith("layers."):
@@ -63,6 +75,8 @@ def stage_of(name: str, cfg: ModelConfig, n_stages: int) -> int:
 
 def init_params(cfg: ModelConfig) -> Params:
     """Uniform(-a, a), a = std*sqrt(3), Philox keyed by (init_seed, tensor index); norms = 1."""
+    if cfg.arch != "decoder":
+        return _arch_impl(cfg).init_params(cfg)
     out: Params = {}
     a = cfg.init_std * math.sqrt(3.0)
     for idx, (name, shape) in enumerate(sorted(param_shapes(cfg).items())):
@@ -218,6 +232,8 @@ def forward(
     cfg: ModelConfig, p: Params, tokens: Tensor, moe: MoeFn | None = None
 ) -> tuple[Tensor, Tensor]:
     """tokens int64 [B, T+1] -> (mean CE loss fp32, aux loss fp32); ``moe`` swaps the MoE block."""
+    if cfg.arch != "decoder":
+        return _arch_impl(cfg).forward(cfg, p, tokens, moe=moe)
     moe_fn = moe or _moe
     dt = compute_dtype(cfg)
     inp, tgt = tokens[:, :-1], tokens[:, 1:]

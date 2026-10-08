@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from hypertrain.protocol.messages import RunManifest, f32val
+from hypertrain.protocol.messages import ODSpec, RunManifest, f32val
 
 DTYPES = ("fp32", "bf16")
 STATE_POLICIES = ("reset", "derived", "carry")
@@ -31,6 +31,9 @@ class ModelConfig:
     init_std: float = 0.02
     aux_loss_coef: float = 0.01
     compute_dtype: str = "fp32"
+    arch: str = "decoder"
+    od: ODSpec | None = None
+    profile: str = ""
 
     @property
     def is_moe(self) -> bool:
@@ -149,6 +152,9 @@ class TrainConfig:
             init_std=f32val(ms.init_std),
             aux_loss_coef=f32val(ms.aux_loss_coef),
             compute_dtype=ms.compute_dtype,
+            arch=ms.arch,
+            od=ms.od,
+            profile=ref.profile or "",
         )
         sched = inn.lr_schedule
         inner = InnerConfig(

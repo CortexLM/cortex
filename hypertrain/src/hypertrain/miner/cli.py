@@ -14,12 +14,34 @@ import numpy as np
 import numpy.typing as npt
 
 from hypertrain.data.shards import ShardSamples, ShardSetManifest, verify_shards
+from hypertrain.datasets.shards16 import ShardSet16Manifest, U16ShardSamples, verify_shards16
 from hypertrain.miner.core import Miner, MinerConfig, MinerError, canonical
 from hypertrain.protocol.messages import RunManifest
 from hypertrain.trainer.loop import SampleFn
 
 
+def _u16_sampler(data_dir: Path, manifest: RunManifest) -> SampleFn:
+    m = ShardSet16Manifest.from_json((data_dir / "manifest.json").read_text())
+    ds = manifest.dataset
+    if (m.merkle_root, m.shard_sha256_root, m.n_samples, m.unit_sha256_root) != (
+        ds.merkle_root,
+        ds.shard_sha256_root,
+        ds.n_samples,
+        ds.unit_sha256_root,
+    ):
+        raise MinerError(
+            "local shards are not the run's dataset (merkle/shard root/n_samples/unit root)"
+        )
+    errors = verify_shards16(data_dir, m)
+    if errors:
+        raise MinerError(f"shard verification failed: {errors[:3]}")
+    samples = U16ShardSamples(data_dir, m.n_shards, m.samples_per_shard, m.seq_len)
+    return samples.row
+
+
 def shard_sampler(data_dir: Path, manifest: RunManifest) -> SampleFn:
+    if manifest.dataset.sample_format.startswith("u16"):
+        return _u16_sampler(data_dir, manifest)
     m = ShardSetManifest.from_json((data_dir / "manifest.json").read_text())
     ds = manifest.dataset
     if (m.merkle_root, m.shard_sha256_root, m.n_samples) != (

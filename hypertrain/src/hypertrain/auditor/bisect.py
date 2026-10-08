@@ -32,7 +32,15 @@ from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.messages import Bisect, Resolution
 from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.loop import Assignment, Params, SampleFn, _load_batch
-from hypertrain.trainer.model import _attn, _moe, _rms, _swiglu, compute_dtype, embed
+from hypertrain.trainer.model import (
+    _arch_impl,
+    _attn,
+    _moe,
+    _rms,
+    _swiglu,
+    compute_dtype,
+    embed,
+)
 from hypertrain.trainer.optim import OptState, init_state, lr_at, step
 
 Level = Literal["step", "layer", "op"]
@@ -97,6 +105,8 @@ def traced_forward(
     Layer ``-1`` op ``input`` is the token batch; layer L ops are TAIL_OPS[:3].
     """
     m = cfg.model
+    if m.arch != "decoder":
+        return _arch_impl(m).traced_forward(cfg, p, tokens, hook)
     dt = compute_dtype(m)
     hook(-1, "input", tokens)
     inp, tgt = tokens[:, :-1], tokens[:, 1:]

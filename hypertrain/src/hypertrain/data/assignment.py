@@ -95,7 +95,10 @@ def assign_round(
     batch: int,
     base_w: int,
     generation: int = 0,
+    unit: int = 1,
 ) -> RoundAssignment:
+    if unit < 1 or batch % unit or n_samples % unit or base_w % unit:
+        raise ValueError("batch, n_samples and base_w must be multiples of unit")
     size = n_slots * batch
     if n_slots < 1 or batch < 1 or base_w < 0 or size > n_samples:
         raise ValueError("need n_slots, batch >= 1, base_w >= 0, n_slots*batch <= n_samples")
@@ -104,11 +107,14 @@ def assign_round(
     # boundary (skips <= S*B tail samples). Upgrade: per-exposure (epoch, idx) ids.
     if (base_w + size - 1) // n_samples != epoch:
         raise ValueError("round block straddles an epoch boundary")
-    rprp = FeistelPRP(assign_key(run_id, w, drand_sig), size)
-    eprp = FeistelPRP(epoch_key(run_id, epoch), n_samples)
-    off = base_w % n_samples
+    # Both PRPs act on units of `unit` consecutive samples; unit=1 is the per-sample scheme.
+    bu = batch // unit
+    rprp = FeistelPRP(assign_key(run_id, w, drand_sig), n_slots * bu)
+    eprp = FeistelPRP(epoch_key(run_id, epoch), n_samples // unit)
+    off = (base_w % n_samples) // unit
     slices = tuple(
-        tuple(eprp(off + rprp(slot * batch + j)) for j in range(batch)) for slot in range(n_slots)
+        tuple(eprp(off + rprp(slot * bu + k)) * unit + j for k in range(bu) for j in range(unit))
+        for slot in range(n_slots)
     )
     return RoundAssignment(run_id, w, generation, epoch, base_w, batch, slices)
 

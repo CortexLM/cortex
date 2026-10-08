@@ -274,7 +274,8 @@ class Miner:
         return next((m for m in view["miners"] if m["hotkey"] == self.kp.ss58), None)
 
     def start_state(self, w: int, ro: RoundOpen) -> Params:
-        if w == 0:
+        od = self.train_cfg.model.od
+        if w == 0 and not (od and od.warm_start):
             theta = init_params(self.train_cfg.model)
         else:
             theta, _ = unpack_state(self._fetch_state(ro.theta_hash))
