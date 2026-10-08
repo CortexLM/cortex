@@ -211,7 +211,7 @@ class MinerActor:
             core.train_round = functools.partial(core.train_round, after_step=bump_at(step))
             fault = Fault(step, tcfg.model.n_layers, "update", common.DELTA)
             core.Executor = functools.partial(Executor, fault=fault)  # type: ignore[misc]
-        self.c = httpx.Client(base_url=cfg["api"], timeout=120)
+        self.c = httpx.Client(base_url=cfg["api"], timeout=120, limits=common.HTTP_LIMITS)
         self.relay = Relay(self.c)
         objects = LocalFSStore(Path(cfg["objects"]))
         mcfg = core.MinerConfig(
@@ -224,7 +224,11 @@ class MinerActor:
             allow_file_upload=True,
         )
         self.m = E2EMiner(
-            mcfg, httpx.Client(timeout=120), get, wait=self.relay.tick, blob_sink=objects.put
+            mcfg,
+            httpx.Client(timeout=120, limits=common.HTTP_LIMITS),
+            get,
+            wait=self.relay.tick,
+            blob_sink=objects.put,
         )
         self.m.relay = self.relay
         self.m.mode = cfg.get("mode", "honest")
@@ -325,7 +329,7 @@ class AuditorActor:
         self.m = RunManifest.model_validate(json.loads(Path(cfg["manifest"]).read_text()))
         self.cfg = TrainConfig.from_manifest(self.m.body())
         self.get = sample(self.cfg)
-        self.c = httpx.Client(base_url=cfg["api"], timeout=120)
+        self.c = httpx.Client(base_url=cfg["api"], timeout=120, limits=common.HTTP_LIMITS)
         self.auditor = Auditor(
             HttpApi(self.c, common.WORKER), common.AUDITOR, common.CPU_ENV, self.get
         )
@@ -409,7 +413,7 @@ class AggregatorActor:
         self.run_id = self.m.run_id()
         self.objects = LocalFSStore(Path(cfg["objects"]))
         self.states = Path(cfg["states"])
-        self.c = httpx.Client(base_url=cfg["api"], timeout=120)
+        self.c = httpx.Client(base_url=cfg["api"], timeout=120, limits=common.HTTP_LIMITS)
         self.h = common.bearer(common.ADMIN)
         self.agg = Aggregator(
             self.objects,

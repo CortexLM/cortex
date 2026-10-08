@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "trainer"))
 
 from trainer_fixtures import small_manifest_body  # noqa: E402
@@ -27,6 +29,8 @@ OWNER = Keypair(b"\x77" * 32)
 IMAGE = "sha256:" + "1" * 64
 EPOCH_SECONDS = 86_400  # every scenario's finalize events fall in one ledger epoch
 DELTA = 1e-3  # size of every injected single-element fault
+# Actors pause for training/startup; never reuse a socket racing the server's idle close.
+HTTP_LIMITS = httpx.Limits(max_keepalive_connections=0)
 # Drand-round timeouts (manifest verify.T); audit_after_commit >= 40 is enforced by the protocol.
 TIMEOUTS = {
     "assign_after_open": 2,

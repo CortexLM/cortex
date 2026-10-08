@@ -22,6 +22,14 @@ from hypertrain.ledger import Params  # noqa: E402
 from hypertrain.protocol.messages import QUICKNET_GENESIS  # noqa: E402
 
 
+class ReadyServer(uvicorn.Server):
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        await super().startup(sockets=sockets)
+        if self.started:
+            assert sockets is not None
+            print(f"READY {sockets[0].getsockname()[1]}", flush=True)
+
+
 def main() -> None:
     state, secrets, registry, vest = (
         Path(sys.argv[1]),
@@ -51,9 +59,7 @@ def main() -> None:
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     sock.listen(64)
-    port = sock.getsockname()[1]
-    print(f"READY {port}", flush=True)  # socket already listening; /health gates readiness
-    uvicorn.Server(uvicorn.Config(app, log_level="warning")).run(sockets=[sock])
+    ReadyServer(uvicorn.Config(app, log_level="info", access_log=False)).run(sockets=[sock])
 
 
 if __name__ == "__main__":

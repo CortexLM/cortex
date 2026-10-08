@@ -10,7 +10,17 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from common import ADMIN, INTERNAL, OWNER, RUN_CONFIG, SLUG, WORKER, beacon_payload, bearer
+from common import (
+    ADMIN,
+    HTTP_LIMITS,
+    INTERNAL,
+    OWNER,
+    RUN_CONFIG,
+    SLUG,
+    WORKER,
+    beacon_payload,
+    bearer,
+)
 from trainer_fixtures import sample
 
 from hypertrain.protocol.envelope import seal
@@ -42,10 +52,9 @@ class Server:
             [*args, str(vest)], stdout=subprocess.PIPE, stderr=self.log, text=True, env=ONE_THREAD
         )
         self.base = f"http://127.0.0.1:{self._ready_port()}"
-        self.c = httpx.Client(base_url=self.base, timeout=120)
-        deadline = time.monotonic() + READY_SECONDS
-        while self.c.get("/health").status_code != 200:
-            assert time.monotonic() < deadline, "challenge /health never became 200"
+        self.c = httpx.Client(base_url=self.base, timeout=120, limits=HTTP_LIMITS)
+        r = self.c.get("/health", timeout=READY_SECONDS)
+        assert r.status_code == 200, f"challenge /health: {r.status_code} {r.text}"
 
     def _ready_port(self) -> int:
         assert self.proc.stdout is not None
@@ -147,7 +156,10 @@ class Proc:
         out = json.loads(self._line("RESULT ", ACTOR_CALL_SECONDS)[len("RESULT ") :])
         self.calls[-1].update(out)
         if "error" in out:
-            raise ActorError(f"{self.name}.{self.calls[-1]['cmd']}: {out['error']}: {out['msg']}")
+            raise ActorError(
+                f"{self.name}.{self.calls[-1]['cmd']}: {out['error']}: {out['msg']}\n"
+                f"actor exit={self.proc.poll()}; stderr:\n{self.tail()}"
+            )
         return out["ok"]
 
     def call(self, cmd: str, **args: Any) -> Any:
@@ -279,7 +291,13 @@ class World:
         """Send run_round to every miner process at once, then collect (they run concurrently)."""
         for mn in miners:
             mn.send("run_round", w=w, **args)
-        return [mn.recv() for mn in miners]
+        try:
+            return [mn.recv() for mn in miners]
+        except ActorError as error:
+            raise ActorError(
+                f"{error}\nchallenge-app exit={self.srv.proc.poll()}; "
+                f"stderr:\n{self.srv.log_text()[-5000:]}"
+            ) from error
 
     def push(self, rnd: int) -> None:
         self.d = max(self.d, self.latest())
