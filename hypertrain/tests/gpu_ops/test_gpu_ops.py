@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
 import sys
+import urllib.response
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from hypertrain.gpu_ops import budget
+from hypertrain.gpu_ops import budget, provider
 from hypertrain.gpu_ops.journal import Journal
 from hypertrain.gpu_ops.provider import KeyFileError, Provider, RefusedWrite, read_api_key, redact
 
@@ -105,6 +107,45 @@ def test_mock_enforces_live_paths(mock_factory: Any, tmp_path: Path) -> None:
     assert p.call("GET", "/api/v0/instances/", "v0list").status == 410
     assert p.call("GET", "/api/v0/users/current", "noslash2").status == 308
 
+
+def test_put_spacing_evidence_ignores_raw_persistence_delay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    now = 100.0
+    starts: list[float] = []
+    completions: list[float] = []
+    persisted = 0
+    write = provider.durable_write
+    monkeypatch.setenv("HT_GPU_VIRTUAL_TIME", "1")
+    monkeypatch.setattr(provider.time, "monotonic", lambda: now)
+    j = Journal(tmp_path)
+    p = Provider("http://127.0.0.1", KEY, tmp_path, j, live=False)
+    endpoint = p.endpoint("PUT", "/api/v0/asks/900/")
+    p.pace[endpoint] = 5.0
+
+    def respond(request: Any, timeout: float) -> Any:
+        starts.append(p.monotonic())
+        completions.append(p.monotonic())
+        return urllib.response.addinfourl(
+            io.BytesIO(b'{"success": true}'), {}, request.full_url, 200
+        )
+
+    def persist(path: Any, data: bytes) -> None:
+        nonlocal now, persisted
+        write(path, data)
+        if persisted == 0:
+            now += 2.0
+        persisted += 1
+
+    monkeypatch.setattr(provider._OPENER, "open", respond)
+    monkeypatch.setattr(provider, "durable_write", persist)
+    for i in range(2):
+        assert p.call("PUT", f"/api/v0/asks/{900 + i}/", f"put-{i}", body={}).ok()
+
+    vm = [r["vmono"] for r in j.all("provider_call", method="PUT")]
+    assert starts == completions == [100.0, 105.0]
+    assert vm == completions, f"response completions={completions}, journal timestamps={vm}"
+    assert all(b - a >= 5.0 for a, b in zip(vm, vm[1:], strict=False))
 
 def test_happy_e2e_three_hosts_identical_roots(
     mock_factory: Any, run_cfg: Any, tmp_path: Path

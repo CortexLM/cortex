@@ -182,7 +182,7 @@ class Provider:
         durable_write(self.raw / name, json.dumps(record).encode())
         self.journal.append(
             "provider_call",
-            vmono=self.monotonic(),
+            vmono=self.last[endpoint],  # Response completion used by pacing, not post-fsync time.
             method=method,
             path=redact(path, self.key),
             http_status=status,
