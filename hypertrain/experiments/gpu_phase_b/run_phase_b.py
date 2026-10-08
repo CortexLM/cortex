@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,7 @@ from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.island import Comm, DistComm, Geometry, island_from_manifest, train_island
 from hypertrain.trainer.loop import Assignment, LeafRecord
 from hypertrain.trainer.model import init_params, param_shapes
+from hypertrain.trainer.optim import init_state
 
 HERE = Path(__file__).resolve().parent
 EXPECTED_SM_COUNT = 170
@@ -180,8 +182,12 @@ def run_round(
     if n > n_rows:
         raise SystemExit("shard too small for assignment")
     theta = {k: place(v) for k, v in init_params(cfg.model).items()}
+    carry = None
+    if cfg.inner.state_policy == "carry":  # round 0 of a carry run: zero state (miner core rule)
+        carry = init_state(replace(cfg.inner, state_policy="reset"), theta)
     t0 = time.perf_counter()
-    res = train_island(cfg, lay, comm, theta, Assignment(run_id, 0, tuple(range(n))), get)
+    a0 = Assignment(run_id, 0, tuple(range(n)))
+    res = train_island(cfg, lay, comm, theta, a0, get, carry=carry)
     seconds = time.perf_counter() - t0
     ti, tv = topk_hashes(res.delta_payload)
     tokens = n * cfg.model.seq_len

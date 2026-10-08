@@ -92,14 +92,16 @@ def token_logprobs(cfg: ModelConfig, theta: Params, ids: Sequence[int]) -> Tenso
         captured.append(logits.detach())
         return F.cross_entropy(logits, target, *a, **k)
 
-    shim = types.SimpleNamespace(**{n: getattr(F, n) for n in dir(F) if not n.startswith("__")})
+    shim: Any = types.SimpleNamespace(
+        **{n: getattr(F, n) for n in dir(F) if not n.startswith("__")}
+    )
     shim.cross_entropy = capture
     tokens = torch.tensor([list(ids)], dtype=torch.int64)
-    model_mod.F = shim  # type: ignore[attr-defined]
+    model_mod.F = shim
     try:
         forward(cfg, theta, tokens)
     finally:
-        model_mod.F = F  # type: ignore[attr-defined]
+        model_mod.F = F
     return torch.log_softmax(captured[0].float(), dim=-1)
 
 
@@ -185,7 +187,7 @@ def lm_eval_adapter(cfg: ModelConfig, theta: Params) -> Any:
 
     inner = ByteLM(cfg, theta)
 
-    class HypertrainLM(LM):  # type: ignore[misc]
+    class HypertrainLM(LM):
         def loglikelihood(self, requests: Any) -> list[tuple[float, bool]]:
             return [inner.loglikelihood(*r.args) for r in requests]
 

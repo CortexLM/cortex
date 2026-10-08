@@ -191,7 +191,7 @@ def test_phase_b_oom_log_watch_kills_fast(mock_factory: Any, tmp_path: Path) -> 
     done = [r for r in rows if r["kind"] == "job_done"]
     assert {r["role"] for r in done} == {"h0", "h1"} and all(r["exit"] == "97" for r in done)
     assert all(r["name"] == "probe" for r in done)
-    assert "WATCH_KILL" in (rd / "rescue/h0/probe.log").read_text()
+    assert "OutOfMemoryError" in (rd / "rescue/h0/probe.watch").read_text()
     assert len([r for r in rows if r["kind"] == "absence_confirmed"]) == 2
 
 

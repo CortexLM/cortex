@@ -1,0 +1,704 @@
+{
+ "b2": {
+  "config": {
+   "profile": "phase_b 654,965,760 params, H=30 J=5, EP8 ZeRO-1, mb 2/rank, sparseloco 1.56% 2-bit",
+   "rewarmup_steps": 0,
+   "state_policy": "carry"
+  },
+  "intra_host_repeat": {
+   "h0": true,
+   "h1": true
+  },
+  "network": "see network; BBR CENSORED (kernel), cubic numbers recorded",
+  "overhead": {
+   "max_ratio": 2.062,
+   "per_host_ratio": {
+    "h0": 1.9693,
+    "h1": 2.062
+   },
+   "verdict": "REPLAN"
+  },
+  "overhead_reading": "REPLAN (>1.6): base/det = 1.97 (h0) and 2.06 (h1). Plan rule says >1.6 flags re-plan. Baseline also uses TF32 + bf16 reduced-precision + cudnn benchmark + NCCL all_reduce, so the ratio mixes determinism cost with precision/kernel differences; the base arm's hashes are identical across hosts too",
+  "per_host": {
+   "h0": {
+    "base_tok_per_s": 2111.303,
+    "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+    "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+    "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+    "probe_peak_alloc_gib": 23.228,
+    "probe_peak_mem_frac": 0.7823,
+    "run_id": "a23d36adfee265aae8ad64e45a12c0582ba923a940ffc00272fc5c2e3ef7c7eb",
+    "tok_per_s": 1072.125,
+    "topk_index_sha256": "8b952cbdf2428be1e25d1cf7909d78624106c0ffa93fc2e68db587f5444caa14",
+    "topk_value_sha256": "2cae72e151b1aac5d3022aabf43da87a7251e0b4ed8765c4f5d52aef6e9e6557"
+   },
+   "h1": {
+    "base_tok_per_s": 4125.753,
+    "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+    "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+    "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+    "probe_peak_alloc_gib": 23.228,
+    "probe_peak_mem_frac": 0.7823,
+    "run_id": "a23d36adfee265aae8ad64e45a12c0582ba923a940ffc00272fc5c2e3ef7c7eb",
+    "tok_per_s": 2000.84,
+    "topk_index_sha256": "8b952cbdf2428be1e25d1cf7909d78624106c0ffa93fc2e68db587f5444caa14",
+    "topk_value_sha256": "2cae72e151b1aac5d3022aabf43da87a7251e0b4ed8765c4f5d52aef6e9e6557"
+   }
+  },
+  "run_id": "a23d36adfee265aae8ad64e45a12c0582ba923a940ffc00272fc5c2e3ef7c7eb",
+  "verdict": "PASS"
+ },
+ "cost": {
+  "b2_admission": {
+   "credit_before_usd": "26.208764912619994",
+   "effective_cap_usd": "26.208764912619994",
+   "worst_case_usd": "24.43"
+  },
+  "basis": "snapshot-0 credit 33.48 minus final GET credit minus settled Phase A 0.630; covers a1-a3, b1, b2 (prepaid, conservative; billing may settle further)",
+  "cap_usd": "32.850",
+  "final_credit_usd": "21.280939983119993",
+  "lines": [
+   {
+    "item": "round1_a1_a3",
+    "usd": "1.832"
+   },
+   {
+    "item": "b1_code_fault",
+    "usd": "4.809235087380006"
+   },
+   {
+    "item": "b2",
+    "usd": "4.927824929500001"
+   }
+  ],
+  "total_usd": "11.569060016880007"
+ },
+ "distinct_machine_ids": 2,
+ "hosts": [
+  {
+   "driver_version": "580.95.05",
+   "instance_id": 54772665,
+   "machine_id": 54141,
+   "role": "h0"
+  },
+  {
+   "driver_version": "580.159.03",
+   "instance_id": 54772674,
+   "machine_id": 47115,
+   "role": "h1"
+  }
+ ],
+ "image": "docker.io/vastai/pytorch:2.14.0-cu130-cuda-13.2-mini-py312-2026-09-08@sha256:450710d89268fcd55632f28fdd80508ee920a53075b3f8e9f828bdc154e3d856",
+ "image_digest": "sha256:450710d89268fcd55632f28fdd80508ee920a53075b3f8e9f828bdc154e3d856",
+ "intra_host_repeat": {
+  "h0": true,
+  "h1": true
+ },
+ "inventory": {
+  "owned_instances": 0,
+  "parsed": true,
+  "total_rows": 0
+ },
+ "mismatches": [],
+ "network": {
+  "iperf": {
+   "iperf-h0-bbr-P1": {
+    "reason": "iperf output missing or malformed",
+    "verdict": "CENSORED"
+   },
+   "iperf-h0-bbr-P32": {
+    "reason": "iperf output missing or malformed",
+    "verdict": "CENSORED"
+   },
+   "iperf-h0-bbr-P8": {
+    "reason": "iperf output missing or malformed",
+    "verdict": "CENSORED"
+   },
+   "iperf-h0-cubic-P1": {
+    "congestion": "cubic",
+    "received_Gbps": 0.0304,
+    "retransmits": 1107,
+    "sent_Gbps": 0.0327
+   },
+   "iperf-h0-cubic-P32": {
+    "congestion": "cubic",
+    "received_Gbps": 0.4659,
+    "retransmits": 11080,
+    "sent_Gbps": 0.5272
+   },
+   "iperf-h0-cubic-P8": {
+    "congestion": "cubic",
+    "received_Gbps": 0.1466,
+    "retransmits": 3801,
+    "sent_Gbps": 0.1643
+   }
+  },
+  "iperf_note": "BBR runs: iperf3 'unable to set TCP_CONGESTION: ... not supported on this host' (container kernel lacks tcp_bbr) -> CENSORED; cubic h1->h0 (Taiwan->Quebec): 0.03 / 0.15 / 0.47 Gbit/s at P1/P8/P32",
+  "nccl": {
+   "h0": {
+    "backend": "nccl",
+    "nccl": "2.30.7",
+    "rows": [
+     {
+      "all_gather_busbw_GBps": 2.695071645591934,
+      "all_gather_ms": 43.57602596282959,
+      "all_to_all_busbw_GBps": 2.48156028384129,
+      "all_to_all_ms": 5.915658827871084,
+      "mib_per_rank": 16.0
+     },
+     {
+      "all_gather_busbw_GBps": 2.6652577278124743,
+      "all_gather_ms": 352.50778421759605,
+      "all_to_all_busbw_GBps": 2.3939922850517057,
+      "all_to_all_ms": 49.05634522438049,
+      "mib_per_rank": 128.0
+     },
+     {
+      "all_gather_busbw_GBps": 2.6747218621060482,
+      "all_gather_ms": 1405.0419362261891,
+      "all_to_all_busbw_GBps": 2.407755771297502,
+      "all_to_all_ms": 195.10369515046477,
+      "mib_per_rank": 512.0
+     }
+    ],
+    "world": 8
+   },
+   "h1": {
+    "backend": "nccl",
+    "nccl": "2.30.7",
+    "rows": [
+     {
+      "all_gather_busbw_GBps": 24.63963372844684,
+      "all_gather_ms": 4.766325396485627,
+      "all_to_all_busbw_GBps": 18.47832429440336,
+      "all_to_all_ms": 0.7944477954879403,
+      "mib_per_rank": 16.0
+     },
+     {
+      "all_gather_busbw_GBps": 24.46385602304774,
+      "all_gather_ms": 38.40457919286564,
+      "all_to_all_busbw_GBps": 19.747518681107955,
+      "all_to_all_ms": 5.947102210484445,
+      "mib_per_rank": 128.0
+     },
+     {
+      "all_gather_busbw_GBps": 24.491861897808253,
+      "all_gather_ms": 153.4426577971317,
+      "all_to_all_busbw_GBps": 19.98184898730757,
+      "all_to_all_ms": 23.50943840574473,
+      "mib_per_rank": 512.0
+     }
+    ],
+    "world": 8
+   }
+  },
+  "nccl_note": "intra-host busbw: h1 about 24.5 GB/s all_gather, 19.9 GB/s all_to_all; h0 about 2.7 / 2.4 GB/s (PCIe-limited host, pcie_bw 13.8) -> explains h0 1.9x slower det",
+  "skipped": false
+ },
+ "off_hardware_gate": [],
+ "outcome": "completed",
+ "overhead": {
+  "max_ratio": 2.062,
+  "per_host_ratio": {
+   "h0": 1.9693,
+   "h1": 2.062
+  },
+  "verdict": "REPLAN"
+ },
+ "phase": "B",
+ "probe": {
+  "h0": {
+   "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+   "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+   "per_rank": [
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7754,
+     "peak_mem_gib": 23.206,
+     "rank": 0,
+     "seconds": 440.254
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7771,
+     "peak_mem_gib": 23.198,
+     "rank": 1,
+     "seconds": 454.784
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7797,
+     "peak_mem_gib": 23.204,
+     "rank": 2,
+     "seconds": 441.898
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7679,
+     "peak_mem_gib": 23.212,
+     "rank": 3,
+     "seconds": 486.106
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7777,
+     "peak_mem_gib": 23.22,
+     "rank": 4,
+     "seconds": 449.69
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7823,
+     "peak_mem_gib": 23.228,
+     "rank": 5,
+     "seconds": 487.293
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7797,
+     "peak_mem_gib": 23.22,
+     "rank": 6,
+     "seconds": 454.307
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7759,
+     "peak_mem_gib": 23.212,
+     "rank": 7,
+     "seconds": 483.04
+    }
+   ],
+   "ranks_over_mem_limit": []
+  },
+  "h1": {
+   "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+   "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+   "per_rank": [
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7754,
+     "peak_mem_gib": 23.206,
+     "rank": 0,
+     "seconds": 248.284
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7771,
+     "peak_mem_gib": 23.198,
+     "rank": 1,
+     "seconds": 246.358
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7797,
+     "peak_mem_gib": 23.204,
+     "rank": 2,
+     "seconds": 248.857
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7679,
+     "peak_mem_gib": 23.212,
+     "rank": 3,
+     "seconds": 247.861
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7777,
+     "peak_mem_gib": 23.22,
+     "rank": 4,
+     "seconds": 246.461
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7823,
+     "peak_mem_gib": 23.228,
+     "rank": 5,
+     "seconds": 249.152
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7797,
+     "peak_mem_gib": 23.22,
+     "rank": 6,
+     "seconds": 248.034
+    },
+    {
+     "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+     "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+     "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+     "peak_mem_frac": 0.7759,
+     "peak_mem_gib": 23.212,
+     "rank": 7,
+     "seconds": 248.976
+    }
+   ],
+   "ranks_over_mem_limit": []
+  }
+ },
+ "reason": null,
+ "reference_delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+ "reference_leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+ "reference_role": "h0",
+ "runs": [
+  {
+   "arm": "det",
+   "machine_id": 54141,
+   "result": {
+    "H": 30,
+    "J": 5,
+    "arm": "det",
+    "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+    "env": {
+     "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+     "CUDA_DISABLE_PTX_JIT": "1",
+     "capability": [
+      12,
+      0
+     ],
+     "code_sha256": "598bd3da1255dc9fbc65c85e411d2b232922b4c29e1be99b640000ba3f41b4d8",
+     "cuda_runtime": "13.0",
+     "determinism": {
+      "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+      "bf16_reduced_precision_reduction": false,
+      "cudnn_allow_tf32": false,
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": true,
+      "deterministic_algorithms": true,
+      "deterministic_warn_only": false,
+      "matmul_allow_tf32": false,
+      "num_threads": 1,
+      "torch_preloaded": false
+     },
+     "device": "cuda",
+     "device_count": 8,
+     "driver_version": "580.95.05",
+     "gpu_name": "NVIDIA GeForce RTX 5090",
+     "hypertrain_path": "/workspace/ht-phase-b/src/hypertrain",
+     "nccl": "2.30.7",
+     "python": "3.12.14",
+     "sm_count": 170,
+     "sm_counts": [
+      170
+     ],
+     "torch": "2.14.0+cu130"
+    },
+    "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+    "layout": {
+     "dp_size": 1,
+     "ep_size": 8,
+     "n_gpus": 8,
+     "pp": 1,
+     "zero1": true
+    },
+    "leaves": [
+     "3e4aa17a6842422220493c6976e8c71d6a3c0b46258eab644f5ff15a819a4acd",
+     "859a8d549a9c110d7710131234df8e4cab0c2b182797adf7830a5e2ef056a393",
+     "e44bd165a382b62417233c0170686ed45a5ad583286cb43089d4fc5ff7047fe2",
+     "ff92e4dd8a10a321664121bfbb4c99765817889ff9d9d45a6bc6113140765954",
+     "dfe51e8fbc8162bab787cc247a8e64eaf848cb243ed4d9297795bafb11165bdc",
+     "5d2fb399b021bcadf0a6c051f68fe0265fc1946ba330edfc77a37477067cfff2",
+     "009066006af334a0066bf79bb803af2f6c387ab207108bbeda0e6585561b5b60"
+    ],
+    "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+    "manifest_sha256": "0e70ac40f5879129a6889026c1df7069a849c6b91fea5c806468026a07757884",
+    "mem_limit_frac": 0.85,
+    "n_gpus": 8,
+    "ops": [
+     "all_gather",
+     "all_to_all"
+    ],
+    "param_count": 654965760,
+    "profile": "phase_b",
+    "ranks_agree": true,
+    "ranks_over_mem_limit": [],
+    "run_id": "a23d36adfee265aae8ad64e45a12c0582ba923a940ffc00272fc5c2e3ef7c7eb",
+    "seconds": 458.454,
+    "steps_override": null,
+    "tok_per_s": 1072.125,
+    "tokens": 491520,
+    "topk_index_sha256": "8b952cbdf2428be1e25d1cf7909d78624106c0ffa93fc2e68db587f5444caa14",
+    "topk_value_sha256": "2cae72e151b1aac5d3022aabf43da87a7251e0b4ed8765c4f5d52aef6e9e6557"
+   },
+   "role": "h0"
+  },
+  {
+   "arm": "det",
+   "machine_id": 47115,
+   "result": {
+    "H": 30,
+    "J": 5,
+    "arm": "det",
+    "delta_hash": "9e2ca0634ecb65657702a71ae140bb121aa7f3754ad98dd3a86fb0d604838916",
+    "env": {
+     "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+     "CUDA_DISABLE_PTX_JIT": "1",
+     "capability": [
+      12,
+      0
+     ],
+     "code_sha256": "598bd3da1255dc9fbc65c85e411d2b232922b4c29e1be99b640000ba3f41b4d8",
+     "cuda_runtime": "13.0",
+     "determinism": {
+      "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+      "bf16_reduced_precision_reduction": false,
+      "cudnn_allow_tf32": false,
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": true,
+      "deterministic_algorithms": true,
+      "deterministic_warn_only": false,
+      "matmul_allow_tf32": false,
+      "num_threads": 1,
+      "torch_preloaded": false
+     },
+     "device": "cuda",
+     "device_count": 8,
+     "driver_version": "580.159.03",
+     "gpu_name": "NVIDIA GeForce RTX 5090",
+     "hypertrain_path": "/workspace/ht-phase-b/src/hypertrain",
+     "nccl": "2.30.7",
+     "python": "3.12.14",
+     "sm_count": 170,
+     "sm_counts": [
+      170
+     ],
+     "torch": "2.14.0+cu130"
+    },
+    "final_theta_hash": "a5f5089c8eca3abdb2ef1847f5c381d4213c596b617ea2ee556b19ab19f832aa",
+    "layout": {
+     "dp_size": 1,
+     "ep_size": 8,
+     "n_gpus": 8,
+     "pp": 1,
+     "zero1": true
+    },
+    "leaves": [
+     "3e4aa17a6842422220493c6976e8c71d6a3c0b46258eab644f5ff15a819a4acd",
+     "859a8d549a9c110d7710131234df8e4cab0c2b182797adf7830a5e2ef056a393",
+     "e44bd165a382b62417233c0170686ed45a5ad583286cb43089d4fc5ff7047fe2",
+     "ff92e4dd8a10a321664121bfbb4c99765817889ff9d9d45a6bc6113140765954",
+     "dfe51e8fbc8162bab787cc247a8e64eaf848cb243ed4d9297795bafb11165bdc",
+     "5d2fb399b021bcadf0a6c051f68fe0265fc1946ba330edfc77a37477067cfff2",
+     "009066006af334a0066bf79bb803af2f6c387ab207108bbeda0e6585561b5b60"
+    ],
+    "leaves_root": "6f0a73d6174f9bbf92382fe2722083edf128e5686a01b37a57eb29c50dda45ae",
+    "manifest_sha256": "0e70ac40f5879129a6889026c1df7069a849c6b91fea5c806468026a07757884",
+    "mem_limit_frac": 0.85,
+    "n_gpus": 8,
+    "ops": [
+     "all_gather",
+     "all_to_all"
+    ],
+    "param_count": 654965760,
+    "profile": "phase_b",
+    "ranks_agree": true,
+    "ranks_over_mem_limit": [],
+    "run_id": "a23d36adfee265aae8ad64e45a12c0582ba923a940ffc00272fc5c2e3ef7c7eb",
+    "seconds": 245.657,
+    "steps_override": null,
+    "tok_per_s": 2000.84,
+    "tokens": 491520,
+    "topk_index_sha256": "8b952cbdf2428be1e25d1cf7909d78624106c0ffa93fc2e68db587f5444caa14",
+    "topk_value_sha256": "2cae72e151b1aac5d3022aabf43da87a7251e0b4ed8765c4f5d52aef6e9e6557"
+   },
+   "role": "h1"
+  },
+  {
+   "arm": "base",
+   "machine_id": 54141,
+   "result": {
+    "H": 30,
+    "J": 5,
+    "arm": "base",
+    "delta_hash": "4e8fa32fcb3c0580c18956c50d5ff27ecb2e1cca753f7e42b30b0331bdf5dae6",
+    "env": {
+     "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+     "CUDA_DISABLE_PTX_JIT": "1",
+     "capability": [
+      12,
+      0
+     ],
+     "code_sha256": "598bd3da1255dc9fbc65c85e411d2b232922b4c29e1be99b640000ba3f41b4d8",
+     "cuda_runtime": "13.0",
+     "determinism": {
+      "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+      "bf16_reduced_precision_reduction": false,
+      "cudnn_allow_tf32": false,
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": true,
+      "deterministic_algorithms": true,
+      "deterministic_warn_only": false,
+      "matmul_allow_tf32": false,
+      "num_threads": 1,
+      "torch_preloaded": false
+     },
+     "device": "cuda",
+     "device_count": 8,
+     "driver_version": "580.95.05",
+     "gpu_name": "NVIDIA GeForce RTX 5090",
+     "hypertrain_path": "/workspace/ht-phase-b/src/hypertrain",
+     "nccl": "2.30.7",
+     "python": "3.12.14",
+     "sm_count": 170,
+     "sm_counts": [
+      170
+     ],
+     "torch": "2.14.0+cu130"
+    },
+    "final_theta_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "layout": {
+     "dp_size": 1,
+     "ep_size": 8,
+     "n_gpus": 8,
+     "pp": 1,
+     "zero1": true
+    },
+    "leaves": [
+     "0000000000000000000000000000000000000000000000000000000000000000",
+     "0000000000000000000000000000000000000000000000000000000000000000",
+     "0000000000000000000000000000000000000000000000000000000000000000",
+     "0000000000000000000000000000000000000000000000000000000000000000",
+     "0000000000000000000000000000000000000000000000000000000000000000",
+     "0000000000000000000000000000000000000000000000000000000000000000",
+     "0000000000000000000000000000000000000000000000000000000000000000"
+    ],
+    "leaves_root": "01bf8644fed90e7a09f29fafc00d0f3d4337c1cae24ebd53087ef14815ee63d8",
+    "manifest_sha256": "0e70ac40f5879129a6889026c1df7069a849c6b91fea5c806468026a07757884",
+    "mem_limit_frac": 0.85,
+    "n_gpus": 8,
+    "ops": [
+     "all_gather",
+     "all_reduce",
+     "all_to_all"
+    ],
+    "param_count": 654965760,
+    "profile": "phase_b",
+    "ranks_agree": true,
+    "ranks_over_mem_limit": [],
+    "run_id": "a23d36adfee265aae8ad64e45a12c0582ba923a940ffc00272fc5c2e3ef7c7eb",
+    "seconds": 232.804,
+    "steps_override": null,
+    "tok_per_s": 2111.303,
+    "tokens": 491520,
+    "topk_index_sha256": "ecba061e4c91d848488e8037bc1d4650a1b328d525d54b3eece7d3b2c81fef74",
+    "topk_value_sha256": "315bff386c769ef45d563f0397d2b8346a94b4562af5c88be2ada60839ddac78"
+   },
+   "role": "h0"
+  },
+  {
+   "arm": "base",
+   "machine_id": 47115,
+   "result": {
+    "H": 30,
+    "J": 5,
+    "arm": "base",
+    "delta_hash": "4e8fa32fcb3c0580c18956c50d5ff27ecb2e1cca753f7e42b30b0331bdf5dae6",
+    "env": {
+     "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+     "CUDA_DISABLE_PTX_JIT": "1",
+     "capability": [
+      12,
+      0
+     ],
+     "code_sha256": "598bd3da1255dc9fbc65c85e411d2b232922b4c29e1be99b640000ba3f41b4d8",
+     "cuda_runtime": "13.0",
+     "determinism": {
+      "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+      "bf16_reduced_precision_reduction": false,
+      "cudnn_allow_tf32": false,
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": true,
+      "deterministic_algorithms": true,
+      "deterministic_warn_only": false,
+      "matmul_allow_tf32": false,
+      "num_threads": 1,
+      "torch_preloaded": false
+     },
+     "device": "cuda",
+     "device_count": 8,
+     "driver_version": "580.159.03",
+     "gpu_name": "NVIDIA GeForce RTX 5090",
+     "hypertrain_path": "/workspace/ht-phase-b/src/hypertrain",
+     "nccl": "2.30.7",
+     "python": "3.12.14",
+     "sm_count": 170,
+     "sm_counts": [
+      170
+     ],
+     "torch": "2.14.0+cu130"
+    },
+    "final_theta_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "layout": {
+     "dp_size": 1,
+     "ep_size": 8,
+     "n_gpus": 8,
+     "pp": 1,
+     "zero1": true
+    },
+    "leaves": [
+     "0000000000000000000000000000000000000000000000000000000000000000",
+     "0000000000000000000000000000000000000000000000000000000000000000",
+     "0000000000000000000000000000000000000000000000000000000000000000",
+     "0000000000000000000000000000000000000000000000000000000000000000",
+     "0000000000000000000000000000000000000000000000000000000000000000",
+     "0000000000000000000000000000000000000000000000000000000000000000",
+     "0000000000000000000000000000000000000000000000000000000000000000"
+    ],
+    "leaves_root": "01bf8644fed90e7a09f29fafc00d0f3d4337c1cae24ebd53087ef14815ee63d8",
+    "manifest_sha256": "0e70ac40f5879129a6889026c1df7069a849c6b91fea5c806468026a07757884",
+    "mem_limit_frac": 0.85,
+    "n_gpus": 8,
+    "ops": [
+     "all_gather",
+     "all_reduce",
+     "all_to_all"
+    ],
+    "param_count": 654965760,
+    "profile": "phase_b",
+    "ranks_agree": true,
+    "ranks_over_mem_limit": [],
+    "run_id": "a23d36adfee265aae8ad64e45a12c0582ba923a940ffc00272fc5c2e3ef7c7eb",
+    "seconds": 119.135,
+    "steps_override": null,
+    "tok_per_s": 4125.753,
+    "tokens": 491520,
+    "topk_index_sha256": "ecba061e4c91d848488e8037bc1d4650a1b328d525d54b3eece7d3b2c81fef74",
+    "topk_value_sha256": "315bff386c769ef45d563f0397d2b8346a94b4562af5c88be2ada60839ddac78"
+   },
+   "role": "h1"
+  }
+ ],
+ "task": "todo 16 Phase B cross-host 8x5090 island round",
+ "verdict": "PASS",
+ "_source": "trimmed copy of .omo/evidence/hypertrain-challenge/task-16-hypertrain-challenge.json (no host addresses, GPU ids or raw logs)"
+}

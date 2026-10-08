@@ -1,0 +1,42 @@
+{
+ "source_note": "Numbers copied from evidence JSON named in docs/RESULTS.md; GET-only Vast read 2026-10-08.",
+ "budget": {
+  "cap_usd": 33.48,
+  "nominal_cap_usd": 50,
+  "opening_credit_usd": 33.48,
+  "current_credit_usd": 20.9532,
+  "total_debit_usd": 12.5298,
+  "phase_a_usd": 0.63,
+  "phase_b_usd": 11.569,
+  "phase_b_round1_a1_a3_usd": 1.832,
+  "phase_b_b1_usd": 4.809,
+  "phase_b_b2_usd": 4.928,
+  "attributed_usd": 12.199,
+  "post_final_get_residual_usd": 0.331,
+  "headroom_usd": 20.95,
+  "owned_instances": 0,
+  "volumes": 0
+ },
+ "phase_b": {
+  "overhead_h0": 1.9693,
+  "overhead_h1": 2.062,
+  "replan_threshold": 1.6,
+  "params": 654965760,
+  "hosts": 2,
+  "gpus_per_host": 8
+ },
+ "phase_a": {
+  "hosts": 3,
+  "identical_honest_runs": 6,
+  "neg_control_divergent_leaf": 11
+ },
+ "parity": {
+  "jobs_total": 150,
+  "jobs_finished": 0
+ },
+ "e2e": {
+  "tests": 14,
+  "no_replay_failed": 7,
+  "no_replay_passed": 7
+ }
+}

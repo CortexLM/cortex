@@ -275,7 +275,8 @@ class PhaseBOrchestrator(Orchestrator):
         cmd = (
             f"cd {q(self.remote_root(role))} && {{ {shlex.join(full)} > {log} 2>&1 & p=$!; w=0;"
             f" while kill -0 $p 2>/dev/null; do if [ $w = 0 ] && grep -qE {q(WATCH_RE)} {log};"
-            f" then w=1; echo WATCH_KILL >> {log}; kill $p; fi; sleep {WATCH_SECONDS}; done;"
+            f" then w=1; grep -m1 -E {q(WATCH_RE)} {log} > out/{name}.watch; kill $p; fi;"
+            f" sleep {WATCH_SECONDS}; done;"
             f" wait $p; rc=$?; [ $w = 1 ] && rc=97; echo EXIT=$rc; }}"
         )
         proc = self.ssh(role).run(cmd, "job-" + name, self.dir / "logs")

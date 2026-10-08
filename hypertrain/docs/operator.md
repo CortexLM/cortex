@@ -147,9 +147,9 @@ uv run --frozen python -m hypertrain.beacon check --live
 | vocab 259 | plan todo 4 byte-level tokenizer |
 | everything listed as `UNSOURCED (provisional, todo 13)` | not sourced yet; to be tuned by todo 13 |
 
-Inner optimizer state: the todo 7 experiment chose arm A0, carry the inner AdamW state across rounds (`state_policy = "carry"`, no re-warmup). The reset, partial reset and re-warmup arms (A1, A2, A3) all failed the gate in `experiments/results/decision.json`. The example manifest still says `reset`, as written before the decision; set `inner.state_policy = "carry"` in a production manifest.
+Inner optimizer state: the todo 7 experiment chose arm A0, carry the inner AdamW state across rounds (`state_policy = "carry"`, no re-warmup). The reset, partial reset and re-warmup arms (A1, A2, A3) all failed the gate in `experiments/results/decision.json`. The example manifest now says `carry` with no re-warmup. The Phase A and Phase B GPU profiles (`experiments/gpu_phase_a/phase_a.json`, `experiments/gpu_phase_b/phase_b.json`) pin `reset` explicitly, because they run a single round from the public start where no previous state exists and the pin keeps their run ids unchanged.
 
-Parity thresholds and the final tuned values: **PENDING (todo 13)**. The benchmark gap the run must stay under and the tuned inner and outer values come from the todo 13 parity work and will be filled in here when it lands. Don't use the provisional values above for a paid run without that.
+Parity thresholds and the final tuned values: **not available (todo 13 CENSORED)**. The full CPU grid stopped with 0{ev:experiments/results/summary.json#full_scale_status.jobs_done} of 150{ev:experiments/results/summary.json#full_scale_status.jobs_censored} jobs finished, so no tuned inner or outer values and no measured parity gap exist. Don't treat the provisional values above as validated for a paid run. See [parity.md section 5](parity.md#5-results-of-the-cpu-grid).
 
 Print the example with its provenance:
 
@@ -356,4 +356,4 @@ Exit codes: 0 ok, 2 admission rejected, 3 failed but cleaned up, 4 a rental may 
 - Disputes are bisected at step level only.
 - The canary needs docker, since podman rejects `--tmpfs ...:uid=`.
 - The journal anchor is optional.
-- Parity thresholds and tuned hyperparameters: PENDING (todo 13).
+- Parity thresholds and tuned hyperparameters: not available, the CPU grid was CENSORED (0 jobs finished); see [parity.md section 5](parity.md#5-results-of-the-cpu-grid).

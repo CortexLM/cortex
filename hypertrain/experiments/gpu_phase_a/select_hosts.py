@@ -23,6 +23,7 @@ from hypertrain.gpu_ops.provider import Provider, list_rows, read_api_key
 
 CFG = Path(__file__).resolve().parent / "live-config.json"
 
+
 def main(argv: list[str]) -> int:
     out = Path(argv[1])
     keep = [int(x) for x in argv[argv.index("--keep") + 1 :]] if "--keep" in argv else []
@@ -38,10 +39,17 @@ def main(argv: list[str]) -> int:
     qs = urllib.parse.urlencode({"select_filters": f, "limit": 500})
     ch = p.call("GET", "/api/v0/charges/?" + qs, "charges")
     q = {
-        "gpu_name": {"eq": "RTX 5090"}, "num_gpus": {"eq": 1}, "rentable": {"eq": True},
-        "rented": {"eq": False}, "verified": {"eq": True}, "reliability2": {"gte": 0.98},
-        "cuda_max_good": {"gte": 13.0}, "disk_space": {"gte": 40}, "dph_total": {"lte": 0.6},
-        "type": "on-demand", "limit": 200,
+        "gpu_name": {"eq": "RTX 5090"},
+        "num_gpus": {"eq": 1},
+        "rentable": {"eq": True},
+        "rented": {"eq": False},
+        "verified": {"eq": True},
+        "reliability2": {"gte": 0.98},
+        "cuda_max_good": {"gte": 13.0},
+        "disk_space": {"gte": 40},
+        "dph_total": {"lte": 0.6},
+        "type": "on-demand",
+        "limit": 200,
     }
     r = p.call("GET", "/api/v0/bundles/?" + urllib.parse.urlencode({"q": json.dumps(q)}), "offers")
     credit = budget.dec(acct.parsed.get("credit")) if acct.ok() else None
@@ -50,8 +58,11 @@ def main(argv: list[str]) -> int:
         "taken_utc": datetime.datetime.now(datetime.UTC).isoformat(),
         "account_id": acct.parsed.get("id") if acct.ok() else None,
         "credit_usd": str(credit),
-        "inventory": {"http_status": None if inv is None else 200, "parsed": inv is not None,
-                      "owned_instances": None if inv is None else len(inv)},
+        "inventory": {
+            "http_status": None if inv is None else 200,
+            "parsed": inv is not None,
+            "owned_instances": None if inv is None else len(inv),
+        },
         "charges_last_30d": {
             "http_status": ch.status,
             "count": len(chp.get("results") or chp.get("charges") or []),
@@ -85,7 +96,12 @@ def main(argv: list[str]) -> int:
         if len(pick) == 3:
             break
     keys = (
-        "id", "machine_id", "host_id", "dph_total", "driver_version", "geolocation",
+        "id",
+        "machine_id",
+        "host_id",
+        "dph_total",
+        "driver_version",
+        "geolocation",
         "reliability2",
     )
     snap["offers_seen"] = None if offers is None else len(offers)
@@ -104,6 +120,7 @@ def main(argv: list[str]) -> int:
     )
     CFG.write_text(json.dumps(cfg, indent=1) + "\n")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))

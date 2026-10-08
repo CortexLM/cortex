@@ -115,16 +115,13 @@ The open question behind the whole design was whether an RTX 5090 gives bit-iden
 
 Evidence was recomputed from the raw rescued artifacts by an independent verifier. The run used a pinned image (`vastai/pytorch` at digest `sha256:450710d8...d856`), `torch 2.14.0+cu130`, deterministic algorithms on and TF32 off.
 
-### Still running
+### Results from the experiments
 
-<!-- PENDING:todo7 -->
-- **Optimizer state between rounds.** Whether the inner optimizer should reset, use a public derived state, or carry over is being decided by a CPU experiment. Results pending.
+- **Optimizer state between rounds.** Decided: `state_policy = carry` with segment audits. On a 4.3M-parameter CPU proxy the reset arm A1, re-warmup arm A2 and derived arm A3 all failed the gate; A1 was 2.23%{ev:experiments/results/decision.json#cells.M2_H30.arms.A1.mean_gap*100} worse than carry at M=2, H=30 (A3: 10.5%{ev:experiments/results/decision.json#cells.M2_H30.arms.A3.mean_gap*100}). Tiny proxy, no claim about scale; see [docs/mechanism.md](docs/mechanism.md#8-evidence-from-experiments).
 
-<!-- PENDING:todo13 -->
-- **Parity thresholds.** A CPU grid and an equivalence-test harness for many replicas across regions. Results pending.
+- **Parity thresholds.** The CPU grid for many replicas across regions did not finish: 0{ev:experiments/results/summary.json#full_scale_status.jobs_done} of 150{ev:experiments/results/summary.json#full_scale_status.jobs_censored} full-scale jobs completed before the user stopped it, so parity is not demonstrated and a 100B claim stays an extrapolation. Details and the re-run recipe are in [docs/parity.md](docs/parity.md#5-results-of-the-cpu-grid).
 
-<!-- PENDING:todo16 -->
-- **GPU determinism, Phase B.** One deterministic DiLoCo round of a larger MoE model on multi-GPU 8x RTX 5090 hosts, with overhead and network measurements. Results pending.
+- **GPU determinism, Phase B: passed, with a cost flag.** On two hosts of 8x RTX 5090 (Quebec and Taiwan, drivers 580.95.05 and 580.159.03), one round of a 654965760{ev:experiments/results/phase_b_summary.json#runs.0.result.param_count}-parameter MoE (H=30{ev:experiments/results/phase_b_summary.json#runs.0.result.H}, J=5{ev:experiments/results/phase_b_summary.json#runs.0.result.J}) gave identical leaves root, delta hash, final theta and top-k sets on both hosts. Peak memory was 78%{ev:experiments/results/phase_b_summary.json#b2.per_host.h0.probe_peak_mem_frac*100} per GPU. Determinism costs too much: base/det time ratio 1.97{ev:experiments/results/phase_b_summary.json#overhead.per_host_ratio.h0} and 2.06{ev:experiments/results/phase_b_summary.json#overhead.per_host_ratio.h1}, above the plan's 1.6 re-plan flag. Part of that gap is the baseline using TF32, bf16 reduced-precision reductions and cuDNN autotune; the split is not measured. Inter-host TCP (cubic) reached 0.03{ev:experiments/results/phase_b_summary.json#network.iperf.iperf-h0-cubic-P1.received_Gbps}, 0.15{ev:experiments/results/phase_b_summary.json#network.iperf.iperf-h0-cubic-P8.received_Gbps} and 0.47{ev:experiments/results/phase_b_summary.json#network.iperf.iperf-h0-cubic-P32.received_Gbps} Gbit/s with 1, 8 and 32 streams; BBR could not be tested because the host kernel lacks it. Phase B cost USD 11.57{ev:experiments/results/phase_b_summary.json#cost.total_usd}. Details: [docs/mechanism.md](docs/mechanism.md#cross-host-bitwise-result).
 
 ## Quickstart
 
@@ -233,7 +230,7 @@ What isn't done yet, honestly:
 - **Single GPU miner client.** `hypertrain-miner` currently enforces one GPU per island. The multi-rank island layout exists in `trainer/island.py` and is tested on CPU, but the client doesn't launch it yet.
 - **Joining is manual.** Contract v1 has no public join route. `hypertrain-miner join` prints a signed admission request (with a hardware self-check) that the operator adds to the roster.
 - **Dispute bisection in the miner is step level only.** The auditor side bisects down to layer and operation; the miner client takes part at step level and doesn't poll open disputes on its own.
-- **GPU determinism is proven for one setup.** Phase A covers single RTX 5090 hosts with a pinned image. Multi-GPU hosts are Phase B, still pending. The hardware self-check has only run on CPU.
+- **GPU determinism is proven for one setup.** Phase A covers single RTX 5090 hosts with a pinned image. Multi-GPU hosts (Phase B) passed on two hosts; see the Phase B note above. The hardware self-check has only run on CPU.
 - **Quality parity is unproven.** No parity claim is made until the pending CPU and GPU work reports.
 - **One run per state directory** in the challenge service.
 - **The publish secret scan is a heuristic.** `scripts/publish.sh` skips digit-free values of 20+ characters under a credential parent. It does not guarantee a clean tree, so the out-of-band token approval and a manual review stay mandatory.

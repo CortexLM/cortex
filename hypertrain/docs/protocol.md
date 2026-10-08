@@ -141,4 +141,4 @@ An auditor and a miner must produce identical bits on any allowed host. A manife
 6. **Shapes.** Fixed micro-batch and sequence length, pre-tokenized u32 shards, no dynamic padding.
 7. **Kernels.** Deterministic attention backward, MoE router ties broken by the lowest index, fixed-order reductions. Cross-rank sums inside an island are fixed-order `all_gather` plus local sum (`forbid_reductions` guards against NCCL `all_reduce`).
 8. **Master state.** fp32 master weights and optimizer state; `compute_dtype` is `bf16` or `fp32`.
-9. **Evidence.** Phase A on three rented hosts is summarized in [mechanism.md](mechanism.md#cross-host-bitwise-result) (section "Cross-host bitwise result"). Phase B is reported by the final evidence task and is not claimed here.
+9. **Evidence.** Phase A on three rented hosts is summarized in [mechanism.md](mechanism.md#cross-host-bitwise-result) (section "Cross-host bitwise result"). The 8-GPU island result (Phase B) is in the same document, subsection "Cross-host bitwise result on 8-GPU islands".

@@ -11,7 +11,7 @@
     "assignment sample ids 0..H*mb*n_gpus-1 of data/train/shard-00000.u32, identical on every host": "plan todo 16 'same assignment on every host'",
     "tiny profile": "CPU test-only shape (mock e2e, gloo, fake-device proxy); never used for paid runs",
     "inner.state_policy=reset, rewarmup_steps=3": "single round from the public start; pinned by todo 13 when the example manifest default switched to carry, so run_ids equal the pre-switch (paid Phase A) manifests",
-    "inner.state_policy=reset, rewarmup_steps=0": "Phase B is one round from init: no previous round state exists (example_manifest switched to carry by todo 7 at 23:07; carry requires prior state); pinned here so example drift cannot change the workload"
+    "inner.state_policy=carry, rewarmup_steps=0": "plan todo 16 measures the production round; todo 7 decision (experiments/results/decision.json) + todo 13 manifest default = carry with no re-warmup (segment replay requires 0). Round 0 starts from zero AdamW state exactly like hypertrain.miner.core._carry. Pinned so manifest drift cannot change the workload; run IDs recorded in evidence"
   },
   "profiles": {
     "phase_b": {
@@ -32,7 +32,7 @@
         "J": 5,
         "micro_batch": 2,
         "grad_accum": 1,
-        "state_policy": "reset",
+        "state_policy": "carry",
         "rewarmup_steps": 0
       },
       "outer": {
@@ -67,7 +67,7 @@
         "J": 2,
         "micro_batch": 1,
         "grad_accum": 1,
-        "state_policy": "reset",
+        "state_policy": "carry",
         "rewarmup_steps": 0
       },
       "outer": {
