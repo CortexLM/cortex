@@ -10,7 +10,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# ponytail: conftest must import first (determinism setup before torch); ruff sees it as
+# first-party since tests/conftest.py exists, so pin the order with an isort split.
 import conftest  # noqa: E402,F401
+
+# isort: split
 from aud_fixtures import (  # noqa: E402
     AUDITOR,
     ENV,
