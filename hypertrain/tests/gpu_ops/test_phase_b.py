@@ -135,6 +135,15 @@ def test_phase_b_e2e_mock_two_hosts(mock_factory: Any, tmp_path: Path) -> None:
     assert ev["mismatches"] == [] and ev["verdict"] == "CENSORED" and ev["off_hardware_gate"]
     assert set(ev["overhead"]["per_host_ratio"]) == {"h0", "h1"}
     assert all(ev["network"]["nccl"][r]["world"] == 8 for r in ("h0", "h1"))
+    for r in ("h0", "h1"):
+        net = ev["network"]["nccl"][r]
+        assert net["backend"] == "gloo"
+        assert [row["mib_per_rank"] for row in net["rows"]] == [0.125, 1, 4]
+        assert all(
+            row[op + "_busbw_GBps"] > 0
+            for row in net["rows"]
+            for op in ("all_gather", "all_to_all")
+        )
     assert ev["network"]["iperf"] == "CENSORED" and ev["network"]["iperf_endpoint"] is None
     assert ev["inventory"] == {"parsed": True, "total_rows": 0, "owned_instances": 0}
     rows = journal(rd)

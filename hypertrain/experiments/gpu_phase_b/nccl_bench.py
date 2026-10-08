@@ -2,7 +2,7 @@
 
 busbw = (n-1)/n * bytes / t (nccl-tests convention; bytes = all_gather output / all_to_all input).
 Usage: torchrun --standalone --nproc-per-node N nccl_bench.py --device cuda|cpu --out OUT.json
-       [--sizes-mib 16,128,512] [--iters 5]
+       [--sizes-mib SIZES] [--iters 5] (defaults: CUDA 16,128,512; CPU 0.125,1,4)
 """
 
 from __future__ import annotations
@@ -52,9 +52,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", choices=["cuda", "cpu"], required=True)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--sizes-mib", default="16,128,512")
+    ap.add_argument("--sizes-mib")
     ap.add_argument("--iters", type=int, default=5)
     a = ap.parse_args()
+    sizes = a.sizes_mib or ("16,128,512" if a.device == "cuda" else "0.125,1,4")
     local = int(os.environ.get("LOCAL_RANK", "0"))
     if a.device == "cuda":
         torch.cuda.set_device(local)
@@ -62,7 +63,7 @@ def main() -> int:
     else:
         dist.init_process_group("gloo")
     try:
-        rows = [bench(a.device, float(s), a.iters) for s in a.sizes_mib.split(",")]
+        rows = [bench(a.device, float(s), a.iters) for s in sizes.split(",")]
         if dist.get_rank() == 0:
             meta = {"world": dist.get_world_size(), "backend": dist.get_backend()}
             if a.device == "cuda":
