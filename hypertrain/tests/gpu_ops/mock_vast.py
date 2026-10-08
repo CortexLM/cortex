@@ -8,6 +8,7 @@ show_429 (n), delete_429 (n). State at GET /__state.
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import re
@@ -58,8 +59,10 @@ def spawn_sshd(iid: int) -> tuple[int, subprocess.Popen[bytes], Path]:
         f"ListenAddress 127.0.0.1\nPort {port}\nHostKey {d}/host\nPidFile {d}/pid\n"
         f"AuthorizedKeysFile {d}/authorized_keys\nStrictModes no\n"
         "PermitRootLogin prohibit-password\n"
-        "PasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM yes\n"
-        f"AllowUsers {os.environ.get('USER', 'root')}\nLogLevel ERROR\nMaxStartups 100\n"
+        "PasswordAuthentication no\nKbdInteractiveAuthentication no\n"
+        # PAM session setup needs root (/run/motd.dynamic); a plain runner user must not use it
+        f"UsePAM {'yes' if os.getuid() == 0 else 'no'}\n"
+        f"AllowUsers {getpass.getuser()}\nLogLevel ERROR\nMaxStartups 100\n"
     )
     log = open(d / "sshd.log", "ab")
     proc = subprocess.Popen(

@@ -5,6 +5,7 @@ import hypertrain.trainer  # noqa: F401  (determinism before torch)
 # isort: split
 
 import json
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -205,7 +206,7 @@ def test_design_is_preregistered_and_bounded() -> None:
 def test_streaming_p1_equals_flat_and_variants_run() -> None:
     sc = pg.SCALES["smoke"] | {"steps": 12}
     cfg = pg.build_cfg(sc, 0, 2)
-    tr = ChunkedShards(ROOT / "data" / "train", sc["seq_len"])
+    tr = ChunkedShards(Path(os.environ["HYPERTRAIN_DATA_DIR"]) / "train", sc["seq_len"])
     spec = SimSpec(
         M=2,
         H=3,

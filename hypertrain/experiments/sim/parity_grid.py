@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
+# HYPERTRAIN_DATA_DIR: corpus root holding train/ and holdout/ (default: <repo>/data, unpublished)
+DATA = Path(os.environ.get("HYPERTRAIN_DATA_DIR", ROOT / "data"))
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 PREREG = HERE / "parity_prereg.json"
@@ -296,8 +298,8 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
             return row | {"status": "CENSORED", "reason": "cap reached before start"}
         sc, c = job["scale"], job["spec"]
         S, s = sc["steps"], job["seed"]
-        tr = ChunkedShards(ROOT / "data" / "train", sc["seq_len"])
-        ho = ChunkedShards(ROOT / "data" / "holdout", sc["seq_len"])
+        tr = ChunkedShards(DATA / "train", sc["seq_len"])
+        ho = ChunkedShards(DATA / "holdout", sc["seq_len"])
         ho_ids = list(range(0, ho.n, ho.n // sc["n_heldout"]))[: sc["n_heldout"]]
         if job["kind"] == "dp":
             cfg = build_cfg(sc, s, GLOBAL_BATCH)

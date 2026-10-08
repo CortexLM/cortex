@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import getpass
 import hashlib
 import importlib.util
 import json
@@ -60,7 +61,7 @@ def phase_b_cfg(tmp: Path, base: str, **over: Any) -> Path:
         shard.write_bytes(
             rng.integers(0, 259, size=(64, 1025), dtype=np.uint32).astype("<u4").tobytes()
         )
-    cfg = json.loads((B / "live-config.json").read_text())
+    cfg = json.loads((B / "live-config.example.json").read_text())
     defaults: dict[str, Any] = dict(
         base_url=base,
         key_file=str(key),
@@ -69,10 +70,12 @@ def phase_b_cfg(tmp: Path, base: str, **over: Any) -> Path:
         phase_cap_usd="27.37",
         hard_deadline_seconds=3600,
         hosts=[{"role": f"h{i}", "machine_id": 6000 + i, "max_dph_total": 4.2} for i in range(2)],
+        tree=str(TREE),
         shard=str(shard),
         remote_root=str(tmp / "remote-{role}"),
         remote_python=sys.executable,
         setup_command="",
+        ssh_user=getpass.getuser(),
         profile="tiny",
         device="cpu",
         evidence_path=str(tmp / "evidence.json"),
@@ -292,7 +295,7 @@ def test_fake_device_emulated_island_matches_gloo(tmp_path: Path, arm: str) -> N
     """8 emulated ranks on the CUDA-free proxy device == 8-rank gloo run of the same worker."""
     rb = _load("run_phase_b")
     spec = json.loads((B / "phase_b.json").read_text())["profiles"]["tiny"]
-    shard = TREE / "data/train/shard-00000.u32"
+    shard = Path(os.environ["HYPERTRAIN_DATA_DIR"]) / "train/shard-00000.u32"
     sha = hashlib.sha256(shard.read_bytes()).hexdigest()
     get, n_rows = rb.shard_reader(shard, sha, spec["model"]["seq_len"])
     out = tmp_path / "gloo.json"

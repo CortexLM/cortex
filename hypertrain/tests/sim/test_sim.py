@@ -5,6 +5,7 @@ import hypertrain.trainer  # noqa: F401  (determinism before torch)
 # isort: split
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -32,7 +33,7 @@ STEPS = 12
 
 def _setup() -> tuple[object, ChunkedShards]:
     cfg = base_cfg(0, STEPS, seq_len=64, tiny=True)
-    return cfg, ChunkedShards(ROOT / "data" / "train", 64)
+    return cfg, ChunkedShards(Path(os.environ["HYPERTRAIN_DATA_DIR"]) / "train", 64)
 
 
 def test_m1_h1_equals_data_parallel_bitwise() -> None:

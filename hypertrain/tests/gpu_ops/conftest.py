@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import getpass
 import hashlib
 import json
 import os
@@ -131,7 +132,7 @@ def run_cfg(tmp_path: Path) -> Any:
             "shard": str(shard),
             "remote_root": str(tmp_path / "remote-{role}"),
             "remote_python": sys.executable,
-            "ssh_user": "root",
+            "ssh_user": getpass.getuser(),
             "profile": "tiny",
             "device": "cpu",
             "runs_per_host": 2,

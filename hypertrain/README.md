@@ -141,7 +141,7 @@ uv run --frozen python -m hypertrain.auditor --help
 uv run --frozen pytest -q tests/protocol tests/ledger
 ```
 
-The full quality gate (format, lint, types and every test) is `bash scripts/check.sh`. CI runs it on each push to main and each pull request (the slow sim/e2e tests in a parallel job); images are published manually. It takes a while.
+The full quality gate (format, lint, types and every test) is `bash scripts/check.sh`. CI runs it on each push to main and each pull request (the slow sim/e2e tests in a parallel job); once CI passes on main, `images.yml` publishes and attests both images to GHCR. It takes a while.
 
 ### Run the challenge service locally
 

@@ -16,19 +16,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "trainer"))
 import common  # noqa: E402,F401  (determinism before torch)
 import harness  # noqa: E402
 
-EVIDENCE = Path(
-    os.environ.get(
-        "HT_E2E_EVIDENCE",
-        "/root/distributed-decision-training/.omo/evidence/hypertrain-challenge/task-17-scenarios",
-    )
-)
+# Set HT_E2E_EVIDENCE to keep the per-scenario evidence; by default it goes to a tmp dir.
+_EVIDENCE_ENV = os.environ.get("HT_E2E_EVIDENCE")
+
+
+@pytest.fixture(scope="session")
+def evidence_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return Path(_EVIDENCE_ENV) if _EVIDENCE_ENV else tmp_path_factory.mktemp("e2e-evidence")
 
 
 @pytest.fixture
-def scenario_dir(request: pytest.FixtureRequest, tmp_path: Path) -> Path:
+def scenario_dir(request: pytest.FixtureRequest, tmp_path: Path, evidence_root: Path) -> Path:
     if harness.NO_REPLAY:
         return tmp_path / "evidence"
-    d = EVIDENCE / request.node.name
+    d = evidence_root / request.node.name
     shutil.rmtree(d, ignore_errors=True)
     d.mkdir(parents=True)
     return d

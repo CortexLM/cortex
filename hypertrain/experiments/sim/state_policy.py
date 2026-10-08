@@ -31,6 +31,8 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
+# HYPERTRAIN_DATA_DIR: corpus root holding train/ and holdout/ (default: <repo>/data, unpublished)
+DATA = Path(os.environ.get("HYPERTRAIN_DATA_DIR", ROOT / "data"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 OUTER_LR_GRID = (0.2, 0.4, 0.7, 1.0)
@@ -97,8 +99,8 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         if time.time() > job["deadline"]:
             return row | {"status": "CENSORED", "heldout_loss": "", "diverged": ""}
         cfg = base_cfg(job["seed"], job["steps"], job.get("seq_len"), job.get("tiny", False))
-        tr = ChunkedShards(ROOT / "data" / "train", cfg.model.seq_len)
-        ho = ChunkedShards(ROOT / "data" / "holdout", cfg.model.seq_len)
+        tr = ChunkedShards(DATA / "train", cfg.model.seq_len)
+        ho = ChunkedShards(DATA / "holdout", cfg.model.seq_len)
         ho_ids = list(range(0, ho.n, ho.n // job.get("n_heldout", N_HELDOUT)))
         ho_ids = ho_ids[: job.get("n_heldout", N_HELDOUT)]
         arm = ARMS[job["arm"] if job["kind"] == "diloco" else "A0"]
@@ -148,7 +150,7 @@ def init_eval(seed: int, steps: int, seq_len: int | None, tiny: bool, n_heldout:
     from hypertrain.trainer.model import init_params
 
     cfg = base_cfg(seed, steps, seq_len, tiny)
-    ho = ChunkedShards(ROOT / "data" / "holdout", cfg.model.seq_len)
+    ho = ChunkedShards(DATA / "holdout", cfg.model.seq_len)
     ids = list(range(0, ho.n, ho.n // n_heldout))[:n_heldout]
     return heldout_loss(cfg, init_params(cfg.model), ids, ho)
 

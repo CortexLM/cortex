@@ -16,7 +16,14 @@ secrets=$(mktemp -d)
 cleanup() {
   "$engine" logs "$name" 2>&1 | sed 's/^/  [container] /' || true
   "$engine" rm -f "$name" >/dev/null 2>&1 || true
-  rm -rf "$secrets"
+  # best effort: files may be owned by a subuid under rootless podman, so retry through the engine
+  rm -rf "$secrets" 2>/dev/null || {
+    chmod -R u+rwX "$secrets" 2>/dev/null || true
+    rm -rf "$secrets" 2>/dev/null \
+      || "$engine" run --rm -v "$secrets:/s" --user 0:0 --entrypoint rm "$image" -rf /s/. 2>/dev/null \
+      || true
+    rmdir "$secrets" 2>/dev/null || true
+  }
 }
 trap cleanup EXIT
 
@@ -24,10 +31,13 @@ pass() { echo "PASS: $*"; }
 die() { echo "FAIL: $*" >&2; exit 1; }
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
+# podman rejects the uid= tmpfs option; a world-writable /data is equivalent for the uid-65532 check.
+if [ "$engine" = docker ]; then data_opt=/data:uid=65532,gid=65532; else data_opt=/data:mode=1777; fi
+
 start() { # extra run args...
   "$engine" rm -f "$name" >/dev/null 2>&1 || true
   "$engine" run -d --name "$name" --read-only --user 65532:65532 --cap-drop ALL \
-    --security-opt no-new-privileges --tmpfs /tmp --tmpfs /data:uid=65532,gid=65532 \
+    --security-opt no-new-privileges --tmpfs /tmp --tmpfs "$data_opt" \
     -p "127.0.0.1:$port:8000" "$@" "$image" >/dev/null
   for _ in $(seq 120); do
     [ "$(code "$base/version")" = 200 ] && return 0
@@ -72,8 +82,11 @@ openssl rand -hex 32 >"$secrets/admin.token"
 openssl rand -hex 32 >"$secrets/worker.token"
 openssl rand -hex 32 >"$secrets/coord.key"
 printf '%s\n' "$internal" >"$secrets/internal.token"
-chown -R 65532:65532 "$secrets" 2>/dev/null || chmod 0444 "$secrets"/*
-chmod 0500 "$secrets"; chmod 0400 "$secrets"/* 2>/dev/null || true
+# The container runs as 65532, which is neither the owner nor (on docker, no userns remap) in the
+# runner user's group, so only "other" bits help: world-readable files in a world-searchable dir.
+# Rootless podman maps the invoking user to container root and 65532 to a subuid, so "other" is the
+# only class that works there too. The dir is a private mktemp path, so this is harmless.
+chmod 0755 "$secrets"; chmod 0444 "$secrets"/*
 start -v "$secrets:/run/secrets:ro"
 h=$(code "$base/health"); [ "$h" = 200 ] || die "/health with secrets is $h, expected 200"
 pass "/health 200 with secrets"
