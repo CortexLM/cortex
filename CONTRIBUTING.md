@@ -41,7 +41,7 @@ SQLite, signatures, RLM state, scoring, sealing, and validator verification.
 
 ## Pull requests
 
-Target `main`, fill in the pull request template, and request a Greptile review.
+Target `main`, fill in the pull request template, and request a CodeRabbit review.
 Use Conventional Commit subjects no longer than 72 characters:
 
 ```text

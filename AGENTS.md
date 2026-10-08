@@ -184,7 +184,7 @@ signed leaves, gateway seal, a `sealed: true` fetch and validator recomputation.
 Health endpoints alone do not verify a challenge. CI must not contact OpenRouter,
 rent provider compute, boot Firecracker or submit an on-chain transaction.
 
-Pull requests require a Greptile review. If silent, comment `@greptileai review`.
+Pull requests require a CodeRabbit review. If silent, comment `@coderabbitai review`.
 Commit subjects use `type(scope): lowercase summary`, at most 72 characters.
 
 ## Never commit

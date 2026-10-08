@@ -17,10 +17,10 @@
 - [ ] No challenge content, credential, floating production image, or invented digest was added
 - [ ] Frozen protocol specifications and `BASE_*`/domain compatibility remain intact
 
-## Greptile
+## CodeRabbit
 
-- [ ] Greptile reviewed this PR and findings are resolved or answered
-- [ ] If the bot was silent, I commented `@greptileai review`
+- [ ] CodeRabbit reviewed this PR and findings are resolved or answered
+- [ ] If the bot was silent, I commented `@coderabbitai review`
 
 ## Risk
 
