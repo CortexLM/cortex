@@ -57,7 +57,7 @@ A further challenge, Sentinel, is planned and is not live. See [docs/ecosystem.m
 ## The Cortex ecosystem
 
 <p align="center">
-  <img src="docs/assets/cortex-ecosystem.png" alt="Cortex at the center, with miners and challenges on one side and the Cortex apps on the other" width="100%">
+  <img src="docs/assets/cortex-ecosystem.png" alt="Cortex architecture: challenges feed the Cortex network, which powers the Cortex apps" width="100%">
 </p>
 
 Cortex is the engine behind a family of products. Miners improve models and detectors through challenges, and the apps are where those improvements are meant to ship.
