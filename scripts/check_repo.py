@@ -20,8 +20,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FROZEN_SPECS = {
     "docs/BUNDLE_SPEC.md": "c7a43fca324a2f44e7c40bca5acde1bd5ea30cabde1e8c0a0011aeedbb4330a3",
-    "docs/DESIGN_CHALLENGE.md": "c93051da4e08f16390dbbef33747aee8ccc7451a2cb4660acc105a8fff231617",
-    "docs/PRISM.md": "bce5789ac64cbc75e62ac78daa8452b8ae3a5eaff0b0134afb6f9ff9dd372925",
 }
 SHARES = {"bounty": 2000, "proof": 8000}
 PROPORTIONAL_SHARES = {"bounty": 3000, "proof": 7000}

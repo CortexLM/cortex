@@ -192,6 +192,12 @@ reports `validator outcome=verified` for the same root/vector from historical
 chain state. The unsealed UID0 fallback is a readiness failure, not a weight to
 submit.
 
+To run a validator without Compose, use `scripts/run-validator.sh` from a
+repository clone. It needs `WALLET_NAME`, `WALLET_HOTKEY` and an independently
+pinned `GATEWAY_PUBLIC`, takes trust files from `config/`, and refuses to run
+master-only commands; see the
+[quick start](../docs/external-miner/validators.md#quick-start-one-script).
+
 ## Proof VM host
 
 The host requires Linux, `/dev/kvm`, Firecracker, jailer, nftables/network

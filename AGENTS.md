@@ -21,9 +21,8 @@ bounty/proof 2,000/8,000 profile; algorithm 2 is bounty/proof 3,000/7,000
 (document version >=2); algorithm 3 (document version >=3) admits any 1..64
 unique ids and pays each challenge `share * min(sum(leaves), 10^12) / 10^12`.
 Activation is an offline owner ceremony. Design, Prism and Relearn are retired
-products. Their frozen specifications and historical miner pointers remain for
-compatibility; no active code, service, trust-root row or leaf may register
-them.
+products and their documentation has been removed. No active code, service,
+trust-root row or leaf may register them.
 
 Start with [the architecture](docs/ARCHITECTURE.md),
 [Proof](docs/PROOF.md), [challenge containers](docs/CHALLENGES.md) and
@@ -51,8 +50,7 @@ The working branch is `main`. Production releases are annotated `v*.*.*` tags.
 
 - Preserve `BASE_*` names, deployed compatibility paths and every `base-*-v1`
   signature domain. `CORTEX_*` is an accepted master alias only.
-- Do not edit `docs/BUNDLE_SPEC.md`, `docs/DESIGN_CHALLENGE.md` or
-  `docs/PRISM.md`. Their exact SHA-256 values are checked by
+- Do not edit `docs/BUNDLE_SPEC.md`. Its exact SHA-256 value is checked by
   `scripts/check_repo.py`.
 - Production image references are digest-only. Never invent a digest; an empty
   or unknown pin remains fail-closed.

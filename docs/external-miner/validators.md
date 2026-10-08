@@ -2,6 +2,25 @@
 
 # Validator guide
 
+## Quick start (one script)
+
+From a clone of this repository, after `uv sync --locked --extra chain`:
+
+```bash
+export WALLET_NAME=validator WALLET_HOTKEY=default
+export GATEWAY_PUBLIC=<gateway hotkey pinned from an independent source>
+scripts/run-validator.sh --verify-only   # then run without the flag to submit
+```
+
+`scripts/run-validator.sh` defaults to `GATEWAY=https://chain.joinbase.ai`,
+`NETUID=100`, `NETWORK=finney` and `STATE_DB=$HOME/.cortex/validator.sqlite3`.
+It checks that `GET $GATEWAY/v1/weights/latest` answers with the expected
+netuid, takes the trust files and minimum versions from `config/`, reads the
+subnet `weights_version` from the chain (override with `VERSION_KEY`) and then
+runs `cortex validator`. `--dry-run` prints the command without running it;
+`--once` runs one tick. The script refuses master-only commands and master
+environments. The sections below describe the underlying CLI.
+
 Cortex runs a centralized authoritative gateway. The master gateway is the
 authority for weights: it serves `/v1/weights/latest`, `/v1/weights/{epoch}`
 and `/v1/bundle/{epoch}`. A Python validator consumes those endpoints,

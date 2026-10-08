@@ -4,7 +4,7 @@ Cortex is a Python Bittensor research subnet. The owner-signed trust root lists
 the live challenges: legacy bounty/proof 2,000/8,000 (algorithm 1), 3,000/7,000
 (algorithm 2, version >=2) or 1..64 unique ids (algorithm 3, version >=3). The
 sum is always 10,000. Proof is built in; every other challenge is a Docker
-container per docs/CHALLENGES.md. Design, Prism and Relearn are historical only.
+container per docs/CHALLENGES.md. Design, Prism and Relearn are retired and removed.
 
 - Preserve frozen SCALE encodings, Merkle construction, aggregation and every
   `base-*-v1` signature preimage. Cross-language vectors must remain green.

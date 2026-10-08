@@ -81,9 +81,8 @@ frozen consensus wire format. The public documentation contract is checked by
 `uv run python scripts/check_repo.py`.
 
 `relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design` and `prism`
-are retired products with no trust-root row or emission. Their historical
-[Relearn](relearn.md), [image](relearn-image.md), [agent](relearn-agent.md) and
-[multimodal](relearn-mm.md) pointers remain for old links only.
+are retired products with no trust-root row or emission. Their documentation
+has been removed.
 
 ## License
 
