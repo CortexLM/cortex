@@ -23,10 +23,10 @@ of copying the same contract into a second runbook.
 
 ## Frozen and historical material
 
-`BUNDLE_SPEC.md`, `DESIGN_CHALLENGE.md` and `PRISM.md` are byte-pinned by
-`scripts/check_repo.py`. Do not edit them. Design, Prism and Relearn are not live
-products. The Relearn files under `external-miner/` and `proof-tbench.md` remain
-short historical pointers so old URLs do not disappear.
+`BUNDLE_SPEC.md` is byte-pinned by `scripts/check_repo.py`. Do not edit it.
+Design, Prism and Relearn are retired products and their documentation has been
+removed. `external-miner/proof-tbench.md` remains a short historical pointer so
+an old URL does not disappear.
 
 ## API changes
 

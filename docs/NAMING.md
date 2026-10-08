@@ -45,8 +45,8 @@ The signed trust root lists the live challenge ids and their shares, which total
 (algorithm 3). `proof` is built in; every other id is a
 [challenge container](CHALLENGES.md) named `cortex-challenge-<id>`, with state in
 the `cortex-challenge-<id>-data` volume and routes under `/challenge/<id>/`.
-Design, Prism and Relearn names may appear in frozen or historical documentation
-only. They are not services, routes, trust-root rows or emission recipients.
+Design, Prism and Relearn are retired products whose documentation has been
+removed. They are not services, routes, trust-root rows or emission recipients.
 
 ## File and command names
 

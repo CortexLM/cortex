@@ -1,7 +1,0 @@
-{
-  "triggerOnDrafts": true,
-  "autoReview": ["open", "push"],
-  "statusCheck": true,
-  "statusCommentsEnabled": true,
-  "ignorePatterns": "docs/BUNDLE_SPEC.md\ndocs/DESIGN_CHALLENGE.md\ndocs/PRISM.md\ndocs/external-miner/relearn*.md\ndocs/external-miner/proof-tbench.md"
-}
